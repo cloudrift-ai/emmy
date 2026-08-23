@@ -17,7 +17,7 @@ tags:
 
 model:
   huggingface: Qwen/Qwen3.8-27B-FP8
-  rationale: "Strong FP8 variant of the breakout 3.8 model for wider deployment."
+  rationale: "Strong FP8 variant benefiting directly from Qwen3.8 breakout wave."
   heat: 95
   revision: 017b9c7af6b5689d5dd426a76e0bc077eb5ca20a
   task: generate
