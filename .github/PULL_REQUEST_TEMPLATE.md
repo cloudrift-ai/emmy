@@ -12,26 +12,26 @@ body hard to edit. The ~120-character rule applies to files in the repository, n
 
 ## Abstract
 
-Attention reached the tensor cores through a rewrite that split its key axis into an outer stride and an inner block. The block bought the expectation channel a semiring to live in, and cost eight orders of magnitude of schedule space, three copies of one score in the tree, and a minute of compile time. This change deletes the rewrite and stores what a twist recipe already declares — the plain per-element contribution, plus the recipe itself — so the expectation is a bare product of two operand edges with no block needed to see it. A tensor-core tier then folds the whole carrier one staged chunk at a time: build the chunk's score, reduce it per row into the chunk's pivot, apply the recipe's own channel maps against that pivot, multiply the weight against the streamed value on tensor cores, and merge once per chunk through the recipe's stable combine. The block it folds is the schedule's staged chunk and nothing else, so no width is ever read off an extent.
+Attention reached the tensor cores through a rewrite that split its key axis into an outer stride and an inner block. The block bought the expectation channel a semiring to live in, and cost eight orders of magnitude of schedule space, three contraction sites where the tree has one score, and a compile measured in tens of seconds. This change deletes the rewrite and stores what a twist recipe already declares — the plain per-element contribution, plus the recipe itself — so the expectation is a bare product of two operand edges that needs no block to be seen. A tensor-core tier then folds the whole carrier one staged chunk at a time: build the chunk's score, reduce it per row into the chunk's pivot, apply the recipe's own channel maps against that pivot, multiply the weight against the streamed value on tensor cores, and merge once per chunk through the recipe's stable combine. The block it folds is the schedule's staged chunk and nothing else, so no width is ever read off an extent again.
 
 ### f16 SDPA, `(1, 8, 512, 128)`, RTX 5090
 
-| | main | this branch |
+| | main | here |
 | --- | --- | --- |
 | tuned | 176 µs | **37 µs** |
-| `--ir tile` | 55 s | 2 s |
-| cold, before anything is measured | 177 µs | **73 ms** |
-| lines under `emmy/` | — | **−633** |
+| `emmy compile --ir tile` | 38 s | **8 s** |
+| cold, before anything is measured | 177 µs | 73 ms — see *What got worse* |
+| lines under `emmy/` | baseline | **−633** |
 
 ---
 
 ## What the term stores
 
-A twisted fold used to store the conjugated program: `Fold.twist` folded the pair into the stable carrier and kept THAT, after which the bilinear product lived inside a rescale program where no reading looks. It now stores the base monoid's own contribution as its `lift`, that monoid's componentwise ⊕ as its `base`, and the recipe — bound to this term's roles — as its `twist`. The stable ⊕ and the ψ-image of the lift are both derived from those (`Fold.combine`, `Fold.injected`), so there is one stored spelling of the algebra.
+A twisted fold used to store the conjugated program: the fusion folded the pair into the stable carrier and kept THAT, after which the bilinear product lived inside a rescale program where no reading looks. It now stores the base monoid's own contribution as its `lift`, that monoid's componentwise ⊕ as its `base`, and the recipe — bound to this term's roles — as its `twist`. The stable ⊕ and the ψ-image of the lift are both derived from those (`Fold.combine`, `Fold.injected`), so the algebra has one stored spelling.
 
-That is what makes attention's expectation read as `weight ⊗ value` in the term. `Fold.as_contraction` reads one CHANNEL's cone rather than the whole lift, so the channel is recognized beside a running maximum and a denominator that are no product at all; the weight's own cone became an operand edge, which is what leaves the channel a bare monomial.
+That is what makes attention's expectation read as `weight ⊗ value` in the term. `Fold.as_contraction` reads one CHANNEL's cone rather than the whole lift, so the channel is recognized beside a running maximum and a denominator that are no product at all, and the weight's own cone became an operand edge, which is what leaves the channel a bare monomial.
 
-Nothing may see through ψ. The base form denotes `Sum exp(score)` and overflows, so a serial step folds the recipe's authored per-channel injections instead of evaluating ψ, and the chunk tier folds the recipe's patterns.
+Nothing may see through ψ. The base form denotes `Sum exp(score)` and overflows, so a serial step folds the recipe's authored per-channel injections rather than evaluating ψ, and the chunk tier folds the recipe's patterns.
 
 ## The chunk tier
 
@@ -39,41 +39,41 @@ Nothing may see through ψ. The base form denotes `Sum exp(score)` and overflows
 
 Three things keep the emitter small.
 
-The SCORE is the nested contraction the tree already carries as a site of its own, and the fragment seam already tied the two together: the score's N tile must equal the consumer's chunk, one warp column wide, same register rows. That is FlashAttention's shape, stated where the schedule can see it, so the enumeration needed no rule of its own — the tier realizes the agreement rather than assuming it.
+The SCORE is the nested contraction the tree already carries as a site of its own, and the fragment seam already tied the two together: the score's N tile must equal the consumer's chunk, one warp column wide, same register rows. That is FlashAttention's own shape, stated where the schedule can see it — so the enumeration needed no rule of its own, and the tier realizes the agreement rather than assuming it.
 
-The WEIGHT reaches the expectation's `mma.sync` as a register repack of the score's own C fragments. No shared-memory round trip, and `FragmentRepack` was already in the tree for exactly this.
+The WEIGHT reaches the expectation's `mma.sync` as a register repack of the score's C fragments. No shared-memory round trip; `FragmentRepack` was already in the tree for exactly this handoff.
 
-`_residence` evaluates a recipe pattern, the chunk merge and the projection epilogue at whatever residence each value has — a C fragment, the two per-lane registers an m16n8 row rides in, or cell-uniform. None of the three is written for tensor cores; where a value lives is a fact about the tile, not about the program.
+`_residence` evaluates a recipe pattern, the chunk merge and the projection epilogue at whatever residence each value has — a C fragment, the two per-lane registers an m16n8 row rides in, or cell-uniform. None of the three is written for tensor cores: where a value lives is a fact about the tile, not about the program.
 
 ## The key extent may be symbolic
 
-Nothing in the tier sizes itself against the key extent, so a ragged last chunk is the only thing a dynamic stream needs. Its overhanging columns fill with the pivot's identity through the node the causal mask already used: the pivot ignores them, every channel's pattern folds a zero weight through them, and the loads past the extent clamp and zero the way every gmem-direct fragment loader already does. Measured: a symbolic key length of 509 against a static query length of 512 compiles, emits 39 `mma.sync`, and matches eager to 2.4e-4.
+Nothing in the tier sizes itself against the key extent, so a ragged last chunk is all a dynamic stream needs. Its overhanging columns fill with the pivot's identity through the node the causal mask already used — the pivot ignores them, every channel's pattern folds a zero weight through them, and the loads past the extent clamp and zero the way every gmem-direct fragment loader already does. A symbolic key length of 509 against a static query length of 512 compiles, emits 39 `mma.sync`, and matches eager to 2.4e-4.
 
 ## What got worse
 
-**The cold pick.** With nothing measured for the shape, the offline prior takes a placement cut whose consumer folds the carrier serially with the value dimension on the grid — which recomputes the score once per output column. That is 73 ms against main's 177 ms cold pick. One `emmy tune` fixes it (37 µs, and the greedy picks it from then on), and a deployed model answers from its goldens rather than from the cold prior, but an ad-hoc unmeasured compile of this shape is much worse than it was. This is a ranking shortfall, not a realization gap, so it is reported rather than recorded as a corpus case.
+**The cold pick, badly.** With nothing measured for the shape, the offline prior takes a placement cut whose consumer folds the carrier serially with the value dimension on the grid — which recomputes the whole score once per output column. That is 73 ms against main's 177 µs. One `emmy tune` fixes it and the greedy picks 37 µs from then on, and a deployed model answers from its goldens rather than from the cold prior; but an ad-hoc unmeasured compile of this shape is far worse than it was. The arm is legal and slow, not wrong, so refusing it in a pass would be the thing this repo does not do. It is a ranking shortfall against a space the fitted prior has never seen, and it wants a prior refresh rather than a gate.
 
 **A twisted carrier no longer offers a scalar register tile.** The scalar tier folds the stored lift into one accumulator per bilinear channel, which for a twist is the base contribution — it would have folded `Sum exp(score)`. The three fp32 `qwen3emb/sdpa-*` cases pinned exactly that row; they were already recorded gaps and stay recorded ones, with the reason corrected.
 
-**There is no FlashAttention on fp32 or on a materialized score.** The tier needs a 16-bit atom whose C fragment repacks into an A operand, and it builds the chunk's score from a nested contraction. A score that arrives as a slab — the placement cut's arm, and the two `matmul/f16-symbolic-*` cases — reaches no chunk. Both are open cases carrying that reason.
+**Two shapes reach no chunk.** The tier needs a 16-bit atom whose C fragment repacks into an A operand, so fp32 attention has none; and it builds the chunk's score from a nested contraction, so a score that arrives as a slab — the placement cut's arm, and the two `matmul/f16-symbolic-*` cases — has nothing to build from. Both are open cases carrying that reason.
 
 ## What may not come back
 
 The blocked emitter went with the rewrite: a carrier term holding one operand per carried component, every one folding the same explicit block, plus the residence evaluator that interpreted a lambda at fragment / row / uniform residence and the kernel IR nodes only it produced. An emitter for this carrier takes its block from the SCHEDULE and never from a second reduce axis carved into the term. `FragmentRowReduce` did come back — a per-row fold over one warp's C fragments is what a chunk pivot IS — but as a leaf the tier emits, not as an interpreter of a term.
 
-## Two fixes the tier exposed
+## Two bugs the tier exposed
 
-A fragment seam was derived for every site that reads bilinear. A twisted carrier reads bilinear on one channel, so it claimed a `need` at its score's seam — and while no tier folded it, that need spelled "free", which refuses the score producer every tile it has. Attention's `Q·K` came out untiled. The facts are now scoped to `Fold.tiles_whole`, and a carrier the tier does not fold claims nothing at the seam.
+A fragment seam was derived for every site that reads bilinear. A twisted carrier reads bilinear on one channel, so it claimed a `need` at its score's seam — and while no tier folded it, that need spelled "free", which refuses the score producer every tile it has. Attention's `Q·K` came out untiled, which is what made two closed corpus cases go red. The facts are now scoped to `Fold.tiles_whole`, and a carrier the tier does not fold claims nothing at the seam.
 
-A short-query attention traces with the KEY in the score's canonical A slot, and two readings came out transposed: the score got a `(key, query)` tile, and the emitter read the mma's A off the stored operand order. Under a chunked carrier the orientation is the consumer's — the tier builds a `(row, chunk)` tile whichever operand the canonical form put in A — and the emitter picks its A by which operand carries the carrier's row.
+A short-query attention traces with the KEY in the score's canonical A slot, and two readings then came out transposed: the score got a `(key, query)` tile, and the emitter read the mma's A off the stored operand order. Under a chunked carrier the orientation is the consumer's — the tier builds a `(row, chunk)` tile whichever operand the canonical form put in A — and the emitter picks its A by which operand carries the carrier's row.
 
 ## Evidence
 
-`make test`, `make lint` and `make test-goldens` all pass. The realization corpus is green at parity with main (the same two failures main has: `reduce/rms-norm-cut-sweep-work` and a `qwen3emb/gated-mlp-s128` worker crash under xdist, both reproduced on `main` unchanged).
+`make test`, `make lint` and `make test-goldens` pass. The realization corpus is green at parity with `main`: the same two failures `main` has (`reduce/rms-norm-cut-sweep-work`, and a `qwen3emb/gated-mlp-s128` worker crash under xdist) reproduce on `main` unchanged.
 
 Three e2e cases cover the tier: an f16 SDPA on a pinned chunk row is one `mma.sync` kernel matching torch, once chunk-aligned, once ragged, once symbolic.
 
-Every kernel identity for attention changed by design; the corpus was restamped with `make test-corpus-regen` and the checked-in model goldens will need a tuning round on their cards.
+Every attention kernel identity changed by design. The corpus was restamped with `make test-corpus-regen`; the checked-in model goldens go stale and want a tuning round on their cards.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 

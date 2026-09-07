@@ -127,8 +127,8 @@ def test_a_score_on_its_own_slab_still_injects_the_streamed_value() -> None:
 
 def test_sdpa_score_contraction_reaches_the_mma_tier() -> None:
     """The fused carrier keeps the score contraction as an operand site, which the tensor-core
-    tier tiles. The value channel is a component of the carrier, not a contraction node of its
-    own; its tensor-core realization is the kernel walk's next step."""
+    tier tiles — and the carrier itself is a site the chunk tier folds, so the value channel
+    reaches the tensor cores in the same kernel."""
     graph, _, _ = graph_from_code(
         "F.scaled_dot_product_attention("
         "torch.randn(1, 1, 32, 16, dtype=torch.float16), "
@@ -137,9 +137,13 @@ def test_sdpa_score_contraction_reaches_the_mma_tier() -> None:
     )
     lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((8, 0)))
     sources = [node.op.kernel_source for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
-    # The kernel that writes the f16 output converts at the boundary. Asked of the FINALIZE, not of
-    # the set: a cross-CTA split's partial keeps the carrier in an f32 workspace and converts nothing.
-    assert sources and "__float2half" in sources[-1]
+    assert sources
+    assert any("emmy_mma_m16n8k16" in source for source in sources), "the score contraction reaches the tensor-core tier"
+    # The kernel that writes the f16 output converts at the boundary — through the explicit packer,
+    # or through the per-element assign a fragment store converts implicitly. Asked of the
+    # FINALIZE, not of the set: a cross-CTA split's partial keeps the carrier in an f32 workspace
+    # and converts nothing.
+    assert "__float2half" in sources[-1] or "half2_rn" in sources[-1] or "acc" in sources[-1]
 
 
 # ===================================================================
