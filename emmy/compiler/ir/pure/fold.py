@@ -643,10 +643,14 @@ class Fold:
         pluses = self.base.components()
         if pluses is None:
             return ()
-        by_name = {param: edge for param, edge, _ in self.bindings}
+        # Keyed by the name the walk below READS — the operand's own result, since ``based`` is
+        # spelled over ``applied``. A term's param usually carries its operand's name and the two
+        # agree by accident; a cut renames the operand's result to its workspace and they part,
+        # which lost B and with it the whole channel.
+        by_name = {edge.exposes[index]: edge for _param, edge, index in self.bindings}
         a_edge = self.operands[0]
-        a_names = {param for param, edge, _ in self.bindings if edge is a_edge}
-        uniform = {param for param, edge, _ in self.bindings if edge is not a_edge and not edge.free_axes}
+        a_names = {edge.exposes[index] for _param, edge, index in self.bindings if edge is a_edge}
+        uniform = {edge.exposes[index] for _param, edge, index in self.bindings if edge is not a_edge and not edge.free_axes}
         based = self.based()  # bilinearity lives in BASE coordinates; ψ divides the product away
         out: list[tuple[int, Fold]] = []
         for index, result in enumerate(based.results):
