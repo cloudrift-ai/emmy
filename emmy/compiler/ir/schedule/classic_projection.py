@@ -153,8 +153,13 @@ def _node_refusal(tile: TileOp, target, node, fragment_epilogue: bool, packed: t
         return "the projection epilogue is not a per-fragment straight-line program"
     # The operand tuple in stored order — there is no named A/B role any more, and a nested
     # scheduling site on ANY operand refuses the same way.
-    if any(edge.axis is not None for edge in node.operands):
+    if any(edge.axis is not None for edge in node.operands) and not node.chunked():
         return "a nested scheduling site inhabits an operand edge"
+    # A CHUNKED carrier is the one exception: its A IS the score contraction, so A reduces. That is
+    # the tier's own shape — the chunk's score is the producer's tile — and the fragment agreement
+    # composed in ``extend`` is what holds the two to one atom. It only reached here as a zero-axis
+    # cone with the contraction nested under it while the fusion still minted that cone, so the
+    # blanket refusal never saw the case it was not written about.
     if node.chunked() and (why := _chunk_refusal(tile, node)) is not None:
         return why
 
