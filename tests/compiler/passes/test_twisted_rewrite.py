@@ -51,7 +51,9 @@ def _tile(code: str) -> TileOp:
     graph, _, _ = graph_from_code(code)
     graph = Pipeline.build(LOOP_PASSES).run(graph)
     graph = Pipeline.build(["lowering/tile"], select=["lift", "twisted"]).run(graph)
-    return next(node.op for node in graph.nodes.values() if isinstance(node.op, TileOp) and node.id.endswith(("softmax", "attention")))
+    # By the TREE, not the node id: the carrier is what these tests are about, and a softmax fused
+    # into a matmul names its node after neither.
+    return next(node.op for node in graph.nodes.values() if isinstance(node.op, TileOp) and _twisted_folds(node.op.op))
 
 
 def _twisted(code: str) -> Fold:
@@ -100,6 +102,27 @@ def test_causal_sdpa_uses_the_same_twisted_rewrite() -> None:
     )
 
     assert len(fold.init) == 3
+
+
+def test_a_score_on_its_own_slab_still_injects_the_streamed_value() -> None:
+    """``psi`` at the singleton takes the expectation channel to the streamed VALUE, whichever edge
+    supplies the score.
+
+    Attention hoists the score and the weight onto one cone, so the weight is the score's own edge
+    and reading the edge alone was enough to tell it from the value. A softmax whose scores arrive
+    as a tensor of their own puts the weight on an edge that is neither — and binding by edge then
+    made the carrier fold ``exp(s)`` where it meant to fold ``v``, which is a wrong answer, not a
+    slow kernel."""
+    fold = _twisted(
+        "torch.matmul(torch.softmax(torch.randn(2, 8, 8, dtype=torch.float16), dim=-1), torch.randn(2, 8, 4, dtype=torch.float16))"
+    )
+
+    (channel, streamed) = fold.bilinear_channels()[0]
+    injected = fold.injected
+    assert injected.results[channel] == streamed.exposes[0], (
+        f"channel {channel} injects {injected.results[channel]!r}; psi takes it to the streamed value "
+        f"{streamed.exposes[0]!r}, and the weight is what it divides out"
+    )
 
 
 def test_sdpa_score_contraction_reaches_the_mma_tier() -> None:

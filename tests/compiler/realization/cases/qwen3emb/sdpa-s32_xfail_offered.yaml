@@ -1,7 +1,7 @@
-# evidence: the schedule pins the value channel on tensor cores (the P·V half beside the score's mma). The channel now
-# READS as a contraction and the site is offered; no atom tier folds it yet. Both tiers fold the stored lift straight
-# into their accumulator, and for a twisted carrier that is the BASE contribution — it denotes Sum exp(score) and folds
-# none of the states that are not the bilinear channel — so the row is declined and the greedy falls back.
+# evidence: the schedule pins the value channel on tensor cores (the P·V half beside the score's mma). The channel
+# READS as a contraction now (`Fold.bilinear_channels`), but no atom tier folds a twisted carrier: both fold the stored
+# lift into one accumulator per bilinear channel, and this carrier holds states that are no product at all beside it —
+# nor is that lift what a step may fold. `TileOp.contracts` offers no tile at the site, so the pin reaches no row.
 # Qwen3-Embedding-0.6B decoder layer 0, kernels 6 and 7: causal GQA attention.
 # hidden=1024 heads=16 kv_heads=8 head_dim=128, fp32, seq 32. One of the twelve layer-0
 # kernels the perf suite curated before the corpus became its case source.

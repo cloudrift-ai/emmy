@@ -419,18 +419,40 @@ class Fold:
         renames with nothing.
 
         The SCORE is the pivot channel's contribution, which is what every recipe's role vector
-        leads with. An EXTRA is an operand component a channel reads that the score's own edge does
-        not supply — attention's streamed value, read beside the weight cone that carries the score,
-        which is why formation hoists the two into one edge. A role the term never bound (Welford's
-        ``1/N``, whose base contribution does not read it) is simply absent from the tail.
+        leads with. An EXTRA is an operand component a channel reads that is neither derived from
+        the score nor a carried contribution of its own — attention's streamed value, read beside
+        the weight cone. A role the term never bound (Welford's ``1/N``, whose base contribution
+        does not read it) is simply absent from the tail.
+
+        What a recipe DERIVES is not a role, and two tests are needed to say so. A recipe's lift
+        defines the weight from the score (``e = exp(s)``), and formation is free to factor that
+        definition onto an operand edge; when the score arrives as a slab beside it, the weight's
+        edge is not the score's. Reading the edge identity alone mistook the weight for the
+        streamed value and the carrier folded ``exp(s)`` where it meant to fold ``v`` — a wrong
+        answer, not a slow kernel.
+
+        - a candidate this term also CARRIES is the recipe's own derived channel: results line up
+          with the recipe's lift results, so a param a result passes through is that definition,
+          however far the factoring moved it. This is the only test left once a cut materializes
+          the weight into a workspace, where it is a slab like any other;
+        - a candidate whose own subtree computes the SCORE is that definition too, which is what
+          catches it on a term carrying the expectation before the denominator has joined, where
+          the weight is no result yet.
         """
         bound = {param: (edge, index) for param, edge, index in self.bindings}
         supplies = bound.get(self.lift.results[0], (None, 0))[0]
+        carried = set(self.lift.results)
+
+        def derives(edge: Fold) -> bool:
+            """Whether ``edge``'s value is computed from the score's — structurally, because the
+            same read reached through two edges is two objects."""
+            return edge is supplies or edge == supplies or any(derives(operand) for operand in edge.operands)
+
         extras: list[str] = []
         for result in self.lift.results[1:]:
             for param in self.lift.cone(result).params:
                 edge, index = bound.get(param, (None, 0))
-                if edge is None or edge is supplies or edge.exposes[index] in extras:
+                if edge is None or param in carried or derives(edge) or edge.exposes[index] in extras:
                     continue
                 extras.append(edge.exposes[index])
         return (self.applied.results[0], *extras)
@@ -515,6 +537,17 @@ class Fold:
             b_trans=b_trans,
             channel=channel,
         )
+
+    def tiles_whole(self) -> bool:
+        """Whether an atom tier could fold this term WHOLE — every carried state is a bilinear
+        channel, so the tile's accumulators are the carrier.
+
+        Both tiers fold one accumulator per product channel and have no residence for a state that
+        is not one, so a carrier holding a running maximum beside its expectation is no tile site
+        however bilinear that expectation reads. Stated in the algebra rather than as a twist test:
+        the count is what the tiers can carry, and a recipe that folded nothing but products would
+        pass on the same terms."""
+        return self.as_contraction() is not None and len(self.bilinear_channels()) == len(self.base.results)
 
     @cached_method
     def bilinear_channels(self) -> tuple[tuple[int, Fold], ...]:

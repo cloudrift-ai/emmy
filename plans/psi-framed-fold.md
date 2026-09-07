@@ -173,26 +173,78 @@ the field serves both recipes rather than carrying a passenger for one.
 0. **Revert `0b781fabd` (#726).** Verified: it reverse-applies to
    `main` cleanly. It restores the four-node carrier, the 6.5 × 10⁹ space and a seconds-long `--ir tile`, and
    takes `035_block`, its two test files and the corpus stamps with it. It also gives back the FA-2 numbers and
-   returns the SDPA mma tests to strict xfail — a stated regression that stands until step 4.
+   returns the SDPA mma tests to strict xfail — a stated regression that stands until step 5.
    *Verify:* `make test`, `make lint`, `make test-goldens`. Read any golden row recorded since #726 as suspect
-   rather than as a row to re-record.
+   rather than as a row to re-record. The revert LEFT the blocked emitter itself standing, unreachable; step 4
+   finishes the job.
 1. **`Fold` speaks the recipe's vocabulary.** Add `base` and `twist`; derive `combine`. Planar folds take
    `twist=None` and `componentwise(base)`, which is what they already have. *Verify:* the suite unchanged, digest
    A/B byte-identical — this step alone still is neutral.
 2. **The twisted rewrite emits base + ψ.** `020_twisted` stops baking the conjugate and builds the fold above: the
    recipe's own `lift`, instantiated on the term's operands. Emission changes here. *Verify:* the SDPA dump is the
    target tree; corpus restamped deliberately, with the identity change named.
-3. **Per-channel contraction reading.** `as_contraction` reads one channel's cone rather than the whole lift.
-   Existing test, narrower scope; no new algebra. *Verify:* the three channel readings above; Welford's channel 3
-   declines, its product multiplying one edge by itself; sites key on `(node, channel)` and the paired-mma row test,
-   un-xfailed, passes with no block; report the measured schedule space.
-4. **Lowering applies ψ.** The base form denotes `Sum exp(s)` and overflows. Nothing may see through ψ — the same
-   legality that plan's `through` predicate states for the hoist — and no lowering path may take the base form as
-   input. *Verify:* accuracy on a stream long enough that the base form would overflow; `mma.sync` count >= 4;
-   #726's 3.3 µs at `(1,4,128,32)` and 150 µs at `(1,8,512,128)` met or beaten.
-5. **Symbolic key extent.** Nothing sizes itself against the extent any more, so a dynamic stream should reach the
-   same sites. *Verify:* a symbolic-length trace compiles and still emits mma; add a corpus case, which is new
-   capability rather than a restamp.
+3. **Per-channel contraction reading.** DONE. `as_contraction` reads one channel's cone rather than the whole lift,
+   against the BASE monoid's per-state ⊕ — asking the stable `combine` would refuse every twisted carrier before a
+   channel was looked at. `Fold.bilinear_channels` is the algebraic half; the geometry takes the first entry. The
+   site stays keyed on the node: the channel is derived, not a second key. *Measured:* the three channel readings
+   above; Welford's channel 3 declines, its product squaring one edge.
+4. **One reading for "a tile folds this whole", and the old emitter is gone.** DONE. `Fold.tiles_whole` — every
+   carried state is a bilinear channel, so the tile's accumulators ARE the carrier — is what decides a TILE site
+   (`TileOp.contracts`), the node's schedule domain, its transport catalog, and whether a root has a chain. A
+   twisted carrier answers no, because both tiers fold one accumulator per product channel and have no residence
+   for a state that is not one; nor is the stored lift what a step may fold there, since for a twist it is the base
+   contribution and denotes `Sum exp(s)`. Nothing may see through ψ.
+
+   Refusing at the ENUMERATION rather than at the binder is the load-bearing half. Offered-but-unrealizable rows
+   cost the greedy one blocklist retry per rank and there are more ranked rows than the retry budget, so a pinned
+   P·V shape wedged with an unlowered `TileOp` instead of falling back. The old blocked emitter went with this
+   step — see **What may not come back**.
+5. **The carrier's tensor-core form.** NOT BUILT, and until it is, the site is NOT OFFERED. The design is stated
+   below; it is a fresh emitter over the psi-framed term, not a revival. *Verify when built:* accuracy on a stream
+   long enough that the base form would overflow; `mma.sync` count >= 4; #726's 3.3 µs at `(1,4,128,32)` and 150 µs
+   at `(1,8,512,128)` met or beaten; the `attention/sdpa-*-mma`, `qwen3emb/sdpa-*` and `matmul/f16-symbolic-*`
+   corpus cases close.
+6. **Symbolic key extent.** Nothing sizes itself against the extent any more, so a dynamic stream should reach the
+   same sites once step 5 lands. *Verify:* a symbolic-length trace compiles and still emits mma; the two symbolic
+   corpus cases close.
+
+## What may not come back
+
+The tree carried a second emitter for attention until this branch removed it. Its shape: a carrier term holding one
+operand per carried component, every one folding the same EXPLICIT block, with the block loop bound to the staged K
+loop, plus the residence evaluator that interpreted a `Lambda` at fragment / row / uniform residence and the kernel
+IR nodes only it produced.
+
+Removed with it, and not to be restored: `scheduled_fold_contraction`, `_fold_staged`, `_carrier_values`,
+`_projection_finalize`, `fold_store_tail` / `fold_store_sink`, the `_child_*` producer-seam builders, the
+`kernel/_eval.py` residence evaluator, `FragmentRowReduce`, `FragmentSelect`, `FragmentLoad`, `frag_layout`, and
+`staged_kloop`'s lead segment.
+
+**The rule.** An emitter for this carrier takes its block from the SCHEDULE — the staged K chunk — and never from a
+second reduce axis carved into the term. A design that reintroduces per-component operands, a block axis, a `Window`
+carrying a block, or any width derived from an extent is reintroducing the thing that took the attention schedule
+space from 6.5 × 10⁹ to 2.3 × 10¹⁷, made `--ir tile` take 55 s, and put three α-equal copies of one score in the
+tree. Kernel identity may not turn on a form rule nothing measured.
+
+## The carrier's tensor-core form — the shape to build
+
+The term is one axis, one lift, one carrier. What an mma tier needs, it derives:
+
+- the CHUNK is `STAGE`'s `bk_elems`, a schedule choice — there is no other block;
+- the SCORE for the chunk is the cone of the pivot channel's result, which is the nested contraction the tree
+  already carries as a site of its own;
+- the chunk's PIVOT is that score's ⊕ over the chunk — a row reduce of the score fragments, one scalar per
+  physical row;
+- the WEIGHT is the recipe's own `Channel.pattern` instantiated on that pivot (`exp(s − g)`), which is why the
+  pattern is load-bearing at lowering and not, as the open question below guessed, dead once matching moves;
+- every non-bilinear channel folds its own cone over that weight, again as a row reduce;
+- the bilinear channel stores the weight as the A slab and mma's it against its streamed operand;
+- the chunk's partial merges into the carrier through the stored `combine` — the recipe's stable ⊕, applied once
+  per chunk rather than once per element.
+
+Two things this must NOT do. It must not read `lift` as the thing to fold — that is the base contribution, and the
+weight above is what ψ makes of it. And it must not need the term to name the chunk: the same term must lower on
+every `STAGE`, including none.
 
 ## What breaks
 
@@ -201,10 +253,19 @@ the field serves both recipes rather than carrying a passenger for one.
 Kernel identity changes for every attention kernel. Checked-in goldens go stale and need a tuning round on the
 card; the corpus needs `make test-corpus-regen`. Neither is a reason to re-record a red row into green.
 
-Between the revert and step 4 there is no FA-2 — four steps on one branch, not five phases of another plan.
+There is no FA-2 on this branch. Attention lowers at the scalar reduce tier, which is correct and slow.
 
-The base form overflows. Step 4 is not a nicety: until ψ is unskippable, a wrong lowering is silent and only the
-numerics move.
+The base form overflows. The refusal in step 4 is not a nicety: without it a wrong lowering is silent and only the
+numerics move — and one already was. `Fold.roles` read an extra by its operand EDGE, which mistook the weight for
+the streamed value whenever the score arrived on a slab of its own, and the carrier folded `exp(s)` where it meant
+to fold `v`. Two disqualifiers are needed: a value this term also carries is the recipe's own derived channel, and
+a value whose subtree computes the score is that definition too. Neither alone covers both a cut (where the weight
+is a workspace slab) and the fixpoint's intermediate carrier (where it is no result yet).
+
+Still red, and not from this design: `attention/rmsnorm-gqa-sdpa-stat-fill` and `attention/rmsnorm-qk-sdpa-stat-cut`
+lose the SCORE contraction's own register tile — the accepted rows carry `TILE=''` where they carried `f1` — and
+`reduce/cross-cta-flash-kernel` fails at `realized` under strict evidence. All three date from the base + ψ rewrite,
+which put the weight cone on its own operand edge and changed these kernels' site set.
 
 ## Open questions
 
@@ -212,9 +273,8 @@ numerics move.
   note produced and try to twist it again.
 - **Which channel is the pivot.** Softmax's is state 0 by author ordering. Nothing here should re-derive that;
   confirm the fold can name it the way the recipe does.
-- **Whether `020_twisted` still needs `Channel.pattern` to match.** Construction moves to `Recipe.lift`, but the
-  MATCH is unchanged. If the pattern half turns out to be dead once construction moves, say so — that is the other
-  plan's phase 4 arriving early and for free.
+- **Whether `020_twisted` still needs `Channel.pattern` to match.** ANSWERED, and the other way round: the pattern
+  is not dead, it is what step 5's emitter builds the weight from. Matching and lowering read the same declaration.
 
 ## Acceptance
 
@@ -223,3 +283,4 @@ numerics move.
 - Cold greedy on that shape at or under the 42 µs a hand sweep of 36 pinned rows found.
 - Dynamic-length attention emits mma, which it cannot today.
 - `git diff --stat main -- emmy/` net negative against `main` after the revert.
+- No symbol from **What may not come back** exists in the tree.

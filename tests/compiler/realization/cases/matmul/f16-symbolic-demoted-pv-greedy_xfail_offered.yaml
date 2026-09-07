@@ -1,7 +1,7 @@
-# evidence: the schedule pins the value channel on tensor cores (the P·V half beside the score's mma). The channel now
-# READS as a contraction and the site is offered; no atom tier folds it yet. Both tiers fold the stored lift straight
-# into their accumulator, and for a twisted carrier that is the BASE contribution — it denotes Sum exp(score) and folds
-# none of the states that are not the bilinear channel — so the row is declined and the greedy falls back.
+# evidence: the schedule pins the value channel on tensor cores (the P·V half beside the score's mma). The channel
+# READS as a contraction now (`Fold.bilinear_channels`), but no atom tier folds a twisted carrier: both fold the stored
+# lift into one accumulator per bilinear channel, and this carrier holds states that are no product at all beside it —
+# nor is that lift what a step may fold. `TileOp.contracts` offers no tile at the site, so the pin reaches no row.
 compute_cap:
 - 12
 - 0
@@ -37,14 +37,12 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE: mma_m16n8k16_f16_f32/f2x2/k2
+      TILE: mma_m16n8k16_f16_f32/f4x8/k8
       WORK: w2x2
-      STAGE: d1/smem
-      REDUCE: ''
-    identity: 94505d472850f979843a2b75a59611ab1048d2b941475e2f638068d6f328fc3c
+    identity: 955199dd3c346531150b603c7db1ccac424f575f922e1298d29ce563132d438d
     latency:
       NVIDIA GeForce RTX 5090:
-        emmy_us: 36.90192655280784
+        emmy_us: 57.96894255806418
         tcompile_us: 14.433882692280937
   - name: k_matmul_softmax_reduce_a5d6d8.30e0386ccf87.2bc23c87fb88
     bindings: {}
