@@ -29,6 +29,12 @@ from emmy.compiler.ir.tile.ops import axis_names, sched_of
 # ``lift`` + ``combine`` and contributed no schedule site on seven of them. ``--ir loop`` is where
 # a reader goes for a body.
 #
+# The ONE structure it does not draw as a branch is a SCALAR operand (:meth:`Fold.scalar`) — an
+# sdpa scale, an rms epsilon. Nothing decides at one, so its branch would be a line of tree art
+# around a constant; it is spelled inside the reader that binds it (:func:`_inlined`) instead, and
+# the params it bound leave the signature with it. That is not derived material — the statements
+# printed are the edge's own, under the reader's names for them.
+#
 # Schedule choices are not on the term at all. The owning ``TileOp`` supplies one complete
 # generic ``Schedule`` whose node choices annotate their canonical sites.
 # --------------------------------------------------------------------------- #
@@ -76,17 +82,18 @@ class _Ctx:
         return f"   ⟨{' '.join(bits)}⟩" if bits else ""
 
 
-def _lam_sig(lam, ctx: _Ctx | None = None) -> str:
+def _lam_sig(lam, ctx: _Ctx | None = None, drop: frozenset[str] = frozenset()) -> str:
     """A lambda's one-line signature. A float result is the ι literal injected in the lift
     (softmax's singleton ``(x, 1)``), which has no def to name.
 
     A non-empty CAPTURE set is spelled between the params and the results — without it a λ that
     reads an enclosing value would print as though it were closed, which is the one property the
-    reader most needs (an unclosed subtree can never become an operand edge)."""
+    reader most needs (an unclosed subtree can never become an operand edge). ``drop`` are the
+    params bound to inlined scalar operands (:func:`_inlined`), which the body now defines."""
     rs = ", ".join(lam.results)
     cap = ctx.captures(lam) if ctx is not None else ()
     free = f" [captures {', '.join(cap)}]" if cap else ""
-    return f"λ({', '.join(lam.params)}){free} -> ({rs})"
+    return f"λ({', '.join(p for p in lam.params if p not in drop)}){free} -> ({rs})"
 
 
 def _axis_span(axis) -> str:
@@ -145,6 +152,26 @@ def _edge(edge, ctx: _Ctx, result: str | None = None) -> tuple[str, object]:
     return f"{head}: {_head(edge, ctx)}   ‹computed›", _subtree(edge, ctx)
 
 
+def _inlined(node) -> tuple[set[int], frozenset[str], tuple]:
+    """The SCALAR operand edges spelled inside their reader — ``(their ids, the params they bind,
+    their statements)``, the statements renamed onto those params.
+
+    A scalar term (:meth:`Fold.scalar`) is one value for the whole kernel. Its own branch carries
+    nothing a reader wants: no residence to print, no schedule keyed against it, no seam offered at
+    it — just an indirection between a scale and the multiply that reads it. So it is spelled where
+    it is read, at the head of the reader's body, and the params it bound leave the signature with
+    it. A scalar edge has no params of its own, so the rename touches its defs alone."""
+    hidden = {id(edge) for edge in node.operands if edge.scalar()}
+    if not hidden:
+        return hidden, frozenset(), ()
+    params, stmts = [], []
+    for edge in (e for e in node.operands if id(e) in hidden):
+        rename = {edge.exposes[index]: param for param, bound, index in node.bindings if bound is edge}
+        params.extend(rename.values())
+        stmts.extend(edge.lift.rename(rename).body)
+    return hidden, frozenset(params), tuple(stmts)
+
+
 def _items(node, ctx: _Ctx) -> list[tuple[str, object]]:
     """A node's STORED children, each a labelled branch with operand bindings explicit. Nothing
     derived: the step, the synthesized nodes inside it and the lowered nest are all consequences
@@ -154,13 +181,14 @@ def _items(node, ctx: _Ctx) -> list[tuple[str, object]]:
         return items
     # Stored operand order IS the presentation: a contraction's A is ``operands[0]`` by canonical
     # form, and each edge's bracket names the positional lift param it binds.
-    items += [_edge(e, ctx) for e in node.operands]
+    hidden, dropped, scalars = _inlined(node)
+    items += [_edge(e, ctx) for e in node.operands if id(e) not in hidden]
     if node.axis is not None:
         init = ", ".join(x if isinstance(x, str) else format(x, "g") for x in node.init)
         items.append((f"init: ({init})", lambda cont: []))
     # Always emitted, even for an empty body: the branch carries the SIGNATURE, and a node's
     # binder is storage whether or not it computes anything (an identity projection binds too).
-    items.append((f"lift: {_lam_sig(node.lift, ctx)}", _stmts(node.lift.body, ctx)))
+    items.append((f"lift: {_lam_sig(node.lift, ctx, dropped)}", _stmts((*scalars, *node.lift.body), ctx)))
     # The ⊕ is STORAGE only as ``base``; the twisted conjugate is derived from it and the recipe
     # (``combine = psi(psi_inv(x) base psi_inv(y))``), so a twisted node names the recipe in its
     # header and prints one op per state here instead of the twelve-statement program.

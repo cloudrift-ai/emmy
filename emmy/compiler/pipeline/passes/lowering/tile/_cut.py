@@ -298,6 +298,11 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
             # An observed fold's per-step results exist only inside its stream — a cut would
             # separate the scan from its streamed boundary store, which no piece can then spell.
             continue
+        if node.scalar():
+            # One value for the whole kernel (an sdpa scale and its mask fills). The piece would be
+            # a kernel that writes those scalars to a workspace so its reader can read them back —
+            # never the faster kernel set, and one more arm for the greedy to rank and price.
+            continue
         consumer = store_dtype_consumers.get(id(node))
         if consumer is not None and match_packed_pair_node(consumer, tile.inputs) is not None:
             # An operand cone of a BLOCK-SCALED packed pair reaches gmem already: its codes and

@@ -655,6 +655,18 @@ class Fold:
             return None
         return SlabView(load=self.lift.body[0])
 
+    @cached_method
+    def scalar(self) -> bool:
+        """Whether this term is ONE value for the whole kernel — no operands, no axis and no free
+        coordinates, so its body is straight-line arithmetic over scalar reads (an sdpa scale and
+        its two mask fills, an rms epsilon and its mean divisor).
+
+        Such a term DECIDES nothing. There is no residence, partition or tile to pick for a value
+        every worker holds, and a seam offered at it would launch a kernel to write one scalar to a
+        workspace so its reader could read it back — so the cut pass passes over it, exactly as the
+        node walk passes over a slab. The dump spells it inside its reader for the same reason."""
+        return self.axis is None and not self.operands and not self.free_axes and bool(self.lift.body)
+
     # ---- the DERIVED READINGS. ``Map`` and ``Contraction`` are no longer stored kinds (the
     # collapse); every field they carried reads back off the one stored term here, so their old
     # accessors keep their exact meanings and their consumers keep their exact spellings. ------- #

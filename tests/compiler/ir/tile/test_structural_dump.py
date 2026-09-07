@@ -18,7 +18,7 @@ them — never from the term; (e) a λ that is not closed says what it captures.
 from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.schedule import Placement, Raster, Reduce, Schedule, Stage, Tile, Work
 from emmy.compiler.ir.schedule.classic import (
@@ -145,6 +145,42 @@ def test_a_computed_edge_nests_as_a_subtree_a_materialized_one_is_a_leaf() -> No
     assert any("‹materialized›" in ln and "load Wg" in ln for ln in lines)
     # The cone's own body is reached BELOW the a edge — the subtree is really rendered.
     assert any("xhat = multiply(xhat_e, xhat_s)" in ln for ln in lines)
+
+
+# --- a scalar operand is spelled inside its reader ------------------------------------------------ #
+
+
+def _scaled_scores() -> Fold:
+    """The sdpa score shape — a reduce scaled by a constant the frontend broadcast into a one-element
+    buffer. The lift closes over that buffer's read, so the scale arrives as its own operand edge."""
+    scale = projection(
+        body=(
+            Load(name="s0", input="sdpa_scale", index=(Literal(0, "int"),)),
+            Load(name="s1", input="sdpa_mask_fill", index=(Literal(0, "int"),)),
+        ),
+        results=("s0", "s1"),
+    )
+    return projection(
+        (_stat_fold(), scale),
+        (
+            Assign(name="v2", op="multiply", args=("acc0", "s0")),
+            Assign(name="v3", op="add", args=("v2", "s1")),
+        ),
+    )
+
+
+def test_a_scalar_operand_is_inlined_into_the_lift_that_reads_it() -> None:
+    """One value for the whole kernel decides nothing — no residence, no partition, no seam — so its
+    branch would be tree art around a constant. It is spelled where it is read instead, and the
+    params it bound leave the signature with it."""
+    text = "\n".join(pretty(_scaled_scores()))
+    assert "operand[s0, s1]" not in text  # no branch of its own
+    assert "lift: λ(acc0) -> (v3)" in text  # nor the params it bound
+    # Its statements open the reader's body, under the reader's own names for them.
+    assert "     s0 = load sdpa_scale[0]" in text
+    assert "     v2 = multiply(acc0, s0)" in text
+    # The reduce beside it is untouched: an edge that DOES decide keeps its branch.
+    assert "operand[acc0]: Fold[k] reduce   ‹computed›" in text
 
 
 # --- nothing DERIVED reaches the dump ------------------------------------------------------------ #

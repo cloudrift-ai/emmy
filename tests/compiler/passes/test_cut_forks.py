@@ -708,6 +708,37 @@ def test_alpha_equivalent_operand_cones_cluster_into_one_seam() -> None:
     assert len(clustered) == 1 and len(clustered[0].siblings) == 1
 
 
+def test_a_scalar_operand_is_no_seam() -> None:
+    """A value uniform over the kernel — an sdpa scale beside its mask fills — offers no cut. The
+    piece would be a kernel writing scalars to a workspace so its reader could read them back, and
+    a seam nothing realizes costs the greedy an arm per rank."""
+    from emmy.compiler.ir.expr import Literal
+
+    scale = projection(
+        body=(
+            Load(name="s0", input="sdpa_scale", index=(Literal(0, "int"),)),
+            Load(name="s1", input="sdpa_mask_fill", index=(Literal(0, "int"),)),
+        ),
+        results=("s0", "s1"),
+    )
+    scores = contraction("k", Load(name="q", input="q", index=(Var("m"), Var("k"))), (Load(name="kk", input="k", index=(Var("n"), Var("k"))), "acc0"))
+    root = projection(
+        (scores, scale),
+        (Assign(name="v0", op="multiply", args=("acc0", "s0")), Assign(name="v1", op="add", args=("v0", "s1"))),
+    )
+    tile = TileOp(
+        op=root,
+        name="k_scores",
+        place=Placement(free=(Axis("m", 8), Axis("n", 8))),
+        axes=(Axis("m", 8), Axis("n", 8), Axis("k", 8)),
+        output_specs=(OutputSpec(write=Write(output="out", index=(Var("m"), Var("n")), values=("v1",))),),
+        inputs={name: Tensor(name, (8, 8), "f16") for name in ("q", "k", "sdpa_scale", "sdpa_mask_fill")},
+        outputs={"out": Tensor("out", (8, 8), "f16")},
+    )
+    assert scale.scalar() and not scores.scalar()
+    assert [seam.node for seam in cuttable_seams(tile)] == [scores]
+
+
 def test_every_seam_is_an_unpinned_arm() -> None:
     """The unpinned fork offers every cuttable seam as its own structural arm, spelled by the same
     key the pin path resolves."""
