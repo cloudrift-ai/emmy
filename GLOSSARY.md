@@ -57,8 +57,9 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Multi-output node (MIMO)** — One graph node or kernel that writes several output buffers. Independent terminal
   branches may fuse into one MIMO kernel while retaining one output port per observable value.
 - **Output-owning cut** — A placement cut whose piece writes one of the kernel's OWN output buffers rather than a
-  workspace, offered where the branch it cuts is that output's only producer. It leaves single-output kernels, which
-  is what lets each one bind its store's sweep axis as a grid axis when no axis rides every store.
+  workspace. Offered where the branch it cuts is that output's only producer and the piece would bind a grid axis the
+  fused kernel cannot: it leaves single-output kernels, each free to bind its store's sweep axis when no axis rides
+  every store.
 - **Output equivalence cluster** — A single-owner chain of same-dtype copies that preserves every element's flat
   address while changing only shape. With one terminal live output, the splicer may retarget the computed source's
   `Write` across the cluster instead of reconstructing its computation at the copies' loads.
