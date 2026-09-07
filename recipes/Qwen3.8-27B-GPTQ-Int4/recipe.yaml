@@ -1,0 +1,71 @@
+# Qwen3.8-27B GPTQ Int4 — the recommended serving configuration on Volta: two V100 SXM2 16 GB.
+#
+#   emmy deploy ssh --recipe recipes/Qwen3.8-27B-GPTQ-Int4 --ssh user@host
+#
+# This is a DEPLOYMENT config, not an experiment: one variant, no workload grid, no `benchmark:`
+# block. The workload grid that justifies these values lives in
+# experiments/Qwen3.8-27B-GPTQ-Int4/serving/.
+#
+# There is no Emmy lane here: this run qualified serving only, so Emmy eligibility is unevaluated
+# rather than established. See RESULTS.md.
+tags:
+  - best-effort
+
+model:
+  # The 4-bit builds of Qwen3.8-27B are mostly `compressed-tensors`, whose kernels gate at
+  # "Min capability: 75" and refuse to run on Volta's sm_70. This one is real GPTQ
+  # (quant_method="gptq", 4-bit, group_size=128, desc_act=false, sym=true) and was prepared and
+  # tested by its author on a V100, which is why it is the 4-bit checkpoint this recipe serves.
+  huggingface: "Max73333/Qwen3.8-27B-GPTQ-Int4-V100"
+  rationale: "Only Volta-capable 4-bit build of the Qwen3.8 wave; community quant, not a vendor release."
+  heat: 0
+  revision: d5a18cc1477e301e50d3fe4167fbf76db9337edc
+  task: generate
+
+engine:
+  llm:
+    # 19.6 GB of weights do not fit one 16 GB card. TP2 is the smallest size that fits and
+    # divides cleanly: 24 attention heads / 2 = 12, 4 key/value heads / 2 = 2.
+    tensor_parallel_size: 2
+    pipeline_parallel_size: 1
+    gpu_memory_utilization: 0.88
+    # Native context is 262,144 and does not fit. Measured here: 262,144 needs 8.16 GiB of KV
+    # against a 4.57 GiB pool, and 131,072 needs 4.16 GiB against 3.06 GiB once the Triton GDN
+    # path takes its workspace. At 65,536 the pool holds 93,206 tokens. Validated by retrieving a
+    # planted marker from a 60,295-token prompt, not by startup alone.
+    context_length: 65536
+    # The KV pool allows 1.42x concurrency at full context, so 4 slots queue rather than run
+    # fully parallel at long prompts. That is the intended tradeoff: short requests still batch.
+    max_concurrent_requests: 4
+    vllm:
+      # Stock vLLM has no sm_70 support. This is the 1Cat-vLLM Volta fork; the tag is named for
+      # the model it was first built for, but the wheel is the whole fork. It is the first
+      # published sm70 image new enough for Qwen3.8: its qwen3_5 config defaults
+      # partial_rotary_factor to 0.25 and its Gated DeltaNet layer accepts output_gate_type
+      # "swish", both of which Qwen3.8 declares and the older 1cat-vllm-sm70:1.0.0 does not know.
+      # Serving that checkpoint on 1.0.0 would apply full rotary to a model asking for a quarter.
+      image: "cloudriftai/1cat-vllm-deepseek-v4-flash-0731:1.2.3-d76126608"
+      # --dtype half: Volta has no bfloat16. --language-model-only drops the vision tower, which
+      # this checkpoint leaves unquantized; the text path is what is qualified here.
+      # --max-num-seqs comes from max_concurrent_requests above (the schema forbids it here).
+      extra_args: >-
+        --dtype half
+        --language-model-only
+        --gdn-prefill-backend triton
+        --max-num-batched-tokens 4096
+        --enable-auto-tool-choice
+        --tool-call-parser qwen3_coder
+        --reasoning-parser qwen3
+      extra_env:
+        # Qwen3.8-27B is 48 Gated DeltaNet layers out of 64, so the GDN path is unavoidable. This
+        # image cannot build the Volta-native flash_qla GDN extension: it ships the sources but
+        # not the CUDA development headers, so the JIT fails at
+        # `fatal error: cusparse.h: No such file or directory`. Selecting the Triton GDN *prefill*
+        # backend above is not sufficient, because the GDN decode path reaches for flash_qla
+        # independently; this knob is what actually keeps the JIT out of the run. A purpose-built
+        # sm_70 image should prebuild that extension instead and drop this line.
+        VLLM_SM70_GDN_DECODE_FLASHQLA: "0"
+
+matrices:
+  deploy.gpu: "NVIDIA Tesla V100 SXM2 16GB"
+  deploy.gpu_count: 2
