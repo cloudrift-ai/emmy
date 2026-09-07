@@ -1298,13 +1298,15 @@ backend). It short-circuits from the `perf` cache in three cases. A kernel whose
 slice it is in — its identity is its rendered source and launch geometry, the same bytes wherever it appears — so
 one such row decides the slice as `bench_fail`, blamed exactly as recorded, and the other kernels need no row of
 their own (an all-or-nothing lookup re-benched every hang on every fresh session, because a failure is recorded only
-against the kernel the watchdog named and the innocent kernels stay rowless — `persist_bench_failure`, the one
-writer for a failed bench, which `run --bench`'s greedy row also comes through). A failure that names no kernel in a
-multi-kernel terminal — a wall kill — blames none of them, but what IS known, that this kernel set failed at that
-budget, is filed as a `bench_fail` under the set's own key (`TerminalBench.set_key`, the digest of its kernels'
-variant keys) and replays for that exact set; the row carries no knobs and no kernel stands behind it, so the
-greedy's disqualification index (joined on `S_*` signatures) and the dataset (joined on `cuda_op`) never see it, and
-a kernel of the set enrolled on its own still benches. An `ok` replay needs every `CudaOp`'s row for the current
+against the kernel the failure names — the watchdog's hang, or nvcc's refusal of a kernel's source — and the
+innocent kernels stay rowless — `persist_bench_failure`, the one writer for a failed bench, which `run --bench`'s
+greedy row also comes through; the name is read off the message text, since the exception class does not cross
+the worker pipe, and with the quote `repr` escapes when the message also holds a `"`). A failure that names no
+kernel in a multi-kernel terminal — a wall kill — blames none of them, but what IS known, that this kernel set
+failed at that budget, is filed as a `bench_fail` under the set's own key (`TerminalBench.set_key`, the digest of
+its kernels' variant keys) and replays for that exact set; the row carries no knobs and no kernel stands behind it,
+so the greedy's disqualification index (joined on `S_*` signatures) and the dataset (joined on `cuda_op`) never see
+it, and a kernel of the set enrolled on its own still benches. An `ok` replay needs every `CudaOp`'s row for the current
 `(context_key, backend)`: the bench runs the whole graph, so a partial cache cannot stand in for the Σ. Otherwise it
 does one `await backend.benchmark_async(...)`, walks `Op.source` once to record op inventory + lowering edges + the
 `perf` row per kernel, and returns the aggregate `PerfStats` for the search to score.

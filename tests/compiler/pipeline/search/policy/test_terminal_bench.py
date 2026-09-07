@@ -190,6 +190,22 @@ async def test_a_hung_kernel_is_blamed_alone() -> None:
     assert len(per_kernel) == 1, "only the culprit trains the prior on this failure"
 
 
+async def test_a_kernel_nvcc_refuses_is_blamed_alone() -> None:
+    """A worker-side nvcc failure names its kernel too, but it reaches the parent through ``repr``
+    of the child's exception, and nvcc's detail quotes identifiers with ``"``, so the name's own
+    ``'`` comes back escaped as ``\\'``. Blame must read it anyway: left unrecorded, the same source
+    is elected and refused again on every compile (a host loop re-elected one such kernel with
+    nothing filed)."""
+    db, cand = SearchDB(), _candidate_pair()
+    inner = RuntimeError("nvcc compile failed for kernel 'k_culprit': k.cu(135): error: identifier \"a26_1\" is undefined")
+    exc = BenchWorkerJobError(f"bench worker error: {inner!r}")
+
+    _stats, status, _measured, _per_kernel = await bench_terminal_async(cand, backend=_RaisingBackend(exc), db=db)
+
+    assert status == "bench_fail"
+    assert _fail_rows(db, cand) == {"k_culprit": "bench_fail"}, "the refused kernel is the one nvcc named"
+
+
 async def test_a_blamed_kernel_replays_the_hang_for_its_slice() -> None:
     """The culprit's row is the slice's evidence: a kernel that hung hangs every slice it is in, so
     on the next session the slice must be served ``bench_fail`` from the cache without the innocent
