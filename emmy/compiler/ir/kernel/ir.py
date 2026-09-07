@@ -1071,6 +1071,63 @@ class FragmentApply(Stmt):
         return lines
 
 
+@dataclass(frozen=True)
+class FragmentRowReduce(Stmt):
+    """Per-ROW reduction over one warp's ``mma.sync`` C fragments — the chunk pivot and the
+    per-row channel partials the twisted carrier's atom tier folds (``_atom._FlashOps``).
+
+    Each lane of an ``m16n8`` C fragment owns 4 f32 elements: rows ``g`` / ``g+8``
+    (``g = lane/4``), cols ``(lane%4)*2 + {0,1}``. A chunk-wide score tile is ``len(frags)`` such
+    fragments side by side, so reducing over the chunk is: combine each fragment's in-lane column
+    pair across every fragment, then a ``__shfl_xor`` butterfly over the ``group``-lane column set
+    (``group = 4`` for ``m16n8`` — the lanes differing in ``lane%4`` hold a row's 8 columns).
+    Afterwards every lane of a column group holds the full per-row value, so ``top`` (rows ``g``)
+    and ``bot`` (rows ``g+8``) are the :data:`ROW` operands :class:`FragmentApply` broadcasts.
+
+    Distinct from :class:`WarpShuffle`, which folds a whole per-thread monoid state over a
+    cooperative-K lane set; this folds WITHIN one warp's fragments along the atom's N direction,
+    keyed on the PTX C layout. It is why the tier requires the chunk to sit inside one warp column
+    (``n_units == 1`` on the score): a reduction that crossed warps would need smem."""
+
+    top: str  # the per-row value for rows g (broadcast across the column group)
+    bot: str  # the per-row value for rows g+8
+    frags: tuple[str, ...]  # the C fragments (float[4] each) spanning the chunk
+    op: ElementwiseImpl  # the fold — ``maximum`` for the pivot, ``add`` for a summed channel
+    group: int = 4  # column-group lane span (m16n8: 4 lanes hold a row's 8 cols)
+    dtype: DataType = F32
+
+    def deps(self) -> tuple[str, ...]:
+        return self.frags
+
+    def defines(self) -> tuple[str, ...]:
+        return (self.top, self.bot)
+
+    def pretty(self, indent: str = "") -> list[str]:
+        return [f"{indent}FragmentRowReduce({self.top}, {self.bot} <- {', '.join(self.frags)}, op={self.op.name})"]
+
+    def render(self, ctx: RenderCtx) -> list[str]:
+        pad = _pad(ctx.indent)
+        f32 = ctx.type_name("f32")
+
+        def combine(parts: list[str]) -> str:
+            e = parts[0]
+            for p in parts[1:]:
+                e = _binary_combine_expr(self.op, e, p, ctx.target, "f32")
+            return e
+
+        top_parts = [f"{f}[{i}]" for f in self.frags for i in (0, 1)]
+        bot_parts = [f"{f}[{i}]" for f in self.frags for i in (2, 3)]
+        out = [f"{pad}{f32} {self.top} = {combine(top_parts)};", f"{pad}{f32} {self.bot} = {combine(bot_parts)};"]
+        ctx.ssa_dtypes[self.top] = ctx.ssa_dtypes[self.bot] = "f32"
+        s = int(self.group) // 2
+        while s > 0:
+            for nm in (self.top, self.bot):
+                shfl = f"__shfl_xor_sync(0xffffffff, {nm}, {s})"
+                out.append(f"{pad}{nm} = {_binary_combine_expr(self.op, nm, shfl, ctx.target, 'f32')};")
+            s >>= 1
+        return out
+
+
 #: The reserved coordinate Vars a :class:`FragmentMask` predicate is written over — the element's
 #: ABSOLUTE query row / key column; the render substitutes each element's coords (tile origin +
 #: layout offset) for these.
@@ -2782,6 +2839,13 @@ def _(s: FragmentRepack, rename, sigma, axis_fn):
     # Pure register (the flash P→A handoff): route the dest + the two source C fragments through
     # ``rename`` (SSA canonicalizer / per-cell replicator); no index / axis to σ-substitute.
     return FragmentRepack(frag=rename(s.frag), srcs=(rename(s.srcs[0]), rename(s.srcs[1])), ab_dtype=s.ab_dtype)
+
+
+@_rewrite_kind.register
+def _(s: FragmentRowReduce, rename, sigma, axis_fn):
+    return FragmentRowReduce(
+        top=rename(s.top), bot=rename(s.bot), frags=tuple(rename(f) for f in s.frags), op=s.op, group=s.group, dtype=s.dtype
+    )
 
 
 @_rewrite_kind.register

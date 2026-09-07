@@ -264,7 +264,10 @@ def _contraction_domain(
     wide_warp_tiles = tuple(
         plan for name in allowed_atoms if _kstep_refusal(facts.k_axis, (plan := Tile(atom=ATOM_REGISTRY[name], regs=(26, 4), bk=2))) is None
     )
-    scalar_tiles = scalar_tile_moves() if len(node.operands) == 2 else (Tile(),)
+    # The scalar register tier folds the STORED lift, which for a twist is the base contribution
+    # and denotes ``Sum exp(score)``: only the atom tier folds the recipe's chunk patterns instead,
+    # so a twisted carrier's untiled arm is the plain serial fold and nothing between.
+    scalar_tiles = scalar_tile_moves() if len(node.operands) == 2 and node.twist is None else (Tile(),)
     catalog = (
         *scalar_tiles,
         *(plan for plan in warp_tile_moves(allowed_atoms) if _kstep_refusal(facts.k_axis, plan) is None),

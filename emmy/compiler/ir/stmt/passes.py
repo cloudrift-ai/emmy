@@ -250,6 +250,7 @@ def _(s: StridedLoop, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
         body=tuple(rewrite(c, rename, sigma, axis_fn) for c in s.body),
         unroll=s.unroll,
         end=sigma.apply(s.end) if s.end is not None else None,
+        seed=s.seed,
     )
 
 
@@ -340,6 +341,7 @@ def _(s: StridedLoop, ctx: SimplifyCtx) -> Stmt:
         body=tuple(simplify(c, inner) for c in s.body),
         unroll=s.unroll,
         end=s.end.simplify(ctx) if s.end is not None else None,
+        seed=s.seed,
     )
 
 

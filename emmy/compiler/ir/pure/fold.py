@@ -539,15 +539,53 @@ class Fold:
         )
 
     def tiles_whole(self) -> bool:
-        """Whether an atom tier could fold this term WHOLE — every carried state is a bilinear
-        channel, so the tile's accumulators are the carrier.
+        """Whether an atom tier could fold this term WHOLE — the tile's accumulators ARE the
+        carrier, at one of the two shapes a tier carries.
 
-        Both tiers fold one accumulator per product channel and have no residence for a state that
-        is not one, so a carrier holding a running maximum beside its expectation is no tile site
-        however bilinear that expectation reads. Stated in the algebra rather than as a twist test:
-        the count is what the tiers can carry, and a recipe that folded nothing but products would
-        pass on the same terms."""
-        return self.as_contraction() is not None and len(self.bilinear_channels()) == len(self.base.results)
+        A PLANAR carrier qualifies when every carried state is a bilinear channel: both tiers fold
+        one accumulator per product channel and have no residence for a state that is not one.
+        Stated in the algebra rather than as a twist test — a recipe that folded nothing but
+        products would pass on the same terms.
+
+        A TWISTED carrier qualifies when the recipe folds it one staged CHUNK at a time
+        (:meth:`chunked`): the states that are no product are then per-row scalars the chunk's own
+        reductions produce, and the accumulator is the one bilinear channel. The stored lift is
+        still not what any step may fold — for a twist it is the base contribution and denotes
+        ``Sum exp(score)`` — so the tier folds the recipe's channel patterns against the chunk's
+        pivot instead, and merges the chunk's partial through the stable ⊕."""
+        if self.as_contraction() is None:
+            return False
+        if self.twist is not None:
+            return self.chunked()
+        return len(self.bilinear_channels()) == len(self.base.results)
+
+    @cached_method
+    def chunked(self) -> bool:
+        """Whether the recipe this twisted carrier names lets a tier fold it CHUNK BY CHUNK.
+
+        Four things the chunk emission needs, all of them the recipe's:
+
+        - one ``pattern`` per carried state past the pivot — the per-element map over
+          ``(score, pivot, *extras)`` the chunk folds, which is what stands in for the stored base
+          contribution the tier may not touch;
+        - a state count the recipe covers, so no carried state is left without one;
+        - ``advance`` and ``rescale`` — the stable ⊕ at an open channel count, applied once per
+          chunk rather than once per element (a recipe spelling one fixed-arity ``combine`` merges
+          whole carriers, which is not what a chunk hands back);
+        - exactly ONE bilinear channel, since the tier holds one accumulator and every other state
+          rides as a per-row scalar.
+        """
+        twist = self.twist
+        if twist is None or self.base is None or not twist.channels:
+            return False
+        recipe = twist.recipe
+        if recipe.advance is None or recipe.rescale is None:
+            return False
+        if len(twist.channels) != len(self.base.results) - 1:
+            return False
+        if any(recipe.channels[index].pattern is None for index in twist.channels):
+            return False
+        return len(self.bilinear_channels()) == 1
 
     @cached_method
     def bilinear_channels(self) -> tuple[tuple[int, Fold], ...]:

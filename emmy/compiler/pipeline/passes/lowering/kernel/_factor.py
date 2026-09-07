@@ -193,7 +193,12 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
         step = list(op.step())
         reducing = _peeled_root(root, ctx)
         aside_copies = False
-        if reducing is None or reducing.as_contraction() is None or ctx.sched.tile_of(reducing) is None:
+        # A CHUNKED twisted carrier is the exception the aside copy does not serve: the chunk tier
+        # produces every carried state — the pivot and the denominator as per-row registers, the
+        # expectation as the accumulator fragment — so the sibling reads them by name like the
+        # serial arm does, and a second copy of the whole fold beside the tier's is dead code that
+        # redeclares the carrier.
+        if reducing is None or reducing.as_contraction() is None or ctx.sched.tile_of(reducing) is None or reducing.chunked():
             placed = set(root.lower(axes=axes))
             siblings = [stmt for edge in op.operands if edge is not root for stmt in edge.lower(axes=axes) if stmt not in placed]
         else:
@@ -355,6 +360,19 @@ def with_store(stmts: list[Stmt], output: str, grid, value: str) -> list[Stmt]:
     return [*stmts, Write(output=output, index=index, value=value)]
 
 
+def _inner_site(c, ctx: Ctx) -> tuple | None:
+    """The nested contraction a CHUNKED twisted carrier folds against, as ``(node, placed tile)``.
+
+    ``None`` for every other node — a planar contraction folds its own operands and has no second
+    site inside its step. The producer is the one the schedule already keyed the fragment seam on
+    (``ContractionFacts.producer``), so this reads it rather than re-deriving it."""
+    if not (isinstance(c, Fold) and c.chunked()):
+        return None
+    facts = ctx.sched.tile.contractions.get(ctx.sched.tile.node_id(c))
+    producer = facts.producer if facts is not None else None
+    return None if producer is None else (producer, ctx.sched.tile_of(producer))
+
+
 def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: tuple = (), frag_ns: str = "") -> Tile:
     """The ONE root binder — every kernel binds through the same pipeline: read WHICH AXES the
     schedule tiles off the node, build the fold region, and seal through the one :func:`grid_tile`
@@ -401,10 +419,19 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         # grid (N 32 beside N 64), the pair binds one of them, and a positional ``grid[:-2]`` then
         # dropped the other — leaving an axis no block, unit or lead var defines.
         lead = tuple(axis for axis in grid if axis.name not in {bound.name for bound in tile.axes})
+        # The NESTED site this node folds a chunk of at a time — the twisted carrier's score, whose
+        # own ``TILE`` the schedule decided beside this one. The fragment seam already made the two
+        # agree (one warp column on the score, its N tile the chunk); the emission needs the node
+        # and its placed geometry to build the chunk's score tile.
+        inner = _inner_site(c, ctx)
         state_decls, reduce_region = reduce_codegen(
-            c, tile, stage, ctx.inputs, ctx.workers, seam, lead, frag_ns, k_axis=k_axis, axes=ctx.sched.tile.axes
+            c, tile, stage, ctx.inputs, ctx.workers, seam, lead, frag_ns, k_axis=k_axis, axes=ctx.sched.tile.axes, inner=inner
         )
-        sink = store if store is not None else store_sink(c, tile, Body(tuple(epi)), lead, frag_ns, k_axis=k_axis, axes=ctx.sched.tile.axes)
+        sink = (
+            store
+            if store is not None
+            else store_sink(c, tile, Body(tuple(epi)), lead, frag_ns, k_axis=k_axis, axes=ctx.sched.tile.axes, inner=inner)
+        )
         t = unit_tile(register_tile(atomize(tile.atom.shape[:2]), tile.mn), tile.mn)
         mn, bt, lanes = tile.mn, tile.launch_threads, tile.atom.lanes
     else:

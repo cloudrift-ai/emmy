@@ -38,11 +38,14 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.kernel.ir import (
     FRAG,
+    ROW,
     UNIFORM,
     BlockScaleLoad,
     EpilogueLoad,
     FragmentApply,
     FragmentPromote,
+    FragmentRepack,
+    FragmentRowReduce,
     LdmatrixLoad,
     MmaSyncPtx,
     RegEpilogue,
@@ -1453,6 +1456,9 @@ class _AtomOps:
     # the kernel holds them, and every open-body lowering of an operand here takes the table.
     k_axis: Axis | None = None
     axes: tuple = ()
+    # The NESTED contraction this node folds a chunk of at a time, as ``(node, placed Tile)`` — the
+    # twisted carrier's score, whose own site the schedule decided. ``None`` everywhere else.
+    inner: tuple | None = None
 
     def frag(self, name: str) -> str:
         """``name`` in this emission's fragment namespace (:attr:`frag_ns`)."""
@@ -1930,6 +1936,440 @@ class _ScalarOps(_AtomOps):
         return _dedup_loads(cell)
 
 
+# ---- the twisted carrier's chunk tier ------------------------------------------------------- #
+#
+# The carrier is ONE term over one axis. No block is carved into it: the block this tier folds is
+# the schedule's staged K chunk (``STAGE``'s ``bk_elems``) and nothing else. Per chunk it builds the
+# score (the nested contraction the tree already carries as a site of its own), reduces it per row
+# into the chunk's pivot, instantiates the recipe's own channel patterns against that pivot, folds
+# each non-bilinear channel per row and the bilinear one on tensor cores, and merges the chunk's
+# partial into the carrier through the recipe's stable ⊕ — once per chunk, not once per element.
+# The stored lift is never folded here: for a twist it is the base contribution and denotes
+# ``Sum exp(score)``.
+
+
+#: The reserved names this tier binds a recipe pattern's score and pivot roles to — a pattern is
+#: written over ROLES, and these are the two the tier supplies rather than the term.
+_SCORE = "__score"
+_PIVOT = "__pivot"
+
+
+def _row_pair(state: str, i: int) -> tuple[str, str]:
+    """The two per-lane registers carrying ``state`` for register row ``i``. An m16n8 lane owns rows
+    ``g`` and ``g+8``, so a per-row carrier component is a PAIR — and that pair is exactly the
+    :data:`ROW` operand a :class:`FragmentApply` broadcasts and a :class:`FragmentRowReduce`
+    produces."""
+    return (f"{state}__r{i}_0", f"{state}__r{i}_1")
+
+
+def _residence(stmts, *, frags: dict, rows: dict, tag: str, hold: str = "", memo: dict | None = None, frags_only: bool = False):
+    """Evaluate one straight-line scalar program at the residence each value it reads has.
+
+    ``frags`` maps a name to the C fragment holding it, ``rows`` a name to its ``(top, bot)``
+    register pair; every other name is uniform across the cell. A statement reading a fragment
+    becomes a :class:`FragmentApply` whose arg kinds are read off those two maps; one reading a row
+    scalar and no fragment is emitted twice, once per row half; one reading neither is emitted
+    verbatim. An ``Accum`` writes back into the value it names rather than declaring a new one, at
+    the same three residences. Returns the statements beside the two maps extended with what they
+    defined.
+
+    ``hold`` names a fragment that must SURVIVE the program — the carrier's own accumulator, which
+    is declared once outside the chunk loop and may not be re-declared inside it. A statement whose
+    arguments include it writes back IN PLACE (the op must be commutative, so the accumulator can
+    lead the argument list); its result then denotes the accumulator too. ``memo`` shares one
+    fragment per repeated ``(op, args)`` across calls, so two channels whose patterns both spell
+    the weight compute it once. ``frags_only`` keeps the fragment statements alone — the same
+    program run again for a second output column, whose row and uniform halves already stand.
+
+    This is what lets a recipe's channel pattern, its merge and a projection epilogue reach tensor
+    cores without any of them being written for tensor cores: all three are ordinary scalar
+    programs, and where their values live is a fact about this tile, not about them."""
+    from emmy.compiler.pipeline import RuleSkipped  # noqa: PLC0415 — avoid an import cycle
+
+    out: list[Stmt] = []
+    frags, rows, memo = dict(frags), dict(rows), memo if memo is not None else {}
+    for stmt in stmts:
+        accum = isinstance(stmt, Accum)
+        if not isinstance(stmt, (Assign, Accum)):
+            if not frags_only:
+                out.append(stmt)  # a uniform leaf — a scalar Load, the same value for every element
+            continue
+        reads = (stmt.base or stmt.name, stmt.value) if accum else stmt.args
+        kinds = [FRAG if a in frags else ROW if a in rows else UNIFORM for a in reads]
+        if FRAG in kinds:
+            args = [frags[a] if k == FRAG else rows[a] if k == ROW else a for a, k in zip(reads, kinds, strict=True)]
+            target = frags.get(stmt.name) if accum else (hold if hold and hold in args else None)
+            if target is not None:
+                if len(args) > 1 and target not in args:
+                    args, kinds = [target, *args[1:]], [FRAG, *kinds[1:]]
+                elif len(args) > 1 and not stmt.op.commutative and args.index(target) != 0:
+                    raise RuleSkipped(f"the carrier's accumulator reaches a non-commutative {stmt.op.name} in the chunk merge")
+                elif len(args) > 1:
+                    lead = args.index(target)
+                    args = [args[lead], *args[:lead], *args[lead + 1 :]]
+                    kinds = [kinds[lead], *kinds[:lead], *kinds[lead + 1 :]]
+            key = (stmt.op.name, tuple(args), tuple(kinds))
+            if target is None and key in memo:
+                frags[stmt.name] = memo[key]
+                continue
+            name = target if target is not None else f"{tag}{stmt.name}"
+            out.append(FragmentApply(out=name, op=stmt.op, args=tuple(args), kinds=tuple(kinds), in_place=target is not None))
+            frags[stmt.name] = name
+            if target is None:
+                memo[key] = name
+        elif ROW in kinds:
+            pair = rows[stmt.name] if accum and stmt.name in rows else (f"{tag}{stmt.name}_0", f"{tag}{stmt.name}_1")
+            for half, target in enumerate(pair):
+                bound = tuple(rows[a][half] if a in rows else a for a in reads)
+                if not frags_only:
+                    out.append(
+                        Accum(name=target, value=bound[1], op=stmt.op, base=bound[0]) if accum else replace(stmt, name=target, args=bound)
+                    )
+            rows[stmt.name] = pair
+        elif not frags_only:
+            out.append(stmt)
+    return out, frags, rows
+
+
+@dataclass(frozen=True)
+class _FlashOps(_MmaOps):
+    """The TWISTED carrier folded one staged CHUNK at a time — attention's tensor-core form.
+
+    The ordinary mma tier folds a term's own lift into one accumulator per bilinear channel. A
+    twisted carrier cannot be folded that way at all: its stored lift is the BASE contribution, and
+    the states beside its expectation are a running pivot and a denominator that are no accumulator.
+    So this tier folds the RECIPE, and takes its only block from the schedule:
+
+    - the CHUNK is ``STAGE``'s ``bk_elems`` over the carrier's own axis;
+    - the SCORE for the chunk is the nested contraction (:attr:`inner`), whose output tile is the
+      ``(m, chunk)`` pair — which is why the fragment seam requires one warp column on it and its N
+      tile to equal this node's chunk;
+    - the chunk's PIVOT is that score's ⊕ over the chunk, one :class:`FragmentRowReduce` per row;
+    - each channel folds the recipe's own ``pattern`` against that pivot — a row reduce for a
+      channel that is no product, an ``mma.sync`` against the streamed operand for the one that is;
+    - the chunk's partial merges through the recipe's stable ⊕ (:meth:`Fold.merge`), applied once
+      per chunk rather than once per element.
+
+    Every operand reads gmem-direct through the ordinary fragment loaders. A staged operand slab is
+    a later transport choice, not a shape this tier depends on.
+    """
+
+    # ---- what the recipe says, in this term's names ------------------------------------------ #
+
+    @property
+    def _recipe(self):
+        return self.c.twist.recipe
+
+    @property
+    def _bilinear(self) -> int:
+        """The carried state the products fold into — the one accumulator this tier holds."""
+        return self.c.bilinear_channels()[0][0]
+
+    def _carried(self) -> tuple[tuple[int, str, float], ...]:
+        """Every carried state as ``(index, name, seed)``, the pivot first — carrier order."""
+        return tuple((index, name, self.c.init[index]) for index, name in enumerate(self.c.base.results))
+
+    def _pattern(self, index: int):
+        """Carried state ``index``'s per-element map over the chunk's pivot — the recipe's own
+        ``pattern``, its score and pivot roles left as the reserved names this tier binds and its
+        extras spelled the way the term spells them. Returns the statements and the result."""
+        channel = self._recipe.channels[self.c.twist.channels[index - 1]]
+        extras = dict(zip(self._recipe.lift.params[1:], self.c.roles[1:], strict=False))
+        bound = {channel.pattern.params[0]: _SCORE, channel.pattern.params[1]: _PIVOT, **extras}
+        instance = channel.pattern.rename(lambda name: bound.get(name, name))
+        return tuple(instance.body), instance.results[0]
+
+    # ---- the carrier's registers -------------------------------------------------------------- #
+
+    def state(self, cells):
+        """The chunk tier's live registers: the expectation's accumulator fragments and the per-row
+        registers every other carried state rides in. Everything a chunk needs but no chunk carries
+        — the score's tile, the weight, the chunk partial — is declared inside the chunk loop."""
+        m, n = self.tile.m, self.tile.n
+        bilinear = self._bilinear
+        decls: list[Stmt] = [self._frag(f"_c{i}_{j}", "c") for i in range(m.reg) for j in range(n.reg)]
+        decls += [
+            Init(name=name, identity=seed, dtype=F32)
+            for index, state, seed in self._carried()
+            if index != bilinear
+            for i in range(m.reg)
+            for name in _row_pair(self.frag(state), i)
+        ]
+        return decls
+
+    def _frag(self, name: str, role: str) -> RegFragment:
+        atom = self.tile.atom
+        return RegFragment(
+            name=self.frag(name),
+            role=role,
+            shape=atom.ptx_shape,
+            dtype=atom.operand_dtype(role),
+            nregs=atom.fragment_nregs(role),
+        )
+
+    # ---- the chunk ---------------------------------------------------------------------------- #
+
+    def reduce(self, cells, offset, mn):
+        """The chunk loop — the ONE loop this tier opens over the carrier's axis."""
+        from emmy.compiler.pipeline import RuleSkipped  # noqa: PLC0415 — avoid an import cycle
+
+        m, n = mn
+        atom = self.tile.atom
+        if atom.fragment_layout != "m16n8k16" or not atom.c_to_a_repack:
+            raise RuleSkipped("the chunk tier needs an atom whose C fragment repacks into an A operand", reject=True)
+        bk = self.stage.bk_elems if self.stage is not None else atom.atom_k
+        cols, steps = bk // atom.atom_n, bk // atom.atom_k
+        if bk % atom.atom_k or cols != 2 * steps:
+            raise RuleSkipped(f"a chunk of {bk} does not tile into whole {atom.atom_k}-wide mma steps", reject=True)
+        key = self.k_axis
+        if not key.extent.is_static or key.extent.as_static() % bk:
+            raise RuleSkipped("the chunk tier needs a key extent its chunk tiles exactly", reject=True)
+        score = self.inner[0] if self.inner else None
+        if score is None or any(edge.as_slab() is None for edge in (*score.operands, self.c.operands[1])):
+            raise RuleSkipped("the chunk tier reads its score operands and its streamed value as slabs", reject=True)
+        cone = self.c.operands[0].applied.cone(self.c.roles[0])
+        if any(not isinstance(stmt, (Assign, Load)) for stmt in cone.body):
+            raise RuleSkipped("the score's own cone holds more than a straight-line program", reject=True)
+
+        chunk = Axis(name=f"{key.name}__ck", extent=key.extent)
+        base = Var(chunk.name)
+        # The cone's row-invariant leaves (attention's scale) are read once, ahead of the chunk loop.
+        pre = [stmt for edge in self.c.operands[0].operands if edge is not score for stmt in edge.lower(axes=self.axes)]
+
+        memo: dict = {}
+        body: list[Stmt] = self._score_tile(offset, mn, base, cols)
+        scored, pivots = {}, {}
+        for i in range(m.reg):
+            for j in range(cols):
+                stmts, frags, _ = _residence(
+                    cone.body,
+                    frags={score.exposes[0]: self.frag(f"_s{i}_{j}")},
+                    rows={},
+                    tag=f"_w{i}_{j}_",
+                    memo=memo.setdefault((i, j), {}),
+                )
+                body += stmts
+                scored[i, j] = frags[self.c.roles[0]]
+            pivots[i] = _row_pair(self.frag("_g"), i)
+            body.append(
+                FragmentRowReduce(
+                    top=pivots[i][0],
+                    bot=pivots[i][1],
+                    frags=tuple(scored[i, j] for j in range(cols)),
+                    op=self.c.base.components()[0],
+                )
+            )
+        weights, partials = {}, {}
+        for index, state, _seed in self._carried():
+            if index == 0:
+                continue
+            stmts, result = self._pattern(index)
+            product = stmts[-1] if index == self._bilinear else None
+            if product is not None and (not isinstance(product, Assign) or len(product.args) != 2 or product.name != result):
+                raise RuleSkipped("the bilinear channel's pattern does not end in its product", reject=True)
+            for i in range(m.reg):
+                folded = []
+                for j in range(cols):
+                    cell, frags, _ = _residence(
+                        stmts[:-1] if product is not None else stmts,
+                        frags={_SCORE: scored[i, j]},
+                        rows={_PIVOT: pivots[i]},
+                        tag=f"_ch{i}_{j}_",
+                        memo=memo[i, j],
+                    )
+                    body += cell
+                    if product is None:
+                        folded.append(frags[result])
+                        continue
+                    held = [arg for arg in product.args if arg in frags]
+                    if len(held) != 1:
+                        raise RuleSkipped("the bilinear channel's product multiplies no single computed weight", reject=True)
+                    weights[i, j] = frags[held[0]]
+                if product is None:
+                    partials[index, i] = (f"{self.frag(state)}__p{i}_0", f"{self.frag(state)}__p{i}_1")
+                    body.append(
+                        FragmentRowReduce(
+                            top=partials[index, i][0],
+                            bot=partials[index, i][1],
+                            frags=tuple(folded),
+                            op=self.c.base.components()[index],
+                        )
+                    )
+        body += self._expectation(offset, mn, base, weights, steps)
+        body += self._merge(mn, pivots, partials)
+        # ``seed=False``: the carrier is declared once outside this loop at the seeds the TERM names
+        # — the pivot's is not ``maximum``'s neutral element — so the loop must not re-seed it.
+        return pre, [
+            StridedLoop(axis=chunk, start=Literal(0, "int"), step=Literal(bk, "int"), body=Body(tuple(body)), unroll=False, seed=False)
+        ]
+
+    def _score_tile(self, offset, mn, base, cols) -> list[Stmt]:
+        """The chunk's score — one ``(m, chunk)`` mma tile, its own K loop inside the chunk."""
+        m, _ = mn
+        atom, score, key = self.tile.atom, self.inner[0], self.k_axis
+        inner_k = next(axis for axis in self.axes if axis.name == score.axis)
+        a_load, b_load = (edge.as_slab().load for edge in score.operands[:2])
+        trans = score.as_contraction().b_trans
+        decls: list[Stmt] = [self._frag(f"_qa{i}", "a") for i in range(m.reg)]
+        decls += [self._frag(f"_kb{j}", "b") for j in range(cols)]
+        decls += [self._frag(f"_s{i}_{j}", "c") for i in range(m.reg) for j in range(cols)]
+        loop: list[Stmt] = [
+            LdmatrixLoad(
+                frag=self.frag(f"_qa{i}"),
+                src_buffer=a_load.input,
+                src_index=tuple(Sigma({m.axis.name: offset[0].base(i)}).apply(e) for e in a_load.index),
+                role="a",
+                staged=False,
+                gmem_guard=_guard(m, offset[0].base(i)),
+                fragment_layout=atom.fragment_layout,
+            )
+            for i in range(m.reg)
+        ]
+        loop += [
+            LdmatrixLoad(
+                frag=self.frag(f"_kb{j}"),
+                src_buffer=b_load.input,
+                src_index=tuple(Sigma({key.name: BinaryExpr("+", base, Literal(j * atom.atom_n, "int"))}).apply(e) for e in b_load.index),
+                role="b",
+                staged=False,
+                b_trans=trans,
+                fragment_layout=atom.fragment_layout,
+            )
+            for j in range(cols)
+        ]
+        loop += [
+            MmaSyncPtx(
+                c_frag=self.frag(f"_s{i}_{j}"),
+                a_frag=self.frag(f"_qa{i}"),
+                b_frag=self.frag(f"_kb{j}"),
+                shape=atom.ptx_shape,
+                ab_dtype=atom.ab_dtype,
+                c_dtype=atom.operand_dtype("c").name,
+            )
+            for i in range(m.reg)
+            for j in range(cols)
+        ]
+        return [
+            *decls,
+            StridedLoop(
+                axis=inner_k,
+                start=Literal(0, "int"),
+                step=Literal(atom.atom_k, "int"),
+                body=Body(tuple(loop)),
+                unroll=unroll_ok(inner_k.extent),
+            ),
+        ]
+
+    def _expectation(self, offset, mn, base, weights, steps) -> list[Stmt]:
+        """The bilinear channel's product: the weight repacks into an A operand IN REGISTERS and
+        ``mma.sync``\\ s against the streamed operand, into the chunk's own accumulator so the merge
+        can rescale both sides of the ⊕."""
+        m, n = mn
+        atom = self.tile.atom
+        v_load = self.c.operands[1].as_slab().load
+        out: list[Stmt] = [self._frag(f"_a{i}_{t}", "a") for i in range(m.reg) for t in range(steps)]
+        out += [self._frag(f"_b{j}_{t}", "b") for j in range(n.reg) for t in range(steps)]
+        out += [self._frag(f"_p{i}_{j}", "c") for i in range(m.reg) for j in range(n.reg)]
+        for t in range(steps):
+            out += [
+                FragmentRepack(frag=self.frag(f"_a{i}_{t}"), srcs=(weights[i, 2 * t], weights[i, 2 * t + 1]), ab_dtype=atom.ab_dtype)
+                for i in range(m.reg)
+            ]
+            row = BinaryExpr("+", base, Literal(t * atom.atom_k, "int"))
+            out += [
+                LdmatrixLoad(
+                    frag=self.frag(f"_b{j}_{t}"),
+                    src_buffer=v_load.input,
+                    src_index=tuple(Sigma({self.k_axis.name: row, n.axis.name: offset[1].base(j)}).apply(e) for e in v_load.index),
+                    role="b",
+                    staged=False,
+                    b_trans=self.c.as_contraction().b_trans,
+                    gmem_guard=_guard(n, offset[1].base(j)),
+                    fragment_layout=atom.fragment_layout,
+                )
+                for j in range(n.reg)
+            ]
+            out += [
+                MmaSyncPtx(
+                    c_frag=self.frag(f"_p{i}_{j}"),
+                    a_frag=self.frag(f"_a{i}_{t}"),
+                    b_frag=self.frag(f"_b{j}_{t}"),
+                    shape=atom.ptx_shape,
+                    ab_dtype=atom.ab_dtype,
+                    c_dtype=atom.operand_dtype("c").name,
+                )
+                for i in range(m.reg)
+                for j in range(n.reg)
+            ]
+        return out
+
+    def _merge(self, mn, pivots, partials) -> list[Stmt]:
+        """The recipe's own stable ⊕ (:meth:`Fold.merge`), applied once per chunk at each state's
+        residence: the pivot and every summed channel are per-row registers, the expectation the
+        accumulator fragment. The row half stands for the whole register row, so it is emitted for
+        the first output column alone and the later columns take the fragment half only."""
+        m, n = mn
+        states = self.c.base.results
+        bilinear = self._bilinear
+        other = tuple(f"__ck_{state}" for state in states)
+        program = tuple(self.c.merge(other))
+        out: list[Stmt] = []
+        for i in range(m.reg):
+            rows = {states[0]: _row_pair(self.frag(states[0]), i), other[0]: pivots[i]}
+            for index, state, _seed in self._carried():
+                if index in (0, bilinear):
+                    continue
+                rows[state] = _row_pair(self.frag(state), i)
+                rows[other[index]] = partials[index, i]
+            for j in range(n.reg):
+                held = self.frag(f"_c{i}_{j}")
+                cell, _f, _r = _residence(
+                    program,
+                    frags={states[bilinear]: held, other[bilinear]: self.frag(f"_p{i}_{j}")},
+                    rows=rows,
+                    tag=f"_mg{i}_",
+                    hold=held,
+                    frags_only=j > 0,
+                )
+                out += cell
+        return out
+
+    # ---- the sink ------------------------------------------------------------------------------ #
+
+    def store(self, i, j, offset, mn):
+        """Write cell ``(i, j)``'s expectation, the projection applied at each value's residence —
+        the denominator is a per-row register here, not something a :class:`RegEpilogue` chain can
+        bind, so the projection evaluates ahead of the store and the store writes the fragment."""
+        atom, (m, n) = self.tile.atom, mn
+        mcell, ncell = offset[0].base(i), offset[1].base(j)
+        sigma = Sigma({m.axis.name: mcell, n.axis.name: ncell})
+        bilinear = self._bilinear
+        frags = {self.c.base.results[bilinear]: self.frag(f"_c{i}_{j}")}
+        rows = {state: _row_pair(self.frag(state), i) for index, state, _ in self._carried() if index != bilinear}
+        stmts, frags, _rows = _residence(
+            [stmt for stmt in self.epilogue if not isinstance(stmt, Write)], frags=frags, rows=rows, tag=f"_ep{i}_{j}_"
+        )
+        out = list(stmts)
+        for write in (stmt for stmt in self.epilogue if isinstance(stmt, Write)):
+            out.append(
+                RegStore(
+                    dst_buffer=write.output,
+                    dst_index=tuple(sigma.apply(e) for e in write.index),
+                    frag=frags[write.value],
+                    shape=atom.shape,
+                    epilogue=None,
+                    m_guard=_guard(m, mcell),
+                    n_guard=_guard(n, ncell),
+                    atomic=write.atomic,
+                    swizzle=write.swizzle,
+                    fragment_layout=atom.fragment_layout,
+                    row_dim=_axis_dim(write.index, m.axis.name),
+                    col_dim=_axis_dim(write.index, n.axis.name),
+                )
+            )
+        return out
+
+
 def _atom_ops(
     c: Fold,
     tile: Tile,
@@ -1943,6 +2383,7 @@ def _atom_ops(
     slabs: tuple = (None, None),
     k_axis: Axis | None = None,
     axes: tuple = (),
+    inner: tuple | None = None,
 ) -> _AtomOps:
     """The **one** atom dispatch — select the codegen strategy off the atom kind. ``c`` is the
     stored algebra, ``tile`` the PLACED schedule slice (``Tile.at``) the geometry derives from.
@@ -1967,8 +2408,14 @@ def _atom_ops(
         # Only the A edge is replaced; the term keeps its own lift, monoid and seeds, so there is
         # no semiring to re-thread and no former to go through.
         c = replace(c, operands=(make_cone([a_load], k_axis.name), *c.operands[1:]))
-    cls = _MmaOps if isinstance(tile.atom, AtomKind) else _ScalarOps
-    return cls(c, tile, stage, inputs, workers, lead, Body(()) if epilogue is None else epilogue, seam, frag_ns, slabs, k_axis, axes)
+    if not isinstance(tile.atom, AtomKind):
+        cls = _ScalarOps
+    else:
+        # A twisted carrier the recipe folds chunk by chunk takes the CHUNK tier; every other
+        # contraction takes the ordinary one. The reading is the term's (:meth:`Fold.chunked`),
+        # the same one ``TileOp.contracts`` offered the site on.
+        cls = _FlashOps if c.chunked() else _MmaOps
+    return cls(c, tile, stage, inputs, workers, lead, Body(()) if epilogue is None else epilogue, seam, frag_ns, slabs, k_axis, axes, inner)
 
 
 def reduce_codegen(
@@ -1983,6 +2430,7 @@ def reduce_codegen(
     *,
     k_axis: Axis | None = None,
     axes: tuple = (),
+    inner: tuple | None = None,
 ):
     """The reusable, **sink-agnostic** ``(state_decls, reduce_region)`` from the atom strategy — the
     accumulator decls + the contraction K-loop (the ONE :meth:`_AtomOps.reduce` driver: the shared
@@ -1990,15 +2438,23 @@ def reduce_codegen(
     ``stage`` / ``inputs`` bind operand staging (both atoms stage the same smem slab off it, differing
     only in the drain leaf — ``ldmatrix`` vs plain ``Load``); ``workers`` splits the staged phases
     across producer / compute warp bands (the resolved :class:`WarpSpec`; ``None`` = uniform)."""
-    ops = _atom_ops(c, tile, stage, inputs, workers, seam=seam, lead=lead, frag_ns=frag_ns, k_axis=k_axis, axes=axes)
+    ops = _atom_ops(c, tile, stage, inputs, workers, seam=seam, lead=lead, frag_ns=frag_ns, k_axis=k_axis, axes=axes, inner=inner)
     return ops.state, ops.reduce
 
 
 def store_sink(
-    c: Fold, tile: Tile, epilogue: Body | None = None, lead: tuple = (), frag_ns: str = "", *, k_axis: Axis | None = None, axes: tuple = ()
+    c: Fold,
+    tile: Tile,
+    epilogue: Body | None = None,
+    lead: tuple = (),
+    frag_ns: str = "",
+    *,
+    k_axis: Axis | None = None,
+    axes: tuple = (),
+    inner: tuple | None = None,
 ):
     """The default **matmul sink** — the per-cell ``store(i, j, offset, mn)`` from the atom strategy
     (an mma ``RegStore`` / the replicated scalar ``epilogue`` tail), folding in the ``epilogue`` (the
     projection off the node's zero-axis ``Fold`` wrapper + the store glue). A caller may replace
     the sink while reusing the shared ``reduce`` emission."""
-    return _atom_ops(c, tile, epilogue=epilogue, lead=lead, frag_ns=frag_ns, k_axis=k_axis, axes=axes).store
+    return _atom_ops(c, tile, epilogue=epilogue, lead=lead, frag_ns=frag_ns, k_axis=k_axis, axes=axes, inner=inner).store
