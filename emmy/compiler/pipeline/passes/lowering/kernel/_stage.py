@@ -758,19 +758,6 @@ class SyncTransport:
 
 
 @dataclass(frozen=True)
-class LeadSegment:
-    """A body segment placed BEFORE the drain, with the SINGLE-BUFFER operand group it reads.
-
-    A scheduled Fold child uses this segment to produce the operand slab consumed by the following
-    contraction drain. ``transport`` is ``None`` when the child reads directly from global memory;
-    otherwise it carries the child's own staged operand group. Keeping the groups distinct exposes
-    their non-overlapping live ranges to the common pipeline skeleton."""
-
-    build: Callable[[], list[Stmt]]
-    transport: object | None = None
-
-
-@dataclass(frozen=True)
 class CpAsyncTransport:
     """The cp.async producer: cooperative gmem→smem fills committed into groups, drained by
     ``CpAsyncWait(group=in_flight)``. ``operands`` is the ``(A, B)`` :class:`Operand` pair; each
@@ -1236,7 +1223,6 @@ def staged_kloop(
     k0: str = "_ks",
     k_end: Expr | None = None,
     k_first: Expr | None = None,
-    lead: LeadSegment | None = None,
 ) -> tuple[list[Stmt], list[Stmt]]:
     """The whole-body staged K-loop — ONE operand-group live across the entire ``drain``, run through
     :func:`pipelined_kloop` (the segment list is the single ``(drain(slot), slabs)`` entry, so the
@@ -1263,20 +1249,13 @@ def staged_kloop(
     identity exactly, so skipping them is bit-identical; the prefetch clamp re-pins onto the last
     NEEDED chunk (``((k_end − 1) / bk) · bk``). CTA-uniformity keeps the in-loop barriers legal.
     ``k_first`` starts it late (the banded stream's sliding-window bound) — same contract, applied
-    at the other end; under ``workers`` the start is dropped (full stream — exact, un-skipped).
-
-    ``lead`` (a :class:`LeadSegment`) runs BEFORE the drain and may bring its own single-buffer
-    operand group. It becomes segment 0, so the scheduler waits before the producer, barriers after
-    it, and refills that group's next chunk while the drain consumes the current one."""
-    # A symbolic ``k_extent`` is a ``Dim``: the chunk count is a
-    # runtime value, so allocate the full ``depth`` ring (the tuned hint has ≥ depth chunks) and let
-    # the transport absorb any over-primed tail chunk (TMA zero-fills its box; cp.async clamp-reads
-    # the last valid key rows) — the drain masks those keys to the fold identity, so it stays
-    # bit-identical to gmem-direct. Static callers pass plain ``int``s.
+    at the other end; under ``workers`` the start is dropped (full stream — exact, un-skipped)."""
+    # A symbolic ``k_extent`` is a ``Dim``: the chunk count is a runtime value, so allocate the full
+    # ``depth`` ring (the tuned hint has >= depth chunks) and let the transport absorb any
+    # over-primed tail chunk (TMA zero-fills its box; cp.async clamp-reads the last valid key rows)
+    # — the drain masks those keys to the fold identity, so it stays bit-identical to gmem-direct.
     if workers is not None:
-        symbolic = isinstance(k_extent, Dim)
-        assert lead is None, "the producer band drives one operand group — a nested producer has no band placement"
-        assert not symbolic, "producer-band + symbolic-kv staging is not built (the band drives static-kv TMA only)"
+        assert not isinstance(k_extent, Dim), "producer-band + symbolic-kv staging is not built (the band drives static-kv TMA only)"
         assert isinstance(transport, TmaTransport), "warp specialization drives the TMA transport only (scheduler legality)"
         assert block_threads is not None, "warp specialization needs the compute-band thread count"
         # A banded stream start is not built for the producer/compute band split — stream the full
@@ -1294,17 +1273,12 @@ def staged_kloop(
             k_end=k_end,
         )
     slabs = _staged_slabs(transport)
-    lead_group = lead is not None and lead.transport is not None
-    groups = ((lead.transport, 1), (transport, depth)) if lead_group else ((transport, depth),)
 
     def segments(slots):
-        drain_seg = (drain(slots[-1]), slabs)
-        if lead is None:
-            return [drain_seg]
-        return [(lead.build(), _staged_slabs(lead.transport) if lead_group else frozenset()), drain_seg]
+        return [(drain(slots[-1]), slabs)]
 
     return pipelined_kloop(
-        operands=groups,
+        operands=((transport, depth),),
         build_segments=segments,
         bk_elems=bk_elems,
         n_chunks=n_chunks,

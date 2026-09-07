@@ -57,7 +57,7 @@ from emmy.compiler.ir.stmt import (
     pretty_body,
     render_body,
 )
-from emmy.compiler.ir.stmt.base import render_merge_program, select_to_ternary
+from emmy.compiler.ir.stmt.base import render_merge_program
 from emmy.compiler.ir.stmt.ir import BodyOp
 
 # The widest iteration space a 32-bit flat thread id can address — past this the
@@ -950,14 +950,6 @@ M16N8 = FragLayout(
 )
 
 
-def frag_layout(atom_m: int, atom_n: int) -> FragLayout:
-    """The :class:`FragLayout` for an mma atom — the single per-atom geometry source. Raises for any
-    atom not modeled (only m16n8 today), so the fragment realizer fails loudly on a new tier."""
-    if (atom_m, atom_n) == (16, 8):
-        return M16N8
-    raise NotImplementedError(f"no fragment C-layout modeled for atom m{atom_m}n{atom_n}")
-
-
 def _lane_preamble(ctx: RenderCtx, pad: str, decl: str) -> list[str]:
     """Emit the mma lane preamble (``_g`` / ``_t``) once per C scope: ``decl`` if ``_g`` is not yet
     declared here (tracked in ``ctx.scope_decls``), else ``[]``. Every emitter defines ``_g``/``_t``
@@ -1079,175 +1071,11 @@ class FragmentApply(Stmt):
         return lines
 
 
-@dataclass(frozen=True)
-class FragmentRowReduce(Stmt):
-    """Per-row reduction over an ``mma.sync`` C-fragment's N (column) lanes — the
-    flash fragment-softmax ``rowmax`` / ``rowsum`` (validated by the FA-2 reference
-    kernel in ``tests/compiler/e2e/test_attention_coverage.py``).
-
-    Each lane of an ``m16n8`` C-fragment owns 4 f32 elements: rows ``g`` / ``g+8``
-    (``g = lane/4``), cols ``(lane%4)*2 + {0,1}``. A ``BN``-wide score tile is
-    ``len(frags)`` such fragments (one per N-atom). Reducing over N (the kv columns)
-    is: combine each fragment's in-lane col pair (``frag[0]∘frag[1]`` for row ``g``,
-    ``frag[2]∘frag[3]`` for row ``g+8``) across all N-atoms, then a ``__shfl_xor``
-    butterfly over the ``group``-lane column set (``group=4`` for ``m16n8`` — lanes
-    differing in ``lane%4`` hold the 8 distinct cols of a row). After the butterfly
-    every lane in a column group holds the full per-row reduction, so the two outputs
-    ``top`` (rows ``g``) / ``bot`` (rows ``g+8``) are correct on every lane — the
-    fragment-distributed (2 rows/lane) form the online-softmax stats need.
-
-    Distinct from :class:`WarpShuffle` (which reduces a whole per-thread monoid state
-    over a cooperative-K lane set): this reduces *within* one warp's C-fragment over
-    the atom's N direction, keyed on the PTX C-layout."""
-
-    top: str  # the per-row reduction for rows g (broadcast across the column group)
-    bot: str  # the per-row reduction for rows g+8
-    frags: tuple[str, ...]  # the C-fragment arrays (float[4] each), one per N-atom of the BN tile
-    op: ElementwiseImpl  # the reduce op (maximum for rowmax, add for rowsum)
-    group: int = 4  # column-group lane span (m16n8: 4 lanes hold a row's 8 cols)
-    dtype: DataType = F32
-
-    def deps(self) -> tuple[str, ...]:
-        return self.frags
-
-    def defines(self) -> tuple[str, ...]:
-        return (self.top, self.bot)
-
-    def pretty(self, indent: str = "") -> list[str]:
-        return [f"{indent}FragmentRowReduce({self.top}, {self.bot} <- {', '.join(self.frags)}, op={self.op.name})"]
-
-    def render(self, ctx: RenderCtx) -> list[str]:
-        pad = _pad(ctx.indent)
-        f32 = ctx.type_name("f32")
-
-        def combine(parts: list[str]) -> str:
-            e = parts[0]
-            for p in parts[1:]:
-                e = _binary_combine_expr(self.op, e, p, ctx.target, "f32")
-            return e
-
-        top_parts = [f"{f}[{i}]" for f in self.frags for i in (0, 1)]
-        bot_parts = [f"{f}[{i}]" for f in self.frags for i in (2, 3)]
-        out = [f"{pad}{f32} {self.top} = {combine(top_parts)};", f"{pad}{f32} {self.bot} = {combine(bot_parts)};"]
-        ctx.ssa_dtypes[self.top] = ctx.ssa_dtypes[self.bot] = "f32"
-        s = int(self.group) // 2
-        while s > 0:
-            for nm in (self.top, self.bot):
-                shfl = f"__shfl_xor_sync(0xffffffff, {nm}, {s})"
-                out.append(f"{pad}{nm} = {_binary_combine_expr(self.op, nm, shfl, ctx.target, 'f32')};")
-            s >>= 1
-        return out
-
-
 #: The reserved coordinate Vars a :class:`FragmentMask` predicate is written over — the element's
 #: ABSOLUTE query row / key column; the render substitutes each element's coords (tile origin +
 #: layout offset) for these.
 FRAG_ROW = "__frow"
 FRAG_COL = "__fcol"
-
-
-@dataclass(frozen=True)
-class FragmentLoad(Stmt):
-    """Load a tensor tile directly into the C-fragment element layout.
-
-    ``index`` is written over :data:`FRAG_ROW` and :data:`FRAG_COL`; ``row_base`` and
-    ``col_base`` locate one register cell.  This is the fragment-resident form of a scalar
-    :class:`Load`, used when a scheduled Fold consumes an already materialized tile rather than a
-    contraction child.
-    """
-
-    out: str
-    input: str
-    index: tuple[Expr, ...]
-    col_base: Expr
-    row_base: Expr | None = None
-    dtype: DataType | None = None
-    layout: FragLayout = M16N8
-
-    def defines(self) -> tuple[str, ...]:
-        return (self.out,)
-
-    def external_reads(self) -> tuple[str, ...]:
-        return (self.input,)
-
-    def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
-        new = rename.get(self.input, self.input)
-        return self if new == self.input else replace(self, input=new)
-
-    def exprs(self) -> tuple[Expr, ...]:
-        bases = (self.col_base,) + ((self.row_base,) if self.row_base is not None else ())
-        return (*self.index, *bases)
-
-    def pretty(self, indent: str = "") -> list[str]:
-        return [f"{indent}FragmentLoad({self.out} <- {self.input})"]
-
-    def render(self, ctx: RenderCtx) -> list[str]:
-        from emmy.compiler.ir.stmt import render_index  # noqa: PLC0415
-
-        pad = _pad(ctx.indent)
-        lay = self.layout
-        src_dtype = self.dtype.name if self.dtype is not None else ctx.buffer_dtypes.get(self.input, "f32")
-        lines = [f"{pad}float {self.out}[{lay.n_elems}];", *_lane_preamble(ctx, pad, lay.lane_decl)]
-        for i in range(lay.n_elems):
-            sub = {FRAG_COL: BinaryExpr("+", self.col_base, lay.col_off[i])}
-            if self.row_base is not None:
-                sub[FRAG_ROW] = BinaryExpr("+", self.row_base, lay.row_off[lay.elem_row[i]])
-            flat = render_index(self.input, tuple(expr.substitute(sub) for expr in self.index), ctx)
-            value = ctx.target.convert(f"{self.input}[{flat}]", src_dtype, "f32")
-            lines.append(f"{pad}{self.out}[{i}] = {value};")
-        ctx.ssa_dtypes[self.out] = "f32"
-        return lines
-
-
-@dataclass(frozen=True)
-class FragmentSelect(Stmt):
-    """Coordinate-predicated uniform values lifted over an mma C-fragment.
-
-    This is the fragment-tier sibling of scalar :class:`Select`: every branch value is a scalar
-    uniform across the fragment, while each predicate may read the fragment element's absolute
-    row / column through :data:`FRAG_ROW` / :data:`FRAG_COL`. The render substitutes the tile base
-    plus the fragment layout's per-element offset, then reuses :func:`select_to_ternary` so branch
-    ordering and scalar casts stay identical to ``Select``.
-
-    Fragment-valued branches are deliberately not represented here. The lifting boundary accepts
-    only uniform branch values and declines any other shape rather than silently broadcasting it.
-    """
-
-    out: str
-    branches: tuple[SelectBranch, ...]
-    col_base: Expr
-    row_base: Expr | None = None
-    layout: FragLayout = M16N8
-
-    def __post_init__(self) -> None:
-        if not self.branches:
-            raise ValueError("FragmentSelect.branches must be non-empty")
-
-    def deps(self) -> tuple[str, ...]:
-        return tuple(branch.value for branch in self.branches)
-
-    def defines(self) -> tuple[str, ...]:
-        return (self.out,)
-
-    def exprs(self) -> tuple[Expr, ...]:
-        bases = (self.col_base,) + ((self.row_base,) if self.row_base is not None else ())
-        return (*tuple(branch.select for branch in self.branches), *bases)
-
-    def pretty(self, indent: str = "") -> list[str]:
-        return [f"{indent}FragmentSelect({self.out} <- {len(self.branches)} uniform branches)"]
-
-    def render(self, ctx: RenderCtx) -> list[str]:
-        pad = _pad(ctx.indent)
-        lay = self.layout
-        lines = [f"{pad}float {self.out}[{lay.n_elems}];", *_lane_preamble(ctx, pad, lay.lane_decl)]
-        for i in range(lay.n_elems):
-            sub: dict[str, Expr] = {FRAG_COL: BinaryExpr("+", self.col_base, lay.col_off[i])}
-            if self.row_base is not None:
-                sub[FRAG_ROW] = BinaryExpr("+", self.row_base, lay.row_off[lay.elem_row[i]])
-            branches = tuple(SelectBranch(value=branch.value, select=branch.select.substitute(sub)) for branch in self.branches)
-            expr = select_to_ternary(Select(name=self.out, branches=branches))
-            lines.append(f"{pad}{self.out}[{i}] = {expr.render(ctx)};")
-        return lines
 
 
 @dataclass(frozen=True)
@@ -2957,13 +2785,6 @@ def _(s: FragmentRepack, rename, sigma, axis_fn):
 
 
 @_rewrite_kind.register
-def _(s: FragmentRowReduce, rename, sigma, axis_fn):
-    return FragmentRowReduce(
-        top=rename(s.top), bot=rename(s.bot), frags=tuple(rename(f) for f in s.frags), op=s.op, group=s.group, dtype=s.dtype
-    )
-
-
-@_rewrite_kind.register
 def _(s: FragmentMask, rename, sigma, axis_fn):
     # ``frag`` is SSA (the score fragment); the tile-origin bases + the predicate σ-substitute so
     # the canonicalizer renames the query / kv axis vars (``qb``→``a1``, ``kv``→``a3``). The
@@ -2975,29 +2796,5 @@ def _(s: FragmentMask, rename, sigma, axis_fn):
         col_base=sigma.apply(s.col_base),
         row_base=sigma.apply(s.row_base) if s.row_base is not None else None,
         fill=s.fill,
-        layout=s.layout,
-    )
-
-
-@_rewrite_kind.register
-def _(s: FragmentLoad, rename, sigma, axis_fn):
-    return FragmentLoad(
-        out=rename(s.out),
-        input=s.input,
-        index=tuple(sigma.apply(expr) for expr in s.index),
-        col_base=sigma.apply(s.col_base),
-        row_base=sigma.apply(s.row_base) if s.row_base is not None else None,
-        dtype=s.dtype,
-        layout=s.layout,
-    )
-
-
-@_rewrite_kind.register
-def _(s: FragmentSelect, rename, sigma, axis_fn):
-    return FragmentSelect(
-        out=rename(s.out),
-        branches=tuple(SelectBranch(value=rename(branch.value), select=sigma.apply(branch.select)) for branch in s.branches),
-        col_base=sigma.apply(s.col_base),
-        row_base=sigma.apply(s.row_base) if s.row_base is not None else None,
         layout=s.layout,
     )

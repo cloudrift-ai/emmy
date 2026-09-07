@@ -64,10 +64,7 @@ from emmy.compiler.ir.tile.ops import UnbindableProjection, chain_form, chain_me
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import (
     clamp_last,
     copy_cell,
-    fold_store_sink,
-    fold_store_tail,
     reduce_codegen,
-    scheduled_fold_contraction,
     store_sink,
 )
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import sync_row_fill
@@ -384,18 +381,9 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
     # geometry the atom reads is the slice's own, not a separate view object's. A stored node
     # WITHOUT a TILE slice takes the reduce tiers instead (the per-cell / coop-K forms), where the
     # whole grid rides untiled.
-    folded = scheduled_fold_contraction(op, ctx.sched) if isinstance(op, Fold) and op.axis is not None else None
-    if folded is not None:
-        # A BLOCKED carrier whose bilinear channel took a staged warp tile: that channel's tile is
-        # the kernel's output tiling and the block loop is its staged K loop, so the node bound
-        # here is the channel and the carrier rides it as the per-block program.
-        value_child, tile, stage = folded
-        c, projection = value_child, tail
-        tail = fold_store_tail(tail, op, value_child)
-    else:
-        c, value_child, projection = op, None, ()
-        tile = ctx.sched.tile_of(op) if isinstance(op, Fold) and op.as_contraction() is not None else None
-        stage = ctx.sched.get("STAGE", op) if tile is not None else None
+    c = op
+    tile = ctx.sched.tile_of(op) if isinstance(op, Fold) and op.as_contraction() is not None else None
+    stage = ctx.sched.get("STAGE", op) if tile is not None else None
     if tile is not None and tile.axes is not None and len(grid) >= 2:
         epi = list(tail)
         if not has_write(epi):
@@ -404,9 +392,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         # A — its whole body is the per-cell fill).
         # The node's K with its extent: the term names it, the kernel's axis table holds it.
         k_axis = ctx.sched.axis_of(op.axis)
-        seam = (
-            cone_seam(c.operands[0], k_axis.name, ctx.sched.tile.axes) if value_child is None and c.operands[0].as_slab() is None else None
-        )
+        seam = cone_seam(c.operands[0], k_axis.name, ctx.sched.tile.axes) if c.operands[0].as_slab() is None else None
         # The leading (batch / ksplit) grid axes ride untiled below the ``(m, n)`` cell — the GRID's
         # fact, not the tiled cell's, so they are threaded to the emission that needs them (the
         # per-cell rename's shared coordinates) from here, where the kernel grid is in hand. Every
@@ -415,30 +401,10 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         # grid (N 32 beside N 64), the pair binds one of them, and a positional ``grid[:-2]`` then
         # dropped the other — leaving an axis no block, unit or lead var defines.
         lead = tuple(axis for axis in grid if axis.name not in {bound.name for bound in tile.axes})
-        carried = {}
         state_decls, reduce_region = reduce_codegen(
-            c,
-            tile,
-            stage,
-            ctx.inputs,
-            ctx.workers,
-            seam,
-            lead,
-            frag_ns,
-            fold=op if value_child is not None else None,
-            value_child=value_child,
-            k_axis=k_axis,
-            axes=ctx.sched.tile.axes,
-            sched=ctx.sched,
-            projection=projection,
-            carried=carried,
+            c, tile, stage, ctx.inputs, ctx.workers, seam, lead, frag_ns, k_axis=k_axis, axes=ctx.sched.tile.axes
         )
-        if store is not None:
-            sink = store
-        elif value_child is not None:
-            sink = fold_store_sink(tile, tuple(epi), carried, frag_ns)
-        else:
-            sink = store_sink(c, tile, Body(tuple(epi)), lead, frag_ns, k_axis=k_axis, axes=ctx.sched.tile.axes)
+        sink = store if store is not None else store_sink(c, tile, Body(tuple(epi)), lead, frag_ns, k_axis=k_axis, axes=ctx.sched.tile.axes)
         t = unit_tile(register_tile(atomize(tile.atom.shape[:2]), tile.mn), tile.mn)
         mn, bt, lanes = tile.mn, tile.launch_threads, tile.atom.lanes
     else:

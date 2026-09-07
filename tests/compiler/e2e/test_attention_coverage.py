@@ -1,11 +1,13 @@
 r"""Attention coverage over the canonical Fold tree.
 
-The tests cover scalar and tensor-core SDPA, causal and additive masks, GQA, symbolic sequence
-lengths, split reductions, staging and swizzling, a hand-written FA-2 reference, and TinyLlama
-attention integration. Tensor-core SDPA is realized by the generic residence evaluator: scheduled
-child contractions produce fragments, row statistics use ``FragmentRowReduce``, and the enclosing
-Fold's stored carrier Lambda combines the state. No attention-specific scheduler or emitter is
-part of the tested contract.
+The tests cover scalar SDPA, causal and additive masks, GQA, symbolic sequence lengths, split
+reductions, a hand-written FA-2 reference, and TinyLlama attention integration. No
+attention-specific scheduler or emitter is part of the tested contract.
+
+The tensor-core arm is NOT covered here. A twisted carrier reaches no atom tier: the carrier folds
+one bilinear channel beside states that are no product at all, and both tiers fold the stored
+lift — the base contribution — straight into their accumulator. The hand-written FA-2 kernel below
+stays as the spec that arm has to meet; the realization corpus carries the gap as recorded cases.
 
 ## Measured evidence
 
@@ -96,8 +98,6 @@ materialized Q/K/V instead of recomputing them per scalar cell.
 
 from __future__ import annotations
 
-import re
-
 import numpy as np
 import pytest
 import torch
@@ -166,10 +166,6 @@ def _pin_classic(monkeypatch, pins: dict[str, str]) -> None:
         monkeypatch.setenv(f"EMMY_{key.upper()}", value)
 
 
-def _pin_sdpa_reductions(monkeypatch, value: str = "") -> None:
-    _pin_classic(monkeypatch, {"REDUCE@map.1/twist": value, "REDUCE@map.1/twist.1/inner": value})
-
-
 def _max_diff(backend, compiled, feed: dict, ref_fn) -> float:
     """Run emmy + the torch eager ``ref_fn`` under one GPU-lock window; return max|Δ|."""
     run_result, eager = backend.run(compiled, input_data=feed, pre_run=ref_fn)
@@ -177,98 +173,6 @@ def _max_diff(backend, compiled, feed: dict, ref_fn) -> float:
     assert got.shape == eager.shape
     assert not np.any(np.isnan(got)), "emmy output has NaN"
     return float(np.max(np.abs(got - eager)))
-
-
-def test_fragment_lift_preserves_coordinate_select_as_fragment_values():
-    """A causal score prefix keeps its coordinate Select exact at fragment residence."""
-    from emmy.compiler.ir.elementwise import ElementwiseImpl  # noqa: PLC0415
-    from emmy.compiler.ir.expr import BinaryExpr, Literal, Var  # noqa: PLC0415
-    from emmy.compiler.ir.kernel.ir import FRAG, FragmentApply, FragmentSelect  # noqa: PLC0415
-    from emmy.compiler.ir.pure import Lambda  # noqa: PLC0415
-    from emmy.compiler.ir.stmt import Assign, Body, RenderCtx, Select, SelectBranch  # noqa: PLC0415
-    from emmy.compiler.pipeline.passes.lowering.kernel._eval import Value, evaluate  # noqa: PLC0415
-
-    body = (
-        Assign("scaled", ElementwiseImpl("multiply"), ("acc", "scale")),
-        Select(
-            "bias",
-            (
-                SelectBranch("zero", BinaryExpr("<=", Var("key"), Var("query"))),
-                SelectBranch("fill", BinaryExpr(">", Var("key"), Var("query"))),
-            ),
-        ),
-        Assign("masked", ElementwiseImpl("add"), ("scaled", "bias")),
-    )
-    lifted, _, _ = evaluate(
-        Lambda(params=("acc", "scale", "zero", "fill"), body=Body(body), results=("masked",)),
-        {
-            "acc": Value.frag((("_score00", "_score01"), ("_score10", "_score11"))),
-            "scale": Value.uniform("scale"),
-            "zero": Value.uniform("zero"),
-            "fill": Value.uniform("fill"),
-        },
-        axes=("query", "key"),
-        bases=(
-            ((Literal(16, "int"), Literal(32, "int")), (Literal(16, "int"), Literal(40, "int"))),
-            ((Literal(32, "int"), Literal(32, "int")), (Literal(32, "int"), Literal(40, "int"))),
-        ),
-    )
-
-    assert [type(stmt) for stmt in lifted] == [FragmentApply] * 4 + [FragmentSelect] * 4 + [FragmentApply] * 4
-    assert lifted[0].args == ("_score00", "scale")
-    assert lifted[4].out == "bias__f0_0"
-    assert lifted[7].out == "bias__f1_1"
-    assert lifted[8].args == ("bias__f0_0", "scaled__f0_0")
-    assert lifted[8].kinds == (FRAG, FRAG)
-    first = "\n".join(lifted[4].render(RenderCtx(indent=0, literal_ssa={"zero": 0.0, "fill": -1e9})))
-    last = "\n".join(lifted[7].render(RenderCtx(indent=0, literal_ssa={"zero": 0.0, "fill": -1e9})))
-    assert "__frow" not in first and "__fcol" not in first
-    assert "32 + (_t * 2" in first and "16 + _g" in first
-    assert "40 + (_t * 2" in last and "32 + _g" in last
-    assert first.count("?") == last.count("?") == 4
-
-
-def test_fragment_lift_declines_nonuniform_select_branches():
-    """A coordinate Select may not broadcast a fragment or per-cell value as a uniform branch."""
-    from emmy.compiler.ir.elementwise import ElementwiseImpl  # noqa: PLC0415
-    from emmy.compiler.ir.expr import BinaryExpr, Literal, Var  # noqa: PLC0415
-    from emmy.compiler.ir.pure import Lambda  # noqa: PLC0415
-    from emmy.compiler.ir.stmt import Assign, Body, Select, SelectBranch  # noqa: PLC0415
-    from emmy.compiler.pipeline.passes.lowering.kernel._eval import Value, evaluate  # noqa: PLC0415
-
-    fragment_branch = (
-        Assign("scaled", ElementwiseImpl("multiply"), ("acc", "scale")),
-        Select(
-            "masked",
-            (
-                SelectBranch("scaled", BinaryExpr("<=", Var("key"), Var("query"))),
-                SelectBranch("fill", BinaryExpr(">", Var("key"), Var("query"))),
-            ),
-        ),
-    )
-    per_cell_branch = (
-        Assign("scaled", ElementwiseImpl("multiply"), ("acc", "scale")),
-        Assign("row_value", ElementwiseImpl("multiply"), ("query", "scale")),
-        Select(
-            "masked",
-            (
-                SelectBranch("row_value", BinaryExpr("<=", Var("key"), Var("query"))),
-                SelectBranch("fill", BinaryExpr(">", Var("key"), Var("query"))),
-            ),
-        ),
-    )
-    for body in (fragment_branch, per_cell_branch):
-        with pytest.raises(ValueError):
-            evaluate(
-                Lambda(params=("acc", "scale", "fill"), body=Body(body), results=("masked",)),
-                {
-                    "acc": Value.frag((("_score",),)),
-                    "scale": Value.uniform("scale"),
-                    "fill": Value.uniform("fill"),
-                },
-                axes=("query", "key"),
-                bases=(((Literal(16, "int"), Literal(32, "int")),),),
-            )
 
 
 # =========================================================================== #
@@ -345,177 +249,6 @@ def test_scalar_flash_matches_torch(monkeypatch, variant):
 
 
 @requires_cuda
-@pytest.mark.parametrize("cfg", [(1, 1, 32, 16), (1, 2, 64, 16)])
-@pytest.mark.xfail(strict=True, reason="fused value channel on tensor cores: not on this tree yet (PR #699)")
-def test_fused_single_kernel_sdpa_matches_torch(monkeypatch, cfg):
-    """SDPA lowers to ONE kernel and matches torch through the ordinary fusion path.
-
-    Recognition proves the exact two-use score inverse, so nested-reduce readability and work
-    account for the producer once. Pin the fused placement because this test protects that sibling,
-    not the tuner's choice between the fused and cut rows — and pin the paired mma row for the
-    same reason: the assertions below are about the composed score's tensor-core EMISSION, which
-    only that row exercises, while which row a cold compile picks is the evidence hierarchy's
-    business and an accepted-to-be-imperfect one."""
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
-    monkeypatch.setenv("EMMY_WORK", "w1x1")
-    # The score's N tile is the value contraction's streamed K block (the paired fragment seam).
-    _pin_classic(
-        monkeypatch,
-        {
-            "TILE@map.1/twist.1/inner": "mma_m16n8k16_f16_f32/f1x2",
-            "TILE@map.1/twist": "mma_m16n8k16_f16_f32/f1x1",
-            "REDUCE@map.1/twist": "",
-            "REDUCE@map.1/twist.1/inner": "",
-            "STAGE@map.1/twist.1/inner": "",
-            "STAGE@map.1/twist": "",
-        },
-    )
-    monkeypatch.setenv("EMMY_RASTER", "")
-    torch.manual_seed(0)
-    B, H, S, D = cfg
-    q, k, v = (torch.randn(B, H, S, D, dtype=torch.float16) for _ in range(3))
-    feed = {"q": q.numpy(), "k": k.numpy(), "v": v.numpy()}
-    cuda = {n: torch.from_numpy(a).cuda() for n, a in feed.items()}
-
-    def ref():
-        with torch.no_grad():
-            return F.scaled_dot_product_attention(cuda["q"], cuda["k"], cuda["v"]).cpu().flatten().float().numpy()
-
-    backend, compiled, _graph, kernels = _trace(_Sdpa(), (q, k, v))
-    assert len(kernels) == 1, f"the merged cell must lower to ONE kernel, got {len(kernels)}: {kernels}"
-    src = compiled.nodes[kernels[0]].op.kernel_source
-    # Both halves of the composed score reach the TENSOR CORE: the score's transposed-B fragment
-    # load (its own mma, not the enclosing P@V's staged drain) and the statistic's fragment
-    # row-reduce butterfly. Without these the score is a scalar dot per element — 15x slower, and a
-    # silent regression a numerics assert would never catch.
-    assert "emmy_mma_load_b_gmem_trans" in src, "the composed score is not on the mma tier"
-    assert "__shfl_xor_sync" in src, "the statistic is not at fragment residence"
-    # Every slab is addressed through ONE swizzle mode — all of its uses XOR, or none do. Which
-    # mode a slab picks is the schedule's business (a row too narrow for any atom stays NONE), but
-    # a MIXED slab is a silently WRONG kernel, not a slow one: it stores row-major under a drain
-    # that reads permuted. The weight tile is where that bites, because its producer is a fragment
-    # store rather than a copy — its mode rides ``RegStore.swizzle``, and the per-cell store
-    # rewrite dropped exactly that field.
-    slabs = set(re.findall(r"__shared__[^;]*?(\w+_smem)\[", src))
-    assert slabs, "the fused kernel stages no slab"
-    for slab in slabs:
-        uses = len(re.findall(rf"(?<!\w){slab}\[", src)) - 1  # every use but the declaration
-        swizzled = len(re.findall(rf"(?<!\w){slab}\[emmy_swizzle_", src))
-        assert swizzled in (0, uses), f"{slab}: {swizzled} of {uses} uses swizzle — producer and drain disagree"
-    md = _max_diff(backend, compiled, feed, ref)
-    assert md < 4e-3, f"fused sdpa{cfg} vs torch max_diff={md:.6e}"
-
-
-@requires_cuda
-@pytest.mark.parametrize("cfg", [(1, 1, 32, 16), (1, 2, 64, 16)])
-@pytest.mark.xfail(strict=True, reason="fused value channel on tensor cores: not on this tree yet (PR #699)")
-def test_fused_sdpa_sweeps_the_score_once(monkeypatch, cfg):
-    """The fused kernel makes ONE pass over the keys — the statistic and the weight come off the
-    SAME score fragments.
-
-    The two halves cannot share a pass while the weight names a denominator the sweep has not
-    finished, so the cone's state-only factors are split off and multiplied back onto the output
-    fragments after the loop, and the recipe's rescale factor (the one the merge puts on every
-    carried channel) advances the enclosing drain's output tile per KV chunk.
-
-    What is asserted is that form's OBSERVABLE consequence: the carried ``(pivot, denominator)``
-    pair never leaves the registers, so nothing is bridged through the stat smem rows the two-pass
-    pair needs. Recomputing the score costs 1.4-1.7x across ``D = 16..128`` on a 5090, and a
-    regression to the two-pass pair is invisible to a numerics assert.
-
-    ``REDUCE`` is pinned off because the single pass needs the sweep and the contraction to cover
-    the same keys; a split-K partition does not, and there the two-pass pair stands
-    (``test_fused_sdpa_split_partition_keeps_the_two_pass_pair``)."""
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
-    _pin_sdpa_reductions(monkeypatch)  # serial reduce: the sweep and the contraction cover the same keys
-    torch.manual_seed(0)
-    B, H, S, D = cfg
-    q, k, v = (torch.randn(B, H, S, D, dtype=torch.float16) for _ in range(3))
-    feed = {"q": q.numpy(), "k": k.numpy(), "v": v.numpy()}
-    cuda = {n: torch.from_numpy(a).cuda() for n, a in feed.items()}
-
-    def ref():
-        with torch.no_grad():
-            return F.scaled_dot_product_attention(cuda["q"], cuda["k"], cuda["v"]).cpu().flatten().float().numpy()
-
-    backend, compiled, _graph, kernels = _trace(_Sdpa(), (q, k, v))
-    assert len(kernels) == 1, f"the merged cell must lower to ONE kernel, got {len(kernels)}: {kernels}"
-    src = compiled.nodes[kernels[0]].op.kernel_source
-    assert "_a_stat_" not in src, "the statistic is bridged through smem — the sweep ran twice (two-pass pair)"
-    assert "__shfl_xor_sync" in src, "the statistic is not at fragment residence"
-    md = _max_diff(backend, compiled, feed, ref)
-    assert md < 4e-3, f"single-pass fused sdpa{cfg} vs torch max_diff={md:.6e}"
-
-
-@requires_cuda
-@pytest.mark.xfail(strict=True, reason="fused value channel on tensor cores: not on this tree yet (PR #699)")
-def test_fused_causal_sdpa_sweeps_the_score_once(monkeypatch):
-    """The causal coordinate Select stays on score fragments, so the one-pass sweep remains legal."""
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
-    _pin_sdpa_reductions(monkeypatch)
-    monkeypatch.setenv("EMMY_WORK", "w2x1")
-    monkeypatch.setenv("EMMY_TILE@MAP.1/TWIST.1/INNER", "mma_m16n8k16_f16_f32/f2x2/k2")
-    monkeypatch.setenv("EMMY_TILE@MAP.1/TWIST", "mma_m16n8k16_f16_f32/f2x4")
-    torch.manual_seed(0)
-    B, H, S, D = 1, 2, 128, 32
-    q, k, v = (torch.randn(B, H, S, D, dtype=torch.float16) for _ in range(3))
-    feed = {"q": q.numpy(), "k": k.numpy(), "v": v.numpy()}
-    cuda = {name: torch.from_numpy(array).cuda() for name, array in feed.items()}
-
-    def ref():
-        with torch.no_grad():
-            return F.scaled_dot_product_attention(cuda["q"], cuda["k"], cuda["v"], is_causal=True).cpu().flatten().float().numpy()
-
-    backend, compiled, _graph, kernels = _trace(_Causal(), (q, k, v))
-    assert len(kernels) == 1, f"the merged cell must lower to ONE kernel, got {len(kernels)}: {kernels}"
-    src = compiled.nodes[kernels[0]].op.kernel_source
-    assert "_a_stat_" not in src, "the causal statistic is bridged through smem — the sweep ran twice"
-    assert "?" in src, "the causal coordinate Select did not reach the fragment program"
-    md = _max_diff(backend, compiled, feed, ref)
-    assert md < 4e-3, f"single-pass causal fused sdpa vs torch max_diff={md:.6e}"
-
-
-@requires_cuda
-@pytest.mark.xfail(strict=True, reason="fused value channel on tensor cores: not on this tree yet (PR #699)")
-def test_fused_sdpa_stages_the_nested_score(monkeypatch):
-    """The nested score reads its OWN operands out of smem — the keys refilled per chunk, the
-    queries filled once ahead of the sweep — not through the per-lane gmem fragment loaders.
-
-    Every warp of the CTA needs the whole key chunk, so gmem-direct made it cross L1 once per warp;
-    staged, it crosses once per CTA and the read is one ``ldmatrix`` where it was four scalar loads
-    per lane. Measured on a 5090 that is 35.1 → 22.2 µs at ``(1, 8, 512, 128)`` and 148.3 → 97.0 at
-    ``(1, 8, 2048, 64)``.
-
-    Asserted structurally, because it is invisible to a numerics check: the score's slabs exist and
-    no gmem fragment loader is CALLED (the helper definitions always ship)."""
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
-    _pin_sdpa_reductions(monkeypatch)
-    monkeypatch.setenv("EMMY_WORK", "w2x1")
-    monkeypatch.setenv("EMMY_TILE@MAP.1/TWIST.1/INNER", "mma_m16n8k16_f16_f32/f2x2")
-    monkeypatch.setenv("EMMY_TILE@MAP.1/TWIST", "mma_m16n8k16_f16_f32/f2x2")
-    monkeypatch.setenv("EMMY_STAGE@MAP.1/TWIST.1/INNER", "d1/smem-async")
-    monkeypatch.setenv("EMMY_STAGE@MAP.1/TWIST", "d1/smem")
-    torch.manual_seed(0)
-    B, H, S, D = 1, 2, 64, 16
-    q, k, v = (torch.randn(B, H, S, D, dtype=torch.float16) for _ in range(3))
-    feed = {"q": q.numpy(), "k": k.numpy(), "v": v.numpy()}
-    cuda = {n: torch.from_numpy(a).cuda() for n, a in feed.items()}
-
-    def ref():
-        with torch.no_grad():
-            return F.scaled_dot_product_attention(cuda["q"], cuda["k"], cuda["v"]).cpu().flatten().float().numpy()
-
-    backend, compiled, _graph, kernels = _trace(_Sdpa(), (q, k, v))
-    src = compiled.nodes[kernels[0]].op.kernel_source
-    assert "_s_b_smem" in src, "the nested score's keys are not staged"
-    assert "_s_a_smem" in src, "the nested score's queries are not staged"
-    for loader in ("emmy_mma_load_a_gmem(", "emmy_mma_load_b_gmem_trans("):
-        assert src.count(loader) == src.count(f"void {loader}"), f"{loader} is still called — an operand stayed gmem-direct"
-    md = _max_diff(backend, compiled, feed, ref)
-    assert md < 4e-3, f"staged-score fused sdpa vs torch max_diff={md:.6e}"
-
-
-@requires_cuda
 def test_fused_sdpa_split_partition_merges_monoid_states(monkeypatch):
     """Each partition folds its key slice into the same state; the finalize merges those states."""
     monkeypatch.setenv("EMMY_PLACE", "fuse")
@@ -535,30 +268,6 @@ def test_fused_sdpa_split_partition_merges_monoid_states(monkeypatch):
     assert "__partial" in src and src.count("__global__") == 2
     md = _max_diff(backend, compiled, feed, ref)
     assert md < 4e-3, f"split-K fused sdpa vs torch max_diff={md:.6e}"
-
-
-@requires_cuda
-@pytest.mark.xfail(strict=True, reason="fused value channel on tensor cores: not on this tree yet (PR #699)")
-def test_fused_causal_sdpa_split_partition_keeps_absolute_predicate_coordinates(monkeypatch):
-    """A causal partial compares absolute query/key coordinates after the Fold is sliced."""
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
-    monkeypatch.setenv("EMMY_REDUCE@MAP.1/TWIST", "g2k")
-    torch.manual_seed(0)
-    B, H, S, D = 1, 2, 128, 32
-    q, k, v = (torch.randn(B, H, S, D, dtype=torch.float16) for _ in range(3))
-    feed = {"q": q.numpy(), "k": k.numpy(), "v": v.numpy()}
-    cuda = {name: torch.from_numpy(array).cuda() for name, array in feed.items()}
-
-    def ref():
-        with torch.no_grad():
-            return F.scaled_dot_product_attention(cuda["q"], cuda["k"], cuda["v"], is_causal=True).cpu().flatten().float().numpy()
-
-    backend, compiled, _graph, kernels = _trace(_Causal(), (q, k, v))
-    src = "".join(compiled.nodes[nid].op.kernel_source for nid in kernels)
-    assert "__partial" in src and src.count("__global__") == 2
-    assert "_ks - _ks" not in src, "the causal predicate lost the absolute key-chunk base"
-    md = _max_diff(backend, compiled, feed, ref)
-    assert md < 4e-3, f"split-K causal fused sdpa vs torch max_diff={md:.6e}"
 
 
 @requires_cuda
