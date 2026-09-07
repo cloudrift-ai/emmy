@@ -42,7 +42,7 @@ configs:
       STAGE: d1/smem
       LOOPIFY: '0'
       RASTER: ''
-    identity: eb74b174290bc40763cc4c842e3039516584a3fcf05f5703071e81c20e19d04e
+    identity: 3ec795cedf21b59dce873ccc52ebbacf6519878078959430f44405a131ffc106
   - name: k_sdpa_6a2bfa.0015e9065043.448a0d722d09
     bindings: {}
     pins:

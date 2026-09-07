@@ -32,7 +32,7 @@ configs:
       PLACE: fuse
     knobs:
       REDUCE: g2k
-    identity: 2e40dced853112eb65f9137b4b380b20bfdc6884d262441e4a35e381b6f1858a
+    identity: bb5c9d5210b455653b6fe7a3817a074626e0a30dc500ebf85602bbfe34249485
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 22.498559951782227
