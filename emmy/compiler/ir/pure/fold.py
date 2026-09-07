@@ -466,7 +466,11 @@ class Fold:
         the :class:`~emmy.compiler.ir.pure.twist.Twist` closes this with no walk at all.
         """
         bound = {param: (edge, index) for param, edge, index in self.bindings}
-        carried = set(self.lift.results)
+        # A result the body DEFINES is the recipe's own derived channel. A result that is a bare
+        # param is the opposite: the channel passes an operand component through untouched, which
+        # is exactly what a role is — stable coordinates spell attention's expectation as the
+        # streamed value itself, so testing every result would hide the one role it names.
+        carried = {name for stmt in self.lift.body for name in stmt.defines()} & set(self.lift.results)
         extras: list[str] = []
         for result in self.lift.results[1:]:
             for param in self.lift.cone(result).params:
@@ -926,6 +930,11 @@ class Fold:
             # replaced the statements that read it.
             read = {name for stmt in body for name in stmt.deps()} | set(results)
             held = [entry for entry in held if not read.isdisjoint(entry[1])]
+            # B SECOND. A leads by canonical form; a bilinear channel's other factor must follow it,
+            # because staging and both atom tiers take B from ``operands[1]`` rather than asking the
+            # channel. An operand with no free coordinates — attention's scale — is no channel's
+            # factor at all, so it sorts behind the streamed value instead of between the pair.
+            held = [held[0], *sorted(held[1:], key=lambda entry: not entry[0].free_axes)]
             # The carrier is the RECIPE's own vector: the pivot, then the channels it holds in the
             # order the recipe declares them, whatever order the tree happened to fuse them in.
             # Softmax's is (m, D, O) whether the denominator or the expectation clicked first, so a

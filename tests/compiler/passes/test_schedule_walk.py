@@ -332,9 +332,9 @@ def test_every_computed_statistic_receives_a_node_id(unpinned, monkeypatch) -> N
     # the cone the carrier's product multiplies by carries it, so no second binder reaches it.
     assert reduce_keys == {
         "REDUCE@map.1/twist",
-        "REDUCE@map.1/twist.1/map.1/inner",
-        "REDUCE@map.1/twist.1/map.1/inner.1/map.2/map.1/reduce",
-        "REDUCE@map.1/twist.1/map.1/inner.2/map.2/map.1/reduce",
+        "REDUCE@map.1/twist.1/inner",
+        "REDUCE@map.1/twist.1/inner.1/map.2/map.1/reduce",
+        "REDUCE@map.1/twist.1/inner.2/map.2/map.1/reduce",
     }
 
 
