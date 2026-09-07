@@ -43,6 +43,7 @@ tests/compiler/passes/
 ├── test_warp_specialize_deadlock.py # WS=1 stranded-TMA deadlock (Qwen3 k_linear_mean_reduce) regressions
 ├── test_tile_naming.py             # provenance-driven k_<op>_<suffix> kernel naming
 ├── test_shared_constant_cone.py    # one broadcast constant, two sibling cones — one declaration per scope
+├── test_cut_workspace_boundary_store.py # a cut re-spells the consumer's boundary stores, not only its term
 └── test_pipeline_semantics.py      # full pass chain (decompose → opt → fuse) vs numpy
 ```
 
@@ -165,6 +166,18 @@ kernel's schedule rows and keys its evidence row by that identity, including whe
 regenerated
 Loop target contain several kernels and the stored identity must select one. Direct
 contraction-operand cuts remain strict xfails until Tile IR represents their materialized workspace dtype.
+The output-owning cut has its own group there: which seams own an output, that realizing one leaves single-output
+pieces whose placements gain a grid axis, that a piece takes the projection statements its own store reads, and the
+two refusals — a shared epilogue statement no piece can own, and a partition where no piece would gain an axis. The
+shared-epilogue shape is spelled in Python rather than taken from a case: both corpus shapes join their branches with
+an empty root body, so the body-splitting half of the ownership rule has no case to exercise it.
+This group is the ONLY coverage the output-owning cut has, and the corpus deliberately carries none. A case's
+`offered` stage materializes the complete row set of the kernel set it pins, and the cut's whole point is to give a
+multi-root kernel a real grid — the NVFP4 encode's packed-code piece then has six contraction roots offering ~1400
+rows each, and their composition is past enumerating. Pinning the contraction seams beside it shrinks every piece to
+at most two roots and does enumerate, but a route spelled on the parent's tree cannot be replayed from evidence
+(`attention/rmsnorm-qk-sdpa-composed-cut_xfail_realized.yaml` records that gap). So the numerics of a cut kernel set
+stay unproven on hardware until one of those two holds; the tests here prove the structure only.
 The recipe program's monoid laws are covered
 independently by `tests/compiler/ir/pure/test_twist.py`; end-to-end softmax and attention accuracy remain covered by
 the e2e suites.

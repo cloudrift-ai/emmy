@@ -134,12 +134,13 @@ class Candidate:
             # deterministic single-path compile it leaves the node
             # un-lowered with no recourse — so we both (a) emit a debug
             # "filtered" line and (b) record the rejection into the
-            # run's optional sink. ``Pipeline.run`` (greedy) reads the
-            # sink after the terminal settles and raises a loud
-            # ``LoweringError`` if any recorded node is still un-lowered,
-            # turning the old "CudaBackend: non-CudaOp TileOp" mystery into
-            # an actionable error. The sink is absent under ``tune`` so the
-            # fork-pruning path keeps its zero-overhead silent behavior.
+            # run's optional sink. Which nodes are un-lowered is read off
+            # the settled terminal rather than off this sink (greedy's
+            # ``_stuck``); what the sink adds is the pass and the reason
+            # the loud ``LoweringError`` names, turning the old
+            # "CudaBackend: non-CudaOp TileOp" mystery into an actionable
+            # error. The sink is absent under ``tune`` so the fork-pruning
+            # path keeps its zero-overhead silent behavior.
             sink = self.run.rejections
             if raw_options and (sink is not None or _logger.isEnabledFor(logging.DEBUG)):
                 rejected = [o for o in raw_options if isinstance(o, Op)]
