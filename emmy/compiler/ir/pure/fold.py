@@ -585,7 +585,14 @@ class Fold:
             return False
         if any(recipe.channels[index].pattern is None for index in twist.channels):
             return False
-        return len(self.bilinear_channels()) == 1
+        if len(self.bilinear_channels()) != 1:
+            return False
+        # The bilinear channel's pattern must END in its product, since that product is the one
+        # thing the tier does not evaluate per element: it is the mma against the streamed operand,
+        # and what comes before it is the weight the mma's A operand carries.
+        channel = recipe.channels[twist.channels[self.bilinear_channels()[0][0] - 1]]
+        product = channel.pattern.body[-1] if channel.pattern.body else None
+        return isinstance(product, Assign) and len(product.args) == 2 and product.name == channel.pattern.results[0]
 
     @cached_method
     def bilinear_channels(self) -> tuple[tuple[int, Fold], ...]:

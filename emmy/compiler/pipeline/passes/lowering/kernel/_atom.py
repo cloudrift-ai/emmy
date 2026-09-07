@@ -2126,28 +2126,26 @@ class _FlashOps(_MmaOps):
 
     def reduce(self, cells, offset, mn):
         """The chunk loop — the ONE loop this tier opens over the carrier's axis."""
-        from emmy.compiler.pipeline import RuleSkipped  # noqa: PLC0415 — avoid an import cycle
-
         m, n = mn
         atom = self.tile.atom
-        if atom.fragment_layout != "m16n8k16" or not atom.c_to_a_repack:
-            raise RuleSkipped("the chunk tier needs an atom whose C fragment repacks into an A operand", reject=True)
         # The chunk is the TILE's own K width. This tier reads every operand gmem-direct, so it
         # takes no transport from ``STAGE`` and the site spells none.
         bk = atom.atom_k * self.tile.bk
         cols, steps = bk // atom.atom_n, bk // atom.atom_k
         key = self.k_axis
-        score, score_tile = self.inner if self.inner else (None, None)
-        if score is None or any(edge.as_slab() is None for edge in (*score.operands, self.c.operands[1])):
-            raise RuleSkipped("the chunk tier reads its score operands and its streamed value as slabs", reject=True)
-        # The score's own site decides the chunk's score tile, and the fragment seam is what made
-        # the two agree. Realize that agreement rather than assume it: a score row the seam did not
-        # constrain would be stamped on a kernel whose emission ignored it.
-        if not getattr(score_tile, "is_warp", False) or (score_tile.n.units, score_tile.n.tile, score_tile.m.reg) != (1, bk, m.reg):
-            raise RuleSkipped("the score's tile is not the chunk this carrier folds, one warp column wide", reject=True)
+        score, score_tile = self.inner
+        # Every one of these is a projection gate (``_chunk_refusal``, ``_atom_families``, and the
+        # fragment seam), so a row that reached the binder carries them. Asserted rather than
+        # re-decided: an enumeration that stopped spelling one of them would otherwise miscompile
+        # in silence.
+        assert atom.c_to_a_repack, "the chunk tier needs an atom whose C fragment repacks into an A operand"
+        assert all(edge.as_slab() is not None for edge in (*score.operands, self.c.operands[1])), (
+            "the chunk tier reads its score operands and its streamed value as slabs"
+        )
+        assert score_tile.is_warp and (score_tile.n.units, score_tile.n.tile, score_tile.m.reg) == (1, bk, m.reg), (
+            "the score's tile is the chunk this carrier folds, one warp column wide — the fragment seam's own equation"
+        )
         cone = self.c.operands[0].applied.cone(self.c.roles[0])
-        if any(not isinstance(stmt, (Assign, Load)) for stmt in cone.body):
-            raise RuleSkipped("the score's own cone holds more than a straight-line program", reject=True)
 
         chunk = Axis(name=f"{key.name}__ck", extent=key.extent)
         base = Var(chunk.name)
@@ -2199,8 +2197,6 @@ class _FlashOps(_MmaOps):
                 continue
             stmts, result = self._pattern(index)
             product = stmts[-1] if index == self._bilinear else None
-            if product is not None and (not isinstance(product, Assign) or len(product.args) != 2 or product.name != result):
-                raise RuleSkipped("the bilinear channel's pattern does not end in its product", reject=True)
             for i in range(m.reg):
                 folded = []
                 for j in range(cols):
@@ -2215,10 +2211,8 @@ class _FlashOps(_MmaOps):
                     if product is None:
                         folded.append(frags[result])
                         continue
-                    held = [arg for arg in product.args if arg in frags]
-                    if len(held) != 1:
-                        raise RuleSkipped("the bilinear channel's product multiplies no single computed weight", reject=True)
-                    weights[i, j] = frags[held[0]]
+                    (held,) = [arg for arg in product.args if arg in frags]
+                    weights[i, j] = frags[held]
                 if product is None:
                     partials[index, i] = (f"{self.frag(state)}__p{i}_0", f"{self.frag(state)}__p{i}_1")
                     body.append(
