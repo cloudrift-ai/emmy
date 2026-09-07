@@ -1962,7 +1962,17 @@ def _row_pair(state: str, i: int) -> tuple[str, str]:
     return (f"{state}__r{i}_0", f"{state}__r{i}_1")
 
 
-def _residence(stmts, *, frags: dict, rows: dict, tag: str, hold: str = "", memo: dict | None = None, frags_only: bool = False):
+def _residence(
+    stmts,
+    *,
+    frags: dict,
+    rows: dict,
+    tag: str,
+    frag_tag: str | None = None,
+    hold: str = "",
+    memo: dict | None = None,
+    frags_only: bool = False,
+):
     """Evaluate one straight-line scalar program at the residence each value it reads has.
 
     ``frags`` maps a name to the C fragment holding it, ``rows`` a name to its ``(top, bot)``
@@ -1979,7 +1989,9 @@ def _residence(stmts, *, frags: dict, rows: dict, tag: str, hold: str = "", memo
     lead the argument list); its result then denotes the accumulator too. ``memo`` shares one
     fragment per repeated ``(op, args)`` across calls, so two channels whose patterns both spell
     the weight compute it once. ``frags_only`` keeps the fragment statements alone — the same
-    program run again for a second output column, whose row and uniform halves already stand.
+    program run again for a second output column, whose row and uniform halves already stand; such
+    a run names its fragments under ``frag_tag`` so two columns do not collide on a temp the row
+    half is right to share.
 
     This is what lets a recipe's channel pattern, its merge and a projection epilogue reach tensor
     cores without any of them being written for tensor cores: all three are ordinary scalar
@@ -1988,6 +2000,7 @@ def _residence(stmts, *, frags: dict, rows: dict, tag: str, hold: str = "", memo
 
     out: list[Stmt] = []
     frags, rows, memo = dict(frags), dict(rows), memo if memo is not None else {}
+    frag_tag = tag if frag_tag is None else frag_tag
     for stmt in stmts:
         accum = isinstance(stmt, Accum)
         if not isinstance(stmt, (Assign, Accum)):
@@ -2012,7 +2025,7 @@ def _residence(stmts, *, frags: dict, rows: dict, tag: str, hold: str = "", memo
             if target is None and key in memo:
                 frags[stmt.name] = memo[key]
                 continue
-            name = target if target is not None else f"{tag}{stmt.name}"
+            name = target if target is not None else f"{frag_tag}{stmt.name}"
             out.append(FragmentApply(out=name, op=stmt.op, args=tuple(args), kinds=tuple(kinds), in_place=target is not None))
             frags[stmt.name] = name
             if target is None:
@@ -2124,9 +2137,14 @@ class _FlashOps(_MmaOps):
         key = self.k_axis
         if not key.extent.is_static or key.extent.as_static() % bk:
             raise RuleSkipped("the chunk tier needs a key extent its chunk tiles exactly", reject=True)
-        score = self.inner[0] if self.inner else None
+        score, score_tile = self.inner if self.inner else (None, None)
         if score is None or any(edge.as_slab() is None for edge in (*score.operands, self.c.operands[1])):
             raise RuleSkipped("the chunk tier reads its score operands and its streamed value as slabs", reject=True)
+        # The score's own site decides the chunk's score tile, and the fragment seam is what made
+        # the two agree. Realize that agreement rather than assume it: a score row the seam did not
+        # constrain would be stamped on a kernel whose emission ignored it.
+        if not getattr(score_tile, "is_warp", False) or (score_tile.n.units, score_tile.n.tile, score_tile.m.reg) != (1, bk, m.reg):
+            raise RuleSkipped("the score's tile is not the chunk this carrier folds, one warp column wide", reject=True)
         cone = self.c.operands[0].applied.cone(self.c.roles[0])
         if any(not isinstance(stmt, (Assign, Load)) for stmt in cone.body):
             raise RuleSkipped("the score's own cone holds more than a straight-line program", reject=True)
@@ -2328,6 +2346,7 @@ class _FlashOps(_MmaOps):
                     frags={states[bilinear]: held, other[bilinear]: self.frag(f"_p{i}_{j}")},
                     rows=rows,
                     tag=f"_mg{i}_",
+                    frag_tag=f"_mg{i}_{j}_",
                     hold=held,
                     frags_only=j > 0,
                 )
@@ -2338,17 +2357,25 @@ class _FlashOps(_MmaOps):
 
     def store(self, i, j, offset, mn):
         """Write cell ``(i, j)``'s expectation, the projection applied at each value's residence —
-        the denominator is a per-row register here, not something a :class:`RegEpilogue` chain can
-        bind, so the projection evaluates ahead of the store and the store writes the fragment."""
+        a carried state the tier keeps as a per-row register is not something a :class:`RegEpilogue`
+        chain can bind, so the projection evaluates ahead of the store and the store writes the
+        fragment. A projection that reads no such state is the ordinary sink's (a placement cut
+        materializes the denominator, and the tail is then a per-cell chain like any other)."""
+        from emmy.compiler.pipeline import RuleSkipped  # noqa: PLC0415 — avoid an import cycle
+
         atom, (m, n) = self.tile.atom, mn
         mcell, ncell = offset[0].base(i), offset[1].base(j)
         sigma = Sigma({m.axis.name: mcell, n.axis.name: ncell})
         bilinear = self._bilinear
         frags = {self.c.base.results[bilinear]: self.frag(f"_c{i}_{j}")}
         rows = {state: _row_pair(self.frag(state), i) for index, state, _ in self._carried() if index != bilinear}
-        stmts, frags, _rows = _residence(
-            [stmt for stmt in self.epilogue if not isinstance(stmt, Write)], frags=frags, rows=rows, tag=f"_ep{i}_{j}_"
-        )
+        tail = [stmt for stmt in self.epilogue if not isinstance(stmt, Write)]
+        if not (set(rows) & {name for stmt in tail for name in stmt.deps()}):
+            return super().store(i, j, offset, mn)
+        cell = {m.axis.name, n.axis.name}
+        if any(isinstance(stmt, Load) and cell & {name for e in stmt.index for name in e.free_vars()} for stmt in tail):
+            raise RuleSkipped("the chunk tier's projection reads a per-cell operand beside a per-row carrier state", reject=True)
+        stmts, frags, _rows = _residence(tail, frags=frags, rows=rows, tag=f"_ep{i}_{j}_")
         out = list(stmts)
         for write in (stmt for stmt in self.epilogue if isinstance(stmt, Write)):
             out.append(

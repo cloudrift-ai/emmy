@@ -220,6 +220,17 @@ the base form denotes `Sum exp(score)`, so the step reads the recipe's authored 
 evaluating ψ on it, and an operand no rendered statement reads — the weight cone, on the serial nest — is not placed
 at all.
 
+### One reading for "a tier folds this whole"
+
+`Fold.tiles_whole` decides whether a node is a TILE site (`TileOp.contracts`), which schedule domain it takes, what
+transport catalog its edges get, whether it holds a fragment at a seam (`contraction_facts`), and whether a root has
+a chain. Two shapes answer yes. A PLANAR carrier qualifies when every carried state is a bilinear channel — the
+tile's accumulators ARE the carrier. A TWISTED one qualifies through `Fold.chunked`: the recipe names a pattern for
+every state past the pivot, supplies `advance` / `rescale` (the stable ⊕ at an open channel count, which is what a
+per-chunk merge needs), and leaves exactly one bilinear channel, so every other state rides as a per-row scalar and
+the one accumulator is the expectation. Neither reading mentions attention or softmax: a recipe that folded nothing
+but products passes the first, and one shaped like softmax passes the second.
+
 ## Kernel identity
 
 Every "are these two kernels the same?" question is answered by ONE function — `Op.identity_key`

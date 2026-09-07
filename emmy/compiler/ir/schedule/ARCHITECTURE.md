@@ -94,6 +94,12 @@ where it does not, one tiled root is the kernel's root and every other reduce lo
 a second output-tiled root among those roots. The row that tiled both — a gate/up projection whose one output reads
 both channels — used to be offered, ranked first, and refused at materialize.
 
+A CHUNKED carrier's seam is stricter than an ordinary consumer's. The ordinary need tolerates an untiled producer;
+this one is built on the fragment, since the chunk's score IS the producer's tile — so the producer must be
+warp-tiled at the same atom, one warp column wide, with the chunk as its N tile and the same register rows
+(`_fragment_agreements`). That equation is FlashAttention's own shape, and stating it here is what keeps the tier
+from being offered a row its emission would have to ignore.
+
 A pin is a restriction on those projected domains, never a source of choices, so it narrows what a site may select and
 cannot manufacture a value the projection withheld. A value scoped to a site that does not offer it empties that
 site's restriction and the kernel enumerates no row — the loud direction. A bare family pin is applicable at a site

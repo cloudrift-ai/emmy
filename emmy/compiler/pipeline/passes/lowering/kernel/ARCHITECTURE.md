@@ -362,22 +362,44 @@ tile base — an offset operand lands the box at absolute coordinates).
 
 ## Fold carriers lower at their scheduled residence
 
-Scalar Fold carriers use the common reduce-axis tiling (`_tile_reduce_axis` — cooperative lanes, register ILP, or
-serial). That is the only tier a carrier with more than one state reaches today: the tensor-core tiers fold one
-accumulator per bilinear channel and have no residence for a state that is not one.
+A planar carrier the atom tiers cannot fold whole uses the common reduce-axis tiling (`_tile_reduce_axis` —
+cooperative lanes, register ILP, or serial). A TWISTED carrier the recipe folds chunk by chunk (`Fold.chunked`) takes
+an atom tier of its own instead, `_atom._FlashOps`.
+
+### The chunk tier
+
+The tier folds the RECIPE, never the stored lift — for a twist that lift is the base contribution and denotes
+`Sum exp(score)`. Per staged K chunk (`STAGE`'s `bk_elems`, the only block it uses) it emits the score, reduces it
+per row into the chunk's pivot, instantiates each channel's `pattern` against that pivot, folds a channel that is no
+product per row and the bilinear one on tensor cores, and merges the chunk's partial through the recipe's stable ⊕
+(`Fold.merge`) once per chunk.
+
+Three things make it small. The SCORE is the nested contraction the tree already carries as a site of its own, and
+the fragment seam already ties the two together — the score's N tile must equal the consumer's chunk, one warp column
+wide (`_fragment_agreements`), which is exactly FlashAttention's shape — so the enumeration needed no rule of its own
+and the tier realizes the agreement rather than assuming it. The WEIGHT reaches the expectation's `mma.sync` through
+`FragmentRepack`, in registers, with no shared-memory round trip. And `_residence` evaluates a recipe pattern, the
+merge and the projection epilogue at whatever residence each value has — a C fragment, the two per-lane registers an
+m16n8 row rides in, or cell-uniform — so none of the three is written for tensor cores; where a value lives is a fact
+about the tile, not about the program.
+
+A projection that reads no per-row carrier state is the ordinary sink's (a placement cut materializes the
+denominator, and the tail is then a per-cell chain like any other).
 
 ### What may not come back
 
 The tree once carried a second emitter for attention: a carrier whose term held one operand per carried component,
 every one folding the same explicit block, with the block loop bound to the staged K loop. It was removed with the
-blocking rewrite that produced that shape, and with it the residence evaluator, `FragmentRowReduce`, `FragmentSelect`,
+blocking rewrite that produced that shape, and with it the residence evaluator, `FragmentSelect`, `FragmentLoad`,
 `frag_layout` and `staged_kloop`'s lead segment.
 
-Do not restore any of it. The carrier's term now holds one axis and one lift whose per-channel cones say which state is
-bilinear (`Fold.bilinear_channels`), and an emitter that wants a block must take it from the SCHEDULE — the staged K
-chunk — not from a second reduce axis carved into the term. A design that reintroduces per-component operands, a block
-axis, or a width derived from an extent is reintroducing the thing that took the attention schedule space from 10^9 to
-10^17 and made every kernel identity turn on a form rule nothing measured.
+Do not restore any of it. The carrier's term holds one axis and one lift whose per-channel cones say which state is
+bilinear (`Fold.bilinear_channels`), and an emitter that wants a block takes it from the SCHEDULE — the staged K
+chunk — never from a second reduce axis carved into the term. A design that reintroduces per-component operands, a
+block axis, or a width derived from an extent is reintroducing the thing that took the attention schedule space from
+10^9 to 10^17 and made every kernel identity turn on a form rule nothing measured. `FragmentRowReduce` came back with
+the chunk tier — a per-row fold over one warp's C fragments is what a chunk pivot IS — but it came back as a leaf the
+tier emits, not as an interpreter of a term.
 
 The Fold move is never re-decided during materialization. `ReduceStage.combine` is the placement-keyed selector:
 within-warp uses `SHFL`, within-block uses a `SHFL` plus shared-memory tree, and cross-CTA uses `ATOMIC` or `KERNEL`

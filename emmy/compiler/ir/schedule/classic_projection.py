@@ -55,7 +55,7 @@ from emmy.compiler.ir.schedule.classic import (
     node_id_spelling,
 )
 from emmy.compiler.ir.schedule.views import ContractionFacts
-from emmy.compiler.ir.stmt import Body, Load, Loop, Write
+from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.ops import Sched, chain_form, chain_members, edge_dtypes, kernel_roots, projection_tail, scheduled
@@ -155,6 +155,8 @@ def _node_refusal(tile: TileOp, target, node, fragment_epilogue: bool, packed: t
     # scheduling site on ANY operand refuses the same way.
     if any(edge.axis is not None for edge in node.operands):
         return "a nested scheduling site inhabits an operand edge"
+    if node.chunked() and (why := _chunk_refusal(tile, node)) is not None:
+        return why
 
     a_edge = node.operands[0]
     dtype = edge_dtypes(a_edge, tile.inputs)[0]
@@ -178,6 +180,36 @@ def _node_refusal(tile: TileOp, target, node, fragment_epilogue: bool, packed: t
         return "a demoting compute fill cannot produce an fp8 fragment"
     if not (atoms_for(atom_dtype, ctx=target) or atoms_for(atom_dtype, acc=atom_dtype, ctx=target)):
         return f"no tensor-core atom takes a {atom_dtype} multiplicand on this target"
+    return None
+
+
+
+def _chunk_refusal(tile: TileOp, node) -> str | None:
+    """Return why the CHUNK tier cannot fold this twisted carrier, whatever atom is offered.
+
+    Stated at the enumeration, not at the binder: a row nothing realizes costs the greedy a
+    blocklist retry per rank, and there are more ranked rows than the retry budget."""
+    facts = tile.contractions.get(tile.node_id(node))
+    score = facts.producer if facts is not None else None
+    if score is None:
+        return "the chunk tier folds a carrier whose pivot a nested contraction supplies"
+    if any(edge.as_slab() is None for edge in (*score.operands, *node.operands[1:])):
+        return "the chunk tier reads its score operands and its streamed value as slabs"
+    if not tile.axis_of(node.axis).extent.is_static:
+        return "the chunk tier needs a key extent its chunk tiles exactly"
+    cone = node.operands[0].applied.cone(node.roles[0])
+    if any(not isinstance(stmt, (Assign, Load)) for stmt in cone.body):
+        return "the score's own cone holds more than a straight-line program"
+    # The tier holds ONE accumulator — the expectation — and every other carried state as a per-row
+    # register the store may read but not write out. A cross-CTA split's partial writes the whole
+    # carrier to its workspace, which is a kernel this tier cannot produce.
+    tail = projection_tail(tile)
+    body = Body(tail)
+    expectation = node.base.results[node.bilinear_channels()[0][0]]
+    for write in (stmt for stmt in tail if isinstance(stmt, Write)):
+        reads = set(write.values) | set(body.backward_cone(tuple(write.values)).external_reads)
+        if expectation not in reads:
+            return "the chunk tier writes its expectation; a carried state beside it has no output of its own"
     return None
 
 
@@ -230,6 +262,11 @@ def _atom_families(tile: TileOp, target, node, tail: list, packed: tuple = (None
             name for name in names if _atom_refusal(ATOM_REGISTRY[name], dtype, a_step, a_is_load, tail, tile.place.free, shapes) is None
         )
 
+    # The CHUNK tier hands its weight to the expectation's mma as a register repack of the score's
+    # own C fragments, so only an atom whose two lane maps line up can carry it.
+    if node.chunked():
+        offered = bindable(atoms_for(edge_dtypes(a_edge, tile.inputs)[0], ctx=target))
+        return tuple(name for name in offered if ATOM_REGISTRY[name].c_to_a_repack)
     if (pair := packed[1]) is not None:
         if any(operand.bits is None for operand in pair.b):
             return ()

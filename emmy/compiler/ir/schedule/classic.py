@@ -244,6 +244,13 @@ def _kstep_refusal(k_axis, plan: Tile) -> str | None:
 def _plan_node_refusal(tile_op, node: Fold, plan: Tile, placed: PlacedTile, facts: ContractionFacts) -> str | None:
     from . import staging  # noqa: PLC0415
 
+    if plan.is_warp and node.chunked():
+        # The chunk tier folds whole chunks and nothing else: it merges once per chunk through the
+        # recipe's ⊕, and a ragged last chunk would merge a partial pivot. A cross-CTA slice whose
+        # length the chunk does not divide is where this bites.
+        step = plan.atom.atom_k * plan.bk
+        if not facts.k_axis.extent.is_static or facts.k_axis.extent.as_static() % step:
+            return f"the chunk tier needs a key extent its {step}-wide chunk tiles exactly"
     refusal = _kstep_refusal(facts.k_axis, plan)
     if refusal is not None or not _needs_fill(tile_op, node, plan):
         return refusal
@@ -297,6 +304,7 @@ def _resolve_stage(
 
 def _fragment_agreements(
     site: NodeId,
+    node: Fold,
     plan: Tile,
     placed: PlacedTile,
     stage: ResolvedStage | None,
@@ -308,12 +316,21 @@ def _fragment_agreements(
         if not plan.is_tiled:
             offer = ("free",)
         elif plan.is_warp:
-            offer = ("warp", plan.atom.shape, plan.atom.fragment_layout, placed.n.units, placed.n.tile)
+            offer = ("warp", plan.atom.shape, plan.atom.fragment_layout, placed.n.units, placed.n.tile, placed.m.reg)
         else:
             offer = ("scalar",)
         out.append(_FragmentAgreement("offer", node_id_spelling(site), offer))
-    if facts.need is not None:
-        if plan.is_warp and stage is not None and stage.transport == "smem":
+    if facts.need is not None and not (node.chunked() and not plan.is_warp):
+        # A chunked carrier the tier does NOT fold — the serial arm — reads its score as a plain
+        # value like any reduce and claims nothing at the seam, so the score keeps its own tile.
+        if plan.is_warp and node.chunked():
+            # A CHUNKED carrier does not merely tolerate a fragment at the seam, it is built on
+            # one: the chunk's score IS the producer's tile, so the producer must be warp-tiled at
+            # this atom with the chunk as its N tile, one warp column wide and the same register
+            # rows. Stated as a need of its own because the ordinary one accepts an untiled
+            # producer, and that row would be stamped on a kernel whose emission ignored it.
+            need = ("chunk", plan.atom.shape, plan.atom.fragment_layout, stage.bk_elems if stage is not None else 0, placed.m.reg)
+        elif plan.is_warp and stage is not None and stage.transport == "smem":
             need = ("step" if facts.need_step else "warp", plan.atom.shape, plan.atom.fragment_layout, stage.bk_elems)
         else:
             need = ("free",)
@@ -996,6 +1013,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             fragments=(
                 _fragment_agreements(
                     site,
+                    fold,
                     node.tile,
                     geometry,
                     resolved_stage,
@@ -1125,7 +1143,11 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             if other is None:
                 continue
             need, offer = (claim.value, other) if claim.role == "need" else (other, claim.value)
-            if offer[0] == "free":
+            if need[0] == "chunk":
+                compatible = (
+                    offer[0] == "warp" and need[1:3] == offer[1:3] and offer[3] == 1 and offer[4] == need[3] and offer[5] == need[4]
+                )
+            elif offer[0] == "free":
                 compatible = need[0] != "step"
             else:
                 compatible = (
