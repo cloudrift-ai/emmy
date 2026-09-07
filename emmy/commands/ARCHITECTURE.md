@@ -271,7 +271,11 @@ the failure names — the one the watchdog saw hang, or the one nvcc refused to 
 kernel earns a `bench_fail` perf row at the run budget's fail sentinel and the innocent kernels earn none, so the
 next compile disqualifies that arm instead of electing the same route and failing the same way again; a failure
 that names no kernel records nothing, and a compile-budget overrun measured
-nothing and records nothing. `--no-record-nodes` opts out of all of it.
+nothing and records nothing. `--no-record-nodes` opts out of all of it. This recording happens before any pinned row
+compiles — including when an embedded Loop's same-input reference completed but its repeated greedy timing crossed
+the watchdog — and a pinned row that pins no knobs beyond the greedy compile's own input regime is then skipped
+rather than re-elected and re-failed identically; a pinned row carrying its own knobs (a genuinely different config,
+or an `--ab` row) still benches.
 
 For a fair hybrid-vs-MCTS comparison, both working files start from the same inventory-only trace: do not copy verified
 knob rows into either baseline as proposals. Canonical goldens remain the common implicit deploy context for both runs.
