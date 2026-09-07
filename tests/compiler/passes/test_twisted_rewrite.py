@@ -99,22 +99,25 @@ def _twisted(code: str) -> Fold:
 
 
 def test_softmax_rewrites_to_twisted_pair() -> None:
-    """The row maximum and the exp-weighted sum fuse into one ``(m, l)`` carrier over the BASE
-    monoid: the lift contributes ``(score, exp(score))`` off the score slab, and ψ takes that
-    singleton to ``(score, 1)`` for the step to fold."""
+    """The row maximum and the exp-weighted sum fuse into one ``(m, l)`` carrier in STABLE
+    coordinates: the lift contributes ``(score, 1)`` off the score slab — the singleton the
+    carrier's own ⊕ folds — and ψ⁻¹ brings back ``(score, exp score)`` for a matcher to read."""
     fold = _twisted("torch.softmax(torch.randn(4, 8, dtype=torch.float16), dim=-1)")
 
     assert fold.twist.recipe is SOFTMAX and fold.combine == SOFTMAX.program(fold.as_reduction().states)
     assert len(fold.init) == 2 and fold.init[1] == 0.0
     assert [edge.as_slab() is not None for edge in fold.operands] == [True], "the score slab is its one operand"
-    assert [stmt.op.name for stmt in fold.lift.body] == ["exp"], "the base contribution is (score, exp score)"
+    assert [stmt.value for stmt in fold.lift.body if isinstance(stmt, Const)] == [1.0], "the stable singleton is (score, 1)"
+    assert not [stmt for stmt in fold.lift.body if isinstance(stmt, Assign) and stmt.op.name == "exp"], "no exp in the term"
+    assert [stmt.op.name for stmt in fold.based().body if isinstance(stmt, Assign)] == ["exp", "multiply"], "psi_inv restores it"
     assert any(isinstance(stmt, Const) and stmt.value == 1.0 for stmt in fold.injected.body), "psi injects 1"
 
 
 def test_sdpa_rewrites_to_twisted_expectation() -> None:
-    """Attention's value channel joins the same carrier, and the carrier reads A × B with the
-    WEIGHT STILL IN THE LIFT: the score contraction leads, the value slab is the streamed operand,
-    and no cone is minted to hold ``exp(s)``. The ``1/l`` factor hoists into the epilogue above."""
+    """Attention's value channel joins the same carrier, stored in STABLE coordinates: the score
+    contraction leads, the value slab is the streamed operand, and the expectation channel injects
+    that value unchanged. The bilinear reading comes back through ψ⁻¹ (:meth:`Fold.based`), so no
+    cone is minted to hold ``exp(s)``. The ``1/l`` factor hoists into the epilogue above."""
     tile = _tile(
         "F.scaled_dot_product_attention("
         "torch.randn(1, 1, 4, 2, dtype=torch.float16), "
@@ -128,7 +131,7 @@ def test_sdpa_rewrites_to_twisted_expectation() -> None:
     (_, streamed) = fold.bilinear_channels()[0]
     assert streamed.as_slab() is not None and streamed.free_axes, "the value slab is B"
     assert fold.as_contraction() is not None
-    assert [stmt.name for stmt in fold.lift.body if stmt.op.name == "exp"] == ["e"], "one weight, in the lift"
+    assert not [s for s in fold.lift.body if isinstance(s, Assign) and s.op.name == "exp"], "the weight is not in the term"
     assert tile.op.axis is None and any(stmt.op.name == "multiply" for stmt in tile.op.lift.body), "the epilogue applies 1/l once"
 
 
@@ -246,8 +249,9 @@ def test_welford_variance_pair_fuses_into_one_carrier() -> None:
     score, one, mean, square = fold.lift.results
     consts = {stmt.name: stmt.value for stmt in fold.lift.body if isinstance(stmt, Const)}
     products = {stmt.name: stmt.args for stmt in fold.lift.body if isinstance(stmt, Assign) and stmt.op.name == "multiply"}
-    assert mean == score and consts[one] == 1.0, "the base contribution is (x, 1, x, x*x)"
-    assert products[square] == (score, score), "channel 3 squares one edge, so it is no contraction"
+    assert mean == score and consts[one] == 1.0, "the stable singleton is (x, 1, x, 0)"
+    assert consts[square] == 0.0, "one element deviates from its own mean by nothing"
+    assert products == {}, "no product in the term at all, so no channel reads bilinear"
     injected = {stmt.name: stmt.value for stmt in fold.injected.body if isinstance(stmt, Const)}
     assert injected[fold.injected.results[3]] == 0.0, "psi takes it to 0 — a lone element deviates from its own mean by nothing"
     lowered = fold.lower(axes=axes)

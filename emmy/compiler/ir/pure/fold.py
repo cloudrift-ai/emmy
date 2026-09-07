@@ -396,21 +396,46 @@ class Fold:
 
     @cached_property
     def injected(self) -> Lambda:
-        """The lift SEEN THROUGH ψ — ``injected = psi ∘ lift``, the singleton the ⊕ folds, in the
-        operands' spelling. ``applied`` itself for a planar fold, where ψ is the identity.
+        """The singleton the ⊕ folds — :attr:`applied`, always.
 
-        For a twisted one the stored ``lift`` computes the BASE contribution, which is what makes a
-        channel read as a contraction and what a schedule tiles; it is NOT what a serial step may
-        emit, because ``Sum exp(score)`` overflows. So the step folds this instead: the score's own
-        cone, then the recipe's authored injections (:meth:`Twist.inject`) — the simplified form ψ
-        takes where the pivot IS the score. Nothing else may see through ψ.
+        The term STORES its contribution in the carrier's own coordinates (the twisted fusion
+        splices the recipe's authored injections, not its base lift), so there is nothing left to
+        see through: what the step folds is what the lift says. Kept as a name because every
+        consumer of a folded singleton reads it, and because the base reading is now the derived
+        one (:meth:`based`) rather than this.
+        """
+        return self.applied
+
+    @cached_method
+    def based(self) -> Lambda:
+        """The lift in BASE coordinates — ``psi_inv ∘ lift``, the contribution the base monoid
+        folds. :attr:`applied` itself for a planar fold, where the two coordinate systems coincide.
+
+        RECOGNITION ONLY. The base form denotes ``Sum exp(score)`` and overflows for a large enough
+        logit — that is exactly why the term stores the stable side — so nothing may emit these
+        statements. It exists because bilinearity lives in base coordinates and nowhere else: ψ
+        divides each channel by a factor at the singleton, so softmax's stable contribution is
+        ``(s, 1, v)`` with no product in it at all, while ``psi_inv`` brings back
+        ``(s, exp(s), exp(s)·v)`` where the expectation channel is a bare product of the weight and
+        the streamed value. :meth:`bilinear_channels` reads this; :meth:`step` reads the lift.
         """
         applied = self.applied
         if self.twist is None or not self.twist.channels:
-            return applied  # planar, or a merge whose elements are carrier states already
-        injection = self.twist.inject(self.roles, self.base.results)
-        score = injection.results[0]
-        return Lambda(params=applied.params, body=Body((*applied.cone(score).body, *injection.body)), results=injection.results)
+            return applied
+        psi_inv = self.twist.recipe.psi_inv
+        # ψ⁻¹ is written over the recipe's FULL carrier; this term holds the pivot plus whichever
+        # channels have fused so far, so it is restricted to those slots before instantiation — a
+        # half-fused carrier (the denominator in, the expectation not yet) is the ordinary case
+        # during the rewrite's own fixpoint.
+        slots = (0, *(1 + channel for channel in self.twist.channels))
+        wanted = tuple(psi_inv.results[slot] for slot in slots)
+        members = tuple(psi_inv.body.backward_cone(wanted).members)
+        restricted = Lambda(params=tuple(psi_inv.params[slot] for slot in slots), body=Body(members), results=wanted)
+        taken = {name for stmt in applied.body for name in stmt.defines()} | set(applied.params)
+        names = dict(zip(restricted.params, applied.results, strict=True))
+        names.update((stmt.name, stmt.name if stmt.name not in taken else f"_b_{stmt.name}") for stmt in members)
+        instance = restricted.rename(names)
+        return Lambda(params=applied.params, body=Body((*applied.body, *instance.body)), results=instance.results)
 
     @cached_property
     def roles(self) -> tuple[str, ...]:
@@ -508,7 +533,8 @@ class Fold:
         if not channels:
             return None
         channel, b_edge = channels[0]
-        product = _channel_product(self.lift, self.lift.results[channel])[1].op
+        based = self.based()
+        product = _channel_product(based, based.results[channel])[1].op
         plus = self.base.components()[channel]
         a_edge = self.operands[0]
         a_space, b_space = a_edge.free_axes, b_edge.free_axes
@@ -617,14 +643,17 @@ class Fold:
         a_edge = self.operands[0]
         a_names = {param for param, edge, _ in self.bindings if edge is a_edge}
         uniform = {param for param, edge, _ in self.bindings if edge is not a_edge and not edge.free_axes}
+        based = self.based()  # bilinearity lives in BASE coordinates; ψ divides the product away
         out: list[tuple[int, Fold]] = []
-        for index, result in enumerate(self.lift.results):
-            cone, product = _channel_product(self.lift, result)
+        for index, result in enumerate(based.results):
+            cone, product = _channel_product(based, result)
             if product is None or len(product.args) != 2:
                 continue  # a state the carrier passes through, or one whose cone ends in no product
             plus = pluses[index]
-            if not (plus.associative and plus.commutative and plus.has_identity) or self.init[index] != plus.identity:
+            if not (plus.associative and plus.commutative and plus.has_identity):
                 continue
+            if self.twist is None and self.init[index] != plus.identity:
+                continue  # a planar fold seeds the ⊕ itself; a recipe's base is a monoid by construction
             if not product.op.distributes_over(plus):
                 continue
             left = [arg for arg in product.args if _over_a(arg, cone, a_names, uniform)]
@@ -852,9 +881,11 @@ class Fold:
             # The carrier's states: the pivot's, then every channel in recipe order — the matched
             # one is this fold's own state, one without a pattern a state the recipe adds. Each
             # takes the recipe's BASE contribution for it (``lift``'s own result), instantiated at
-            # the score and this channel's extras: the term stores what the recipe declares, and ψ
-            # is applied at lowering (:attr:`injected`). The SEEDS stay the carrier's — the state
-            # is the stable one, only the per-element contribution is the base's.
+            # the score and this channel's extras. STABLE coordinates throughout: the contribution
+            # stored is the recipe's authored INJECTION — the singleton in the carrier's own state
+            # space, where the pivot IS the score and softmax's ``exp(s)·v`` has already simplified
+            # to ``v``. The base contribution is a derived reading (:meth:`based`) a matcher asks
+            # for and nothing emits. Seeds are the carrier's, as the states are.
             state = view.states[0]
             score = pivot.lift.results[0]
             added = [
@@ -871,7 +902,7 @@ class Fold:
             body, results, inits = list(pivot.lift.body), list(pivot.lift.results), list(pivot.init)
             for name, index, init in added:
                 taken = {n for stmt in body for n in stmt.defines()} | {p for _, slot in held for p in slot}
-                cone = recipe.lift.cone(recipe.lift.results[1 + index])
+                cone = recipe.channels[index].injection
                 names = {param: roles[param] for param in cone.params}
                 # Statement by statement, so a channel BINDS what the body already computes rather
                 # than spelling it again: softmax's denominator and its expectation share the whole
