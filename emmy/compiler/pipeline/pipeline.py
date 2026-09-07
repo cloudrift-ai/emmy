@@ -553,7 +553,7 @@ class Pipeline:
         Retry orchestration, the ``rejections`` sink, and the loud
         :class:`LoweringError` on an un-lowered node are greedy search
         POLICY, owned by
-        :class:`~emmy.compiler.pipeline.search.policy.greedy.GreedyStrategy` —
+        :class:`~emmy.compiler.pipeline.search.strategy.greedy.GreedyStrategy` —
         this method is the thin engine entry point."""
         from emmy.compiler.pipeline.search.strategy import GreedyStrategy  # noqa: PLC0415
 

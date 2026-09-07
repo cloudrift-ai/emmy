@@ -859,7 +859,7 @@ losing to a finite arm, and the fused root returns only when every cut above the
 retirement is logged at WARNING with the rejection reason.
 
 **Greedy validity fallback.** The whole greedy retry orchestration is search policy, owned by
-`policy/greedy.GreedyStrategy` — `Pipeline.run` is a thin entry point delegating to it. The prior ranks by
+`strategy/greedy.GreedyStrategy` — `Pipeline.run` is a thin entry point delegating to it. The prior ranks by
 predicted latency, which can rank a tile that fails `validate(ctx)` (smem / thread budget) first — `tune`
 benches-and-skips it, but greedy benches nothing. So when a deterministic compile leaves a node un-lowered, the
 strategy blocklists the `tile_identity` of the pick the resolve made at that node — read off the trace, never off
