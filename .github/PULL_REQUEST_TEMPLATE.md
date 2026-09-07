@@ -69,11 +69,11 @@ A short-query attention traces with the KEY in the score's canonical A slot, and
 
 ## Evidence
 
-`make test`, `make lint` and `make test-goldens` pass. The realization corpus is green at parity with `main`: the same two failures `main` has (`reduce/rms-norm-cut-sweep-work`, and a `qwen3emb/gated-mlp-s128` worker crash under xdist) reproduce on `main` unchanged.
+`make test` and `make lint` pass. The realization corpus is green at parity with `main`: the two failures it has (`reduce/rms-norm-cut-sweep-work`, and a `qwen3emb/gated-mlp-s128` worker crash under xdist) reproduce on `main` unchanged.
 
-Three e2e cases cover the tier: an f16 SDPA on a pinned chunk row is one `mma.sync` kernel matching torch, once chunk-aligned, once ragged, once symbolic.
+`make test-goldens` is red — and it is red on `main` too, on the `matmul.square.*` rows, which predates this branch. Compared file by file, this branch adds no red row: `rtx4080_sm89` fails the same 8 rows on both sides and `gemma-4-12B-it/rtx5090_sm120` the same 23. Attention kernel identity did change by design, so the checked-in model goldens still want a tuning round on their cards before they mean anything again.
 
-Every attention kernel identity changed by design. The corpus was restamped with `make test-corpus-regen`; the checked-in model goldens go stale and want a tuning round on their cards.
+Three e2e cases cover the tier: an f16 SDPA on a pinned chunk row is one `mma.sync` kernel matching torch, once chunk-aligned, once ragged, once symbolic. The realization corpus was restamped with `make test-corpus-regen`.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 
