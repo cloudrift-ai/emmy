@@ -1,0 +1,58 @@
+# Volta qualification lane for Qwen3.8-27B-FP8.
+#
+# Target is four V100 SXM2 16 GB (sm_70). Weights are 30.9 GB, so min-to-serve is about 40.2 GB
+# and four cards (4 x 16,384 MiB = 68.7 GB) are the smallest admissible platform; two cards hold
+# 34.4 GB and cannot take the weights.
+#
+# Volta has no native FP8 arithmetic. The 1Cat fork serves FP8 checkpoints on sm_70 through its
+# TurboMind dequantization path, which the DeepSeek-V4-Flash lane on this same engine selects
+# with VLLM_SM70_FP8_TURBOMIND and VLLM_SM70_QUANT_BACKEND. Neither is baked into the image, so
+# this lane sets both explicitly. This is emulation, not hardware FP8: treat any throughput
+# result as a property of that dequantization path.
+#
+# TP4 divides cleanly: 24 attention heads / 4 = 6 and 4 key/value heads / 4 = 1.
+model:
+  huggingface: "Qwen/Qwen3.8-27B-FP8"
+  revision: 017b9c7af6b5689d5dd426a76e0bc077eb5ca20a
+  task: generate
+
+engine:
+  llm:
+    tensor_parallel_size: 4
+    pipeline_parallel_size: 1
+    gpu_memory_utilization: 0.88
+    context_length: 262144
+    max_concurrent_requests: 4
+    vllm:
+      image: "cloudriftai/1cat-vllm-deepseek-v4-flash-0731:1.2.3-d76126608"
+      extra_args: >-
+        --dtype half
+        --language-model-only
+        --gdn-prefill-backend triton
+        --max-num-batched-tokens 4096
+        --enable-auto-tool-choice
+        --tool-call-parser qwen3_coder
+        --reasoning-parser qwen3
+      extra_env:
+        VLLM_SM70_FP8_TURBOMIND: "1"
+        VLLM_SM70_QUANT_BACKEND: "turbomind"
+        # The GDN decode path reaches for the flash_qla JIT extension independently of the
+        # prefill backend, and building it fails in this image at a missing cusparse header.
+        VLLM_SM70_GDN_DECODE_FLASHQLA: "0"
+
+benchmark:
+  # 16 prompts, not 32: the same workload at 32 ran 1,631 s on the FP16 lane, over the 20-minute
+  # per-variant cap. Halving the request count is the prescribed remedy and keeps this row inside
+  # it without changing the shape being measured.
+  max_concurrency: 4
+  num_prompts: 16
+  random_input_len: 1000
+  random_output_len: 1000
+  num_warmups: 2
+  seed: 0
+  temperature: 0.0
+  ignore_eos: true
+
+matrices:
+  deploy.gpu: "NVIDIA Tesla V100 SXM2 16GB"
+  deploy.gpu_count: 4

@@ -1,0 +1,71 @@
+# Volta qualification lane for Qwen3.8-27B GPTQ Int4.
+#
+# Target is two V100 SXM2 16 GB (sm_70). Weights are 19.6 GB, so one 16 GB card cannot hold them;
+# TP2 is the smallest tensor-parallel size that fits (2 x 16,384 MiB = 34.4 GB against a 25.5 GB
+# min-to-serve). The surrounding eight-card host is not used by this lane.
+#
+# Engine: the 1Cat-vLLM sm_70 fork. Stock vLLM has no Volta support, and the older
+# cloudriftai/1cat-vllm-sm70:1.0.0 image predates Qwen3.8 -- its qwen3_5 config has no
+# partial_rotary_factor, so it would silently apply full rotary to a model that declares 0.25.
+# This image is built from fork commit d76126608, whose qwen3_5 config defaults
+# partial_rotary_factor to 0.25 and whose Gated DeltaNet layer accepts output_gate_type="swish";
+# both are Qwen3.8-specific fields.
+#
+# Qwen3.8-27B is 64 layers, 48 of them linear attention (Gated DeltaNet) and 16 full attention,
+# so the GDN prefill backend matters more than the attention backend here. The fork's Volta-native
+# flashqla_sm70 path is NOT usable in this image: it is a JIT torch extension, and building it
+# fails at `fatal error: cusparse.h: No such file or directory` because the runtime layer ships
+# the flash_qla sources without the CUDA development headers they include. triton is the backend
+# the checkpoint author validated on a V100 and needs no JIT. A future purpose-built sm_70 image
+# should either prebuild that extension or ship the headers.
+#
+# Context starts at the checkpoint's native 262,144. Qualification halves it on a measured
+# capacity failure and keeps the largest context that both starts and completes a materially
+# full request.
+model:
+  huggingface: "Max73333/Qwen3.8-27B-GPTQ-Int4-V100"
+  revision: d5a18cc1477e301e50d3fe4167fbf76db9337edc
+  task: generate
+
+engine:
+  llm:
+    tensor_parallel_size: 2
+    pipeline_parallel_size: 1
+    gpu_memory_utilization: 0.88
+    # Native context is 262,144 and does not fit. Measured on this platform: 262,144 needs
+    # 8.16 GiB of KV against a 4.57 GiB pool, and 131,072 needs 4.16 GiB against 3.06 GiB once
+    # the Triton GDN path takes its workspace. The engine put the ceiling at 95,648, so 65,536
+    # is the largest power-of-two halving that fits, at 2.08 GiB.
+    context_length: 65536
+    max_concurrent_requests: 4
+    vllm:
+      image: "cloudriftai/1cat-vllm-deepseek-v4-flash-0731:1.2.3-d76126608"
+      # --dtype half: Volta has no bfloat16. --language-model-only drops the vision tower for
+      # this text-only qualification. --max-num-seqs comes from max_concurrent_requests above.
+      extra_args: >-
+        --dtype half
+        --language-model-only
+        --gdn-prefill-backend triton
+        --max-num-batched-tokens 4096
+        --enable-auto-tool-choice
+        --tool-call-parser qwen3_coder
+        --reasoning-parser qwen3
+      extra_env:
+        # Selecting the Triton GDN *prefill* backend is not enough: the GDN decode path reaches
+        # for flash_qla independently and hits the same missing-header build failure. This knob
+        # is what actually keeps the JIT extension out of the run.
+        VLLM_SM70_GDN_DECODE_FLASHQLA: "0"
+
+benchmark:
+  max_concurrency: 4
+  num_prompts: 32
+  random_input_len: 1000
+  random_output_len: 1000
+  num_warmups: 2
+  seed: 0
+  temperature: 0.0
+  ignore_eos: true
+
+matrices:
+  deploy.gpu: "NVIDIA Tesla V100 SXM2 16GB"
+  deploy.gpu_count: 2
