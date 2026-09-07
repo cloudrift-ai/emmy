@@ -264,8 +264,12 @@ def _output_owners(tile: TileOp) -> dict[int, tuple]:
         regions = output_regions(op, tile.output_specs)
     except UnbindableProjection:
         return {}
-    fused = promoted_sweep(op, tile.output_specs)
-    return {id(region): (tail, stores) for region, tail, stores in regions if stores and not promoted_sweep(region, stores) <= fused}
+    fused = promoted_sweep(op, tile.output_specs, free=tile.place.free)
+    return {
+        id(region): (tail, stores)
+        for region, tail, stores in regions
+        if stores and not promoted_sweep(region, stores, free=tile.place.free) <= fused
+    }
 
 
 def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:

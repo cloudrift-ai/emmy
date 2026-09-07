@@ -1083,8 +1083,11 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         """The contraction roots that may not be output-tiled together
         (:func:`~emmy.compiler.ir.tile.ops.refused_roots`): one of them is the kernel's root and
         every other reduce lowers serially inside the projection, so a row tiling a second root
-        spells a kernel the binder never builds. The binder's rule, applied at the offer — and the
-        same rule the placement lane's shared-root cut offers to dissolve."""
+        spells a kernel the binder never builds. The binder's rule, applied at the offer. The
+        placement lane asks a NEIGHBOURING question of the same projection
+        (:func:`~emmy.compiler.ir.tile.ops.owns_outputs_it_cannot_bind`) and the two answers
+        differ — a projection this one finds nothing shared in can still be one that cut takes
+        apart."""
         from emmy.compiler.ir.tile.ops import refused_roots  # noqa: PLC0415
 
         return frozenset(self.tile_op.node_id(root) for root in refused_roots(self.tile_op.op, tuple(self.tile_op.output_specs)))

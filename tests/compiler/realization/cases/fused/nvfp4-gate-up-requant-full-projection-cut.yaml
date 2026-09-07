@@ -1,16 +1,20 @@
 # The same serving W4A4 MLP shape as nvfp4-gate-up-requant-place-cut.yaml — gate + up + SiLU and the
-# NVFP4 re-encode of their product — pinned to the other route the encode's projection offers.
+# NVFP4 re-encode of their product — pinned to the route that takes its projection apart.
 #
-# That projection holds four contraction roots (gate and up, at the even and the odd feature of each
-# packed byte) under outputs it does not partition by producing root, so the kernel binder builds
-# around ONE of them and lowers the other three serially inside the projection: three of the four
-# reach no tensor-core tier at any width. The sibling case cuts one root into its own kernel and
-# leaves that shape in place. This one pins the SHARED-ROOT CUT — three of the four become kernels of
-# their own in a single placement decision, each over the two-axis grid its own store rides, and the
-# kernel that reads them back keeps the fourth.
+# Fused, that projection is one kernel at grid 1. Its two outputs ride different widths, so no axis
+# is on both stores' sweep paths and nothing promotes onto the launch; every one of its eight
+# contractions then sits under a serial sweep with no (m, n) pair to tile, and the binder builds
+# around one of them and lowers the rest inside the projection. The sibling case cuts one
+# contraction out and leaves the rest of that shape standing.
 #
-# The four pieces are what this case holds the compiler to: three e2m1 tensor-core contractions and
-# the residual encode. The sibling case stays as it is; the two pin the two routes.
+# This case pins the FULL-PROJECTION CUT: every contraction its own kernel, and each of the two
+# outputs its own kernel over the sweep its store rides. Ten kernels: eight contractions with one
+# root each, and the packed-code piece across the feature axis at 128 blocks of 256 threads, where
+# the fused kernel spends one block walking that axis in a loop.
+#
+# What the entries below pin is that kernel set and one enumerable schedule per piece. Which tier
+# each contraction then reaches is a pricing question the deploy answers, and the perf lane
+# measures; a row here would only freeze one answer to it.
 compute_cap:
 - 12
 - 0
@@ -1686,44 +1690,66 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
+      PLACE@map.1/map: cut
+      PLACE@map.1/map.2/reduce.1/inner: cut
+      PLACE@map.1/map.2/reduce.2/inner: cut
+      PLACE@map.1/map.3/inner: cut
       PLACE@map.1/map.4/inner: cut
       PLACE@map.1/map.5/inner: cut
       PLACE@map.1/map.6/inner: cut
+      PLACE@map.2/map: cut
+      PLACE@map.2/map.2/reduce.1/inner: cut
+      PLACE@map.2/map.2/reduce.2/inner: cut
     identity: fc7cd092faad82175f6f259fa67c2b084fe6960bb87807e145e7d0b93d7519ef
-  - name: k_linear_reduce_d0a3a9.ee41d0acb382.3000d482e789
+  - name: k_linear_reduce_d0a3a9.ee41d0acb382.10803bc913cd
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      TILE@map.1/map.2/reduce.1/inner: ''
-      TILE@map.1/map.2/reduce.2/inner: ''
-      TILE@map.1/map.3/inner: ''
-      TILE@map.2/map.2/reduce.1/inner: ''
-      TILE@map.2/map.2/reduce.2/inner: ''
-      REDUCE@map.1/map.2/reduce: ''
-      REDUCE@map.1/map.2/reduce.1/inner: ''
-      REDUCE@map.1/map.2/reduce.2/inner: ''
-      REDUCE@map.1/map.3/inner: ''
-      REDUCE@map.2/map.2/reduce: ''
-      REDUCE@map.2/map.2/reduce.1/inner: ''
-      REDUCE@map.2/map.2/reduce.2/inner: ''
-      STAGE@map.1/map.2/reduce.1/inner: ''
-      STAGE@map.1/map.2/reduce.2/inner: ''
-      STAGE@map.1/map.3/inner: ''
-      STAGE@map.2/map.2/reduce.1/inner: ''
-      STAGE@map.2/map.2/reduce.2/inner: ''
       WORK: ''
+      REDUCE: ''
       RASTER: ''
-    identity: 3000d482e7893524875d095aa75a3b66943316d07456a684c4df0d48678dd8be
+    identity: 10803bc913cd3b907a319a34935263742601f0ba34e335a35cf6abff66338b69
+  - name: k_linear_reduce_d0a3a9.ee41d0acb382.164405503128
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: 164405503128c34732187bab5afc8419952e999aa656791878c745b02b8385e9
+  - name: k_linear_reduce_d0a3a9.ee41d0acb382.1a8e99a59c9f
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: ''
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    identity: 1a8e99a59c9f537bfbfaa72ee7fae8b5da267e52157974955333139790b389f4
+  - name: k_linear_reduce_d0a3a9.ee41d0acb382.39c61bf04132
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: ''
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    identity: 39c61bf04132786aa5d4ea5028b406fcd847ac8892947d9bea27ba004b67b6a4
   - name: k_linear_reduce_d0a3a9.ee41d0acb382.558c1ab15cf7
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      TILE: mma_m16n8k64_e2m1_f32/f1x4/k8
-      WORK: w2x1
+      WORK: ''
+      TILE: ''
       REDUCE: ''
-      STAGE: d1/smem-async
+      STAGE: ''
       RASTER: ''
     identity: 558c1ab15cf7e282ae9107818f85a1cbc482d3c00aa6a0522bc4bf74c8f4c1a0
   - name: k_linear_reduce_d0a3a9.ee41d0acb382.61b2ad516ca8
@@ -1731,23 +1757,56 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE: mma_m16n8k64_e2m1_f32/f1x4/k8
-      WORK: w2x1
+      WORK: ''
+      TILE: ''
       REDUCE: ''
-      STAGE: d1/smem-async
+      STAGE: ''
       RASTER: ''
     identity: 61b2ad516ca8b44dd1ee67a70948f1e3539e18462f06c3f3e86ceba95f3b4680
+  - name: k_linear_reduce_d0a3a9.ee41d0acb382.7b51da77761c
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: ''
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    identity: 7b51da77761c80d0b88c4d545d5eda0a1a3735557c9fa9fe0d7bd14ec4222cd6
   - name: k_linear_reduce_d0a3a9.ee41d0acb382.8916e4b17762
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      TILE: mma_m16n8k64_e2m1_f32/f1x4/k8
-      WORK: w2x1
+      WORK: ''
+      TILE: ''
       REDUCE: ''
-      STAGE: d1/smem-async
+      STAGE: ''
       RASTER: ''
     identity: 8916e4b17762167507568b8599290e01fcf77aeb479632ff5374b9000e9c25dd
+  - name: k_linear_reduce_d0a3a9.ee41d0acb382.c774a588bfbc
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: ''
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    identity: c774a588bfbc167402f76a5ee3eaa8d93c219fb844f46d494fa15b11f2ecb65e
+  - name: k_linear_reduce_d0a3a9.ee41d0acb382.f717229676d6
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: ''
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    identity: f717229676d6b5500a6fd533f50ed5afbc81fba16f7d9cae86a362da350d7a64
 loops:
 - inputs: [x]
   outputs: [x_static_fp4_scale_bits, x_static_fp4_bits]

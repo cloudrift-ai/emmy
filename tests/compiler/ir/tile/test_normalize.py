@@ -204,16 +204,29 @@ def _swept_reduce(*, per_cell: bool) -> TileOp:
     )
 
 
-def test_a_pointwise_store_sweep_promotes() -> None:
-    """A kernel with nothing to hoist ahead of its sweep binds the sweep as a grid axis. Cutting
-    every contraction out of a multi-output projection leaves exactly this — a piece writing one
-    output per cell — and leaving its sweep a serial loop would trade a contraction the grid could
-    not tile for a loop the grid cannot tile either."""
+def test_a_pointwise_sweep_stays_a_loop_for_the_worker_split() -> None:
+    """A kernel whose only work IS the sweep keeps it. Nothing folds, so nothing would be
+    replicated by binding it — but the kernel materializer already distributes a bare output sweep
+    across a worker inventory, and `cases/reduce/rms-norm-cut-sweep-work.yaml` pins the row that
+    does it (885.9 us walking the sweep in one thread, 4.2 us split across 512). Taking the axis
+    onto the grid here would decide that for the schedule instead of offering it."""
     body = (Load(name="v", input="x", index=(Var("m"), Var("n"))), Assign(name="out_v", op="negative", args=("v",)))
     store = OutputSpec(write=Write(output="out", index=(Var("m"), Var("n")), value="out_v"), sweep=(N16,))
     tile = _tile(projection((), body, ("out_v",)), N16, free=(M8,), output_specs=(store,))
 
-    assert tuple(axis.name for axis in tile.place.free) == ("m", "n")
+    assert tuple(axis.name for axis in tile.place.free) == ("m",)
+    assert tuple(axis.name for axis in tile.output_specs[0].sweep) == ("n",)
+
+
+def test_a_pointwise_sweep_promotes_when_the_launch_has_no_other_axis() -> None:
+    """The same bare sweep with nothing else to launch over. One block runs the whole kernel however
+    the workers are split, so the sweep is the only axis the grid could spread across and it takes
+    it — the residual-add piece a cut leaves behind in the serving post-attention kernel."""
+    body = (Load(name="v", input="x", index=(Var("n"),)), Assign(name="out_v", op="negative", args=("v",)))
+    store = OutputSpec(write=Write(output="out", index=(Var("n"),), value="out_v"), sweep=(N16,))
+    tile = _tile(projection((), body, ("out_v",)), N16, output_specs=(store,))
+
+    assert tuple(axis.name for axis in tile.place.free) == ("n",)
     assert tile.output_specs[0].sweep == ()
 
 

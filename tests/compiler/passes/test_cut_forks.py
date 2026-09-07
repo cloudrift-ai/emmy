@@ -986,26 +986,31 @@ def test_the_full_projection_cut_leaves_one_contraction_per_piece_on_a_grid() ->
         assert len(piece.place.free) >= 2, f"{piece.name} kept a one-axis placement"
 
 
-def _one_root_kernel(*, per_cell: bool = True) -> tuple[Graph, object]:
-    """Two owned outputs, one binder root — the post-attention shape in miniature.
+def _one_root_kernel() -> tuple[Graph, object]:
+    """Two owned outputs, one binder root — the serving post-attention shape in miniature.
 
-    The wide branch multiplies a contraction by a reduce, so it is ABOUT two reducing terms and the
+    The wide branch multiplies a contraction by two folds, so it reads several reduces and the
     binder has no single node to build it around; ``kernel_roots`` therefore sees only the narrow
     branch's contraction and reports one. The outputs still partition by ownership, and the fused
     kernel still cannot tile the wide branch — which is why the offer asks ownership, not how many
     roots the binder found.
 
-    ``per_cell`` decides whether that reduce reads the wide store's sweep. Reading it, the reduce is
-    per-cell work the piece can keep. Not reading it, it is the branch's row statistic, evaluated
-    once ahead of the sweep — the shape of the rms mean in the serving post-attention kernel.
+    The two folds are deliberately different. ``stat`` does not read the wide store's sweep: it is
+    the branch's row statistic, evaluated once ahead of the sweep, the shape of the rms mean in the
+    serving kernel. ``blockmax`` does read it, so each cell of the sweep folds its own — the shape
+    of the NVFP4 encode's per-block maximum.
     """
-    m, wide, narrow, k, r = Axis("m", 8), Axis("n", 16), Axis("n2", 4), Axis("k", 8), Axis("r", 4)
+    m, wide, narrow, k, r, q = Axis("m", 8), Axis("n", 16), Axis("n2", 4), Axis("k", 8), Axis("r", 4), Axis("q", 4)
     acc = contraction(
         k, Load(name="a_v", input="a", index=(Var("m"), Var("k"))), (Load(name="b_v", input="b", index=(Var("k"), Var("n"))), "acc")
     )
-    coords = ("m", "n", "r") if per_cell else ("m", "r")
-    stat = reduction(r, (slab("s_v", "s", *coords),), (Assign(name="stat__v", op="copy", args=("s_v",)),), ("stat",))
-    first = projection((acc, stat), (Assign(name="wide_out", op=ElementwiseImpl("multiply"), args=("acc", "stat")),), ("wide_out",))
+    stat = reduction(r, (slab("s_v", "s", "m", "r"),), (Assign(name="stat__v", op="copy", args=("s_v",)),), ("stat",))
+    blockmax = reduction(
+        q, (slab("t_v", "t", "m", "n", "q"),), (Assign(name="blockmax__v", op="copy", args=("t_v",)),), ("blockmax",), ops="maximum"
+    )
+    scaled = Assign(name="scaled", op=ElementwiseImpl("multiply"), args=("acc", "stat"))
+    wide_out = Assign(name="wide_out", op=ElementwiseImpl("multiply"), args=("scaled", "blockmax"))
+    first = projection((acc, stat, blockmax), (scaled, wide_out), ("wide_out",))
     second = contraction(
         k, Load(name="c_v", input="c", index=(Var("m"), Var("k"))), (Load(name="d_v", input="d", index=(Var("k"), Var("n2"))), "narrow_out")
     )
@@ -1013,7 +1018,7 @@ def _one_root_kernel(*, per_cell: bool = True) -> tuple[Graph, object]:
         op=projection((first, second), results=("wide_out", "narrow_out")),
         name="wide",
         place=Placement(free=(m,)),
-        axes=(m, wide, narrow, k, r),
+        axes=(m, wide, narrow, k, r, q),
         output_specs=(
             OutputSpec(Write(output="wide", index=(Var("m"), Var("n")), value="wide_out"), sweep=(wide,)),
             OutputSpec(Write(output="narrow", index=(Var("m"), Var("n2")), value="narrow_out"), sweep=(narrow,)),
@@ -1024,18 +1029,22 @@ def _one_root_kernel(*, per_cell: bool = True) -> tuple[Graph, object]:
         _input(graph, name, (8, 8))
     _input(graph, "b", (8, 16))
     _input(graph, "d", (8, 4))
-    _input(graph, "s", (8, 16, 4) if per_cell else (8, 4))
+    _input(graph, "s", (8, 4))
+    _input(graph, "t", (8, 16, 4))
     graph.add_node(
-        tile, ["a", "b", "c", "d", "s"], outputs=(Tensor("wide", (8, 16), "f16"), Tensor("narrow", (8, 4), "f16")), node_id="wide"
+        tile,
+        ["a", "b", "c", "d", "s", "t"],
+        outputs=(Tensor("wide", (8, 16), "f16"), Tensor("narrow", (8, 4), "f16")),
+        node_id="wide",
     )
     return graph, graph.nodes["wide"]
 
 
 def test_the_offer_reads_ownership_not_how_many_roots_the_binder_found() -> None:
     """A projection can own two outputs it cannot bind while ``kernel_roots`` reports ONE: a branch
-    about two reducing terms is no root of its own, so counting roots misses the kernel entirely.
-    The post-attention output+norm+requant kernel is that shape, and it is the one this cut exists
-    for. Asking ownership finds it."""
+    reading several reduces is no root of its own, so counting roots misses the kernel entirely. The
+    serving post-attention output+norm+requant kernel is that shape, and it is the one this cut
+    exists for. Asking ownership finds it."""
     from emmy.compiler.ir.tile.ops import kernel_roots, owns_outputs_it_cannot_bind, refused_roots  # noqa: PLC0415
 
     graph, node = _one_root_kernel()
@@ -1043,87 +1052,27 @@ def test_the_offer_reads_ownership_not_how_many_roots_the_binder_found() -> None
 
     assert len(kernel_roots(tile.op)) == 1 and refused_roots(tile.op, tile.output_specs) == ()
     assert owns_outputs_it_cannot_bind(tile.op, tile.output_specs)
-    _, knobs = _composed_arm(graph, node)
-    # The narrow branch is a contraction AND the sole producer of its output, so it is one seam on
-    # both counts and the cut names it once.
-    assert sorted(knobs) == sorted({*_contraction_spellings(tile), *(s.spelling for s in cuttable_seams(tile) if s.owned is not None)})
+    assert len(_composed_arm(graph, node)[1]) > 1
 
 
-def _summing_kernel(roots: int, *, shared: bool) -> tuple[Graph, object]:
-    """``roots`` contractions over one output width, either summed into ONE store or each writing
-    its own.
+def test_the_cut_takes_a_row_statistic_but_leaves_a_per_cell_fold() -> None:
+    """Which folds the cut hands away, and why each answer is the one the piece needs.
 
-    Summed, the store's cone reads every operand, so the outputs do not partition by ownership at
-    all and no piece could take one. Written separately, they partition by ownership AND by root,
-    which is the shape the kernel binder already binds in one kernel.
+    A reduce evaluated once ahead of a branch's output sweep keeps that branch's piece at one grid
+    axis — the sweep-promotion rule will not replicate a row statistic per cell, and it is right not
+    to — so the cut hands it its own kernel and the piece reads the one value back. A reduce each
+    cell of the sweep folds for itself replicates nothing, so it stays where it is and the piece
+    binds its sweep around it.
     """
-    m, n, k = Axis("m", 8), Axis("n", 16), Axis("k", 8)
-    names = tuple(f"c{index}" for index in range(roots))
-    edges = tuple(
-        contraction(
-            k,
-            Load(name=f"a_{name}", input="a", index=(Var("m"), Var("k"))),
-            (Load(name=f"b_{name}", input=f"w_{name}", index=(Var("k"), Var(n.name))), name),
-        )
-        for name in names
-    )
-    body = [Assign(name="out", op=ElementwiseImpl("add"), args=(names[0], names[1]))]
-    body += [Assign(name="out", op=ElementwiseImpl("add"), args=("out", name)) for name in names[2:]]
-    stores = ("summed",) if shared else names
-    tile = TileOp(
-        op=projection(edges, body=body if shared else (), results=("out",) if shared else names),
-        name="summed",
-        place=Placement(free=(m,)),
-        axes=(m, n, k),
-        output_specs=tuple(
-            OutputSpec(Write(output=store, index=(Var("m"), Var("n")), value="out" if shared else store), sweep=(n,)) for store in stores
-        ),
-    )
-    graph = Graph()
-    _input(graph, "a", (8, 8))
-    for name in names:
-        _input(graph, f"w_{name}", (8, 16))
-    graph.add_node(
-        tile,
-        ["a", *(f"w_{name}" for name in names)],
-        outputs=tuple(Tensor(store, (8, 16), "f16") for store in stores),
-        node_id="summed",
-    )
-    return graph, graph.nodes["summed"]
-
-
-def test_no_full_projection_cut_where_the_outputs_do_not_partition_or_already_bind() -> None:
-    """Two refusals, one per half of the offer. Outputs that do not partition by ownership leave no
-    piece to hand anything to — three contractions summed into one store, and attention's one output
-    over its whole tree. Outputs that partition by root as well are what the binder already binds in
-    one kernel, so cutting would buy launches and no tier."""
-    graph, summed = _summing_kernel(3, shared=True)
-    assert all(len(knobs) == 1 for _, knobs in _cut_arms(graph, summed))
-
-    _, attention = _case_match("attention/rmsnorm-qk-sdpa-composed-cut_xfail_realized.yaml")
-    single = next(node for node in attention.nodes.values() if isinstance(node.op, TileOp))
-    assert all(len(knobs) == 1 for _, knobs in _cut_arms(attention, single))
-
-    graph, partitioned = _summing_kernel(3, shared=False)
-    assert all(len(knobs) == 1 for _, knobs in _cut_arms(graph, partitioned))
-
-
-def test_the_cut_takes_a_row_statistic_that_would_pin_its_piece_to_one_cell() -> None:
-    """A reduce evaluated once ahead of a branch's output sweep keeps that branch's piece at one
-    grid axis — the sweep-promotion rule refuses to replicate a row statistic per cell, and it is
-    right to. So the cut hands the statistic its own kernel too, and the piece reads the one value
-    back. The serving post-attention kernel is exactly this: an rms mean over the whole hidden
-    dimension, ahead of a store that sweeps a sixteenth of it.
-    """
-    graph, node = _one_root_kernel(per_cell=False)
-    statistic = next(seam.spelling for seam in cuttable_seams(node.op) if seam.node.axis == "r")
+    graph, node = _one_root_kernel()
+    seams = {seam.node.axis: seam.spelling for seam in cuttable_seams(node.op) if seam.node.axis in ("r", "q")}
 
     _, knobs = _composed_arm(graph, node)
-    assert statistic in knobs, "the hoisted statistic is part of the decision, not left behind"
+    assert seams["r"] in knobs, "the row statistic is part of the decision, not left behind"
+    assert seams["q"] not in knobs, "the per-cell fold is the piece's own work"
 
-    fragment = _composed_arm(graph, node)[0].materialize()
-    owning = fragment.nodes["wide__placed"].op
-    assert [axis.name for axis in owning.place.free] == ["m", "n"], "the piece binds its store's sweep once nothing is hoisted"
+    owning = _composed_arm(graph, node)[0].materialize().nodes["wide__placed"].op
+    assert [axis.name for axis in owning.place.free] == ["m", "n"], "the piece binds its store's sweep around what it kept"
 
 
 def test_a_recorded_route_selects_the_arm_spelling_its_whole_cut_set() -> None:

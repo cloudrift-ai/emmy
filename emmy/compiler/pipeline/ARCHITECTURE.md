@@ -1615,13 +1615,14 @@ boundary.
 
 `020_twisted` rewrites the exp-family composition over that canonical tree. The single `030_cut` pass reaches a
 fixpoint over two ordered domains: it offers the maximal tree and every semantically closed stored child-Fold seam
-through `PLACE` — and, on a kernel whose outputs do not partition by producing contraction root, the shared-root cut
-beside them, one arm handing every such root but the first its own kernel, because each of those seams alone leaves
-the binder building around one root and lowering the rest serially — then the unsplit tree beside every cross-CTA
-reduce split the head Fold admits. A selected cut writes the complete child state to workspaces; a selected split
-slices the same Fold and folds partial state tuples with its stored combine. Both return fresh unmapped TileOps.
-`040_schedule` then enumerates schedules over each stored Fold tree only. Independent roots stay fused and combine
-only schedules with matching physical output-axis tile widths and unit counts.
+through `PLACE` — and, on a kernel whose outputs each have one producing branch while some branch is not about a
+single reduce (`ops.owns_outputs_it_cannot_bind`), the full-projection cut beside them: one arm handing every
+contraction, every reduce evaluated ahead of an output sweep, and every owned output its own kernel, because each of
+those seams alone leaves the rest of the shape standing — then the unsplit tree beside every cross-CTA reduce split
+the head Fold admits. A selected cut writes the complete child state to workspaces; a selected split slices the same
+Fold and folds partial state tuples with its stored combine. Both return fresh unmapped TileOps. `040_schedule` then
+enumerates schedules over each stored Fold tree only. Independent roots stay fused and combine only schedules with
+matching physical output-axis tile widths and unit counts.
 
 The complete structural invariant is documented in
 [`ir/tile/ARCHITECTURE.md`](../ir/tile/ARCHITECTURE.md), and pass behavior in

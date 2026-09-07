@@ -185,7 +185,7 @@ def _dense_axis_suffix(index: tuple, name: str) -> bool:
     return True
 
 
-def promoted_sweep(op, output_specs: tuple[OutputSpec, ...]) -> set[str]:
+def promoted_sweep(op, output_specs: tuple[OutputSpec, ...], *, free: tuple[Axis, ...] = ()) -> set[str]:
     """The output-sweep axes ``op``'s grid binds instead of sweeping — the kernel's grid RANK above
     its free axes, and the reason a contraction site can name an ``(m, n)`` pair at all.
 
@@ -195,21 +195,28 @@ def promoted_sweep(op, output_specs: tuple[OutputSpec, ...]) -> set[str]:
     GRID REPLICATE:
 
     - a contraction operand reads it. The coordinate is that contraction's own output coordinate,
-      so the tiles do that work per cell whatever the placement says, and a statistic hoisted ahead
-      of the sweep beside them is cheap against it.
-    - nothing in the term is evaluated ahead of the sweep: every reduce the term holds reads the
-      axis, so each cell folds its own and binding the axis replicates none of them. A term with no
-      reduce at all is the degenerate case — the pointwise piece a cut leaves once every
-      contraction under it has its own kernel, whose sweep would otherwise stay a serial loop that
-      no grid can tile either.
+      so the tiles do that work per cell whatever the placement says, and a statistic evaluated
+      ahead of the sweep beside them is cheap against it.
+    - every reduce the term holds reads the axis, so each cell folds its own and binding the axis
+      replicates none of them — the NVFP4 encode's packed codes over a maximum taken across each
+      sixteen of them. A term with NO reduce satisfies that vacuously, and then it promotes only
+      when ``free`` is empty: a kernel with no free axis launches ONE block whatever it does, so
+      its shared sweep is the only axis the launch could spread over. Where the placement already
+      has an axis, a bare elementwise sweep stays a sweep — the kernel materializer distributes
+      exactly that across a worker inventory (``_lane_close``, the close a cooperating reduce's
+      projection takes), and binding it here would decide for the schedule that measured the
+      alternative (``cases/reduce/rms-norm-cut-sweep-work.yaml``: 885.9 us walked in one thread,
+      4.2 us split across 512).
 
-    The complement is what the second ground protects: a reduce that does NOT read the axis is the
-    ROW's statistic, evaluated once for the whole sweep — softmax's maximum, rms-norm's sum of
+    The complement is what the reduce clause protects: a reduce that does NOT read the axis is the
+    row's statistic, evaluated once for the whole sweep — softmax's maximum, rms-norm's sum of
     squares. Binding the sweep would recompute it per output element, so that sweep stays a loop.
 
-    Two readers, one rule: :meth:`TileOp.__post_init__` applies it, and the cut pass asks it of a
-    candidate piece to decide whether peeling an output off a multi-output kernel would give that
-    piece a grid pair the fused kernel cannot have (``lowering/tile/_cut.py``).
+    Three readers, one rule. :meth:`TileOp.__post_init__` applies it. The cut pass asks it of a
+    candidate piece, to decide whether peeling an output off a multi-output kernel would give that
+    piece a grid pair the fused kernel cannot have. And the full-projection cut reads its refusal
+    from the other side: a reduce this will not bind past is one that cut hands its own kernel
+    (both in ``lowering/tile/_cut.py``).
     """
     if not output_specs:
         return set()
@@ -223,7 +230,7 @@ def promoted_sweep(op, output_specs: tuple[OutputSpec, ...]) -> set[str]:
         name
         for name in shared
         if any(any(name in edge.free_axes for edge in con.operands) for con in contractions)
-        or all(name in reduce.free_axes for reduce in reduces)
+        or (all(name in reduce.free_axes for reduce in reduces) and (reduces or not free))
     }
 
 
@@ -399,7 +406,7 @@ class TileOp(Op):
             raise ValueError("cannot canonicalize a TileOp after a schedule has been attached")
         object.__setattr__(self, "op", normalized)
 
-        promoted = promoted_sweep(normalized, self.output_specs)
+        promoted = promoted_sweep(normalized, self.output_specs, free=self.place.free)
         if not promoted:
             self._own_axes()
             self._validate_schedule()
