@@ -204,8 +204,10 @@ def _workspace_dtypes(node: Fold, tile: TileOp, consumer: Fold | None, table: di
     consuming contraction) is the exception: it materializes explicitly at the dtype that
     contraction's output is stored at — the element the fused slab would have stored — never the
     carrier its cone computed in (only the ``a`` edge has a converting fill, so an f32 workspace on
-    a ``b`` edge could feed no warp atom). A seam whose dtypes stay undetermined is not offered:
-    the offer and the realization must agree, and a raise past the offer would kill the compile."""
+    a ``b`` edge could feed no warp atom). That exception is a ZERO-AXIS cone's; a REDUCING operand
+    would have been no slab fused either, so it keeps the f32 carrier (:func:`cuttable_seams` names
+    which edges the exception reaches). A seam whose dtypes stay undetermined is not offered: the
+    offer and the realization must agree, and a raise past the offer would kill the compile."""
     names = node.exposes
     if consumer is not None:
         dtype = _fed_store_dtype(tile, consumer)
@@ -271,12 +273,16 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
     apply to it."""
     all_sites = sites(tile.op)
     owners = _output_owners(tile)
+    # Only a ZERO-AXIS operand cone: the rule says the workspace holds what the fused slab would
+    # have stored, and a cone is exactly that element. A REDUCING operand — a twisted carrier's
+    # score contraction — is no slab fused either: it stays an f32 accumulator in registers, so its
+    # workspace is the carrier's own f32, and f16 scores would reach the softmax a percent off.
     store_dtype_consumers = {
         id(edge): site.node
         for site in all_sites
         if site.node.as_contraction() is not None
         for edge in site.node.operands
-        if isinstance(edge, Fold) and edge.as_slab() is None
+        if isinstance(edge, Fold) and edge.as_slab() is None and edge.axis is None
     }
     outer = tuple(axis.name for axis in (*tile.place.free, *(axis for store in tile.output_specs for axis in store.sweep)))
     occurrence_axes: dict[int, list[tuple]] = {}
