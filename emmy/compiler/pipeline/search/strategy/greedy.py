@@ -15,9 +15,11 @@ from typing import TYPE_CHECKING
 from emmy.compiler.context import Context
 from emmy.compiler.ir.loop.ir import LoopOp
 from emmy.compiler.ir.tile.ir import TileOp
+from emmy.compiler.pipeline.knob import family_of
 from emmy.compiler.pipeline.pipeline import Decision, LoweringError, Run
 from emmy.compiler.pipeline.search.db import SearchDB
-from emmy.compiler.pipeline.search.policy.greedy import greedy_decide, logger, tile_identity
+from emmy.compiler.pipeline.search.pins import composed_routes
+from emmy.compiler.pipeline.search.policy.greedy import _db_measured_index, _strip_fork_stamps, greedy_decide, logger, tile_identity
 from emmy.compiler.pipeline.search.strategy.base import SearchStrategy
 
 if TYPE_CHECKING:
@@ -77,27 +79,44 @@ class GreedyStrategy(SearchStrategy):
         # truncated build terminates in an earlier dialect, where a surviving tile is the answer.
         complete = pipeline.lowers_to_cuda
         blocked: dict[str, set[frozenset]] = {}
-        for _attempt in range(_MAX_GREEDY_RETRIES):
-            rejections: list[tuple[str, str, str]] = []
-            run = Run(pipeline=pipeline, ctx=ctx, db=db, backend=backend, dump=dump, rejections=rejections)
-            terminal, trace = run.resolve(graph.copy(), greedy_decide(blocked=blocked, db=db))
-            stuck = _stuck(terminal, rejections, lowers_to_cuda=complete)
-            if not stuck or not _retire(blocked, trace, stuck):
-                break
-        # The prior-ranked tiles all overflowed ``validate(ctx)`` within the retry budget — an
-        # *online* prior can extrapolate a large tile onto a small shape, and the blocklist
-        # retry exhausts before reaching an in-budget leaf. Re-resolve WITHOUT the prior (the
-        # emission-order pick): the point is dropping the extrapolation that overflowed, not
-        # the quality of what emission order lands on. When that leaf overflows too the
-        # re-resolve stays un-lowered and ``_raise_on_unlowered`` fires below, exactly as
-        # before.
-        if _stuck(terminal, rejections, lowers_to_cuda=complete):
-            rejections = []
-            run = Run(pipeline=pipeline, ctx=ctx, db=db, backend=backend, dump=dump, rejections=rejections)
-            terminal, _ = run.resolve(graph.copy(), greedy_decide(blocked=blocked, prior=None, db=db))
+        # A measured route row that marks several seams of one kernel is the composed decision a
+        # pinned compile consumed them as; the cut pass offers that arm beside its single seams so
+        # the row can spell it (``spelled_arm``), the way the pinned compile that measured it did.
+        with composed_routes(_measured_composed_routes(db, ctx)):
+            for _attempt in range(_MAX_GREEDY_RETRIES):
+                rejections: list[tuple[str, str, str]] = []
+                run = Run(pipeline=pipeline, ctx=ctx, db=db, backend=backend, dump=dump, rejections=rejections)
+                terminal, trace = run.resolve(graph.copy(), greedy_decide(blocked=blocked, db=db))
+                stuck = _stuck(terminal, rejections, lowers_to_cuda=complete)
+                if not stuck or not _retire(blocked, trace, stuck):
+                    break
+            # The prior-ranked tiles all overflowed ``validate(ctx)`` within the retry budget — an
+            # *online* prior can extrapolate a large tile onto a small shape, and the blocklist
+            # retry exhausts before reaching an in-budget leaf. Re-resolve WITHOUT the prior (the
+            # emission-order pick): the point is dropping the extrapolation that overflowed, not
+            # the quality of what emission order lands on. When that leaf overflows too the
+            # re-resolve stays un-lowered and ``_raise_on_unlowered`` fires below, exactly as
+            # before.
+            if _stuck(terminal, rejections, lowers_to_cuda=complete):
+                rejections = []
+                run = Run(pipeline=pipeline, ctx=ctx, db=db, backend=backend, dump=dump, rejections=rejections)
+                terminal, _ = run.resolve(graph.copy(), greedy_decide(blocked=blocked, prior=None, db=db))
         _raise_on_unlowered(terminal, rejections, lowers_to_cuda=complete)
         logger.info("compile: total %.2fs (deterministic resolve)", time.monotonic() - t_start)
         return terminal
+
+
+def _measured_composed_routes(db, ctx) -> list[tuple[frozenset, tuple[str, ...]]]:
+    """Every measured route row in this compile's evidence that marks several seams ``cut`` — a
+    composed decision, keyed by the signature of the kernel it was recorded on (less the stamps a
+    schedule fork mints, as the evidence pick matches route rows) — for the cut pass to offer."""
+    out: list[tuple[frozenset, tuple[str, ...]]] = []
+    for signature, rows in _db_measured_index(db, ctx).routes.items():
+        for tun, _us in rows:
+            keys = tuple(sorted(key for key, value in tun.items() if family_of(key) == "PLACE" and value == "cut"))
+            if len(keys) > 1 and (entry := (_strip_fork_stamps(signature), keys)) not in out:
+                out.append(entry)
+    return out
 
 
 def _stuck(graph: Graph, rejections: list[tuple[str, str, str]], *, lowers_to_cuda: bool) -> dict[str, tuple[str, str]]:

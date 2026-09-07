@@ -14,10 +14,11 @@ from emmy.compiler.ir.schedule import Schedule, ScheduleContext, ScheduleRefused
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.path import MissingSiteError, resolve, sites
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
-from emmy.compiler.pipeline.fork import DeferredFork
+from emmy.compiler.pipeline.fork import SCHEDULE_FORK_STAMPS, DeferredFork, fork_signature
 from emmy.compiler.pipeline.knob import family_of, family_pins
 from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams, output_map, realize
 from emmy.compiler.pipeline.passes.lowering.tile._split import split_forks
+from emmy.compiler.pipeline.search.pins import composed_cuts_for
 
 PATTERN = [Pattern("root", TileOp)]
 FIXPOINT = True
@@ -129,7 +130,43 @@ def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str] | None:
     return None
 
 
-def _placement_forks(match: Match, root: Node, tile: TileOp):
+def _composed_forks(match: Match, root: Node, tile: TileOp, seams, ctx) -> list[DeferredFork]:
+    """One composed arm per measured route of this kernel that names several of its seams
+    (:func:`composed_cuts_for`) — the decision a pinned compile consumed those seams as, offered
+    again so the row that measured it can spell it. A key naming no site here belongs to another
+    kernel; a route that resolves to fewer than two seams adds nothing the single arms lack."""
+    if ctx is None:
+        return []
+    signature = frozenset((key, value) for key, value in fork_signature(tile, (), ctx) if key not in SCHEDULE_FORK_STAMPS)
+    routes = composed_cuts_for(signature)
+    if not routes:
+        return []
+    all_sites = sites(tile.op)
+    by_node = _seam_index(seams)
+    out: list[DeferredFork] = []
+    for keys in routes:
+        chosen: list = []
+        for name in keys:
+            try:
+                site = resolve(tile.op, name, all_sites=all_sites)
+            except MissingSiteError:
+                continue
+            seam = by_node.get(id(site.node)) if site is not None else None
+            if seam is not None and not any(picked is seam for picked in chosen):
+                chosen.append(seam)
+        if len(chosen) > 1:
+            composed = tuple(chosen)
+            out.append(
+                DeferredFork(
+                    lambda composed=composed: realize(match, root, composed, placement_decided=True),
+                    {seam.spelling: "cut" for seam in composed},
+                    structural=True,
+                )
+            )
+    return out
+
+
+def _placement_forks(match: Match, root: Node, tile: TileOp, ctx=None):
     """Return the next stored-edge cut fork, or ``None`` when that domain is consumed."""
     seams = cuttable_seams(tile)
     if not seams:
@@ -151,15 +188,15 @@ def _placement_forks(match: Match, root: Node, tile: TileOp):
 
     options = [DeferredFork(lambda: replace(tile, placement_decided=True), {"PLACE": "fuse"})]
     options.extend(DeferredFork(lambda seam=seam: realize(match, root, (seam,)), {seam.spelling: "cut"}, structural=True) for seam in seams)
+    options.extend(_composed_forks(match, root, tile, seams, ctx))
     return options
 
 
 def rewrite(match: Match, root: Node, ctx=None):
-    del ctx
     tile: TileOp = root.op
     if tile.op is None or tile.place.is_mapped or tile.schedule is not None:
         raise RuleSkipped("TileOp already scheduled")
-    choices = None if tile.placement_decided else _placement_forks(match, root, tile)
+    choices = None if tile.placement_decided else _placement_forks(match, root, tile, ctx)
     if choices is None:
         choices = split_forks(match, root)
     if choices is None:

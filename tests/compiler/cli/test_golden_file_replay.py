@@ -633,6 +633,47 @@ def test_recorded_greedy_pick_is_picked_again_under_strict_evidence(tmp_path):
     assert greedy_pick_rows(again) == rows
 
 
+def test_recorded_composed_pick_is_picked_again_under_strict_evidence(tmp_path):
+    """A pinned compile consumes every scoped PLACE pin that resolves on one kernel as ONE composed
+    decision, and ``--record-greedy`` records it as one routing row naming every seam. Those rows
+    are evidence enough for the same composed cut under strict evidence — the cut pass offers the
+    composed arm the row spells beside its single seams, on the replay that keys the rows and on
+    the deploy that reads them — rather than the first offered seam the row marks with the rest
+    left unresolved and every receipt keyed under a kernel that replay never minted."""
+    from emmy import config
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+    from emmy.compiler.pipeline.search.golden import golden_record_from_entry, records_override, sole_evidence
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+    from emmy.compiler.pipeline.search.working_golden import KernelSetDecisions, greedy_pick_rows, record_greedy_pick
+
+    path = tmp_path / "working-route.yaml"
+    document = _working_placement_route(path)
+    entry = document["configs"][0]
+    seed = golden_record_from_entry(document, entry, entry["realizations"][0])
+    ctx = Context.from_target((8, 9))
+    both = {"PLACE@inner.1/map": "cut", "PLACE@inner.1/map.3/map": "cut"}
+    taken = KernelSetDecisions()
+    with records_override([]), pinned_knobs({"FAST_MATH": False, **both}):
+        picked = Pipeline.build(CUDA_PASSES).with_strategies(taken).run(seed.target_program.copy(), ctx=ctx, db=None)
+    rows = greedy_pick_rows(picked)
+    assert len(rows) >= 3 and taken.decisions[0][1] == both, "one composed decision minting at least two pieces"
+
+    written = record_greedy_pick(
+        path,
+        document,
+        "working.route",
+        decisions=[(identity, knobs, 5.0, 6.0) for identity, knobs in taken.decisions],
+        kernels=[(identity, row, 1.0, 2.0) for identity, row in rows],
+        reference_backend="same-input-greedy",
+    )
+    reloaded = load_golden_file(path)
+    added = [row for row in reloaded["configs"][0]["realizations"] if row["name"] in written]
+    records = [golden_record_from_entry(reloaded, reloaded["configs"][0], row) for row in added]
+    with sole_evidence(records), pinned_knobs({"FAST_MATH": False}), config.strict_evidence_override(True):
+        again = Pipeline.build(CUDA_PASSES).run(seed.target_program.copy(), ctx=ctx, db=None)
+    assert greedy_pick_rows(again) == rows
+
+
 def test_run_records_the_greedy_pick_of_an_embedded_golden(monkeypatch, tmp_path):
     """``run --golden PATH --realization NAME --bench --record-greedy``: the greedy row compiles with
     the file's rows as its golden evidence (here the routing row, so the cut is taken), and after

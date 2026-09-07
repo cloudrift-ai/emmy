@@ -97,6 +97,7 @@
  "tests/compiler/cli/test_eval.py::test_variants_top_truncation_keeps_pick_row": 1.21,
  "tests/compiler/cli/test_golden_file_replay.py::test_compile_working_file_uses_exact_loop_target": 1.28,
  "tests/compiler/cli/test_golden_file_replay.py::test_duplicate_name_requires_target_scoped_working_file": 0.07,
+ "tests/compiler/cli/test_golden_file_replay.py::test_recorded_composed_pick_is_picked_again_under_strict_evidence": 7.5,
  "tests/compiler/cli/test_golden_file_replay.py::test_recorded_greedy_pick_is_picked_again_under_strict_evidence": 6.68,
  "tests/compiler/cli/test_golden_file_replay.py::test_recorded_route_cuts_the_selected_compile_target[explicit]": 19.34,
  "tests/compiler/cli/test_golden_file_replay.py::test_recorded_route_cuts_the_selected_compile_target[ordinary]": 19.4,

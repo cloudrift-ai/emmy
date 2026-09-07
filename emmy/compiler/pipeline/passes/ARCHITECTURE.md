@@ -124,7 +124,12 @@ so the unpinned placement fork never returns under a pin-driven compile. A pin t
 realizes is an addressing error. Only unpinned cuts leave the pieces undecided, so search can explore their smaller
 seams before scheduling. The environment is the pass's one pin source (`knob.family_pins`); a measured route row
 never becomes a pin — the deploy's evidence pick takes one of the pass's own offered arms with it
-(`pins.spelled_arm`), and every piece the arm mints is a brand-new kernel whose own forks consult its own rows.
+(`pins.spelled_arm`), and every piece the arm mints is a brand-new kernel whose own forks consult its own rows. A
+row that names several of a kernel's seams (the composed decision a pinned compile consumed them as, written by
+`run --record-greedy`) can only be taken if that composition is on the ballot, so beside its single seams the pass
+offers one composed arm per such route registered for the kernel's signature (`pins.composed_routes`, filled by the
+greedy strategy from the evidence index and by a golden record's replay from its own keys); its pieces are decided
+like a pinned cut's, since they are the kernels the row measured.
 `040_schedule` is the classic assignment boundary. The model under `ir/schedule` projects direct, plain-reduction,
 scalar-contraction, precision-gated tensor-core, materialized-operand copy, computed-operand and multi-channel smem
 compute-fill, and kernel-global raster domains. `ClassicScheduleContext` alone composes their compatibility. The pass

@@ -30,10 +30,12 @@ def spelled_arm(options, row) -> tuple[object, dict[str, str]] | None:
     """The kernel-set arm a knob row spells among a cut-pass fork's ``options``, as ``(option, its
     knobs)`` — or ``None`` when the row decides nothing at this fork.
 
-    At a placement fork the row spells the first offered seam it marks ``cut`` (a bare
-    ``PLACE=cut`` takes the root-most offered seam), the fuse arm when it marks no seam ``cut`` —
-    a schedule row with no ``PLACE`` key says the kernel it decorates ran fused — and nothing when
-    the seams it marks are not on this kernel's ballot. At a split fork it spells the offered plan
+    At a placement fork the row spells the composed arm that cuts exactly the seams it marks when
+    it marks several of this kernel's offered seams — the one decision a pinned compile consumed
+    them as, and the one ``run --record-greedy`` wrote — else the first offered seam it marks
+    ``cut`` (a bare ``PLACE=cut`` takes the root-most offered seam), the fuse arm when it marks no
+    seam ``cut`` — a schedule row with no ``PLACE`` key says the kernel it decorates ran fused — and
+    nothing when the seams it marks are not on this kernel's ballot. At a split fork it spells the offered plan
     whose cross-CTA half equals its ``REDUCE`` value's, and the unsplit arm when that value carries
     no such half or the row carries no ``REDUCE`` at all — a schedule row measured the kernel
     whole. One reading for both consumers:
@@ -48,6 +50,11 @@ def spelled_arm(options, row) -> tuple[object, dict[str, str]] | None:
     if any(family_of(key) == "PLACE" for key in keys):
         route = {str(key): str(value) for key, value in row.items() if family_of(str(key)) == "PLACE"}
         cuts = {key for key, value in route.items() if value == "cut"}
+        wanted = {key for _, knobs in arms for key, value in knobs.items() if value == "cut" and key in cuts}
+        if len(wanted) > 1:
+            for option, knobs in arms:
+                if {key for key, value in knobs.items() if value == "cut"} == wanted:
+                    return option, knobs
         for option, knobs in arms:
             if any(value == "cut" and (key in cuts or "PLACE" in cuts) for key, value in knobs.items()):
                 return option, knobs
@@ -150,6 +157,35 @@ def unreproducible_pin_flag(pinned: dict, kernel_knobs: list[dict], *, reject_co
         ran = "/".join(ran_values) if ran_values else ("(off)" if saw_off else "(unset)")
         misses.append(f"{name}={want} realized {ran}")
     return f"unreproducible pin: {'; '.join(misses)}" if misses else None
+
+
+#: Measured composed routes the cut pass offers beside its single seams: ``(signature, cut keys)``
+#: entries — the signature a kernel's ``S_*`` stamps (``None``: every kernel of the compile, a record
+#: replaying its own target), the keys the ``PLACE@…`` seams one measured row marks ``cut`` together.
+_COMPOSED_ROUTES: list[tuple[frozenset | None, tuple[str, ...]]] = []
+
+
+@contextlib.contextmanager
+def composed_routes(entries):
+    """Temporarily register measured composed routes for the cut pass (:func:`composed_cuts_for`)."""
+    saved = list(_COMPOSED_ROUTES)
+    _COMPOSED_ROUTES.extend(entries)
+    try:
+        yield
+    finally:
+        _COMPOSED_ROUTES[:] = saved
+
+
+def composed_cuts_for(signature: frozenset) -> list[tuple[str, ...]]:
+    """The registered composed routes that describe a kernel of ``signature`` — every key the route's
+    signature has, with the same value (the rule the evidence index matches rows by), or a route
+    registered for every kernel."""
+    candidate = dict(signature)
+    out: list[tuple[str, ...]] = []
+    for sig, keys in _COMPOSED_ROUTES:
+        if (sig is None or (sig and all(candidate.get(key) == value for key, value in sig))) and keys not in out:
+            out.append(keys)
+    return out
 
 
 @contextlib.contextmanager

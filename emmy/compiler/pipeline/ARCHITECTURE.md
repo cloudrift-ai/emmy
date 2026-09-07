@@ -566,8 +566,11 @@ first — over a different kind of row. A **route row** is a measured row whose 
 price of applying that decision to the kernel it was recorded on, and the index files it under `routes` rather than
 `ok`. `greedy._route_candidates` turns EVERY measured row of the kernel's signature into a candidate, each one of the
 pass's OWN offered arms: the arm the row spells (`pins.spelled_arm` — a schedule row the fused / unsplit arm, since
-the kernel it decorates ran that way; a route row the first offered seam it marks `cut`, or the offered plan whose
-`g<n>` half its `REDUCE` value carries; a row whose cut seams are not on this ballot decides nothing). A measured arm
+the kernel it decorates ran that way; a route row the composed arm that cuts exactly the several offered seams it
+marks `cut` — the one decision a pinned compile consumed them as, which the cut pass offers beside its single seams
+wherever a measured row of the kernel names it (`pins.composed_routes`, registered by `GreedyStrategy.run` from the
+index's route rows) — else the first offered seam it marks, or the offered plan whose `g<n>` half its `REDUCE` value
+carries; a row whose cut seams are not on this ballot decides nothing). A measured arm
 outranks every arm priced by nested resolution (a Σ that may hold predictions); among measured arms the fastest wins;
 strict evidence refuses a kernel-set fork no measured arm decides. With no measured arm the arms are priced exactly as
 Part 4 describes (`_priced_pick`, the streamed fused-vs-splice comparison, the serial-work floor). Nothing is
@@ -674,8 +677,10 @@ At deploy a record is rows, nothing more, and every row is keyed by the kernel i
 A record that decorates one kernel is that kernel's schedule row under the target's signature. Any other record is
 read through its replay (`golden._replay`): the target is resolved through the tile passes under the record's pins
 (the environment it was measured under), its knobs followed fork by fork through the same `pins.spelled_arm` the
-deploy reads a route row with. Each kernel-set arm the knobs spelled is a route row under the signature of the kernel
-that fork was offered on; its schedule row is keyed under the child its stored identity names, or — for a row the
+deploy reads a route row with — the seams an entry of the set marks `cut` together offered as one composed arm on the
+replay's kernels, exactly as the deploy offers them. Each kernel-set arm the knobs spelled is a route row under the
+signature of the kernel that fork was offered on; its schedule row is keyed under the child its stored identity
+names, or — for a row the
 tuner merged with the parent's split — under the one child whose enumerated rows contain it. A piece inherits nothing
 from the kernel it replaced, so a record's remaining keys are read against the piece's own offers; a key no piece
 offers, or a schedule row no kernel of the replay enumerates, is stale and is no evidence. Whether a record still
