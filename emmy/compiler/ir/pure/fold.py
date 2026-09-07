@@ -424,35 +424,29 @@ class Fold:
         the weight cone. A role the term never bound (Welford's ``1/N``, whose base contribution
         does not read it) is simply absent from the tail.
 
-        What a recipe DERIVES is not a role, and two tests are needed to say so. A recipe's lift
-        defines the weight from the score (``e = exp(s)``), and formation is free to factor that
-        definition onto an operand edge; when the score arrives as a slab beside it, the weight's
-        edge is not the score's. Reading the edge identity alone mistook the weight for the
-        streamed value and the carrier folded ``exp(s)`` where it meant to fold ``v`` — a wrong
-        answer, not a slow kernel.
+        What a recipe DERIVES is not a role, and the test is that this term also CARRIES it: results
+        line up with the recipe's lift results, so a param a result passes through is that
+        definition, however far the factoring moved it. It is also the only test that still works
+        once a cut materializes the weight into a workspace, where it is a slab like any other.
 
-        - a candidate this term also CARRIES is the recipe's own derived channel: results line up
-          with the recipe's lift results, so a param a result passes through is that definition,
-          however far the factoring moved it. This is the only test left once a cut materializes
-          the weight into a workspace, where it is a slab like any other;
-        - a candidate whose own subtree computes the SCORE is that definition too, which is what
-          catches it on a term carrying the expectation before the denominator has joined, where
-          the weight is no result yet.
+        This reads THIS NODE: its stored bindings, its own lift, and its operands' interfaces —
+        never an operand's internals. The subtree walk that used to sit beside the carried test,
+        asking by object identity whether a candidate's own cone computes the score, is gone. It
+        made a twisted carrier's lowering a function of its whole subtree and of the tree-wide
+        sharing `normalize` restores, which is not a question a node may ask.
+
+        GAP it leaves: a carrier holding the expectation before the denominator has joined has not
+        made the weight one of its results yet, so the carried test cannot see it and it reads as a
+        streamed extra. The fusion knows every role when it builds the carrier, so storing them on
+        the :class:`~emmy.compiler.ir.pure.twist.Twist` closes this with no walk at all.
         """
         bound = {param: (edge, index) for param, edge, index in self.bindings}
-        supplies = bound.get(self.lift.results[0], (None, 0))[0]
         carried = set(self.lift.results)
-
-        def derives(edge: Fold) -> bool:
-            """Whether ``edge``'s value is computed from the score's — structurally, because the
-            same read reached through two edges is two objects."""
-            return edge is supplies or edge == supplies or any(derives(operand) for operand in edge.operands)
-
         extras: list[str] = []
         for result in self.lift.results[1:]:
             for param in self.lift.cone(result).params:
                 edge, index = bound.get(param, (None, 0))
-                if edge is None or param in carried or derives(edge) or edge.exposes[index] in extras:
+                if edge is None or param in carried or edge.exposes[index] in extras:
                     continue
                 extras.append(edge.exposes[index])
         return (self.applied.results[0], *extras)
@@ -514,7 +508,7 @@ class Fold:
         if not channels:
             return None
         channel, b_edge = channels[0]
-        product = self.lift.cone(self.lift.results[channel]).body[0].op
+        product = _channel_product(self.lift, self.lift.results[channel])[1].op
         plus = self.base.components()[channel]
         a_edge = self.operands[0]
         a_space, b_space = a_edge.free_axes, b_edge.free_axes
@@ -605,7 +599,15 @@ class Fold:
         that are no product at all. The ⊕ is the BASE monoid's, componentwise by construction — a
         twist's stable ``combine`` is not, and asking it would refuse every twisted carrier. Each
         channel's ⊕ must be a commutative monoid its seed is the identity of, and the product must
-        distribute over it. Memoized on the term."""
+        distribute over it.
+
+        A is what ``operands[0]`` SUPPLIES, not what it exposes: the left factor may be a component
+        of that edge, or a value this lift computes from its components alone (attention's
+        ``e = exp(r)``, the weight over the score). Requiring a component made a carrier bilinear
+        only after its weight had been reified into an operand of its own — a node that adds no
+        computation and exists to satisfy this pattern. The reach stays inside the node: the cone
+        walked is this lift's own body, and an operand is asked for nothing but its interface.
+        Memoized on the term."""
         if self.axis is None or self.base is None or len(self.operands) < 2:
             return ()
         pluses = self.base.components()
@@ -616,20 +618,19 @@ class Fold:
         a_names = {param for param, edge, _ in self.bindings if edge is a_edge}
         out: list[tuple[int, Fold]] = []
         for index, result in enumerate(self.lift.results):
-            cone = self.lift.cone(result)
-            if len(cone.body) != 1 or not isinstance(stmt := cone.body[0], Assign) or len(stmt.args) != 2:
-                continue  # a state the carrier passes through, or one whose cone is more than a product
+            cone, product = _channel_product(self.lift, result)
+            if product is None or len(product.args) != 2:
+                continue  # a state the carrier passes through, or one whose cone ends in no product
             plus = pluses[index]
             if not (plus.associative and plus.commutative and plus.has_identity) or self.init[index] != plus.identity:
                 continue
-            if not stmt.op.distributes_over(plus):
+            if not product.op.distributes_over(plus):
                 continue
-            other = set(stmt.args) - a_names
-            if len(set(stmt.args) & a_names) != 1 or len(other) != 1:
-                continue  # a product that does not multiply A by exactly one other edge
-            edge = by_name.get(next(iter(other)))
-            if edge is not None and edge is not a_edge:
-                out.append((index, edge))
+            left = [arg for arg in product.args if _over_a(arg, cone, a_names)]
+            right = [arg for arg in product.args if (edge := by_name.get(arg)) is not None and edge is not a_edge]
+            if len(left) != 1 or len(right) != 1 or left[0] == right[0]:
+                continue  # a square, or a product that does not multiply A by exactly one other edge
+            out.append((index, by_name[right[0]]))
         return tuple(out)
 
     @cached_method
@@ -1192,6 +1193,31 @@ def _(s: Fold, rename, sigma, axis_fn):
             results=tuple(rename(r) for r in s.observe.results),
         )
     return replace(s, operands=operands, lift=lift, base=base, observe=observe)
+
+
+def _channel_product(lift: Lambda, result: str) -> tuple[Lambda, Assign | None]:
+    """One carried state's cone and the ``Assign`` that ENDS it — the product a bilinear channel
+    contributes, or ``None`` when the state is a pass-through or its cone ends in something else.
+
+    The cone may hold more than that one statement: a channel whose left factor this lift derives
+    (attention's ``e = exp(r)``) carries the derivation with it, and the product is still the
+    statement defining the result."""
+    cone = lift.cone(result)
+    stmt = next((s for s in cone.body if result in s.defines()), None)
+    return cone, stmt if isinstance(stmt, Assign) else None
+
+
+def _over_a(name: str, cone: Lambda, a_names: set[str]) -> bool:
+    """Whether ``name`` is the A factor of ``cone``'s product — a component ``operands[0]`` binds,
+    or a value the cone computes from those components ALONE.
+
+    The second reading is what lets a carrier read bilinear before its weight is reified. It walks
+    the cone, which is this lift's own body, and never an operand's internals: a name bound to any
+    other edge closes back as itself and fails the test."""
+    if name in a_names:
+        return True
+    reads = set(cone.cone(name).params)
+    return bool(reads) and reads <= a_names
 
 
 def _writes_under(term: Fold, writing: set[int]) -> bool:

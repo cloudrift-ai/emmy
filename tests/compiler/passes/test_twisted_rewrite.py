@@ -21,13 +21,50 @@ from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.pure import Fold
+from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.pure.twist import SOFTMAX, WELFORD
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Const, Load, Loop, Write
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op
 from emmy.compiler.pipeline.passes.lowering.tile._twist import _hoist_invariant, rewrite_twisted
+from tests.compiler.terms import projection, slab
+
+
+def _carrier(weight_of: str) -> Fold:
+    """FlashAttention's carrier with the weight still IN the lift — the shape the fusion holds
+    before ``_factor_weights`` reifies ``e`` into an operand of its own. ``weight_of`` names the
+    value the weight is derived from, so the negative case differs by one argument."""
+    score = projection((slab("s", "S", "i", "j"),), (Assign(name="r", op="negative", args=("s",)),))
+    value = slab("v", "V", "j", "n")
+    return Fold(
+        operands=(score, value),
+        lift=Lambda(
+            params=("j", "r", "v"),
+            body=Body((Assign(name="e", op="exp", args=(weight_of,)), Assign(name="ev", op="multiply", args=("e", "v")))),
+            results=("r", "e", "ev"),
+        ),
+        init=(-1e30, 0.0, 0.0),
+        base=Lambda.componentwise((ElementwiseImpl("maximum"), ElementwiseImpl("add"), ElementwiseImpl("add")), ("m", "d", "o")),
+    )
+
+
+def test_a_carrier_reads_bilinear_before_its_weight_is_reified() -> None:
+    """A is what ``operands[0]`` SUPPLIES, not what it exposes: the weight the lift derives from the
+    score is the left factor, so the channel is a contraction with no operand minted for it."""
+    carrier = _carrier("r")
+    (channel, streamed) = carrier.bilinear_channels()[0]
+    assert channel == 2 and streamed is carrier.operands[1]
+    view = carrier.as_contraction()
+    assert view is not None and view.axis == "j" and view.channel == 2
+    assert set(view.left_axes) == {"i"} and set(view.right_axes) == {"n"}
+
+
+def test_a_weight_derived_from_the_streamed_value_is_no_contraction() -> None:
+    """The left factor must come from A alone. Derived from B it is a square in disguise, and
+    offering an mma for it would be a wrong answer, not a slow kernel."""
+    assert _carrier("v").bilinear_channels() == ()
+    assert _carrier("v").as_contraction() is None
 
 
 def _folds(root: Fold):
