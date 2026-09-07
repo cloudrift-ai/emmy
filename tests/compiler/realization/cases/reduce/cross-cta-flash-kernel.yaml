@@ -52,7 +52,7 @@ configs:
       FAST_MATH: false
     knobs:
       REDUCE@twist: ''
-      REDUCE@twist.1/map.1/inner: ''
+      REDUCE@twist.1/inner: ''
       WORK: ''
       TILE: ''
       STAGE: ''
@@ -73,7 +73,7 @@ configs:
       FAST_MATH: false
     knobs:
       REDUCE@twist: ''
-      REDUCE@twist.1/map.1/inner: ''
+      REDUCE@twist.1/inner: ''
       WORK: ''
       TILE: ''
       STAGE: ''
@@ -94,7 +94,7 @@ configs:
       FAST_MATH: false
     knobs:
       REDUCE@twist: ''
-      REDUCE@twist.1/map.1/inner: ''
+      REDUCE@twist.1/inner: ''
       WORK: ''
       TILE: ''
       STAGE: ''
@@ -106,7 +106,7 @@ configs:
       FAST_MATH: false
     knobs:
       REDUCE@twist: ''
-      REDUCE@twist.1/map.1/inner: ''
+      REDUCE@twist.1/inner: ''
       WORK: ''
       TILE: ''
       STAGE: ''
@@ -118,7 +118,7 @@ configs:
       FAST_MATH: false
     knobs:
       REDUCE@twist: ''
-      REDUCE@twist.1/map.1/inner: ''
+      REDUCE@twist.1/inner: ''
       WORK: ''
       TILE: ''
       STAGE: ''
@@ -139,7 +139,7 @@ configs:
       FAST_MATH: false
     knobs:
       REDUCE@twist: ''
-      REDUCE@twist.1/map.1/inner: ''
+      REDUCE@twist.1/inner: ''
       WORK: ''
       TILE: ''
       STAGE: ''
