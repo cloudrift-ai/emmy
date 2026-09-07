@@ -49,7 +49,7 @@ configs:
       FAST_MATH: true
     knobs:
       REDUCE@map.1/twist: ''
-      REDUCE@map.1/twist.1/map.1/inner: ''
+      REDUCE@map.1/twist.1/inner: ''
       WORK: ''
       TILE: ''
       STAGE: ''
@@ -61,7 +61,7 @@ configs:
       FAST_MATH: true
     knobs:
       REDUCE@map.1/twist: ''
-      REDUCE@map.1/twist.1/map.1/inner: ''
+      REDUCE@map.1/twist.1/inner: ''
       WORK: ''
       TILE: ''
       STAGE: ''
@@ -79,7 +79,7 @@ configs:
       FAST_MATH: true
     knobs:
       REDUCE@map.1/twist: ''
-      REDUCE@map.1/twist.1/map.1/inner: ''
+      REDUCE@map.1/twist.1/inner: ''
       WORK: ''
       TILE: ''
       STAGE: ''

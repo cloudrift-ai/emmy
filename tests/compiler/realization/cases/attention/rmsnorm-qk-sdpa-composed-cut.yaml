@@ -56,9 +56,9 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-      PLACE@map.1/twist.1/map.1/inner.1/map: cut
-      PLACE@map.1/twist.1/map.1/inner.2/map: cut
-      PLACE@map.1/twist.1/map.1/inner.2/map.3/map.1/reduce: cut
+      PLACE@map.1/twist.1/inner.1/map: cut
+      PLACE@map.1/twist.1/inner.2/map: cut
+      PLACE@map.1/twist.1/inner.2/map.3/map.1/reduce: cut
     knobs:
       TILE: ''
       WORK: t16
