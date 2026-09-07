@@ -1,0 +1,58 @@
+# Volta qualification lane for the official Qwen3.8-27B checkpoint at FP16.
+#
+# Target is eight V100 SXM2 16 GB (sm_70). The checkpoint is 55.6 GB of BF16 weights, so
+# min-to-serve is about 72.3 GB and eight cards (8 x 16,384 MiB = 137.4 GB) are the smallest
+# admissible platform on this fleet; four cards hold only 68.7 GB and cannot take the weights
+# plus a usable KV cache.
+#
+# Volta has no bfloat16, so --dtype half casts the checkpoint to FP16. That makes this the only
+# lane with no quantization kernel in the path, which is why it is the cleanest test of whether
+# the engine understands Qwen3.8 at all.
+#
+# TP8 divides cleanly: 24 attention heads / 8 = 3, 48 linear-attention value heads / 8 = 6,
+# 16 linear-attention key heads / 8 = 2. The 4 key/value heads are fewer than the 8 ranks, which
+# vLLM handles by replicating them because 8 % 4 == 0.
+#
+# The host exposes no NVLink (nvidia-smi topo reports PHB between every pair), so the TP8
+# all-reduce crosses PCIe. Expect that to dominate decode latency relative to a 4-card lane on a
+# smaller checkpoint; it is a property of the platform, not of the model.
+model:
+  huggingface: "Qwen/Qwen3.8-27B"
+  revision: 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
+  task: generate
+
+engine:
+  llm:
+    tensor_parallel_size: 8
+    pipeline_parallel_size: 1
+    gpu_memory_utilization: 0.88
+    context_length: 262144
+    max_concurrent_requests: 4
+    vllm:
+      image: "cloudriftai/1cat-vllm-deepseek-v4-flash-0731:1.2.3-d76126608"
+      extra_args: >-
+        --dtype half
+        --language-model-only
+        --gdn-prefill-backend triton
+        --max-num-batched-tokens 4096
+        --enable-auto-tool-choice
+        --tool-call-parser qwen3_coder
+        --reasoning-parser qwen3
+      extra_env:
+        # The GDN decode path reaches for the flash_qla JIT extension independently of the
+        # prefill backend, and building it fails in this image at a missing cusparse header.
+        VLLM_SM70_GDN_DECODE_FLASHQLA: "0"
+
+benchmark:
+  max_concurrency: 4
+  num_prompts: 32
+  random_input_len: 1000
+  random_output_len: 1000
+  num_warmups: 2
+  seed: 0
+  temperature: 0.0
+  ignore_eos: true
+
+matrices:
+  deploy.gpu: "NVIDIA Tesla V100 SXM2 16GB"
+  deploy.gpu_count: 8

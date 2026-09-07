@@ -573,7 +573,8 @@ strict evidence refuses a kernel-set fork no measured arm decides. With no measu
 Part 4 describes (`_priced_pick`, the streamed fused-vs-splice comparison, the serial-work floor). Nothing is
 installed on the kernel: a piece a cut or split mints is a brand-new kernel (`knob.consume_kernel_row` strips every
 decision family and every feature), its own forks consult the rows of its own signature, and a piece that fails to
-lower is handled the way any structural pick's is (`Pipeline.run`'s retry with the splices withdrawn).
+lower re-ranks at its own forks and, once no row of it binds, retires the one cut that minted it (`Pipeline.run`'s
+retry).
 
 Env pins sit ABOVE the whole list: a hand pin (`--ab`, `EMMY_KNOBS`, `EMMY_<KNOB>`) settles the pinned families before
 any fork reaches a decide. That is how a row is MEASURED — `run --golden PATH --bench` pins each golden row and each
@@ -831,10 +832,9 @@ sum-of-predictions comparison would be exposed to the model's absolute-µs error
 different kernel families, and that is a fitting requirement on the prior. When a splice cannot be priced at all,
 the pricing decides nothing and every leaf — cuts included — goes on to the ordinary leaf ranking
 (`_priced_pick`, the flat-list form kept for exactly these corners). **No leaf is
-withheld to keep a kernel set unchanged.** The one thing that does withdraw the splices is `price_structural=False`,
-which is not about speed: it is how `GreedyStrategy` retires a structural pick once no row of a fragment kernel binds
-(a fragment's failure cannot be blocklisted at the structural fork site), and how a nested price probe avoids
-re-splitting the slice it is pricing.
+withheld to keep a kernel set unchanged.** The one thing that does withdraw every splice is `price_structural=False`,
+which is not about speed: it is how a nested price probe avoids re-splitting the slice it is pricing. A retired cut
+withdraws ONE splice — the blocklisted decision identity at that node — and the fork re-prices over what remains.
 
 **Evidence joins tolerate stamps a row predates, and nothing else.** `Prior.sig_groups` is one contract for the
 reservoir, the evidence index (tune DB rows and golden rows alike) and the disqualification tier: a row describes a
@@ -851,21 +851,35 @@ matching measured rows.
 
 **Retries are decide-wrappers over a deterministic re-resolve** — every other choice replays identically (cheap
 non-chronological backtracking, no snapshots). A fragment kernel's refused row blocklists at that piece's own schedule
-fork, so the composed route replays while the piece re-ranks; only once no row of it binds are structural picks retired.
+fork, so the composed route replays while the piece re-ranks, across as many retries as the piece has rows. Only once
+no row of it binds is a structural pick retired, and only one: the cut that minted the piece (the trace's `Decision`
+records the ids a splice minted), blocklisted by its decision identity at its own fork, where the decide withdraws
+that splice and re-prices the fork over the remaining arms with the same evidence — so a disqualified fused side keeps
+losing to a finite arm, and the fused root returns only when every cut above the piece has been retired in turn. The
+retirement is logged at WARNING with the rejection reason.
 
 **Greedy validity fallback.** The whole greedy retry orchestration is search policy, owned by
 `policy/greedy.GreedyStrategy` — `Pipeline.run` is a thin entry point delegating to it. The prior ranks by
 predicted latency, which can rank a tile that fails `validate(ctx)` (smem / thread budget) first — `tune`
 benches-and-skips it, but greedy benches nothing. So when a deterministic compile leaves a node un-lowered, the
-strategy blocklists that tile's `tile_identity` (its planner knobs) and re-resolves: `greedy_decide(blocked=…)`
-drops the matching leaf and picks the next-best. This is bounded by `_MAX_GREEDY_RETRIES`.
+strategy blocklists the `tile_identity` of the pick the resolve made at that node — read off the trace, never off
+the terminal node's own knob row, which a kernel-stage pass can stamp with a policy knob (`LOOPIFY`) no schedule
+leaf spells — and re-resolves: `greedy_decide(blocked=…)` drops the matching leaf and picks the next-best. This is
+bounded by `_MAX_GREEDY_RETRIES`.
 When the retry budget exhausts with the node still un-lowered (an *online* prior can rank many over-budget tiles above
 the first in-budget one), the strategy takes one last **emission-order resolve**
 (`greedy_decide(blocked=…, prior=None)`): its point is that it ignores the prior whose extrapolation caused the
 overflow, and the blocklist rides along so this last resolve can never re-pick a tile that already
-failed `validate(ctx)`. It is a validity fallback, not a quality one — it makes no claim about the speed of what it
-lands on, and the enumeration promises it no particular leaf. When that leaf leaves the node un-lowered too,
-`_raise_on_unlowered` fires the loud `LoweringError`.
+failed `validate(ctx)`; the measured arms still decide the kernel-set forks they spell. It is a validity fallback,
+not a quality one — it makes no claim about the speed of what it lands on, and the enumeration promises it no
+particular leaf. When that leaf leaves the node un-lowered too, `_raise_on_unlowered` fires the loud `LoweringError`.
+
+What counts as un-lowered depends on how far the pipeline runs (`Pipeline.lowers_to_cuda`). A pipeline that reaches
+the final lowering pass promises a graph of `CudaOp`, so **every** surviving `TileOp` / `LoopOp` is stranded, whether
+or not a rule recorded a rejection for it — a materializer that declines a row with a plain `RuleSkipped`, or a rule
+that never matched, strands the node while recording nothing, and used to escape all three fallbacks above and leave
+a half-lowered graph the compile reported as a success. A truncated pipeline terminates in an earlier dialect by
+design, so there only a node with a recorded rejection counts.
 
 ### `Pipeline.tune_async` — the autotune sweep
 
@@ -1164,7 +1178,8 @@ don't invent a third:
 - **Measurement identity = `(ctx.structural_key, the variant key)`** — ground truth about *materialized leaves*: `perf`
   rows (the per-variant replay cache), op inventory (`loop_op` / `tile_op` / `kernel_op` / `cuda_op`), and two-level
   dedup. The structural `child_key` on `lowering` rows is measurement linkage (it joins the inventory), NOT a replay
-  key.
+  key. A multi-kernel terminal's verdict, when no kernel can be blamed for it, keys by the digest of its kernels'
+  variant keys (`TerminalBench.set_key`) — the same identity, composed over the set.
 
 ### Search persistence: on-disk inventory vs in-memory MCTS
 
@@ -1299,9 +1314,22 @@ cached `perf` rows ensure no re-bench on warm starts. Greedy compiles build no t
 `Search`.
 
 **`terminal_bench.bench_terminal_async`** is the only path that knows about all four parts (graph, DB, tree-through-`search.observe`,
-backend). It short-circuits when every `CudaOp` in the graph already has a `perf` row for the current `(context_key,
-backend)`. Otherwise it does one `await backend.benchmark_async(...)`, walks `Op.source` once to record op inventory +
-lowering edges + the `perf` row per kernel, and returns the aggregate `PerfStats` for the search to score.
+backend). It short-circuits from the `perf` cache in three cases. A kernel whose row is a `bench_fail` fails every
+slice it is in — its identity is its rendered source and launch geometry, the same bytes wherever it appears — so
+one such row decides the slice as `bench_fail`, blamed exactly as recorded, and the other kernels need no row of
+their own (an all-or-nothing lookup re-benched every hang on every fresh session, because a failure is recorded only
+against the kernel the failure names — the watchdog's hang, or nvcc's refusal of a kernel's source — and the
+innocent kernels stay rowless — `persist_bench_failure`, the one writer for a failed bench, which `run --bench`'s
+greedy row also comes through; the name is read off the message text, since the exception class does not cross
+the worker pipe, and with the quote `repr` escapes when the message also holds a `"`). A failure that names no
+kernel in a multi-kernel terminal — a wall kill — blames none of them, but what IS known, that this kernel set
+failed at that budget, is filed as a `bench_fail` under the set's own key (`TerminalBench.set_key`, the digest of
+its kernels' variant keys) and replays for that exact set; the row carries no knobs and no kernel stands behind it,
+so the greedy's disqualification index (joined on `S_*` signatures) and the dataset (joined on `cuda_op`) never see
+it, and a kernel of the set enrolled on its own still benches. An `ok` replay needs every `CudaOp`'s row for the current
+`(context_key, backend)`: the bench runs the whole graph, so a partial cache cannot stand in for the Σ. Otherwise it
+does one `await backend.benchmark_async(...)`, walks `Op.source` once to record op inventory + lowering edges + the
+`perf` row per kernel, and returns the aggregate `PerfStats` for the search to score.
 Tune terminals request one nominal warmup; the CUDA benchmark's existing clock-ramp floor extends that warmup until
 it covers 10 ms of GPU time. A slow candidate therefore spends one iteration warming instead of exhausting the
 run-stage budget on discarded repeats. Pinned and deployable comparisons retain their caller-selected warmup count.
@@ -1365,6 +1393,23 @@ persists in the derived golden store beside identities and verdicts). The regime
 (`golden.regime_live`) skips PLACE pins — the route is the record's kernel-set decision, not an input regime — and
 validation rejects a realization that schedules behind pinned cuts without a stored identity. A stored identity equal
 to the target's own lift is the corpus's derived stamp, not a receipt, and keeps the pooled decode.
+
+**A whole kernel set records as one set of entries, each naming its kernel by identity.** `run --golden PATH
+--realization NAME --bench --record-greedy` (`working_golden.record_greedy_pick`) writes the kernel set the greedy
+compile picked back into the working file: one routing row per kernel-set decision the compile took — its `identity`
+the kernel the fork was offered on, its `knobs` the arm's `PLACE@seam: cut` or split-carrying `REDUCE` value, its
+`emmy_us` the whole graph's isolated timing — and one child-identity schedule receipt per CUDA kernel (the tile
+kernel it lowered from, its realized schedule row, its own isolated launch timing), all under the seed realization's
+input regime with the greedy comparison row as `same-input-greedy` reference. A nested cut is a routing row of the
+piece it was offered on, so a cascade of cuts is as many routing rows, and the replay walks the set together: the entry
+whose identity a fork's kernel carries decides that fork, and the set's lead decides the rest. Receipts written this way
+carry NO route in `pins`, unlike the corpus convention above: seam spellings are kernel-local, and a cut key copied
+onto every receipt re-cuts any piece that happens to offer a same-spelled seam (a 4096-token DeepSeek V4 serving twin
+cuts its residual at `PLACE@map.3/map` twice, at two cascade steps, and a piece of it offers a third). For the same
+reason the replay memo is keyed by the entry's identity beside its row and pins: two entries of one set can spell the
+same row on different kernels. Recorded this way, a strict-evidence compile of the file picks the same kernel set
+again from the file's rows alone (no tune DB, no prior): that 10-kernel twin, whose unseeded pick spends minutes
+pricing, resolves from its 19 recorded rows in seconds.
 
 The preferred reference is the runnable Torch slice (`torch-eager`) or the applicable library kernel (`cublas`). A
 Loop IR fallback has no frontend callable by construction; an origin slice can also have synthetic boundaries whose

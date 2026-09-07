@@ -24,7 +24,7 @@ A **statement** (`ir/stmt/`) occupies a position in an instruction stream: it ha
 scope, and — for a carrier — a seed the enclosing scope has to declare. A **pure term**
 (`ir/pure/`) denotes a value: it binds names, carries an algebra, substitutes and compares up to
 α-renaming, and has no position at all. `Lambda`, the `Fold` term and the twist recipes (`ir/pure/twist.py` — a
-twisted monoid as data, which `Fold.twist` fuses a reduce and the reduce it reads into) all live on the term side.
+twisted monoid as data, which `Fold.fuse` fuses a reduce and the reduce it reads into) all live on the term side.
 
 **A pure class is never a `Stmt` subclass and never occupies a statement position.** When a term
 has to reach the instruction stream it is RENDERED into statements at the point of use — never
@@ -402,8 +402,9 @@ spelling: two lambdas over roles for an open channel count (softmax's pivot adva
 recipe for softmax and flash attention alike) or one lambda over every state pair (Welford's fixed carrier
 `(sum, count, mean, M2)`). `Recipe.program(states)` instantiates either over a fold's state names by renaming, and
 the definition certifies the data: the program is the conjugate of the base on random states, the seeds are the base
-identities under ψ⁻¹, the injections are the lift seen through ψ. `Fold.twist(recipe)`
-fuses a reduce onto the reduce it reads, found among its operands: the pivot's state is the lift param bound to it,
+identities under ψ⁻¹, the injections are the lift seen through ψ. `Fold.fuse(recipe)`
+fuses a reduce onto the reduce it reads, found among its operands, and the fused fold stores the recipe in its
+`twist` field so the stable ⊕ derives rather than being baked in: the pivot's state is the lift param bound to it,
 the score is the sub-cone of the lift alpha-equal to the pivot's own per-element map (operand for operand, through a
 projection's
 components), and what remains, in role order, must equal a channel's pattern by canonical form. A click gives the
@@ -431,15 +432,17 @@ commutative product's arguments does not change them. Formation is strict: a ker
 result
 may be a bare
 `float` literal — ι is spelled in the lift (softmax's singleton
-is `(x, 1)`). The TRUE monoid is the flat `(init, combine)` pair stored directly on the `Fold` (the `Monoid` wrapper
-class dissolved at 1r) — ONE program, `combine : S × S → S` a pure `Lambda` whose
-results carry the fold's REAL accumulator names; the serial streaming step is NEVER stored (it derives as combine
-specialized at the singleton), so update-vs-combine consistency holds by construction. `Lambda.componentwise`
-builds a plain fold's combine (DEGENERATE is the derived `Lambda.components()` shape reading, not a storage
-arm). A `Fold` carries NO
+is `(x, 1)`). The monoid is the `(init, base)` pair stored directly on the `Fold` beside the optional `twist`
+recipe (the `Monoid` wrapper class dissolved at 1r) — `base : S × S → S` a pure `Lambda`, always the componentwise ⊕
+that `Lambda.componentwise` builds, whose results carry the fold's REAL accumulator names. The ⊕ the fold folds with
+is DERIVED from that pair (`Fold.combine` — `base` itself when `twist` is `None`, the recipe's stable conjugate
+`psi(psi_inv(x) base psi_inv(y))` otherwise), and the serial streaming step is derived from it in turn (combine
+specialized at the singleton), so there is one stored spelling of the algebra and update-vs-combine consistency holds
+by construction. A `Fold` carries NO
 precision: accumulator dtype is a KERNEL-IR fact, stamped on the lowered `Accum` by the Init-placement pass, and a
-reduce `Loop` arriving with a typed `Accum` is not canonical input to total lift. A twisted monoid's combine is a
-recipe's program, recognized by canonical form (`Fold.twist`), never by a stored family name;
+reduce `Loop` arriving with a typed `Accum` is not canonical input to total lift. A twisted monoid's combine is the
+recipe's program, reached by NAMING the recipe the fold instantiates rather than by restating it; the fusion that
+names it recognizes the pair by canonical form (`Fold.fuse`), never by a stored family name;
 `tests/compiler/ir/pure/test_twist.py` pins its associativity on random states.
 
 ### `loop/ir.py` — LoopOp types
@@ -719,8 +722,7 @@ directly (no separate AST class).
 | `LdmatrixLoad`     | Load one operand into a `RegFragment`. The m16n8k16 layout can use `ldmatrix.sync.aligned.m8n8.x{4,trans}.b16` from shared memory or a global-memory-direct gather with the same lane map. SM70 has no `ldmatrix`, so the Volta m8n8k4 layout uses its cooperative gather for both address spaces: a global pointer for the direct path or a shared-slab pointer after synchronous-copy staging; its four computation groups duplicate the appropriate A or B quadrant. `b_trans=True` marks a `[N, K]` weight and selects the corresponding transposed gather. Guards clamp M/N lanes and zero masked K elements in both layouts. A 1-byte staged slab (`byte_slab=True`) has no `ldmatrix` below sm_100a and drains through the cooperative gather too; when it also carries a `scale_buffer` the slab holds PACKED PAIRS (an NVFP4 weight — one byte, two K elements, and one scale per k block in that companion slab), and the loader decodes both codes through the f16 value table and scales them as it fills the fragment. |
 | `MmaSyncPtx`       | Inline PTX for either `mma.sync.aligned.m8n8k4.row.col.f32.f16.f16.f32` on the Volta fragment layout or the established `mma.sync.aligned.m16n8k16.row.col.{f32,f16}.{f16,bf16}.{f16,bf16}.{f32,f16}` family. The renderer includes only the selected family's prelude, so SM70 never parses newer `ldmatrix` or m16n8k16 assembly. The BLOCK-SCALED fp4 form (`m16n8k64`, `kind::mxf4nvf4`) additionally carries `sfa_frag` / `sfb_frag`: both multiplicands are packed e2m1 pairs and the instruction applies one ue4m3 scale per 16 K elements itself, so the call passes those two scale registers where the others repeat the accumulator. Its data fragments reuse the fp8 byte loaders — the k64 4-bit lane map is the k32 8-bit one, over a row of K/2 bytes — leaving only the scale loaders new. It assembles only for the arch-suffixed consumer-Blackwell target, which the plan requests through `KernelSpec.arch_specific` (the flag TMA also sets). |
 | `FragmentPromote`  | Fold a packed f16-accumulate C fragment into its f32 shadow fragment and rezero it (`emmy_mma_promote_f16acc`: PTX `cvt.f32.f16` + add per element) — the chunked-accumulation promote pairing the f16-acc `MmaSyncPtx`. The mma chain accumulates in f16 at full rate; each K chunk (the staged bk slab, every `_F16ACC_STEPS` gmem-direct atom steps) folds into the f32 shadow, bounding the f16 rounding to one chunk while the store/epilogue read f32. |
-| `FragmentLoad`     | Load one scalar tensor element per C-fragment element using the shared fragment layout's absolute row/column coordinates. The residence evaluator uses it when a Fold Lambda reads a materialized source at fragment residence. |
-| `FragmentSelect`   | Coordinate-predicated uniform values over one C fragment. It substitutes each fragment element's absolute row/column through the shared fragment layout, then uses scalar `Select` branch order and casts exactly; fragment-valued or per-cell branches fail closed at the lifting boundary. |
+| `FragmentRowReduce` | Fold one warp's C fragments along the atom's N direction, per ROW: the in-lane column pairs of every fragment combine, then a `__shfl_xor` butterfly over the column-group lanes leaves each lane holding both of its rows' values. That pair is what a `FragmentApply` broadcasts as a `ROW` operand. The chunk tier's pivot and its summed channel partials are exactly this, which is why the tier needs the chunk to sit inside one warp column. |
 | `RegStore`         | Layout-aware per-lane epilogue store: four C elements for m16n8k16 or eight elements covering the four Volta output quadrants for m8n8k4. Stores f32 directly or downconverts to f16. Optional `RegEpilogue` loads and pointwise chains are evaluated at each element's own coordinates; guarded tails predicate every load and store. |
 | Shared from `tile` | `Tile` (launch geometry); from `ir/stmt/`: `Loop`, `StridedLoop`, `Load`, `Assign`, `Accum`, `Write`, `Select`, `Cond`. |
 

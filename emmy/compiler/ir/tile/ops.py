@@ -299,9 +299,7 @@ class Sched:
           result tiles the placement's trailing free pair;
         - any other nested contraction takes the free m axis and its nearest ENCLOSING fold's axis as n —
           read through a slice partial's window PARENT, so the view carries the pre-slice geometry
-          the fragment clamps were built against. A BLOCK window is the exception, and the reason
-          blocking exists: the enclosing fold walks one block at a time, so the block's OWN extent
-          is the n the fragment is sized against, not the stream it was carved from.
+          the fragment clamps were built against.
         """
         free = tuple(self.place.free)
         site = self.site_of(node)
@@ -329,8 +327,8 @@ class Sched:
         if len(free) < 2:
             return None
         # The nearest ENCLOSING fold, through any zero-axis projection between them — a projection
-        # binds no coordinate, so it cannot be the one the result is evaluated over. A blocked
-        # carrier's weight cone reaches its score through exactly one such level.
+        # binds no coordinate, so it cannot be the one the result is evaluated over. A weight cone
+        # reaches the score it is built over through exactly one such level.
         parent = next(
             (
                 found
@@ -343,7 +341,11 @@ class Sched:
         ax = self.axis_of(parent.node.axis) if parent is not None else None
         if ax is None:
             return None
-        return orient((free[-2], ax.window.parent if ax.window is not None and not ax.window.block else ax))
+        pair = (free[-2], ax.window.parent if ax.window is not None else ax)
+        # Under a CHUNKED carrier the orientation is the CONSUMER's, not the term's: the tier
+        # builds a ``(row, chunk)`` tile per chunk whichever operand the canonical form put in A,
+        # so the enclosing axis is N here even when A's own axis is the one that would take M.
+        return pair if parent.node.chunked() else orient(pair)
 
 
 def sched_of(tile) -> Sched:
@@ -445,6 +447,23 @@ def projection_root(edge: Fold) -> Fold | None:
     return reducing[0] if len(reducing) == 1 else None
 
 
+def tiled_edges(operands, scheduled=None) -> tuple[Fold, ...]:
+    """The operand edges of one projection whose :func:`projection_root` is a bilinear reduce —
+    ONE edge per distinct root, the first that reaches it, and only roots ``scheduled`` accepts.
+
+    Per ROOT, because a reduce its own epilogue reads back is reached twice through the operands
+    that share it: the carrier itself, and the ``1/l`` projection over it. Counting those as two
+    output-tiled roots asks the binder to give each its own output specification, and a twisted
+    carrier's one output belongs to both."""
+    out: dict[int, Fold] = {}
+    for edge in operands:
+        root = projection_root(edge)
+        if root is None or root.as_contraction() is None or (scheduled is not None and not scheduled(root)):
+            continue
+        out.setdefault(id(root), edge)
+    return tuple(out.values())
+
+
 def output_regions(op: Fold, output_specs: tuple) -> tuple[tuple[Fold, Body, tuple], ...]:
     """Partition a projection by OUTPUT OWNERSHIP — ``(region, tail, stores)`` per operand of ``op``:
     the operand term, the root-body statements only that operand's outputs read, and those output
@@ -454,11 +473,12 @@ def output_regions(op: Fold, output_specs: tuple) -> tuple[tuple[Fold, Body, tup
     root body must be disjoint, and together those cones must cover it. Refusals raise
     :class:`UnbindableProjection`.
 
-    This is the ownership rule alone. :func:`projection_regions` composes it with the reducing-root
-    resolution the kernel binder needs; the cut pass reads it bare, because a region peeled into its
-    own KERNEL carries whatever root structure it likes (the NVFP4 encode's packed-code branch owns
-    one output over six reducing roots — unbindable as one region of one kernel, ordinary as a
-    kernel).
+    This is the structural ownership rule alone, shared by kernel binding and by the rewrites that
+    turn one multi-output ``TileOp`` into fresh pieces. :func:`projection_regions` composes it with
+    the reducing-root resolution the kernel binder needs; the cut pass reads it bare, because a
+    region peeled into its own KERNEL carries whatever root structure it likes (the NVFP4 encode's
+    packed-code branch owns one output over six reducing roots — unbindable as one region of one
+    kernel, ordinary as a kernel).
     """
     lift = op.applied
     spelled = dict(zip(op.lift.params, lift.params, strict=True))
@@ -531,9 +551,9 @@ def kernel_roots(op) -> tuple[Fold, ...]:
     term alone, so the schedule projection offers the partition catalog only where it is realized."""
     node = op
     while isinstance(node, Fold) and node.axis is None and node.operands:
-        tiled = [root for edge in node.operands if (root := projection_root(edge)) is not None and root.as_contraction() is not None]
+        tiled = tuple(projection_root(edge) for edge in tiled_edges(node.operands))
         if len(tiled) > 1:
-            return tuple(tiled)
+            return tiled
         node = tiled[0] if tiled else node.operands[0]
     return (node,) if isinstance(node, Fold) else ()
 
@@ -543,10 +563,12 @@ def chain_members(root: Fold) -> tuple[Fold, ...]:
     operand edges and the axis-invariant (hoisted) reduce operands of members, deepest first, so a
     member another member's cone reads comes ahead of it. This is the CHAIN the binder emits in
     body order around one shared lane axis. A reduce read per step of another (the score inside
-    the twist) lowers inside that reduce's loop and is no member, and a contraction root has no
-    chain: its cone's statistic is the tiled fill's business, not a fold beside the root's."""
+    the twist) lowers inside that reduce's loop and is no member, and a root a tile folds WHOLE has
+    no chain: its cone's statistic is the tiled fill's business, not a fold beside the root's. A
+    carrier the tiers cannot fold whole (:meth:`Fold.tiles_whole`) keeps its chain — no fill takes
+    its cone over, so the members are still folds beside it."""
     out: list[Fold] = []
-    if not isinstance(root, Fold) or root.axis is None or root.as_contraction() is not None:
+    if not isinstance(root, Fold) or root.axis is None or root.tiles_whole():
         return ()
 
     def visit(node: Fold, hoisted_from: str | None) -> None:
@@ -665,4 +687,5 @@ __all__ = [
     "projection_tail",
     "reduce_plan",
     "sched_of",
+    "tiled_edges",
 ]

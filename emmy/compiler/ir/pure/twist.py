@@ -17,7 +17,7 @@ recipe serves any channel count; Welford's as one lambda). The definition certif
 program is the conjugate of the base on every state pair, the seeds are the base identities under
 ψ⁻¹, the injections are the lift seen through ψ (``tests/compiler/ir/pure/test_twist.py``).
 
-The one generic algorithm that applies any recipe is :meth:`Fold.twist`, which finds the pivot
+The one generic algorithm that applies any recipe is :meth:`Fold.fuse`, which finds the pivot
 among ``F``'s own operands: matching is alpha-invariant by construction — ``F``'s lift binds its
 operands positionally, so the pivot's state is the param bound to ``G``; the score is whatever
 sub-cone of ``F``'s lift is alpha-equal to ``G``'s own per-element map, operand for operand; and
@@ -54,6 +54,61 @@ class Channel:
 
 
 @dataclass(frozen=True)
+class Twist:
+    """One :class:`Recipe` INSTANTIATED on a term — the schema, plus which channel each of the
+    term's carried states is.
+
+    A recipe states its algebra over ROLE names: ``lift``'s params are ``(score, *extras)``, and
+    every channel's ``pattern`` and ``injection`` binds those same roles. What a TERM calls each of
+    them is read off the term (``Fold.roles``), never stored, so this holds no name and renames
+    with nothing. ``channels`` says which recipe channel each carried state past the pivot is — the
+    carrier grows one state per fusion, so its order is the order the tree was fused in and not the
+    recipe's — and it is what lets a fold DERIVE both halves it does not store: the stable ⊕
+    (:meth:`program`) and the ψ-image of its own lift (:meth:`inject`).
+
+    EMPTY ``channels`` says the term folds no per-element contribution at all: a cross-CTA split's
+    partial merge reads finished carrier states out of a workspace, so ψ has already been applied to
+    every one of them and it names the recipe only to reach the same ⊕ they were produced under.
+    """
+
+    recipe: Recipe
+    channels: tuple[int, ...]
+
+    @property
+    def name(self) -> str:
+        return self.recipe.name
+
+    def program(self, states: tuple[str, ...]) -> Lambda:
+        """``combine`` over these state names — ``psi(psi_inv(x) base psi_inv(y))``, in the stable
+        spelling the recipe authored (:meth:`Recipe.program`)."""
+        return self.recipe.program(states)
+
+    def inject(self, roles: tuple[str, ...], states: tuple[str, ...]) -> Lambda:
+        """``psi ∘ lift`` at the singleton — the score, then one channel injection per carried state
+        past the pivot — over ``roles``, this term's spelling of ``Recipe.lift``'s params in order.
+        A role the term never bound is simply absent from the tail, and an injection that reads one
+        raises rather than guessing.
+
+        Written out by the recipe's AUTHORED injections rather than by evaluating ``psi`` on the
+        base contribution: at the singleton the pivot IS the score, so ``psi`` divides each channel
+        by a factor the contribution already carries (softmax's ``exp(s)·v ↦ v``), and evaluating
+        the two apart denotes ``exp(s)`` and overflows. That simplification is exactly what a
+        channel's ``injection`` states, so lowering reads it instead of computing it.
+        """
+        spelled = dict(zip(self.recipe.lift.params, roles, strict=False))  # a role the term never bound stays absent
+        body: list[Stmt] = []
+        results = [roles[0]]
+        for state, index in zip(states[1:], self.channels, strict=True):
+            injection = self.recipe.channels[index].injection
+            names = {param: spelled[param] for param in injection.params}
+            names.update((stmt.name, f"{state}__{stmt.name}") for stmt in injection.body)
+            instance = injection.rename(names)
+            body.extend(instance.body)
+            results.extend(instance.results)
+        return Lambda(params=roles, body=Body(tuple(body)), results=tuple(results))
+
+
+@dataclass(frozen=True)
 class Recipe:
     """A twisted monoid as data. ``base`` names the componentwise ⊕ of every carrier state — the
     pivot's first, then one per channel in recipe order — and ``lift`` is the base's per-element
@@ -64,7 +119,7 @@ class Recipe:
     factors the move puts on every carried channel, ``rescale`` takes one channel pair and those
     factors ``(s, s′, *factors)`` to the channel's merged value. ``combine`` is one lambda over
     every state pair in role order — pivot, then the channels, then the same with ``__o`` — for a
-    carrier of fixed arity. Applied by the one generic algorithm, :meth:`Fold.twist`."""
+    carrier of fixed arity. Applied by the one generic algorithm, :meth:`Fold.fuse`."""
 
     name: str
     base: tuple[str, ...]
@@ -240,4 +295,4 @@ WELFORD = Recipe(
 
 RECIPES = (SOFTMAX, WELFORD)
 
-__all__ = ["RECIPES", "SOFTMAX", "WELFORD", "Channel", "Recipe"]
+__all__ = ["RECIPES", "SOFTMAX", "WELFORD", "Channel", "Recipe", "Twist"]

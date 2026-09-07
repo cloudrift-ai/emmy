@@ -1,13 +1,71 @@
+# Qwen3.8-27B-FP8 on four V100 SXM2 16 GB (sm_70 Volta).
+#
+#   emmy deploy ssh --recipe recipes/Qwen3.8-27B-FP8 --ssh user@host
+#
+# This is a DEPLOYMENT config, not an experiment: one variant, no workload grid, no `benchmark:`
+# block. The workload grid that justifies these values lives in
+# experiments/Qwen3.8-27B-FP8/serving/.
+#
+# SCOPE: this recipe records the platform that was actually qualified, which is Volta. The
+# discovery shell it replaces proposed one RTX PRO 6000 Blackwell Max-Q and one H200 141GB; both
+# remain UNQUALIFIED here, which means unmeasured, not unsuitable. Either card has native FP8
+# hardware that this one lacks, so their numbers would not resemble these.
+#
+# There is no Emmy lane here: this run qualified serving only, so Emmy eligibility is unevaluated
+# rather than established. See RESULTS.md.
 tags:
-  - onboarding
-  - untested
+  - best-effort
+
 model:
   huggingface: Qwen/Qwen3.8-27B-FP8
   rationale: "Strong FP8 variant of the breakout 3.8 model for wider deployment."
   heat: 95
+  revision: 017b9c7af6b5689d5dd426a76e0bc077eb5ca20a
   task: generate
+
+engine:
+  llm:
+    # 30.9 GB of FP8 weights give a min-to-serve near 40.2 GB, so four cards
+    # (4 x 16,384 MiB = 68.7 GB) are the smallest admissible platform; two hold only 34.4 GB.
+    # TP4 divides cleanly: 24 attention heads / 4 = 6, 4 key/value heads / 4 = 1.
+    tensor_parallel_size: 4
+    pipeline_parallel_size: 1
+    gpu_memory_utilization: 0.88
+    # The full native window fits: the measured KV pool holds 292,125 tokens, giving 1.11x
+    # concurrency at full context. Note the caveat in RESULTS.md — that is allocated capacity,
+    # and end-to-end retrieval was validated at 60,295 tokens, not at the full window.
+    context_length: 262144
+    max_concurrent_requests: 4
+    vllm:
+      # Stock vLLM has no sm_70 support. This is the 1Cat-vLLM Volta fork; the tag is named for
+      # the model it was first built for, but the wheel is the whole fork. It is the first
+      # published sm70 image new enough for Qwen3.8: its qwen3_5 config defaults
+      # partial_rotary_factor to 0.25 and its Gated DeltaNet layer accepts output_gate_type
+      # "swish", both of which Qwen3.8 declares and the older 1cat-vllm-sm70:1.0.0 does not know.
+      image: "cloudriftai/1cat-vllm-deepseek-v4-flash-0731:1.2.3-d76126608"
+      # --dtype half sets the compute dtype; Volta has no bfloat16. --language-model-only drops
+      # the vision tower; the text path is what is qualified here.
+      extra_args: >-
+        --dtype half
+        --language-model-only
+        --gdn-prefill-backend triton
+        --max-num-batched-tokens 4096
+        --enable-auto-tool-choice
+        --tool-call-parser qwen3_coder
+        --reasoning-parser qwen3
+      extra_env:
+        # Volta has no FP8 arithmetic. The fork serves FP8 checkpoints on sm_70 through its
+        # TurboMind dequantization path, which these two switches select; neither is baked into
+        # the image, and the DeepSeek-V4-Flash lane on this same engine sets them the same way.
+        VLLM_SM70_FP8_TURBOMIND: "1"
+        VLLM_SM70_QUANT_BACKEND: "turbomind"
+        # 48 of the 64 layers are Gated DeltaNet, so that path is unavoidable. This image cannot
+        # build the Volta-native flash_qla GDN extension: it ships the sources but not the CUDA
+        # development headers, so the JIT fails at `fatal error: cusparse.h`. Selecting the Triton
+        # GDN *prefill* backend above is not sufficient, because the GDN decode path reaches for
+        # flash_qla independently; this knob is what keeps the JIT out of the run.
+        VLLM_SM70_GDN_DECODE_FLASHQLA: "0"
+
 matrices:
-- deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition
-  deploy.gpu_count: 1
-- deploy.gpu: NVIDIA H200 141GB
-  deploy.gpu_count: 1
+  deploy.gpu: "NVIDIA Tesla V100 SXM2 16GB"
+  deploy.gpu_count: 4

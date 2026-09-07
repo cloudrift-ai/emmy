@@ -109,9 +109,14 @@ to the serial fold; each ILP copy suffixes only its per-copy SSA temps
 (`__r{r}`)
 — the shared iteration coordinates, **including any nested contraction's own reduce-axis var** (whose `for`
 declaration `copy_cell` does not rename), stay shared, so each copy re-declares its own nested
-loop under the one name; anything else tiles nothing and folds serially one thread per
-output cell (the degenerate `op.lower()` + `with_store`) — there is **no** separate "scalar tier" branch, and no
-per-kind emitter: which axis is tiled is schedule data, not a kernel identity. The projection sink and the store value
+loop under the one name; anything else tiles nothing and folds one thread per
+output cell (the degenerate `op.lower()` + `with_store`) — except a kernel whose ONLY work is a free output sweep,
+which distributes that sweep across its `WORK` threads through the same `_lane_close` a cooperating reduce uses for
+its projection: each lane owns a strided slice and writes its own cells, so there is no combine and no store guard.
+That third path is what a placement cut needs — it leaves the reduction in one piece and a bare elementwise map in
+the other, and without it that map runs one thread per row with the sweep serial inside (an RTX 5090 measured 885.9
+us against 4.2 us for the same kernel once the sweep is distributed). There is **no** separate "scalar tier"
+branch, and no per-kind emitter: which axis is tiled is schedule data, not a kernel identity. The projection sink and the store value
 (`out_val`, the root node's produced `Handle`) are threaded down the recursion, so `with_store` is node-agnostic. The
 kernel-boundary `TileOp.output_specs` are reconstituted at the zero-axis Fold peel — an output-tiled root's region
 being its epilogue term over it —
@@ -122,7 +127,9 @@ lift. An output sweep whose axis the peeled root's cone reads cannot wrap at the
 projection, so no wrap position encloses it): the serial fold binds the projection UNPEELED so the sweep loop wraps
 operand and projection together, and a cooperative / ILP row — whose lanes the sweep would be distributed across —
 declines via `UnbindableProjection` (`RuleSkipped(reject=True)` at the pass boundary; the greedy retries the next
-row). The
+row). The other `UnbindableProjection` — a multi-root binding of a projection whose outputs do not partition by root
+(`ops.projection_regions`) — is a term fact the schedule context reads at the offer, so no enumerated row tiles a
+second root there and the decline is a bug, not a retry. The
 recursion, the binder, the reduce-axis tiling, and the shared-row staging apply live in `_factor.py`; the four tiling
 levels every tier seals through are `_tiling.py`, which knows a `Side` pair, integer counts and three callables — no
 node kinds, no algebra, no `Ctx`. That is the decide/realize seam: the tile schedule picks the plan, `_tiling` is
@@ -241,26 +248,19 @@ scheduled contraction, directly in fragments before storing the slab consumed by
 using the ordinary vectorized copy transports. These are residence choices over the same Fold tree; the scheduler and
 materializer do not recognize operation families.
 
-The fragment Fold evaluator assigns each live value one of three residences: CTA-cell uniform, one scalar per fragment
-row, or one C fragment. It interprets the stored `Lambda` directly. `Assign` broadcasts to the highest input residence,
-`Select` substitutes the fragment layout's absolute coordinates, and coordinate-dependent `Load` becomes
-`FragmentLoad`. Every runtime-bounded coordinate clamp-reads in-bounds — a masked M row exactly like the reduce
-axis — and the reduce boundary additionally adds `FragmentMask` with the Fold identity (the overhanging M row is a
-discarded duplicate instead, the copy-transport contract). A Lambda-evaluated producer's fragment column cells span
-the whole `bk`-wide slab chunk the drain reads, independent of the output tile's register tiling. The same evaluator
-applies the stored carrier `combine` Lambda to the running state, using in-place targets for carried values.
+**A carrier the tiers cannot fold WHOLE is no tile site.** `Fold.tiles_whole` asks whether every carried state is a
+bilinear channel, so that the tile's accumulators are the carrier itself. Both tiers fold one accumulator per product
+channel and have no residence for a state that is not one; nor is the stored `lift` what a step may fold there, since
+for a twist it is the BASE contribution and denotes `Sum exp(score)`. Nothing may see through psi.
 
-A scheduled child contraction is supplied through the evaluator's structural callback. The ordinary atom strategy
-declares and drains its fragments; `FragmentRowReduce` derives row-resident partials; the parent Fold's `combine`
-Lambda merges those partials and fragment-resident channels. `SyncOperand.producer` and `_stage.LeadSegment` merely
-describe the resulting whole-slab producer and its live range to the common staged-loop scheduler. A materialized
-source follows the same path through `FragmentLoad`. No separate blocked, chain, or attention emitter remains.
+That one reading decides four things together: whether `TileOp.contracts` offers a TILE site, whether the node takes
+the contraction or the reduction schedule domain, whether its edges get a transport catalog, and whether a root has a
+chain. Refusing at the enumeration rather than at the binder is deliberate — an offered row nothing realizes costs the
+greedy one blocklist retry per rank, and there are more ranked rows than the retry budget, so a pinned P·V shape wedged
+with an unlowered `TileOp` instead of falling back.
 
-Fragment stores preserve semantic coordinates independently of their destination address, and retain every
-`Assign.dtype`; rebasing a producer into a tile-local slab therefore cannot rebase a causal predicate or erase a
-store/load conversion. The producer's `RegStore` carries the same slab swizzle the consumer's `ldmatrix` undoes.
-Loop-invariant and chunk-varying child operands use the same ordinary staging transports and liveness rules as every
-other contraction.
+The tensor-core form of a twisted carrier is unbuilt, and the emitter it needs is not the one this tree used to carry —
+see "What may not come back" below.
 
 Where the edge is not a bindable contraction (or the atom has no modeled C layout) it stays per-cell: spliced into the
 fill's cell and evaluated inline from lowered loop IR, a scalar dot per slab cell. Geometry: exact cover on N only. A
@@ -373,15 +373,44 @@ tile base — an offset operand lands the box at absolute coordinates).
 
 ## Fold carriers lower at their scheduled residence
 
-Scalar Fold carriers use the common reduce-axis tiling (`_tile_reduce_axis` — cooperative lanes, register ILP, or
-serial). A Fold whose value-producing child is a scheduled contraction uses the residence evaluator above: child
-fragments become row partials through `FragmentRowReduce`, and the Fold's stored `combine` Lambda merges them into
-row- and fragment-resident state. This applies equally to planar and twisted monoids; the materializer reads only the
-Fold algebra and schedule.
+A planar carrier the atom tiers cannot fold whole uses the common reduce-axis tiling (`_tile_reduce_axis` —
+cooperative lanes, register ILP, or serial). A TWISTED carrier the recipe folds chunk by chunk (`Fold.chunked`) takes
+an atom tier of its own instead, `_atom._FlashOps`.
 
-Boundary writes consume those residences directly. Fragment state stores in place; row and uniform state broadcasts
-through the fragment layout before storing, so split partial kernels preserve every carrier component without
-assuming that all components share the contraction accumulator's residence.
+### The chunk tier
+
+The tier folds the RECIPE, never the stored lift — for a twist that lift is the base contribution and denotes
+`Sum exp(score)`. Per staged K chunk (`STAGE`'s `bk_elems`, the only block it uses) it emits the score, reduces it
+per row into the chunk's pivot, instantiates each channel's `pattern` against that pivot, folds a channel that is no
+product per row and the bilinear one on tensor cores, and merges the chunk's partial through the recipe's stable ⊕
+(`Fold.merge`) once per chunk.
+
+Three things make it small. The SCORE is the nested contraction the tree already carries as a site of its own, and
+the fragment seam already ties the two together — the score's N tile must equal the consumer's chunk, one warp column
+wide (`_fragment_agreements`), which is exactly FlashAttention's shape — so the enumeration needed no rule of its own
+and the tier realizes the agreement rather than assuming it. The WEIGHT reaches the expectation's `mma.sync` through
+`FragmentRepack`, in registers, with no shared-memory round trip. And `_residence` evaluates a recipe pattern, the
+merge and the projection epilogue at whatever residence each value has — a C fragment, the two per-lane registers an
+m16n8 row rides in, or cell-uniform — so none of the three is written for tensor cores; where a value lives is a fact
+about the tile, not about the program.
+
+A projection that reads no per-row carrier state is the ordinary sink's (a placement cut materializes the
+denominator, and the tail is then a per-cell chain like any other).
+
+### What may not come back
+
+The tree once carried a second emitter for attention: a carrier whose term held one operand per carried component,
+every one folding the same explicit block, with the block loop bound to the staged K loop. It was removed with the
+blocking rewrite that produced that shape, and with it the residence evaluator, `FragmentSelect`, `FragmentLoad`,
+`frag_layout` and `staged_kloop`'s lead segment.
+
+Do not restore any of it. The carrier's term holds one axis and one lift whose per-channel cones say which state is
+bilinear (`Fold.bilinear_channels`), and an emitter that wants a block takes it from the SCHEDULE — the staged K
+chunk — never from a second reduce axis carved into the term. A design that reintroduces per-component operands, a
+block axis, or a width derived from an extent is reintroducing the thing that took the attention schedule space from
+10^9 to 10^17 and made every kernel identity turn on a form rule nothing measured. `FragmentRowReduce` came back with
+the chunk tier — a per-row fold over one warp's C fragments is what a chunk pivot IS — but it came back as a leaf the
+tier emits, not as an interpreter of a term.
 
 The Fold move is never re-decided during materialization. `ReduceStage.combine` is the placement-keyed selector:
 within-warp uses `SHFL`, within-block uses a `SHFL` plus shared-memory tree, and cross-CTA uses `ATOMIC` or `KERNEL`

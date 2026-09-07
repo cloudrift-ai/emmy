@@ -32,7 +32,7 @@ configs:
       PLACE: fuse
     knobs:
       REDUCE: g2k
-    identity: 67cbcab0df00f82f63dd2926d4b01cd40345f8801d05ba2ad82c9c8ab642f2ca
+    identity: 2e40dced853112eb65f9137b4b380b20bfdc6884d262441e4a35e381b6f1858a
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 22.498559951782227
@@ -52,7 +52,7 @@ configs:
       FAST_MATH: false
     knobs:
       REDUCE@twist: ''
-      REDUCE@twist.1/inner: ''
+      REDUCE@twist.1/map.1/inner: ''
       WORK: ''
       TILE: ''
       STAGE: ''
@@ -73,7 +73,7 @@ configs:
       FAST_MATH: false
     knobs:
       REDUCE@twist: ''
-      REDUCE@twist.1/inner: ''
+      REDUCE@twist.1/map.1/inner: ''
       WORK: ''
       TILE: ''
       STAGE: ''
@@ -94,9 +94,63 @@ configs:
       FAST_MATH: false
     knobs:
       REDUCE@twist: ''
-      REDUCE@twist.1/inner: ''
+      REDUCE@twist.1/map.1/inner: ''
       WORK: ''
       TILE: ''
       STAGE: ''
       RASTER: ''
     identity: 5a2933635c03c8d6da2ab5aefb24503b720d499a9fa5ff19cef36ddc49e8659d
+  - name: k_sdpa_fbd178.50222a02272c.75c279335783
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@twist: ''
+      REDUCE@twist.1/map.1/inner: ''
+      WORK: ''
+      TILE: ''
+      STAGE: ''
+      RASTER: ''
+    identity: 75c2793357838caef7114aa8e83911c2184a6f4248e734b346f060d70b57979d
+  - name: k_sdpa_fbd178.50222a02272c.1006fd017f81
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@twist: ''
+      REDUCE@twist.1/map.1/inner: ''
+      WORK: ''
+      TILE: ''
+      STAGE: ''
+      RASTER: ''
+    identity: 1006fd017f8155be78f84a0b4d255382535e48007fca8d1b791feef1c46b56cd
+  - name: k_sdpa_fbd178.50222a02272c.8d7d8cf4973e
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: 8d7d8cf4973ead77bea989c4b792b5226db77d473d96889199c8de8816781df3
+  - name: k_sdpa_fbd178.50222a02272c.71f3f4d022cf
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@twist: ''
+      REDUCE@twist.1/map.1/inner: ''
+      WORK: ''
+      TILE: ''
+      STAGE: ''
+      RASTER: ''
+    identity: 71f3f4d022cf69705ee580877fc0d3c19816feaafa7fd4b5fd2f12a30d17a990
+  - name: k_sdpa_fbd178.50222a02272c.9d4e8c6d3ba2
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: 9d4e8c6d3ba276f2722d32e648aa41aabc3b93bdbdd0c2b32528bcbe932ac1b7

@@ -18,6 +18,7 @@ from emmy.compiler.ir.cuda.ir import CudaOp
 from emmy.compiler.ir.kernel.ir import KernelOp
 from emmy.compiler.ir.loop.ir import LoopOp
 from emmy.compiler.pipeline.search.db import PerfStats
+from emmy.compiler.structural import digest
 
 # The engine logger keeps the existing ``[tune]`` log channel and verbosity toggles.
 logger = logging.getLogger("emmy.compiler.pipeline")
@@ -53,39 +54,23 @@ class TerminalBench:
         #: fork made it several, they hold DIFFERENT rows and there is no single row to attribute
         #: the total to. Each kernel carries its own decisions and earns its own sample.
         self.per_kernel: list[tuple[dict, float, str]] = []
-
-    #: The kernel a watchdog message NAMES — ``kernel 'k_foo (iter 0)' did not complete …``. The
-    #: exception class does not survive the bench worker's pipe (it arrives wrapped in a
-    #: ``BenchWorkerJobError``), so the label is recovered from the text.
-    _NAMED_KERNEL = re.compile(r"kernel '([A-Za-z_][A-Za-z0-9_]*)")
-
-    def _blamed(self, exc) -> set[int]:
-        """``id()``s of the nodes a failure is EVIDENCE ABOUT — usually not every kernel benched.
-
-        A terminal benches many kernels together and one of them hanging fails the whole run, so
-        blaming all of them records a failure for kernels that were never shown to fail. That is
-        not a cosmetic mislabel: those rows are read as deploy evidence, and on DeepSeek-V4's post
-        block 70 recorded failures carried only 7 distinct errors — 20 kernels condemned by one
-        hang, and 21 by a bench-worker startup timeout that is not a property of any kernel.
-
-        So blame is recorded only where it is unambiguous: the kernel the watchdog named, or the
-        single kernel of a one-kernel terminal. Otherwise nothing is persisted — the run failed,
-        but which kernel failed is unknown, and unknown is not the same as failed. The terminal
-        still reports ``bench_fail`` either way, so the search treats the candidate as failed and
-        moves on; only the durable per-kernel evidence is narrowed to what was actually observed."""
-        named = self._NAMED_KERNEL.search(str(exc))
-        if named is not None:
-            culprit = named.group(1)
-            return {id(n) for n in self.cuda_nodes if getattr(n.op, "kernel_name", "") == culprit}
-        return {id(self.cuda_nodes[0])} if len(self.cuda_nodes) == 1 else set()
+        #: The kernel set's own identity — the digest of its kernels' variant keys — where a
+        #: multi-kernel terminal's verdict is filed when no single kernel can be blamed for it
+        #: (:func:`persist_bench_failure`). ``None`` for a one-kernel terminal, whose verdict is its kernel's.
+        keys = [n.op.identity_key(with_io=True, with_knobs=True) for n in self.cuda_nodes]
+        self.set_key = digest("kernel-set", *sorted(keys)) if len(keys) > 1 and None not in keys else None
 
     def _note(self, op, stats, status: str) -> None:
         self.per_kernel.append((dict(getattr(op, "knobs", None) or {}), float(stats.median), status))
 
-    @staticmethod
-    def _point_stats(us: float):
+    def _fail_verdict(self, us: float, status: str = "bench_fail"):
+        """The terminal's value when it cannot be priced: every kernel at the fail sentinel ``us``
+        — the Σ a fresh failure returns, so a replayed one scores the same."""
+        return point_stats(us * len(self.cuda_nodes)), status
 
-        return PerfStats(median=us, min=us, max=us, mean=us, variance=0.0, n_samples=0)
+    def _cached_row(self, node):
+        key = node.op.identity_key(with_io=True, with_knobs=True)
+        return self.db.lookup_perf(self.context_key, key, backend=self.backend_name) if key is not None else None
 
     @staticmethod
     def _stats_from_launch(lt):
@@ -127,34 +112,41 @@ class TerminalBench:
                 ", ".join(f"{nid}: {type(self.graph.nodes[nid].op).__name__}" for nid in self.unlowered),
             )
             fail_s = self.backend.bench_run_timeout_s if self.backend is not None else 1.0
-            return "done", (self._point_stats(float(fail_s) * 1_000_000.0), "bench_fail")
+            return "done", (point_stats(float(fail_s) * 1_000_000.0), "bench_fail")
 
         if not self.cuda_nodes:
-            return "done", (self._point_stats(0.0), "ok")
+            return "done", (point_stats(0.0), "ok")
 
-        # Cache lookup: if every CudaOp already has a perf row for this
-        # (context, backend), skip the benchmark entirely and rebuild the
-        # aggregate stats from the DB. Per-kernel partial caching isn't
-        # useful here because ``backend.benchmark`` runs the whole graph.
-        cached_rows = []
-        for node in self.cuda_nodes:
-            key = node.op.identity_key(with_io=True, with_knobs=True)
-            row = self.db.lookup_perf(self.context_key, key, backend=self.backend_name) if key is not None else None
-            if row is None:
-                cached_rows = None
-                break
-            cached_rows.append(row)
-        if cached_rows is not None:
-            logger.info("[tune] cache hit for %d kernel(s) — skipping bench", len(self.cuda_nodes))
+        # Cache lookup. A kernel with a failed row fails every slice it is in — its identity is
+        # its rendered source and launch geometry, the same bytes wherever it appears — so one such
+        # row decides the slice, blamed exactly as it was recorded, and the other kernels need no
+        # row of their own (the all-or-nothing rule below used to re-bench a hang on every fresh
+        # session because the innocent kernels had none). An ``ok`` replay still needs every
+        # kernel's row: ``backend.benchmark`` runs the whole graph, so a partial cache cannot
+        # stand in for the Σ. A verdict filed against the kernel set as a whole (an unblamed wall
+        # kill, :meth:`finalize_exc`) is looked up first: it has no kernel behind it.
+        if self.set_key is not None:
+            row = self.db.lookup_perf(self.context_key, self.set_key, backend=self.backend_name)
+            if row is not None:
+                logger.info(
+                    "[tune] cache hit: this %d-kernel set recorded %s as a whole — skipping bench", len(self.cuda_nodes), row.status
+                )
+                return "done", self._fail_verdict(row.stats.median, row.status)
+        rows = [(node, self._cached_row(node)) for node in self.cuda_nodes]
+        failed = [(node, row) for node, row in rows if row is not None and row.status != "ok"]
+        if failed:
+            logger.info("[tune] cache hit: %d of %d kernel(s) recorded %s — skipping bench", len(failed), len(rows), failed[0][1].status)
+            for node, row in failed:
+                self._note(node.op, row.stats, row.status)
+            return "done", self._fail_verdict(failed[0][1].stats.median, failed[0][1].status)
+        if all(row is not None for _node, row in rows):
+            logger.info("[tune] cache hit for %d kernel(s) — skipping bench", len(rows))
             agg = None
-            status = "ok"
-            for node, row in zip(self.cuda_nodes, cached_rows, strict=True):
-                if row.status != "ok":
-                    status = row.status
+            for node, row in rows:
                 agg = self._accumulate(agg, row.stats)
                 self._note(node.op, row.stats, row.status)
                 logger.info("[tune]   %s @ %.2f us  (%s, cached)", row.op_key[:12], row.stats.median, row.status)
-            return "done", (agg or self._point_stats(0.0), status)
+            return "done", (agg or point_stats(0.0), "ok")
 
         if self.backend is None:
             # No real measurement → do NOT persist. Writing the 1.0us stub
@@ -166,9 +158,9 @@ class TerminalBench:
             # explicit stub backend.
             agg = None
             for node in self.cuda_nodes:
-                agg = self._accumulate(agg, self._point_stats(1.0))
-                self._note(node.op, self._point_stats(1.0), "ok")
-            return "done", (agg or self._point_stats(0.0), "ok")
+                agg = self._accumulate(agg, point_stats(1.0))
+                self._note(node.op, point_stats(1.0), "ok")
+            return "done", (agg or point_stats(0.0), "ok")
 
         logger.info("[tune] benching %d kernel(s) in graph", len(self.cuda_nodes))
         return "bench", None
@@ -185,9 +177,9 @@ class TerminalBench:
                 len(self.cuda_nodes),
                 exc,
             )
-            return self._point_stats(0.0), "compile_timeout"
+            return point_stats(0.0), "compile_timeout"
         fail_us = float(self.backend.bench_run_timeout_s) * 1_000_000.0
-        blamed = self._blamed(exc)
+        blamed = persist_bench_failure(self.db, self.context_key, self.backend_name, self.cuda_nodes, exc, fail_us)
         logger.warning(
             "[tune] backend.benchmark failed (%s) — pinning bench_fail @ %.1f us for %d of %d kernel(s)",
             exc,
@@ -195,14 +187,16 @@ class TerminalBench:
             len(blamed),
             len(self.cuda_nodes),
         )
-        s = self._point_stats(fail_us)
-        agg = None
-        for node in self.cuda_nodes:
-            if id(node) in blamed:
-                self._persist(node.op, stats=s, status="bench_fail", error=f"{type(exc).__name__}: {exc}")
-                self._note(node.op, s, "bench_fail")
-            agg = self._accumulate(agg, s)
-        return agg or self._point_stats(0.0), "bench_fail"
+        s = point_stats(fail_us)
+        for node in blamed:
+            self._note(node.op, s, "bench_fail")
+        if not blamed and self.set_key is not None:
+            # The row carries no knobs: nothing about any kernel is claimed, so the greedy's
+            # disqualification index (which joins on ``S_*`` signatures) and the dataset (which
+            # joins on ``cuda_op``) never see it — only this cache lookup does.
+            error = f"{type(exc).__name__}: {exc}"
+            self.db.record_perf(self.context_key, self.set_key, backend=self.backend_name, status="bench_fail", stats=s, error=error)
+        return self._fail_verdict(fail_us)
 
     def finalize_result(self, result):
         agg = None
@@ -214,7 +208,7 @@ class TerminalBench:
                 len(self.cuda_nodes),
             )
             avg_us = (result.time_ms * 1000.0) / max(len(self.cuda_nodes), 1)
-            s = self._point_stats(avg_us)
+            s = point_stats(avg_us)
             for node in self.cuda_nodes:
                 self._persist(node.op, stats=s, status="ok", captured=result.captured)
                 self._note(node.op, s, "ok")
@@ -232,7 +226,7 @@ class TerminalBench:
             _cp.get_default_memory_pool().free_all_blocks()
         except Exception:  # noqa: BLE001 — best-effort cleanup
             pass
-        return agg or self._point_stats(0.0), "ok"
+        return agg or point_stats(0.0), "ok"
 
 
 async def bench_terminal_async(cand, *, backend, db):
@@ -356,3 +350,41 @@ def persist_kernel_perf(
     knobs = getattr(cuda_op, "knobs", None) or {}
     db.record_perf(context_key, cuda_key, backend=backend_name, status=status, stats=stats, knobs=knobs, captured=captured, error=error)
     return True
+
+
+#: The kernel a failure message NAMES — ``kernel 'k_foo (iter 0)' did not complete …`` from the
+#: watchdog, ``nvcc compile failed for kernel 'k_foo': …`` from the compiler. The exception class
+#: does not survive the bench worker's pipe (it arrives wrapped in a ``BenchWorkerJobError``
+#: carrying the child exception's ``repr``), so the label is recovered from the text — and
+#: ``repr`` escapes the name's quote as ``\'`` when the message also holds a ``"`` (nvcc quotes
+#: identifiers that way), so the quote is matched with or without its backslash.
+_NAMED_KERNEL = re.compile(r"kernel \\?'([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def persist_bench_failure(db, context_key: str, backend_name: str, cuda_nodes, exc, fail_us: float) -> list:
+    """Persist a failed bench as the per-kernel evidence it is: a ``bench_fail`` perf row at the
+    ``fail_us`` sentinel for every node the failure is EVIDENCE ABOUT — usually not every kernel
+    benched — and return those nodes. The ONE writer for a bench failure, as
+    :func:`persist_kernel_perf` is for a measurement: the tuner's terminal bench and
+    ``run --bench``'s greedy row both come here, so a hang blames the same kernel whichever
+    command measured it.
+
+    A bench runs many kernels together and one of them hanging fails the whole run, so blaming all
+    of them records a failure for kernels that were never shown to fail. That is not a cosmetic
+    mislabel: those rows are read as deploy evidence, and on DeepSeek-V4's post block 70 recorded
+    failures carried only 7 distinct errors — 20 kernels condemned by one hang, and 21 by a
+    bench-worker startup timeout that is not a property of any kernel. So blame is recorded only
+    where it is unambiguous: the kernel the watchdog named, or the single kernel of a one-kernel
+    graph. Otherwise no kernel earns a row — the run failed, but which kernel failed is unknown,
+    and unknown is not the same as failed (the tuner files that verdict under the kernel set's
+    own key instead)."""
+    named = _NAMED_KERNEL.search(str(exc))
+    if named is not None:
+        blamed = [n for n in cuda_nodes if getattr(n.op, "kernel_name", "") == named.group(1)]
+    else:
+        blamed = list(cuda_nodes) if len(cuda_nodes) == 1 else []
+    stats = point_stats(fail_us)
+    error = f"{type(exc).__name__}: {exc}"
+    for node in blamed:
+        persist_kernel_perf(db, context_key, backend_name, node.op, stats=stats, status="bench_fail", error=error)
+    return blamed
