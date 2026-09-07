@@ -209,14 +209,16 @@ def _items(node, ctx: _Ctx) -> list[tuple[str, object]]:
     dropped |= frozenset(name for edge in node.operands for name in edge.exposes if name not in read)
     items.append((f"lift: {_lam_sig(lift, ctx, dropped)}", _stmts((*scalars, *lift.body), ctx)))
     # A twisted node's own ⊕ is κ_S, the stable combine — that and the lift above it are what the
-    # carrier IS. It prints as a signature: the stable program is a dozen statements and ``--ir
-    # loop`` has them. ψ and the base monoid follow as HELPERS, which is what they are once the
+    # carrier IS, so it prints like any other combine, body and all. It is the longest branch on the
+    # node and it earns the room: the rescale is where the numerics live, and a signature alone left
+    # a twisted node the only kind whose algebra the dump would not show. ψ and the base monoid
+    # follow as HELPERS, which is what they are once the
     # term is stored in stable coordinates — the coordinate map a matcher reads back through
     # (:meth:`Fold.based`) and the componentwise ⊕ it conjugates. They are spelled in the RECIPE's
     # own names, not the term's: neither is bound to this carrier and neither renames with it.
     if node.twist is not None:
         recipe = node.twist.recipe
-        items.append((f"combine: {_lam_sig(node.combine, ctx)}", lambda cont: []))
+        items.append((f"combine: {_lam_sig(node.combine, ctx)}", _stmts(node.combine.body, ctx)))
         items.append((f"helper: psi {_lam_sig(recipe.psi, ctx)}", _stmts(recipe.psi.body, ctx)))
         items.append((f"helper: base = ({', '.join(op.name for op in node.base.components())})", lambda cont: []))
     elif node.combine is not None:

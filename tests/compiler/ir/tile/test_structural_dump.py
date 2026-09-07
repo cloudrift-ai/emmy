@@ -227,7 +227,9 @@ def test_a_twisted_node_prints_its_stable_combine_then_psi_and_the_base_as_helpe
         twist=Twist(recipe=SOFTMAX, channels=(0,)),
     )
     text = "\n".join(pretty(fold))
-    assert "├─ combine: λ(m, l, m__o, l__o) -> (m, l)" in text, "the stable ⊕, as a signature"
+    assert "├─ combine: λ(m, l, m__o, l__o) -> (m, l)" in text, "the stable ⊕ is the node's own algebra"
+    assert "│    m__o__alpha = exp(m__o__dg)" in text, "body and all — the rescale is where the numerics live"
+    assert "│    m__o__dg = subtract(m, m__o__gn)" in text, "and every exp argument is visibly a distance below the pivot"
     assert "├─ helper: psi λ(m, D, O) -> (m, d, o)" in text
     assert "│    d = multiply(D, f)" in text, "the coordinate map's own program, in the recipe's names"
     assert "└─ helper: base = (maximum, add)" in text
