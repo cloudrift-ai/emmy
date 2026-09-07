@@ -12,7 +12,7 @@ body hard to edit. The ~120-character rule applies to files in the repository, n
 
 ## Abstract
 
-Attention reached the tensor cores through a rewrite that split its key axis into an outer stride and an inner block. The block bought the expectation channel a semiring to live in, and cost eight orders of magnitude of schedule space, three contraction sites where the tree has one score, and a compile measured in tens of seconds. This change deletes the rewrite and stores what a twist recipe already declares — the plain per-element contribution, plus the recipe itself — so the expectation is a bare product of two operand edges that needs no block to be seen. A tensor-core tier then folds the whole carrier one staged chunk at a time: build the chunk's score, reduce it per row into the chunk's pivot, apply the recipe's own channel maps against that pivot, multiply the weight against the streamed value on tensor cores, and merge once per chunk through the recipe's stable combine. The block it folds is the schedule's staged chunk and nothing else, so no width is ever read off an extent again.
+Attention reached the tensor cores through a rewrite that split its key axis into an outer stride and an inner block. The block bought the expectation channel a semiring to live in, and cost eight orders of magnitude of schedule space, three contraction sites where the tree has one score, and a compile measured in tens of seconds. This change deletes the rewrite and stores what a twist recipe already declares — the plain per-element contribution, plus the recipe itself — so the expectation is a bare product of two operand edges that needs no block to be seen. A tensor-core tier then folds the whole carrier one staged chunk at a time: build the chunk's score, reduce it per row into the chunk's pivot, apply the recipe's own channel maps against that pivot, multiply the weight against the streamed value on tensor cores, and merge once per chunk through the recipe's stable combine. The block it folds is the schedule's staged chunk and nothing else, so no width is read off an extent.
 
 ### f16 SDPA, `(1, 8, 512, 128)`, RTX 5090
 
@@ -21,7 +21,7 @@ Attention reached the tensor cores through a rewrite that split its key axis int
 | tuned | 176 µs | **37 µs** |
 | `emmy compile --ir tile` | 38 s | **8 s** |
 | cold, before anything is measured | 177 µs | 73 ms — see *What got worse* |
-| lines under `emmy/` | baseline | **−633** |
+| lines under `emmy/` | baseline | **−609** |
 
 ---
 
