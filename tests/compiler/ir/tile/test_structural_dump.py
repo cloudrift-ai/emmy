@@ -147,6 +147,22 @@ def test_a_computed_edge_nests_as_a_subtree_a_materialized_one_is_a_leaf() -> No
     assert any("xhat = multiply(xhat_e, xhat_s)" in ln for ln in lines)
 
 
+def test_a_lift_prints_the_operand_name_for_every_slot_it_binds() -> None:
+    """The signature echoes the brackets above it, name for name. What a reader happens to call a
+    slot is spelling, not computation — and where it has no name at all (the twist rewrite's
+    ``_unread<i>``) its own spelling says strictly less than the operand's. The body is re-spelled
+    with it, so the two stay consistent."""
+    node = Fold(
+        operands=(_stat_fold(), _cone()),
+        lift=Lambda(params=("_unread0", "w"), body=Body((Assign(name="o", op="exp", args=("w",)),)), results=("o",)),
+    )
+    text = "\n".join(pretty(node))
+    assert "├─ operand[acc0]: Fold[k] reduce" in text
+    assert "└─ lift: λ(acc0, xhat) -> (o)" in text
+    assert "     o = exp(xhat)" in text  # the body follows the signature
+    assert "_unread0" not in text and "(w)" not in text
+
+
 # --- a scalar operand is spelled inside its reader ------------------------------------------------ #
 
 
