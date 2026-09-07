@@ -228,6 +228,10 @@ def _computed_edge(node: Fold) -> bool:
 def _needs_fill(tile_op, node: Fold, plan: Tile) -> bool:
     from . import staging  # noqa: PLC0415
 
+    if node.chunked():
+        # The chunk tier's A is the WEIGHT, which never leaves registers: it is what the chunk's
+        # own score fragments repack into. There is no operand to fill and no slab to fill it from.
+        return False
     return plan.is_warp and (_computed_edge(node) or (len(node.operands) - 1) > 1 or staging.converting_a(node, plan.atom, tile_op.inputs))
 
 
@@ -297,6 +301,7 @@ def _resolve_stage(
 
 def _fragment_agreements(
     site: NodeId,
+    node: Fold,
     plan: Tile,
     placed: PlacedTile,
     stage: ResolvedStage | None,
@@ -308,12 +313,26 @@ def _fragment_agreements(
         if not plan.is_tiled:
             offer = ("free",)
         elif plan.is_warp:
-            offer = ("warp", plan.atom.shape, plan.atom.fragment_layout, placed.n.units, placed.n.tile)
+            # The last entry names both output sides by AXIS. Which of them a consumer wants is the
+            # consumer's question: the ordinary need wants the producer's N, a chunked one wants
+            # whichever side carries ITS key, and the term's canonical orientation decides which
+            # that is (a score whose A edge is the key tiles the key as M).
+            sides = tuple((side.axis.name, side.units, side.tile, side.reg) for side in (placed.m, placed.n))
+            offer = ("warp", plan.atom.shape, plan.atom.fragment_layout, placed.n.units, placed.n.tile, sides)
         else:
             offer = ("scalar",)
         out.append(_FragmentAgreement("offer", node_id_spelling(site), offer))
-    if facts.need is not None:
-        if plan.is_warp and stage is not None and stage.transport == "smem":
+    if facts.need is not None and not (node.chunked() and not plan.is_warp):
+        # A chunked carrier the tier does NOT fold — the serial arm — reads its score as a plain
+        # value like any reduce and claims nothing at the seam, so the score keeps its own tile.
+        if plan.is_warp and node.chunked():
+            # A CHUNKED carrier does not merely tolerate a fragment at the seam, it is built on
+            # one: the chunk's score IS the producer's tile, so the producer must be warp-tiled at
+            # this atom with the chunk as its N tile, one warp column wide and the same register
+            # rows. Stated as a need of its own because the ordinary one accepts an untiled
+            # producer, and that row would be stamped on a kernel whose emission ignored it.
+            need = ("chunk", plan.atom.shape, plan.atom.fragment_layout, plan.atom.atom_k * plan.bk, placed.m.reg, node.axis)
+        elif plan.is_warp and stage is not None and stage.transport == "smem":
             need = ("step" if facts.need_step else "warp", plan.atom.shape, plan.atom.fragment_layout, stage.bk_elems)
         else:
             need = ("free",)
@@ -996,6 +1015,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             fragments=(
                 _fragment_agreements(
                     site,
+                    fold,
                     node.tile,
                     geometry,
                     resolved_stage,
@@ -1125,7 +1145,16 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             if other is None:
                 continue
             need, offer = (claim.value, other) if claim.role == "need" else (other, claim.value)
-            if offer[0] == "free":
+            if need[0] == "chunk":
+                rows, keys = offer[5] if offer[0] == "warp" else ((), ())
+                compatible = (
+                    offer[0] == "warp"
+                    and need[1:3] == offer[1:3]
+                    and keys[0] == need[5]  # the producer's N is the carrier's key: a (row, chunk) tile
+                    and keys[1:3] == (1, need[3])  # one warp column, and that column IS the chunk
+                    and rows[3] == need[4]  # the same register rows the carrier holds
+                )
+            elif offer[0] == "free":
                 compatible = need[0] != "step"
             else:
                 compatible = (

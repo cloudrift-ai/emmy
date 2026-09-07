@@ -232,7 +232,7 @@ def test_promoted_attention_output_sweep_closes_the_a100_b_seam_idempotently() -
     assert all(spec.sweep == () for spec in tile.output_specs)
     assert reconstructed.op is tile.op
     # The authored seam — the score's K cone — is offered on the promoted tree.
-    assert "PLACE@map.1/twist.1/inner.2/map" in {seam.spelling for seam in cuttable_seams(tile)}
+    assert "PLACE@map.1/twist.1/map.1/inner.2/map" in {seam.spelling for seam in cuttable_seams(tile)}
 
 
 # ---- closure at formation ---------------------------------------------------------------------- #
@@ -618,7 +618,7 @@ def test_share_common_cones_unifies_internally_renamed_copies() -> None:
 
     def cone(load: str, product: str, row: str = "m") -> Fold:
         body = Body((Load(name=load, input="x", index=(Var(row), Var("k"))), Assign(name=product, op="multiply", args=(load, load))))
-        return Fold(lift=Lambda.closing(("k",), body, (product,)), init=(0.0,), combine=Lambda.componentwise(("add",), ("acc",)))
+        return Fold(lift=Lambda.closing(("k",), body, (product,)), init=(0.0,), base=Lambda.componentwise(("add",), ("acc",)))
 
     def consumer(inner: Fold, out: str) -> Fold:
         return projection((inner,), (Assign(name=out, op="exp", args=("acc",)),), (out,))

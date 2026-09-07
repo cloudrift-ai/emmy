@@ -1,13 +1,10 @@
-# evidence: the softmax-V half of a head-dim-128 SDPA reaches no warp tier. This is #699's recorded debt — the fused
-# value channel on tensor cores, removed with `_derived_expect_fold` / `_twisted_derived_step` — the same gap
-# `sdpa-computed-value-cut-mma` carries. The P·V half rides the twist's carrier, so this kernel's only contraction site
-# is the score's QK reduce over `a3`, and no mma TILE is offered for the value channel. The row below is a recorded
-# RTX 5090 golden (11.84 us, fast-math) measured on the `attention.hd128.softmax_v` Loop target, a separate
-# softmax-then-value kernel `torch.sdpa` no longer traces to; its `STAGE d1/smem` is the computed-A compute fill, which
-# names no stage the score contraction can realize, so the pin is refused before a row is enumerated and greedy falls
-# to a scalar schedule. Closing the gap means the twist becomes the P·V site (`TILE@map.1/twist`); this row will also
-# need its STAGE keyed to that site, since as spelled it is refused at 5719f823 too, where the removed machinery
-# still stood.
+# evidence: the softmax-V half of a head-dim-128 SDPA. The chunk tier folds this carrier on tensor cores now, so the
+# tree has TWO tile sites — the score's and the carrier's — and the row below is the one-site spelling from before it:
+# a bare `TILE` beside a bare `STAGE d1/smem`, recorded on an RTX 5090 at 11.84 us against the
+# `attention.hd128.softmax_v` Loop target, a separate softmax-then-value kernel `torch.sdpa` no longer traces to. The
+# carrier's site spells no `STAGE` at all (its tier reads every operand gmem-direct), so that half of the pin resolves
+# at no site and the enumeration refuses before a row is offered. Closing the gap means re-recording the row
+# site-scoped on the card, not a change to the tier.
 compute_cap:
 - 12
 - 0
@@ -45,59 +42,49 @@ configs:
       STAGE: d1/smem
       LOOPIFY: '0'
       RASTER: ''
-    identity: 421e8affbf7f698502f4eb4858d5806486f81c8fb99f940d1249d8c7832d3bc2
-  - name: k_sdpa_893d20.d0bcbf49187a.835f8cdcbdf4
+    identity: eb74b174290bc40763cc4c842e3039516584a3fcf05f5703071e81c20e19d04e
+  - name: k_sdpa_6a2bfa.0015e9065043.448a0d722d09
     bindings: {}
     pins:
       FAST_MATH: true
     knobs:
-      TILE@map.1/twist.1/reduce.1/inner: mma_m16n8k16_f16_f32/f1x8
-      TILE@map.1/twist.2/inner: mma_m16n8k16_f16_f32/f1x1/k4
-      TILE@map.1/twist.2/inner.1/map.1/inner: mma_m16n8k16_f16_f32/f1x8
       REDUCE@map.1/twist: ''
-      REDUCE@map.1/twist.1/reduce: ''
-      REDUCE@map.1/twist.1/reduce.1/inner: ''
-      REDUCE@map.1/twist.2/inner: ''
-      REDUCE@map.1/twist.2/inner.1/map.1/inner: ''
-      REDUCE@map.1/twist.3/reduce: ''
-      STAGE@map.1/twist.1/reduce.1/inner: ''
-      STAGE@map.1/twist.2/inner: d1/smem
-      STAGE@map.1/twist.2/inner.1/map.1/inner: ''
-      WORK: w1x1
+      REDUCE@map.1/twist.1/map.1/inner: ''
+      WORK: ''
+      TILE: ''
+      STAGE: ''
       RASTER: ''
-    identity: 835f8cdcbdf469ce1336e667055d746011d9586ecbf98bf80afdba168b1b304b
-  - name: k_sdpa_893d20.d0bcbf49187a.d3fd04f562bc
-    bindings: {}
-    pins:
-      FAST_MATH: true
-    knobs: {}
-    identity: d3fd04f562bcfc86ef391ee5e22de8373759f0574d65ecf9d9f5f48c53a6bcbf
-  - name: k_sdpa_6a2bfa.0015e9065043.025b4fbf4e51
+    identity: 448a0d722d096bccb0149aa890a2192c6719a6d859c56ef0ebeea84fbc5d4afd
+  - name: k_sdpa_6a2bfa.0015e9065043.42f4ac2f45ef
     bindings: {}
     pins:
       FAST_MATH: true
     knobs:
-      TILE@map.1/twist.1/reduce.1/inner: mma_m16n8k16_f16_f32/f1x8
-      TILE@map.1/twist.2/inner: mma_m16n8k16_f16_f32/f1x1/k4
-      TILE@map.1/twist.2/inner.1/map.1/inner: mma_m16n8k16_f16_f32/f1x8
       REDUCE@map.1/twist: ''
-      REDUCE@map.1/twist.1/reduce: ''
-      REDUCE@map.1/twist.1/reduce.1/inner: ''
-      REDUCE@map.1/twist.2/inner: ''
-      REDUCE@map.1/twist.2/inner.1/map.1/inner: ''
-      REDUCE@map.1/twist.3/reduce: ''
-      STAGE@map.1/twist.1/reduce.1/inner: ''
-      STAGE@map.1/twist.2/inner: d1/smem
-      STAGE@map.1/twist.2/inner.1/map.1/inner: ''
-      WORK: w1x1
+      REDUCE@map.1/twist.1/map.1/inner: ''
+      WORK: ''
+      TILE: ''
+      STAGE: ''
       RASTER: ''
-    identity: 025b4fbf4e511ca517ca867a23eb3cd1141c6a9b66376c5d54c964decadc6c80
-  - name: k_sdpa_6a2bfa.0015e9065043.531615f1b378
+    identity: 42f4ac2f45ef1f6aba545a62a12b4888e71f8101e29afb45ebb4af4219d222eb
+  - name: k_sdpa_6a2bfa.0015e9065043.eb74b174290b
     bindings: {}
     pins:
       FAST_MATH: true
     knobs: {}
-    identity: 531615f1b378d5298389389a2c97f470fdf97ec6be88a52e06313465c606a087
+    identity: eb74b174290bc40763cc4c842e3039516584a3fcf05f5703071e81c20e19d04e
+  - name: k_sdpa_6a2bfa.0015e9065043.fb05568f956b
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      REDUCE@map.1/twist: ''
+      REDUCE@map.1/twist.1/map.1/inner: ''
+      WORK: ''
+      TILE: ''
+      STAGE: ''
+      RASTER: ''
+    identity: fb05568f956bc5f3686693caa643bd929543fbeb156ffeaf808ca4ee2c4f2748
 loops:
 - inputs: [x0, x1, x2]
   outputs: [scaled_dot_product_attention]
@@ -137,22 +124,22 @@ loops:
             dtype: null
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 8}, window: null, step: null}}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 8}, window: null}}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 512}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 512}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 512}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 512}, window: null}}
                         body:
                           body:
                           - class: Loop
                             fields:
-                              axis: {class: Axis, fields: {name: a3, extent: {dim: 128}, window: null, step: null}}
+                              axis: {class: Axis, fields: {name: a3, extent: {dim: 128}, window: null}}
                               body:
                                 body:
                                 - class: Load
@@ -197,12 +184,12 @@ loops:
                         seed: true
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 512}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 512}, window: null}}
                         body:
                           body:
                           - class: Loop
                             fields:
-                              axis: {class: Axis, fields: {name: a4, extent: {dim: 128}, window: null, step: null}}
+                              axis: {class: Axis, fields: {name: a4, extent: {dim: 128}, window: null}}
                               body:
                                 body:
                                 - class: Load
@@ -246,17 +233,17 @@ loops:
                       fields: {name: v6, op: {elementwise: reciprocal}, args: {tuple: [acc3]}, dtype: null}
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a5, extent: {dim: 128}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a5, extent: {dim: 128}, window: null}}
                         body:
                           body:
                           - class: Loop
                             fields:
-                              axis: {class: Axis, fields: {name: a6, extent: {dim: 512}, window: null, step: null}}
+                              axis: {class: Axis, fields: {name: a6, extent: {dim: 512}, window: null}}
                               body:
                                 body:
                                 - class: Loop
                                   fields:
-                                    axis: {class: Axis, fields: {name: a7, extent: {dim: 128}, window: null, step: null}}
+                                    axis: {class: Axis, fields: {name: a7, extent: {dim: 128}, window: null}}
                                     body:
                                       body:
                                       - class: Load

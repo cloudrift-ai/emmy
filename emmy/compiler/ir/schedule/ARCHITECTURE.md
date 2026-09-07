@@ -94,18 +94,11 @@ where it does not, one tiled root is the kernel's root and every other reduce lo
 a second output-tiled root among those roots. The row that tiled both — a gate/up projection whose one output reads
 both channels — used to be offered, ranked first, and refused at materialize.
 
-A site INSIDE a block is offered only the tiles that consume exactly that block. Two sites sit
-inside one: the CHANNEL, whose K is the block, so its K-step consumes it in one trip; and the SCORE
-the weight cone reads, whose output covers the block in one fragment grid. Both equations are the
-kernel binder's own — a fragment grid that does not cover the chunk it stores has no seam — so
-reading them here is what keeps a row the binder must refuse from being offered. The scalar tier is
-offered at such a site only when no warp tile fits at all: the block was cut so a channel could
-reach the tensor cores, and it costs a second pass over the stream to do it.
-
-A blocked stream's OUTER axis strides, so every partition sizes itself against `Axis.trips` rather
-than the extent — the coop band's lane share, the ILP remainder, the cross-CTA width. `coop-t` is
-the one band it never takes: it sweeps the OUTPUT axis so B loads coalesce at every k step, and a
-strided reduce axis has no reading of that.
+A CHUNKED carrier's seam is stricter than an ordinary consumer's. The ordinary need tolerates an untiled producer;
+this one is built on the fragment, since the chunk's score IS the producer's tile — so the producer must be
+warp-tiled at the same atom, one warp column wide, with the chunk as its N tile and the same register rows
+(`_fragment_agreements`). That equation is FlashAttention's own shape, and stating it here is what keeps the tier
+from being offered a row its emission would have to ignore.
 
 A pin is a restriction on those projected domains, never a source of choices, so it narrows what a site may select and
 cannot manufacture a value the projection withheld. A value scoped to a site that does not offer it empties that

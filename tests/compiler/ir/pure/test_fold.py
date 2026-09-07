@@ -22,8 +22,8 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Fold, Lambda
-from emmy.compiler.ir.pure.twist import SOFTMAX
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Const, Loop, OutputSpec, Write
+from emmy.compiler.ir.pure.twist import SOFTMAX, Twist
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Loop, OutputSpec, Write
 from tests.compiler.terms import contraction, reduction, slab
 
 M_AXIS, N_AXIS, K_AXIS = Axis("m", Dim(8)), Axis("n", Dim(4)), Axis("k", Dim(16))
@@ -75,7 +75,7 @@ def test_a_multi_channel_term_puts_the_shared_operand_first_at_formation() -> No
     init, combine = (0.0, 0.0), Lambda.componentwise(("add", "add"), ("acc_g", "acc_u"))
     body = (Assign(name="acc_g__v", op="multiply", args=("g", "l")), Assign(name="acc_u__v", op="multiply", args=("u", "l")))
     lift = Lambda.closing(("k", "g", "u", "l"), Body(body), ("acc_g__v", "acc_u__v"))
-    fold = Fold(operands=(g, u, x), lift=lift, init=init, combine=combine)
+    fold = Fold(operands=(g, u, x), lift=lift, init=init, base=combine)
     assert fold.operands == (x, g, u) and fold.lift.params == ("k", "l", "g", "u")
     assert fold.as_contraction() is not None
 
@@ -224,7 +224,7 @@ def test_an_observed_store_rides_the_reduce_loop_after_the_observer() -> None:
     init, combine = (0.0,), Lambda.componentwise(("add",), ("acc",))
     observe = Lambda(params=("k", "acc"), body=Body((Assign(name="acc__obs", op="copy", args=("acc",)),)), results=("acc__obs",))
     lift = Lambda.closing(("k", "y"), Body((Assign(name="acc__v", op="copy", args=("y",)),)), ("acc__v",))
-    scan = Fold(operands=(slab("y", "y", "m", "k"),), lift=lift, init=init, combine=combine, observe=observe)
+    scan = Fold(operands=(slab("y", "y", "m", "k"),), lift=lift, init=init, base=combine, observe=observe)
     store = OutputSpec(write=Write(output="o", index=(Var("m"), Var("k")), value="acc__obs"))
     (loop,) = scan.lower(scan.free_axes, (store,), axes=SCOPE)
     assert [type(stmt).__name__ for stmt in loop.body] == ["Load", "Assign", "Accum", "Assign", "Write"]
@@ -234,10 +234,14 @@ def test_an_observed_store_rides_the_reduce_loop_after_the_observer() -> None:
 
 
 def _twisted(states: tuple[str, str] = ("m", "l")) -> Fold:
-    """The exp-family ``(m, l)`` carrier: the softmax recipe's program over a ``(score, 1)`` singleton."""
-    body = Body((Assign(name="s", op="copy", args=("y",)), Const(name="one", value=1.0)))
-    lift = Lambda.closing(("k", "y"), body, ("s", "one"))
-    return Fold(operands=(slab("y", "y", "m", "k"),), lift=lift, init=(-1e30, 0.0), combine=SOFTMAX.program(states))
+    """The exp-family ``(m, l)`` carrier in the BASE frame: the lift contributes ``(score, exp(score))``
+    to the ``(maximum, add)`` base monoid, and naming the softmax recipe is what derives both the
+    stable ⊕ and the ψ-image ``(score, 1)`` that the step actually folds."""
+    body = Body((Assign(name="s", op="copy", args=("y",)), Assign(name="e", op="exp", args=("s",))))
+    lift = Lambda.closing(("k", "y"), body, ("s", "e"))
+    base = Lambda.componentwise(SOFTMAX.base[:2], states)
+    twist = Twist(recipe=SOFTMAX, channels=(0,))
+    return Fold(operands=(slab("y", "y", "m", "k"),), lift=lift, init=(-1e30, 0.0), base=base, twist=twist)
 
 
 def test_a_twisted_state_spelling_never_reaches_the_canonical_form() -> None:
@@ -252,7 +256,7 @@ def test_a_componentwise_merge_is_one_accum_per_state() -> None:
     init, combine = (0.0, -1e30), Lambda.componentwise(("add", "maximum"), ("acc0", "acc1"))
     body = Body((Assign(name="a0", op="copy", args=("y",)), Assign(name="a1", op="negative", args=("y",))))
     lift = Lambda.closing(("k", "y"), body, ("a0", "a1"))
-    fold = Fold(operands=(slab("y", "y", "m", "k"),), lift=lift, init=init, combine=combine)
+    fold = Fold(operands=(slab("y", "y", "m", "k"),), lift=lift, init=init, base=combine)
     stmts = fold.merge(("acc0__p", "acc1__p"))
     assert [(s.name, s.op.name, s.value) for s in stmts] == [("acc0", "add", "acc0__p"), ("acc1", "maximum", "acc1__p")]
     assert [s.op.identity for s in stmts] == [0.0, -1e30], "the seed the identity placement will emit"
@@ -296,9 +300,12 @@ def test_the_step_is_the_merge_at_the_injected_singleton() -> None:
     """One derivation: the serial step applies the same program at the lift's results, its
     ``Accum`` forms folding over the reduce axis, after the lift body."""
     fold = _twisted()
-    step, merged = fold.step(), fold.merge(fold.lift.results)
-    assert tuple(step[: len(fold.lift.body)]) == tuple(fold.lift.body)
-    assert tuple(step[len(fold.lift.body) :]) == tuple(replace(s, axes=("k",)) if isinstance(s, Accum) else s for s in merged)
+    injected = fold.injected
+    assert injected.results == ("s", "l__one"), "psi takes the base singleton (score, exp score) to (score, 1)"
+    assert "e" not in {stmt.name for stmt in injected.body}, "nothing may see through psi: exp(score) overflows"
+    step, merged = fold.step(), fold.merge(injected.results)
+    assert tuple(step[: len(injected.body)]) == tuple(injected.body)
+    assert tuple(step[len(injected.body) :]) == tuple(replace(s, axes=("k",)) if isinstance(s, Accum) else s for s in merged)
 
 
 # --- the memo ------------------------------------------------------------------------------------ #
@@ -321,7 +328,7 @@ def test_a_consumer_names_what_it_binds_and_rendering_spells_the_operand() -> No
     term: equal canonical forms, equal lowered bodies."""
     y = slab("y", "y", "m", "k")
     lift = Lambda.closing(("k", "value"), Body((Assign(name="acc__v", op="copy", args=("value",)),)), ("acc__v",))
-    fold = Fold(operands=(y,), lift=lift, init=(0.0,), combine=Lambda.componentwise(("add",), ("acc",)))
+    fold = Fold(operands=(y,), lift=lift, init=(0.0,), base=Lambda.componentwise(("add",), ("acc",)))
     assert fold.bindings == (("value", y, 0),) and fold.applied.params == ("k", "y")
     (loop,) = fold.lower(axes=SCOPE)
     assert [stmt.args for stmt in loop.body if isinstance(stmt, Assign)] == [("y",)]

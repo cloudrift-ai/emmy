@@ -55,7 +55,7 @@ from emmy.compiler.ir.schedule.classic import (
     node_id_spelling,
 )
 from emmy.compiler.ir.schedule.views import ContractionFacts
-from emmy.compiler.ir.stmt import Body, Load, Loop, Write
+from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.ops import Sched, chain_form, chain_members, edge_dtypes, kernel_roots, projection_tail, scheduled
@@ -96,10 +96,7 @@ def _reduction_domain(tile: TileOp, node) -> tuple[Reduce, ...]:
         return (Reduce(),)  # the binder partitions the roots it peels and their chain members; any other reduce lowers serially
     if {axis.name for spec in tile.output_specs for axis in spec.sweep} & node.free_axes:
         return (Reduce(),)
-    # ``coop-t`` sweeps the OUTPUT axis so B loads coalesce at every k step, which a STRIDED
-    # reduce axis has no reading of: its k steps are blocks, and one lane per output column would
-    # sweep a block rather than an element. The other bands ride :attr:`Axis.trips` and do.
-    transposed_ok = _transposed_reduction_ok(tile) and is_root and not chain_form(node) and tile.axis_of(node.axis).step is None
+    transposed_ok = _transposed_reduction_ok(tile) and is_root and not chain_form(node)
     return (
         Reduce(),
         *(choice for choice in coop_reduce_moves() if not choice.coop_transposed or (choice.coop % WARP_LANES == 0 and transposed_ok)),
@@ -158,6 +155,8 @@ def _node_refusal(tile: TileOp, target, node, fragment_epilogue: bool, packed: t
     # scheduling site on ANY operand refuses the same way.
     if any(edge.axis is not None for edge in node.operands):
         return "a nested scheduling site inhabits an operand edge"
+    if node.chunked() and (why := _chunk_refusal(tile, node)) is not None:
+        return why
 
     a_edge = node.operands[0]
     dtype = edge_dtypes(a_edge, tile.inputs)[0]
@@ -181,6 +180,33 @@ def _node_refusal(tile: TileOp, target, node, fragment_epilogue: bool, packed: t
         return "a demoting compute fill cannot produce an fp8 fragment"
     if not (atoms_for(atom_dtype, ctx=target) or atoms_for(atom_dtype, acc=atom_dtype, ctx=target)):
         return f"no tensor-core atom takes a {atom_dtype} multiplicand on this target"
+    return None
+
+
+def _chunk_refusal(tile: TileOp, node) -> str | None:
+    """Return why the CHUNK tier cannot fold this twisted carrier, whatever atom is offered.
+
+    Stated at the enumeration, not at the binder: a row nothing realizes costs the greedy a
+    blocklist retry per rank, and there are more ranked rows than the retry budget."""
+    facts = tile.contractions.get(tile.node_id(node))
+    score = facts.producer if facts is not None else None
+    if score is None:
+        return "the chunk tier folds a carrier whose pivot a nested contraction supplies"
+    if any(edge.as_slab() is None for edge in (*score.operands, *node.operands[1:])):
+        return "the chunk tier reads its score operands and its streamed value as slabs"
+    cone = node.operands[0].applied.cone(node.roles[0])
+    if any(not isinstance(stmt, (Assign, Load)) for stmt in cone.body):
+        return "the score's own cone holds more than a straight-line program"
+    # The tier holds ONE accumulator — the expectation — and every other carried state as a per-row
+    # register the store may read but not write out. A cross-CTA split's partial writes the whole
+    # carrier to its workspace, which is a kernel this tier cannot produce.
+    tail = projection_tail(tile)
+    body = Body(tail)
+    expectation = node.base.results[node.bilinear_channels()[0][0]]
+    for write in (stmt for stmt in tail if isinstance(stmt, Write)):
+        reads = set(write.values) | set(body.backward_cone(tuple(write.values)).external_reads)
+        if expectation not in reads:
+            return "the chunk tier writes its expectation; a carried state beside it has no output of its own"
     return None
 
 
@@ -233,6 +259,11 @@ def _atom_families(tile: TileOp, target, node, tail: list, packed: tuple = (None
             name for name in names if _atom_refusal(ATOM_REGISTRY[name], dtype, a_step, a_is_load, tail, tile.place.free, shapes) is None
         )
 
+    # The CHUNK tier hands its weight to the expectation's mma as a register repack of the score's
+    # own C fragments, so only an atom whose two lane maps line up can carry it.
+    if node.chunked():
+        offered = bindable(atoms_for(edge_dtypes(a_edge, tile.inputs)[0], ctx=target))
+        return tuple(name for name in offered if ATOM_REGISTRY[name].c_to_a_repack)
     if (pair := packed[1]) is not None:
         if any(operand.bits is None for operand in pair.b):
             return ()
@@ -264,12 +295,13 @@ def _contraction_domain(
     """Project one contraction's locally realizable scalar and tensor-core choices."""
     per_cell_reductions = _reduction_domain(tile, node) if facts.k_axis.extent.is_static else (Reduce(),)
     allowed_atoms = _warp_atoms(tile, target, node)
-    # A BLOCKED site's K is the block, and the block is whatever this tile's K-step turns out to
-    # be — the two are one quantity, so nothing narrows the other and ``bk`` ranges freely here.
     wide_warp_tiles = tuple(
-        plan for name in allowed_atoms if _kstep_refusal(facts.k_axis, plan := Tile(atom=ATOM_REGISTRY[name], regs=(26, 4), bk=2)) is None
+        plan for name in allowed_atoms if _kstep_refusal(facts.k_axis, (plan := Tile(atom=ATOM_REGISTRY[name], regs=(26, 4), bk=2))) is None
     )
-    scalar_tiles = scalar_tile_moves() if len(node.operands) == 2 else (Tile(),)
+    # The scalar register tier folds the STORED lift, which for a twist is the base contribution
+    # and denotes ``Sum exp(score)``: only the atom tier folds the recipe's chunk patterns instead,
+    # so a twisted carrier's untiled arm is the plain serial fold and nothing between.
+    scalar_tiles = scalar_tile_moves() if len(node.operands) == 2 and node.twist is None else (Tile(),)
     catalog = (
         *scalar_tiles,
         *(plan for plan in warp_tile_moves(allowed_atoms) if _kstep_refusal(facts.k_axis, plan) is None),
@@ -307,9 +339,14 @@ def _options(state: _ProjectionState, node) -> tuple:
         )
         return tuple(ProjectionSchedule(plan) for plan in plans)
 
+    # The CONTRACTION domain is the tile catalog, so it belongs to a node the tiers can fold whole
+    # (:meth:`Fold.tiles_whole`) — the same reading ``TileOp.contracts`` offers a TILE site on. A
+    # twisted carrier reads bilinear on one channel and folds states beside it that are no
+    # accumulator, so it takes the REDUCTION domain like any other carrier; handing it the tile
+    # catalog offered choices no key spells and no row accepts, and cost the sibling score its own.
     choices = (
         _contraction_domain(state.tile, state.target, node, state.tile.contractions[site])
-        if view.as_contraction() is not None
+        if node.tiles_whole()
         else tuple(ReductionSchedule(Tile(), reduction) for reduction in _reduction_domain(state.tile, node))
     )
     valid_choices = []
@@ -324,68 +361,20 @@ def _options(state: _ProjectionState, node) -> tuple:
             and _plan_node_refusal(state.tile, node, choice.tile, geometry, facts) is not None
         ):
             continue
-        valid_choices.append((choice, geometry))
-    # A site INSIDE a block exists to be bilinear. The block was cut so a channel could reach the
-    # tensor cores, and it costs a second pass over the stream to do it — a scalar row there pays
-    # that and buys nothing. So the scalar tier is offered only where no warp tile fits the block
-    # at all, and a warp tile that does not consume the block EXACTLY is not offered: the block is
-    # one step of the stream, and a row that half-covers it emits a different blocking from the
-    # one the term spells. This is blocking's own reading, applied to the sites it created.
-    if any(_block_of(state.tile, node, geometry) is not None for _, geometry in valid_choices):
-        fitting = [
-            choice
-            for choice, geometry in valid_choices
-            if choice.tile.is_warp and not _block_refusal(state.tile, node, choice.tile, geometry)
-        ]
-        valid_choices = fitting or [choice for choice, _ in valid_choices]
-    else:
-        valid_choices = [choice for choice, _ in valid_choices]
+        valid_choices.append(choice)
     if not valid_choices:
         raise ClassicProjectionError(f"classic site {node_id_spelling(site)} has no locally supported choice")
     return tuple(valid_choices)
-
-
-def _block_extent(tile: TileOp, name: str | None) -> int | None:
-    """The block ``name`` walks, when it is a block's INNER axis — the one blocking cut the stream
-    into. The outer axis strides and is not one."""
-    if name is None:
-        return None
-    axis = tile.axis_of(name)
-    window = axis.window
-    return axis.extent.as_static() if window is not None and window.block and axis.step is None else None
-
-
-def _block_of(tile: TileOp, node, geometry) -> int | None:
-    """The block one site's tile has to consume, or ``None`` when the site is not inside a block.
-
-    Two sites sit inside one: the CHANNEL, whose K IS the block; and the SCORE the weight reads,
-    whose output covers the block.
-    """
-    block = _block_extent(tile, node.axis)
-    if block is not None:
-        return block
-    return _block_extent(tile, geometry.axes[1].name if isinstance(geometry, PlacedTile) else None)
-
-
-def _block_refusal(tile: TileOp, node, plan: Tile, geometry) -> bool:
-    """Whether one warp tile inside a block fails to consume exactly that block — the channel's
-    K-step in ONE trip, the score's fragment grid in one cover.
-
-    Both equations are the emitter's own (a fragment grid that does not cover the chunk it stores
-    has no seam), and reading them here is what keeps the enumeration from offering rows the kernel
-    binder must then refuse.
-    """
-    if _block_extent(tile, node.axis) is not None:
-        return plan.atom.atom_k * plan.bk != _block_extent(tile, node.axis)
-    block = _block_of(tile, node, geometry)
-    return block is not None and plan.regs[1] * plan.atom.atom_n != block
 
 
 def _edge_domain(state: _ProjectionState, site: int, choices: tuple) -> tuple[EdgeSchedule, ...]:
     """Project the independent edge catalog; context composition decides compatibility."""
     node = state.tile.sites[site].node
     view = state.tile.views[site]
-    if view.as_contraction() is None:
+    # A transport is a tile's operand fill, so the catalog belongs to a site a tile folds whole —
+    # the same reading ``TileOp.stage_edges`` spells a STAGE key on. A chunked carrier folds whole
+    # and still takes none: its tier is gmem-direct.
+    if not view.tiles_whole() or view.chunked():
         return (EdgeSchedule(Stage.direct()),)
     supported = {}
     direct = EdgeSchedule(Stage.direct())

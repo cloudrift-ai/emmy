@@ -1,5 +1,7 @@
-# evidence: the schedule pins the value channel on tensor cores (the P·V half beside the score's mma) — the twist
-# carries P·V inside its carrier on this tree and offers no child contraction site yet; it realized on main.
+# evidence: the schedule pins the value channel on tensor cores (the P·V half beside the score's mma). The chunk tier
+# folds this carrier now, but the cut materializes the WEIGHT into a workspace, so the carrier's score is a slab and
+# not the nested contraction the tier builds each chunk from — the same gap `matmul/f16-symbolic-computed-a-k-warp`
+# carries. It realized on main, under the blocking rewrite this branch removed.
 # A linear projection supplies SDPA's value operand. Cutting that stored Fold edge must preserve
 # the public f16 tensor dtype so the resulting attention consumer can offer tensor-core schedules.
 compute_cap:
@@ -44,10 +46,10 @@ configs:
       FAST_MATH: false
       PLACE@map.1/twist.3/inner: cut
     knobs:
-      TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x2
+      TILE@map.1/twist.1/map.1/inner: mma_m16n8k16_f16_f32/f1x2
       TILE@map.1/twist: mma_m16n8k16_f16_f32/f1x1
       STAGE@map.1/twist: d1/smem
       WORK: w1x1
       REDUCE: ''
       RASTER: ''
-    identity: e77f8f4ee3821c2bc2c8db5c48fc923d451ebfd5246b80a426cf860f8d179d43
+    identity: 433d4720a7709cdd12128c5a31ae86ff083d0d9f7f30f8b2926539a8f40b713d

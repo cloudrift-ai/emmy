@@ -194,7 +194,6 @@ def test_computed_fold_sites_are_keyed_schedule_sites(case, tile_sites, reduce_s
     assert sum(key == "REDUCE" or key.startswith("REDUCE@") for key in row) == reduce_sites
 
 
-@pytest.mark.xfail(strict=True, reason="fused value channel on tensor cores: not on this tree yet (PR #699)")
 def test_sdpa_fold_tree_offers_a_paired_mma_row(unpinned, monkeypatch) -> None:
     """The walk reaches a row where BOTH flash contractions ride the tensor core — the score's N
     tile feeding the value contraction's streamed K block through the fragment seam."""
@@ -328,13 +327,14 @@ def test_every_computed_statistic_receives_a_node_id(unpinned, monkeypatch) -> N
     rows = _rows(graph)
     assert rows, "the fused attention kernel must still enumerate"
     reduce_keys = {key for row in rows for key in row if key.startswith("REDUCE@")}
-    # Four reduce sites, each keyed by its route: the twisted carrier, the score contraction
-    # under it, and the two norm statistics under the score's Q and K cones.
+    # Four reduce sites, each keyed by its route: the twisted carrier, the score contraction under
+    # its weight cone, and the two norm statistics under the score's Q and K cones. ONE score node —
+    # the cone the carrier's product multiplies by carries it, so no second binder reaches it.
     assert reduce_keys == {
         "REDUCE@map.1/twist",
-        "REDUCE@map.1/twist.1/inner",
-        "REDUCE@map.1/twist.1/inner.1/map.2/map.1/reduce",
-        "REDUCE@map.1/twist.1/inner.2/map.2/map.1/reduce",
+        "REDUCE@map.1/twist.1/map.1/inner",
+        "REDUCE@map.1/twist.1/map.1/inner.1/map.2/map.1/reduce",
+        "REDUCE@map.1/twist.1/map.1/inner.2/map.2/map.1/reduce",
     }
 
 
@@ -504,7 +504,7 @@ def test_a_scoped_partition_pin_on_a_serial_only_chain_site_enumerates_nothing(u
         operands=(inner,),
         lift=Lambda.closing(("j", "acc_inner"), Body(()), ("acc_inner",)),
         init=(0.0,),
-        combine=Lambda.componentwise(("add",), ("acc_outer",)),
+        base=Lambda.componentwise(("add",), ("acc_outer",)),
     )
     root = _chain_root(outer, results=("acc_outer",))
     tile = TileOp(op=root, place=Placement(free=(Axis("m", 4),)), axes=(Axis("m", 4), Axis("j", 4), _K), name="k_chain_probe", knobs={})

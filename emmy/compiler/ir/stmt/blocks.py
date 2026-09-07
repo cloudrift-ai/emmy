@@ -253,6 +253,10 @@ class StridedLoop(Stmt):
     body: Body
     unroll: bool = False
     end: Expr | None = None
+    seed: bool = True  # emit the per-``Accum`` identity seed before the loop; False when the
+    # carrier this loop folds is declared once OUTSIDE it at a seed the term names and the ⊕'s
+    # identity does not (a twisted carrier's pivot seeds at the term's own ``init``, not at
+    # ``maximum``'s neutral element). The same flag ``Loop`` carries, for the same reason.
 
     def __post_init__(self) -> None:
         if not isinstance(self.body, Body):
@@ -273,6 +277,7 @@ class StridedLoop(Stmt):
             body=body,
             unroll=self.unroll,
             end=self.end,
+            seed=self.seed,
         )
 
     def binds_axes(self) -> frozenset[str]:
@@ -308,7 +313,8 @@ class StridedLoop(Stmt):
                 identity = s.op.identity
                 if identity is None:
                     raise ValueError(f"Accum {s.name!r} op {s.op.name!r} has no identity")
-                out.append(f"{pad}{ctx.type_name(s.dtype)} {s.name} = {ctx.identity_literal(identity, s.dtype)};")
+                if self.seed:
+                    out.append(f"{pad}{ctx.type_name(s.dtype)} {s.name} = {ctx.identity_literal(identity, s.dtype)};")
                 ctx.ssa_dtypes[s.name] = (s.dtype or _F32).name
         var = self.axis.name
         start_str = self.start.render(ctx)

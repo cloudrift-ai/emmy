@@ -51,7 +51,9 @@ def _tile(code: str) -> TileOp:
     graph, _, _ = graph_from_code(code)
     graph = Pipeline.build(LOOP_PASSES).run(graph)
     graph = Pipeline.build(["lowering/tile"], select=["lift", "twisted"]).run(graph)
-    return next(node.op for node in graph.nodes.values() if isinstance(node.op, TileOp) and node.id.endswith(("softmax", "attention")))
+    # By the TREE, not the node id: the carrier is what these tests are about, and a softmax fused
+    # into a matmul names its node after neither.
+    return next(node.op for node in graph.nodes.values() if isinstance(node.op, TileOp) and _twisted_folds(node.op.op))
 
 
 def _twisted(code: str) -> Fold:
@@ -60,19 +62,22 @@ def _twisted(code: str) -> Fold:
 
 
 def test_softmax_rewrites_to_twisted_pair() -> None:
-    """The row maximum and the exp-weighted sum fuse into one ``(m, l)`` carrier injecting
-    ``(score, 1)``, the score slab its one operand."""
+    """The row maximum and the exp-weighted sum fuse into one ``(m, l)`` carrier over the BASE
+    monoid: the lift contributes ``(score, exp(score))`` off the score slab, and ψ takes that
+    singleton to ``(score, 1)`` for the step to fold."""
     fold = _twisted("torch.softmax(torch.randn(4, 8, dtype=torch.float16), dim=-1)")
 
-    assert fold.combine == SOFTMAX.program(fold.as_reduction().states)
+    assert fold.twist.recipe is SOFTMAX and fold.combine == SOFTMAX.program(fold.as_reduction().states)
     assert len(fold.init) == 2 and fold.init[1] == 0.0
-    assert [edge.as_slab() is not None for edge in fold.operands] == [True]
-    assert any(isinstance(stmt, Const) and stmt.value == 1.0 for stmt in fold.lift.body)
+    assert [edge.as_slab() is not None for edge in fold.operands] == [True], "the score slab is its one operand"
+    assert [stmt.op.name for stmt in fold.lift.body] == ["exp"], "the base contribution is (score, exp score)"
+    assert any(isinstance(stmt, Const) and stmt.value == 1.0 for stmt in fold.injected.body), "psi injects 1"
 
 
 def test_sdpa_rewrites_to_twisted_expectation() -> None:
-    """Attention's value channel joins the same carrier: three states, the score contraction and
-    the value slab among the operands, and the ``1/l`` factor hoisted into the epilogue above."""
+    """Attention's value channel joins the same carrier, and the carrier comes out A × B: the
+    weight cone leads, the value slab is the streamed operand, and the score contraction sits under
+    the cone — one node, not one per binder. The ``1/l`` factor hoists into the epilogue above."""
     tile = _tile(
         "F.scaled_dot_product_attention("
         "torch.randn(1, 1, 4, 2, dtype=torch.float16), "
@@ -82,8 +87,9 @@ def test_sdpa_rewrites_to_twisted_expectation() -> None:
     (fold,) = _twisted_folds(tile.op)
 
     assert len(fold.init) == 3
-    assert sum(edge.as_contraction() is not None for edge in fold.operands) == 1
-    assert sum(edge.as_slab() is not None for edge in fold.operands) == 2
+    cone, streamed = fold.operands
+    assert cone.axis is None and streamed.as_slab() is not None
+    assert sum(edge.as_contraction() is not None for edge in cone.operands) == 1, "the one score node"
     assert tile.op.axis is None and any(stmt.op.name == "multiply" for stmt in tile.op.lift.body), "the epilogue applies 1/l once"
 
 
@@ -98,10 +104,31 @@ def test_causal_sdpa_uses_the_same_twisted_rewrite() -> None:
     assert len(fold.init) == 3
 
 
+def test_a_score_on_its_own_slab_still_injects_the_streamed_value() -> None:
+    """``psi`` at the singleton takes the expectation channel to the streamed VALUE, whichever edge
+    supplies the score.
+
+    Attention hoists the score and the weight onto one cone, so the weight is the score's own edge
+    and reading the edge alone was enough to tell it from the value. A softmax whose scores arrive
+    as a tensor of their own puts the weight on an edge that is neither — and binding by edge then
+    made the carrier fold ``exp(s)`` where it meant to fold ``v``, which is a wrong answer, not a
+    slow kernel."""
+    fold = _twisted(
+        "torch.matmul(torch.softmax(torch.randn(2, 8, 8, dtype=torch.float16), dim=-1), torch.randn(2, 8, 4, dtype=torch.float16))"
+    )
+
+    (channel, streamed) = fold.bilinear_channels()[0]
+    injected = fold.injected
+    assert injected.results[channel] == streamed.exposes[0], (
+        f"channel {channel} injects {injected.results[channel]!r}; psi takes it to the streamed value "
+        f"{streamed.exposes[0]!r}, and the weight is what it divides out"
+    )
+
+
 def test_sdpa_score_contraction_reaches_the_mma_tier() -> None:
     """The fused carrier keeps the score contraction as an operand site, which the tensor-core
-    tier tiles. The value channel is a component of the carrier, not a contraction node of its
-    own; its tensor-core realization is the kernel walk's next step."""
+    tier tiles — and the carrier itself is a site the chunk tier folds, so the value channel
+    reaches the tensor cores in the same kernel."""
     graph, _, _ = graph_from_code(
         "F.scaled_dot_product_attention("
         "torch.randn(1, 1, 32, 16, dtype=torch.float16), "
@@ -109,9 +136,14 @@ def test_sdpa_score_contraction_reaches_the_mma_tier() -> None:
         "torch.randn(1, 1, 32, 16, dtype=torch.float16))"
     )
     lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((8, 0)))
-    (source,) = (node.op.kernel_source for node in lowered.nodes.values() if isinstance(node.op, CudaOp))
-    assert "acc3__one" not in source or True  # the carrier lowers; what the tier picked is the schedule's
-    assert "__float2half" in source
+    sources = [node.op.kernel_source for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
+    assert sources
+    assert any("emmy_mma_m16n8k16" in source for source in sources), "the score contraction reaches the tensor-core tier"
+    # The kernel that writes the f16 output converts at the boundary — through the explicit packer,
+    # or through the per-element assign a fragment store converts implicitly. Asked of the
+    # FINALIZE, not of the set: a cross-CTA split's partial keeps the carrier in an f32 workspace
+    # and converts nothing.
+    assert "__float2half" in sources[-1] or "half2_rn" in sources[-1] or "acc" in sources[-1]
 
 
 # ===================================================================
@@ -172,9 +204,13 @@ def test_welford_variance_pair_fuses_into_one_carrier() -> None:
     assert view.states == ("acc0", "acc1__n", "acc1__mean", "acc1")
     assert fold.combine.alpha_eq(WELFORD.program(view.states))
     assert fold.init == (0.0, 0.0, 0.0, 0.0)
-    score, one, mean, zero = fold.lift.results
+    score, one, mean, square = fold.lift.results
     consts = {stmt.name: stmt.value for stmt in fold.lift.body if isinstance(stmt, Const)}
-    assert mean == score and consts[one] == 1.0 and consts[zero] == 0.0, "the singleton is (x, 1, x, 0)"
+    products = {stmt.name: stmt.args for stmt in fold.lift.body if isinstance(stmt, Assign) and stmt.op.name == "multiply"}
+    assert mean == score and consts[one] == 1.0, "the base contribution is (x, 1, x, x*x)"
+    assert products[square] == (score, score), "channel 3 squares one edge, so it is no contraction"
+    injected = {stmt.name: stmt.value for stmt in fold.injected.body if isinstance(stmt, Const)}
+    assert injected[fold.injected.results[3]] == 0.0, "psi takes it to 0 — a lone element deviates from its own mean by nothing"
     lowered = fold.lower(axes=axes)
     (loop,) = [stmt for stmt in lowered if isinstance(stmt, Loop)]  # ``1/N`` is hoisted ahead of it
     defined = {loop.axis.name, "a0", *view.states, *(name for stmt in lowered for name in stmt.defines())}

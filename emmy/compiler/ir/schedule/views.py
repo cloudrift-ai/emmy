@@ -36,11 +36,18 @@ def contraction_facts(owner) -> frozendict[NodeId, ContractionFacts]:
     ``owner`` is the kernel that indexes the sites — the :class:`~emmy.compiler.ir.tile.TileOp`,
     read through ``nodes`` / ``node_sites`` / ``views`` / ``node_at`` / ``node_id`` / ``parents`` /
     ``derived``, so this layer states the reading without importing the tile layer that owns it.
+
+    The population is what an atom tier can fold WHOLE (:meth:`Fold.tiles_whole`) — the same
+    reading ``TileOp.contracts`` offers a TILE site on. A twisted carrier reads bilinear on one
+    channel and folds a running maximum beside it, so no tier folds it and it holds no fragment:
+    it consumes its score as a plain value, like any reduce. Deriving facts for it anyway made it
+    claim a fragment ``need`` at the score's seam, and a need no plan can satisfy refused the
+    score its OWN tile.
     """
     facts = {}
     for site in range(len(owner.sites)):
         view = owner.views[site]
-        if view.as_contraction() is None:
+        if not view.tiles_whole():
             continue
         node = owner.sites[site].node
         computed = tuple(edge for edge in node.operands if edge.as_slab() is None)
@@ -54,7 +61,7 @@ def contraction_facts(owner) -> frozendict[NodeId, ContractionFacts]:
             for edge in node.operands
             if edge.as_slab() is None
             for term in _terms(edge)
-            if term.as_contraction() is not None and k_axis.name in term.free_axes
+            if term.tiles_whole() and k_axis.name in term.free_axes
         )
         producer = nested[0] if len(nested) == 1 else None
         facts[site] = ContractionFacts(

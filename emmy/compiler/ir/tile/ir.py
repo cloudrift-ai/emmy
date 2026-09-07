@@ -485,10 +485,18 @@ class TileOp(Op):
         the other side is one no tile strides: a split-K partition (it only ever composes with the
         reduction index) or a reshape residue the other side's reads are value-dead in under this
         kernel's extents. A B that changes with the row it is contracted against — a storage-decode scale
-        read per row, a grouped weight addressed by the row — is no slab per tile."""
+        read per row, a grouped weight addressed by the row — is no slab per tile.
+
+        A carrier the tiers cannot fold WHOLE is no tile site however bilinear one channel reads
+        (:meth:`Fold.tiles_whole`): a twisted carrier holds a running maximum and a denominator
+        beside its expectation, and neither is an mma accumulator — nor is the stored lift what a
+        step may fold there, since for a twist it is the BASE contribution and denotes
+        ``Sum exp(score)``. Refusing HERE rather than at the binder is what keeps the offer honest:
+        a row nothing realizes costs the greedy a blocklist retry per rank, and there are more
+        ranked rows than the retry budget."""
         node = self.views[site]
         view = node.as_contraction()
-        if view is None:
+        if view is None or not node.tiles_whole():
             return False
         if not view.shared_axes or (view.left_axes and view.right_axes):
             return True
@@ -525,8 +533,12 @@ class TileOp(Op):
 
     @cached_property
     def stage_edges(self) -> tuple[EdgeSite, ...]:
-        """The operand positions a ``STAGE`` transport can address."""
-        return tuple(edge for edge in self.edge_sites if self.contracts(edge[0]))
+        """The operand positions a ``STAGE`` transport can address.
+
+        A CHUNKED carrier's are not among them: its tier reads every operand gmem-direct and takes
+        its chunk off the ``TILE``, so a transport spelling there would decide nothing and two rows
+        would name one kernel."""
+        return tuple(edge for edge in self.edge_sites if self.contracts(edge[0]) and not self.views[edge[0]].chunked())
 
     @cached_property
     def _packed_readings(self) -> frozendict:

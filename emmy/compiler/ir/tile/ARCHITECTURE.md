@@ -199,7 +199,7 @@ creates one zero-axis root `Fold` over the lifted cell.
 
 `pipeline/passes/lowering/tile/020_twisted.py` runs after construction canonicalization and before scheduling. It
 tries every twist recipe (`ir/pure/twist.py`) on every reduce that reads a reduce as an operand — the shape the lift
-gives a two-pass softmax — and rewrites the tree's operands onto each fold `Fold.twist` returns, to a fixpoint. Pure
+gives a two-pass softmax — and rewrites the tree's operands onto each fold `Fold.fuse` returns, to a fixpoint. Pure
 softmax is the arity-two case; SDPA adds expectation components, which join by the same call once the `1/l` factor
 constant along the axis has hoisted out of the fold, and a causal mask is simply part of the shared score cone. The
 pass has no operation-family matcher: a recipe clicks by canonical form, or it does not.
@@ -208,7 +208,28 @@ The rewrite consumes the canonical Fold tree. It reuses the registered monoid ge
 and scoped score equivalence both for sibling maximum/additive folds and for the equivalent canonical composition in
 which contraction normalization has placed those statistics inside a computed normalized-exponential operand.
 Normalization factors remain in the projection epilogue, while a directly loaded expectation value becomes a Fold
-operand; the generic twisted Fold derivation then exposes the corresponding contraction to scheduling.
+operand.
+
+What the fused fold STORES is the recipe's own vocabulary: the BASE monoid's per-element contribution as its `lift`,
+that monoid's componentwise ⊕ as its `base`, and the recipe itself — bound to this term's roles — as its `twist`. Both
+halves the term does not store follow from that pair: the stable ⊕ (`Fold.combine`) and the ψ-image of the lift
+(`Fold.injected`), which is the singleton the serial step actually folds. Storing the base is what leaves attention's
+expectation channel spelled as `weight ⊗ value` in the term rather than buried in a rescale program, and the weight's
+cone becomes an operand of its own, so the channel is a bare product of two operand edges. Nothing may see through ψ:
+the base form denotes `Sum exp(score)`, so the step reads the recipe's authored per-channel injections instead of
+evaluating ψ on it, and an operand no rendered statement reads — the weight cone, on the serial nest — is not placed
+at all.
+
+### One reading for "a tier folds this whole"
+
+`Fold.tiles_whole` decides whether a node is a TILE site (`TileOp.contracts`), which schedule domain it takes, what
+transport catalog its edges get, whether it holds a fragment at a seam (`contraction_facts`), and whether a root has
+a chain. Two shapes answer yes. A PLANAR carrier qualifies when every carried state is a bilinear channel — the
+tile's accumulators ARE the carrier. A TWISTED one qualifies through `Fold.chunked`: the recipe names a pattern for
+every state past the pivot, supplies `advance` / `rescale` (the stable ⊕ at an open channel count, which is what a
+per-chunk merge needs), and leaves exactly one bilinear channel, so every other state rides as a per-row scalar and
+the one accumulator is the expectation. Neither reading mentions attention or softmax: a recipe that folded nothing
+but products passes the first, and one shaped like softmax passes the second.
 
 ## Kernel identity
 
@@ -271,20 +292,10 @@ choice. Construction rejects missing, extra, mismatched, or partly attached fact
   positions; it does not mint alternate nodes or edge identities. The derivations memoize on the Fold ROOT, so every
   `TileOp` over one term shares them; the `TileOp` properties are accessors, not a second cache.
 - `path.sites` is a reading of that same walk, adding only what the codec needs: the ROUTE that reaches each site,
-  `(kind departed, operand taken)` per hop. A placement key spells that route —
-  `PLACE@map.1/twist.1/inner.2/map`, each departure as `kind.index`, the arrival's kind last — so it is unique by
-  construction, with no ordinal, no shortest-unique search and no axis name; a stale key fails at the first segment
-  whose kind is not what stands there. The codec owns spelling, resolution and ambiguity — not traversal.
-- An axis `Window` records which rewrite already reshaped the stream it walks: `partition` for the
-  one a cross-CTA split produced, `block` for both axes a blocked stream splits into. Both refuse a
-  second rewrite of the same kind; they differ in what the geometry means, and a nested contraction
-  reads its enclosing fold's axis as the tile's n through exactly that difference — a partition
-  slice reports its pre-split parent (the fragment clamps were built against it) while a block
-  reports its OWN axis, because the enclosing fold walks one block at a time. The two blocked axes
-  are told apart by `Axis.step`, which only the outer one carries: it walks the stream's extent in
-  strides of the block, so no width enters the index arithmetic and `lower` renders it as a
-  `StridedLoop`. `Axis.trips` is the reading every partition sizes itself against — `ceil(extent /
-  step)`, which for a strided axis is not its extent.
+  `(kind departed, operand taken)` per hop. A placement key spells that route — `PLACE@map.1/twist.1/inner.2/map`,
+  each departure as `kind.index`, the arrival's kind last — so it is unique by construction, with no ordinal, no
+  shortest-unique search and no axis name; a stale key fails at the first segment whose kind is not what stands
+  there. The codec owns spelling, resolution and ambiguity — not traversal.
 - `KernelSchedule`, `ProjectionSchedule` / `ReductionSchedule`, and `EdgeSchedule` contain choices only. They do not
   cache paths, classifications, shapes, placed geometry, resolved shared-memory sizes, or codec spellings.
 - `ClassicScheduleContext` derives local support after selecting a node and its incident edges. `extend` composes it
