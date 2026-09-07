@@ -37,17 +37,16 @@ def contraction_facts(owner) -> frozendict[NodeId, ContractionFacts]:
     read through ``nodes`` / ``node_sites`` / ``views`` / ``node_at`` / ``node_id`` / ``parents`` /
     ``derived``, so this layer states the reading without importing the tile layer that owns it.
 
-    The population is what an atom tier can fold WHOLE (:meth:`Fold.tiles_whole`) — the same
-    reading ``TileOp.contracts`` offers a TILE site on. A twisted carrier reads bilinear on one
-    channel and folds a running maximum beside it, so no tier folds it and it holds no fragment:
-    it consumes its score as a plain value, like any reduce. Deriving facts for it anyway made it
-    claim a fragment ``need`` at the score's seam, and a need no plan can satisfy refused the
-    score its OWN tile.
-    """
+    The population is the sites ``TileOp.contracts`` offers a TILE site on: what an atom tier can
+    fold WHOLE (:meth:`Fold.tiles_whole`) as one slab per tile. A twisted carrier folds a running
+    maximum beside its bilinear channel, so no tier folds it and it holds no fragment; deriving facts
+    for it anyway claimed a fragment ``need`` no plan satisfies and refused the score its OWN tile.
+    A B slab that changes with the row it is contracted against folds whole and is still no tile (an
+    mma B fragment is one ``B[k, n]`` for every row); read off ``tiles_whole`` alone, it took the
+    tile catalog with no ``TILE`` key to spell it and emitted B's address with the unsplit row."""
     facts = {}
     for site in range(len(owner.sites)):
-        view = owner.views[site]
-        if not view.tiles_whole():
+        if not owner.contracts(site):
             continue
         node = owner.sites[site].node
         computed = tuple(edge for edge in node.operands if edge.as_slab() is None)
