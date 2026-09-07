@@ -323,7 +323,7 @@ def test_normalization_shares_structurally_identical_cones() -> None:
     sites (attention's softmax statistics, once in the weight cone and once in the epilogue) are
     one object, so placement sees one value and a composed cut materializes it once. Severed
     sharing is the recompute class PR #679 measured at three orders of magnitude."""
-    tile = case_target_tile("attention/rmsnorm-qk-sdpa-composed-cut_xfail_realized.yaml")
+    tile = case_target_tile("attention/rmsnorm-qk-sdpa-composed-cut.yaml")
 
     by_identity = {id(site.node): site.node for site in sites(tile.op)}
     by_value: dict[tuple, list[Fold]] = {}
