@@ -12,7 +12,7 @@ body hard to edit. The ~120-character rule applies to files in the repository, n
 
 ## Abstract
 
-The checked-in bucketing baseline gained four entries spelled without the marker suffix a CUDA test is collected under. A key that never matches is the same as no key at all, so the staleness gate goes on naming those four tests as missing and fails the run it just balanced around them. This spells them the way the gate reads them, and records the one serving-runner pole that crossed five seconds on its own.
+The checked-in bucketing baseline gained four entries spelled without the marker suffix a CUDA test is collected under. A key that never matches is the same as no key at all, so the staleness gate goes on naming those four tests as missing and fails the run it just balanced around them. This spells them the way the gate reads them, and records the two poles that crossed five seconds on their own.
 
 ---
 
