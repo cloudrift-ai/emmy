@@ -7992,18 +7992,18 @@ configs:
     knobs:
       TILE@map.1/inner: ''
       TILE@map.2/inner: ''
-      TILE@map.2/inner.1/map.1/reduce.2/map.1/inner: ''
-      TILE@map.2/inner.1/map.1/reduce.2/map.4/map.1/reduce.1/inner: ''
+      TILE@map.2/inner.1/map.1/inner.2/map.1/inner: ''
+      TILE@map.2/inner.1/map.1/inner.2/map.4/map.1/reduce.1/inner: ''
       REDUCE@map.1/inner: ''
       REDUCE@map.2/inner: ''
-      REDUCE@map.2/inner.1/map.1/reduce: ''
-      REDUCE@map.2/inner.1/map.1/reduce.2/map.1/inner: ''
-      REDUCE@map.2/inner.1/map.1/reduce.2/map.4/map.1/reduce: ''
-      REDUCE@map.2/inner.1/map.1/reduce.2/map.4/map.1/reduce.1/inner: ''
+      REDUCE@map.2/inner.1/map.1/inner: ''
+      REDUCE@map.2/inner.1/map.1/inner.2/map.1/inner: ''
+      REDUCE@map.2/inner.1/map.1/inner.2/map.4/map.1/reduce: ''
+      REDUCE@map.2/inner.1/map.1/inner.2/map.4/map.1/reduce.1/inner: ''
       STAGE@map.1/inner: ''
       STAGE@map.2/inner: ''
-      STAGE@map.2/inner.1/map.1/reduce.2/map.1/inner: ''
-      STAGE@map.2/inner.1/map.1/reduce.2/map.4/map.1/reduce.1/inner: ''
+      STAGE@map.2/inner.1/map.1/inner.2/map.1/inner: ''
+      STAGE@map.2/inner.1/map.1/inner.2/map.4/map.1/reduce.1/inner: ''
       WORK: ''
       RASTER: ''
     identity: ae0ae126827b5b90038b53715f26924c6e7786e0a87e319c7021f984c7910917
@@ -8068,18 +8068,18 @@ configs:
     knobs:
       TILE@map.1/inner: ''
       TILE@map.2/inner: ''
-      TILE@map.2/inner.1/map.1/reduce.2/map.1/inner: ''
-      TILE@map.2/inner.1/map.1/reduce.2/map.4/map.1/reduce.1/inner: ''
+      TILE@map.2/inner.1/map.1/inner.2/map.1/inner: ''
+      TILE@map.2/inner.1/map.1/inner.2/map.4/map.1/reduce.1/inner: ''
       REDUCE@map.1/inner: ''
       REDUCE@map.2/inner: ''
-      REDUCE@map.2/inner.1/map.1/reduce: ''
-      REDUCE@map.2/inner.1/map.1/reduce.2/map.1/inner: ''
-      REDUCE@map.2/inner.1/map.1/reduce.2/map.4/map.1/reduce: ''
-      REDUCE@map.2/inner.1/map.1/reduce.2/map.4/map.1/reduce.1/inner: ''
+      REDUCE@map.2/inner.1/map.1/inner: ''
+      REDUCE@map.2/inner.1/map.1/inner.2/map.1/inner: ''
+      REDUCE@map.2/inner.1/map.1/inner.2/map.4/map.1/reduce: ''
+      REDUCE@map.2/inner.1/map.1/inner.2/map.4/map.1/reduce.1/inner: ''
       STAGE@map.1/inner: ''
       STAGE@map.2/inner: ''
-      STAGE@map.2/inner.1/map.1/reduce.2/map.1/inner: ''
-      STAGE@map.2/inner.1/map.1/reduce.2/map.4/map.1/reduce.1/inner: ''
+      STAGE@map.2/inner.1/map.1/inner.2/map.1/inner: ''
+      STAGE@map.2/inner.1/map.1/inner.2/map.4/map.1/reduce.1/inner: ''
       WORK: ''
       RASTER: ''
     identity: c50011e472ba20eaee0cf874d489c4ee89abf78c99d6eb32a08848935600ced5
@@ -8144,18 +8144,18 @@ configs:
     knobs:
       TILE@map.1/inner: ''
       TILE@map.2/inner: ''
-      TILE@map.2/inner.2/map.1/reduce.2/map.1/inner: ''
-      TILE@map.2/inner.2/map.1/reduce.2/map.4/map.1/reduce.1/inner: ''
+      TILE@map.2/inner.2/map.1/inner.2/map.1/inner: ''
+      TILE@map.2/inner.2/map.1/inner.2/map.4/map.1/reduce.1/inner: ''
       REDUCE@map.1/inner: ''
       REDUCE@map.2/inner: ''
-      REDUCE@map.2/inner.2/map.1/reduce: ''
-      REDUCE@map.2/inner.2/map.1/reduce.2/map.1/inner: ''
-      REDUCE@map.2/inner.2/map.1/reduce.2/map.4/map.1/reduce: ''
-      REDUCE@map.2/inner.2/map.1/reduce.2/map.4/map.1/reduce.1/inner: ''
+      REDUCE@map.2/inner.2/map.1/inner: ''
+      REDUCE@map.2/inner.2/map.1/inner.2/map.1/inner: ''
+      REDUCE@map.2/inner.2/map.1/inner.2/map.4/map.1/reduce: ''
+      REDUCE@map.2/inner.2/map.1/inner.2/map.4/map.1/reduce.1/inner: ''
       STAGE@map.1/inner: ''
       STAGE@map.2/inner: ''
-      STAGE@map.2/inner.2/map.1/reduce.2/map.1/inner: ''
-      STAGE@map.2/inner.2/map.1/reduce.2/map.4/map.1/reduce.1/inner: ''
+      STAGE@map.2/inner.2/map.1/inner.2/map.1/inner: ''
+      STAGE@map.2/inner.2/map.1/inner.2/map.4/map.1/reduce.1/inner: ''
       WORK: ''
       RASTER: ''
     identity: c3ab176921568e0ddc9b4ba9974e0dd36d80db17c592b81cbdeb625806082987
@@ -8891,18 +8891,18 @@ configs:
     knobs:
       TILE@map.1/inner: ''
       TILE@map.2/inner: ''
-      TILE@map.2/inner.1/map.1/reduce.2/map.1/inner: ''
-      TILE@map.2/inner.1/map.1/reduce.2/map.4/map.1/reduce.1/inner: ''
+      TILE@map.2/inner.1/map.1/inner.2/map.1/inner: ''
+      TILE@map.2/inner.1/map.1/inner.2/map.4/map.1/reduce.1/inner: ''
       REDUCE@map.1/inner: ''
       REDUCE@map.2/inner: ''
-      REDUCE@map.2/inner.1/map.1/reduce: ''
-      REDUCE@map.2/inner.1/map.1/reduce.2/map.1/inner: ''
-      REDUCE@map.2/inner.1/map.1/reduce.2/map.4/map.1/reduce: ''
-      REDUCE@map.2/inner.1/map.1/reduce.2/map.4/map.1/reduce.1/inner: ''
+      REDUCE@map.2/inner.1/map.1/inner: ''
+      REDUCE@map.2/inner.1/map.1/inner.2/map.1/inner: ''
+      REDUCE@map.2/inner.1/map.1/inner.2/map.4/map.1/reduce: ''
+      REDUCE@map.2/inner.1/map.1/inner.2/map.4/map.1/reduce.1/inner: ''
       STAGE@map.1/inner: ''
       STAGE@map.2/inner: ''
-      STAGE@map.2/inner.1/map.1/reduce.2/map.1/inner: ''
-      STAGE@map.2/inner.1/map.1/reduce.2/map.4/map.1/reduce.1/inner: ''
+      STAGE@map.2/inner.1/map.1/inner.2/map.1/inner: ''
+      STAGE@map.2/inner.1/map.1/inner.2/map.4/map.1/reduce.1/inner: ''
       WORK: ''
       RASTER: ''
     identity: b31f9309a92c63d6943f2a794147e2294897f5420dc7c1ce257ce9df2857f9bd
@@ -8990,30 +8990,30 @@ configs:
     knobs:
       TILE@map.1/map.1/reduce.1/inner: ''
       TILE@map.1/map.2/reduce.1/inner: ''
-      TILE@map.1/map.2/reduce.1/inner.1/map.1/reduce.2/map.1/inner: ''
-      TILE@map.1/map.2/reduce.1/inner.1/map.1/reduce.2/map.5/map.2/reduce.1/inner: ''
+      TILE@map.1/map.2/reduce.1/inner.1/map.1/inner.2/map.1/inner: ''
+      TILE@map.1/map.2/reduce.1/inner.1/map.1/inner.2/map.5/map.2/reduce.1/inner: ''
       TILE@map.2/inner: ''
       TILE@map.3/inner: ''
-      TILE@map.3/inner.1/map.1/reduce.2/map.1/inner: ''
+      TILE@map.3/inner.1/map.1/inner.2/map.1/inner: ''
       REDUCE@map.1/map.1/reduce: ''
       REDUCE@map.1/map.1/reduce.1/inner: ''
       REDUCE@map.1/map.2/reduce: ''
       REDUCE@map.1/map.2/reduce.1/inner: ''
-      REDUCE@map.1/map.2/reduce.1/inner.1/map.1/reduce: ''
-      REDUCE@map.1/map.2/reduce.1/inner.1/map.1/reduce.2/map.1/inner: ''
-      REDUCE@map.1/map.2/reduce.1/inner.1/map.1/reduce.2/map.5/map.2/reduce: ''
-      REDUCE@map.1/map.2/reduce.1/inner.1/map.1/reduce.2/map.5/map.2/reduce.1/inner: ''
+      REDUCE@map.1/map.2/reduce.1/inner.1/map.1/inner: ''
+      REDUCE@map.1/map.2/reduce.1/inner.1/map.1/inner.2/map.1/inner: ''
+      REDUCE@map.1/map.2/reduce.1/inner.1/map.1/inner.2/map.5/map.2/reduce: ''
+      REDUCE@map.1/map.2/reduce.1/inner.1/map.1/inner.2/map.5/map.2/reduce.1/inner: ''
       REDUCE@map.2/inner: ''
       REDUCE@map.3/inner: ''
-      REDUCE@map.3/inner.1/map.1/reduce: ''
-      REDUCE@map.3/inner.1/map.1/reduce.2/map.1/inner: ''
+      REDUCE@map.3/inner.1/map.1/inner: ''
+      REDUCE@map.3/inner.1/map.1/inner.2/map.1/inner: ''
       STAGE@map.1/map.1/reduce.1/inner: ''
       STAGE@map.1/map.2/reduce.1/inner: ''
-      STAGE@map.1/map.2/reduce.1/inner.1/map.1/reduce.2/map.1/inner: ''
-      STAGE@map.1/map.2/reduce.1/inner.1/map.1/reduce.2/map.5/map.2/reduce.1/inner: ''
+      STAGE@map.1/map.2/reduce.1/inner.1/map.1/inner.2/map.1/inner: ''
+      STAGE@map.1/map.2/reduce.1/inner.1/map.1/inner.2/map.5/map.2/reduce.1/inner: ''
       STAGE@map.2/inner: ''
       STAGE@map.3/inner: ''
-      STAGE@map.3/inner.1/map.1/reduce.2/map.1/inner: ''
+      STAGE@map.3/inner.1/map.1/inner.2/map.1/inner: ''
       WORK: ''
       RASTER: ''
     identity: ebb4b8731a17996e375c700f9e0acf243bb1abfb8008b29099940eac7a4a5c13
@@ -9229,9 +9229,7 @@ loops:
             dtype: null
         - class: Loop
           fields:
-            axis:
-              class: Axis
-              fields: {name: a0, extent: {dim: {sym: num_tokens, hint: 512}}, window: null}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: {sym: num_tokens, hint: 512}}, window: null}}
             body:
               body:
               - class: Loop
@@ -9703,9 +9701,7 @@ loops:
             dtype: null
         - class: Loop
           fields:
-            axis:
-              class: Axis
-              fields: {name: a0, extent: {dim: {sym: num_tokens, hint: 512}}, window: null}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: {sym: num_tokens, hint: 512}}, window: null}}
             body:
               body:
               - class: Loop
@@ -11891,9 +11887,7 @@ loops:
             dtype: null
         - class: Loop
           fields:
-            axis:
-              class: Axis
-              fields: {name: a0, extent: {dim: {sym: num_tokens, hint: 512}}, window: null}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: {sym: num_tokens, hint: 512}}, window: null}}
             body:
               body:
               - class: Loop
@@ -12624,9 +12618,7 @@ loops:
             dtype: null
         - class: Loop
           fields:
-            axis:
-              class: Axis
-              fields: {name: a0, extent: {dim: {sym: num_tokens, hint: 512}}, window: null}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: {sym: num_tokens, hint: 512}}, window: null}}
             body:
               body:
               - class: Loop
@@ -12980,9 +12972,7 @@ loops:
             dtype: null
         - class: Loop
           fields:
-            axis:
-              class: Axis
-              fields: {name: a0, extent: {dim: {sym: num_tokens, hint: 512}}, window: null}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: {sym: num_tokens, hint: 512}}, window: null}}
             body:
               body:
               - class: Loop
@@ -15325,9 +15315,7 @@ loops:
             dtype: null
         - class: Loop
           fields:
-            axis:
-              class: Axis
-              fields: {name: a0, extent: {dim: {sym: num_tokens, hint: 512}}, window: null}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: {sym: num_tokens, hint: 512}}, window: null}}
             body:
               body:
               - class: Loop
@@ -16781,9 +16769,7 @@ loops:
             dtype: null
         - class: Loop
           fields:
-            axis:
-              class: Axis
-              fields: {name: a0, extent: {dim: {sym: num_tokens, hint: 512}}, window: null}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: {sym: num_tokens, hint: 512}}, window: null}}
             body:
               body:
               - class: Loop
@@ -19236,9 +19222,7 @@ loops:
           fields: {name: v2, op: {elementwise: reciprocal}, args: {tuple: [in4]}, dtype: null}
         - class: Loop
           fields:
-            axis:
-              class: Axis
-              fields: {name: a0, extent: {dim: {sym: num_tokens, hint: 512}}, window: null}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: {sym: num_tokens, hint: 512}}, window: null}}
             body:
               body:
               - class: Loop

@@ -230,6 +230,15 @@ Five rules make it load-bearing:
 5. **Preserve the leading comment block.** `dump_golden_file` is a plain YAML dump and drops comments, so a naive
    rewrite would eat the `# evidence:` line on every regeneration.
 
+**The authored half rots differently.** Those five rules are about the DERIVED half, and they all assume the case still
+loads. When an IR dataclass loses a field, every case whose stored program serialized it stops parsing —
+`load_golden_file` refuses the whole document on an unknown field, so `test_case_derived_half_is_current` reports a
+load error instead of a mismatch, and regeneration cannot help because it has nothing to read. The fix belongs with the
+commit that retires the field: drop the retired key from the stored programs. That is lossless exactly when the field
+sits at its default in every case, which is the ordinary situation for one only a now-deleted construct ever set; a
+case that used the construct for real has lost its program and needs re-authoring, not editing. So retiring an IR field
+means grepping the corpus for its wire name, not only re-running regeneration.
+
 ## Adding a case
 
 ```bash

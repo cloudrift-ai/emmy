@@ -1454,8 +1454,10 @@ def _write_ab_json(
     from emmy.compiler.pipeline.knob import complete_kernel_row, schedule_row_key, tuning_knob_items  # noqa: PLC0415
 
     def _record_row(knobs: dict) -> dict:
-        # A forkless kernel's row is its OFF anchors with no node assignment — the one row a golden
-        # entry for it spells — which ``complete_kernel_row`` refuses; record it as-is.
+        # The canonical row a golden entry for this kernel spells — including a forkless kernel's,
+        # which is its OFF anchors alone. A row ``complete_kernel_row`` still refuses is malformed
+        # (a missing kernel family, a non-canonical site key), and one such kernel must not sink
+        # the whole record, so it lands as its schedule key.
         try:
             return complete_kernel_row(knobs)
         except ValueError:

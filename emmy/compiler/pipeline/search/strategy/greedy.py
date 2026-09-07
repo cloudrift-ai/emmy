@@ -48,9 +48,13 @@ class GreedyStrategy(SearchStrategy):
     * **Prior-off re-resolve** — when the blocklist budget exhausts, one final resolve without
       the prior (emission-order pick) drops the extrapolation that overflowed; the measured
       arms still decide the kernel-set forks they spell, and ``blocked`` rides along.
-    * **Loud failure** — a rejection that left its node un-lowered raises
+    * **Loud failure** — a node the settled terminal left un-lowered raises
       :class:`~emmy.compiler.pipeline.pipeline.LoweringError` instead of a downstream
-      ``CudaBackend`` mystery.
+      ``CudaBackend`` mystery. What counts as un-lowered is the whole terminal when the
+      pipeline runs to the end of lowering (:attr:`Pipeline.lowers_to_cuda`), not just the
+      nodes a rule recorded a rejection for — a materializer that declines a row with an
+      ordinary ``RuleSkipped`` records nothing and used to escape every one of the fallbacks
+      above, returning a half-lowered graph the compile reported as a success.
     """
 
     def __init__(self, pipeline, *, backend=None, db=None, dump=None) -> None:
@@ -69,12 +73,15 @@ class GreedyStrategy(SearchStrategy):
         db = self.db if self.db is not None else SearchDB()
         t_start = time.monotonic()
 
+        # Only a pipeline that runs to the final lowering pass promises a Graph[CudaOp]; a
+        # truncated build terminates in an earlier dialect, where a surviving tile is the answer.
+        complete = pipeline.lowers_to_cuda
         blocked: dict[str, set[frozenset]] = {}
         for _attempt in range(_MAX_GREEDY_RETRIES):
             rejections: list[tuple[str, str, str]] = []
             run = Run(pipeline=pipeline, ctx=ctx, db=db, backend=backend, dump=dump, rejections=rejections)
             terminal, trace = run.resolve(graph.copy(), greedy_decide(blocked=blocked, db=db))
-            stuck = _stuck(terminal, rejections)
+            stuck = _stuck(terminal, rejections, lowers_to_cuda=complete)
             if not stuck or not _retire(blocked, trace, stuck):
                 break
         # The prior-ranked tiles all overflowed ``validate(ctx)`` within the retry budget — an
@@ -84,25 +91,36 @@ class GreedyStrategy(SearchStrategy):
         # the quality of what emission order lands on. When that leaf overflows too the
         # re-resolve stays un-lowered and ``_raise_on_unlowered`` fires below, exactly as
         # before.
-        if _stuck(terminal, rejections):
+        if _stuck(terminal, rejections, lowers_to_cuda=complete):
             rejections = []
             run = Run(pipeline=pipeline, ctx=ctx, db=db, backend=backend, dump=dump, rejections=rejections)
             terminal, _ = run.resolve(graph.copy(), greedy_decide(blocked=blocked, prior=None, db=db))
-        _raise_on_unlowered(terminal, rejections, ctx)
+        _raise_on_unlowered(terminal, rejections, lowers_to_cuda=complete)
         logger.info("compile: total %.2fs (deterministic resolve)", time.monotonic() - t_start)
         return terminal
 
 
-def _stuck(graph: Graph, rejections: list[tuple[str, str, str]]) -> dict[str, tuple[str, str]]:
-    """``{node_id: (pass_label, reason)}`` for every node a ``validate(ctx)`` rejection
-    (see :func:`Candidate.try_rewrite`) left un-lowered — still a pre-final ``LoopOp`` /
-    ``TileOp`` at the terminal: the over-budget tile→kernel drop leaves a knob-stamped
-    ``TileOp``, a pre-tile drop a ``LoopOp``. A node a later rule lowered anyway is a
-    harmless intermediate filter, and partial pipelines that legitimately terminate at the
-    loop / tile stage record no rejection at all. The last recorded rejection of a node
-    wins (the final pass that tried to lower it)."""
+def _stuck(graph: Graph, rejections: list[tuple[str, str, str]], *, lowers_to_cuda: bool) -> dict[str, tuple[str, str]]:
+    """``{node_id: (pass_label, reason)}`` for every node the resolution left un-lowered — still a
+    pre-final ``LoopOp`` / ``TileOp`` at the terminal: the over-budget tile→kernel drop leaves a
+    knob-stamped ``TileOp``, a pre-tile drop a ``LoopOp``. A node a later rule lowered anyway is a
+    harmless intermediate filter. The last recorded rejection of a node wins (the final pass that
+    tried to lower it); a node stranded with none is reported by the op it is stuck on.
+
+    ``lowers_to_cuda`` (:attr:`Pipeline.lowers_to_cuda`) decides which nodes are eligible. A
+    pipeline that runs to the end of lowering promises a ``Graph`` of ``CudaOp``, so EVERY
+    surviving tile is stranded, whether or not a rule recorded a rejection: a materializer that
+    declines a row with an ordinary ``RuleSkipped``, or a rule that never matched, strands the node
+    just as thoroughly as an all-options-filtered one and records nothing. A truncated pipeline
+    terminates in an earlier dialect by design, so there only a node with a recorded rejection
+    counts."""
     last = {nid: (pass_label, reason) for nid, pass_label, reason in rejections}
-    return {nid: why for nid, why in last.items() if (node := graph.nodes.get(nid)) is not None and isinstance(node.op, (LoopOp, TileOp))}
+    eligible = graph.nodes.keys() if lowers_to_cuda else last.keys()
+    return {
+        nid: last.get(nid, ("no lowering rule produced a kernel", f"the node is still a {type(node.op).__name__}"))
+        for nid in eligible
+        if (node := graph.nodes.get(nid)) is not None and isinstance(node.op, (LoopOp, TileOp))
+    }
 
 
 def _retire(blocked: dict[str, set[frozenset]], trace: list[Decision], stuck: dict[str, tuple[str, str]]) -> bool:
@@ -146,17 +164,17 @@ def _block(blocked: dict[str, set[frozenset]], pick: Decision) -> bool:
     return True
 
 
-def _raise_on_unlowered(graph: Graph, rejections: list[tuple[str, str, str]], ctx) -> None:
-    """Fail a greedy compile loudly when a recorded ``validate(ctx)`` rejection left its node
-    un-lowered (:func:`_stuck`) instead of leaking the pre-final op to the backend."""
-    stuck = _stuck(graph, rejections)
+def _raise_on_unlowered(graph: Graph, rejections: list[tuple[str, str, str]], *, lowers_to_cuda: bool) -> None:
+    """Fail a greedy compile loudly when the settled terminal still holds a pre-final dialect op
+    (:func:`_stuck`, which ``lowers_to_cuda`` scopes) instead of leaking it to the backend."""
+    stuck = _stuck(graph, rejections, lowers_to_cuda=lowers_to_cuda)
     if not stuck:
         return
-    lines = [f"  - {nid!r}: {pass_label} rejected its only lowering — {reason}" for nid, (pass_label, reason) in stuck.items()]
+    lines = [f"  - {nid!r}: {pass_label} — {reason}" for nid, (pass_label, reason) in sorted(stuck.items())]
     raise LoweringError(
-        f"compile: {len(stuck)} node(s) left un-lowered — the chosen tile shape produced a kernel that "
-        f"failed validate(ctx) and the deterministic compile had no fallback:\n"
+        f"compile: {len(stuck)} node(s) left un-lowered — the deterministic compile exhausted its "
+        f"fallbacks and has no kernel for them:\n"
         + "\n".join(lines)
         + "\nPin a fitting tile via EMMY_KNOBS, raise the smem budget, or adjust tile-geometry "
-        "scoring so an in-budget variant ranks first."
+        "scoring so a variant this lowering accepts ranks first."
     )

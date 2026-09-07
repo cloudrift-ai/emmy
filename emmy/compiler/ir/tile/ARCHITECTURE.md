@@ -114,6 +114,12 @@ same closed operand edges and placement seams. The invariant also applies when a
 an already-mapped Tile: promotion extends the grid in lockstep with the free axes, so per-cell replication never
 mistakes the swept coordinate for an SSA name.
 
+That rule is `promoted_sweep`, and it has two readers. Construction applies it. The placement fork asks it of a
+CANDIDATE piece: where a kernel's stores ride axes with no axis in common, nothing promotes and the whole kernel keeps
+its one-axis grid, yet each store taken alone may promote its own — the NVFP4 encode, whose packed codes ride the
+feature axis and whose block scales ride one sixteenth of it. That is the question the output-owning cut is offered
+on (`lowering/tile/_cut.py`). Stating the rule once keeps the two answers one rule rather than two copies of it.
+
 **Storage-decode factors hoist to the epilogue.** A product argument whose cone is a STORAGE DECODE
 (`ElementwiseImpl.decodes` — the trait, never an op-name list) times factors constant along the fold
 axis is not left as a computed cone. Formation splits it: the decode is absorbed by the raw slab's storage
@@ -339,6 +345,12 @@ from the kernel it replaced and is decided from the rows of its own signature.
 A computed edge injected into a twisted expectation is already the operand of the derived contraction that appears
 when placement materializes it. Its workspace therefore uses the consumer's public store dtype, not the producer's
 f32 reduction-carrier dtype; otherwise the materialized B slab would make every f16 tensor-core atom ineligible.
+
+The operand cones of a block-scaled packed pair are the one exception: they are not seams. That reading is a property
+of the cone, and it is what the packed-pair cell binds on — its codes and its block scale are already loads, and the
+cone only decodes them, so materializing it stores the decoded values and leaves the consumer with neither. Nothing
+reaches memory that was not there before, and every occurrence the seam stands for loses the cell. The contraction's
+own seam stays offered, which is the cut that gives a piece the output-axis pair a fragment needs.
 
 Scheduling sees only the rewritten stored Fold tree. Every Fold has one node site; the scheduler does not suppress a
 child because its parent may realize it. A derived unit-axis

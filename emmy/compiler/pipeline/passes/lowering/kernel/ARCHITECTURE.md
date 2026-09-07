@@ -18,6 +18,15 @@ memory-effect reading neither has: a `Write` or an async fill between two identi
 second a different value. A same-name repeat cannot hide such a reload, since a rebind in one C scope is already
 illegal. A name re-bound to a DIFFERENT address is left alone: that is an SSA fault and must surface as one.
 
+The finished body then answers the complementary question, `_unbound_names`: does it read anything its launch never
+supplies? A well-formed kernel reads its own buffers, the symbolic extents passed beside them and the renderer's CTA
+helpers (`lane` / `warp`), and nothing else — every other name is bound by a statement or an enclosing axis, which is
+what `free_names` subtracts. What survives is a value some emission referred to under a spelling nothing defines: a
+per-cell rename whose shared coordinates missed an axis, a staged fill whose σ left a tile axis free, a workspace read
+a boundary store was not re-spelled for. Each of those reached nvcc as *identifier "x" is undefined*, a hundred
+errors deep in a generated source and charged to whichever candidate the tuner happened to be benching. Asserting it
+here names the kernel and the value instead, in the pass that built them.
+
 `factorize` builds the ambient `Ctx` and dispatches `tile.op` through `_factorize`, which peels projecting zero-axis
 `Fold`s and binds each leaf via the ONE root-binding pipeline (`_factor._bind`) — its form is read off the node's
 SCHEDULE (which axes are tiled), never a kernel kind, and
@@ -203,11 +212,16 @@ structurally different primitives — sit behind one `fill`/`commit`/`wait` seam
 **one atom-agnostic driver** (`_atom._staged`) builds the operand pair + the transport for either atom; the atom
 supplies only the slab drain leaf via `_AtomOps.staged_drain` (the shared inner fragment drain
 `_staged_inner_atom_loop` — `ldmatrix` on modern atoms, a cooperative shared gather on Volta — or the scalar
-`_scalar_drain`). A fill's gmem-address σ — and a gmem-direct fragment load's — binds **every** tiled output axis,
-not just the operand's own: the tile axis at `tile_base + cell` (masked axes clamp in-bounds) and the SIBLING axis at
-its block base — a slab is CTA-shared across the sibling and a fragment is one `B[k, n]` for every row, so a sibling
-var can only survive as a value-dead flat-index reshape residue (a merged / reshaped weight row), and left unbound it
-would emit the unsplit axis name the kernel no longer defines. The staging **decision** does not live here at all: the
+`_scalar_drain`). A fill's σ binds **every** tiled output axis, not just the operand's own: the tile
+axis at `tile_base + cell` (masked axes clamp in-bounds) and the SIBLING axis at its block base — a slab is
+CTA-shared across the sibling, so a sibling var can only survive as a value-dead occurrence: a flat-index reshape
+residue on a merged / reshaped weight row, or, in a packed weight's block-scale fill, a per-tensor scale a placement
+cut moved into a workspace the consuming kernel indexes by its outer free axes. Left unbound either would emit the
+unsplit axis name the kernel no longer defines. The same binding covers the gmem-direct fragment read of an
+**unstaged** operand (`_MmaOps.read_row` / `read_col`), where the invariance is the warp's rather than the CTA's: an A
+fragment serves every cell of its register row, so its address is n-invariant in value, and a split-K partition that
+placed its `ksplit` coordinate on n is the syntactic occurrence that survives. The staging **decision** does not live
+here at all: the
 `ResolvedStage` in `ClassicMaterialization` arrives **already resolved** by the scheduler (transport eligibility, the
 slab names, K-chunk `bk_elems`, and depth clamps). A direct edge has an explicit direct `Stage` choice and no resolved
 materialization. The `state` builder (which slots the operand fragments) and shared `reduce` (which emits the loop)
@@ -243,10 +257,8 @@ bilinear channel, so that the tile's accumulators are the carrier itself. Both t
 channel and have no residence for a state that is not one; nor is the stored `lift` what a step may fold there, since
 for a twist it is the BASE contribution and denotes `Sum exp(score)`. Nothing may see through psi.
 
-That reading, with the one-slab-per-tile reading of the pair's shared coordinates (a B slab that changes with the row
-it is contracted against is no tile: an mma B fragment is one `B[k, n]` for every row), is `TileOp.contracts`, and it
-decides three things together: whether the node is a TILE site, whether it takes the contraction or the reduction
-schedule domain, and whether its edges get a transport catalog; `tiles_whole` alone decides whether a root has a
+That one reading decides four things together: whether `TileOp.contracts` offers a TILE site, whether the node takes
+the contraction or the reduction schedule domain, whether its edges get a transport catalog, and whether a root has a
 chain. Refusing at the enumeration rather than at the binder is deliberate — an offered row nothing realizes costs the
 greedy one blocklist retry per rank, and there are more ranked rows than the retry budget, so a pinned P·V shape wedged
 with an unlowered `TileOp` instead of falling back.
@@ -456,6 +468,8 @@ a fixpoint (fresh `_r{depth}` per pass; already-arrayed `fam[i]` refs re-parsed)
 pass k re-rolls the inner N-atoms, pass k+1 sees the resulting sibling loops as a run and wraps them. Correctness is
 structural: an unrolled congruent run executes in the SAME order as the original straight-line statements, so a template
 that reproduces every window is byte-identical after nvcc unrolls — identical SASS.
+Only the family's `RegFragment` decl carries its dtype, so a render that needs a fragment reference's dtype reads it
+off the stem (`kernel.ir.frag_dtype`) — an arrayed member is `fam[_r]`, which no declaration names.
 A readability lever for `--ir cuda` inspection, `N=4` the recommended sweet spot (skips the 2-long runs).
 Two orthogonal readability transforms ride alongside: `FragmentApply` **always** renders as one element
 `#pragma unroll for (_e)` loop (the ROW operand as the row-split ternary `_e < 2 ? row0 : row1`), so a re-rolled family
