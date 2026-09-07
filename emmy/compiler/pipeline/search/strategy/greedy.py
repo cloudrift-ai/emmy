@@ -82,7 +82,9 @@ class GreedyStrategy(SearchStrategy):
         # A measured route row that marks several seams of one kernel is the composed decision a
         # pinned compile consumed them as; the cut pass offers that arm beside its single seams so
         # the row can spell it (``spelled_arm``), the way the pinned compile that measured it did.
-        with composed_routes(_measured_composed_routes(db, ctx)):
+        # Only a pipeline that reaches the cut pass consults it: the loop-level lowerings a golden
+        # record's derivations run (hundreds per file) never do, and must not pay the evidence import.
+        with composed_routes(_measured_composed_routes(db, ctx) if complete else []):
             for _attempt in range(_MAX_GREEDY_RETRIES):
                 rejections: list[tuple[str, str, str]] = []
                 run = Run(pipeline=pipeline, ctx=ctx, db=db, backend=backend, dump=dump, rejections=rejections)
