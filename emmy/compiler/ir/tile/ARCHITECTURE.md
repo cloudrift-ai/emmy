@@ -120,6 +120,11 @@ its one-axis grid, yet each store taken alone may promote its own — the NVFP4 
 feature axis and whose block scales ride one sixteenth of it. That is the question the output-owning cut is offered
 on (`lowering/tile/_cut.py`). Stating the rule once keeps the two answers one rule rather than two copies of it.
 
+The root-ownership refusal has the same shape. `refused_roots` answers which contraction roots a kernel will not bind
+together — two or more of them and an output partition that fails — and two readers ask it rather than restate it: the
+schedule projection refuses a prefix that output-tiles a second of them, and the placement fork offers the shared-root
+cut, handing every one of them but the first its own kernel. Neither reader changes the kernel binder's rule.
+
 **Storage-decode factors hoist to the epilogue.** A product argument whose cone is a STORAGE DECODE
 (`ElementwiseImpl.decodes` — the trait, never an op-name list) times factors constant along the fold
 axis is not left as a computed cone. Formation splits it: the decode is absorbed by the raw slab's storage

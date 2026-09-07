@@ -19,6 +19,11 @@ evidence to weigh:
   sibling nothing to do for them but copy, so this deletes a buffer and a copy. It also leaves both
   pieces single-output, which is what lets the shared-sweep promotion
   (:func:`~emmy.compiler.ir.tile.ir.promoted_sweep`) bind a sweep the fused kernel had to serialize.
+
+Several seams can also be ONE decision. :func:`realize` takes a group, and :func:`shared_root_seams` names one such
+group off the tree: the contraction roots a projection refuses to bind together, all but the first. That group has to
+be one decision — each of its seams alone leaves the refusal standing — which is also what makes the route
+recordable, since a measured row names a decision rather than a sequence of them.
 """
 
 from __future__ import annotations

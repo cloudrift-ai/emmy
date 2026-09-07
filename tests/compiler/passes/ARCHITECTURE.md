@@ -168,16 +168,24 @@ Loop target contain several kernels and the stored identity must select one. Dir
 contraction-operand cuts remain strict xfails until Tile IR represents their materialized workspace dtype.
 The output-owning cut has its own group there: which seams own an output, that realizing one leaves single-output
 pieces whose placements gain a grid axis, that a piece takes the projection statements its own store reads, and the
-two refusals — a shared epilogue statement no piece can own, and a partition where no piece would gain an axis. The
+two refusals — a shared epilogue statement no piece can own, and a split where no piece would gain an axis. The
 shared-epilogue shape is spelled in Python rather than taken from a case: both corpus shapes join their branches with
-an empty root body, so the body-splitting half of the ownership rule has no case to exercise it.
-This group is the ONLY coverage the output-owning cut has, and the corpus deliberately carries none. A case's
-`offered` stage materializes the complete row set of the kernel set it pins, and the cut's whole point is to give a
-multi-root kernel a real grid — the NVFP4 encode's packed-code piece then has six contraction roots offering ~1400
-rows each, and their composition is past enumerating. Pinning the contraction seams beside it shrinks every piece to
-at most two roots and does enumerate, but a route spelled on the parent's tree cannot be replayed from evidence
-(`attention/rmsnorm-qk-sdpa-composed-cut_xfail_realized.yaml` records that gap). So the numerics of a cut kernel set
-stay unproven on hardware until one of those two holds; the tests here prove the structure only.
+an empty body at the tree's root, so the body-splitting half of the ownership rule has no case to exercise it.
+The shared-root cut shares that group, one test per condition it turns on: a kernel whose outputs do not partition by
+producing contraction root gets exactly one offer covering several seams at once and nothing else does, taking it
+leaves every piece bindable, the kernel that keeps the first root keeps a contraction over both its grid axes, and
+handing every root away instead would leave that kernel pointwise. The summed-roots shape lives in Python for the same
+reason the shared-epilogue one does: the corpus programs carry no kernel that sums several contractions into one
+store. The corpus does hold the cut itself, on the NVFP4 encode (`fused/nvfp4-gate-up-requant-shared-root-cut.yaml`):
+the three refused contraction roots become their own tensor-core kernels in one placement decision. What it still
+carries no case for is the output-owning cut, and the reason is cost. A case's `offered` stage materializes the
+complete row set of the kernel set it pins, and that cut's whole point is to give a multi-root kernel a real grid —
+the packed-code piece then holds four contraction roots and an amax fold over a two-axis placement, and one
+enumeration of the pinned set has not finished in 500 s. So the numerics of an output-owning kernel set stay unproven
+on hardware; the tests here prove its structure only. A second limit stands beside that one: a row naming a set of
+seams the fork offers no single alternative for still loses its route, because the replay takes one of those seams and
+the pieces it mints respell the rest (`attention/rmsnorm-qk-sdpa-composed-cut_xfail_realized.yaml` records that gap,
+which the shared-root cut answers only for the sets IT offers).
 The recipe program's monoid laws are covered
 independently by `tests/compiler/ir/pure/test_twist.py`; end-to-end softmax and attention accuracy remain covered by
 the e2e suites.

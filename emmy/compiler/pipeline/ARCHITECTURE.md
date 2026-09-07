@@ -566,11 +566,13 @@ first — over a different kind of row. A **route row** is a measured row whose 
 price of applying that decision to the kernel it was recorded on, and the index files it under `routes` rather than
 `ok`. `greedy._route_candidates` turns EVERY measured row of the kernel's signature into a candidate, each one of the
 pass's OWN offered arms: the arm the row spells (`pins.spelled_arm` — a schedule row the fused / unsplit arm, since
-the kernel it decorates ran that way; a route row the first offered seam it marks `cut`, or the offered plan whose
-`g<n>` half its `REDUCE` value carries; a row whose cut seams are not on this ballot decides nothing). A measured arm
-outranks every arm priced by nested resolution (a Σ that may hold predictions); among measured arms the fastest wins;
-strict evidence refuses a kernel-set fork no measured arm decides. With no measured arm the arms are priced exactly as
-Part 4 describes (`_priced_pick`, the streamed fused-vs-splice comparison, the serial-work floor). Nothing is
+the kernel it decorates ran that way; a route row the arm cutting exactly the seams it marks `cut` among the arms
+offered here — one arm may cut several seams at once, and only the SET tells it from the single-seam arms it composes
+— else the first offered seam it marks `cut`, or the offered plan whose `g<n>` half its `REDUCE` value carries; a row
+whose cut seams are not on this ballot decides nothing). A measured arm outranks every arm priced by nested
+resolution (a Σ that may hold predictions); among measured arms the fastest wins; strict evidence refuses a
+kernel-set fork no measured arm decides. With no measured arm the arms are priced exactly as Part 4 describes
+(`_priced_pick`, the streamed fused-vs-splice comparison, the serial-work floor). Nothing is
 installed on the kernel: a piece a cut or split mints is a brand-new kernel (`knob.consume_kernel_row` strips every
 decision family and every feature), its own forks consult the rows of its own signature, and a piece that fails to
 lower re-ranks at its own forks and, once no row of it binds, retires the one cut that minted it (`Pipeline.run`'s
@@ -1613,11 +1615,13 @@ boundary.
 
 `020_twisted` rewrites the exp-family composition over that canonical tree. The single `030_cut` pass reaches a
 fixpoint over two ordered domains: it offers the maximal tree and every semantically closed stored child-Fold seam
-through `PLACE`, then the unsplit tree beside every cross-CTA reduce split the head Fold admits. A selected cut writes
-the complete child state to workspaces; a selected split slices the same Fold and folds partial state tuples with its
-stored combine. Both return fresh unmapped TileOps. `040_schedule` then enumerates
-schedules over each stored Fold tree only. Independent roots stay fused and combine only schedules with matching
-physical output-axis tile widths and unit counts.
+through `PLACE` — and, on a kernel whose outputs do not partition by producing contraction root, the shared-root cut
+beside them, one arm handing every such root but the first its own kernel, because each of those seams alone leaves
+the binder building around one root and lowering the rest serially — then the unsplit tree beside every cross-CTA
+reduce split the head Fold admits. A selected cut writes the complete child state to workspaces; a selected split
+slices the same Fold and folds partial state tuples with its stored combine. Both return fresh unmapped TileOps.
+`040_schedule` then enumerates schedules over each stored Fold tree only. Independent roots stay fused and combine
+only schedules with matching physical output-axis tile widths and unit counts.
 
 The complete structural invariant is documented in
 [`ir/tile/ARCHITECTURE.md`](../ir/tile/ARCHITECTURE.md), and pass behavior in

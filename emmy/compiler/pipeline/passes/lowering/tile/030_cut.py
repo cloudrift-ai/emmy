@@ -133,7 +133,7 @@ def _placement_forks(match: Match, root: Node, tile: TileOp):
     """Return the next stored-edge cut fork, or ``None`` when that domain is consumed.
 
     Unpinned, the fork is fuse, one arm per cuttable seam, and — on a kernel whose projection
-    refuses to bind its contraction roots together — the composed SHARED-ROOT CUT
+    refuses to bind its contraction roots together — the composed SHARED-ROOT cut
     (:func:`~emmy.compiler.pipeline.passes.lowering.tile._cut.shared_root_seams`), which no
     sequence of the single-seam arms expresses as one decision."""
     seams = cuttable_seams(tile)

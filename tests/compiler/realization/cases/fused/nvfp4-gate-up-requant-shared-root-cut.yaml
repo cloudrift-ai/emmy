@@ -5,9 +5,9 @@
 # packed byte) under outputs it does not partition by producing root, so the kernel binder builds
 # around ONE of them and lowers the other three serially inside the projection: three of the four
 # reach no tensor-core tier at any width. The sibling case cuts one root into its own kernel and
-# leaves that shape in place. This one pins the SHARED-ROOT CUT — the three roots the binder refuses
-# become kernels of their own in a single placement decision, each at the (m, n) grid its own store
-# rides, and the consumer keeps the fourth.
+# leaves that shape in place. This one pins the SHARED-ROOT CUT — three of the four become kernels of
+# their own in a single placement decision, each over the two-axis grid its own store rides, and the
+# kernel that reads them back keeps the fourth.
 #
 # The four pieces are what this case holds the compiler to: three e2m1 tensor-core contractions and
 # the residual encode. The sibling case stays as it is; the two pin the two routes.

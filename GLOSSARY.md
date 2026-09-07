@@ -60,6 +60,11 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   workspace. Offered where the branch it cuts is that output's only producer and the piece would bind a grid axis the
   fused kernel cannot: it leaves single-output kernels, each free to bind its store's sweep axis when no axis rides
   every store.
+- **Shared-root cut** — A placement cut that hands several of one kernel's contractions their own kernels in a single
+  decision. Offered where the kernel's outputs do not split cleanly by which contraction produced them: the compiler
+  then builds the kernel around one contraction and runs every other one serially inside it, where none reaches a
+  tensor-core tier. The cut takes every such contraction but the first; keeping one is what lets the remaining
+  kernel's output loop become a launch axis instead of a serial sweep.
 - **Output equivalence cluster** — A single-owner chain of same-dtype copies that preserves every element's flat
   address while changing only shape. With one terminal live output, the splicer may retarget the computed source's
   `Write` across the cluster instead of reconstructing its computation at the copies' loads.

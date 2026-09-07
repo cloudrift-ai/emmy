@@ -570,7 +570,7 @@ def refused_roots(op, output_specs: tuple) -> tuple[Fold, ...]:
 
     One rule, two readers, which is why it lives here rather than at either of them: the schedule
     projection refuses a prefix that output-tiles a second of these
-    (``ir/schedule/classic._shared_roots``), and the placement lane offers the SHARED-ROOT CUT,
+    (``ir/schedule/classic._shared_roots``), and the placement lane offers the SHARED-ROOT cut,
     handing every one of them but the first its own kernel
     (``pipeline/passes/lowering/tile/_cut.shared_root_seams``).
     """
