@@ -166,6 +166,7 @@
  "tests/compiler/e2e/test_attention_coverage.py::test_chunk_tier_folds_the_carrier_on_tensor_cores[128]@cuda": 7.3,
  "tests/compiler/e2e/test_attention_coverage.py::test_chunk_tier_takes_a_symbolic_key_extent@cuda": 3.5,
  "tests/compiler/e2e/test_attention_coverage.py::test_flash_causal_and_gqa_match_torch@cuda": 7.7,
+ "tests/compiler/e2e/test_attention_coverage.py::test_flash_transposed_output_matches_torch@cuda": 5.2,
  "tests/compiler/e2e/test_attention_coverage.py::test_full_self_attn_tinyllama@cuda": 6.0,
  "tests/compiler/e2e/test_attention_coverage.py::test_full_self_attn_tinyllama_seq512@cuda": 5.8,
  "tests/compiler/e2e/test_attention_coverage.py::test_fused_causal_sdpa_split_partition_keeps_absolute_predicate_coordinates": 10.8,
