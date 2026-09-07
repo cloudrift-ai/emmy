@@ -352,10 +352,13 @@ def persist_kernel_perf(
     return True
 
 
-#: The kernel a watchdog message NAMES — ``kernel 'k_foo (iter 0)' did not complete …``. The
-#: exception class does not survive the bench worker's pipe (it arrives wrapped in a
-#: ``BenchWorkerJobError``), so the label is recovered from the text.
-_NAMED_KERNEL = re.compile(r"kernel '([A-Za-z_][A-Za-z0-9_]*)")
+#: The kernel a failure message NAMES — ``kernel 'k_foo (iter 0)' did not complete …`` from the
+#: watchdog, ``nvcc compile failed for kernel 'k_foo': …`` from the compiler. The exception class
+#: does not survive the bench worker's pipe (it arrives wrapped in a ``BenchWorkerJobError``
+#: carrying the child exception's ``repr``), so the label is recovered from the text — and
+#: ``repr`` escapes the name's quote as ``\'`` when the message also holds a ``"`` (nvcc quotes
+#: identifiers that way), so the quote is matched with or without its backslash.
+_NAMED_KERNEL = re.compile(r"kernel \\?'([A-Za-z_][A-Za-z0-9_]*)")
 
 
 def persist_bench_failure(db, context_key: str, backend_name: str, cuda_nodes, exc, fail_us: float) -> list:
