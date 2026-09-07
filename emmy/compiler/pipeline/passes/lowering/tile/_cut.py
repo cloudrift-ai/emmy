@@ -38,7 +38,7 @@ from emmy.compiler.ir.schedule.packing import match_packed_pair_node
 from emmy.compiler.ir.stmt import Assign, Body, Load, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ir import promoted_sweep
-from emmy.compiler.ir.tile.ops import UnbindableProjection, carries_partition, edge_dtypes, output_regions
+from emmy.compiler.ir.tile.ops import UnbindableProjection, carries_partition, edge_dtypes, output_regions, refused_roots
 from emmy.compiler.ir.tile.path import family_sites, sites, spell
 from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.knob import consume_kernel_row
@@ -338,6 +338,34 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
         out,
         {id(seam.node): seam.frontier is None and seam.owned is None and store_dtype_consumers.get(id(seam.node)) for seam in out},
     )
+
+
+def shared_root_seams(tile: TileOp, seams) -> tuple[CutSite, ...]:
+    """The seams of the SHARED-ROOT cut — every contraction root the kernel's projection refuses to
+    bind beside the others (:func:`~emmy.compiler.ir.tile.ops.refused_roots`) except the first —
+    or ``()`` where the kernel has no such cut to offer.
+
+    A refused kernel binds ONE of its roots and lowers the rest serially inside the projection, so
+    those contractions reach no tensor-core tier where they are. Handing them their own kernels is
+    one decision rather than several: each single seam alone leaves the refusal in place, and the
+    evidence a route is recorded as names a decision, not a sequence of them.
+
+    The first root stays because a piece needs a contraction to have a grid at all —
+    :func:`~emmy.compiler.ir.tile.ir.promoted_sweep` promotes a shared output sweep only where a
+    contraction operand reads it, so a consumer with every root handed away is pointwise and sweeps
+    serially. It is also the smallest cut that clears the refusal, which needs only one root left.
+
+    The seams are the ones :func:`cuttable_seams` already offers; nothing new becomes cuttable, and
+    a refused root no seam covers declines the whole cut rather than realizing a partial one. With
+    fewer than two roots to hand away the decision IS a single seam, which the fork offers on its
+    own.
+    """
+    handed = refused_roots(tile.op, tile.output_specs)[1:]
+    if len(handed) < 2:
+        return ()
+    by_node = {id(seam.node): seam for seam in seams}
+    chosen = tuple(by_node[id(root)] for root in handed if id(root) in by_node)
+    return chosen if len(chosen) == len(handed) else ()
 
 
 def _cluster_value_seams(seams: list[CutSite], operand_of: dict[int, object]) -> tuple[CutSite, ...]:
@@ -739,4 +767,4 @@ def realize(
     return fragment
 
 
-__all__ = ["CutSite", "Frontier", "cuttable_seams", "output_map", "realize", "storage_frontier"]
+__all__ = ["CutSite", "Frontier", "cuttable_seams", "output_map", "realize", "shared_root_seams", "storage_frontier"]

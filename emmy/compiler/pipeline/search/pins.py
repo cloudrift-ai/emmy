@@ -30,10 +30,14 @@ def spelled_arm(options, row) -> tuple[object, dict[str, str]] | None:
     """The kernel-set arm a knob row spells among a cut-pass fork's ``options``, as ``(option, its
     knobs)`` — or ``None`` when the row decides nothing at this fork.
 
-    At a placement fork the row spells the first offered seam it marks ``cut`` (a bare
-    ``PLACE=cut`` takes the root-most offered seam), the fuse arm when it marks no seam ``cut`` —
-    a schedule row with no ``PLACE`` key says the kernel it decorates ran fused — and nothing when
-    the seams it marks are not on this kernel's ballot. At a split fork it spells the offered plan
+    At a placement fork the row spells the arm cutting exactly the seams it marks ``cut`` on this
+    kernel's ballot — a composed arm and the single-seam arms it is built from all carry keys such
+    a row marks, so only the SET tells them apart, and picking a single-seam arm would strand the
+    row's remaining keys on pieces whose trees respell them. Where no arm cuts that exact set the
+    reading falls back to the first offered seam the row marks ``cut``, which is what a bare
+    ``PLACE=cut`` takes (the root-most offered seam). The fuse arm answers a row that marks no seam
+    ``cut`` — a schedule row with no ``PLACE`` key says the kernel it decorates ran fused — and
+    nothing when the seams it marks are not on this kernel's ballot. At a split fork it spells the offered plan
     whose cross-CTA half equals its ``REDUCE`` value's, and the unsplit arm when that value carries
     no such half or the row carries no ``REDUCE`` at all — a schedule row measured the kernel
     whole. One reading for both consumers:
@@ -48,6 +52,10 @@ def spelled_arm(options, row) -> tuple[object, dict[str, str]] | None:
     if any(family_of(key) == "PLACE" for key in keys):
         route = {str(key): str(value) for key, value in row.items() if family_of(str(key)) == "PLACE"}
         cuts = {key for key, value in route.items() if value == "cut"}
+        ballot = cuts & keys
+        for option, knobs in arms:
+            if ballot and {key for key, value in knobs.items() if value == "cut"} == ballot:
+                return option, knobs
         for option, knobs in arms:
             if any(value == "cut" and (key in cuts or "PLACE" in cuts) for key, value in knobs.items()):
                 return option, knobs

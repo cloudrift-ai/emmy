@@ -16,7 +16,7 @@ from emmy.compiler.ir.tile.path import MissingSiteError, resolve, sites
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.fork import DeferredFork
 from emmy.compiler.pipeline.knob import family_of, family_pins
-from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams, output_map, realize
+from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams, output_map, realize, shared_root_seams
 from emmy.compiler.pipeline.passes.lowering.tile._split import split_forks
 
 PATTERN = [Pattern("root", TileOp)]
@@ -130,7 +130,12 @@ def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str] | None:
 
 
 def _placement_forks(match: Match, root: Node, tile: TileOp):
-    """Return the next stored-edge cut fork, or ``None`` when that domain is consumed."""
+    """Return the next stored-edge cut fork, or ``None`` when that domain is consumed.
+
+    Unpinned, the fork is fuse, one arm per cuttable seam, and — on a kernel whose projection
+    refuses to bind its contraction roots together — the composed SHARED-ROOT CUT
+    (:func:`~emmy.compiler.pipeline.passes.lowering.tile._cut.shared_root_seams`), which no
+    sequence of the single-seam arms expresses as one decision."""
     seams = cuttable_seams(tile)
     if not seams:
         return None
@@ -151,6 +156,9 @@ def _placement_forks(match: Match, root: Node, tile: TileOp):
 
     options = [DeferredFork(lambda: replace(tile, placement_decided=True), {"PLACE": "fuse"})]
     options.extend(DeferredFork(lambda seam=seam: realize(match, root, (seam,)), {seam.spelling: "cut"}, structural=True) for seam in seams)
+    shared = shared_root_seams(tile, seams)
+    if shared:
+        options.append(DeferredFork(lambda: realize(match, root, shared), {seam.spelling: "cut" for seam in shared}, structural=True))
     return options
 
 

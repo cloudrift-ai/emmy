@@ -1080,22 +1080,14 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
 
     @cached_property
     def _shared_roots(self) -> frozenset[NodeId]:
-        """The contraction roots that may not be output-tiled together. The kernel binder builds a
-        kernel around several output-tiled roots only where the projection partitions its outputs
-        by root (:func:`~emmy.compiler.ir.tile.ops.projection_regions`); where it does not, one
-        tiled root is the kernel's root and every other reduce lowers serially inside the
-        projection, so a row tiling a second root spells a kernel the binder never builds. The
-        binder's rule, applied at the offer."""
-        from emmy.compiler.ir.tile.ops import UnbindableProjection, kernel_roots, projection_regions  # noqa: PLC0415
+        """The contraction roots that may not be output-tiled together
+        (:func:`~emmy.compiler.ir.tile.ops.refused_roots`): one of them is the kernel's root and
+        every other reduce lowers serially inside the projection, so a row tiling a second root
+        spells a kernel the binder never builds. The binder's rule, applied at the offer — and the
+        same rule the placement lane's shared-root cut offers to dissolve."""
+        from emmy.compiler.ir.tile.ops import refused_roots  # noqa: PLC0415
 
-        roots = kernel_roots(self.tile_op.op)
-        if len(roots) < 2:
-            return frozenset()
-        try:
-            projection_regions(self.tile_op.op, tuple(self.tile_op.output_specs))
-        except UnbindableProjection:
-            return frozenset(self.tile_op.node_id(root) for root in roots)
-        return frozenset()
+        return frozenset(self.tile_op.node_id(root) for root in refused_roots(self.tile_op.op, tuple(self.tile_op.output_specs)))
 
     def _support_refusal(self, site: NodeId, support: _LocalSupport) -> str | None:
         """Return why one locally supported pick cannot extend this prefix."""

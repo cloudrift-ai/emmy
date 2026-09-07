@@ -558,6 +558,32 @@ def kernel_roots(op) -> tuple[Fold, ...]:
     return (node,) if isinstance(node, Fold) else ()
 
 
+def refused_roots(op, output_specs: tuple) -> tuple[Fold, ...]:
+    """The contraction roots a kernel's projection refuses to bind TOGETHER, or ``()`` when it
+    binds every one of them.
+
+    The binder builds a kernel around several output-tiled roots only where the projection
+    partitions its outputs by root (:func:`projection_regions`). Where it does not, one root is the
+    kernel's and every other reduce lowers serially inside the projection, so those contractions
+    reach no tensor-core tier where they are. A single-root kernel has nothing shared: the question
+    only arises from :func:`kernel_roots` holding two or more.
+
+    One rule, two readers, which is why it lives here rather than at either of them: the schedule
+    projection refuses a prefix that output-tiles a second of these
+    (``ir/schedule/classic._shared_roots``), and the placement lane offers the SHARED-ROOT CUT,
+    handing every one of them but the first its own kernel
+    (``pipeline/passes/lowering/tile/_cut.shared_root_seams``).
+    """
+    roots = kernel_roots(op)
+    if len(roots) < 2:
+        return ()
+    try:
+        projection_regions(op, tuple(output_specs))
+    except UnbindableProjection:
+        return roots
+    return ()
+
+
 def chain_members(root: Fold) -> tuple[Fold, ...]:
     """The reduce folds a kernel root's cones close over — reached from ``root`` through zero-axis
     operand edges and the axis-invariant (hoisted) reduce operands of members, deepest first, so a
