@@ -568,11 +568,13 @@ def refused_roots(op, output_specs: tuple) -> tuple[Fold, ...]:
     reach no tensor-core tier where they are. A single-root kernel has nothing shared: the question
     only arises from :func:`kernel_roots` holding two or more.
 
-    One rule, two readers, which is why it lives here rather than at either of them: the schedule
-    projection refuses a prefix that output-tiles a second of these
-    (``ir/schedule/classic._shared_roots``), and the placement lane offers the SHARED-ROOT cut,
-    handing every one of them but the first its own kernel
-    (``pipeline/passes/lowering/tile/_cut.shared_root_seams``).
+    It lives here rather than in the scheduler that reads it (``ir/schedule/classic._shared_roots``
+    refuses a prefix that output-tiles a second of these) because it is a fact about the term, read
+    off the same two rules the binder itself applies. :func:`owns_outputs_it_cannot_bind` asks the
+    neighbouring question the placement lane's full-projection cut is offered on; the two differ,
+    and both are needed: a projection whose outputs do not partition at ALL still refuses roots
+    here, while a single-root projection whose one region reads several reduces refuses nothing
+    here and is exactly what that cut takes apart.
     """
     roots = kernel_roots(op)
     if len(roots) < 2:
@@ -582,6 +584,29 @@ def refused_roots(op, output_specs: tuple) -> tuple[Fold, ...]:
     except UnbindableProjection:
         return roots
     return ()
+
+
+def owns_outputs_it_cannot_bind(op, output_specs: tuple) -> bool:
+    """Whether this projection partitions its outputs by OWNERSHIP but not by producing root.
+
+    Two answers from the rules above. :func:`output_regions` must succeed — every output has one
+    producing branch, the branches' cones are disjoint and cover the root body — so each of them
+    could become a kernel writing that output. And :func:`projection_root` must fail on at least one
+    of those regions: it reads several reduces or none, so the binder has no single node to build a
+    kernel around and lowers every reduce but one serially inside the projection.
+
+    That combination is what the placement lane's full-projection cut is offered on
+    (``pipeline/passes/lowering/tile/_cut.full_projection_seams``): the ownership half says the
+    pieces exist, the root half says the fused kernel cannot reach a tensor-core tier for more than
+    one of its contractions. Where the outputs do not partition at all — one output over a whole
+    tree, the ordinary fused kernel — there is no piece to hand anything to and the answer is
+    ``False``.
+    """
+    try:
+        regions = output_regions(op, tuple(output_specs))
+    except UnbindableProjection:
+        return False
+    return any(projection_root(region) is None for region, _tail, _stores in regions)
 
 
 def chain_members(root: Fold) -> tuple[Fold, ...]:

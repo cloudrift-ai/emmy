@@ -189,10 +189,23 @@ def promoted_sweep(op, output_specs: tuple[OutputSpec, ...]) -> set[str]:
     """The output-sweep axes ``op``'s grid binds instead of sweeping — the kernel's grid RANK above
     its free axes, and the reason a contraction site can name an ``(m, n)`` pair at all.
 
-    Only an axis EVERY store rides promotes: hoisting a shared sweep replicates nothing but the
-    statistics ahead of it, while a sibling nest's own axis would replicate every other nest per
-    cell (DeepSeek-V4 post4096's root: four nests, a 2^56-cell grid). A shared axis promotes only
-    when a contraction operand reads it, so a purely pointwise sweep keeps its loop.
+    Only an axis EVERY store rides promotes: a sibling nest's own axis would replicate every other
+    nest per cell (DeepSeek-V4 post4096's root: four nests, a 2^56-cell grid). A shared axis then
+    promotes on either of two grounds, and what both answer is the same question — WHAT WOULD THE
+    GRID REPLICATE:
+
+    - a contraction operand reads it. The coordinate is that contraction's own output coordinate,
+      so the tiles do that work per cell whatever the placement says, and a statistic hoisted ahead
+      of the sweep beside them is cheap against it.
+    - nothing in the term is evaluated ahead of the sweep: every reduce the term holds reads the
+      axis, so each cell folds its own and binding the axis replicates none of them. A term with no
+      reduce at all is the degenerate case — the pointwise piece a cut leaves once every
+      contraction under it has its own kernel, whose sweep would otherwise stay a serial loop that
+      no grid can tile either.
+
+    The complement is what the second ground protects: a reduce that does NOT read the axis is the
+    ROW's statistic, evaluated once for the whole sweep — softmax's maximum, rms-norm's sum of
+    squares. Binding the sweep would recompute it per output element, so that sweep stays a loop.
 
     Two readers, one rule: :meth:`TileOp.__post_init__` applies it, and the cut pass asks it of a
     candidate piece to decide whether peeling an output off a multi-output kernel would give that
@@ -203,8 +216,15 @@ def promoted_sweep(op, output_specs: tuple[OutputSpec, ...]) -> set[str]:
     shared = set.intersection(*({axis.name for axis in store.sweep} for store in output_specs))
     if not shared:
         return set()
-    contractions = tuple(site.node for site in sites(op) if site.node.as_contraction() is not None)
-    return {name for name in shared if any(any(name in edge.free_axes for edge in con.operands) for con in contractions)}
+    nodes = tuple(site.node for site in sites(op))
+    contractions = tuple(node for node in nodes if node.as_contraction() is not None)
+    reduces = tuple(node for node in nodes if isinstance(node, Fold) and node.axis is not None)
+    return {
+        name
+        for name in shared
+        if any(any(name in edge.free_axes for edge in con.operands) for con in contractions)
+        or all(name in reduce.free_axes for reduce in reduces)
+    }
 
 
 def _implicit_unit_row(specs: tuple[OutputSpec, ...], free: tuple[Axis, ...]) -> Axis | None:

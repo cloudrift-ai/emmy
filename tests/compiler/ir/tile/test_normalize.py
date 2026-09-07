@@ -182,6 +182,61 @@ def test_sibling_output_sweeps_stay_sweeps() -> None:
     assert tuple(tuple(axis.name for axis in store.sweep) for store in tile.output_specs) == (("n",), ("p",))
 
 
+def _swept_reduce(*, per_cell: bool) -> TileOp:
+    """One store swept over ``n``, computed from a reduce over ``r``.
+
+    ``per_cell`` decides whether that reduce reads the sweep coordinate. Reading it, the reduce is
+    a fact about one output element — the block statistic an NVFP4 encode piece keeps once its
+    contractions are cut away. Not reading it, the reduce is the ROW's statistic, evaluated once
+    ahead of the sweep and shared by all of it: rms-norm's sum of squares, softmax's maximum.
+    """
+    r = Axis("r", 4)
+    index = (Var("m"), Var("n"), Var("r")) if per_cell else (Var("m"), Var("r"))
+    read = slab("sample", "s", *(str(part.name) for part in index))
+    stat = reduction(r, (read,), (Assign(name="stat__v", op="copy", args=("sample",)),), ("stat",))
+    root = projection((stat,), (Assign(name="result", op="negative", args=("stat",)),), ("result",))
+    return _tile(
+        root,
+        N16,
+        r,
+        free=(M8,),
+        output_specs=(OutputSpec(write=Write(output="out", index=(Var("m"), Var("n")), value="result"), sweep=(N16,)),),
+    )
+
+
+def test_a_pointwise_store_sweep_promotes() -> None:
+    """A kernel with nothing to hoist ahead of its sweep binds the sweep as a grid axis. Cutting
+    every contraction out of a multi-output projection leaves exactly this — a piece writing one
+    output per cell — and leaving its sweep a serial loop would trade a contraction the grid could
+    not tile for a loop the grid cannot tile either."""
+    body = (Load(name="v", input="x", index=(Var("m"), Var("n"))), Assign(name="out_v", op="negative", args=("v",)))
+    store = OutputSpec(write=Write(output="out", index=(Var("m"), Var("n")), value="out_v"), sweep=(N16,))
+    tile = _tile(projection((), body, ("out_v",)), N16, free=(M8,), output_specs=(store,))
+
+    assert tuple(axis.name for axis in tile.place.free) == ("m", "n")
+    assert tile.output_specs[0].sweep == ()
+
+
+def test_a_per_cell_reduce_promotes_the_sweep_it_reads() -> None:
+    """A reduce evaluated at the sweep coordinate is per-cell work already, so binding the sweep
+    replicates nothing — each cell folds its own."""
+    tile = _swept_reduce(per_cell=True)
+
+    assert tuple(axis.name for axis in tile.place.free) == ("m", "n")
+    assert tile.output_specs[0].sweep == ()
+
+
+def test_a_row_statistic_keeps_its_sweep_a_loop() -> None:
+    """The protection the contraction clause was written for. A reduce that does NOT read the sweep
+    is evaluated once ahead of it and shared by every position, so binding the sweep would recompute
+    the whole statistic per output element — softmax's maximum and rms-norm's sum of squares, both
+    of which the corpus holds. The sweep stays a loop."""
+    tile = _swept_reduce(per_cell=False)
+
+    assert tuple(axis.name for axis in tile.place.free) == ("m",)
+    assert tuple(axis.name for axis in tile.output_specs[0].sweep) == ("n",)
+
+
 def test_nested_contraction_promotes_a_swept_column_beside_an_implicit_unit_row() -> None:
     """A nested linear site turns the swept column into grid placement before scheduling."""
     r = Axis("r", 4)

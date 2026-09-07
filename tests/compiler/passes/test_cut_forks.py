@@ -45,7 +45,7 @@ from emmy.compiler.pipeline.search.golden import (
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.torch_wire import graph_to_wire
 from tests.compiler.helpers import case_target_tile, direct_classic_leaf, requires_cuda
-from tests.compiler.terms import contraction, projection
+from tests.compiler.terms import contraction, projection, reduction, slab
 
 _CTX = Context.from_target((12, 0))
 _CUT = import_module("emmy.compiler.pipeline.passes.lowering.tile.030_cut")
@@ -921,9 +921,9 @@ def test_an_output_owning_cut_is_declined_where_no_piece_would_gain_a_grid_axis(
     assert all(seam.owned is None for seam in cuttable_seams(tile))
 
 
-# ---- the shared-root cut ----------------------------------------------------------------------- #
+# ---- the full-projection cut --------------------------------------------------------------------- #
 
-#: The serving W4A4 MLP shape, whose requant branch is the binder-refused multi-root kernel.
+#: The serving W4A4 MLP shape, whose requant projection owns more outputs than the binder can bind.
 _REQUANT = "fused/nvfp4-gate-up-requant-place-cut.yaml"
 
 
@@ -936,78 +936,126 @@ def _cut_arms(graph: Graph, node) -> list:
 def _composed_arm(graph: Graph, node):
     """The one arm whose knob row marks several seams ``cut``."""
     composed = [(option, knobs) for option, knobs in _cut_arms(graph, node) if len(knobs) > 1]
-    assert len(composed) == 1, f"expected one composed arm, got {[knobs for _, knobs in composed]}"
+    assert len(composed) == 1, f"expected one composed arm, got {[sorted(knobs) for _, knobs in composed]}"
     return composed[0]
 
 
-def _consumer(fragment: Graph, node):
-    """The sibling piece a realized cut leaves holding the store ``node`` wrote — named after that
-    store, where each handed-away piece is named after the workspace it mints."""
-    want = f"{node.op.output_specs[0].write.output}__placed"
-    return next(
-        piece for piece in fragment.nodes.values() if isinstance(piece.op, TileOp) and piece.op.output_specs[0].write.output == want
-    )
-
-
-def _root_spellings(tile: TileOp) -> list[str]:
-    """This kernel's binder roots, spelled the way a placement key names them."""
-    from emmy.compiler.ir.tile.ops import kernel_roots  # noqa: PLC0415
+def _contraction_spellings(tile: TileOp) -> list[str]:
+    """Every contraction occurrence of this kernel, spelled the way a placement key names it. A
+    contraction standing at the kernel's own root is no PLACE site and reads as ``ROOT``."""
     from emmy.compiler.ir.tile.path import sites, spell  # noqa: PLC0415
 
     all_sites = sites(tile.op)
-    return [spell(tile.op, "PLACE", root, all_sites=all_sites) for root in kernel_roots(tile.op)]
+    return [
+        spell(tile.op, "PLACE", site.node, all_sites=all_sites) if site.hops else "ROOT"
+        for site in all_sites
+        if site.node.as_contraction() is not None
+    ]
 
 
-def test_a_binder_refused_kernel_offers_one_shared_root_cut_arm() -> None:
-    """The requant branch holds four contraction roots its outputs do not partition by root, so the
-    binder builds a kernel around ONE of them and lowers the other three serially inside the
-    projection. The placement fork offers handing exactly those three their own kernels as a single
-    decision — spelled by the seams it already offers one at a time."""
+def _piece_ops(fragment: Graph) -> list[TileOp]:
+    return [node.op for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
+
+
+def test_a_projection_owning_more_than_it_binds_offers_one_full_projection_cut() -> None:
+    """The requant projection partitions its outputs by ownership — the packed codes and the block
+    scales each have one producing branch — but not by producing root: the code branch alone holds
+    six contractions. The placement fork offers taking the whole projection apart as ONE decision,
+    every contraction and every owned output its own kernel, spelled by seams it already offers one
+    at a time."""
     graph, node = _mimo_case(_REQUANT)
     _, knobs = _composed_arm(graph, node)
+    owning = [seam.spelling for seam in cuttable_seams(node.op) if seam.owned is not None]
 
     assert set(knobs.values()) == {"cut"}
-    assert sorted(knobs) == sorted(_root_spellings(node.op)[1:]), "the first root stays; every other one is handed away"
+    assert sorted(knobs) == sorted([*_contraction_spellings(node.op), *owning])
 
 
-def test_the_shared_root_cut_leaves_every_piece_bindable() -> None:
-    """Taking it: each handed-away root becomes a kernel of its own and the consumer keeps one, so
-    the projection the binder refused is left nowhere in the resulting set."""
-    from emmy.compiler.ir.tile.ops import refused_roots  # noqa: PLC0415
-
+def test_the_full_projection_cut_leaves_one_contraction_per_piece_on_a_grid() -> None:
+    """Taking it. Every piece holds at most one contraction, which is the committed shape: each
+    expensive contraction computed once as the sole root of its own kernel, the owned outputs read
+    back. And every piece binds at least two grid axes — the pointwise pieces included, which is
+    what the sweep-promotion rule has to supply once no contraction is left under them."""
     graph, node = _mimo_case(_REQUANT)
-    option, _ = _composed_arm(graph, node)
-    pieces = [piece.op for piece in option.materialize().nodes.values() if isinstance(piece.op, TileOp)]
+    option, knobs = _composed_arm(graph, node)
+    pieces = _piece_ops(option.materialize())
 
-    assert len(pieces) == 4, "three handed-away roots and the consumer that reads them back"
-    assert all(refused_roots(piece.op, piece.output_specs) == () for piece in pieces)
+    assert len(pieces) == len(knobs), "one piece per seam; the projection hands away all of its outputs"
+    for piece in pieces:
+        assert len(_contraction_spellings(piece)) <= 1, f"{piece.name} still holds several contractions"
+        assert len(piece.place.free) >= 2, f"{piece.name} kept a one-axis placement"
 
 
-def test_the_shared_root_cut_keeps_the_consumers_contraction_and_its_grid() -> None:
-    """Asked of the packed-code piece, the one the output-owning cut gives a rank-two placement: the
-    consumer still holds the kept contraction, over both grid axes. That contraction is what
-    promotes the feature sweep, so a decision that handed it away too would leave a pointwise piece
-    sweeping serially where the tensor-core tier had been."""
-    fragment = _realized(_REQUANT, "PLACE@map.1/map")
-    codes = next(piece for piece in fragment.nodes.values() if piece.id == "mul_static_fp4_bits__placed")
-    kept, *handed = _root_spellings(codes.op)
+def _one_root_kernel(*, per_cell: bool = True) -> tuple[Graph, object]:
+    """Two owned outputs, one binder root — the post-attention shape in miniature.
 
-    option, knobs = _composed_arm(fragment, codes)
-    assert sorted(knobs) == sorted(handed)
+    The wide branch multiplies a contraction by a reduce, so it is ABOUT two reducing terms and the
+    binder has no single node to build it around; ``kernel_roots`` therefore sees only the narrow
+    branch's contraction and reports one. The outputs still partition by ownership, and the fused
+    kernel still cannot tile the wide branch — which is why the offer asks ownership, not how many
+    roots the binder found.
 
-    consumer = _consumer(option.materialize(), codes)
-    assert _root_spellings(consumer.op) == [kept]
-    assert len(consumer.op.place.free) >= 2, "the consumer kept the grid its contraction binds"
+    ``per_cell`` decides whether that reduce reads the wide store's sweep. Reading it, the reduce is
+    per-cell work the piece can keep. Not reading it, it is the branch's row statistic, evaluated
+    once ahead of the sweep — the shape of the rms mean in the serving post-attention kernel.
+    """
+    m, wide, narrow, k, r = Axis("m", 8), Axis("n", 16), Axis("n2", 4), Axis("k", 8), Axis("r", 4)
+    acc = contraction(
+        k, Load(name="a_v", input="a", index=(Var("m"), Var("k"))), (Load(name="b_v", input="b", index=(Var("k"), Var("n"))), "acc")
+    )
+    coords = ("m", "n", "r") if per_cell else ("m", "r")
+    stat = reduction(r, (slab("s_v", "s", *coords),), (Assign(name="stat__v", op="copy", args=("s_v",)),), ("stat",))
+    first = projection((acc, stat), (Assign(name="wide_out", op=ElementwiseImpl("multiply"), args=("acc", "stat")),), ("wide_out",))
+    second = contraction(
+        k, Load(name="c_v", input="c", index=(Var("m"), Var("k"))), (Load(name="d_v", input="d", index=(Var("k"), Var("n2"))), "narrow_out")
+    )
+    tile = TileOp(
+        op=projection((first, second), results=("wide_out", "narrow_out")),
+        name="wide",
+        place=Placement(free=(m,)),
+        axes=(m, wide, narrow, k, r),
+        output_specs=(
+            OutputSpec(Write(output="wide", index=(Var("m"), Var("n")), value="wide_out"), sweep=(wide,)),
+            OutputSpec(Write(output="narrow", index=(Var("m"), Var("n2")), value="narrow_out"), sweep=(narrow,)),
+        ),
+    )
+    graph = Graph()
+    for name in ("a", "c"):
+        _input(graph, name, (8, 8))
+    _input(graph, "b", (8, 16))
+    _input(graph, "d", (8, 4))
+    _input(graph, "s", (8, 16, 4) if per_cell else (8, 4))
+    graph.add_node(
+        tile, ["a", "b", "c", "d", "s"], outputs=(Tensor("wide", (8, 16), "f16"), Tensor("narrow", (8, 4), "f16")), node_id="wide"
+    )
+    return graph, graph.nodes["wide"]
+
+
+def test_the_offer_reads_ownership_not_how_many_roots_the_binder_found() -> None:
+    """A projection can own two outputs it cannot bind while ``kernel_roots`` reports ONE: a branch
+    about two reducing terms is no root of its own, so counting roots misses the kernel entirely.
+    The post-attention output+norm+requant kernel is that shape, and it is the one this cut exists
+    for. Asking ownership finds it."""
+    from emmy.compiler.ir.tile.ops import kernel_roots, owns_outputs_it_cannot_bind, refused_roots  # noqa: PLC0415
+
+    graph, node = _one_root_kernel()
+    tile = node.op
+
+    assert len(kernel_roots(tile.op)) == 1 and refused_roots(tile.op, tile.output_specs) == ()
+    assert owns_outputs_it_cannot_bind(tile.op, tile.output_specs)
+    _, knobs = _composed_arm(graph, node)
+    # The narrow branch is a contraction AND the sole producer of its output, so it is one seam on
+    # both counts and the cut names it once.
+    assert sorted(knobs) == sorted({*_contraction_spellings(tile), *(s.spelling for s in cuttable_seams(tile) if s.owned is not None)})
 
 
 def _summing_kernel(roots: int, *, shared: bool) -> tuple[Graph, object]:
     """``roots`` contractions over one output width, either summed into ONE store or each writing
     its own.
 
-    Summed, the store's cone reads every operand, the ownership partition refuses and the binder can
-    build around one root only — the shape the shared-root cut exists for, and the shape that shows
-    what keeping one root buys. Written separately, the outputs partition by root and the binder
-    binds all of them in one kernel, so there is nothing to hand away.
+    Summed, the store's cone reads every operand, so the outputs do not partition by ownership at
+    all and no piece could take one. Written separately, they partition by ownership AND by root,
+    which is the shape the kernel binder already binds in one kernel.
     """
     m, n, k = Axis("m", 8), Axis("n", 16), Axis("k", 8)
     names = tuple(f"c{index}" for index in range(roots))
@@ -1015,7 +1063,7 @@ def _summing_kernel(roots: int, *, shared: bool) -> tuple[Graph, object]:
         contraction(
             k,
             Load(name=f"a_{name}", input="a", index=(Var("m"), Var("k"))),
-            (Load(name=f"b_{name}", input=f"w_{name}", index=(Var("k"), Var("n"))), name),
+            (Load(name=f"b_{name}", input=f"w_{name}", index=(Var("k"), Var(n.name))), name),
         )
         for name in names
     )
@@ -1044,30 +1092,14 @@ def _summing_kernel(roots: int, *, shared: bool) -> tuple[Graph, object]:
     return graph, graph.nodes["summed"]
 
 
-def test_handing_every_root_away_would_leave_a_pointwise_consumer() -> None:
-    """Why the cut keeps one. Three contractions summed into one store: the offered arm hands two
-    away and the consumer still contracts, while cutting all three leaves it adding three workspace
-    reads — no contraction left to promote the output sweep, and no grid pair for a tier to name."""
-    from emmy.compiler.ir.tile.ops import kernel_roots  # noqa: PLC0415
+def test_no_full_projection_cut_where_the_outputs_do_not_partition_or_already_bind() -> None:
+    """Two refusals, one per half of the offer. Outputs that do not partition by ownership leave no
+    piece to hand anything to — three contractions summed into one store, and attention's one output
+    over its whole tree. Outputs that partition by root as well are what the binder already binds in
+    one kernel, so cutting would buy launches and no tier."""
+    graph, summed = _summing_kernel(3, shared=True)
+    assert all(len(knobs) == 1 for _, knobs in _cut_arms(graph, summed))
 
-    graph, node = _summing_kernel(3, shared=True)
-    option, knobs = _composed_arm(graph, node)
-    assert sorted(knobs) == sorted(_root_spellings(node.op)[1:])
-
-    kept = _consumer(option.materialize(), node)
-    assert kernel_roots(kept.op.op)[0].as_contraction() is not None
-
-    match = Match(graph=graph, root_node_id=node.id, rule=Rule(name="test", pattern=[]))
-    match.output = output_map(node)
-    every = tuple(seam for seam in cuttable_seams(node.op) if seam.spelling in set(_root_spellings(node.op)))
-    stripped = _consumer(realize(match, node, every), node)
-    assert kernel_roots(stripped.op.op)[0].as_contraction() is None, "with no root left the consumer is pointwise"
-
-
-def test_no_shared_root_cut_where_the_binder_already_binds_every_root() -> None:
-    """Two refusals, one per condition of the offer. A single-root kernel has no shared root to hand
-    away; a kernel whose outputs DO partition by root already binds all of them together, so cutting
-    would buy launches and no tier."""
     _, attention = _case_match("attention/rmsnorm-qk-sdpa-composed-cut_xfail_realized.yaml")
     single = next(node for node in attention.nodes.values() if isinstance(node.op, TileOp))
     assert all(len(knobs) == 1 for _, knobs in _cut_arms(attention, single))
@@ -1076,19 +1108,38 @@ def test_no_shared_root_cut_where_the_binder_already_binds_every_root() -> None:
     assert all(len(knobs) == 1 for _, knobs in _cut_arms(graph, partitioned))
 
 
+def test_the_cut_takes_a_row_statistic_that_would_pin_its_piece_to_one_cell() -> None:
+    """A reduce evaluated once ahead of a branch's output sweep keeps that branch's piece at one
+    grid axis — the sweep-promotion rule refuses to replicate a row statistic per cell, and it is
+    right to. So the cut hands the statistic its own kernel too, and the piece reads the one value
+    back. The serving post-attention kernel is exactly this: an rms mean over the whole hidden
+    dimension, ahead of a store that sweeps a sixteenth of it.
+    """
+    graph, node = _one_root_kernel(per_cell=False)
+    statistic = next(seam.spelling for seam in cuttable_seams(node.op) if seam.node.axis == "r")
+
+    _, knobs = _composed_arm(graph, node)
+    assert statistic in knobs, "the hoisted statistic is part of the decision, not left behind"
+
+    fragment = _composed_arm(graph, node)[0].materialize()
+    owning = fragment.nodes["wide__placed"].op
+    assert [axis.name for axis in owning.place.free] == ["m", "n"], "the piece binds its store's sweep once nothing is hoisted"
+
+
 def test_a_recorded_route_selects_the_arm_spelling_its_whole_cut_set() -> None:
-    """A composed arm and the single-seam arms it is built from all carry keys a composed row marks,
-    so only the cut-key SET tells them apart: a row spelling three seams selects the arm that cuts
-    exactly those three, and a row spelling one still selects that seam's own arm."""
+    """A composed arm and the single-seam arms it composes all carry keys a composed row marks, so
+    only the cut-key SET tells them apart: a row spelling the whole set selects the composed arm, and
+    a row spelling one seam still selects that seam's own arm."""
     from emmy.compiler.pipeline.search.pins import spelled_arm  # noqa: PLC0415
 
     graph, node = _mimo_case(_REQUANT)
     match = Match(graph=graph, root_node_id=node.id, rule=Rule(name="test", pattern=[]))
     options = _CUT.rewrite(match, node)
-    kept, *handed = _root_spellings(node.op)
+    _, whole = _composed_arm(graph, node)
 
-    composed = spelled_arm(options, dict.fromkeys(handed, "cut"))
-    assert composed is not None and sorted(composed[1]) == sorted(handed)
+    composed = spelled_arm(options, dict.fromkeys(whole, "cut"))
+    assert composed is not None and sorted(composed[1]) == sorted(whole)
 
-    single = spelled_arm(options, {kept: "cut"})
-    assert single is not None and list(single[1]) == [kept]
+    one = next(iter(sorted(whole)))
+    single = spelled_arm(options, {one: "cut"})
+    assert single is not None and list(single[1]) == [one]
