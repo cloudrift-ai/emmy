@@ -1517,16 +1517,22 @@ def test_write_ab_json_greedy_bench_fail_and_record_knobs(tmp_path):
 
 
 def test_write_ab_json_records_a_forkless_kernel_row(tmp_path):
-    """A forkless kernel's schedule space collapsed to its OFF anchors — no node assignment, which
-    ``complete_kernel_row`` refuses — yet its ``record_knobs`` is that row as-is: the one enumerated
-    row a golden entry for it spells. The residual of a placement cut is one such kernel, and it
-    must not sink the whole record."""
+    """A forkless kernel's schedule space collapsed to its OFF anchors — no node assignment — and
+    its ``record_knobs`` is that row as-is: the one enumerated row a golden entry for it spells.
+    The residual of a placement cut is one such kernel, and it must not sink the whole record.
+
+    ``complete_kernel_row`` accepts the row rather than refusing it: ``TILE`` and ``REDUCE`` key off
+    the tile's contraction and reduction sites, so a kernel with neither has nothing to assign and
+    is complete without one. The policy stamp rides along exactly as it does on a kernel that DOES
+    carry forks — ``schedule_row_key`` projects it out when the row is matched against a leaf, so it
+    is recorded, not identity."""
     import json
     from types import SimpleNamespace
 
     from emmy.commands.run import _write_ab_json
     from emmy.compiler.graph import Graph, Tensor
     from emmy.compiler.ir.cuda.ir import CudaOp
+    from emmy.compiler.pipeline.knob import schedule_row_key
 
     graph = Graph()
     forkless = CudaOp(kernel_name="k", knobs={"WORK": "", "RASTER": "", "LOOPIFY": 0})
@@ -1538,7 +1544,8 @@ def test_write_ab_json_records_a_forkless_kernel_row(tmp_path):
     _write_ab_json(args, {}, graph, None, [])
 
     rec = json.loads((tmp_path / "ab.json").read_text())
-    assert rec["greedy"]["kernels"][0]["record_knobs"] == {"WORK": "", "RASTER": ""}
+    assert rec["greedy"]["kernels"][0]["record_knobs"] == {"WORK": "", "RASTER": "", "LOOPIFY": "0"}
+    assert schedule_row_key(rec["greedy"]["kernels"][0]["record_knobs"]) == (("WORK", ""), ("RASTER", ""))
 
 
 def test_print_kernel_stats_greedy_bench_fail_row(capsys):
