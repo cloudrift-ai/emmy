@@ -85,6 +85,19 @@ configs:
       STAGE: ''
       RASTER: ''
     identity: fb05568f956bc5f3686693caa643bd929543fbeb156ffeaf808ca4ee2c4f2748
+  - name: k_sdpa_6a2bfa.0015e9065043.032fc79559fc
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      TILE@map.1/twist: ''
+      TILE@map.1/twist.1/inner: ''
+      REDUCE@map.1/twist: ''
+      REDUCE@map.1/twist.1/inner: ''
+      WORK: ''
+      STAGE: ''
+      RASTER: ''
+    identity: 032fc79559fcae7dc66446ff62ec07ccae09426566ea765cd1a194b171fa545e
 loops:
 - inputs: [x0, x1, x2]
   outputs: [scaled_dot_product_attention]

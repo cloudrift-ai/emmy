@@ -89,3 +89,13 @@ configs:
       REDUCE: ''
       RASTER: ''
     identity: 4fde58f4f7e00b9b17d5b89545a77a3dc9699ad4666e0fc2af647896d6337b81
+  - name: k_matmul_softmax_reduce_2c67a1.c029b4a45303.3295ee7031df
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: 3295ee7031dff76a7235902b25f13df94728188938ebce6837201443cda7abd2

@@ -56,3 +56,16 @@ configs:
       RASTER: ''
       WORK: t32x16
     identity: 3a4b84d27383d81e107c3ab1f76d96f9ae59dc6174abf6ce77fc44e5677b06d3
+  - name: k_sdpa_d0df3e.b595be4fca99.b77e6e905e09
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE@map.1/twist: ''
+      TILE@map.1/twist.1/inner: ''
+      REDUCE@map.1/twist: ''
+      REDUCE@map.1/twist.1/inner: ''
+      WORK: ''
+      STAGE: ''
+      RASTER: ''
+    identity: b77e6e905e090f5fc51419169ed51dc7a1727c55975577eed40feb198f416653
