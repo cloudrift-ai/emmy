@@ -189,6 +189,22 @@ def _leaf_graph(leaf: object) -> Graph:
     return option if option is not None else leaf.expand()[0]
 
 
+def _materialized_graph(leaf: object) -> Graph | None:
+    """The ``Graph`` behind a structural leaf, or ``None`` when the option cannot be minted.
+
+    A deferred structural leaf is a thunk: expanding it RUNS the rewrite that builds its
+    fragment, and a rewrite may refuse there (``_split``'s closure gate: a sliced piece whose
+    term does not close). That refusal means "this is not an option", not "this compile is
+    broken" — the fused side and every sibling splice are still live, and pricing must drop the
+    refused leaf rather than let the raise escape a fork that had a healthy alternative in hand.
+    """
+    try:
+        return _leaf_graph(leaf)
+    except (ValueError, KeyError) as exc:  # noqa: BLE001 — a refusal is data here, not an error
+        logger.debug("structural option refused at mint (%s) — dropping it from the fork", exc)
+        return None
+
+
 def _decision_key(fp: ForkPoint, blocked: dict | None) -> tuple | None:
     """The decision memo's key for one schedule fork, or ``None`` where the memo does not apply.
 
@@ -378,16 +394,16 @@ def _priced_pick(
     picking it."""
     from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
 
-    priced = [
-        (
-            o,
-            _price_graph(_leaf_graph(o), fp.ctx, prior, memo, db, decisions)
-            if _is_structural_option(o)
-            else _price_op_leaf(fp, o, prior, memo, db, decisions),
-        )
-        for o in leaves
-    ]
-    if any(us is None for _, us in priced):
+    priced: list[tuple[object, float | None]] = []
+    for o in leaves:
+        if not _is_structural_option(o):
+            priced.append((o, _price_op_leaf(fp, o, prior, memo, db, decisions)))
+            continue
+        graph = _materialized_graph(o)
+        if graph is None:  # refused at mint — not an option, so not a reason to stop pricing
+            continue
+        priced.append((o, _price_graph(graph, fp.ctx, prior, memo, db, decisions)))
+    if not priced or any(us is None for _, us in priced):
         return None
     return min(priced, key=lambda op_us: op_us[1])[0]
 
@@ -1052,9 +1068,10 @@ def greedy_decide(
                     # row, so this is a single resolve, not one per enumerated leaf — keeping the
                     # two sides of the kernel-set comparison the same quantity (a fork-local row
                     # score would omit any further scored forks the fused resolution hits).
-                    priced = [(o, _price_graph(_leaf_graph(o), fp.ctx, the_prior, memo, db, decisions)) for o in splices]
+                    minted = [(o, _materialized_graph(o)) for o in splices]
+                    priced = [(o, _price_graph(g, fp.ctx, the_prior, memo, db, decisions)) for o, g in minted if g is not None]
                     fused_us = _price_op_leaf(fp, leaf, the_prior, memo, db, decisions)
-                    if fused_us is not None and all(us is not None for _, us in priced):
+                    if fused_us is not None and priced and all(us is not None for _, us in priced):
                         best_o, best_us = min(priced, key=lambda o_us: o_us[1])
                         if best_us < fused_us:
                             fp.score = best_us

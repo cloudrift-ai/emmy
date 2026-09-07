@@ -140,6 +140,19 @@ def _enforce(reason: str | None) -> None:
         raise ValueError(reason)
 
 
+def _unclosed_piece(piece) -> str | None:
+    """A structural rewrite must yield closed terms. ``030_cut`` enforces that on the seams it
+    offers (``_closed_at``); nothing re-checked the region a split slices for a PLACED piece, so a
+    slice that loses a ``Load`` binding the rebound region still reads minted a kernel every later
+    body computation refuses (``Fold.lower``'s closure gate) — poisoning the branch long after it
+    was offered instead of retiring it here."""
+    try:
+        _ = piece.loop_body  # cached_property: computed here once, reused by every later stage
+    except (ValueError, KeyError) as exc:
+        return f"split piece does not close: {exc}"
+    return None
+
+
 def _reducing_roots(op: Fold) -> tuple[Fold, ...]:
     """The DISTINCT reducing roots a projection's operands carry — the head fold reached through
     its epilogue and again as a shared operand is one root, and a provider term carries none."""
@@ -529,6 +542,7 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
         piece = _piece(
             _project(_rebind(region, node, partial_fold), body, (split, *free)), (split, *free), output_specs=p_stores, axes=axes
         )
+        _enforce(_unclosed_piece(piece))
         result = _one(match, frag, root, piece)
         return _add_projection_pieces(match, result, projection_pieces, free)
 
@@ -556,6 +570,7 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     # lead axes from the placement, so nothing is restamped on the node.
     ws_stores = tuple(OutputSpec(write=Write(output=ws_name, index=ws_index(i), value=states[i])) for i in range(n_comp))
     partial_tile = _piece(partial_fold, (split, *free), output_specs=ws_stores, axes=axes)
+    _enforce(_unclosed_piece(partial_tile))
 
     # --- finalize kernel: identity-lift each workspace state tuple through the SAME monoid.
     # The merge axis carries the SAME consumed-split receipt the partial's slice does: the
@@ -579,6 +594,7 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     fin_tile = _piece(
         _project(_rebind(region, node, fin_fold), body, tuple(free)), free, output_specs=fin_stores, axes=_with_axes(tile.axes, fin_axis)
     )
+    _enforce(_unclosed_piece(fin_tile))
     result = _add_output_piece(match, frag, root, fin_tile, _piece_inputs(root, fin_tile, ws_name))
     return _add_projection_pieces(match, result, projection_pieces, free)
 
