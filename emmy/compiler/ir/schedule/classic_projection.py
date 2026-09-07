@@ -207,9 +207,15 @@ def _chunk_refusal(tile: TileOp, node) -> str | None:
         return "the chunk tier folds a carrier whose pivot a nested contraction supplies"
     if any(edge.as_slab() is None for edge in (*score.operands, *node.operands[1:])):
         return "the chunk tier reads its score operands and its streamed value as slabs"
-    cone = node.operands[0].applied.cone(node.roles[0])
-    if any(not isinstance(stmt, (Assign, Load)) for stmt in cone.body):
-        return "the score's own cone holds more than a straight-line program"
+    # The score's own PREFIX is the CARRIER's lift cut to its score role — A is the score
+    # contraction, and what scales its raw accumulator lives in the lift above it. Its leaves past
+    # the producer are read once ahead of the chunk, so none of them may vary over the chunk.
+    prefix = node.applied.cone(node.roles[0])
+    if any(not isinstance(stmt, (Assign, Load)) for stmt in prefix.body):
+        return "the score's own prefix holds more than a straight-line program"
+    leaves = [edge for edge in node.operands[1:] if set(edge.exposes) & set(prefix.params)]
+    if any(node.axis in edge.free_axes for edge in leaves):
+        return "the score's prefix reads an operand that varies over the chunk"
     # The tier holds ONE accumulator — the expectation — and every other carried state as a per-row
     # register the store may read but not write out. A cross-CTA split's partial writes the whole
     # carrier to its workspace, which is a kernel this tier cannot produce.
