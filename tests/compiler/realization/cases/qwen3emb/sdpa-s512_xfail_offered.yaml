@@ -1,8 +1,12 @@
-# evidence: the schedule pins a SCALAR register tile on the twisted carrier. The scalar tier folds the stored lift into
-# one accumulator per bilinear channel, and for a twist that lift is the base contribution — it denotes
-# `Sum exp(score)` — so a twisted carrier offers no scalar tile at all and the pin reaches no row. The chunk tier that
-# does fold this carrier needs a 16-bit mma atom whose C fragment repacks into an A operand, which an fp32 target has
-# none of; closing the gap means an fp32 path for the weight, not a row on this one.
+# evidence: the schedule pins a SCALAR register tile on the twisted carrier, and no scalar tile is offered on one.
+# The obstacle is NOT the numerics any more — the term stores the stable contribution and `Fold.step` folds it under
+# the recipe's own combine, which is why the untiled arm is sound. It is the tier's shape: the scalar register tier
+# folds one additive accumulator per cell, `acc__c{i}_{j} += b·a`, with its multiply, its add and its single state all
+# fixed, while this carrier folds three states under their own ops and seeds with the stable merge between them.
+# Offering the tile anyway reaches the materializer as `reads names it never binds: acc3__c0_0, acc5__sum__c0_0` —
+# the cell copies of the pivot and the denominator, which nothing declares. Closing the gap means the ILP register
+# tier folding a recipe, the way the chunk tier does on tensor cores. The chunk tier itself is no route here: it
+# needs a 16-bit mma atom whose C fragment repacks into an A operand, and this fp32 target has none.
 # Qwen3-Embedding-0.6B decoder layer 0, kernels 6 and 7: causal GQA attention.
 # hidden=1024 heads=16 kv_heads=8 head_dim=128, fp32, seq 512. One of the twelve layer-0
 # kernels the perf suite curated before the corpus became its case source.
