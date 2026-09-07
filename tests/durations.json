@@ -648,6 +648,8 @@
  "tests/compiler/realization/test_realization.py::test_realization[fused/nvfp4-gate-up-requant-place-cut.yaml-correct]@cuda": 583.9,
  "tests/compiler/realization/test_realization.py::test_realization[fused/nvfp4-gate-up-requant-place-cut.yaml-offered]": 11.4,
  "tests/compiler/realization/test_realization.py::test_realization[fused/nvfp4-gate-up-requant-place-cut.yaml-realized]": 17.3,
+ "tests/compiler/realization/test_realization.py::test_realization[fused/nvfp4-gate-up-requant-shared-root-cut.yaml-built]@cuda": 29.7,
+ "tests/compiler/realization/test_realization.py::test_realization[fused/nvfp4-gate-up-requant-shared-root-cut.yaml-correct]@cuda": 45.9,
  "tests/compiler/realization/test_realization.py::test_realization[fused/nvfp4-gate-up-requant-shared-root-cut.yaml-offered]": 14.7,
  "tests/compiler/realization/test_realization.py::test_realization[fused/nvfp4-gate-up-requant-shared-root-cut.yaml-realized]": 20.8,
  "tests/compiler/realization/test_realization.py::test_realization[fused/nvfp4-quantize-cut-shared-normalizer.yaml-correct]@cuda": 15.0,
