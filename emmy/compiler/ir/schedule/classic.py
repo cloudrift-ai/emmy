@@ -228,6 +228,10 @@ def _computed_edge(node: Fold) -> bool:
 def _needs_fill(tile_op, node: Fold, plan: Tile) -> bool:
     from . import staging  # noqa: PLC0415
 
+    if node.chunked():
+        # The chunk tier's A is the WEIGHT, which never leaves registers: it is what the chunk's
+        # own score fragments repack into. There is no operand to fill and no slab to fill it from.
+        return False
     return plan.is_warp and (_computed_edge(node) or (len(node.operands) - 1) > 1 or staging.converting_a(node, plan.atom, tile_op.inputs))
 
 
@@ -244,13 +248,6 @@ def _kstep_refusal(k_axis, plan: Tile) -> str | None:
 def _plan_node_refusal(tile_op, node: Fold, plan: Tile, placed: PlacedTile, facts: ContractionFacts) -> str | None:
     from . import staging  # noqa: PLC0415
 
-    if plan.is_warp and node.chunked():
-        # The chunk tier folds whole chunks and nothing else: it merges once per chunk through the
-        # recipe's ⊕, and a ragged last chunk would merge a partial pivot. A cross-CTA slice whose
-        # length the chunk does not divide is where this bites.
-        step = plan.atom.atom_k * plan.bk
-        if not facts.k_axis.extent.is_static or facts.k_axis.extent.as_static() % step:
-            return f"the chunk tier needs a key extent its {step}-wide chunk tiles exactly"
     refusal = _kstep_refusal(facts.k_axis, plan)
     if refusal is not None or not _needs_fill(tile_op, node, plan):
         return refusal
@@ -329,7 +326,7 @@ def _fragment_agreements(
             # this atom with the chunk as its N tile, one warp column wide and the same register
             # rows. Stated as a need of its own because the ordinary one accepts an untiled
             # producer, and that row would be stamped on a kernel whose emission ignored it.
-            need = ("chunk", plan.atom.shape, plan.atom.fragment_layout, stage.bk_elems if stage is not None else 0, placed.m.reg)
+            need = ("chunk", plan.atom.shape, plan.atom.fragment_layout, plan.atom.atom_k * plan.bk, placed.m.reg)
         elif plan.is_warp and stage is not None and stage.transport == "smem":
             need = ("step" if facts.need_step else "warp", plan.atom.shape, plan.atom.fragment_layout, stage.bk_elems)
         else:

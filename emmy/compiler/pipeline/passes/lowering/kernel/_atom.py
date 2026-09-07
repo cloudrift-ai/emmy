@@ -38,11 +38,13 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.kernel.ir import (
     FRAG,
+    FRAG_COL,
     ROW,
     UNIFORM,
     BlockScaleLoad,
     EpilogueLoad,
     FragmentApply,
+    FragmentMask,
     FragmentPromote,
     FragmentRepack,
     FragmentRowReduce,
@@ -2130,13 +2132,11 @@ class _FlashOps(_MmaOps):
         atom = self.tile.atom
         if atom.fragment_layout != "m16n8k16" or not atom.c_to_a_repack:
             raise RuleSkipped("the chunk tier needs an atom whose C fragment repacks into an A operand", reject=True)
-        bk = self.stage.bk_elems if self.stage is not None else atom.atom_k
+        # The chunk is the TILE's own K width. This tier reads every operand gmem-direct, so it
+        # takes no transport from ``STAGE`` and the site spells none.
+        bk = atom.atom_k * self.tile.bk
         cols, steps = bk // atom.atom_n, bk // atom.atom_k
-        if bk % atom.atom_k or cols != 2 * steps:
-            raise RuleSkipped(f"a chunk of {bk} does not tile into whole {atom.atom_k}-wide mma steps", reject=True)
         key = self.k_axis
-        if not key.extent.is_static or key.extent.as_static() % bk:
-            raise RuleSkipped("the chunk tier needs a key extent its chunk tiles exactly", reject=True)
         score, score_tile = self.inner if self.inner else (None, None)
         if score is None or any(edge.as_slab() is None for edge in (*score.operands, self.c.operands[1])):
             raise RuleSkipped("the chunk tier reads its score operands and its streamed value as slabs", reject=True)
@@ -2151,11 +2151,18 @@ class _FlashOps(_MmaOps):
 
         chunk = Axis(name=f"{key.name}__ck", extent=key.extent)
         base = Var(chunk.name)
+        # A key extent the chunk does not tile — a symbolic stream, or a static one with a
+        # remainder — leaves the last chunk ragged. Its overhanging columns fill with the pivot ⊕'s
+        # identity, so the pivot ignores them and every channel's pattern folds a zero weight
+        # through them; the loads that reach past the extent clamp and zero the same way every
+        # gmem-direct fragment loader already does.
+        ragged = not key.extent.is_static or key.extent.as_static() % bk
+        bound = key.extent_expr() if ragged else None
         # The cone's row-invariant leaves (attention's scale) are read once, ahead of the chunk loop.
         pre = [stmt for edge in self.c.operands[0].operands if edge is not score for stmt in edge.lower(axes=self.axes)]
 
         memo: dict = {}
-        body: list[Stmt] = self._score_tile(offset, mn, base, cols)
+        body: list[Stmt] = self._score_tile(offset, mn, base, cols, bound)
         scored, pivots = {}, {}
         for i in range(m.reg):
             for j in range(cols):
@@ -2168,6 +2175,15 @@ class _FlashOps(_MmaOps):
                 )
                 body += stmts
                 scored[i, j] = frags[self.c.roles[0]]
+                if bound is not None:
+                    body.append(
+                        FragmentMask(
+                            frag=scored[i, j],
+                            mask_when=BinaryExpr(">=", Var(FRAG_COL), bound),
+                            col_base=BinaryExpr("+", base, Literal(j * atom.atom_n, "int")),
+                            fill=self.c.base.components()[0].identity,
+                        )
+                    )
             pivots[i] = _row_pair(self.frag("_g"), i)
             body.append(
                 FragmentRowReduce(
@@ -2213,7 +2229,7 @@ class _FlashOps(_MmaOps):
                             op=self.c.base.components()[index],
                         )
                     )
-        body += self._expectation(offset, mn, base, weights, steps)
+        body += self._expectation(offset, mn, base, weights, steps, bound)
         body += self._merge(mn, pivots, partials)
         # ``seed=False``: the carrier is declared once outside this loop at the seeds the TERM names
         # — the pivot's is not ``maximum``'s neutral element — so the loop must not re-seed it.
@@ -2221,7 +2237,7 @@ class _FlashOps(_MmaOps):
             StridedLoop(axis=chunk, start=Literal(0, "int"), step=Literal(bk, "int"), body=Body(tuple(body)), unroll=False, seed=False)
         ]
 
-    def _score_tile(self, offset, mn, base, cols) -> list[Stmt]:
+    def _score_tile(self, offset, mn, base, cols, bound) -> list[Stmt]:
         """The chunk's score — one ``(m, chunk)`` mma tile, its own K loop inside the chunk."""
         m, _ = mn
         atom, score, key = self.tile.atom, self.inner[0], self.k_axis
@@ -2251,6 +2267,7 @@ class _FlashOps(_MmaOps):
                 role="b",
                 staged=False,
                 b_trans=trans,
+                gmem_guard=None if bound is None else (BinaryExpr("+", base, Literal(j * atom.atom_n, "int")), bound),
                 fragment_layout=atom.fragment_layout,
             )
             for j in range(cols)
@@ -2278,7 +2295,7 @@ class _FlashOps(_MmaOps):
             ),
         ]
 
-    def _expectation(self, offset, mn, base, weights, steps) -> list[Stmt]:
+    def _expectation(self, offset, mn, base, weights, steps, bound) -> list[Stmt]:
         """The bilinear channel's product: the weight repacks into an A operand IN REGISTERS and
         ``mma.sync``\\ s against the streamed operand, into the chunk's own accumulator so the merge
         can rescale both sides of the ⊕."""
@@ -2303,6 +2320,7 @@ class _FlashOps(_MmaOps):
                     staged=False,
                     b_trans=self.c.as_contraction().b_trans,
                     gmem_guard=_guard(n, offset[1].base(j)),
+                    k_zero=None if bound is None else (row, bound),
                     fragment_layout=atom.fragment_layout,
                 )
                 for j in range(n.reg)

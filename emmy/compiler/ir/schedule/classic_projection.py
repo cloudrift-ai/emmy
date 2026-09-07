@@ -183,7 +183,6 @@ def _node_refusal(tile: TileOp, target, node, fragment_epilogue: bool, packed: t
     return None
 
 
-
 def _chunk_refusal(tile: TileOp, node) -> str | None:
     """Return why the CHUNK tier cannot fold this twisted carrier, whatever atom is offered.
 
@@ -195,8 +194,6 @@ def _chunk_refusal(tile: TileOp, node) -> str | None:
         return "the chunk tier folds a carrier whose pivot a nested contraction supplies"
     if any(edge.as_slab() is None for edge in (*score.operands, *node.operands[1:])):
         return "the chunk tier reads its score operands and its streamed value as slabs"
-    if not tile.axis_of(node.axis).extent.is_static:
-        return "the chunk tier needs a key extent its chunk tiles exactly"
     cone = node.operands[0].applied.cone(node.roles[0])
     if any(not isinstance(stmt, (Assign, Load)) for stmt in cone.body):
         return "the score's own cone holds more than a straight-line program"
@@ -375,8 +372,9 @@ def _edge_domain(state: _ProjectionState, site: int, choices: tuple) -> tuple[Ed
     node = state.tile.sites[site].node
     view = state.tile.views[site]
     # A transport is a tile's operand fill, so the catalog belongs to a site a tile folds whole —
-    # the same reading ``TileOp.stage_edges`` spells a STAGE key on.
-    if not view.tiles_whole():
+    # the same reading ``TileOp.stage_edges`` spells a STAGE key on. A chunked carrier folds whole
+    # and still takes none: its tier is gmem-direct.
+    if not view.tiles_whole() or view.chunked():
         return (EdgeSchedule(Stage.direct()),)
     supported = {}
     direct = EdgeSchedule(Stage.direct())

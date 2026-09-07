@@ -533,8 +533,12 @@ class TileOp(Op):
 
     @cached_property
     def stage_edges(self) -> tuple[EdgeSite, ...]:
-        """The operand positions a ``STAGE`` transport can address."""
-        return tuple(edge for edge in self.edge_sites if self.contracts(edge[0]))
+        """The operand positions a ``STAGE`` transport can address.
+
+        A CHUNKED carrier's are not among them: its tier reads every operand gmem-direct and takes
+        its chunk off the ``TILE``, so a transport spelling there would decide nothing and two rows
+        would name one kernel."""
+        return tuple(edge for edge in self.edge_sites if self.contracts(edge[0]) and not self.views[edge[0]].chunked())
 
     @cached_property
     def _packed_readings(self) -> frozendict:
