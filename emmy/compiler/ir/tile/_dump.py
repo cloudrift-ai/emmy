@@ -35,10 +35,12 @@ from emmy.compiler.ir.tile.ops import axis_names, sched_of
 # the slot it held leaves the signature with it. That is not derived material — the statements
 # printed are the edge's own.
 #
-# A lift prints APPLIED: every operand-bound param spelled as the operand result it binds, so the
-# signature echoes the brackets above it name for name. An α-rename between a producer and its
-# consumer is spelling, not computation, and where the consumer has no name at all the twist rewrite
-# supplies ``_unread<i>`` — which says less than the operand's own name for the same value.
+# A lift prints APPLIED, and only the slots it USES: every operand-bound param is spelled as the
+# operand result it binds, so the bracket above resolves which component it is and an unread one can
+# go. An α-rename between a producer and its consumer is spelling, not computation, and where the
+# consumer has no name at all the twist rewrite supplies ``_unread<i>`` — which says less than the
+# operand's own name for the same value. The binding ARITY leaves the signature with them; it stays
+# on the bracket directly above, which is where the component names are read from anyway.
 #
 # Schedule choices are not on the term at all. The owning ``TileOp`` supplies one complete
 # generic ``Schedule`` whose node choices annotate their canonical sites.
@@ -94,7 +96,8 @@ def _lam_sig(lam, ctx: _Ctx | None = None, drop: frozenset[str] = frozenset()) -
     A non-empty CAPTURE set is spelled between the params and the results — without it a λ that
     reads an enclosing value would print as though it were closed, which is the one property the
     reader most needs (an unclosed subtree can never become an operand edge). ``drop`` are the
-    slots of inlined scalar operands (:func:`_inlined`), which the body now defines."""
+    operand slots the branch does not spell — an inlined scalar's (:func:`_inlined`), which the body
+    now defines, and one this reader never reads, which the bracket above it already names."""
     rs = ", ".join(lam.results)
     cap = ctx.captures(lam) if ctx is not None else ()
     free = f" [captures {', '.join(cap)}]" if cap else ""
@@ -195,7 +198,15 @@ def _items(node, ctx: _Ctx) -> list[tuple[str, object]]:
     # it has no name to offer. The producer's spelling is the one the term is rendered in anyway
     # (``step``, ``exposes``, ``lower`` all read through it), so this is the tree's one name per
     # value rather than a second one per consumer.
+    #
+    # And only the slots it USES. Once a param is spelled by the operand result it binds, the
+    # bracket one line up resolves which component it is, so listing the rest buys nothing but
+    # length — and hides the one thing worth reading, that attention's two consumers of one carrier
+    # take different states off it. Only an operand slot can go: a trailing coordinate is in the
+    # signature BECAUSE the body reads it, and the iteration var is the fold's own.
     lift = node.applied
+    read = frozenset(lift.body.ssa_uses) | frozenset(lift.results)
+    dropped |= frozenset(name for edge in node.operands for name in edge.exposes if name not in read)
     items.append((f"lift: {_lam_sig(lift, ctx, dropped)}", _stmts((*scalars, *lift.body), ctx)))
     # The ⊕ is STORAGE only as ``base``; the twisted conjugate is derived from it and the recipe
     # (``combine = psi(psi_inv(x) base psi_inv(y))``), so a twisted node names the recipe in its

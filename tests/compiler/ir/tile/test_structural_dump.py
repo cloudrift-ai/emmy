@@ -147,20 +147,34 @@ def test_a_computed_edge_nests_as_a_subtree_a_materialized_one_is_a_leaf() -> No
     assert any("xhat = multiply(xhat_e, xhat_s)" in ln for ln in lines)
 
 
-def test_a_lift_prints_the_operand_name_for_every_slot_it_binds() -> None:
-    """The signature echoes the brackets above it, name for name. What a reader happens to call a
-    slot is spelling, not computation — and where it has no name at all (the twist rewrite's
-    ``_unread<i>``) its own spelling says strictly less than the operand's. The body is re-spelled
-    with it, so the two stay consistent."""
-    node = Fold(
+def _two_operand_reader() -> Fold:
+    """A reader with its own names for both slots, one of which it never reads — the shape the
+    twisted fusion leaves when it re-seats a carrier's channels."""
+    return Fold(
         operands=(_stat_fold(), _cone()),
         lift=Lambda(params=("_unread0", "w"), body=Body((Assign(name="o", op="exp", args=("w",)),)), results=("o",)),
     )
-    text = "\n".join(pretty(node))
-    assert "├─ operand[acc0]: Fold[k] reduce" in text
-    assert "└─ lift: λ(acc0, xhat) -> (o)" in text
+
+
+def test_a_lift_prints_the_operand_name_for_a_slot_it_reads() -> None:
+    """The signature spells a slot the way the operand does, so it echoes the bracket above it. What
+    a reader happens to call a slot is spelling, not computation. The body is re-spelled with it, so
+    the two stay consistent."""
+    text = "\n".join(pretty(_two_operand_reader()))
+    assert "├─ operand[xhat]: Fold  free" in text
+    assert "└─ lift: λ(xhat) -> (o)" in text
     assert "     o = exp(xhat)" in text  # the body follows the signature
-    assert "_unread0" not in text and "(w)" not in text
+    assert "(w)" not in text
+
+
+def test_a_lift_omits_a_slot_it_never_reads() -> None:
+    """Once a param is spelled by the operand result it binds, the bracket one line up resolves which
+    component it is — so a slot this reader does not use is length and nothing else. Its edge keeps
+    its branch: only the signature entry goes."""
+    text = "\n".join(pretty(_two_operand_reader()))
+    assert "├─ operand[acc0]: Fold[k] reduce" in text  # the edge is still there in full
+    assert "acc0" not in text.rsplit("lift: ", 1)[1].splitlines()[0]  # but not on the reader's line
+    assert "_unread0" not in text
 
 
 # --- a scalar operand is spelled inside its reader ------------------------------------------------ #
