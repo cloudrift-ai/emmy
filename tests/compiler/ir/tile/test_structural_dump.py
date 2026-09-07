@@ -29,7 +29,7 @@ from emmy.compiler.ir.schedule.classic import (
     ProjectionSchedule,
     ReductionSchedule,
 )
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Const, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, TileOp
 from emmy.compiler.ir.tile._dump import pretty
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
@@ -211,6 +211,27 @@ def test_a_scalar_operand_is_inlined_into_the_lift_that_reads_it() -> None:
     assert "     v2 = multiply(acc0, s0)" in text
     # The reduce beside it is untouched: an edge that DOES decide keeps its branch.
     assert "operand[acc0]: Fold[k] reduce   ‹computed›" in text
+
+
+def test_a_twisted_node_prints_its_stable_combine_then_psi_and_the_base_as_helpers() -> None:
+    """The carrier IS its stable lift and κ_S; ψ and the componentwise base monoid are what a
+    matcher reads back through, so they follow as helpers. κ_S prints as a signature — the stable
+    program is a dozen statements and ``--ir loop`` has them."""
+    from emmy.compiler.ir.pure.twist import SOFTMAX, Twist
+
+    fold = Fold(
+        operands=(_stat_fold(),),
+        lift=Lambda(params=("k", "acc0"), body=Body((Const(name="one", value=1.0),)), results=("acc0", "one")),
+        init=(-1e30, 0.0),
+        base=Lambda.componentwise(SOFTMAX.base[:2], ("m", "l")),
+        twist=Twist(recipe=SOFTMAX, channels=(0,)),
+    )
+    text = "\n".join(pretty(fold))
+    assert "├─ combine: λ(m, l, m__o, l__o) -> (m, l)" in text, "the stable ⊕, as a signature"
+    assert "├─ helper: psi λ(m, D, O) -> (m, d, o)" in text
+    assert "│    d = multiply(D, f)" in text, "the coordinate map's own program, in the recipe's names"
+    assert "└─ helper: base = (maximum, add)" in text
+    assert "acc0 <- " not in text  # still nothing derived from the step
 
 
 # --- nothing DERIVED reaches the dump ------------------------------------------------------------ #

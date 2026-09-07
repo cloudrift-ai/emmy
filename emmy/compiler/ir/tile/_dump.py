@@ -208,11 +208,17 @@ def _items(node, ctx: _Ctx) -> list[tuple[str, object]]:
     read = frozenset(lift.body.ssa_uses) | frozenset(lift.results)
     dropped |= frozenset(name for edge in node.operands for name in edge.exposes if name not in read)
     items.append((f"lift: {_lam_sig(lift, ctx, dropped)}", _stmts((*scalars, *lift.body), ctx)))
-    # The ⊕ is STORAGE only as ``base``; the twisted conjugate is derived from it and the recipe
-    # (``combine = psi(psi_inv(x) base psi_inv(y))``), so a twisted node names the recipe in its
-    # header and prints one op per state here instead of the twelve-statement program.
+    # A twisted node's own ⊕ is κ_S, the stable combine — that and the lift above it are what the
+    # carrier IS. It prints as a signature: the stable program is a dozen statements and ``--ir
+    # loop`` has them. ψ and the base monoid follow as HELPERS, which is what they are once the
+    # term is stored in stable coordinates — the coordinate map a matcher reads back through
+    # (:meth:`Fold.based`) and the componentwise ⊕ it conjugates. They are spelled in the RECIPE's
+    # own names, not the term's: neither is bound to this carrier and neither renames with it.
     if node.twist is not None:
-        items.append((f"base: ({', '.join(op.name for op in node.base.components())})", lambda cont: []))
+        recipe = node.twist.recipe
+        items.append((f"combine: {_lam_sig(node.combine, ctx)}", lambda cont: []))
+        items.append((f"helper: psi {_lam_sig(recipe.psi, ctx)}", _stmts(recipe.psi.body, ctx)))
+        items.append((f"helper: base = ({', '.join(op.name for op in node.base.components())})", lambda cont: []))
     elif node.combine is not None:
         items.append((f"combine: {_lam_sig(node.combine, ctx)}", _stmts(node.combine.body, ctx)))
     if node.observe is not None:
