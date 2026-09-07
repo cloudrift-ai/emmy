@@ -27,6 +27,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.kernel import KernelOp
+from emmy.compiler.ir.kernel.ir import FRAG_COL, FRAG_ROW
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Load, Write
 from emmy.compiler.ir.stmt.body import free_names
@@ -60,9 +61,11 @@ def rewrite(match: Match, root: Node) -> KernelOp | None:
         raise RuleSkipped(f"kernel binder refuses this row's projection ownership: {exc}", reject=True) from exc
 
 
-#: The CTA helper coordinates the kernel renderer declares in the prologue of any body that uses
-#: them (``ir.stmt.blocks``), so a statement may read them without any binding in the IR.
-_RENDERED_HELPERS = frozenset({"lane", "warp"})
+#: Names the RENDERER supplies, so a statement may read them with no binding anywhere in the IR:
+#: the CTA helper coordinates it declares in the prologue of any body that uses them
+#: (``ir.stmt.blocks``), and the reserved coordinates a :class:`~emmy.compiler.ir.kernel.ir.FragmentMask`
+#: predicate is written over, which the render substitutes per element (tile origin + layout offset).
+_RENDERED_HELPERS = frozenset({"lane", "warp", FRAG_ROW, FRAG_COL})
 
 
 def _unbound_names(tile: TileOp, root: Node, body: Body) -> set[str]:
