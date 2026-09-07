@@ -217,7 +217,11 @@ axis at `tile_base + cell` (masked axes clamp in-bounds) and the SIBLING axis at
 CTA-shared across the sibling, so a sibling var can only survive as a value-dead occurrence: a flat-index reshape
 residue on a merged / reshaped weight row, or, in a packed weight's block-scale fill, a per-tensor scale a placement
 cut moved into a workspace the consuming kernel indexes by its outer free axes. Left unbound either would emit the
-unsplit axis name the kernel no longer defines. The staging **decision** does not live here at all: the
+unsplit axis name the kernel no longer defines. The same binding covers the gmem-direct fragment read of an
+**unstaged** operand (`_MmaOps.read_row` / `read_col`), where the invariance is the warp's rather than the CTA's: an A
+fragment serves every cell of its register row, so its address is n-invariant in value, and a split-K partition that
+placed its `ksplit` coordinate on n is the syntactic occurrence that survives. The staging **decision** does not live
+here at all: the
 `ResolvedStage` in `ClassicMaterialization` arrives **already resolved** by the scheduler (transport eligibility, the
 slab names, K-chunk `bk_elems`, and depth clamps). A direct edge has an explicit direct `Stage` choice and no resolved
 materialization. The `state` builder (which slots the operand fragments) and shared `reduce` (which emits the loop)
