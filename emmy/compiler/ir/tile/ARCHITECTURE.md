@@ -85,6 +85,15 @@ seam wherever it is closed at the axes of every occurrence, and kernel lowering 
 statements that read them. A computed operand (the RMSNorm'd, RoPE'd K vector) is materializable once per key rather
 than recomputed per query row because it is such a closed cone.
 
+An operand result component NO READER READS is dropped, and the edge's body cut to what its surviving results need.
+A reader is a consuming lift or a kernel-boundary store, so a sweep's per-cell projection keeps what its `Write` names
+even though no lift binds it. The dead components are rewrite residue: the twisted fusion re-seats a carrier's channels
+and mints `_unread<i>` for a slot its reader stopped binding, and an epilogue cone beside it keeps exposing a scale that
+was live when it was formed and went dead when the folds fused. Only a zero-axis operand is restricted — a reducing
+one's components ARE its carried states, and dropping one changes the monoid, which is why attention's running maximum
+stays spelled as the `_unread` it honestly is. The rule is tree-wide and unions over readers, because restricting per
+occurrence would sever the object sharing the next paragraph restores.
+
 An identity pass-through — a projection that only re-exposes its single operand's results — dissolves wherever a
 projection is formed or revisited. That is not cosmetic: a pass-through is what makes two occurrences of the same
 computation compare unequal, and the placement fork's value clustering (`lowering/tile/_cut.py`) relies on

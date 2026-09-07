@@ -721,7 +721,11 @@ def test_a_scalar_operand_is_no_seam() -> None:
         ),
         results=("s0", "s1"),
     )
-    scores = contraction("k", Load(name="q", input="q", index=(Var("m"), Var("k"))), (Load(name="kk", input="k", index=(Var("n"), Var("k"))), "acc0"))
+    scores = contraction(
+        "k",
+        Load(name="q", input="q", index=(Var("m"), Var("k"))),
+        (Load(name="kk", input="k", index=(Var("n"), Var("k"))), "acc0"),
+    )
     root = projection(
         (scores, scale),
         (Assign(name="v0", op="multiply", args=("acc0", "s0")), Assign(name="v1", op="add", args=("v0", "s1"))),

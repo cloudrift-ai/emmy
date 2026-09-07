@@ -317,6 +317,46 @@ def test_key_swept_statistic_stays_when_a_sibling_reads_it() -> None:
     assert stat.axis is not None and any(stat is edge for edge in sweep.operands), "the statistic fold is shared, not copied"
 
 
+def test_normalization_prunes_an_operand_component_no_reader_reads() -> None:
+    """A rewrite can leave a cone exposing a value that went dead when the folds around it fused.
+    Normalization restricts the edge to what its reader binds and cuts the body to match, so the
+    dead half stops riding the interface and the loads defining it stop being carried twice."""
+    epilogue = projection(
+        (slab("acc", "workspace", "m"),),
+        (
+            Load(name="scale", input="sdpa_scale", index=(Literal(0, "int"),)),
+            Assign(name="v10", op="reciprocal", args=("acc",)),
+        ),
+        results=("scale", "v10"),
+    )
+    root = projection((epilogue,), (Assign(name="out", op="multiply", args=("v10", "v10")),))
+    tile = TileOp(
+        op=root,
+        name="k_epilogue",
+        place=Placement(free=(M8,)),
+        axes=(M8,),
+        output_specs=(OutputSpec(write=Write(output="o", index=(Var("m"),), values=("out",))),),
+    )
+    (edge,) = tile.op.operands
+    assert edge.exposes == ("v10",)  # ``scale`` went with the param nothing bound
+    assert tile.op.lift.params == ("v10",)
+    assert not [stmt for stmt in edge.lift.body if isinstance(stmt, Load) and stmt.input == "sdpa_scale"]
+
+
+def test_normalization_keeps_a_component_only_a_boundary_store_reads() -> None:
+    """A store is a reader too: a sweep's per-cell projection reaches its ``Write`` with no lift
+    binding it, so the prune keeps what the output specifications name."""
+    cell = projection((slab("acc", "workspace", "m"),), (Assign(name="v", op="exp", args=("acc",)),), results=("acc", "v"))
+    root = projection((cell,), (Assign(name="out", op="rsqrt", args=("acc",)),))
+    specs = (
+        OutputSpec(write=Write(output="o", index=(Var("m"),), values=("out",))),
+        OutputSpec(write=Write(output="tap", index=(Var("m"),), values=("v",))),
+    )
+    tile = TileOp(op=root, name="k_tap", place=Placement(free=(M8,)), axes=(M8,), output_specs=specs)
+    (edge,) = tile.op.operands
+    assert edge.exposes == ("acc", "v")  # ``v`` survives on the store's word alone
+
+
 def test_normalization_shares_structurally_identical_cones() -> None:
     """The tree-wide invariant: after normalization, no two DISTINCT Fold objects in the tree are
     the same value with the same interface names — copies fusion inlined into several consumption
