@@ -219,14 +219,31 @@ gaps stand between here and a boot that serves, both follow-ups to #692:
    evidence then keeps the prior from deciding at all. The path to serving: make `emmy tune` able to measure
    this family — the tune dead-end sink (#705), the retry-policy and regime-pin fixes in flight, the bench
    budget knobs, and a flag to seed the deploy election's route as a measured proposal — then tune the serving
-   twins on the host, record the golden, and boot under strict evidence. The host measurement of any route
-   remains owed.
+   twins on the host, record the golden, and boot under strict evidence.
+   **Measured (2026-09-07, host round three): a 12-kernel route at 2.10 s per `post4096` forward** (11× off
+   the 23.24 s), benched completely under a pin set of 11 seams, recorded by `run --record-greedy` into the
+   working golden (one composed routing row, two split rows, 12 receipts, every one from measuring), and the
+   strict compile from the file alone emits the measured program byte-identical — with #739, without which a
+   recorded composed cut replayed as its first seam only. Three findings that redirect the rest of this item:
+   **(d)** the route was found by pinned characterization on the host CPU (27 s per probe), not by the loop or
+   the tune: the offline prior prices unmeasured arms at 1e-27 … 1e+67 µs, so every measured piece loses to any
+   arm holding an unmeasured kernel, the tune's 623 measured rows collapsed the election to six kernels, and the
+   online checkpoint fitted on this family is quarantined — the sequential loop and the tune cannot be resumed on
+   this target as they stand. **(e)** the one recompute behind every hang since round one is the mixed stream's
+   RMS statistic, whose provider seam sits inside the gate statistic's subtree; once it is a piece the consumer
+   reads it back instead of walking 16384 trips per cell. **(f)** 93 % of the 2.10 s is two kernels the route
+   left naive — the A-operand reduction (1.37 s, a matmul computed as 8 million 128-lane reductions) and the
+   one-thread-per-row root residual (0.59 s on 16 blocks) — both on the root's own ballot; cutting them is the
+   next measurement, before any route for the other twins. The route has NO correctness verdict yet: `--strict`
+   failed on non-finite values in the random-input replay (the round-one property above) and this twin has no
+   eager reference, so a finite-input check is owed with it.
 
 **Consequence for the stages below.** Gate (c) passed at `ab1ad4592` and still does not reproduce: a boot now
-compiles end to end and the elected route is a measured 23.2 s per `post4096` prefill forward (no longer a
-watchdog unknown) — the boot's roofline audit runs each program 4×, so serving needs roughly an order of
-magnitude off the dominant pieces first. Stage 4 cannot warm or bake until that lands and gate (c) is re-run on
-the host, and the golden re-record should follow it, not precede it.
+compiles end to end and the recorded route is a measured 2.10 s per `post4096` prefill forward (no longer a
+watchdog unknown) — the boot's roofline audit runs each program 4×, so serving needs roughly two orders of
+magnitude off the two naive kernels first, and a strict boot needs a measured route for every serving twin, not
+one. Stage 4 cannot warm or bake until that lands and gate (c) is re-run on the host, and the golden re-record
+should follow it, not precede it.
 
 ## Stage 1 — loader lane: read the published checkpoint (CPU-testable) — **DONE (#651)**
 
@@ -437,11 +454,12 @@ Stage −1: DONE (~2 h). Stage 0 round one: DONE (fixed upstream by #602). Stage
 Stage 3 in-repo: DONE (#662); gate (c) passed once at `ab1ad4592`, gate (d)'s token-ID half with it.
 
 **Stage 0 round three remains the critical path — now as kernel speed, not election.** Partitioning (#693/#694),
-the compiling composed cut (#700) and the serial-work pricing (#702) all landed, and the elected route is
-measured: 23.2 s per `post4096` forward, ~97 % of it in three pieces. What holds everything now: making those
-pieces fast — a measured tune pass over the elected route first (the bench completes with the raised budgets),
-then, if the fork space has no fast row, materializing the matmul contributions (open-ended placement work) —
-with the tune-harness fixes (the three budget knobs, the 45-knob site space, `--dump-dir`) as the supporting
-lane. Then Stage 4: 2–4 days on-host (re-run gate (c), re-record the golden, warm/bake/verify). Stage 5: 1–2 days.
+the compiling composed cut (#700), the serial-work stamp (#702) and the composed route rows (#739) all landed,
+and a recorded route is measured: 2.10 s per `post4096` forward, 93 % of it in two naive kernels. What holds
+everything now: cutting those two on the root's ballot and re-measuring (each complete bench writes the route
+into the working golden; the strict compile from the file is the check), a finite-input correctness verdict for
+the route, then a measured route per serving twin — with the harness gaps (the seed's automatic pin re-benching
+a failed election, the post-hang recording running unbounded in the parent) as the supporting lane. Then Stage
+4: 2–4 days on-host (re-run gate (c), re-record the golden, warm/bake/verify). Stage 5: 1–2 days.
 Adding stage 6 (MXFP4 + tuning) is a further 1–3 weeks. The compiler, not the fork ABI, remains the dominant
 uncertainty.

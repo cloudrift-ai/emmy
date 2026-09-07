@@ -376,7 +376,7 @@ def test_composed_scoped_place_pins_cut_together_and_foreign_pins_are_skipped() 
     seam and one consumer, with a producer reading another seam's workspace when its value nests
     inside it — while a pin whose site path exists on no kernel here is another kernel's and is
     skipped, never an error."""
-    match, graph = _case_match("attention/rmsnorm-qk-sdpa-composed-cut_xfail_realized.yaml")
+    match, graph = _case_match("attention/rmsnorm-qk-sdpa-composed-cut.yaml")
     pins = {
         "PLACE@map.1/twist.1/map.1/inner.1/map": "cut",  # the normalized-Q cone
         "PLACE@map.1/twist.1/map.1/inner.2/map": "cut",  # the normalized-K cone
@@ -400,7 +400,7 @@ def test_composed_scoped_place_pins_cut_together_and_foreign_pins_are_skipped() 
 
 
 def test_bare_and_scoped_place_cuts_compose_in_one_decision() -> None:
-    match, graph = _case_match("attention/rmsnorm-qk-sdpa-composed-cut_xfail_realized.yaml")
+    match, graph = _case_match("attention/rmsnorm-qk-sdpa-composed-cut.yaml")
     pins = {"PLACE": "cut", "PLACE@map.1/twist.1/map.1/inner.2/map": "cut"}
 
     with pinned_knobs(pins):
@@ -711,7 +711,7 @@ def test_alpha_equivalent_operand_cones_cluster_into_one_seam() -> None:
 def test_every_seam_is_an_unpinned_arm() -> None:
     """The unpinned fork offers every cuttable seam as its own structural arm, spelled by the same
     key the pin path resolves."""
-    match, graph = _case_match("attention/rmsnorm-qk-sdpa-composed-cut_xfail_realized.yaml")
+    match, graph = _case_match("attention/rmsnorm-qk-sdpa-composed-cut.yaml")
     node = next(node for node in graph.nodes.values() if isinstance(node.op, TileOp))
     options = _CUT.rewrite(match, node)
     arms = [dict(option.knobs) for option in options if "cut" in option.knobs.values()]

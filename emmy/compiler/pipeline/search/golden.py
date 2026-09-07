@@ -971,7 +971,7 @@ def _replay(
         schedule_row_key,
     )
     from emmy.compiler.pipeline.pipeline import Run, _is_structural_option  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.pins import pinned_knobs, spelled_arm  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import composed_routes, pinned_knobs, spelled_arm  # noqa: PLC0415
 
     def _spelling(entry: GoldenRecord) -> dict[str, str]:
         return {**entry.route, **{str(key): str(value) for key, value in entry.knobs.items()}}
@@ -1074,7 +1074,16 @@ def _replay(
                 buckets.setdefault(identity, set()).add(schedule_row_key(row))
         return ops[0] if ops else leaves[0]
 
-    with pinned_knobs(regime):
+    # The seams an entry marks cut together are one composed decision where they resolve on one
+    # kernel (a pinned compile consumed them so, and ``run --record-greedy`` wrote them so); the cut
+    # pass offers that arm on this replay's kernels so whichever entry decides a fork — the record,
+    # the lead, a sibling naming the kernel — can spell it.
+    composed: list[tuple[frozenset | None, tuple[str, ...]]] = []
+    for entry in (record, lead, *named.values()):
+        keys = tuple(sorted(key for key, value in _spelling(entry).items() if family_of(key) == "PLACE" and value == "cut"))
+        if len(keys) > 1 and (None, keys) not in composed:
+            composed.append((None, keys))
+    with pinned_knobs(regime), composed_routes(composed):
         out, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(record.target_program.copy(), decide)
     for node in out.nodes.values():
         if isinstance(node.op, TileOp):
