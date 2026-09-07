@@ -203,10 +203,11 @@ structurally different primitives — sit behind one `fill`/`commit`/`wait` seam
 **one atom-agnostic driver** (`_atom._staged`) builds the operand pair + the transport for either atom; the atom
 supplies only the slab drain leaf via `_AtomOps.staged_drain` (the shared inner fragment drain
 `_staged_inner_atom_loop` — `ldmatrix` on modern atoms, a cooperative shared gather on Volta — or the scalar
-`_scalar_drain`). A fill's gmem-address σ binds **every** tiled output axis, not just the operand's own: the tile
-axis at `tile_base + cell` (masked axes clamp in-bounds) and the SIBLING axis at its block base — a slab is
-CTA-shared across the sibling, so a sibling var can only survive as a value-dead flat-index reshape residue (a
-merged / reshaped weight row), and left unbound it would emit the unsplit axis name the kernel no longer defines. The staging **decision** does not live here at all: the
+`_scalar_drain`). A fill's gmem-address σ — and a gmem-direct fragment load's — binds **every** tiled output axis,
+not just the operand's own: the tile axis at `tile_base + cell` (masked axes clamp in-bounds) and the SIBLING axis at
+its block base — a slab is CTA-shared across the sibling and a fragment is one `B[k, n]` for every row, so a sibling
+var can only survive as a value-dead flat-index reshape residue (a merged / reshaped weight row), and left unbound it
+would emit the unsplit axis name the kernel no longer defines. The staging **decision** does not live here at all: the
 `ResolvedStage` in `ClassicMaterialization` arrives **already resolved** by the scheduler (transport eligibility, the
 slab names, K-chunk `bk_elems`, and depth clamps). A direct edge has an explicit direct `Stage` choice and no resolved
 materialization. The `state` builder (which slots the operand fragments) and shared `reduce` (which emits the loop)
@@ -242,8 +243,10 @@ bilinear channel, so that the tile's accumulators are the carrier itself. Both t
 channel and have no residence for a state that is not one; nor is the stored `lift` what a step may fold there, since
 for a twist it is the BASE contribution and denotes `Sum exp(score)`. Nothing may see through psi.
 
-That one reading decides four things together: whether `TileOp.contracts` offers a TILE site, whether the node takes
-the contraction or the reduction schedule domain, whether its edges get a transport catalog, and whether a root has a
+That reading, with the one-slab-per-tile reading of the pair's shared coordinates (a B slab that changes with the row
+it is contracted against is no tile: an mma B fragment is one `B[k, n]` for every row), is `TileOp.contracts`, and it
+decides three things together: whether the node is a TILE site, whether it takes the contraction or the reduction
+schedule domain, and whether its edges get a transport catalog; `tiles_whole` alone decides whether a root has a
 chain. Refusing at the enumeration rather than at the binder is deliberate — an offered row nothing realizes costs the
 greedy one blocklist retry per rank, and there are more ranked rows than the retry budget, so a pinned P·V shape wedged
 with an unlowered `TileOp` instead of falling back.

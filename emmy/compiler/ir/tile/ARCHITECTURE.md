@@ -222,10 +222,14 @@ at all.
 
 ### One reading for "a tier folds this whole"
 
-`Fold.tiles_whole` decides whether a node is a TILE site (`TileOp.contracts`), which schedule domain it takes, what
-transport catalog its edges get, whether it holds a fragment at a seam (`contraction_facts`), and whether a root has
-a chain. Two shapes answer yes. A PLANAR carrier qualifies when every carried state is a bilinear channel — the
-tile's accumulators ARE the carrier. A TWISTED one qualifies through `Fold.chunked`: the recipe names a pattern for
+`TileOp.contracts` — `Fold.tiles_whole` plus the one-slab-per-tile reading of the coordinates the pair shares —
+decides whether a node is a TILE site, which schedule domain it takes, what transport catalog its edges get, and
+whether it holds a fragment at a seam (`contraction_facts` is populated for exactly those sites); `tiles_whole` alone
+decides whether a root has a chain. A B slab that changes with the row it is contracted against folds whole and is
+still no tile site: an mma B fragment is one `B[k, n]` for every row, and a catalog read off `tiles_whole` alone
+placed such a site on the grid's trailing pair and emitted B's address with the unsplit row axis. Two shapes fold
+whole. A PLANAR carrier qualifies when every carried state is a bilinear channel — the tile's accumulators ARE the
+carrier. A TWISTED one qualifies through `Fold.chunked`: the recipe names a pattern for
 every state past the pivot, supplies `advance` / `rescale` (the stable ⊕ at an open channel count, which is what a
 per-chunk merge needs), and leaves exactly one bilinear channel, so every other state rides as a per-row scalar and
 the one accumulator is the expectation. Neither reading mentions attention or softmax: a recipe that folded nothing

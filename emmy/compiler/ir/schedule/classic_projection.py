@@ -339,14 +339,15 @@ def _options(state: _ProjectionState, node) -> tuple:
         )
         return tuple(ProjectionSchedule(plan) for plan in plans)
 
-    # The CONTRACTION domain is the tile catalog, so it belongs to a node the tiers can fold whole
-    # (:meth:`Fold.tiles_whole`) — the same reading ``TileOp.contracts`` offers a TILE site on. A
-    # twisted carrier reads bilinear on one channel and folds states beside it that are no
-    # accumulator, so it takes the REDUCTION domain like any other carrier; handing it the tile
-    # catalog offered choices no key spells and no row accepts, and cost the sibling score its own.
+    # The CONTRACTION domain is the tile catalog, so it belongs to a site ``TileOp.contracts`` offers
+    # a TILE site on — the one reading the facts are populated from. A twisted carrier folds states
+    # beside its bilinear channel that are no accumulator, and a B slab that changes with the row it
+    # is contracted against is no slab per tile: both take the REDUCTION domain like any other
+    # carrier. Handing either the tile catalog offered choices no key spells and no row accepts —
+    # the twist's cost the sibling score its own, the row-varying B's emitted the unsplit row axis.
     choices = (
         _contraction_domain(state.tile, state.target, node, state.tile.contractions[site])
-        if node.tiles_whole()
+        if site in state.tile.contractions
         else tuple(ReductionSchedule(Tile(), reduction) for reduction in _reduction_domain(state.tile, node))
     )
     valid_choices = []
@@ -371,10 +372,10 @@ def _edge_domain(state: _ProjectionState, site: int, choices: tuple) -> tuple[Ed
     """Project the independent edge catalog; context composition decides compatibility."""
     node = state.tile.sites[site].node
     view = state.tile.views[site]
-    # A transport is a tile's operand fill, so the catalog belongs to a site a tile folds whole —
-    # the same reading ``TileOp.stage_edges`` spells a STAGE key on. A chunked carrier folds whole
-    # and still takes none: its tier is gmem-direct.
-    if not view.tiles_whole() or view.chunked():
+    # A transport is a tile's operand fill, so the catalog belongs to a tile site — the same reading
+    # ``TileOp.stage_edges`` spells a STAGE key on. A chunked carrier is a tile site and still takes
+    # none: its tier is gmem-direct.
+    if site not in state.tile.contractions or view.chunked():
         return (EdgeSchedule(Stage.direct()),)
     supported = {}
     direct = EdgeSchedule(Stage.direct())
