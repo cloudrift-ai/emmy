@@ -47,14 +47,16 @@ A scalar operand is spelled inside the reader that binds it, so a scale stops be
 
 The cut pass also stops offering a seam at a scalar. That piece was a kernel writing three scalars to a workspace so its reader could read them back.
 
-## What broke
+## What broke — this is not ready
 
-`test_sdpa_score_contraction_reaches_the_mma_tier` is red and left red. The mma rows are still offered — the carrier and the score contraction both answer `contracts` and `tiles_whole`, and the carrier answers `chunked` — but the greedy's default pick moved because kernel identity changed and no recorded evidence matches the new term. It needs a tuning round. Not re-recorded, not weakened to pass.
+**The chunk tier no longer reaches the tensor cores.** Three e2e tests fail on a *pinned* chunk row, so it is not the greedy choosing differently — the row is unenumerable. The atom projection refuses a contraction any of whose operands reduce, and removing the minted node is exactly what made A reduce: A used to be the zero-axis weight cone with the score contraction nested under it, which is the shape the fragment-seam machinery (`ContractionFacts.producer`, `_fragment_agreements`) was written against. Exempting the chunked carrier from that one refusal is not sufficient on its own; there is at least one more gate downstream. Teaching the seam that A may BE the producer is the remaining work, and it is design work, not a test fix.
 
-Kernel identity moved for every twisted term, and the seam under the carrier lost a hop (`PLACE@map.1/twist.1/map.1/inner.2/map` → `PLACE@map.1/twist.1/inner.2/map`). Recorded goldens, realization cases, and PLACE pins of that shape are stale.
+`test_sdpa_score_contraction_reaches_the_mma_tier` is the same cause at a smaller scale.
+
+The realization corpus reports 32 stale cases and 14 changed verdicts. The stale half is what `make test-corpus-regen` exists for; the verdict changes need reading one at a time. Kernel identity moved for every twisted term, so recorded goldens are stale too.
 
 ## Verification
 
-Accuracy against eager passes on SDPA, causal SDPA, softmax, softmax@V and RMSNorm, worst `max_diff` 9.8e-4 in fp16. That is the check that catches a wrong twist. Goldens and the realization corpus are the outstanding gates; both need re-recording on a GPU before this is a deployable reference.
+Accuracy against eager passes on SDPA, causal SDPA, softmax, softmax@V and RMSNorm, worst `max_diff` 9.8e-4 in fp16 — the numerics of the coordinate change are sound. `make test` is 4846 passed / 59 failed; the failures are the corpus and the chunk tier above.
 
 `git diff --stat main -- emmy/**/*.py` is +318 −146. The growth is new capability — a coordinate reading that did not exist, a derived base view, and a normalization rule — set against `_factor_weights`, `_already_held`, and the subtree walk in `Fold.roles` that all came out.
