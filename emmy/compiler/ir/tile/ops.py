@@ -341,7 +341,11 @@ class Sched:
         ax = self.axis_of(parent.node.axis) if parent is not None else None
         if ax is None:
             return None
-        return orient((free[-2], ax.window.parent if ax.window is not None else ax))
+        pair = (free[-2], ax.window.parent if ax.window is not None else ax)
+        # Under a CHUNKED carrier the orientation is the CONSUMER's, not the term's: the tier
+        # builds a ``(row, chunk)`` tile per chunk whichever operand the canonical form put in A,
+        # so the enclosing axis is N here even when A's own axis is the one that would take M.
+        return pair if parent.node.chunked() else orient(pair)
 
 
 def sched_of(tile) -> Sched:

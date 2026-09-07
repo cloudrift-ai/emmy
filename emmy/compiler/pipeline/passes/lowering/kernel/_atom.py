@@ -2142,7 +2142,8 @@ class _FlashOps(_MmaOps):
         assert all(edge.as_slab() is not None for edge in (*score.operands, self.c.operands[1])), (
             "the chunk tier reads its score operands and its streamed value as slabs"
         )
-        assert score_tile.is_warp and (score_tile.n.units, score_tile.n.tile, score_tile.m.reg) == (1, bk, m.reg), (
+        seam = (score_tile.n.axis.name, score_tile.n.units, score_tile.n.tile, score_tile.m.reg)
+        assert score_tile.is_warp and seam == (key.name, 1, bk, m.reg), (
             "the score's tile is the chunk this carrier folds, one warp column wide — the fragment seam's own equation"
         )
         cone = self.c.operands[0].applied.cone(self.c.roles[0])
@@ -2232,12 +2233,18 @@ class _FlashOps(_MmaOps):
         ]
 
     def _score_tile(self, offset, mn, base, cols, bound) -> list[Stmt]:
-        """The chunk's score — one ``(m, chunk)`` mma tile, its own K loop inside the chunk."""
+        """The chunk's score — one ``(row, chunk)`` mma tile, its own K loop inside the chunk.
+
+        Which of the score's two operands is the mma's A is a question about THIS tile, not about
+        the term: A carries the carrier's row, B its key. The term's canonical orientation may name
+        them the other way round (a score whose shared argument is the key), and reading the stored
+        order instead is how the two came out transposed."""
         m, _ = mn
         atom, score, key = self.tile.atom, self.inner[0], self.k_axis
         inner_k = next(axis for axis in self.axes if axis.name == score.axis)
-        a_load, b_load = (edge.as_slab().load for edge in score.operands[:2])
-        trans = score.as_contraction().b_trans
+        over = lambda axis: next(edge for edge in score.operands if axis in edge.free_axes)  # noqa: E731
+        a_load, b_load = (over(name).as_slab().load for name in (m.axis.name, key.name))
+        trans = score.axis in b_load.index[-1].free_vars()
         decls: list[Stmt] = [self._frag(f"_qa{i}", "a") for i in range(m.reg)]
         decls += [self._frag(f"_kb{j}", "b") for j in range(cols)]
         decls += [self._frag(f"_s{i}_{j}", "c") for i in range(m.reg) for j in range(cols)]

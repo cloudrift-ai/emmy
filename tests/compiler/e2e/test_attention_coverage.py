@@ -397,9 +397,68 @@ def _compile_tc(q, k, v, module=None):
     return _trace(module if module is not None else _Sdpa(), (q, k, v))
 
 
-# --------------------------------------------------------------------------- #
-# f16-accumulate PV (the ``_f16acc`` atom on the expect node — chunked f16→f32 promote).
-# --------------------------------------------------------------------------- #
+#: One row of the CHUNK tier: the carrier's own mma tile beside the score's, the seam's equation
+#: satisfied (the score's key side IS the carrier's chunk, one warp column wide, same register rows).
+_CHUNK_ROW = {
+    "PLACE": "fuse",
+    "WORK": "w1x1",
+    "TILE@map.1/twist": "mma_m16n8k16_f16_f32/f2x1/k2",
+    "TILE@map.1/twist.1/map.1/inner": "mma_m16n8k16_f16_f32/f2x4",
+    "REDUCE@map.1/twist": "",
+    "REDUCE@map.1/twist.1/map.1/inner": "",
+    "STAGE": "",
+    "RASTER": "",
+}
+
+
+def _chunk_kernel(module, args, dynamic_shapes=None):
+    """Compile ``module`` on the pinned chunk row and assert the shape of what came out."""
+    with pinned_knobs(_CHUNK_ROW):
+        backend, compiled, _graph, kernels = _trace(module, args, dynamic_shapes=dynamic_shapes)
+    assert len(kernels) == 1, f"the chunk tier fuses the whole attention: {kernels}"
+    source = compiled.nodes[kernels[0]].op.kernel_source
+    assert source.count("emmy_mma_m16n8k16") >= 2, "both the score and the expectation reach mma.sync"
+    assert "emmy_c_to_a_f16" in source, "the weight reaches the expectation's A operand as a register repack"
+    assert "__shfl_xor_sync" in source, "the chunk's pivot is a per-row fold over the score's fragments"
+    return backend, compiled
+
+
+def _sdpa_ref(cuda: dict):
+    def ref():
+        with torch.no_grad():
+            return F.scaled_dot_product_attention(cuda["q"], cuda["k"], cuda["v"]).cpu().flatten().numpy()
+
+    return ref
+
+
+@requires_cuda
+@pytest.mark.parametrize("keys", [128, 100])
+def test_chunk_tier_folds_the_carrier_on_tensor_cores(keys):
+    """An f16 SDPA pinned to the chunk tier is ONE mma kernel and matches torch.
+
+    Two contractions reach the tensor cores in it: the score, and the expectation the twisted
+    carrier folds a chunk at a time. ``keys=100`` is not a multiple of the 32-wide chunk, so its
+    last chunk is ragged and the overhang has to mask to the pivot's identity."""
+    torch.manual_seed(0)
+    q = torch.randn(1, 2, 64, 64, dtype=torch.float16)
+    k, v = (torch.randn(1, 2, keys, 64, dtype=torch.float16) for _ in range(2))
+    feed = {"q": q.numpy(), "k": k.numpy(), "v": v.numpy()}
+    cuda = {name: torch.from_numpy(array).cuda() for name, array in feed.items()}
+    backend, compiled = _chunk_kernel(_Sdpa(), (q, k, v))
+    assert _max_diff(backend, compiled, feed, _sdpa_ref(cuda)) < 1e-2
+
+
+@requires_cuda
+def test_chunk_tier_takes_a_symbolic_key_extent():
+    """Nothing in the tier sizes itself against the key extent, so a dynamic stream reaches it."""
+    torch.manual_seed(0)
+    q = torch.randn(1, 2, 64, 64, dtype=torch.float16)
+    k, v = (torch.randn(1, 2, 100, 64, dtype=torch.float16) for _ in range(2))
+    kv = torch.export.Dim("kv", min=64, max=512)
+    feed = {"q": q.numpy(), "k": k.numpy(), "v": v.numpy()}
+    cuda = {name: torch.from_numpy(array).cuda() for name, array in feed.items()}
+    backend, compiled = _chunk_kernel(_Sdpa(), (q, k, v), dynamic_shapes={"q": {}, "k": {2: kv}, "v": {2: kv}})
+    assert _max_diff(backend, compiled, feed, _sdpa_ref(cuda)) < 1e-2
 
 
 # --------------------------------------------------------------------------- #

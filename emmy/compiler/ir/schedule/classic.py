@@ -313,7 +313,12 @@ def _fragment_agreements(
         if not plan.is_tiled:
             offer = ("free",)
         elif plan.is_warp:
-            offer = ("warp", plan.atom.shape, plan.atom.fragment_layout, placed.n.units, placed.n.tile, placed.m.reg)
+            # The last entry names both output sides by AXIS. Which of them a consumer wants is the
+            # consumer's question: the ordinary need wants the producer's N, a chunked one wants
+            # whichever side carries ITS key, and the term's canonical orientation decides which
+            # that is (a score whose A edge is the key tiles the key as M).
+            sides = tuple((side.axis.name, side.units, side.tile, side.reg) for side in (placed.m, placed.n))
+            offer = ("warp", plan.atom.shape, plan.atom.fragment_layout, placed.n.units, placed.n.tile, sides)
         else:
             offer = ("scalar",)
         out.append(_FragmentAgreement("offer", node_id_spelling(site), offer))
@@ -326,7 +331,7 @@ def _fragment_agreements(
             # this atom with the chunk as its N tile, one warp column wide and the same register
             # rows. Stated as a need of its own because the ordinary one accepts an untiled
             # producer, and that row would be stamped on a kernel whose emission ignored it.
-            need = ("chunk", plan.atom.shape, plan.atom.fragment_layout, plan.atom.atom_k * plan.bk, placed.m.reg)
+            need = ("chunk", plan.atom.shape, plan.atom.fragment_layout, plan.atom.atom_k * plan.bk, placed.m.reg, node.axis)
         elif plan.is_warp and stage is not None and stage.transport == "smem":
             need = ("step" if facts.need_step else "warp", plan.atom.shape, plan.atom.fragment_layout, stage.bk_elems)
         else:
@@ -1141,8 +1146,13 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
                 continue
             need, offer = (claim.value, other) if claim.role == "need" else (other, claim.value)
             if need[0] == "chunk":
+                rows, keys = offer[5] if offer[0] == "warp" else ((), ())
                 compatible = (
-                    offer[0] == "warp" and need[1:3] == offer[1:3] and offer[3] == 1 and offer[4] == need[3] and offer[5] == need[4]
+                    offer[0] == "warp"
+                    and need[1:3] == offer[1:3]
+                    and keys[0] == need[5]  # the producer's N is the carrier's key: a (row, chunk) tile
+                    and keys[1:3] == (1, need[3])  # one warp column, and that column IS the chunk
+                    and rows[3] == need[4]  # the same register rows the carrier holds
                 )
             elif offer[0] == "free":
                 compatible = need[0] != "step"
