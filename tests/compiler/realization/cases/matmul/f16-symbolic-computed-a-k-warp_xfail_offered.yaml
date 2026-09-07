@@ -1,7 +1,7 @@
-# evidence: the schedule pins the value channel on tensor cores (the P·V half beside the score's mma). The channel
-# READS as a contraction now (`Fold.bilinear_channels`), but no atom tier folds a twisted carrier: both fold the stored
-# lift into one accumulator per bilinear channel, and this carrier holds states that are no product at all beside it —
-# nor is that lift what a step may fold. `TileOp.contracts` offers no tile at the site, so the pin reaches no row.
+# evidence: the schedule pins the value channel on tensor cores. The chunk tier folds this carrier now, but it builds
+# the chunk's score from the NESTED contraction the tree carries as a site of its own; here the score is a
+# materialized input slab, so there is no producer to build a chunk from and the site is not offered. Closing the gap
+# means a chunk whose score is read rather than computed.
 compute_cap:
 - 12
 - 0

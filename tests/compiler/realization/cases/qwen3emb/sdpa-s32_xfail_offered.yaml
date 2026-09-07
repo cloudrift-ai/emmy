@@ -1,7 +1,8 @@
-# evidence: the schedule pins the value channel on tensor cores (the P·V half beside the score's mma). The channel
-# READS as a contraction now (`Fold.bilinear_channels`), but no atom tier folds a twisted carrier: both fold the stored
-# lift into one accumulator per bilinear channel, and this carrier holds states that are no product at all beside it —
-# nor is that lift what a step may fold. `TileOp.contracts` offers no tile at the site, so the pin reaches no row.
+# evidence: the schedule pins a SCALAR register tile on the twisted carrier. The scalar tier folds the stored lift into
+# one accumulator per bilinear channel, and for a twist that lift is the base contribution — it denotes
+# `Sum exp(score)` — so a twisted carrier offers no scalar tile at all and the pin reaches no row. The chunk tier that
+# does fold this carrier needs a 16-bit mma atom whose C fragment repacks into an A operand, which an fp32 target has
+# none of; closing the gap means an fp32 path for the weight, not a row on this one.
 # Qwen3-Embedding-0.6B decoder layer 0, kernels 6 and 7: causal GQA attention.
 # hidden=1024 heads=16 kv_heads=8 head_dim=128, fp32, seq 32. One of the twelve layer-0
 # kernels the perf suite curated before the corpus became its case source.

@@ -1,13 +1,10 @@
-# evidence: the softmax-V half of a head-dim-128 SDPA reaches no warp tier. This is #699's recorded debt — the fused
-# value channel on tensor cores, removed with `_derived_expect_fold` / `_twisted_derived_step` — the same gap
-# `sdpa-computed-value-cut-mma` carries. The P·V half rides the twist's carrier, so this kernel's only contraction site
-# is the score's QK reduce over `a3`, and no mma TILE is offered for the value channel. The row below is a recorded
-# RTX 5090 golden (11.84 us, fast-math) measured on the `attention.hd128.softmax_v` Loop target, a separate
-# softmax-then-value kernel `torch.sdpa` no longer traces to; its `STAGE d1/smem` is the computed-A compute fill, which
-# names no stage the score contraction can realize, so the pin is refused before a row is enumerated and greedy falls
-# to a scalar schedule. Closing the gap means the twist becomes the P·V site (`TILE@map.1/twist`); this row will also
-# need its STAGE keyed to that site, since as spelled it is refused at 5719f823 too, where the removed machinery
-# still stood.
+# evidence: the softmax-V half of a head-dim-128 SDPA. The chunk tier folds this carrier on tensor cores now, so the
+# tree has TWO tile sites — the score's and the carrier's — and the row below is the one-site spelling from before it:
+# a bare `TILE` beside a bare `STAGE d1/smem`, recorded on an RTX 5090 at 11.84 us against the
+# `attention.hd128.softmax_v` Loop target, a separate softmax-then-value kernel `torch.sdpa` no longer traces to. The
+# carrier's site spells no `STAGE` at all (its tier reads every operand gmem-direct), so that half of the pin resolves
+# at no site and the enumeration refuses before a row is offered. Closing the gap means re-recording the row
+# site-scoped on the card, not a change to the tier.
 compute_cap:
 - 12
 - 0
