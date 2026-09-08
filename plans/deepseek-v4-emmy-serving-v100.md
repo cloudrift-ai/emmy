@@ -243,10 +243,33 @@ gaps stand between here and a boot that serves, both follow-ups to #692:
    there: six more seams (the twist and exp contractions, the RMS statistic, both A cones, the mixed-stream
    store) at 2.68 s, a `REDUCE=` pin turning the A-operand contraction per-cell at 0.465 s, and one shared twist
    A-cone seam at 0.319 s, with the file's own unpinned election beating each pinned route. **(g)** 75 % of the
-   remaining time is one contraction, the gate/up projection at 0.18 s, and it is NOT a tile site: its
-   four-operand two-channel fold carries two A cones that are unmerged duplicates differing only in product
-   association, so no pin reaches an mma — a compiler gap (reproduced GPU-free on the host), and the same
-   duplication drives every mixed-stream recompute seen since round one. **(h)** the correctness verdict is not
+   remaining time is one contraction, the gate/up projection at 0.18 s, and it was NOT a tile site.
+   Diagnosed on the host 2026-09-08 and FIXED by PR #752: the carrier is two independent matmuls the loop
+   fusion put in one nest — each channel multiplies its own A cone by its own weight slab — and no tier folds
+   such a carrier whole, since a tile holds one A fragment against a B slab per channel. `TileOp.contracts`
+   refuses, no TILE row is enumerated, and no pin reaches an mma. Round four's stated cause is wrong on both
+   halves: the two A cones are not duplicates of one value — they share all three of their own operand edges
+   and read DIFFERENT components of one shared producer, acc42 and acc44 — and a commuted product could not
+   have hidden a duplicate anyway, because a commutative `Assign`'s arguments are re-sorted on the canonical
+   names whenever a `Lambda` is rebuilt, which makes exactly the two spellings that report quoted alpha-equal.
+   Normalization now hands back one fold per state under a projection re-exposing the state tuple; on the host
+   the kernel's a28 and a29 sites go from 0 tile sites to 22, and the contracting site carries a TILE knob in
+   its family. MEASURED the same day, same target and width: the refusing contraction goes from 179.7 ms in one
+   per-cell kernel to 15.4 ms in two kernels of 7.72 ms, both on `mma_m8n8k4`, and **the whole `post4096` forward
+   from 238.8 ms to 74.9 ms (3.2x) as the file's own UNPINNED strict-evidence election** — the number a deploy
+   picks. The pinned steps on the way, against round four's own 455.4 ms under that pin set: 292.8 ms with the
+   pins repaired and a cut per child, 152.0 ms with round four's shared-cone seam beside them, then 74.9 ms
+   unpinned, where every kernel takes its fastest measured row. Nothing else in the set moved more than noise.
+   Two things the round taught about re-measuring a route across this change: the seam
+   paths inside a carrier that comes apart shift one level (9 of the 11 Rstar pins resolved unchanged), and the
+   route's single cut now names ONE of the two children, so a cut per child is needed or the other stays fused
+   into its parent and recomputes its input per cell — the first two benches hung at the 180 s first-iteration
+   deadline on exactly that. Artifacts: `_verify/item3/route{11,12,13}.json`, `E{1,2,3}SPLIT.pins`,
+   `working.split-e{2,3}.yaml`, `autotune.split-e3.db`, `per-state.patch`; `working.yaml` and the tree itself were
+   restored to their round-four state after each run.
+   The nvcc refusal at `post` m1 is the same class of name collision, located this round: the per-cell
+   ILP replication suffixes two different accumulators to one name, so `float acc0__c0_0 = 0.0f;` is emitted
+   twice in one scope (8 collisions in the recorded reproduction). **(h)** the correctness verdict is not
    obtainable with today's CLI: the twin draws its eps and count constants as random inputs, so every replay is
    non-finite, and the same-input reference is the pinned route itself; a finite-input replay per twin and an
    independent reference (the loop-IR CPU runner, unexposed) on `run --golden` are the missing flags. **(i)** all
@@ -541,7 +564,13 @@ two-channel fold). What holds everything now, in order: make that contraction a 
 cones), fix the same-scope accumulator redeclaration nvcc refuses at `post` m1, give `run --golden` finite
 inputs and an independent reference for a correctness verdict, stop concurrent recorders losing rows, then pin
 routes for the 28 realizations still without one (the second `post` kernel family at m1 / m32 / dynamic, the
-`pre` twin at m32 / dynamic). Then Stage 4: 2–4 days on-host (re-run gate (c), re-record the golden,
+`pre` twin at m32 / dynamic). Two of those are closed: the concurrent-recorder loss (#751 — the recorder
+reloads the file under an exclusive lock and adds its rows to what is on disk, so parallel devices stop
+dropping each other's rows) and the tile site (#752, above), which replaces item one with re-measuring the
+route under the split. Nothing on that list reproduces from the checked-in
+`recipes/DeepSeek-V4-Flash-0731/golden/v100_sm70.yaml` — its whole-model programs cat the sibling gate/up
+linears into one weight, and its `k_div_*_reduce` family emits no redeclaration under any knob set tried — so
+every one of them needs the V100 host. Then Stage 4: 2–4 days on-host (re-run gate (c), re-record the golden,
 warm/bake/verify). Stage 5: 1–2 days.
 Adding stage 6 (MXFP4 + tuning) is a further 1–3 weeks. The compiler, not the fork ABI, remains the dominant
 uncertainty.
