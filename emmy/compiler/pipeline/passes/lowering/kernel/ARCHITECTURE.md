@@ -252,10 +252,15 @@ scheduled contraction, directly in fragments before storing the slab consumed by
 using the ordinary vectorized copy transports. These are residence choices over the same Fold tree; the scheduler and
 materializer do not recognize operation families.
 
-**A carrier the tiers cannot fold WHOLE is no tile site.** `Fold.tiles_whole` asks whether every carried state is a
-bilinear channel, so that the tile's accumulators are the carrier itself. Both tiers fold one accumulator per product
-channel and have no residence for a state that is not one; nor is the stored `lift` what a step may fold there, since
-for a twist it is the BASE contribution and denotes `Sum exp(score)`. Nothing may see through psi.
+**A carrier the tiers cannot fold WHOLE is no tile site.** `Fold.tiles_whole` asks whether the tile's accumulators can
+BE the carrier: for a planar one, that every carried state is a bilinear channel; for a twisted one, that the recipe
+lets a tier fold it one staged chunk at a time (`Fold.chunked`), since the stored `lift` is not what a step may fold
+there — for a twist it is the BASE contribution and denotes `Sum exp(score)`, and nothing may see through psi.
+
+What each tier then does with those states is its own business. The chunk tier holds one accumulator — the expectation
+— and gives every other state per-row registers. The SCALAR tier replicates the term's own step per cell (`Fold.step`),
+so each cell owns a copy of every state and the tier needs no residence rule at all; what it has no place for is an
+operand past the streamed one that varies over the tile, and the projection offers no scalar plan then.
 
 That one reading decides four things together: whether `TileOp.contracts` offers a TILE site, whether the node takes
 the contraction or the reduction schedule domain, whether its edges get a transport catalog, and whether a root has a
@@ -263,8 +268,8 @@ chain. Refusing at the enumeration rather than at the binder is deliberate — a
 greedy one blocklist retry per rank, and there are more ranked rows than the retry budget, so a pinned P·V shape wedged
 with an unlowered `TileOp` instead of falling back.
 
-The tensor-core form of a twisted carrier is unbuilt, and the emitter it needs is not the one this tree used to carry —
-see "What may not come back" below.
+The tensor-core form of a twisted carrier is the CHUNK tier (`_atom._FlashOps`), and the emitter it needs is not the
+one this tree used to carry — see "What may not come back" below.
 
 Where the edge is not a bindable contraction (or the atom has no modeled C layout) it stays per-cell: spliced into the
 fill's cell and evaluated inline from lowered loop IR, a scalar dot per slab cell. Geometry: exact cover on N only. A
