@@ -5,7 +5,7 @@
 # scalar tier — `attention.hd256.dynM.pv` on the RTX 4090 golden is the recorded row that stopped decoding.
 #
 # The prefix's leaves are read ONCE ahead of the chunk loop, so they need no slab; the `Select` is per element and
-# lands at fragment residence as a `FragmentSelect`, the same coordinate substitution the boundary `FragmentMask`
+# lands at fragment residence as a `FragmentMask`, the same coordinate substitution the boundary mask
 # already performs.
 compute_cap:
 - 12

@@ -430,7 +430,7 @@ readings the tier would otherwise refuse. Its LEAVES are read once ahead of the 
 one needs no gmem address at all: a causal mask's fill / zero constants are a computed pair, and only the pivot source
 and the streamed value are ever asked for a slab. And a `Select` on the score fragment's OWN coordinates — the row the
 carrier folds and the chunk it folds over — is per ELEMENT, not cell-uniform, so `_residence` lands it as a
-`FragmentSelect` under the same coordinate substitution the boundary `FragmentMask` performs. Without those two a
+a `FragmentMask` under the same coordinate substitution the boundary mask performs. Without those two a
 masked carrier fell to the scalar tier whole, which is what `attention.hd256.dynM.pv` on the RTX 4090 recorded and
 then stopped decoding.
 
@@ -448,10 +448,7 @@ a second reduce axis carved into the term. A design that reintroduces per-compon
 block axis, or a width derived from an extent is reintroducing the thing that took the attention schedule space from
 10^9 to 10^17 and made every kernel identity turn on a form rule nothing measured. `FragmentRowReduce` came back with
 the chunk tier — a per-row fold over one warp's C fragments is what a chunk pivot IS — but it came back as a leaf the
-tier emits, not as an interpreter of a term. `FragmentSelect` came back the same way and under the same test: a
-coordinate `Select` in the score's prefix is per element, and the fragment-tier sibling of the scalar statement is
-what `_residence` emits for it. Neither reads a term, carves a block axis, or derives a width from an extent, which
-is what the prohibition is actually about.
+tier emits, not as an interpreter of a term.
 
 The Fold move is never re-decided during materialization. `ReduceStage.combine` is the placement-keyed selector:
 within-warp uses `SHFL`, within-block uses a `SHFL` plus shared-memory tree, and cross-CTA uses `ATOMIC` or `KERNEL`

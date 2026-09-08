@@ -1620,6 +1620,7 @@ configs:
       WORK: w2x2
       TILE: mma_m8n8k4_f16_f32/f2x2/k8
       REDUCE: ''
+      STAGE: ''
       RASTER: ''
     measurements:
       emmy_us: 61.5
@@ -1633,6 +1634,7 @@ configs:
       WORK: w2x2
       TILE: mma_m8n8k4_f16_f32/f2x2/k8
       REDUCE: ''
+      STAGE: ''
       RASTER: ''
     measurements:
       emmy_us: 62.21
@@ -1682,6 +1684,7 @@ configs:
       WORK: w2x2
       TILE: mma_m8n8k4_f16_f32/f2x2/k8
       REDUCE: ''
+      STAGE: ''
       RASTER: ''
     measurements:
       emmy_us: 76.33
@@ -1695,6 +1698,7 @@ configs:
       WORK: w2x2
       TILE: mma_m8n8k4_f16_f32/f2x2/k8
       REDUCE: ''
+      STAGE: ''
       RASTER: ''
     measurements:
       emmy_us: 76.48
@@ -1744,6 +1748,7 @@ configs:
       WORK: w1x2
       TILE: mma_m8n8k4_f16_f32/f2x4/k8
       REDUCE: ''
+      STAGE: ''
       RASTER: ''
     measurements:
       emmy_us: 190.26
@@ -1757,6 +1762,7 @@ configs:
       WORK: w1x2
       TILE: mma_m8n8k4_f16_f32/f2x4/k8
       REDUCE: ''
+      STAGE: ''
       RASTER: ''
     measurements:
       emmy_us: 190.87
@@ -1806,6 +1812,7 @@ configs:
       WORK: w1x1
       TILE: mma_m8n8k4_f16_f32/f2x2/k4
       REDUCE: ''
+      STAGE: ''
       RASTER: ''
     measurements:
       emmy_us: 48.71
@@ -1819,6 +1826,7 @@ configs:
       WORK: w1x1
       TILE: mma_m8n8k4_f16_f32/f2x2/k4
       REDUCE: ''
+      STAGE: ''
       RASTER: ''
     measurements:
       emmy_us: 48.59
@@ -1854,6 +1862,7 @@ configs:
       WORK: w1x1
       TILE: mma_m8n8k4_f16_f32/f2x2/k4
       REDUCE: ''
+      STAGE: ''
       RASTER: ''
     measurements:
       emmy_us: 56.78
@@ -1867,6 +1876,7 @@ configs:
       WORK: w1x1
       TILE: mma_m8n8k4_f16_f32/f2x2/k4
       REDUCE: ''
+      STAGE: ''
       RASTER: ''
     measurements:
       emmy_us: 56.83
