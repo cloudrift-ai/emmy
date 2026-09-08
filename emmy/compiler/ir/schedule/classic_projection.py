@@ -203,9 +203,14 @@ def _chunk_refusal(tile: TileOp, node) -> str | None:
     blocklist retry per rank, and there are more ranked rows than the retry budget."""
     facts = tile.contractions.get(tile.node_id(node))
     score = facts.producer if facts is not None else None
-    if score is None:
-        return "the chunk tier folds a carrier whose pivot a nested contraction supplies"
-    if any(edge.as_slab() is None for edge in (*score.operands, *node.operands[1:])):
+    # The chunk's score is CONTRACTED into its fragments when a nested contraction supplies it, and
+    # GATHERED into them when the carrier's own A edge is already the stored tile (softmax@V, whose
+    # probabilities arrive as an input). Either way the tier gets a ``(row, chunk)`` C fragment; a
+    # carrier that is neither has no chunk to fold.
+    reads = (*score.operands, *node.operands[1:]) if score is not None else node.operands
+    if score is None and node.operands[0].as_slab() is None:
+        return "the chunk tier folds a carrier whose pivot a nested contraction or a stored tile supplies"
+    if any(edge.as_slab() is None for edge in reads):
         return "the chunk tier reads its score operands and its streamed value as slabs"
     # The score's own PREFIX is the CARRIER's lift cut to its score role — A is the score
     # contraction, and what scales its raw accumulator lives in the lift above it. Its leaves past
@@ -316,13 +321,13 @@ def _contraction_domain(
     wide_warp_tiles = tuple(
         plan for name in allowed_atoms if _kstep_refusal(facts.k_axis, (plan := Tile(atom=ATOM_REGISTRY[name], regs=(26, 4), bk=2))) is None
     )
-    # The scalar register tier folds ONE additive accumulator per cell — ``acc__c{i}_{j} += b·a``,
-    # its multiply, its add and its single state all fixed. A twisted carrier folds three states
-    # under their own ops and seeds with the recipe's stable merge between them, which only the
-    # chunk tier does; a register tile on one reads cell copies of the states nothing declares.
-    # NOT a numerics gate any more: the term stores the STABLE contribution and ``Fold.step`` folds
-    # it under the recipe's own ⊕, so the untiled arm is sound. The tier's shape is what refuses.
-    scalar_tiles = scalar_tile_moves() if len(node.operands) == 2 and node.twist is None else (Tile(),)
+    # The scalar register tier replicates the TERM's own step per cell, so a recipe folds there
+    # like any other algebra — three states under their own ops, seeded by the ⊕'s identities.
+    # What it has no residence for is an operand past the streamed one that VARIES: those are read
+    # once, ahead of the cells, so every one of them must be uniform across the tile (attention's
+    # scale and its mask fills are; a second streamed B is not, and rides the warp compute fill).
+    uniform_extras = len(node.operands) >= 2 and not any(edge.free_axes for edge in node.operands[2:])
+    scalar_tiles = scalar_tile_moves() if uniform_extras else (Tile(),)
     catalog = (
         *scalar_tiles,
         *(plan for plan in warp_tile_moves(allowed_atoms) if _kstep_refusal(facts.k_axis, plan) is None),

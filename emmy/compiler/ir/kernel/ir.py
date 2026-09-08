@@ -2870,6 +2870,21 @@ def _(s: FragmentRowReduce, rename, sigma, axis_fn):
 
 
 @_rewrite_kind.register
+def _(s: FragmentBiasAdd, rename, sigma, axis_fn):
+    # Same shape as :class:`FragmentMask`'s: ``frag`` is SSA, the tile-origin bases and the load
+    # template σ-substitute, and the reserved ``__frow`` / ``__fcol`` coordinate vars are not local
+    # axes, so σ leaves them alone.
+    return FragmentBiasAdd(
+        frag=rename(s.frag),
+        buf=s.buf,
+        index=tuple(sigma.apply(e) for e in s.index),
+        col_base=sigma.apply(s.col_base),
+        row_base=sigma.apply(s.row_base),
+        layout=s.layout,
+    )
+
+
+@_rewrite_kind.register
 def _(s: FragmentMask, rename, sigma, axis_fn):
     # ``frag`` is SSA (the score fragment); the tile-origin bases + the predicate σ-substitute so
     # the canonicalizer renames the query / kv axis vars (``qb``→``a1``, ``kv``→``a3``). The

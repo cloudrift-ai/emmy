@@ -1,10 +1,9 @@
-# evidence: the softmax-V half of a head-dim-128 SDPA. The chunk tier folds this carrier on tensor cores now, so the
-# tree has TWO tile sites — the score's and the carrier's — and the row below is the one-site spelling from before it:
-# a bare `TILE` beside a bare `STAGE d1/smem`, recorded on an RTX 5090 at 11.84 us against the
-# `attention.hd128.softmax_v` Loop target, a separate softmax-then-value kernel `torch.sdpa` no longer traces to. The
-# carrier's site spells no `STAGE` at all (its tier reads every operand gmem-direct), so that half of the pin resolves
-# at no site and the enumeration refuses before a row is offered. Closing the gap means re-recording the row
-# site-scoped on the card, not a change to the tier.
+# The softmax-V half of a head-dim-128 SDPA, as the `attention.hd128.softmax_v` Loop target: a separate
+# softmax-then-value kernel `torch.sdpa` no longer traces to, kept as its own reproducer. The score contraction
+# carries the mma tile and the fill stages one shared-memory slab.
+#
+# The row was recorded with a synchronous `d1/smem` fill, which only the Volta atom resolves: on a target with
+# `cp.async` the blocking vector copy is never offered, so the stage is spelled `d1/smem-async` here.
 compute_cap:
 - 12
 - 0
@@ -39,65 +38,10 @@ configs:
       WORK: w2x4
       TILE: mma_m16n8k16_f16_f16/f1x4/k8
       REDUCE: ''
-      STAGE: d1/smem
+      STAGE: d1/smem-async
       LOOPIFY: '0'
       RASTER: ''
     identity: 3ec795cedf21b59dce873ccc52ebbacf6519878078959430f44405a131ffc106
-  - name: k_sdpa_6a2bfa.0015e9065043.448a0d722d09
-    bindings: {}
-    pins:
-      FAST_MATH: true
-    knobs:
-      REDUCE@map.1/twist: ''
-      REDUCE@map.1/twist.1/inner: ''
-      WORK: ''
-      TILE: ''
-      STAGE: ''
-      RASTER: ''
-    identity: 448a0d722d096bccb0149aa890a2192c6719a6d859c56ef0ebeea84fbc5d4afd
-  - name: k_sdpa_6a2bfa.0015e9065043.42f4ac2f45ef
-    bindings: {}
-    pins:
-      FAST_MATH: true
-    knobs:
-      REDUCE@map.1/twist: ''
-      REDUCE@map.1/twist.1/inner: ''
-      WORK: ''
-      TILE: ''
-      STAGE: ''
-      RASTER: ''
-    identity: 42f4ac2f45ef1f6aba545a62a12b4888e71f8101e29afb45ebb4af4219d222eb
-  - name: k_sdpa_6a2bfa.0015e9065043.eb74b174290b
-    bindings: {}
-    pins:
-      FAST_MATH: true
-    knobs: {}
-    identity: eb74b174290bc40763cc4c842e3039516584a3fcf05f5703071e81c20e19d04e
-  - name: k_sdpa_6a2bfa.0015e9065043.fb05568f956b
-    bindings: {}
-    pins:
-      FAST_MATH: true
-    knobs:
-      REDUCE@map.1/twist: ''
-      REDUCE@map.1/twist.1/inner: ''
-      WORK: ''
-      TILE: ''
-      STAGE: ''
-      RASTER: ''
-    identity: fb05568f956bc5f3686693caa643bd929543fbeb156ffeaf808ca4ee2c4f2748
-  - name: k_sdpa_6a2bfa.0015e9065043.032fc79559fc
-    bindings: {}
-    pins:
-      FAST_MATH: true
-    knobs:
-      TILE@map.1/twist: ''
-      TILE@map.1/twist.1/inner: ''
-      REDUCE@map.1/twist: ''
-      REDUCE@map.1/twist.1/inner: ''
-      WORK: ''
-      STAGE: ''
-      RASTER: ''
-    identity: 032fc79559fcae7dc66446ff62ec07ccae09426566ea765cd1a194b171fa545e
 loops:
 - inputs: [x0, x1, x2]
   outputs: [scaled_dot_product_attention]
