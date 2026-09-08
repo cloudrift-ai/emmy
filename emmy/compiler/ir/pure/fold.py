@@ -672,6 +672,52 @@ class Fold:
         return tuple(out)
 
     @cached_method
+    def per_state(self) -> Fold | None:
+        """This carrier as ONE fold per carried state, under a projection re-exposing the state
+        tuple — or ``None`` where taking it apart buys nothing.
+
+        A planar carrier whose channels multiply DIFFERENT operand pairs is two contractions the
+        loop fusion put in one nest. No tier folds it whole: the tile's accumulators are one A
+        against a B slab per channel, and there is one A here per channel. Each state ON ITS OWN is
+        an ordinary matmul the mma tier already tiles, so the term says so — one term per state,
+        the projection above them exposing what the carrier exposed, and every reading downstream
+        (:meth:`bilinear_channels`, :meth:`tiles_whole`, ``TileOp.contracts``, the atom's channels)
+        stays exactly as strict as it was.
+
+        Only what refuses comes apart: a carrier that folds whole is the FUSED form the atom wants
+        (one ldmatrix'd A fragment, N mma chains off it) and stays one term, and a state that is no
+        product of its own — a sum beside a sum of squares, whose two states read one loaded value —
+        stays too, since two terms would read that value twice for nothing. A twisted or observed
+        carrier never comes apart: its states are coupled by the recipe.
+        """
+        if self.axis is None or self.twist is not None or self.observe is not None or self.base is None:
+            return None
+        pluses = self.base.components()
+        if pluses is None or len(self.base.results) < 2 or self.tiles_whole():
+            return None
+        children: list[Fold] = []
+        for index, result in enumerate(self.lift.results):
+            body = Body(tuple(self.lift.body.backward_cone((result,)).members))
+            read = body.ssa_uses
+            operands, params = [], []
+            for edge in self.operands:
+                slots = [param for param, other, _ in self.bindings if other is edge]
+                if any(param in read for param in slots):
+                    operands.append(edge)  # every component stays bound: the binding is positional
+                    params.extend(slots)
+            child = replace(
+                self,
+                operands=tuple(operands),
+                lift=Lambda.closing((self.axis, *params), body, (result,)),
+                init=(self.init[index],),
+                base=Lambda.componentwise((pluses[index],), (self.base.results[index],)),
+            )
+            if not child.tiles_whole():
+                return None
+            children.append(child)
+        return Fold(operands=tuple(children), lift=Lambda.closing(self.exposes, Body(()), self.exposes))
+
+    @cached_method
     def as_reduction(self) -> ReductionView | None:
         """The :class:`ReductionView` of this term — its combine read as a monoid fold — or
         ``None`` for a term without one (a slab, a projection). Memoized on the term."""

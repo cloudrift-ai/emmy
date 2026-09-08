@@ -674,6 +674,51 @@ def test_share_common_cones_unifies_internally_renamed_copies() -> None:
     assert distinct.operands[0].operands[0] is not distinct.operands[1].operands[0]
 
 
+def test_a_carrier_of_two_independent_products_becomes_one_term_per_state() -> None:
+    """Two matmuls the fusion put in one nest — each its own A and its own B — fold whole one at a
+    time and not together: a tier holds ONE A fragment against a B slab per channel. Normalization
+    hands back one term per state, each an ordinary contraction the mma tier tiles, under a
+    projection exposing what the carrier exposed."""
+    a28 = Axis("a28", Dim(64))
+    carrier = reduction(
+        a28,
+        (slab("wg", "Wg", "n", "a28"), slab("xg", "Xg", "m", "a28"), slab("wu", "Wu", "n", "a28"), slab("xu", "Xu", "m", "a28")),
+        (
+            Assign(name="acc_g__v", op="multiply", args=("wg", "xg")),
+            Assign(name="acc_u__v", op="multiply", args=("wu", "xu")),
+        ),
+        ("acc_g", "acc_u"),
+    )
+    assert len(carrier.bilinear_channels()) == 1 and not carrier.tiles_whole()
+
+    apart = carrier.per_state()
+    assert apart is not None and apart.axis is None and apart.exposes == carrier.exposes
+    assert [child.exposes for child in apart.operands] == [("acc_g",), ("acc_u",)]
+    assert all(child.tiles_whole() and len(child.operands) == 2 for child in apart.operands)
+    assert apart.per_state() is None, "idempotent: what it hands back folds whole"
+
+    tile = TileOp(op=carrier, place=Placement(free=(M8, N16)), axes=(M8, N16, a28))
+    assert [site for site in tile.node_sites if tile.contracts(site)] == [1, 2]
+
+
+def test_a_carrier_that_folds_whole_or_carries_no_product_stays_one_term() -> None:
+    """Two shapes normalization must leave alone: the FUSED gate/up carrier, whose channels share
+    their A — the form the atom wants, one ldmatrix'd A fragment and an mma chain per channel — and
+    a carrier whose states are no product at all (a sum beside a sum of squares over one loaded
+    value), which splitting would make read that value twice for nothing."""
+    a28 = Axis("a28", Dim(64))
+    shared = contraction(a28, slab("x", "X", "m", "a28"), (slab("wg", "Wg", "n", "a28"), "acc_g"), (slab("wu", "Wu", "n", "a28"), "acc_u"))
+    assert shared.tiles_whole() and shared.per_state() is None
+
+    statistics = reduction(
+        a28,
+        (slab("x", "X", "m", "a28"),),
+        (Assign(name="sum__v", op="multiply", args=("x", "x")), Assign(name="count__v", op="add", args=("x", "x"))),
+        ("sum", "count"),
+    )
+    assert len(statistics.bilinear_channels()) < 2 and statistics.per_state() is None
+
+
 def test_total_lift_produces_canonical_contraction() -> None:
     inner = Body(
         (
