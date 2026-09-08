@@ -743,12 +743,11 @@ def test_record_greedy_pick_appends_routing_rows_and_receipts_once(tmp_path, mon
 
     path = tmp_path / "working.yaml"
     dump_golden_file(_document(_matmul("mm", pins={"FAST_MATH": True})), path)
-    document = load_golden_file(path)
     root, piece = "1" * 64, "a" * 64
     decisions = [(root, {"PLACE@map.1/map": "cut"}, 30.0, 33.0)]
     kernels = [(piece, _classic_row(work="w1x1"), 10.0, 11.0), ("b" * 64, {"WORK": "", "RASTER": ""}, 20.0, 22.0)]
 
-    written = record_greedy_pick(path, document, "mm", decisions=decisions, kernels=kernels, reference_backend="same-input-greedy")
+    written = record_greedy_pick(path, "mm", decisions=decisions, kernels=kernels, reference_backend="same-input-greedy")
 
     assert written == ["mm.111111111111", "mm.aaaaaaaaaaaa", "mm.bbbbbbbbbbbb"]
     realizations = load_golden_file(path)["configs"][0]["realizations"]
@@ -765,11 +764,28 @@ def test_record_greedy_pick_appends_routing_rows_and_receipts_once(tmp_path, mon
     assert all(golden_entry_state(row) is GoldenEntryState.VERIFIED for row in realizations[1:])
 
     kernels[0] = (piece, _classic_row(work="w1x1"), 9.0, 11.5)
-    assert record_greedy_pick(path, document, "mm", decisions=decisions, kernels=kernels, reference_backend="same-input-greedy") == written
+    assert record_greedy_pick(path, "mm", decisions=decisions, kernels=kernels, reference_backend="same-input-greedy") == written
     realizations = load_golden_file(path)["configs"][0]["realizations"]
     assert [row["name"] for row in realizations] == ["mm", *written]
     assert realizations[2]["measurements"] == {"emmy_us": 9.0, "reference_us": 11.5, "reference_backend": "same-input-greedy"}
 
     monkeypatch.setattr(working_golden, "is_repository_golden_path", lambda _path: True)
     with pytest.raises(ValueError, match="canonical repository golden"):
-        record_greedy_pick(path, document, "mm", decisions=decisions, kernels=kernels, reference_backend="same-input-greedy")
+        record_greedy_pick(path, "mm", decisions=decisions, kernels=kernels, reference_backend="same-input-greedy")
+
+
+def test_a_recorder_keeps_the_rows_another_writer_added_after_it_read(tmp_path):
+    """Two runs recording into one file — the host loop's parallel devices — each load it, add
+    their rows and write the whole document back. The write reloads the file under an exclusive
+    lock, so the second recorder keeps the first's rows instead of dumping the document it read
+    before them."""
+    from emmy.compiler.pipeline.search.working_golden import record_greedy_pick
+
+    path = tmp_path / "working.yaml"
+    dump_golden_file(_document(_matmul("mm", pins={"FAST_MATH": True})), path)
+    row = {"WORK": "", "RASTER": ""}
+    first = record_greedy_pick(path, "mm", decisions=[], kernels=[("a" * 64, row, 1.0, 2.0)], reference_backend="same-input-greedy")
+    second = record_greedy_pick(path, "mm", decisions=[], kernels=[("b" * 64, row, 3.0, 4.0)], reference_backend="same-input-greedy")
+
+    realizations = load_golden_file(path)["configs"][0]["realizations"]
+    assert [entry["name"] for entry in realizations] == ["mm", *first, *second]

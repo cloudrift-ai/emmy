@@ -579,14 +579,8 @@ def _record_greedy_pick(args, graph, bench, greedy_iso, taken) -> None:
         (identity, knobs, whole if mine is None else mine, whole_ref if theirs is None else theirs)
         for (identity, knobs), mine, theirs in zip(taken.decisions, *prices, strict=True)
     ]
-    document = getattr(args, "_golden_document", None)
-    if document is None:
-        from emmy.compiler.pipeline.search.golden import load_golden_file  # noqa: PLC0415
-
-        document = load_golden_file(args.golden)
     record_greedy_pick(
         args.golden,
-        document,
         args.realization,
         decisions=decisions,
         kernels=[(identity, row, us(mine), us(theirs)) for (identity, row), mine, theirs in zip(rows, *launches, strict=True)],
