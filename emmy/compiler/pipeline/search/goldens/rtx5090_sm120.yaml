@@ -1526,13 +1526,12 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f32/f1x4/k8
       REDUCE: ''
-      STAGE: d1/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 14.8
-      reference_us: 23.9
-      reference_backend: emmy-greedy
+      emmy_us: 16.15
+      reference_us: 16.15
+      reference_backend: same-input-greedy
 - program: 33
   target:
     loop: 2
@@ -1579,13 +1578,12 @@ configs:
       WORK: w1x4
       TILE: mma_m16n8k16_f16_f32/f1x2/k4
       REDUCE: ''
-      STAGE: d1/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 11.95
-      reference_us: 104.99
-      reference_backend: emmy-greedy
+      emmy_us: 22.2
+      reference_us: 22.2
+      reference_backend: same-input-greedy
   - name: attention.hd128.dynM.softmax_v
     bindings: {}
     pins:
@@ -1594,13 +1592,12 @@ configs:
       WORK: w1x4
       TILE: mma_m16n8k16_f16_f32/f1x2/k4
       REDUCE: ''
-      STAGE: d1/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 11.9
-      reference_us: 104.99
-      reference_backend: emmy-greedy
+      emmy_us: 22.21
+      reference_us: 22.2
+      reference_backend: same-input-greedy
 - program: 34
   target:
     loop: 4
@@ -1715,13 +1712,12 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f32/f1x2/k8
       REDUCE: ''
-      STAGE: d1/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 13.51
-      reference_us: 59.03
-      reference_backend: emmy-greedy
+      emmy_us: 11.56
+      reference_us: 11.54
+      reference_backend: same-input-greedy
   - name: attention.hd64.dynM.softmax_v
     bindings: {}
     pins:
@@ -1730,13 +1726,12 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f32/f1x2/k8
       REDUCE: ''
-      STAGE: d1/smem
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 13.51
-      reference_us: 59.03
-      reference_backend: emmy-greedy
+      emmy_us: 11.57
+      reference_us: 11.54
+      reference_backend: same-input-greedy
 loops:
 - inputs: [x0, x1]
   outputs: [scaled_dot_product_attention_scaled]

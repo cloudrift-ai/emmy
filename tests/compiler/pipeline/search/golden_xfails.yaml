@@ -3,16 +3,6 @@
 # deleted. Never add a line to make a red row green — re-record the card, or fix the
 # enumeration. See test_golden.py.
 
-rtx4080_sm89.yaml:
-  - matmul.square.512
-  - matmul.square.1024
-  - matmul.square.2048
-  - matmul.square.4096
-  - matmul.square.512.fp16
-  - matmul.square.1024.fp16#1
-  - matmul.square.1024.fp16#2
-  - matmul.square.2048.fp16
-  - matmul.square.4096.fp16
 rtx4090_sm89.yaml:
   - attention.hd128.pv#1
   - attention.hd128.pv#2
@@ -26,20 +16,5 @@ rtx4090_sm89.yaml:
   - attention.hd64.dynM.pv#2
 rtx5090_sm120.yaml:
   - attention.hd128.softmax_v#1
-  - attention.hd128.softmax_v#2
-  - attention.hd128.dynM.softmax_v#1
-  - attention.hd128.dynM.softmax_v#2
   - attention.hd64.softmax_v#1
   - attention.hd64.softmax_v#2
-  - attention.hd64.dynM.softmax_v#1
-  - attention.hd64.dynM.softmax_v#2
-rtxpro6000_sm120.yaml:
-  - matmul.square.512
-  - matmul.square.1024
-  - matmul.square.2048
-  - matmul.square.4096
-  - matmul.square.512.fp16#1
-  - matmul.square.512.fp16#2
-  - matmul.square.1024.fp16
-  - matmul.square.2048.fp16
-  - matmul.square.4096.fp16

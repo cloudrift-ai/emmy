@@ -142,6 +142,7 @@ configs:
     knobs:
       WORK: t16x8
       TILE: f2x6
+      REDUCE: ''
       RASTER: ''
       STAGE: d2/smem-tma
     measurements:
@@ -160,6 +161,7 @@ configs:
     knobs:
       WORK: t16x16
       TILE: f4x6
+      REDUCE: ''
       RASTER: ''
       STAGE: d4/smem-tma
     measurements:
@@ -178,6 +180,7 @@ configs:
     knobs:
       WORK: t32x16
       TILE: f4x12
+      REDUCE: ''
       RASTER: ''
       STAGE: d2/smem-tma
     measurements:
@@ -196,6 +199,7 @@ configs:
     knobs:
       WORK: t32x16
       TILE: f4x6
+      REDUCE: ''
       RASTER: ''
       STAGE: d3/smem-tma
     measurements:
@@ -214,6 +218,7 @@ configs:
     knobs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      REDUCE: ''
       RASTER: ''
       STAGE: d3/smem-tma
     measurements:
@@ -227,6 +232,7 @@ configs:
     knobs:
       WORK: w1x4
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      REDUCE: ''
       RASTER: ''
       STAGE: d2/smem-tma
     measurements:
@@ -245,6 +251,7 @@ configs:
     knobs:
       WORK: w1x4
       TILE: mma_m16n8k16_f16_f32/f4x2/k2
+      REDUCE: ''
       RASTER: ''
       STAGE: d4/smem-tma
     measurements:
@@ -263,6 +270,7 @@ configs:
     knobs:
       WORK: w4x2
       TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      REDUCE: ''
       RASTER: ''
       STAGE: d2/smem-tma
     measurements:
@@ -281,6 +289,7 @@ configs:
     knobs:
       WORK: w8x2
       TILE: mma_m16n8k16_f16_f32/f2x8/k4
+      REDUCE: ''
       RASTER: ''
       STAGE: d2/smem-tma
     measurements:
