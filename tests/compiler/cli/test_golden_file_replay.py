@@ -616,7 +616,6 @@ def test_recorded_greedy_pick_is_picked_again_under_strict_evidence(tmp_path):
 
     written = record_greedy_pick(
         path,
-        document,
         "working.route",
         decisions=[(identity, knobs, 5.0, 6.0) for identity, knobs in taken.decisions],
         kernels=[(identity, row, 1.0, 2.0) for identity, row in rows],
@@ -661,7 +660,6 @@ def test_recorded_composed_pick_is_picked_again_under_strict_evidence(tmp_path):
 
     written = record_greedy_pick(
         path,
-        document,
         "working.route",
         decisions=[(identity, knobs, 5.0, 6.0) for identity, knobs in taken.decisions],
         kernels=[(identity, row, 1.0, 2.0) for identity, row in rows],

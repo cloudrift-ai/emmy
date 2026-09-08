@@ -7,7 +7,9 @@ persistence. CLI commands only validate argument combinations and report errors.
 
 from __future__ import annotations
 
+import contextlib
 import copy
+import fcntl
 from collections import Counter
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -483,7 +485,6 @@ async def measure_proposals(
 
 def record_latency(
     path: str | Path,
-    document: dict,
     name: str,
     *,
     hardware_id: str,
@@ -503,12 +504,23 @@ def record_latency(
     a ratchet: ``emmy_us`` against its own stored value says *did we regress*, and ``tcompile_us``
     beside it says *are we ahead of or behind torch*, per case, per card. ``tcompile_us`` is
     omitted rather than faked when the target has no torch twin to compile.
+
+    Read and written inside one :func:`exclusive_golden`, like every measurement this module writes
+    back: a run passing both ``--record`` and ``--record-greedy`` writes twice, and a stale second
+    document would drop whatever landed between the two.
     """
     destination = Path(path)
     if is_repository_golden_path(destination):
         raise ValueError(f"refusing to write measurements into a canonical repository golden: {destination}")
+    with exclusive_golden(destination):
+        _record_latency_row(destination, name, hardware_id=hardware_id, emmy_us=emmy_us, tcompile_us=tcompile_us, knobs=knobs, pins=pins)
+
+
+def _record_latency_row(destination: Path, name: str, *, hardware_id, emmy_us, tcompile_us, knobs, pins) -> None:
+    """One card's latencies written into the file as it stands NOW. Runs under the lock."""
     from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
 
+    document = load_golden_file(destination)
     wanted_knobs = canonical_row_key(knobs) if knobs is not None else None
     wanted_pins = tuple(sorted((key, str(value)) for key, value in pins.items())) if pins is not None else None
     matches = []
@@ -612,9 +624,24 @@ def greedy_pick_rows(graph) -> list[tuple[str, dict[str, str]]]:
     return rows
 
 
+@contextlib.contextmanager
+def exclusive_golden(path: Path):
+    """Hold one working golden's read-modify-write against every other process on this machine.
+
+    A recorder loads the file, adds its rows and writes the whole document back, so two runs that
+    both load before either writes each dump a document missing the other's rows — 18 of 151
+    realizations recorded in one parallel round were lost that way. The reload belongs INSIDE this
+    lock: locking a stale document would serialize the loss, not stop it. ``flock`` releases with
+    the descriptor, on a killed process too."""
+    lock = path.with_name(path.name + ".lock")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock, "w") as handle:  # noqa: PTH123, SIM115 — flock takes a descriptor
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        yield
+
+
 def record_greedy_pick(
     path: str | Path,
-    document: dict,
     name: str,
     *,
     decisions: list[tuple[str, dict, float, float]],
@@ -632,13 +659,22 @@ def record_greedy_pick(
     spellings are kernel-local, so a cut key copied onto every receipt would re-cut any piece that
     offers a same-spelled seam; the replay follows the routing rows, each naming its kernel by
     identity. A row already recorded for the same kernel and knobs takes the new timings, anything
-    else is appended, so a re-record never duplicates. Returns the names written, in order.
+    else is appended, so a re-record never duplicates. The file is read and written back inside
+    one :func:`exclusive_golden`, so the rows a concurrent recorder wrote meanwhile survive.
+    Returns the names written, in order.
     """
     destination = Path(path)
     if is_repository_golden_path(destination):
         raise ValueError(f"refusing to write measurements into a canonical repository golden: {destination}")
+    with exclusive_golden(destination):
+        return _record_rows(destination, name, decisions=decisions, kernels=kernels, reference_backend=reference_backend)
+
+
+def _record_rows(destination: Path, name: str, *, decisions, kernels, reference_backend: str) -> list[str]:
+    """The rows of one greedy pick, added to the file as it stands NOW. Runs under the lock."""
     from emmy.compiler.pipeline.knob import canonical_row_key, family_of  # noqa: PLC0415
 
+    document = load_golden_file(destination)
     seeds = [(entry, realization) for entry in document["configs"] for realization in entry["realizations"] if realization["name"] == name]
     if not seeds:
         raise ValueError(f"{destination} has no realization named {name!r}")

@@ -524,14 +524,8 @@ def _record_golden_latency(args, results: dict, golden_benches) -> None:
     if not tcompile_us:
         # Not fatal: the ratchet is `emmy_us`, and some targets have no torch twin to compile.
         logger.warning("--record: no torch.compile timing for %s; storing the Emmy latency alone", args.realization)
-    document = getattr(args, "_golden_document", None)
-    if document is None:
-        from emmy.compiler.pipeline.search.golden import load_golden_file  # noqa: PLC0415
-
-        document = load_golden_file(args.golden)
     record_latency(
         args.golden,
-        document,
         args.realization,
         hardware_id=Context.probe().hardware_id(),
         emmy_us=emmy_us,
@@ -579,14 +573,8 @@ def _record_greedy_pick(args, graph, bench, greedy_iso, taken) -> None:
         (identity, knobs, whole if mine is None else mine, whole_ref if theirs is None else theirs)
         for (identity, knobs), mine, theirs in zip(taken.decisions, *prices, strict=True)
     ]
-    document = getattr(args, "_golden_document", None)
-    if document is None:
-        from emmy.compiler.pipeline.search.golden import load_golden_file  # noqa: PLC0415
-
-        document = load_golden_file(args.golden)
     record_greedy_pick(
         args.golden,
-        document,
         args.realization,
         decisions=decisions,
         kernels=[(identity, row, us(mine), us(theirs)) for (identity, row), mine, theirs in zip(rows, *launches, strict=True)],
