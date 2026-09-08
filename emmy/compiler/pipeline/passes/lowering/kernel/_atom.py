@@ -50,6 +50,7 @@ from emmy.compiler.ir.kernel.ir import (
     FragmentPromote,
     FragmentRepack,
     FragmentRowReduce,
+    FragmentSelect,
     LdmatrixLoad,
     MmaSyncPtx,
     RegEpilogue,
@@ -2009,6 +2010,28 @@ def _row_pair(state: str, i: int) -> tuple[str, str]:
     return (f"{state}__r{i}_0", f"{state}__r{i}_1")
 
 
+@dataclass(frozen=True)
+class _CellCoords:
+    """One C fragment's own coordinates — which axes its two element coordinates ARE, and where
+    the tile puts them. :func:`_residence` reads a coordinate ``Select`` through it."""
+
+    axes: tuple[str, str]  # the row axis, then the column axis
+    row_base: Expr
+    col_base: Expr
+
+    def predicates(self, stmt: Select) -> bool:
+        """Whether every branch of ``stmt`` selects on THIS cell's coordinates alone — the reading
+        that makes the statement per-element. Anything else stays uniform."""
+        return all(var in self.axes for pred in stmt.exprs() for var in pred.free_vars())
+
+    def select(self, name: str, stmt: Select) -> FragmentSelect:
+        """``stmt`` at fragment residence: its predicates restated over the reserved coordinate
+        vars the render substitutes this cell's origin into."""
+        sigma = Sigma({self.axes[0]: Var(FRAG_ROW), self.axes[1]: Var(FRAG_COL)})
+        branches = tuple(replace(branch, select=sigma.apply(branch.select)) for branch in stmt.branches)
+        return FragmentSelect(out=name, branches=branches, col_base=self.col_base, row_base=self.row_base)
+
+
 def _residence(
     stmts,
     *,
@@ -2019,6 +2042,7 @@ def _residence(
     hold: str = "",
     memo: dict | None = None,
     frags_only: bool = False,
+    cell: _CellCoords | None = None,
 ):
     """Evaluate one straight-line scalar program at the residence each value it reads has.
 
@@ -2029,6 +2053,12 @@ def _residence(
     verbatim. An ``Accum`` writes back into the value it names rather than declaring a new one, at
     the same three residences. Returns the statements beside the two maps extended with what they
     defined.
+
+    ``cell`` names this fragment's own coordinates (:class:`_CellCoords`). With it a ``Select``
+    over those axes is per-ELEMENT rather than uniform, and lands at fragment residence as a
+    :class:`FragmentSelect` — an SDPA score mask reaches the tensor cores that way. Without it a
+    ``Select`` is passed through like any other leaf, so only a caller that HAS coordinates offers
+    the reading.
 
     ``hold`` names a fragment that must SURVIVE the program — the carrier's own accumulator, which
     is declared once outside the chunk loop and may not be re-declared inside it. A statement whose
@@ -2050,6 +2080,11 @@ def _residence(
     frag_tag = tag if frag_tag is None else frag_tag
     for stmt in stmts:
         accum = isinstance(stmt, Accum)
+        if isinstance(stmt, Select) and cell is not None and cell.predicates(stmt):
+            name = f"{frag_tag}{stmt.name}"
+            out.append(cell.select(name, stmt))
+            frags[stmt.name] = name
+            continue
         if not isinstance(stmt, (Assign, Accum)):
             if not frags_only:
                 out.append(stmt)  # a uniform leaf — a scalar Load, the same value for every element
@@ -2203,7 +2238,7 @@ class _FlashOps(_MmaOps):
         # in silence.
         assert atom.c_to_a_repack, "the chunk tier needs an atom whose C fragment repacks into an A operand"
         assert all(
-            edge.as_slab() is not None for edge in ((*score.operands, self.c.operands[1]) if score is not None else self.c.operands)
+            edge.as_slab() is not None for edge in ((*score.operands, self.c.operands[1]) if score is not None else self.c.operands[:2])
         ), "the chunk tier reads its score operands and its streamed value as slabs"
         if score is not None:
             seam = (score_tile.n.axis.name, score_tile.n.units, score_tile.n.tile, score_tile.m.reg)
@@ -2239,12 +2274,16 @@ class _FlashOps(_MmaOps):
         scored, pivots = {}, {}
         for i in range(m.reg):
             for j in range(cols):
+                col_base = BinaryExpr("+", base, Literal(j * atom.atom_n, "int"))
                 stmts, frags, _ = _residence(
                     prefix.body,
                     frags={held: self.frag(f"_s{i}_{j}")},
                     rows={},
                     tag=f"_w{i}_{j}_",
                     memo=memo.setdefault((i, j), {}),
+                    # The score fragment IS the (row, chunk) pair, so a prefix ``Select`` on those
+                    # two axes — an SDPA causal / windowed mask — is per element, not uniform.
+                    cell=_CellCoords(axes=(m.axis.name, key.name), row_base=offset[0].base(i), col_base=col_base),
                 )
                 body += stmts
                 scored[i, j] = frags[self.c.roles[0]]
@@ -2253,7 +2292,7 @@ class _FlashOps(_MmaOps):
                         FragmentMask(
                             frag=scored[i, j],
                             mask_when=BinaryExpr(">=", Var(FRAG_COL), bound),
-                            col_base=BinaryExpr("+", base, Literal(j * atom.atom_n, "int")),
+                            col_base=col_base,
                             fill=self.c.base.components()[0].identity,
                         )
                     )
@@ -2313,14 +2352,22 @@ class _FlashOps(_MmaOps):
         # one slot (``_chunk_warp_stage``), so the drain reads the slab a fill just wrote and the
         # slot expression never varies.
         assert self.stage.depth == 1, "the chunk tier's staged ring is single-buffer"
-        assert bound is None, "a staged chunk needs a static, chunk-divisible key extent"
+        # A RAGGED key extent stages too (``_chunk_warp_stage`` states when): the last chunk
+        # overhangs, its value rows read the last valid key, and the boundary ``FragmentMask``
+        # above has already put those keys at the pivot identity — so they weigh exactly zero and
+        # the duplicates fold to nothing, the same discipline the gmem-direct arm carries.
+        static_k = key.extent.is_static
+        big_k = key.extent.as_static() if static_k else key.extent
+        n_chunks = (
+            big_k // bk if static_k else Dim(BinaryExpr("/", BinaryExpr("+", big_k.expr, Literal(bk - 1, "int")), Literal(bk, "int")))
+        )
         decls, region = staged_kloop(
             transport=value.transport,
             drain=lambda _slot: body,
             depth=1,
             bk_elems=bk,
-            n_chunks=key.extent.as_static() // bk,
-            k_extent=key.extent.as_static(),
+            n_chunks=n_chunks,
+            k_extent=big_k,
             k0=chunk.name,
             seed=False,
         )

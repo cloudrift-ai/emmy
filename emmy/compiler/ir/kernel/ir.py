@@ -1084,6 +1084,12 @@ class FragmentRowReduce(Stmt):
     Afterwards every lane of a column group holds the full per-row value, so ``top`` (rows ``g``)
     and ``bot`` (rows ``g+8``) are the :data:`ROW` operands :class:`FragmentApply` broadcasts.
 
+    The fold starts at ``op``'s IDENTITY, like any other. That is not decoration on the pivot: a
+    ``maximum`` whose every input is ``-inf`` — one chunk of a causal score all of whose keys the
+    mask sent there — reduces to ``-inf``, and the channels that then take ``exp(s − pivot)`` read
+    ``-inf − -inf`` and produce NaN. Seeded at the registry's SOFT ``-1e30`` the pivot stays finite,
+    those keys weigh exactly zero, and the recipe's own merge scales the whole chunk out.
+
     Distinct from :class:`WarpShuffle`, which folds a whole per-thread monoid state over a
     cooperative-K lane set; this folds WITHIN one warp's fragments along the atom's N direction,
     keyed on the PTX C layout. It is why the tier requires the chunk to sit inside one warp column
@@ -1115,8 +1121,9 @@ class FragmentRowReduce(Stmt):
                 e = _binary_combine_expr(self.op, e, p, ctx.target, "f32")
             return e
 
-        top_parts = [f"{f}[{i}]" for f in self.frags for i in (0, 1)]
-        bot_parts = [f"{f}[{i}]" for f in self.frags for i in (2, 3)]
+        seed = ctx.identity_literal(self.op.identity, "f32")
+        top_parts = [seed, *(f"{f}[{i}]" for f in self.frags for i in (0, 1))]
+        bot_parts = [seed, *(f"{f}[{i}]" for f in self.frags for i in (2, 3))]
         out = [f"{pad}{f32} {self.top} = {combine(top_parts)};", f"{pad}{f32} {self.bot} = {combine(bot_parts)};"]
         ctx.ssa_dtypes[self.top] = ctx.ssa_dtypes[self.bot] = "f32"
         s = int(self.group) // 2
@@ -1183,6 +1190,65 @@ class FragmentMask(Stmt):
                 sub[FRAG_ROW] = BinaryExpr("+", self.row_base, lay.row_off[lay.elem_row[i]])
             pred = self.mask_when.substitute(sub).render(ctx)
             lines.append(f"{pad}if ({pred}) {self.frag}[{i}] = {fill};")
+        return lines
+
+
+@dataclass(frozen=True)
+class FragmentSelect(Stmt):
+    """Per-element **coordinate-predicated value binding** over an mma C-fragment — the
+    fragment-tier sibling of the scalar :class:`~emmy.compiler.ir.stmt.leaves.Select`, exactly as
+    :class:`FragmentApply` is the sibling of ``Assign``.
+
+    Branch values are cell-uniform scalars; each predicate reads the element's ABSOLUTE row /
+    column through :data:`FRAG_ROW` / :data:`FRAG_COL`. The render substitutes the tile origin plus
+    the layout's per-element offset — the same substitution :class:`FragmentMask` performs — and
+    then hands the branches to ``select_to_ternary``, so branch order and the scalar casts stay
+    identical to ``Select``'s own. A fragment-valued branch has no representation here: the
+    residence evaluator leaves any other shape uniform rather than broadcasting it silently.
+
+    This is what carries an SDPA score mask to the tensor cores. A causal or windowed mask traces
+    as ``select(key <= query ? 0 : -inf)`` added to the score, so the chunk tier meets it as an
+    ordinary statement of the score's own prefix. Distinct from :class:`FragmentMask`, which
+    OVERWRITES a fragment with one fold identity: this one BINDS a value the program goes on to
+    read."""
+
+    out: str
+    branches: tuple[SelectBranch, ...]
+    col_base: Expr
+    row_base: Expr | None = None
+    layout: FragLayout = M16N8
+
+    def __post_init__(self) -> None:
+        if not self.branches:
+            raise ValueError("FragmentSelect.branches must be non-empty")
+
+    def deps(self) -> tuple[str, ...]:
+        return tuple(branch.value for branch in self.branches)
+
+    def defines(self) -> tuple[str, ...]:
+        return (self.out,)
+
+    def exprs(self) -> tuple[Expr, ...]:
+        bases = (self.col_base,) + ((self.row_base,) if self.row_base is not None else ())
+        return (*(branch.select for branch in self.branches), *bases)
+
+    def pretty(self, indent: str = "") -> list[str]:
+        return [f"{indent}FragmentSelect({self.out} <- {len(self.branches)} uniform branches)"]
+
+    def render(self, ctx: RenderCtx) -> list[str]:
+        from emmy.compiler.ir.stmt.base import select_to_ternary  # noqa: PLC0415
+        from emmy.compiler.ir.stmt.leaves import Select  # noqa: PLC0415
+
+        pad = _pad(ctx.indent)
+        lay = self.layout
+        lines = [f"{pad}float {self.out}[{lay.n_elems}];", *_lane_preamble(ctx, pad, lay.lane_decl)]
+        ctx.ssa_dtypes[self.out] = "f32"
+        for i in range(lay.n_elems):
+            sub: dict[str, Expr] = {FRAG_COL: BinaryExpr("+", self.col_base, lay.col_off[i])}
+            if self.row_base is not None:
+                sub[FRAG_ROW] = BinaryExpr("+", self.row_base, lay.row_off[lay.elem_row[i]])
+            branches = tuple(replace(branch, select=branch.select.substitute(sub)) for branch in self.branches)
+            lines.append(f"{pad}{self.out}[{i}] = {select_to_ternary(Select(name=self.out, branches=branches)).render(ctx)};")
         return lines
 
 
@@ -2880,6 +2946,19 @@ def _(s: FragmentBiasAdd, rename, sigma, axis_fn):
         index=tuple(sigma.apply(e) for e in s.index),
         col_base=sigma.apply(s.col_base),
         row_base=sigma.apply(s.row_base),
+        layout=s.layout,
+    )
+
+
+@_rewrite_kind.register
+def _(s: FragmentSelect, rename, sigma, axis_fn):
+    # ``out`` is SSA; the tile-origin bases and every branch predicate σ-substitute, and the
+    # reserved ``__frow`` / ``__fcol`` coordinate vars are no local axis, so σ leaves them alone.
+    return FragmentSelect(
+        out=rename(s.out),
+        branches=tuple(replace(b, value=rename(b.value), select=sigma.apply(b.select)) for b in s.branches),
+        col_base=sigma.apply(s.col_base),
+        row_base=sigma.apply(s.row_base) if s.row_base is not None else None,
         layout=s.layout,
     )
 

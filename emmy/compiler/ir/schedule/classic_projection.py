@@ -55,7 +55,7 @@ from emmy.compiler.ir.schedule.classic import (
     node_id_spelling,
 )
 from emmy.compiler.ir.schedule.views import ContractionFacts
-from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Write
+from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Select, Write
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.ops import Sched, chain_form, chain_members, edge_dtypes, kernel_roots, projection_tail, scheduled
@@ -207,7 +207,13 @@ def _chunk_refusal(tile: TileOp, node) -> str | None:
     # GATHERED into them when the carrier's own A edge is already the stored tile (softmax@V, whose
     # probabilities arrive as an input). Either way the tier gets a ``(row, chunk)`` C fragment; a
     # carrier that is neither has no chunk to fold.
-    reads = (*score.operands, *node.operands[1:]) if score is not None else node.operands
+    #
+    # Exactly TWO edges reach a fragment loader: whatever supplies the pivot, and the streamed
+    # value. Those need a gmem address. Every operand past them is a leaf of the score's own
+    # prefix, lowered ONCE ahead of the chunk loop, and a causal mask's fill / zero constants
+    # arrive there as a computed pair with no slab at all — asking one for an address refused a
+    # masked carrier over an edge the tier never addresses.
+    reads = (*score.operands, node.operands[1]) if score is not None else node.operands[:2]
     if score is None and node.operands[0].as_slab() is None:
         return "the chunk tier folds a carrier whose pivot a nested contraction or a stored tile supplies"
     if any(edge.as_slab() is None for edge in reads):
@@ -216,9 +222,20 @@ def _chunk_refusal(tile: TileOp, node) -> str | None:
     # contraction, and what scales its raw accumulator lives in the lift above it. Its leaves past
     # the producer are read once ahead of the chunk, so none of them may vary over the chunk.
     prefix = node.applied.cone(node.roles[0])
-    if any(not isinstance(stmt, (Assign, Load)) for stmt in prefix.body):
+    # A ``Select`` on the score fragment's OWN coordinates — the row the carrier folds and the
+    # chunk it folds over — is per element, and the tier evaluates it at fragment residence
+    # (``_CellCoords``); an SDPA causal or windowed mask arrives exactly so. Selecting on anything
+    # else is a value the fragment has no coordinate for.
+    coords = (tile.place.free[-2].name, node.axis)
+    for stmt in prefix.body:
+        if isinstance(stmt, (Assign, Load)):
+            continue
+        if isinstance(stmt, Select) and all(var in coords for pred in stmt.exprs() for var in pred.free_vars()):
+            continue
         return "the score's own prefix holds more than a straight-line program"
     leaves = [edge for edge in node.operands[1:] if set(edge.exposes) & set(prefix.params)]
+    if any(all(edge is not leaf for leaf in leaves) for edge in node.operands[2:]):
+        return "the chunk tier reads an operand that is no leaf of the score's prefix"
     if any(node.axis in edge.free_axes for edge in leaves):
         return "the score's prefix reads an operand that varies over the chunk"
     # The tier holds ONE accumulator — the expectation — and every other carried state as a per-row
@@ -285,6 +302,16 @@ def _atom_families(tile: TileOp, target, node, tail: list, packed: tuple = (None
 
     # The CHUNK tier hands its weight to the expectation's mma as a register repack of the score's
     # own C fragments, so only an atom whose two lane maps line up can carry it.
+    #
+    # And only at the PLAIN accumulator — no ``acc=atom_dtype`` sibling here, unlike the general
+    # path below. The tier reads its score, its channel partials and its carried states back
+    # ELEMENT-WISE as f32 (the scale, the row maximum, the exp and the merge all do), so a 16-bit C
+    # would need an f32 shadow fragment behind every one of them. There is nothing to buy with it:
+    # a streaming softmax is not mma-rate-bound, which is the only place the full-rate cell pays.
+    # Measured on ``attention.hd128.qk``, which lowers through the general tier and offers both
+    # accumulators at one geometry — f32 5.2 us against f16 5.3 staged and 16.2 against 16.4
+    # gmem-direct on an RTX 5090 — against the 1.34-1.61x the same cell is worth on the projection
+    # kernels, where the mma chain IS the kernel.
     if node.chunked():
         offered = bindable(atoms_for(edge_dtypes(a_edge, tile.inputs)[0], ctx=target))
         return tuple(name for name in offered if ATOM_REGISTRY[name].c_to_a_repack)

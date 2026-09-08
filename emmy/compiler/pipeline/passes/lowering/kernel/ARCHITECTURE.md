@@ -196,7 +196,14 @@ The warp (mma) tier stages its reused gmem operands through an smem slab, driven
 whose fragments repack in registers or a stored tile gathered at the fragment lane map, and a copy transport carries
 neither. Its ring is single-buffer, because a prefetch there would have to interleave with the softmax between the
 fill and the drain rather than with an atom-K loop; `_chunk_warp_stage` enforces that by handing back `depth=1`, so a
-deeper spelling never reaches the fork. Every staged path runs **one** liveness-scheduled K-loop skeleton, `pipelined_kloop` in
+deeper spelling never reaches the fork. Its key extent may be SYMBOLIC, which every other staged operand refuses: a
+K-major value rows its slab by key and runs its copy chunks along the head dim, so the extent enters neither the chunk
+width nor the gmem row stride and the last chunk simply overhangs. Both ends of that tail are already disciplined —
+the fill clamps the overhanging key row onto the last valid one (a TMA box zero-fills instead) and the drain's
+boundary `FragmentMask` has put those keys at the pivot identity — so a serving-shaped attention kernel, whose key
+extent IS the KV cache length, stages like any other. On an RTX 5090 that is 2.5x on the `attention.hd64.softmax_v`
+golden target (28.7 us gmem-direct against 11.4 us at `d1/smem-tma`). A TRANSPOSED value keeps the static demand: its
+gmem rows stride by the extent. Every staged path runs **one** liveness-scheduled K-loop skeleton, `pipelined_kloop` in
 **`_stage.py`**: the loop body arrives as ordered segments tagged with the slab names each READS, every staged
 operand-group is a `(transport, depth)` pair, and the fill / wait / barrier placement is DERIVED from each group's
 live range (`[first reader, last reader]` over the segments) — wait before the first reader, a CTA barrier past the
@@ -417,6 +424,15 @@ about the tile, not about the program.
 A projection that reads no per-row carrier state is the ordinary sink's (a placement cut materializes the
 denominator, and the tail is then a per-cell chain like any other).
 
+The score's own PREFIX — the carrier's lift cut to its score role — is where an SDPA mask arrives, and it takes two
+readings the tier would otherwise refuse. Its LEAVES are read once ahead of the chunk loop, so an operand that feeds
+one needs no gmem address at all: a causal mask's fill / zero constants are a computed pair, and only the pivot source
+and the streamed value are ever asked for a slab. And a `Select` on the score fragment's OWN coordinates — the row the
+carrier folds and the chunk it folds over — is per ELEMENT, not cell-uniform, so `_residence` lands it as a
+`FragmentSelect` under the same coordinate substitution the boundary `FragmentMask` performs. Without those two a
+masked carrier fell to the scalar tier whole, which is what `attention.hd256.dynM.pv` on the RTX 4090 recorded and
+then stopped decoding.
+
 ### What may not come back
 
 The tree once carried a second emitter for attention: a carrier whose term held one operand per carried component,
@@ -430,7 +446,10 @@ chunk — never from a second reduce axis carved into the term. A design that re
 block axis, or a width derived from an extent is reintroducing the thing that took the attention schedule space from
 10^9 to 10^17 and made every kernel identity turn on a form rule nothing measured. `FragmentRowReduce` came back with
 the chunk tier — a per-row fold over one warp's C fragments is what a chunk pivot IS — but it came back as a leaf the
-tier emits, not as an interpreter of a term.
+tier emits, not as an interpreter of a term. `FragmentSelect` came back the same way and under the same test: a
+coordinate `Select` in the score's prefix is per element, and the fragment-tier sibling of the scalar statement is
+what `_residence` emits for it. Neither reads a term, carves a block axis, or derives a width from an extent, which
+is what the prohibition is actually about.
 
 The Fold move is never re-decided during materialization. `ReduceStage.combine` is the placement-keyed selector:
 within-warp uses `SHFL`, within-block uses a `SHFL` plus shared-memory tree, and cross-CTA uses `ATOMIC` or `KERNEL`
