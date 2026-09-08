@@ -1403,7 +1403,11 @@ to the target's own lift is the corpus's derived stamp, not a receipt, and keeps
 --realization NAME --bench --record-greedy` (`working_golden.record_greedy_pick`) writes the kernel set the greedy
 compile picked back into the working file: one routing row per kernel-set decision the compile took — its `identity`
 the kernel the fork was offered on, its `knobs` the arm's `PLACE@seam: cut` or split-carrying `REDUCE` value, its
-`emmy_us` the whole graph's isolated timing — and one child-identity schedule receipt per CUDA kernel (the tile
+`emmy_us` the summed isolated timings of the kernels the decision produced (`working_golden.kernel_set_prices`: the
+splice's minted kernels, a later decision that consumed one of them standing in with its own; the whole graph's
+timing only where a kernel of the set has no launch) — the units the kernel-set fork ranks it in against the replaced
+kernel's own receipt, so a measured split never loses to the unsplit kernel for carrying the program's total — and
+one child-identity schedule receipt per CUDA kernel (the tile
 kernel it lowered from, its realized schedule row, its own isolated launch timing), all under the seed realization's
 input regime with the greedy comparison row as `same-input-greedy` reference. A nested cut is a routing row of the
 piece it was offered on, so a cascade of cuts is as many routing rows, and the replay walks the set together: the entry

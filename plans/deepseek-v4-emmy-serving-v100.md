@@ -237,13 +237,93 @@ gaps stand between here and a boot that serves, both follow-ups to #692:
    next measurement, before any route for the other twins. The route has NO correctness verdict yet: `--strict`
    failed on non-finite values in the random-input replay (the round-one property above) and this twin has no
    eager reference, so a finite-input check is owed with it.
+   **Measured (2026-09-08, host round four): 0.245 s per `post4096` forward** — 19 kernels, 8.6× off round
+   three and 95× off the 23.24 s of 2026-09-02 — and it is the UNPINNED strict-evidence election of what the
+   working golden deploys, stable byte-for-byte after every other twin's rows were recorded beside it. The path
+   there: six more seams (the twist and exp contractions, the RMS statistic, both A cones, the mixed-stream
+   store) at 2.68 s, a `REDUCE=` pin turning the A-operand contraction per-cell at 0.465 s, and one shared twist
+   A-cone seam at 0.319 s, with the file's own unpinned election beating each pinned route. **(g)** 75 % of the
+   remaining time is one contraction, the gate/up projection at 0.18 s, and it is NOT a tile site: its
+   four-operand two-channel fold carries two A cones that are unmerged duplicates differing only in product
+   association, so no pin reaches an mma — a compiler gap (reproduced GPU-free on the host), and the same
+   duplication drives every mixed-stream recompute seen since round one. **(h)** the correctness verdict is not
+   obtainable with today's CLI: the twin draws its eps and count constants as random inputs, so every replay is
+   non-finite, and the same-input reference is the pinned route itself; a finite-input replay per twin and an
+   independent reference (the loop-IR CPU runner, unexposed) on `run --golden` are the missing flags. **(i)** all
+   151 serving-width realizations of the twins file ran unpinned and 123 carry measured routes (expert 4/4, pre
+   2/4 with `pre4096` on a three-seam pin, post 118/144); the 28 missing are the second large `post` kernel
+   family at m1 / m32 / dynamic (hangs unpinned — the `post4096` pin treatment), five small `post` reduces at m1
+   (two refused by nvcc on a same-scope accumulator redeclaration, reproduced GPU-free; three retry-arm timeouts)
+   and 18 rows lost to concurrent `--record-greedy` writers of one file. The `pre` twin's unpinned election is
+   the round-two recomputation class at every width, and its contractions also refuse an mma. Routing rows are
+   now priced at the launches their decision produced (#741), which is what let a measured split rank against
+   the unsplit receipt.
 
 **Consequence for the stages below.** Gate (c) passed at `ab1ad4592` and still does not reproduce: a boot now
-compiles end to end and the recorded route is a measured 2.10 s per `post4096` prefill forward (no longer a
-watchdog unknown) — the boot's roofline audit runs each program 4×, so serving needs roughly two orders of
-magnitude off the two naive kernels first, and a strict boot needs a measured route for every serving twin, not
-one. Stage 4 cannot warm or bake until that lands and gate (c) is re-run on the host, and the golden re-record
-should follow it, not precede it.
+compiles end to end and the recorded route is a measured 0.245 s per `post4096` prefill forward (no longer a
+watchdog unknown) — the boot's roofline audit runs each program 4×, so serving needs the gate/up contraction
+tiled first, and a strict boot needs a measured route for every serving twin: 28 of 151 realizations still lack
+one, so `emmy serve --strict-evidence` would raise at their first fork. Stage 4 cannot warm or bake until that
+lands and gate (c) is re-run on the host, and the golden re-record should follow it, not precede it.
+
+### Operations handoff — how the Stage 0 host loop is run (for a fresh session or another machine)
+
+The V100 host's address is deliberately absent from this repo; it lives in the operator's notes and is used only
+inside commands. Everything else a continuing session needs is here.
+
+**Host layout.** The compiler tree is `~/emmy-durations/` — a plain export of `origin/main` (no `.git`) with its own
+`./venv`; sync it with `git archive origin/main | ssh HOST tar -x -C STAGING` then `rsync -a --delete --exclude venv
+--exclude _verify --exclude _tune --exclude 'durations*' --exclude emmy_ml.egg-info --exclude '*.db*' --exclude
+__pycache__ --exclude .git STAGING/ ~/emmy-durations/`. All loop artifacts sit in `~/emmy-durations/_verify/item3/`:
+`working.yaml` (the working golden — the measured routes; `working.routeN.yaml` / `working.final4.yaml` are its
+snapshots), `autotune.db` (the tune-DB COPY every command points at; `autotune.iterNstate.db`, `autotune.routeNstate.db`,
+`autotune.roundNstart.db`, `autotune.tune{1,2}state.db` are byte snapshots taken through SQLite's backup API),
+`online.json` (the online-prior checkpoint), `twins.yaml` (the captured serving twins, unchanged), the per-iteration
+`iterN.{cu,log}`, the pinned probes `*.pins` + `*.cu`, and the GPU-free reproductions `nvcc-refused-k_div_11_reduce.cu`
+(the same-scope accumulator redeclaration) and `tile_probe.py` (the two-channel contraction that is not a tile site).
+The round reports (`item3-host-report.md`, `item3-resume-report.md`, `item3-round3-report.md`,
+`item3-round4-report.md`) are untracked, under `.superpowers/` in the agent worktrees on the operator's Mac; this plan
+carries their conclusions.
+
+**Never touch** `~/.cache/emmy/autotune.db` (the real tune DB; backup `~/autotune.db.bak-2026-09-02`), `~/emmy`,
+`~/emmy-dsv4`, `~/emmy-fix-backup`, `~/emmy-durations/_verify/gap3-tune/` (partial rows that regress the election —
+never merge that DB), or `~/.cache/emmy/verify3/` (another user's live tuning session). Another user tunes kernels on
+this host: run `nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name --format=csv` before every launch, use only
+devices nobody holds, never kill a foreign process, and delete nothing when done.
+
+**Invocation.** Every command runs from `~/emmy-durations` with `PATH=/usr/local/cuda-12.9/bin:$PATH
+CUDA_HOME=/usr/local/cuda-12.9 LD_PRELOAD=/usr/local/cuda-12.9/lib64/libnvrtc.so.12 HF_HOME=/hf_models
+HF_HUB_OFFLINE=1 EMMY_TUNE_DB=$HOME/emmy-durations/_verify/item3/autotune.db
+EMMY_ONLINE_FILE=$HOME/emmy-durations/_verify/item3/online.json` and the budgets `EMMY_KERNEL_TIMEOUT_MS=30000
+EMMY_FIRST_ITER_TIMEOUT_MS=180000 EMMY_BENCH_COMPILE_TIMEOUT_S=900 EMMY_BENCH_RUN_TIMEOUT_S=1800
+EMMY_BENCH_WALL_TIMEOUT_S=3600`; recording needs `--warmup 5 --iters 20`. The launchers in `_verify/item3/` carry all
+of it: `pin.sh NAME "K=V,…"` (a CPU-only pinned compile of the `post4096` target into `NAME.cu`, ~27 s — the way a
+route is shaped; `nest.py` / `ktable.py` read a dump's per-kernel grid and serial depth), `route.sh N PINSNAME` (bench +
+`--record-greedy` of `PINSNAME.pins` under `EMMY_KNOBS`, one device, writes the route into `working.yaml` and the
+per-kernel rows into the DB copy), `strict.sh NAME` (the gate: `compile --golden working.yaml --realization …
+--strict-evidence --target sm_70 --ir cuda`, no pin, must emit the measured program byte-identical), `twins.sh LIST
+DEVICE` (unpinned strict bench + `--record-greedy` per realization, one writer per device), `iter.sh N` (the unpinned
+evidence-loop iteration — do not resume it, see finding (d)), `evidence_probe.py` / `ballot_probe*.py` (what the
+evidence index and each kernel-set fork see). Run long commands with `nohup … &` and poll; snapshot the DB before any
+kill.
+
+**Pin mechanics.** Under `EMMY_KNOBS` the cut pass visits only the root: every `PLACE@seam=cut` that resolves on the
+root joins one composed decision, nested cuts are spelled from the root (`map.4/map.2/inner…`), a key naming no root
+seam is silently skipped, and a bare `PLACE=fuse` fuses everything unaddressed. `Rstar.pins` (round three, 11 seams),
+`B6.pins`, `E1.pins` (+`REDUCE=`), `F1.pins` are the measured sets; the file's own unpinned strict election beat every
+one of them once their rows were recorded. Target realization:
+`post4096.k_linear_softmax_matmul_mean_reduce_9716a1.f86b6dbe35b7.m4096`, `--target sm_70`. A GPU-less `--target
+sm_70` compile on a Mac featurizes with the default card's 170 SMs and elects differently from the live V100 (80), so
+every election replay runs on the host CPU.
+
+**Rules that bind every round.** The prior must never decide a production election; the golden must carry a measured
+row for every kernel; `--strict-evidence` is the gate; no pricing floor, bound, clamp or hand-edited price, ever; no
+benchmark scripts (`emmy run --bench --json`, `emmy compile`, `emmy tune` only — a missing capability is a flag to
+add); every harness fix ships as a minimal PR per AGENTS.md with a red-then-green test and the goldens gate compared
+against pristine `origin/main` per-file counts (all 11 files are red on `main` since #691/#699 — identical counts mean
+pre-existing). On a CUDA-less Mac never run `make test-durations`; hand-insert a `tests/durations.json` entry at the
+CI-measured value if the durations gate fires. In an agent worktree, symlink the main checkout's `venv` and prefix
+`PYTHONPATH=$PWD`.
 
 ## Stage 1 — loader lane: read the published checkpoint (CPU-testable) — **DONE (#651)**
 
@@ -453,13 +533,15 @@ shows expert weight streaming dominates and the fused-unpack GEMM can plausibly 
 Stage −1: DONE (~2 h). Stage 0 round one: DONE (fixed upstream by #602). Stage 1: DONE (#651). Stage 2: DONE (#656).
 Stage 3 in-repo: DONE (#662); gate (c) passed once at `ab1ad4592`, gate (d)'s token-ID half with it.
 
-**Stage 0 round three remains the critical path — now as kernel speed, not election.** Partitioning (#693/#694),
-the compiling composed cut (#700), the serial-work stamp (#702) and the composed route rows (#739) all landed,
-and a recorded route is measured: 2.10 s per `post4096` forward, 93 % of it in two naive kernels. What holds
-everything now: cutting those two on the root's ballot and re-measuring (each complete bench writes the route
-into the working golden; the strict compile from the file is the check), a finite-input correctness verdict for
-the route, then a measured route per serving twin — with the harness gaps (the seed's automatic pin re-benching
-a failed election, the post-hang recording running unbounded in the parent) as the supporting lane. Then Stage
-4: 2–4 days on-host (re-run gate (c), re-record the golden, warm/bake/verify). Stage 5: 1–2 days.
+**Stage 0 round three remains the critical path — now as one compiler gap, not election.** Partitioning
+(#693/#694), the compiling composed cut (#700), the serial-work stamp (#702), the composed route rows (#739) and
+the route-row pricing (#741) all landed, and the working golden's own strict election measures 0.245 s per
+`post4096` forward, 75 % of it in one contraction the compiler cannot tile (two duplicate A cones on a
+two-channel fold). What holds everything now, in order: make that contraction a tile site (merge the duplicate
+cones), fix the same-scope accumulator redeclaration nvcc refuses at `post` m1, give `run --golden` finite
+inputs and an independent reference for a correctness verdict, stop concurrent recorders losing rows, then pin
+routes for the 28 realizations still without one (the second `post` kernel family at m1 / m32 / dynamic, the
+`pre` twin at m32 / dynamic). Then Stage 4: 2–4 days on-host (re-run gate (c), re-record the golden,
+warm/bake/verify). Stage 5: 1–2 days.
 Adding stage 6 (MXFP4 + tuning) is a further 1–3 weeks. The compiler, not the fork ABI, remains the dominant
 uncertainty.
