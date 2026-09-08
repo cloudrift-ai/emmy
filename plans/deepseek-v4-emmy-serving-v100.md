@@ -266,6 +266,65 @@ tiled first, and a strict boot needs a measured route for every serving twin: 28
 one, so `emmy serve --strict-evidence` would raise at their first fork. Stage 4 cannot warm or bake until that
 lands and gate (c) is re-run on the host, and the golden re-record should follow it, not precede it.
 
+### Operations handoff — how the Stage 0 host loop is run (for a fresh session or another machine)
+
+The V100 host's address is deliberately absent from this repo; it lives in the operator's notes and is used only
+inside commands. Everything else a continuing session needs is here.
+
+**Host layout.** The compiler tree is `~/emmy-durations/` — a plain export of `origin/main` (no `.git`) with its own
+`./venv`; sync it with `git archive origin/main | ssh HOST tar -x -C STAGING` then `rsync -a --delete --exclude venv
+--exclude _verify --exclude _tune --exclude 'durations*' --exclude emmy_ml.egg-info --exclude '*.db*' --exclude
+__pycache__ --exclude .git STAGING/ ~/emmy-durations/`. All loop artifacts sit in `~/emmy-durations/_verify/item3/`:
+`working.yaml` (the working golden — the measured routes; `working.routeN.yaml` / `working.final4.yaml` are its
+snapshots), `autotune.db` (the tune-DB COPY every command points at; `autotune.iterNstate.db`, `autotune.routeNstate.db`,
+`autotune.roundNstart.db`, `autotune.tune{1,2}state.db` are byte snapshots taken through SQLite's backup API),
+`online.json` (the online-prior checkpoint), `twins.yaml` (the captured serving twins, unchanged), the per-iteration
+`iterN.{cu,log}`, the pinned probes `*.pins` + `*.cu`, and the GPU-free reproductions `nvcc-refused-k_div_11_reduce.cu`
+(the same-scope accumulator redeclaration) and `tile_probe.py` (the two-channel contraction that is not a tile site).
+The round reports (`item3-host-report.md`, `item3-resume-report.md`, `item3-round3-report.md`,
+`item3-round4-report.md`) are untracked, under `.superpowers/` in the agent worktrees on the operator's Mac; this plan
+carries their conclusions.
+
+**Never touch** `~/.cache/emmy/autotune.db` (the real tune DB; backup `~/autotune.db.bak-2026-09-02`), `~/emmy`,
+`~/emmy-dsv4`, `~/emmy-fix-backup`, `~/emmy-durations/_verify/gap3-tune/` (partial rows that regress the election —
+never merge that DB), or `~/.cache/emmy/verify3/` (another user's live tuning session). Another user tunes kernels on
+this host: run `nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name --format=csv` before every launch, use only
+devices nobody holds, never kill a foreign process, and delete nothing when done.
+
+**Invocation.** Every command runs from `~/emmy-durations` with `PATH=/usr/local/cuda-12.9/bin:$PATH
+CUDA_HOME=/usr/local/cuda-12.9 LD_PRELOAD=/usr/local/cuda-12.9/lib64/libnvrtc.so.12 HF_HOME=/hf_models
+HF_HUB_OFFLINE=1 EMMY_TUNE_DB=$HOME/emmy-durations/_verify/item3/autotune.db
+EMMY_ONLINE_FILE=$HOME/emmy-durations/_verify/item3/online.json` and the budgets `EMMY_KERNEL_TIMEOUT_MS=30000
+EMMY_FIRST_ITER_TIMEOUT_MS=180000 EMMY_BENCH_COMPILE_TIMEOUT_S=900 EMMY_BENCH_RUN_TIMEOUT_S=1800
+EMMY_BENCH_WALL_TIMEOUT_S=3600`; recording needs `--warmup 5 --iters 20`. The launchers in `_verify/item3/` carry all
+of it: `pin.sh NAME "K=V,…"` (a CPU-only pinned compile of the `post4096` target into `NAME.cu`, ~27 s — the way a
+route is shaped; `nest.py` / `ktable.py` read a dump's per-kernel grid and serial depth), `route.sh N PINSNAME` (bench +
+`--record-greedy` of `PINSNAME.pins` under `EMMY_KNOBS`, one device, writes the route into `working.yaml` and the
+per-kernel rows into the DB copy), `strict.sh NAME` (the gate: `compile --golden working.yaml --realization …
+--strict-evidence --target sm_70 --ir cuda`, no pin, must emit the measured program byte-identical), `twins.sh LIST
+DEVICE` (unpinned strict bench + `--record-greedy` per realization, one writer per device), `iter.sh N` (the unpinned
+evidence-loop iteration — do not resume it, see finding (d)), `evidence_probe.py` / `ballot_probe*.py` (what the
+evidence index and each kernel-set fork see). Run long commands with `nohup … &` and poll; snapshot the DB before any
+kill.
+
+**Pin mechanics.** Under `EMMY_KNOBS` the cut pass visits only the root: every `PLACE@seam=cut` that resolves on the
+root joins one composed decision, nested cuts are spelled from the root (`map.4/map.2/inner…`), a key naming no root
+seam is silently skipped, and a bare `PLACE=fuse` fuses everything unaddressed. `Rstar.pins` (round three, 11 seams),
+`B6.pins`, `E1.pins` (+`REDUCE=`), `F1.pins` are the measured sets; the file's own unpinned strict election beat every
+one of them once their rows were recorded. Target realization:
+`post4096.k_linear_softmax_matmul_mean_reduce_9716a1.f86b6dbe35b7.m4096`, `--target sm_70`. A GPU-less `--target
+sm_70` compile on a Mac featurizes with the default card's 170 SMs and elects differently from the live V100 (80), so
+every election replay runs on the host CPU.
+
+**Rules that bind every round.** The prior must never decide a production election; the golden must carry a measured
+row for every kernel; `--strict-evidence` is the gate; no pricing floor, bound, clamp or hand-edited price, ever; no
+benchmark scripts (`emmy run --bench --json`, `emmy compile`, `emmy tune` only — a missing capability is a flag to
+add); every harness fix ships as a minimal PR per AGENTS.md with a red-then-green test and the goldens gate compared
+against pristine `origin/main` per-file counts (all 11 files are red on `main` since #691/#699 — identical counts mean
+pre-existing). On a CUDA-less Mac never run `make test-durations`; hand-insert a `tests/durations.json` entry at the
+CI-measured value if the durations gate fires. In an agent worktree, symlink the main checkout's `venv` and prefix
+`PYTHONPATH=$PWD`.
+
 ## Stage 1 — loader lane: read the published checkpoint (CPU-testable) — **DONE (#651)**
 
 Extend the quantized split loader (`load_quantized_split` + `loader/quant.py`) with one DeepSeek-native lane:
