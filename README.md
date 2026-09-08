@@ -473,7 +473,8 @@ require CloudRift organization access.
 3. Add tests in `tests/` (see [tests/ARCHITECTURE.md](tests/ARCHITECTURE.md))
 4. While developing, run only the tests that cover your change, and open a **draft** PR early
 5. Finish the PR once, at the end: audit the diff, update the docs, then `make test && make lint` (use `make format`
-   to auto-fix), fill in `.github/PULL_REQUEST_TEMPLATE.md`, and mark the PR ready for review
+   to auto-fix), use `.github/PULL_REQUEST_TEMPLATE.md` as the guide for the PR body without editing it, and mark the
+   PR ready for review
 
 ## License
 

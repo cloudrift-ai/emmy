@@ -12,31 +12,27 @@ body hard to edit. The ~120-character rule applies to files in the repository, n
 
 ## Abstract
 
-The realization corpus had no `sm_89` case, so its GPU build and accuracy stages all skipped on an RTX 4090. Four representative rows from the hardware golden now exercise scalar and tensor-core matmul, vectorized pointwise work, and cooperative softmax on that capability. This is a small live-GPU baseline, not full golden qualification.
+<!--
+One short paragraph, plain technical English: what was done and why. Four or five sentences is already long. No file
+paths, no symbol names, no code.
 
-| Golden row | Distinct schedule path |
-| --- | --- |
-| f16 matmul | tensor cores with a two-deep async pipeline |
-| f32 matmul | scalar tiles with a cross-CTA reduction child |
-| ReLU | vectorized, interleaved pointwise loads |
-| softmax | cooperative 256-thread reduction |
+No bullets. A list here is almost always a first draft that was never revised — if the points belong together, they
+belong in the paragraph, and if they do not, they belong below the rule. In the rare case a list is genuinely the
+clearest form, five bullets is the hard cap.
+
+"Abstract" is the one fixed heading. Everything below is named for whatever the change is about.
+-->
+
+<!--
+OPTIONAL: one small artifact that carries the abstract's claim — a short table of before/after numbers, a diagram, a
+few lines of output. One only, and only if it says something the paragraph cannot. Name the heading for what it shows
+("Latency", "New pass order"). Delete this block if there is nothing worth showing.
+-->
 
 ---
 
-## Scope
-
-The default golden tests decode every hardware row without a GPU. Replaying every sensible schedule would duplicate golden qualification and grow with the schedule space, so the realization corpus remains selective. Its new rule permits a representative baseline only when a capability would otherwise execute no `built` or `correct` nodes.
-
-Recent work is already reflected in the base branch: #742 closed six realization gaps, and #744 through #746 recovered most hardware-golden rows. None of these four cases duplicates an existing exact program and schedule. The eight RTX 4090 rows still marked as decode gaps are attention PV variants; they remain out of this passing baseline.
-
-The cases contain no latency claim or GPU model name. Only their declared compute capability controls whether the live GPU stages run.
-
-## Verification
-
-On the supplied RTX 4090, the selected corpus run passed all 20 nodes. Eight of those nodes compiled or ran the kernels on the GPU.
-
-`make test` passes: 4,400 passed, 1,054 skipped, and 23 xfailed.
-
-`make lint` passes.
-
-`make test-goldens` was not run because no compiler or model golden changed. `git diff --stat main -- emmy/` is empty; this PR adds test data, duration records, and the corpus policy that bounds the new baseline.
+<!--
+Everything else, under headings that fit the story: design decisions, alternatives rejected, measurements, what broke,
+what got slower, what was removed. Code references are fine here. Length is fine here, but the same revision rule
+applies — a section a reviewer would skip should not exist.
+-->
