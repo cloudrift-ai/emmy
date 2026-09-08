@@ -2439,20 +2439,36 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
                     )
                 if resp.get("greedy_error"):
                     greedy_fail = f"greedy timing failed after reference execution: {resp['greedy_error']}"
+                    _record_greedy_failure(args, backend, graph, resp["greedy_error"])
             if pinned and tail:
                 if ab_ref is None:
                     reason = greedy_fail or "the greedy worker returned no run outputs"
                     missing = "pinned embedded-Loop verification requires same-input greedy outputs, but none were returned"
                     reference_error = f"{missing}: {reason}"
                 elif same_input_greedy or not strict_correctness or accuracy_error is None:
+                    to_bench = pinned
                     if greedy_fail:
-                        logger.error("%s — untimed greedy is ineligible; pinned rows still bench", greedy_fail)
+                        # An automatic golden-config row with no knobs pins nothing beyond the input
+                        # regime the greedy compile already used, so re-compiling it reaches the exact
+                        # same election and re-fails the same way (the DeepSeek-V4 double-hang cost).
+                        # An --ab row or a row with real schedule knobs is a genuinely different
+                        # config and still benches.
+                        same_election = [s for s in pinned if getattr(s, "shape", None) is not None and not s.knobs]
+                        if same_election:
+                            to_bench = [s for s in pinned if s not in same_election]
+                            logger.warning(
+                                "%s — pinned re-bench of %s skipped: it has no knobs to pin it away from the greedy pick that just failed",
+                                greedy_fail,
+                                ", ".join(s.name for s in same_election),
+                            )
+                        if to_bench:
+                            logger.error("%s — untimed greedy is ineligible; pinned rows still bench", greedy_fail)
                     else:
                         greedy_iso = await _bench_greedy_isolated(backend, graph, warmup=args.warmup, iters=args.iters)
                     ab_benches = await _bench_golden_variants(
                         backend,
                         embedded,
-                        pinned,
+                        to_bench,
                         warmup=args.warmup,
                         iters=args.iters,
                         ref=ab_ref,

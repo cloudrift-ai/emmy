@@ -2077,14 +2077,16 @@ class _FlashOps(_MmaOps):
     """The TWISTED carrier folded one staged CHUNK at a time — attention's tensor-core form.
 
     The ordinary mma tier folds a term's own lift into one accumulator per bilinear channel. A
-    twisted carrier cannot be folded that way at all: its stored lift is the BASE contribution, and
-    the states beside its expectation are a running pivot and a denominator that are no accumulator.
-    So this tier folds the RECIPE, and takes its only block from the schedule:
+    twisted carrier cannot be folded that way at all: its stored lift is the STABLE contribution,
+    whose expectation channel is the streamed value itself, and the states beside that expectation
+    are a running pivot and a denominator that are no accumulator. So this tier folds the RECIPE,
+    and takes its only block from the schedule:
 
     - the CHUNK is ``STAGE``'s ``bk_elems`` over the carrier's own axis;
-    - the SCORE for the chunk is the nested contraction (:attr:`inner`), whose output tile is the
-      ``(m, chunk)`` pair — which is why the fragment seam requires one warp column on it and its N
-      tile to equal this node's chunk;
+    - the SCORE for the chunk is the nested contraction (:attr:`inner`) with the carrier's own
+      prefix over it — A IS that contraction, so the operand exposes the raw accumulator and the
+      lift is what scales it. Its output tile is the ``(m, chunk)`` pair, which is why the fragment
+      seam requires one warp column on it and its N tile to equal this node's chunk;
     - the chunk's PIVOT is that score's ⊕ over the chunk, one :class:`FragmentRowReduce` per row;
     - each channel folds the recipe's own ``pattern`` against that pivot — a row reduce for a
       channel that is no product, an ``mma.sync`` against the streamed operand for the one that is;
@@ -2172,7 +2174,16 @@ class _FlashOps(_MmaOps):
         assert score_tile.is_warp and seam == (key.name, 1, bk, m.reg), (
             "the score's tile is the chunk this carrier folds, one warp column wide — the fragment seam's own equation"
         )
-        cone = self.c.operands[0].applied.cone(self.c.roles[0])
+        # The score's own PREFIX: the carrier's lift cut to its score role. A is the score
+        # contraction now, so the producer exposes the RAW accumulator and the carrier's lift is
+        # what scales it — the prefix reads that result and the carrier's uniform leaves, nothing
+        # else. Both are the gate's own reading (``_chunk_refusal``).
+        prefix = self.c.applied.cone(self.c.roles[0])
+        leaves = [edge for edge in self.c.operands[1:] if set(edge.exposes) & set(prefix.params)]
+        assert all(self.c.axis not in edge.free_axes for edge in leaves), (
+            "the chunk tier reads the score's prefix leaves once, ahead of the chunk loop"
+        )
+        pre = [stmt for edge in leaves for stmt in edge.lower(axes=self.axes)]
 
         chunk = Axis(name=f"{key.name}__ck", extent=key.extent)
         base = Var(chunk.name)
@@ -2183,8 +2194,6 @@ class _FlashOps(_MmaOps):
         # gmem-direct fragment loader already does.
         ragged = not key.extent.is_static or key.extent.as_static() % bk
         bound = key.extent_expr() if ragged else None
-        # The cone's row-invariant leaves (attention's scale) are read once, ahead of the chunk loop.
-        pre = [stmt for edge in self.c.operands[0].operands if edge is not score for stmt in edge.lower(axes=self.axes)]
 
         memo: dict = {}
         body: list[Stmt] = self._score_tile(offset, mn, base, cols, bound)
@@ -2192,7 +2201,7 @@ class _FlashOps(_MmaOps):
         for i in range(m.reg):
             for j in range(cols):
                 stmts, frags, _ = _residence(
-                    cone.body,
+                    prefix.body,
                     frags={score.exposes[0]: self.frag(f"_s{i}_{j}")},
                     rows={},
                     tag=f"_w{i}_{j}_",

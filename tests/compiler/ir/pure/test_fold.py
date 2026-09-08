@@ -23,7 +23,7 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.pure.twist import SOFTMAX, Twist
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Loop, OutputSpec, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Const, Loop, OutputSpec, Write
 from tests.compiler.terms import contraction, reduction, slab
 
 M_AXIS, N_AXIS, K_AXIS = Axis("m", Dim(8)), Axis("n", Dim(4)), Axis("k", Dim(16))
@@ -234,11 +234,11 @@ def test_an_observed_store_rides_the_reduce_loop_after_the_observer() -> None:
 
 
 def _twisted(states: tuple[str, str] = ("m", "l")) -> Fold:
-    """The exp-family ``(m, l)`` carrier in the BASE frame: the lift contributes ``(score, exp(score))``
-    to the ``(maximum, add)`` base monoid, and naming the softmax recipe is what derives both the
-    stable ⊕ and the ψ-image ``(score, 1)`` that the step actually folds."""
-    body = Body((Assign(name="s", op="copy", args=("y",)), Assign(name="e", op="exp", args=("s",))))
-    lift = Lambda.closing(("k", "y"), body, ("s", "e"))
+    """The exp-family ``(m, l)`` carrier in STABLE coordinates: the lift contributes the singleton
+    ``(score, 1)`` the carrier's own ⊕ folds, and naming the softmax recipe is what derives both
+    that ⊕ and the base reading ``(score, exp score)`` a matcher asks for."""
+    body = Body((Assign(name="s", op="copy", args=("y",)), Const(name="one", value=1.0)))
+    lift = Lambda.closing(("k", "y"), body, ("s", "one"))
     base = Lambda.componentwise(SOFTMAX.base[:2], states)
     twist = Twist(recipe=SOFTMAX, channels=(0,))
     return Fold(operands=(slab("y", "y", "m", "k"),), lift=lift, init=(-1e30, 0.0), base=base, twist=twist)
@@ -301,7 +301,7 @@ def test_the_step_is_the_merge_at_the_injected_singleton() -> None:
     ``Accum`` forms folding over the reduce axis, after the lift body."""
     fold = _twisted()
     injected = fold.injected
-    assert injected.results == ("s", "l__one"), "psi takes the base singleton (score, exp score) to (score, 1)"
+    assert injected.results == ("s", "one"), "the stored lift IS the singleton; nothing is applied to it"
     assert "e" not in {stmt.name for stmt in injected.body}, "nothing may see through psi: exp(score) overflows"
     step, merged = fold.step(), fold.merge(injected.results)
     assert tuple(step[: len(injected.body)]) == tuple(injected.body)

@@ -29,6 +29,19 @@ from emmy.compiler.ir.tile.ops import axis_names, sched_of
 # ``lift`` + ``combine`` and contributed no schedule site on seven of them. ``--ir loop`` is where
 # a reader goes for a body.
 #
+# The ONE structure it does not draw as a branch is a SCALAR operand (:meth:`Fold.scalar`) — an
+# sdpa scale, an rms epsilon. Nothing decides at one, so its branch would be a line of tree art
+# around a constant; it is spelled inside the reader that binds it (:func:`_inlined`) instead, and
+# the slot it held leaves the signature with it. That is not derived material — the statements
+# printed are the edge's own.
+#
+# A lift prints APPLIED, and only the slots it USES: every operand-bound param is spelled as the
+# operand result it binds, so the bracket above resolves which component it is and an unread one can
+# go. An α-rename between a producer and its consumer is spelling, not computation, and where the
+# consumer has no name at all the twist rewrite supplies ``_unread<i>`` — which says less than the
+# operand's own name for the same value. The binding ARITY leaves the signature with them; it stays
+# on the bracket directly above, which is where the component names are read from anyway.
+#
 # Schedule choices are not on the term at all. The owning ``TileOp`` supplies one complete
 # generic ``Schedule`` whose node choices annotate their canonical sites.
 # --------------------------------------------------------------------------- #
@@ -76,17 +89,19 @@ class _Ctx:
         return f"   ⟨{' '.join(bits)}⟩" if bits else ""
 
 
-def _lam_sig(lam, ctx: _Ctx | None = None) -> str:
+def _lam_sig(lam, ctx: _Ctx | None = None, drop: frozenset[str] = frozenset()) -> str:
     """A lambda's one-line signature. A float result is the ι literal injected in the lift
     (softmax's singleton ``(x, 1)``), which has no def to name.
 
     A non-empty CAPTURE set is spelled between the params and the results — without it a λ that
     reads an enclosing value would print as though it were closed, which is the one property the
-    reader most needs (an unclosed subtree can never become an operand edge)."""
+    reader most needs (an unclosed subtree can never become an operand edge). ``drop`` are the
+    operand slots the branch does not spell — an inlined scalar's (:func:`_inlined`), which the body
+    now defines, and one this reader never reads, which the bracket above it already names."""
     rs = ", ".join(lam.results)
     cap = ctx.captures(lam) if ctx is not None else ()
     free = f" [captures {', '.join(cap)}]" if cap else ""
-    return f"λ({', '.join(lam.params)}){free} -> ({rs})"
+    return f"λ({', '.join(p for p in lam.params if p not in drop)}){free} -> ({rs})"
 
 
 def _axis_span(axis) -> str:
@@ -145,6 +160,21 @@ def _edge(edge, ctx: _Ctx, result: str | None = None) -> tuple[str, object]:
     return f"{head}: {_head(edge, ctx)}   ‹computed›", _subtree(edge, ctx)
 
 
+def _inlined(node) -> tuple[set[int], frozenset[str], tuple]:
+    """The SCALAR operand edges spelled inside their reader — ``(their ids, the results they
+    contribute to the signature, their statements)``.
+
+    A scalar term (:meth:`Fold.scalar`) is one value for the whole kernel. Its own branch carries
+    nothing a reader wants: no residence to print, no schedule keyed against it, no seam offered at
+    it — just an indirection between a scale and the multiply that reads it. So it is spelled where
+    it is read, at the head of the reader's body, and the slot it held leaves the signature with it.
+    The lift prints APPLIED, so a slot is already spelled by the edge's own result name and the
+    statements splice in unrenamed."""
+    hidden = tuple(edge for edge in node.operands if edge.scalar())
+    names = frozenset(name for edge in hidden for name in edge.exposes)
+    return {id(edge) for edge in hidden}, names, tuple(stmt for edge in hidden for stmt in edge.lift.body)
+
+
 def _items(node, ctx: _Ctx) -> list[tuple[str, object]]:
     """A node's STORED children, each a labelled branch with operand bindings explicit. Nothing
     derived: the step, the synthesized nodes inside it and the lowered nest are all consequences
@@ -154,18 +184,43 @@ def _items(node, ctx: _Ctx) -> list[tuple[str, object]]:
         return items
     # Stored operand order IS the presentation: a contraction's A is ``operands[0]`` by canonical
     # form, and each edge's bracket names the positional lift param it binds.
-    items += [_edge(e, ctx) for e in node.operands]
+    hidden, dropped, scalars = _inlined(node)
+    items += [_edge(e, ctx) for e in node.operands if id(e) not in hidden]
     if node.axis is not None:
         init = ", ".join(x if isinstance(x, str) else format(x, "g") for x in node.init)
         items.append((f"init: ({init})", lambda cont: []))
     # Always emitted, even for an empty body: the branch carries the SIGNATURE, and a node's
     # binder is storage whether or not it computes anything (an identity projection binds too).
-    items.append((f"lift: {_lam_sig(node.lift, ctx)}", _stmts(node.lift.body, ctx)))
-    # The ⊕ is STORAGE only as ``base``; the twisted conjugate is derived from it and the recipe
-    # (``combine = psi(psi_inv(x) base psi_inv(y))``), so a twisted node names the recipe in its
-    # header and prints one op per state here instead of the twelve-statement program.
+    # APPLIED, not stored: the lift prints with every operand-bound param spelled as the operand
+    # result it binds, so the signature echoes the brackets above it name for name. What the reader
+    # calls a slot it never reads is not a fact about the computation — it is whatever the rewrite
+    # that built the reader had to hand, and the twist mints ``_unread<i>`` there precisely because
+    # it has no name to offer. The producer's spelling is the one the term is rendered in anyway
+    # (``step``, ``exposes``, ``lower`` all read through it), so this is the tree's one name per
+    # value rather than a second one per consumer.
+    #
+    # And only the slots it USES. Once a param is spelled by the operand result it binds, the
+    # bracket one line up resolves which component it is, so listing the rest buys nothing but
+    # length — and hides the one thing worth reading, that attention's two consumers of one carrier
+    # take different states off it. Only an operand slot can go: a trailing coordinate is in the
+    # signature BECAUSE the body reads it, and the iteration var is the fold's own.
+    lift = node.applied
+    read = frozenset(lift.body.ssa_uses) | frozenset(lift.results)
+    dropped |= frozenset(name for edge in node.operands for name in edge.exposes if name not in read)
+    items.append((f"lift: {_lam_sig(lift, ctx, dropped)}", _stmts((*scalars, *lift.body), ctx)))
+    # A twisted node's own ⊕ is κ_S, the stable combine — that and the lift above it are what the
+    # carrier IS, so it prints like any other combine, body and all. It is the longest branch on the
+    # node and it earns the room: the rescale is where the numerics live, and a signature alone left
+    # a twisted node the only kind whose algebra the dump would not show. ψ and the base monoid
+    # follow as HELPERS, which is what they are once the
+    # term is stored in stable coordinates — the coordinate map a matcher reads back through
+    # (:meth:`Fold.based`) and the componentwise ⊕ it conjugates. They are spelled in the RECIPE's
+    # own names, not the term's: neither is bound to this carrier and neither renames with it.
     if node.twist is not None:
-        items.append((f"base: ({', '.join(op.name for op in node.base.components())})", lambda cont: []))
+        recipe = node.twist.recipe
+        items.append((f"combine: {_lam_sig(node.combine, ctx)}", _stmts(node.combine.body, ctx)))
+        items.append((f"helper: psi {_lam_sig(recipe.psi, ctx)}", _stmts(recipe.psi.body, ctx)))
+        items.append((f"helper: base = ({', '.join(op.name for op in node.base.components())})", lambda cont: []))
     elif node.combine is not None:
         items.append((f"combine: {_lam_sig(node.combine, ctx)}", _stmts(node.combine.body, ctx)))
     if node.observe is not None:

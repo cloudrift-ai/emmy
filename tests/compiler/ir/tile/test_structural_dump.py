@@ -18,7 +18,7 @@ them — never from the term; (e) a λ that is not closed says what it captures.
 from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.schedule import Placement, Raster, Reduce, Schedule, Stage, Tile, Work
 from emmy.compiler.ir.schedule.classic import (
@@ -29,7 +29,7 @@ from emmy.compiler.ir.schedule.classic import (
     ProjectionSchedule,
     ReductionSchedule,
 )
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Const, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, TileOp
 from emmy.compiler.ir.tile._dump import pretty
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
@@ -145,6 +145,95 @@ def test_a_computed_edge_nests_as_a_subtree_a_materialized_one_is_a_leaf() -> No
     assert any("‹materialized›" in ln and "load Wg" in ln for ln in lines)
     # The cone's own body is reached BELOW the a edge — the subtree is really rendered.
     assert any("xhat = multiply(xhat_e, xhat_s)" in ln for ln in lines)
+
+
+def _two_operand_reader() -> Fold:
+    """A reader with its own names for both slots, one of which it never reads — the shape the
+    twisted fusion leaves when it re-seats a carrier's channels."""
+    return Fold(
+        operands=(_stat_fold(), _cone()),
+        lift=Lambda(params=("_unread0", "w"), body=Body((Assign(name="o", op="exp", args=("w",)),)), results=("o",)),
+    )
+
+
+def test_a_lift_prints_the_operand_name_for_a_slot_it_reads() -> None:
+    """The signature spells a slot the way the operand does, so it echoes the bracket above it. What
+    a reader happens to call a slot is spelling, not computation. The body is re-spelled with it, so
+    the two stay consistent."""
+    text = "\n".join(pretty(_two_operand_reader()))
+    assert "├─ operand[xhat]: Fold  free" in text
+    assert "└─ lift: λ(xhat) -> (o)" in text
+    assert "     o = exp(xhat)" in text  # the body follows the signature
+    assert "(w)" not in text
+
+
+def test_a_lift_omits_a_slot_it_never_reads() -> None:
+    """Once a param is spelled by the operand result it binds, the bracket one line up resolves which
+    component it is — so a slot this reader does not use is length and nothing else. Its edge keeps
+    its branch: only the signature entry goes."""
+    text = "\n".join(pretty(_two_operand_reader()))
+    assert "├─ operand[acc0]: Fold[k] reduce" in text  # the edge is still there in full
+    assert "acc0" not in text.rsplit("lift: ", 1)[1].splitlines()[0]  # but not on the reader's line
+    assert "_unread0" not in text
+
+
+# --- a scalar operand is spelled inside its reader ------------------------------------------------ #
+
+
+def _scaled_scores() -> Fold:
+    """The sdpa score shape — a reduce scaled by a constant the frontend broadcast into a one-element
+    buffer. The lift closes over that buffer's read, so the scale arrives as its own operand edge."""
+    scale = projection(
+        body=(
+            Load(name="s0", input="sdpa_scale", index=(Literal(0, "int"),)),
+            Load(name="s1", input="sdpa_mask_fill", index=(Literal(0, "int"),)),
+        ),
+        results=("s0", "s1"),
+    )
+    return projection(
+        (_stat_fold(), scale),
+        (
+            Assign(name="v2", op="multiply", args=("acc0", "s0")),
+            Assign(name="v3", op="add", args=("v2", "s1")),
+        ),
+    )
+
+
+def test_a_scalar_operand_is_inlined_into_the_lift_that_reads_it() -> None:
+    """One value for the whole kernel decides nothing — no residence, no partition, no seam — so its
+    branch would be tree art around a constant. It is spelled where it is read instead, and the
+    params it bound leave the signature with it."""
+    text = "\n".join(pretty(_scaled_scores()))
+    assert "operand[s0, s1]" not in text  # no branch of its own
+    assert "lift: λ(acc0) -> (v3)" in text  # nor the params it bound
+    # Its statements open the reader's body, under the reader's own names for them.
+    assert "     s0 = load sdpa_scale[0]" in text
+    assert "     v2 = multiply(acc0, s0)" in text
+    # The reduce beside it is untouched: an edge that DOES decide keeps its branch.
+    assert "operand[acc0]: Fold[k] reduce   ‹computed›" in text
+
+
+def test_a_twisted_node_prints_its_stable_combine_then_psi_and_the_base_as_helpers() -> None:
+    """The carrier IS its stable lift and κ_S; ψ and the componentwise base monoid are what a
+    matcher reads back through, so they follow as helpers. κ_S prints as a signature — the stable
+    program is a dozen statements and ``--ir loop`` has them."""
+    from emmy.compiler.ir.pure.twist import SOFTMAX, Twist
+
+    fold = Fold(
+        operands=(_stat_fold(),),
+        lift=Lambda(params=("k", "acc0"), body=Body((Const(name="one", value=1.0),)), results=("acc0", "one")),
+        init=(-1e30, 0.0),
+        base=Lambda.componentwise(SOFTMAX.base[:2], ("m", "l")),
+        twist=Twist(recipe=SOFTMAX, channels=(0,)),
+    )
+    text = "\n".join(pretty(fold))
+    assert "├─ combine: λ(m, l, m__o, l__o) -> (m, l)" in text, "the stable ⊕ is the node's own algebra"
+    assert "│    m__o__alpha = exp(m__o__dg)" in text, "body and all — the rescale is where the numerics live"
+    assert "│    m__o__dg = subtract(m, m__o__gn)" in text, "and every exp argument is visibly a distance below the pivot"
+    assert "├─ helper: psi λ(m, D, O) -> (m, d, o)" in text
+    assert "│    d = multiply(D, f)" in text, "the coordinate map's own program, in the recipe's names"
+    assert "└─ helper: base = (maximum, add)" in text
+    assert "acc0 <- " not in text  # still nothing derived from the step
 
 
 # --- nothing DERIVED reaches the dump ------------------------------------------------------------ #

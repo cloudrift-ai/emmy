@@ -884,3 +884,92 @@ def test_run_files_a_hung_greedy_kernel_as_bench_fail_evidence(monkeypatch, tmp_
     filed = {name: row.status for name, row in rows.items() if row is not None}
     assert filed == {nodes[-1].op.kernel_name: "bench_fail"}, "only the kernel the watchdog named is evidence"
     assert rows[nodes[-1].op.kernel_name].stats.median == pytest.approx(2.0e6), "priced at the run budget's fail sentinel"
+
+
+def test_run_skips_pinned_rebench_of_the_same_election_after_a_greedy_hang(monkeypatch, tmp_path):
+    """An embedded Loop golden has no Torch twin, so its greedy job can complete the same-input
+    reference and only then have its repeated timing cross the watchdog (``resp["greedy_error"]``).
+    Before, ``run`` still re-compiled and re-benched the seed's automatic pin in that case even
+    though the pin carries no knobs of its own: with nothing pinning it away from the greedy
+    compile's own choices, it re-elects and re-hangs the identical program a second time (the
+    DeepSeek-V4-Flash post4096 double-cost defect). The fix (1) records the bench_fail evidence
+    for the failed election BEFORE any pinned compile begins, and (2) skips re-benching the
+    knob-less automatic pin, leaving any pinned row that DOES carry its own knobs to bench as
+    usual."""
+    from emmy.commands import run as run_module
+    from emmy.commands.compile import resolve_golden_arg
+
+    path = tmp_path / "working.yaml"
+    _working_loop(path)  # default state: an untuned seed realization with no recorded knobs
+    args = _args(
+        path,
+        realization="working.relu",
+        ir=None,
+        bench=True,
+        ab=None,
+        debug=False,
+        dump_dir=None,
+        bench_backends="emmy",
+        warmup=5,
+        iters=20,
+        seed=0,
+        json=None,
+        profile=False,
+        record=False,
+        record_greedy=False,
+        strict_correctness=False,
+    )
+    resolve_golden_arg(args)
+    assert args.golden_configs and not args.golden_configs[0].knobs, "the seed must carry no knobs"
+
+    class FakeBackend:
+        name = "cuda"
+        tune_db = None
+        bench_compile_timeout_s = 1.0
+        bench_run_timeout_s = 1.0
+
+        def __init__(self, **_kwargs):
+            pass
+
+        async def benchmark_compare_async(self, _graph, **_kwargs):
+            return {
+                "results": {},
+                "result": None,
+                "captured": False,
+                "torch_available": False,
+                "accuracy_error": None,
+                "run_io": ({"x": object()}, {"y": object()}),
+                "greedy_error": "HungKernelError: repeated timing crossed the watchdog",
+                "reference_run_us": 4_000_000.0,
+            }
+
+        async def aclose_async_worker(self):
+            pass
+
+    class FakeDump:
+        @staticmethod
+        def resolve(_path):
+            return None
+
+    calls = []
+
+    def fake_record_failure(*_args, **_kwargs):
+        calls.append("record")
+
+    async def fake_bench_golden_variants(_backend, _source, pinned, **_kwargs):
+        calls.append(("bench_golden_variants", list(pinned)))
+        return []
+
+    async def fail_if_isolated(*_args, **_kwargs):
+        raise AssertionError("a failed greedy timing must not be re-benched or made eligible")
+
+    monkeypatch.setattr(run_module, "_record_greedy_failure", fake_record_failure)
+    monkeypatch.setattr(run_module, "_bench_golden_variants", fake_bench_golden_variants)
+    monkeypatch.setattr(run_module, "_bench_greedy_isolated", fail_if_isolated)
+    monkeypatch.setattr(run_module, "_print_kernel_stats", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(SystemExit):
+        run_module._handle_run_ir(args, FakeBackend, FakeDump)
+
+    assert calls[0] == "record", "the bench_fail row must be recorded before the pinned walk starts"
+    assert calls[1] == ("bench_golden_variants", []), "the knob-less seed pin must not be re-compiled and re-benched"
