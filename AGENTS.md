@@ -319,25 +319,33 @@ Then run the gates, in this order, after every edit above is in:
 
 22. **Run the full suite**: `make test` — fix any failures. If a realization case comes back stale, `make
     test-corpus-regen` applies the fix.
-23. **Run the linter**: `make lint` — if it fails, run `make format` and re-check
-24. **Decode the model goldens** whenever the change touches the compiler (anything under `emmy/compiler/`, and
+23. **Record the durations of every test this change ADDS that takes over a second.** `make test` fails at session
+    end when a test at or over 5 s is missing from `tests/durations.json`, because CI buckets its xdist workers on
+    that file and plans around a hole. Record at **1 s**, not 5: the gate reads the RUNNER's clock and CI is far
+    slower than a dev box — the three nodes that failed this way measured 3-4 s locally and 24-38 s on CI — so
+    anything over a second here can cross the gate there. Run the new tests alone with
+    `--durations=0 --durations-min=1` and add every node they report, at the number you measured, keeping the file
+    in one machine's units. `make test-durations` re-measures the WHOLE suite serially and REPLACES the file; reach
+    for it when the balance has drifted, not to land a handful of new tests.
+24. **Run the linter**: `make lint` — if it fails, run `make format` and re-check
+25. **Decode the model goldens** whenever the change touches the compiler (anything under `emmy/compiler/`, and
     always for a schedule-codec, enumeration or knob-spelling change): `make test-goldens`. Off the default lane and
     needs no GPU. `make test` guards the realization corpus and the hardware goldens against exactly this class of
     change; nothing guards the checked-in model goldens, so a rebuild of the schedule space can invalidate every
     recorded row of one in silence. If rows go red, name the change that did it in the PR body — do **not** re-record
     them to make it green, which enshrines the regression as the new reference.
-25. **Write the PR body** in an untracked temporary file outside the repository, using
+26. **Write the PR body** in an untracked temporary file outside the repository, using
     `.github/PULL_REQUEST_TEMPLATE.md` as a guide. Never replace the tracked template with a PR's content. The title
     is a functional description readable with no context. The abstract is one short plain-English paragraph — no
     bullets, no code references. One optional artifact may follow it — a small table, a diagram, a few lines of
     output — when it carries the claim better than the paragraph. Then a horizontal rule, then everything else —
     decisions, measurements, what broke, what got slower, what was removed — under headings that fit the story.
     `Abstract` is the only fixed heading.
-26. **Revise the PR body at least twice before posting.** Write it, then reread it as a reviewer with no
+27. **Revise the PR body at least twice before posting.** Write it, then reread it as a reviewer with no
     context, check it against the template and against the design philosophy below, cut, and repeat. A first
     draft is always too long: it lists what was done instead of saying what the change is, and it keeps
     sentences that no reviewer would miss. Stop when nothing else can come out without losing the point.
-27. **Mark the PR ready for review.** This is the last step. A draft PR that has not been through finalization
+28. **Mark the PR ready for review.** This is the last step. A draft PR that has not been through finalization
     is not ready, whatever else is green.
 
 # Behavioral Guidelines:
