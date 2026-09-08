@@ -1743,12 +1743,11 @@ configs:
       WORK: w1x16
       TILE: mma_m16n8k16_f16_f32/f2x1/k4
       REDUCE: ''
-      STAGE: d1/smem
       RASTER: ''
     measurements:
-      emmy_us: 10.25
-      reference_us: 127.74
-      reference_backend: emmy-greedy
+      emmy_us: 39.23
+      reference_us: 39.12
+      reference_backend: same-input-greedy
   - name: attention.hd128.dynM.pv
     bindings: {}
     pins:
@@ -1921,12 +1920,11 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f32/f1x4/k8
       REDUCE: ''
-      STAGE: d1/smem
       RASTER: ''
     measurements:
-      emmy_us: 13.81
-      reference_us: 102.6
-      reference_backend: emmy-greedy
+      emmy_us: 15.22
+      reference_us: 15.01
+      reference_backend: same-input-greedy
   - name: attention.hd64.dynM.pv
     bindings: {}
     pins:

@@ -72,13 +72,13 @@ format: setup
 # ~12% cold / ~6% warm on a 5090 (923s vs 1031s cold), not the "~3x" this comment used
 # to claim — that predated the WMMA->mma.sync migration which removed the cicc unroll
 # blowup it rested on. See AGENTS.md for the measurement.
-# --durations: the slowest tests are printed on every run (CI included), so a new long
-# pole is visible in the log the moment it lands rather than after someone profiles.
+# --durations=0 plus --durations-min=1 prints every test taking at least 1s on each
+# run (CI included); the session gate still rejects unbaselined tests at 5s.
 # `EMMY_GOLDEN_FILE=` (set, empty) deploys no repository golden in this lane: the correctness lane never asks how
 # fast a pick is, and importing a card's goldens is work every worker process would repeat. Tests that need golden
 # evidence scope it themselves (`--golden PATH`, `records_override`), which takes precedence.
 test: setup
-	EMMY_NVCC_FLAGS="-Xcicc -O1" EMMY_GOLDEN_FILE= ./venv/bin/pytest tests/ -v -n auto --dist=loadgroup --durations=25
+	EMMY_NVCC_FLAGS="-Xcicc -O1" EMMY_GOLDEN_FILE= ./venv/bin/pytest tests/ -v -n auto --dist=loadgroup --durations=0 --durations-min=1
 
 # Restamp the realization corpus's derived half (program wire, name, identity, canonical knobs)
 # after a kernel-identity or schedule-codec change. `make test` DETECTS staleness on any machine,
@@ -100,7 +100,7 @@ test-goldens: setup
 # LPT-buckets on, so CI's first (cache-less) run is balanced. Runs through one xdist
 # worker: loadgroup stamps the canonical @cuda group suffixes the parallel suite
 # looks up, without concurrent workers inflating the measurements. Commit the result
-# when the balance has drifted (a new heavy test, a big pass-cost change).
+# when the balance has drifted (a newly reported slow test, a big pass-cost change).
 test-durations: setup
 	EMMY_NVCC_FLAGS="-Xcicc -O1" EMMY_GOLDEN_FILE= ./venv/bin/pytest tests/ -q -p no:randomly -n 1 --dist=loadgroup --write-durations
 

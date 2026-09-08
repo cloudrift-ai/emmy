@@ -1,8 +1,9 @@
 # Hardware-golden rows that still decode to nothing
 
-Status: 13 of 155 recorded rows across the four hardware goldens equal no enumerated leaf, down from 105. Three are
-on the RTX 5090, ten on the RTX 4090; the 4080 and the PRO 6000 are clean. Every one that is left is an attention
-row. This memo covers what blocks each, and the three dead ends already walked so nobody walks them twice.
+Status: 11 of 155 recorded rows across the four hardware goldens equal no enumerated leaf, down from 105. Three are
+on the RTX 5090, eight on the RTX 4090; the 4080 and the PRO 6000 are clean. Every one that is left is an attention
+row, and every one is now blocked by a NAMED compiler behaviour — nothing left here is a spelling or a measurement.
+This memo covers what blocks each, and the four dead ends already walked so nobody walks them twice.
 
 Do not re-record a row to make it green. A row that stops decoding because the schedule it names is gone is a
 regression in the enumeration, and recording today's pick in its place writes that regression in as the reference.
@@ -16,34 +17,33 @@ limits, not measurement.
 | --- | --- | --- |
 | A family omitted where the enumeration spells it at its off value | 60 | Spell the key; measurements survive |
 | A `g<n>` split compared to a leaf the pieces cannot spell | 27 | Fixed the decode to compare the piece row |
-| The kernel offers no staging family at all | 5 | Drop the key, re-measure on the card |
+| The kernel offers no staging family at all | 7 | Drop the key, re-measure on the card |
 
 The first two are meaning-preserving and needed no GPU. The third does not preserve meaning — the stored
-microseconds were taken with a synchronous shared-memory fill — so those rows were re-benched at O3 on the 5090.
-All five now realize what the greedy pick takes anyway: the tuning win they recorded, 13.51 us against a 59.03 us
-reference in one case, is a win the default has since absorbed.
+microseconds were taken with a synchronous shared-memory fill — so those rows were re-benched at O3 on the card
+that recorded them, five on the 5090 and two on the 4090. All seven realize what the greedy pick takes anyway: the
+tuning win they recorded, 13.51 us against a 59.03 us reference in one case, is a win the default has since
+absorbed.
 
-## The 13 that are left
+## The 11 that are left
 
-Two things block them, and four rows carry both. `STAGE` below means the row pins `d1/smem` where its kernel offers
-no staging family; `f16` means the row spells `mma_m16n8k16_f16_f16`; `atomic` means its `REDUCE` names an atomic
-cross-CTA reduce.
+Three things block them, and four rows carry two at once. `f16` means the row spells `mma_m16n8k16_f16_f16`;
+`atomic` means its `REDUCE` names an atomic cross-CTA reduce; `no mma` means the pool offers no tensor-core tile of
+any kind.
 
 | Row | Card | Blocked by |
 | --- | --- | --- |
 | `attention.hd128.softmax_v#1` | 5090 | f16 |
 | `attention.hd64.softmax_v#1` | 5090 | f16, atomic (`g4a`) |
-| `attention.hd64.softmax_v#2` | 5090 | STAGE, atomic (`g4a`) |
-| `attention.hd128.pv#1` | 4090 | STAGE, atomic (`g2a`) |
+| `attention.hd64.softmax_v#2` | 5090 | atomic (`g4a`) |
+| `attention.hd128.pv#1` | 4090 | atomic (`g2a`) |
 | `attention.hd128.pv#2` | 4090 | f16, atomic (`g2a`) |
-| `attention.hd128.dynM.pv#1` | 4090 | STAGE |
 | `attention.hd128.dynM.pv#2` | 4090 | f16 |
-| `attention.hd64.dynM.pv#1` | 4090 | STAGE |
 | `attention.hd64.dynM.pv#2` | 4090 | f16 |
-| `attention.hd64.pv#1` | 4090 | undiagnosed (`g4k`) |
-| `attention.hd64.pv#2` | 4090 | f16, undiagnosed (`g4k`) |
-| `attention.hd256.dynM.pv#1` | 4090 | undiagnosed |
-| `attention.hd256.dynM.pv#2` | 4090 | undiagnosed |
+| `attention.hd64.pv#1` | 4090 | no mma (split pieces) |
+| `attention.hd64.pv#2` | 4090 | f16, no mma (split pieces) |
+| `attention.hd256.dynM.pv#1` | 4090 | no mma (chunk tier refuses) |
+| `attention.hd256.dynM.pv#2` | 4090 | no mma (chunk tier refuses) |
 
 ## Blocker 1 — the chunk tier never offers the reduced accumulator (6 rows)
 
@@ -93,8 +93,8 @@ pair is the verified one: `#2` decodes with the staging key dropped and then fai
     — use the deferred f32 workspace finalize (REDUCE=g<n>k)
 
 Attention's carrier folds a running maximum, a denominator and an expectation, so an atomic fold over one additive
-component cannot express it. The 4090 pair is inferred from the same spelling and has not been built — that card was
-not reachable during this work.
+component cannot express it. Both pairs are verified on their own card: the 4090's `attention.hd128.pv` refuses to
+compile with the same message on both lanes.
 
 ### Dead end 4 — the compiler's own suggestion
 
@@ -103,22 +103,37 @@ Respelling `g4a` as `g4k` splits the target into pieces that take no mma tile at
 139.5 us + 4.2 us against 26.1 us unsplit. So the choice is to make the atomic reduce carry a multi-component fold,
 or to accept that these rows have no cross-CTA plan and re-measure them unsplit.
 
-## The staging rows that only need the card (3 rows)
+## Blocker 3 — the tensor-core tier is absent from these targets (4 rows)
 
-`attention.hd128.dynM.pv#1`, `attention.hd64.dynM.pv#1` and `attention.hd128.pv#1` on the 4090 decode as soon as the
-staging key is dropped, exactly like the five already closed on the 5090. `hd128.pv#1` carries `g2a` as well, so
-expect it to decode and then fail to build until blocker 2 is closed.
+`attention.hd256.dynM.pv#1`/`#2` and `attention.hd64.pv#1`/`#2` on the 4090. Each records an
+`mma_m16n8k16_f16_f32` row, and the pool offers no mma tile of any kind — only the scalar tier (`t32x8`, `f26x4`,
+`f1x*`). Two different causes, both now named; neither is blocker 1 or 2.
 
-Needs the card at `riftuser@211.21.50.85 -p 57010`, prepared the way the tune-kernels skill describes, then:
+**hd256 is a chunk-tier refusal.** `_node_refusal` answers outright:
+
+    the chunk tier reads its score operands and its streamed value as slabs
+
+So at that head dimension the tier declines the target and the warp atoms are never projected. Whether a 256-wide
+head SHOULD reach the chunk tier is the question to settle; the refusal is deliberate, not incidental.
+
+**hd64.pv is the split's doing.** Its node refusal is `None` — the tier is willing — but the row spells
+`REDUCE: g4k`, so the replay follows the split arm and what enumerates is the PIECES. Those offer only scalar tiles.
+This is the same effect seen when `g4a` was respelled to `g4k` on the 5090 (dead end 4): a cross-CTA split mints
+pieces the tensor-core tier does not serve. `attention.hd64.dynM.pv#1`, which spells no split, keeps its mma rows —
+that is the controlled comparison.
+
+Closing hd64.pv therefore means the same question as blocker 2: why a split's pieces lose the warp tier.
+
+## Working on the 4090
+
+The card at `riftuser@211.21.50.85 -p 57010` has the CUDA toolkit at `/usr/local/cuda` but nvcc is NOT on the
+default PATH, and emmy dropped its NVRTC fallback — so every bench dies with `nvcc unavailable` until the run
+carries `CUDA_HOME=/usr/local/cuda PATH=/usr/local/cuda/bin:$PATH`. `make setup` there takes about twenty minutes,
+almost all of it pulling CUDA wheels.
+
+The pinned bench that re-measures a staging row:
 
     emmy run --golden <file> --realization <name> --bench --bench-backends emmy --json <out>
 
 Promote `emmy_us` from the pinned row's isolated timing and `reference_us` from the greedy isolated timing, with
 `reference_backend: same-input-greedy`.
-
-## Undiagnosed (3 rows)
-
-`attention.hd256.dynM.pv#1`/`#2` and `attention.hd64.pv#1` on the 4090. All f32-accumulate, all still dead after the
-staging key is dropped, none affected by blocker 1. `hd256.dynM` offers 234 candidate rows where its siblings offer
-2778, so that target enumerates far more narrowly — check first whether it lowers differently at that head
-dimension. `hd64.pv#1` spells `g4k`, a split rather than an atomic reduce, so it is not blocker 2.
