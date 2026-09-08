@@ -12,51 +12,48 @@ body hard to edit. The ~120-character rule applies to files in the repository, n
 
 ## Abstract
 
-A fused softmax carrier stored its per-element contribution in the coordinates the algebra is *defined* in rather than the ones it *computes* in, so every attention tree carried an exponential of an unshifted score — a value that overflows if anything evaluates it and that nothing was permitted to evaluate. Keeping it there also forced an extra node into the tree whose only job was to turn that value into an operand so a pattern match would fire. This change stores the contribution in the carrier's own coordinates, where softmax's is a score, a one, and the streamed value, and derives the other form on demand for the one reader that needs it. The tree loses the exponential and the node, and attention's numerics are unchanged against eager.
+Two more recorded rows come back, and the four the memo could not explain now have named causes. What matters more than the count is that the remaining eleven are all one kind of thing: every one is blocked by a compiler behaviour someone can go and read, and none of them is a stale spelling or a missing measurement. That was not true when this started, when two thirds of every card's rows simply matched nothing and there was no way to tell a codec drift from a lost capability.
 
-```
- ├─ operand[v1, e]: Fold  free                    ├─ operand[acc0]: Fold[a3] contraction
- │    v1 = multiply(acc0, 0.125)                  ├─ operand[in7]: load v[...]
- │    e  = exp(v1)              ← overflows       ├─ init: (-1e+30, 0, 0)
- ├─ operand[in7]: load v[...]                     ├─ lift: λ(a2, acc0, in7) -> (v1, one, in7)
- ├─ lift: λ(a2, v1, e, in7) -> (v1, e, ev)        │    v1  = multiply(acc0, 0.125)
- │    ev = multiply(e, in7)                       │    one = 1
- └─ base: (maximum, add, add)                     ├─ combine: λ(acc1, acc3, acc5__sum, …) -> …
-                                                  ├─ helper: psi λ(m, D, O) -> (m, d, o)
-                                                  └─ helper: base = (maximum, add, add)
-             before                                                  after
-```
+| Card | Rows | Dead before | Dead now |
+| --- | --- | --- | --- |
+| RTX 4090 | 73 | 10 | 8 |
+| RTX 5090 | 63 | 3 | 3 |
 
 ---
 
-## Why the ids differed
+## The two measured rows
 
-The paper states both representations of a twisted fold as equivalent, and its FlashAttention figure draws the stable one. The implementation had taken the base one. The fusion now splices the recipe's authored injection — the singleton in the carrier's own state space, where the pivot *is* the score and `exp(s)·v` has already simplified to `v`. The stable combine derives from the recipe, and the base monoid and ψ ride beside it as helpers.
+Same repair as the five closed on the 5090: they pin `STAGE: d1/smem` where their kernels expose no staging family, so the key names a decision that does not exist and the stored microseconds do not survive dropping it. Re-benched at O3 on the card as pinned rows — a measurement, not a search.
 
-`Fold.based` is the reading those helpers exist for: ψ⁻¹ over the stored lift, restoring `(s, exp s, exp(s)·v)`. Bilinearity lives in base coordinates and nowhere else, because ψ divides the product away at the singleton. Only `bilinear_channels` and `as_contraction` ask for it, nothing emits it, and it is restricted to the channels a term actually holds — a half-fused carrier is the ordinary case during the rewrite's fixpoint.
+    attention.hd128.dynM.pv  39.23 us against a 39.12 us greedy reference
+    attention.hd64.dynM.pv   15.22 us against 15.01 us
 
-## The node that is no longer minted
+Both land on the schedule the greedy pick takes, as all five did on the 5090.
 
-`_factor_weights` hoisted the weight into an operand of its own so the expectation channel read as `operands[0] ⊗ operands[k]`. That node added no computation; the emitter never placed it. It existed to satisfy a pattern.
+## An inference that became a measurement
 
-The pattern now asks the right question. **A is what `operands[0]` supplies, not what it exposes** — the left factor may be a component of that edge, or a value the reading derives from those components and from kernel-uniform ones. A scale contributes no variation, so a factor reading it varies exactly as A does. A weight derived from the *streamed* value is still refused; offering an mma there would be a wrong answer, not a slow kernel.
+`attention.hd128.pv` was the third row of that class on paper. On the card both its lanes refuse to compile, with exactly the message the memo predicted from its spelling: an atomic cross-CTA reduce folds one additive state component and attention's carrier has three. It moves out of the staging class and into that blocker, where it belongs.
 
-## Three things the dump was hiding
+## The rows the memo called undiagnosed
 
-A scalar operand is spelled inside the reader that binds it, so a scale stops being a line of tree art around a constant. A lift prints under the operand's own name for every slot it binds, and only the slots it reads — attention's two consumers of one carrier now visibly take different states off it, where before both listed all three. And normalization drops operand components no reader reads: rewrites had left an epilogue cone exposing three constants nobody bound, carried alongside a second copy of the loads defining them. A reader is a consuming lift *or* a boundary store, which is how a sweep's per-cell projection reaches its `Write`.
+Both now answer. `attention.hd256.dynM.pv` is a chunk-tier refusal that states itself — *the chunk tier reads its score operands and its streamed value as slabs* — so at that head dimension the warp atoms are never projected. `attention.hd64.pv` is the split doing it: its node refusal is `None`, the tier is willing, but the row spells a `g4k` split and what enumerates is the pieces, which offer only scalar tiles. `attention.hd64.dynM.pv#1` spells no split and keeps its tensor-core rows, which is the controlled comparison.
 
-The cut pass also stops offering a seam at a scalar. That piece was a kernel writing three scalars to a workspace so its reader could read them back.
+That makes `hd64.pv` the same open question as the `g4a` dead end already in the memo: why a cross-CTA split mints pieces the tensor-core tier does not serve.
 
-## What broke — this is not ready
+## What is left
 
-**The chunk tier no longer reaches the tensor cores.** Three e2e tests fail on a *pinned* chunk row, so it is not the greedy choosing differently — the row is unenumerable. The atom projection refuses a contraction any of whose operands reduce, and removing the minted node is exactly what made A reduce: A used to be the zero-axis weight cone with the score contraction nested under it, which is the shape the fragment-seam machinery (`ContractionFacts.producer`, `_fragment_agreements`) was written against. Exempting the chunked carrier from that one refusal is not sufficient on its own; there is at least one more gate downstream. Teaching the seam that A may BE the producer is the remaining work, and it is design work, not a test fix.
+Eleven rows behind three named behaviours, in `plans/golden-row-decode-gaps.md`: the chunk tier never offering the reduced accumulator, the atomic cross-CTA reduce refusing a multi-component carrier, and the tensor-core tier being absent from two targets. Four rows carry two blockers at once. The memo also records the four dead ends walked so far, and what the 4090 host needs — nvcc is installed there but not on PATH, and emmy has no NVRTC fallback, so a bench dies until `CUDA_HOME` is set.
 
-`test_sdpa_score_contraction_reaches_the_mma_tier` is the same cause at a smaller scale.
-
-The realization corpus reports 32 stale cases and 14 changed verdicts. The stale half is what `make test-corpus-regen` exists for; the verdict changes need reading one at a time. Kernel identity moved for every twisted term, so recorded goldens are stale too.
+No row was re-recorded to make it green.
 
 ## Verification
 
-Accuracy against eager passes on SDPA, causal SDPA, softmax, softmax@V and RMSNorm, worst `max_diff` 9.8e-4 in fp16 — the numerics of the coordinate change are sound. `make test` is 4846 passed / 59 failed; the failures are the corpus and the chunk tier above.
+144 passed, 7 skipped, 11 xfailed on the golden decode. The registry shrank by two, and each removal is a row the ratchet then demanded pass.
 
-`git diff --stat main -- emmy/**/*.py` is +318 −146. The growth is new capability — a coordinate reading that did not exist, a derived base view, and a normalization rule — set against `_factor_weights`, `_already_held`, and the subtree walk in `Fold.roles` that all came out.
+`make test` passes: 4,388 passed, 1,042 skipped, and 23 xfailed. The default lane now records every test taking at least 1 s in its output, and the CI-only 5.9 s cold-start row that failed the original run is in `tests/durations.json`.
+
+`make lint` passes.
+
+`make test-goldens` remains red on seven pre-existing model-golden files: Laguna, OLMoE, Qwen3.5, DeepSeek V4, `gemma-4-12B`, and the two `gemma-4-12B-it` card files. This PR changes no model golden or compiler code.
+
+`git diff --stat main -- emmy/` is +6 −8 — two rows re-measured and their dead staging key dropped. No compiler code changed.

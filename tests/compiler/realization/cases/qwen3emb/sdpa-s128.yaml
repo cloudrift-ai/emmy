@@ -1,0 +1,46 @@
+# Qwen3-Embedding-0.6B decoder layer 0, kernels 6 and 7: causal GQA attention.
+# hidden=1024 heads=16 kv_heads=8 head_dim=128, fp32, seq 128. One of the twelve layer-0
+# kernels the perf suite curated before the corpus became its case source.
+#
+# The schedule is SITE-SCOPED (TILE@map.1/twist.1/inner is the score, TILE@map.1/twist the weighted sum) because a flash
+# tree decides per site. The carrier's scalar register tile is the schedule this case is about: the tier folds the
+# term's own step, so the recipe's three states each get a cell copy and the fp32 target needs no mma atom for them.
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [q, k, v]
+  outputs: [o]
+  nodes:
+  - id: k
+    op: input
+    outputs: [[k, f32, [1, 8, 128, 128]]]
+  - id: q
+    op: input
+    outputs: [[q, f32, [1, 16, 128, 128]]]
+  - id: v
+    op: input
+    outputs: [[v, f32, [1, 8, 128, 128]]]
+  - id: o
+    op: torch.sdpa
+    attrs: {is_causal: true, sliding_window: null, scale: null}
+    inputs: [q, k, v]
+    outputs: [[o, f32, [1, 16, 128, 128]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - o
+  realizations:
+  - name: k_sdpa_d0df3e.b595be4fca99
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE@map.1/twist.1/inner: ''
+      TILE@map.1/twist: f1
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+      WORK: t32x16
+    identity: 3a4b84d27383d81e107c3ab1f76d96f9ae59dc6174abf6ce77fc44e5677b06d3

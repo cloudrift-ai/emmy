@@ -39,11 +39,13 @@ from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.kernel.ir import (
     FRAG,
     FRAG_COL,
+    FRAG_ROW,
     ROW,
     UNIFORM,
     BlockScaleLoad,
     EpilogueLoad,
     FragmentApply,
+    FragmentBiasAdd,
     FragmentMask,
     FragmentPromote,
     FragmentRepack,
@@ -59,6 +61,7 @@ from emmy.compiler.ir.schedule import Side, Stage, Tile
 from emmy.compiler.ir.schedule.packing import block_scaled_atom, packed_readings
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
+from emmy.compiler.ir.stmt.body import free_names
 from emmy.compiler.ir.stmt.passes import rename_free
 from emmy.compiler.ir.tile.ops import cone_stat, cone_stat_dtypes, make_cone
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
@@ -1891,10 +1894,17 @@ class _ScalarOps(_AtomOps):
 
     def gmem_leaves(self, offset, mn):
         """The gmem-direct scalar leaf constructors: each register ROW reads its A operand once (a
-        gmem ``Load`` or a computed register-resident body), each COL its
-        B ``Load`` once, each ``(i, j)`` cell folds ``acc__c{i}_{j} += b·a``, and the K-loop is a unit
-        ``Loop`` (``Loop.render`` seeds the accumulators; the store reads them). A masked axis wraps
-        its read in-bounds (``% extent``) and the overhanging store is guarded (:meth:`store`).
+        gmem ``Load`` or a computed register-resident body), each COL its B ``Load`` once, each
+        ``(i, j)`` cell folds the TERM's own per-step statements (:meth:`Fold.step`), and the
+        K-loop is a unit ``Loop`` (``Loop.render`` seeds the accumulators; the store reads them). A
+        masked axis wraps its read in-bounds (``% extent``) and the overhanging store is guarded
+        (:meth:`store`).
+
+        Folding the step rather than a written-out ``acc__c{i}_{j} += b·a`` is what lets a recipe
+        reach this tier: a twisted carrier's three states, their own ops and the stable merge
+        between them are all in that step already, and each cell owns a copy of every one of them.
+        Any further operand is uniform across the tile (the projection offers no scalar tile
+        otherwise), so it is read ONCE ahead of the K-loop and every cell shares it.
 
         An operand that VARIES ALONG THE OTHER output axis (:func:`_cell_varying`) is read once per
         CELL instead — the row / column reuse is a property of the operand, not of the tier."""
@@ -1902,15 +1912,20 @@ class _ScalarOps(_AtomOps):
         assert len(self.channels) == 1, "the scalar tier is single-fold — a multi-B node rides the warp smem compute fill"
         k_axis = self.k_axis
         m, n = mn
+        step = tuple(c.step())
+        a_body, b_body = c.operands[0].lower(axes=self.axes), c.operands[1].lower(axes=self.axes)
+        uniform = [stmt for edge in c.operands[2:] for stmt in edge.lower(axes=self.axes)]
         # The operand bodies contribute their OWN loop coordinates (a computed cone's internal
         # fold axes): a replicated read of such a coordinate must keep its name — the loop that
         # binds it is copied with the cell, so suffixing the reads (but never a Loop's binding)
         # emitted references no scope defines.
-        prot = _scalar_protected(
-            c, self.tile, self.lead, body=(*c.operands[0].lower(axes=self.axes), *c.operands[1].lower(axes=self.axes)), k_axis=self.k_axis
-        )
+        prot = _scalar_protected(c, self.tile, self.lead, body=(*a_body, *b_body, *step), k_axis=self.k_axis)
         b_name, a_name = c.operands[1].exposes[-1], c.operands[0].exposes[-1]
-        a_body, b_body = c.operands[0].lower(axes=self.axes), c.operands[1].lower(axes=self.axes)
+        # Whatever the step reads and does not define is bound OUTSIDE the cell — a uniform leaf
+        # above the loop. Only the two operand results (rebound per row / column below) and the
+        # carried states (one copy per cell) are the cell's own.
+        outer = {name for stmt in step for name in free_names(stmt)} - {name for stmt in step for name in stmt.defines()}
+        prot |= outer - {a_name, b_name} - set(c.exposes)
         a_cell, b_cell = _cell_varying(a_body, n), _cell_varying(b_body, m)
 
         def at_m(i):  # register row ``i``'s m coordinate (a 1-D output has no m side)
@@ -1940,15 +1955,12 @@ class _ScalarOps(_AtomOps):
                 *(copy_cell(a_body, cell, a_sfx, prot) if a_cell else ()),
                 *(copy_cell(b_body, cell, b_sfx, prot) if b_cell else ()),
             ]
-            v = f"{c.exposes[0]}__v__c{i}_{j}"
-            return [
-                *reads,
-                Assign(name=v, op=_MUL, args=(f"{b_name}{b_sfx}", f"{a_name}{a_sfx}")),
-                Accum(name=f"{c.exposes[0]}__c{i}_{j}", value=v, op=_ADD, axes=(k_axis.name,)),
-            ]
+            bound = {a_name: f"{a_name}{a_sfx}", b_name: f"{b_name}{b_sfx}"}
+            rebound = [stmt.rewrite(lambda name: bound.get(name, name)) for stmt in step]
+            return [*reads, *copy_cell(rebound, cell, f"__c{i}_{j}", prot | set(bound.values()))]
 
         def wrap(body):
-            return [Loop(axis=k_axis, body=Body(tuple(body)), unroll=_unroll_inner(k_axis))]
+            return [*uniform, Loop(axis=k_axis, body=Body(tuple(body)), unroll=_unroll_inner(k_axis))]
 
         return dict(read_row=read_row, read_col=read_col, contract=contract, wrap=wrap)
 
@@ -2161,19 +2173,22 @@ class _FlashOps(_MmaOps):
         bk = atom.atom_k * self.tile.bk
         cols, steps = bk // atom.atom_n, bk // atom.atom_k
         key = self.k_axis
-        score, score_tile = self.inner
+        # ``None`` when the carrier's A edge IS the stored score (softmax@V): there is no nested
+        # contraction to tile, and the chunk's fragments are gathered rather than contracted.
+        score, score_tile = self.inner if self.inner is not None else (None, None)
         # Every one of these is a projection gate (``_chunk_refusal``, ``_atom_families``, and the
         # fragment seam), so a row that reached the binder carries them. Asserted rather than
         # re-decided: an enumeration that stopped spelling one of them would otherwise miscompile
         # in silence.
         assert atom.c_to_a_repack, "the chunk tier needs an atom whose C fragment repacks into an A operand"
-        assert all(edge.as_slab() is not None for edge in (*score.operands, self.c.operands[1])), (
-            "the chunk tier reads its score operands and its streamed value as slabs"
-        )
-        seam = (score_tile.n.axis.name, score_tile.n.units, score_tile.n.tile, score_tile.m.reg)
-        assert score_tile.is_warp and seam == (key.name, 1, bk, m.reg), (
-            "the score's tile is the chunk this carrier folds, one warp column wide — the fragment seam's own equation"
-        )
+        assert all(
+            edge.as_slab() is not None for edge in ((*score.operands, self.c.operands[1]) if score is not None else self.c.operands)
+        ), "the chunk tier reads its score operands and its streamed value as slabs"
+        if score is not None:
+            seam = (score_tile.n.axis.name, score_tile.n.units, score_tile.n.tile, score_tile.m.reg)
+            assert score_tile.is_warp and seam == (key.name, 1, bk, m.reg), (
+                "the score's tile is the chunk this carrier folds, one warp column wide — the fragment seam's own equation"
+            )
         # The score's own PREFIX: the carrier's lift cut to its score role. A is the score
         # contraction now, so the producer exposes the RAW accumulator and the carrier's lift is
         # what scales it — the prefix reads that result and the carrier's uniform leaves, nothing
@@ -2196,13 +2211,16 @@ class _FlashOps(_MmaOps):
         bound = key.extent_expr() if ragged else None
 
         memo: dict = {}
-        body: list[Stmt] = self._score_tile(offset, mn, base, cols, bound)
+        body: list[Stmt] = (
+            self._score_tile(offset, mn, base, cols, bound) if score is not None else self._gathered_score(offset, mn, base, cols, bound)
+        )
+        held = (score if score is not None else self.c.operands[0]).exposes[0]
         scored, pivots = {}, {}
         for i in range(m.reg):
             for j in range(cols):
                 stmts, frags, _ = _residence(
                     prefix.body,
-                    frags={score.exposes[0]: self.frag(f"_s{i}_{j}")},
+                    frags={held: self.frag(f"_s{i}_{j}")},
                     rows={},
                     tag=f"_w{i}_{j}_",
                     memo=memo.setdefault((i, j), {}),
@@ -2266,6 +2284,36 @@ class _FlashOps(_MmaOps):
         return pre, [
             StridedLoop(axis=chunk, start=Literal(0, "int"), step=Literal(bk, "int"), body=Body(tuple(body)), unroll=False, seed=False)
         ]
+
+    def _gathered_score(self, offset, mn, base, cols, bound) -> list[Stmt]:
+        """The chunk's score, READ — the carrier's A edge is already the stored tile (softmax@V,
+        whose probabilities arrive as an input), so there is nothing to contract.
+
+        Each ``(row, chunk)`` C fragment is gathered from that tile at the fragment's own lane map:
+        a role-``c`` :class:`RegFragment` declares zero, so one :class:`FragmentBiasAdd` per
+        fragment IS the fragment. Both coordinates are read wrapped in-bounds — an overhanging row
+        is discarded by the store guard and an overhanging column is refilled with the pivot ⊕'s
+        identity by the boundary :class:`FragmentMask` the caller emits, exactly as the contracted
+        form's clamped reads are."""
+        m, _ = mn
+        atom, load = self.tile.atom, self.c.operands[0].as_slab().load
+        row = _wrap(m, Var(FRAG_ROW))
+        col = Var(FRAG_COL) if bound is None else BinaryExpr("%", Var(FRAG_COL), bound)
+        index = tuple(Sigma({m.axis.name: row, self.k_axis.name: col}).apply(e) for e in load.index)
+        out: list[Stmt] = []
+        for i in range(m.reg):
+            for j in range(cols):
+                out.append(self._frag(f"_s{i}_{j}", "c"))
+                out.append(
+                    FragmentBiasAdd(
+                        frag=self.frag(f"_s{i}_{j}"),
+                        buf=load.input,
+                        index=index,
+                        row_base=offset[0].base(i),
+                        col_base=BinaryExpr("+", base, Literal(j * atom.atom_n, "int")),
+                    )
+                )
+        return out
 
     def _score_tile(self, offset, mn, base, cols, bound) -> list[Stmt]:
         """The chunk's score — one ``(row, chunk)`` mma tile, its own K loop inside the chunk.
