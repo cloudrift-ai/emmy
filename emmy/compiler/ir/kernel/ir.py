@@ -990,19 +990,17 @@ def _lane_preamble(ctx: RenderCtx, pad: str, decl: str, names: tuple[str, ...] =
 
 @dataclass(frozen=True)
 class FragmentApply(Stmt):
-    """Generic per-element pointwise op over ``mma.sync`` ``m16n8`` C-fragments — the
-    **carrier-generic** fragment-tier sibling of the scalar ``Assign``, and the ONE fragment
-    pointwise node (it subsumes the former hard-coded ``FragmentExp`` / ``FragmentScale``).
+    """Generic per-element pointwise op over an ``mma.sync`` C fragment — the carrier-generic
+    fragment-tier sibling of the scalar ``Assign``, and the one fragment pointwise node.
 
-    Writes ``out`` (a ``float[4]`` C-fragment) ``= op(args…)`` per element ``i`` via the same
+    Writes ``out`` (a layout-sized f32 C fragment) ``= op(args…)`` per element ``i`` via the same
     ``op_to_expr`` translation the scalar ``Assign`` uses — so ANY elementwise op reaches the
     tensor-core tier, not just softmax's ``exp`` / scale. Each arg is one of three
     :data:`FRAG` / :data:`ROW` / :data:`UNIFORM` ``kinds``:
 
     - ``FRAG`` — a C-fragment, indexed ``arg[i]``;
-    - ``ROW`` — a per-row scalar, broadcast by row (suffix ``0`` for rows ``g`` = elements
-      ``[0,1]``, ``1`` for rows ``g+8`` = elements ``[2,3]`` — the m16n8 2-rows/lane layout);
-    - ``UNIFORM`` — a cell-uniform scalar / literal, the same value for all 4 elements.
+    - ``ROW`` — a per-row scalar pair, broadcast by the layout's element-to-row map;
+    - ``UNIFORM`` — a cell-uniform scalar or literal, the same value for every element.
 
     Realizations: ``exp(s − m)`` = a ``subtract`` (FRAG, ROW) then an ``exp`` (FRAG); ``O *= α`` =
     an in-place ``multiply`` (FRAG, ROW); ``O /= l`` = an in-place ``divide`` (FRAG, ROW); ``S *=
@@ -1011,8 +1009,8 @@ class FragmentApply(Stmt):
 
     Each ``args`` entry is a ``str`` for a FRAG / UNIFORM operand, or a ``(row0, row1)`` pair of
     SSA names for a ROW operand (the two per-row scalars stored explicitly — so SSA rename keeps
-    them consistent with their definitions; a bare name + render-time suffix would diverge under
-    rename)."""
+    them consistent with their definitions; a bare name plus a render-time suffix would diverge
+    under rename)."""
 
     out: str
     op: ElementwiseImpl
@@ -1107,22 +1105,20 @@ class FragmentRowReduce(Stmt):
     """Per-ROW reduction over one warp's ``mma.sync`` C fragments — the chunk pivot and the
     per-row channel partials the twisted carrier's atom tier folds (``_atom._FlashOps``).
 
-    Each lane of an ``m16n8`` C fragment owns 4 f32 elements: rows ``g`` / ``g+8``
-    (``g = lane/4``), cols ``(lane%4)*2 + {0,1}``. A chunk-wide score tile is ``len(frags)`` such
-    fragments side by side, so reducing over the chunk is: combine each fragment's in-lane column
-    pair across every fragment, then a ``__shfl_xor`` butterfly over the ``group``-lane column set
-    (``group = 4`` for ``m16n8`` — the lanes differing in ``lane%4`` hold a row's 8 columns).
-    Afterwards every lane of a column group holds the full per-row value, so ``top`` (rows ``g``)
-    and ``bot`` (rows ``g+8``) are the :data:`ROW` operands :class:`FragmentApply` broadcasts.
+    A chunk-wide score tile is ``len(frags)`` C fragments side by side. Reducing over the chunk
+    combines every element assigned to each of the lane's two rows, then applies the layout's
+    ``__shfl_xor`` butterfly masks across the lanes that hold columns of the same row. Afterwards
+    every lane in the group holds the full per-row value, so ``top`` and ``bot`` are the
+    :data:`ROW` operands :class:`FragmentApply` broadcasts.
 
     Distinct from :class:`WarpShuffle`, which folds a whole per-thread monoid state over a
     cooperative-K lane set; this folds WITHIN one warp's fragments along the atom's N direction,
     keyed on the PTX C layout. It is why the tier requires the chunk to sit inside one warp column
     (``n_units == 1`` on the score): a reduction that crossed warps would need smem."""
 
-    top: str  # the per-row value for rows g (broadcast across the column group)
-    bot: str  # the per-row value for rows g+8
-    frags: tuple[str, ...]  # the C fragments (float[4] each) spanning the chunk
+    top: str  # the first per-lane row value, broadcast across its column group
+    bot: str  # the second per-lane row value, broadcast across its column group
+    frags: tuple[str, ...]  # the layout-sized C fragments spanning the chunk
     op: ElementwiseImpl  # the fold — ``maximum`` for the pivot, ``add`` for a summed channel
     layout: FragLayout = M16N8
     dtype: DataType = F32

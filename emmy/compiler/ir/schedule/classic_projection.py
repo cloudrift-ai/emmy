@@ -340,9 +340,7 @@ def _contraction_domain(
         chunk = plan.atom.atom_k * plan.bk
         return not node.chunked() or (chunk >= plan.atom.atom_n and chunk % plan.atom.atom_n == 0)
 
-    wide_warp_tiles = tuple(
-        plan for name in allowed_atoms if warp_plan_ok(plan := Tile(atom=ATOM_REGISTRY[name], regs=(26, 4), bk=2))
-    )
+    wide_warp_tiles = tuple(plan for name in allowed_atoms if warp_plan_ok(plan := Tile(atom=ATOM_REGISTRY[name], regs=(26, 4), bk=2)))
     # The scalar register tier replicates the TERM's own step per cell, so a recipe folds there
     # like any other algebra — three states under their own ops, seeded by the ⊕'s identities.
     # What it has no residence for is an operand past the streamed one that VARIES: those are read

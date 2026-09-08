@@ -62,7 +62,6 @@ from emmy.compiler.ir.stmt.leaves import (
     Init,
     Load,
     Mma,
-    mask_select_predicate,
     OutputSpec,
     Pack,
     Select,
@@ -70,6 +69,7 @@ from emmy.compiler.ir.stmt.leaves import (
     Unpack,
     Write,
     ZeroPrologue,
+    mask_select_predicate,
 )
 from emmy.compiler.ir.stmt.normalize import (
     canonicalize_buffer_names,

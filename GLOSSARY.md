@@ -82,10 +82,10 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Elementwise operation** — An operation independently applied to corresponding tensor elements, such as adding
   two tensors.
 - **Reduction** — Combining many values into fewer values, such as summing a row or finding its maximum.
-- **Chunk** — The slice of a reduction axis one trip of a staged K loop covers (`STAGE`'s `bk_elems`). It is a
-  SCHEDULE choice, so it never appears in a term: an emitter that wants a block takes this one. The twisted carrier's
-  tensor-core tier folds the recipe one chunk at a time — the chunk's pivot, its channel partials, and one merge
-  through the stable ⊕ per chunk instead of per element.
+- **Chunk** — The slice of a reduction axis one loop trip folds. An ordinary staged contraction derives it from the
+  resolved `STAGE` K width. The twisted carrier's tensor-core tier instead uses the `TILE` atom's K width and has no
+  `STAGE` choice. It is schedule data, so it never appears in a term: the tier folds the recipe's pivot and channel
+  partials, then performs one merge through the stable ⊕ per chunk instead of per element.
 - **Scan (prefix reduction)** — A reduction that also stores its running state at every step, such as `cumsum`. In
   Emmy a scan is a Fold with an **observer**: a pure per-step function over the carried state whose results only
   kernel-boundary output writes consume. An observed fold preserves its stream order, so it schedules as the serial
