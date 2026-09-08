@@ -1166,19 +1166,20 @@ FRAG_COL = "__fcol"
 
 @dataclass(frozen=True)
 class FragmentMask(Stmt):
-    """Generic per-element **coordinate-predicated fill** over an mma C-fragment — the ONE fragment
-    mask node (it subsumes the former ``FragmentCausalMask`` / ``FragmentBoundaryMask``). Writes
-    ``fill`` (the carrier's fold identity — the soft ``-1e30`` so ``max(m, fill) = m`` and
-    ``exp(fill − m) = 0``) to every element whose absolute coordinates satisfy ``mask_when``, a
-    predicate ``Expr`` over the reserved coordinate vars :data:`FRAG_ROW` (``__frow``, absolute
-    query row) / :data:`FRAG_COL` (``__fcol``, absolute key column).
+    """Generic per-element coordinate mask over an mma C-fragment.
+
+    Writes ``fill`` to every element whose absolute coordinates satisfy ``mask_when``. When
+    ``keep`` and ``keep_op`` are present, the other branch applies
+    ``keep_op(fragment, keep)``. This realizes an additive coordinate ``Select`` as a stable mask:
+    the masked branch becomes the carrier's finite identity instead of producing ``-inf - -inf``
+    in an all-masked chunk, while the keep branch retains its authored scalar value.
 
     The render adds the tile origin (``row_base`` / ``col_base``) to the layout's per-element offset
     and substitutes the result for ``__frow`` / ``__fcol``, then emits a guarded write — so the
     predicate is a generic ``Expr``, not hard-coded CUDA. Causal = ``__fcol > __frow``; symbolic
     boundary = ``__fcol >= seq_len``; any coordinate predicate (windowed, banded, …) is a different
     ``mask_when`` over the same node. Applied to the scaled score before the rowmax; emitting two
-    masks in sequence ANDs their keep-predicates (both write ``fill``). ``row_base`` is required iff
+    boundary masks in sequence AND their keep-predicates. ``row_base`` is required iff
     ``mask_when`` references ``__frow``."""
 
     frag: str
@@ -1186,10 +1187,17 @@ class FragmentMask(Stmt):
     col_base: Expr
     row_base: Expr | None = None
     fill: float = -1e30
+    keep: str | None = None
+    keep_op: ElementwiseImpl | None = None
     layout: FragLayout = M16N8
 
+    def __post_init__(self) -> None:
+        if (self.keep is None) != (self.keep_op is None):
+            raise ValueError("FragmentMask keep and keep_op must be provided together")
+
     def deps(self) -> tuple[str, ...]:
-        return (self.frag,)
+        keep = (self.keep,) if self.keep is not None else ()
+        return (self.frag, *keep)
 
     def defines(self) -> tuple[str, ...]:
         return (self.frag,)
@@ -1204,14 +1212,29 @@ class FragmentMask(Stmt):
     def render(self, ctx: RenderCtx) -> list[str]:
         pad = _pad(ctx.indent)
         lay = self.layout
+
         fill = ctx.identity_literal(self.fill, "f32")
+
+        def keep_update(i: int) -> str:
+            assert self.keep is not None and self.keep_op is not None
+            literal = ctx.literal_ssa.get(self.keep) if ctx.literal_ssa else None
+            if literal is not None:
+                keep = ctx.identity_literal(literal, "f32")
+            else:
+                dtype = ctx.ssa_dtypes.get(self.keep, "f32")
+                keep = self.keep if dtype == "f32" else ctx.target.convert(self.keep, dtype, "f32")
+            return _binary_combine_expr(self.keep_op, f"{self.frag}[{i}]", keep, ctx.target, "f32")
+
         lines = _lane_preamble(ctx, pad, lay.lane_decl, lay.lane_names)
         for i in range(lay.n_elems):
             sub: dict[str, Expr] = {FRAG_COL: BinaryExpr("+", self.col_base, lay.col_off[i])}
             if self.row_base is not None:
                 sub[FRAG_ROW] = BinaryExpr("+", self.row_base, lay.row_off[lay.elem_row[i]])
             pred = self.mask_when.substitute(sub).render(ctx)
-            lines.append(f"{pad}if ({pred}) {self.frag}[{i}] = {fill};")
+            line = f"{pad}if ({pred}) {self.frag}[{i}] = {fill};"
+            if self.keep is not None:
+                line += f" else {self.frag}[{i}] = {keep_update(i)};"
+            lines.append(line)
         return lines
 
 
@@ -2935,5 +2958,7 @@ def _(s: FragmentMask, rename, sigma, axis_fn):
         col_base=sigma.apply(s.col_base),
         row_base=sigma.apply(s.row_base) if s.row_base is not None else None,
         fill=s.fill,
+        keep=rename(s.keep) if s.keep is not None else None,
+        keep_op=s.keep_op,
         layout=s.layout,
     )

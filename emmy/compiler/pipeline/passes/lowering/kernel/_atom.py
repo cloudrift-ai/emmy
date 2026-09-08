@@ -2084,6 +2084,8 @@ def _residence(
                         row_base=row_base,
                         col_base=col_base,
                         fill=mask_fill,
+                        keep=mask.branches[0].value,
+                        keep_op=stmt.op,
                         layout=layout,
                     )
                 )
