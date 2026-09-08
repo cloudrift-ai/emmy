@@ -39,11 +39,13 @@ from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.kernel.ir import (
     FRAG,
     FRAG_COL,
+    FRAG_ROW,
     ROW,
     UNIFORM,
     BlockScaleLoad,
     EpilogueLoad,
     FragmentApply,
+    FragmentBiasAdd,
     FragmentMask,
     FragmentPromote,
     FragmentRepack,
@@ -2171,19 +2173,23 @@ class _FlashOps(_MmaOps):
         bk = atom.atom_k * self.tile.bk
         cols, steps = bk // atom.atom_n, bk // atom.atom_k
         key = self.k_axis
-        score, score_tile = self.inner
+        # ``None`` when the carrier's A edge IS the stored score (softmax@V): there is no nested
+        # contraction to tile, and the chunk's fragments are gathered rather than contracted.
+        score, score_tile = self.inner if self.inner is not None else (None, None)
         # Every one of these is a projection gate (``_chunk_refusal``, ``_atom_families``, and the
         # fragment seam), so a row that reached the binder carries them. Asserted rather than
         # re-decided: an enumeration that stopped spelling one of them would otherwise miscompile
         # in silence.
         assert atom.c_to_a_repack, "the chunk tier needs an atom whose C fragment repacks into an A operand"
-        assert all(edge.as_slab() is not None for edge in (*score.operands, self.c.operands[1])), (
-            "the chunk tier reads its score operands and its streamed value as slabs"
-        )
-        seam = (score_tile.n.axis.name, score_tile.n.units, score_tile.n.tile, score_tile.m.reg)
-        assert score_tile.is_warp and seam == (key.name, 1, bk, m.reg), (
-            "the score's tile is the chunk this carrier folds, one warp column wide — the fragment seam's own equation"
-        )
+        assert all(
+            edge.as_slab() is not None
+            for edge in ((*score.operands, self.c.operands[1]) if score is not None else self.c.operands)
+        ), "the chunk tier reads its score operands and its streamed value as slabs"
+        if score is not None:
+            seam = (score_tile.n.axis.name, score_tile.n.units, score_tile.n.tile, score_tile.m.reg)
+            assert score_tile.is_warp and seam == (key.name, 1, bk, m.reg), (
+                "the score's tile is the chunk this carrier folds, one warp column wide — the fragment seam's own equation"
+            )
         # The score's own PREFIX: the carrier's lift cut to its score role. A is the score
         # contraction now, so the producer exposes the RAW accumulator and the carrier's lift is
         # what scales it — the prefix reads that result and the carrier's uniform leaves, nothing
@@ -2206,13 +2212,16 @@ class _FlashOps(_MmaOps):
         bound = key.extent_expr() if ragged else None
 
         memo: dict = {}
-        body: list[Stmt] = self._score_tile(offset, mn, base, cols, bound)
+        body: list[Stmt] = (
+            self._score_tile(offset, mn, base, cols, bound) if score is not None else self._gathered_score(offset, mn, base, cols, bound)
+        )
+        held = (score if score is not None else self.c.operands[0]).exposes[0]
         scored, pivots = {}, {}
         for i in range(m.reg):
             for j in range(cols):
                 stmts, frags, _ = _residence(
                     prefix.body,
-                    frags={score.exposes[0]: self.frag(f"_s{i}_{j}")},
+                    frags={held: self.frag(f"_s{i}_{j}")},
                     rows={},
                     tag=f"_w{i}_{j}_",
                     memo=memo.setdefault((i, j), {}),
@@ -2276,6 +2285,36 @@ class _FlashOps(_MmaOps):
         return pre, [
             StridedLoop(axis=chunk, start=Literal(0, "int"), step=Literal(bk, "int"), body=Body(tuple(body)), unroll=False, seed=False)
         ]
+
+    def _gathered_score(self, offset, mn, base, cols, bound) -> list[Stmt]:
+        """The chunk's score, READ — the carrier's A edge is already the stored tile (softmax@V,
+        whose probabilities arrive as an input), so there is nothing to contract.
+
+        Each ``(row, chunk)`` C fragment is gathered from that tile at the fragment's own lane map:
+        a role-``c`` :class:`RegFragment` declares zero, so one :class:`FragmentBiasAdd` per
+        fragment IS the fragment. Both coordinates are read wrapped in-bounds — an overhanging row
+        is discarded by the store guard and an overhanging column is refilled with the pivot ⊕'s
+        identity by the boundary :class:`FragmentMask` the caller emits, exactly as the contracted
+        form's clamped reads are."""
+        m, _ = mn
+        atom, load = self.tile.atom, self.c.operands[0].as_slab().load
+        row = _wrap(m, Var(FRAG_ROW))
+        col = Var(FRAG_COL) if bound is None else BinaryExpr("%", Var(FRAG_COL), bound)
+        index = tuple(Sigma({m.axis.name: row, self.k_axis.name: col}).apply(e) for e in load.index)
+        out: list[Stmt] = []
+        for i in range(m.reg):
+            for j in range(cols):
+                out.append(self._frag(f"_s{i}_{j}", "c"))
+                out.append(
+                    FragmentBiasAdd(
+                        frag=self.frag(f"_s{i}_{j}"),
+                        buf=load.input,
+                        index=index,
+                        row_base=offset[0].base(i),
+                        col_base=BinaryExpr("+", base, Literal(j * atom.atom_n, "int")),
+                    )
+                )
+        return out
 
     def _score_tile(self, offset, mn, base, cols, bound) -> list[Stmt]:
         """The chunk's score — one ``(row, chunk)`` mma tile, its own K loop inside the chunk.

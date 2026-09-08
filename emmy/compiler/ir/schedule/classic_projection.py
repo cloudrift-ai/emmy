@@ -203,9 +203,14 @@ def _chunk_refusal(tile: TileOp, node) -> str | None:
     blocklist retry per rank, and there are more ranked rows than the retry budget."""
     facts = tile.contractions.get(tile.node_id(node))
     score = facts.producer if facts is not None else None
-    if score is None:
-        return "the chunk tier folds a carrier whose pivot a nested contraction supplies"
-    if any(edge.as_slab() is None for edge in (*score.operands, *node.operands[1:])):
+    # The chunk's score is CONTRACTED into its fragments when a nested contraction supplies it, and
+    # GATHERED into them when the carrier's own A edge is already the stored tile (softmax@V, whose
+    # probabilities arrive as an input). Either way the tier gets a ``(row, chunk)`` C fragment; a
+    # carrier that is neither has no chunk to fold.
+    reads = (*score.operands, *node.operands[1:]) if score is not None else node.operands
+    if score is None and node.operands[0].as_slab() is None:
+        return "the chunk tier folds a carrier whose pivot a nested contraction or a stored tile supplies"
+    if any(edge.as_slab() is None for edge in reads):
         return "the chunk tier reads its score operands and its streamed value as slabs"
     # The score's own PREFIX is the CARRIER's lift cut to its score role — A is the score
     # contraction, and what scales its raw accumulator lives in the lift above it. Its leaves past
