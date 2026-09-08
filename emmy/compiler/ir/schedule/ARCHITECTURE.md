@@ -102,6 +102,12 @@ from being offered a row its emission would have to ignore. The chunk is the con
 staging slab, and must contain a complete logical C fragment so its score can repack into the paired contraction's A
 operand. Coordinate masks remain eligible only when their complementary branches form an additive cell mask.
 
+`TileOp.stage_edges` offers a transport at every operand of every contracting site, a chunked carrier's included —
+which tier then puts which operand on a slab is the tier's own business. The chunked site used to be excluded on the
+reading that it "takes its chunk off the `TILE`, so a transport spelling there would decide nothing"; a `Stage` never
+spelled that chunk (the resolver derives `bk_elems` from `Tile.bk`), so what the exclusion decided was that
+attention's value channel reads gmem-direct.
+
 A pin is a restriction on those projected domains, never a source of choices, so it narrows what a site may select and
 cannot manufacture a value the projection withheld. A value scoped to a site that does not offer it empties that
 site's restriction and the kernel enumerates no row — the loud direction. A bare family pin is applicable at a site

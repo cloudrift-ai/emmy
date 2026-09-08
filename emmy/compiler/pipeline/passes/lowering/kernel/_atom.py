@@ -2184,8 +2184,11 @@ class _FlashOps(_MmaOps):
     - the chunk's partial merges through the recipe's stable ⊕ (:meth:`Fold.merge`), applied once
       per chunk rather than once per element.
 
-    Every operand reads gmem-direct through the ordinary fragment loaders. A staged operand slab is
-    a later transport choice, not a shape this tier depends on.
+    The streamed value reads from a shared-memory slab when the row spells a transport, and
+    gmem-direct otherwise; every other operand reads gmem-direct through the ordinary fragment
+    loaders. Staging is a transport choice, not a shape this tier depends on — which is why the
+    chunk loop is the same body either way, with the staged form's loop built by the shared
+    fill/drain skeleton (:meth:`_value_slab`, :meth:`_value_read`).
     """
 
     # ---- what the recipe says, in this term's names ------------------------------------------ #
