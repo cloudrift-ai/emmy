@@ -1115,6 +1115,7 @@ configs:
       FAST_EXP: false
       INTERLEAVE_LOADS: true
       REDUCE: coop
+      RASTER: ''
       VECTORIZE_LOADS: true
     measurements:
       emmy_us: 3.7
@@ -1135,6 +1136,7 @@ configs:
       FAST_EXP: false
       INTERLEAVE_LOADS: true
       REDUCE: coop
+      RASTER: ''
       VECTORIZE_LOADS: true
     measurements:
       emmy_us: 1.5
@@ -1154,6 +1156,7 @@ configs:
       FAST_EXP: false
       INTERLEAVE_LOADS: true
       REDUCE: coop
+      RASTER: ''
       VECTORIZE_LOADS: true
     measurements:
       emmy_us: 10.2
@@ -1174,6 +1177,7 @@ configs:
       FAST_EXP: false
       INTERLEAVE_LOADS: true
       REDUCE: coop
+      RASTER: ''
       VECTORIZE_LOADS: true
     measurements:
       emmy_us: 3.3
@@ -1193,6 +1197,7 @@ configs:
       FAST_EXP: false
       INTERLEAVE_LOADS: true
       REDUCE: coop
+      RASTER: ''
       VECTORIZE_LOADS: true
     measurements:
       emmy_us: 3.8
@@ -1212,6 +1217,7 @@ configs:
       FAST_EXP: false
       INTERLEAVE_LOADS: true
       REDUCE: coop
+      RASTER: ''
       VECTORIZE_LOADS: true
     measurements:
       emmy_us: 6.4
@@ -1231,6 +1237,7 @@ configs:
       FAST_EXP: false
       INTERLEAVE_LOADS: true
       REDUCE: coop
+      RASTER: ''
       VECTORIZE_LOADS: true
     measurements:
       emmy_us: 10.2
@@ -1250,6 +1257,7 @@ configs:
       FAST_EXP: false
       INTERLEAVE_LOADS: true
       TILE: f4
+      RASTER: ''
       VECTORIZE_LOADS: true
     measurements:
       emmy_us: 3.3
@@ -1269,6 +1277,7 @@ configs:
       FAST_EXP: false
       INTERLEAVE_LOADS: true
       TILE: f2
+      RASTER: ''
       VECTORIZE_LOADS: true
     measurements:
       emmy_us: 11.1
@@ -1288,6 +1297,7 @@ configs:
       FAST_EXP: false
       INTERLEAVE_LOADS: true
       REDUCE: coop
+      RASTER: ''
       VECTORIZE_LOADS: true
     measurements:
       emmy_us: 3.7
@@ -1308,6 +1318,7 @@ configs:
       FAST_EXP: false
       INTERLEAVE_LOADS: true
       REDUCE: coop
+      RASTER: ''
       VECTORIZE_LOADS: true
     measurements:
       emmy_us: 1.5
@@ -1327,6 +1338,7 @@ configs:
       FAST_EXP: false
       INTERLEAVE_LOADS: true
       REDUCE: coop
+      RASTER: ''
       VECTORIZE_LOADS: true
     measurements:
       emmy_us: 10.1
@@ -1347,6 +1359,7 @@ configs:
       FAST_EXP: false
       INTERLEAVE_LOADS: true
       REDUCE: coop
+      RASTER: ''
       VECTORIZE_LOADS: true
     measurements:
       emmy_us: 3.3
@@ -1366,6 +1379,7 @@ configs:
       FAST_EXP: false
       INTERLEAVE_LOADS: true
       REDUCE: coop
+      RASTER: ''
       VECTORIZE_LOADS: true
     measurements:
       emmy_us: 3.9
@@ -1385,6 +1399,7 @@ configs:
       FAST_EXP: false
       INTERLEAVE_LOADS: true
       REDUCE: coop
+      RASTER: ''
       VECTORIZE_LOADS: true
     measurements:
       emmy_us: 6.4
@@ -1404,6 +1419,7 @@ configs:
       FAST_EXP: false
       INTERLEAVE_LOADS: true
       REDUCE: coop
+      RASTER: ''
       VECTORIZE_LOADS: true
     measurements:
       emmy_us: 10.3
@@ -1423,6 +1439,7 @@ configs:
       FAST_EXP: false
       INTERLEAVE_LOADS: true
       TILE: f4
+      RASTER: ''
       VECTORIZE_LOADS: true
     measurements:
       emmy_us: 3.3
@@ -1442,6 +1459,7 @@ configs:
       FAST_EXP: false
       INTERLEAVE_LOADS: true
       TILE: f2
+      RASTER: ''
       VECTORIZE_LOADS: true
     measurements:
       emmy_us: 11.1
