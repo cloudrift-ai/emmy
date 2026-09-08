@@ -192,7 +192,18 @@ carries any leading (batch) grid axes and supports a 1-D (m-absent) output. (The
 ## Operand staging — the warp-tier smem pipeline (`STAGE` codec → `Stage`)
 
 The warp (mma) tier stages its reused gmem operands through an smem slab, driven off the node's `STAGE` codec →
-`schedule.Stage`. Every staged path runs **one** liveness-scheduled K-loop skeleton, `pipelined_kloop` in
+`schedule.Stage`. The CHUNK tier stages one of them, the value it streams: its score is either a nested contraction
+whose fragments repack in registers or a stored tile gathered at the fragment lane map, and a copy transport carries
+neither. Its ring is single-buffer, because a prefetch there would have to interleave with the softmax between the
+fill and the drain rather than with an atom-K loop; `_chunk_warp_stage` enforces that by handing back `depth=1`, so a
+deeper spelling never reaches the fork. Its key extent may be SYMBOLIC, which every other staged operand refuses: a
+K-major value rows its slab by key and runs its copy chunks along the head dim, so the extent enters neither the chunk
+width nor the gmem row stride and the last chunk simply overhangs. Both ends of that tail are already disciplined —
+the fill clamps the overhanging key row onto the last valid one (a TMA box zero-fills instead) and the drain's
+boundary `FragmentMask` has put those keys at the pivot identity — so a serving-shaped attention kernel, whose key
+extent IS the KV cache length, stages like any other. On an RTX 5090 that is 2.5x on the `attention.hd64.softmax_v`
+golden target (28.7 us gmem-direct against 11.4 us at `d1/smem-tma`). A TRANSPOSED value keeps the static demand: its
+gmem rows stride by the extent. Every staged path runs **one** liveness-scheduled K-loop skeleton, `pipelined_kloop` in
 **`_stage.py`**: the loop body arrives as ordered segments tagged with the slab names each READS, every staged
 operand-group is a `(transport, depth)` pair, and the fill / wait / barrier placement is DERIVED from each group's
 live range (`[first reader, last reader]` over the segments) — wait before the first reader, a CTA barrier past the
@@ -395,10 +406,11 @@ an atom tier of its own instead, `_atom._FlashOps`.
 
 The tier folds the RECIPE's patterns per chunk, not the stored lift — that lift is the SINGLETON's contribution
 (`(score, 1, value)` for softmax), which is the right thing for a serial step and says nothing about a chunk. The
-chunk is the `TILE` atom's own K width; every operand is read gmem-direct, so this site has no `STAGE` choice. Per
-chunk it emits the score, reduces it per row into the chunk's pivot, instantiates each channel's `pattern` against
-that pivot, folds a channel that is no product per row and the bilinear one on tensor cores, and merges the chunk's
-partial through the recipe's stable ⊕ (`Fold.merge`) once per chunk.
+chunk is `TILE`'s own K width, which is also what the stage resolver derives `bk_elems` as — one number, two
+readers, so a `STAGE` at this site names the transport and never a second block. Per chunk it emits the score,
+reduces it per row into the chunk's pivot, instantiates each channel's `pattern` against that pivot, folds a channel
+that is no product per row and the bilinear one on tensor cores, and merges the chunk's partial through the recipe's
+stable ⊕ (`Fold.merge`) once per chunk.
 
 Three things make it small. The SCORE is the nested contraction the tree already carries as a site of its own, and
 the fragment seam already ties the two together — the score's N tile must equal the consumer's chunk, one warp column
@@ -412,6 +424,15 @@ shuffle geometry.
 
 A projection that reads no per-row carrier state is the ordinary sink's (a placement cut materializes the
 denominator, and the tail is then a per-cell chain like any other).
+
+The score's own PREFIX — the carrier's lift cut to its score role — is where an SDPA mask arrives, and it takes two
+readings the tier would otherwise refuse. Its LEAVES are read once ahead of the chunk loop, so an operand that feeds
+one needs no gmem address at all: a causal mask's fill / zero constants are a computed pair, and only the pivot source
+and the streamed value are ever asked for a slab. And a `Select` on the score fragment's OWN coordinates — the row the
+carrier folds and the chunk it folds over — is per ELEMENT, not cell-uniform, so `_residence` lands it as a
+a `FragmentMask` under the same coordinate substitution the boundary mask performs. Without those two a
+masked carrier fell to the scalar tier whole, which is what `attention.hd256.dynM.pv` on the RTX 4090 recorded and
+then stopped decoding.
 
 ### What may not come back
 

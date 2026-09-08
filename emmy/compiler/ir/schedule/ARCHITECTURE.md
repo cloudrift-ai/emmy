@@ -102,11 +102,32 @@ from being offered a row its emission would have to ignore. The chunk is the con
 staging slab, and must contain a complete logical C fragment so its score can repack into the paired contraction's A
 operand. Coordinate masks remain eligible only when their complementary branches form an additive cell mask.
 
+The tier's other refusals (`_chunk_refusal`) are the same kind of statement, and two of them are about the score's own
+PREFIX — the carrier's lift cut to its score role, which is where an SDPA mask lands. Only what reaches a fragment
+loader needs a gmem address: whatever supplies the pivot, and the streamed value. The prefix's remaining leaves are
+read once ahead of the chunk loop, so a mask's fill / zero constants may be a computed pair with no slab at all, and
+its statements may include a `Select` on the score fragment's OWN coordinates, which the emitter evaluates per element.
+Both were blanket refusals, and either one sent a masked attention target to the scalar tier whole.
+
+`TileOp.stage_edges` offers a transport at every operand of every contracting site, a chunked carrier's included —
+which tier then puts which operand on a slab is the tier's own business. The chunked site used to be excluded on the
+reading that it "takes its chunk off the `TILE`, so a transport spelling there would decide nothing"; a `Stage` never
+spelled that chunk (the resolver derives `bk_elems` from `Tile.bk`), so what the exclusion decided was that
+attention's value channel reads gmem-direct.
+
 A pin is a restriction on those projected domains, never a source of choices, so it narrows what a site may select and
 cannot manufacture a value the projection withheld. A value scoped to a site that does not offer it empties that
 site's restriction and the kernel enumerates no row — the loud direction. A bare family pin is applicable at a site
 only when the value already belongs to that site's projected values, which is what lets one ambient pin sweep a whole
 model; on a site that cannot carry it, it is silently inapplicable rather than refused.
+
+A bare pin on a kernel that spells its family per site is a DISJUNCTION over those sites: one carries the value and
+every other is OFF. That is the reading `unreproducible_pin_flag` and `evidence_row_vouches` already give a bare key,
+so a row measured under a bare pin reads back the same way it was pinned. The per-site restriction therefore leaves
+the empty spelling open wherever a bare pin could apply, and the completed schedule is asked which site carried it —
+the one place in the enumeration where a pin is decided across sites rather than at one. Reading it as a conjunction
+instead makes it unsatisfiable on exactly the kernels that need it most: attention spells `TILE` at its score
+contraction and at its chunked value channel, and no schedule carries one mma tile at both.
 
 `ClassicScheduleCodec` is the concrete strict wire boundary. Its public encode and decode operations validate through
 one `ClassicScheduleContext`; private syntax-only parsing and encoding let graph reconstruction attach materialization

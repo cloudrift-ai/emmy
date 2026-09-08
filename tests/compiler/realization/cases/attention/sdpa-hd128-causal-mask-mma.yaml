@@ -1,0 +1,64 @@
+# A CAUSAL head-dim-128 SDPA folded on the tensor cores. SDPA's mask traces as a coordinate `Select` over the
+# query row and the key column, added to the score inside the twisted carrier's own prefix, and the chunk tier
+# refused the whole target over it twice: the mask's fill / zero constants are a computed operand with no gmem
+# address, and the `Select` itself was no straight-line statement. So every masked attention target fell to the
+# scalar tier — `attention.hd256.dynM.pv` on the RTX 4090 golden is the recorded row that stopped decoding.
+#
+# The prefix's leaves are read ONCE ahead of the chunk loop, so they need no slab; the `Select` is per element and
+# lands at fragment residence as a `FragmentMask`, the same coordinate substitution the boundary mask
+# already performs.
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [x0, x1, x2]
+  outputs: [scaled_dot_product_attention]
+  nodes:
+  - id: scaled_dot_product_attention_c3
+    op: constant
+    attrs:
+      name: scaled_dot_product_attention_c3
+      value: 0.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[scaled_dot_product_attention_c3, f16, [1]]]
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 8, 512, 128]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [1, 8, 512, 128]]]
+  - id: x2
+    op: input
+    outputs: [[x2, f16, [1, 8, 512, 128]]]
+  - id: scaled_dot_product_attention
+    op: torch.sdpa
+    attrs: {is_causal: true, sliding_window: null, scale: null}
+    inputs: [x0, x1, x2]
+    outputs: [[scaled_dot_product_attention, f16, [1, 8, 512, 128]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - scaled_dot_product_attention
+  realizations:
+  - name: k_sdpa_deb5ea.d6f7283119fe
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x1
+      TILE@map.1/twist: mma_m16n8k16_f16_f32/f1x1
+      TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x2
+      REDUCE@map.1/twist: ''
+      REDUCE@map.1/twist.1/inner: ''
+      STAGE@map.1/twist: ''
+      STAGE@map.1/twist.1/inner: ''
+      LOOPIFY: '0'
+      RASTER: ''
+    identity: 909a3ae21b91fd2b1ff79aa2d864126659f6825bbd9fd675ce4dd9a6b8210a9d

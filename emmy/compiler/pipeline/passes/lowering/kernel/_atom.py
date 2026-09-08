@@ -588,6 +588,7 @@ def _slab_operands(
     elems: tuple = (None, None),
     b_trans: bool = False,
     pads: tuple[int, int] = (0, 0),
+    roles: tuple[int, ...] = (0, 1),
 ):
     """The staged ``(A, B)`` :class:`Operand` pair — the one operand-geometry factory both tiers build,
     looped over the two operands. A is ``(tile_m × bk)`` indexed by the M tile axis (the slab ROW); B is
@@ -602,9 +603,15 @@ def _slab_operands(
     transport-level dtype) — a mixed-dtype scalar contraction (fp32 A × fp16 B) must size each slab
     and fill by its OWN element width. ``pads`` are the per-operand slab row pads in elements
     (:data:`~emmy.compiler.ir.address.BYTE_SLAB_PAD` on a
-    cp.async-staged byte slab; 0 everywhere else)."""
+    cp.async-staged byte slab; 0 everywhere else).
+
+    ``roles`` selects which operands to build (default both). A tier that stages ONE of them — the
+    chunk tier, whose score never leaves registers — passes ``(1,)`` and leaves the other's entries
+    unread, so the geometry stays in this one factory instead of being written twice."""
     ops: list[Operand] = []
     for i, (tag, is_row) in enumerate((("a", True), ("b", b_trans))):
+        if i not in roles:
+            continue
         tile, tile_base, sibling = mn[i], base[i], mn[1 - i]
         shape = (tile.tile, bk_elems) if is_row else (bk_elems, tile.tile)
         elem = elems[i]
@@ -1094,6 +1101,19 @@ def _block_scaled_operands(
     return (a_bits, *b_bits), copies, fills
 
 
+def _chunk_stream(k_axis: Axis, bk: int):
+    """The staged K stream as the loop skeleton takes it — ``(extent, chunk count)``. A static
+    extent unrolls a literal count; a SYMBOLIC one hands the skeleton its ``Dim`` and the runtime
+    ``ceil(K / bk)``, and the last chunk then overhangs. Every staged path answers that overhang
+    the same way — the fill masks its tail to the fold identity (:func:`_k_masked`) or clamps onto
+    the last valid row, so the drain still reads whole chunks."""
+    if k_axis.extent.is_static:
+        static = k_axis.extent.as_static()
+        return static, static // bk
+    extent = k_axis.extent
+    return extent, Dim(BinaryExpr("/", BinaryExpr("+", extent.expr, Literal(bk - 1, "int")), Literal(bk, "int")))
+
+
 def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
     """The **one** STAGED K-loop driver, atom-agnostic — build the ``(A, B)`` operand pair, the
     :class:`Transport` (a cp.async prefetch ring or the TMA box-copy producer) and run the one
@@ -1108,12 +1128,8 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
     the store guard."""
     c, stage, tile = ops.c, ops.stage, ops.tile
     k_axis = ops.k_axis
-    # The chunk stream. A static K unrolls a literal chunk count; a SYMBOLIC one hands the skeleton
-    # its ``Dim`` and the runtime ``ceil(K / bk)`` — the fill masks the last chunk's tail to the
-    # fold identity (:func:`_k_masked`), so the drain still reads whole chunks.
-    bk, static_k = stage.bk_elems, k_axis.extent.is_static
-    K = k_axis.extent.as_static() if static_k else k_axis.extent
-    n_chunks = K // bk if static_k else Dim(BinaryExpr("/", BinaryExpr("+", K.expr, Literal(bk - 1, "int")), Literal(bk, "int")))
+    bk = stage.bk_elems
+    K, n_chunks = _chunk_stream(k_axis, bk)
     elem = ops.slab_elem()
     cta = _cta(mn, tile.atom.lanes, tile.launch_threads)
     finalize: list[Stmt] = []
@@ -2146,6 +2162,17 @@ def _residence(
 
 
 @dataclass(frozen=True)
+class _ValueSlab:
+    """The chunk tier's staged value operand, as the drain reads it: the smem buffer, its row
+    stride, the swizzle its fill wrote with, and whether the slab is N-major."""
+
+    slab: str
+    ldm: int
+    swizzle: str
+    trans: bool
+    transport: object
+
+
 class _FlashOps(_MmaOps):
     """The TWISTED carrier folded one scheduled CHUNK at a time — attention's tensor-core form.
 
@@ -2166,8 +2193,11 @@ class _FlashOps(_MmaOps):
     - the chunk's partial merges through the recipe's stable ⊕ (:meth:`Fold.merge`), applied once
       per chunk rather than once per element.
 
-    Every operand reads gmem-direct through the ordinary fragment loaders. A staged operand slab is
-    a later transport choice, not a shape this tier depends on.
+    The streamed value reads from a shared-memory slab when the row spells a transport, and
+    gmem-direct otherwise; every other operand reads gmem-direct through the ordinary fragment
+    loaders. Staging is a transport choice, not a shape this tier depends on — which is why the
+    chunk loop is the same body either way, with the staged form's loop built by the shared
+    fill/drain skeleton (:meth:`_value_slab`, :meth:`_value_read`).
     """
 
     # ---- what the recipe says, in this term's names ------------------------------------------ #
@@ -2230,8 +2260,8 @@ class _FlashOps(_MmaOps):
         m, n = mn
         atom = self.tile.atom
         layout = frag_layout(atom.fragment_layout)
-        # The chunk is the TILE's own K width. This tier reads every operand gmem-direct, so it
-        # takes no transport from ``STAGE`` and the site spells none.
+        # The chunk is the TILE's own K width, which is also what the resolver derives ``bk_elems``
+        # as — so a ``STAGE`` at this site names the transport and adds no second spelling of it.
         bk = atom.atom_k * self.tile.bk
         cols, steps = bk // atom.atom_n, bk // atom.atom_k
         key = self.k_axis
@@ -2348,13 +2378,72 @@ class _FlashOps(_MmaOps):
                             layout=layout,
                         )
                     )
-        body += self._expectation(offset, mn, base, weights, steps, bound)
+        value = self._value_slab(mn, bk)
+        body += self._expectation(offset, mn, base, weights, steps, bound, value=value)
         body += self._merge(mn, pivots, partials)
         # ``seed=False``: the carrier is declared once outside this loop at the seeds the TERM names
         # — the pivot's is not ``maximum``'s neutral element — so the loop must not re-seed it.
-        return pre, [
-            StridedLoop(axis=chunk, start=Literal(0, "int"), step=Literal(bk, "int"), body=Body(tuple(body)), unroll=False, seed=False)
-        ]
+        if value is None:
+            return pre, [
+                StridedLoop(axis=chunk, start=Literal(0, "int"), step=Literal(bk, "int"), body=Body(tuple(body)), unroll=False, seed=False)
+            ]
+        # The staged form is the same body under the shared fill→drain skeleton, with the chunk loop
+        # built by it: one operand group, one segment, and ``k0`` keeping this tier's own axis name
+        # so everything the body reads off ``base`` still resolves. The resolver holds the ring at
+        # one slot (``_chunk_warp_stage``), so the drain reads the slab a fill just wrote and the
+        # slot expression never varies.
+        assert self.stage.depth == 1, "the chunk tier's staged ring is single-buffer"
+        # A RAGGED key extent stages too (``_chunk_warp_stage`` states when): the last chunk
+        # overhangs, its value rows read the last valid key, and the boundary ``FragmentMask``
+        # above has already put those keys at the pivot identity — so they weigh exactly zero and
+        # the duplicates fold to nothing, the same discipline the gmem-direct arm carries.
+        k_extent, n_chunks = _chunk_stream(key, bk)
+        decls, region = staged_kloop(
+            transport=value.transport,
+            drain=lambda _slot: body,
+            depth=1,
+            bk_elems=bk,
+            n_chunks=n_chunks,
+            k_extent=k_extent,
+            k0=chunk.name,
+            seed=False,
+        )
+        return [*pre, *decls], region
+
+    def _value_slab(self, mn, bk: int):
+        """The streamed value's staged slab and its transport, or ``None`` when this row reads it
+        gmem-direct.
+
+        The carrier's own second operand is the only one this tier stages: its score is either a
+        nested contraction whose C fragments repack in registers, or a stored tile gathered at the
+        fragment lane map, and a copy transport can carry neither. So the group is one slab, built
+        by the same :func:`_slab_operands` geometry every other tier's B takes."""
+        if self.stage is None:
+            return None
+        elem = self.tile.atom.operand_dtype("b")
+        load = self.c.operands[1].as_slab().load
+        trans = self.c.as_contraction().b_trans
+        swizzle = self.slab_swizzles(mn, elem.nbytes)[1]
+        (operand,) = _slab_operands(
+            index_srcs=(None, load.index),
+            bufs=(None, load.input),
+            mn=mn,
+            k_axis=self.k_axis,
+            bk_elems=bk,
+            base=_tile_base(mn),
+            swizzles=("NONE", swizzle),
+            elems=(None, elem),
+            b_trans=trans,
+            roles=(1,),
+        )
+        common = dict(
+            operands=(operand,),
+            slab_dtype=cuda_name(elem),
+            elem_bytes=elem.nbytes,
+            cta=_cta(mn, self.tile.atom.lanes, self.tile.launch_threads),
+        )
+        transport = TmaTransport(**common) if self.stage.transport == "smem-tma" else CpAsyncTransport(**common)
+        return _ValueSlab(slab=operand.slab, ldm=(bk if trans else mn[1].tile), swizzle=swizzle, trans=trans, transport=transport)
 
     def _gathered_score(self, offset, mn, base, cols, bound) -> list[Stmt]:
         """The chunk's score, READ — the carrier's A edge is already the stored tile (softmax@V,
@@ -2451,10 +2540,15 @@ class _FlashOps(_MmaOps):
             ),
         ]
 
-    def _expectation(self, offset, mn, base, weights, steps, bound) -> list[Stmt]:
+    def _expectation(self, offset, mn, base, weights, steps, bound, value=None) -> list[Stmt]:
         """The bilinear channel's product: the weight repacks into an A operand IN REGISTERS and
         ``mma.sync``\\ s against the streamed operand, into the chunk's own accumulator so the merge
-        can rescale both sides of the ⊕."""
+        can rescale both sides of the ⊕.
+
+        ``value`` is the streamed operand's staged slab (:meth:`_value_slab`) or ``None`` for the
+        gmem-direct read. Staged, the coordinates become slab-local — the chunk's own K step and the
+        within-tile N coord — and the boundary work moves to the fill, which is why the caller
+        asserts a chunk-divisible extent there."""
         m, n = mn
         atom = self.tile.atom
         v_load = self.c.operands[1].as_slab().load
@@ -2483,20 +2577,7 @@ class _FlashOps(_MmaOps):
                     for i in range(m.reg)
                 ]
             row = BinaryExpr("+", base, Literal(t * atom.atom_k, "int"))
-            out += [
-                LdmatrixLoad(
-                    frag=self.frag(f"_b{j}_{t}"),
-                    src_buffer=v_load.input,
-                    src_index=tuple(Sigma({self.k_axis.name: row, n.axis.name: offset[1].base(j)}).apply(e) for e in v_load.index),
-                    role="b",
-                    staged=False,
-                    b_trans=self.c.as_contraction().b_trans,
-                    gmem_guard=_guard(n, offset[1].base(j)),
-                    k_zero=None if bound is None else (row, bound),
-                    fragment_layout=atom.fragment_layout,
-                )
-                for j in range(n.reg)
-            ]
+            out += [self._value_read(value, n, offset, j, t, v_load, row, bound) for j in range(n.reg)]
             out += [
                 MmaSyncPtx(
                     c_frag=self.frag(f"_p{i}_{j}"),
@@ -2510,6 +2591,40 @@ class _FlashOps(_MmaOps):
                 for j in range(n.reg)
             ]
         return out
+
+    def _value_read(self, value, n, offset, j: int, t: int, v_load, row, bound) -> Stmt:
+        """One fragment of the streamed value at chunk step ``t``, column ``j`` — from its staged
+        slab when the row spells a transport, else straight from gmem.
+
+        The slab read is the drain :func:`_staged_inner_atom_loop` already builds for a B operand:
+        the K coordinate is the chunk's own step, the other is the within-tile column this warp
+        owns, and a slab written N-major swaps the two and takes the plain ldmatrix."""
+        atom = self.tile.atom
+        if value is None:
+            return LdmatrixLoad(
+                frag=self.frag(f"_b{j}_{t}"),
+                src_buffer=v_load.input,
+                src_index=tuple(Sigma({self.k_axis.name: row, n.axis.name: offset[1].base(j)}).apply(e) for e in v_load.index),
+                role="b",
+                staged=False,
+                b_trans=self.c.as_contraction().b_trans,
+                gmem_guard=_guard(n, offset[1].base(j)),
+                k_zero=None if bound is None else (row, bound),
+                fragment_layout=atom.fragment_layout,
+            )
+        within = BinaryExpr("+", BinaryExpr("*", Var(n.unit), Literal(n.reg * atom.atom_n, "int")), Literal(j * atom.atom_n, "int"))
+        step = Literal(t * atom.atom_k, "int")
+        return LdmatrixLoad(
+            frag=self.frag(f"_b{j}_{t}"),
+            src_buffer=value.slab,
+            src_index=(within, step) if value.trans else (step, within),
+            role="b",
+            staged=True,
+            ldm=value.ldm,
+            swizzle=value.swizzle,
+            b_trans=value.trans,
+            fragment_layout=atom.fragment_layout,
+        )
 
     def _merge(self, mn, pivots, partials) -> list[Stmt]:
         """The recipe's own stable ⊕ (:meth:`Fold.merge`), applied once per chunk at each state's

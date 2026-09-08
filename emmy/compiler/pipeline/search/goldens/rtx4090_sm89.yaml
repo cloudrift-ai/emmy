@@ -1677,13 +1677,13 @@ configs:
       FAST_MATH: false
     knobs:
       WORK: w2x4
-      TILE: mma_m16n8k16_f16_f32/f1x4/k4
-      REDUCE: g2a
-      STAGE: d1/smem
+      TILE: mma_m16n8k16_f16_f32/f1x4/k8
+      REDUCE: ''
+      STAGE: d1/smem-async
       RASTER: ''
     measurements:
-      emmy_us: 13.9
-      reference_us: 24.1
+      emmy_us: 17.32
+      reference_us: 19.07
       reference_backend: emmy-greedy
   - name: attention.hd128.pv
     bindings: {}
@@ -1691,14 +1691,14 @@ configs:
       FAST_MATH: true
     knobs:
       WORK: w2x4
-      TILE: mma_m16n8k16_f16_f16/f1x4/k4
-      REDUCE: g2a
-      STAGE: d1/smem
+      TILE: mma_m16n8k16_f16_f32/f1x4/k8
+      REDUCE: ''
+      STAGE: d1/smem-async
       RASTER: gm8
     measurements:
-      emmy_us: 13.7
-      reference_us: 24.2
-      reference_backend: emmy-greedy
+      emmy_us: 17.21
+      reference_us: 17.04
+      reference_backend: same-input-greedy
 - program: 39
   target:
     loop: 2
@@ -1743,6 +1743,7 @@ configs:
       WORK: w1x16
       TILE: mma_m16n8k16_f16_f32/f2x1/k4
       REDUCE: ''
+      STAGE: ''
       RASTER: ''
     measurements:
       emmy_us: 39.23
@@ -1754,14 +1755,14 @@ configs:
       FAST_MATH: true
     knobs:
       WORK: w1x16
-      TILE: mma_m16n8k16_f16_f16/f2x1/k4
+      TILE: mma_m16n8k16_f16_f32/f2x1/k4
       REDUCE: ''
-      STAGE: d1/smem
+      STAGE: ''
       RASTER: ''
     measurements:
-      emmy_us: 9.52
-      reference_us: 127.49
-      reference_backend: emmy-greedy
+      emmy_us: 39.4
+      reference_us: 38.7
+      reference_backend: same-input-greedy
 - program: 40
   target:
     loop: 4
@@ -1806,11 +1807,11 @@ configs:
       WORK: w4x2
       TILE: mma_m16n8k16_f16_f32/f1x8/k8
       REDUCE: ''
-      STAGE: d1/smem
+      STAGE: d1/smem-async
       RASTER: ''
     measurements:
-      emmy_us: 34.5
-      reference_us: 69.63
+      emmy_us: 44.17
+      reference_us: 48.54
       reference_backend: emmy-greedy
   - name: attention.hd256.dynM.pv
     bindings: {}
@@ -1820,12 +1821,12 @@ configs:
       WORK: w4x2
       TILE: mma_m16n8k16_f16_f32/f1x8/k8
       REDUCE: ''
-      STAGE: d1/smem
+      STAGE: d1/smem-async
       RASTER: ''
     measurements:
-      emmy_us: 34.32
-      reference_us: 69.34
-      reference_backend: emmy-greedy
+      emmy_us: 44.17
+      reference_us: 44.36
+      reference_backend: same-input-greedy
 - program: 41
   target:
     loop: 5
@@ -1869,27 +1870,27 @@ configs:
     knobs:
       WORK: w4x1
       TILE: mma_m16n8k16_f16_f32/f1x8/k8
-      REDUCE: g4k
-      STAGE: d1/smem
+      REDUCE: ''
+      STAGE: d1/smem-async
       RASTER: ''
     measurements:
-      emmy_us: 20.7
-      reference_us: 25.8
-      reference_backend: emmy-greedy
+      emmy_us: 11.78
+      reference_us: 11.77
+      reference_backend: same-input-greedy
   - name: attention.hd64.pv
     bindings: {}
     pins:
       FAST_MATH: true
     knobs:
       WORK: w4x1
-      TILE: mma_m16n8k16_f16_f16/f1x8/k8
-      REDUCE: g4k
-      STAGE: d1/smem
+      TILE: mma_m16n8k16_f16_f32/f1x8/k8
+      REDUCE: ''
+      STAGE: d1/smem-async
       RASTER: ''
     measurements:
-      emmy_us: 20.3
-      reference_us: 25.9
-      reference_backend: emmy-greedy
+      emmy_us: 11.78
+      reference_us: 11.77
+      reference_backend: same-input-greedy
 - program: 42
   target:
     loop: 7
@@ -1920,10 +1921,11 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f32/f1x4/k8
       REDUCE: ''
+      STAGE: d1/smem-async
       RASTER: ''
     measurements:
-      emmy_us: 15.22
-      reference_us: 15.01
+      emmy_us: 10.2
+      reference_us: 10.24
       reference_backend: same-input-greedy
   - name: attention.hd64.dynM.pv
     bindings: {}
@@ -1931,14 +1933,14 @@ configs:
       FAST_MATH: true
     knobs:
       WORK: w2x2
-      TILE: mma_m16n8k16_f16_f16/f1x4/k8
+      TILE: mma_m16n8k16_f16_f32/f1x4/k8
       REDUCE: ''
-      STAGE: d1/smem
+      STAGE: d1/smem-async
       RASTER: ''
     measurements:
-      emmy_us: 13.26
-      reference_us: 102.6
-      reference_backend: emmy-greedy
+      emmy_us: 10.39
+      reference_us: 10.22
+      reference_backend: same-input-greedy
 loops:
 - inputs: [x0, x1]
   outputs: [scaled_dot_product_attention_scaled]

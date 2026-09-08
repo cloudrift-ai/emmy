@@ -271,6 +271,8 @@ def _resolve_stage(
 ) -> ResolvedStage | None:
     from . import staging  # noqa: PLC0415
 
+    if node.chunked() and not plan.is_warp:
+        return None  # the chunked carrier's per-cell fallback reads no slab (``_edge_domain``)
     packed = tile_op.packed_reading(node)
     packed_copy = packed[0] is not None and choice.transport in ("smem-async", "smem-tma")
     if _needs_fill(tile_op, node, plan) and not packed_copy:
@@ -1205,6 +1207,8 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         self._require_kernel_prefix(assignment)
         if self._unsupported_global:
             self._refuse("global schedule pin is unsupported by every applicable site")
+        if self._pins is not None and (why := self._global_pin_refusal(assignment)):
+            self._refuse(why)
         return replace(self, _assignment=assignment)
 
     def _require_kernel_prefix(self, schedule: ClassicAssignment) -> None:
@@ -1280,6 +1284,19 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         return any(key.partition("@")[0] == family and value in self.values(key) for key in self.keys())
 
     def _allows_value(self, family: str, key: str, value: str) -> bool:
+        """Whether one site's value satisfies the pins that reach it.
+
+        A ``FAMILY@route`` pin decides its own site. A BARE pin of a family this kernel spells per
+        site names ONE of them — some site carries the value and every other is OFF, the reading
+        ``unreproducible_pin_flag`` and ``evidence_row_vouches`` already give a bare key — so it
+        leaves the empty spelling open at every site, and :meth:`_global_pin_refusal` asks the
+        completed schedule which site carried it. Binding it at every site that can spell it reads
+        the pin as a conjunction instead, which two sites of one family rarely satisfy together:
+        attention spells TILE at its score contraction and at its chunked value channel, and no
+        schedule carries one mma tile at both.
+        """
+        if key != family and any(pin_key == family for pin_key, _ in self._pins[family]):
+            return not value or all(pin == value for pin in self._applicable_pins(family, key))
         return all(pin == value for pin in self._applicable_pins(family, key))
 
     def _applicable_pins(self, family: str, key: str) -> tuple[str, ...]:
@@ -1289,6 +1306,37 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         if exact:
             return exact
         return tuple(pin for pin_key, pin in self._pins[family] if pin_key == family and pin in self.values(key))
+
+    def _global_pin_refusal(self, schedule: ClassicAssignment) -> str | None:
+        """Why a completed schedule leaves a bare pin unrealized — the half of the bare reading
+        :meth:`_allows_value` cannot decide one site at a time.
+
+        Only an ambiguous family is asked: where the codec spells one key the pin binds there, and
+        the per-site restriction has already decided it.
+        """
+        assert self._pins is not None
+        if not any(pin_key == family and pin for family, pins in self._pins.items() for pin_key, pin in pins):
+            return None
+        spelled = self._spelled_sites(schedule)
+        for family, pins in self._pins.items():
+            sites = {key: value for key, value in spelled if key.partition("@")[0] == family}
+            if len(sites) < 2:
+                continue
+            for pin_key, pin in pins:
+                if pin_key == family and pin and pin not in sites.values():
+                    return f"bare {family} pin {pin} is realized by no site of this kernel"
+        return None
+
+    def _spelled_sites(self, schedule: ClassicAssignment) -> tuple[tuple[str, str], ...]:
+        """One complete schedule's per-site values, keyed the way the codec spells them."""
+        pairs = [(self.node_key("TILE", site), schedule.nodes[site].tile.spell()) for site in self.tile_op.family_sites["TILE"]]
+        pairs += [
+            (self.node_key("REDUCE", site), node.reduce.spell())
+            for site in self.tile_op.family_sites["REDUCE"]
+            if isinstance(node := schedule.nodes[site], ReductionSchedule)
+        ]
+        pairs += [(self.stage_key(edge), schedule.edges[edge].stage.spell()) for edge in self.tile_op.stage_edges]
+        return tuple(dict.fromkeys(pairs))
 
     def _kernel_restriction_allows(self, kernel: KernelSchedule) -> bool:
         """Whether the kernel support can still satisfy the immutable restriction ``c``."""
