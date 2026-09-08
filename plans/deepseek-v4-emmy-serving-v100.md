@@ -237,13 +237,34 @@ gaps stand between here and a boot that serves, both follow-ups to #692:
    next measurement, before any route for the other twins. The route has NO correctness verdict yet: `--strict`
    failed on non-finite values in the random-input replay (the round-one property above) and this twin has no
    eager reference, so a finite-input check is owed with it.
+   **Measured (2026-09-08, host round four): 0.245 s per `post4096` forward** — 19 kernels, 8.6× off round
+   three and 95× off the 23.24 s of 2026-09-02 — and it is the UNPINNED strict-evidence election of what the
+   working golden deploys, stable byte-for-byte after every other twin's rows were recorded beside it. The path
+   there: six more seams (the twist and exp contractions, the RMS statistic, both A cones, the mixed-stream
+   store) at 2.68 s, a `REDUCE=` pin turning the A-operand contraction per-cell at 0.465 s, and one shared twist
+   A-cone seam at 0.319 s, with the file's own unpinned election beating each pinned route. **(g)** 75 % of the
+   remaining time is one contraction, the gate/up projection at 0.18 s, and it is NOT a tile site: its
+   four-operand two-channel fold carries two A cones that are unmerged duplicates differing only in product
+   association, so no pin reaches an mma — a compiler gap (reproduced GPU-free on the host), and the same
+   duplication drives every mixed-stream recompute seen since round one. **(h)** the correctness verdict is not
+   obtainable with today's CLI: the twin draws its eps and count constants as random inputs, so every replay is
+   non-finite, and the same-input reference is the pinned route itself; a finite-input replay per twin and an
+   independent reference (the loop-IR CPU runner, unexposed) on `run --golden` are the missing flags. **(i)** all
+   151 serving-width realizations of the twins file ran unpinned and 123 carry measured routes (expert 4/4, pre
+   2/4 with `pre4096` on a three-seam pin, post 118/144); the 28 missing are the second large `post` kernel
+   family at m1 / m32 / dynamic (hangs unpinned — the `post4096` pin treatment), five small `post` reduces at m1
+   (two refused by nvcc on a same-scope accumulator redeclaration, reproduced GPU-free; three retry-arm timeouts)
+   and 18 rows lost to concurrent `--record-greedy` writers of one file. The `pre` twin's unpinned election is
+   the round-two recomputation class at every width, and its contractions also refuse an mma. Routing rows are
+   now priced at the launches their decision produced (#741), which is what let a measured split rank against
+   the unsplit receipt.
 
 **Consequence for the stages below.** Gate (c) passed at `ab1ad4592` and still does not reproduce: a boot now
-compiles end to end and the recorded route is a measured 2.10 s per `post4096` prefill forward (no longer a
-watchdog unknown) — the boot's roofline audit runs each program 4×, so serving needs roughly two orders of
-magnitude off the two naive kernels first, and a strict boot needs a measured route for every serving twin, not
-one. Stage 4 cannot warm or bake until that lands and gate (c) is re-run on the host, and the golden re-record
-should follow it, not precede it.
+compiles end to end and the recorded route is a measured 0.245 s per `post4096` prefill forward (no longer a
+watchdog unknown) — the boot's roofline audit runs each program 4×, so serving needs the gate/up contraction
+tiled first, and a strict boot needs a measured route for every serving twin: 28 of 151 realizations still lack
+one, so `emmy serve --strict-evidence` would raise at their first fork. Stage 4 cannot warm or bake until that
+lands and gate (c) is re-run on the host, and the golden re-record should follow it, not precede it.
 
 ## Stage 1 — loader lane: read the published checkpoint (CPU-testable) — **DONE (#651)**
 
@@ -453,13 +474,15 @@ shows expert weight streaming dominates and the fused-unpack GEMM can plausibly 
 Stage −1: DONE (~2 h). Stage 0 round one: DONE (fixed upstream by #602). Stage 1: DONE (#651). Stage 2: DONE (#656).
 Stage 3 in-repo: DONE (#662); gate (c) passed once at `ab1ad4592`, gate (d)'s token-ID half with it.
 
-**Stage 0 round three remains the critical path — now as kernel speed, not election.** Partitioning (#693/#694),
-the compiling composed cut (#700), the serial-work stamp (#702) and the composed route rows (#739) all landed,
-and a recorded route is measured: 2.10 s per `post4096` forward, 93 % of it in two naive kernels. What holds
-everything now: cutting those two on the root's ballot and re-measuring (each complete bench writes the route
-into the working golden; the strict compile from the file is the check), a finite-input correctness verdict for
-the route, then a measured route per serving twin — with the harness gaps (the seed's automatic pin re-benching
-a failed election, the post-hang recording running unbounded in the parent) as the supporting lane. Then Stage
-4: 2–4 days on-host (re-run gate (c), re-record the golden, warm/bake/verify). Stage 5: 1–2 days.
+**Stage 0 round three remains the critical path — now as one compiler gap, not election.** Partitioning
+(#693/#694), the compiling composed cut (#700), the serial-work stamp (#702), the composed route rows (#739) and
+the route-row pricing (#741) all landed, and the working golden's own strict election measures 0.245 s per
+`post4096` forward, 75 % of it in one contraction the compiler cannot tile (two duplicate A cones on a
+two-channel fold). What holds everything now, in order: make that contraction a tile site (merge the duplicate
+cones), fix the same-scope accumulator redeclaration nvcc refuses at `post` m1, give `run --golden` finite
+inputs and an independent reference for a correctness verdict, stop concurrent recorders losing rows, then pin
+routes for the 28 realizations still without one (the second `post` kernel family at m1 / m32 / dynamic, the
+`pre` twin at m32 / dynamic). Then Stage 4: 2–4 days on-host (re-run gate (c), re-record the golden,
+warm/bake/verify). Stage 5: 1–2 days.
 Adding stage 6 (MXFP4 + tuning) is a further 1–3 weeks. The compiler, not the fork ABI, remains the dominant
 uncertainty.
