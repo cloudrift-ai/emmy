@@ -32,7 +32,7 @@ from emmy.compiler.backend.cuda.dtype import cuda_name
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.address import BYTE_SLAB_PAD
-from emmy.compiler.ir.atom import AtomKind
+from emmy.compiler.ir.atom import AtomKind, wide_accumulate
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, TernaryExpr, Var
@@ -2246,7 +2246,10 @@ class _FlashOps(_MmaOps):
         — the score's tile, the weight, the chunk partial — is declared inside the chunk loop."""
         m, n = self.tile.m, self.tile.n
         bilinear = self._bilinear
-        decls: list[Stmt] = [self._frag(f"_c{i}_{j}", "c") for i in range(m.reg) for j in range(n.reg)]
+        # The carrier accumulates in f32 whatever the expectation's cell does: a reduced cell's
+        # chunk partial is promoted here once per chunk (:meth:`_expectation`), which is the
+        # hybrid's whole point — the mma chain at full rate, the running sum still f32.
+        decls: list[Stmt] = [self._frag(f"_c{i}_{j}", "c", self._score_atom) for i in range(m.reg) for j in range(n.reg)]
         decls += [
             Init(name=name, identity=seed, dtype=F32)
             for index, state, seed in self._carried()
@@ -2256,8 +2259,10 @@ class _FlashOps(_MmaOps):
         ]
         return decls
 
-    def _frag(self, name: str, role: str) -> RegFragment:
-        atom = self.tile.atom
+    def _frag(self, name: str, role: str, atom=None) -> RegFragment:
+        """One register fragment of ``atom`` (the carrier's cell by default — the score passes its
+        own, which differs from the carrier's only in the accumulator)."""
+        atom = self.tile.atom if atom is None else atom
         return RegFragment(
             name=self.frag(name),
             role=role,
@@ -2488,6 +2493,14 @@ class _FlashOps(_MmaOps):
         return _ChunkStreams(value=value, key=key, transport=transport)
 
     @property
+    def _score_atom(self):
+        """The score's mma cell — the carrier's atom at an f32 accumulator
+        (:func:`wide_accumulate`). The chunk's pivot, its denominator and every channel's pattern
+        are f32 registers read off these fragments, so the score does not take the reduced cell
+        even when the expectation does."""
+        return wide_accumulate(self.tile.atom)
+
+    @property
     def _score_k(self) -> Axis:
         """The score's own contraction axis — the head dim its chunk covers in one pass."""
         return next(axis for axis in self.axes if axis.name == self.inner[0].axis)
@@ -2510,14 +2523,14 @@ class _FlashOps(_MmaOps):
         identity by the boundary :class:`FragmentMask` the caller emits, exactly as the contracted
         form's clamped reads are."""
         m, _ = mn
-        atom, load = self.tile.atom, self.c.operands[0].as_slab().load
+        atom, load = self._score_atom, self.c.operands[0].as_slab().load
         row = _wrap(m, Var(FRAG_ROW))
         col = Var(FRAG_COL) if bound is None else BinaryExpr("%", Var(FRAG_COL), bound)
         index = tuple(Sigma({m.axis.name: row, self.k_axis.name: col}).apply(e) for e in load.index)
         out: list[Stmt] = []
         for i in range(m.reg):
             for j in range(cols):
-                out.append(self._frag(f"_s{i}_{j}", "c"))
+                out.append(self._frag(f"_s{i}_{j}", "c", atom))
                 out.append(
                     FragmentBiasAdd(
                         frag=self.frag(f"_s{i}_{j}"),
@@ -2544,13 +2557,13 @@ class _FlashOps(_MmaOps):
         does for the streamed value. The QUERY stays gmem-direct either way: it does not move with
         the chunk, so a slab would be refilled with the same rows every iteration."""
         m, _ = mn
-        atom, score, key = self.tile.atom, self.inner[0], self.k_axis
+        atom, score, key = self._score_atom, self.inner[0], self.k_axis
         inner_k = self._score_k
         b_load = next(edge for edge in score.operands if key.name in edge.free_axes).as_slab().load
         trans = score.axis in b_load.index[-1].free_vars()
         staged, steps = (None if streams is None else streams.key), self._score_steps()
-        decls: list[Stmt] = [self._frag(f"_kb{j}", "b") for j in range(cols)]
-        decls += [self._frag(f"_s{i}_{j}", "c") for i in range(m.reg) for j in range(cols)]
+        decls: list[Stmt] = [self._frag(f"_kb{j}", "b", atom) for j in range(cols)]
+        decls += [self._frag(f"_s{i}_{j}", "c", atom) for i in range(m.reg) for j in range(cols)]
 
         def at_step(t: int | None) -> list[Stmt]:
             """One atom-K step of the score: its key fragments, then a cell per register row."""
@@ -2572,7 +2585,7 @@ class _FlashOps(_MmaOps):
         if steps is None:  # a symbolic score K keeps its loop, and reloads the query inside it
             loop = [self._query_read(offset, m, i, None) for i in range(m.reg)]
             return [
-                *(self._frag(self._query_frag(i, None), "a") for i in range(m.reg)),
+                *(self._frag(self._query_frag(i, None), "a", atom) for i in range(m.reg)),
                 *decls,
                 StridedLoop(
                     axis=inner_k,
@@ -2599,7 +2612,7 @@ class _FlashOps(_MmaOps):
 
     def _query_read(self, offset, m, i: int, t: int | None) -> Stmt:
         """One query fragment of register row ``i`` at score-K step ``t``, read gmem-direct."""
-        atom = self.tile.atom
+        atom = self._score_atom
         a_load = next(edge for edge in self.inner[0].operands if m.axis.name in edge.free_axes).as_slab().load
         k = Var(self._score_k.name) if t is None else Literal(t * atom.atom_k, "int")
         sigma = Sigma({m.axis.name: offset[0].base(i), self._score_k.name: k})
@@ -2628,7 +2641,7 @@ class _FlashOps(_MmaOps):
             stmt
             for i in range(m.reg)
             for t in range(steps)
-            for stmt in (self._frag(self._query_frag(i, t), "a"), self._query_read(offset, m, i, t))
+            for stmt in (self._frag(self._query_frag(i, t), "a", self._score_atom), self._query_read(offset, m, i, t))
         ]
 
     def _key_read(self, key, slot, b_load, base, j: int, bound, trans: bool, k: Expr) -> Stmt:
@@ -2638,7 +2651,7 @@ class _FlashOps(_MmaOps):
         The slab is N-MAJOR to this drain even though the fill wrote it K-major: its rows are the
         chunk's keys, which are the score's N, and its columns the score's K — so the read is the
         plain (no ``.trans``) ldmatrix at the fragment's ``(key row, K step)`` base."""
-        atom = self.tile.atom
+        atom = self._score_atom
         col = BinaryExpr("+", base, Literal(j * atom.atom_n, "int"))
         if key is None:
             sigma = Sigma({self.k_axis.name: col, self._score_k.name: k})
@@ -2676,9 +2689,15 @@ class _FlashOps(_MmaOps):
         atom = self.tile.atom
         staged = None if streams is None else streams.value
         v_load = self.c.operands[1].as_slab().load
+        # The mma's own target. On a REDUCED-accumulate cell that is the packed ``_ph`` fragment,
+        # promoted into the f32 ``_p`` the merge folds once this chunk's mmas are done — the chunk
+        # IS the promote cadence, so the reduced chain never accumulates past one chunk of keys.
+        cell = "_ph" if _f16acc(atom) else "_p"
         out: list[Stmt] = [self._frag(f"_a{i}_{t}", "a") for i in range(m.reg) for t in range(steps)]
         out += [self._frag(f"_b{j}_{t}", "b") for j in range(n.reg) for t in range(steps)]
-        out += [self._frag(f"_p{i}_{j}", "c") for i in range(m.reg) for j in range(n.reg)]
+        out += [self._frag(f"_p{i}_{j}", "c", self._score_atom) for i in range(m.reg) for j in range(n.reg)]
+        if _f16acc(atom):
+            out += [self._frag(f"{cell}{i}_{j}", "c") for i in range(m.reg) for j in range(n.reg)]
         for t in range(steps):
             if atom.fragment_layout == "m8n8k4":
                 out += [
@@ -2704,13 +2723,19 @@ class _FlashOps(_MmaOps):
             out += [self._value_read(staged, slot, n, offset, j, t, v_load, row, bound) for j in range(n.reg)]
             out += [
                 MmaSyncPtx(
-                    c_frag=self.frag(f"_p{i}_{j}"),
+                    c_frag=self.frag(f"{cell}{i}_{j}"),
                     a_frag=self.frag(f"_a{i}_{t}"),
                     b_frag=self.frag(f"_b{j}_{t}"),
                     shape=atom.ptx_shape,
                     ab_dtype=atom.ab_dtype,
                     c_dtype=atom.operand_dtype("c").name,
                 )
+                for i in range(m.reg)
+                for j in range(n.reg)
+            ]
+        if _f16acc(atom):
+            out += [
+                FragmentPromote(dst=self.frag(f"_p{i}_{j}"), src=self.frag(f"{cell}{i}_{j}"))
                 for i in range(m.reg)
                 for j in range(n.reg)
             ]
