@@ -12,48 +12,41 @@ body hard to edit. The ~120-character rule applies to files in the repository, n
 
 ## Abstract
 
-Nothing was checking that the schedules recorded in the hardware goldens still exist. The check was written, but it sat behind a marker the default suite deselects and CI runs only the default suite, so nothing ran it. Turning it on shows two thirds of the recorded rows match nothing the compiler enumerates any more — those cards have been resolving from the prior rather than from their own measurements. The check now asks one test per row instead of one per file, which is fast enough to run every time, names the row that died instead of a count, and gives the dead rows somewhere to be listed so the list can only shrink.
+Two thirds of the rows recorded in the hardware goldens matched nothing the compiler enumerates, so those cards were resolving from the prior instead of from their own measurements. Neither cause was stale data. Most rows left a knob family unspelled where the enumeration spells it at its off value, and the strict comparison reads a missing family as a mismatch. The rest recorded a split across thread blocks, and the check was asking the pieces that split mints to spell a decision their parent made — which no piece can do, and for which the code already had a rule that nothing called. Sixty-nine rows come back, with the measurements they were recorded with.
 
-| File | Rows | Equal no enumerated leaf |
-| --- | --- | --- |
-| rtx4080_sm89 | 9 | 9 |
-| rtx4090_sm89 | 73 | 48 |
-| rtx5090_sm120 | 63 | 38 |
-| rtxpro6000_sm120 | 10 | 10 |
-| **total** | **155** | **105** |
+| Card | Rows | Dead before | Dead now |
+| --- | --- | --- | --- |
+| RTX 4090 | 73 | 48 | 10 |
+| RTX 5090 | 63 | 38 | 8 |
+| RTX PRO 6000 | 10 | 10 | 9 |
+| RTX 4080 | 9 | 9 | 9 |
 
 ---
 
-## Why per row
+## The unspelled off values
 
-Parsing one hardware golden costs 0.05 s. Deciding whether one recorded row still equals an enumerated leaf costs about a second. All of the cost is per row, and one node per file spent it on four workers, so the set took 132 s with two files running. 155 nodes spread over all sixteen: about 25 s cold, 8 s warm.
+42 rows differ from an offered row only by a family they do not spell at all: 38 want `RASTER`, three want `REDUCE`, one wants both `RASTER` and `TILE`. Adding the key is meaning-preserving — an off value is what the row already meant — so the recorded microseconds still describe the schedule they were taken on. The dumper round-trips both files byte for byte, so that commit is 43 inserted lines and nothing else, each key placed where sibling rows already spell it.
 
-That is cheap enough for the default lane, which is where they now run.
+## The split rows
 
-## What it found
+A recorded `REDUCE: g2k` names the kernel-set arm at a split fork. The replay resolves it and mints the pieces, and no piece can stamp the `g<n>` it came from — so comparing the recorded row against a leaf asked a piece to spell its parent's decision. It never could: 27 rows across three cards decoded to nothing for that reason alone.
 
-105 of 155 rows decode to nothing, every one of them for the same reason: the recorded schedule equals no row the enumeration offers today. `main` fails identically, so this branch did not cause it — it is what the marker was hiding. Plain f32 square matmul is among the failures on every card, so whatever moved was not narrow.
+`piece_row` is that rule, already written down — reduce the value to what a piece can still stamp — and the decode simply never called it. It also dropped the key when the whole value was the split, which reads as "free" where an enumerated leaf spells the decided off, so it missed on its own account. Both halves are fixed.
 
-Dating it is separate work, and re-recording needs the four cards.
+**The second half reaches past the test.** `piece_row` also feeds the evidence index, so a split row that measured a card was joining no kernel at all — invisible to the pick that deploys it.
 
-## The registry
+## What is left
 
-`golden_xfails.yaml` sits beside the test and lists those rows as strict expected failures, so the list can only shrink. Closing a row turns its node red until the line is deleted. A line naming a row the file no longer records fails on its own, with a message saying so — that node deliberately carries no expected-failure mark, because marked, its own failure would be the expected one and the dead line would sit there forever. Both directions were exercised.
+36 rows, with a memo at `plans/golden-row-decode-gaps.md`. On the two cards in scope every one is an attention row, in three classes: nine whose kernels no longer offer a staging family at all, where the spelling is settled but the microseconds need re-taking on the card; six whose f16-accumulate atom is not a candidate for the fused attention target, though the minimized corpus case realizes the same schedule under the same pins; and three not yet diagnosed. The 4080 and the PRO 6000 were outside the scope of this change and are untouched.
 
-The realization corpus states the same rule as a filename suffix. Rows are not files, so this is that rule in the only spelling available to it, including the part that matters most: never add a line to make a red row green.
-
-Labels are the row's name, numbered when a file records that name more than once — three of the four files do, for alternate input pins or alternate schedules of one realization.
-
-## What `make test-goldens` covers now
-
-Model goldens alone. They are an order of magnitude more rows and the widest is a multi-megabyte parse, so they keep one case per file behind the marker. Nothing runs them automatically except the nightly onboarding job, on the models it touches. That hole stays open and is worth its own change.
+No row was re-recorded to make it green.
 
 ## Verification
 
-The search tests are 247 passed, 7 skipped, 105 xfailed. `ruff check` and `ruff format --check` pass on the changed test.
+340 passed, 7 skipped, 36 xfailed across the search tests and the lowering guardrail — that covers the golden decode, the evidence index, and the piece-row path both consume. The registry shrank from 105 rows to 36, and every removal is a row the ratchet then demanded pass.
 
-`tests/durations.json` gains 142 entries. Several rows cost more than 5 s on a cold derivation memo, and the staleness gate fails the suite until a test that heavy is in the baseline. They are measured from a cold run and merged, rather than regenerating the file, which would have meant running the whole suite for a change that touches one directory.
+## Line balance
 
-`git diff --stat main -- emmy/` is empty. This is test infrastructure; nothing in the core moved.
+`git diff --stat main -- emmy/` is +55 −5. Forty-three of those lines are recorded rows rather than code. `golden.py` is +12 −5, and its executable half is two lines shorter; the rest is the note explaining why a piece row is what a leaf is compared to.
 
 **Draft.** `make test` has not been run.
