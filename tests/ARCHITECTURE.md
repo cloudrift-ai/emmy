@@ -209,12 +209,13 @@ renamed and deleted tests drop out instead of lingering as ghost slots the bucke
 one xdist loadgroup worker: execution stays serial, while CUDA node IDs keep the canonical ``@cuda`` / ``@cuda-cli``
 suffixes the parallel suite uses for lookup. Point it at the whole suite, never a subset.
 
-Two things keep it honest. `make test` passes `--durations=25`, so every run (CI included) prints its slowest tests and
-a new long pole shows up in the log immediately. And the session-end gate in `conftest.py` fails any run where a test
-took **5 s or more without being in the baseline**, naming the offenders and asking for `make test-durations`. The bar
-sits far above the 0.05 s recording threshold on purpose — CI runners are several times slower than a dev box, and the
-gap guarantees nothing near the threshold can drift across it. It is a session hook rather than a test case because
-only the controller, and only after the last report, has every test's duration; an xdist worker sees just its own slice.
+Two things keep it honest. `make test` passes `--durations=0 --durations-min=1`, so every run (CI included) prints every
+test that takes at least 1 s instead of only a fixed-size tail. And the session-end gate in `conftest.py` fails any run
+where a test took **5 s or more without being in the baseline**, naming the offenders and asking for
+`make test-durations`. Keeping the failure bar above the 0.05 s recording threshold lets the report expose differences
+between a development machine and CI without making worker-specific cold imports gate the run. It is a session hook
+rather than a test case because only the controller, and only after the last report, has every test's duration; an
+xdist worker sees just its own slice.
 
 The `perf` marker gates **suite-wide**, not just `tests/perf/`: the root `tests/conftest.py` hook skips every
 perf-marked item unless `-m perf` was passed, and since the root conftest loads for any `tests/` collection the gate

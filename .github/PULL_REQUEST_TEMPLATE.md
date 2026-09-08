@@ -50,6 +50,10 @@ No row was re-recorded to make it green.
 
 144 passed, 7 skipped, 11 xfailed on the golden decode. The registry shrank by two, and each removal is a row the ratchet then demanded pass.
 
-`git diff --stat main -- emmy/` is +6 −8 — two rows re-measured and their dead staging key dropped. No compiler code changed.
+`make test` passes: 4,388 passed, 1,042 skipped, and 23 xfailed. The default lane now records every test taking at least 1 s in its output, and the CI-only 5.9 s cold-start row that failed the original run is in `tests/durations.json`.
 
-**Draft.** `make test` has not been run.
+`make lint` passes.
+
+`make test-goldens` remains red on seven pre-existing model-golden files: Laguna, OLMoE, Qwen3.5, DeepSeek V4, `gemma-4-12B`, and the two `gemma-4-12B-it` card files. This PR changes no model golden or compiler code.
+
+`git diff --stat main -- emmy/` is +6 −8 — two rows re-measured and their dead staging key dropped. No compiler code changed.
