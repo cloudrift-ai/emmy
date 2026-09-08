@@ -1737,6 +1737,88 @@ configs:
       emmy_us: 12.17
       reference_us: 12.17
       reference_backend: same-input-greedy
+- program: 32
+  target:
+    origins:
+    - scaled_dot_product_attention
+  realizations:
+  - name: attention.hd128.fused
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      TILE@map.1/twist: mma_m16n8k16_f16_f16/f1x16/k4
+      TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x8/k4
+      REDUCE@map.1/twist: ''
+      REDUCE@map.1/twist.1/inner: ''
+      STAGE@map.1/twist: d2/smem-tma
+      STAGE@map.1/twist.1/inner: ''
+      WORK: w2x1
+      RASTER: ''
+    identity: 3ec795cedf21b59dce873ccc52ebbacf6519878078959430f44405a131ffc106
+    measurements:
+      emmy_us: 15.3
+      reference_us: 15.26
+      reference_backend: same-input-greedy
+  - name: attention.hd128.fused
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE@map.1/twist: mma_m16n8k16_f16_f32/f1x16/k4
+      TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x8/k4
+      REDUCE@map.1/twist: ''
+      REDUCE@map.1/twist.1/inner: ''
+      STAGE@map.1/twist: d2/smem-tma
+      STAGE@map.1/twist.1/inner: ''
+      WORK: w2x1
+      RASTER: ''
+    identity: 3ec795cedf21b59dce873ccc52ebbacf6519878078959430f44405a131ffc106
+    measurements:
+      emmy_us: 16.3
+      reference_us: 16.21
+      reference_backend: same-input-greedy
+- program: 34
+  target:
+    origins:
+    - scaled_dot_product_attention
+  realizations:
+  - name: attention.hd64.fused
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      TILE@map.1/twist: mma_m16n8k16_f16_f16/f1x8/k4
+      TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x8/k4
+      REDUCE@map.1/twist: ''
+      REDUCE@map.1/twist.1/inner: ''
+      STAGE@map.1/twist: d2/smem-tma
+      STAGE@map.1/twist.1/inner: ''
+      WORK: w2x1
+      RASTER: ''
+    identity: 1ff07928066714d26b8fa657cae132fe963ef413347e30d80117ced0c077ee1b
+    measurements:
+      emmy_us: 8.09
+      reference_us: 8.03
+      reference_backend: same-input-greedy
+  - name: attention.hd64.fused
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE@map.1/twist: mma_m16n8k16_f16_f32/f1x8/k8
+      TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x16/k4
+      REDUCE@map.1/twist: ''
+      REDUCE@map.1/twist.1/inner: ''
+      STAGE@map.1/twist: d2/smem-tma
+      STAGE@map.1/twist.1/inner: ''
+      WORK: w2x1
+      RASTER: ''
+    identity: 1ff07928066714d26b8fa657cae132fe963ef413347e30d80117ced0c077ee1b
+    measurements:
+      emmy_us: 8.82
+      reference_us: 8.82
+      reference_backend: same-input-greedy
 loops:
 - inputs: [x0, x1]
   outputs: [scaled_dot_product_attention_scaled]
