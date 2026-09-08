@@ -485,7 +485,6 @@ async def measure_proposals(
 
 def record_latency(
     path: str | Path,
-    document: dict,
     name: str,
     *,
     hardware_id: str,
@@ -505,12 +504,23 @@ def record_latency(
     a ratchet: ``emmy_us`` against its own stored value says *did we regress*, and ``tcompile_us``
     beside it says *are we ahead of or behind torch*, per case, per card. ``tcompile_us`` is
     omitted rather than faked when the target has no torch twin to compile.
+
+    Read and written inside one :func:`exclusive_golden`, like every measurement this module writes
+    back: a run passing both ``--record`` and ``--record-greedy`` writes twice, and a stale second
+    document would drop whatever landed between the two.
     """
     destination = Path(path)
     if is_repository_golden_path(destination):
         raise ValueError(f"refusing to write measurements into a canonical repository golden: {destination}")
+    with exclusive_golden(destination):
+        _record_latency_row(destination, name, hardware_id=hardware_id, emmy_us=emmy_us, tcompile_us=tcompile_us, knobs=knobs, pins=pins)
+
+
+def _record_latency_row(destination: Path, name: str, *, hardware_id, emmy_us, tcompile_us, knobs, pins) -> None:
+    """One card's latencies written into the file as it stands NOW. Runs under the lock."""
     from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
 
+    document = load_golden_file(destination)
     wanted_knobs = canonical_row_key(knobs) if knobs is not None else None
     wanted_pins = tuple(sorted((key, str(value)) for key, value in pins.items())) if pins is not None else None
     matches = []

@@ -524,14 +524,8 @@ def _record_golden_latency(args, results: dict, golden_benches) -> None:
     if not tcompile_us:
         # Not fatal: the ratchet is `emmy_us`, and some targets have no torch twin to compile.
         logger.warning("--record: no torch.compile timing for %s; storing the Emmy latency alone", args.realization)
-    document = getattr(args, "_golden_document", None)
-    if document is None:
-        from emmy.compiler.pipeline.search.golden import load_golden_file  # noqa: PLC0415
-
-        document = load_golden_file(args.golden)
     record_latency(
         args.golden,
-        document,
         args.realization,
         hardware_id=Context.probe().hardware_id(),
         emmy_us=emmy_us,

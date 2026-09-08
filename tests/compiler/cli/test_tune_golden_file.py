@@ -215,7 +215,6 @@ def test_record_latency_selects_the_measured_row_not_its_same_named_sibling(tmp_
 
     record_latency(
         path,
-        document,
         "mm",
         hardware_id="test-gpu",
         emmy_us=7.5,
@@ -776,16 +775,19 @@ def test_record_greedy_pick_appends_routing_rows_and_receipts_once(tmp_path, mon
 
 def test_a_recorder_keeps_the_rows_another_writer_added_after_it_read(tmp_path):
     """Two runs recording into one file — the host loop's parallel devices — each load it, add
-    their rows and write the whole document back. The write reloads the file under an exclusive
-    lock, so the second recorder keeps the first's rows instead of dumping the document it read
-    before them."""
-    from emmy.compiler.pipeline.search.working_golden import record_greedy_pick
+    their rows and write the whole document back. Every write reloads the file under an exclusive
+    lock, so a recorder keeps the rows that landed after it read instead of dumping the document it
+    read before them. Both writers this module offers are checked: ``--record``'s latency block and
+    ``--record-greedy``'s rows, which one run writes one after the other."""
+    from emmy.compiler.pipeline.search.working_golden import record_greedy_pick, record_latency
 
     path = tmp_path / "working.yaml"
     dump_golden_file(_document(_matmul("mm", pins={"FAST_MATH": True})), path)
     row = {"WORK": "", "RASTER": ""}
     first = record_greedy_pick(path, "mm", decisions=[], kernels=[("a" * 64, row, 1.0, 2.0)], reference_backend="same-input-greedy")
     second = record_greedy_pick(path, "mm", decisions=[], kernels=[("b" * 64, row, 3.0, 4.0)], reference_backend="same-input-greedy")
+    record_latency(path, "mm", hardware_id="test-gpu", emmy_us=7.5, tcompile_us=8.0)
 
     realizations = load_golden_file(path)["configs"][0]["realizations"]
     assert [entry["name"] for entry in realizations] == ["mm", *first, *second]
+    assert realizations[0]["latency"] == {"test-gpu": {"emmy_us": 7.5, "tcompile_us": 8.0}}
