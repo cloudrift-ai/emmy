@@ -823,11 +823,13 @@ def decode_record(record: GoldenRecord, siblings: Sequence[GoldenRecord] = ()) -
     program selects exactly one kernel, except that a child-identity schedule receipt may select its
     kernel from a multi-kernel target by stored identity; a routing record's every cut key names a
     seam the cut pass offers on the replay (:func:`_replay`); a SCHEDULE record's spelled row equals
-    one enumerated leaf (``canonical_row_key`` equality under the record's own pins) — no prefix
-    matching, no any-of, no classified shape. A receipt's
+    one enumerated leaf (``schedule_match_key`` equality under the record's own pins) — no prefix
+    matching, no any-of, no classified shape. That equality is blind to the two sides' OFF anchors:
+    which of them a spelling writes down depends on whether it came from a resolved kernel or from a
+    fork's offered leaf, and neither carries schedule content. A receipt's
     identity must equal one kernel resolved under the record's pins, and the spelled row must equal
     one of THAT kernel's rows — a sibling child's row must not vouch for it."""
-    from emmy.compiler.pipeline.knob import schedule_row_key  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import schedule_match_key  # noqa: PLC0415
 
     verdict_key = digest(_record_fingerprint(record), str(sorted(record.knobs.items())), str(record.pins), record.identity or "")
     store = _identity_store()
@@ -848,7 +850,7 @@ def decode_record(record: GoldenRecord, siblings: Sequence[GoldenRecord] = ()) -
     # The piece row, not the recorded one: a ``g<n>`` cross-CTA half names the kernel-set arm the
     # replay already resolved, and the pieces it mints cannot stamp it, so comparing it to a leaf
     # asks a piece to spell its parent's decision.
-    row = schedule_row_key(piece_row(record.knobs))
+    row = schedule_match_key(piece_row(record.knobs))
     if record.is_receipt and (tile is None or record.identity != tile.identity_key(with_io=True)):
         child_rows = candidates.get(record.identity)
         if child_rows is None:
@@ -877,8 +879,9 @@ class _Replay(NamedTuple):
     """One replay of a record's target through the tile passes under the record's pins, following
     the record's knobs at every kernel-set fork (:func:`~emmy.compiler.pipeline.search.pins.spelled_arm`).
 
-    ``rows`` — the EXHAUSTIVE replay's answer: every schedule-row identity each kernel can realize,
-    bucketed by the kernel's deploy identity (``identity_key(with_io=True)``; ``None`` for forks
+    ``rows`` — the EXHAUSTIVE replay's answer: every schedule-row identity each kernel can realize
+    as a :func:`~emmy.compiler.pipeline.knob.schedule_match_key`, bucketed by the kernel's deploy
+    identity (``identity_key(with_io=True)``; ``None`` for forks
     whose root is not a recognized ``TileOp``): the fork leaves' rows, PLUS each resolved kernel's
     own realized row — a forkless kernel (the schedule space collapsed to one row, often the all-OFF
     anchor) never opens a fork, so its one row is read off the resolved op instead. Behind a cut the
@@ -974,6 +977,7 @@ def _replay(
         canonical_row_key,
         evidence_row_vouches,
         family_of,
+        schedule_match_key,
         schedule_pin_fingerprint,  # noqa: PLC0415
         schedule_row_key,
     )
@@ -1078,7 +1082,7 @@ def _replay(
         for leaf in ops:
             row = leaf_knobs(leaf)
             if row:
-                buckets.setdefault(identity, set()).add(schedule_row_key(row))
+                buckets.setdefault(identity, set()).add(schedule_match_key(row))
         return ops[0] if ops else leaves[0]
 
     # The seams an entry marks cut together are one composed decision where they resolve on one
@@ -1095,9 +1099,10 @@ def _replay(
     for node in out.nodes.values():
         if isinstance(node.op, TileOp):
             identity = _identity_of(node.op)
-            row = schedule_row_key(dict(node.op.knobs or {}))
+            knobs = dict(node.op.knobs or {})
+            row = schedule_row_key(knobs)
             if exhaustive:
-                buckets.setdefault(identity, set()).add(row)
+                buckets.setdefault(identity, set()).add(schedule_match_key(knobs))
             if identity is not None:
                 kernels.add(identity)
                 realized[identity] = dict(row)
