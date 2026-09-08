@@ -2,8 +2,10 @@
 
 Status: 11 of 155 recorded rows across the four hardware goldens equal no enumerated leaf, down from 105. Three are
 on the RTX 5090, eight on the RTX 4090; the 4080 and the PRO 6000 are clean. Every one that is left is an attention
-row, and every one is now blocked by a NAMED compiler behaviour — nothing left here is a spelling or a measurement.
-This memo covers what blocks each, and the four dead ends already walked so nobody walks them twice.
+row. This memo covers what blocks each, and the dead ends already walked so nobody walks them twice.
+
+Every one of the eleven also pins `STAGE: d1/smem` on a kernel whose pool carries no STAGE key, so every one needs a
+re-measure on its own card whatever else is fixed. The row table below names the OTHER blocker each carries.
 
 Do not re-record a row to make it green. A row that stops decoding because the schedule it names is gone is a
 regression in the enumeration, and recording today's pick in its place writes that regression in as the reference.
@@ -27,9 +29,9 @@ absorbed.
 
 ## The 11 that are left
 
-Three things block them, and four rows carry two at once. `f16` means the row spells `mma_m16n8k16_f16_f16`;
-`atomic` means its `REDUCE` names an atomic cross-CTA reduce; `no mma` means the pool offers no tensor-core tile of
-any kind.
+Beside the staging key above, three things block them, and four rows carry two at once. `f16` means the row spells
+`mma_m16n8k16_f16_f16`; `atomic` means its `REDUCE` names an atomic cross-CTA reduce; `no mma` means the pool offers
+no tensor-core tile of any kind.
 
 | Row | Card | Blocked by |
 | --- | --- | --- |
@@ -45,16 +47,42 @@ any kind.
 | `attention.hd256.dynM.pv#1` | 4090 | no mma (chunk tier refuses) |
 | `attention.hd256.dynM.pv#2` | 4090 | no mma (chunk tier refuses) |
 
-## Blocker 1 — the chunk tier never offers the reduced accumulator (6 rows)
+## Blocker 1 — CLOSED as a question: the reduced accumulator is not worth offering here (6 rows)
 
 Each of the six spells `mma_m16n8k16_f16_f16` under `FAST_MATH: true`, and the pool offers thousands of
-`mma_m16n8k16_f16_f32` rows and not one `f16_f16`.
+`mma_m16n8k16_f16_f32` rows and not one `f16_f16`. `classic_projection._atom_families` has a branch per tier; the
+general path returns the atoms at the plain f32 accumulator plus the ones accumulating in the multiplicand dtype,
+and the CHUNK branch returns only the first. That much of the old diagnosis was right. Everything read into it was
+not.
 
-**Root cause, located.** `classic_projection._atom_families` has a branch per tier. The general path returns
-`base + reduced_acc` — the atoms at the plain f32 accumulator plus the ones whose accumulator is the multiplicand
-dtype. The CHUNK branch returns only the first: it calls `atoms_for(dtype)` at the default `acc=F32` and never asks
-for the reduced accumulator at all. When attention's value channel became a chunked site, the f16-accumulate cell
-stopped being a candidate there.
+**The chunk tier was given the missing path, and measured.** Its expectation chain — the P·V product, which is what
+the site names — now accumulates packed and folds into an f32 partial once per chunk, exactly the scheme the general
+tiers carry; its score chain widens to f32 on its own, because a score is what the exponential amplifies and the
+article below did the same. The result builds and computes the right answer on an RTX 5090. It is also not faster.
+Everything else held fixed, at `-O3`:
+
+| Target | TILE | f32 acc | f16 acc |
+| --- | --- | --- | --- |
+| `attention.hd128.softmax_v` | `f1x4/k8` | 16.1 us | 16.0 us |
+| `attention.hd128.softmax_v` | `f1x4/k4` | **15.7 us** | 18.3 us |
+| `attention.hd64.softmax_v` | `f1x8/k4` | **20.0 us** | 28.1 us |
+| `attention.hd64.softmax_v` | `f1x8/k8` | 26.1 us | 25.2 us |
+
+The fastest row of every target is f32-accumulate, and at the article's own 64-K-element cadence (`k4`) the f16 path
+is 17–40% slower. The chunk is short: the promote's convert-and-add per cell is a large fraction of a four-step mma
+chain, where the article's projection kernels amortize the same promote over K=7680. So the projection's exclusion
+stays, and the six rows are unrecoverable as spelled — they were recorded before the value channel became a chunked
+site, on a kernel shape that no longer exists.
+
+The work was reverted; only the measurement is kept. Do not re-open this without a shape where the chunk is long
+enough for the mma chain to dominate.
+
+### What the six rows actually need
+
+All six ALSO pin `STAGE: d1/smem` on a kernel whose pool carries no STAGE key at all — a chunked carrier reads every
+operand gmem-direct, so it offers no staging family. That is the same cause the seven closed rows had, and it is
+what the row table above does not say. Dropping the key changes what the stored microseconds mean, so each needs a
+re-measure on the card that recorded it.
 
 ### Dead end 1 — the precision gate
 
@@ -65,24 +93,27 @@ Pinning `F16_MMA_F32_ACC` explicitly changes nothing.
 ### Dead end 2 — tightening `c_to_a_repack`
 
 `FragmentRepack` reads four f32 values a lane and packs them with `cvt.rn.f16x2.f32`, and `c_to_a_repack` returns
-`True` on shape alone — which reads like an over-claim for an atom whose C operand is f16, and like the reason the
-chunk branch excludes it. It is not. Requiring `operand_dtype("c") == F32` there was tried and reverted.
+`True` on shape alone. Requiring `operand_dtype("c") == F32` there was tried and reverted, on the argument that the
+atom folds its packed partials into f32 shadows every 64 K-elements and the repack gathers an f32 fragment either
+way — the technique written up at <https://riftstack.ai/research/optimizing-gemma-4-12b-rtx>.
 
-The atom does not produce an f16 result. Its mma chain runs on packed f16 partials (`_ch{i}_{j}`) and folds them
-into f32 SHADOWS every 64 K-elements; the shadows keep the `_c{i}_{j}` names every sink reads
-(`_atom._mma_c_base`, `_f16acc_promotes`). The repack gathers an f32 fragment either way, so keying on shape is
-right. The technique — full-rate HMMA with periodic promotion into f32 shadows, bounding the error to 64-element
-chunks — is written up at <https://riftstack.ai/research/optimizing-gemma-4-12b-rtx>.
+That argument holds for the tiers that IMPLEMENT the shadows. The chunk tier did not: it declared its own score,
+partial and carried fragments at the atom's C dtype and read all three back element-wise as f32 — the scale, the row
+maximum, the exp and the merge all do. Offered without a promote scheme the cell built and returned inf, its
+epilogue reading a packed f16 pair as four f32 scalars. Keying on shape was still right; what was missing was the
+scheme, and the scheme turned out not to pay.
 
-### Dead end 3 — just adding the reduced accumulator
+### Dead end 3 — the corpus case the widening broke
 
-Adding `atoms_for(chunk_dtype, acc=chunk_dtype)` to that branch offers 2282 f16-accumulate rows and makes all six
-rows decode once the staging key is dropped. It also fails `attention/sdpa-hd128-softmax-v-mma`, a closed corpus
-case, with `no enumerated row carries the pin (0 rows offered at sm_120)`. That case pins its TILE bare, so once the
-chunked score node also accepts `f16_f16` the pin binds at both contraction sites and the pair realizes nothing.
-
-So the chunk tier's lowering refuses this path for a reason the projection only exposes. Start by finding which site
-the bare pin binds to in that case and what the pair cannot realize — not by widening the projection again.
+Adding `atoms_for(chunk_dtype, acc=chunk_dtype)` to that branch also failed `attention/sdpa-hd128-softmax-v-mma`, a
+closed corpus case, with `no enumerated row carries the pin (0 rows offered at sm_120)`. That was read as the chunk
+tier's lowering refusing the path. It was not: it was a separate compiler bug, now fixed. The case pins its TILE
+bare on a kernel that spells TILE at two sites, and the enumeration bound a bare pin at EVERY site that could spell
+the value — a conjunction. As soon as the chunked value channel could also spell `f16_f16` the pin bound at both
+contraction sites, and no schedule carries one mma tile at both. The same thing was already true on `main` for any
+value both sites can spell: a bare `TILE=mma_m16n8k16_f16_f32/f1x4/k2` offered 0 rows while the same value pinned at
+the inner site alone offered 2. A bare pin is a disjunction — one site carries it, the others are OFF, the reading
+`unreproducible_pin_flag` and `evidence_row_vouches` already gave it.
 
 ## Blocker 2 — the atomic cross-CTA reduce refuses a multi-component carrier (4 rows)
 
