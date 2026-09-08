@@ -1,0 +1,47 @@
+# Softmax@V with a symbolic sequence length: the probabilities arrive as a stored input, so the carrier's A edge IS
+# the score and the chunk tier gathers its fragments rather than contracting them. The row is the wide tile, four register rows by eight columns at k8.
+#
+# Both halves of the tree are targets (`o` and `probs`), so the case also pins what the softmax kernel beside the
+# expectation realizes.
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [scores, v]
+  outputs: [o]
+  nodes:
+  - id: scores
+    op: input
+    outputs: [[scores, f16, [16, {sym: seq_len, hint: 512}, {sym: seq_len, hint: 512}]]]
+  - id: probs
+    op: torch.softmax
+    attrs: {axis: -1}
+    inputs: [scores]
+    outputs: [[probs, f16, [16, {sym: seq_len, hint: 512}, {sym: seq_len, hint: 512}]]]
+  - id: v
+    op: input
+    outputs: [[v, f16, [16, {sym: seq_len, hint: 512}, 128]]]
+  - id: o
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [probs, v]
+    outputs: [[o, f16, [16, {sym: seq_len, hint: 512}, 128]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - o
+    - probs
+  realizations:
+  - name: k_matmul_softmax_reduce_2c67a1.c029b4a45303
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE: mma_m16n8k16_f16_f32/f4x8/k8
+      WORK: w2x2
+    identity: ba172514db11e954136589b7b094d38a3b24dd608b59288bc5097f0e053e5407
+    latency:
+      NVIDIA GeForce RTX 5090:
+        emmy_us: 84.25333102544148
+        tcompile_us: 14.322963025834826
