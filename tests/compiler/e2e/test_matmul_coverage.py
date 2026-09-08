@@ -264,9 +264,9 @@ def test_scalar_matmul_stages_through_pipeline(monkeypatch) -> None:
     stamps the resolved ``Stage`` (eligibility + sizing run once, scheduler-side): a ``tma`` pin on a
     register-tiled scalar matmul resolves with the depth-aware fit-to-smem ``bk_elems`` derived (the
     scalar gmem→smem ring — ``depth`` is honored, the K-chunk sized so ``depth`` slots fit 48 KiB);
-    a ``sync`` pin — no contraction transport — is refused rather than selecting gmem-direct. The
-    stamped ``knobs`` codec is the resolved spelling, so a pin always names the pipeline the kernel
-    actually has."""
+    a ``sync`` pin resolves on Volta, where neither asynchronous transport is available. The stamped
+    ``knobs`` codec is the resolved spelling, so a pin always names the pipeline the kernel actually
+    has."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
 
     monkeypatch.setenv("EMMY_TILE", "f2x2")
@@ -282,9 +282,13 @@ def test_scalar_matmul_stages_through_pipeline(monkeypatch) -> None:
     assert stage.depth == 2, stage  # the scalar ring honors the pinned depth (slots fit 48 KiB)
     assert stage.bk_elems == 64, stage  # derived depth-aware fit-to-smem K-chunk (K=64 divides)
 
-    monkeypatch.setenv("EMMY_STAGE", "d1/smem")  # reg needs a computed edge — declines on a materialized contraction
-    with pytest.raises(ValueError, match="does not resolve"):
-        Pipeline.build(TILE_PASSES).run(_scalar_stage_graph(), ctx=Context.from_target((9, 0)))
+    monkeypatch.setenv("EMMY_STAGE", "d2/smem")
+    out = Pipeline.build(TILE_PASSES).run(_scalar_stage_graph(), ctx=Context.from_target((7, 0)))
+    tile_op = next(n.op for n in out.nodes.values() if isinstance(n.op, TileOp))
+    stage = _node_stage(tile_op)
+    assert stage is not None and stage.transport == "smem" and stage.depth == 2, stage
+    src = _render_src(_scalar_stage_graph(), cc=(7, 0))
+    assert "__shared__" in src and "cp.async" not in src
 
 
 def test_scalar_masked_n_stage_pin_refuses(monkeypatch) -> None:

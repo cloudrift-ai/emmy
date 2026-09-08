@@ -999,6 +999,20 @@ class Select(Stmt):
         return [f"{_pad(ctx.indent)}float {self.name} = {expr.render(ctx)};"]
 
 
+def mask_select_predicate(select: Select) -> Expr | None:
+    """The mask branch of an ordered two-way comparison, or ``None`` for another Select form."""
+    if len(select.branches) != 2:
+        return None
+    keep, mask = select.branches
+    if not isinstance(keep.select, BinaryExpr) or not isinstance(mask.select, BinaryExpr):
+        return None
+    if (keep.select.op, mask.select.op) not in (("<", ">="), ("<=", ">")):
+        return None
+    if keep.select.left != mask.select.left or keep.select.right != mask.select.right:
+        return None
+    return mask.select
+
+
 @dataclass(frozen=True)
 class ZeroPrologue(Stmt):
     """Zero another launch's atomic accumulator from THIS kernel — the delegated zero-init

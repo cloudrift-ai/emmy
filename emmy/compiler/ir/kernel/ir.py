@@ -910,20 +910,21 @@ class FragLayout:
     - ``n_elems`` — f32 registers per lane in the C-fragment.
     - ``elem_row`` — the row index (``0 .. rows_per_lane-1``) each element belongs to; ``rows_per_lane``
       derives from it.
-    - ``reduce_group`` — the row-reduce ``__shfl_xor`` butterfly lane span.
+    - ``reduce_xors`` — the row-reduce ``__shfl_xor`` butterfly lane masks.
     - ``lane_decl`` — the per-kernel lane preamble the coordinate ``Expr``s below reference.
+    - ``lane_names`` — the names declared by that preamble.
     - ``row_off`` / ``col_off`` — the per-element coordinate **offsets as ``Expr``s** (over the
       ``lane_decl`` locals): ``row_off[r]`` the in-tile row of row-index ``r``, ``col_off[i]`` the
       in-N-atom column of element ``i``. :class:`FragmentMask` adds the tile origin and substitutes
       these into its coordinate predicate (so the mask is a generic ``Expr``, not hard-coded CUDA).
 
-    Only m16n8 is modeled today (both the QK^T and P@V atoms); ``frag_layout`` raises for any other,
-    so an unmodeled atom fails loudly rather than miscompiling."""
+    ``frag_layout`` raises for an unmodeled atom, so one fails loudly rather than miscompiling."""
 
     n_elems: int
     elem_row: tuple[int, ...]
-    reduce_group: int
+    reduce_xors: tuple[int, ...]
     lane_decl: str
+    lane_names: tuple[str, ...]
     row_off: tuple[Expr, ...]
     col_off: tuple[Expr, ...]
 
@@ -943,39 +944,63 @@ def _m16n8_col(b: int) -> Expr:
 M16N8 = FragLayout(
     n_elems=4,
     elem_row=(0, 0, 1, 1),
-    reduce_group=4,
+    reduce_xors=(2, 1),
     lane_decl="const int _g = (threadIdx.x & 31) >> 2, _t = (threadIdx.x & 31) & 3;",
+    lane_names=("_g", "_t"),
     row_off=(Var("_g"), BinaryExpr("+", Var("_g"), Literal(8, "int"))),
     col_off=(_m16n8_col(0), _m16n8_col(1), _m16n8_col(0), _m16n8_col(1)),
 )
 
 
-def _lane_preamble(ctx: RenderCtx, pad: str, decl: str) -> list[str]:
-    """Emit the mma lane preamble (``_g`` / ``_t``) once per C scope: ``decl`` if ``_g`` is not yet
-    declared here (tracked in ``ctx.scope_decls``), else ``[]``. Every emitter defines ``_g``/``_t``
-    identically (``(threadIdx.x & 31) >> 2`` / ``& 3``), so a later stmt in the same scope reuses the
-    first declaration instead of re-scoping itself — no redundant ``{ }`` around the store / mask."""
-    if "_g" in ctx.scope_decls:
+def _m8n8k4_col(offset: int) -> Expr:
+    return Var("_vc") if offset == 0 else BinaryExpr("+", Var("_vc"), Literal(offset, "int"))
+
+
+#: Volta's four m8n8k4 computation groups arranged as one logical 16x16 C fragment. A lane owns
+#: two rows and four columns from each row; lanes of one row differ in bits 1 and 2.
+M8N8K4 = FragLayout(
+    n_elems=8,
+    elem_row=(0, 0, 1, 1, 0, 0, 1, 1),
+    reduce_xors=(4, 2),
+    lane_decl=(
+        "const int _vl = threadIdx.x & 31, _vq = (_vl & 15) >> 2, "
+        "_vr = (_vq >> 1) * 8 + (_vl >> 4) * 4 + (_vl & 1), _vc = (_vq & 1) * 8 + (_vl & 2);"
+    ),
+    lane_names=("_vl", "_vq", "_vr", "_vc"),
+    row_off=(Var("_vr"), BinaryExpr("+", Var("_vr"), Literal(2, "int"))),
+    col_off=tuple(_m8n8k4_col(offset) for offset in (0, 1, 0, 1, 4, 5, 4, 5)),
+)
+
+
+def frag_layout(name: str) -> FragLayout:
+    """The C-fragment layout named by an atom descriptor."""
+    try:
+        return {"m16n8k16": M16N8, "m8n8k4": M8N8K4}[name]
+    except KeyError as exc:
+        raise ValueError(f"unmodeled C-fragment layout {name!r}") from exc
+
+
+def _lane_preamble(ctx: RenderCtx, pad: str, decl: str, names: tuple[str, ...] = ("_g", "_t")) -> list[str]:
+    """Emit one fragment-layout lane preamble per C scope."""
+    if set(names) <= ctx.scope_decls:
         return []
-    ctx.scope_decls.update(("_g", "_t"))
+    ctx.scope_decls.update(names)
     return [f"{pad}{decl}"]
 
 
 @dataclass(frozen=True)
 class FragmentApply(Stmt):
-    """Generic per-element pointwise op over ``mma.sync`` ``m16n8`` C-fragments — the
-    **carrier-generic** fragment-tier sibling of the scalar ``Assign``, and the ONE fragment
-    pointwise node (it subsumes the former hard-coded ``FragmentExp`` / ``FragmentScale``).
+    """Generic per-element pointwise op over an ``mma.sync`` C fragment — the carrier-generic
+    fragment-tier sibling of the scalar ``Assign``, and the one fragment pointwise node.
 
-    Writes ``out`` (a ``float[4]`` C-fragment) ``= op(args…)`` per element ``i`` via the same
+    Writes ``out`` (a layout-sized f32 C fragment) ``= op(args…)`` per element ``i`` via the same
     ``op_to_expr`` translation the scalar ``Assign`` uses — so ANY elementwise op reaches the
     tensor-core tier, not just softmax's ``exp`` / scale. Each arg is one of three
     :data:`FRAG` / :data:`ROW` / :data:`UNIFORM` ``kinds``:
 
     - ``FRAG`` — a C-fragment, indexed ``arg[i]``;
-    - ``ROW`` — a per-row scalar, broadcast by row (suffix ``0`` for rows ``g`` = elements
-      ``[0,1]``, ``1`` for rows ``g+8`` = elements ``[2,3]`` — the m16n8 2-rows/lane layout);
-    - ``UNIFORM`` — a cell-uniform scalar / literal, the same value for all 4 elements.
+    - ``ROW`` — a per-row scalar pair, broadcast by the layout's element-to-row map;
+    - ``UNIFORM`` — a cell-uniform scalar or literal, the same value for every element.
 
     Realizations: ``exp(s − m)`` = a ``subtract`` (FRAG, ROW) then an ``exp`` (FRAG); ``O *= α`` =
     an in-place ``multiply`` (FRAG, ROW); ``O /= l`` = an in-place ``divide`` (FRAG, ROW); ``S *=
@@ -984,8 +1009,8 @@ class FragmentApply(Stmt):
 
     Each ``args`` entry is a ``str`` for a FRAG / UNIFORM operand, or a ``(row0, row1)`` pair of
     SSA names for a ROW operand (the two per-row scalars stored explicitly — so SSA rename keeps
-    them consistent with their definitions; a bare name + render-time suffix would diverge under
-    rename)."""
+    them consistent with their definitions; a bare name plus a render-time suffix would diverge
+    under rename)."""
 
     out: str
     op: ElementwiseImpl
@@ -1022,11 +1047,15 @@ class FragmentApply(Stmt):
         modeled atom), so the boundaries are ``block = n_elems / rows_per_lane`` apart."""
         lay = self.layout
         rows, block = lay.rows_per_lane, lay.n_elems // lay.rows_per_lane
-        if list(lay.elem_row) != [r for r in range(rows) for _ in range(block)]:
-            raise NotImplementedError(f"FragmentApply loop render needs a contiguous elem_row, got {lay.elem_row!r}")
-        expr: Expr = Var(names[rows - 1])
-        for r in range(rows - 2, -1, -1):
-            expr = TernaryExpr(BinaryExpr("<", Var("_e"), Literal((r + 1) * block, "int")), Var(names[r]), expr)
+        contiguous = [r for r in range(rows) for _ in range(block)]
+        if list(lay.elem_row) == contiguous:
+            expr: Expr = Var(names[rows - 1])
+            for r in range(rows - 2, -1, -1):
+                expr = TernaryExpr(BinaryExpr("<", Var("_e"), Literal((r + 1) * block, "int")), Var(names[r]), expr)
+            return expr
+        expr = Var(names[lay.elem_row[-1]])
+        for i in range(lay.n_elems - 2, -1, -1):
+            expr = TernaryExpr(BinaryExpr("==", Var("_e"), Literal(i, "int")), Var(names[lay.elem_row[i]]), expr)
         return expr
 
     def _arg_e(self, name: object, kind: str, ctx: RenderCtx) -> Expr:
@@ -1076,24 +1105,22 @@ class FragmentRowReduce(Stmt):
     """Per-ROW reduction over one warp's ``mma.sync`` C fragments — the chunk pivot and the
     per-row channel partials the twisted carrier's atom tier folds (``_atom._FlashOps``).
 
-    Each lane of an ``m16n8`` C fragment owns 4 f32 elements: rows ``g`` / ``g+8``
-    (``g = lane/4``), cols ``(lane%4)*2 + {0,1}``. A chunk-wide score tile is ``len(frags)`` such
-    fragments side by side, so reducing over the chunk is: combine each fragment's in-lane column
-    pair across every fragment, then a ``__shfl_xor`` butterfly over the ``group``-lane column set
-    (``group = 4`` for ``m16n8`` — the lanes differing in ``lane%4`` hold a row's 8 columns).
-    Afterwards every lane of a column group holds the full per-row value, so ``top`` (rows ``g``)
-    and ``bot`` (rows ``g+8``) are the :data:`ROW` operands :class:`FragmentApply` broadcasts.
+    A chunk-wide score tile is ``len(frags)`` C fragments side by side. Reducing over the chunk
+    combines every element assigned to each of the lane's two rows, then applies the layout's
+    ``__shfl_xor`` butterfly masks across the lanes that hold columns of the same row. Afterwards
+    every lane in the group holds the full per-row value, so ``top`` and ``bot`` are the
+    :data:`ROW` operands :class:`FragmentApply` broadcasts.
 
     Distinct from :class:`WarpShuffle`, which folds a whole per-thread monoid state over a
     cooperative-K lane set; this folds WITHIN one warp's fragments along the atom's N direction,
     keyed on the PTX C layout. It is why the tier requires the chunk to sit inside one warp column
     (``n_units == 1`` on the score): a reduction that crossed warps would need smem."""
 
-    top: str  # the per-row value for rows g (broadcast across the column group)
-    bot: str  # the per-row value for rows g+8
-    frags: tuple[str, ...]  # the C fragments (float[4] each) spanning the chunk
+    top: str  # the first per-lane row value, broadcast across its column group
+    bot: str  # the second per-lane row value, broadcast across its column group
+    frags: tuple[str, ...]  # the layout-sized C fragments spanning the chunk
     op: ElementwiseImpl  # the fold — ``maximum`` for the pivot, ``add`` for a summed channel
-    group: int = 4  # column-group lane span (m16n8: 4 lanes hold a row's 8 cols)
+    layout: FragLayout = M16N8
     dtype: DataType = F32
 
     def deps(self) -> tuple[str, ...]:
@@ -1115,16 +1142,14 @@ class FragmentRowReduce(Stmt):
                 e = _binary_combine_expr(self.op, e, p, ctx.target, "f32")
             return e
 
-        top_parts = [f"{f}[{i}]" for f in self.frags for i in (0, 1)]
-        bot_parts = [f"{f}[{i}]" for f in self.frags for i in (2, 3)]
+        top_parts = [f"{f}[{i}]" for f in self.frags for i, row in enumerate(self.layout.elem_row) if row == 0]
+        bot_parts = [f"{f}[{i}]" for f in self.frags for i, row in enumerate(self.layout.elem_row) if row == 1]
         out = [f"{pad}{f32} {self.top} = {combine(top_parts)};", f"{pad}{f32} {self.bot} = {combine(bot_parts)};"]
         ctx.ssa_dtypes[self.top] = ctx.ssa_dtypes[self.bot] = "f32"
-        s = int(self.group) // 2
-        while s > 0:
+        for s in self.layout.reduce_xors:
             for nm in (self.top, self.bot):
                 shfl = f"__shfl_xor_sync(0xffffffff, {nm}, {s})"
                 out.append(f"{pad}{nm} = {_binary_combine_expr(self.op, nm, shfl, ctx.target, 'f32')};")
-            s >>= 1
         return out
 
 
@@ -1137,19 +1162,20 @@ FRAG_COL = "__fcol"
 
 @dataclass(frozen=True)
 class FragmentMask(Stmt):
-    """Generic per-element **coordinate-predicated fill** over an mma C-fragment — the ONE fragment
-    mask node (it subsumes the former ``FragmentCausalMask`` / ``FragmentBoundaryMask``). Writes
-    ``fill`` (the carrier's fold identity — the soft ``-1e30`` so ``max(m, fill) = m`` and
-    ``exp(fill − m) = 0``) to every element whose absolute coordinates satisfy ``mask_when``, a
-    predicate ``Expr`` over the reserved coordinate vars :data:`FRAG_ROW` (``__frow``, absolute
-    query row) / :data:`FRAG_COL` (``__fcol``, absolute key column).
+    """Generic per-element coordinate mask over an mma C-fragment.
+
+    Writes ``fill`` to every element whose absolute coordinates satisfy ``mask_when``. When
+    ``keep`` and ``keep_op`` are present, the other branch applies
+    ``keep_op(fragment, keep)``. This realizes an additive coordinate ``Select`` as a stable mask:
+    the masked branch becomes the carrier's finite identity instead of producing ``-inf - -inf``
+    in an all-masked chunk, while the keep branch retains its authored scalar value.
 
     The render adds the tile origin (``row_base`` / ``col_base``) to the layout's per-element offset
     and substitutes the result for ``__frow`` / ``__fcol``, then emits a guarded write — so the
     predicate is a generic ``Expr``, not hard-coded CUDA. Causal = ``__fcol > __frow``; symbolic
     boundary = ``__fcol >= seq_len``; any coordinate predicate (windowed, banded, …) is a different
     ``mask_when`` over the same node. Applied to the scaled score before the rowmax; emitting two
-    masks in sequence ANDs their keep-predicates (both write ``fill``). ``row_base`` is required iff
+    boundary masks in sequence AND their keep-predicates. ``row_base`` is required iff
     ``mask_when`` references ``__frow``."""
 
     frag: str
@@ -1157,10 +1183,17 @@ class FragmentMask(Stmt):
     col_base: Expr
     row_base: Expr | None = None
     fill: float = -1e30
+    keep: str | None = None
+    keep_op: ElementwiseImpl | None = None
     layout: FragLayout = M16N8
 
+    def __post_init__(self) -> None:
+        if (self.keep is None) != (self.keep_op is None):
+            raise ValueError("FragmentMask keep and keep_op must be provided together")
+
     def deps(self) -> tuple[str, ...]:
-        return (self.frag,)
+        keep = (self.keep,) if self.keep is not None else ()
+        return (self.frag, *keep)
 
     def defines(self) -> tuple[str, ...]:
         return (self.frag,)
@@ -1175,14 +1208,29 @@ class FragmentMask(Stmt):
     def render(self, ctx: RenderCtx) -> list[str]:
         pad = _pad(ctx.indent)
         lay = self.layout
+
         fill = ctx.identity_literal(self.fill, "f32")
-        lines = _lane_preamble(ctx, pad, lay.lane_decl)
+
+        def keep_update(i: int) -> str:
+            assert self.keep is not None and self.keep_op is not None
+            literal = ctx.literal_ssa.get(self.keep) if ctx.literal_ssa else None
+            if literal is not None:
+                keep = ctx.identity_literal(literal, "f32")
+            else:
+                dtype = ctx.ssa_dtypes.get(self.keep, "f32")
+                keep = self.keep if dtype == "f32" else ctx.target.convert(self.keep, dtype, "f32")
+            return _binary_combine_expr(self.keep_op, f"{self.frag}[{i}]", keep, ctx.target, "f32")
+
+        lines = _lane_preamble(ctx, pad, lay.lane_decl, lay.lane_names)
         for i in range(lay.n_elems):
             sub: dict[str, Expr] = {FRAG_COL: BinaryExpr("+", self.col_base, lay.col_off[i])}
             if self.row_base is not None:
                 sub[FRAG_ROW] = BinaryExpr("+", self.row_base, lay.row_off[lay.elem_row[i]])
             pred = self.mask_when.substitute(sub).render(ctx)
-            lines.append(f"{pad}if ({pred}) {self.frag}[{i}] = {fill};")
+            line = f"{pad}if ({pred}) {self.frag}[{i}] = {fill};"
+            if self.keep is not None:
+                line += f" else {self.frag}[{i}] = {keep_update(i)};"
+            lines.append(line)
         return lines
 
 
@@ -1234,7 +1282,7 @@ class FragmentBiasAdd(Stmt):
         lay = self.layout
         conv = {"f16": "__half2float({})", "bf16": "__bfloat162float({})"}
         dt = ctx.buffer_dtypes.get(self.buf, "f32")
-        lines = _lane_preamble(ctx, pad, lay.lane_decl)
+        lines = _lane_preamble(ctx, pad, lay.lane_decl, lay.lane_names)
         for i in range(lay.n_elems):
             sub: dict[str, Expr] = {
                 FRAG_COL: BinaryExpr("+", self.col_base, lay.col_off[i]),
@@ -1866,17 +1914,17 @@ class FragmentPromote(Stmt):
 
 @dataclass(frozen=True)
 class FragmentRepack(Stmt):
-    """Convert two k-adjacent mma **C fragments** (f32, m16n8) into one 16-bit **A operand
-    fragment** (m16k16) IN REGISTERS — the ``AtomKind.c_to_a_repack`` lane-map compatibility:
-    per lane, ``srcs[0]``'s four values are exactly the A fragment's low k-half pairs and
-    ``srcs[1]``'s its high k-half, so the conversion is four ``cvt.rn.{f16,bf16}x2.f32`` packs
-    with no shuffle and no smem round-trip (the flash P→A handoff; same round-to-nearest-even
-    the smem path's ``RegStore`` applied, so the repack is bit-identical to it). The emitter
-    gates on the atom capability at schedule time — this node assumes it."""
+    """Convert mma **C fragments** into one 16-bit **A operand fragment** in registers.
 
-    frag: str  # destination A fragment (4 × u32)
-    srcs: tuple[str, str]  # (low k-half, high k-half) C fragments (4 × f32 each)
+    The m16n8k16 layout takes two k-adjacent C fragments whose lanes already align with A. The
+    Volta m8n8k4 layout takes one logical 16-column C fragment and selects one of its four-column
+    slices with warp shuffles. The emitter gates on ``AtomKind.c_to_a_repack`` at schedule time."""
+
+    frag: str
+    srcs: tuple[str, ...]
     ab_dtype: str = "f16"
+    fragment_layout: str = "m16n8k16"
+    part: int = 0
 
     def deps(self) -> tuple[str, ...]:
         return self.srcs
@@ -1885,9 +1933,13 @@ class FragmentRepack(Stmt):
         return (self.frag,)
 
     def pretty(self, indent: str = "") -> list[str]:
-        return [f"{indent}FragmentRepack {self.frag} <- ({self.srcs[0]}, {self.srcs[1]}) ({self.ab_dtype})"]
+        return [f"{indent}FragmentRepack {self.frag} <- {self.srcs} ({self.ab_dtype}, {self.fragment_layout}, part={self.part})"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
+        if self.fragment_layout == "m8n8k4":
+            assert len(self.srcs) == 1
+            return [f"{_pad(ctx.indent)}emmy_c_to_a_{self.ab_dtype}_m8n8k4<{self.part}>({self.frag}, {self.srcs[0]});"]
+        assert len(self.srcs) == 2
         return [f"{_pad(ctx.indent)}emmy_c_to_a_{self.ab_dtype}({self.frag}, {self.srcs[0]}, {self.srcs[1]});"]
 
 
@@ -2857,15 +2909,21 @@ def _(s: FragmentApply, rename, sigma, axis_fn):
 
 @_rewrite_kind.register
 def _(s: FragmentRepack, rename, sigma, axis_fn):
-    # Pure register (the flash P→A handoff): route the dest + the two source C fragments through
+    # Pure register (the flash P→A handoff): route the destination and source C fragments through
     # ``rename`` (SSA canonicalizer / per-cell replicator); no index / axis to σ-substitute.
-    return FragmentRepack(frag=rename(s.frag), srcs=(rename(s.srcs[0]), rename(s.srcs[1])), ab_dtype=s.ab_dtype)
+    return FragmentRepack(
+        frag=rename(s.frag),
+        srcs=tuple(rename(src) for src in s.srcs),
+        ab_dtype=s.ab_dtype,
+        fragment_layout=s.fragment_layout,
+        part=s.part,
+    )
 
 
 @_rewrite_kind.register
 def _(s: FragmentRowReduce, rename, sigma, axis_fn):
     return FragmentRowReduce(
-        top=rename(s.top), bot=rename(s.bot), frags=tuple(rename(f) for f in s.frags), op=s.op, group=s.group, dtype=s.dtype
+        top=rename(s.top), bot=rename(s.bot), frags=tuple(rename(f) for f in s.frags), op=s.op, layout=s.layout, dtype=s.dtype
     )
 
 
@@ -2896,5 +2954,7 @@ def _(s: FragmentMask, rename, sigma, axis_fn):
         col_base=sigma.apply(s.col_base),
         row_base=sigma.apply(s.row_base) if s.row_base is not None else None,
         fill=s.fill,
+        keep=rename(s.keep) if s.keep is not None else None,
+        keep_op=s.keep_op,
         layout=s.layout,
     )

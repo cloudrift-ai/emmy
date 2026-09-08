@@ -311,6 +311,42 @@ static __device__ __forceinline__ void emmy_mma884_load_b_smem_trans(unsigned* r
     emmy_mma884_load_b_impl<T, F>(r, s, ldm, 16, 4, true);
 }
 
+// Volta C->A register repack. One logical m8n8k4 C fragment covers 16x16 through
+// four computation groups. An A fragment needs one row's four adjacent columns;
+// those values live in two lanes of the computation group for that column quarter.
+template <int Part>
+static __device__ __forceinline__ void emmy_c_to_a_f16_m8n8k4(unsigned* a, const float* c) {
+    int lane = threadIdx.x & 31;
+    int comp = (lane & 15) >> 2;
+    int src_comp = (comp & 2) | (Part >> 1);
+    int src0 = (lane & 16) | (src_comp << 2) | (lane & 1);
+    int src1 = src0 + 2;
+    constexpr int col_half = (Part & 1) << 2;
+    float x00 = __shfl_sync(0xffffffffu, c[col_half], src0);
+    float x01 = __shfl_sync(0xffffffffu, c[col_half + 1], src0);
+    float x10 = __shfl_sync(0xffffffffu, c[col_half + 2], src0);
+    float x11 = __shfl_sync(0xffffffffu, c[col_half + 3], src0);
+    float y00 = __shfl_sync(0xffffffffu, c[col_half], src1);
+    float y01 = __shfl_sync(0xffffffffu, c[col_half + 1], src1);
+    float y10 = __shfl_sync(0xffffffffu, c[col_half + 2], src1);
+    float y11 = __shfl_sync(0xffffffffu, c[col_half + 3], src1);
+    bool high_row = (lane & 2) != 0;
+    float x0 = high_row ? x10 : x00;
+    float x1 = high_row ? x11 : x01;
+    float y0 = high_row ? y10 : y00;
+    float y1 = high_row ? y11 : y01;
+    asm("{.reg .b16 lo, hi;\\n\\t"
+        "cvt.rn.f16.f32 lo, %1;\\n\\t"
+        "cvt.rn.f16.f32 hi, %2;\\n\\t"
+        "mov.b32 %0, {lo, hi};}\\n"
+        : "=r"(a[0]) : "f"(x0), "f"(x1));
+    asm("{.reg .b16 lo, hi;\\n\\t"
+        "cvt.rn.f16.f32 lo, %1;\\n\\t"
+        "cvt.rn.f16.f32 hi, %2;\\n\\t"
+        "mov.b32 %0, {lo, hi};}\\n"
+        : "=r"(a[1]) : "f"(y0), "f"(y1));
+}
+
 static __device__ __forceinline__ void emmy_mma_m8n8k4_f16_f32(
     float* d, const unsigned* a, const unsigned* b, const float* c) {
     asm volatile("mma.sync.aligned.m8n8k4.row.col.f32.f16.f16.f32 "

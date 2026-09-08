@@ -621,9 +621,11 @@ the compute fill writes the plain row-major slab the cooperative gather already 
 and a materialized `a` whose dtype the atom cannot bind, through the converting fill — reaches the tier here exactly
 as it does on the newer families. The generic staged-loop scheduler still owns `d<n>` slot rotation and `/p<n>`
 register-fragment pipelining; blocking copies make deeper shared rings correct but do not promise copy/compute
-overlap. C-to-A repacking still declines this atom. Target capability predicates select this family below SM80 and
-the established `m16n8k16` families on SM80 and newer; an incompatible atom or copy-transport pin fails instead of
-lowering through instructions the target cannot execute.
+overlap. The chunk tier also repacks a Volta C fragment into each four-column A slice with warp shuffles, so paired
+attention contractions stay on tensor cores; the scheduler admits only chunks that contain a complete logical C
+fragment. Target capability predicates select this family below SM80 and the established `m16n8k16` families on
+SM80 and newer; an incompatible atom or copy-transport pin fails instead of lowering through instructions the target
+cannot execute.
 
 **The f16-accumulate atom sibling** (`mma_m16n8k16_f16_f16`, C→f16 — atom names follow
 `mma_<shape>_<ab_dtype>_<acc_dtype>`, the compressed PTX/CUTLASS D.A.B.C order, with no acc-unspecified alias): on

@@ -116,12 +116,12 @@ class AtomKind:
 
     @property
     def c_to_a_repack(self) -> bool:
-        """C→A fragment lane-map compatibility: the m16n8k16 family's f32 C fragment (m16n8 —
-        per lane ``c[0..3]`` at ``(grp[, +8], tig·2[, +1])``) is elementwise lane-ALIGNED with the
-        16-bit A fragment's two k-halves, so two k-adjacent C fragments convert into one A operand
-        fragment per lane — no shuffle, no smem round-trip (``FragmentRepack``, the flash P→A
-        handoff). Holds exactly when the C tile is half the A tile's K width (n·2 == k) at m16."""
-        return self.shape == (16, 8, 16)
+        """Whether this atom has a C→A register repack for the flash P→A handoff.
+
+        The m16n8k16 layout is lane-aligned and converts two adjacent C fragments directly. The
+        Volta m8n8k4 layout selects each four-column A slice from its logical 16-column C fragment
+        with warp shuffles. Neither needs a shared-memory round trip."""
+        return self.shape == (16, 8, 16) or self.fragment_layout == "m8n8k4"
 
 
 @dataclass(frozen=True)

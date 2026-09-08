@@ -230,9 +230,9 @@ mark on anything else silently drops it from `make test` even on GPU machines (t
 correctness pins for a while). GPU correctness tests guard themselves with `requires_cuda` / `importorskip` instead.
 
 `goldens` is the second off-lane marker, gated by the same hook. `tests/compiler/pipeline/search/test_golden.py`
-strictly decodes recorded rows against the current compiler, and it splits by what the file costs. The four hardware
+strictly decodes recorded rows against the current compiler, and it splits by what the file costs. The five hardware
 goldens run on the DEFAULT lane, one node per recorded row: parsing one of those files costs milliseconds and
-deciding one row costs about a second, so 155 nodes scatter over the workers instead of four files queueing behind
+deciding one row costs about a second, so 224 nodes scatter over the workers instead of five files queueing behind
 the widest, and a failure names the row rather than a count. The model goldens keep one case per file behind the
 marker, which `make test-goldens` runs — an inventory is hundreds of rows whose per-row nodes would cost more to
 collect than to run, and the widest file is a multi-megabyte parse. The derivation memo

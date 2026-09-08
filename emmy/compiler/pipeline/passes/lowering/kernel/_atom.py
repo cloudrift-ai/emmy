@@ -40,10 +40,12 @@ from emmy.compiler.ir.kernel.ir import (
     FRAG,
     FRAG_COL,
     FRAG_ROW,
+    M16N8,
     ROW,
     UNIFORM,
     BlockScaleLoad,
     EpilogueLoad,
+    FragLayout,
     FragmentApply,
     FragmentBiasAdd,
     FragmentMask,
@@ -55,12 +57,27 @@ from emmy.compiler.ir.kernel.ir import (
     RegEpilogue,
     RegFragment,
     RegStore,
+    frag_layout,
 )
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule import Side, Stage, Tile
 from emmy.compiler.ir.schedule.packing import block_scaled_atom, packed_readings
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
+from emmy.compiler.ir.stmt import (
+    Accum,
+    Assign,
+    Body,
+    Cond,
+    Init,
+    Load,
+    Loop,
+    Select,
+    SelectBranch,
+    Stmt,
+    StridedLoop,
+    Write,
+    mask_select_predicate,
+)
 from emmy.compiler.ir.stmt.body import free_names
 from emmy.compiler.ir.stmt.passes import rename_free
 from emmy.compiler.ir.tile.ops import cone_stat, cone_stat_dtypes, make_cone
@@ -1215,7 +1232,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             elem_bytes=elem.nbytes,
             cta=cta,
             prologue_stmts=tuple(stat_pro),
-            copy_sync=tile.atom.sync_copy_staging,
+            copy_sync=not tile.is_warp or tile.atom.sync_copy_staging,
         )
     else:
         assert len(ops.channels) == 1, "cp.async / TMA staging is single-fold — a multi-B node rides the smem compute fill"
@@ -1979,7 +1996,7 @@ class _ScalarOps(_AtomOps):
 # ---- the twisted carrier's chunk tier ------------------------------------------------------- #
 #
 # The carrier is ONE term over one axis. No block is carved into it: the block this tier folds is
-# the schedule's staged K chunk (``STAGE``'s ``bk_elems``) and nothing else. Per chunk it builds the
+# the ``TILE`` atom's own K width and nothing else. Per chunk it builds the
 # score (the nested contraction the tree already carries as a site of its own), reduces it per row
 # into the chunk's pivot, instantiates the recipe's own channel patterns against that pivot, folds
 # each non-bilinear channel per row and the bilinear one on tensor cores, and merges the chunk's
@@ -2012,6 +2029,11 @@ def _residence(
     hold: str = "",
     memo: dict | None = None,
     frags_only: bool = False,
+    layout: FragLayout = M16N8,
+    select_sigma: Sigma | None = None,
+    row_base: Expr | None = None,
+    col_base: Expr | None = None,
+    mask_fill: float | None = None,
 ):
     """Evaluate one straight-line scalar program at the residence each value it reads has.
 
@@ -2041,7 +2063,35 @@ def _residence(
     out: list[Stmt] = []
     frags, rows, memo = dict(frags), dict(rows), memo if memo is not None else {}
     frag_tag = tag if frag_tag is None else frag_tag
+    selects: dict[str, Select] = {}
     for stmt in stmts:
+        if isinstance(stmt, Select) and select_sigma is not None:
+            selects[stmt.name] = stmt
+            continue
+        if isinstance(stmt, Assign) and stmt.op.name == "add" and mask_fill is not None and select_sigma is not None:
+            selected = [arg for arg in stmt.args if arg in selects]
+            source = [arg for arg in stmt.args if arg in frags]
+            if len(selected) == len(source) == 1 and row_base is not None and col_base is not None:
+                mask = selects.pop(selected[0])
+                predicate = mask_select_predicate(mask)
+                if predicate is None:
+                    raise RuleSkipped("the chunk tier needs complementary branches for a coordinate mask")
+                name = f"{frag_tag}{stmt.name}"
+                out.append(FragmentApply(out=name, op=ElementwiseImpl("copy"), args=(frags[source[0]],), kinds=(FRAG,), layout=layout))
+                out.append(
+                    FragmentMask(
+                        frag=name,
+                        mask_when=select_sigma.apply(predicate),
+                        row_base=row_base,
+                        col_base=col_base,
+                        fill=mask_fill,
+                        keep=mask.branches[0].value,
+                        keep_op=stmt.op,
+                        layout=layout,
+                    )
+                )
+                frags[stmt.name] = name
+                continue
         accum = isinstance(stmt, Accum)
         if not isinstance(stmt, (Assign, Accum)):
             if not frags_only:
@@ -2066,7 +2116,16 @@ def _residence(
                 frags[stmt.name] = memo[key]
                 continue
             name = target if target is not None else f"{frag_tag}{stmt.name}"
-            out.append(FragmentApply(out=name, op=stmt.op, args=tuple(args), kinds=tuple(kinds), in_place=target is not None))
+            out.append(
+                FragmentApply(
+                    out=name,
+                    op=stmt.op,
+                    args=tuple(args),
+                    kinds=tuple(kinds),
+                    in_place=target is not None,
+                    layout=layout,
+                )
+            )
             frags[stmt.name] = name
             if target is None:
                 memo[key] = name
@@ -2081,12 +2140,14 @@ def _residence(
             rows[stmt.name] = pair
         elif not frags_only:
             out.append(stmt)
+    if selects:
+        raise RuleSkipped("the chunk tier needs each coordinate Select to form an additive mask")
     return out, frags, rows
 
 
 @dataclass(frozen=True)
 class _FlashOps(_MmaOps):
-    """The TWISTED carrier folded one staged CHUNK at a time — attention's tensor-core form.
+    """The TWISTED carrier folded one scheduled CHUNK at a time — attention's tensor-core form.
 
     The ordinary mma tier folds a term's own lift into one accumulator per bilinear channel. A
     twisted carrier cannot be folded that way at all: its stored lift is the STABLE contribution,
@@ -2094,7 +2155,7 @@ class _FlashOps(_MmaOps):
     are a running pivot and a denominator that are no accumulator. So this tier folds the RECIPE,
     and takes its only block from the schedule:
 
-    - the CHUNK is ``STAGE``'s ``bk_elems`` over the carrier's own axis;
+    - the CHUNK is the ``TILE`` atom's K width over the carrier's own axis;
     - the SCORE for the chunk is the nested contraction (:attr:`inner`) with the carrier's own
       prefix over it — A IS that contraction, so the operand exposes the raw accumulator and the
       lift is what scales it. Its output tile is the ``(m, chunk)`` pair, which is why the fragment
@@ -2168,6 +2229,7 @@ class _FlashOps(_MmaOps):
         """The chunk loop — the ONE loop this tier opens over the carrier's axis."""
         m, n = mn
         atom = self.tile.atom
+        layout = frag_layout(atom.fragment_layout)
         # The chunk is the TILE's own K width. This tier reads every operand gmem-direct, so it
         # takes no transport from ``STAGE`` and the site spells none.
         bk = atom.atom_k * self.tile.bk
@@ -2181,9 +2243,8 @@ class _FlashOps(_MmaOps):
         # re-decided: an enumeration that stopped spelling one of them would otherwise miscompile
         # in silence.
         assert atom.c_to_a_repack, "the chunk tier needs an atom whose C fragment repacks into an A operand"
-        assert all(
-            edge.as_slab() is not None for edge in ((*score.operands, self.c.operands[1]) if score is not None else self.c.operands)
-        ), "the chunk tier reads its score operands and its streamed value as slabs"
+        reads = (*score.operands, self.c.operands[1]) if score is not None else self.c.operands[:2]
+        assert all(edge.as_slab() is not None for edge in reads), "the chunk tier reads its score operands and its streamed value as slabs"
         if score is not None:
             seam = (score_tile.n.axis.name, score_tile.n.units, score_tile.n.tile, score_tile.m.reg)
             assert score_tile.is_warp and seam == (key.name, 1, bk, m.reg), (
@@ -2202,6 +2263,7 @@ class _FlashOps(_MmaOps):
 
         chunk = Axis(name=f"{key.name}__ck", extent=key.extent)
         base = Var(chunk.name)
+        select_sigma = Sigma({m.axis.name: Var(FRAG_ROW), key.name: Var(FRAG_COL)})
         # A key extent the chunk does not tile — a symbolic stream, or a static one with a
         # remainder — leaves the last chunk ragged. Its overhanging columns fill with the pivot ⊕'s
         # identity, so the pivot ignores them and every channel's pattern folds a zero weight
@@ -2224,6 +2286,11 @@ class _FlashOps(_MmaOps):
                     rows={},
                     tag=f"_w{i}_{j}_",
                     memo=memo.setdefault((i, j), {}),
+                    layout=layout,
+                    select_sigma=select_sigma,
+                    row_base=offset[0].base(i),
+                    col_base=BinaryExpr("+", base, Literal(j * atom.atom_n, "int")),
+                    mask_fill=self.c.base.components()[0].identity,
                 )
                 body += stmts
                 scored[i, j] = frags[self.c.roles[0]]
@@ -2234,6 +2301,7 @@ class _FlashOps(_MmaOps):
                             mask_when=BinaryExpr(">=", Var(FRAG_COL), bound),
                             col_base=BinaryExpr("+", base, Literal(j * atom.atom_n, "int")),
                             fill=self.c.base.components()[0].identity,
+                            layout=layout,
                         )
                     )
             pivots[i] = _row_pair(self.frag("_g"), i)
@@ -2243,6 +2311,7 @@ class _FlashOps(_MmaOps):
                     bot=pivots[i][1],
                     frags=tuple(scored[i, j] for j in range(cols)),
                     op=self.c.base.components()[0],
+                    layout=layout,
                 )
             )
         weights, partials = {}, {}
@@ -2260,6 +2329,7 @@ class _FlashOps(_MmaOps):
                         rows={_PIVOT: pivots[i]},
                         tag=f"_ch{i}_{j}_",
                         memo=memo[i, j],
+                        layout=layout,
                     )
                     body += cell
                     if product is None:
@@ -2275,6 +2345,7 @@ class _FlashOps(_MmaOps):
                             bot=partials[index, i][1],
                             frags=tuple(folded),
                             op=self.c.base.components()[index],
+                            layout=layout,
                         )
                     )
         body += self._expectation(offset, mn, base, weights, steps, bound)
@@ -2311,6 +2382,7 @@ class _FlashOps(_MmaOps):
                         index=index,
                         row_base=offset[0].base(i),
                         col_base=BinaryExpr("+", base, Literal(j * atom.atom_n, "int")),
+                        layout=frag_layout(atom.fragment_layout),
                     )
                 )
         return out
@@ -2390,10 +2462,26 @@ class _FlashOps(_MmaOps):
         out += [self._frag(f"_b{j}_{t}", "b") for j in range(n.reg) for t in range(steps)]
         out += [self._frag(f"_p{i}_{j}", "c") for i in range(m.reg) for j in range(n.reg)]
         for t in range(steps):
-            out += [
-                FragmentRepack(frag=self.frag(f"_a{i}_{t}"), srcs=(weights[i, 2 * t], weights[i, 2 * t + 1]), ab_dtype=atom.ab_dtype)
-                for i in range(m.reg)
-            ]
+            if atom.fragment_layout == "m8n8k4":
+                out += [
+                    FragmentRepack(
+                        frag=self.frag(f"_a{i}_{t}"),
+                        srcs=(weights[i, t // 4],),
+                        ab_dtype=atom.ab_dtype,
+                        fragment_layout=atom.fragment_layout,
+                        part=t % 4,
+                    )
+                    for i in range(m.reg)
+                ]
+            else:
+                out += [
+                    FragmentRepack(
+                        frag=self.frag(f"_a{i}_{t}"),
+                        srcs=(weights[i, 2 * t], weights[i, 2 * t + 1]),
+                        ab_dtype=atom.ab_dtype,
+                    )
+                    for i in range(m.reg)
+                ]
             row = BinaryExpr("+", base, Literal(t * atom.atom_k, "int"))
             out += [
                 LdmatrixLoad(
@@ -2451,6 +2539,7 @@ class _FlashOps(_MmaOps):
                     frag_tag=f"_mg{i}_{j}_",
                     hold=held,
                     frags_only=j > 0,
+                    layout=frag_layout(self.tile.atom.fragment_layout),
                 )
                 out += cell
         return out
@@ -2477,7 +2566,13 @@ class _FlashOps(_MmaOps):
         cell = {m.axis.name, n.axis.name}
         if any(isinstance(stmt, Load) and cell & {name for e in stmt.index for name in e.free_vars()} for stmt in tail):
             raise RuleSkipped("the chunk tier's projection reads a per-cell operand beside a per-row carrier state", reject=True)
-        stmts, frags, _rows = _residence(tail, frags=frags, rows=rows, tag=f"_ep{i}_{j}_")
+        stmts, frags, _rows = _residence(
+            tail,
+            frags=frags,
+            rows=rows,
+            tag=f"_ep{i}_{j}_",
+            layout=frag_layout(atom.fragment_layout),
+        )
         out = list(stmts)
         for write in (stmt for stmt in self.epilogue if isinstance(stmt, Write)):
             out.append(
