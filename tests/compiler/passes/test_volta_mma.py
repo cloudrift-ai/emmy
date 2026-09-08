@@ -201,6 +201,31 @@ def test_sm70_sync_copy_composes_ring_and_register_pipelines(monkeypatch) -> Non
     assert "cp.async" not in src and "ldmatrix" not in src
 
 
+def test_sm70_ring_splits_the_blocking_copy_across_the_drain(monkeypatch) -> None:
+    """A ring on a target without ``cp.async`` puts its in-flight chunk in REGISTERS.
+
+    The fill issues the next chunk's global loads, the resident chunk's mma drain runs, and only
+    then do the registers land in the slab — so the drain covers the load latency and ONE barrier
+    per chunk publishes the deposit. Back-to-back load/store fills (what a ring emitted before)
+    leave the latency fully exposed and need two barriers, which measured slower than no ring at
+    all on every V100 shape tried."""
+    monkeypatch.setenv("EMMY_TILE", f"{VOLTA}/f2x2/k4")
+    monkeypatch.setenv("EMMY_WORK", "w2x2")  # 128 threads: the slabs stripe evenly, so the split engages
+    monkeypatch.setenv("EMMY_STAGE", "d2/smem")
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    src, knobs = _source(_graph(m=64, n=64, k=32), Context(compute_capability=(7, 0)))
+    assert family_value(knobs, "STAGE") == "d2/smem"
+    prologue, _, body = src.partition("for (int _ks")
+    issue = body.index("_v__a_stage0_0")  # the staged gmem load of the PREFETCH chunk
+    drain = body.index("emmy_mma_m8n8k4_f16_f32")
+    deposit = body.index("*reinterpret_cast<uint4*>(&_a_smem[")
+    assert issue < drain < deposit, "the drain must sit between the staged load and its slab store"
+    assert body.count("__syncthreads();") == 1, "the deposit's barrier is the whole per-chunk handshake"
+    assert prologue.count("__syncthreads();") == 1, "the primed slot is published once before the loop"
+    for forbidden in NEWER_INSTRUCTIONS:
+        assert forbidden not in src
+
+
 def test_sm70_register_tile_keeps_the_volta_fragment_layout_through_the_reroll(monkeypatch) -> None:
     """A register tile wide enough to ROLL back into a loop still drains and stores as Volta.
 
