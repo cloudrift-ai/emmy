@@ -172,6 +172,38 @@ def golden_entry_state(entry: Mapping) -> GoldenEntryState:
     return GoldenEntryState.VERIFIED
 
 
+def golden_set_state(entry: Mapping, realizations: Sequence[Mapping]) -> GoldenEntryState:
+    """One realization's state read over the SET it belongs to, which is the unit a routed
+    realization is verified as.
+
+    An ordinary row measures one kernel and answers for itself (:func:`golden_entry_state`). A
+    realization that names a ``route`` measures nothing of its own: what ran was a kernel set, and
+    what was timed is the routing rows it names beside the child-identity receipts of its target.
+    So it is VERIFIED exactly when every row it names is present and measured, and every receipt
+    beside it is measured too — one unmeasured member and the set is not a thing anyone ran.
+
+    A realization with neither measurements nor a route is INVENTORY as before, and this is the
+    only reading of "verified" that a promotion, a whole-file bench walk and the tuner's
+    do-not-overwrite check share."""
+    state = golden_entry_state(entry)
+    if state is GoldenEntryState.VERIFIED or not entry.get("route"):
+        return state
+    by_name = {row.get("name"): row for row in realizations}
+    members = [by_name.get(name) for name in entry["route"]]
+    receipts = [row for row in realizations if row.get("identity") and row is not entry and _schedules_a_kernel(row)]
+    if any(member is None for member in members):
+        return state
+    if all(golden_entry_state(member) is GoldenEntryState.VERIFIED for member in [*members, *receipts]):
+        return GoldenEntryState.VERIFIED
+    return state
+
+
+def _schedules_a_kernel(realization: Mapping) -> bool:
+    """Whether a row carries a SCHEDULE row rather than a route — a child-identity receipt."""
+    knobs = realization.get("knobs") or {}
+    return bool(knobs) and any(str(key).split("@", 1)[0] != "PLACE" for key in knobs)
+
+
 @dataclass(frozen=True)
 class GoldenRecord:
     name: str
@@ -196,6 +228,13 @@ class GoldenRecord:
     #: to several kernels, and only the stored identity says which child this row's schedule
     #: decorates (and so which kernel's ``S_*`` signature its row is evidence under).
     identity: str | None = None
+    #: The rows this realization's KERNEL SET was recorded as, by name — the routing rows
+    #: ``record_greedy_pick`` wrote for it, in the order the compile took them. A realization that
+    #: names them measures nothing itself: the set is what was measured, and the set is what
+    #: verifies it (:func:`golden_set_state`), spells its route (:func:`_replay`) and pins its
+    #: bench (:func:`route_pins`). Empty for the ordinary one-kernel row, which carries its own
+    #: measured schedule and needs no reference.
+    route_names: tuple[str, ...] = ()
     #: Measured microseconds per ``Context.hardware_id``: ``{card: {emmy_us, tcompile_us}}``. A
     #: model golden is one file per card and uses the flat ``measurements`` block instead; a corpus
     #: case is one file across many cards, which a flat block cannot hold.
@@ -506,7 +545,7 @@ def validate_golden_file(
                 raise ValueError(f"{realization_where} must be a mapping")
             _require_keys(
                 realization,
-                {"name", "bindings", "pins", "knobs", "measurements", "ranking", "identity", "latency"},
+                {"name", "bindings", "pins", "knobs", "measurements", "ranking", "identity", "latency", "route"},
                 realization_where,
             )
             if not isinstance(realization.get("name"), str) or not realization["name"]:
@@ -569,17 +608,25 @@ def validate_golden_file(
                         f"{realization_where} schedules a kernel behind pinned cut(s) without naming it; "
                         "a child-identity schedule receipt must store the child kernel's identity"
                     )
+            if "route" in realization:
+                route = realization["route"]
+                if not isinstance(route, list) or not route or any(not isinstance(name, str) or not name for name in route):
+                    raise ValueError(f"{realization_where}.route must be a non-empty list of realization names")
+                names = {row.get("name") for row in entry["realizations"]}
+                unknown = [name for name in route if name not in names]
+                if unknown:
+                    raise ValueError(f"{realization_where}.route names no realization of this target: {', '.join(sorted(unknown))}")
             if "ranking" in realization and not isinstance(realization["ranking"], Mapping):
                 raise ValueError(f"{realization_where}.ranking must be a mapping")
             if strict and "ranking" in realization:
                 raise ValueError(f"{realization_where} working ranking metadata cannot be promoted")
             try:
-                state = golden_entry_state(realization)
+                state = golden_set_state(realization, entry["realizations"])
             except ValueError as exc:
                 raise ValueError(f"{realization_where} ({realization.get('name', '?')}): {exc}") from exc
             if strict and state != GoldenEntryState.VERIFIED:
                 raise ValueError(f"{realization_where} repository promotion requires knobs and paired positive timings")
-            if state == GoldenEntryState.VERIFIED:
+            if state == GoldenEntryState.VERIFIED and "measurements" in realization:
                 measurements = realization["measurements"]
                 _require_keys(measurements, {"emmy_us", "reference_us", "reference_backend"}, f"{realization_where}.measurements")
                 _positive_number(measurements["emmy_us"], f"{realization_where}.measurements.emmy_us")
@@ -621,6 +668,7 @@ def golden_record_from_entry(document: Mapping, entry: Mapping, realization: Map
         measurements=dict(realization["measurements"]) if realization.get("measurements") is not None else None,
         ranking=dict(realization["ranking"]) if realization.get("ranking") is not None else None,
         identity=realization.get("identity"),
+        route_names=tuple(realization.get("route") or ()),
         latency=dict(realization["latency"]) if realization.get("latency") is not None else None,
     )
 
@@ -637,6 +685,25 @@ def regime_pins(record: GoldenRecord) -> dict:
     (:func:`regime_live`). The schedule row and the route never travel this way; they are
     measured rows the evidence pick joins to the kernel they were recorded for."""
     return {str(key): value for key, value in record.pins if str(key).split("@", 1)[0] != "PLACE"}
+
+
+def route_pins(record: GoldenRecord, records: Sequence[GoldenRecord]) -> dict:
+    """The arm keys of the routing rows ``record`` names, as one hand pin — what a bench of that
+    realization has to publish for the compile to reach the kernel set that was measured.
+
+    A routing row's knobs ARE its arm — a placement cut's ``PLACE@seam: cut`` or a cross-CTA
+    split's ``REDUCE`` value — so both kinds travel. A cascade's later decisions are taken on the
+    pieces the earlier ones mint, and a scoped ``PLACE`` pin that resolves on no kernel addresses
+    another kernel of the graph (``030_cut._placement_restriction``), so publishing every routing
+    row's keys at once reproduces the whole cascade rather than only its first step. Empty for a
+    record that names no route, which is the ordinary row whose own knobs are its pin."""
+    by_name = {other.name: other for other in records}
+    pins: dict[str, str] = {}
+    for name in record.route_names:
+        referenced = by_name.get(name)
+        if referenced is not None:
+            pins.update({str(key): str(value) for key, value in referenced.knobs.items()})
+    return pins
 
 
 def shared_regime_pins(records: Sequence[GoldenRecord]) -> dict:
@@ -973,8 +1040,14 @@ def _replay(
     from emmy.compiler.pipeline.pipeline import Run, _is_structural_option  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import pinned_knobs, spelled_arm  # noqa: PLC0415
 
+    by_name = {entry.name: entry for entry in (record, *siblings)}
+
     def _spelling(entry: GoldenRecord) -> dict[str, str]:
-        return {**entry.route, **{str(key): str(value) for key, value in entry.knobs.items()}}
+        # A routed realization measures nothing itself and carries no row, so read alone it would
+        # say "this kernel ran whole" — the fuse reading, which is right for a row that genuinely
+        # took no kernel-set decision and wrong for this one. It spells the route it names instead.
+        referenced = {key: value for name in entry.route_names for key, value in (by_name[name].route if name in by_name else {}).items()}
+        return {**referenced, **entry.route, **{str(key): str(value) for key, value in entry.knobs.items()}}
 
     lead = record if lead is None else lead
     named = {entry.identity: entry for entry in siblings if entry.identity is not None}
@@ -1541,6 +1614,8 @@ def _live_gpu_key() -> tuple[str, tuple[int, int]] | None:
 __all__ = [
     "GOLDEN_RECORDS",
     "GoldenEntryState",
+    "golden_set_state",
+    "route_pins",
     "GoldenFileValidation",
     "GoldenRecord",
     "dump_golden_file",

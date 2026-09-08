@@ -633,6 +633,119 @@ def test_recorded_greedy_pick_is_picked_again_under_strict_evidence(tmp_path):
     assert greedy_pick_rows(again) == rows
 
 
+def _recorded_set(tmp_path):
+    """A working golden whose seed realization has had one greedy kernel set recorded onto it."""
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+    from emmy.compiler.pipeline.search.golden import golden_record_from_entry, records_override
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+    from emmy.compiler.pipeline.search.working_golden import KernelSetDecisions, greedy_pick_rows, record_greedy_pick
+
+    path = tmp_path / "working-set.yaml"
+    document = _working_placement_route(path)
+    entry = document["configs"][0]
+    seed = golden_record_from_entry(document, entry, entry["realizations"][0])
+    ctx = Context.from_target((8, 9))
+    taken = KernelSetDecisions()
+    with records_override([seed]), pinned_knobs({"FAST_MATH": False}):
+        picked = Pipeline.build(CUDA_PASSES).with_strategies(taken).run(seed.target_program.copy(), ctx=ctx, db=None)
+    written = record_greedy_pick(
+        path,
+        document,
+        "working.route",
+        decisions=[(identity, knobs, 5.0, 6.0) for identity, knobs in taken.decisions],
+        kernels=[(identity, row, 1.0, 2.0) for identity, row in greedy_pick_rows(picked)],
+        reference_backend="same-input-greedy",
+    )
+    return path, load_golden_file(path), written, len(taken.decisions)
+
+
+def test_a_recorded_set_names_its_routing_rows_on_the_seed(tmp_path):
+    """The seed realization gains a ``route`` naming the routing rows the compile took, in the order
+    it took them. A cascade takes several, and every one of them is named: a piece's cut key is
+    spelled on the piece's own tree, so the first decision alone does not say what the set was."""
+    _path, reloaded, written, decisions = _recorded_set(tmp_path)
+    seed = reloaded["configs"][0]["realizations"][0]
+
+    assert seed["name"] == "working.route"
+    assert seed["route"] == written[:decisions], "the seed names its routing rows, not its receipts"
+    assert decisions >= 1
+
+
+def test_a_realization_naming_its_route_is_verified_by_the_set(tmp_path):
+    """The unit of verification is the routed SET. A realization with no measurements of its own is
+    verified when every row its ``route`` names is measured, and stops being verified as soon as one
+    of them is not. A realization with neither measurements nor a route stays unverified."""
+    from emmy.compiler.pipeline.search.golden import GoldenEntryState, golden_set_state
+
+    _path, reloaded, _written, _decisions = _recorded_set(tmp_path)
+    realizations = reloaded["configs"][0]["realizations"]
+    seed = realizations[0]
+    seed.pop("knobs", None)
+    seed.pop("measurements", None)
+
+    assert golden_set_state(seed, realizations) is GoldenEntryState.VERIFIED
+
+    named = next(row for row in realizations if row["name"] == seed["route"][0])
+    named.pop("measurements")
+    assert golden_set_state(seed, realizations) is not GoldenEntryState.VERIFIED
+
+    seed.pop("route")
+    assert golden_set_state(seed, realizations) is GoldenEntryState.INVENTORY
+
+
+def test_a_realization_naming_its_route_spells_that_route(tmp_path):
+    """Read as evidence, such a realization spells the route it names — never fuse. Its own knobs
+    say nothing, so without the reference the replay reads it as a kernel that ran whole.
+
+    Asked here of a set whose rows name no kernel by identity, so every fork falls to the set's
+    lead — the routed realization itself, which has only the reference to answer with."""
+    from emmy.compiler.pipeline.search.golden import _replay, golden_record_from_entry, lead_of, siblings_of
+
+    _path, reloaded, _written, _decisions = _recorded_set(tmp_path)
+    entry = reloaded["configs"][0]
+    seed_row = entry["realizations"][0]
+    seed_row.pop("knobs", None)
+    seed_row.pop("measurements", None)
+    for row in entry["realizations"][1:]:
+        row.pop("identity", None)
+
+    def _arms(rows):
+        records = [golden_record_from_entry(reloaded, entry, row) for row in rows]
+        seed = records[0]
+        return _replay(seed, siblings=siblings_of(seed, records), lead=lead_of(seed, records)).arms
+
+    assert any(arm.get("PLACE@inner.1/map") == "cut" for _signature, arm in _arms(entry["realizations"]))
+
+    seed_row.pop("route")
+    assert not any(arm.get("PLACE@inner.1/map") == "cut" for _signature, arm in _arms(entry["realizations"]))
+
+
+def test_benching_a_routed_realization_pins_the_route_it_names(tmp_path):
+    """Benching a routed realization by name has to compile the kernel set that was measured. Its
+    own knobs are empty, so the pin the bench publishes comes from the routing rows it names —
+    every one of them, since a cascade's later cuts are spelled on the pieces the earlier ones
+    mint. Without that the compile would fall to the unpinned fork and time whatever the planner
+    picked, under the realization's name."""
+    from emmy.commands.compile import resolve_golden_arg
+    from emmy.commands.run import _sample_replay_knobs
+
+    path, reloaded, written, decisions = _recorded_set(tmp_path)
+    seed = reloaded["configs"][0]["realizations"][0]
+    seed.pop("knobs", None)
+    seed.pop("measurements", None)
+    dump_golden_file(reloaded, path, overwrite=True)
+
+    args = _args(path, realization="working.route", ir=None)
+    args._explicit_realization = True
+    resolve_golden_arg(args)
+
+    (row,) = [config for config in args.golden_configs if config.name == "working.route"]
+    pinned = _sample_replay_knobs(row)
+    routing = [r for r in reloaded["configs"][0]["realizations"] if r["name"] in written[:decisions]]
+    for arm in routing:
+        assert all(pinned.get(key) == value for key, value in arm["knobs"].items()), pinned
+
+
 def test_run_records_the_greedy_pick_of_an_embedded_golden(monkeypatch, tmp_path):
     """``run --golden PATH --realization NAME --bench --record-greedy``: the greedy row compiles with
     the file's rows as its golden evidence (here the routing row, so the cut is taken), and after

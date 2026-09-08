@@ -15,8 +15,8 @@ from pathlib import Path
 from emmy.compiler.pipeline.search.golden import (
     GoldenEntryState,
     dump_golden_file,
-    golden_entry_state,
     golden_record_from_entry,
+    golden_set_state,
     is_repository_golden_path,
     load_golden_file,
 )
@@ -595,6 +595,14 @@ def record_greedy_pick(
     offers a same-spelled seam; the replay follows the routing rows, each naming its kernel by
     identity. A row already recorded for the same kernel and knobs takes the new timings, anything
     else is appended, so a re-record never duplicates. Returns the names written, in order.
+
+    The SEED then names the routing rows it was recorded with, in that order (``route``). That
+    reference makes the realization's unit of verification the routed SET rather than one row's own
+    schedule: what ran is a kernel set, so the seed measures nothing itself and is read through the
+    rows it names — verified with them (:func:`~emmy.compiler.pipeline.search.golden.golden_set_state`),
+    spelling their route on replay, and benched under their arm keys. A seed that also carries a
+    measured row of its own keeps it and stays verified by it; the reference says what its kernel
+    set was either way. A one-kernel compile takes no kernel-set decision and so writes none.
     """
     destination = Path(path)
     if is_repository_golden_path(destination):
@@ -623,6 +631,8 @@ def record_greedy_pick(
         else:
             recorded["measurements"] = row["measurements"]
         written.append(row["name"])
+    if decisions:
+        seed["route"] = written[: len(decisions)]
     dump_golden_file(document, destination, overwrite=True, incremental=True)
     return written
 
@@ -632,7 +642,7 @@ def persist_proposal_rankings(path: str | Path, document: dict, target: WorkingG
     configs = document["configs"]
     for ((entry_index, realization_index), _pins), ranking in zip(target.proposals, rankings, strict=True):
         realization = configs[entry_index]["realizations"][realization_index]
-        if golden_entry_state(realization) == GoldenEntryState.VERIFIED:
+        if golden_set_state(realization, configs[entry_index]["realizations"]) == GoldenEntryState.VERIFIED:
             continue
         realization["ranking"] = {**ranking, "source": "proposal"}
     dump_golden_file(document, path, overwrite=True, incremental=True)
@@ -667,7 +677,12 @@ def persist_tune_winner(
             and canonical_row_key(configs[path[0]]["realizations"][path[1]]["knobs"]) == winner_key
         ]
         writable = next(
-            (path for path in matching if golden_entry_state(configs[path[0]]["realizations"][path[1]]) != GoldenEntryState.VERIFIED),
+            (
+                path
+                for path in matching
+                if golden_set_state(configs[path[0]]["realizations"][path[1]], configs[path[0]]["realizations"])
+                != GoldenEntryState.VERIFIED
+            ),
             None,
         )
         if writable is not None:

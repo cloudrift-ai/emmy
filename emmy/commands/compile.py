@@ -201,7 +201,13 @@ def resolve_golden_arg(args) -> None:
     if getattr(args, "dynamic", None):
         logger.error("--dynamic is incompatible with --golden (a dynamic golden's spec is part of its config)")
         sys.exit(2)
-    from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS, goldens_for_live_gpu, load_golden_file, load_golden_records
+    from emmy.compiler.pipeline.search.golden import (
+        GOLDEN_RECORDS,
+        goldens_for_live_gpu,
+        load_golden_file,
+        load_golden_records,
+        route_pins,
+    )
 
     # Canonical replay scopes to the live card as before. An explicit working file is
     # intentionally literal: no repository union and no live-card filtering, because its
@@ -248,7 +254,7 @@ def resolve_golden_arg(args) -> None:
     args._golden_records = [record for record in records if record.target_key == matches[0].target_key]
     pinned = matches
     if document is not None:
-        verified = [record for record in matches if record.measurements is not None]
+        verified = [record for record in matches if record.measurements is not None or route_pins(record, records)]
         winners = [record for record in matches if record.ranking is not None and record.ranking.get("tune_winner") is True]
         valid_winner = (
             len(winners) == 1
@@ -262,7 +268,7 @@ def resolve_golden_arg(args) -> None:
             sys.exit(2)
         if not getattr(args, "_explicit_realization", True):
             pinned = verified or winners
-    args.golden_configs = [golden_row(match) for match in pinned]
+    args.golden_configs = [golden_row(match, records) for match in pinned]
     logger.info(
         "[golden] %s%s → embedded %s target %s (%d matching row%s, %d automatic pin%s)",
         name,
@@ -276,16 +282,27 @@ def resolve_golden_arg(args) -> None:
     )
 
 
-def golden_row(record):
+def golden_row(record, records=()):
     """A golden record as the duck-typed pinned row ``run`` benches and reports: the
     :class:`~emmy.compiler.pipeline.search.data.Sample` view (``name`` / ``pins`` / ``knobs`` /
     ``shape`` / ``dynamic``) plus the ``record`` itself — the row ``run`` measures under a hand pin and records as
-    deploy evidence."""
+    deploy evidence.
+
+    A record that names a route carries no row of its own, so its pin comes from the routing rows it
+    names (:func:`~emmy.compiler.pipeline.search.golden.route_pins`, resolved against ``records``).
+    Those arm keys ride the row's ``pins`` beside the input regime, which is what the bench
+    publishes: the kernel set that was measured is the one that compiles, rather than whatever the
+    unpinned fork picks under the realization's name."""
     from types import SimpleNamespace  # noqa: PLC0415
 
     from emmy.compiler.pipeline.search.data import Sample  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import route_pins  # noqa: PLC0415
 
-    return SimpleNamespace(**vars(Sample.from_golden(record)), record=record)
+    sample = vars(Sample.from_golden(record))
+    route = route_pins(record, records)
+    if route:
+        sample["pins"] = {**sample["pins"], **route}
+    return SimpleNamespace(**sample, record=record)
 
 
 def add_quantize_arg(parser) -> None:
