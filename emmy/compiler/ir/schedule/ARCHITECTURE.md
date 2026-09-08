@@ -102,6 +102,12 @@ from being offered a row its emission would have to ignore. The chunk is the con
 staging slab, and must contain a complete logical C fragment so its score can repack into the paired contraction's A
 operand. Coordinate masks remain eligible only when their complementary branches form an additive cell mask.
 
+The tier also demands the score's own contraction extent be STATIC: the chunk covers it in one pass and holds a query
+fragment per atom-K step, so a symbolic extent there has no step count to hold them at. And the ATOM it names is the
+EXPECTATION's — the score keeps that atom's f32 sibling (`wide_accumulate`), so the reduced-accumulate cell can run
+the expectation's mma chain at the consumer-die full rate without moving the softmax's running max and denominator off
+f32; the chunk partial promotes into the f32 carrier once per chunk, which is the promote cadence.
+
 The tier's other refusals (`_chunk_refusal`) are the same kind of statement, and two of them are about the score's own
 PREFIX — the carrier's lift cut to its score role, which is where an SDPA mask lands. Only what reaches a fragment
 loader needs a gmem address: whatever supplies the pivot, and the streamed value. The prefix's remaining leaves are
@@ -113,7 +119,8 @@ Both were blanket refusals, and either one sent a masked attention target to the
 which tier then puts which operand on a slab is the tier's own business. The chunked site used to be excluded on the
 reading that it "takes its chunk off the `TILE`, so a transport spelling there would decide nothing"; a `Stage` never
 spelled that chunk (the resolver derives `bk_elems` from `Tile.bk`), so what the exclusion decided was that
-attention's value channel reads gmem-direct.
+attention's value channel reads gmem-direct. That one transport now covers BOTH operands the carrier streams —
+`chunk_key_stage` says whether the score's key joins the value on the ring, and the resolver sizes the ring at both.
 
 A pin is a restriction on those projected domains, never a source of choices, so it narrows what a site may select and
 cannot manufacture a value the projection withheld. A value scoped to a site that does not offer it empties that

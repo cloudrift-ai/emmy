@@ -268,9 +268,7 @@ def wide_accumulate(atom: AtomKind) -> AtomKind:
     return next(
         sibling
         for sibling in ATOM_REGISTRY.values()
-        if sibling.shape == atom.shape
-        and sibling.operand_dtype("a") == atom.operand_dtype("a")
-        and sibling.operand_dtype("c") == F32
+        if sibling.shape == atom.shape and sibling.operand_dtype("a") == atom.operand_dtype("a") and sibling.operand_dtype("c") == F32
     )
 
 

@@ -1409,7 +1409,10 @@ timing only where a kernel of the set has no launch) — the units the kernel-se
 kernel's own receipt, so a measured split never loses to the unsplit kernel for carrying the program's total — and
 one child-identity schedule receipt per CUDA kernel (the tile
 kernel it lowered from, its realized schedule row, its own isolated launch timing), all under the seed realization's
-input regime with the greedy comparison row as `same-input-greedy` reference. A nested cut is a routing row of the
+input regime with the greedy comparison row as `same-input-greedy` reference. The PRECISION gates on that regime are
+the compile's own, not the seed's (`pins.measured_precision_pins`): a row measured with the reduced-accumulate or
+native-fp8 cell offered has to say so, or the replay republishes a regime that no longer enumerates it — measured
+evidence for a pick nothing can take again. A nested cut is a routing row of the
 piece it was offered on, so a cascade of cuts is as many routing rows, and the replay walks the set together: the entry
 whose identity a fork's kernel carries decides that fork, and the set's lead decides the rest. Receipts written this way
 carry NO route in `pins`, unlike the corpus convention above: seam spellings are kernel-local, and a cut key copied

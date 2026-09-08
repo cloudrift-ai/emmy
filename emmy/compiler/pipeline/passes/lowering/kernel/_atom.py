@@ -2558,21 +2558,20 @@ class _FlashOps(_MmaOps):
         the chunk, so a slab would be refilled with the same rows every iteration."""
         m, _ = mn
         atom, score, key = self._score_atom, self.inner[0], self.k_axis
-        inner_k = self._score_k
         b_load = next(edge for edge in score.operands if key.name in edge.free_axes).as_slab().load
         trans = score.axis in b_load.index[-1].free_vars()
-        staged, steps = (None if streams is None else streams.key), self._score_steps()
+        staged = None if streams is None else streams.key
         decls: list[Stmt] = [self._frag(f"_kb{j}", "b", atom) for j in range(cols)]
         decls += [self._frag(f"_s{i}_{j}", "c", atom) for i in range(m.reg) for j in range(cols)]
 
-        def at_step(t: int | None) -> list[Stmt]:
+        def at_step(t: int) -> list[Stmt]:
             """One atom-K step of the score: its key fragments, then a cell per register row."""
-            k = Var(inner_k.name) if t is None else Literal(t * atom.atom_k, "int")
+            k = Literal(t * atom.atom_k, "int")
             out = [self._key_read(staged, slot, b_load, base, j, bound, trans, k) for j in range(cols)]
             return out + [
                 MmaSyncPtx(
                     c_frag=self.frag(f"_s{i}_{j}"),
-                    a_frag=self.frag(self._query_frag(i, t)),
+                    a_frag=self.frag(f"_qa{i}_{t}"),
                     b_frag=self.frag(f"_kb{j}"),
                     shape=atom.ptx_shape,
                     ab_dtype=atom.ab_dtype,
@@ -2582,67 +2581,44 @@ class _FlashOps(_MmaOps):
                 for j in range(cols)
             ]
 
-        if steps is None:  # a symbolic score K keeps its loop, and reloads the query inside it
-            loop = [self._query_read(offset, m, i, None) for i in range(m.reg)]
-            return [
-                *(self._frag(self._query_frag(i, None), "a", atom) for i in range(m.reg)),
-                *decls,
-                StridedLoop(
-                    axis=inner_k,
-                    start=Literal(0, "int"),
-                    step=Literal(atom.atom_k, "int"),
-                    body=Body(tuple(loop + at_step(None))),
-                    unroll=False,
-                ),
-            ]
-        return [*decls, *(stmt for t in range(steps) for stmt in at_step(t))]
+        return [*decls, *(stmt for t in range(self._score_steps()) for stmt in at_step(t))]
 
-    def _score_steps(self) -> int | None:
-        """The score's atom-K steps within one chunk, or ``None`` when its K is symbolic and the
-        step stays a rolled loop. Static, the steps go straight-line — the shape the query hoist
-        needs, since a rolled loop has nowhere to hold a fragment per step (``LOOPIFY`` re-rolls it
-        back for a readable listing)."""
-        k = self._score_k
-        return k.extent.as_static() // self.tile.atom.atom_k if k.extent.is_static else None
-
-    def _query_frag(self, i: int, t: int | None) -> str:
-        """The query fragment of register row ``i`` at score-K step ``t`` (``None`` = the one
-        fragment a rolled step reloads)."""
-        return f"_qa{i}" if t is None else f"_qa{i}_{t}"
-
-    def _query_read(self, offset, m, i: int, t: int | None) -> Stmt:
-        """One query fragment of register row ``i`` at score-K step ``t``, read gmem-direct."""
-        atom = self._score_atom
-        a_load = next(edge for edge in self.inner[0].operands if m.axis.name in edge.free_axes).as_slab().load
-        k = Var(self._score_k.name) if t is None else Literal(t * atom.atom_k, "int")
-        sigma = Sigma({m.axis.name: offset[0].base(i), self._score_k.name: k})
-        return LdmatrixLoad(
-            frag=self.frag(self._query_frag(i, t)),
-            src_buffer=a_load.input,
-            src_index=tuple(sigma.apply(e) for e in a_load.index),
-            role="a",
-            staged=False,
-            gmem_guard=_guard(m, offset[0].base(i)),
-            fragment_layout=atom.fragment_layout,
-        )
+    def _score_steps(self) -> int:
+        """The score's atom-K steps within one chunk. They go STRAIGHT-LINE, which is what lets the
+        query hoist hold a fragment per step — a rolled loop would have nowhere to keep them.
+        ``_chunk_refusal`` gates the symbolic extent that has no step count (``LOOPIFY`` re-rolls
+        the run for a readable listing)."""
+        return self._score_k.extent.as_static() // self.tile.atom.atom_k
 
     def _query(self, offset, mn) -> list[Stmt]:
         """The score's QUERY fragments, held in registers ACROSS the chunk loop.
 
         Q's gmem index carries the query row and the score's own contraction axis and never the
         carrier's key, so its fragments are chunk-invariant: read inside the loop they re-issued the
-        same gmem loads once per chunk, which on a 4096-key stream is 64 times. Empty when the score
-        has no straight-line steps to hold one fragment each (:meth:`_score_steps`), and when the
-        carrier's A edge is a stored tile — that shape has no query."""
-        if self.inner is None or (steps := self._score_steps()) is None:
+        same gmem loads once per chunk, which on a 4096-key stream is 64 times. Empty for the
+        carrier whose A edge is a stored tile — that shape has no query."""
+        if self.inner is None:
             return []
         m, _ = mn
-        return [
-            stmt
-            for i in range(m.reg)
-            for t in range(steps)
-            for stmt in (self._frag(self._query_frag(i, t), "a", self._score_atom), self._query_read(offset, m, i, t))
-        ]
+        atom = self._score_atom
+        a_load = next(edge for edge in self.inner[0].operands if m.axis.name in edge.free_axes).as_slab().load
+        out: list[Stmt] = []
+        for i in range(m.reg):
+            for t in range(self._score_steps()):
+                sigma = Sigma({m.axis.name: offset[0].base(i), self._score_k.name: Literal(t * atom.atom_k, "int")})
+                out.append(self._frag(f"_qa{i}_{t}", "a", atom))
+                out.append(
+                    LdmatrixLoad(
+                        frag=self.frag(f"_qa{i}_{t}"),
+                        src_buffer=a_load.input,
+                        src_index=tuple(sigma.apply(e) for e in a_load.index),
+                        role="a",
+                        staged=False,
+                        gmem_guard=_guard(m, offset[0].base(i)),
+                        fragment_layout=atom.fragment_layout,
+                    )
+                )
+        return out
 
     def _key_read(self, key, slot, b_load, base, j: int, bound, trans: bool, k: Expr) -> Stmt:
         """One key fragment of the score at chunk column ``j`` — from its staged slab at ring
@@ -2735,9 +2711,7 @@ class _FlashOps(_MmaOps):
             ]
         if _f16acc(atom):
             out += [
-                FragmentPromote(dst=self.frag(f"_p{i}_{j}"), src=self.frag(f"{cell}{i}_{j}"))
-                for i in range(m.reg)
-                for j in range(n.reg)
+                FragmentPromote(dst=self.frag(f"_p{i}_{j}"), src=self.frag(f"{cell}{i}_{j}")) for i in range(m.reg) for j in range(n.reg)
             ]
         return out
 

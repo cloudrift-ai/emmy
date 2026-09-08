@@ -210,6 +210,10 @@ def _chunk_refusal(tile: TileOp, node) -> str | None:
     reads = (*score.operands, node.operands[1]) if score is not None else node.operands[:2]
     if score is None and node.operands[0].as_slab() is None:
         return "the chunk tier folds a carrier whose pivot a nested contraction or a stored tile supplies"
+    # The chunk covers the score's OWN contraction in one pass and holds a query fragment per step,
+    # so a symbolic extent there has no step count to hold them at.
+    if score is not None and not tile.axis_of(score.axis).extent.is_static:
+        return "the chunk tier covers the score's contraction in one pass, so its extent must be static"
     if any(edge.as_slab() is None for edge in reads):
         return "the chunk tier reads its score operands and its streamed value as slabs"
     # The score's own PREFIX is the CARRIER's lift cut to its score role — A is the score

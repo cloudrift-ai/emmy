@@ -560,6 +560,8 @@
  "tests/compiler/realization/test_realization.py::test_realization[attention/sdpa-hd128-staged-value.yaml-built]@cuda": 4.69,
  "tests/compiler/realization/test_realization.py::test_realization[attention/sdpa-hd128-staged-value.yaml-correct]@cuda": 22.7,
  "tests/compiler/realization/test_realization.py::test_realization[attention/sdpa-hd128-staged-value.yaml-realized]": 4.62,
+ "tests/compiler/realization/test_realization.py::test_realization[attention/sdpa-hd64-staged-key-ring.yaml-built]@cuda": 6.5,
+ "tests/compiler/realization/test_realization.py::test_realization[attention/sdpa-hd64-staged-key-ring.yaml-realized]": 7.1,
  "tests/compiler/realization/test_realization.py::test_realization[attention/sdpa-volta-causal-mask-sm70.yaml-offered]": 0.13,
  "tests/compiler/realization/test_realization.py::test_realization[attention/sdpa-volta-causal-mask-sm70.yaml-realized]": 1.3,
  "tests/compiler/realization/test_realization.py::test_realization[attention/sdpa-volta-paired-mma-sm70.yaml-offered]": 0.14,

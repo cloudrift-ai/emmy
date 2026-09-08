@@ -192,18 +192,26 @@ carries any leading (batch) grid axes and supports a 1-D (m-absent) output. (The
 ## Operand staging — the warp-tier smem pipeline (`STAGE` codec → `Stage`)
 
 The warp (mma) tier stages its reused gmem operands through an smem slab, driven off the node's `STAGE` codec →
-`schedule.Stage`. The CHUNK tier stages one of them, the value it streams: its score is either a nested contraction
-whose fragments repack in registers or a stored tile gathered at the fragment lane map, and a copy transport carries
-neither. Its ring is single-buffer, because a prefetch there would have to interleave with the softmax between the
-fill and the drain rather than with an atom-K loop; `_chunk_warp_stage` enforces that by handing back `depth=1`, so a
-deeper spelling never reaches the fork. Its key extent may be SYMBOLIC, which every other staged operand refuses: a
+`schedule.Stage`. The CHUNK tier stages the two it streams along its carrier axis — the value it folds against and its
+score's KEY, both B-shaped slabs of `bk_elems` key rows, the key's columns spanning the score's whole contraction so
+one chunk covers it in a single pass (`chunk_key_stage` states the reading once; the resolver sizes the ring with it
+and the emission builds the slabs off it). The score's own fragments are never copied: they repack in registers out of
+the chunk's C fragments, or come off a stored probability tile at the fragment lane map, and that shape has no key at
+all — the value then stages alone. The QUERY is not staged either, for the opposite reason: its index never carries the
+carrier's key, so it is loop-INVARIANT and rides hoisted registers instead, one A fragment per score-K step read once
+ahead of the chunk loop. Depth is the ordinary budget clamp, so a ring deeper than one prefetches the next chunk's key
+and value ACROSS the softmax between this chunk's fill and drain — the longest overlap this tier has to offer. Its key
+extent may be SYMBOLIC, which every other staged operand refuses: a
 K-major value rows its slab by key and runs its copy chunks along the head dim, so the extent enters neither the chunk
 width nor the gmem row stride and the last chunk simply overhangs. Both ends of that tail are already disciplined —
 the fill clamps the overhanging key row onto the last valid one (a TMA box zero-fills instead) and the drain's
 boundary `FragmentMask` has put those keys at the pivot identity — so a serving-shaped attention kernel, whose key
 extent IS the KV cache length, stages like any other. On an RTX 5090 that is 2.5x on the `attention.hd64.softmax_v`
 golden target (28.7 us gmem-direct against 11.4 us at `d1/smem-tma`). A TRANSPOSED value keeps the static demand: its
-gmem rows stride by the extent. Every staged path runs **one** liveness-scheduled K-loop skeleton, `pipelined_kloop` in
+gmem rows stride by the extent. On the FUSED kernel `F.scaled_dot_product_attention` traces to, the key slab, the
+deeper ring and the hoisted query together are 1.75x at the published FlashAttention-2 geometry — (1, 8, 4096, 64) on
+an RTX 5090, 422 us at 1.77x eager against 241 us at 1.03x. Every staged path runs **one** liveness-scheduled K-loop
+skeleton, `pipelined_kloop` in
 **`_stage.py`**: the loop body arrives as ordered segments tagged with the slab names each READS, every staged
 operand-group is a `(transport, depth)` pair, and the fill / wait / barrier placement is DERIVED from each group's
 live range (`[first reader, last reader]` over the segments) — wait before the first reader, a CTA barrier past the
@@ -421,6 +429,15 @@ shared-memory round trip. And `_residence` evaluates a recipe pattern, coordinat
 epilogue at whatever residence each value has — a C fragment, the per-lane registers a row rides in, or cell-uniform
 — so none is written for one atom family; the atom's fragment-layout descriptor supplies the element, row, and
 shuffle geometry.
+
+Two of the tier's registers are held ACROSS the chunk loop rather than per chunk. The QUERY fragments are one: their
+gmem index never carries the carrier's key, so reading them inside the loop re-issued the same loads once per chunk
+(64 times on a 4096-key stream). They ride hoisted instead, one A fragment per score-K step, which is why those steps
+go straight-line — a rolled loop has nowhere to keep them, and `LOOPIFY` re-rolls the run for a readable listing. The
+CARRIER is the other, and it is f32 whatever the expectation's cell accumulates in: on the reduced-accumulate cell the
+expectation's `mma.sync` targets a packed f16 fragment and one `FragmentPromote` per chunk folds it here, so the mma
+chain runs at the consumer-die full rate while the running sum stays f32. The score keeps that atom's f32 sibling
+either way — its C fragments are what the pivot, the denominator and every channel's pattern are read off.
 
 A projection that reads no per-row carrier state is the ordinary sink's (a placement cut materializes the
 denominator, and the tail is then a per-cell chain like any other).
