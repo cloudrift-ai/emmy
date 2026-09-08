@@ -1255,6 +1255,11 @@ def pipelined_kloop(
         g.first, g.last = readers[0], readers[-1]
         if g.ring >= 2:
             g.kind, g.lag = "ring", g.ring - 1
+            # A split fill primes ONE chunk (its staging registers are named per lane, not per
+            # slot), which the resolvers guarantee by capping such a ring at ``SPLIT_COPY_DEPTH``.
+            assert not (getattr(g.transport, "lands_after_drain", False) and g.lag > 1), (
+                f"a split fill holds one chunk in registers, but its ring is {g.ring} — the resolver did not cap the depth"
+            )
         elif g.first == 0 and g.last == len(segments) - 1:
             g.kind, g.lag = "current", 0
         else:
