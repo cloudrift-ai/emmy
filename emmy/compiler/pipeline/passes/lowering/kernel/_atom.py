@@ -1995,7 +1995,7 @@ class _ScalarOps(_AtomOps):
 # ---- the twisted carrier's chunk tier ------------------------------------------------------- #
 #
 # The carrier is ONE term over one axis. No block is carved into it: the block this tier folds is
-# the schedule's staged K chunk (``STAGE``'s ``bk_elems``) and nothing else. Per chunk it builds the
+# the ``TILE`` atom's own K width and nothing else. Per chunk it builds the
 # score (the nested contraction the tree already carries as a site of its own), reduces it per row
 # into the chunk's pivot, instantiates the recipe's own channel patterns against that pivot, folds
 # each non-bilinear channel per row and the bilinear one on tensor cores, and merges the chunk's
@@ -2146,7 +2146,7 @@ def _residence(
 
 @dataclass(frozen=True)
 class _FlashOps(_MmaOps):
-    """The TWISTED carrier folded one staged CHUNK at a time — attention's tensor-core form.
+    """The TWISTED carrier folded one scheduled CHUNK at a time — attention's tensor-core form.
 
     The ordinary mma tier folds a term's own lift into one accumulator per bilinear channel. A
     twisted carrier cannot be folded that way at all: its stored lift is the STABLE contribution,
@@ -2154,7 +2154,7 @@ class _FlashOps(_MmaOps):
     are a running pivot and a denominator that are no accumulator. So this tier folds the RECIPE,
     and takes its only block from the schedule:
 
-    - the CHUNK is ``STAGE``'s ``bk_elems`` over the carrier's own axis;
+    - the CHUNK is the ``TILE`` atom's K width over the carrier's own axis;
     - the SCORE for the chunk is the nested contraction (:attr:`inner`) with the carrier's own
       prefix over it — A IS that contraction, so the operand exposes the raw accumulator and the
       lift is what scales it. Its output tile is the ``(m, chunk)`` pair, which is why the fragment

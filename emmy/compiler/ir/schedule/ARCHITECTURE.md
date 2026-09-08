@@ -98,7 +98,9 @@ A CHUNKED carrier's seam is stricter than an ordinary consumer's. The ordinary n
 this one is built on the fragment, since the chunk's score IS the producer's tile — so the producer must be
 warp-tiled at the same atom, one warp column wide, with the chunk as its N tile and the same register rows
 (`_fragment_agreements`). That equation is FlashAttention's own shape, and stating it here is what keeps the tier
-from being offered a row its emission would have to ignore.
+from being offered a row its emission would have to ignore. The chunk is the consumer `TILE` atom's K width, not a
+staging slab, and must contain a complete logical C fragment so its score can repack into the paired contraction's A
+operand. Coordinate masks remain eligible only when their complementary branches form an additive cell mask.
 
 A pin is a restriction on those projected domains, never a source of choices, so it narrows what a site may select and
 cannot manufacture a value the projection withheld. A value scoped to a site that does not offer it empties that
