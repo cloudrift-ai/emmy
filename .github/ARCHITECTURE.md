@@ -28,6 +28,9 @@ alone whether the PR concerns them, which is why code references stay below the 
 for two revision passes before posting, because the failure it guards against is a first draft that lists
 everything done instead of saying what the change is.
 
+The template stays reusable and never holds one PR's content. Agents draft the body in an untracked temporary file
+outside the repository, post that body to GitHub, and leave the tracked template unchanged.
+
 ## Pull-request checks
 
 **Tests** runs three parallel jobs and installs the CI dependency set on Python 3.13. A newer commit cancels the
