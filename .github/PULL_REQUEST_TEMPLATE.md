@@ -12,47 +12,44 @@ body hard to edit. The ~120-character rule applies to files in the repository, n
 
 ## Abstract
 
-Twenty-three more recorded rows come back, leaving thirteen of the original hundred and five. The 4080 and the PRO 6000 were entirely dead and cost nothing to repair: every one of their rows had simply left a knob unspelled where the enumeration spells it at its off value, and neither card needs to be reachable for that. Five rows on the 5090 pinned a staging choice their kernels no longer expose, so those were re-benched on the card rather than respelled, and the result is worth stating plainly — the tuning win they recorded is one the default pick has since absorbed. The rest of the work went into finding why five attention rows spell a tensor-core cell the enumeration never offers. That is located, and the one-line fix for it is not shippable; the memo says why.
+Two more recorded rows come back, and the four the memo could not explain now have named causes. What matters more than the count is that the remaining eleven are all one kind of thing: every one is blocked by a compiler behaviour someone can go and read, and none of them is a stale spelling or a missing measurement. That was not true when this started, when two thirds of every card's rows simply matched nothing and there was no way to tell a codec drift from a lost capability.
 
 | Card | Rows | Dead before | Dead now |
 | --- | --- | --- | --- |
-| RTX 4080 | 9 | 9 | 0 |
-| RTX PRO 6000 | 10 | 9 | 0 |
-| RTX 5090 | 63 | 8 | 3 |
-| RTX 4090 | 73 | 10 | 10 |
+| RTX 4090 | 73 | 10 | 8 |
+| RTX 5090 | 63 | 3 | 3 |
 
 ---
 
-## The two unreachable cards
+## The two measured rows
 
-All 18 of their rows differ from an offered row by the same single thing: the record omits `REDUCE` where the enumeration spells it at off. That is the class already closed on the other two cards, and it is meaning-preserving, so the measurements stand and no GPU is involved. That is exactly why these went first — neither card is reachable, and an omitted off value never needed one.
+Same repair as the five closed on the 5090: they pin `STAGE: d1/smem` where their kernels expose no staging family, so the key names a decision that does not exist and the stored microseconds do not survive dropping it. Re-benched at O3 on the card as pinned rows — a measurement, not a search.
 
-## The five re-measured rows
+    attention.hd128.dynM.pv  39.23 us against a 39.12 us greedy reference
+    attention.hd64.dynM.pv   15.22 us against 15.01 us
 
-Each recorded `STAGE: d1/smem`. Those kernels expose no staging family at all now, so the key names a decision that does not exist and the row decodes the moment it is dropped. The stored microseconds do not survive that: they were taken with a synchronous shared-memory fill, and the kernel stages however the tiling stages it today. So they were re-benched at O3 on the card as pinned rows — a measurement, not a search.
+Both land on the schedule the greedy pick takes, as all five did on the 5090.
 
-All five land on the same schedule the greedy pick takes. `attention.hd64.dynM.softmax_v` recorded 13.51 us against a 59.03 us reference and now reads 11.56 against 11.54. The row is still evidence; it is no longer a win over the default.
+## An inference that became a measurement
 
-## The f16-accumulate lockout
+`attention.hd128.pv` was the third row of that class on paper. On the card both its lanes refuse to compile, with exactly the message the memo predicted from its spelling: an atomic cross-CTA reduce folds one additive state component and attention's carrier has three. It moves out of the staging class and into that blocker, where it belongs.
 
-`classic_projection._atom_families` returns `base + reduced_acc` on its general path and only `base` on the CHUNK branch — it asks `atoms_for` at the default f32 accumulator and never for the reduced one. When attention's value channel became a chunked site, the f16-accumulate cell stopped being a candidate there. That is the whole cause: the pool offers thousands of `mma_m16n8k16_f16_f32` rows and not one `f16_f16`.
+## The rows the memo called undiagnosed
 
-The precision gate is not involved. The resolved gate is folded into the pool key, so the two lanes do not share a cache entry, and pinning it explicitly changes nothing.
+Both now answer. `attention.hd256.dynM.pv` is a chunk-tier refusal that states itself — *the chunk tier reads its score operands and its streamed value as slabs* — so at that head dimension the warp atoms are never projected. `attention.hd64.pv` is the split doing it: its node refusal is `None`, the tier is willing, but the row spells a `g4k` split and what enumerates is the pieces, which offer only scalar tiles. `attention.hd64.dynM.pv#1` spells no split and keeps its tensor-core rows, which is the controlled comparison.
 
-**Adding the reduced accumulator to that branch is not the fix.** It offers 2282 f16 rows and makes all five rows decode. It also empties the enumeration of `attention/sdpa-hd128-softmax-v-mma`, a closed corpus case: that case pins its TILE bare, so once the chunked score node accepts `f16_f16` the pin binds at both contraction sites and the pair realizes nothing. The chunk tier's lowering refuses this path for a reason the projection only exposes. Reverted rather than shipped with a corpus regression.
-
-One fact for the next attempt, since it inverts the obvious reading: this atom does not produce an f16 result. Its mma chain runs on packed f16 partials and folds them into f32 shadows every 64 K-elements, and the shadows keep the names every sink reads. The repack gathers an f32 fragment either way, so `c_to_a_repack` keying on shape alone is correct and the refusal is somewhere else.
+That makes `hd64.pv` the same open question as the `g4a` dead end already in the memo: why a cross-CTA split mints pieces the tensor-core tier does not serve.
 
 ## What is left
 
-13 rows, all attention, in `plans/golden-row-decode-gaps.md`: five behind the lockout above, two whose atomic cross-CTA reduce cannot fold a three-component carrier (and whose compiler-suggested alternative collapses the target to a scalar pair at 139.5 us against 26.1 us unsplit), four needing the 4090 for the staging re-measure, and two undiagnosed.
+Eleven rows behind three named behaviours, in `plans/golden-row-decode-gaps.md`: the chunk tier never offering the reduced accumulator, the atomic cross-CTA reduce refusing a multi-component carrier, and the tensor-core tier being absent from two targets. Four rows carry two blockers at once. The memo also records the four dead ends walked so far, and what the 4090 host needs — nvcc is installed there but not on PATH, and emmy has no NVRTC fallback, so a bench dies until `CUDA_HOME` is set.
 
 No row was re-recorded to make it green.
 
 ## Verification
 
-339 passed, 7 skipped, 13 xfailed across the search tests. The realization corpus is 424 passed, 8 skipped, 3 xfailed on its GPU-free stages — the check that caught the projection change and the reason it is not in this diff.
+144 passed, 7 skipped, 11 xfailed on the golden decode. The registry shrank by two, and each removal is a row the ratchet then demanded pass.
 
-`git diff --stat main -- emmy/` is +33 −20, all of it recorded rows. No compiler code changed.
+`git diff --stat main -- emmy/` is +6 −8 — two rows re-measured and their dead staging key dropped. No compiler code changed.
 
 **Draft.** `make test` has not been run.
