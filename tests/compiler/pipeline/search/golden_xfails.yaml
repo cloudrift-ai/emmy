@@ -6,13 +6,11 @@
 rtx4090_sm89.yaml:
   - attention.hd128.pv#1
   - attention.hd128.pv#2
-  - attention.hd128.dynM.pv#1
   - attention.hd128.dynM.pv#2
   - attention.hd256.dynM.pv#1
   - attention.hd256.dynM.pv#2
   - attention.hd64.pv#1
   - attention.hd64.pv#2
-  - attention.hd64.dynM.pv#1
   - attention.hd64.dynM.pv#2
 rtx5090_sm120.yaml:
   - attention.hd128.softmax_v#1
