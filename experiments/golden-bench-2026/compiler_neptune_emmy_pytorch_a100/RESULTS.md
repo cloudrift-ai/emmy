@@ -96,6 +96,33 @@ optimized libraries beat Neptune on the three common A100 prefill operators, whi
 decode and ahead on GQA decode. The paper used an A100-SXM4-40GB, whereas this run used an A100-SXM4-80GB; the GPUs
 have the same compute architecture but different memory systems, so exact latency equality is not expected.
 
+### Reconstructing the normalized paper table
+
+`paper-baselines.csv` extracts the 40 shared shape measurements used by the paper. For each shape, the Neptune value
+is the arithmetic mean of 15 projected GPU ranges for each available manual or tuned schedule, followed by selection
+of the lower schedule mean. The Inductor value is the minimum of 15 captured, whole-forward CUDA-event measurements.
+The per-family reproduced value is the geometric mean of `neptune_mean_us / inductor_min_us` over the eight sequence
+lengths. This gives 1.21, 1.13, 1.16, 0.97, and 0.34 for global prefill, causal prefill, GQA prefill, causal decode,
+and GQA decode, respectively. Lower values favor Neptune because current Inductor is normalized to one.
+
+`paper-table.csv` records the published library-relative ratios, their artifact replay, and the displayed values after
+putting both results on the current Inductor scale. For each operator, the bridge is
+
+```text
+paper Neptune / current Inductor
+  = replayed Neptune / current Inductor
+  * replayed library / Neptune
+  / published library / Neptune
+```
+
+The Neptune paper publishes only two-decimal family ratios. The final column in `paper-table.csv` therefore records
+the displayed paper value directly; recomputing from the rounded intermediate columns can differ by 0.01.
+
+To audit `paper-baselines.csv`, extract `results.tar.gz`, then extract
+`2026-08-16_00-41-38/a100x1_artifacts.tar.gz`. Neptune ranges are in
+`2026-08-16_00-41-38/nsys-stats/<operator>-b1-s<sequence>.csv`. Inductor JSON filenames are listed in the CSV and
+live under `evidence/emmy-tcompile/json/` in the nested archive. Warmup ranges are excluded.
+
 The paper's Table 2 reports Neptune relative to Triton, FlexAttention, TVM, and Mirage, rather than to the manually
 optimized libraries. The pinned artifact revision leaves its TVM runners disabled, so this experiment cannot claim a
 complete reproduction of every Table 2 cell. Its PyTorch 2.6 runners also select specialized SDPA, cuDNN, or CUTLASS
@@ -185,6 +212,7 @@ only the missing host lane. The durable `recipe.yaml` contains the corrected wor
 
 ## Durable files
 
+- Paper reconstruction: `paper-baselines.csv` and `paper-table.csv`
 - Starter experiment record: `a100x1_e246bb6279fd.experiment.yaml`
 - Tuned decode-causal experiment record: `a100x1_lemmy_od-c_9f8816b4a4fb.experiment.yaml`; SHA-256
   `07a4b79cf046bfb16b766bc830974dc42f5cc291c87874c3de7f25d7fb7b81d3`
