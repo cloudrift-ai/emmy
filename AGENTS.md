@@ -319,14 +319,18 @@ Then run the gates, in this order, after every edit above is in:
 
 22. **Run the full suite**: `make test` — fix any failures. If a realization case comes back stale, `make
     test-corpus-regen` applies the fix.
-23. **Record the durations of every test this change ADDS that takes over a second.** `make test` fails at session
-    end when a test at or over 5 s is missing from `tests/durations.json`, because CI buckets its xdist workers on
-    that file and plans around a hole. Record at **1 s**, not 5: the gate reads the RUNNER's clock and CI is far
-    slower than a dev box — the three nodes that failed this way measured 3-4 s locally and 24-38 s on CI — so
-    anything over a second here can cross the gate there. Run the new tests alone with
-    `--durations=0 --durations-min=1` and add every node they report, at the number you measured, keeping the file
-    in one machine's units. `make test-durations` re-measures the WHOLE suite serially and REPLACES the file; reach
-    for it when the balance has drifted, not to land a handful of new tests.
+23. **Record the durations of every test this change ADDS that takes over half a second.** `make test` fails at
+    session end when a test at or over 5 s is missing from `tests/durations.json`, because CI buckets its xdist
+    workers on that file and plans around a hole. Record well BELOW that bar: the gate reads the runner's clock,
+    and a CI runner is several times slower than a dev box — the three nodes that failed this way measured 3-4 s
+    here and 24-38 s there. Half a second is that 5 s bar divided by the spread, with margin; it is not the file's
+    own floor, which is lower still (`_MIN_RECORDED`), because a regeneration can afford to list everything and a
+    hand-written addition cannot. Measure with the flags `make test` uses — `-n 2 --dist=loadgroup
+    --durations=0 --durations-min=0.5` — because under `loadgroup` a nodeid carries its group suffix (`@cuda`), and
+    a key written without one is never found. Add every node at the number you measured, keyed exactly as reported.
+    `make test-durations` re-measures the WHOLE suite serially and REPLACES the file; reach for it when the balance
+    has drifted, not to land a handful of new tests. If one still slips through, the gate names it and prints the
+    id in the form to paste — that is the backstop, not the plan.
 24. **Run the linter**: `make lint` — if it fails, run `make format` and re-check
 25. **Decode the model goldens** whenever the change touches the compiler (anything under `emmy/compiler/`, and
     always for a schedule-codec, enumeration or knob-spelling change): `make test-goldens`. Off the default lane and
