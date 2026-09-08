@@ -203,10 +203,11 @@ def resolve_golden_arg(args) -> None:
         sys.exit(2)
     from emmy.compiler.pipeline.search.golden import (
         GOLDEN_RECORDS,
+        GoldenEntryState,
+        golden_set_state,
         goldens_for_live_gpu,
         load_golden_file,
         load_golden_records,
-        route_pins,
     )
 
     # Canonical replay scopes to the live card as before. An explicit working file is
@@ -254,7 +255,12 @@ def resolve_golden_arg(args) -> None:
     args._golden_records = [record for record in records if record.target_key == matches[0].target_key]
     pinned = matches
     if document is not None:
-        verified = [record for record in matches if record.measurements is not None or route_pins(record, records)]
+        states = {
+            realization["name"]: golden_set_state(realization, config["realizations"])
+            for config in document["configs"]
+            for realization in config["realizations"]
+        }
+        verified = [record for record in matches if states.get(record.name) is GoldenEntryState.VERIFIED]
         winners = [record for record in matches if record.ranking is not None and record.ranking.get("tune_winner") is True]
         valid_winner = (
             len(winners) == 1
@@ -288,20 +294,20 @@ def golden_row(record, records=()):
     ``shape`` / ``dynamic``) plus the ``record`` itself — the row ``run`` measures under a hand pin and records as
     deploy evidence.
 
-    A record that names a route carries no row of its own, so its pin comes from the routing rows it
-    names (:func:`~emmy.compiler.pipeline.search.golden.route_pins`, resolved against ``records``).
-    Those arm keys ride the row's ``pins`` beside the input regime, which is what the bench
-    publishes: the kernel set that was measured is the one that compiles, rather than whatever the
-    unpinned fork picks under the realization's name."""
+    A record listing a ``kernel_set`` usually carries no row of its own, so its pin comes from the
+    routing rows it lists (:func:`~emmy.compiler.pipeline.search.golden.kernel_set_pins`, resolved
+    against ``records``). Those arms ride the row's ``pins`` beside the input regime, and the bench
+    publishes both: the compile then reaches the kernel set the recording measured, rather than
+    whatever the unpinned fork picks under the realization's name."""
     from types import SimpleNamespace  # noqa: PLC0415
 
     from emmy.compiler.pipeline.search.data import Sample  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden import route_pins  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import kernel_set_pins  # noqa: PLC0415
 
     sample = vars(Sample.from_golden(record))
-    route = route_pins(record, records)
-    if route:
-        sample["pins"] = {**sample["pins"], **route}
+    arms = kernel_set_pins(record, records)
+    if arms:
+        sample["pins"] = {**sample["pins"], **arms}
     return SimpleNamespace(**sample, record=record)
 
 

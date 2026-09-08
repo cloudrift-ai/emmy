@@ -596,13 +596,13 @@ def record_greedy_pick(
     identity. A row already recorded for the same kernel and knobs takes the new timings, anything
     else is appended, so a re-record never duplicates. Returns the names written, in order.
 
-    The SEED then names the routing rows it was recorded with, in that order (``route``). That
-    reference makes the realization's unit of verification the routed SET rather than one row's own
-    schedule: what ran is a kernel set, so the seed measures nothing itself and is read through the
-    rows it names — verified with them (:func:`~emmy.compiler.pipeline.search.golden.golden_set_state`),
-    spelling their route on replay, and benched under their arm keys. A seed that also carries a
-    measured row of its own keeps it and stays verified by it; the reference says what its kernel
-    set was either way. A one-kernel compile takes no kernel-set decision and so writes none.
+    The SEED then lists those routing rows by name, in that order (``kernel_set``). That list is
+    what lets the file say a realization ran as a kernel SET rather than as one kernel:
+    :func:`~emmy.compiler.pipeline.search.golden.golden_set_state` reads the listed rows to decide
+    whether the realization verifies, a replay of it spells their arms, and a bench of it publishes
+    those arms as its pin. A seed that also carries a measured row of its own keeps that row and
+    verifies on it; the list still says what its kernel set held. A compile that takes no kernel-set
+    decision writes no list at all.
     """
     destination = Path(path)
     if is_repository_golden_path(destination):
@@ -632,7 +632,7 @@ def record_greedy_pick(
             recorded["measurements"] = row["measurements"]
         written.append(row["name"])
     if decisions:
-        seed["route"] = written[: len(decisions)]
+        seed["kernel_set"] = written[: len(decisions)]
     dump_golden_file(document, destination, overwrite=True, incremental=True)
     return written
 

@@ -1379,24 +1379,25 @@ their family has one applicable node and route-qualified (`TILE@map.1/inner`) on
 transport choice per consumer node, including an explicit empty direct choice. Promotion rejects incomplete rows,
 aliases, and unknown sites. It never fills or repairs a recording.
 
-**A split's children persist as child-identity schedule receipts.** One flat `knobs` map decorates exactly one
-kernel, so a route whose cut splits the target into several kernels cannot record conflicting per-child schedules in
-one realization. Each child instead gets its own sibling realization — a *receipt*: the route's cut(s) frozen in
-`pins` (the route the replay follows fork by fork to reach the children), the child's schedule row in `knobs`, and
-the child kernel's deploy identity stored in `identity`. The stored identity is the strict decode's kernel selector
-(`kernel_identity` returns it as-is — the target's own lift stops at the pre-cut kernel and cannot name a child): the
-stored identity must equal one kernel resolved under the record's pins, and the spelled row must equal one of THAT
-kernel's enumerated rows, so a sibling child's row never vouches. Ordinary records must still select exactly one
-pre-cut kernel, but a receipt may outlive target-boundary drift that makes its regenerated target lower to several:
-the stored identity selects one bucket from the kernels resolved under its pins, without first requiring the legacy
-one-kernel lift. As evidence a receipt is two rows: its route under the signature of the kernel the cut was offered
-on and its schedule row under the child's (both read off the record's replay, `golden._replay`, whose evidence half
-persists in the derived golden store beside identities and verdicts). The regime check
-(`golden.regime_live`) skips PLACE pins — the route is the record's kernel-set decision, not an input regime — and
-validation rejects a realization that schedules behind pinned cuts without a stored identity. A stored identity equal
-to the target's own lift is the corpus's derived stamp, not a receipt, and keeps the pooled decode.
+**A split's children persist as child-identity schedule receipts.** One flat `knobs` map decorates exactly one kernel,
+so a route whose cut splits the target into several kernels cannot record conflicting per-child schedules in one
+realization. Each child instead gets its own sibling realization — a *receipt*: the child's schedule row in `knobs`,
+and the child kernel's deploy identity stored in `identity`. A realization corpus case, the convention this paragraph
+describes, additionally freezes the route's cut(s) in `pins` — the route the replay follows fork by fork to reach the
+children. The stored identity is the strict decode's kernel selector (`kernel_identity` returns it as-is — the
+target's own lift stops at the pre-cut kernel and cannot name a child): the stored identity must equal one kernel
+resolved under the record's pins, and the spelled row must equal one of THAT kernel's enumerated rows, so a sibling
+child's row never vouches. Ordinary records must still select exactly one pre-cut kernel, but a receipt may outlive
+target-boundary drift that makes its regenerated target lower to several: the stored identity selects one bucket from
+the kernels resolved under its pins, without first requiring the legacy one-kernel lift. As evidence a receipt is two
+rows: its route under the signature of the kernel the cut was offered on and its schedule row under the child's (both
+read off the record's replay, `golden._replay`, whose evidence half persists in the derived golden store beside
+identities and verdicts). The regime check (`golden.regime_live`) skips PLACE pins — the route is the record's
+kernel-set decision, not an input regime — and validation rejects a realization that schedules behind pinned cuts
+without a stored identity. A stored identity equal to the target's own lift is the corpus's derived stamp, not a
+receipt, and keeps the pooled decode.
 
-**A whole kernel set records as one set of entries, each naming its kernel by identity.** `run --golden PATH
+**A whole kernel set records as one set of entries, each measured entry naming its kernel by identity.** `run --golden PATH
 --realization NAME --bench --record-greedy` (`working_golden.record_greedy_pick`) writes the kernel set the greedy
 compile picked back into the working file: one routing row per kernel-set decision the compile took — its `identity`
 the kernel the fork was offered on, its `knobs` the arm's `PLACE@seam: cut` or split-carrying `REDUCE` value, its
@@ -1413,6 +1414,20 @@ same row on different kernels. Recorded this way, a strict-evidence compile of t
 again from the file's rows alone (no tune DB, no prior): that 10-kernel twin, whose unseeded pick spends minutes
 pricing, resolves from its 19 recorded rows in seconds.
 
+**The realization those rows belong to lists them.** `record_greedy_pick` writes `kernel_set` onto that seed
+realization — the one `--realization NAME` named: the routing rows' names, in the order the compile took the
+decisions, and nothing at all when the compile took none. The list is what lets the file say a realization ran as a
+kernel SET rather than as one kernel, and three readers follow it. `golden_set_state` marks the realization `VERIFIED`
+when every row it lists carries measurements and so does every schedule-carrying row of the same target, which is the
+reading a promotion applies. `compile.golden_row` publishes the listed rows' knobs — a placement cut's `PLACE` key and
+a split's `REDUCE` value alike — as the hand pin for that one compile, so a bench of the realization by name reaches
+the kernel set the recording measured rather than whatever the unpinned fork picks under its name; the whole-file
+bench walk selects its rows through that same reading. And `_replay` folds the listed knobs into the record's
+spelling: where no row of the set names a fork's kernel by identity, that spelling is what answers the fork, so the
+row spells its cuts and splits instead of reading as fuse. A row that took no kernel-set decision still reads as fuse,
+which is the right answer for it. The list holds every decision rather than the first because a cascade takes its
+later cuts on the pieces the earlier ones mint, spelled on those pieces' own trees: the first decision alone neither
+describes the set nor pins it back.
 The preferred reference is the runnable Torch slice (`torch-eager`) or the applicable library kernel (`cublas`). A
 Loop IR fallback has no frontend callable by construction; an origin slice can also have synthetic boundaries whose
 post-fusion output geometry is not independently comparable to its Torch slice. Such a target may use a separately

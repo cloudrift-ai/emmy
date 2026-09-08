@@ -659,7 +659,7 @@ def _recorded_set(tmp_path):
     return path, load_golden_file(path), written, len(taken.decisions)
 
 
-def test_a_recorded_set_names_its_routing_rows_on_the_seed(tmp_path):
+def test_a_recorded_set_lists_its_routing_rows_on_the_seed(tmp_path):
     """The seed realization gains a ``route`` naming the routing rows the compile took, in the order
     it took them. A cascade takes several, and every one of them is named: a piece's cut key is
     spelled on the piece's own tree, so the first decision alone does not say what the set was."""
@@ -667,11 +667,11 @@ def test_a_recorded_set_names_its_routing_rows_on_the_seed(tmp_path):
     seed = reloaded["configs"][0]["realizations"][0]
 
     assert seed["name"] == "working.route"
-    assert seed["route"] == written[:decisions], "the seed names its routing rows, not its receipts"
+    assert seed["kernel_set"] == written[:decisions], "the seed lists its routing rows, not its receipts"
     assert decisions >= 1
 
 
-def test_a_realization_naming_its_route_is_verified_by_the_set(tmp_path):
+def test_a_realization_listing_its_kernel_set_is_verified_by_it(tmp_path):
     """The unit of verification is the routed SET. A realization with no measurements of its own is
     verified when every row its ``route`` names is measured, and stops being verified as soon as one
     of them is not. A realization with neither measurements nor a route stays unverified."""
@@ -685,15 +685,36 @@ def test_a_realization_naming_its_route_is_verified_by_the_set(tmp_path):
 
     assert golden_set_state(seed, realizations) is GoldenEntryState.VERIFIED
 
-    named = next(row for row in realizations if row["name"] == seed["route"][0])
+    named = next(row for row in realizations if row["name"] == seed["kernel_set"][0])
     named.pop("measurements")
     assert golden_set_state(seed, realizations) is not GoldenEntryState.VERIFIED
 
-    seed.pop("route")
+    seed.pop("kernel_set")
     assert golden_set_state(seed, realizations) is GoldenEntryState.INVENTORY
 
 
-def test_a_realization_naming_its_route_spells_that_route(tmp_path):
+def test_promotion_accepts_a_realization_verified_by_its_kernel_set(tmp_path):
+    """The promotion check asks the same question, so a routed realization promotes on the strength
+    of the rows it names. Take a measurement away from one of them and it no longer does — the set
+    is not something anyone ran."""
+    from emmy.compiler.pipeline.search.golden import GoldenFileValidation, validate_golden_file
+
+    _path, reloaded, _written, _decisions = _recorded_set(tmp_path)
+    reloaded["gpu_name"] = "NVIDIA GeForce RTX 4080"
+    realizations = reloaded["configs"][0]["realizations"]
+    seed = realizations[0]
+    seed.pop("knobs", None)
+    seed.pop("measurements", None)
+
+    validate_golden_file(reloaded, validation=GoldenFileValidation.PROMOTION)
+
+    named = next(row for row in realizations if row["name"] == seed["kernel_set"][0])
+    named.pop("measurements")
+    with pytest.raises(ValueError, match="requires knobs and paired positive timings"):
+        validate_golden_file(reloaded, validation=GoldenFileValidation.PROMOTION)
+
+
+def test_a_realization_listing_its_kernel_set_spells_its_arms(tmp_path):
     """Read as evidence, such a realization spells the route it names — never fuse. Its own knobs
     say nothing, so without the reference the replay reads it as a kernel that ran whole.
 
@@ -716,11 +737,11 @@ def test_a_realization_naming_its_route_spells_that_route(tmp_path):
 
     assert any(arm.get("PLACE@inner.1/map") == "cut" for _signature, arm in _arms(entry["realizations"]))
 
-    seed_row.pop("route")
+    seed_row.pop("kernel_set")
     assert not any(arm.get("PLACE@inner.1/map") == "cut" for _signature, arm in _arms(entry["realizations"]))
 
 
-def test_benching_a_routed_realization_pins_the_route_it_names(tmp_path):
+def test_benching_a_routed_realization_pins_the_arms_it_lists(tmp_path):
     """Benching a routed realization by name has to compile the kernel set that was measured. Its
     own knobs are empty, so the pin the bench publishes comes from the routing rows it names —
     every one of them, since a cascade's later cuts are spelled on the pieces the earlier ones
