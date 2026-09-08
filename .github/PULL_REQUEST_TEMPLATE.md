@@ -12,11 +12,11 @@ body hard to edit. The ~120-character rule applies to files in the repository, n
 
 ## Abstract
 
-The scalar register tier wrote out the one thing it folds — a multiply, an add, one accumulator per cell — so attention's carrier, which folds three states under their own operations, had no register tile at all. It now replicates the term's own step per cell, which already holds those states and the merge between them, and the algebra it folds stops being the tier's business. That closes the three qwen3-embedding SDPA gaps in the realization corpus; the two remaining SDPA gaps turn out to be stale case files rather than compiler gaps, and closing them empties the corpus of open attention cases.
+Two tiers each hardcoded one shape of the thing they fold, and attention paid for both. The scalar register tier wrote out a multiply, an add and one accumulator per cell, so a carrier that folds three states under their own operations had no register tile at all; the chunk tier built its score with an inner `mma`, so a carrier whose score arrives already stored had no tensor-core row. Each now takes that shape from the term instead: the scalar tier replicates the term's own step per cell, and the chunk tier gathers its score fragments when nothing computes them. Every open attention case in the realization corpus closes — three on the first change, two on the second, and two more that turned out to be stale case files rather than compiler gaps.
 
 ---
 
-## What the tier folds
+## What the scalar tier folds
 
 `_ScalarOps` emitted `acc__c{i}_{j} += b·a` per cell, with its multiply, its add and its single state fixed in the emitter. A twisted carrier folds a running pivot, a denominator and an expectation, each under its own operation, seeded by the merge between them — so the projection refused every scalar plan on one, and a plan forced through reached the materializer reading cell copies of the pivot and the denominator that nothing declared.
 
@@ -24,13 +24,21 @@ The scalar register tier wrote out the one thing it folds — a multiply, an add
 
 The one thing the tier has no place for is an operand past the streamed one that varies over the tile: those are read once, ahead of the K-loop, so the projection offers a scalar plan only when every one of them is uniform. Attention's scale and its mask fills are; a second streamed B is not, and still rides the warp compute fill, which is where the old `len(operands) == 2` test had been sending it.
 
+## A chunk whose score is read
+
+The chunk tier's score is the nested contraction the tree carries as a site of its own. Softmax@V has no such site — the probabilities are an input — so `ContractionFacts.producer` was empty, the tier refused, and no tensor-core row was offered for the value channel at all.
+
+Such a carrier now gathers each `(row, chunk)` C fragment from the stored tile at the fragment's own lane map. **Nothing new was needed to do it.** A role-`c` `RegFragment` declares zero, and `FragmentBiasAdd` already reads gmem at exactly that map and adds — so one of those per fragment IS the fragment. It had been in the tree without a caller; giving it one also gave it the `rewrite` handler it had never needed, which is what the first `emmy run` over the new kernel found. Everything above the score — the row reduce, the channel patterns, the repack into an A operand — reads the same C fragments either way.
+
+Both coordinates read wrapped in-bounds. An overhanging row is discarded by the store guard and an overhanging column refilled with the pivot's identity by the boundary mask the tier already emits, exactly as the contracted form's clamped reads are.
+
 ## The stale half
 
-Two of the five cases were not compiler gaps at all.
+Two of the seven cases were not compiler gaps at all.
 
 `sdpa-hd128-softmax-v-mma` pinned a synchronous `d1/smem` fill. Only the Volta atom resolves that transport — on a target with `cp.async` the blocking vector copy is never offered — so the pin matched no row and the whole enumeration emptied, which reads exactly like a lockout. `sdpa-computed-value-cut-mma` cut at `map.1/twist.3/inner`, a site the tree no longer numbers, so the cut never fired and the carrier kept two nested contractions, leaving the chunk tier unable to say which one supplies the pivot. Both are respellings, and both then realize, build and run.
 
-A third kind of staleness cuts deeper. All five cases carried entries a `COMPLETE=1` run had added while their gap was open, and in four of them one of those entries was an all-off row addressed by identity to the very kernel the case is about. `golden._replay` decides a fork by the entry owning that kernel, so that row outranked the lead and pinned the carrier untiled: the case asserted the opposite of what it was written to assert, and nothing could see it. The corpus's staleness check compares against what regeneration produces, and regeneration reproduces a dead entry unchanged.
+A third kind of staleness cuts deeper. All seven carried entries a `COMPLETE=1` run had added while their gap was open, and in six of them one of those was an all-off row addressed by identity to the very kernel the case is about. `golden._replay` decides a fork by the entry owning that kernel, so that row outranked the lead and pinned the carrier untiled: the case asserted the opposite of what it was written to assert, and nothing could see it. The corpus's staleness check compares against what regeneration produces, and regeneration reproduces a dead entry unchanged.
 
 **That hole is still open.** `complete` adds an entry for an undecided kernel and never removes one that has gone dead, and no test detects either. Fixing it is its own change.
 
@@ -38,12 +46,16 @@ A third kind of staleness cuts deeper. All five cases carried entries a `COMPLET
 
 `built` and `correct` for `sdpa-computed-value-cut-mma`: it declares sm_80 and this card is sm_120, so the corpus skips them, by the rule that a pinned schedule is a claim about one capability.
 
-Nothing measures. A scalar tile on a carrier recomputes the pivot and the denominator once per register column of a row, which is correct and wasteful; the chunk tier's per-row residence is the answer if the row ever ranks. No case in the corpus carries a timing for these, and `tests/perf` is where that question belongs.
+The two softmax@V rows are slow. Re-measured on the card they are 33.4 us (narrow tile) and 84.3 us (wide) against 14.3 us for torch.compile — the stored numbers, 36.9 and 58.0, belonged to a row the compiler could not realize when they were taken, so they are re-recorded rather than kept. Being 2.3x behind torch on a shape that now reaches the tensor cores at all is a code-generation finding; the corpus deliberately does not record one, and `tests/perf` is where it belongs.
+
+A scalar tile on a carrier recomputes the pivot and the denominator once per register column of a row, which is correct and wasteful. The chunk tier's per-row residence is the answer if such a row ever ranks.
 
 ## Verification
 
-Offered, realized, built and correct on an RTX 5090 for every closed case the card can run. The GPU-free corpus is 616 passed with the ten remaining gaps; no case that traces from `torch.sdpa` is open any more, though two of the ten — `f16-symbolic-computed-a-k-warp` and `f16-symbolic-demoted-pv-greedy` — are softmax@V, so attention algebra still has gaps. Both fail at `offered`, and dropping any one of their pinned keys changes nothing about what enumerates, which is the signature of a bare one-site row against a tree that now scopes its sites. `tests/compiler/passes` is 571 passed; attention coverage and the schedule-IR tests are green; `make lint` passes.
+Offered, realized, built and correct on an RTX 5090 for all seven closed cases, minus the sm_80 skip above. No `_xfail_` case in the corpus is attention any more — the eight left are matmul and fused. The GPU-free corpus plus attention coverage is 643 passed; `tests/compiler/passes` is 571 passed; the schedule-IR tests are green; `make lint` passes.
 
-`git diff --stat main -- emmy/` is +43 −28, of which +17 −11 is the architecture note. The code is +32 −22, one line of it an import. The growth is the capability: a scalar tile on a carrier that had none.
+`tests/durations.json` needed both halves of a rename: thirteen ghost entries for node ids the closures retired, and entries for the stages that now run — the hd128 case's `correct` is 59 s and its `realized` 8 s, both over the staleness gate. One pre-existing hole, `test_depthwise_conv1d_matches_eager[cuda]@cuda` at 7 s, was already failing that gate and is recorded too. Measured under `-n auto --dist=loadgroup` so the ids carry the group tags `make test` gives them.
 
-**Draft.** `make test`, `make test-goldens` and `make test-durations` have not been run. The durations gate already names three tests over five seconds that are missing from `tests/durations.json`.
+`git diff --stat main -- emmy/` is +137 −44, of which +17 −11 is the architecture note. The growth is the two capabilities: a scalar tile on a carrier that had none, and a chunk whose score is read.
+
+**Draft.** `make test` and `make test-goldens` have not been run.

@@ -269,7 +269,11 @@ greedy one blocklist retry per rank, and there are more ranked rows than the ret
 with an unlowered `TileOp` instead of falling back.
 
 The tensor-core form of a twisted carrier is the CHUNK tier (`_atom._FlashOps`), and the emitter it needs is not the
-one this tree used to carry — see "What may not come back" below.
+one this tree used to carry — see "What may not come back" below. Its chunk's score is CONTRACTED into C fragments when
+a nested contraction supplies it and GATHERED into them when the carrier's own A edge is already the stored tile
+(softmax@V, whose probabilities arrive as an input): a role-`c` `RegFragment` declares zero and `FragmentBiasAdd` reads
+gmem at the fragment's own lane map, so one of those per fragment IS the fragment, and everything above it — the row
+reduce, the channel patterns, the repack — reads the same C fragments either way.
 
 Where the edge is not a bindable contraction (or the atom has no modeled C layout) it stays per-cell: spliced into the
 fill's cell and evaluated inline from lowered loop IR, a scalar dot per slab cell. Geometry: exact cover on N only. A
