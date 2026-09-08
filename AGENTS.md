@@ -90,10 +90,15 @@ removed the cicc unroll blowup it rested on. The cold/warm gap also puts kernel 
 suite's wall time, so it is not the dominant cost either. Keeping `-O1` here buys ~12% cold; dropping it would leave
 one compile regime everywhere in the repo.
 
-Checked-in model goldens are not exercised by the default test suite. The nightly `onboard-model` workflow owns
-their repository validation, strict decode, and exact-GPU replay so model qualification stays with its GPU evidence.
-The decode half alone is also reachable off the default lane, on any machine: `make test-goldens` strictly decodes
-every checked-in golden file (one case per file) against the current compiler, which is how you see a card's rows go
+The default suite decodes the model-agnostic hardware goldens row by row: one test node per recorded row, so the
+work scatters over the xdist workers and a failure names the row. Rows that no longer decode are listed as strict
+xfails in `tests/compiler/pipeline/search/golden_xfails.yaml`, which only ever shrinks — closing a row turns its
+node red until the line is deleted. Never add a line to make a red row green.
+
+Checked-in MODEL goldens are not exercised by the default suite. The nightly `onboard-model` workflow owns their
+repository validation, strict decode, and exact-GPU replay so model qualification stays with its GPU evidence. The
+decode half alone is also reachable off the default lane, on any machine: `make test-goldens` strictly decodes every
+checked-in model golden (one case per file) against the current compiler, which is how you see a card's rows go
 green again after a tuning round re-records them.
 
 When running a large subset (e.g. `tests/compiler/`), pass the same `-n auto --dist=loadgroup` flags `make test` uses to
@@ -192,8 +197,9 @@ Quick test models / scripts (for local iteration):
   `make bench-kernels`)
 - `make test-corpus-regen` — restamp the realization corpus's derived half after a kernel-identity or schedule-codec
   change (`make test` detects the staleness on any machine; this applies the fix)
-- `make test-goldens` — strict-decode every checked-in golden against the current compiler (off the default lane,
-  no GPU needed; a stale row is detectable anywhere, re-recording it is what needs the card)
+- `make test-goldens` — strict-decode the checked-in model goldens against the current compiler (off the default
+  lane, no GPU needed; a stale row is detectable anywhere, re-recording it is what needs the card). The hardware
+  goldens are decoded row by row by `make test`
 - `make test-durations` — re-measure `tests/durations.json`, the checked-in per-test timings the suite balances its
   xdist workers on; commit the result when the balance has drifted
 - `make lint` — run `ruff check` and `ruff format --check`
@@ -314,12 +320,12 @@ Then run the gates, in this order, after every edit above is in:
 22. **Run the full suite**: `make test` — fix any failures. If a realization case comes back stale, `make
     test-corpus-regen` applies the fix.
 23. **Run the linter**: `make lint` — if it fails, run `make format` and re-check
-24. **Decode the goldens** whenever the change touches the compiler (anything under `emmy/compiler/`, and always
-    for a schedule-codec, enumeration or knob-spelling change): `make test-goldens`. Off the default lane and needs no
-    GPU. `make test` guards the realization corpus against exactly this class of change and nothing guarded the
-    checked-in model goldens, so a rebuild of the schedule space can invalidate every recorded row in silence. If rows
-    go red, name the change that did it in the PR body — do **not** re-record them to make it green, which enshrines
-    the regression as the new reference.
+24. **Decode the model goldens** whenever the change touches the compiler (anything under `emmy/compiler/`, and
+    always for a schedule-codec, enumeration or knob-spelling change): `make test-goldens`. Off the default lane and
+    needs no GPU. `make test` guards the realization corpus and the hardware goldens against exactly this class of
+    change; nothing guards the checked-in model goldens, so a rebuild of the schedule space can invalidate every
+    recorded row of one in silence. If rows go red, name the change that did it in the PR body — do **not** re-record
+    them to make it green, which enshrines the regression as the new reference.
 25. **Write the PR body** to `.github/PULL_REQUEST_TEMPLATE.md`. The title is a functional description readable
     with no context. The abstract is one short plain-English paragraph — no bullets, no code references. One
     optional artifact may follow it — a small table, a diagram, a few lines of output — when it carries the
