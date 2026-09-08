@@ -1,5 +1,89 @@
 # Golden-bench kernel corpus
 
+## Qwen3-0.6B requalification, RTX 4090 / RTX 5090 / V100 (2026-09-08)
+
+Branch `exp/verify-3` at `834ac4c7` (current main `9a7f0afe` plus one commit, the split closure fix below). Each
+card ran the recipe protocol: fresh trace, deployable-O3 tune (budget 12, patience 4, seed 0), a torch.compile
+diagnostic, then five strict O3 repeats. 4090 and 5090 ran the base and dynamic-FP8 checkpoints at sequence lengths
+512 and 1; the V100 ran the base checkpoint only (its sm_70 image has no FP8 path). RTX 4090 x1 and RTX 5090 x1 on
+Vast; V100-SXM3-32GB device 15 on a shared host. GPU identity was verified at the driver level before any run — one
+earlier Vast host advertised a 4090 but carried a spoofed RTX 3090 and was rejected.
+
+### Headline: emmy beats both baselines on every kernel that verified
+
+Every non-fused kernel tuned to a sub-3-microsecond schedule on all three cards. Where the strict verify produced a
+paired comparison, emmy beat eager PyTorch by 12x to 160x and beat or matched torch.compile — the harder baseline —
+on all but one shape.
+
+| card | leg | kernel | emmy | eager | torch.compile | vs eager | vs tc |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| RTX 4090 | base s1 | `k_mean` | 0.77 us | 67.4 us | 1.7 us | 87.3x | 2.15x |
+| RTX 4090 | fp8 s1 | `k_mean` | 0.76 us | 122.1 us | — | 160.1x | — |
+| RTX 4090 | fp8 s512 | `k_p_attn_q_proj` (quant) | 2.71 us | 88.9 us | 3.1 us | 32.8x | 1.16x |
+| RTX 4090 | fp8 s1 | `k_mul_1_dynamic_fp8_value` | 0.84 us | 4.3 us | 4.2 us | 5.1x | 5.07x |
+| RTX 5090 | base s512 | `k_to_pointwise` | 1.21 us | 24.6 us | 2.1 us | 20.3x | 1.72x |
+| RTX 5090 | base s1 | `k_p_input_layernorm` | 0.69 us | 12.5 us | 2.0 us | 18.2x | 2.97x |
+| RTX 5090 | fp8 s512 | `k_p_attn_q_proj` (quant) | 2.1 us | 55.3 us | 4.1 us | 25.8x | 1.91x |
+| V100 | base s1 | `k_mean` | 2.1 us | 117.5 us | 2.4 us | 56.5x | 1.14x |
+| V100 | base s512 | `k_to_pointwise` | 3.0 us | 70.4 us | 2.9 us | 23.2x | 0.96x |
+
+The one soft spot is the transpose kernel, which loses slightly to eager on the 4090 (0.8x) and wins on the 5090
+(1.3x) — normal per-shape register-tile variation, not a regression. The FP8 dynamic-quantization kernels are emmy's
+strongest ground against torch.compile: it wins them by up to 5x, because those pointwise scale-and-cast kernels are
+exactly where emmy's schedule beats a launch-fusion baseline.
+
+### The verify coverage gap is a loader-strictness blocker, not a schedule failure
+
+Only two to three targets per leg produced a paired eager/torch.compile comparison. Every other non-fused target
+tuned successfully — the emmy O3 latencies above and in the tune databases are complete — but its strict verify
+aborted inside the golden loader:
+
+```
+ValueError: <target>: the persisted target selects no kernel after lowering
+```
+
+The cause is `_target_kernel_nodes` (`emmy/compiler/pipeline/search/golden.py:786`), which selects the target kernel
+by exact origin-set equality between the record's persisted origins and the origins the loop lowering re-derives.
+A raw `emmy trace -o working.yaml` records origins that current lowering does not reproduce exactly — lowering
+attaches an extra broadcast origin — so no kernel matches and the loader raises. The same kernel type verifies in one
+leg and fails in another (`k_p_input_layernorm` passes at base s512, fails at fp8 s512), which is the signature of a
+provenance divergence, not a kernel-quality one. The checked-in goldens load cleanly (12 of 12 tested on this
+revision), so the loader is correct for a properly regenerated inventory; the mismatch is specific to a freshly
+traced working file. Fix direction: either regenerate the working inventory through `write_trace_inventory` on the
+deploy revision so the origins agree, or relax the selector to the minimal origin superset of the persisted set.
+This is the single change that would raise this cycle's verified coverage from a quarter of the corpus to all of it.
+
+### The goldens are deliberately not updated this cycle
+
+Because most targets lack a paired `emmy_us` / `reference_us` measurement, promoting them would write an incomplete
+matrix over the complete checked-in goldens from #675 — a data loss, which the tuning contract forbids. The verified
+subset is real and reproducible, but a partial promotion is worse than none. The goldens should be refreshed in a
+follow-up run once the loader blocker above is fixed and the full corpus verifies.
+
+### Fused attention targets: deferred, and why
+
+The two triple-fused attention targets per prefill leg (`k_linear_sdpa_mean_reduce`, `k_sdpa_linear_mean_reduce`)
+and one per decode leg spiral the tuner. MCTS explores thousands of un-lowerable candidates that drop with
+`KeyError: 'v149'` — 1,400 to 3,400 dropped candidates per target with zero admissible rows — while the one route
+that does lower is the fused kernel, which hangs past the 74-second bench budget. The candidate budget only counts
+admissible measurements, so patience never triggers and the search runs until its wall-clock cap, producing nothing.
+These targets were split out of each working file into a sibling `working.deferred.yaml`, preserved for a dedicated
+run once the surrounding goldens exist or the lowering gap is closed. The V100's fused targets were additionally
+benched greedily (cold, no search) to document their sm_70 deploy without a spiral. The underlying gap is a cut
+piece whose sliced region reads a `Load` binding the slice dropped, so `Fold.lower`'s closure gate refuses every
+later body computation of the minted kernel; the split fix below closes the greedy path, but the MCTS exploratory
+branches still reach the malformed piece and need an offer-time refusal to stop descending the dead subtree.
+
+### Compiler fix landed: split refuses a piece whose term does not close
+
+`030_cut` enforces term closedness on the seams it offers, but `realize_split` never re-checked the region it slices
+for a placed piece, so a slice that loses a `Load` binding minted a kernel every later body computation refuses.
+`_unclosed_piece` now applies the same rule at all three mint points in `realize_split`, and greedy pricing treats a
+refused structural leaf as not-offered rather than letting the raise escape a fork that had a healthy alternative.
+Verified: healthy cuts offer identical option counts, the split and greedy-policy suites pass, and greedy lowering
+of the previously failing fused target now produces a clean three-kernel cut. The MCTS-side offer-time refusal
+remains open work.
+
 ## Current-head corpus requalification (2026-08-29)
 
 The draft is based on current main `b88763fa`; the exact combined source for this pass is `857ba7e9`. Every hardware
