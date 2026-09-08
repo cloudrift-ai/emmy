@@ -153,8 +153,13 @@ def _node_refusal(tile: TileOp, target, node, fragment_epilogue: bool, packed: t
         return "the projection epilogue is not a per-fragment straight-line program"
     # The operand tuple in stored order — there is no named A/B role any more, and a nested
     # scheduling site on ANY operand refuses the same way.
-    if any(edge.axis is not None for edge in node.operands):
+    if any(edge.axis is not None for edge in node.operands) and not node.chunked():
         return "a nested scheduling site inhabits an operand edge"
+    # A CHUNKED carrier is the one exception: its A IS the score contraction, so A reduces. That is
+    # the tier's own shape — the chunk's score is the producer's tile — and the fragment agreement
+    # composed in ``extend`` is what holds the two to one atom. It only reached here as a zero-axis
+    # cone with the contraction nested under it while the fusion still minted that cone, so the
+    # blanket refusal never saw the case it was not written about.
     if node.chunked() and (why := _chunk_refusal(tile, node)) is not None:
         return why
 
@@ -202,9 +207,15 @@ def _chunk_refusal(tile: TileOp, node) -> str | None:
         return "the chunk tier folds a carrier whose pivot a nested contraction supplies"
     if any(edge.as_slab() is None for edge in (*score.operands, *node.operands[1:])):
         return "the chunk tier reads its score operands and its streamed value as slabs"
-    cone = node.operands[0].applied.cone(node.roles[0])
-    if any(not isinstance(stmt, (Assign, Load)) for stmt in cone.body):
-        return "the score's own cone holds more than a straight-line program"
+    # The score's own PREFIX is the CARRIER's lift cut to its score role — A is the score
+    # contraction, and what scales its raw accumulator lives in the lift above it. Its leaves past
+    # the producer are read once ahead of the chunk, so none of them may vary over the chunk.
+    prefix = node.applied.cone(node.roles[0])
+    if any(not isinstance(stmt, (Assign, Load)) for stmt in prefix.body):
+        return "the score's own prefix holds more than a straight-line program"
+    leaves = [edge for edge in node.operands[1:] if set(edge.exposes) & set(prefix.params)]
+    if any(node.axis in edge.free_axes for edge in leaves):
+        return "the score's prefix reads an operand that varies over the chunk"
     # The tier holds ONE accumulator — the expectation — and every other carried state as a per-row
     # register the store may read but not write out. A cross-CTA split's partial writes the whole
     # carrier to its workspace, which is a kernel this tier cannot produce.
@@ -305,9 +316,12 @@ def _contraction_domain(
     wide_warp_tiles = tuple(
         plan for name in allowed_atoms if _kstep_refusal(facts.k_axis, (plan := Tile(atom=ATOM_REGISTRY[name], regs=(26, 4), bk=2))) is None
     )
-    # The scalar register tier folds the STORED lift, which for a twist is the base contribution
-    # and denotes ``Sum exp(score)``: only the atom tier folds the recipe's chunk patterns instead,
-    # so a twisted carrier's untiled arm is the plain serial fold and nothing between.
+    # The scalar register tier folds ONE additive accumulator per cell — ``acc__c{i}_{j} += b·a``,
+    # its multiply, its add and its single state all fixed. A twisted carrier folds three states
+    # under their own ops and seeds with the recipe's stable merge between them, which only the
+    # chunk tier does; a register tile on one reads cell copies of the states nothing declares.
+    # NOT a numerics gate any more: the term stores the STABLE contribution and ``Fold.step`` folds
+    # it under the recipe's own ⊕, so the untiled arm is sound. The tier's shape is what refuses.
     scalar_tiles = scalar_tile_moves() if len(node.operands) == 2 and node.twist is None else (Tile(),)
     catalog = (
         *scalar_tiles,

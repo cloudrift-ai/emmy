@@ -21,13 +21,50 @@ from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.pure import Fold
+from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.pure.twist import SOFTMAX, WELFORD
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Const, Load, Loop, Write
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op
 from emmy.compiler.pipeline.passes.lowering.tile._twist import _hoist_invariant, rewrite_twisted
+from tests.compiler.terms import projection, slab
+
+
+def _carrier(weight_of: str) -> Fold:
+    """FlashAttention's carrier with the weight still IN the lift — the shape the fusion holds
+    before ``_factor_weights`` reifies ``e`` into an operand of its own. ``weight_of`` names the
+    value the weight is derived from, so the negative case differs by one argument."""
+    score = projection((slab("s", "S", "i", "j"),), (Assign(name="r", op="negative", args=("s",)),))
+    value = slab("v", "V", "j", "n")
+    return Fold(
+        operands=(score, value),
+        lift=Lambda(
+            params=("j", "r", "v"),
+            body=Body((Assign(name="e", op="exp", args=(weight_of,)), Assign(name="ev", op="multiply", args=("e", "v")))),
+            results=("r", "e", "ev"),
+        ),
+        init=(-1e30, 0.0, 0.0),
+        base=Lambda.componentwise((ElementwiseImpl("maximum"), ElementwiseImpl("add"), ElementwiseImpl("add")), ("m", "d", "o")),
+    )
+
+
+def test_a_carrier_reads_bilinear_before_its_weight_is_reified() -> None:
+    """A is what ``operands[0]`` SUPPLIES, not what it exposes: the weight the lift derives from the
+    score is the left factor, so the channel is a contraction with no operand minted for it."""
+    carrier = _carrier("r")
+    (channel, streamed) = carrier.bilinear_channels()[0]
+    assert channel == 2 and streamed is carrier.operands[1]
+    view = carrier.as_contraction()
+    assert view is not None and view.axis == "j" and view.channel == 2
+    assert set(view.left_axes) == {"i"} and set(view.right_axes) == {"n"}
+
+
+def test_a_weight_derived_from_the_streamed_value_is_no_contraction() -> None:
+    """The left factor must come from A alone. Derived from B it is a square in disguise, and
+    offering an mma for it would be a wrong answer, not a slow kernel."""
+    assert _carrier("v").bilinear_channels() == ()
+    assert _carrier("v").as_contraction() is None
 
 
 def _folds(root: Fold):
@@ -62,22 +99,25 @@ def _twisted(code: str) -> Fold:
 
 
 def test_softmax_rewrites_to_twisted_pair() -> None:
-    """The row maximum and the exp-weighted sum fuse into one ``(m, l)`` carrier over the BASE
-    monoid: the lift contributes ``(score, exp(score))`` off the score slab, and ψ takes that
-    singleton to ``(score, 1)`` for the step to fold."""
+    """The row maximum and the exp-weighted sum fuse into one ``(m, l)`` carrier in STABLE
+    coordinates: the lift contributes ``(score, 1)`` off the score slab — the singleton the
+    carrier's own ⊕ folds — and ψ⁻¹ brings back ``(score, exp score)`` for a matcher to read."""
     fold = _twisted("torch.softmax(torch.randn(4, 8, dtype=torch.float16), dim=-1)")
 
     assert fold.twist.recipe is SOFTMAX and fold.combine == SOFTMAX.program(fold.as_reduction().states)
     assert len(fold.init) == 2 and fold.init[1] == 0.0
     assert [edge.as_slab() is not None for edge in fold.operands] == [True], "the score slab is its one operand"
-    assert [stmt.op.name for stmt in fold.lift.body] == ["exp"], "the base contribution is (score, exp score)"
+    assert [stmt.value for stmt in fold.lift.body if isinstance(stmt, Const)] == [1.0], "the stable singleton is (score, 1)"
+    assert not [stmt for stmt in fold.lift.body if isinstance(stmt, Assign) and stmt.op.name == "exp"], "no exp in the term"
+    assert [stmt.op.name for stmt in fold.based().body if isinstance(stmt, Assign)] == ["exp", "multiply"], "psi_inv restores it"
     assert any(isinstance(stmt, Const) and stmt.value == 1.0 for stmt in fold.injected.body), "psi injects 1"
 
 
 def test_sdpa_rewrites_to_twisted_expectation() -> None:
-    """Attention's value channel joins the same carrier, and the carrier comes out A × B: the
-    weight cone leads, the value slab is the streamed operand, and the score contraction sits under
-    the cone — one node, not one per binder. The ``1/l`` factor hoists into the epilogue above."""
+    """Attention's value channel joins the same carrier, stored in STABLE coordinates: the score
+    contraction leads, the value slab is the streamed operand, and the expectation channel injects
+    that value unchanged. The bilinear reading comes back through ψ⁻¹ (:meth:`Fold.based`), so no
+    cone is minted to hold ``exp(s)``. The ``1/l`` factor hoists into the epilogue above."""
     tile = _tile(
         "F.scaled_dot_product_attention("
         "torch.randn(1, 1, 4, 2, dtype=torch.float16), "
@@ -87,9 +127,11 @@ def test_sdpa_rewrites_to_twisted_expectation() -> None:
     (fold,) = _twisted_folds(tile.op)
 
     assert len(fold.init) == 3
-    cone, streamed = fold.operands
-    assert cone.axis is None and streamed.as_slab() is not None
-    assert sum(edge.as_contraction() is not None for edge in cone.operands) == 1, "the one score node"
+    assert fold.operands[0].as_contraction() is not None, "the one score node leads — A is what it supplies"
+    (_, streamed) = fold.bilinear_channels()[0]
+    assert streamed.as_slab() is not None and streamed.free_axes, "the value slab is B"
+    assert fold.as_contraction() is not None
+    assert not [s for s in fold.lift.body if isinstance(s, Assign) and s.op.name == "exp"], "the weight is not in the term"
     assert tile.op.axis is None and any(stmt.op.name == "multiply" for stmt in tile.op.lift.body), "the epilogue applies 1/l once"
 
 
@@ -207,8 +249,9 @@ def test_welford_variance_pair_fuses_into_one_carrier() -> None:
     score, one, mean, square = fold.lift.results
     consts = {stmt.name: stmt.value for stmt in fold.lift.body if isinstance(stmt, Const)}
     products = {stmt.name: stmt.args for stmt in fold.lift.body if isinstance(stmt, Assign) and stmt.op.name == "multiply"}
-    assert mean == score and consts[one] == 1.0, "the base contribution is (x, 1, x, x*x)"
-    assert products[square] == (score, score), "channel 3 squares one edge, so it is no contraction"
+    assert mean == score and consts[one] == 1.0, "the stable singleton is (x, 1, x, 0)"
+    assert consts[square] == 0.0, "one element deviates from its own mean by nothing"
+    assert products == {}, "no product in the term at all, so no channel reads bilinear"
     injected = {stmt.name: stmt.value for stmt in fold.injected.body if isinstance(stmt, Const)}
     assert injected[fold.injected.results[3]] == 0.0, "psi takes it to 0 — a lone element deviates from its own mean by nothing"
     lowered = fold.lower(axes=axes)

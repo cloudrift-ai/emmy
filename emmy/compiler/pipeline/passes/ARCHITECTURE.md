@@ -542,10 +542,11 @@ without a placement or value-cut analysis.
 `020_twisted` is a separate algebraic rewrite over the canonical tree. It fuses every reduce that reads a reduce
 into the twisted monoid a recipe recognizes (`Fold.fuse` — the pivot's state is the operand binding, the score the
 sub-cone alpha-equal to the pivot's own map, the rest a channel's pattern by canonical form), hoisting factors
-constant along the axis out of the fold first. The fused fold stores the recipe's BASE contribution as its lift and
-names the recipe in its `twist`, so the stable ⊕ and the ψ-image the step folds are both derived rather than baked in;
-a channel whose base contribution is a product gets the other factor's cone as an operand of its own, which is what
-leaves attention's expectation channel spelled as one monomial over two operand edges. Softmax, SDPA, and causal SDPA
+constant along the axis out of the fold first. The fused fold stores the recipe's authored INJECTION as its lift —
+the singleton in the carrier's own coordinates — and names the recipe in its `twist`, so the stable ⊕ derives from it
+and the base contribution is a derived reading (`Fold.based`) that only a matcher asks for. Nothing is hoisted to make
+attention's expectation channel read bilinear: A is what `operands[0]` supplies, so the weight may stay a value the
+reading derives. Softmax, SDPA, and causal SDPA
 differ only in carrier arity and score/value lambdas; there is no operation-family matcher. Nor is there an
 attention emitter: a carrier the recipe folds chunk by chunk (`Fold.chunked`) is a TILE site like any other, and
 the tier that folds it reads the recipe's patterns and its stable ⊕, never a named shape. `040_schedule` enumerates the complete

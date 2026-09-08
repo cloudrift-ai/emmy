@@ -383,8 +383,9 @@ an atom tier of its own instead, `_atom._FlashOps`.
 
 ### The chunk tier
 
-The tier folds the RECIPE, never the stored lift — for a twist that lift is the base contribution and denotes
-`Sum exp(score)`. Per staged K chunk (`STAGE`'s `bk_elems`, the only block it uses) it emits the score, reduces it
+The tier folds the RECIPE's patterns per chunk, not the stored lift — that lift is the SINGLETON's contribution
+(`(score, 1, value)` for softmax), which is the right thing for a serial step and says nothing about a chunk. Per
+staged K chunk (`STAGE`'s `bk_elems`, the only block it uses) it emits the score, reduces it
 per row into the chunk's pivot, instantiates each channel's `pattern` against that pivot, folds a channel that is no
 product per row and the bilinear one on tensor cores, and merges the chunk's partial through the recipe's stable ⊕
 (`Fold.merge`) once per chunk.

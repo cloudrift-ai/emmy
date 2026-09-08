@@ -41,7 +41,7 @@ configs:
       WORK: w2x2
       STAGE: d1/smem
       REDUCE: ''
-    identity: 955199dd3c346531150b603c7db1ccac424f575f922e1298d29ce563132d438d
+    identity: ba172514db11e954136589b7b094d38a3b24dd608b59288bc5097f0e053e5407
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 36.90192655280784
@@ -91,3 +91,13 @@ configs:
       REDUCE: ''
       RASTER: ''
     identity: 4fde58f4f7e00b9b17d5b89545a77a3dc9699ad4666e0fc2af647896d6337b81
+  - name: k_matmul_softmax_reduce_2c67a1.c029b4a45303.3295ee7031df
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: 3295ee7031dff76a7235902b25f13df94728188938ebce6837201443cda7abd2
