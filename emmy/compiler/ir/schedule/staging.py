@@ -184,9 +184,10 @@ def _chunk_warp_stage(
     The synchronous ``smem`` transport declines: it is the Volta atom's blocking vector copy, and
     attention's chunk tier has no sm_70 kernel to serve. A SYMBOLIC key extent does NOT decline —
     see the ragged-tail reading below, which is what lets a serving-shaped attention kernel stage
-    at all. Depth is the ordinary budget clamp: the chunk loop carries the whole softmax between
-    its fill and its drain, so a deeper ring prefetches the next chunk's key and value ACROSS that
-    softmax, which is the longest overlap this tier has to offer.
+    at all, though it keeps the single-buffer ring. On a STATIC extent depth is the ordinary budget
+    clamp: the chunk loop carries the whole softmax between its fill and its drain, so a deeper ring
+    prefetches the next chunk's key and value ACROSS that softmax, which is the longest overlap this
+    tier has to offer.
     """
     atom, view, n = tile.atom, c.as_contraction(), tile.n
     slab = c.operands[1].as_slab()
@@ -223,7 +224,14 @@ def _chunk_warp_stage(
         slot_bytes += bk_elems * key[1] * b_nbytes
     if slot_bytes > budget:
         return None
-    choice = replace(stage, depth=_clamp_depth(stage.depth, slot_bytes, budget), reg_depth=min(stage.reg_depth, tile.bk))
+    # A RAGGED stream keeps the single-buffer ring the tail discipline above was written for.
+    # Measured: with a prefetch slot on top of it the kernel HANGS and poisons the CUDA context
+    # (``test_masked_symbolic_accuracy[demoted_pv-*]`` and ``[computed_a_symbolic_k_warp-16]``, which
+    # run this tier at a symbolic key length); at one slot it is correct. What the runtime chunk
+    # count does to the prefetch's clamp is not diagnosed, so the depth is refused here rather than
+    # offered and left to fail at the card.
+    depth = 1 if ragged else _clamp_depth(stage.depth, slot_bytes, budget)
+    choice = replace(stage, depth=depth, reg_depth=min(stage.reg_depth, tile.bk))
     return ResolvedStage(choice, bk_elems=bk_elems)
 
 

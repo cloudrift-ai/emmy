@@ -200,10 +200,12 @@ the chunk's C fragments, or come off a stored probability tile at the fragment l
 all — the value then stages alone. The QUERY is not staged either, for the opposite reason: its index never carries the
 carrier's key, so it is loop-INVARIANT and rides hoisted registers instead, one A fragment per score-K step read once
 ahead of the chunk loop. Depth is the ordinary budget clamp, so a ring deeper than one prefetches the next chunk's key
-and value ACROSS the softmax between this chunk's fill and drain — the longest overlap this tier has to offer. Its key
-extent may be SYMBOLIC, which every other staged operand refuses: a
+and value ACROSS the softmax between this chunk's fill and drain — the longest overlap this tier has to offer, on a
+STATIC extent. Its key extent may be SYMBOLIC, which every other staged operand refuses: a
 K-major value rows its slab by key and runs its copy chunks along the head dim, so the extent enters neither the chunk
-width nor the gmem row stride and the last chunk simply overhangs. Both ends of that tail are already disciplined —
+width nor the gmem row stride and the last chunk simply overhangs. It keeps the single-buffer ring: a prefetch slot on
+top of that tail hangs the kernel and poisons the context, undiagnosed, so the resolver refuses the depth rather than
+offering a row that fails at the card. Both ends of the tail itself are already disciplined —
 the fill clamps the overhanging key row onto the last valid one (a TMA box zero-fills instead) and the drain's
 boundary `FragmentMask` has put those keys at the pivot identity — so a serving-shaped attention kernel, whose key
 extent IS the KV cache length, stages like any other. On an RTX 5090 that is 2.5x on the `attention.hd64.softmax_v`
