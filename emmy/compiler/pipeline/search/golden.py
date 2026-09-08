@@ -845,7 +845,10 @@ def decode_record(record: GoldenRecord, siblings: Sequence[GoldenRecord] = ()) -
         reason = f"routing key {replay.unresolved[0]!r} does not resolve to an offered cut seam" if replay.unresolved else None
         return _remember_verdict(verdict_key, reason)
     candidates = replay.rows
-    row = schedule_row_key(record.knobs)
+    # The piece row, not the recorded one: a ``g<n>`` cross-CTA half names the kernel-set arm the
+    # replay already resolved, and the pieces it mints cannot stamp it, so comparing it to a leaf
+    # asks a piece to spell its parent's decision.
+    row = schedule_row_key(piece_row(record.knobs))
     if record.is_receipt and (tile is None or record.identity != tile.identity_key(with_io=True)):
         child_rows = candidates.get(record.identity)
         if child_rows is None:
@@ -906,16 +909,20 @@ class _Replay(NamedTuple):
 def piece_row(row: Mapping[str, str]) -> dict[str, str]:
     """A record's schedule row as a piece of its kernel set can carry it: a ``REDUCE`` value reduced
     to what a piece can still stamp (:func:`~emmy.compiler.pipeline.search.pins.stampable_reduce`),
-    since the cross-CTA split it names was the parent's decision."""
+    since the cross-CTA split it names was the parent's decision.
+
+    A value whose whole content was the split reduces to the OFF ``''``, and the key STAYS at it:
+    the piece decided to fold nothing, and an enumerated leaf spells that decision rather than
+    omitting the family (:attr:`GoldenRecord.schedule_row`). Dropping the key instead read as
+    "free", which no leaf equals — the whole split half of a card's rows decoded to nothing and
+    joined no kernel in the evidence index."""
     from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import stampable_reduce  # noqa: PLC0415
 
     out = {str(key): str(value) for key, value in row.items()}
     for key, value in list(out.items()):
         if family_of(key) == "REDUCE" and (rest := stampable_reduce(value)) is not None:
-            del out[key]
-            if rest:
-                out[key] = rest
+            out[key] = rest
     return out
 
 

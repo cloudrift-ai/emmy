@@ -774,6 +774,7 @@ configs:
     knobs:
       WORK: t32x16
       TILE: f4x8
+      REDUCE: ''
       RASTER: ''
       STAGE: d2/smem-async
     measurements:
@@ -792,6 +793,7 @@ configs:
     knobs:
       WORK: t32x8
       TILE: f4x26
+      REDUCE: ''
       RASTER: ''
       STAGE: d2/smem-async
     measurements:
@@ -810,6 +812,7 @@ configs:
     knobs:
       WORK: w1x2
       TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      REDUCE: ''
       RASTER: ''
       STAGE: d2/smem-async/p2
     measurements:
@@ -1280,7 +1283,9 @@ configs:
     knobs:
       WORK: ''
       FAST_EXP: false
+      TILE: ''
       INTERLEAVE_LOADS: true
+      RASTER: ''
       VECTORIZE_LOADS: true
     measurements:
       emmy_us: 4.6
@@ -1298,6 +1303,7 @@ configs:
     knobs:
       WORK: ''
       TILE: f4
+      RASTER: ''
     measurements:
       emmy_us: 16.3
       reference_us: 18.0
@@ -1314,6 +1320,7 @@ configs:
     knobs:
       WORK: ''
       TILE: f2
+      RASTER: ''
     measurements:
       emmy_us: 4.6
       reference_us: 5.0
@@ -1330,6 +1337,7 @@ configs:
     knobs:
       WORK: ''
       TILE: f4
+      RASTER: ''
     measurements:
       emmy_us: 16.5
       reference_us: 19.0
@@ -1346,6 +1354,7 @@ configs:
     knobs:
       WORK: t256
       REDUCE: coop
+      RASTER: ''
     measurements:
       emmy_us: 3.5
       reference_us: 6.0
@@ -1362,6 +1371,7 @@ configs:
     knobs:
       WORK: t512
       REDUCE: coop
+      RASTER: ''
     measurements:
       emmy_us: 12.4
       reference_us: 14.0
@@ -1378,6 +1388,7 @@ configs:
     knobs:
       WORK: t128
       REDUCE: coop
+      RASTER: ''
     measurements:
       emmy_us: 3.6
       reference_us: 6.0
@@ -1394,6 +1405,7 @@ configs:
     knobs:
       WORK: t256
       REDUCE: coop
+      RASTER: ''
     measurements:
       emmy_us: 13.2
       reference_us: 14.0
@@ -1411,6 +1423,7 @@ configs:
     knobs:
       WORK: t128
       REDUCE: coop
+      RASTER: ''
     measurements:
       emmy_us: 2.1
       reference_us: 4.0
@@ -1428,6 +1441,7 @@ configs:
     knobs:
       WORK: t256
       REDUCE: coop
+      RASTER: ''
     measurements:
       emmy_us: 4.5
       reference_us: 7.0
@@ -1445,6 +1459,7 @@ configs:
     knobs:
       WORK: t128
       REDUCE: coop
+      RASTER: ''
     measurements:
       emmy_us: 2.1
       reference_us: 4.0
@@ -1462,6 +1477,7 @@ configs:
     knobs:
       WORK: t256
       REDUCE: coop
+      RASTER: ''
     measurements:
       emmy_us: 4.6
       reference_us: 7.0
@@ -1478,6 +1494,7 @@ configs:
     knobs:
       WORK: t256
       REDUCE: coop
+      RASTER: ''
     measurements:
       emmy_us: 4.1
       reference_us: 4.0
@@ -1494,6 +1511,7 @@ configs:
     knobs:
       WORK: t256
       REDUCE: coop
+      RASTER: ''
     measurements:
       emmy_us: 7.2
       reference_us: 7.0
@@ -1510,6 +1528,7 @@ configs:
     knobs:
       WORK: t256
       REDUCE: coop
+      RASTER: ''
     measurements:
       emmy_us: 13.8
       reference_us: 13.0
@@ -1526,6 +1545,7 @@ configs:
     knobs:
       WORK: t256
       REDUCE: coop
+      RASTER: ''
     measurements:
       emmy_us: 4.1
       reference_us: 4.0
@@ -1542,6 +1562,7 @@ configs:
     knobs:
       WORK: t256
       REDUCE: coop
+      RASTER: ''
     measurements:
       emmy_us: 7.2
       reference_us: 7.0
@@ -1558,6 +1579,7 @@ configs:
     knobs:
       WORK: t256
       REDUCE: coop
+      RASTER: ''
     measurements:
       emmy_us: 13.8
       reference_us: 13.0
@@ -1574,6 +1596,7 @@ configs:
     knobs:
       WORK: t256
       REDUCE: coop
+      RASTER: ''
     measurements:
       emmy_us: 6.9
       reference_us: 7.0
@@ -1590,6 +1613,7 @@ configs:
     knobs:
       WORK: t64
       REDUCE: coop
+      RASTER: ''
     measurements:
       emmy_us: 3.7
       reference_us: 5.0
@@ -1606,6 +1630,7 @@ configs:
     knobs:
       WORK: t256
       REDUCE: coop
+      RASTER: ''
     measurements:
       emmy_us: 6.9
       reference_us: 7.0
