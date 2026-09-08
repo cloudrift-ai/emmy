@@ -106,6 +106,14 @@ site's restriction and the kernel enumerates no row — the loud direction. A ba
 only when the value already belongs to that site's projected values, which is what lets one ambient pin sweep a whole
 model; on a site that cannot carry it, it is silently inapplicable rather than refused.
 
+A bare pin on a kernel that spells its family per site is a DISJUNCTION over those sites: one carries the value and
+every other is OFF. That is the reading `unreproducible_pin_flag` and `evidence_row_vouches` already give a bare key,
+so a row measured under a bare pin reads back the same way it was pinned. The per-site restriction therefore leaves
+the empty spelling open wherever a bare pin could apply, and the completed schedule is asked which site carried it —
+the one place in the enumeration where a pin is decided across sites rather than at one. Reading it as a conjunction
+instead makes it unsatisfiable on exactly the kernels that need it most: attention spells `TILE` at its score
+contraction and at its chunked value channel, and no schedule carries one mma tile at both.
+
 `ClassicScheduleCodec` is the concrete strict wire boundary. Its public encode and decode operations validate through
 one `ClassicScheduleContext`; private syntax-only parsing and encoding let graph reconstruction attach materialization
 before the `TileOp` constructor performs that same validation once. It owns canonical complete-row and prefix-delta
