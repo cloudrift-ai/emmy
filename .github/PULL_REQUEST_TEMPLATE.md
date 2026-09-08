@@ -42,7 +42,7 @@ Nothing measures. A scalar tile on a carrier recomputes the pivot and the denomi
 
 ## Verification
 
-Offered, realized, built and correct on an RTX 5090 for every closed case the card can run. The GPU-free corpus is 616 passed with the ten remaining gaps (all matmul and fused — no attention case is open now); `tests/compiler/passes` is 571 passed; attention coverage and the schedule-IR tests are green; `make lint` passes.
+Offered, realized, built and correct on an RTX 5090 for every closed case the card can run. The GPU-free corpus is 616 passed with the ten remaining gaps; no case that traces from `torch.sdpa` is open any more, though two of the ten — `f16-symbolic-computed-a-k-warp` and `f16-symbolic-demoted-pv-greedy` — are softmax@V, so attention algebra still has gaps. Both fail at `offered`, and dropping any one of their pinned keys changes nothing about what enumerates, which is the signature of a bare one-site row against a tree that now scopes its sites. `tests/compiler/passes` is 571 passed; attention coverage and the schedule-IR tests are green; `make lint` passes.
 
 `git diff --stat main -- emmy/` is +43 −28, of which +17 −11 is the architecture note. The code is +32 −22, one line of it an import. The growth is the capability: a scalar tile on a carrier that had none.
 
