@@ -87,13 +87,13 @@ FIXTURES = {
 }
 
 
-def _rows(graph) -> list[dict]:
+def _rows(graph, cc: tuple[int, int] = _CC) -> list[dict]:
     """The sampled candidate rows of every schedule fork ``graph`` opens.
 
     The sample makes the walk exhaust its leaf stream once inside ``schedule`` (the reservoir
     retains nothing proportional to the pool), so these tests observe a complete traversal without
     flattening a live space into test memory."""
-    ctx = dc_replace(Context.from_target(_CC), pool_sample=PoolSample(rows=8, seed=0))
+    ctx = dc_replace(Context.from_target(cc), pool_sample=PoolSample(rows=8, seed=0))
     return enumerate_graph(graph, ctx).rows
 
 
@@ -202,6 +202,27 @@ def test_sdpa_fold_tree_offers_a_paired_mma_row(unpinned, monkeypatch) -> None:
     monkeypatch.setenv("EMMY_RASTER", "")
     rows = _rows(_sdpa_graph())
     assert any(sum(key.startswith("TILE@") and "mma_" in str(value) for key, value in row.items()) == 2 for row in rows)
+
+
+@pytest.mark.parametrize(("tile", "paired"), (("f1x1", False), ("f1x1/k2", False), ("f1x1/k4", True)))
+def test_volta_sdpa_chunk_requires_a_full_c_fragment(tile, paired, unpinned, monkeypatch) -> None:
+    """Volta can keep both attention contractions on tensor cores once the score fragment spans
+    the value MMA's 16-column K block. Smaller chunks cannot supply one complete A fragment."""
+    _pin(
+        monkeypatch,
+        **{
+            "WORK": "w1x1",
+            "TILE@map.1/twist.1/inner": "mma_m8n8k4_f16_f32/f1x1/k4",
+            "TILE@map.1/twist": f"mma_m8n8k4_f16_f32/{tile}",
+            "REDUCE": "",
+            "STAGE@map.1/twist.1/inner": "",
+            "STAGE@map.1/twist": "",
+            "RASTER": "",
+        },
+    )
+    rows = _rows(_sdpa_graph(), cc=(7, 0))
+    offered = any(sum(key.startswith("TILE@") and "mma_" in str(value) for key, value in row.items()) == 2 for row in rows)
+    assert offered is paired
 
 
 def test_global_classic_pins_restrict_every_applicable_site(unpinned, monkeypatch) -> None:

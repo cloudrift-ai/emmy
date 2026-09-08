@@ -55,7 +55,7 @@ from emmy.compiler.ir.schedule.classic import (
     node_id_spelling,
 )
 from emmy.compiler.ir.schedule.views import ContractionFacts
-from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Write
+from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Select, Write, mask_select_predicate
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.ops import Sched, chain_form, chain_members, edge_dtypes, kernel_roots, projection_tail, scheduled
@@ -207,7 +207,7 @@ def _chunk_refusal(tile: TileOp, node) -> str | None:
     # GATHERED into them when the carrier's own A edge is already the stored tile (softmax@V, whose
     # probabilities arrive as an input). Either way the tier gets a ``(row, chunk)`` C fragment; a
     # carrier that is neither has no chunk to fold.
-    reads = (*score.operands, *node.operands[1:]) if score is not None else node.operands
+    reads = (*score.operands, node.operands[1]) if score is not None else node.operands[:2]
     if score is None and node.operands[0].as_slab() is None:
         return "the chunk tier folds a carrier whose pivot a nested contraction or a stored tile supplies"
     if any(edge.as_slab() is None for edge in reads):
@@ -216,8 +216,23 @@ def _chunk_refusal(tile: TileOp, node) -> str | None:
     # contraction, and what scales its raw accumulator lives in the lift above it. Its leaves past
     # the producer are read once ahead of the chunk, so none of them may vary over the chunk.
     prefix = node.applied.cone(node.roles[0])
-    if any(not isinstance(stmt, (Assign, Load)) for stmt in prefix.body):
+    if any(not isinstance(stmt, (Assign, Load, Select)) for stmt in prefix.body):
         return "the score's own prefix holds more than a straight-line program"
+    coord_axes = {node.axis, *node.as_contraction().left_axes}
+    uniform = {name for edge in node.operands if not edge.free_axes for name in edge.exposes}
+    for stmt in (stmt for stmt in prefix.body if isinstance(stmt, Select)):
+        consumers = [
+            consumer
+            for consumer in prefix.body
+            if isinstance(consumer, Assign) and consumer.op.name == "add" and stmt.name in consumer.args
+        ]
+        if (
+            mask_select_predicate(stmt) is None
+            or len(consumers) != 1
+            or not set(stmt.deps()) <= uniform
+            or any(not branch.select.free_vars() <= coord_axes for branch in stmt.branches)
+        ):
+            return "the score's coordinate Select does not form a cell-uniform additive mask"
     leaves = [edge for edge in node.operands[1:] if set(edge.exposes) & set(prefix.params)]
     if any(node.axis in edge.free_axes for edge in leaves):
         return "the score's prefix reads an operand that varies over the chunk"
@@ -318,8 +333,15 @@ def _contraction_domain(
     """Project one contraction's locally realizable scalar and tensor-core choices."""
     per_cell_reductions = _reduction_domain(tile, node) if facts.k_axis.extent.is_static else (Reduce(),)
     allowed_atoms = _warp_atoms(tile, target, node)
+
+    def warp_plan_ok(plan: Tile) -> bool:
+        if _kstep_refusal(facts.k_axis, plan) is not None:
+            return False
+        chunk = plan.atom.atom_k * plan.bk
+        return not node.chunked() or (chunk >= plan.atom.atom_n and chunk % plan.atom.atom_n == 0)
+
     wide_warp_tiles = tuple(
-        plan for name in allowed_atoms if _kstep_refusal(facts.k_axis, (plan := Tile(atom=ATOM_REGISTRY[name], regs=(26, 4), bk=2))) is None
+        plan for name in allowed_atoms if warp_plan_ok(plan := Tile(atom=ATOM_REGISTRY[name], regs=(26, 4), bk=2))
     )
     # The scalar register tier replicates the TERM's own step per cell, so a recipe folds there
     # like any other algebra — three states under their own ops, seeded by the ⊕'s identities.
@@ -330,7 +352,7 @@ def _contraction_domain(
     scalar_tiles = scalar_tile_moves() if uniform_extras else (Tile(),)
     catalog = (
         *scalar_tiles,
-        *(plan for plan in warp_tile_moves(allowed_atoms) if _kstep_refusal(facts.k_axis, plan) is None),
+        *(plan for plan in warp_tile_moves(allowed_atoms) if warp_plan_ok(plan)),
         *wide_warp_tiles,
     )
     return tuple(

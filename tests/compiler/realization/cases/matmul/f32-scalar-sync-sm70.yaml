@@ -1,0 +1,62 @@
+compute_cap:
+- 7
+- 0
+programs:
+- inputs:
+  - x0
+  - x1
+  outputs:
+  - matmul
+  nodes:
+  - id: x0
+    op: input
+    outputs:
+    - - x0
+      - f32
+      - - 512
+        - 512
+  - id: x1
+    op: input
+    outputs:
+    - - x1
+      - f32
+      - - 512
+        - 512
+  - id: matmul
+    op: torch.matmul
+    attrs:
+      has_bias: false
+    inputs:
+    - x0
+    - x1
+    outputs:
+    - - matmul
+      - f32
+      - - 512
+        - 512
+configs:
+- program: 0
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: k_matmul_befb76.313488d19410
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t16x8
+      TILE: f4x8
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/smem
+    identity: 6c2eb36225dec295097d2206fc5f2b894f6ded2c127e51e0b7f4c281f112fa90
+  - name: k_matmul_befb76.313488d19410.ac3e12d7a7c1
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: ac3e12d7a7c1f6080afc4b83555dc5c2545256d43821ee715b265df7362382a8
