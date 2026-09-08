@@ -2,17 +2,3 @@
 # current compiler. Strict xfails: closing one turns its node red until the line is
 # deleted. Never add a line to make a red row green — re-record the card, or fix the
 # enumeration. See test_golden.py.
-
-rtx4090_sm89.yaml:
-  - attention.hd128.pv#1
-  - attention.hd128.pv#2
-  - attention.hd128.dynM.pv#2
-  - attention.hd256.dynM.pv#1
-  - attention.hd256.dynM.pv#2
-  - attention.hd64.pv#1
-  - attention.hd64.pv#2
-  - attention.hd64.dynM.pv#2
-rtx5090_sm120.yaml:
-  - attention.hd128.softmax_v#1
-  - attention.hd64.softmax_v#1
-  - attention.hd64.softmax_v#2

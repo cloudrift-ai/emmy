@@ -550,12 +550,20 @@ class TileOp(Op):
 
     @cached_property
     def stage_edges(self) -> tuple[EdgeSite, ...]:
-        """The operand positions a ``STAGE`` transport can address.
+        """The operand positions a ``STAGE`` transport can address — every operand of every site
+        that contracts, a CHUNKED carrier's included.
 
-        A CHUNKED carrier's are not among them: its tier reads every operand gmem-direct and takes
-        its chunk off the ``TILE``, so a transport spelling there would decide nothing and two rows
-        would name one kernel."""
-        return tuple(edge for edge in self.edge_sites if self.contracts(edge[0]) and not self.views[edge[0]].chunked())
+        The chunked carrier used to be excluded, on the reading that its tier "takes its chunk off
+        the ``TILE``, so a transport spelling there would decide nothing". A ``STAGE`` never spelled
+        the chunk: :class:`Stage` carries a transport and two buffer depths, and the resolver
+        derives ``bk_elems`` from ``Tile.bk`` — the same number the tier already computes. What the
+        exclusion actually decided was that attention's value channel reads gmem-direct, which is
+        worth ~3x against a staged fill on the cards measured.
+
+        Which of a site's operands then rides a slab is the TIER's business, not this list's: the
+        chunk tier stages its streamed value and keeps the score in registers where the repack
+        needs it."""
+        return tuple(edge for edge in self.edge_sites if self.contracts(edge[0]))
 
     @cached_property
     def _packed_readings(self) -> frozendict:

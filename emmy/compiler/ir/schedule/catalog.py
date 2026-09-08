@@ -86,6 +86,7 @@ def warp_tile_moves(atom_names: tuple[str, ...]) -> list[Tile]:
 
 def stage_moves(*, warp: bool, ctx=None) -> list[Stage]:
     """Return the finite staging domain, filtered to transports available on ``ctx``."""
+    smem = [Stage.parse(spelling) for spelling in ("d1/smem", "d2/smem", "d3/smem", "d4/smem")]
     depths = [
         Stage.parse(spelling)
         for spelling in (
@@ -100,8 +101,9 @@ def stage_moves(*, warp: bool, ctx=None) -> list[Stage]:
         )
     ]
     if warp:
-        smem = [Stage.parse(spelling) for spelling in ("d1/smem", "d2/smem", "d3/smem", "d4/smem", "d1/smem/p2", "d2/smem/p2")]
-        depths = [*smem, *depths, Stage.parse("d2/smem-async/p2"), Stage.parse("d2/smem-tma/p2")]
+        smem.extend(Stage.parse(spelling) for spelling in ("d1/smem/p2", "d2/smem/p2"))
+        depths.extend((Stage.parse("d2/smem-async/p2"), Stage.parse("d2/smem-tma/p2")))
+    depths = [*smem, *depths]
     return depths if ctx is None else [move for move in depths if move.available_on(ctx)]
 
 

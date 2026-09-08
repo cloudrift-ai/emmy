@@ -1049,6 +1049,7 @@ def pipelined_kloop(
     k0: str = "_ks",
     k_end: Expr | None = None,
     k_first: Expr | None = None,
+    seed: bool = True,
 ) -> tuple[list[Stmt], list[Stmt]]:
     """The **one** liveness-scheduled staged K-loop skeleton — every staged form is this scheduler
     run over the loop body's dataflow; none is its own skeleton.
@@ -1206,6 +1207,7 @@ def pipelined_kloop(
         body=Body(tuple(body)),
         unroll=False,
         end=k_end,
+        seed=seed,
     )
     return decls, [*pre, outer]
 
@@ -1223,6 +1225,7 @@ def staged_kloop(
     k0: str = "_ks",
     k_end: Expr | None = None,
     k_first: Expr | None = None,
+    seed: bool = True,
 ) -> tuple[list[Stmt], list[Stmt]]:
     """The whole-body staged K-loop — ONE operand-group live across the entire ``drain``, run through
     :func:`pipelined_kloop` (the segment list is the single ``(drain(slot), slabs)`` entry, so the
@@ -1242,7 +1245,9 @@ def staged_kloop(
     scheduler's legality gate), ``block_threads`` naming the compute band.
 
     ``k0`` names the chunk loop variable (default ``"_ks"``) — a drain whose body references the
-    chunk base by name passes its own axis name.
+    chunk base by name passes its own axis name. ``seed=False`` suppresses the per-``Accum``
+    identity seed ahead of the loop, for a carrier declared and seeded once outside it at a seed
+    the term names (the chunk tier's twisted carrier).
 
     ``k_end`` (an ``Expr`` over in-scope grid vars, CTA-uniform, ``≤ k_extent``) stops the chunk
     loop early. Chunks past it fold the carrier
@@ -1286,4 +1291,5 @@ def staged_kloop(
         k0=k0,
         k_end=k_end,
         k_first=k_first,
+        seed=seed,
     )

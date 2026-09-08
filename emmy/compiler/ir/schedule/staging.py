@@ -73,25 +73,37 @@ def _tma_operand_rank(index: tuple, tile_name: str, k_name: str) -> bool:
     return all(not ({tile_name, k_name} & e.free_vars()) for e in index[:-2])
 
 
-def _warp_vector_copy(k_axis: Axis, tile_n: int, bk_elems: int, mask_n: bool, b_trans: bool) -> bool:
-    """Vector-copy staging: a STATIC, tile-divisible K, an unmasked N, and an even inner slab dim."""
-    if mask_n or not k_axis.extent.is_static:
+def _warp_vector_copy(k_axis: Axis, tile_n: int, bk_elems: int, mask_n: bool, b_trans: bool, *, ragged: bool = False) -> bool:
+    """Vector-copy staging: a STATIC, tile-divisible K, an unmasked N, and an even inner slab dim.
+
+    ``ragged`` drops the K demand for a caller whose drain folds an overhanging chunk to nothing
+    (:func:`_chunk_warp_stage` states the one such reading)."""
+    if mask_n:
         return False
-    if k_axis.extent.as_static() % bk_elems:
+    if not ragged and (not k_axis.extent.is_static or k_axis.extent.as_static() % bk_elems):
         return False
     return bk_elems % _CP_ASYNC_MIN_ELEMS == 0 and (b_trans or tile_n % _CP_ASYNC_MIN_ELEMS == 0)
 
 
-def _warp_tma(k_axis: Axis, n_axis: Axis, tile_n: int, bk_elems: int, a_bytes: int, b_bytes: int, mask_n: bool, b_trans: bool) -> bool:
+def _warp_tma(
+    k_axis: Axis, n_axis: Axis, tile_n: int, bk_elems: int, a_bytes: int, b_bytes: int, mask_n: bool, b_trans: bool, *, ragged: bool = False
+) -> bool:
     """TMA staging: STATIC tile-divisible K and N, and 16 B-aligned inner dims — each operand's
     box inner dim and gmem inner stride at its OWN element width (a byte-staged fp8 B sizes at
-    1 B). A transposed B boxes N-major, so N drops out of the alignment gate."""
-    if mask_n or not (k_axis.extent.is_static and n_axis.extent.is_static):
+    1 B). A transposed B boxes N-major, so N drops out of the alignment gate.
+
+    ``ragged`` is :func:`_warp_vector_copy`'s flag, and drops the same K demand — with it the
+    spans K measures drop out of the alignment gate too, which is sound only where K is no inner
+    dim of any staged operand (again :func:`_chunk_warp_stage`'s K-major reading)."""
+    if mask_n or not n_axis.extent.is_static:
         return False
-    k, n = k_axis.extent.as_static(), n_axis.extent.as_static()
-    if k % bk_elems:
+    if not ragged and (not k_axis.extent.is_static or k_axis.extent.as_static() % bk_elems):
         return False
-    inner = (bk_elems * a_bytes, k * a_bytes) + ((bk_elems * b_bytes, k * b_bytes) if b_trans else (tile_n * b_bytes, n * b_bytes))
+    n = n_axis.extent.as_static()
+    inner = [bk_elems * a_bytes, *((bk_elems * b_bytes,) if b_trans else (tile_n * b_bytes, n * b_bytes))]
+    if not ragged:
+        k = k_axis.extent.as_static()
+        inner += [k * a_bytes, *((k * b_bytes,) if b_trans else ())]
     return all(x % _TMA_ALIGN == 0 for x in inner)
 
 
@@ -103,6 +115,68 @@ _PACKED_BLOCK = 16
 #: The fragment dtypes the packed drain is spelled for. Both hold every e2m1 value exactly, so the
 #: decode is a constant-table read in either; a wider or narrower operand has no such table.
 _PACKED_FRAGMENT_DTYPES = ("f16", "bf16")
+
+
+def _chunk_warp_stage(c: Fold, tile: Tile, stage: Stage, budget: int, inputs, k_axis: Axis) -> ResolvedStage | None:
+    """Resolve a ``Stage`` for a CHUNKED carrier — attention's flash tier.
+
+    ONE slab, sized on the streamed value alone. The carrier's other operand is its score, and no
+    transport can copy it either way it arrives: as a nested contraction it never leaves registers
+    (the chunk's own C fragments repack into the expectation's A), and as a stored tile the tier
+    gathers it at the fragment's own lane map rather than reading rows. So the ring is the value's,
+    at the chunk width ``Tile.bk`` already spells — which is why admitting a transport here adds no
+    second spelling of that width.
+
+    The eligibility gates are the generic arm's B half, asked of the one operand that has a slab.
+    A value whose stored dtype is not the atom's declines rather than staging a converting slab:
+    the chunk drain reads 16-bit fragments, and the gmem-direct fragment load converts per element
+    correctly today.
+
+    The synchronous ``smem`` transport declines: it is the Volta atom's blocking vector copy, and
+    attention's chunk tier has no sm_70 kernel to serve. A SYMBOLIC key extent does NOT decline —
+    see the ragged-tail reading below, which is what lets a serving-shaped attention kernel stage
+    at all. The ring is SINGLE-BUFFER: this hands back
+    ``depth=1`` however deep the row asked, so a deeper
+    spelling is simply not offered — the same discipline the budget clamp uses, and the reason an
+    over-budget row leaves the fork instead of failing at materialization. The chunk loop's body
+    carries the whole softmax between the fill and the drain, so a prefetch has to interleave with
+    the merge rather than with an atom-K loop, and that scheduling is not built. Depth 1 is where
+    the measured win is anyway: the staged `attention.hd128.qk` row that beats gmem-direct 3.1x is
+    ``d1/smem-tma``.
+    """
+    atom, view, n = tile.atom, c.as_contraction(), tile.n
+    slab = c.operands[1].as_slab()
+    if view is None or slab is None:
+        return None
+    b_nbytes = atom.operand_dtype("b").nbytes
+    stored = inputs.get(slab.load.input) if inputs else None
+    if stored is not None and stored.dtype != atom.operand_dtype("b"):
+        return None
+    bk_elems = tile.bk * atom.atom_k
+    # A SYMBOLIC key extent stages when the slab's gmem geometry never reads it. A K-MAJOR value —
+    # the ordinary attention layout — rows the slab by key and runs its copy chunks along the head
+    # dim, so the extent enters neither the chunk width nor the gmem row stride, and the last chunk
+    # simply overhangs. Both ends of that tail are already disciplined: the fill clamps the
+    # overhanging key row to the last valid one (a TMA box zero-fills instead), and the drain's
+    # boundary ``FragmentMask`` has put those keys at the pivot identity, so they weigh exactly
+    # zero and the duplicate value rows fold to nothing. A TRANSPOSED value strides its gmem rows
+    # BY the key extent, so it keeps the static, chunk-divisible demand every staged operand makes.
+    ragged = not k_axis.extent.is_static and not view.b_trans
+    vector_copy_ok = _warp_vector_copy(k_axis, n.tile, bk_elems, n.mask, view.b_trans, ragged=ragged)
+    tma_ok = (
+        stage.transport == "smem-tma"
+        and _tma_operand_rank(slab.load.index, n.axis.name, k_axis.name)
+        and max(n.tile, bk_elems) <= _TMA_MAX_BOX
+        and _warp_tma(k_axis, n.axis, n.tile, bk_elems, b_nbytes, b_nbytes, n.mask, view.b_trans, ragged=ragged)
+    )
+    cp_ok = stage.transport == "smem-async" and vector_copy_ok
+    if not (tma_ok or cp_ok):
+        return None
+    b_rows, b_cols = (n.tile, bk_elems) if view.b_trans else (bk_elems, n.tile)
+    slot_bytes = b_rows * b_cols * b_nbytes
+    if slot_bytes > budget:
+        return None
+    return ResolvedStage(replace(stage, depth=1, reg_depth=min(stage.reg_depth, tile.bk)), bk_elems=bk_elems)
 
 
 def _packed_warp_stage(c: Fold, tile: Tile, stage: Stage, budget: int, packed, inputs, k_axis: Axis) -> ResolvedStage | None:
@@ -291,6 +365,8 @@ def resolve_warp_stage(
         return _block_scaled_warp_stage(c, tile, stage, budget, pair, inputs, k_axis)
     if single is not None:
         return _packed_warp_stage(c, tile, stage, budget, single, inputs, k_axis)
+    if c.chunked():
+        return _chunk_warp_stage(c, tile, stage, budget, inputs, k_axis)
     atom = tile.atom
     sync_copy = stage.transport == "smem" and atom.sync_copy_staging
     bk_elems = tile.bk * atom.atom_k
@@ -352,7 +428,7 @@ def resolve_scalar_stage(c: Fold, tile: Tile, stage: Stage, inputs, budget: int,
     (gmem-direct). The slab K-chunk ``bk_elems`` is DERIVED to fit ``depth`` operand slots in the
     smem ``budget`` (the largest offered chunk dividing K) — not codec-spelled, so no schema change;
     when no chunk fits at the requested depth the depth steps down, single-buffer last."""
-    if stage.transport not in ("smem-tma", "smem-async") or not k_axis.extent.is_static:
+    if stage.transport not in ("smem", "smem-tma", "smem-async") or not k_axis.extent.is_static:
         return None
     # A masked-N B-slab fill would clamp a chunk-start column into a row-crossing gmem address and
     # hang on the misaligned copy; a transposed B has no scalar drain variant (the warp tier stages

@@ -183,6 +183,11 @@ The recipe program's monoid laws are covered
 independently by `tests/compiler/ir/pure/test_twist.py`; end-to-end softmax and attention accuracy remain covered by
 the e2e suites.
 
+`test_volta_mma.py` covers the SM70 atom as one capability family: cooperative global and synchronous staged fragment
+loads, computed operands, C-to-A repacking for paired attention contractions, per-atom row reduction, and causal
+coordinate masking. The realization corpus supplies the exact-GPU build and correctness checks for the schedules
+that combine those paths.
+
 ## Adding a New Rule Test
 
 When adding a new rewrite rule, add both test types in `test_decompose_rules.py`:

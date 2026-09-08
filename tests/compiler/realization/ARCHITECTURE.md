@@ -88,8 +88,12 @@ Why each part, and why nothing else:
   selector that lets the replay apply that entry at its own kernel's forks (`golden._replay` walks a target's entries
   as one set, deciding each fork by the entry whose identity is the kernel being offered).
 
-Three spelling rules decide what a case actually asserts:
+Four spelling rules decide what a case actually asserts:
 
+- **On a kernel with several sites for one family, spell the family by route.** A bare `TILE` there asks for one of
+  the sites — one carries the value, the rest are OFF — so a case that means "this tile at BOTH contraction roots"
+  and spells it bare asserts something weaker than it reads, and passes on a schedule it was written to refuse.
+  `fused/gate-up-distinct-a` was mis-authored that way.
 - **A knob present with `''` is pinned OFF; a knob absent is free.** `''` is a decided value — the schedule declined
   that family — while an absent key lets the fork choose. Several of the tests this corpus replaces `delenv` a family
   rather than setting it empty, and the two are different pins.
@@ -239,6 +243,13 @@ Five rules make it load-bearing:
    program, so a regeneration on a machine without that card carries existing entries through untouched.
 5. **Preserve the leading comment block.** `dump_golden_file` is a plain YAML dump and drops comments, so a naive
    rewrite would eat the `# evidence:` line on every regeneration.
+
+**A non-target entry's `identity` is authored, and nothing re-derives it.** `regenerate` restamps the target
+entry's identity only, so a change that moves a PIECE's identity leaves every further entry addressing a kernel the
+case no longer compiles to — and the staleness test cannot see it, because it compares against what `regenerate`
+produces and `regenerate` reproduces the same stale identity. `COMPLETE=1` adds the entry the set is now missing but
+never removes the dead one, so a case can carry both. Re-authoring the entry is the fix; detecting it automatically
+would mean matching a stored identity against the kernels the replay actually resolves, which nothing does yet.
 
 **The authored half rots differently.** Those five rules are about the DERIVED half, and they all assume the case still
 loads. When an IR dataclass loses a field, every case whose stored program serialized it stops parsing —
