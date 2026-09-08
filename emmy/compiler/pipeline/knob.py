@@ -609,14 +609,31 @@ def canonical_row_key(knobs: dict) -> tuple[tuple[str, str], ...]:
 
 
 def schedule_row_key(knobs: dict) -> tuple[tuple[str, str], ...]:
-    """The exact schedule identity projection a recorded row is compared to a leaf by (the strict
-    golden decode).
+    """The schedule families of a row, as a comparable tuple — what a kernel's schedule decision is
+    RECORDED as. :func:`schedule_match_key` is what two such rows are compared by.
 
     A recorded row legitimately carries later forks' knobs too (the
     kernel-stage policy BOOLs, ``LOOPIFY``); those are separate decisions at separate forks and
     never part of THIS fork's identity. Structural branch prefixes pass through this helper while
     matching a complete leaf, so validation belongs at recording and leaf-construction boundaries."""
     return canonical_row_key({k: v for k, v in knobs.items() if family_of(k) in SCHEDULE_FAMILIES})
+
+
+def schedule_match_key(knobs: dict) -> tuple[tuple[str, str], ...]:
+    """:func:`schedule_row_key` without its OFF anchors — the projection two rows are compared as
+    the SAME schedule by.
+
+    The two sides of that comparison are written in different spellings. A resolved kernel carries
+    every declared OFF value, because the pipeline stamps them at the pass boundary
+    (:func:`apply_off_defaults`), and that is the row a recording is taken from. A fork offers its
+    leaves in the codec's spelling, which keys only the families the kernel's own sites give it. So
+    the same schedule is spelled with different anchors depending on which side names it, and an
+    anchor carries no schedule content either way — it records a pass that declined. Comparing the
+    spellings exactly is what left two thirds of the recorded golden rows matching nothing.
+
+    Recording keeps the anchors: a forkless kernel's row IS its OFF anchors, and dropping them
+    there writes an empty row that spells no decision at all."""
+    return tuple((key, value) for key, value in schedule_row_key(knobs) if not is_off_value(family_of(key), value))
 
 
 def evidence_row_vouches(cand_tun: dict, row_tun: dict, *, exact_families: frozenset[str] = frozenset()) -> bool:

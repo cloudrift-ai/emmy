@@ -687,8 +687,12 @@ offers, or a schedule row no kernel of the replay enumerates, is stale and is no
 realizes is the question the nightly `onboard-model` workflow asks with the strict decode (`golden.decode_record`),
 over the same replay: the persisted program must select exactly one kernel (a receipt selects its child by stored
 identity), a routing record's every cut key must name a seam the cut pass offers, and a schedule row must equal one
-enumerated leaf under the record's own pins. The default test suite does not load checked-in goldens because proving a
-row enumerates its whole fork costs record count times fork size.
+enumerated leaf under the record's own pins. Equality there is blind to the two sides' OFF anchors. A resolved kernel
+carries every declared OFF value, because the pipeline stamps them at the pass boundary, and that is the row a
+recording is taken from; a fork offers its leaves carrying only the families the kernel's own sites give it. Both
+spell the same schedule, so which anchors appear says where a spelling came from, not what it decided. The default
+test suite does not load checked-in goldens because proving a row enumerates its whole fork costs record count times
+fork size.
 
 **Whether goldens are training data differs between the two halves of the prior.** The **online** prior never trains
 on them: a recorded golden row enters no reservoir and no checkpoint. (Benchmarks of a golden *shape* during a tune

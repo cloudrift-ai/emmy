@@ -284,6 +284,7 @@
  "tests/compiler/pipeline/search/policy/test_greedy.py::test_price_memo_keys_on_exact_identity_not_the_term_hash": 18.27,
  "tests/compiler/pipeline/search/prior/test_catboost_model.py::test_fit_recovers_the_planted_signal": 0.28,
  "tests/compiler/pipeline/search/prior/test_report.py::test_a_pool_too_small_for_a_metric_is_excluded_and_the_count_says_so": 0.28,
+ "tests/compiler/pipeline/search/test_golden.py::test_decode_ignores_off_anchors_but_not_a_decided_value": 5.2,
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[rtx4080_sm89.yaml/matmul.square.1024.fp16#1]": 1.86,
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[rtx4080_sm89.yaml/matmul.square.1024.fp16#2]": 1.88,
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[rtx4080_sm89.yaml/matmul.square.1024]": 0.28,
