@@ -1666,11 +1666,14 @@ _MASKED_CASES = {
     # no reader any more.)
     "demoted_n": ({}, [31, 130, 700], _make_demoted_n),
     "demoted_pv": ({}, [16, 31, 130, 700], _make_pv_softmax),
-    # The same softmax-P@V shape PINNED onto the mma tier: a COMPUTED A over a symbolic K, which
-    # only the smem compute fill's K mask makes realizable. The straddling extents are where that
-    # mask earns its keep — 16 and 31 are shorter than one whole slab chunk.
+    # The same softmax-P@V shape PINNED onto the mma tier: a COMPUTED A over a symbolic K. The
+    # straddling extents are where the chunk tier's own K mask earns its keep — 16 and 31 are
+    # shorter than one whole chunk. STAGE is pinned OFF because a symbolic K has no staged
+    # transport (the copy resolvers all want a static, chunk-divisible extent), so this row is
+    # gmem-direct by construction; it read `d1/smem` while the chunked carrier spelled no STAGE
+    # key at all and the pin was inert.
     "computed_a_symbolic_k_warp": (
-        {"TILE": _MASK_WARP[0], "WORK": _MASK_WARP[1], "STAGE": "d1/smem", "REDUCE": ""},
+        {"TILE": _MASK_WARP[0], "WORK": _MASK_WARP[1], "STAGE": "", "REDUCE": ""},
         [16, 31, 130, 700],
         _make_pv_softmax,
     ),

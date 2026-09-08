@@ -111,7 +111,10 @@ def _pin_sdpa(monkeypatch) -> None:
             "TILE@map.1/twist": "mma_m16n8k16_f16_f32/f1x1",
             "REDUCE": "",
             "STAGE@map.1/twist.1/inner": "",
-            "STAGE@map.1/twist": "d1/smem",
+            # The chunked carrier stages the value it streams; `d1/smem` is the Volta blocking
+            # copy, which this target has no atom for. It read that while the site spelled no
+            # STAGE key and the pin was inert.
+            "STAGE@map.1/twist": "d1/smem-async",
         },
     )
 
