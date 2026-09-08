@@ -244,6 +244,13 @@ Five rules make it load-bearing:
 5. **Preserve the leading comment block.** `dump_golden_file` is a plain YAML dump and drops comments, so a naive
    rewrite would eat the `# evidence:` line on every regeneration.
 
+**A non-target entry's `identity` is authored, and nothing re-derives it.** `regenerate` restamps the target
+entry's identity only, so a change that moves a PIECE's identity leaves every further entry addressing a kernel the
+case no longer compiles to — and the staleness test cannot see it, because it compares against what `regenerate`
+produces and `regenerate` reproduces the same stale identity. `COMPLETE=1` adds the entry the set is now missing but
+never removes the dead one, so a case can carry both. Re-authoring the entry is the fix; detecting it automatically
+would mean matching a stored identity against the kernels the replay actually resolves, which nothing does yet.
+
 **The authored half rots differently.** Those five rules are about the DERIVED half, and they all assume the case still
 loads. When an IR dataclass loses a field, every case whose stored program serialized it stops parsing —
 `load_golden_file` refuses the whole document on an unknown field, so `test_case_derived_half_is_current` reports a

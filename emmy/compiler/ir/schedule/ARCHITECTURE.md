@@ -102,6 +102,13 @@ from being offered a row its emission would have to ignore. The chunk is the con
 staging slab, and must contain a complete logical C fragment so its score can repack into the paired contraction's A
 operand. Coordinate masks remain eligible only when their complementary branches form an additive cell mask.
 
+The tier's other refusals (`_chunk_refusal`) are the same kind of statement, and two of them are about the score's own
+PREFIX — the carrier's lift cut to its score role, which is where an SDPA mask lands. Only what reaches a fragment
+loader needs a gmem address: whatever supplies the pivot, and the streamed value. The prefix's remaining leaves are
+read once ahead of the chunk loop, so a mask's fill / zero constants may be a computed pair with no slab at all, and
+its statements may include a `Select` on the score fragment's OWN coordinates, which the emitter evaluates per element.
+Both were blanket refusals, and either one sent a masked attention target to the scalar tier whole.
+
 `TileOp.stage_edges` offers a transport at every operand of every contracting site, a chunked carrier's included —
 which tier then puts which operand on a slab is the tier's own business. The chunked site used to be excluded on the
 reading that it "takes its chunk off the `TILE`, so a transport spelling there would decide nothing"; a `Stage` never
