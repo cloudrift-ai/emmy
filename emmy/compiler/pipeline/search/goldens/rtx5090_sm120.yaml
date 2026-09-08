@@ -1526,12 +1526,12 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f32/f1x4/k8
       REDUCE: ''
-      STAGE: ''
+      STAGE: d1/smem-tma
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 16.15
-      reference_us: 16.15
+      emmy_us: 11.0
+      reference_us: 11.0
       reference_backend: same-input-greedy
 - program: 33
   target:

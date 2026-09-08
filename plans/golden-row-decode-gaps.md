@@ -86,6 +86,29 @@ and it is closed: the tier stages the value it streams, and on this 5090 `attent
 refactor. The rows still need re-measuring on their own cards to deploy it, because each pins `STAGE: d1/smem` — the
 synchronous fill a `cp.async` target never offers — and a measured row is what the greedy reads.
 
+### What the staging re-measure reached, and what it did not
+
+Re-measured on the 5090 as a two-candidate pinned bench per target — the recorded row's own geometry against each
+transport it offers, nothing else moved:
+
+| Target | recorded | staged | outcome |
+| --- | --- | --- | --- |
+| `attention.hd128.softmax_v` (std) | 16.15 us | **11.0 us** `d1/smem-tma` | re-recorded; the greedy deploys it |
+| `attention.hd128.dynM.softmax_v` | 22.2 us | not offered | row kept |
+| `attention.hd64.dynM.softmax_v` | 11.56 us | not offered | row kept |
+
+The two `dynM` targets refuse every copy transport because their KEY extent is symbolic, and both copy gates —
+`_warp_vector_copy` and `_warp_tma` — require a static, chunk-divisible K. The chunk tier's own staged emitter
+agrees: it reads `key.extent.as_static()` and asserts the chunk is not ragged.
+
+**The work that would close them.** `staged_kloop` already takes a symbolic `k_extent` as a `Dim`, allocates the
+full ring against the tuned hint, and lets the transport absorb the over-primed tail — "the drain masks those keys
+to the fold identity, so it stays bit-identical to gmem-direct". So the skeleton is not what refuses. What refuses is
+the pair of resolver gates above and the two static reads in `_FlashOps.reduce`. Closing it means giving the chunked
+carrier the same ragged-tail discipline the gmem-direct path already has (`bound`, the boundary `FragmentMask`) on
+the fill side instead of the drain side. Until then a symbolic-sequence attention kernel stays gmem-direct, which on
+the static targets is worth 1.4–2.6×.
+
 **What was tried.** The chunk tier was given the promote scheme: its expectation chain accumulates packed and folds
 into an f32 partial once per chunk, its score chain widens to f32 on its own. It builds and computes the right
 answer on a 5090, and it recovers none of the gap — 16.0 us against the f32 path's 16.1, and 17–40% SLOWER at the
