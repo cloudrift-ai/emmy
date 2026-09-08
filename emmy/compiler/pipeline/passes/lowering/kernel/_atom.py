@@ -2182,8 +2182,7 @@ class _FlashOps(_MmaOps):
         # in silence.
         assert atom.c_to_a_repack, "the chunk tier needs an atom whose C fragment repacks into an A operand"
         assert all(
-            edge.as_slab() is not None
-            for edge in ((*score.operands, self.c.operands[1]) if score is not None else self.c.operands)
+            edge.as_slab() is not None for edge in ((*score.operands, self.c.operands[1]) if score is not None else self.c.operands)
         ), "the chunk tier reads its score operands and its streamed value as slabs"
         if score is not None:
             seam = (score_tile.n.axis.name, score_tile.n.units, score_tile.n.tile, score_tile.m.reg)
