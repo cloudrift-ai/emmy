@@ -47,42 +47,44 @@ no tensor-core tile of any kind.
 | `attention.hd256.dynM.pv#1` | 4090 | no mma (chunk tier refuses) |
 | `attention.hd256.dynM.pv#2` | 4090 | no mma (chunk tier refuses) |
 
-## Blocker 1 — CLOSED as a question: the reduced accumulator is not worth offering here (6 rows)
+## Blocker 1 — the chunk tier never offers the reduced accumulator (6 rows)
 
 Each of the six spells `mma_m16n8k16_f16_f16` under `FAST_MATH: true`, and the pool offers thousands of
 `mma_m16n8k16_f16_f32` rows and not one `f16_f16`. `classic_projection._atom_families` has a branch per tier; the
 general path returns the atoms at the plain f32 accumulator plus the ones accumulating in the multiplicand dtype,
-and the CHUNK branch returns only the first. That much of the old diagnosis was right. Everything read into it was
-not.
+and the CHUNK branch returns only the first. When attention's value channel became a chunked site, the
+f16-accumulate cell stopped being a candidate there.
 
-**The chunk tier was given the missing path, and measured.** Its expectation chain — the P·V product, which is what
-the site names — now accumulates packed and folds into an f32 partial once per chunk, exactly the scheme the general
-tiers carry; its score chain widens to f32 on its own, because a score is what the exponential amplifies and the
-article below did the same. The result builds and computes the right answer on an RTX 5090. It is also not faster.
-Everything else held fixed, at `-O3`:
+**Closing it is worth almost nothing, and the reason matters more than the blocker.** The obvious argument for
+closing it is that `attention.hd128.softmax_v` recorded 11.84 us with that cell and its greedy pick measures 16.1 us
+today — 1.36× off its own recorded best. That 1.36× is real. It is not the accumulator.
 
-| Target | TILE | f32 acc | f16 acc |
-| --- | --- | --- | --- |
-| `attention.hd128.softmax_v` | `f1x4/k8` | 16.1 us | 16.0 us |
-| `attention.hd128.softmax_v` | `f1x4/k4` | **15.7 us** | 18.3 us |
-| `attention.hd64.softmax_v` | `f1x8/k4` | **20.0 us** | 28.1 us |
-| `attention.hd64.softmax_v` | `f1x8/k8` | 26.1 us | 25.2 us |
+`attention.hd128.qk` still lowers through the general tier, still offers both accumulators, and still decodes, so it
+answers both questions at once. Same card, same geometry, only the two variables moving:
 
-The fastest row of every target is f32-accumulate, and at the article's own 64-K-element cadence (`k4`) the f16 path
-is 17–40% slower. The chunk is short: the promote's convert-and-add per cell is a large fraction of a four-step mma
-chain, where the article's projection kernels amortize the same promote over K=7680. So the projection's exclusion
-stays, and the six rows are unrecoverable as spelled — they were recorded before the value channel became a chunked
-site, on a kernel shape that no longer exists.
+| STAGE | accumulator | us |
+| --- | --- | --- |
+| `d1/smem-tma` | f32 | **5.2** |
+| `d1/smem-tma` | f16 | 5.3 |
+| none | f32 | 16.2 |
+| none | f16 | 16.4 |
 
-The work was reverted; only the measurement is kept. Do not re-open this without a shape where the chunk is long
-enough for the mma chain to dominate.
+The staged fill is worth **3.1×**. The reduced accumulator is worth nothing — marginally negative at both staging
+states. The recorded rows say the same thing once they are read as pairs: every `qk` / `softmax_v` pair whose two
+lanes share a staging state differs by 1.006–1.05× between accumulators, and the one pair that shows 1.36× —
+`hd128.softmax_v` — has a staged f16 row against an UNSTAGED f32 one. The published measurements
+(<https://riftstack.ai/research/optimizing-gemma-4-12b-rtx>) are consistent: 1.34–1.61× on the projection kernels,
+where the mma chain is the kernel, and 1.03× on attention overall.
 
-### What the six rows actually need
+**So the six rows are worth closing only for the staging.** And the chunk tier has no staging family at all by
+construction: `TileOp.stage_edges` excludes a chunked carrier because its tier reads every operand gmem-direct, so a
+transport spelling there would decide nothing. That is the regression the refactor introduced, and on the evidence
+above it is worth roughly 3× on these kernels — far more than the cell this blocker is named after.
 
-All six ALSO pin `STAGE: d1/smem` on a kernel whose pool carries no STAGE key at all — a chunked carrier reads every
-operand gmem-direct, so it offers no staging family. That is the same cause the seven closed rows had, and it is
-what the row table above does not say. Dropping the key changes what the stored microseconds mean, so each needs a
-re-measure on the card that recorded it.
+**What was tried.** The chunk tier was given the promote scheme: its expectation chain accumulates packed and folds
+into an f32 partial once per chunk, its score chain widens to f32 on its own. It builds and computes the right
+answer on a 5090, and it recovers none of the gap — 16.0 us against the f32 path's 16.1, and 17–40% SLOWER at the
+`k4` cadence where the promote fires most often. Reverted. Do not implement it again ahead of the staging.
 
 ### Dead end 1 — the precision gate
 
@@ -94,14 +96,13 @@ Pinning `F16_MMA_F32_ACC` explicitly changes nothing.
 
 `FragmentRepack` reads four f32 values a lane and packs them with `cvt.rn.f16x2.f32`, and `c_to_a_repack` returns
 `True` on shape alone. Requiring `operand_dtype("c") == F32` there was tried and reverted, on the argument that the
-atom folds its packed partials into f32 shadows every 64 K-elements and the repack gathers an f32 fragment either
-way — the technique written up at <https://riftstack.ai/research/optimizing-gemma-4-12b-rtx>.
+atom folds its packed partials into f32 shadows and the repack gathers an f32 fragment either way.
 
-That argument holds for the tiers that IMPLEMENT the shadows. The chunk tier did not: it declared its own score,
-partial and carried fragments at the atom's C dtype and read all three back element-wise as f32 — the scale, the row
-maximum, the exp and the merge all do. Offered without a promote scheme the cell built and returned inf, its
-epilogue reading a packed f16 pair as four f32 scalars. Keying on shape was still right; what was missing was the
-scheme, and the scheme turned out not to pay.
+That argument holds for the tiers that IMPLEMENT the shadows. The chunk tier does not: it declares its own score,
+partial and carried fragments at the atom's C dtype and reads all three back element-wise as f32 — the scale, the row
+maximum, the exp and the merge all do. Offered without a promote scheme the cell builds and returns inf, its
+epilogue reading a packed f16 pair as four f32 scalars. Keying on shape is still right; the shadows are what the
+tier is missing.
 
 ### Dead end 3 — the corpus case the widening broke
 
