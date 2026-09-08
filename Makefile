@@ -23,7 +23,7 @@ help:
 	@echo "  serve-models    - List the models with a pinned release config"
 	@echo "  test-durations - Re-measure tests/durations.json (the CI test-balancing baseline)"
 	@echo "  test-corpus-regen - Restamp the realization corpus after an identity / codec change (COMPLETE=1 adds entries)"
-	@echo "  test-goldens   - Strict-decode every checked-in golden (off the default lane, no GPU needed)"
+	@echo "  test-goldens   - Strict-decode the checked-in model goldens (off the default lane, no GPU needed)"
 	@echo "  clean          - Remove virtual environment and generated files"
 	@echo "  test-compose   - Test docker-compose generation with sample config"
 
@@ -87,11 +87,12 @@ test: setup
 test-corpus-regen: setup
 	./venv/bin/python -m tests.compiler.realization.regen $(if $(COMPLETE),--complete,)
 
-# Strict-decode every checked-in golden. Off the default lane: a full pass re-derives every
-# recorded row's enumeration, minutes per file. Run it after a tuning round has re-recorded a
-# card's rows, to see which files the compiler can replay again. Needs no GPU — decoding targets
-# each record's DECLARED capability, so a stale row is detectable anywhere; re-recording it is
-# what needs the card.
+# Strict-decode the checked-in MODEL goldens. Off the default lane: a model inventory is hundreds
+# of rows and the widest file is a multi-megabyte parse. Run it after a tuning round has
+# re-recorded a card's rows, to see which files the compiler can replay again. Needs no GPU —
+# decoding targets each record's DECLARED capability, so a stale row is detectable anywhere;
+# re-recording it is what needs the card. The hardware goldens are decoded row by row by
+# `make test`.
 test-goldens: setup
 	./venv/bin/pytest tests/compiler/pipeline/search/test_golden.py -m goldens -n auto --dist=loadgroup -v -p no:randomly --no-header
 
