@@ -2,6 +2,7 @@
 
 import asyncio
 import copy
+import re
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -678,9 +679,12 @@ def test_run_records_the_greedy_pick_of_an_embedded_golden(monkeypatch, tmp_path
     """``run --golden PATH --realization NAME --bench --record-greedy``: the greedy row compiles with
     the file's rows as its golden evidence (here the routing row, so the cut is taken), and after
     the bench the kernel set it picked is written back as measured rows — a routing row per
-    kernel-set decision with the isolated whole-graph timing, a receipt per kernel with its
-    isolated launch timing, the greedy comparison row as every reference — while the per-kernel
-    perf rows and node leaves every embedded-golden bench records by default are recorded too."""
+    kernel-set decision priced at the summed isolated launches of the kernels that decision
+    produced (the root's cut owns every kernel; the residual's split owns only its own pieces, so
+    its row ranks in the same units as the unsplit kernel's receipt would), a receipt per kernel
+    with its isolated launch timing, the greedy comparison row as every reference — while the
+    per-kernel perf rows and node leaves every embedded-golden bench records by default are
+    recorded too."""
     from emmy.commands import run as run_module
     from emmy.commands.compile import resolve_golden_arg
     from emmy.compiler import target as target_mod
@@ -767,13 +771,35 @@ def test_run_records_the_greedy_pick_of_an_embedded_golden(monkeypatch, tmp_path
     receipts = [row for row in added if not _is_route_row(row["knobs"])]
     assert routing[0]["knobs"] == {"PLACE@inner.1/map": "cut"} and len(receipts) >= 2
     total = sum(range(1, len(receipts) + 1))
+    # The root's cut produced every kernel; the residual's cross-CTA split (whichever ``g<n>`` the
+    # prior picked) produced every kernel but the piece the cut minted ahead of it (the first
+    # launch), so its row is priced without it.
+    assert len(routing) == 2 and re.fullmatch(r"g\d+[ak]", routing[1]["knobs"]["REDUCE"])
     assert [row["measurements"] for row in routing] == [
-        {"emmy_us": pytest.approx(total * 1.0), "reference_us": pytest.approx(total * 2.0), "reference_backend": "same-input-greedy"}
-    ] * len(routing)
+        {"emmy_us": pytest.approx(total * 1.0), "reference_us": pytest.approx(total * 2.0), "reference_backend": "same-input-greedy"},
+        {
+            "emmy_us": pytest.approx((total - 1) * 1.0),
+            "reference_us": pytest.approx((total - 1) * 2.0),
+            "reference_backend": "same-input-greedy",
+        },
+    ]
     assert [row["measurements"] for row in receipts] == [
         {"emmy_us": pytest.approx((i + 1) * 1.0), "reference_us": pytest.approx((i + 1) * 2.0), "reference_backend": "same-input-greedy"}
         for i in range(len(receipts))
     ]
+
+
+def test_kernel_set_prices_sum_the_kernels_a_decision_produced():
+    """A decision is priced at the launches of the kernels it produced, a later decision that
+    consumed one of them standing in with its own kernels; a kernel without a launch leaves the
+    price undecided (``None``) rather than inventing one."""
+    from emmy.compiler.pipeline.search.working_golden import kernel_set_prices
+
+    sets = [("root", ("piece", "root")), ("root", ("partial", "root")), ("piece", ("piece_a", "piece_b"))]
+    launches = {"partial": 2.0, "root": 3.0, "piece_a": 5.0, "piece_b": 7.0}
+    assert kernel_set_prices(sets, launches) == [17.0, 5.0, 12.0]
+    assert kernel_set_prices(sets, {"root": 3.0, "partial": 2.0}) == [None, 5.0, None]
+    assert kernel_set_prices([], launches) == []
 
 
 def test_run_files_a_hung_greedy_kernel_as_bench_fail_evidence(monkeypatch, tmp_path):

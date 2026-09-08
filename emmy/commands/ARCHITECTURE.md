@@ -256,10 +256,11 @@ rows, so promotion compares aggregate execution rather than a sum of isolated la
 and knobs; a repeated name alone is never enough to choose a row. Newly appended tune winners start without copied
 latency because the seed row's measurement describes a different schedule. `--record-greedy` (with `--golden PATH
 --realization NAME --bench`) records the OTHER side of the table — the kernel set the greedy row picked — as
-measured realizations of the named target: one routing row per kernel-set decision the compile took and one
-child-identity schedule receipt per kernel, each timed by the isolated re-bench with the greedy comparison row as its
-`same-input-greedy` reference (`working_golden.record_greedy_pick`; the pipeline ARCHITECTURE's golden-record Part
-has the spelling). That is how a pick the prior made becomes rows a strict-evidence compile of the file deploys
+measured realizations of the named target: one routing row per kernel-set decision the compile took, priced at the
+summed isolated launches of the kernels that decision produced, and one child-identity schedule receipt per kernel at
+its own isolated launch, both with the greedy comparison row as their `same-input-greedy` reference
+(`working_golden.record_greedy_pick`; the pipeline ARCHITECTURE's golden-record Part has the spelling and the
+pricing). That is how a pick the prior made becomes rows a strict-evidence compile of the file deploys
 from without a prior. Independently of both, every clean pinned row and the greedy isolated re-bench are written into
 the tune DB by default at tune-standard measurement quality: per-kernel `perf` rows through the tuner's own writer —
 the deploy evidence the next `compile` / `run` / `serve` picks from, which is how a replayed golden or a hand-pinned

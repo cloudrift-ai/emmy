@@ -548,16 +548,19 @@ def _record_golden_latency(args, results: dict, golden_benches) -> None:
     )
 
 
-def _record_greedy_pick(args, graph, bench, greedy_iso, decisions) -> None:
+def _record_greedy_pick(args, graph, bench, greedy_iso, taken) -> None:
     """Write the greedy pick's kernel set back into the benched working golden as measured rows.
 
-    Each kernel-set decision the compile took becomes a routing row priced at the isolated
-    whole-graph timing, and each kernel a child-identity schedule receipt at its isolated launch
-    timing — the pinned-comparable numbers every golden row carries. The greedy comparison row,
-    the same graph timed once more beside torch, is every row's reference: the pair checks
-    measurement parity, not framework correctness, and ``reference_backend`` says so.
+    Each kernel-set decision the compile took becomes a routing row priced at the summed isolated
+    launch timings of the kernels it produced (``kernel_set_prices``; the whole graph's isolated
+    timing where a kernel of the set has no launch), and each kernel a child-identity schedule
+    receipt at its isolated launch timing — the pinned-comparable numbers every golden row carries,
+    and the units a kernel-set fork ranks a routing row against the replaced kernel's receipt in.
+    The greedy comparison row, the same graph timed once more beside torch, is every row's
+    reference: the pair checks measurement parity, not framework correctness, and
+    ``reference_backend`` says so.
     """
-    from emmy.compiler.pipeline.search.working_golden import greedy_pick_rows, record_greedy_pick  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.working_golden import greedy_pick_rows, kernel_set_prices, record_greedy_pick  # noqa: PLC0415
 
     isolated = greedy_iso.bench if greedy_iso is not None and greedy_iso.status == "ok" else None
     rows = greedy_pick_rows(graph)
@@ -569,7 +572,13 @@ def _record_greedy_pick(args, graph, bench, greedy_iso, decisions) -> None:
     def us(launch) -> float:
         return (min(launch.samples) if launch.samples else launch.time_ms) * 1000
 
-    total = (_bench_total_us(isolated)[0], _bench_total_us(bench)[0])
+    whole, whole_ref = _bench_total_us(isolated)[0], _bench_total_us(bench)[0]
+    node_ids = [node.id for node in _launch_order_cuda_nodes(graph)]
+    prices = [kernel_set_prices(taken.kernel_sets, dict(zip(node_ids, (us(launch) for launch in side), strict=True))) for side in launches]
+    decisions = [
+        (identity, knobs, whole if mine is None else mine, whole_ref if theirs is None else theirs)
+        for (identity, knobs), mine, theirs in zip(taken.decisions, *prices, strict=True)
+    ]
     document = getattr(args, "_golden_document", None)
     if document is None:
         from emmy.compiler.pipeline.search.golden import load_golden_file  # noqa: PLC0415
@@ -579,7 +588,7 @@ def _record_greedy_pick(args, graph, bench, greedy_iso, decisions) -> None:
         args.golden,
         document,
         args.realization,
-        decisions=[(identity, knobs, *total) for identity, knobs in decisions],
+        decisions=decisions,
         kernels=[(identity, row, us(mine), us(theirs)) for (identity, row), mine, theirs in zip(rows, *launches, strict=True)],
         reference_backend="same-input-greedy",
     )
@@ -2550,7 +2559,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
     if getattr(args, "record", False):
         _record_golden_latency(args, results or {}, ab_benches)
     if getattr(args, "record_greedy", False):
-        _record_greedy_pick(args, graph, bench, greedy_iso, taken.decisions)
+        _record_greedy_pick(args, graph, bench, greedy_iso, taken)
     for error in strict_errors or []:
         logger.error("strict: %s", error)
     if embedded is not None:
