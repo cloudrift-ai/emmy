@@ -369,7 +369,7 @@ class TileOp(Op):
 
     def __post_init__(self) -> None:
         Op.__post_init__(self)
-        normalized = normalize_fold_tree(self.op)
+        normalized = normalize_fold_tree(self.op, self.output_specs)
         # A matrix row Loop IR elided at extent one is restored as a free axis when the stores
         # prove it and the tree holds a contraction to orient on it (:func:`_implicit_unit_row`).
         unit_row = _implicit_unit_row(self.output_specs, self.place.free)

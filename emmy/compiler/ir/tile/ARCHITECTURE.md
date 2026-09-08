@@ -85,6 +85,15 @@ seam wherever it is closed at the axes of every occurrence, and kernel lowering 
 statements that read them. A computed operand (the RMSNorm'd, RoPE'd K vector) is materializable once per key rather
 than recomputed per query row because it is such a closed cone.
 
+An operand result component NO READER READS is dropped, and the edge's body cut to what its surviving results need.
+A reader is a consuming lift or a kernel-boundary store, so a sweep's per-cell projection keeps what its `Write` names
+even though no lift binds it. The dead components are rewrite residue: the twisted fusion re-seats a carrier's channels
+and mints `_unread<i>` for a slot its reader stopped binding, and an epilogue cone beside it keeps exposing a scale that
+was live when it was formed and went dead when the folds fused. Only a zero-axis operand is restricted — a reducing
+one's components ARE its carried states, and dropping one changes the monoid, which is why attention's running maximum
+stays spelled as the `_unread` it honestly is. The rule is tree-wide and unions over readers, because restricting per
+occurrence would sever the object sharing the next paragraph restores.
+
 An identity pass-through — a projection that only re-exposes its single operand's results — dissolves wherever a
 projection is formed or revisited. That is not cosmetic: a pass-through is what makes two occurrences of the same
 computation compare unequal, and the placement fork's value clustering (`lowering/tile/_cut.py`) relies on
@@ -216,15 +225,23 @@ which contraction normalization has placed those statistics inside a computed no
 Normalization factors remain in the projection epilogue, while a directly loaded expectation value becomes a Fold
 operand.
 
-What the fused fold STORES is the recipe's own vocabulary: the BASE monoid's per-element contribution as its `lift`,
-that monoid's componentwise ⊕ as its `base`, and the recipe itself — bound to this term's roles — as its `twist`. Both
-halves the term does not store follow from that pair: the stable ⊕ (`Fold.combine`) and the ψ-image of the lift
-(`Fold.injected`), which is the singleton the serial step actually folds. Storing the base is what leaves attention's
-expectation channel spelled as `weight ⊗ value` in the term rather than buried in a rescale program, and the weight's
-cone becomes an operand of its own, so the channel is a bare product of two operand edges. Nothing may see through ψ:
-the base form denotes `Sum exp(score)`, so the step reads the recipe's authored per-channel injections instead of
-evaluating ψ on it, and an operand no rendered statement reads — the weight cone, on the serial nest — is not placed
-at all.
+The fused fold stores its contribution in STABLE coordinates — the carrier's own state space. Its `lift` is the
+recipe's authored injection at the singleton, where the pivot IS the score and softmax's `exp(s)·v` has already
+simplified to `v`; its `init` is that carrier's seed; and the recipe, bound to this term's roles, is its `twist`. So
+softmax's carrier spells `(score, 1, value)` and no term anywhere holds an `exp` of an unshifted score. The stable ⊕
+(`Fold.combine`) derives from the recipe, and `Fold.injected` is the lift itself: the term stores what the step folds.
+
+The base monoid rides beside it as a HELPER — `base` is its componentwise ⊕, and ψ comes from the recipe. `Fold.based`
+is the reading they exist for: `psi_inv` applied to the stored lift, restoring `(s, exp s, exp(s)·v)` so a matcher can
+see the expectation channel as a bare product. Bilinearity lives in base coordinates and nowhere else, because ψ
+divides the product away at the singleton. That reading is RECOGNITION ONLY — the base form denotes `Sum exp(score)`
+and overflows — so `bilinear_channels` and `as_contraction` ask for it and nothing emits it. ψ⁻¹ is written over the
+recipe's full carrier and is restricted to the channels a term actually holds, since a half-fused carrier is the
+ordinary case during the rewrite's own fixpoint.
+
+Nothing is minted to make that reading work. A is what `operands[0]` SUPPLIES, not what it exposes: the left factor
+may be a component of that edge or a value the reading derives from those components and kernel-uniform ones (a scale,
+an epsilon — one contributes no variation, so the factor varies exactly as A does).
 
 ### One reading for "a tier folds this whole"
 

@@ -403,9 +403,9 @@ _CHUNK_ROW = {
     "PLACE": "fuse",
     "WORK": "w1x1",
     "TILE@map.1/twist": "mma_m16n8k16_f16_f32/f2x1/k2",
-    "TILE@map.1/twist.1/map.1/inner": "mma_m16n8k16_f16_f32/f2x4",
+    "TILE@map.1/twist.1/inner": "mma_m16n8k16_f16_f32/f2x4",
     "REDUCE@map.1/twist": "",
-    "REDUCE@map.1/twist.1/map.1/inner": "",
+    "REDUCE@map.1/twist.1/inner": "",
     "STAGE": "",
     "RASTER": "",
 }
