@@ -352,7 +352,7 @@ def resolve_scalar_stage(c: Fold, tile: Tile, stage: Stage, inputs, budget: int,
     (gmem-direct). The slab K-chunk ``bk_elems`` is DERIVED to fit ``depth`` operand slots in the
     smem ``budget`` (the largest offered chunk dividing K) — not codec-spelled, so no schema change;
     when no chunk fits at the requested depth the depth steps down, single-buffer last."""
-    if stage.transport not in ("smem-tma", "smem-async") or not k_axis.extent.is_static:
+    if stage.transport not in ("smem", "smem-tma", "smem-async") or not k_axis.extent.is_static:
         return None
     # A masked-N B-slab fill would clamp a chunk-start column into a row-crossing gmem address and
     # hang on the misaligned copy; a transposed B has no scalar drain variant (the warp tier stages

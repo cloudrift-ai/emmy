@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import pytest
 
+from emmy.compiler.context import Context
 from emmy.compiler.ir.schedule import Reduce, Tile, Work, resolve_site_tile
+from emmy.compiler.ir.schedule.catalog import stage_moves
 
 
 def test_work_codec_round_trips() -> None:
@@ -30,6 +32,15 @@ def test_work_codec_rejects_malformed() -> None:
     for bad in ("x4", "w4", "t16x8+p1", "w4x1+q2", "w4x1x2", "w04x1", "t16x1", "w4x1+p0", " w4x1"):
         with pytest.raises(ValueError):
             Work.parse(bad)
+
+
+def test_scalar_stage_catalog_offers_sync_staging_on_volta() -> None:
+    assert [stage.spell() for stage in stage_moves(warp=False, ctx=Context.from_target((7, 0)))] == [
+        "d1/smem",
+        "d2/smem",
+        "d3/smem",
+        "d4/smem",
+    ]
 
 
 def test_tile_site_value_carries_no_worker_tokens() -> None:

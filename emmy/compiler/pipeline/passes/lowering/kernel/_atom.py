@@ -1215,7 +1215,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             elem_bytes=elem.nbytes,
             cta=cta,
             prologue_stmts=tuple(stat_pro),
-            copy_sync=tile.atom.sync_copy_staging,
+            copy_sync=not tile.is_warp or tile.atom.sync_copy_staging,
         )
     else:
         assert len(ops.channels) == 1, "cp.async / TMA staging is single-fold — a multi-B node rides the smem compute fill"
