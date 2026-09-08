@@ -88,8 +88,12 @@ Why each part, and why nothing else:
   selector that lets the replay apply that entry at its own kernel's forks (`golden._replay` walks a target's entries
   as one set, deciding each fork by the entry whose identity is the kernel being offered).
 
-Three spelling rules decide what a case actually asserts:
+Four spelling rules decide what a case actually asserts:
 
+- **On a kernel with several sites for one family, spell the family by route.** A bare `TILE` there asks for one of
+  the sites — one carries the value, the rest are OFF — so a case that means "this tile at BOTH contraction roots"
+  and spells it bare asserts something weaker than it reads, and passes on a schedule it was written to refuse.
+  `fused/gate-up-distinct-a` was mis-authored that way.
 - **A knob present with `''` is pinned OFF; a knob absent is free.** `''` is a decided value — the schedule declined
   that family — while an absent key lets the fork choose. Several of the tests this corpus replaces `delenv` a family
   rather than setting it empty, and the two are different pins.

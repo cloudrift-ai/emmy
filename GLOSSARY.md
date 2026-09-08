@@ -251,8 +251,10 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   fused norm→linear kernel folds both its statistic and its contraction — the name carries a suffix identifying the
   step, as in the statistic's `REDUCE@<axis>` beside the contraction's bare `REDUCE`. The shortest name that is
   unambiguous is the one golden files, the tuning database and hand-set pins all
-  use. (In the code, these names are produced by walking the kernel's stored Fold tree, which is why the
-  source calls the machinery the tree-path codec.)
+  use. A plain name PINNED on a kernel that has several such steps asks for one of them: one step carries the value
+  and every other declines the choice. That is what a row measured under a plain pin recorded, so it is what the
+  enumeration, the golden decode and the evidence pick all read it as. (In the code, these names are produced by
+  walking the kernel's stored Fold tree, which is why the source calls the machinery the tree-path codec.)
 - **Realize** — A recorded configuration *realizes* when the compiler, at the point where it makes that choice, offers
   a candidate matching the recording. A configuration that realizes nowhere cannot be deployed, however good the
   measurement stored with it.
