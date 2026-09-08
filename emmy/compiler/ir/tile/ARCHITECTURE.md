@@ -258,6 +258,13 @@ per-chunk merge needs), and leaves exactly one bilinear channel, so every other 
 the one accumulator is the expectation. Neither reading mentions attention or softmax: a recipe that folded nothing
 but products passes the first, and one shaped like softmax passes the second.
 
+A carrier that qualifies as NEITHER, because its channels multiply different operand pairs, is not a tile site and
+does not stay one term: normalization hands it back as one fold per state under a projection re-exposing the state
+tuple (`Fold.per_state`). Two matmuls loop fusion put in one nest fold whole one at a time and not together — a tile
+holds one A fragment against a B slab per channel — and the mma tier the pair is refused is the one each of them
+alone already has. Only what refuses comes apart, and only when every state that comes out folds whole on its own,
+which is what leaves the fused shared-A form and a carrier of plain statistics as they were.
+
 ## Kernel identity
 
 Every "are these two kernels the same?" question is answered by ONE function — `Op.identity_key`

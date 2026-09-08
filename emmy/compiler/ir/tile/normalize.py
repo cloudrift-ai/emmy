@@ -4,7 +4,8 @@ Each :class:`Fold` owns every canonical form a node can state about itself at fo
 lambda bodies' statement order, a bilinear term's A-first operand orientation. What remains here
 is what only the WHOLE tree can decide: an identity projection dissolves into the one operand it
 re-exposes (a closing rewrite can leave one behind, and it is what makes two occurrences of the
-same computation compare unequal), and same-value cones become ONE shared object.
+same computation compare unequal), a carrier the fusion left holding two independent contractions
+becomes one term per state, and same-value cones become ONE shared object.
 
 INVARIANT — normalization ends with no operand result component that no reader reads
 (:func:`_prune_unread`), and with same-value cones (alpha-equal, identical captures and
@@ -46,7 +47,11 @@ def _normalize_fold(fold: Fold) -> Fold:
     node = replace(fold, operands=operands) if operands != fold.operands else fold
     if node.axis is None and (collapsed := _passthrough(node)) is not None:
         return collapsed
-    return node
+    # A carrier no tier folds whole because its channels multiply different pairs is two
+    # contractions in one nest: it says so as one term per state (:meth:`Fold.per_state`), and
+    # the projection that replaces it exposes what it exposed. Bottom-up like everything here,
+    # and idempotent — the terms it hands back fold whole, so nothing comes apart twice.
+    return apart if (apart := node.per_state()) is not None else node
 
 
 def _binds(node: Fold) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...], tuple[str, ...]]:
