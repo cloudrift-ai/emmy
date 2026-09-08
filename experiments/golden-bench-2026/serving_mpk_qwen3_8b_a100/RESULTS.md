@@ -28,6 +28,31 @@ All five stock vLLM repeats completed eight requests with zero failed requests. 
 0.02 ms/token, while the persistent-kernel latency range spans 0.080 ms/token. The directly comparable Mirage baseline
 and persistent-kernel lanes are therefore both repeatable enough that run-to-run variation cannot explain their gap.
 
+## Reconstructing the normalized paper table
+
+`paper-baselines.csv` records every value read from the 15 retained text outputs. The arithmetic means are 33.136
+ms/token for MPK's kernel-per-operator path, 9.8038 ms/token for its megakernel, and 10.752 ms/token for vLLM 0.23.0.
+The controlled MPK speedup is therefore `33.136 / 9.8038 = 3.3799x`.
+
+`paper-table.csv` contains the two comparisons used by the paper. The [MPK paper](https://arxiv.org/abs/2512.22219)
+reports 12.5 ms/token for MPK and 14.5 ms/token for its vLLM-or-SGLang baseline, giving 0.8621. The replayed row divides
+the 9.8038 ms/token megakernel mean by the current vLLM mean, giving 0.9118. Lower normalized latency is better. The
+file also retains the controlled comparison against MPK's own kernel-per-operator path, which is the source of the
+3.38x result.
+
+`paper-support.csv` freezes the two inputs to the paper's memory-bandwidth calculation: 15.14 GB of unique BF16
+weights read per decode step and 1565 GB/s from a separate A100 device-to-device copy measurement. Their quotient is
+9.674 ms/token. The MPK archive does not contain the separate copy-benchmark log, so this CSV preserves the reported
+input rather than presenting it as part of the MPK replay.
+
+To audit the repeat table, extract `results.tar.gz` and inspect `2026-08-14_20-24-20/`. MPK's two lanes report
+`per-token latency` in `a100x1_mpk_{base,mega}_r*.txt`; vLLM reports `Mean TPOT` in `a100x1_stock_r*.txt`. The two
+metrics come from different harnesses, which is why only the MPK kernel-per-operator versus megakernel ratio is a
+controlled speedup.
+
+The stock server log records `enforce_eager=False` and `cudagraph_mode=FULL_AND_PIECEWISE`, followed by completed
+piecewise and full CUDA Graph capture. The current vLLM baseline therefore does not pay repeated Python launch cost.
+
 ## Protocol and limitations
 
 - All lanes ran Qwen3-8B on the same NVIDIA A100-SXM4-80GB. Mirage was pinned to revision
@@ -60,6 +85,7 @@ and persistent-kernel lanes are therefore both repeatable enough that run-to-run
 
 ## Durable files
 
+- Paper reconstruction: `paper-baselines.csv`, `paper-table.csv`, and `paper-support.csv`
 - Experiment record: `a100x1_e246bb6279fd.experiment.yaml`
 - Raw-results archive: `results.tar.gz`
 - Archived root: `2026-08-14_20-24-20/`

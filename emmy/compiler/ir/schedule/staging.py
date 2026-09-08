@@ -117,32 +117,77 @@ _PACKED_BLOCK = 16
 _PACKED_FRAGMENT_DTYPES = ("f16", "bf16")
 
 
-def _chunk_warp_stage(c: Fold, tile: Tile, stage: Stage, budget: int, inputs, k_axis: Axis) -> ResolvedStage | None:
+def chunk_key_stage(tile: Tile, stage: Stage, inputs, producer, producer_k, k_axis: Axis) -> tuple | None:
+    """The chunk tier's SECOND streamed slab — its score's KEY — as ``(load, span)``, or ``None``
+    when the streamed value slabs alone.
+
+    A chunk carrier reads TWO operands along its key axis: the score's key and the value it
+    streams. Both are B-shaped slabs of ``bk_elems`` key rows, so this asks the value's own
+    questions of the key at the KEY's spans — its rows the chunk's keys, its columns the score's
+    WHOLE contraction span, which the chunk loop covers in one pass. That span must therefore be
+    static, and it must be the key's gmem-contiguous dim so the fill's copy chunks run along it.
+
+    ``None`` where the carrier has no nested score at all — the gathered ``softmax@V`` shape, whose
+    A is a stored probability tile read at the fragment lane map — or where the key declines any of
+    those questions; the value then stages alone. The SCORE fragments themselves never leave
+    registers either way (the chunk's own C fragments repack into the expectation's A), which is
+    why this stages the key rather than the score.
+
+    One statement, two readers: :func:`_chunk_warp_stage` sizes the ring with it and the chunk
+    tier's emission builds the slab off it, so the fork and the kernel agree on which operands are
+    resident."""
+    if producer is None or producer_k is None or not producer_k.extent.is_static:
+        return None
+    key = next((edge for edge in producer.operands if k_axis.name in edge.free_axes), None)
+    slab = key.as_slab() if key is not None else None
+    if slab is None or producer_k.name not in slab.load.index[-1].free_vars():
+        return None  # the score's contraction span must be the key's gmem inner dim (the fill's chunk)
+    stored = inputs.get(slab.load.input) if inputs else None
+    if stored is not None and stored.dtype != tile.atom.operand_dtype("b"):
+        return None
+    span, nbytes = producer_k.extent.as_static(), tile.atom.operand_dtype("b").nbytes
+    bk_elems = tile.bk * tile.atom.atom_k
+    # The key rows its slab by key and runs its copy chunks along the score's span, so a SYMBOLIC
+    # key extent enters neither the chunk width nor the gmem row stride — the value's own
+    # ragged-tail reading, at this operand's spans.
+    ragged = not k_axis.extent.is_static
+    copies = (
+        _warp_vector_copy(k_axis, span, bk_elems, False, False, ragged=ragged)
+        if stage.transport == "smem-async"
+        else (
+            stage.transport == "smem-tma"
+            and _tma_operand_rank(slab.load.index, producer_k.name, k_axis.name)
+            and max(span, bk_elems) <= _TMA_MAX_BOX
+            and _warp_tma(k_axis, producer_k, span, bk_elems, nbytes, nbytes, False, False, ragged=ragged)
+        )
+    )
+    return (slab.load, span) if copies else None
+
+
+def _chunk_warp_stage(
+    c: Fold, tile: Tile, stage: Stage, budget: int, inputs, k_axis: Axis, producer=None, producer_k=None
+) -> ResolvedStage | None:
     """Resolve a ``Stage`` for a CHUNKED carrier — attention's flash tier.
 
-    ONE slab, sized on the streamed value alone. The carrier's other operand is its score, and no
-    transport can copy it either way it arrives: as a nested contraction it never leaves registers
-    (the chunk's own C fragments repack into the expectation's A), and as a stored tile the tier
-    gathers it at the fragment's own lane map rather than reading rows. So the ring is the value's,
-    at the chunk width ``Tile.bk`` already spells — which is why admitting a transport here adds no
-    second spelling of that width.
+    The ring holds the carrier's two STREAMED operands: the value it folds against, and the score's
+    key when :func:`chunk_key_stage` says that one slabs too. Both stream along the carrier's own
+    key axis at the chunk width ``Tile.bk`` already spells — which is why admitting a transport
+    here adds no second spelling of that width. The score's own fragments are never copied: they
+    repack in registers out of the chunk's C fragments, or, in the gathered shape, come off a
+    stored tile at the fragment lane map.
 
-    The eligibility gates are the generic arm's B half, asked of the one operand that has a slab.
-    A value whose stored dtype is not the atom's declines rather than staging a converting slab:
+    The eligibility gates are the generic arm's B half, asked of each operand that has a slab. An
+    operand whose stored dtype is not the atom's declines rather than staging a converting slab:
     the chunk drain reads 16-bit fragments, and the gmem-direct fragment load converts per element
     correctly today.
 
     The synchronous ``smem`` transport declines: it is the Volta atom's blocking vector copy, and
     attention's chunk tier has no sm_70 kernel to serve. A SYMBOLIC key extent does NOT decline —
     see the ragged-tail reading below, which is what lets a serving-shaped attention kernel stage
-    at all. The ring is SINGLE-BUFFER: this hands back
-    ``depth=1`` however deep the row asked, so a deeper
-    spelling is simply not offered — the same discipline the budget clamp uses, and the reason an
-    over-budget row leaves the fork instead of failing at materialization. The chunk loop's body
-    carries the whole softmax between the fill and the drain, so a prefetch has to interleave with
-    the merge rather than with an atom-K loop, and that scheduling is not built. Depth 1 is where
-    the measured win is anyway: the staged `attention.hd128.qk` row that beats gmem-direct 3.1x is
-    ``d1/smem-tma``.
+    at all, though it keeps the single-buffer ring. On a STATIC extent depth is the ordinary budget
+    clamp: the chunk loop carries the whole softmax between its fill and its drain, so a deeper ring
+    prefetches the next chunk's key and value ACROSS that softmax, which is the longest overlap this
+    tier has to offer.
     """
     atom, view, n = tile.atom, c.as_contraction(), tile.n
     slab = c.operands[1].as_slab()
@@ -174,9 +219,20 @@ def _chunk_warp_stage(c: Fold, tile: Tile, stage: Stage, budget: int, inputs, k_
         return None
     b_rows, b_cols = (n.tile, bk_elems) if view.b_trans else (bk_elems, n.tile)
     slot_bytes = b_rows * b_cols * b_nbytes
+    key = chunk_key_stage(tile, stage, inputs, producer, producer_k, k_axis)
+    if key is not None:
+        slot_bytes += bk_elems * key[1] * b_nbytes
     if slot_bytes > budget:
         return None
-    return ResolvedStage(replace(stage, depth=1, reg_depth=min(stage.reg_depth, tile.bk)), bk_elems=bk_elems)
+    # A RAGGED stream keeps the single-buffer ring the tail discipline above was written for.
+    # Measured: with a prefetch slot on top of it the kernel HANGS and poisons the CUDA context
+    # (``test_masked_symbolic_accuracy[demoted_pv-*]`` and ``[computed_a_symbolic_k_warp-16]``, which
+    # run this tier at a symbolic key length); at one slot it is correct. What the runtime chunk
+    # count does to the prefetch's clamp is not diagnosed, so the depth is refused here rather than
+    # offered and left to fail at the card.
+    depth = 1 if ragged else _clamp_depth(stage.depth, slot_bytes, budget)
+    choice = replace(stage, depth=depth, reg_depth=min(stage.reg_depth, tile.bk))
+    return ResolvedStage(choice, bk_elems=bk_elems)
 
 
 def _packed_warp_stage(c: Fold, tile: Tile, stage: Stage, budget: int, packed, inputs, k_axis: Axis) -> ResolvedStage | None:
@@ -330,6 +386,8 @@ def resolve_warp_stage(
     *,
     readings: tuple | None = None,
     k_axis: Axis,
+    producer=None,
+    producer_k=None,
 ) -> ResolvedStage | None:
     """Resolve an operand ``Stage`` against the warp (mma) contraction ``c`` — synchronous copy,
     cp.async, TMA, or gmem-direct (``None``). The resolved stage carries ``bk_elems``, ``depth``
@@ -366,7 +424,7 @@ def resolve_warp_stage(
     if single is not None:
         return _packed_warp_stage(c, tile, stage, budget, single, inputs, k_axis)
     if c.chunked():
-        return _chunk_warp_stage(c, tile, stage, budget, inputs, k_axis)
+        return _chunk_warp_stage(c, tile, stage, budget, inputs, k_axis, producer, producer_k)
     atom = tile.atom
     sync_copy = stage.transport == "smem" and atom.sync_copy_staging
     bk_elems = tile.bk * atom.atom_k
@@ -649,6 +707,7 @@ def resolve_fill_stage(
 
 
 __all__ = [
+    "chunk_key_stage",
     "computed_operand_copy_dtype",
     "computed_operand_cover",
     "converting_a",

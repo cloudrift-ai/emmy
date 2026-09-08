@@ -14,6 +14,7 @@ from functools import cached_property
 
 from frozendict import frozendict
 
+from emmy.compiler.ir.atom import wide_accumulate
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.structural import instance_memo
 from emmy.utils import cached_method
@@ -297,6 +298,8 @@ def _resolve_stage(
             tile_op.inputs,
             readings=packed,
             k_axis=facts.k_axis,
+            producer=facts.producer,
+            producer_k=tile_op.axis_of(facts.producer.axis) if facts.producer is not None else None,
         )
     return staging.resolve_scalar_stage(node, placed, choice, tile_op.inputs, target.max_dynamic_smem, facts.k_axis)
 
@@ -369,11 +372,17 @@ def _paired_budget_refusal(node: Fold, producer: Fold | None, placed: PlacedTile
     if atom.operand_dtype("c").nbytes == 2:
         c_regs += atom.atom_m * atom.atom_n // 32
     depth = max(1, stage.reg_depth)
-    channels = len(node.operands) - 1
+    # C fragment SETS the consumer holds. A fused multi-channel edge keeps one per streamed
+    # operand; a TWISTED carrier keeps one — its bilinear channel — beside per-row registers for
+    # the states that are no product, so counting its operands claimed fragments it never declares.
+    channels = len(node.bilinear_channels()) if node.chunked() else len(node.operands) - 1
     consumer_c = channels * placed.reg_m * placed.reg_n * c_regs
     consumer = placed.reg_m * depth * a_regs + channels * (placed.reg_n * depth * b_regs + placed.reg_m * placed.reg_n * c_regs)
     producer_n = stage.bk_elems // atom.atom_n
-    producer_regs = placed.reg_m * a_regs + (len(producer.operands) - 1) * (producer_n * b_regs + placed.reg_m * producer_n * c_regs)
+    # The producer accumulates at ITS own cell: a chunked consumer on the reduced-accumulate cell
+    # still scores in f32 (``wide_accumulate``), so its score tile is no wider for it.
+    producer_c = _fragment_registers(wide_accumulate(atom), "c")
+    producer_regs = placed.reg_m * a_regs + (len(producer.operands) - 1) * (producer_n * b_regs + placed.reg_m * producer_n * producer_c)
     required = max(consumer, consumer_c + producer_regs)
     available = min(MAX_REGISTERS_PER_THREAD, MAX_REGISTERS_PER_CTA // placed.block_threads)
     if required <= available:

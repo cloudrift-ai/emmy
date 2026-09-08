@@ -87375,7 +87375,7 @@ configs:
     knobs:
       LOOPIFY: '0'
       RASTER: ''
-      REDUCE: coop
+      REDUCE@inner: coop
       STAGE: ''
       TILE: ''
       WORK: t128
@@ -88837,7 +88837,7 @@ configs:
     knobs:
       LOOPIFY: '0'
       RASTER: ''
-      REDUCE: coop
+      REDUCE@inner: coop
       STAGE: ''
       TILE: ''
       WORK: t128
@@ -90109,7 +90109,7 @@ configs:
     knobs:
       LOOPIFY: '0'
       RASTER: ''
-      REDUCE: coop
+      REDUCE@inner: coop
       STAGE: ''
       TILE: ''
       WORK: t128
@@ -91210,7 +91210,7 @@ configs:
     knobs:
       LOOPIFY: '0'
       RASTER: ''
-      REDUCE: coop
+      REDUCE@inner: coop
       STAGE: ''
       TILE: ''
       WORK: t128
@@ -91872,7 +91872,7 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@a1: coop
+      REDUCE@inner: coop
       WORK: t32
       TILE: ''
       STAGE: ''
@@ -91890,7 +91890,7 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@a1: coop
+      REDUCE@inner: coop
       WORK: t128
       TILE: ''
       STAGE: ''
@@ -91908,7 +91908,7 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@a1: coop
+      REDUCE@inner: coop
       WORK: t32
       TILE: ''
       STAGE: ''
@@ -91926,7 +91926,7 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@a1: coop
+      REDUCE@inner: coop
       WORK: t32
       TILE: ''
       STAGE: ''
@@ -91944,7 +91944,7 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@a1: coop
+      REDUCE@inner: coop
       WORK: t128
       TILE: ''
       STAGE: ''
@@ -91962,7 +91962,7 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@a1: coop
+      REDUCE@inner: coop
       WORK: t32
       TILE: ''
       STAGE: ''
@@ -91980,7 +91980,7 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@a1: coop
+      REDUCE@inner: coop
       WORK: t32
       TILE: ''
       STAGE: ''
@@ -91998,7 +91998,7 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@a1: coop
+      REDUCE@inner: coop
       WORK: t128
       TILE: ''
       STAGE: ''
@@ -92016,7 +92016,7 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@a1: coop
+      REDUCE@inner: coop
       WORK: t32
       TILE: ''
       STAGE: ''
@@ -92034,7 +92034,7 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@a1: coop
+      REDUCE@inner: coop
       WORK: t32
       TILE: ''
       STAGE: ''
@@ -92052,7 +92052,7 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@a1: coop
+      REDUCE@inner: coop
       WORK: t128
       TILE: ''
       STAGE: ''
@@ -92070,7 +92070,7 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@a1: coop
+      REDUCE@inner: coop
       WORK: t32
       TILE: ''
       STAGE: ''
@@ -92088,7 +92088,7 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@a1: coop
+      REDUCE@inner: coop
       WORK: t256
       TILE: ''
       STAGE: ''

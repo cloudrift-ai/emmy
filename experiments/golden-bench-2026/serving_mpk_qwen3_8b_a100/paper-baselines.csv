@@ -1,0 +1,16 @@
+lane,repeat,metric,latency_ms_per_token,source
+mpk_kernel_per_operator,0,per_token_latency,33.442,a100x1_mpk_base_r0.txt
+mpk_kernel_per_operator,1,per_token_latency,33.092,a100x1_mpk_base_r1.txt
+mpk_kernel_per_operator,2,per_token_latency,32.632,a100x1_mpk_base_r2.txt
+mpk_kernel_per_operator,3,per_token_latency,33.280,a100x1_mpk_base_r3.txt
+mpk_kernel_per_operator,4,per_token_latency,33.234,a100x1_mpk_base_r4.txt
+mpk_megakernel,0,per_token_latency,9.786,a100x1_mpk_mega_r0.txt
+mpk_megakernel,1,per_token_latency,9.791,a100x1_mpk_mega_r1.txt
+mpk_megakernel,2,per_token_latency,9.792,a100x1_mpk_mega_r2.txt
+mpk_megakernel,3,per_token_latency,9.865,a100x1_mpk_mega_r3.txt
+mpk_megakernel,4,per_token_latency,9.785,a100x1_mpk_mega_r4.txt
+vllm_0.23.0,0,mean_tpot,10.76,a100x1_stock_r0.txt
+vllm_0.23.0,1,mean_tpot,10.74,a100x1_stock_r1.txt
+vllm_0.23.0,2,mean_tpot,10.75,a100x1_stock_r2.txt
+vllm_0.23.0,3,mean_tpot,10.76,a100x1_stock_r3.txt
+vllm_0.23.0,4,mean_tpot,10.75,a100x1_stock_r4.txt

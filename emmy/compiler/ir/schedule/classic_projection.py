@@ -210,6 +210,10 @@ def _chunk_refusal(tile: TileOp, node) -> str | None:
     reads = (*score.operands, node.operands[1]) if score is not None else node.operands[:2]
     if score is None and node.operands[0].as_slab() is None:
         return "the chunk tier folds a carrier whose pivot a nested contraction or a stored tile supplies"
+    # The chunk covers the score's OWN contraction in one pass and holds a query fragment per step,
+    # so a symbolic extent there has no step count to hold them at.
+    if score is not None and not tile.axis_of(score.axis).extent.is_static:
+        return "the chunk tier covers the score's contraction in one pass, so its extent must be static"
     if any(edge.as_slab() is None for edge in reads):
         return "the chunk tier reads its score operands and its streamed value as slabs"
     # The score's own PREFIX is the CARRIER's lift cut to its score role — A is the score
@@ -299,10 +303,14 @@ def _atom_families(tile: TileOp, target, node, tail: list, packed: tuple = (None
         )
 
     # The CHUNK tier hands its weight to the expectation's mma as a register repack of the score's
-    # own C fragments, so only an atom whose two lane maps line up can carry it.
+    # own C fragments, so only an atom whose two lane maps line up can carry it. Both accumulators
+    # are offered: the cell named here is the EXPECTATION's, whose chunk partial promotes into the
+    # f32 carrier once per chunk — the reduced one therefore runs that chain at the full consumer-die
+    # rate without moving the softmax statistics off f32 (the score keeps ``wide_accumulate``).
     if node.chunked():
-        offered = bindable(atoms_for(edge_dtypes(a_edge, tile.inputs)[0], ctx=target))
-        return tuple(name for name in offered if ATOM_REGISTRY[name].c_to_a_repack)
+        dtype = edge_dtypes(a_edge, tile.inputs)[0]
+        offered = bindable((*atoms_for(dtype, ctx=target), *atoms_for(dtype, acc=dtype, ctx=target)))
+        return tuple(dict.fromkeys(name for name in offered if ATOM_REGISTRY[name].c_to_a_repack))
     if (pair := packed[1]) is not None:
         # ``_node_refusal`` already proved the channels share one stored code dtype that this
         # target has a cell for; the cell addresses its own operands, so no atom refusal applies.

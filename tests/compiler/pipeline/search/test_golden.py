@@ -96,6 +96,35 @@ def test_recorded_row_decodes(path: Path, label: str) -> None:
     assert (reason := _decode(record, records)) is None, reason
 
 
+def test_decode_ignores_off_anchors_but_not_a_decided_value() -> None:
+    """A row's OFF anchors are not part of what it is compared by, and its decided values are.
+
+    Which anchors a spelling writes down says where it came from, not what it decided: a resolved
+    kernel carries every declared OFF value because the pipeline stamps them at the pass boundary,
+    while a fork offers its leaves carrying only the families the kernel's sites give it. Both spell
+    the same schedule. Requiring them to agree is what left two thirds of the recorded rows matching
+    nothing, so the decode compares them blind to the anchors — and stays strict about every value a
+    row actually decided.
+    """
+    from dataclasses import replace
+
+    # The smallest target on the card, named rather than searched for: every assertion below decodes
+    # the record again, so the row this stands on decides what the test costs.
+    records = _records_of(_HARDWARE_GOLDENS_DIR / "rtx5090_sm120.yaml")
+    named = [r for r in records if r.name == "matmul.square.512" and any(v == "" for v in r.knobs.values())]
+    record = next((r for r in named if _decode(r, records) is None), None)
+    assert record is not None, "matmul.square.512 records no decoding row carrying an OFF anchor to compare against"
+
+    stripped = replace(record, knobs={key: value for key, value in record.knobs.items() if value != ""})
+    assert _decode(stripped, records) is None, "a row must decode without the anchors a fork's leaf would not spell"
+
+    anchored = replace(record, knobs={"STAGE": "", "REDUCE": "", "RASTER": "", **record.knobs})
+    assert _decode(anchored, records) is None, "and with the anchors a resolved kernel would be stamped with"
+
+    decided = next(key for key, value in record.knobs.items() if value not in ("", "0"))
+    assert _decode(replace(record, knobs={**record.knobs, decided: "not-a-real-value"}), records) is not None
+
+
 def _recipe_paths() -> list[Path]:
     """The recipe-local model goldens — the repository set minus the hardware files above."""
     with _repository_golden_paths() as paths:

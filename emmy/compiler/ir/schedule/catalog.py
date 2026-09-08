@@ -51,12 +51,17 @@ def scalar_tile_moves() -> list[Tile]:
     return moves
 
 
+# ``fn`` runs past ``fm``'s widest point because a register row is what covers an output axis a
+# single warp column has to span whole: attention's expectation tiles the value's head dim on N, and
+# at head_dim 256 the score's seam allows exactly one warp column there, so the 32 atoms are the only
+# spelling of it. Both are still bounded by ``MAX_FRAGMENT_CELLS`` and, per atom, by
+# ``MAX_FRAGMENT_REGISTERS`` below — the wide points are grid gaps under those limits, not a raise.
 _WARP_TILE_SPACE = Space(
     dims=(
         Dimension("wm", (1, 2, 4, 8, 16)),
         Dimension("wn", (1, 2, 4, 8, 16)),
         Dimension("fm", (1, 2, 4, 8)),
-        Dimension("fn", (1, 2, 4, 8)),
+        Dimension("fn", (1, 2, 4, 8, 16, 32)),
         Dimension("bk", (1, 2, 4, 8)),
     ),
     bounds=(
