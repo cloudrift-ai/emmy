@@ -2,7 +2,7 @@
 
 Status: 13 of 155 recorded rows across the four hardware goldens equal no enumerated leaf, down from 105. Three are
 on the RTX 5090, ten on the RTX 4090; the 4080 and the PRO 6000 are clean. Every one that is left is an attention
-row. This memo covers what blocks each, and the three dead ends already walked so nobody walks them twice.
+row. This memo covers what blocks each, and the four dead ends already walked so nobody walks them twice.
 
 Do not re-record a row to make it green. A row that stops decoding because the schedule it names is gone is a
 regression in the enumeration, and recording today's pick in its place writes that regression in as the reference.
@@ -25,7 +25,7 @@ reference in one case, is a win the default has since absorbed.
 
 ## The 13 that are left
 
-Two things block them, and four rows carry both. `STAGE` below means the row pins `d1/smem` where its kernel offers
+Three things block them, and four rows carry two at once. `STAGE` below means the row pins `d1/smem` where its kernel offers
 no staging family; `f16` means the row spells `mma_m16n8k16_f16_f16`; `atomic` means its `REDUCE` names an atomic
 cross-CTA reduce.
 
@@ -40,10 +40,10 @@ cross-CTA reduce.
 | `attention.hd128.dynM.pv#2` | 4090 | f16 |
 | `attention.hd64.dynM.pv#1` | 4090 | STAGE |
 | `attention.hd64.dynM.pv#2` | 4090 | f16 |
-| `attention.hd64.pv#1` | 4090 | undiagnosed (`g4k`) |
-| `attention.hd64.pv#2` | 4090 | f16, undiagnosed (`g4k`) |
-| `attention.hd256.dynM.pv#1` | 4090 | undiagnosed |
-| `attention.hd256.dynM.pv#2` | 4090 | undiagnosed |
+| `attention.hd64.pv#1` | 4090 | no mma offered (split pieces) |
+| `attention.hd64.pv#2` | 4090 | f16, no mma offered (split pieces) |
+| `attention.hd256.dynM.pv#1` | 4090 | no mma offered (chunk tier refuses) |
+| `attention.hd256.dynM.pv#2` | 4090 | no mma offered (chunk tier refuses) |
 
 ## Blocker 1 — the chunk tier never offers the reduced accumulator (6 rows)
 
@@ -103,6 +103,27 @@ Respelling `g4a` as `g4k` splits the target into pieces that take no mma tile at
 139.5 us + 4.2 us against 26.1 us unsplit. So the choice is to make the atomic reduce carry a multi-component fold,
 or to accept that these rows have no cross-CTA plan and re-measure them unsplit.
 
+## Blocker 3 — the tensor-core tier is absent from these targets (4 rows)
+
+`attention.hd256.dynM.pv#1`/`#2` and `attention.hd64.pv#1`/`#2` on the 4090. Each records an
+`mma_m16n8k16_f16_f32` row, and the pool offers no mma tile of any kind — only the scalar tier (`t32x8`, `f26x4`,
+`f1x*`). Two different causes, both now named; neither is blocker 1 or 2.
+
+**hd256 is a chunk-tier refusal.** `_node_refusal` answers outright:
+
+    the chunk tier reads its score operands and its streamed value as slabs
+
+So at that head dimension the tier declines the target and the warp atoms are never projected. Whether a 256-wide
+head SHOULD reach the chunk tier is the question to settle; the refusal is deliberate, not incidental.
+
+**hd64.pv is the split's doing.** Its node refusal is `None` — the tier is willing — but the row spells
+`REDUCE: g4k`, so the replay follows the split arm and what enumerates is the PIECES. Those offer only scalar tiles.
+This is the same effect seen when `g4a` was respelled to `g4k` on the 5090 (dead end 4): a cross-CTA split mints
+pieces the tensor-core tier does not serve. `attention.hd64.dynM.pv#1`, which spells no split, keeps its mma rows —
+that is the controlled comparison.
+
+Closing hd64.pv therefore means the same question as blocker 2: why a split's pieces lose the warp tier.
+
 ## The staging rows that only need the card (3 rows)
 
 `attention.hd128.dynM.pv#1`, `attention.hd64.dynM.pv#1` and `attention.hd128.pv#1` on the 4090 decode as soon as the
@@ -115,10 +136,3 @@ Needs the card at `riftuser@211.21.50.85 -p 57010`, prepared the way the tune-ke
 
 Promote `emmy_us` from the pinned row's isolated timing and `reference_us` from the greedy isolated timing, with
 `reference_backend: same-input-greedy`.
-
-## Undiagnosed (3 rows)
-
-`attention.hd256.dynM.pv#1`/`#2` and `attention.hd64.pv#1` on the 4090. All f32-accumulate, all still dead after the
-staging key is dropped, none affected by blocker 1. `hd256.dynM` offers 234 candidate rows where its siblings offer
-2778, so that target enumerates far more narrowly — check first whether it lowers differently at that head
-dimension. `hd64.pv#1` spells `g4k`, a split rather than an atomic reduce, so it is not blocker 2.
