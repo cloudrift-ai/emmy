@@ -316,13 +316,13 @@ def _contraction_domain(
     wide_warp_tiles = tuple(
         plan for name in allowed_atoms if _kstep_refusal(facts.k_axis, (plan := Tile(atom=ATOM_REGISTRY[name], regs=(26, 4), bk=2))) is None
     )
-    # The scalar register tier folds ONE additive accumulator per cell — ``acc__c{i}_{j} += b·a``,
-    # its multiply, its add and its single state all fixed. A twisted carrier folds three states
-    # under their own ops and seeds with the recipe's stable merge between them, which only the
-    # chunk tier does; a register tile on one reads cell copies of the states nothing declares.
-    # NOT a numerics gate any more: the term stores the STABLE contribution and ``Fold.step`` folds
-    # it under the recipe's own ⊕, so the untiled arm is sound. The tier's shape is what refuses.
-    scalar_tiles = scalar_tile_moves() if len(node.operands) == 2 and node.twist is None else (Tile(),)
+    # The scalar register tier replicates the TERM's own step per cell, so a recipe folds there
+    # like any other algebra — three states under their own ops, seeded by the ⊕'s identities.
+    # What it has no residence for is an operand past the streamed one that VARIES: those are read
+    # once, ahead of the cells, so every one of them must be uniform across the tile (attention's
+    # scale and its mask fills are; a second streamed B is not, and rides the warp compute fill).
+    uniform_extras = len(node.operands) >= 2 and not any(edge.free_axes for edge in node.operands[2:])
+    scalar_tiles = scalar_tile_moves() if uniform_extras else (Tile(),)
     catalog = (
         *scalar_tiles,
         *(plan for plan in warp_tile_moves(allowed_atoms) if _kstep_refusal(facts.k_axis, plan) is None),

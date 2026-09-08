@@ -59,6 +59,7 @@ from emmy.compiler.ir.schedule import Side, Stage, Tile
 from emmy.compiler.ir.schedule.packing import block_scaled_atom, packed_readings
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
+from emmy.compiler.ir.stmt.body import free_names
 from emmy.compiler.ir.stmt.passes import rename_free
 from emmy.compiler.ir.tile.ops import cone_stat, cone_stat_dtypes, make_cone
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
@@ -1891,10 +1892,17 @@ class _ScalarOps(_AtomOps):
 
     def gmem_leaves(self, offset, mn):
         """The gmem-direct scalar leaf constructors: each register ROW reads its A operand once (a
-        gmem ``Load`` or a computed register-resident body), each COL its
-        B ``Load`` once, each ``(i, j)`` cell folds ``acc__c{i}_{j} += b·a``, and the K-loop is a unit
-        ``Loop`` (``Loop.render`` seeds the accumulators; the store reads them). A masked axis wraps
-        its read in-bounds (``% extent``) and the overhanging store is guarded (:meth:`store`).
+        gmem ``Load`` or a computed register-resident body), each COL its B ``Load`` once, each
+        ``(i, j)`` cell folds the TERM's own per-step statements (:meth:`Fold.step`), and the
+        K-loop is a unit ``Loop`` (``Loop.render`` seeds the accumulators; the store reads them). A
+        masked axis wraps its read in-bounds (``% extent``) and the overhanging store is guarded
+        (:meth:`store`).
+
+        Folding the step rather than a written-out ``acc__c{i}_{j} += b·a`` is what lets a recipe
+        reach this tier: a twisted carrier's three states, their own ops and the stable merge
+        between them are all in that step already, and each cell owns a copy of every one of them.
+        Any further operand is uniform across the tile (the projection offers no scalar tile
+        otherwise), so it is read ONCE ahead of the K-loop and every cell shares it.
 
         An operand that VARIES ALONG THE OTHER output axis (:func:`_cell_varying`) is read once per
         CELL instead — the row / column reuse is a property of the operand, not of the tier."""
@@ -1902,15 +1910,20 @@ class _ScalarOps(_AtomOps):
         assert len(self.channels) == 1, "the scalar tier is single-fold — a multi-B node rides the warp smem compute fill"
         k_axis = self.k_axis
         m, n = mn
+        step = tuple(c.step())
+        a_body, b_body = c.operands[0].lower(axes=self.axes), c.operands[1].lower(axes=self.axes)
+        uniform = [stmt for edge in c.operands[2:] for stmt in edge.lower(axes=self.axes)]
         # The operand bodies contribute their OWN loop coordinates (a computed cone's internal
         # fold axes): a replicated read of such a coordinate must keep its name — the loop that
         # binds it is copied with the cell, so suffixing the reads (but never a Loop's binding)
         # emitted references no scope defines.
-        prot = _scalar_protected(
-            c, self.tile, self.lead, body=(*c.operands[0].lower(axes=self.axes), *c.operands[1].lower(axes=self.axes)), k_axis=self.k_axis
-        )
+        prot = _scalar_protected(c, self.tile, self.lead, body=(*a_body, *b_body, *step), k_axis=self.k_axis)
         b_name, a_name = c.operands[1].exposes[-1], c.operands[0].exposes[-1]
-        a_body, b_body = c.operands[0].lower(axes=self.axes), c.operands[1].lower(axes=self.axes)
+        # Whatever the step reads and does not define is bound OUTSIDE the cell — a uniform leaf
+        # above the loop. Only the two operand results (rebound per row / column below) and the
+        # carried states (one copy per cell) are the cell's own.
+        outer = {name for stmt in step for name in free_names(stmt)} - {name for stmt in step for name in stmt.defines()}
+        prot |= outer - {a_name, b_name} - set(c.exposes)
         a_cell, b_cell = _cell_varying(a_body, n), _cell_varying(b_body, m)
 
         def at_m(i):  # register row ``i``'s m coordinate (a 1-D output has no m side)
@@ -1940,15 +1953,12 @@ class _ScalarOps(_AtomOps):
                 *(copy_cell(a_body, cell, a_sfx, prot) if a_cell else ()),
                 *(copy_cell(b_body, cell, b_sfx, prot) if b_cell else ()),
             ]
-            v = f"{c.exposes[0]}__v__c{i}_{j}"
-            return [
-                *reads,
-                Assign(name=v, op=_MUL, args=(f"{b_name}{b_sfx}", f"{a_name}{a_sfx}")),
-                Accum(name=f"{c.exposes[0]}__c{i}_{j}", value=v, op=_ADD, axes=(k_axis.name,)),
-            ]
+            bound = {a_name: f"{a_name}{a_sfx}", b_name: f"{b_name}{b_sfx}"}
+            rebound = [stmt.rewrite(lambda name: bound.get(name, name)) for stmt in step]
+            return [*reads, *copy_cell(rebound, cell, f"__c{i}_{j}", prot | set(bound.values()))]
 
         def wrap(body):
-            return [Loop(axis=k_axis, body=Body(tuple(body)), unroll=_unroll_inner(k_axis))]
+            return [*uniform, Loop(axis=k_axis, body=Body(tuple(body)), unroll=_unroll_inner(k_axis))]
 
         return dict(read_row=read_row, read_col=read_col, contract=contract, wrap=wrap)
 
