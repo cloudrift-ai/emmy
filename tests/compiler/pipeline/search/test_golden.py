@@ -108,10 +108,12 @@ def test_decode_ignores_off_anchors_but_not_a_decided_value() -> None:
     """
     from dataclasses import replace
 
+    # The smallest target on the card, named rather than searched for: every assertion below decodes
+    # the record again, so the row this stands on decides what the test costs.
     records = _records_of(_HARDWARE_GOLDENS_DIR / "rtx5090_sm120.yaml")
-    carries_anchor = [r for r in records if any(v == "" for v in r.knobs.values()) and any(v for v in r.knobs.values())]
-    record = next((r for r in carries_anchor if _decode(r, records) is None), None)
-    assert record is not None, "no row of the card decodes, so this test can say nothing about how one is compared"
+    named = [r for r in records if r.name == "matmul.square.512" and any(v == "" for v in r.knobs.values())]
+    record = next((r for r in named if _decode(r, records) is None), None)
+    assert record is not None, "matmul.square.512 records no decoding row carrying an OFF anchor to compare against"
 
     stripped = replace(record, knobs={key: value for key, value in record.knobs.items() if value != ""})
     assert _decode(stripped, records) is None, "a row must decode without the anchors a fork's leaf would not spell"
