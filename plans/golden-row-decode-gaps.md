@@ -4,8 +4,10 @@ Status: 11 of 155 recorded rows across the four hardware goldens equal no enumer
 on the RTX 5090, eight on the RTX 4090; the 4080 and the PRO 6000 are clean. Every one that is left is an attention
 row. This memo covers what blocks each, and the dead ends already walked so nobody walks them twice.
 
-Every one of the eleven also pins `STAGE: d1/smem` on a kernel whose pool carries no STAGE key, so every one needs a
-re-measure on its own card whatever else is fixed. The row table below names the OTHER blocker each carries.
+Every one of the eleven also pins `STAGE: d1/smem`, the synchronous fill a `cp.async` target never offers, so every
+one needs a re-measure on its own card whatever else is fixed. That is now worth doing for its own sake: the chunk
+tier stages its streamed value since this memo's blocker 1 closed, and a re-measured row would deploy a kernel
+1.4–2.6× faster than the gmem-direct one it names today. The row table below names the OTHER blocker each carries.
 
 Do not re-record a row to make it green. A row that stops decoding because the schedule it names is gone is a
 regression in the enumeration, and recording today's pick in its place writes that regression in as the reference.
@@ -76,15 +78,19 @@ lanes share a staging state differs by 1.006–1.05× between accumulators, and 
 (<https://riftstack.ai/research/optimizing-gemma-4-12b-rtx>) are consistent: 1.34–1.61× on the projection kernels,
 where the mma chain is the kernel, and 1.03× on attention overall.
 
-**So the six rows are worth closing only for the staging.** And the chunk tier has no staging family at all by
-construction: `TileOp.stage_edges` excludes a chunked carrier because its tier reads every operand gmem-direct, so a
-transport spelling there would decide nothing. That is the regression the refactor introduced, and on the evidence
-above it is worth roughly 3× on these kernels — far more than the cell this blocker is named after.
+**So the six rows are worth closing only for the staging — which is now DONE.** The chunk tier had no staging
+family at all by construction: `TileOp.stage_edges` excluded a chunked carrier because its tier read every operand
+gmem-direct, so "a transport spelling there would decide nothing". That was the regression the refactor introduced,
+and it is closed: the tier stages the value it streams, and on this 5090 `attention.hd128.softmax_v` goes 16.1 →
+11.2 us and `attention.hd64.softmax_v` 26.2 → 10.1 us, recovering the 11.84 us the first of them recorded before the
+refactor. The rows still need re-measuring on their own cards to deploy it, because each pins `STAGE: d1/smem` — the
+synchronous fill a `cp.async` target never offers — and a measured row is what the greedy reads.
 
 **What was tried.** The chunk tier was given the promote scheme: its expectation chain accumulates packed and folds
 into an f32 partial once per chunk, its score chain widens to f32 on its own. It builds and computes the right
 answer on a 5090, and it recovers none of the gap — 16.0 us against the f32 path's 16.1, and 17–40% SLOWER at the
-`k4` cadence where the promote fires most often. Reverted. Do not implement it again ahead of the staging.
+`k4` cadence where the promote fires most often. Reverted, and there is no reason to try it again: the transport
+beside it was the whole 1.36×.
 
 ### Dead end 1 — the precision gate
 
