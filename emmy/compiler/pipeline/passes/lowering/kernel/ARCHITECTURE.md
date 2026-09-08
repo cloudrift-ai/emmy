@@ -192,7 +192,11 @@ carries any leading (batch) grid axes and supports a 1-D (m-absent) output. (The
 ## Operand staging — the warp-tier smem pipeline (`STAGE` codec → `Stage`)
 
 The warp (mma) tier stages its reused gmem operands through an smem slab, driven off the node's `STAGE` codec →
-`schedule.Stage`. Every staged path runs **one** liveness-scheduled K-loop skeleton, `pipelined_kloop` in
+`schedule.Stage`. The CHUNK tier stages one of them, the value it streams: its score is either a nested contraction
+whose fragments repack in registers or a stored tile gathered at the fragment lane map, and a copy transport carries
+neither. Its ring is single-buffer, because a prefetch there would have to interleave with the softmax between the
+fill and the drain rather than with an atom-K loop; `_chunk_warp_stage` enforces that by handing back `depth=1`, so a
+deeper spelling never reaches the fork. Every staged path runs **one** liveness-scheduled K-loop skeleton, `pipelined_kloop` in
 **`_stage.py`**: the loop body arrives as ordered segments tagged with the slab names each READS, every staged
 operand-group is a `(transport, depth)` pair, and the fill / wait / barrier placement is DERIVED from each group's
 live range (`[first reader, last reader]` over the segments) — wait before the first reader, a CTA barrier past the
@@ -393,8 +397,10 @@ an atom tier of its own instead, `_atom._FlashOps`.
 ### The chunk tier
 
 The tier folds the RECIPE's patterns per chunk, not the stored lift — that lift is the SINGLETON's contribution
-(`(score, 1, value)` for softmax), which is the right thing for a serial step and says nothing about a chunk. Per
-staged K chunk (`STAGE`'s `bk_elems`, the only block it uses) it emits the score, reduces it
+(`(score, 1, value)` for softmax), which is the right thing for a serial step and says nothing about a chunk. The
+chunk is `TILE`'s own K width, which is also what the stage resolver derives `bk_elems` as — one number, two
+readers, so a `STAGE` at this site names the transport and never a second block. Per chunk it emits the score,
+reduces it
 per row into the chunk's pivot, instantiates each channel's `pattern` against that pivot, folds a channel that is no
 product per row and the bilinear one on tensor cores, and merges the chunk's partial through the recipe's stable ⊕
 (`Fold.merge`) once per chunk.
