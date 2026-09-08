@@ -271,6 +271,8 @@ def _resolve_stage(
 ) -> ResolvedStage | None:
     from . import staging  # noqa: PLC0415
 
+    if node.chunked() and not plan.is_warp:
+        return None  # the chunked carrier's per-cell fallback reads no slab (``_edge_domain``)
     packed = tile_op.packed_reading(node)
     packed_copy = packed[0] is not None and choice.transport in ("smem-async", "smem-tma")
     if _needs_fill(tile_op, node, plan) and not packed_copy:

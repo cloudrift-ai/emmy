@@ -1743,6 +1743,7 @@ configs:
       WORK: w1x16
       TILE: mma_m16n8k16_f16_f32/f2x1/k4
       REDUCE: ''
+      STAGE: ''
       RASTER: ''
     measurements:
       emmy_us: 39.23
@@ -1920,6 +1921,7 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f32/f1x4/k8
       REDUCE: ''
+      STAGE: ''
       RASTER: ''
     measurements:
       emmy_us: 15.22

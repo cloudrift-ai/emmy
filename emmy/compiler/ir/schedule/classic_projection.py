@@ -417,11 +417,10 @@ def _options(state: _ProjectionState, node) -> tuple:
 def _edge_domain(state: _ProjectionState, site: int, choices: tuple) -> tuple[EdgeSchedule, ...]:
     """Project the independent edge catalog; context composition decides compatibility."""
     node = state.tile.sites[site].node
-    view = state.tile.views[site]
     # A transport is a tile's operand fill, so the catalog belongs to a tile site — the same reading
-    # ``TileOp.stage_edges`` spells a STAGE key on. A chunked carrier is a tile site and still takes
-    # none: its tier is gmem-direct.
-    if site not in state.tile.contractions or view.chunked():
+    # ``TileOp.stage_edges`` spells a STAGE key on, a chunked carrier included: its tier stages the
+    # streamed value it folds against and keeps the score in registers.
+    if site not in state.tile.contractions:
         return (EdgeSchedule(Stage.direct()),)
     supported = {}
     direct = EdgeSchedule(Stage.direct())
@@ -429,8 +428,12 @@ def _edge_domain(state: _ProjectionState, site: int, choices: tuple) -> tuple[Ed
         warp: tuple(stage_moves(warp=warp, ctx=state.target))
         for warp in {choice.tile.is_warp for choice in choices if choice.tile.is_tiled}
     }
+    chunked = state.tile.views[site].chunked()
     for choice in choices:
-        if not choice.tile.is_tiled:
+        if not choice.tile.is_tiled or (chunked and not choice.tile.is_warp):
+            # A chunked carrier's transport belongs to its own tier, which is the tensor-core one.
+            # Its per-cell fallback folds the recipe in registers and reads no slab, so a stage
+            # there would name a fill nothing performs.
             supported.setdefault(direct, None)
             continue
         if _needs_fill(state.tile, node, choice.tile):

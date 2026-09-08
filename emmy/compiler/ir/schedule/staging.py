@@ -105,6 +105,57 @@ _PACKED_BLOCK = 16
 _PACKED_FRAGMENT_DTYPES = ("f16", "bf16")
 
 
+def _chunk_warp_stage(c: Fold, tile: Tile, stage: Stage, budget: int, inputs, k_axis: Axis) -> ResolvedStage | None:
+    """Resolve a ``Stage`` for a CHUNKED carrier — attention's flash tier.
+
+    ONE slab, sized on the streamed value alone. The carrier's other operand is its score, and no
+    transport can copy it either way it arrives: as a nested contraction it never leaves registers
+    (the chunk's own C fragments repack into the expectation's A), and as a stored tile the tier
+    gathers it at the fragment's own lane map rather than reading rows. So the ring is the value's,
+    at the chunk width ``Tile.bk`` already spells — which is why admitting a transport here adds no
+    second spelling of that width.
+
+    The eligibility gates are the generic arm's B half, asked of the one operand that has a slab.
+    A value whose stored dtype is not the atom's declines rather than staging a converting slab:
+    the chunk drain reads 16-bit fragments, and the gmem-direct fragment load converts per element
+    correctly today.
+
+    The synchronous ``smem`` transport declines: it is the Volta atom's blocking vector copy, and
+    attention's chunk tier has no sm_70 kernel to serve. The ring is SINGLE-BUFFER: this hands back
+    ``depth=1`` however deep the row asked, so a deeper
+    spelling is simply not offered — the same discipline the budget clamp uses, and the reason an
+    over-budget row leaves the fork instead of failing at materialization. The chunk loop's body
+    carries the whole softmax between the fill and the drain, so a prefetch has to interleave with
+    the merge rather than with an atom-K loop, and that scheduling is not built. Depth 1 is where
+    the measured win is anyway: the staged `attention.hd128.qk` row that beats gmem-direct 3.1x is
+    ``d1/smem-tma``.
+    """
+    atom, view, n = tile.atom, c.as_contraction(), tile.n
+    slab = c.operands[1].as_slab()
+    if view is None or slab is None:
+        return None
+    b_nbytes = atom.operand_dtype("b").nbytes
+    stored = inputs.get(slab.load.input) if inputs else None
+    if stored is not None and stored.dtype != atom.operand_dtype("b"):
+        return None
+    bk_elems = tile.bk * atom.atom_k
+    vector_copy_ok = _warp_vector_copy(k_axis, n.tile, bk_elems, n.mask, view.b_trans)
+    tma_ok = (
+        stage.transport == "smem-tma"
+        and _tma_operand_rank(slab.load.index, n.axis.name, k_axis.name)
+        and max(n.tile, bk_elems) <= _TMA_MAX_BOX
+        and _warp_tma(k_axis, n.axis, n.tile, bk_elems, b_nbytes, b_nbytes, n.mask, view.b_trans)
+    )
+    cp_ok = stage.transport == "smem-async" and vector_copy_ok
+    if not (tma_ok or cp_ok):
+        return None
+    b_rows, b_cols = (n.tile, bk_elems) if view.b_trans else (bk_elems, n.tile)
+    slot_bytes = b_rows * b_cols * b_nbytes
+    if slot_bytes > budget:
+        return None
+    return ResolvedStage(replace(stage, depth=1, reg_depth=min(stage.reg_depth, tile.bk)), bk_elems=bk_elems)
+
+
 def _packed_warp_stage(c: Fold, tile: Tile, stage: Stage, budget: int, packed, inputs, k_axis: Axis) -> ResolvedStage | None:
     """Resolve the PACKED byte-slab stage for a packed-pair k-block B — the NVFP4 weight cone.
 
@@ -291,6 +342,8 @@ def resolve_warp_stage(
         return _block_scaled_warp_stage(c, tile, stage, budget, pair, inputs, k_axis)
     if single is not None:
         return _packed_warp_stage(c, tile, stage, budget, single, inputs, k_axis)
+    if c.chunked():
+        return _chunk_warp_stage(c, tile, stage, budget, inputs, k_axis)
     atom = tile.atom
     sync_copy = stage.transport == "smem" and atom.sync_copy_staging
     bk_elems = tile.bk * atom.atom_k
