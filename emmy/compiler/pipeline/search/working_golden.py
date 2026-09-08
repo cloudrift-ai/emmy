@@ -673,13 +673,18 @@ def record_greedy_pick(
 def _record_rows(destination: Path, name: str, *, decisions, kernels, reference_backend: str) -> list[str]:
     """The rows of one greedy pick, added to the file as it stands NOW. Runs under the lock."""
     from emmy.compiler.pipeline.knob import canonical_row_key, family_of  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import measured_precision_pins  # noqa: PLC0415
 
     document = load_golden_file(destination)
     seeds = [(entry, realization) for entry in document["configs"] for realization in entry["realizations"] if realization["name"] == name]
     if not seeds:
         raise ValueError(f"{destination} has no realization named {name!r}")
     entry, seed = seeds[0]
+    # The seed's regime, with the precision gates the compile ACTUALLY enumerated under laid over
+    # it: a row measured with the reduced-accumulate cell offered must say so, or a replay
+    # republishes a regime that no longer offers it (``measured_precision_pins``).
     regime = {key: value for key, value in seed["pins"].items() if family_of(str(key)) != "PLACE"}
+    regime.update(measured_precision_pins())
     written: list[str] = []
     for identity, knobs, emmy_us, reference_us in (*decisions, *kernels):
         row = {

@@ -1,0 +1,50 @@
+# The chunk tier with BOTH of its streamed operands on the slab ring, two slots deep, and its expectation on the
+# reduced-accumulate cell. Each of the three is a distinct emission the corpus had no live coverage of: the score's key
+# arrives through `_a_smem` beside the value's `_b_smem` and drains N-major with the plain ldmatrix, every slab read
+# rides the skeleton's own ring slot rather than a literal 0, and the expectation's mma targets a packed f16 fragment
+# whose `FragmentPromote` folds it into the f32 carrier once per chunk. The query is hoisted out of the chunk loop and
+# read once per score-K step, which is what the straight-line steps here exist to hold.
+#
+# Together they are the article's FlashAttention-2 kernel: on an RTX 5090 at the article's own (1, 8, 4096, 64) shape
+# the same spelling measures 1.25x eager, against 0.55x before any of them.
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [x0, x1, x2]
+  outputs: [scaled_dot_product_attention]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 4, 256, 64]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [1, 4, 256, 64]]]
+  - id: x2
+    op: input
+    outputs: [[x2, f16, [1, 4, 256, 64]]]
+  - id: scaled_dot_product_attention
+    op: torch.sdpa
+    attrs: {is_causal: false, sliding_window: null, scale: null}
+    inputs: [x0, x1, x2]
+    outputs: [[scaled_dot_product_attention, f16, [1, 4, 256, 64]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - scaled_dot_product_attention
+  realizations:
+  - name: k_sdpa_f09d66.f188e5b14604
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      TILE@map.1/twist: mma_m16n8k16_f16_f16/f1x8/k4
+      TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x8/k4
+      REDUCE@map.1/twist: ''
+      REDUCE@map.1/twist.1/inner: ''
+      STAGE@map.1/twist: d2/smem-tma
+      STAGE@map.1/twist.1/inner: ''
+      WORK: w2x1
+      RASTER: ''
+    identity: cd034f554a0772a461886f128bd6cf457b1f6e5650a0af4f43e455ebbbad8cd0

@@ -254,6 +254,24 @@ def atoms_for(ab_dtype: DataType | None, *, acc: DataType = F32, ctx=None) -> tu
     )
 
 
+def wide_accumulate(atom: AtomKind) -> AtomKind:
+    """The same cell with an f32 accumulator — ``atom`` itself unless it is a reduced-accumulate
+    variant.
+
+    The chunk tier runs its two mma chains at DIFFERENT accumulators: the expectation may take the
+    reduced cell at the full consumer-die rate, since its chunk partial promotes into an f32
+    carrier once per chunk, while the score feeds the softmax's running max and denominator, which
+    stay f32 throughout. Every other field of the two cells agrees, so the score's cell is the
+    carrier's with its accumulator put back."""
+    if atom.operand_dtype("c") == F32:
+        return atom
+    return next(
+        sibling
+        for sibling in ATOM_REGISTRY.values()
+        if sibling.shape == atom.shape and sibling.operand_dtype("a") == atom.operand_dtype("a") and sibling.operand_dtype("c") == F32
+    )
+
+
 def atom_for(name: str) -> AtomKind:
     """The registered :class:`AtomKind` for its one canonical ``TILE`` codec name."""
     try:
@@ -262,4 +280,4 @@ def atom_for(name: str) -> AtomKind:
         raise ValueError(f"unknown atom kind {name!r} (have {sorted(ATOM_REGISTRY)})") from None
 
 
-__all__ = ["ATOM_REGISTRY", "AtomKind", "atom_for"]
+__all__ = ["ATOM_REGISTRY", "AtomKind", "atom_for", "wide_accumulate"]
