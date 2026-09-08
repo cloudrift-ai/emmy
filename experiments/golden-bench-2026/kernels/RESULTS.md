@@ -32,6 +32,114 @@ The one soft spot is the transpose kernel, which loses slightly to eager on the 
 strongest ground against torch.compile: it wins them by up to 5x, because those pointwise scale-and-cast kernels are
 exactly where emmy's schedule beats a launch-fusion baseline.
 
+### Full per-target results
+
+Every non-fused target that tuned. Where the strict verify produced a paired comparison, eager and
+torch.compile latencies are shown; targets marked *(emmy-O3 only)* tuned successfully but their verify aborted
+on the loader-strictness blocker described above, so only the deployable-O3 emmy latency is available. Fused
+attention targets are excluded (deferred). All latencies in microseconds; speedups are baseline / emmy.
+
+
+**RTX 4090 — base, seq 512 (prefill)** (4 targets, 3 verified)
+
+| kernel | emmy µs | eager µs | tc µs | vs eager | vs tc |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `k_p_input_layernorm_weight_bc_pointwise.` | 1.42 | 17.1 | 1.8 | 12.1x | 1.28x |
+| `k_to_cast_pointwise.cd115a5611e2` *(emmy-O3 only)* | 1.74 | — | — | — | — |
+| `k_to_pointwise.190061c2f879` | 1.74 | 26.8 | 2.2 | 15.4x | 1.29x |
+| `k_transpose_ce7ad6.127df56e7bd8` | 2.17 | 1.8 | 1.8 | 0.8x | 0.82x |
+
+**RTX 4090 — base, seq 1 (decode)** (3 targets, 2 verified)
+
+| kernel | emmy µs | eager µs | tc µs | vs eager | vs tc |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `k_p_input_layernorm_weight_bc_pointwise.` | 0.75 | 11.6 | 1.2 | 15.3x | 1.65x |
+| `k_mean_77fe62.19ee6dab6b01` | 0.77 | 67.4 | 1.7 | 87.3x | 2.15x |
+| `k_mul_1_pointwise.fdbf05544f80` *(emmy-O3 only)* | 0.77 | — | — | — | — |
+
+**RTX 4090 — FP8-dynamic, seq 512** (9 targets, 2 verified)
+
+| kernel | emmy µs | eager µs | tc µs | vs eager | vs tc |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `k_sdpa_pointwise_6009f7.ed05ef5f0259` *(emmy-O3 only)* | 0.75 | — | — | — | — |
+| `k_unsqueeze_aa05dc.c1668b33a4f3` *(emmy-O3 only)* | 0.92 | — | — | — | — |
+| `k_unsqueeze_aa05dc.c1668b33a4f3.unsqueez` *(emmy-O3 only)* | 0.92 | — | — | — | — |
+| `k_p_attn_k_norm_weight_bc_pointwise.c7d0` | 1.24 | 17.3 | 1.7 | 14.0x | 1.35x |
+| `k_p_input_layernorm_weight_bc_pointwise.` *(emmy-O3 only)* | 1.41 | — | — | — | — |
+| `k_to_cast_pointwise.cd115a5611e2` *(emmy-O3 only)* | 1.88 | — | — | — | — |
+| `k_to_pointwise.190061c2f879` *(emmy-O3 only)* | 1.88 | — | — | — | — |
+| `k_p_attn_q_proj_weight_pointwise.1a45dc8` | 2.71 | 88.9 | 3.1 | 32.8x | 1.16x |
+| `k_linear_pointwise_f7fda3.e1b88b93a8ad` *(emmy-O3 only)* | 3.02 | — | — | — | — |
+
+**RTX 4090 — FP8-dynamic, seq 1** (6 targets, 2 verified)
+
+| kernel | emmy µs | eager µs | tc µs | vs eager | vs tc |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `k_transpose_99c2c8.3d6df6ca4e1c` *(emmy-O3 only)* | 0.76 | — | — | — | — |
+| `k_linear_mean_reduce_50fabd.f461a57d2a65` *(emmy-O3 only)* | 0.76 | — | — | — | — |
+| `k_mean_c300e6.891e7eba4847` | 0.76 | 122.1 | 0.0 | 160.1x | — |
+| `k_linear_mean_reduce_66f39e.19aa97c0bc40` *(emmy-O3 only)* | 0.76 | — | — | — | — |
+| `k_transpose_2391a2.25dbc4a22648` *(emmy-O3 only)* | 0.77 | — | — | — | — |
+| `k_mul_1_dynamic_fp8_value_pointwise.af61` | 0.84 | 4.3 | 4.2 | 5.1x | 5.07x |
+
+**RTX 5090 — base, seq 512 (prefill)** (4 targets, 3 verified)
+
+| kernel | emmy µs | eager µs | tc µs | vs eager | vs tc |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `k_p_input_layernorm_weight_bc_pointwise.` | 1.18 | 16.4 | 2.1 | 13.9x | 1.77x |
+| `k_to_cast_pointwise.cd115a5611e2` *(emmy-O3 only)* | 1.21 | — | — | — | — |
+| `k_to_pointwise.190061c2f879` | 1.21 | 24.6 | 2.1 | 20.3x | 1.72x |
+| `k_transpose_ce7ad6.127df56e7bd8` | 1.76 | 2.2 | 2.2 | 1.3x | 1.26x |
+
+**RTX 5090 — base, seq 1 (decode)** (3 targets, 2 verified)
+
+| kernel | emmy µs | eager µs | tc µs | vs eager | vs tc |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `k_p_input_layernorm_weight_bc_pointwise.` | 0.69 | 12.5 | 2.0 | 18.2x | 2.97x |
+| `k_mul_1_pointwise.fdbf05544f80` *(emmy-O3 only)* | 0.71 | — | — | — | — |
+| `k_mean_77fe62.19ee6dab6b01` | 0.72 | 72.0 | 2.3 | 99.6x | 3.22x |
+
+**RTX 5090 — FP8-dynamic, seq 512** (9 targets, 2 verified)
+
+| kernel | emmy µs | eager µs | tc µs | vs eager | vs tc |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `k_sdpa_pointwise_6009f7.ed05ef5f0259` *(emmy-O3 only)* | 0.72 | — | — | — | — |
+| `k_unsqueeze_aa05dc.c1668b33a4f3` *(emmy-O3 only)* | 0.77 | — | — | — | — |
+| `k_unsqueeze_aa05dc.c1668b33a4f3.unsqueez` *(emmy-O3 only)* | 0.77 | — | — | — | — |
+| `k_p_attn_k_norm_weight_bc_pointwise.c7d0` | 1.04 | 16.4 | 2.1 | 15.7x | 1.99x |
+| `k_p_input_layernorm_weight_bc_pointwise.` *(emmy-O3 only)* | 1.18 | — | — | — | — |
+| `k_to_cast_pointwise.cd115a5611e2` *(emmy-O3 only)* | 1.21 | — | — | — | — |
+| `k_to_pointwise.190061c2f879` *(emmy-O3 only)* | 1.21 | — | — | — | — |
+| `k_p_attn_q_proj_weight_pointwise.1a45dc8` | 2.07 | 55.3 | 4.1 | 26.8x | 1.98x |
+| `k_linear_pointwise_f7fda3.e1b88b93a8ad` *(emmy-O3 only)* | 2.59 | — | — | — | — |
+
+**RTX 5090 — FP8-dynamic, seq 1** (6 targets, 2 verified)
+
+| kernel | emmy µs | eager µs | tc µs | vs eager | vs tc |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `k_transpose_99c2c8.3d6df6ca4e1c` *(emmy-O3 only)* | 0.69 | — | — | — | — |
+| `k_transpose_2391a2.25dbc4a22648` *(emmy-O3 only)* | 0.71 | — | — | — | — |
+| `k_mul_1_dynamic_fp8_value_pointwise.af61` | 0.72 | 4.9 | 5.0 | 6.9x | 6.94x |
+| `k_linear_mean_reduce_50fabd.f461a57d2a65` *(emmy-O3 only)* | 0.72 | — | — | — | — |
+| `k_mean_c300e6.891e7eba4847` | 0.72 | 132.7 | 0.0 | 183.5x | — |
+| `k_linear_mean_reduce_66f39e.19aa97c0bc40` *(emmy-O3 only)* | 0.74 | — | — | — | — |
+
+**V100 — base, seq 512 (prefill)** (3 targets, 2 verified)
+
+| kernel | emmy µs | eager µs | tc µs | vs eager | vs tc |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `k_to_cast_pointwise.cd115a5611e2` *(emmy-O3 only)* | 2.73 | — | — | — | — |
+| `k_to_pointwise.190061c2f879` | 2.73 | 70.4 | 2.9 | 25.8x | 1.07x |
+| `k_p_input_layernorm_weight_bc_pointwise.` | 2.85 | 31.9 | 3.0 | 11.2x | 1.07x |
+
+**V100 — base, seq 1 (decode)** (3 targets, 2 verified)
+
+| kernel | emmy µs | eager µs | tc µs | vs eager | vs tc |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `k_p_input_layernorm_weight_bc_pointwise.` | 1.25 | 16.4 | 2.1 | 13.1x | 1.67x |
+| `k_mean_77fe62.19ee6dab6b01` | 1.26 | 117.5 | 2.4 | 92.9x | 1.88x |
+| `k_mul_1_pointwise.fdbf05544f80` *(emmy-O3 only)* | 1.47 | — | — | — | — |
+
 ### The verify coverage gap is a loader-strictness blocker, not a schedule failure
 
 Only two to three targets per leg produced a paired eager/torch.compile comparison. Every other non-fused target
