@@ -113,9 +113,10 @@ the shared module already provides.
 - **Do not load checked-in golden YAML in the default suite — except the realization corpus.** Unit tests use
   synthetic records and working files, and the nightly `onboard-model` workflow owns repository schema validation,
   strict decode, and exact-GPU replay for `recipes/*/golden/*.yaml`. `tests/compiler/realization/cases/` differs on
-  both counts that motivated the rule: its files are hand-minimized reproducers rather than model qualification
-  evidence, and they carry no measurement claim, so nothing about them is card-specific. They also target a
-  **declared** capability rather than the live card — `Context.from_target(compute_cap)` — so the enumeration and
+  both counts that motivated the rule: its files are hand-minimized reproducers or a small capability baseline from a
+  model-agnostic hardware golden, and they carry no measurement claim, so nothing about them is card-specific. They
+  also target a **declared** capability rather than the live card — `Context.from_target(compute_cap)` — so the
+  enumeration and
   lowering stages are machine-independent and an sm_70 lockout is exercised on a box that has no sm_70. Only the
   build and accuracy stages consult the live card, and they gate on `device_compute_capability() == compute_cap`,
   beside `requires_sm90` in spirit but keyed on equality rather than a floor. Golden decode splits the same way: the

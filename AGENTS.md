@@ -273,8 +273,8 @@ reports; agents perform that reasoning and write the report.
    user's agreement.
 6. **Commit as soon as the chosen subset is green.** Do not run the full suite, the linter, or the documentation pass
    before a commit. Say in the commit message what you did not verify.
-7. **Open a draft PR with the first push.** Use `.github/PULL_REQUEST_TEMPLATE.md`; a title and a rough abstract
-   are enough at this point. Everything after that lands as more commits on the same PR.
+7. **Open a draft PR with the first push.** Use `.github/PULL_REQUEST_TEMPLATE.md` as a guide, but do not edit it; a
+   title and a rough abstract are enough at this point. Everything after that lands as more commits on the same PR.
 
 ### Finalization — once per PR (MANDATORY — do NOT skip these)
 
@@ -326,12 +326,13 @@ Then run the gates, in this order, after every edit above is in:
     change; nothing guards the checked-in model goldens, so a rebuild of the schedule space can invalidate every
     recorded row of one in silence. If rows go red, name the change that did it in the PR body — do **not** re-record
     them to make it green, which enshrines the regression as the new reference.
-25. **Write the PR body** to `.github/PULL_REQUEST_TEMPLATE.md`. The title is a functional description readable
-    with no context. The abstract is one short plain-English paragraph — no bullets, no code references. One
-    optional artifact may follow it — a small table, a diagram, a few lines of output — when it carries the
-    claim better than the paragraph. Then a horizontal rule, then everything else — decisions, measurements,
-    what broke, what got slower, what was removed — under headings that fit the story. `Abstract` is the only
-    fixed heading.
+25. **Write the PR body** in an untracked temporary file outside the repository, using
+    `.github/PULL_REQUEST_TEMPLATE.md` as a guide. Never replace the tracked template with a PR's content. The title
+    is a functional description readable with no context. The abstract is one short plain-English paragraph — no
+    bullets, no code references. One optional artifact may follow it — a small table, a diagram, a few lines of
+    output — when it carries the claim better than the paragraph. Then a horizontal rule, then everything else —
+    decisions, measurements, what broke, what got slower, what was removed — under headings that fit the story.
+    `Abstract` is the only fixed heading.
 26. **Revise the PR body at least twice before posting.** Write it, then reread it as a reviewer with no
     context, check it against the template and against the design philosophy below, cut, and repeat. A first
     draft is always too long: it lists what was done instead of saying what the change is, and it keeps

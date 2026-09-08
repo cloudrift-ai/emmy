@@ -1,9 +1,11 @@
 # The realization corpus
 
-A data-driven regression lane for one failure class: **a schedule that should be realizable is not**. Each case is a
-checked-in minimized reproducer — one program, one authored kernel set — and the lane replays it against the compiler
-in front of you: once as a hand pin, to ask whether each schedule can be offered at all, and then as the compile's only
-evidence, strict, to ask whether the compiler realizes, builds and runs the set the way a deploy would.
+A data-driven regression lane for pinned schedules. Most cases are minimized reproducers of one failure class: **a
+schedule that should be realizable is not**. A small capability baseline also keeps the live GPU stages exercised where
+the corpus would otherwise have no exact-capability case. Every case has one program and one authored kernel set, and
+the lane replays it against the compiler in front of you: once as a hand pin, to ask whether each schedule can be
+offered at all, and then as the compile's only evidence, strict, to ask whether the compiler realizes, builds and runs
+the set the way a deploy would.
 
 This directory is kind-organized in the sense `tests/ARCHITECTURE.md` sanctions: its cases span lowering, the CUDA
 backend, the pin machinery and the golden loader, and they share one workflow.
@@ -19,9 +21,17 @@ cases/<family>/<name>.yaml
 
 ## What earns a case
 
-Only a realization gap: a schedule family that is never offered, a pin that refuses or fails to lower, or a pin that
-runs wrong. Two neighbouring failure classes deliberately do **not** earn one, because admitting them would make the
-ratchet meaningless:
+A case earns a place in the corpus in either of two ways:
+
+- A realization gap: a schedule family that is never offered, a pin that refuses or fails to lower, or a pin that
+  runs wrong.
+- Capability coverage: a small representative set from a model-agnostic hardware golden when that capability would
+  otherwise run no `built` or `correct` nodes. Keep distinct kernel kinds and schedules, omit measurements and GPU
+  names, and stop once the main paths have live coverage. This proves those rows still build and run; it does not
+  qualify the full golden.
+
+Two neighbouring failure classes deliberately do **not** earn a case, because admitting them would make the ratchet
+meaningless:
 
 - **search shortfall** — the schedule realizes and the prior simply does not pick it when nothing measured is in
   scope. Fix it by measuring, or report it as a prior finding. (A row that *is* in scope and still is not picked is
