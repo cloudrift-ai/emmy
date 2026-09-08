@@ -1085,6 +1085,19 @@ def _block_scaled_operands(
     return (a_bits, *b_bits), copies, fills
 
 
+def _chunk_stream(k_axis: Axis, bk: int):
+    """The staged K stream as the loop skeleton takes it — ``(extent, chunk count)``. A static
+    extent unrolls a literal count; a SYMBOLIC one hands the skeleton its ``Dim`` and the runtime
+    ``ceil(K / bk)``, and the last chunk then overhangs. Every staged path answers that overhang
+    the same way — the fill masks its tail to the fold identity (:func:`_k_masked`) or clamps onto
+    the last valid row, so the drain still reads whole chunks."""
+    if k_axis.extent.is_static:
+        static = k_axis.extent.as_static()
+        return static, static // bk
+    extent = k_axis.extent
+    return extent, Dim(BinaryExpr("/", BinaryExpr("+", extent.expr, Literal(bk - 1, "int")), Literal(bk, "int")))
+
+
 def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
     """The **one** STAGED K-loop driver, atom-agnostic — build the ``(A, B)`` operand pair, the
     :class:`Transport` (a cp.async prefetch ring or the TMA box-copy producer) and run the one
@@ -1099,12 +1112,8 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
     the store guard."""
     c, stage, tile = ops.c, ops.stage, ops.tile
     k_axis = ops.k_axis
-    # The chunk stream. A static K unrolls a literal chunk count; a SYMBOLIC one hands the skeleton
-    # its ``Dim`` and the runtime ``ceil(K / bk)`` — the fill masks the last chunk's tail to the
-    # fold identity (:func:`_k_masked`), so the drain still reads whole chunks.
-    bk, static_k = stage.bk_elems, k_axis.extent.is_static
-    K = k_axis.extent.as_static() if static_k else k_axis.extent
-    n_chunks = K // bk if static_k else Dim(BinaryExpr("/", BinaryExpr("+", K.expr, Literal(bk - 1, "int")), Literal(bk, "int")))
+    bk = stage.bk_elems
+    K, n_chunks = _chunk_stream(k_axis, bk)
     elem = ops.slab_elem()
     cta = _cta(mn, tile.atom.lanes, tile.launch_threads)
     finalize: list[Stmt] = []
@@ -2356,18 +2365,14 @@ class _FlashOps(_MmaOps):
         # overhangs, its value rows read the last valid key, and the boundary ``FragmentMask``
         # above has already put those keys at the pivot identity — so they weigh exactly zero and
         # the duplicates fold to nothing, the same discipline the gmem-direct arm carries.
-        static_k = key.extent.is_static
-        big_k = key.extent.as_static() if static_k else key.extent
-        n_chunks = (
-            big_k // bk if static_k else Dim(BinaryExpr("/", BinaryExpr("+", big_k.expr, Literal(bk - 1, "int")), Literal(bk, "int")))
-        )
+        k_extent, n_chunks = _chunk_stream(key, bk)
         decls, region = staged_kloop(
             transport=value.transport,
             drain=lambda _slot: body,
             depth=1,
             bk_elems=bk,
             n_chunks=n_chunks,
-            k_extent=big_k,
+            k_extent=k_extent,
             k0=chunk.name,
             seed=False,
         )
