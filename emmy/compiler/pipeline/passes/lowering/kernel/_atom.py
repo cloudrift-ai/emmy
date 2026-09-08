@@ -1269,6 +1269,9 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             cta=cta,
             prologue_stmts=tuple(stat_pro),
             copy_sync=not tile.is_warp or tile.atom.sync_copy_staging,
+            # A ring under a blocking copy asks for the register-staged split — that is what makes
+            # ``depth`` mean chunks-in-flight here, as it does on the cp.async / TMA transports.
+            staged=stage.depth >= 2,
         )
     else:
         assert len(ops.channels) == 1, "cp.async / TMA staging is single-fold — a multi-B node rides the smem compute fill"
