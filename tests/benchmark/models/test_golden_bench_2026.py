@@ -2,6 +2,7 @@
 
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -411,6 +412,73 @@ def test_neptune_emmy_pytorch_a100_share_one_experiment(project_root) -> None:
     assert '"captured_whole_forward"' in pytorch_runner
 
 
+def test_rtx5090_attention_comparison_is_recorded_and_bounded(project_root) -> None:
+    directory = Path(project_root) / EXP / "compiler_attention_rtx5090"
+    tasks = enumerate_tasks([str(directory)])
+    recipe = load_recipe(str(directory))
+
+    assert len(tasks) == 20
+    assert {task.recipe.deploy.gpu for task in tasks} == {"NVIDIA GeForce RTX 5090"}
+    assert all(task.recipe.deploy.gpu_count == 1 for task in tasks)
+    assert {task.variant.params["lane"] for task in tasks} == {"emmy", "baselines"}
+    assert {task.variant.params["operator"] for task in tasks} == {
+        "prefill_global",
+        "prefill_causal",
+        "prefill_gqa",
+        "decode_causal",
+        "decode_gqa",
+    }
+    assert {task.variant.params["batch"] for task in tasks} == {1, 8}
+
+    run = recipe.command.run
+    assert "torch==2.13.0" in run
+    assert "flash-attn==2.8.3" in run
+    assert "tilelang==0.1.8" in run
+    assert "FLASH_ATTN_CUDA_ARCHS=120" in run
+    assert "da967821698eb7a79a76d27fbe25e314a3273f2b12ba4833e981658139d0e6d9" in run
+    assert 'case "$lane" in' in run
+    assert "emmy tune" not in run
+    assert "for repeat" not in run
+    assert recipe.command.strict is True
+    assert recipe.command.result_files == ["artifacts.tar.gz"]
+    assert recipe.command.stage == [
+        "emmy",
+        "pyproject.toml",
+        "README.md",
+        "LICENSE",
+        "experiments/golden-bench-2026/compiler_attention_rtx5090/operators.sh",
+        "experiments/golden-bench-2026/compiler_attention_rtx5090/run_emmy.sh",
+        "experiments/golden-bench-2026/compiler_attention_rtx5090/run_baselines.py",
+        "experiments/golden-bench-2026/compiler_attention_rtx5090/golden",
+    ]
+
+    operators_path = directory / "operators.sh"
+    assert operators_path.stat().st_mode & 0o111
+    operators = operators_path.read_text()
+    assert "SEQUENCE_LENGTHS=(1024 2048 4096 8192 16384 32768)" in operators
+    assert 'operator_code "$1" "$2" "$3" || exit' in operators
+    assert "q.reshape($batch,8,8,1,128)" in operators
+
+    emmy_runner_path = directory / "run_emmy.sh"
+    assert emmy_runner_path.stat().st_mode & 0o111
+    emmy_runner = emmy_runner_path.read_text()
+    assert '"$emmy" run --golden "$golden" --bench --bench-backends emmy' in emmy_runner
+    assert '"$emmy" run -c "$source_code" --bench --strict --bench-backends eager,tcompile,emmy' in emmy_runner
+    assert "--warmup 10 --iters 100" in emmy_runner
+    assert "for repetition" not in emmy_runner
+    assert 'test "$missing_goldens" -eq 0' in emmy_runner
+    assert 'test "$successful_setups" -eq "${#SEQUENCE_LENGTHS[@]}"' in emmy_runner
+
+    baseline_runner = (directory / "run_baselines.py").read_text()
+    assert 'VERSIONS = {"torch": "2.13.0", "flash_attn": "2.8.3", "tilelang": "0.1.8"}' in baseline_runner
+    assert 'mode="max-autotune-no-cudagraphs"' in baseline_runner
+    assert "flash_attn_func" in baseline_runner
+    assert "flex_attention" in baseline_runner
+    assert '"inductor_normalized_speedup"' in baseline_runner
+    assert '"TileLang"] = {' in baseline_runner
+    subprocess.run([sys.executable, str(directory / "run_baselines.py"), "--smoke"], check=True)
+
+
 @pytest.mark.skipif(shutil.which("timeout") is None, reason="run_emmy.sh needs GNU coreutils `timeout`")
 def test_neptune_emmy_runner_fails_when_one_setup_is_incomplete(project_root, tmp_path) -> None:
     directory = Path(project_root) / EXP / "compiler_neptune_emmy_pytorch_a100"
@@ -461,7 +529,7 @@ def test_every_command_variant_renders(project_root) -> None:
             assert "/task" in command
             subprocess.run(["bash", "-n"], input=command, text=True, check=True)
             rendered += 1
-    assert rendered == 58
+    assert rendered == 78
 
 
 def test_gemma_serving_ab_has_four_points_per_lane(project_root) -> None:

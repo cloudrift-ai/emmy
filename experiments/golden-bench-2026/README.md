@@ -207,6 +207,37 @@ latency over max(weight-streaming floor, compute floor) for that kernel's weight
 decomposes an end-to-end decode gap into per-kernel code headroom versus inter-kernel launch and scheduling gaps.
 This recipe preserves the raw MPK and vLLM outputs; any separate analysis owns the roofline calculations.
 
+## RTX 5090 attention comparison
+
+`compiler_attention_rtx5090` compares recorded Emmy schedules with current attention libraries on one RTX 5090. It
+is a full-attention Q, K, V to output experiment and is separate from the fragment kernels in `kernels`. The operator
+set is global prefill, causal prefill, causal GQA prefill, noncausal MHA decode, and noncausal GQA decode. Every setup
+uses FP16, head dimension 128, batch 1 or 8, and sequence lengths 1024 through 32768 in powers of two. MHA uses 32
+query and KV heads. GQA uses 64 query heads and 8 KV heads.
+
+The axes follow the public [Nautilus paper](https://arxiv.org/abs/2604.14825), but this is not an exact Nautilus
+reproduction. Nautilus publishes RTX 5090 aggregate plots but no runnable artifact, raw per-setup timings, or exact
+per-model head dimensions. Report this experiment as a comparison against the named public libraries, and use the
+paper's aggregate speedups only as external context.
+
+The baseline lane pins PyTorch 2.13.0, FlashAttention-2 2.8.3, and TileLang 0.1.8. It measures eager SDPA, a
+`torch.compile` SDPA wrapper, compiled FlexAttention, FlashAttention-2, and the unchanged TileLang 0.1.8 prefill
+examples. TileLang decode is not part of the denominator because that release has no full-attention decode example
+with the same operator contract. Do not substitute its paged or split-KV decode examples. PyTorch Inductor is the
+normalization anchor: the recorded normalized value is Inductor latency divided by backend latency, so a value above
+one favors the named backend.
+
+Each setup has one process and one measurement window: 10 warmups followed by 100 CUDA-event measurements. The
+reported setup latency is the minimum captured whole-forward time, matching the rest of the kernel suite. The raw
+record also retains the mean, median, and every sample. A failure of correctness, exact package versions, or common
+CUDA graph capture makes the row incomplete. There are no fresh-process repeats, so the result is a direct
+engineering comparison rather than a confidence-interval claim.
+
+The Emmy lane never searches. It requires one recorded RTX 5090 golden for every setup, replays each golden once at
+deployable `-O3`, and measures the same source once with eager PyTorch, current Inductor, and untuned Emmy for the
+direct correctness boundary. Missing goldens fail the row. Tuning, validation, and golden recording happen before
+the experiment and remain separate from its measurements.
+
 ## Neptune compiler comparison
 
 `compiler_neptune_emmy_pytorch_a100` owns both parts of the A100 comparison and produces one artifact archive for one
