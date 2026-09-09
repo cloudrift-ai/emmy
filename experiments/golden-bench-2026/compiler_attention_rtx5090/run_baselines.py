@@ -136,13 +136,18 @@ def _build_functions(args: argparse.Namespace, q: Any, k: Any, v: Any) -> dict[s
         def causal_mask(_batch: Any, _head: Any, query: Any, key: Any) -> Any:
             return query >= key
 
+        # The mask reads neither the batch nor the head index, so one mask serves every one of
+        # them. Ask for it compiled: the eager builder materializes the dense [B, 1, Q, KV]
+        # boolean and reduces it, which is 64 GiB at batch 8 and 32768 -- larger than any card
+        # this runs on, for a mask that is the same triangle every time.
         block_mask = create_block_mask(
             causal_mask,
-            B=args.batch,
+            B=None,
             H=None,
             Q_LEN=q.shape[-2],
             KV_LEN=k.shape[-2],
             device="cuda",
+            _compile=True,
         )
 
     def flex() -> Any:
@@ -168,27 +173,48 @@ def _build_functions(args: argparse.Namespace, q: Any, k: Any, v: Any) -> dict[s
 
 
 def _check_outputs(functions: dict[str, Callable[[], Any]]) -> dict[str, dict[str, Any]]:
+    """Compare every backend against SDPA one batch element at a time.
+
+    Comparing whole tensors needs several more copies of the output than the measurement window
+    itself holds, so at batch 8 it is the correctness check -- not the timing -- that runs out of
+    memory. The criterion is unchanged: every element within rtol/atol, and both reported errors
+    are over the whole output.
+    """
     import torch
 
     reference = functions["SDPA"]()
     checks = {}
     for name, function in functions.items():
         output = function()
-        torch.testing.assert_close(output, reference, rtol=1e-2, atol=1e-2)
-        difference = (output.float() - reference.float()).abs()
+        largest, total = 0.0, 0.0
+        for actual, expected in zip(output.split(1), reference.split(1), strict=True):
+            torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
+            difference = (actual - expected).abs()
+            largest = max(largest, difference.max().item())
+            total += difference.sum(dtype=torch.float64).item()
         checks[name] = {
             "status": "pass",
             "rtol": 1e-2,
             "atol": 1e-2,
-            "max_abs_error": difference.max().item(),
-            "mean_abs_error": difference.mean().item(),
+            "max_abs_error": largest,
+            "mean_abs_error": total / output.numel(),
         }
+        del output
     return checks
 
 
 def _capture_all(functions: dict[str, Callable[[], Any]]) -> tuple[dict[str, Callable[[], Any]], list[Any]]:
+    """Capture every backend into one shared graph pool.
+
+    A pool per graph holds one whole output tensor per backend at once and fragments what is left,
+    which is what put batch 8 past this card's memory from 16384 up. The backends are independent --
+    each reads the same inputs and writes its own output -- and correctness is settled before
+    capture, so the outputs may share the pool: a timing window never reads them.
+    """
     import torch
 
+    torch.cuda.empty_cache()
+    pool = torch.cuda.graph_pool_handle()
     graphs = []
     replays = {}
     for name, function in functions.items():
@@ -199,7 +225,7 @@ def _capture_all(functions: dict[str, Callable[[], Any]]) -> tuple[dict[str, Cal
                 function()
         torch.cuda.current_stream().wait_stream(side)
         graph = torch.cuda.CUDAGraph()
-        with torch.no_grad(), torch.cuda.graph(graph):
+        with torch.no_grad(), torch.cuda.graph(graph, pool=pool):
             function()
         graphs.append(graph)
         replays[name] = graph.replay
