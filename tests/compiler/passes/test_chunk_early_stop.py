@@ -64,14 +64,13 @@ def test_masks_that_do_not_bound_every_row_from_above_leave_the_stream_whole(stm
     assert _mask_key_end(stmts, "s2", KEY, "a1", ROW_BLOCK) is None, why
 
 
-def _sdpa(causal: bool) -> str:
-    q = "torch.randn(1, 1, 64, 32, dtype=torch.float16)"
+def _sdpa(causal: bool, heads: int = 1, rows: int = 64) -> str:
+    q = f"torch.randn(1, {heads}, {rows}, 32, dtype=torch.float16)"
     return f"F.scaled_dot_product_attention({q}, {q}, {q}{', is_causal=True' if causal else ''})"
 
 
-@pytest.mark.parametrize("causal", [True, False], ids=["causal", "global"])
-def test_the_emitted_chunk_loop_carries_the_stop_only_under_a_causal_mask(causal: bool) -> None:
-    graph = graph_from_code(_sdpa(causal))[0]
+def _sources(code: str) -> list[str]:
+    graph = graph_from_code(code)[0]
     pins = {
         "TILE@map.1/twist": "mma_m16n8k16_f16_f32/f1x4/k2",
         "TILE@map.1/twist.1/inner": "mma_m16n8k16_f16_f32/f1x4/k2",
@@ -81,6 +80,33 @@ def test_the_emitted_chunk_loop_carries_the_stop_only_under_a_causal_mask(causal
     }
     with pinned_knobs(pins):
         lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((12, 0)))
-    sources = [node.op.kernel_source for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
+    return [node.op.kernel_source for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
+
+
+@pytest.mark.parametrize(
+    ("code", "stops", "why"),
+    [
+        (_sdpa(True, heads=8, rows=512), True, "256 CTAs of 16 rows over 8 heads: several waves, the stop shortens the kernel"),
+        (_sdpa(True), False, "4 CTAs: one wave, the kernel takes as long as its longest CTA either way"),
+        (_sdpa(False, heads=8, rows=512), False, "no mask, nothing to stop at"),
+    ],
+    ids=["causal-multi-wave", "causal-one-wave", "global"],
+)
+def test_the_emitted_chunk_loop_carries_the_stop_only_where_it_can_shorten_the_kernel(code: str, stops: bool, why: str) -> None:
+    sources = _sources(code)
     assert len(sources) == 1 and "__ck" in sources[0], "one fused kernel with a chunk loop"
-    assert ("__ck_end" in sources[0]) is causal
+    assert ("__ck_end" in sources[0]) is stops, why
+
+
+def test_the_launch_count_is_the_lead_extents_times_the_block_counts() -> None:
+    from emmy.compiler.ir.schedule.choices import Side
+    from emmy.compiler.pipeline.passes.lowering.kernel._factor import launch_ctas
+
+    m = Side(axis=Axis(name="a1", extent=Dim(512)), tile=64, units=4, reg=1, block="a1_b", unit="a1_u")
+    n = Side(axis=Axis(name="a5", extent=Dim(256)), tile=256, units=1, reg=32, block="a5_b", unit="a5_u")
+    heads = Axis(name="a0", extent=Dim(16))
+    assert launch_ctas((heads,), (m, n)) == 16 * 8
+    assert launch_ctas((), (m, None)) == 8
+    ragged = Side(axis=Axis(name="a1", extent=Dim(100)), tile=64, units=4, reg=1, block="a1_b", unit="a1_u")
+    assert launch_ctas((), (ragged, None)) == 2, "a partial block still launches"
+    assert launch_ctas((Axis(name="s", extent=Dim("seq_len")),), (m, n)) is None, "a symbolic extent is unknown"

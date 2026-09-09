@@ -479,9 +479,12 @@ a `FragmentMask` under the same coordinate substitution the boundary mask perfor
 ONCE, ahead of the loop, for what it says about whole chunks (`_mask_key_end`): a mask whose masked branch reads
 `key > row + c` (or `>=`) with `c ≥ 0` masks every key from the CTA's block end onward for every row the CTA holds,
 so the chunk loop stops there — the skeleton's `k_end`, CTA-uniform in the grid var alone, bit-identical because a
-masked chunk folds the carrier identity exactly. A causal stream gets about half its work back that way; a mask that
-bounds the keys from below, or whose lead could stop a block before its first chunk, keeps the whole stream and the
-per-element mask alone. Without those readings a
+masked chunk folds the carrier identity exactly. A causal stream gets about half its work back that way — on a launch
+of more CTAs than the card has SMs. A launch that fits in one wave takes as long as its longest CTA whatever the
+others skip, and the dynamic trip count alone cost 9% at the 128-CTA head-width-256 shape, so `_factor` keeps the
+stream whole there (`launch_ctas` against `Context.sm_count`; the CTA-per-SM half of the test is ptxas's to know, so
+fewer CTAs than SMs is the conservative reading). A mask that bounds the keys from below, or whose lead could stop a
+block before its first chunk, keeps the whole stream and the per-element mask alone. Without those readings a
 masked carrier fell to the scalar tier whole, which is what `attention.hd256.dynM.pv` on the RTX 4090 recorded and
 then stopped decoding.
 

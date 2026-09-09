@@ -1588,6 +1588,8 @@ class _AtomOps:
     # The NESTED contraction this node folds a chunk of at a time, as ``(node, placed Tile)`` — the
     # twisted carrier's score, whose own site the schedule decided. ``None`` everywhere else.
     inner: tuple | None = None
+    # The launch fits the card in one wave: the chunk tier keeps its stream whole (see ``_factor``).
+    one_wave: bool = False
 
     def frag(self, name: str) -> str:
         """``name`` in this emission's fragment namespace (:attr:`frag_ns`)."""
@@ -2417,9 +2419,11 @@ class _FlashOps(_MmaOps):
         pre = [stmt for edge in leaves for stmt in edge.lower(axes=self.axes)]
         pre += self._query(offset, mn)
         # A causal mask makes every chunk past this CTA's last row pure identity work: the loop
-        # stops there (``k_end``), which is what gives a causal stream half its work back.
+        # stops there (``k_end``), which is what gives a causal stream half its work back — unless
+        # the launch is one wave, where the kernel takes as long as its longest CTA anyway and the
+        # dynamic trip count only costs (9% measured at the 128-CTA head-width-256 shape).
         scored_name = (score if score is not None else self.c.operands[0]).exposes[0]
-        k_end = _mask_key_end(prefix.body, scored_name, key, m.axis.name, offset[0])
+        k_end = None if self.one_wave else _mask_key_end(prefix.body, scored_name, key, m.axis.name, offset[0])
 
         chunk = Axis(name=f"{key.name}__ck", extent=key.extent)
         base = Var(chunk.name)
@@ -2961,6 +2965,7 @@ def _atom_ops(
     k_axis: Axis | None = None,
     axes: tuple = (),
     inner: tuple | None = None,
+    one_wave: bool = False,
 ) -> _AtomOps:
     """The **one** atom dispatch — select the codegen strategy off the atom kind. ``c`` is the
     stored algebra, ``tile`` the PLACED schedule slice (``Tile.at``) the geometry derives from.
@@ -2992,7 +2997,22 @@ def _atom_ops(
         # contraction takes the ordinary one. The reading is the term's (:meth:`Fold.chunked`),
         # the same one ``TileOp.contracts`` offered the site on.
         cls = _FlashOps if c.chunked() else _MmaOps
-    return cls(c, tile, stage, inputs, workers, lead, Body(()) if epilogue is None else epilogue, seam, frag_ns, slabs, k_axis, axes, inner)
+    return cls(
+        c,
+        tile,
+        stage,
+        inputs,
+        workers,
+        lead,
+        Body(()) if epilogue is None else epilogue,
+        seam,
+        frag_ns,
+        slabs,
+        k_axis,
+        axes,
+        inner,
+        one_wave,
+    )
 
 
 def reduce_codegen(
@@ -3008,6 +3028,7 @@ def reduce_codegen(
     k_axis: Axis | None = None,
     axes: tuple = (),
     inner: tuple | None = None,
+    one_wave: bool = False,
 ):
     """The reusable, **sink-agnostic** ``(state_decls, reduce_region)`` from the atom strategy — the
     accumulator decls + the contraction K-loop (the ONE :meth:`_AtomOps.reduce` driver: the shared
@@ -3015,7 +3036,9 @@ def reduce_codegen(
     ``stage`` / ``inputs`` bind operand staging (both atoms stage the same smem slab off it, differing
     only in the drain leaf — ``ldmatrix`` vs plain ``Load``); ``workers`` splits the staged phases
     across producer / compute warp bands (the resolved :class:`WarpSpec`; ``None`` = uniform)."""
-    ops = _atom_ops(c, tile, stage, inputs, workers, seam=seam, lead=lead, frag_ns=frag_ns, k_axis=k_axis, axes=axes, inner=inner)
+    ops = _atom_ops(
+        c, tile, stage, inputs, workers, seam=seam, lead=lead, frag_ns=frag_ns, k_axis=k_axis, axes=axes, inner=inner, one_wave=one_wave
+    )
     return ops.state, ops.reduce
 
 
