@@ -556,21 +556,16 @@ shows expert weight streaming dominates and the fused-unpack GEMM can plausibly 
 Stage −1: DONE (~2 h). Stage 0 round one: DONE (fixed upstream by #602). Stage 1: DONE (#651). Stage 2: DONE (#656).
 Stage 3 in-repo: DONE (#662); gate (c) passed once at `ab1ad4592`, gate (d)'s token-ID half with it.
 
-**Stage 0 round three remains the critical path — now as one compiler gap, not election.** Partitioning
-(#693/#694), the compiling composed cut (#700), the serial-work stamp (#702), the composed route rows (#739) and
-the route-row pricing (#741) all landed, and the working golden's own strict election measures 0.245 s per
-`post4096` forward, 75 % of it in one contraction the compiler cannot tile (two duplicate A cones on a
-two-channel fold). What holds everything now, in order: make that contraction a tile site (merge the duplicate
-cones), fix the same-scope accumulator redeclaration nvcc refuses at `post` m1, give `run --golden` finite
-inputs and an independent reference for a correctness verdict, stop concurrent recorders losing rows, then pin
-routes for the 28 realizations still without one (the second `post` kernel family at m1 / m32 / dynamic, the
-`pre` twin at m32 / dynamic). Two of those are closed: the concurrent-recorder loss (#751 — the recorder
-reloads the file under an exclusive lock and adds its rows to what is on disk, so parallel devices stop
-dropping each other's rows) and the tile site (#752, above), which replaces item one with re-measuring the
-route under the split. Nothing on that list reproduces from the checked-in
-`recipes/DeepSeek-V4-Flash-0731/golden/v100_sm70.yaml` — its whole-model programs cat the sibling gate/up
-linears into one weight, and its `k_div_*_reduce` family emits no redeclaration under any knob set tried — so
-every one of them needs the V100 host. Then Stage 4: 2–4 days on-host (re-run gate (c), re-record the golden,
-warm/bake/verify). Stage 5: 1–2 days.
-Adding stage 6 (MXFP4 + tuning) is a further 1–3 weeks. The compiler, not the fork ABI, remains the dominant
-uncertainty.
+**Stage 0 round three is no longer a compiler gap — what is left is measurement.** Partitioning (#693/#694), the
+compiling composed cut (#700), the serial-work stamp (#702), the composed route rows (#739), the route-row pricing
+(#741), the recorder's lock (#751), the carrier taken apart (#752) and the tail's own name (#757) have all landed.
+The `post4096` forward measures **74.9 ms** as the file's own unpinned strict-evidence election, against 238.8 ms
+before the carrier came apart. What holds everything now, in order: give `run --golden` finite inputs and an
+independent reference for a correctness verdict; re-measure the recorded routes under the split (a carrier that
+comes apart needs a cut per child, and its seam paths shift one level) and pin routes for the realizations that
+still have none — the second `post` kernel family at m1 / m32 / dynamic, the `pre` twin at m32 / dynamic, and the
+two `post1` reduces #757 unblocks; then re-run gate (c). None of that reproduces from the checked-in
+`recipes/DeepSeek-V4-Flash-0731/golden/v100_sm70.yaml`, whose whole-model programs cat the sibling gate/up linears
+into one weight, so every step needs the V100 host. Then Stage 4: 2–4 days on-host (re-run gate (c), re-record
+the golden, warm/bake/verify). Stage 5: 1–2 days. Adding stage 6 (MXFP4 + tuning) is a further 1–3 weeks. The
+evidence the deploy reads, not the fork ABI and no longer the compiler, is now the dominant uncertainty.

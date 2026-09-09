@@ -109,7 +109,10 @@ to the serial fold; each ILP copy suffixes only its per-copy SSA temps
 (`__r{r}`)
 — the shared iteration coordinates, **including any nested contraction's own reduce-axis var** (whose `for`
 declaration `copy_cell` does not rename), stay shared, so each copy re-declares its own nested
-loop under the one name; anything else tiles nothing and folds one thread per
+loop under the one name, while a name the replicated TAIL defines that is spelled like one of the term's carried
+states is renamed apart first (`_unshadowed`): both would take the same cell suffix and land on that cell's
+accumulator, two declarations of one name in one scope, and a tail that recomputes the carrier's own fold has
+exactly that shape; anything else tiles nothing and folds one thread per
 output cell (the degenerate `op.lower()` + `with_store`) — except a kernel whose ONLY work is a free output sweep,
 which distributes that sweep across its `WORK` threads through the same `_lane_close` a cooperating reduce uses for
 its projection: each lane owns a strided slice and writes its own cells, so there is no combine and no store guard.

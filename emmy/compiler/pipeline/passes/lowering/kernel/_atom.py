@@ -79,7 +79,7 @@ from emmy.compiler.ir.stmt import (
     Write,
     mask_select_predicate,
 )
-from emmy.compiler.ir.stmt.body import free_names
+from emmy.compiler.ir.stmt.body import _exposed_defines, free_names
 from emmy.compiler.ir.stmt.passes import rename_free
 from emmy.compiler.ir.tile.ops import cone_stat, cone_stat_dtypes, make_cone
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
@@ -119,6 +119,22 @@ def unroll_ok_n(trips: int, cap: int | None = None) -> bool:
 
 
 # Shared per-cell helpers, used across this module (the atom-generic mma/scalar codegen).
+def _unshadowed(body, states: tuple[str, ...]) -> list:
+    """``body`` with its OWN definition of a carried state renamed apart, if it has one.
+
+    The tail replicates under the same ``__c{i}_{j}`` suffix the states take, so a tail that DEFINES
+    a value spelled like one of them lands on that cell's accumulator: two declarations of one name
+    in one scope, which nvcc refuses (``acc0__c0_0 has already been declared``). It happens where the
+    tail RECOMPUTES the carrier's own fold — one traced value whose two occurrences the tree could
+    not share because they were formed differently — and however alike they look those are two
+    values, so the tail's takes its own name. A tail that only READS a state is untouched, and still
+    reads the cell's accumulator through the ordinary suffix."""
+    shadowed = {name for stmt in body for name in _exposed_defines(stmt)} & set(states)
+    if not shadowed:
+        return list(body)
+    return [stmt.rewrite(lambda name: f"{name}__own" if name in shadowed else name) for stmt in body]
+
+
 def copy_cell(body, sigma, suffix: str, protected) -> list:
     """One copy of a tiled reduce ``body``: σ-substitute its indices (``sigma``) and suffix every
     per-copy SSA name (the shared grid / reduce / lane coordinates in ``protected`` pass through
@@ -2006,9 +2022,8 @@ class _ScalarOps(_AtomOps):
         the (overhanging) write, dedup shared operand loads."""
         c = self.c
         sigma = _scalar_sigma(mn, offset, i, j)
-        cell = copy_cell(
-            self.epilogue, sigma, f"__c{i}_{j}", _scalar_protected(c, self.tile, self.lead, body=self.epilogue, k_axis=self.k_axis)
-        )
+        tail = _unshadowed(self.epilogue, c.exposes)
+        cell = copy_cell(tail, sigma, f"__c{i}_{j}", _scalar_protected(c, self.tile, self.lead, body=tail, k_axis=self.k_axis))
         cell = _guard_writes(cell, _scalar_bound(mn, offset, i, j))
         return _dedup_loads(cell)
 
