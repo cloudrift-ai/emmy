@@ -170,7 +170,8 @@ fill→drain skeleton — and the atom contributes only leaves, never a loop. Pe
 - **mma** (`_MmaOps`) — atom `(16, 8, 16)`, `lanes == 32`. The UNIT is a **warp**; its leaves emit `RegFragment` /
   `LdmatrixLoad` / `MmaSyncPtx` / `RegStore` and decode the atom-lane offset at render. `RegStore` derives both
   algebraic M/N strides from the output index: contiguous N keeps packed stores, while a reversed physical orientation
-  uses scalar strided stores. A multi-channel root partitions its projection by output dependence and emits one store
+  uses scalar strided stores. On Volta, each adjacent accumulator pair stays packed under an M-only tail guard; an N
+  guard still splits the pair. A multi-channel root partitions its projection by output dependence and emits one store
   sink per output.
 - **scalar** (`_ScalarOps`) — atom `(1, 1, 1)`, `lanes == 1`. The UNIT is a **single thread** (so there is no `_lane`
   axis); its leaves are plain `Load`s + an fma cell, the projection `tail` replicated per register cell with its
@@ -274,8 +275,9 @@ loss against no ring at all (474 vs 468 us on a 512x4096x4096 projection) into 3
 512x4096x28672 one, whose 896 CTAs already hide the latency and whose doubled slab costs occupancy. Which deploys is
 evidence's call per shape, which is the point: before the split, `depth >= 2` was a pessimization everywhere on that
 card. `/p<n>` remains the independent smem→register fragment pipeline. The Volta m8n8k4 atom enables the synchronous
-fill for materialized and computed f16
-A/B edges; its cooperative gather drains either slab, while newer instruction families stay disabled. The
+fill for materialized and computed f16 A/B edges. A staged A or N-major B fragment is contiguous for its lane and
+drains with one 64-bit shared load; canonical B retains the cooperative scalar gather. Newer instruction families stay
+disabled. The
 **`smem-tma`** transport
 additionally requires **sm_90+**
 (Hopper/Blackwell): below it (the schedule's TMA gate, mirroring the frontend TMA-fold gate) the `d*/smem-tma*` moves
