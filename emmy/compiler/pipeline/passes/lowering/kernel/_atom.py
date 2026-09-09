@@ -2306,15 +2306,19 @@ def _slab_row(operand, slot, row: Expr) -> Expr:
 
 @dataclass(frozen=True)
 class _ChunkStreams:
-    """The chunk tier's staged operand group — the value the carrier folds against, its score's key
-    when that one slabs too (:func:`chunk_key_stage`), and the one transport that fills both.
+    """The chunk tier's staged operands — the value the carrier folds against, its score's key when
+    that one slabs too (:func:`chunk_key_stage`) — and one transport PER operand.
 
-    Each drain reads its slab off the :class:`Operand` the fill wrote (name, row stride, swizzle,
-    ring-slot row), so the two cannot disagree about where a chunk landed."""
+    Two groups, not one: the key is dead once the score is contracted and the value once the
+    expectation is, so each refills at its own kill point and the copy overlaps the other's
+    phase — FlashAttention-2's single-slab schedule at ring depth one, and the ring's usual
+    prefetch at two or more. One group live across the whole body would fill and wait with
+    nothing to overlap. Each drain reads its slab off the :class:`Operand` the fill wrote (name,
+    row stride, swizzle, ring-slot row), so the two cannot disagree about where a chunk landed."""
 
     value: object
     key: object | None
-    transport: object
+    transports: tuple  # the key's group first when it stages, then the value's
 
 
 class _FlashOps(_MmaOps):
@@ -2464,15 +2468,20 @@ class _FlashOps(_MmaOps):
 
         streams = self._streams(mn, bk)
 
-        def chunk_body(slot) -> list[Stmt]:
-            """The chunk's whole body at ring ``slot`` — score, pivot, channels, expectation,
-            merge. Built once, by the skeleton that knows which slot this iteration drains."""
+        def chunk_segments(slots) -> list[tuple[list[Stmt], frozenset[str]]]:
+            """The chunk's body as the skeleton's segments — the score, reading the key's slab at
+            its group's ring slot, then pivot, channels, expectation and merge, reading the value's
+            at its own — each tagged with the slab it drains, so the skeleton places every group's
+            fill, wait and barrier off its live range. Built once, by the skeleton that knows which
+            slot each group drains this iteration."""
+            key_slot, value_slot = (slots[0] if streams is not None and streams.key is not None else None), slots[-1]
             memo: dict = {}
-            body: list[Stmt] = (
-                self._score_tile(offset, mn, base, cols, bound, streams, slot)
+            scored_stmts: list[Stmt] = (
+                self._score_tile(offset, mn, base, cols, bound, streams, key_slot)
                 if score is not None
                 else self._gathered_score(offset, mn, base, cols, bound)
             )
+            body: list[Stmt] = []
             held = scored_name
             scored, pivots = {}, {}
             for i in range(m.reg):
@@ -2545,31 +2554,35 @@ class _FlashOps(_MmaOps):
                                 layout=layout,
                             )
                         )
-            body += self._expectation(offset, mn, base, weights, steps, bound, streams, slot)
+            body += self._expectation(offset, mn, base, weights, steps, bound, streams, value_slot)
             body += self._merge(mn, pivots, partials)
-            return body
+            if streams is None:
+                return [(scored_stmts + body, frozenset())]
+            key_slabs = frozenset() if streams.key is None else frozenset({streams.key.slab})
+            return [(scored_stmts, key_slabs), (body, frozenset({streams.value.slab}))]
 
         # ``seed=False``: the carrier is declared once outside this loop at the seeds the TERM names
         # — the pivot's is not ``maximum``'s neutral element — so the loop must not re-seed it.
         if streams is None:
-            gmem = Body(tuple(chunk_body(None)))
+            gmem = Body(tuple(stmt for stmts, _ in chunk_segments((None,)) for stmt in stmts))
             start = k_first if k_first is not None else Literal(0, "int")
             loop = StridedLoop(axis=chunk, start=start, step=Literal(bk, "int"), body=gmem, unroll=False, seed=False, end=k_end)
             return pre, [loop]
         # The staged form is the same body under the shared fill→drain skeleton, with the chunk loop
-        # built by it: one operand group, one segment, and ``k0`` keeping this tier's own axis name
-        # so everything the body reads off ``base`` still resolves. Every slab read rides the
-        # skeleton's own read slot, so a ring deeper than one prefetches the next chunk's key and
-        # value ACROSS the softmax between this chunk's fill and drain.
+        # built by it: one operand group per staged operand, the score and the expectation as the
+        # two segments that drain them, and ``k0`` keeping this tier's own axis name so everything
+        # the body reads off ``base`` still resolves. Every slab read rides its group's own read
+        # slot, so a ring deeper than one prefetches the next chunk's key and value ACROSS the
+        # softmax, and a single slot refills each at its kill point — the key under the softmax
+        # and expectation, the value under the next score.
         # A RAGGED key extent stages too (``_chunk_warp_stage`` states when): the last chunk
         # overhangs, its value rows read the last valid key, and the boundary ``FragmentMask``
         # above has already put those keys at the pivot identity — so they weigh exactly zero and
         # the duplicates fold to nothing, the same discipline the gmem-direct arm carries.
         k_extent, n_chunks = _chunk_stream(key, bk)
-        decls, region = staged_kloop(
-            transport=streams.transport,
-            drain=chunk_body,
-            depth=self.stage.depth,
+        decls, region = pipelined_kloop(
+            operands=tuple((transport, self.stage.depth) for transport in streams.transports),
+            build_segments=chunk_segments,
             bk_elems=bk,
             n_chunks=n_chunks,
             k_extent=k_extent,
@@ -2610,7 +2623,7 @@ class _FlashOps(_MmaOps):
             b_trans=trans,
             roles=(1,),
         )
-        operands, key = (value,), None
+        key = None
         if (staged_key := self._key_stage()) is not None:
             k_load, span = staged_key
             span_axis = self._score_k
@@ -2627,15 +2640,15 @@ class _FlashOps(_MmaOps):
                 rows=(False, trans),
                 roles=(0,),
             )
-            operands = (key, value)
-        common = dict(
-            operands=operands,
-            slab_dtype=cuda_name(elem),
-            elem_bytes=elem.nbytes,
-            cta=_cta(mn, self.tile.atom.lanes, self.tile.launch_threads),
-        )
-        transport = TmaTransport(**common) if self.stage.transport == "smem-tma" else CpAsyncTransport(**common)
-        return _ChunkStreams(value=value, key=key, transport=transport)
+        cta = _cta(mn, self.tile.atom.lanes, self.tile.launch_threads)
+
+        def group(operand, tag: str):
+            common = dict(operands=(operand,), slab_dtype=cuda_name(elem), elem_bytes=elem.nbytes, cta=cta)
+            # A TMA group parity-waits its own barrier, so two groups in one loop take two names.
+            return TmaTransport(mbar=f"_mbar{tag}", **common) if self.stage.transport == "smem-tma" else CpAsyncTransport(**common)
+
+        transports = (*(() if key is None else (group(key, "_k"),)), group(value, "_v"))
+        return _ChunkStreams(value=value, key=key, transports=transports)
 
     @property
     def _score_atom(self):

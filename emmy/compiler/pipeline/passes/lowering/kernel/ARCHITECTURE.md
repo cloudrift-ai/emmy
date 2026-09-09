@@ -201,7 +201,14 @@ The warp (mma) tier stages its reused gmem operands through an smem slab, driven
 `schedule.Stage`. The CHUNK tier stages the two it streams along its carrier axis — the value it folds against and its
 score's KEY, both B-shaped slabs of `bk_elems` key rows, the key's columns spanning the score's whole contraction so
 one chunk covers it in a single pass (`chunk_key_stage` states the reading once; the resolver sizes the ring with it
-and the emission builds the slabs off it). The score's own fragments are never copied: they repack in registers out of
+and the emission builds the slabs off it). They are TWO operand groups of the skeleton, not one — the score is the
+segment that drains the key's slab and the expectation the one that drains the value's — so each group's fill,
+wait and release derive from its own live range: at ring depth one the key refills right after the score, under
+the softmax and the expectation, and the value after the expectation, under the next score (FlashAttention-2's
+single-slab schedule); a deeper ring prefetches both at the top. One group live across the whole body filled and
+waited with nothing to overlap, which is why the single-slot rows ran 56-100 us at head width 256 against the
+ring's 39. A TMA group parity-waits its own barrier (`_mbar_k`, `_mbar_v`).
+The score's own fragments are never copied: they repack in registers out of
 the chunk's C fragments, or come off a stored probability tile at the fragment lane map, and that shape has no key at
 all — the value then stages alone. The QUERY is not staged either, for the opposite reason: its index never carries the
 carrier's key, so it is loop-INVARIANT and rides hoisted registers instead, one A fragment per score-K step read once
