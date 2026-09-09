@@ -10,8 +10,9 @@ Relative to PyTorch 2.13, Emmy is 1.41--1.54x slower on prefill and 3.47x slower
 decode is the exception against eager PyTorch: Emmy is 3.16x faster. It is still 2.55x slower than Inductor on that
 family. The result is therefore a successful manual qualification and a clear compiler performance gap, not parity.
 
-The main implementation result is bounded reduction domains in Loop IR. Exact causal masks now shorten the QK and
-softmax reduction domain before Flash lowering while retaining the mask for boundary tiles. This reduced the 32768
+The main implementation result is the causal early stop on the chunk tier: the coordinate mask the frontend adds to
+the score is read once where the chunk loop opens, and the loop stops at the CTA's diagonal, so masked chunks are
+skipped instead of folded while the per-element mask still guards the boundary tile. This reduced the 32768
 causal-prefill row from about 130.7 ms to 70.0 ms and the GQA-prefill row from about 258.5 ms to 137.7 ms. The remaining
 prefill gap is schedule and generated-code quality after masked work has already been removed.
 
