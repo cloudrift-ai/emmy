@@ -359,3 +359,26 @@ def test_a_consumer_names_what_it_binds_and_rendering_spells_the_operand() -> No
     store = OutputSpec(write=Write(output="o", index=(Var("m"),), value="total"))
     (m_loop,) = passthrough.lower(frozenset(), (store,), axes=SCOPE)
     assert m_loop.body[-1] == Write(output="o", index=(Var("m"),), value="acc")
+
+
+def test_exposing_restricts_a_projection_whose_results_are_its_bound_params() -> None:
+    """A projection may pass its operands' values straight through — the one ``Fold.per_state`` puts
+    over a carrier it took apart. Its exposed names are then its OPERANDS' names, which is what
+    ``applied`` spells, while its body defines none of them and its own results are the params it
+    binds. A reader restricting it BY EXPOSED NAME must not write that name into the lift's results:
+    the cut that renames a child's state to a workspace name is exactly where the two spellings
+    part, and the lambda then rejects a result nothing defines. Eight realizations of the DeepSeek-V4
+    twins died that way."""
+    axis = Axis("k", 16)
+
+    def child(state: str) -> Fold:
+        product = Assign(name=f"{state}__v", op="multiply", args=(f"l_{state}", f"l_{state}"))
+        return reduction(axis, (slab(f"l_{state}", "X", "m", "k"),), (product,), (state,))
+
+    left, right = child("acc_l__ws"), child("acc_r__ws")
+    wrapper = Fold(operands=(left, right), lift=Lambda.closing(("acc_l", "acc_r"), Body(()), ("acc_l", "acc_r")))
+    assert wrapper.exposes == ("acc_l__ws", "acc_r__ws") and wrapper.lift.results == ("acc_l", "acc_r")
+
+    restricted = wrapper.exposing(("acc_r__ws",))
+    assert restricted.exposes == ("acc_r__ws",)
+    assert restricted.lift.results == ("acc_r",), "the lift keeps its own spelling of the result it now exposes"
