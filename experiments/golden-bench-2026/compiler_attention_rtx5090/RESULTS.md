@@ -5,12 +5,12 @@
 ### Status
 
 The baseline lane is complete: 59 of 59 offered setups measured, every one with whole-forward CUDA graph capture and
-every backend passing its correctness check against eager SDPA. The Emmy lane has not run. It requires one recorded
-golden per setup and none exist, for reasons recorded in `golden/README.md` — a freshly traced
-`F.scaled_dot_product_attention` reaches a kernel identity no recorded row matches, and no knob pin steers it onto the
-structure the card's own recorded attention rows describe.
+every backend passing its correctness check against eager SDPA. The Emmy lane has not run: it requires one recorded
+golden per setup and none exist yet.
 
-So this file reports a library comparison. It says nothing about Emmy.
+What stopped them being recordable at all is fixed — a traced SDPA now builds the same fused structure the card's
+recorded attention rows describe, and a hand pin reaches it. `golden/README.md` carries the detail and what is left to
+do. Until those goldens are recorded, this file reports a library comparison and says nothing about Emmy.
 
 ### Protocol
 

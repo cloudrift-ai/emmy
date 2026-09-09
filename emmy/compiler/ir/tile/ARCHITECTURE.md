@@ -61,6 +61,11 @@ boundary. Unsupported non-canonical Loop IR fails loudly. Kernel placement is a 
 pure body receives a dependency-safe order and commutative `Assign` arguments are sorted before it reaches a Fold.
 Structural identity therefore reads the stored order directly. Contraction canonicalization first orders product
 arguments by geometry, then places the one argument shared by every product in the Fold's shared operand slot.
+Geometry between two operands that both read the reduction axis last is their ROW — the coordinate the other operand
+does NOT read. A coordinate both of them read, a batched matmul's batch and head, is no row and never decides: it
+would be the minimum on both sides, leaving the pair to be ordered by whatever its operands happen to be called, and
+those names are minted in emission order. One kernel's two contractions over the same operands would then orient
+opposite ways, which is enough to stop the twisted rewrite reading their score cones as one score.
 For a broadcast-batched product whose batch axis occurs in only one operand, the placement's trailing output pair
 still supplies that geometry. If its geometric first operand reads the reduction axis non-contiguously and the other
 materialized operand reads it contiguously, the commutative product puts the contiguous operand in the shared A slot;
