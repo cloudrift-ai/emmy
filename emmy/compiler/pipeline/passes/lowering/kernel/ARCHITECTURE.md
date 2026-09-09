@@ -165,14 +165,16 @@ reduce_region)` (operand fragments + the K-loop) — and a per-cell **sink** `st
 default is the matmul `_atom.store_sink`; `factorize(c, store=…)` swaps it. The K-loop itself is **one driver** on the
 strategy base (`_AtomOps.reduce`), deciding nothing: the **scheduler-resolved** `Stage` picks its form — gmem-direct
 (`None`) through the shared `_contract_kloop` `read → ⊗ → fold` spine, or staged through the shared `_staged`
-fill→drain skeleton — and the atom contributes only leaves, never a loop. Per-atom diff:
+fill→drain skeleton — and the atom contributes only leaves, never a loop. The same resolved stage reaches the default
+sink so a paired Volta operand layout and its accumulator map remain one coupled lowering choice. Per-atom diff:
 
 - **mma** (`_MmaOps`) — atom `(16, 8, 16)`, `lanes == 32`. The UNIT is a **warp**; its leaves emit `RegFragment` /
   `LdmatrixLoad` / `MmaSyncPtx` / `RegStore` and decode the atom-lane offset at render. `RegStore` derives both
   algebraic M/N strides from the output index: contiguous N keeps packed stores, while a reversed physical orientation
   uses scalar strided stores. On Volta, each adjacent accumulator pair stays packed under an M-only tail guard; an N
-  guard still splits the pair. A multi-channel root partitions its projection by output dependence and emits one store
-  sink per output.
+  guard still splits the pair. Complete paired Volta tiles derive the interleaved 32×32 accumulator map that matches
+  their operand layouts. A multi-channel root partitions its projection by output dependence and emits one store sink
+  per output.
 - **scalar** (`_ScalarOps`) — atom `(1, 1, 1)`, `lanes == 1`. The UNIT is a **single thread** (so there is no `_lane`
   axis); its leaves are plain `Load`s + an fma cell, the projection `tail` replicated per register cell with its
   operand loads deduped (the arithmetic-intensity reuse). One A read per register ROW and one B read per COLUMN is a
@@ -238,8 +240,8 @@ array**, so `depth` is a free knob for TMA too). The three producers —
 structurally different primitives — sit behind one `fill`/`commit`/`wait` seam, and
 **one atom-agnostic driver** (`_atom._staged`) builds the operand pair + the transport for either atom; the atom
 supplies only the slab drain leaf via `_AtomOps.staged_drain` (the shared inner fragment drain
-`_staged_inner_atom_loop` — `ldmatrix` on modern atoms, a cooperative shared gather on Volta — or the scalar
-`_scalar_drain`). A fill's σ binds **every** tiled output axis, not just the operand's own: the tile
+`_staged_inner_atom_loop` — `ldmatrix` on modern atoms, paired wide loads or a cooperative gather on Volta — or the
+scalar `_scalar_drain`). A fill's σ binds **every** tiled output axis, not just the operand's own: the tile
 axis at `tile_base + cell` (masked axes clamp in-bounds) and the SIBLING axis at its block base — a slab is
 CTA-shared across the sibling, so a sibling var can only survive as a value-dead occurrence: a flat-index reshape
 residue on a merged / reshaped weight row, or, in a packed weight's block-scale fill, a per-tensor scale a placement
@@ -275,9 +277,12 @@ loss against no ring at all (474 vs 468 us on a 512x4096x4096 projection) into 3
 512x4096x28672 one, whose 896 CTAs already hide the latency and whose doubled slab costs occupancy. Which deploys is
 evidence's call per shape, which is the point: before the split, `depth >= 2` was a pessimization everywhere on that
 card. `/p<n>` remains the independent smem→register fragment pipeline. The Volta m8n8k4 atom enables the synchronous
-fill for materialized and computed f16 A/B edges. A staged A or N-major B fragment is contiguous for its lane and
-drains with one 64-bit shared load; canonical B retains the cooperative scalar gather. Newer instruction families stay
-disabled. The
+fill for materialized and computed f16 A/B edges. For a materialized canonical-B tile with even M/N register-fragment
+counts, lowering derives CUTLASS's crosswise-A and B-congruous layouts together: one 128-bit shared load drains each
+adjacent fragment pair, the MMA uses row/row B, and the store uses the coupled interleaved 32×32 accumulator map. This
+is the SM70 default lowering, not a schedule-codec choice; the existing `PAIR_LDMATRIX` policy override disables the
+whole combination. Computed operands, transposed B, and an odd fragment count retain the cooperative gather path.
+Newer instruction families stay disabled. The
 **`smem-tma`** transport
 additionally requires **sm_90+**
 (Hopper/Blackwell): below it (the schedule's TMA gate, mirroring the frontend TMA-fold gate) the `d*/smem-tma*` moves
@@ -510,10 +515,11 @@ the two apply paths stay distinct on a coop-K contraction.
 `030_stamp_types` resolves element dtypes. Integer algebra is always restamped from its typed operands, repairing a
 stale float stamp that a structurally cloned, previously untyped body can carry. `050_vectorize_loads` /
 `080_vectorize_stores` /
-`095_interleave_loads` pack/reorder memory ops; `096_pair_ldmatrix_loads` fuses slab-adjacent staged `x2` B-fragment
-`LdmatrixLoad`s into one `x4` (`pair_frag` — plain `x4` for an N-adjacent transposed-B pair, `x4.trans` for a
-col-adjacent canonical pair; equal swizzle modes pair too — the per-lane address XOR commutes with the paired lane
-map; halves the staged drains' LSU count, bit-identical; fires on the matmul tier's staged drains);
+`095_interleave_loads` pack/reorder memory ops; `096_pair_ldmatrix_loads` fuses adjacent staged fragment loads. On
+modern atoms, two B `x2` loads become one `x4` (plain for N-adjacent transposed B, transposed for col-adjacent canonical
+B). On Volta, adjacent A or B fragments under the derived crosswise/congruous layouts become one 128-bit shared load.
+The transform halves the staged drain's LSU instructions and is bit-identical; equal modern swizzle modes remain
+pairable because their per-lane address XOR commutes with the paired lane map;
 `110_drop_redundant_syncs` collapses the defensive `Sync`s the
 cooperative / shared-row templates emit (body-level only — a slab `Smem` decl flags `smem_seen`, so a load-bearing
 prologue `Sync` is correctly retained; `with_bodies` preserves the cooperative tile's `block_threads`).

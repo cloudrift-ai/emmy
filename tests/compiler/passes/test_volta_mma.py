@@ -211,6 +211,28 @@ def test_sm70_materialized_tiles_use_paired_volta_layout_loads(monkeypatch) -> N
     assert "((_vq >> 1) & 1) * 8" in src
 
 
+def test_sm70_pair_policy_off_retains_the_unpaired_gather(monkeypatch) -> None:
+    """The existing policy override disables the coupled layout as one complete choice."""
+    _pin(monkeypatch, VOLTA, tile="f2x2", stage="d1/smem")
+    monkeypatch.setenv("EMMY_PAIR_LDMATRIX", "0")
+    src, knobs = _source(_graph(m=32, n=32, k=16), Context(compute_capability=(7, 0)))
+    assert "_a_smem[emmy_volta_crosswise(" not in src
+    assert "_b_smem[emmy_volta_b_congruous(" not in src
+    assert "emmy_mma884_load_a_smem(_a0" in src
+    assert "emmy_mma884_load_b_smem(_b0" in src
+    assert "emmy_mma_m8n8k4_f16_f32(_c" in src
+    assert knobs["PAIR_LDMATRIX"] is False
+
+
+def test_sm70_gmem_direct_tile_keeps_the_ordinary_accumulator_map(monkeypatch) -> None:
+    """The paired accumulator map is coupled to a staged operand layout, never used alone."""
+    _pin(monkeypatch, VOLTA, tile="f2x2")
+    src, _ = _source(_graph(m=32, n=32, k=16), Context(compute_capability=(7, 0)))
+    assert "emmy_mma_m8n8k4_f16_f32_brow(_c" not in src
+    assert src.count("emmy_mma_m8n8k4_f16_f32(_c") == 4
+    assert "const int _vq = (_vl & 15) >> 2;" in src
+
+
 def test_sm70_output_stores_contiguous_fragment_pairs(monkeypatch) -> None:
     """The eight Volta accumulator elements leave registers as four contiguous half2 pairs."""
     _pin(monkeypatch, VOLTA)

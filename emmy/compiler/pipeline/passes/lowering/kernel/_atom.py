@@ -97,7 +97,7 @@ from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     staged_kloop,
     sync_stat_fill,
 )
-from emmy.compiler.pipeline.search.space import UNROLL
+from emmy.compiler.pipeline.search.space import PAIR_LDMATRIX, UNROLL
 
 #: The contraction semiring — multiply ⊗ then accumulate ⊕ (add). The same multiply-add ``mma.sync``
 #: realizes; in the scalar tier it is a plain scalar fma loop.
@@ -1640,7 +1640,25 @@ class _MmaOps(_AtomOps):
         scale = getattr(op, "scale", None)
         return None if scale is None else (scale[0], self.stage.bk_elems // scale[1], scale[1])
 
-    def slab_swizzles(self, mn, elem_bytes: int) -> tuple[str, str]:  # noqa: ARG002 — per-operand widths come from slab_elems
+    def _volta_pair_layout(self, mn) -> bool:
+        """Whether this staged cell can use the coupled Volta operand and accumulator layouts."""
+        if self.stage is None or self.tile.atom.fragment_layout != "m8n8k4" or PAIR_LDMATRIX.narrow((True,)) != (True,):
+            return False
+        a_copied = self.c.operands[0].as_slab() is not None
+
+        def copied_b(edge) -> bool:
+            slab = edge.as_slab() if isinstance(edge, Fold) else None
+            return isinstance(slab.load if slab is not None else edge, Load)
+
+        return (
+            a_copied
+            and all(copied_b(edge) for edge, _ in self.channels)
+            and not self.c.as_contraction().b_trans
+            and mn[0].reg % 2 == 0
+            and mn[1].reg % 2 == 0
+        )
+
+    def slab_swizzles(self, mn, elem_bytes: int) -> tuple[str, ...]:  # noqa: ARG002 — per-operand widths come from slab_elems
         """The smem swizzle mode per operand slab, from each slab's inner (contiguous) row
         span — A's is ``bk_elems`` (the K chunk), B's ``tile_n``. TMA applies the mode in
         hardware (in-copy); the cp.async transport applies the identical XOR in software on
@@ -1655,26 +1673,15 @@ class _MmaOps(_AtomOps):
         stages N-major on EVERY transport (cp.async / TMA / the sync transport's async B fills),
         so its inner row span is the K chunk (``bk_elems``) like A's. A 1-byte (fp8) slab stays
         ``NONE`` — its cooperative byte-gather drain applies no address XOR (the ldmatrix XOR is
-        b16-indexed); the cp.async byte slab's bank spread is the row pad instead."""
+        b16-indexed); the cp.async byte slab's bank spread is the row pad instead. Complete paired
+        Volta tiles instead use the crosswise A and B-congruous layouts together; the existing
+        ``PAIR_LDMATRIX`` policy pin can disable that lowering and retain the ordinary gather."""
         if self.tile.atom.fragment_layout == "m8n8k4":
             # Volta has no ldmatrix. A materialized row-major A uses CUTLASS's crosswise layout;
             # a materialized canonical row-major B uses its B-congruous layout and the row/row
             # mma form. Each layout is enabled only when the warp tile contains complete pairs
             # of logical 16-row/column fragments, because one ordinary LDS.128 drains each pair.
-            a_copied = self.c.operands[0].as_slab() is not None
-
-            def copied_b(edge) -> bool:
-                slab = edge.as_slab() if isinstance(edge, Fold) else None
-                return isinstance(slab.load if slab is not None else edge, Load)
-
-            b_copied = all(copied_b(edge) for edge, _ in self.channels)
-            paired = (
-                a_copied
-                and b_copied
-                and not self.c.as_contraction().b_trans
-                and mn[0].reg % 2 == 0
-                and mn[1].reg % 2 == 0
-            )
+            paired = self._volta_pair_layout(mn)
             return (
                 VOLTA_CROSSWISE if paired else "NONE",
                 *((VOLTA_B_CONGRUOUS if paired else "NONE") for _ in self.channels),
@@ -1891,10 +1898,7 @@ class _MmaOps(_AtomOps):
         :class:`RegEpilogue` and guarding overhanging M/N rows. A multi-fold node binds its extra C
         fragments as additional epilogue accumulators (the combine — SwiGLU — reads them per cell)."""
         atom = self.tile.atom
-        volta_interleaved = False
-        if atom.fragment_layout == "m8n8k4":
-            swizzles = self.slab_swizzles(mn, atom.operand_dtype("a").nbytes)
-            volta_interleaved = swizzles == (VOLTA_CROSSWISE, *((VOLTA_B_CONGRUOUS,) * len(self.channels)))
+        volta_interleaved = self._volta_pair_layout(mn)
         m, n = mn
         mcell, ncell = offset[0].base(i), offset[1].base(j)
         tail = list(self.epilogue)
@@ -2964,6 +2968,7 @@ def store_sink(
     lead: tuple = (),
     frag_ns: str = "",
     *,
+    stage: Stage | None = None,
     k_axis: Axis | None = None,
     axes: tuple = (),
     inner: tuple | None = None,
@@ -2971,5 +2976,16 @@ def store_sink(
     """The default **matmul sink** — the per-cell ``store(i, j, offset, mn)`` from the atom strategy
     (an mma ``RegStore`` / the replicated scalar ``epilogue`` tail), folding in the ``epilogue`` (the
     projection off the node's zero-axis ``Fold`` wrapper + the store glue). A caller may replace
-    the sink while reusing the shared ``reduce`` emission."""
-    return _atom_ops(c, tile, epilogue=epilogue, lead=lead, frag_ns=frag_ns, k_axis=k_axis, axes=axes, inner=inner).store
+    the sink while reusing the shared ``reduce`` emission. ``stage`` reaches the sink only because
+    a paired Volta operand layout and its accumulator map are one coupled lowering choice."""
+    return _atom_ops(
+        c,
+        tile,
+        stage,
+        epilogue=epilogue,
+        lead=lead,
+        frag_ns=frag_ns,
+        k_axis=k_axis,
+        axes=axes,
+        inner=inner,
+    ).store

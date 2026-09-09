@@ -2075,6 +2075,10 @@ class RegStore(Stmt):
     whose shared operand varies along the output's trailing axis stores a transposed fragment with
     scalar strided writes, while the ordinary contiguous-N case keeps packed pairs.
 
+    A staged Volta tile using paired operand layouts also derives ``volta_interleaved`` and its
+    register-cell ``fragment_index``. Together they select the coupled 32×32 accumulator map;
+    neither is a schedule choice or a wire-codec field.
+
     ``atomic`` renders each store as an ``atomicAdd`` accumulate instead of a
     plain assign — ``030_cut``'s atomic finalize on the mma tier: every
     split partition's C fragment adds into the (per-launch zero-init'd) output.
@@ -2351,8 +2355,8 @@ class RegStore(Stmt):
         """Store an m8n8k4 accumulator under the selected Volta warp-tile arrangement."""
         pad = _pad(ctx.indent)
         lane = "(threadIdx.x & 31)"
-        # Each four-lane group and its +16 partner own one 8x8 computation. Place the four
-        # groups as quadrants; _vr/_vc are this lane's base row/column within the 16x16 cell.
+        # Each four-lane group and its +16 partner own one 8x8 computation. _vr/_vc are the lane's
+        # base coordinates under either the ordinary 16x16 cell or paired 32x32 warp-tile map.
         if self.volta_interleaved:
             lines = [
                 f"{pad}{{ const int _vl = {lane}; const int _vq = _vl >> 2;",

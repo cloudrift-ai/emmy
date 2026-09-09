@@ -1,12 +1,11 @@
-"""Pair slab-adjacent staged ``x2`` B-fragment ``LdmatrixLoad``\\ s into one ``x4``.
+"""Pair adjacent staged fragment loads into one wide shared-memory instruction.
 
 Every staged B drain costs one ``ldmatrix.x2``[``.trans``] per fragment, but ``ldmatrix.x4``
 loads four 8×8 matrices — two adjacent B fragments — in one instruction, halving the drain's
-LSU count. Two emitters produce the fusable pattern (which is why this is a PASS, not an
-emitter change — same family as ``050_vectorize_loads``): the staged mma drains
-(``_atom._staged_inner_atom_loop`` — N-adjacent plain-``x2`` pairs and col-adjacent
-``x2.trans`` pairs) and the matmul tier's staged drains (``_atom._staged_inner_atom_loop`` —
-``n.reg`` col-adjacent B fragments per K step).
+LSU count. Volta has no ``ldmatrix``; its derived crosswise-A and B-congruous layouts pair two
+logical fragments into one ordinary 128-bit shared load through the same pass. The staged mma
+drain emits both forms, which is why pairing stays a policy peephole rather than moving into the
+emitter.
 
 Legality, judged structurally on the two loads:
 
@@ -18,6 +17,9 @@ Legality, judged structurally on the two loads:
 - **canonical-B** (K-major slab): equal K row, col exactly ``+8`` — the pair is one
   ``x4.trans`` (lanes 16-31 address the ``+8`` column). The ``+8``-half offsets are 16 B, so
   every paired lane address keeps ldmatrix's 16 B alignment;
+- **Volta**: adjacent logical fragment indices under the matching derived layout, with equal
+  logical K coordinates. A pairs register rows; B pairs register columns. Each becomes one
+  LDS.128 and the coupled row/row MMA plus interleaved accumulator map preserve the output;
 - the second load moves UP to the first's position: every intervening stmt must be barrier-free
   straight-line code that neither redefines either fragment nor defines a free var of the moved
   load's index (the flash drain interleaves ``MmaSyncPtx`` between the loads — reading the FIRST
@@ -122,7 +124,14 @@ def _candidate(s: Stmt) -> bool:
 def _pairs_with(a: LdmatrixLoad, b: LdmatrixLoad) -> bool:
     """``b`` is ``a``'s slab-adjacent partner: the SECOND fragment of one x4 (the ``+8``
     matrices lanes 16-31 address)."""
-    if a.src_buffer != b.src_buffer or a.role != b.role or a.ldm != b.ldm or a.b_trans != b.b_trans or a.swizzle != b.swizzle:
+    if (
+        a.src_buffer != b.src_buffer
+        or a.role != b.role
+        or a.ldm != b.ldm
+        or a.b_trans != b.b_trans
+        or a.swizzle != b.swizzle
+        or a.fragment_layout != b.fragment_layout
+    ):
         return False
     row_d, col_d = _delta(a.src_index[0], b.src_index[0]), _delta(a.src_index[1], b.src_index[1])
     if a.fragment_layout == "m8n8k4":

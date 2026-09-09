@@ -362,7 +362,8 @@ _SWIZZLE_SLAB_ALIGN = {"NONE": TMA_SLAB_ALIGN, "B32": 256, "B64": 512, "B128": 1
 
 def _swizzle_align(swizzle: str) -> int:
     """The slab base alignment the SWIZZLE asks for — the same swizzle-atom alignment the TMA table
-    gives, keyed on the hardware mode behind a shift-overridden spelling. ``NONE`` asks for nothing
+    gives, keyed on the hardware mode behind a shift-overridden spelling. The software-written
+    Volta layouts need only the 16-byte alignment of their paired loads. ``NONE`` asks for nothing
     (``0``), so an unswizzled slab packs where it did before this table reached the sync path.
 
     This is only half of a copied slab's requirement; :func:`_fill_align` adds the other half."""
