@@ -188,6 +188,15 @@ def test_sm70_sync_copy_stages_fragments_without_newer_instructions(monkeypatch,
         assert forbidden not in src
 
 
+def test_sm70_contiguous_staged_fragments_use_one_wide_load(monkeypatch) -> None:
+    """A and N-major B fragments are contiguous in their staged slabs, so each drains as one uint2."""
+    _pin(monkeypatch, VOLTA, stage="d1/smem")
+    src, _ = _source(_graph(k=16, trans=True), Context(compute_capability=(7, 0)))
+    assert "uint2 packed = *reinterpret_cast<const uint2*>(s);" in src
+    assert "emmy_mma884_load_smem4(r, s + row * ldm);" in src
+    assert "emmy_mma884_load_smem4(r, s + col * ldm);" in src
+
+
 def test_sm70_sync_copy_composes_ring_and_register_pipelines(monkeypatch) -> None:
     _pin(monkeypatch, VOLTA, tile="f1x1/k2", stage="d2/smem/p2")
     src, knobs = _source(_graph(k=32), Context(compute_capability=(7, 0)))

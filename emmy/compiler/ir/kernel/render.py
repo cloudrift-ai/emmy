@@ -295,12 +295,23 @@ static __device__ __forceinline__ void emmy_mma884_load_b_gmem_trans_nclamp_kzer
     emmy_mma884_load_b_impl<T, F>(r, g, ldm, left, k_left, true);
 }
 
-// The lane map is independent of address space. Pointing the same inlined
-// gather at a shared-memory slab makes ptxas select ordinary LDS instructions;
-// Volta has no warp matrix-load instruction.
+// A and transposed B expose each lane's four half values as one aligned run in
+// the staged slab. Load that run as one 64-bit vector; the canonical B layout
+// still needs the strided gather below. Volta has no warp matrix-load
+// instruction.
+template <typename T>
+static __device__ __forceinline__ void emmy_mma884_load_smem4(unsigned* r, const T* s) {
+    uint2 packed = *reinterpret_cast<const uint2*>(s);
+    r[0] = packed.x;
+    r[1] = packed.y;
+}
+
 template <typename T, typename F = T>
 static __device__ __forceinline__ void emmy_mma884_load_a_smem(unsigned* r, const T* s, int ldm) {
-    emmy_mma884_load_a_impl<T, F>(r, s, ldm, 16, 4);
+    int lane = threadIdx.x & 31;
+    int comp = (lane & 15) >> 2;
+    int row = ((comp >> 1) << 3) + (lane & 3) + ((lane >> 4) << 2);
+    emmy_mma884_load_smem4(r, s + row * ldm);
 }
 template <typename T, typename F = T>
 static __device__ __forceinline__ void emmy_mma884_load_b_smem(unsigned* r, const T* s, int ldm) {
@@ -308,7 +319,10 @@ static __device__ __forceinline__ void emmy_mma884_load_b_smem(unsigned* r, cons
 }
 template <typename T, typename F = T>
 static __device__ __forceinline__ void emmy_mma884_load_b_smem_trans(unsigned* r, const T* s, int ldm) {
-    emmy_mma884_load_b_impl<T, F>(r, s, ldm, 16, 4, true);
+    int lane = threadIdx.x & 31;
+    int comp = (lane & 15) >> 2;
+    int col = ((comp & 1) << 3) + (lane & 3) + ((lane >> 4) << 2);
+    emmy_mma884_load_smem4(r, s + col * ldm);
 }
 
 // Volta C->A register repack. One logical m8n8k4 C fragment covers 16x16 through
