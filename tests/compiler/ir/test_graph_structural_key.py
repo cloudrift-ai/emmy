@@ -289,3 +289,15 @@ def test_structural_key_handles_fragment_repack() -> None:
     volta = FragmentRepack(frag="a0", srcs=("c0",), fragment_layout="m8n8k4", part=3)
     renamed = volta.rewrite(lambda n: {"a0": "a9", "c0": "c8"}.get(n, n))
     assert (renamed.frag, renamed.srcs, renamed.fragment_layout, renamed.part) == ("a9", ("c8",), "m8n8k4", 3)
+
+
+def test_structural_key_handles_index_declaration() -> None:
+    """A precomputed kernel index remains hashable and follows SSA renaming during tuning."""
+    from emmy.compiler.ir.expr import FuncCallExpr, Literal
+    from emmy.compiler.ir.kernel.ir import IndexDecl
+
+    stmt = IndexDecl("store", FuncCallExpr("layout", (Var("row"), Literal(4, "int"))))
+    Body((stmt,)).structural_key()
+    renamed = stmt.rewrite(lambda name: {"store": "store9", "row": "row9"}.get(name, name))
+    assert renamed.name == "store9"
+    assert renamed.value.free_vars() == frozenset({"row9"})

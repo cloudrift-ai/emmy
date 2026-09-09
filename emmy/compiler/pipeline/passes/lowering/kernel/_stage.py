@@ -245,9 +245,9 @@ def _volta_store_decl(*, op, ring: int, cta: CtaTile, elem_bytes: int) -> IndexD
     name, _, _ = plan
     row, col = _sync_copy_coords(0, 8, op.shape[1], cta)
     if op.swizzle == VOLTA_CROSSWISE:
-        value = FuncCallExpr("emmy_volta_crosswise", [row, col, _lit(ring * op.shape[0])])
+        value = FuncCallExpr("emmy_volta_crosswise", (row, col, _lit(ring * op.shape[0])))
     else:
-        value = FuncCallExpr("emmy_volta_b_congruous", [row, col, _lit(op.shape[1])])
+        value = FuncCallExpr("emmy_volta_b_congruous", (row, col, _lit(op.shape[1])))
     return IndexDecl(name=name, value=value)
 
 
