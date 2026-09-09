@@ -60,8 +60,8 @@ def stage_target(stage: Stage, ctx) -> str | None:
 #: the top of the loop body and landed at the bottom of the same body — so exactly one chunk is ever
 #: in flight, however many slots the codec asks for. A third slot would hold no extra chunk, only
 #: idle smem, so the ring caps here the way it caps at the smem budget. Both resolvers apply it; the
-#: staged K-loop skeleton asserts it (``lands_after_drain`` groups prime exactly one chunk, and two
-#: primes would redeclare the same staging registers).
+#: staged K-loop skeleton asserts it (a split fill primes exactly one chunk, and two primes would
+#: redeclare the same staging registers).
 SPLIT_COPY_DEPTH = 2
 
 

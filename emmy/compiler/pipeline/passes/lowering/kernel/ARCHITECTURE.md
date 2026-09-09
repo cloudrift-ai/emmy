@@ -222,9 +222,9 @@ operand-group is a `(transport, depth)` pair, and the fill / wait / barrier plac
 live range (`[first reader, last reader]` over the segments) — wait before the first reader, a CTA barrier past the
 last, `depth >= 2` prefetching chunk `i+ring-1` at the top of the body, whole-body `depth == 1` filling the current
 chunk (the single-buffer degenerate), and a `depth == 1` group live in a PROPER sub-interval refilling chunk `i+1` at
-its kill point so the copy overlaps every segment outside the live range. A group whose fill is SPLIT
-(`lands_after_drain`) also gets a **deposit** placed past its last reader, just ahead of that barrier — the copy's
-second half, landing the registers its fill issued. cp.async `wait_group(N)` counts are a
+its kill point so the copy overlaps every segment outside the live range. A transport whose fill is SPLIT also offers a
+**deposit**, placed past its last reader and just ahead of that barrier — the copy's second half, landing the registers
+its fill issued. Offering one IS the seam: nothing else marks such a group. cp.async `wait_group(N)` counts are a
 static pass over the placed schedule (the commits younger than a group's fill at its wait point); the prologue primes
 exactly the fills the pre-loop iterations would have issued. `staged_kloop` is the whole-body single-group entry
 (the matmul tier's classic `fill → commit → wait → drain → Sync` phases fall out of the derivation). Behind it, a

@@ -652,13 +652,6 @@ class SyncTransport:
             and all(_sync_copy_runs(op.shape, self.cta, op.elem_bytes or self.elem_bytes) is not None for op in self.copy_operands)
         )
 
-    @property
-    def lands_after_drain(self) -> bool:
-        """Implements the :func:`pipelined_kloop` transport seam: this group's in-flight chunk lands
-        AFTER the resident chunk's drain, not before it. True only for the register-staged split —
-        cp.async and TMA land ahead of the drain they feed, in their own ``wait``."""
-        return self.register_staged
-
     def slab_decls(self, ring: int) -> list[Stmt]:
         # Sync-filled slabs are single-buffer (see :meth:`SyncOperand.slot_row`); of the copied
         # peers only the per-chunk ones allocate the ring — the loop-invariant peers never advance,
@@ -1255,11 +1248,6 @@ def pipelined_kloop(
         g.first, g.last = readers[0], readers[-1]
         if g.ring >= 2:
             g.kind, g.lag = "ring", g.ring - 1
-            # A split fill primes ONE chunk (its staging registers are named per lane, not per
-            # slot), which the resolvers guarantee by capping such a ring at ``SPLIT_COPY_DEPTH``.
-            assert not (getattr(g.transport, "lands_after_drain", False) and g.lag > 1), (
-                f"a split fill holds one chunk in registers, but its ring is {g.ring} — the resolver did not cap the depth"
-            )
         elif g.first == 0 and g.last == len(segments) - 1:
             g.kind, g.lag = "current", 0
         else:
@@ -1301,14 +1289,20 @@ def pipelined_kloop(
         decls += g.transport.slab_decls(g.ring)
     for g in groups:
         pre += g.transport.prologue(g.ring)
+    primed_slots = False
     for g in groups:  # prime exactly ``lag`` chunks per group — what iterations -lag..-1 would have filled
         for c in range(g.lag):
             pre += g.transport.fill(k0=_prime_k0(c), slot=_lit(c))
             # A split fill has no copy engine to leave the prime in flight, and no drain ahead of
-            # the loop to hide it behind — land it right here.
-            pre += _deposit(g, _lit(c))
+            # the loop to hide it behind — land it right here. Its staging registers are named per
+            # LANE, not per slot, so a second prime would redeclare them; the resolvers guarantee
+            # there is never one by capping such a ring at ``SPLIT_COPY_DEPTH`` slots.
+            landing = _deposit(g, _lit(c))
+            assert not (landing and c), f"a split fill primes one chunk, but this ring asked for {g.ring} slots"
+            pre += landing
             pre += g.transport.commit()
-    if any(getattr(g.transport, "lands_after_drain", False) for g in groups):
+            primed_slots |= bool(landing)
+    if primed_slots:
         pre.append(Sync())  # every primed slot visible to every lane before the first drain reads it
 
     # The wait-group counting pass: lay the committing fills out in body order (top fills first,
