@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import pytest
 
+from emmy.compiler.context import Context
 from emmy.compiler.ir.schedule import Reduce, Tile, Work, resolve_site_tile
+from emmy.compiler.ir.schedule.catalog import stage_moves
 
 
 def test_work_codec_round_trips() -> None:
@@ -30,6 +32,29 @@ def test_work_codec_rejects_malformed() -> None:
     for bad in ("x4", "w4", "t16x8+p1", "w4x1+q2", "w4x1x2", "w04x1", "t16x1", "w4x1+p0", " w4x1"):
         with pytest.raises(ValueError):
             Work.parse(bad)
+
+
+def test_scalar_stage_catalog_offers_sync_staging_on_volta() -> None:
+    assert [stage.spell() for stage in stage_moves(warp=False, ctx=Context.from_target((7, 0)))] == [
+        "d1/smem",
+        "d2/smem",
+        "d3/smem",
+        "d4/smem",
+    ]
+
+
+def test_warp_stage_catalog_is_the_product_of_its_parametrizations() -> None:
+    """Staging is ONE pipeline whose knobs are independent, so the catalog offers their product and
+    nothing hand-picks which pairings are worth trying — the target filter, the resolvers and
+    measured evidence do that."""
+    hopper = stage_moves(warp=True, ctx=Context.from_target((9, 0)))
+    assert {(stage.transport, stage.depth, stage.reg_depth) for stage in hopper} == {
+        (transport, depth, reg_depth) for transport in ("smem", "smem-async", "smem-tma") for depth in (1, 2, 3, 4) for reg_depth in (1, 2)
+    }
+    # sm_70 issues neither cp.async nor TMA; the register ping-pong still pairs with what is left.
+    volta = stage_moves(warp=True, ctx=Context.from_target((7, 0)))
+    assert {stage.transport for stage in volta} == {"smem"}
+    assert {stage.reg_depth for stage in volta} == {1, 2}
 
 
 def test_tile_site_value_carries_no_worker_tokens() -> None:

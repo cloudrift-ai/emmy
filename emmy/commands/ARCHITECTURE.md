@@ -256,10 +256,11 @@ rows, so promotion compares aggregate execution rather than a sum of isolated la
 and knobs; a repeated name alone is never enough to choose a row. Newly appended tune winners start without copied
 latency because the seed row's measurement describes a different schedule. `--record-greedy` (with `--golden PATH
 --realization NAME --bench`) records the OTHER side of the table — the kernel set the greedy row picked — as
-measured realizations of the named target: one routing row per kernel-set decision the compile took and one
-child-identity schedule receipt per kernel, each timed by the isolated re-bench with the greedy comparison row as its
-`same-input-greedy` reference (`working_golden.record_greedy_pick`; the pipeline ARCHITECTURE's golden-record Part
-has the spelling). That is how a pick the prior made becomes rows a strict-evidence compile of the file deploys
+measured realizations of the named target: one routing row per kernel-set decision the compile took, priced at the
+summed isolated launches of the kernels that decision produced, and one child-identity schedule receipt per kernel at
+its own isolated launch, both with the greedy comparison row as their `same-input-greedy` reference
+(`working_golden.record_greedy_pick`; the pipeline ARCHITECTURE's golden-record Part has the spelling and the
+pricing). That is how a pick the prior made becomes rows a strict-evidence compile of the file deploys
 from without a prior. Independently of both, every clean pinned row and the greedy isolated re-bench are written into
 the tune DB by default at tune-standard measurement quality: per-kernel `perf` rows through the tuner's own writer —
 the deploy evidence the next `compile` / `run` / `serve` picks from, which is how a replayed golden or a hand-pinned
@@ -271,7 +272,11 @@ the failure names — the one the watchdog saw hang, or the one nvcc refused to 
 kernel earns a `bench_fail` perf row at the run budget's fail sentinel and the innocent kernels earn none, so the
 next compile disqualifies that arm instead of electing the same route and failing the same way again; a failure
 that names no kernel records nothing, and a compile-budget overrun measured
-nothing and records nothing. `--no-record-nodes` opts out of all of it.
+nothing and records nothing. `--no-record-nodes` opts out of all of it. This recording happens before any pinned row
+compiles — including when an embedded Loop's same-input reference completed but its repeated greedy timing crossed
+the watchdog — and a pinned row that pins no knobs beyond the greedy compile's own input regime is then skipped
+rather than re-elected and re-failed identically; a pinned row carrying its own knobs (a genuinely different config,
+or an `--ab` row) still benches.
 
 For a fair hybrid-vs-MCTS comparison, both working files start from the same inventory-only trace: do not copy verified
 knob rows into either baseline as proposals. Canonical goldens remain the common implicit deploy context for both runs.

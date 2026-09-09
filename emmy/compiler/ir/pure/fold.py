@@ -396,21 +396,46 @@ class Fold:
 
     @cached_property
     def injected(self) -> Lambda:
-        """The lift SEEN THROUGH ψ — ``injected = psi ∘ lift``, the singleton the ⊕ folds, in the
-        operands' spelling. ``applied`` itself for a planar fold, where ψ is the identity.
+        """The singleton the ⊕ folds — :attr:`applied`, always.
 
-        For a twisted one the stored ``lift`` computes the BASE contribution, which is what makes a
-        channel read as a contraction and what a schedule tiles; it is NOT what a serial step may
-        emit, because ``Sum exp(score)`` overflows. So the step folds this instead: the score's own
-        cone, then the recipe's authored injections (:meth:`Twist.inject`) — the simplified form ψ
-        takes where the pivot IS the score. Nothing else may see through ψ.
+        The term STORES its contribution in the carrier's own coordinates (the twisted fusion
+        splices the recipe's authored injections, not its base lift), so there is nothing left to
+        see through: what the step folds is what the lift says. Kept as a name because every
+        consumer of a folded singleton reads it, and because the base reading is now the derived
+        one (:meth:`based`) rather than this.
+        """
+        return self.applied
+
+    @cached_method
+    def based(self) -> Lambda:
+        """The lift in BASE coordinates — ``psi_inv ∘ lift``, the contribution the base monoid
+        folds. :attr:`applied` itself for a planar fold, where the two coordinate systems coincide.
+
+        RECOGNITION ONLY. The base form denotes ``Sum exp(score)`` and overflows for a large enough
+        logit — that is exactly why the term stores the stable side — so nothing may emit these
+        statements. It exists because bilinearity lives in base coordinates and nowhere else: ψ
+        divides each channel by a factor at the singleton, so softmax's stable contribution is
+        ``(s, 1, v)`` with no product in it at all, while ``psi_inv`` brings back
+        ``(s, exp(s), exp(s)·v)`` where the expectation channel is a bare product of the weight and
+        the streamed value. :meth:`bilinear_channels` reads this; :meth:`step` reads the lift.
         """
         applied = self.applied
         if self.twist is None or not self.twist.channels:
-            return applied  # planar, or a merge whose elements are carrier states already
-        injection = self.twist.inject(self.roles, self.base.results)
-        score = injection.results[0]
-        return Lambda(params=applied.params, body=Body((*applied.cone(score).body, *injection.body)), results=injection.results)
+            return applied
+        psi_inv = self.twist.recipe.psi_inv
+        # ψ⁻¹ is written over the recipe's FULL carrier; this term holds the pivot plus whichever
+        # channels have fused so far, so it is restricted to those slots before instantiation — a
+        # half-fused carrier (the denominator in, the expectation not yet) is the ordinary case
+        # during the rewrite's own fixpoint.
+        slots = (0, *(1 + channel for channel in self.twist.channels))
+        wanted = tuple(psi_inv.results[slot] for slot in slots)
+        members = tuple(psi_inv.body.backward_cone(wanted).members)
+        restricted = Lambda(params=tuple(psi_inv.params[slot] for slot in slots), body=Body(members), results=wanted)
+        taken = {name for stmt in applied.body for name in stmt.defines()} | set(applied.params)
+        names = dict(zip(restricted.params, applied.results, strict=True))
+        names.update((stmt.name, stmt.name if stmt.name not in taken else f"_b_{stmt.name}") for stmt in members)
+        instance = restricted.rename(names)
+        return Lambda(params=applied.params, body=Body((*applied.body, *instance.body)), results=instance.results)
 
     @cached_property
     def roles(self) -> tuple[str, ...]:
@@ -424,35 +449,33 @@ class Fold:
         the weight cone. A role the term never bound (Welford's ``1/N``, whose base contribution
         does not read it) is simply absent from the tail.
 
-        What a recipe DERIVES is not a role, and two tests are needed to say so. A recipe's lift
-        defines the weight from the score (``e = exp(s)``), and formation is free to factor that
-        definition onto an operand edge; when the score arrives as a slab beside it, the weight's
-        edge is not the score's. Reading the edge identity alone mistook the weight for the
-        streamed value and the carrier folded ``exp(s)`` where it meant to fold ``v`` — a wrong
-        answer, not a slow kernel.
+        What a recipe DERIVES is not a role, and the test is that this term also CARRIES it: results
+        line up with the recipe's lift results, so a param a result passes through is that
+        definition, however far the factoring moved it. It is also the only test that still works
+        once a cut materializes the weight into a workspace, where it is a slab like any other.
 
-        - a candidate this term also CARRIES is the recipe's own derived channel: results line up
-          with the recipe's lift results, so a param a result passes through is that definition,
-          however far the factoring moved it. This is the only test left once a cut materializes
-          the weight into a workspace, where it is a slab like any other;
-        - a candidate whose own subtree computes the SCORE is that definition too, which is what
-          catches it on a term carrying the expectation before the denominator has joined, where
-          the weight is no result yet.
+        This reads THIS NODE: its stored bindings, its own lift, and its operands' interfaces —
+        never an operand's internals. The subtree walk that used to sit beside the carried test,
+        asking by object identity whether a candidate's own cone computes the score, is gone. It
+        made a twisted carrier's lowering a function of its whole subtree and of the tree-wide
+        sharing `normalize` restores, which is not a question a node may ask.
+
+        GAP it leaves: a carrier holding the expectation before the denominator has joined has not
+        made the weight one of its results yet, so the carried test cannot see it and it reads as a
+        streamed extra. The fusion knows every role when it builds the carrier, so storing them on
+        the :class:`~emmy.compiler.ir.pure.twist.Twist` closes this with no walk at all.
         """
         bound = {param: (edge, index) for param, edge, index in self.bindings}
-        supplies = bound.get(self.lift.results[0], (None, 0))[0]
-        carried = set(self.lift.results)
-
-        def derives(edge: Fold) -> bool:
-            """Whether ``edge``'s value is computed from the score's — structurally, because the
-            same read reached through two edges is two objects."""
-            return edge is supplies or edge == supplies or any(derives(operand) for operand in edge.operands)
-
+        # A result the body DEFINES is the recipe's own derived channel. A result that is a bare
+        # param is the opposite: the channel passes an operand component through untouched, which
+        # is exactly what a role is — stable coordinates spell attention's expectation as the
+        # streamed value itself, so testing every result would hide the one role it names.
+        carried = {name for stmt in self.lift.body for name in stmt.defines()} & set(self.lift.results)
         extras: list[str] = []
         for result in self.lift.results[1:]:
             for param in self.lift.cone(result).params:
                 edge, index = bound.get(param, (None, 0))
-                if edge is None or param in carried or derives(edge) or edge.exposes[index] in extras:
+                if edge is None or param in carried or edge.exposes[index] in extras:
                     continue
                 extras.append(edge.exposes[index])
         return (self.applied.results[0], *extras)
@@ -514,7 +537,8 @@ class Fold:
         if not channels:
             return None
         channel, b_edge = channels[0]
-        product = self.lift.cone(self.lift.results[channel]).body[0].op
+        based = self.based()
+        product = _channel_product(based, based.results[channel])[1].op
         plus = self.base.components()[channel]
         a_edge = self.operands[0]
         a_space, b_space = a_edge.free_axes, b_edge.free_axes
@@ -605,32 +629,93 @@ class Fold:
         that are no product at all. The ⊕ is the BASE monoid's, componentwise by construction — a
         twist's stable ``combine`` is not, and asking it would refuse every twisted carrier. Each
         channel's ⊕ must be a commutative monoid its seed is the identity of, and the product must
-        distribute over it. Memoized on the term."""
+        distribute over it.
+
+        A is what ``operands[0]`` SUPPLIES, not what it exposes: the left factor may be a component
+        of that edge, or a value this lift computes from its components alone (attention's
+        ``e = exp(r)``, the weight over the score). Requiring a component made a carrier bilinear
+        only after its weight had been reified into an operand of its own — a node that adds no
+        computation and exists to satisfy this pattern. The reach stays inside the node: the cone
+        walked is this lift's own body, and an operand is asked for nothing but its interface.
+        Memoized on the term."""
         if self.axis is None or self.base is None or len(self.operands) < 2:
             return ()
         pluses = self.base.components()
         if pluses is None:
             return ()
-        by_name = {param: edge for param, edge, _ in self.bindings}
+        # Keyed by the name the walk below READS — the operand's own result, since ``based`` is
+        # spelled over ``applied``. A term's param usually carries its operand's name and the two
+        # agree by accident; a cut renames the operand's result to its workspace and they part,
+        # which lost B and with it the whole channel.
+        by_name = {edge.exposes[index]: edge for _param, edge, index in self.bindings}
         a_edge = self.operands[0]
-        a_names = {param for param, edge, _ in self.bindings if edge is a_edge}
+        a_names = {edge.exposes[index] for _param, edge, index in self.bindings if edge is a_edge}
+        uniform = {edge.exposes[index] for _param, edge, index in self.bindings if edge is not a_edge and not edge.free_axes}
+        based = self.based()  # bilinearity lives in BASE coordinates; ψ divides the product away
         out: list[tuple[int, Fold]] = []
-        for index, result in enumerate(self.lift.results):
-            cone = self.lift.cone(result)
-            if len(cone.body) != 1 or not isinstance(stmt := cone.body[0], Assign) or len(stmt.args) != 2:
-                continue  # a state the carrier passes through, or one whose cone is more than a product
+        for index, result in enumerate(based.results):
+            cone, product = _channel_product(based, result)
+            if product is None or len(product.args) != 2:
+                continue  # a state the carrier passes through, or one whose cone ends in no product
             plus = pluses[index]
-            if not (plus.associative and plus.commutative and plus.has_identity) or self.init[index] != plus.identity:
+            if not (plus.associative and plus.commutative and plus.has_identity):
                 continue
-            if not stmt.op.distributes_over(plus):
+            if self.twist is None and self.init[index] != plus.identity:
+                continue  # a planar fold seeds the ⊕ itself; a recipe's base is a monoid by construction
+            if not product.op.distributes_over(plus):
                 continue
-            other = set(stmt.args) - a_names
-            if len(set(stmt.args) & a_names) != 1 or len(other) != 1:
-                continue  # a product that does not multiply A by exactly one other edge
-            edge = by_name.get(next(iter(other)))
-            if edge is not None and edge is not a_edge:
-                out.append((index, edge))
+            left = [arg for arg in product.args if _over_a(arg, cone, a_names, uniform)]
+            right = [arg for arg in product.args if (edge := by_name.get(arg)) is not None and edge is not a_edge and edge.free_axes]
+            if len(left) != 1 or len(right) != 1 or left[0] == right[0]:
+                continue  # a square, or a product that does not multiply A by exactly one other edge
+            out.append((index, by_name[right[0]]))
         return tuple(out)
+
+    @cached_method
+    def per_state(self) -> Fold | None:
+        """This carrier as ONE fold per carried state, under a projection re-exposing the state
+        tuple — or ``None`` where taking it apart buys nothing.
+
+        A planar carrier whose channels multiply DIFFERENT operand pairs is two contractions the
+        loop fusion put in one nest. No tier folds it whole: the tile's accumulators are one A
+        against a B slab per channel, and there is one A here per channel. Each state ON ITS OWN is
+        an ordinary matmul the mma tier already tiles, so the term says so — one term per state,
+        the projection above them exposing what the carrier exposed, and every reading downstream
+        (:meth:`bilinear_channels`, :meth:`tiles_whole`, ``TileOp.contracts``, the atom's channels)
+        stays exactly as strict as it was.
+
+        Only what refuses comes apart: a carrier that folds whole is the FUSED form the atom wants
+        (one ldmatrix'd A fragment, N mma chains off it) and stays one term, and a state that is no
+        product of its own — a sum beside a sum of squares, whose two states read one loaded value —
+        stays too, since two terms would read that value twice for nothing. A twisted or observed
+        carrier never comes apart: its states are coupled by the recipe.
+        """
+        if self.axis is None or self.twist is not None or self.observe is not None or self.base is None:
+            return None
+        pluses = self.base.components()
+        if pluses is None or len(self.base.results) < 2 or self.tiles_whole():
+            return None
+        children: list[Fold] = []
+        for index, result in enumerate(self.lift.results):
+            body = Body(tuple(self.lift.body.backward_cone((result,)).members))
+            read = body.ssa_uses
+            operands, params = [], []
+            for edge in self.operands:
+                slots = [param for param, other, _ in self.bindings if other is edge]
+                if any(param in read for param in slots):
+                    operands.append(edge)  # every component stays bound: the binding is positional
+                    params.extend(slots)
+            child = replace(
+                self,
+                operands=tuple(operands),
+                lift=Lambda.closing((self.axis, *params), body, (result,)),
+                init=(self.init[index],),
+                base=Lambda.componentwise((pluses[index],), (self.base.results[index],)),
+            )
+            if not child.tiles_whole():
+                return None
+            children.append(child)
+        return Fold(operands=tuple(children), lift=Lambda.closing(self.exposes, Body(()), self.exposes))
 
     @cached_method
     def as_reduction(self) -> ReductionView | None:
@@ -654,6 +739,18 @@ class Fold:
         if self.operands or self.base is not None or len(self.lift.body) != 1 or not isinstance(self.lift.body[0], Load):
             return None
         return SlabView(load=self.lift.body[0])
+
+    @cached_method
+    def scalar(self) -> bool:
+        """Whether this term is ONE value for the whole kernel — no operands, no axis and no free
+        coordinates, so its body is straight-line arithmetic over scalar reads (an sdpa scale and
+        its two mask fills, an rms epsilon and its mean divisor).
+
+        Such a term DECIDES nothing. There is no residence, partition or tile to pick for a value
+        every worker holds, and a seam offered at it would launch a kernel to write one scalar to a
+        workspace so its reader could read it back — so the cut pass passes over it, exactly as the
+        node walk passes over a slab. The dump spells it inside its reader for the same reason."""
+        return self.axis is None and not self.operands and not self.free_axes and bool(self.lift.body)
 
     # ---- the DERIVED READINGS. ``Map`` and ``Contraction`` are no longer stored kinds (the
     # collapse); every field they carried reads back off the one stored term here, so their old
@@ -838,9 +935,11 @@ class Fold:
             # The carrier's states: the pivot's, then every channel in recipe order — the matched
             # one is this fold's own state, one without a pattern a state the recipe adds. Each
             # takes the recipe's BASE contribution for it (``lift``'s own result), instantiated at
-            # the score and this channel's extras: the term stores what the recipe declares, and ψ
-            # is applied at lowering (:attr:`injected`). The SEEDS stay the carrier's — the state
-            # is the stable one, only the per-element contribution is the base's.
+            # the score and this channel's extras. STABLE coordinates throughout: the contribution
+            # stored is the recipe's authored INJECTION — the singleton in the carrier's own state
+            # space, where the pivot IS the score and softmax's ``exp(s)·v`` has already simplified
+            # to ``v``. The base contribution is a derived reading (:meth:`based`) a matcher asks
+            # for and nothing emits. Seeds are the carrier's, as the states are.
             state = view.states[0]
             score = pivot.lift.results[0]
             added = [
@@ -857,17 +956,35 @@ class Fold:
             body, results, inits = list(pivot.lift.body), list(pivot.lift.results), list(pivot.init)
             for name, index, init in added:
                 taken = {n for stmt in body for n in stmt.defines()} | {p for _, slot in held for p in slot}
-                cone = recipe.lift.cone(recipe.lift.results[1 + index])
+                cone = recipe.channels[index].injection
                 names = {param: roles[param] for param in cone.params}
-                names.update((stmt.name, stmt.name if stmt.name not in taken else f"{name}__{stmt.name}") for stmt in cone.body)
-                instance = cone.rename(names)
-                body.extend(instance.body)
-                results.append(instance.results[0])
+                # Statement by statement, so a channel BINDS what the body already computes rather
+                # than spelling it again: softmax's denominator and its expectation share the whole
+                # weight prefix, and instantiating each cone whole put two ``exp(s)`` in one lift.
+                have = {(stmt.op, stmt.args): stmt.name for stmt in body if isinstance(stmt, Assign)}
+                for stmt in cone.body:
+                    spelled = stmt.rewrite(lambda read, names=names: names.get(read, read))
+                    if isinstance(spelled, Assign) and (prior := have.get((spelled.op, spelled.args))) is not None:
+                        names[stmt.name] = prior
+                        continue
+                    fresh = stmt.name if stmt.name not in taken else f"{name}__{stmt.name}"
+                    names[stmt.name] = fresh
+                    spelled = replace(spelled, name=fresh)
+                    body.append(spelled)
+                    taken.add(fresh)
+                    if isinstance(spelled, Assign):
+                        have[(spelled.op, spelled.args)] = fresh
+                results.append(names[cone.results[0]])
                 inits.append(init)
-            _factor_weights(body, results, held, len(pivot.lift.results))
-            # An operand the factored lift no longer names is the cone's now, not the carrier's.
+            # An operand the lift no longer names is nobody's — the recipe's own contribution
+            # replaced the statements that read it.
             read = {name for stmt in body for name in stmt.deps()} | set(results)
             held = [entry for entry in held if not read.isdisjoint(entry[1])]
+            # B SECOND. A leads by canonical form; a bilinear channel's other factor must follow it,
+            # because staging and both atom tiers take B from ``operands[1]`` rather than asking the
+            # channel. An operand with no free coordinates — attention's scale — is no channel's
+            # factor at all, so it sorts behind the streamed value instead of between the pair.
+            held = [held[0], *sorted(held[1:], key=lambda entry: not entry[0].free_axes)]
             # The carrier is the RECIPE's own vector: the pivot, then the channels it holds in the
             # order the recipe declares them, whatever order the tree happened to fuse them in.
             # Softmax's is (m, D, O) whether the denominator or the expectation clicked first, so a
@@ -1182,6 +1299,36 @@ def _(s: Fold, rename, sigma, axis_fn):
     return replace(s, operands=operands, lift=lift, base=base, observe=observe)
 
 
+def _channel_product(lift: Lambda, result: str) -> tuple[Lambda, Assign | None]:
+    """One carried state's cone and the ``Assign`` that ENDS it — the product a bilinear channel
+    contributes, or ``None`` when the state is a pass-through or its cone ends in something else.
+
+    The cone may hold more than that one statement: a channel whose left factor this lift derives
+    (attention's ``e = exp(r)``) carries the derivation with it, and the product is still the
+    statement defining the result."""
+    cone = lift.cone(result)
+    stmt = next((s for s in cone.body if result in s.defines()), None)
+    return cone, stmt if isinstance(stmt, Assign) else None
+
+
+def _over_a(name: str, cone: Lambda, a_names: set[str], uniform: set[str]) -> bool:
+    """Whether ``name`` is the A factor of ``cone``'s product — a component ``operands[0]`` binds,
+    or a value the cone computes from those components and kernel-UNIFORM ones alone.
+
+    The second reading is what lets a carrier read bilinear before its weight is reified. It walks
+    the cone, which is this lift's own body, and never an operand's internals: a name bound to any
+    other edge closes back as itself and fails the test.
+
+    ``uniform`` are the components of operands with no free coordinates — attention's scale, an rms
+    epsilon. One contributes no variation, so a factor reading it varies exactly as A does and the
+    channel is bilinear all the same. Without them the weight ``exp(a·scale)`` reads as a product
+    of A with a second varying value and no mma is offered at all."""
+    if name in a_names:
+        return True
+    reads = set(cone.cone(name).params)
+    return bool(reads & a_names) and reads <= a_names | uniform
+
+
 def _writes_under(term: Fold, writing: set[int]) -> bool:
     """Whether any term of ``term``'s subtree defines a value the kernel's boundary stores."""
     pending, seen = [term], set()
@@ -1196,23 +1343,6 @@ def _writes_under(term: Fold, writing: set[int]) -> bool:
     return False
 
 
-def _already_held(stmt: Assign, held: list[tuple[Fold, tuple[str, ...]]]) -> str | None:
-    """The param of an operand component this statement recomputes, or ``None``.
-
-    A hoisted cone keeps the spellings it took with it, so the reader's params and the edge's own
-    results are the same names and the two programs compare directly.
-    """
-    for edge, slot in held:
-        if edge.axis is not None:
-            continue
-        definitions = edge.lift.body.definitions
-        for param, name in zip(slot, edge.exposes, strict=True):
-            own = definitions.get(name)
-            if isinstance(own, Assign) and own.op == stmt.op and own.args == stmt.args:
-                return param
-    return None
-
-
 def _slots(params: tuple[str, ...], edges) -> list[tuple[str, ...]]:
     """``params`` cut into one group per edge — the positional binding, one param per result component."""
     out, cursor = [], 0
@@ -1220,59 +1350,6 @@ def _slots(params: tuple[str, ...], edges) -> list[tuple[str, ...]]:
         out.append(tuple(params[cursor : cursor + len(edge.exposes)]))
         cursor += len(edge.exposes)
     return out
-
-
-def _factor_weights(body: list[Stmt], results: list[str], held: list[tuple[Fold, tuple[str, ...]]], start: int) -> None:
-    """Hoist a channel's WEIGHT into an operand of its own, so the channel reads as a contraction.
-
-    A twisted carrier's expectation channel contributes ``weight ⊗ value`` — one monomial, but the
-    weight is a cone over the score, so as it stands the product multiplies a body definition by an
-    operand and no bilinear reading applies. Hoisting that cone out is what the semiring formation
-    already does for a matmul's decoded A, and it leaves the channel a bare product of two operand
-    edges: A first, B second, exactly where every reader of a contraction looks for them.
-
-    Every OTHER contribution the cone computes travels with it — the score the pivot folds, the
-    weight the denominator folds — so one cone serves the whole carrier and there is one score node
-    under it. Those results keep their spellings, so what was a body definition becomes a param and
-    nothing renames.
-
-    Only the results from ``start`` on are the channels this fusion added; the ones before them are
-    the pivot's own, already factored when it was built. ``body`` and ``held`` are rewritten in place.
-    """
-
-    def hoist(name: str) -> None:
-        members = tuple(Body(tuple(body)).backward_cone((name,)).members)
-        defined = {n for stmt in members for n in stmt.defines()}
-        carried = [result for result in results if result in defined]
-        if name not in carried:
-            carried.append(name)
-        reads = {n for stmt in members for n in stmt.deps()} - defined
-        inner = [(edge, slot) for edge, slot in held if not reads.isdisjoint(slot)]
-        cone = Fold(
-            operands=tuple(edge for edge, _ in inner),
-            lift=Lambda.closing(tuple(param for _, slot in inner for param in slot), Body(members), tuple(carried)),
-        )
-        body[:] = [stmt for stmt in body if defined.isdisjoint(stmt.defines())]
-        held.insert(0, (cone, tuple(carried)))  # A leads: ``operands[0]`` is what the product multiplies
-
-    for position, result in enumerate(results[start:], start):
-        product = {stmt.name: stmt for stmt in body}.get(result)
-        if isinstance(product, Assign) and (already := _already_held(product, held)) is not None:
-            # The denominator's contribution IS the weight the expectation's product multiplies by,
-            # so it binds that operand instead of computing a second copy of it.
-            results[position] = already
-            body[:] = [stmt for stmt in body if stmt is not product]
-            continue
-        if not isinstance(product, Assign) or len(set(product.args)) != 2:
-            continue  # not a monomial over two distinct values — Welford's square is one edge, not a pair
-        bound = {param for _, slot in held for param in slot}
-        free = [arg for arg in product.args if arg not in bound]
-        if len(free) != 1:
-            continue  # already a bare product of operand edges, or a shape this rule cannot orient
-        hoist(free[0])
-        streamed = next((index for index, (_, slot) in enumerate(held) if index and not set(slot).isdisjoint(product.args)), None)
-        if streamed is not None:
-            held.insert(1, held.pop(streamed))  # B second, so the pair reads off the operands in order
 
 
 __all__ = [

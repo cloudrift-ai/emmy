@@ -69,6 +69,7 @@ from emmy.compiler.ir.stmt.leaves import (
     Unpack,
     Write,
     ZeroPrologue,
+    mask_select_predicate,
 )
 from emmy.compiler.ir.stmt.normalize import (
     canonicalize_buffer_names,
@@ -98,6 +99,7 @@ __all__ = [
     "Load",
     "Loop",
     "Mma",
+    "mask_select_predicate",
     "Pack",
     "RenderCtx",
     "ZeroPrologue",

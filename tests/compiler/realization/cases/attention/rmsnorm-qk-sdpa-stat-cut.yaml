@@ -55,7 +55,7 @@ configs:
       REDUCE: ''
       STAGE: ''
       RASTER: ''
-    identity: a1e7af8b547396835ed843e5ad10e1310e063dc736bb48b82142ed46cd0acbd6
+    identity: 3ccf06e8caeec7cd3f984fea3ac280b09d66a70c6d13b84141f4b1879eef7bd4
   - name: k_sdpa_rms_norm_reduce_c7db33.084d63faa9d8.48bf0d51c143
     bindings: {}
     pins:
@@ -96,3 +96,11 @@ configs:
       WORK: ''
       RASTER: ''
     identity: 38829bdbae001a66b53ca9cf0627f27daa739e82c5e1ead38039b7569e13d425
+  - name: k_sdpa_rms_norm_reduce_4ef985.6a9c8ed5d103.51b691d959f9
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      RASTER: ''
+    identity: 51b691d959f945010d3d2b11066e7af130a8b42e56a400dc6b9a132256ee7488

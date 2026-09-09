@@ -894,11 +894,13 @@ def decode_record(record: GoldenRecord, siblings: Sequence[GoldenRecord] = ()) -
     program selects exactly one kernel, except that a child-identity schedule receipt may select its
     kernel from a multi-kernel target by stored identity; a routing record's every cut key names a
     seam the cut pass offers on the replay (:func:`_replay`); a SCHEDULE record's spelled row equals
-    one enumerated leaf (``canonical_row_key`` equality under the record's own pins) — no prefix
-    matching, no any-of, no classified shape. A receipt's
+    one enumerated leaf (``schedule_match_key`` equality under the record's own pins) — no prefix
+    matching, no any-of, no classified shape. That equality is blind to the two sides' OFF anchors:
+    which of them a spelling writes down depends on whether it came from a resolved kernel or from a
+    fork's offered leaf, and neither carries schedule content. A receipt's
     identity must equal one kernel resolved under the record's pins, and the spelled row must equal
     one of THAT kernel's rows — a sibling child's row must not vouch for it."""
-    from emmy.compiler.pipeline.knob import schedule_row_key  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import schedule_match_key  # noqa: PLC0415
 
     verdict_key = digest(_record_fingerprint(record), str(sorted(record.knobs.items())), str(record.pins), record.identity or "")
     store = _identity_store()
@@ -916,7 +918,10 @@ def decode_record(record: GoldenRecord, siblings: Sequence[GoldenRecord] = ()) -
         reason = f"routing key {replay.unresolved[0]!r} does not resolve to an offered cut seam" if replay.unresolved else None
         return _remember_verdict(verdict_key, reason)
     candidates = replay.rows
-    row = schedule_row_key(record.knobs)
+    # The piece row, not the recorded one: a ``g<n>`` cross-CTA half names the kernel-set arm the
+    # replay already resolved, and the pieces it mints cannot stamp it, so comparing it to a leaf
+    # asks a piece to spell its parent's decision.
+    row = schedule_match_key(piece_row(record.knobs))
     if record.is_receipt and (tile is None or record.identity != tile.identity_key(with_io=True)):
         child_rows = candidates.get(record.identity)
         if child_rows is None:
@@ -945,8 +950,9 @@ class _Replay(NamedTuple):
     """One replay of a record's target through the tile passes under the record's pins, following
     the record's knobs at every kernel-set fork (:func:`~emmy.compiler.pipeline.search.pins.spelled_arm`).
 
-    ``rows`` — the EXHAUSTIVE replay's answer: every schedule-row identity each kernel can realize,
-    bucketed by the kernel's deploy identity (``identity_key(with_io=True)``; ``None`` for forks
+    ``rows`` — the EXHAUSTIVE replay's answer: every schedule-row identity each kernel can realize
+    as a :func:`~emmy.compiler.pipeline.knob.schedule_match_key`, bucketed by the kernel's deploy
+    identity (``identity_key(with_io=True)``; ``None`` for forks
     whose root is not a recognized ``TileOp``): the fork leaves' rows, PLUS each resolved kernel's
     own realized row — a forkless kernel (the schedule space collapsed to one row, often the all-OFF
     anchor) never opens a fork, so its one row is read off the resolved op instead. Behind a cut the
@@ -977,16 +983,20 @@ class _Replay(NamedTuple):
 def piece_row(row: Mapping[str, str]) -> dict[str, str]:
     """A record's schedule row as a piece of its kernel set can carry it: a ``REDUCE`` value reduced
     to what a piece can still stamp (:func:`~emmy.compiler.pipeline.search.pins.stampable_reduce`),
-    since the cross-CTA split it names was the parent's decision."""
+    since the cross-CTA split it names was the parent's decision.
+
+    A value whose whole content was the split reduces to the OFF ``''``, and the key STAYS at it:
+    the piece decided to fold nothing, and an enumerated leaf spells that decision rather than
+    omitting the family (:attr:`GoldenRecord.schedule_row`). Dropping the key instead read as
+    "free", which no leaf equals — the whole split half of a card's rows decoded to nothing and
+    joined no kernel in the evidence index."""
     from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import stampable_reduce  # noqa: PLC0415
 
     out = {str(key): str(value) for key, value in row.items()}
     for key, value in list(out.items()):
         if family_of(key) == "REDUCE" and (rest := stampable_reduce(value)) is not None:
-            del out[key]
-            if rest:
-                out[key] = rest
+            out[key] = rest
     return out
 
 
@@ -1038,11 +1048,12 @@ def _replay(
         canonical_row_key,
         evidence_row_vouches,
         family_of,
+        schedule_match_key,
         schedule_pin_fingerprint,  # noqa: PLC0415
         schedule_row_key,
     )
     from emmy.compiler.pipeline.pipeline import Run, _is_structural_option  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.pins import pinned_knobs, spelled_arm  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import composed_routes, pinned_knobs, spelled_arm  # noqa: PLC0415
 
     def _spelling(entry: GoldenRecord) -> dict[str, str]:
         # A routed realization measures nothing itself and carries no row, so read alone it would
@@ -1146,17 +1157,27 @@ def _replay(
         for leaf in ops:
             row = leaf_knobs(leaf)
             if row:
-                buckets.setdefault(identity, set()).add(schedule_row_key(row))
+                buckets.setdefault(identity, set()).add(schedule_match_key(row))
         return ops[0] if ops else leaves[0]
 
-    with pinned_knobs(regime):
+    # The seams an entry marks cut together are one composed decision where they resolve on one
+    # kernel (a pinned compile consumed them so, and ``run --record-greedy`` wrote them so); the cut
+    # pass offers that arm on this replay's kernels so whichever entry decides a fork — the record,
+    # the lead, a sibling naming the kernel — can spell it.
+    composed: list[tuple[frozenset | None, tuple[str, ...]]] = []
+    for entry in (record, lead, *named.values()):
+        keys = tuple(sorted(key for key, value in _spelling(entry).items() if family_of(key) == "PLACE" and value == "cut"))
+        if len(keys) > 1 and (None, keys) not in composed:
+            composed.append((None, keys))
+    with pinned_knobs(regime), composed_routes(composed):
         out, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(record.target_program.copy(), decide)
     for node in out.nodes.values():
         if isinstance(node.op, TileOp):
             identity = _identity_of(node.op)
-            row = schedule_row_key(dict(node.op.knobs or {}))
+            knobs = dict(node.op.knobs or {})
+            row = schedule_row_key(knobs)
             if exhaustive:
-                buckets.setdefault(identity, set()).add(row)
+                buckets.setdefault(identity, set()).add(schedule_match_key(knobs))
             if identity is not None:
                 kernels.add(identity)
                 realized[identity] = dict(row)

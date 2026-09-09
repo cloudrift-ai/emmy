@@ -579,6 +579,66 @@ programs:
     attrs: {is_causal: false, sliding_window: null, scale: null}
     inputs: [x0, x1, x2]
     outputs: [[scaled_dot_product_attention, f16, [1, 8, {sym: seq_len, hint: 512}, 64]]]
+- inputs: [x0, x1, x2]
+  outputs: [scaled_dot_product_attention]
+  nodes:
+  - id: scaled_dot_product_attention_c3
+    op: constant
+    attrs:
+      name: scaled_dot_product_attention_c3
+      value: 0.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[scaled_dot_product_attention_c3, f16, [1]]]
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 8, 512, 128]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [1, 8, 512, 128]]]
+  - id: x2
+    op: input
+    outputs: [[x2, f16, [1, 8, 512, 128]]]
+  - id: scaled_dot_product_attention
+    op: torch.sdpa
+    attrs: {is_causal: true, sliding_window: null, scale: null}
+    inputs: [x0, x1, x2]
+    outputs: [[scaled_dot_product_attention, f16, [1, 8, 512, 128]]]
+- inputs: [x0, x1, x2]
+  outputs: [scaled_dot_product_attention]
+  nodes:
+  - id: scaled_dot_product_attention_c3
+    op: constant
+    attrs:
+      name: scaled_dot_product_attention_c3
+      value: 0.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[scaled_dot_product_attention_c3, f16, [1]]]
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 8, 512, 64]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [1, 8, 512, 64]]]
+  - id: x2
+    op: input
+    outputs: [[x2, f16, [1, 8, 512, 64]]]
+  - id: scaled_dot_product_attention
+    op: torch.sdpa
+    attrs: {is_causal: true, sliding_window: null, scale: null}
+    inputs: [x0, x1, x2]
+    outputs: [[scaled_dot_product_attention, f16, [1, 8, 512, 64]]]
 configs:
 - program: 0
   target:
@@ -1115,6 +1175,7 @@ configs:
       FAST_EXP: false
       INTERLEAVE_LOADS: true
       REDUCE: coop
+      RASTER: ''
       VECTORIZE_LOADS: true
     measurements:
       emmy_us: 3.7
@@ -1135,6 +1196,7 @@ configs:
       FAST_EXP: false
       INTERLEAVE_LOADS: true
       REDUCE: coop
+      RASTER: ''
       VECTORIZE_LOADS: true
     measurements:
       emmy_us: 1.5
@@ -1154,6 +1216,7 @@ configs:
       FAST_EXP: false
       INTERLEAVE_LOADS: true
       REDUCE: coop
+      RASTER: ''
       VECTORIZE_LOADS: true
     measurements:
       emmy_us: 10.2
@@ -1174,6 +1237,7 @@ configs:
       FAST_EXP: false
       INTERLEAVE_LOADS: true
       REDUCE: coop
+      RASTER: ''
       VECTORIZE_LOADS: true
     measurements:
       emmy_us: 3.3
@@ -1193,6 +1257,7 @@ configs:
       FAST_EXP: false
       INTERLEAVE_LOADS: true
       REDUCE: coop
+      RASTER: ''
       VECTORIZE_LOADS: true
     measurements:
       emmy_us: 3.8
@@ -1212,6 +1277,7 @@ configs:
       FAST_EXP: false
       INTERLEAVE_LOADS: true
       REDUCE: coop
+      RASTER: ''
       VECTORIZE_LOADS: true
     measurements:
       emmy_us: 6.4
@@ -1231,6 +1297,7 @@ configs:
       FAST_EXP: false
       INTERLEAVE_LOADS: true
       REDUCE: coop
+      RASTER: ''
       VECTORIZE_LOADS: true
     measurements:
       emmy_us: 10.2
@@ -1250,6 +1317,7 @@ configs:
       FAST_EXP: false
       INTERLEAVE_LOADS: true
       TILE: f4
+      RASTER: ''
       VECTORIZE_LOADS: true
     measurements:
       emmy_us: 3.3
@@ -1269,6 +1337,7 @@ configs:
       FAST_EXP: false
       INTERLEAVE_LOADS: true
       TILE: f2
+      RASTER: ''
       VECTORIZE_LOADS: true
     measurements:
       emmy_us: 11.1
@@ -1288,6 +1357,7 @@ configs:
       FAST_EXP: false
       INTERLEAVE_LOADS: true
       REDUCE: coop
+      RASTER: ''
       VECTORIZE_LOADS: true
     measurements:
       emmy_us: 3.7
@@ -1308,6 +1378,7 @@ configs:
       FAST_EXP: false
       INTERLEAVE_LOADS: true
       REDUCE: coop
+      RASTER: ''
       VECTORIZE_LOADS: true
     measurements:
       emmy_us: 1.5
@@ -1327,6 +1398,7 @@ configs:
       FAST_EXP: false
       INTERLEAVE_LOADS: true
       REDUCE: coop
+      RASTER: ''
       VECTORIZE_LOADS: true
     measurements:
       emmy_us: 10.1
@@ -1347,6 +1419,7 @@ configs:
       FAST_EXP: false
       INTERLEAVE_LOADS: true
       REDUCE: coop
+      RASTER: ''
       VECTORIZE_LOADS: true
     measurements:
       emmy_us: 3.3
@@ -1366,6 +1439,7 @@ configs:
       FAST_EXP: false
       INTERLEAVE_LOADS: true
       REDUCE: coop
+      RASTER: ''
       VECTORIZE_LOADS: true
     measurements:
       emmy_us: 3.9
@@ -1385,6 +1459,7 @@ configs:
       FAST_EXP: false
       INTERLEAVE_LOADS: true
       REDUCE: coop
+      RASTER: ''
       VECTORIZE_LOADS: true
     measurements:
       emmy_us: 6.4
@@ -1404,6 +1479,7 @@ configs:
       FAST_EXP: false
       INTERLEAVE_LOADS: true
       REDUCE: coop
+      RASTER: ''
       VECTORIZE_LOADS: true
     measurements:
       emmy_us: 10.3
@@ -1423,6 +1499,7 @@ configs:
       FAST_EXP: false
       INTERLEAVE_LOADS: true
       TILE: f4
+      RASTER: ''
       VECTORIZE_LOADS: true
     measurements:
       emmy_us: 3.3
@@ -1442,6 +1519,7 @@ configs:
       FAST_EXP: false
       INTERLEAVE_LOADS: true
       TILE: f2
+      RASTER: ''
       VECTORIZE_LOADS: true
     measurements:
       emmy_us: 11.1
@@ -1490,16 +1568,16 @@ configs:
     pins:
       FAST_MATH: true
     knobs:
-      WORK: w2x4
-      TILE: mma_m16n8k16_f16_f16/f1x4/k8
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f1x4/k8
       REDUCE: ''
-      STAGE: d1/smem
+      STAGE: d1/smem-tma
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 11.84
-      reference_us: 23.89
-      reference_backend: emmy-greedy
+      emmy_us: 12.22
+      reference_us: 12.22
+      reference_backend: same-input-greedy
   - name: attention.hd128.softmax_v
     bindings: {}
     pins:
@@ -1508,13 +1586,13 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f32/f1x4/k8
       REDUCE: ''
-      STAGE: d1/smem
+      STAGE: d1/smem-tma
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 14.8
-      reference_us: 23.9
-      reference_backend: emmy-greedy
+      emmy_us: 11.0
+      reference_us: 11.0
+      reference_backend: same-input-greedy
 - program: 33
   target:
     loop: 2
@@ -1561,13 +1639,13 @@ configs:
       WORK: w1x4
       TILE: mma_m16n8k16_f16_f32/f1x2/k4
       REDUCE: ''
-      STAGE: d1/smem
+      STAGE: d1/smem-tma
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 11.95
-      reference_us: 104.99
-      reference_backend: emmy-greedy
+      emmy_us: 19.17
+      reference_us: 19.17
+      reference_backend: same-input-greedy
   - name: attention.hd128.dynM.softmax_v
     bindings: {}
     pins:
@@ -1576,13 +1654,13 @@ configs:
       WORK: w1x4
       TILE: mma_m16n8k16_f16_f32/f1x2/k4
       REDUCE: ''
-      STAGE: d1/smem
+      STAGE: d1/smem-tma
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 11.9
-      reference_us: 104.99
-      reference_backend: emmy-greedy
+      emmy_us: 19.06
+      reference_us: 19.02
+      reference_backend: same-input-greedy
 - program: 34
   target:
     loop: 4
@@ -1627,15 +1705,15 @@ configs:
       FAST_MATH: true
     knobs:
       WORK: w4x1
-      TILE: mma_m16n8k16_f16_f16/f1x8/k4
-      REDUCE: g4a
-      STAGE: d1/smem
+      TILE: mma_m16n8k16_f16_f32/f1x8/k8
+      REDUCE: ''
+      STAGE: d1/smem-tma
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 17.32
-      reference_us: 19.23
-      reference_backend: emmy-greedy
+      emmy_us: 11.39
+      reference_us: 11.37
+      reference_backend: same-input-greedy
   - name: attention.hd64.softmax_v
     bindings: {}
     pins:
@@ -1643,14 +1721,14 @@ configs:
     knobs:
       WORK: w4x1
       TILE: mma_m16n8k16_f16_f32/f1x8/k8
-      REDUCE: g4a
-      STAGE: d1/smem
+      REDUCE: ''
+      STAGE: d1/smem-tma
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 18.12
-      reference_us: 19.08
-      reference_backend: emmy-greedy
+      emmy_us: 11.37
+      reference_us: 11.37
+      reference_backend: same-input-greedy
 - program: 35
   target:
     loop: 6
@@ -1697,13 +1775,13 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f32/f1x2/k8
       REDUCE: ''
-      STAGE: d1/smem
+      STAGE: d1/smem-async
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 13.51
-      reference_us: 59.03
-      reference_backend: emmy-greedy
+      emmy_us: 12.1
+      reference_us: 12.1
+      reference_backend: same-input-greedy
   - name: attention.hd64.dynM.softmax_v
     bindings: {}
     pins:
@@ -1712,13 +1790,177 @@ configs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f32/f1x2/k8
       REDUCE: ''
-      STAGE: d1/smem
+      STAGE: d1/smem-async
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 13.51
-      reference_us: 59.03
-      reference_backend: emmy-greedy
+      emmy_us: 12.17
+      reference_us: 12.17
+      reference_backend: same-input-greedy
+- program: 32
+  target:
+    origins:
+    - scaled_dot_product_attention
+  realizations:
+  - name: attention.hd128.fused
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      TILE@map.1/twist: mma_m16n8k16_f16_f16/f1x16/k4
+      TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x8/k4
+      REDUCE@map.1/twist: ''
+      REDUCE@map.1/twist.1/inner: ''
+      STAGE@map.1/twist: d2/smem-tma
+      STAGE@map.1/twist.1/inner: ''
+      WORK: w2x1
+      RASTER: ''
+    identity: 3ec795cedf21b59dce873ccc52ebbacf6519878078959430f44405a131ffc106
+    measurements:
+      emmy_us: 15.3
+      reference_us: 15.26
+      reference_backend: same-input-greedy
+  - name: attention.hd128.fused
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE@map.1/twist: mma_m16n8k16_f16_f32/f1x16/k4
+      TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x8/k4
+      REDUCE@map.1/twist: ''
+      REDUCE@map.1/twist.1/inner: ''
+      STAGE@map.1/twist: d2/smem-tma
+      STAGE@map.1/twist.1/inner: ''
+      WORK: w2x1
+      RASTER: ''
+    identity: 3ec795cedf21b59dce873ccc52ebbacf6519878078959430f44405a131ffc106
+    measurements:
+      emmy_us: 16.3
+      reference_us: 16.21
+      reference_backend: same-input-greedy
+- program: 34
+  target:
+    origins:
+    - scaled_dot_product_attention
+  realizations:
+  - name: attention.hd64.fused
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      TILE@map.1/twist: mma_m16n8k16_f16_f16/f1x8/k4
+      TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x8/k4
+      REDUCE@map.1/twist: ''
+      REDUCE@map.1/twist.1/inner: ''
+      STAGE@map.1/twist: d2/smem-tma
+      STAGE@map.1/twist.1/inner: ''
+      WORK: w2x1
+      RASTER: ''
+    identity: 1ff07928066714d26b8fa657cae132fe963ef413347e30d80117ced0c077ee1b
+    measurements:
+      emmy_us: 8.09
+      reference_us: 8.03
+      reference_backend: same-input-greedy
+  - name: attention.hd64.fused
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE@map.1/twist: mma_m16n8k16_f16_f32/f1x8/k8
+      TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x16/k4
+      REDUCE@map.1/twist: ''
+      REDUCE@map.1/twist.1/inner: ''
+      STAGE@map.1/twist: d2/smem-tma
+      STAGE@map.1/twist.1/inner: ''
+      WORK: w2x1
+      RASTER: ''
+    identity: 1ff07928066714d26b8fa657cae132fe963ef413347e30d80117ced0c077ee1b
+    measurements:
+      emmy_us: 8.82
+      reference_us: 8.82
+      reference_backend: same-input-greedy
+- program: 36
+  target:
+    origins:
+    - scaled_dot_product_attention
+  realizations:
+  - name: attention.hd128.causal.fused
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      TILE@map.1/twist: mma_m16n8k16_f16_f16/f1x8/k4
+      TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x8/k4
+      REDUCE@map.1/twist: ''
+      REDUCE@map.1/twist.1/inner: ''
+      STAGE@map.1/twist: d2/smem-tma
+      STAGE@map.1/twist.1/inner: d4/smem-async
+      WORK: w2x1
+      RASTER: gm8
+    identity: 909a3ae21b91fd2b1ff79aa2d864126659f6825bbd9fd675ce4dd9a6b8210a9d
+    measurements:
+      emmy_us: 14.91
+      reference_us: 14.85
+      reference_backend: same-input-greedy
+  - name: attention.hd128.causal.fused
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE@map.1/twist: mma_m16n8k16_f16_f32/f1x8/k4
+      TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x8/k4
+      REDUCE@map.1/twist: ''
+      REDUCE@map.1/twist.1/inner: ''
+      STAGE@map.1/twist: d2/smem-tma
+      STAGE@map.1/twist.1/inner: d2/smem-async
+      WORK: w2x1
+      RASTER: ''
+    identity: 909a3ae21b91fd2b1ff79aa2d864126659f6825bbd9fd675ce4dd9a6b8210a9d
+    measurements:
+      emmy_us: 16.42
+      reference_us: 16.44
+      reference_backend: same-input-greedy
+- program: 37
+  target:
+    origins:
+    - scaled_dot_product_attention
+  realizations:
+  - name: attention.hd64.causal.fused
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      TILE@map.1/twist: mma_m16n8k16_f16_f16/f1x8/k8
+      TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x16/k4
+      REDUCE@map.1/twist: ''
+      REDUCE@map.1/twist.1/inner: ''
+      STAGE@map.1/twist: d2/smem-tma
+      STAGE@map.1/twist.1/inner: d4/smem-async
+      WORK: w2x1
+      RASTER: ''
+    identity: 2bc968ffd00d6ed07926fb3a9b6dc0d6ea0ac766c57654da8aaaae0284c18be0
+    measurements:
+      emmy_us: 7.77
+      reference_us: 7.77
+      reference_backend: same-input-greedy
+  - name: attention.hd64.causal.fused
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE@map.1/twist: mma_m16n8k16_f16_f32/f1x8/k8
+      TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x16/k4
+      REDUCE@map.1/twist: ''
+      REDUCE@map.1/twist.1/inner: ''
+      STAGE@map.1/twist: d2/smem-tma
+      STAGE@map.1/twist.1/inner: d3/smem-tma
+      WORK: w2x1
+      RASTER: gm8
+    identity: 2bc968ffd00d6ed07926fb3a9b6dc0d6ea0ac766c57654da8aaaae0284c18be0
+    measurements:
+      emmy_us: 8.77
+      reference_us: 8.78
+      reference_backend: same-input-greedy
 loops:
 - inputs: [x0, x1]
   outputs: [scaled_dot_product_attention_scaled]

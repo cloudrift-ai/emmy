@@ -278,4 +278,14 @@ def test_structural_key_handles_fragment_repack() -> None:
     s = FragmentRepack(frag="a0", srcs=("c0", "c1"), ab_dtype="f16")
     Body((s,)).structural_key()  # must not raise
     renamed = s.rewrite(lambda n: {"a0": "a9", "c0": "c8", "c1": "c7"}.get(n, n))
-    assert (renamed.frag, renamed.srcs, renamed.ab_dtype) == ("a9", ("c8", "c7"), "f16")
+    assert (renamed.frag, renamed.srcs, renamed.ab_dtype, renamed.fragment_layout, renamed.part) == (
+        "a9",
+        ("c8", "c7"),
+        "f16",
+        "m16n8k16",
+        0,
+    )
+
+    volta = FragmentRepack(frag="a0", srcs=("c0",), fragment_layout="m8n8k4", part=3)
+    renamed = volta.rewrite(lambda n: {"a0": "a9", "c0": "c8"}.get(n, n))
+    assert (renamed.frag, renamed.srcs, renamed.fragment_layout, renamed.part) == ("a9", ("c8",), "m8n8k4", 3)

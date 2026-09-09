@@ -113,15 +113,17 @@ the shared module already provides.
 - **Do not load checked-in golden YAML in the default suite — except the realization corpus.** Unit tests use
   synthetic records and working files, and the nightly `onboard-model` workflow owns repository schema validation,
   strict decode, and exact-GPU replay for `recipes/*/golden/*.yaml`. `tests/compiler/realization/cases/` differs on
-  both counts that motivated the rule: its files are hand-minimized reproducers rather than model qualification
-  evidence, and they carry no measurement claim, so nothing about them is card-specific. They also target a
-  **declared** capability rather than the live card — `Context.from_target(compute_cap)` — so the enumeration and
+  both counts that motivated the rule: its files are hand-minimized reproducers or a small capability baseline from a
+  model-agnostic hardware golden, and they carry no measurement claim, so nothing about them is card-specific. They
+  also target a **declared** capability rather than the live card — `Context.from_target(compute_cap)` — so the
+  enumeration and
   lowering stages are machine-independent and an sm_70 lockout is exercised on a box that has no sm_70. Only the
   build and accuracy stages consult the live card, and they gate on `device_compute_capability() == compute_cap`,
-  beside `requires_sm90` in spirit but keyed on equality rather than a floor. The one golden lane inside pytest sits
-  off the default one: `make test-goldens` (the `goldens` marker) strictly decodes every checked-in file, one case
-  per file. It is deselected for COST, not for card-dependence — decoding replays each record at its declared
-  capability, so a stale row is detectable on any machine; re-recording one is what needs the card.
+  beside `requires_sm90` in spirit but keyed on equality rather than a floor. Golden decode splits the same way: the
+  hardware goldens are decoded row by row on the default lane, while the model goldens sit off it behind the
+  `goldens` marker (`make test-goldens`). The model half is deselected for COST, not for card-dependence — decoding
+  replays each record at its declared capability, so a stale row is detectable on any machine; re-recording one is
+  what needs the card.
 - **Keep one subprocess smoke per report path.** Filtering, join, and presentation variants use small synthetic
   records at the owning unit layer instead of launching the CLI repeatedly over the full repository corpus.
 - **Async tests** — tests for async functions are plain `async def` (no decorator needed; `asyncio_mode = "auto"` handles it). Mock async callables with `AsyncMock`.
@@ -173,7 +175,7 @@ pytest tests/deploy/test_recipe.py -v   # single file — the development lane
 pytest tests/deploy/ -k recipe -v      # a few tests — the development lane
 pytest tests/ -v                       # all tests, finalization only (skips off-lane `perf` / `goldens` tests)
 pytest tests/perf/ -m perf -v          # GPU perf suite (see tests/perf/ARCHITECTURE.md)
-pytest tests/compiler/pipeline/search/ -m goldens -v   # strict-decode the checked-in goldens (make test-goldens)
+pytest tests/compiler/pipeline/search/ -m goldens -v   # strict-decode the model goldens (make test-goldens)
 ```
 
 Under `make test` (`-n auto --dist=loadgroup`) the root `conftest.py` routes every CUDA-touching test onto two
@@ -208,12 +210,13 @@ renamed and deleted tests drop out instead of lingering as ghost slots the bucke
 one xdist loadgroup worker: execution stays serial, while CUDA node IDs keep the canonical ``@cuda`` / ``@cuda-cli``
 suffixes the parallel suite uses for lookup. Point it at the whole suite, never a subset.
 
-Two things keep it honest. `make test` passes `--durations=25`, so every run (CI included) prints its slowest tests and
-a new long pole shows up in the log immediately. And the session-end gate in `conftest.py` fails any run where a test
-took **5 s or more without being in the baseline**, naming the offenders and asking for `make test-durations`. The bar
-sits far above the 0.05 s recording threshold on purpose — CI runners are several times slower than a dev box, and the
-gap guarantees nothing near the threshold can drift across it. It is a session hook rather than a test case because
-only the controller, and only after the last report, has every test's duration; an xdist worker sees just its own slice.
+Two things keep it honest. `make test` passes `--durations=0 --durations-min=1`, so every run (CI included) prints every
+test that takes at least 1 s instead of only a fixed-size tail. And the session-end gate in `conftest.py` fails any run
+where a test took **5 s or more without being in the baseline**, naming the offenders and asking for
+`make test-durations`. Keeping the failure bar above the 0.05 s recording threshold lets the report expose differences
+between a development machine and CI without making worker-specific cold imports gate the run. It is a session hook
+rather than a test case because only the controller, and only after the last report, has every test's duration; an
+xdist worker sees just its own slice.
 
 The `perf` marker gates **suite-wide**, not just `tests/perf/`: the root `tests/conftest.py` hook skips every
 perf-marked item unless `-m perf` was passed, and since the root conftest loads for any `tests/` collection the gate
@@ -227,11 +230,21 @@ mark on anything else silently drops it from `make test` even on GPU machines (t
 correctness pins for a while). GPU correctness tests guard themselves with `requires_cuda` / `importorskip` instead.
 
 `goldens` is the second off-lane marker, gated by the same hook. `tests/compiler/pipeline/search/test_golden.py`
-strictly decodes every checked-in golden file — one case per file, so a card's rows go green as a whole when a tuning
-round re-records them — and `make test-goldens` runs it. A full pass re-derives every recorded row's enumeration,
-minutes per file, which is why it is off the default lane; the derivation memo
+strictly decodes recorded rows against the current compiler, and it splits by what the file costs. The five hardware
+goldens run on the DEFAULT lane, one node per recorded row: parsing one of those files costs milliseconds and
+deciding one row costs about a second, so 224 nodes scatter over the workers instead of five files queueing behind
+the widest, and a failure names the row rather than a count. The model goldens keep one case per file behind the
+marker, which `make test-goldens` runs — an inventory is hundreds of rows whose per-row nodes would cost more to
+collect than to run, and the widest file is a multi-megabyte parse. The derivation memo
 (`~/.cache/emmy/golden_identity.json`, keyed by compiler fingerprint and record content) makes a re-run cost only the
-rows that actually changed.
+rows that actually changed; cold, the whole hardware set is about 25 s on 16 workers.
+
+Hardware rows that no longer decode are listed in `golden_xfails.yaml` beside the test and asked as STRICT xfails, so
+the list can only shrink: closing a row turns its node red until the line is deleted, and a line naming a row the
+file no longer records fails on its own. Never add a line to make a red row green — a recorded row that stops
+decoding is a regression in the enumeration, and listing it enshrines that as the reference. The rule is the
+realization corpus's `_xfail_` suffix in another spelling; rows are not files, so the expectation cannot ride on a
+filename.
 
 Repository golden *qualification* is intentionally outside pytest. Model goldens are GPU-specific qualification
 evidence, so the nightly `onboard-model` workflow validates the selected recipe-local file, strictly decodes every

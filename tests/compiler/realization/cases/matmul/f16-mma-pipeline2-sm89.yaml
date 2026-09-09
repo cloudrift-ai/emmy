@@ -1,0 +1,35 @@
+compute_cap:
+- 8
+- 9
+programs:
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [512, 512]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [512, 512]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [512, 512]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: k_matmul_02077b.72e7e3e8f99d
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w1x2
+      TILE: mma_m16n8k16_f16_f16/f2x2/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/smem-async/p2
+    identity: 02ec72b215bad6ea747e09d3a798a9445a0977c76f31ac5711d4d8007fd65554

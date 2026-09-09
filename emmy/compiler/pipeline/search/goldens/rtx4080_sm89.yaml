@@ -128,6 +128,7 @@ configs:
     knobs:
       WORK: t32x8
       TILE: f2x8
+      REDUCE: ''
       RASTER: ''
       STAGE: d2/smem-async
     measurements:
@@ -146,6 +147,7 @@ configs:
     knobs:
       WORK: t32x16
       TILE: f4x8
+      REDUCE: ''
       RASTER: ''
       STAGE: d2/smem-async
     measurements:
@@ -164,6 +166,7 @@ configs:
     knobs:
       WORK: t32x8
       TILE: f4x8
+      REDUCE: ''
       RASTER: ''
       STAGE: d2/smem-async
     measurements:
@@ -182,6 +185,7 @@ configs:
     knobs:
       WORK: t32x16
       TILE: f4x10
+      REDUCE: ''
       RASTER: ''
       STAGE: d2/smem-async
     measurements:
@@ -200,6 +204,7 @@ configs:
     knobs:
       WORK: w2x1
       TILE: mma_m16n8k16_f16_f32/f1x4/k2
+      REDUCE: ''
       RASTER: ''
       STAGE: d4/smem-async
     measurements:
@@ -218,6 +223,7 @@ configs:
     knobs:
       WORK: w2x1
       TILE: mma_m16n8k16_f16_f32/f4x4/k2
+      REDUCE: ''
       RASTER: ''
       STAGE: d1/smem-async
     measurements:
@@ -231,6 +237,7 @@ configs:
     knobs:
       WORK: w4x1
       TILE: mma_m16n8k16_f16_f32/f4x4/k2
+      REDUCE: ''
       RASTER: ''
       STAGE: d2/smem-async/p2
     measurements:
@@ -249,6 +256,7 @@ configs:
     knobs:
       WORK: w1x4
       TILE: mma_m16n8k16_f16_f32/f4x4
+      REDUCE: ''
       RASTER: ''
       STAGE: d2/smem-async
     measurements:
@@ -267,6 +275,7 @@ configs:
     knobs:
       WORK: w1x4
       TILE: mma_m16n8k16_f16_f32/f4x4
+      REDUCE: ''
       RASTER: ''
       STAGE: d2/smem-async
     measurements:

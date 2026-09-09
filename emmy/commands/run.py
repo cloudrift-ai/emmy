@@ -524,14 +524,8 @@ def _record_golden_latency(args, results: dict, golden_benches) -> None:
     if not tcompile_us:
         # Not fatal: the ratchet is `emmy_us`, and some targets have no torch twin to compile.
         logger.warning("--record: no torch.compile timing for %s; storing the Emmy latency alone", args.realization)
-    document = getattr(args, "_golden_document", None)
-    if document is None:
-        from emmy.compiler.pipeline.search.golden import load_golden_file  # noqa: PLC0415
-
-        document = load_golden_file(args.golden)
     record_latency(
         args.golden,
-        document,
         args.realization,
         hardware_id=Context.probe().hardware_id(),
         emmy_us=emmy_us,
@@ -548,16 +542,19 @@ def _record_golden_latency(args, results: dict, golden_benches) -> None:
     )
 
 
-def _record_greedy_pick(args, graph, bench, greedy_iso, decisions) -> None:
+def _record_greedy_pick(args, graph, bench, greedy_iso, taken) -> None:
     """Write the greedy pick's kernel set back into the benched working golden as measured rows.
 
-    Each kernel-set decision the compile took becomes a routing row priced at the isolated
-    whole-graph timing, and each kernel a child-identity schedule receipt at its isolated launch
-    timing — the pinned-comparable numbers every golden row carries. The greedy comparison row,
-    the same graph timed once more beside torch, is every row's reference: the pair checks
-    measurement parity, not framework correctness, and ``reference_backend`` says so.
+    Each kernel-set decision the compile took becomes a routing row priced at the summed isolated
+    launch timings of the kernels it produced (``kernel_set_prices``; the whole graph's isolated
+    timing where a kernel of the set has no launch), and each kernel a child-identity schedule
+    receipt at its isolated launch timing — the pinned-comparable numbers every golden row carries,
+    and the units a kernel-set fork ranks a routing row against the replaced kernel's receipt in.
+    The greedy comparison row, the same graph timed once more beside torch, is every row's
+    reference: the pair checks measurement parity, not framework correctness, and
+    ``reference_backend`` says so.
     """
-    from emmy.compiler.pipeline.search.working_golden import greedy_pick_rows, record_greedy_pick  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.working_golden import greedy_pick_rows, kernel_set_prices, record_greedy_pick  # noqa: PLC0415
 
     isolated = greedy_iso.bench if greedy_iso is not None and greedy_iso.status == "ok" else None
     rows = greedy_pick_rows(graph)
@@ -569,17 +566,17 @@ def _record_greedy_pick(args, graph, bench, greedy_iso, decisions) -> None:
     def us(launch) -> float:
         return (min(launch.samples) if launch.samples else launch.time_ms) * 1000
 
-    total = (_bench_total_us(isolated)[0], _bench_total_us(bench)[0])
-    document = getattr(args, "_golden_document", None)
-    if document is None:
-        from emmy.compiler.pipeline.search.golden import load_golden_file  # noqa: PLC0415
-
-        document = load_golden_file(args.golden)
+    whole, whole_ref = _bench_total_us(isolated)[0], _bench_total_us(bench)[0]
+    node_ids = [node.id for node in _launch_order_cuda_nodes(graph)]
+    prices = [kernel_set_prices(taken.kernel_sets, dict(zip(node_ids, (us(launch) for launch in side), strict=True))) for side in launches]
+    decisions = [
+        (identity, knobs, whole if mine is None else mine, whole_ref if theirs is None else theirs)
+        for (identity, knobs), mine, theirs in zip(taken.decisions, *prices, strict=True)
+    ]
     record_greedy_pick(
         args.golden,
-        document,
         args.realization,
-        decisions=[(identity, knobs, *total) for identity, knobs in decisions],
+        decisions=decisions,
         kernels=[(identity, row, us(mine), us(theirs)) for (identity, row), mine, theirs in zip(rows, *launches, strict=True)],
         reference_backend="same-input-greedy",
     )
@@ -2430,20 +2427,36 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
                     )
                 if resp.get("greedy_error"):
                     greedy_fail = f"greedy timing failed after reference execution: {resp['greedy_error']}"
+                    _record_greedy_failure(args, backend, graph, resp["greedy_error"])
             if pinned and tail:
                 if ab_ref is None:
                     reason = greedy_fail or "the greedy worker returned no run outputs"
                     missing = "pinned embedded-Loop verification requires same-input greedy outputs, but none were returned"
                     reference_error = f"{missing}: {reason}"
                 elif same_input_greedy or not strict_correctness or accuracy_error is None:
+                    to_bench = pinned
                     if greedy_fail:
-                        logger.error("%s — untimed greedy is ineligible; pinned rows still bench", greedy_fail)
+                        # An automatic golden-config row with no knobs pins nothing beyond the input
+                        # regime the greedy compile already used, so re-compiling it reaches the exact
+                        # same election and re-fails the same way (the DeepSeek-V4 double-hang cost).
+                        # An --ab row or a row with real schedule knobs is a genuinely different
+                        # config and still benches.
+                        same_election = [s for s in pinned if getattr(s, "shape", None) is not None and not s.knobs]
+                        if same_election:
+                            to_bench = [s for s in pinned if s not in same_election]
+                            logger.warning(
+                                "%s — pinned re-bench of %s skipped: it has no knobs to pin it away from the greedy pick that just failed",
+                                greedy_fail,
+                                ", ".join(s.name for s in same_election),
+                            )
+                        if to_bench:
+                            logger.error("%s — untimed greedy is ineligible; pinned rows still bench", greedy_fail)
                     else:
                         greedy_iso = await _bench_greedy_isolated(backend, graph, warmup=args.warmup, iters=args.iters)
                     ab_benches = await _bench_golden_variants(
                         backend,
                         embedded,
-                        pinned,
+                        to_bench,
                         warmup=args.warmup,
                         iters=args.iters,
                         ref=ab_ref,
@@ -2550,7 +2563,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
     if getattr(args, "record", False):
         _record_golden_latency(args, results or {}, ab_benches)
     if getattr(args, "record_greedy", False):
-        _record_greedy_pick(args, graph, bench, greedy_iso, taken.decisions)
+        _record_greedy_pick(args, graph, bench, greedy_iso, taken)
     for error in strict_errors or []:
         logger.error("strict: %s", error)
     if embedded is not None:

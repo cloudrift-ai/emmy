@@ -1,0 +1,3231 @@
+gpu_name: NVIDIA Tesla V100 SXM3 32GB
+compute_cap:
+- 7
+- 0
+programs:
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f32, [512, 512]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f32, [512, 512]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f32, [512, 512]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f32, [1024, 1024]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f32, [1024, 1024]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f32, [1024, 1024]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f32, [2048, 2048]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f32, [2048, 2048]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f32, [2048, 2048]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f32, [4096, 4096]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f32, [4096, 4096]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f32, [4096, 4096]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [512, 512]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [512, 512]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [512, 512]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1024, 1024]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [1024, 1024]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [1024, 1024]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [2048, 2048]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [2048, 2048]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [2048, 2048]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [4096, 4096]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [4096, 4096]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [4096, 4096]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f32, [{sym: seq_len, hint: 512}, 512]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f32, [512, 512]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f32, [{sym: seq_len, hint: 512}, 512]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [512, 4096]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [4096, 12288]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [512, 12288]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [512, 4096]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [4096, 4096]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [512, 4096]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [512, 4096]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [4096, 28672]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [512, 28672]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [512, 14336]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [14336, 4096]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [512, 4096]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [{sym: seq_len, hint: 512}, 4096]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [4096, 12288]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [{sym: seq_len, hint: 512}, 12288]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [{sym: seq_len, hint: 512}, 4096]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [4096, 4096]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [{sym: seq_len, hint: 512}, 4096]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [{sym: seq_len, hint: 512}, 4096]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [4096, 28672]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [{sym: seq_len, hint: 512}, 28672]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [{sym: seq_len, hint: 512}, 14336]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [14336, 4096]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [{sym: seq_len, hint: 512}, 4096]]]
+- inputs: [x]
+  outputs: [relu]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [512, 4096]]]
+  - id: relu
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: relu}}
+    inputs: [x]
+    outputs: [[relu, f32, [512, 4096]]]
+- inputs: [x]
+  outputs: [relu]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [512, 16384]]]
+  - id: relu
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: relu}}
+    inputs: [x]
+    outputs: [[relu, f32, [512, 16384]]]
+- inputs: [x]
+  outputs: [relu]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 4096]]]
+  - id: relu
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: relu}}
+    inputs: [x]
+    outputs: [[relu, f32, [{sym: seq_len, hint: 512}, 4096]]]
+- inputs: [x]
+  outputs: [relu]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 16384]]]
+  - id: relu
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: relu}}
+    inputs: [x]
+    outputs: [[relu, f32, [{sym: seq_len, hint: 512}, 16384]]]
+- inputs: [x]
+  outputs: [softmax]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [512, 2048]]]
+  - id: softmax
+    op: torch.softmax
+    attrs: {axis: -1}
+    inputs: [x]
+    outputs: [[softmax, f32, [512, 2048]]]
+- inputs: [x]
+  outputs: [softmax]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [512, 8192]]]
+  - id: softmax
+    op: torch.softmax
+    attrs: {axis: -1}
+    inputs: [x]
+    outputs: [[softmax, f32, [512, 8192]]]
+- inputs: [x]
+  outputs: [softmax]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 2048]]]
+  - id: softmax
+    op: torch.softmax
+    attrs: {axis: -1}
+    inputs: [x]
+    outputs: [[softmax, f32, [{sym: seq_len, hint: 512}, 2048]]]
+- inputs: [x]
+  outputs: [softmax]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 8192]]]
+  - id: softmax
+    op: torch.softmax
+    attrs: {axis: -1}
+    inputs: [x]
+    outputs: [[softmax, f32, [{sym: seq_len, hint: 512}, 8192]]]
+- inputs: [x]
+  outputs: [sum_1]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [512, 2048]]]
+  - id: sum_1_keepdim
+    op: tensor.reduce
+    attrs: {op: {__elementwise__: sum}, axis: -1}
+    inputs: [x]
+    outputs: [[sum_1_keepdim, f32, [512, 1]]]
+  - id: sum_1
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 512}]}
+      sources:
+        __tuple__:
+        - __index_source__: {input_idx: 0, coord_map: [{var: out_coord_0}, {literal: {value: 0, dtype: int}}], select: null}
+    inputs: [sum_1_keepdim]
+    outputs: [[sum_1, f32, [512]]]
+- inputs: [x]
+  outputs: [sum_1]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [512, 8192]]]
+  - id: sum_1_keepdim
+    op: tensor.reduce
+    attrs: {op: {__elementwise__: sum}, axis: -1}
+    inputs: [x]
+    outputs: [[sum_1_keepdim, f32, [512, 1]]]
+  - id: sum_1
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 512}]}
+      sources:
+        __tuple__:
+        - __index_source__: {input_idx: 0, coord_map: [{var: out_coord_0}, {literal: {value: 0, dtype: int}}], select: null}
+    inputs: [sum_1_keepdim]
+    outputs: [[sum_1, f32, [512]]]
+- inputs: [x]
+  outputs: [sum_1]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 2048]]]
+  - id: sum_1_keepdim
+    op: tensor.reduce
+    attrs: {op: {__elementwise__: sum}, axis: -1}
+    inputs: [x]
+    outputs: [[sum_1_keepdim, f32, [{sym: seq_len, hint: 512}, 1]]]
+  - id: sum_1
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: {sym: seq_len, hint: 512}}]}
+      sources:
+        __tuple__:
+        - __index_source__: {input_idx: 0, coord_map: [{var: out_coord_0}, {literal: {value: 0, dtype: int}}], select: null}
+    inputs: [sum_1_keepdim]
+    outputs: [[sum_1, f32, [{sym: seq_len, hint: 512}]]]
+- inputs: [x]
+  outputs: [sum_1]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 8192]]]
+  - id: sum_1_keepdim
+    op: tensor.reduce
+    attrs: {op: {__elementwise__: sum}, axis: -1}
+    inputs: [x]
+    outputs: [[sum_1_keepdim, f32, [{sym: seq_len, hint: 512}, 1]]]
+  - id: sum_1
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: {sym: seq_len, hint: 512}}]}
+      sources:
+        __tuple__:
+        - __index_source__: {input_idx: 0, coord_map: [{var: out_coord_0}, {literal: {value: 0, dtype: int}}], select: null}
+    inputs: [sum_1_keepdim]
+    outputs: [[sum_1, f32, [{sym: seq_len, hint: 512}]]]
+- inputs: [x]
+  outputs: [rms_norm]
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs:
+      name: p_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [2048]}
+      source_dtype: float32
+      source_graph: null
+    outputs: [[p_weight, f32, [2048]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [512, 2048]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, p_weight]
+    outputs: [[rms_norm, f32, [512, 2048]]]
+- inputs: [x]
+  outputs: [rms_norm]
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs:
+      name: p_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [4096]}
+      source_dtype: float32
+      source_graph: null
+    outputs: [[p_weight, f32, [4096]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [512, 4096]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, p_weight]
+    outputs: [[rms_norm, f32, [512, 4096]]]
+- inputs: [x]
+  outputs: [rms_norm]
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs:
+      name: p_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [8192]}
+      source_dtype: float32
+      source_graph: null
+    outputs: [[p_weight, f32, [8192]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [512, 8192]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, p_weight]
+    outputs: [[rms_norm, f32, [512, 8192]]]
+- inputs: [x]
+  outputs: [rms_norm]
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs:
+      name: p_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [2048]}
+      source_dtype: float32
+      source_graph: null
+    outputs: [[p_weight, f32, [2048]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 2048]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, p_weight]
+    outputs: [[rms_norm, f32, [{sym: seq_len, hint: 512}, 2048]]]
+- inputs: [x]
+  outputs: [rms_norm]
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs:
+      name: p_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [4096]}
+      source_dtype: float32
+      source_graph: null
+    outputs: [[p_weight, f32, [4096]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 4096]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, p_weight]
+    outputs: [[rms_norm, f32, [{sym: seq_len, hint: 512}, 4096]]]
+- inputs: [x]
+  outputs: [rms_norm]
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs:
+      name: p_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [8192]}
+      source_dtype: float32
+      source_graph: null
+    outputs: [[p_weight, f32, [8192]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 8192]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, p_weight]
+    outputs: [[rms_norm, f32, [{sym: seq_len, hint: 512}, 8192]]]
+- inputs: [x]
+  outputs: [rms_norm]
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs:
+      name: p_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [3840]}
+      source_dtype: float32
+      source_graph: null
+    outputs: [[p_weight, f32, [3840]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [512, 3840]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, p_weight]
+    outputs: [[rms_norm, f32, [512, 3840]]]
+- inputs: [x]
+  outputs: [rms_norm]
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs:
+      name: p_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [256]}
+      source_dtype: float32
+      source_graph: null
+    outputs: [[p_weight, f32, [256]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [4096, 256]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, p_weight]
+    outputs: [[rms_norm, f32, [4096, 256]]]
+- inputs: [x]
+  outputs: [rms_norm]
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs:
+      name: p_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [3840]}
+      source_dtype: float32
+      source_graph: null
+    outputs: [[p_weight, f32, [3840]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 3840]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, p_weight]
+    outputs: [[rms_norm, f32, [{sym: seq_len, hint: 512}, 3840]]]
+- inputs: [x0, x1, x2]
+  outputs: [scaled_dot_product_attention]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 8, 512, 128]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [1, 8, 512, 128]]]
+  - id: x2
+    op: input
+    outputs: [[x2, f16, [1, 8, 512, 128]]]
+  - id: scaled_dot_product_attention
+    op: torch.sdpa
+    attrs: {is_causal: false, sliding_window: null, scale: null}
+    inputs: [x0, x1, x2]
+    outputs: [[scaled_dot_product_attention, f16, [1, 8, 512, 128]]]
+- inputs: [x0, x1, x2]
+  outputs: [scaled_dot_product_attention]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 8, {sym: seq_len, hint: 512}, 128]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [1, 8, {sym: seq_len, hint: 512}, 128]]]
+  - id: x2
+    op: input
+    outputs: [[x2, f16, [1, 8, {sym: seq_len, hint: 512}, 128]]]
+  - id: scaled_dot_product_attention
+    op: torch.sdpa
+    attrs: {is_causal: false, sliding_window: null, scale: null}
+    inputs: [x0, x1, x2]
+    outputs: [[scaled_dot_product_attention, f16, [1, 8, {sym: seq_len, hint: 512}, 128]]]
+- inputs: [x0, x1, x2]
+  outputs: [scaled_dot_product_attention]
+  nodes:
+  - id: scaled_dot_product_attention_c3
+    op: constant
+    attrs:
+      name: scaled_dot_product_attention_c3
+      value: 0.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[scaled_dot_product_attention_c3, f16, [1]]]
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 16, {sym: seq_len, hint: 512}, 256]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [1, 16, {sym: seq_len, hint: 512}, 256]]]
+  - id: x2
+    op: input
+    outputs: [[x2, f16, [1, 16, {sym: seq_len, hint: 512}, 256]]]
+  - id: scaled_dot_product_attention
+    op: torch.sdpa
+    attrs: {is_causal: true, sliding_window: null, scale: null}
+    inputs: [x0, x1, x2]
+    outputs: [[scaled_dot_product_attention, f16, [1, 16, {sym: seq_len, hint: 512}, 256]]]
+- inputs: [x0, x1, x2]
+  outputs: [scaled_dot_product_attention]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 8, 512, 64]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [1, 8, 512, 64]]]
+  - id: x2
+    op: input
+    outputs: [[x2, f16, [1, 8, 512, 64]]]
+  - id: scaled_dot_product_attention
+    op: torch.sdpa
+    attrs: {is_causal: false, sliding_window: null, scale: null}
+    inputs: [x0, x1, x2]
+    outputs: [[scaled_dot_product_attention, f16, [1, 8, 512, 64]]]
+- inputs: [x0, x1, x2]
+  outputs: [scaled_dot_product_attention]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 8, {sym: seq_len, hint: 512}, 64]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [1, 8, {sym: seq_len, hint: 512}, 64]]]
+  - id: x2
+    op: input
+    outputs: [[x2, f16, [1, 8, {sym: seq_len, hint: 512}, 64]]]
+  - id: scaled_dot_product_attention
+    op: torch.sdpa
+    attrs: {is_causal: false, sliding_window: null, scale: null}
+    inputs: [x0, x1, x2]
+    outputs: [[scaled_dot_product_attention, f16, [1, 8, {sym: seq_len, hint: 512}, 64]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.square.512
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t16x8
+      TILE: f4x8
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/smem
+    measurements:
+      emmy_us: 69.85
+      reference_us: 32.13
+      reference_backend: cublas
+- program: 1
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.square.1024
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t32x16
+      TILE: f4x8
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/smem
+    measurements:
+      emmy_us: 272.9
+      reference_us: 193.19
+      reference_backend: cublas
+- program: 2
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.square.2048
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t32x8
+      TILE: f4x26
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/smem
+    measurements:
+      emmy_us: 1637.38
+      reference_us: 1172.48
+      reference_backend: cublas
+- program: 3
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.square.4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t32x8
+      TILE: f4x26
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/smem
+    measurements:
+      emmy_us: 11896.83
+      reference_us: 8964.1
+      reference_backend: cublas
+- program: 4
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.square.512.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x1
+      TILE: mma_m8n8k4_f16_f32/f2x2/k8
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/smem
+    measurements:
+      emmy_us: 21.93
+      reference_us: 15.72
+      reference_backend: cublas
+  - name: matmul.square.512.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w1x1
+      TILE: mma_m8n8k4_f16_f32/f2x2/k8
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/smem
+    measurements:
+      emmy_us: 21.96
+      reference_us: 15.72
+      reference_backend: cublas
+- program: 5
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.square.1024.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x4
+      TILE: mma_m8n8k4_f16_f32/f4x2/k8
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/smem
+    measurements:
+      emmy_us: 83.11
+      reference_us: 45.57
+      reference_backend: cublas
+  - name: matmul.square.1024.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w1x4
+      TILE: mma_m8n8k4_f16_f32/f4x2/k8
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/smem
+    measurements:
+      emmy_us: 83.54
+      reference_us: 45.57
+      reference_backend: cublas
+- program: 6
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.square.2048.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x4
+      TILE: mma_m8n8k4_f16_f32/f4x2/k8
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/smem
+    measurements:
+      emmy_us: 423.94
+      reference_us: 245.76
+      reference_backend: cublas
+  - name: matmul.square.2048.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w1x4
+      TILE: mma_m8n8k4_f16_f32/f4x2/k8
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/smem
+    measurements:
+      emmy_us: 423.42
+      reference_us: 239.62
+      reference_backend: cublas
+- program: 7
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.square.4096.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x4
+      TILE: mma_m8n8k4_f16_f32/f4x2/k8
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/smem
+    measurements:
+      emmy_us: 2940.93
+      reference_us: 1345.54
+      reference_backend: cublas
+  - name: matmul.square.4096.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w1x4
+      TILE: mma_m8n8k4_f16_f32/f4x2/k8
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/smem
+    measurements:
+      emmy_us: 2939.9
+      reference_us: 1347.58
+      reference_backend: cublas
+- program: 8
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.square.512.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t16x8
+      TILE: f4x8
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/smem
+    measurements:
+      emmy_us: 67.24
+      reference_us: 35.84
+      reference_backend: cublas
+- program: 9
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.qkv.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x4
+      TILE: mma_m8n8k4_f16_f32/f4x2/k8
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/smem
+    measurements:
+      emmy_us: 1211.39
+      reference_us: 572.42
+      reference_backend: cublas
+  - name: matmul.qkv.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w1x4
+      TILE: mma_m8n8k4_f16_f32/f4x2/k8
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/smem
+    measurements:
+      emmy_us: 1116.16
+      reference_us: 566.27
+      reference_backend: cublas
+- program: 10
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.o_proj.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x4
+      TILE: mma_m8n8k4_f16_f32/f4x4/k8
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d1/smem
+    measurements:
+      emmy_us: 509.44
+      reference_us: 238.59
+      reference_backend: cublas
+  - name: matmul.o_proj.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x4
+      TILE: mma_m8n8k4_f16_f32/f4x4/k8
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d1/smem
+    measurements:
+      emmy_us: 508.42
+      reference_us: 238.59
+      reference_backend: cublas
+- program: 11
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.mlp_gate_up.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x4
+      TILE: mma_m8n8k4_f16_f32/f2x4/k8
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d1/smem
+    measurements:
+      emmy_us: 2633.73
+      reference_us: 1308.67
+      reference_backend: cublas
+  - name: matmul.mlp_gate_up.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x4
+      TILE: mma_m8n8k4_f16_f32/f2x4/k8
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d1/smem
+    measurements:
+      emmy_us: 2547.71
+      reference_us: 1199.1
+      reference_backend: cublas
+- program: 12
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.mlp_down.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x1
+      TILE: mma_m8n8k4_f16_f32/f4x4/k8
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d1/smem
+    measurements:
+      emmy_us: 1597.44
+      reference_us: 589.82
+      reference_backend: cublas
+  - name: matmul.mlp_down.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w1x1
+      TILE: mma_m8n8k4_f16_f32/f4x4/k8
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d1/smem
+    measurements:
+      emmy_us: 1429.5
+      reference_us: 589.82
+      reference_backend: cublas
+- program: 13
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.qkv.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x4
+      TILE: mma_m8n8k4_f16_f32/f2x4/k8
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d1/smem
+    measurements:
+      emmy_us: 1386.5
+      reference_us: 591.87
+      reference_backend: cublas
+  - name: matmul.qkv.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x4
+      TILE: mma_m8n8k4_f16_f32/f2x4/k8
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d1/smem
+    measurements:
+      emmy_us: 1381.38
+      reference_us: 588.8
+      reference_backend: cublas
+- program: 14
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.o_proj.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m8n8k4_f16_f32/f4x4/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/smem
+    measurements:
+      emmy_us: 356.35
+      reference_us: 242.69
+      reference_backend: cublas
+  - name: matmul.o_proj.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m8n8k4_f16_f32/f4x4/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/smem
+    measurements:
+      emmy_us: 356.35
+      reference_us: 227.33
+      reference_backend: cublas
+- program: 15
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.mlp_gate_up.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x4
+      TILE: mma_m8n8k4_f16_f32/f2x4/k8
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d1/smem
+    measurements:
+      emmy_us: 2450.43
+      reference_us: 1141.76
+      reference_backend: cublas
+  - name: matmul.mlp_gate_up.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x4
+      TILE: mma_m8n8k4_f16_f32/f2x4/k8
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d1/smem
+    measurements:
+      emmy_us: 2451.46
+      reference_us: 1161.22
+      reference_backend: cublas
+- program: 16
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.mlp_down.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m8n8k4_f16_f32/f4x4/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/smem
+    measurements:
+      emmy_us: 1241.09
+      reference_us: 602.11
+      reference_backend: cublas
+  - name: matmul.mlp_down.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m8n8k4_f16_f32/f4x4/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/smem
+    measurements:
+      emmy_us: 1103.87
+      reference_us: 579.58
+      reference_backend: cublas
+- program: 17
+  target:
+    origins:
+    - relu
+  realizations:
+  - name: pointwise.n4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      RASTER: ''
+    measurements:
+      emmy_us: 20.71
+      reference_us: 21.66
+      reference_backend: torch-eager
+- program: 18
+  target:
+    origins:
+    - relu
+  realizations:
+  - name: pointwise.n16384
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      RASTER: ''
+    measurements:
+      emmy_us: 77.51
+      reference_us: 78.51
+      reference_backend: torch-eager
+- program: 19
+  target:
+    origins:
+    - relu
+  realizations:
+  - name: pointwise.n4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      RASTER: ''
+    measurements:
+      emmy_us: 20.59
+      reference_us: 21.74
+      reference_backend: torch-eager
+- program: 20
+  target:
+    origins:
+    - relu
+  realizations:
+  - name: pointwise.n16384.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      RASTER: ''
+    measurements:
+      emmy_us: 77.35
+      reference_us: 78.59
+      reference_backend: torch-eager
+- program: 21
+  target:
+    origins:
+    - softmax
+  realizations:
+  - name: softmax.k2048
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+      RASTER: ''
+    measurements:
+      emmy_us: 12.05
+      reference_us: 16.9
+      reference_backend: torch-eager
+- program: 22
+  target:
+    origins:
+    - softmax
+  realizations:
+  - name: softmax.k8192
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t512
+      REDUCE: coop
+      RASTER: ''
+    measurements:
+      emmy_us: 63.87
+      reference_us: 53.59
+      reference_backend: torch-eager
+- program: 23
+  target:
+    origins:
+    - softmax
+  realizations:
+  - name: softmax.k2048.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+      RASTER: ''
+    measurements:
+      emmy_us: 12.18
+      reference_us: 17.09
+      reference_backend: torch-eager
+- program: 24
+  target:
+    origins:
+    - softmax
+  realizations:
+  - name: softmax.k8192.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t512
+      REDUCE: coop
+      RASTER: ''
+    measurements:
+      emmy_us: 63.62
+      reference_us: 53.91
+      reference_backend: torch-eager
+- program: 25
+  target:
+    origins:
+    - sum_1
+    - sum_1_keepdim
+  realizations:
+  - name: reduce.k2048
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      REDUCE: coop
+      RASTER: ''
+    measurements:
+      emmy_us: 3.73
+      reference_us: 24.97
+      reference_backend: torch-eager
+- program: 26
+  target:
+    origins:
+    - sum_1
+    - sum_1_keepdim
+  realizations:
+  - name: reduce.k8192
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t64
+      REDUCE: coop
+      RASTER: ''
+    measurements:
+      emmy_us: 20.48
+      reference_us: 43.45
+      reference_backend: torch-eager
+- program: 27
+  target:
+    origins:
+    - sum_1
+    - sum_1_keepdim
+  realizations:
+  - name: reduce.k2048.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t64
+      REDUCE: coop
+      RASTER: ''
+    measurements:
+      emmy_us: 3.51
+      reference_us: 28.01
+      reference_backend: torch-eager
+- program: 28
+  target:
+    origins:
+    - sum_1
+    - sum_1_keepdim
+  realizations:
+  - name: reduce.k8192.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t64
+      REDUCE: coop
+      RASTER: ''
+    measurements:
+      emmy_us: 19.78
+      reference_us: 45.88
+      reference_backend: torch-eager
+- program: 29
+  target:
+    origins:
+    - rms_norm
+  realizations:
+  - name: rms_norm.k2048
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+      RASTER: ''
+    measurements:
+      emmy_us: 13.27
+      reference_us: 12.57
+      reference_backend: torch-eager
+- program: 30
+  target:
+    origins:
+    - rms_norm
+  realizations:
+  - name: rms_norm.k4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t512
+      REDUCE: coop
+      RASTER: ''
+    measurements:
+      emmy_us: 27.85
+      reference_us: 30.32
+      reference_backend: torch-eager
+- program: 31
+  target:
+    origins:
+    - rms_norm
+  realizations:
+  - name: rms_norm.k8192
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t512
+      REDUCE: coop
+      RASTER: ''
+    measurements:
+      emmy_us: 64.51
+      reference_us: 61.78
+      reference_backend: torch-eager
+- program: 32
+  target:
+    origins:
+    - rms_norm
+  realizations:
+  - name: rms_norm.k2048.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+      RASTER: ''
+    measurements:
+      emmy_us: 13.1
+      reference_us: 12.58
+      reference_backend: torch-eager
+- program: 33
+  target:
+    origins:
+    - rms_norm
+  realizations:
+  - name: rms_norm.k4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t512
+      REDUCE: coop
+      RASTER: ''
+    measurements:
+      emmy_us: 27.85
+      reference_us: 30.16
+      reference_backend: torch-eager
+- program: 34
+  target:
+    origins:
+    - rms_norm
+  realizations:
+  - name: rms_norm.k8192.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t512
+      REDUCE: coop
+      RASTER: ''
+    measurements:
+      emmy_us: 64.65
+      reference_us: 62.1
+      reference_backend: torch-eager
+- program: 35
+  target:
+    origins:
+    - rms_norm
+  realizations:
+  - name: rms_norm.k3840
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t512
+      REDUCE: coop
+      RASTER: ''
+    measurements:
+      emmy_us: 26.43
+      reference_us: 28.02
+      reference_backend: torch-eager
+- program: 36
+  target:
+    origins:
+    - rms_norm
+  realizations:
+  - name: gemma4_12b.qknorm.k256
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      REDUCE: coop
+      RASTER: ''
+    measurements:
+      emmy_us: 12.29
+      reference_us: 13.93
+      reference_backend: torch-eager
+- program: 37
+  target:
+    origins:
+    - rms_norm
+  realizations:
+  - name: rms_norm.k3840.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t512
+      REDUCE: coop
+      RASTER: ''
+    measurements:
+      emmy_us: 26.52
+      reference_us: 28.24
+      reference_backend: torch-eager
+- program: 38
+  target:
+    loop: 0
+  realizations:
+  - name: attention.hd128.qk
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m8n8k4_f16_f32/f4x4/k8
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d1/smem
+    measurements:
+      emmy_us: 29.03
+      reference_us: 44.59
+      reference_backend: emmy-greedy
+  - name: attention.hd128.qk
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m8n8k4_f16_f32/f4x4/k8
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d1/smem
+    measurements:
+      emmy_us: 29.06
+      reference_us: 42.11
+      reference_backend: emmy-greedy
+- program: 38
+  target:
+    loop: 1
+  realizations:
+  - name: attention.hd128.pv
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m8n8k4_f16_f32/f2x2/k8
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 61.5
+      reference_us: 140.29
+      reference_backend: emmy-greedy
+  - name: attention.hd128.pv
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m8n8k4_f16_f32/f2x2/k8
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 62.21
+      reference_us: 135.17
+      reference_backend: emmy-greedy
+- program: 39
+  target:
+    loop: 2
+  realizations:
+  - name: attention.hd128.dynM.qk
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m8n8k4_f16_f32/f4x4/k8
+      REDUCE: ''
+      RASTER: ''
+      STAGE: ''
+    measurements:
+      emmy_us: 111.27
+      reference_us: 2116.61
+      reference_backend: emmy-greedy
+  - name: attention.hd128.dynM.qk
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m8n8k4_f16_f32/f4x4/k8
+      REDUCE: ''
+      RASTER: ''
+      STAGE: ''
+    measurements:
+      emmy_us: 111.96
+      reference_us: 230.4
+      reference_backend: emmy-greedy
+- program: 39
+  target:
+    loop: 3
+  realizations:
+  - name: attention.hd128.dynM.pv
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m8n8k4_f16_f32/f2x2/k8
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 76.33
+      reference_us: 2694.14
+      reference_backend: emmy-greedy
+  - name: attention.hd128.dynM.pv
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m8n8k4_f16_f32/f2x2/k8
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 76.48
+      reference_us: 2690.05
+      reference_backend: emmy-greedy
+- program: 40
+  target:
+    loop: 4
+  realizations:
+  - name: attention.hd256.dynM.qk
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m8n8k4_f16_f32/f4x4/k8
+      REDUCE: ''
+      RASTER: ''
+      STAGE: ''
+    measurements:
+      emmy_us: 430.08
+      reference_us: 850.94
+      reference_backend: emmy-greedy
+  - name: attention.hd256.dynM.qk
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m8n8k4_f16_f32/f4x4/k8
+      REDUCE: ''
+      RASTER: ''
+      STAGE: ''
+    measurements:
+      emmy_us: 429.57
+      reference_us: 606.21
+      reference_backend: emmy-greedy
+- program: 40
+  target:
+    loop: 9
+  realizations:
+  - name: attention.hd256.dynM.pv
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x2
+      TILE: mma_m8n8k4_f16_f32/f2x4/k8
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 190.26
+      reference_us: 6463.49
+      reference_backend: emmy-greedy
+  - name: attention.hd256.dynM.pv
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w1x2
+      TILE: mma_m8n8k4_f16_f32/f2x4/k8
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 190.87
+      reference_us: 6488.06
+      reference_backend: emmy-greedy
+- program: 41
+  target:
+    loop: 5
+  realizations:
+  - name: attention.hd64.qk
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m8n8k4_f16_f32/f4x4/k8
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d1/smem
+    measurements:
+      emmy_us: 21.77
+      reference_us: 121.22
+      reference_backend: emmy-greedy
+  - name: attention.hd64.qk
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m8n8k4_f16_f32/f4x4/k8
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d1/smem
+    measurements:
+      emmy_us: 21.86
+      reference_us: 32.73
+      reference_backend: emmy-greedy
+- program: 41
+  target:
+    loop: 6
+  realizations:
+  - name: attention.hd64.pv
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x1
+      TILE: mma_m8n8k4_f16_f32/f2x2/k4
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 48.71
+      reference_us: 48.62
+      reference_backend: emmy-greedy
+  - name: attention.hd64.pv
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w1x1
+      TILE: mma_m8n8k4_f16_f32/f2x2/k4
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 48.59
+      reference_us: 106.61
+      reference_backend: emmy-greedy
+- program: 42
+  target:
+    loop: 7
+  realizations:
+  - name: attention.hd64.dynM.qk
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m8n8k4_f16_f32/f4x4/k8
+      REDUCE: ''
+      RASTER: ''
+      STAGE: ''
+    measurements:
+      emmy_us: 62.91
+      reference_us: 83.97
+      reference_backend: emmy-greedy
+- program: 42
+  target:
+    loop: 8
+  realizations:
+  - name: attention.hd64.dynM.pv
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x1
+      TILE: mma_m8n8k4_f16_f32/f2x2/k4
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 56.78
+      reference_us: 83.71
+      reference_backend: emmy-greedy
+  - name: attention.hd64.dynM.pv
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w1x1
+      TILE: mma_m8n8k4_f16_f32/f2x2/k4
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    measurements:
+      emmy_us: 56.83
+      reference_us: 83.97
+      reference_backend: emmy-greedy
+loops:
+- inputs: [x0, x1]
+  outputs: [scaled_dot_product_attention_scaled]
+  nodes:
+  - id: scaled_dot_product_attention_scale
+    op: constant
+    attrs:
+      name: scaled_dot_product_attention_scale
+      value: 0.08838834764831843
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[scaled_dot_product_attention_scale, f16, [1]]]
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 8, 512, 128]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [1, 8, 512, 128]]]
+  - id: scaled_dot_product_attention_scaled
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Load
+          fields:
+            names: {tuple: [in0]}
+            input: scaled_dot_product_attention_scale
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 8}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 512}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 512}, window: null}}
+                        body:
+                          body:
+                          - class: Loop
+                            fields:
+                              axis: {class: Axis, fields: {name: a3, extent: {dim: 128}, window: null}}
+                              body:
+                                body:
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in1]}
+                                    input: x1
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a0}}
+                                      - {expr: {var: a2}}
+                                      - {expr: {var: a3}}
+                                    dtype: null
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in2]}
+                                    input: x0
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a0}}
+                                      - {expr: {var: a1}}
+                                      - {expr: {var: a3}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in1, in2]}, dtype: null}
+                                - class: Accum
+                                  fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a3]}, base: null}
+                              unroll: false
+                              role: {axis_role: free}
+                              seed: true
+                          - class: Assign
+                            fields: {name: v1, op: {elementwise: multiply}, args: {tuple: [acc0, in0]}, dtype: null}
+                          - class: Write
+                            fields:
+                              output: scaled_dot_product_attention_scaled
+                              index:
+                                tuple:
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {var: a0}}
+                                - {expr: {var: a1}}
+                                - {expr: {var: a2}}
+                              values: {tuple: [v1]}
+                              value_dtype: null
+                              atomic: false
+                              swizzle: NONE
+                        unroll: false
+                        role: {axis_role: free}
+                        seed: true
+                  unroll: false
+                  role: {axis_role: free}
+                  seed: true
+            unroll: false
+            role: {axis_role: free}
+            seed: true
+      name: k_sdpa_reduce_282f22
+    inputs: [scaled_dot_product_attention_scale, x1, x0]
+    outputs: [[scaled_dot_product_attention_scaled, f16, [1, 8, 512, 512]]]
+- inputs: [scaled_dot_product_attention_scaled, x2]
+  outputs: [scaled_dot_product_attention]
+  nodes:
+  - id: scaled_dot_product_attention_scaled
+    op: input
+    outputs: [[scaled_dot_product_attention_scaled, f16, [1, 8, 512, 512]]]
+  - id: x2
+    op: input
+    outputs: [[x2, f16, [1, 8, 512, 128]]]
+  - id: scaled_dot_product_attention
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 8}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 512}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 512}, window: null}}
+                        body:
+                          body:
+                          - class: Load
+                            fields:
+                              names: {tuple: [in0]}
+                              input: scaled_dot_product_attention_scaled
+                              index:
+                                tuple:
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {var: a0}}
+                                - {expr: {var: a1}}
+                                - {expr: {var: a2}}
+                              dtype: null
+                          - class: Accum
+                            fields:
+                              name: acc0
+                              value: in0
+                              op: {elementwise: maximum}
+                              dtype: null
+                              axes: {tuple: [a2]}
+                              base: null
+                        unroll: false
+                        role: {axis_role: free}
+                        seed: true
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 512}, window: null}}
+                        body:
+                          body:
+                          - class: Load
+                            fields:
+                              names: {tuple: [in1]}
+                              input: scaled_dot_product_attention_scaled
+                              index:
+                                tuple:
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {var: a0}}
+                                - {expr: {var: a1}}
+                                - {expr: {var: a2}}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v0, op: {elementwise: subtract}, args: {tuple: [in1, acc0]}, dtype: null}
+                          - {class: Assign, fields: {name: v1, op: {elementwise: exp}, args: {tuple: [v0]}, dtype: null}}
+                          - class: Accum
+                            fields: {name: acc1, value: v1, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
+                        unroll: false
+                        role: {axis_role: free}
+                        seed: true
+                    - class: Assign
+                      fields: {name: v2, op: {elementwise: reciprocal}, args: {tuple: [acc1]}, dtype: null}
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a3, extent: {dim: 128}, window: null}}
+                        body:
+                          body:
+                          - class: Loop
+                            fields:
+                              axis: {class: Axis, fields: {name: a4, extent: {dim: 512}, window: null}}
+                              body:
+                                body:
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in2]}
+                                    input: scaled_dot_product_attention_scaled
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a0}}
+                                      - {expr: {var: a1}}
+                                      - {expr: {var: a4}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v3, op: {elementwise: subtract}, args: {tuple: [in2, acc0]}, dtype: null}
+                                - {class: Assign, fields: {name: v4, op: {elementwise: exp}, args: {tuple: [v3]}, dtype: null}}
+                                - class: Assign
+                                  fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [v2, v4]}, dtype: null}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in3]}
+                                    input: x2
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a0}}
+                                      - {expr: {var: a4}}
+                                      - {expr: {var: a3}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v6, op: {elementwise: multiply}, args: {tuple: [in3, v5]}, dtype: null}
+                                - class: Accum
+                                  fields: {name: acc2, value: v6, op: {elementwise: add}, dtype: null, axes: {tuple: [a4]}, base: null}
+                              unroll: false
+                              role: {axis_role: free}
+                              seed: true
+                          - class: Write
+                            fields:
+                              output: scaled_dot_product_attention
+                              index:
+                                tuple:
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {var: a0}}
+                                - {expr: {var: a1}}
+                                - {expr: {var: a3}}
+                              values: {tuple: [acc2]}
+                              value_dtype: null
+                              atomic: false
+                              swizzle: NONE
+                        unroll: false
+                        role: {axis_role: free}
+                        seed: true
+                  unroll: false
+                  role: {axis_role: free}
+                  seed: true
+            unroll: false
+            role: {axis_role: free}
+            seed: true
+      name: k_sdpa_reduce_540e6d
+    inputs: [scaled_dot_product_attention_scaled, x2]
+    outputs: [[scaled_dot_product_attention, f16, [1, 8, 512, 128]]]
+- inputs: [x0, x1]
+  outputs: [scaled_dot_product_attention_scaled]
+  nodes:
+  - id: scaled_dot_product_attention_scale
+    op: constant
+    attrs:
+      name: scaled_dot_product_attention_scale
+      value: 0.08838834764831843
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[scaled_dot_product_attention_scale, f16, [1]]]
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 8, {sym: seq_len, hint: 512}, 128]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [1, 8, {sym: seq_len, hint: 512}, 128]]]
+  - id: scaled_dot_product_attention_scaled
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Load
+          fields:
+            names: {tuple: [in0]}
+            input: scaled_dot_product_attention_scale
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 8}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
+                        body:
+                          body:
+                          - class: Loop
+                            fields:
+                              axis: {class: Axis, fields: {name: a3, extent: {dim: 128}, window: null}}
+                              body:
+                                body:
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in1]}
+                                    input: x1
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a0}}
+                                      - {expr: {var: a2}}
+                                      - {expr: {var: a3}}
+                                    dtype: null
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in2]}
+                                    input: x0
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a0}}
+                                      - {expr: {var: a1}}
+                                      - {expr: {var: a3}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in1, in2]}, dtype: null}
+                                - class: Accum
+                                  fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a3]}, base: null}
+                              unroll: false
+                              role: {axis_role: free}
+                              seed: true
+                          - class: Assign
+                            fields: {name: v1, op: {elementwise: multiply}, args: {tuple: [acc0, in0]}, dtype: null}
+                          - class: Write
+                            fields:
+                              output: scaled_dot_product_attention_scaled
+                              index:
+                                tuple:
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {var: a0}}
+                                - {expr: {var: a1}}
+                                - {expr: {var: a2}}
+                              values: {tuple: [v1]}
+                              value_dtype: null
+                              atomic: false
+                              swizzle: NONE
+                        unroll: false
+                        role: {axis_role: free}
+                        seed: true
+                  unroll: false
+                  role: {axis_role: free}
+                  seed: true
+            unroll: false
+            role: {axis_role: free}
+            seed: true
+      name: k_sdpa_reduce_05b522
+    inputs: [scaled_dot_product_attention_scale, x1, x0]
+    outputs: [[scaled_dot_product_attention_scaled, f16, [1, 8, {sym: seq_len, hint: 512}, {sym: seq_len, hint: 512}]]]
+- inputs: [scaled_dot_product_attention_scaled, x2]
+  outputs: [scaled_dot_product_attention]
+  nodes:
+  - id: scaled_dot_product_attention_scaled
+    op: input
+    outputs: [[scaled_dot_product_attention_scaled, f16, [1, 8, {sym: seq_len, hint: 512}, {sym: seq_len, hint: 512}]]]
+  - id: x2
+    op: input
+    outputs: [[x2, f16, [1, 8, {sym: seq_len, hint: 512}, 128]]]
+  - id: scaled_dot_product_attention
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 8}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
+                        body:
+                          body:
+                          - class: Load
+                            fields:
+                              names: {tuple: [in0]}
+                              input: scaled_dot_product_attention_scaled
+                              index:
+                                tuple:
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {var: a0}}
+                                - {expr: {var: a1}}
+                                - {expr: {var: a2}}
+                              dtype: null
+                          - class: Accum
+                            fields:
+                              name: acc0
+                              value: in0
+                              op: {elementwise: maximum}
+                              dtype: null
+                              axes: {tuple: [a2]}
+                              base: null
+                        unroll: false
+                        role: {axis_role: free}
+                        seed: true
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
+                        body:
+                          body:
+                          - class: Load
+                            fields:
+                              names: {tuple: [in1]}
+                              input: scaled_dot_product_attention_scaled
+                              index:
+                                tuple:
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {var: a0}}
+                                - {expr: {var: a1}}
+                                - {expr: {var: a2}}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v0, op: {elementwise: subtract}, args: {tuple: [in1, acc0]}, dtype: null}
+                          - {class: Assign, fields: {name: v1, op: {elementwise: exp}, args: {tuple: [v0]}, dtype: null}}
+                          - class: Accum
+                            fields: {name: acc1, value: v1, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
+                        unroll: false
+                        role: {axis_role: free}
+                        seed: true
+                    - class: Assign
+                      fields: {name: v2, op: {elementwise: reciprocal}, args: {tuple: [acc1]}, dtype: null}
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a3, extent: {dim: 128}, window: null}}
+                        body:
+                          body:
+                          - class: Loop
+                            fields:
+                              axis: {class: Axis, fields: {name: a4, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
+                              body:
+                                body:
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in2]}
+                                    input: scaled_dot_product_attention_scaled
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a0}}
+                                      - {expr: {var: a1}}
+                                      - {expr: {var: a4}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v3, op: {elementwise: subtract}, args: {tuple: [in2, acc0]}, dtype: null}
+                                - {class: Assign, fields: {name: v4, op: {elementwise: exp}, args: {tuple: [v3]}, dtype: null}}
+                                - class: Assign
+                                  fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [v2, v4]}, dtype: null}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in3]}
+                                    input: x2
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a0}}
+                                      - {expr: {var: a4}}
+                                      - {expr: {var: a3}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v6, op: {elementwise: multiply}, args: {tuple: [in3, v5]}, dtype: null}
+                                - class: Accum
+                                  fields: {name: acc2, value: v6, op: {elementwise: add}, dtype: null, axes: {tuple: [a4]}, base: null}
+                              unroll: false
+                              role: {axis_role: free}
+                              seed: true
+                          - class: Write
+                            fields:
+                              output: scaled_dot_product_attention
+                              index:
+                                tuple:
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {var: a0}}
+                                - {expr: {var: a1}}
+                                - {expr: {var: a3}}
+                              values: {tuple: [acc2]}
+                              value_dtype: null
+                              atomic: false
+                              swizzle: NONE
+                        unroll: false
+                        role: {axis_role: free}
+                        seed: true
+                  unroll: false
+                  role: {axis_role: free}
+                  seed: true
+            unroll: false
+            role: {axis_role: free}
+            seed: true
+      name: k_sdpa_reduce_143343
+    inputs: [scaled_dot_product_attention_scaled, x2]
+    outputs: [[scaled_dot_product_attention, f16, [1, 8, {sym: seq_len, hint: 512}, 128]]]
+- inputs: [x0, x1]
+  outputs: [scaled_dot_product_attention_scaled]
+  nodes:
+  - id: scaled_dot_product_attention_scale
+    op: constant
+    attrs:
+      name: scaled_dot_product_attention_scale
+      value: 0.0625
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[scaled_dot_product_attention_scale, f16, [1]]]
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 16, {sym: seq_len, hint: 512}, 256]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [1, 16, {sym: seq_len, hint: 512}, 256]]]
+  - id: scaled_dot_product_attention_scaled
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Load
+          fields:
+            names: {tuple: [in0]}
+            input: scaled_dot_product_attention_scale
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 16}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
+                        body:
+                          body:
+                          - class: Loop
+                            fields:
+                              axis: {class: Axis, fields: {name: a3, extent: {dim: 256}, window: null}}
+                              body:
+                                body:
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in1]}
+                                    input: x1
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a0}}
+                                      - {expr: {var: a2}}
+                                      - {expr: {var: a3}}
+                                    dtype: null
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in2]}
+                                    input: x0
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a0}}
+                                      - {expr: {var: a1}}
+                                      - {expr: {var: a3}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in1, in2]}, dtype: null}
+                                - class: Accum
+                                  fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a3]}, base: null}
+                              unroll: false
+                              role: {axis_role: free}
+                              seed: true
+                          - class: Assign
+                            fields: {name: v1, op: {elementwise: multiply}, args: {tuple: [acc0, in0]}, dtype: null}
+                          - class: Write
+                            fields:
+                              output: scaled_dot_product_attention_scaled
+                              index:
+                                tuple:
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {var: a0}}
+                                - {expr: {var: a1}}
+                                - {expr: {var: a2}}
+                              values: {tuple: [v1]}
+                              value_dtype: null
+                              atomic: false
+                              swizzle: NONE
+                        unroll: false
+                        role: {axis_role: free}
+                        seed: true
+                  unroll: false
+                  role: {axis_role: free}
+                  seed: true
+            unroll: false
+            role: {axis_role: free}
+            seed: true
+      name: k_sdpa_reduce_60084c
+    inputs: [scaled_dot_product_attention_scale, x1, x0]
+    outputs: [[scaled_dot_product_attention_scaled, f16, [1, 16, {sym: seq_len, hint: 512}, {sym: seq_len, hint: 512}]]]
+- inputs: [x0, x1]
+  outputs: [scaled_dot_product_attention_scaled]
+  nodes:
+  - id: scaled_dot_product_attention_scale
+    op: constant
+    attrs:
+      name: scaled_dot_product_attention_scale
+      value: 0.125
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[scaled_dot_product_attention_scale, f16, [1]]]
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 8, 512, 64]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [1, 8, 512, 64]]]
+  - id: scaled_dot_product_attention_scaled
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Load
+          fields:
+            names: {tuple: [in0]}
+            input: scaled_dot_product_attention_scale
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 8}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 512}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 512}, window: null}}
+                        body:
+                          body:
+                          - class: Loop
+                            fields:
+                              axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null}}
+                              body:
+                                body:
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in1]}
+                                    input: x1
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a0}}
+                                      - {expr: {var: a2}}
+                                      - {expr: {var: a3}}
+                                    dtype: null
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in2]}
+                                    input: x0
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a0}}
+                                      - {expr: {var: a1}}
+                                      - {expr: {var: a3}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in1, in2]}, dtype: null}
+                                - class: Accum
+                                  fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a3]}, base: null}
+                              unroll: false
+                              role: {axis_role: free}
+                              seed: true
+                          - class: Assign
+                            fields: {name: v1, op: {elementwise: multiply}, args: {tuple: [acc0, in0]}, dtype: null}
+                          - class: Write
+                            fields:
+                              output: scaled_dot_product_attention_scaled
+                              index:
+                                tuple:
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {var: a0}}
+                                - {expr: {var: a1}}
+                                - {expr: {var: a2}}
+                              values: {tuple: [v1]}
+                              value_dtype: null
+                              atomic: false
+                              swizzle: NONE
+                        unroll: false
+                        role: {axis_role: free}
+                        seed: true
+                  unroll: false
+                  role: {axis_role: free}
+                  seed: true
+            unroll: false
+            role: {axis_role: free}
+            seed: true
+      name: k_sdpa_reduce_bf514b
+    inputs: [scaled_dot_product_attention_scale, x1, x0]
+    outputs: [[scaled_dot_product_attention_scaled, f16, [1, 8, 512, 512]]]
+- inputs: [scaled_dot_product_attention_scaled, x2]
+  outputs: [scaled_dot_product_attention]
+  nodes:
+  - id: scaled_dot_product_attention_scaled
+    op: input
+    outputs: [[scaled_dot_product_attention_scaled, f16, [1, 8, 512, 512]]]
+  - id: x2
+    op: input
+    outputs: [[x2, f16, [1, 8, 512, 64]]]
+  - id: scaled_dot_product_attention
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 8}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 512}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 512}, window: null}}
+                        body:
+                          body:
+                          - class: Load
+                            fields:
+                              names: {tuple: [in0]}
+                              input: scaled_dot_product_attention_scaled
+                              index:
+                                tuple:
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {var: a0}}
+                                - {expr: {var: a1}}
+                                - {expr: {var: a2}}
+                              dtype: null
+                          - class: Accum
+                            fields:
+                              name: acc0
+                              value: in0
+                              op: {elementwise: maximum}
+                              dtype: null
+                              axes: {tuple: [a2]}
+                              base: null
+                        unroll: false
+                        role: {axis_role: free}
+                        seed: true
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 512}, window: null}}
+                        body:
+                          body:
+                          - class: Load
+                            fields:
+                              names: {tuple: [in1]}
+                              input: scaled_dot_product_attention_scaled
+                              index:
+                                tuple:
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {var: a0}}
+                                - {expr: {var: a1}}
+                                - {expr: {var: a2}}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v0, op: {elementwise: subtract}, args: {tuple: [in1, acc0]}, dtype: null}
+                          - {class: Assign, fields: {name: v1, op: {elementwise: exp}, args: {tuple: [v0]}, dtype: null}}
+                          - class: Accum
+                            fields: {name: acc1, value: v1, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
+                        unroll: false
+                        role: {axis_role: free}
+                        seed: true
+                    - class: Assign
+                      fields: {name: v2, op: {elementwise: reciprocal}, args: {tuple: [acc1]}, dtype: null}
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null}}
+                        body:
+                          body:
+                          - class: Loop
+                            fields:
+                              axis: {class: Axis, fields: {name: a4, extent: {dim: 512}, window: null}}
+                              body:
+                                body:
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in2]}
+                                    input: scaled_dot_product_attention_scaled
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a0}}
+                                      - {expr: {var: a1}}
+                                      - {expr: {var: a4}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v3, op: {elementwise: subtract}, args: {tuple: [in2, acc0]}, dtype: null}
+                                - {class: Assign, fields: {name: v4, op: {elementwise: exp}, args: {tuple: [v3]}, dtype: null}}
+                                - class: Assign
+                                  fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [v2, v4]}, dtype: null}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in3]}
+                                    input: x2
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a0}}
+                                      - {expr: {var: a4}}
+                                      - {expr: {var: a3}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v6, op: {elementwise: multiply}, args: {tuple: [in3, v5]}, dtype: null}
+                                - class: Accum
+                                  fields: {name: acc2, value: v6, op: {elementwise: add}, dtype: null, axes: {tuple: [a4]}, base: null}
+                              unroll: false
+                              role: {axis_role: free}
+                              seed: true
+                          - class: Write
+                            fields:
+                              output: scaled_dot_product_attention
+                              index:
+                                tuple:
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {var: a0}}
+                                - {expr: {var: a1}}
+                                - {expr: {var: a3}}
+                              values: {tuple: [acc2]}
+                              value_dtype: null
+                              atomic: false
+                              swizzle: NONE
+                        unroll: false
+                        role: {axis_role: free}
+                        seed: true
+                  unroll: false
+                  role: {axis_role: free}
+                  seed: true
+            unroll: false
+            role: {axis_role: free}
+            seed: true
+      name: k_sdpa_reduce_09b9ca
+    inputs: [scaled_dot_product_attention_scaled, x2]
+    outputs: [[scaled_dot_product_attention, f16, [1, 8, 512, 64]]]
+- inputs: [x0, x1]
+  outputs: [scaled_dot_product_attention_scaled]
+  nodes:
+  - id: scaled_dot_product_attention_scale
+    op: constant
+    attrs:
+      name: scaled_dot_product_attention_scale
+      value: 0.125
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[scaled_dot_product_attention_scale, f16, [1]]]
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 8, {sym: seq_len, hint: 512}, 64]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [1, 8, {sym: seq_len, hint: 512}, 64]]]
+  - id: scaled_dot_product_attention_scaled
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Load
+          fields:
+            names: {tuple: [in0]}
+            input: scaled_dot_product_attention_scale
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 8}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
+                        body:
+                          body:
+                          - class: Loop
+                            fields:
+                              axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null}}
+                              body:
+                                body:
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in1]}
+                                    input: x1
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a0}}
+                                      - {expr: {var: a2}}
+                                      - {expr: {var: a3}}
+                                    dtype: null
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in2]}
+                                    input: x0
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a0}}
+                                      - {expr: {var: a1}}
+                                      - {expr: {var: a3}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in1, in2]}, dtype: null}
+                                - class: Accum
+                                  fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a3]}, base: null}
+                              unroll: false
+                              role: {axis_role: free}
+                              seed: true
+                          - class: Assign
+                            fields: {name: v1, op: {elementwise: multiply}, args: {tuple: [acc0, in0]}, dtype: null}
+                          - class: Write
+                            fields:
+                              output: scaled_dot_product_attention_scaled
+                              index:
+                                tuple:
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {var: a0}}
+                                - {expr: {var: a1}}
+                                - {expr: {var: a2}}
+                              values: {tuple: [v1]}
+                              value_dtype: null
+                              atomic: false
+                              swizzle: NONE
+                        unroll: false
+                        role: {axis_role: free}
+                        seed: true
+                  unroll: false
+                  role: {axis_role: free}
+                  seed: true
+            unroll: false
+            role: {axis_role: free}
+            seed: true
+      name: k_sdpa_reduce_37854e
+    inputs: [scaled_dot_product_attention_scale, x1, x0]
+    outputs: [[scaled_dot_product_attention_scaled, f16, [1, 8, {sym: seq_len, hint: 512}, {sym: seq_len, hint: 512}]]]
+- inputs: [scaled_dot_product_attention_scaled, x2]
+  outputs: [scaled_dot_product_attention]
+  nodes:
+  - id: scaled_dot_product_attention_scaled
+    op: input
+    outputs: [[scaled_dot_product_attention_scaled, f16, [1, 8, {sym: seq_len, hint: 512}, {sym: seq_len, hint: 512}]]]
+  - id: x2
+    op: input
+    outputs: [[x2, f16, [1, 8, {sym: seq_len, hint: 512}, 64]]]
+  - id: scaled_dot_product_attention
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 8}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
+                        body:
+                          body:
+                          - class: Load
+                            fields:
+                              names: {tuple: [in0]}
+                              input: scaled_dot_product_attention_scaled
+                              index:
+                                tuple:
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {var: a0}}
+                                - {expr: {var: a1}}
+                                - {expr: {var: a2}}
+                              dtype: null
+                          - class: Accum
+                            fields:
+                              name: acc0
+                              value: in0
+                              op: {elementwise: maximum}
+                              dtype: null
+                              axes: {tuple: [a2]}
+                              base: null
+                        unroll: false
+                        role: {axis_role: free}
+                        seed: true
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
+                        body:
+                          body:
+                          - class: Load
+                            fields:
+                              names: {tuple: [in1]}
+                              input: scaled_dot_product_attention_scaled
+                              index:
+                                tuple:
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {var: a0}}
+                                - {expr: {var: a1}}
+                                - {expr: {var: a2}}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v0, op: {elementwise: subtract}, args: {tuple: [in1, acc0]}, dtype: null}
+                          - {class: Assign, fields: {name: v1, op: {elementwise: exp}, args: {tuple: [v0]}, dtype: null}}
+                          - class: Accum
+                            fields: {name: acc1, value: v1, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
+                        unroll: false
+                        role: {axis_role: free}
+                        seed: true
+                    - class: Assign
+                      fields: {name: v2, op: {elementwise: reciprocal}, args: {tuple: [acc1]}, dtype: null}
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null}}
+                        body:
+                          body:
+                          - class: Loop
+                            fields:
+                              axis: {class: Axis, fields: {name: a4, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
+                              body:
+                                body:
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in2]}
+                                    input: scaled_dot_product_attention_scaled
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a0}}
+                                      - {expr: {var: a1}}
+                                      - {expr: {var: a4}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v3, op: {elementwise: subtract}, args: {tuple: [in2, acc0]}, dtype: null}
+                                - {class: Assign, fields: {name: v4, op: {elementwise: exp}, args: {tuple: [v3]}, dtype: null}}
+                                - class: Assign
+                                  fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [v2, v4]}, dtype: null}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in3]}
+                                    input: x2
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a0}}
+                                      - {expr: {var: a4}}
+                                      - {expr: {var: a3}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v6, op: {elementwise: multiply}, args: {tuple: [in3, v5]}, dtype: null}
+                                - class: Accum
+                                  fields: {name: acc2, value: v6, op: {elementwise: add}, dtype: null, axes: {tuple: [a4]}, base: null}
+                              unroll: false
+                              role: {axis_role: free}
+                              seed: true
+                          - class: Write
+                            fields:
+                              output: scaled_dot_product_attention
+                              index:
+                                tuple:
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {var: a0}}
+                                - {expr: {var: a1}}
+                                - {expr: {var: a3}}
+                              values: {tuple: [acc2]}
+                              value_dtype: null
+                              atomic: false
+                              swizzle: NONE
+                        unroll: false
+                        role: {axis_role: free}
+                        seed: true
+                  unroll: false
+                  role: {axis_role: free}
+                  seed: true
+            unroll: false
+            role: {axis_role: free}
+            seed: true
+      name: k_sdpa_reduce_8d5b30
+    inputs: [scaled_dot_product_attention_scaled, x2]
+    outputs: [[scaled_dot_product_attention, f16, [1, 8, {sym: seq_len, hint: 512}, 64]]]
+- inputs: [scaled_dot_product_attention_scaled, x2]
+  outputs: [scaled_dot_product_attention]
+  nodes:
+  - id: scaled_dot_product_attention_mask_fill_c
+    op: constant
+    attrs:
+      name: scaled_dot_product_attention_mask_fill_c
+      value: -1000000000.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[scaled_dot_product_attention_mask_fill_c, f16, [1]]]
+  - id: scaled_dot_product_attention_mask_zero_c
+    op: constant
+    attrs:
+      name: scaled_dot_product_attention_mask_zero_c
+      value: 0.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[scaled_dot_product_attention_mask_zero_c, f16, [1]]]
+  - id: scaled_dot_product_attention_scaled
+    op: input
+    outputs: [[scaled_dot_product_attention_scaled, f16, [1, 16, {sym: seq_len, hint: 512}, {sym: seq_len, hint: 512}]]]
+  - id: x2
+    op: input
+    outputs: [[x2, f16, [1, 16, {sym: seq_len, hint: 512}, 256]]]
+  - id: scaled_dot_product_attention
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Load
+          fields:
+            names: {tuple: [in0]}
+            input: scaled_dot_product_attention_mask_fill_c
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Load
+          fields:
+            names: {tuple: [in1]}
+            input: scaled_dot_product_attention_mask_zero_c
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 16}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
+                        body:
+                          body:
+                          - class: Select
+                            fields:
+                              name: v0
+                              branches:
+                                tuple:
+                                - class: SelectBranch
+                                  fields: {value: in1, select: {expr: {binary: {op: <=, left: {var: a2}, right: {var: a1}}}}}
+                                - class: SelectBranch
+                                  fields: {value: in0, select: {expr: {binary: {op: '>', left: {var: a2}, right: {var: a1}}}}}
+                          - class: Load
+                            fields:
+                              names: {tuple: [in2]}
+                              input: scaled_dot_product_attention_scaled
+                              index:
+                                tuple:
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {var: a0}}
+                                - {expr: {var: a1}}
+                                - {expr: {var: a2}}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v1, op: {elementwise: add}, args: {tuple: [in2, v0]}, dtype: null}
+                          - class: Accum
+                            fields:
+                              name: acc0
+                              value: v1
+                              op: {elementwise: maximum}
+                              dtype: null
+                              axes: {tuple: [a2]}
+                              base: null
+                        unroll: false
+                        role: {axis_role: free}
+                        seed: true
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
+                        body:
+                          body:
+                          - class: Select
+                            fields:
+                              name: v2
+                              branches:
+                                tuple:
+                                - class: SelectBranch
+                                  fields: {value: in1, select: {expr: {binary: {op: <=, left: {var: a2}, right: {var: a1}}}}}
+                                - class: SelectBranch
+                                  fields: {value: in0, select: {expr: {binary: {op: '>', left: {var: a2}, right: {var: a1}}}}}
+                          - class: Load
+                            fields:
+                              names: {tuple: [in3]}
+                              input: scaled_dot_product_attention_scaled
+                              index:
+                                tuple:
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {var: a0}}
+                                - {expr: {var: a1}}
+                                - {expr: {var: a2}}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v3, op: {elementwise: add}, args: {tuple: [in3, v2]}, dtype: null}
+                          - class: Assign
+                            fields: {name: v4, op: {elementwise: subtract}, args: {tuple: [v3, acc0]}, dtype: null}
+                          - {class: Assign, fields: {name: v5, op: {elementwise: exp}, args: {tuple: [v4]}, dtype: null}}
+                          - class: Accum
+                            fields: {name: acc1, value: v5, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
+                        unroll: false
+                        role: {axis_role: free}
+                        seed: true
+                    - class: Assign
+                      fields: {name: v6, op: {elementwise: reciprocal}, args: {tuple: [acc1]}, dtype: null}
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a3, extent: {dim: 256}, window: null}}
+                        body:
+                          body:
+                          - class: Loop
+                            fields:
+                              axis: {class: Axis, fields: {name: a4, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
+                              body:
+                                body:
+                                - class: Select
+                                  fields:
+                                    name: v7
+                                    branches:
+                                      tuple:
+                                      - class: SelectBranch
+                                        fields: {value: in1, select: {expr: {binary: {op: <=, left: {var: a4}, right: {var: a1}}}}}
+                                      - class: SelectBranch
+                                        fields: {value: in0, select: {expr: {binary: {op: '>', left: {var: a4}, right: {var: a1}}}}}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in4]}
+                                    input: scaled_dot_product_attention_scaled
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a0}}
+                                      - {expr: {var: a1}}
+                                      - {expr: {var: a4}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v8, op: {elementwise: add}, args: {tuple: [in4, v7]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v9, op: {elementwise: subtract}, args: {tuple: [v8, acc0]}, dtype: null}
+                                - {class: Assign, fields: {name: v10, op: {elementwise: exp}, args: {tuple: [v9]}, dtype: null}}
+                                - class: Assign
+                                  fields: {name: v11, op: {elementwise: multiply}, args: {tuple: [v10, v6]}, dtype: null}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in5]}
+                                    input: x2
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a0}}
+                                      - {expr: {var: a4}}
+                                      - {expr: {var: a3}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v12, op: {elementwise: multiply}, args: {tuple: [in5, v11]}, dtype: null}
+                                - class: Accum
+                                  fields: {name: acc2, value: v12, op: {elementwise: add}, dtype: null, axes: {tuple: [a4]}, base: null}
+                              unroll: false
+                              role: {axis_role: free}
+                              seed: true
+                          - class: Write
+                            fields:
+                              output: scaled_dot_product_attention
+                              index:
+                                tuple:
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {var: a0}}
+                                - {expr: {var: a1}}
+                                - {expr: {var: a3}}
+                              values: {tuple: [acc2]}
+                              value_dtype: null
+                              atomic: false
+                              swizzle: NONE
+                        unroll: false
+                        role: {axis_role: free}
+                        seed: true
+                  unroll: false
+                  role: {axis_role: free}
+                  seed: true
+            unroll: false
+            role: {axis_role: free}
+            seed: true
+      name: k_sdpa_reduce_338a20
+    inputs: [scaled_dot_product_attention_mask_fill_c, scaled_dot_product_attention_mask_zero_c, scaled_dot_product_attention_scaled, x2]
+    outputs: [[scaled_dot_product_attention, f16, [1, 16, {sym: seq_len, hint: 512}, 256]]]

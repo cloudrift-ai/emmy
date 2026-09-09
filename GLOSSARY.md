@@ -88,10 +88,10 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Elementwise operation** — An operation independently applied to corresponding tensor elements, such as adding
   two tensors.
 - **Reduction** — Combining many values into fewer values, such as summing a row or finding its maximum.
-- **Chunk** — The slice of a reduction axis one trip of a staged K loop covers (`STAGE`'s `bk_elems`). It is a
-  SCHEDULE choice, so it never appears in a term: an emitter that wants a block takes this one. The twisted carrier's
-  tensor-core tier folds the recipe one chunk at a time — the chunk's pivot, its channel partials, and one merge
-  through the stable ⊕ per chunk instead of per element.
+- **Chunk** — The slice of a reduction axis one loop trip folds. An ordinary staged contraction derives it from the
+  resolved `STAGE` K width. The twisted carrier's tensor-core tier instead uses the `TILE` atom's K width and has no
+  `STAGE` choice. It is schedule data, so it never appears in a term: the tier folds the recipe's pivot and channel
+  partials, then performs one merge through the stable ⊕ per chunk instead of per element.
 - **Scan (prefix reduction)** — A reduction that also stores its running state at every step, such as `cumsum`. In
   Emmy a scan is a Fold with an **observer**: a pure per-step function over the carried state whose results only
   kernel-boundary output writes consume. An observed fold preserves its stream order, so it schedules as the serial
@@ -257,8 +257,10 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   fused norm→linear kernel folds both its statistic and its contraction — the name carries a suffix identifying the
   step, as in the statistic's `REDUCE@<axis>` beside the contraction's bare `REDUCE`. The shortest name that is
   unambiguous is the one golden files, the tuning database and hand-set pins all
-  use. (In the code, these names are produced by walking the kernel's stored Fold tree, which is why the
-  source calls the machinery the tree-path codec.)
+  use. A plain name PINNED on a kernel that has several such steps asks for one of them: one step carries the value
+  and every other declines the choice. That is what a row measured under a plain pin recorded, so it is what the
+  enumeration, the golden decode and the evidence pick all read it as. (In the code, these names are produced by
+  walking the kernel's stored Fold tree, which is why the source calls the machinery the tree-path codec.)
 - **Realize** — A recorded configuration *realizes* when the compiler, at the point where it makes that choice, offers
   a candidate matching the recording. A configuration that realizes nowhere cannot be deployed, however good the
   measurement stored with it.

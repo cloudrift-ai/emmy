@@ -300,7 +300,7 @@ def test_promoted_attention_output_sweep_closes_the_a100_b_seam_idempotently() -
     assert all(spec.sweep == () for spec in tile.output_specs)
     assert reconstructed.op is tile.op
     # The authored seam — the score's K cone — is offered on the promoted tree.
-    assert "PLACE@map.1/twist.1/map.1/inner.2/map" in {seam.spelling for seam in cuttable_seams(tile)}
+    assert "PLACE@map.1/twist.1/inner.2/map" in {seam.spelling for seam in cuttable_seams(tile)}
 
 
 # ---- closure at formation ---------------------------------------------------------------------- #
@@ -385,13 +385,53 @@ def test_key_swept_statistic_stays_when_a_sibling_reads_it() -> None:
     assert stat.axis is not None and any(stat is edge for edge in sweep.operands), "the statistic fold is shared, not copied"
 
 
+def test_normalization_prunes_an_operand_component_no_reader_reads() -> None:
+    """A rewrite can leave a cone exposing a value that went dead when the folds around it fused.
+    Normalization restricts the edge to what its reader binds and cuts the body to match, so the
+    dead half stops riding the interface and the loads defining it stop being carried twice."""
+    epilogue = projection(
+        (slab("acc", "workspace", "m"),),
+        (
+            Load(name="scale", input="sdpa_scale", index=(Literal(0, "int"),)),
+            Assign(name="v10", op="reciprocal", args=("acc",)),
+        ),
+        results=("scale", "v10"),
+    )
+    root = projection((epilogue,), (Assign(name="out", op="multiply", args=("v10", "v10")),))
+    tile = TileOp(
+        op=root,
+        name="k_epilogue",
+        place=Placement(free=(M8,)),
+        axes=(M8,),
+        output_specs=(OutputSpec(write=Write(output="o", index=(Var("m"),), values=("out",))),),
+    )
+    (edge,) = tile.op.operands
+    assert edge.exposes == ("v10",)  # ``scale`` went with the param nothing bound
+    assert tile.op.lift.params == ("v10",)
+    assert not [stmt for stmt in edge.lift.body if isinstance(stmt, Load) and stmt.input == "sdpa_scale"]
+
+
+def test_normalization_keeps_a_component_only_a_boundary_store_reads() -> None:
+    """A store is a reader too: a sweep's per-cell projection reaches its ``Write`` with no lift
+    binding it, so the prune keeps what the output specifications name."""
+    cell = projection((slab("acc", "workspace", "m"),), (Assign(name="v", op="exp", args=("acc",)),), results=("acc", "v"))
+    root = projection((cell,), (Assign(name="out", op="rsqrt", args=("acc",)),))
+    specs = (
+        OutputSpec(write=Write(output="o", index=(Var("m"),), values=("out",))),
+        OutputSpec(write=Write(output="tap", index=(Var("m"),), values=("v",))),
+    )
+    tile = TileOp(op=root, name="k_tap", place=Placement(free=(M8,)), axes=(M8,), output_specs=specs)
+    (edge,) = tile.op.operands
+    assert edge.exposes == ("acc", "v")  # ``v`` survives on the store's word alone
+
+
 def test_normalization_shares_structurally_identical_cones() -> None:
     """The tree-wide invariant: after normalization, no two DISTINCT Fold objects in the tree are
     the same value with the same interface names — copies fusion inlined into several consumption
     sites (attention's softmax statistics, once in the weight cone and once in the epilogue) are
     one object, so placement sees one value and a composed cut materializes it once. Severed
     sharing is the recompute class PR #679 measured at three orders of magnitude."""
-    tile = case_target_tile("attention/rmsnorm-qk-sdpa-composed-cut_xfail_realized.yaml")
+    tile = case_target_tile("attention/rmsnorm-qk-sdpa-composed-cut.yaml")
 
     by_identity = {id(site.node): site.node for site in sites(tile.op)}
     by_value: dict[tuple, list[Fold]] = {}
@@ -700,6 +740,51 @@ def test_share_common_cones_unifies_internally_renamed_copies() -> None:
 
     distinct = rooted(cone("l2", "p2", row="q"))  # same form, different capture — a different value
     assert distinct.operands[0].operands[0] is not distinct.operands[1].operands[0]
+
+
+def test_a_carrier_of_two_independent_products_becomes_one_term_per_state() -> None:
+    """Two matmuls the fusion put in one nest — each its own A and its own B — fold whole one at a
+    time and not together: a tier holds ONE A fragment against a B slab per channel. Normalization
+    hands back one term per state, each an ordinary contraction the mma tier tiles, under a
+    projection exposing what the carrier exposed."""
+    a28 = Axis("a28", Dim(64))
+    carrier = reduction(
+        a28,
+        (slab("wg", "Wg", "n", "a28"), slab("xg", "Xg", "m", "a28"), slab("wu", "Wu", "n", "a28"), slab("xu", "Xu", "m", "a28")),
+        (
+            Assign(name="acc_g__v", op="multiply", args=("wg", "xg")),
+            Assign(name="acc_u__v", op="multiply", args=("wu", "xu")),
+        ),
+        ("acc_g", "acc_u"),
+    )
+    assert len(carrier.bilinear_channels()) == 1 and not carrier.tiles_whole()
+
+    apart = carrier.per_state()
+    assert apart is not None and apart.axis is None and apart.exposes == carrier.exposes
+    assert [child.exposes for child in apart.operands] == [("acc_g",), ("acc_u",)]
+    assert all(child.tiles_whole() and len(child.operands) == 2 for child in apart.operands)
+    assert apart.per_state() is None, "idempotent: what it hands back folds whole"
+
+    tile = TileOp(op=carrier, place=Placement(free=(M8, N16)), axes=(M8, N16, a28))
+    assert [site for site in tile.node_sites if tile.contracts(site)] == [1, 2]
+
+
+def test_a_carrier_that_folds_whole_or_carries_no_product_stays_one_term() -> None:
+    """Two shapes normalization must leave alone: the FUSED gate/up carrier, whose channels share
+    their A — the form the atom wants, one ldmatrix'd A fragment and an mma chain per channel — and
+    a carrier whose states are no product at all (a sum beside a sum of squares over one loaded
+    value), which splitting would make read that value twice for nothing."""
+    a28 = Axis("a28", Dim(64))
+    shared = contraction(a28, slab("x", "X", "m", "a28"), (slab("wg", "Wg", "n", "a28"), "acc_g"), (slab("wu", "Wu", "n", "a28"), "acc_u"))
+    assert shared.tiles_whole() and shared.per_state() is None
+
+    statistics = reduction(
+        a28,
+        (slab("x", "X", "m", "a28"),),
+        (Assign(name="sum__v", op="multiply", args=("x", "x")), Assign(name="count__v", op="add", args=("x", "x"))),
+        ("sum", "count"),
+    )
+    assert len(statistics.bilinear_channels()) < 2 and statistics.per_state() is None
 
 
 def test_total_lift_produces_canonical_contraction() -> None:

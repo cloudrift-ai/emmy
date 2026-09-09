@@ -2,6 +2,7 @@
 
 import asyncio
 import copy
+import re
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -615,7 +616,6 @@ def test_recorded_greedy_pick_is_picked_again_under_strict_evidence(tmp_path):
 
     written = record_greedy_pick(
         path,
-        document,
         "working.route",
         decisions=[(identity, knobs, 5.0, 6.0) for identity, knobs in taken.decisions],
         kernels=[(identity, row, 1.0, 2.0) for identity, row in rows],
@@ -633,147 +633,56 @@ def test_recorded_greedy_pick_is_picked_again_under_strict_evidence(tmp_path):
     assert greedy_pick_rows(again) == rows
 
 
-def _recorded_set(tmp_path):
-    """A working golden whose seed realization has had one greedy kernel set recorded onto it."""
+def test_recorded_composed_pick_is_picked_again_under_strict_evidence(tmp_path):
+    """A pinned compile consumes every scoped PLACE pin that resolves on one kernel as ONE composed
+    decision, and ``--record-greedy`` records it as one routing row naming every seam. Those rows
+    are evidence enough for the same composed cut under strict evidence — the cut pass offers the
+    composed arm the row spells beside its single seams, on the replay that keys the rows and on
+    the deploy that reads them — rather than the first offered seam the row marks with the rest
+    left unresolved and every receipt keyed under a kernel that replay never minted."""
+    from emmy import config
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
-    from emmy.compiler.pipeline.search.golden import golden_record_from_entry, records_override
+    from emmy.compiler.pipeline.search.golden import golden_record_from_entry, records_override, sole_evidence
     from emmy.compiler.pipeline.search.pins import pinned_knobs
     from emmy.compiler.pipeline.search.working_golden import KernelSetDecisions, greedy_pick_rows, record_greedy_pick
 
-    path = tmp_path / "working-set.yaml"
+    path = tmp_path / "working-route.yaml"
     document = _working_placement_route(path)
     entry = document["configs"][0]
     seed = golden_record_from_entry(document, entry, entry["realizations"][0])
     ctx = Context.from_target((8, 9))
+    both = {"PLACE@inner.1/map": "cut", "PLACE@inner.1/map.3/map": "cut"}
     taken = KernelSetDecisions()
-    with records_override([seed]), pinned_knobs({"FAST_MATH": False}):
+    with records_override([]), pinned_knobs({"FAST_MATH": False, **both}):
         picked = Pipeline.build(CUDA_PASSES).with_strategies(taken).run(seed.target_program.copy(), ctx=ctx, db=None)
+    rows = greedy_pick_rows(picked)
+    assert len(rows) >= 3 and taken.decisions[0][1] == both, "one composed decision minting at least two pieces"
+
     written = record_greedy_pick(
         path,
-        document,
         "working.route",
         decisions=[(identity, knobs, 5.0, 6.0) for identity, knobs in taken.decisions],
-        kernels=[(identity, row, 1.0, 2.0) for identity, row in greedy_pick_rows(picked)],
+        kernels=[(identity, row, 1.0, 2.0) for identity, row in rows],
         reference_backend="same-input-greedy",
     )
-    return path, load_golden_file(path), written, len(taken.decisions)
-
-
-def test_a_recorded_set_lists_its_routing_rows_on_the_seed(tmp_path):
-    """The seed realization gains a ``route`` naming the routing rows the compile took, in the order
-    it took them. A cascade takes several, and every one of them is named: a piece's cut key is
-    spelled on the piece's own tree, so the first decision alone does not say what the set was."""
-    _path, reloaded, written, decisions = _recorded_set(tmp_path)
-    seed = reloaded["configs"][0]["realizations"][0]
-
-    assert seed["name"] == "working.route"
-    assert seed["kernel_set"] == written[:decisions], "the seed lists its routing rows, not its receipts"
-    assert decisions >= 1
-
-
-def test_a_realization_listing_its_kernel_set_is_verified_by_it(tmp_path):
-    """The unit of verification is the routed SET. A realization with no measurements of its own is
-    verified when every row its ``route`` names is measured, and stops being verified as soon as one
-    of them is not. A realization with neither measurements nor a route stays unverified."""
-    from emmy.compiler.pipeline.search.golden import GoldenEntryState, golden_set_state
-
-    _path, reloaded, _written, _decisions = _recorded_set(tmp_path)
-    realizations = reloaded["configs"][0]["realizations"]
-    seed = realizations[0]
-    seed.pop("knobs", None)
-    seed.pop("measurements", None)
-
-    assert golden_set_state(seed, realizations) is GoldenEntryState.VERIFIED
-
-    named = next(row for row in realizations if row["name"] == seed["kernel_set"][0])
-    named.pop("measurements")
-    assert golden_set_state(seed, realizations) is not GoldenEntryState.VERIFIED
-
-    seed.pop("kernel_set")
-    assert golden_set_state(seed, realizations) is GoldenEntryState.INVENTORY
-
-
-def test_promotion_accepts_a_realization_verified_by_its_kernel_set(tmp_path):
-    """The promotion check asks the same question, so a routed realization promotes on the strength
-    of the rows it names. Take a measurement away from one of them and it no longer does — the set
-    is not something anyone ran."""
-    from emmy.compiler.pipeline.search.golden import GoldenFileValidation, validate_golden_file
-
-    _path, reloaded, _written, _decisions = _recorded_set(tmp_path)
-    reloaded["gpu_name"] = "NVIDIA GeForce RTX 4080"
-    realizations = reloaded["configs"][0]["realizations"]
-    seed = realizations[0]
-    seed.pop("knobs", None)
-    seed.pop("measurements", None)
-
-    validate_golden_file(reloaded, validation=GoldenFileValidation.PROMOTION)
-
-    named = next(row for row in realizations if row["name"] == seed["kernel_set"][0])
-    named.pop("measurements")
-    with pytest.raises(ValueError, match="requires knobs and paired positive timings"):
-        validate_golden_file(reloaded, validation=GoldenFileValidation.PROMOTION)
-
-
-def test_a_realization_listing_its_kernel_set_spells_its_arms(tmp_path):
-    """Read as evidence, such a realization spells the route it names — never fuse. Its own knobs
-    say nothing, so without the reference the replay reads it as a kernel that ran whole.
-
-    Asked here of a set whose rows name no kernel by identity, so every fork falls to the set's
-    lead — the routed realization itself, which has only the reference to answer with."""
-    from emmy.compiler.pipeline.search.golden import _replay, golden_record_from_entry, lead_of, siblings_of
-
-    _path, reloaded, _written, _decisions = _recorded_set(tmp_path)
-    entry = reloaded["configs"][0]
-    seed_row = entry["realizations"][0]
-    seed_row.pop("knobs", None)
-    seed_row.pop("measurements", None)
-    for row in entry["realizations"][1:]:
-        row.pop("identity", None)
-
-    def _arms(rows):
-        records = [golden_record_from_entry(reloaded, entry, row) for row in rows]
-        seed = records[0]
-        return _replay(seed, siblings=siblings_of(seed, records), lead=lead_of(seed, records)).arms
-
-    assert any(arm.get("PLACE@inner.1/map") == "cut" for _signature, arm in _arms(entry["realizations"]))
-
-    seed_row.pop("kernel_set")
-    assert not any(arm.get("PLACE@inner.1/map") == "cut" for _signature, arm in _arms(entry["realizations"]))
-
-
-def test_benching_a_routed_realization_pins_the_arms_it_lists(tmp_path):
-    """Benching a routed realization by name has to compile the kernel set that was measured. Its
-    own knobs are empty, so the pin the bench publishes comes from the routing rows it names —
-    every one of them, since a cascade's later cuts are spelled on the pieces the earlier ones
-    mint. Without that the compile would fall to the unpinned fork and time whatever the planner
-    picked, under the realization's name."""
-    from emmy.commands.compile import resolve_golden_arg
-    from emmy.commands.run import _sample_replay_knobs
-
-    path, reloaded, written, decisions = _recorded_set(tmp_path)
-    seed = reloaded["configs"][0]["realizations"][0]
-    seed.pop("knobs", None)
-    seed.pop("measurements", None)
-    dump_golden_file(reloaded, path, overwrite=True)
-
-    args = _args(path, realization="working.route", ir=None)
-    args._explicit_realization = True
-    resolve_golden_arg(args)
-
-    (row,) = [config for config in args.golden_configs if config.name == "working.route"]
-    pinned = _sample_replay_knobs(row)
-    routing = [r for r in reloaded["configs"][0]["realizations"] if r["name"] in written[:decisions]]
-    for arm in routing:
-        assert all(pinned.get(key) == value for key, value in arm["knobs"].items()), pinned
+    reloaded = load_golden_file(path)
+    added = [row for row in reloaded["configs"][0]["realizations"] if row["name"] in written]
+    records = [golden_record_from_entry(reloaded, reloaded["configs"][0], row) for row in added]
+    with sole_evidence(records), pinned_knobs({"FAST_MATH": False}), config.strict_evidence_override(True):
+        again = Pipeline.build(CUDA_PASSES).run(seed.target_program.copy(), ctx=ctx, db=None)
+    assert greedy_pick_rows(again) == rows
 
 
 def test_run_records_the_greedy_pick_of_an_embedded_golden(monkeypatch, tmp_path):
     """``run --golden PATH --realization NAME --bench --record-greedy``: the greedy row compiles with
     the file's rows as its golden evidence (here the routing row, so the cut is taken), and after
     the bench the kernel set it picked is written back as measured rows — a routing row per
-    kernel-set decision with the isolated whole-graph timing, a receipt per kernel with its
-    isolated launch timing, the greedy comparison row as every reference — while the per-kernel
-    perf rows and node leaves every embedded-golden bench records by default are recorded too."""
+    kernel-set decision priced at the summed isolated launches of the kernels that decision
+    produced (the root's cut owns every kernel; the residual's split owns only its own pieces, so
+    its row ranks in the same units as the unsplit kernel's receipt would), a receipt per kernel
+    with its isolated launch timing, the greedy comparison row as every reference — while the
+    per-kernel perf rows and node leaves every embedded-golden bench records by default are
+    recorded too."""
     from emmy.commands import run as run_module
     from emmy.commands.compile import resolve_golden_arg
     from emmy.compiler import target as target_mod
@@ -860,13 +769,35 @@ def test_run_records_the_greedy_pick_of_an_embedded_golden(monkeypatch, tmp_path
     receipts = [row for row in added if not _is_route_row(row["knobs"])]
     assert routing[0]["knobs"] == {"PLACE@inner.1/map": "cut"} and len(receipts) >= 2
     total = sum(range(1, len(receipts) + 1))
+    # The root's cut produced every kernel; the residual's cross-CTA split (whichever ``g<n>`` the
+    # prior picked) produced every kernel but the piece the cut minted ahead of it (the first
+    # launch), so its row is priced without it.
+    assert len(routing) == 2 and re.fullmatch(r"g\d+[ak]", routing[1]["knobs"]["REDUCE"])
     assert [row["measurements"] for row in routing] == [
-        {"emmy_us": pytest.approx(total * 1.0), "reference_us": pytest.approx(total * 2.0), "reference_backend": "same-input-greedy"}
-    ] * len(routing)
+        {"emmy_us": pytest.approx(total * 1.0), "reference_us": pytest.approx(total * 2.0), "reference_backend": "same-input-greedy"},
+        {
+            "emmy_us": pytest.approx((total - 1) * 1.0),
+            "reference_us": pytest.approx((total - 1) * 2.0),
+            "reference_backend": "same-input-greedy",
+        },
+    ]
     assert [row["measurements"] for row in receipts] == [
         {"emmy_us": pytest.approx((i + 1) * 1.0), "reference_us": pytest.approx((i + 1) * 2.0), "reference_backend": "same-input-greedy"}
         for i in range(len(receipts))
     ]
+
+
+def test_kernel_set_prices_sum_the_kernels_a_decision_produced():
+    """A decision is priced at the launches of the kernels it produced, a later decision that
+    consumed one of them standing in with its own kernels; a kernel without a launch leaves the
+    price undecided (``None``) rather than inventing one."""
+    from emmy.compiler.pipeline.search.working_golden import kernel_set_prices
+
+    sets = [("root", ("piece", "root")), ("root", ("partial", "root")), ("piece", ("piece_a", "piece_b"))]
+    launches = {"partial": 2.0, "root": 3.0, "piece_a": 5.0, "piece_b": 7.0}
+    assert kernel_set_prices(sets, launches) == [17.0, 5.0, 12.0]
+    assert kernel_set_prices(sets, {"root": 3.0, "partial": 2.0}) == [None, 5.0, None]
+    assert kernel_set_prices([], launches) == []
 
 
 def test_run_files_a_hung_greedy_kernel_as_bench_fail_evidence(monkeypatch, tmp_path):
@@ -951,3 +882,92 @@ def test_run_files_a_hung_greedy_kernel_as_bench_fail_evidence(monkeypatch, tmp_
     filed = {name: row.status for name, row in rows.items() if row is not None}
     assert filed == {nodes[-1].op.kernel_name: "bench_fail"}, "only the kernel the watchdog named is evidence"
     assert rows[nodes[-1].op.kernel_name].stats.median == pytest.approx(2.0e6), "priced at the run budget's fail sentinel"
+
+
+def test_run_skips_pinned_rebench_of_the_same_election_after_a_greedy_hang(monkeypatch, tmp_path):
+    """An embedded Loop golden has no Torch twin, so its greedy job can complete the same-input
+    reference and only then have its repeated timing cross the watchdog (``resp["greedy_error"]``).
+    Before, ``run`` still re-compiled and re-benched the seed's automatic pin in that case even
+    though the pin carries no knobs of its own: with nothing pinning it away from the greedy
+    compile's own choices, it re-elects and re-hangs the identical program a second time (the
+    DeepSeek-V4-Flash post4096 double-cost defect). The fix (1) records the bench_fail evidence
+    for the failed election BEFORE any pinned compile begins, and (2) skips re-benching the
+    knob-less automatic pin, leaving any pinned row that DOES carry its own knobs to bench as
+    usual."""
+    from emmy.commands import run as run_module
+    from emmy.commands.compile import resolve_golden_arg
+
+    path = tmp_path / "working.yaml"
+    _working_loop(path)  # default state: an untuned seed realization with no recorded knobs
+    args = _args(
+        path,
+        realization="working.relu",
+        ir=None,
+        bench=True,
+        ab=None,
+        debug=False,
+        dump_dir=None,
+        bench_backends="emmy",
+        warmup=5,
+        iters=20,
+        seed=0,
+        json=None,
+        profile=False,
+        record=False,
+        record_greedy=False,
+        strict_correctness=False,
+    )
+    resolve_golden_arg(args)
+    assert args.golden_configs and not args.golden_configs[0].knobs, "the seed must carry no knobs"
+
+    class FakeBackend:
+        name = "cuda"
+        tune_db = None
+        bench_compile_timeout_s = 1.0
+        bench_run_timeout_s = 1.0
+
+        def __init__(self, **_kwargs):
+            pass
+
+        async def benchmark_compare_async(self, _graph, **_kwargs):
+            return {
+                "results": {},
+                "result": None,
+                "captured": False,
+                "torch_available": False,
+                "accuracy_error": None,
+                "run_io": ({"x": object()}, {"y": object()}),
+                "greedy_error": "HungKernelError: repeated timing crossed the watchdog",
+                "reference_run_us": 4_000_000.0,
+            }
+
+        async def aclose_async_worker(self):
+            pass
+
+    class FakeDump:
+        @staticmethod
+        def resolve(_path):
+            return None
+
+    calls = []
+
+    def fake_record_failure(*_args, **_kwargs):
+        calls.append("record")
+
+    async def fake_bench_golden_variants(_backend, _source, pinned, **_kwargs):
+        calls.append(("bench_golden_variants", list(pinned)))
+        return []
+
+    async def fail_if_isolated(*_args, **_kwargs):
+        raise AssertionError("a failed greedy timing must not be re-benched or made eligible")
+
+    monkeypatch.setattr(run_module, "_record_greedy_failure", fake_record_failure)
+    monkeypatch.setattr(run_module, "_bench_golden_variants", fake_bench_golden_variants)
+    monkeypatch.setattr(run_module, "_bench_greedy_isolated", fail_if_isolated)
+    monkeypatch.setattr(run_module, "_print_kernel_stats", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(SystemExit):
+        run_module._handle_run_ir(args, FakeBackend, FakeDump)
+
+    assert calls[0] == "record", "the bench_fail row must be recorded before the pinned walk starts"
+    assert calls[1] == ("bench_golden_variants", []), "the knob-less seed pin must not be re-compiled and re-benched"

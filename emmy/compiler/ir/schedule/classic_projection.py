@@ -55,7 +55,7 @@ from emmy.compiler.ir.schedule.classic import (
     node_id_spelling,
 )
 from emmy.compiler.ir.schedule.views import ContractionFacts
-from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Write
+from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Select, Write, mask_select_predicate
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.ops import Sched, chain_form, chain_members, edge_dtypes, kernel_roots, projection_tail, scheduled
@@ -153,8 +153,13 @@ def _node_refusal(tile: TileOp, target, node, fragment_epilogue: bool, packed: t
         return "the projection epilogue is not a per-fragment straight-line program"
     # The operand tuple in stored order — there is no named A/B role any more, and a nested
     # scheduling site on ANY operand refuses the same way.
-    if any(edge.axis is not None for edge in node.operands):
+    if any(edge.axis is not None for edge in node.operands) and not node.chunked():
         return "a nested scheduling site inhabits an operand edge"
+    # A CHUNKED carrier is the one exception: its A IS the score contraction, so A reduces. That is
+    # the tier's own shape — the chunk's score is the producer's tile — and the fragment agreement
+    # composed in ``extend`` is what holds the two to one atom. It only reached here as a zero-axis
+    # cone with the contraction nested under it while the fusion still minted that cone, so the
+    # blanket refusal never saw the case it was not written about.
     if node.chunked() and (why := _chunk_refusal(tile, node)) is not None:
         return why
 
@@ -198,13 +203,43 @@ def _chunk_refusal(tile: TileOp, node) -> str | None:
     blocklist retry per rank, and there are more ranked rows than the retry budget."""
     facts = tile.contractions.get(tile.node_id(node))
     score = facts.producer if facts is not None else None
-    if score is None:
-        return "the chunk tier folds a carrier whose pivot a nested contraction supplies"
-    if any(edge.as_slab() is None for edge in (*score.operands, *node.operands[1:])):
+    # The chunk's score is CONTRACTED into its fragments when a nested contraction supplies it, and
+    # GATHERED into them when the carrier's own A edge is already the stored tile (softmax@V, whose
+    # probabilities arrive as an input). Either way the tier gets a ``(row, chunk)`` C fragment; a
+    # carrier that is neither has no chunk to fold.
+    reads = (*score.operands, node.operands[1]) if score is not None else node.operands[:2]
+    if score is None and node.operands[0].as_slab() is None:
+        return "the chunk tier folds a carrier whose pivot a nested contraction or a stored tile supplies"
+    # The chunk covers the score's OWN contraction in one pass and holds a query fragment per step,
+    # so a symbolic extent there has no step count to hold them at.
+    if score is not None and not tile.axis_of(score.axis).extent.is_static:
+        return "the chunk tier covers the score's contraction in one pass, so its extent must be static"
+    if any(edge.as_slab() is None for edge in reads):
         return "the chunk tier reads its score operands and its streamed value as slabs"
-    cone = node.operands[0].applied.cone(node.roles[0])
-    if any(not isinstance(stmt, (Assign, Load)) for stmt in cone.body):
-        return "the score's own cone holds more than a straight-line program"
+    # The score's own PREFIX is the CARRIER's lift cut to its score role — A is the score
+    # contraction, and what scales its raw accumulator lives in the lift above it. Its leaves past
+    # the producer are read once ahead of the chunk, so none of them may vary over the chunk.
+    prefix = node.applied.cone(node.roles[0])
+    if any(not isinstance(stmt, (Assign, Load, Select)) for stmt in prefix.body):
+        return "the score's own prefix holds more than a straight-line program"
+    coord_axes = {node.axis, *node.as_contraction().left_axes}
+    uniform = {name for edge in node.operands if not edge.free_axes for name in edge.exposes}
+    for stmt in (stmt for stmt in prefix.body if isinstance(stmt, Select)):
+        consumers = [
+            consumer
+            for consumer in prefix.body
+            if isinstance(consumer, Assign) and consumer.op.name == "add" and stmt.name in consumer.args
+        ]
+        if (
+            mask_select_predicate(stmt) is None
+            or len(consumers) != 1
+            or not set(stmt.deps()) <= uniform
+            or any(not branch.select.free_vars() <= coord_axes for branch in stmt.branches)
+        ):
+            return "the score's coordinate Select does not form a cell-uniform additive mask"
+    leaves = [edge for edge in node.operands[1:] if set(edge.exposes) & set(prefix.params)]
+    if any(node.axis in edge.free_axes for edge in leaves):
+        return "the score's prefix reads an operand that varies over the chunk"
     # The tier holds ONE accumulator — the expectation — and every other carried state as a per-row
     # register the store may read but not write out. A cross-CTA split's partial writes the whole
     # carrier to its workspace, which is a kernel this tier cannot produce.
@@ -268,10 +303,14 @@ def _atom_families(tile: TileOp, target, node, tail: list, packed: tuple = (None
         )
 
     # The CHUNK tier hands its weight to the expectation's mma as a register repack of the score's
-    # own C fragments, so only an atom whose two lane maps line up can carry it.
+    # own C fragments, so only an atom whose two lane maps line up can carry it. Both accumulators
+    # are offered: the cell named here is the EXPECTATION's, whose chunk partial promotes into the
+    # f32 carrier once per chunk — the reduced one therefore runs that chain at the full consumer-die
+    # rate without moving the softmax statistics off f32 (the score keeps ``wide_accumulate``).
     if node.chunked():
-        offered = bindable(atoms_for(edge_dtypes(a_edge, tile.inputs)[0], ctx=target))
-        return tuple(name for name in offered if ATOM_REGISTRY[name].c_to_a_repack)
+        dtype = edge_dtypes(a_edge, tile.inputs)[0]
+        offered = bindable((*atoms_for(dtype, ctx=target), *atoms_for(dtype, acc=dtype, ctx=target)))
+        return tuple(dict.fromkeys(name for name in offered if ATOM_REGISTRY[name].c_to_a_repack))
     if (pair := packed[1]) is not None:
         # ``_node_refusal`` already proved the channels share one stored code dtype that this
         # target has a cell for; the cell addresses its own operands, so no atom refusal applies.
@@ -302,16 +341,24 @@ def _contraction_domain(
     """Project one contraction's locally realizable scalar and tensor-core choices."""
     per_cell_reductions = _reduction_domain(tile, node) if facts.k_axis.extent.is_static else (Reduce(),)
     allowed_atoms = _warp_atoms(tile, target, node)
-    wide_warp_tiles = tuple(
-        plan for name in allowed_atoms if _kstep_refusal(facts.k_axis, (plan := Tile(atom=ATOM_REGISTRY[name], regs=(26, 4), bk=2))) is None
-    )
-    # The scalar register tier folds the STORED lift, which for a twist is the base contribution
-    # and denotes ``Sum exp(score)``: only the atom tier folds the recipe's chunk patterns instead,
-    # so a twisted carrier's untiled arm is the plain serial fold and nothing between.
-    scalar_tiles = scalar_tile_moves() if len(node.operands) == 2 and node.twist is None else (Tile(),)
+
+    def warp_plan_ok(plan: Tile) -> bool:
+        if _kstep_refusal(facts.k_axis, plan) is not None:
+            return False
+        chunk = plan.atom.atom_k * plan.bk
+        return not node.chunked() or (chunk >= plan.atom.atom_n and chunk % plan.atom.atom_n == 0)
+
+    wide_warp_tiles = tuple(plan for name in allowed_atoms if warp_plan_ok(plan := Tile(atom=ATOM_REGISTRY[name], regs=(26, 4), bk=2)))
+    # The scalar register tier replicates the TERM's own step per cell, so a recipe folds there
+    # like any other algebra — three states under their own ops, seeded by the ⊕'s identities.
+    # What it has no residence for is an operand past the streamed one that VARIES: those are read
+    # once, ahead of the cells, so every one of them must be uniform across the tile (attention's
+    # scale and its mask fills are; a second streamed B is not, and rides the warp compute fill).
+    uniform_extras = len(node.operands) >= 2 and not any(edge.free_axes for edge in node.operands[2:])
+    scalar_tiles = scalar_tile_moves() if uniform_extras else (Tile(),)
     catalog = (
         *scalar_tiles,
-        *(plan for plan in warp_tile_moves(allowed_atoms) if _kstep_refusal(facts.k_axis, plan) is None),
+        *(plan for plan in warp_tile_moves(allowed_atoms) if warp_plan_ok(plan)),
         *wide_warp_tiles,
     )
     return tuple(
@@ -346,14 +393,15 @@ def _options(state: _ProjectionState, node) -> tuple:
         )
         return tuple(ProjectionSchedule(plan) for plan in plans)
 
-    # The CONTRACTION domain is the tile catalog, so it belongs to a node the tiers can fold whole
-    # (:meth:`Fold.tiles_whole`) — the same reading ``TileOp.contracts`` offers a TILE site on. A
-    # twisted carrier reads bilinear on one channel and folds states beside it that are no
-    # accumulator, so it takes the REDUCTION domain like any other carrier; handing it the tile
-    # catalog offered choices no key spells and no row accepts, and cost the sibling score its own.
+    # The CONTRACTION domain is the tile catalog, so it belongs to a site ``TileOp.contracts`` offers
+    # a TILE site on — the one reading the facts are populated from. A twisted carrier folds states
+    # beside its bilinear channel that are no accumulator, and a B slab that changes with the row it
+    # is contracted against is no slab per tile: both take the REDUCTION domain like any other
+    # carrier. Handing either the tile catalog offered choices no key spells and no row accepts —
+    # the twist's cost the sibling score its own, the row-varying B's emitted the unsplit row axis.
     choices = (
         _contraction_domain(state.tile, state.target, node, state.tile.contractions[site])
-        if node.tiles_whole()
+        if site in state.tile.contractions
         else tuple(ReductionSchedule(Tile(), reduction) for reduction in _reduction_domain(state.tile, node))
     )
     valid_choices = []
@@ -377,11 +425,10 @@ def _options(state: _ProjectionState, node) -> tuple:
 def _edge_domain(state: _ProjectionState, site: int, choices: tuple) -> tuple[EdgeSchedule, ...]:
     """Project the independent edge catalog; context composition decides compatibility."""
     node = state.tile.sites[site].node
-    view = state.tile.views[site]
-    # A transport is a tile's operand fill, so the catalog belongs to a site a tile folds whole —
-    # the same reading ``TileOp.stage_edges`` spells a STAGE key on. A chunked carrier folds whole
-    # and still takes none: its tier is gmem-direct.
-    if not view.tiles_whole() or view.chunked():
+    # A transport is a tile's operand fill, so the catalog belongs to a tile site — the same reading
+    # ``TileOp.stage_edges`` spells a STAGE key on, a chunked carrier included: its tier stages the
+    # streamed value it folds against and keeps the score in registers.
+    if site not in state.tile.contractions:
         return (EdgeSchedule(Stage.direct()),)
     supported = {}
     direct = EdgeSchedule(Stage.direct())
@@ -389,8 +436,12 @@ def _edge_domain(state: _ProjectionState, site: int, choices: tuple) -> tuple[Ed
         warp: tuple(stage_moves(warp=warp, ctx=state.target))
         for warp in {choice.tile.is_warp for choice in choices if choice.tile.is_tiled}
     }
+    chunked = state.tile.views[site].chunked()
     for choice in choices:
-        if not choice.tile.is_tiled:
+        if not choice.tile.is_tiled or (chunked and not choice.tile.is_warp):
+            # A chunked carrier's transport belongs to its own tier, which is the tensor-core one.
+            # Its per-cell fallback folds the recipe in registers and reads no slab, so a stage
+            # there would name a fill nothing performs.
             supported.setdefault(direct, None)
             continue
         if _needs_fill(state.tile, node, choice.tile):

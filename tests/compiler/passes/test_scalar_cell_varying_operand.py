@@ -82,6 +82,12 @@ def _muls(tile) -> list[Stmt]:
     return [s for s in Body(tile.body).iter() if isinstance(s, Assign) and s.name.startswith("acc__v")]
 
 
+def _factors(tile) -> set[frozenset[str]]:
+    """The operand pair each cell's product reads. A SET per product: the tier replicates the term's
+    own step, so the order the two factors are spelled in is the term's, not the tier's."""
+    return {frozenset(s.args) for s in _muls(tile)}
+
+
 def _cells(mn) -> list[tuple[int, int]]:
     return [(i, j) for i in range(mn[0].reg) for j in range(mn[1].reg)]
 
@@ -92,7 +98,7 @@ def test_a_operand_varying_along_n_is_read_per_cell() -> None:
     tile, mn = _tile(_cone("a", "A", (Var("m"), Var("k"), Var("n"))), _b_load())
     assert _unbound(tile) == set()
     assert len(_loads_of(tile, "A")) == len(_cells(mn))
-    assert {s.args[1] for s in _muls(tile)} == {f"a__ar{i}_{j}" for i, j in _cells(mn)}
+    assert _factors(tile) == {frozenset((f"a__ar{i}_{j}", f"b__bc{j}")) for i, j in _cells(mn)}
 
 
 def test_b_operand_varying_along_m_is_read_per_cell() -> None:
@@ -101,7 +107,7 @@ def test_b_operand_varying_along_m_is_read_per_cell() -> None:
     tile, mn = _tile(_a_load(), _cone("b", "B", (Var("n"), Var("k"), Var("m"))))
     assert _unbound(tile) == set()
     assert len(_loads_of(tile, "B")) == len(_cells(mn))
-    assert {s.args[0] for s in _muls(tile)} == {f"b__bc{i}_{j}" for i, j in _cells(mn)}
+    assert _factors(tile) == {frozenset((f"a__ar{i}", f"b__bc{i}_{j}")) for i, j in _cells(mn)}
 
 
 def test_computed_a_shared_along_n_is_read_once_per_register_row() -> None:
@@ -110,7 +116,7 @@ def test_computed_a_shared_along_n_is_read_once_per_register_row() -> None:
     tile, mn = _tile(_cone("a", "A", (Var("m"), Var("k"))), _b_load())
     assert _unbound(tile) == set()
     assert len(_loads_of(tile, "A")) == mn[0].reg
-    assert {s.args[1] for s in _muls(tile)} == {f"a__ar{i}" for i in range(mn[0].reg)}
+    assert _factors(tile) == {frozenset((f"a__ar{i}", f"b__bc{j}")) for i, j in _cells(mn)}
 
 
 def test_materialized_operands_keep_the_row_and_column_reuse() -> None:
@@ -120,4 +126,4 @@ def test_materialized_operands_keep_the_row_and_column_reuse() -> None:
     assert _unbound(tile) == set()
     assert len(_loads_of(tile, "A")) == mn[0].reg
     assert len(_loads_of(tile, "B")) == mn[1].reg
-    assert {s.args for s in _muls(tile)} == {(f"b__bc{j}", f"a__ar{i}") for i, j in _cells(mn)}
+    assert _factors(tile) == {frozenset((f"a__ar{i}", f"b__bc{j}")) for i, j in _cells(mn)}

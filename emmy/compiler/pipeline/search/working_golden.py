@@ -7,7 +7,9 @@ persistence. CLI commands only validate argument combinations and report errors.
 
 from __future__ import annotations
 
+import contextlib
 import copy
+import fcntl
 from collections import Counter
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -15,8 +17,8 @@ from pathlib import Path
 from emmy.compiler.pipeline.search.golden import (
     GoldenEntryState,
     dump_golden_file,
+    golden_entry_state,
     golden_record_from_entry,
-    golden_set_state,
     is_repository_golden_path,
     load_golden_file,
 )
@@ -483,7 +485,6 @@ async def measure_proposals(
 
 def record_latency(
     path: str | Path,
-    document: dict,
     name: str,
     *,
     hardware_id: str,
@@ -503,12 +504,23 @@ def record_latency(
     a ratchet: ``emmy_us`` against its own stored value says *did we regress*, and ``tcompile_us``
     beside it says *are we ahead of or behind torch*, per case, per card. ``tcompile_us`` is
     omitted rather than faked when the target has no torch twin to compile.
+
+    Read and written inside one :func:`exclusive_golden`, like every measurement this module writes
+    back: a run passing both ``--record`` and ``--record-greedy`` writes twice, and a stale second
+    document would drop whatever landed between the two.
     """
     destination = Path(path)
     if is_repository_golden_path(destination):
         raise ValueError(f"refusing to write measurements into a canonical repository golden: {destination}")
+    with exclusive_golden(destination):
+        _record_latency_row(destination, name, hardware_id=hardware_id, emmy_us=emmy_us, tcompile_us=tcompile_us, knobs=knobs, pins=pins)
+
+
+def _record_latency_row(destination: Path, name: str, *, hardware_id, emmy_us, tcompile_us, knobs, pins) -> None:
+    """One card's latencies written into the file as it stands NOW. Runs under the lock."""
     from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
 
+    document = load_golden_file(destination)
     wanted_knobs = canonical_row_key(knobs) if knobs is not None else None
     wanted_pins = tuple(sorted((key, str(value)) for key, value in pins.items())) if pins is not None else None
     matches = []
@@ -534,15 +546,21 @@ def record_latency(
 class KernelSetDecisions(PipelineStrategy):
     """Every kernel-set decision one compile took, as ``(identity, arm knobs)``: the deploy identity
     of the kernel the fork was offered on and the knobs of the arm its splice carried — a placement
-    cut's ``PLACE@seam: cut``, a cross-CTA split's ``REDUCE`` value. Cleared when a resolve starts,
-    so a greedy retry reports only the resolution that stood."""
+    cut's ``PLACE@seam: cut``, a cross-CTA split's ``REDUCE`` value. ``kernel_sets`` pairs each
+    decision with the graph ids its splice consumed and minted (``(consumed root id, minted ids)``),
+    which :func:`kernel_set_prices` sums into the decision's measured price. Cleared when a resolve
+    starts, so a greedy retry reports only the resolution that stood."""
 
     def __init__(self) -> None:
         self.decisions: list[tuple[str, dict[str, str]]] = []
+        self.kernel_sets: list[tuple[str, tuple[str, ...]]] = []
+        self._open: str | None = None
 
     def on_run_start(self, event) -> None:
         del event
         self.decisions.clear()
+        self.kernel_sets.clear()
+        self._open = None
 
     def on_splice(self, event) -> None:
         from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
@@ -550,6 +568,38 @@ class KernelSetDecisions(PipelineStrategy):
         identity = event.root_op.identity_key(with_io=True) if isinstance(event.root_op, TileOp) else None
         if identity is not None:
             self.decisions.append((identity, {str(key): str(value) for key, value in event.knobs.items()}))
+            self._open = event.match.root_node_id
+
+    def on_spliced(self, event) -> None:
+        if self._open is not None:
+            self.kernel_sets.append((self._open, tuple(event.receipt.new_compute_ids)))
+            self._open = None
+
+
+def kernel_set_prices(kernel_sets: list[tuple[str, tuple[str, ...]]], launch_us: dict[str, float]) -> list[float | None]:
+    """The measured price of each kernel-set decision: the summed launch timings of the kernels it
+    produced, in the same units as the schedule receipt of the kernel it replaced — the two arms a
+    kernel-set fork ranks against each other (``policy.greedy._route_candidates``). ``kernel_sets``
+    is :attr:`KernelSetDecisions.kernel_sets` in decision order: a later decision that consumed one
+    of an earlier decision's kernels stands in for it with its own kernels. ``launch_us`` maps the
+    terminal graph's CUDA kernel ids to their launch timings. ``None`` where a kernel of the set is
+    not among the launches, so the caller can fall back to the whole graph's timing."""
+    consumed = {root: index for index, (root, _) in enumerate(kernel_sets)}
+    memo: dict[int, set[str]] = {}
+
+    def kernels(index: int) -> set[str]:
+        if index not in memo:
+            out: set[str] = set()
+            for node_id in kernel_sets[index][1]:
+                later = consumed.get(node_id)
+                out |= kernels(later) if later is not None and later > index else {node_id}
+            memo[index] = out
+        return memo[index]
+
+    return [
+        sum(launch_us[node_id] for node_id in ids) if ids and all(node_id in launch_us for node_id in ids) else None
+        for ids in (kernels(index) for index in range(len(kernel_sets)))
+    ]
 
 
 def greedy_pick_rows(graph) -> list[tuple[str, dict[str, str]]]:
@@ -574,9 +624,24 @@ def greedy_pick_rows(graph) -> list[tuple[str, dict[str, str]]]:
     return rows
 
 
+@contextlib.contextmanager
+def exclusive_golden(path: Path):
+    """Hold one working golden's read-modify-write against every other process on this machine.
+
+    A recorder loads the file, adds its rows and writes the whole document back, so two runs that
+    both load before either writes each dump a document missing the other's rows — 18 of 151
+    realizations recorded in one parallel round were lost that way. The reload belongs INSIDE this
+    lock: locking a stale document would serialize the loss, not stop it. ``flock`` releases with
+    the descriptor, on a killed process too."""
+    lock = path.with_name(path.name + ".lock")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock, "w") as handle:  # noqa: PTH123, SIM115 — flock takes a descriptor
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        yield
+
+
 def record_greedy_pick(
     path: str | Path,
-    document: dict,
     name: str,
     *,
     decisions: list[tuple[str, dict, float, float]],
@@ -595,26 +660,32 @@ def record_greedy_pick(
     offers a same-spelled seam; the replay follows the routing rows, each naming its kernel by
     identity. A row already recorded for the same input regime, kernel, and knobs takes the new
     timings; anything else is appended, so a re-record never duplicates or aliases measurements
-    from another width or pin regime. Returns the names written, in order.
-
-    The SEED then lists those routing rows by name, in that order (``kernel_set``). That list is
-    what lets the file say a realization ran as a kernel SET rather than as one kernel:
-    :func:`~emmy.compiler.pipeline.search.golden.golden_set_state` reads the listed rows to decide
-    whether the realization verifies, a replay of it spells their arms, and a bench of it publishes
-    those arms as its pin. A seed that also carries a measured row of its own keeps that row and
-    verifies on it; the list still says what its kernel set held. A compile that takes no kernel-set
-    decision writes no list at all.
+    from another width or pin regime. The file is read and written back inside one
+    :func:`exclusive_golden`, so the rows a concurrent recorder wrote meanwhile survive.
+    Returns the names written, in order.
     """
     destination = Path(path)
     if is_repository_golden_path(destination):
         raise ValueError(f"refusing to write measurements into a canonical repository golden: {destination}")
-    from emmy.compiler.pipeline.knob import canonical_row_key, family_of  # noqa: PLC0415
+    with exclusive_golden(destination):
+        return _record_rows(destination, name, decisions=decisions, kernels=kernels, reference_backend=reference_backend)
 
+
+def _record_rows(destination: Path, name: str, *, decisions, kernels, reference_backend: str) -> list[str]:
+    """The rows of one greedy pick, added to the file as it stands NOW. Runs under the lock."""
+    from emmy.compiler.pipeline.knob import canonical_row_key, family_of  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import measured_precision_pins  # noqa: PLC0415
+
+    document = load_golden_file(destination)
     seeds = [(entry, realization) for entry in document["configs"] for realization in entry["realizations"] if realization["name"] == name]
     if not seeds:
         raise ValueError(f"{destination} has no realization named {name!r}")
     entry, seed = seeds[0]
+    # The seed's regime, with the precision gates the compile ACTUALLY enumerated under laid over
+    # it: a row measured with the reduced-accumulate cell offered must say so, or a replay
+    # republishes a regime that no longer offers it (``measured_precision_pins``).
     regime = {key: value for key, value in seed["pins"].items() if family_of(str(key)) != "PLACE"}
+    regime.update(measured_precision_pins())
     written: list[str] = []
     for identity, knobs, emmy_us, reference_us in (*decisions, *kernels):
         row = {
@@ -639,8 +710,6 @@ def record_greedy_pick(
         else:
             recorded["measurements"] = row["measurements"]
         written.append(row["name"])
-    if decisions:
-        seed["kernel_set"] = written[: len(decisions)]
     dump_golden_file(document, destination, overwrite=True, incremental=True)
     return written
 
@@ -650,7 +719,7 @@ def persist_proposal_rankings(path: str | Path, document: dict, target: WorkingG
     configs = document["configs"]
     for ((entry_index, realization_index), _pins), ranking in zip(target.proposals, rankings, strict=True):
         realization = configs[entry_index]["realizations"][realization_index]
-        if golden_set_state(realization, configs[entry_index]["realizations"]) == GoldenEntryState.VERIFIED:
+        if golden_entry_state(realization) == GoldenEntryState.VERIFIED:
             continue
         realization["ranking"] = {**ranking, "source": "proposal"}
     dump_golden_file(document, path, overwrite=True, incremental=True)
@@ -685,12 +754,7 @@ def persist_tune_winner(
             and canonical_row_key(configs[path[0]]["realizations"][path[1]]["knobs"]) == winner_key
         ]
         writable = next(
-            (
-                path
-                for path in matching
-                if golden_set_state(configs[path[0]]["realizations"][path[1]], configs[path[0]]["realizations"])
-                != GoldenEntryState.VERIFIED
-            ),
+            (path for path in matching if golden_entry_state(configs[path[0]]["realizations"][path[1]]) != GoldenEntryState.VERIFIED),
             None,
         )
         if writable is not None:

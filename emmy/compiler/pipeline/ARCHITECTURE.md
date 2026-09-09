@@ -566,13 +566,14 @@ first — over a different kind of row. A **route row** is a measured row whose 
 price of applying that decision to the kernel it was recorded on, and the index files it under `routes` rather than
 `ok`. `greedy._route_candidates` turns EVERY measured row of the kernel's signature into a candidate, each one of the
 pass's OWN offered arms: the arm the row spells (`pins.spelled_arm` — a schedule row the fused / unsplit arm, since
-the kernel it decorates ran that way; a route row the arm cutting exactly the seams it marks `cut` among the arms
-offered here — one arm may cut several seams at once, and only the SET tells it from the single-seam arms it composes
-— else the first offered seam it marks `cut`, or the offered plan whose `g<n>` half its `REDUCE` value carries; a row
-whose cut seams are not on this ballot decides nothing). A measured arm outranks every arm priced by nested
-resolution (a Σ that may hold predictions); among measured arms the fastest wins; strict evidence refuses a
-kernel-set fork no measured arm decides. With no measured arm the arms are priced exactly as Part 4 describes
-(`_priced_pick`, the streamed fused-vs-splice comparison, the serial-work floor). Nothing is
+the kernel it decorates ran that way; a route row the composed arm that cuts exactly the several offered seams it
+marks `cut` — the one decision a pinned compile consumed them as, which the cut pass offers beside its single seams
+wherever a measured row of the kernel names it (`pins.composed_routes`, registered by `GreedyStrategy.run` from the
+index's route rows) — else the first offered seam it marks, or the offered plan whose `g<n>` half its `REDUCE` value
+carries; a row whose cut seams are not on this ballot decides nothing). A measured arm
+outranks every arm priced by nested resolution (a Σ that may hold predictions); among measured arms the fastest wins;
+strict evidence refuses a kernel-set fork no measured arm decides. With no measured arm the arms are priced exactly as
+Part 4 describes (`_priced_pick`, the streamed fused-vs-splice comparison, the serial-work floor). Nothing is
 installed on the kernel: a piece a cut or split mints is a brand-new kernel (`knob.consume_kernel_row` strips every
 decision family and every feature), its own forks consult the rows of its own signature, and a piece that fails to
 lower re-ranks at its own forks and, once no row of it binds, retires the one cut that minted it (`Pipeline.run`'s
@@ -676,16 +677,22 @@ At deploy a record is rows, nothing more, and every row is keyed by the kernel i
 A record that decorates one kernel is that kernel's schedule row under the target's signature. Any other record is
 read through its replay (`golden._replay`): the target is resolved through the tile passes under the record's pins
 (the environment it was measured under), its knobs followed fork by fork through the same `pins.spelled_arm` the
-deploy reads a route row with. Each kernel-set arm the knobs spelled is a route row under the signature of the kernel
-that fork was offered on; its schedule row is keyed under the child its stored identity names, or — for a row the
+deploy reads a route row with — the seams an entry of the set marks `cut` together offered as one composed arm on the
+replay's kernels, exactly as the deploy offers them. Each kernel-set arm the knobs spelled is a route row under the
+signature of the kernel that fork was offered on; its schedule row is keyed under the child its stored identity
+names, or — for a row the
 tuner merged with the parent's split — under the one child whose enumerated rows contain it. A piece inherits nothing
 from the kernel it replaced, so a record's remaining keys are read against the piece's own offers; a key no piece
 offers, or a schedule row no kernel of the replay enumerates, is stale and is no evidence. Whether a record still
 realizes is the question the nightly `onboard-model` workflow asks with the strict decode (`golden.decode_record`),
 over the same replay: the persisted program must select exactly one kernel (a receipt selects its child by stored
 identity), a routing record's every cut key must name a seam the cut pass offers, and a schedule row must equal one
-enumerated leaf under the record's own pins. The default test suite does not load checked-in goldens because proving a
-row enumerates its whole fork costs record count times fork size.
+enumerated leaf under the record's own pins. Equality there is blind to the two sides' OFF anchors. A resolved kernel
+carries every declared OFF value, because the pipeline stamps them at the pass boundary, and that is the row a
+recording is taken from; a fork offers its leaves carrying only the families the kernel's own sites give it. Both
+spell the same schedule, so which anchors appear says where a spelling came from, not what it decided. The default
+test suite does not load checked-in goldens because proving a row enumerates its whole fork costs record count times
+fork size.
 
 **Whether goldens are training data differs between the two halves of the prior.** The **online** prior never trains
 on them: a recorded golden row enters no reservoir and no checkpoint. (Benchmarks of a golden *shape* during a tune
@@ -1379,31 +1386,37 @@ their family has one applicable node and route-qualified (`TILE@map.1/inner`) on
 transport choice per consumer node, including an explicit empty direct choice. Promotion rejects incomplete rows,
 aliases, and unknown sites. It never fills or repairs a recording.
 
-**A split's children persist as child-identity schedule receipts.** One flat `knobs` map decorates exactly one kernel,
-so a route whose cut splits the target into several kernels cannot record conflicting per-child schedules in one
-realization. Each child instead gets its own sibling realization — a *receipt*: the child's schedule row in `knobs`,
-and the child kernel's deploy identity stored in `identity`. A realization corpus case, the convention this paragraph
-describes, additionally freezes the route's cut(s) in `pins` — the route the replay follows fork by fork to reach the
-children. The stored identity is the strict decode's kernel selector (`kernel_identity` returns it as-is — the
-target's own lift stops at the pre-cut kernel and cannot name a child): the stored identity must equal one kernel
-resolved under the record's pins, and the spelled row must equal one of THAT kernel's enumerated rows, so a sibling
-child's row never vouches. Ordinary records must still select exactly one pre-cut kernel, but a receipt may outlive
-target-boundary drift that makes its regenerated target lower to several: the stored identity selects one bucket from
-the kernels resolved under its pins, without first requiring the legacy one-kernel lift. As evidence a receipt is two
-rows: its route under the signature of the kernel the cut was offered on and its schedule row under the child's (both
-read off the record's replay, `golden._replay`, whose evidence half persists in the derived golden store beside
-identities and verdicts). The regime check (`golden.regime_live`) skips PLACE pins — the route is the record's
-kernel-set decision, not an input regime — and validation rejects a realization that schedules behind pinned cuts
-without a stored identity. A stored identity equal to the target's own lift is the corpus's derived stamp, not a
-receipt, and keeps the pooled decode.
+**A split's children persist as child-identity schedule receipts.** One flat `knobs` map decorates exactly one
+kernel, so a route whose cut splits the target into several kernels cannot record conflicting per-child schedules in
+one realization. Each child instead gets its own sibling realization — a *receipt*: the route's cut(s) frozen in
+`pins` (the route the replay follows fork by fork to reach the children), the child's schedule row in `knobs`, and
+the child kernel's deploy identity stored in `identity`. The stored identity is the strict decode's kernel selector
+(`kernel_identity` returns it as-is — the target's own lift stops at the pre-cut kernel and cannot name a child): the
+stored identity must equal one kernel resolved under the record's pins, and the spelled row must equal one of THAT
+kernel's enumerated rows, so a sibling child's row never vouches. Ordinary records must still select exactly one
+pre-cut kernel, but a receipt may outlive target-boundary drift that makes its regenerated target lower to several:
+the stored identity selects one bucket from the kernels resolved under its pins, without first requiring the legacy
+one-kernel lift. As evidence a receipt is two rows: its route under the signature of the kernel the cut was offered
+on and its schedule row under the child's (both read off the record's replay, `golden._replay`, whose evidence half
+persists in the derived golden store beside identities and verdicts). The regime check
+(`golden.regime_live`) skips PLACE pins — the route is the record's kernel-set decision, not an input regime — and
+validation rejects a realization that schedules behind pinned cuts without a stored identity. A stored identity equal
+to the target's own lift is the corpus's derived stamp, not a receipt, and keeps the pooled decode.
 
-**A whole kernel set records as one set of entries, each measured entry naming its kernel by identity.** `run --golden PATH
+**A whole kernel set records as one set of entries, each naming its kernel by identity.** `run --golden PATH
 --realization NAME --bench --record-greedy` (`working_golden.record_greedy_pick`) writes the kernel set the greedy
 compile picked back into the working file: one routing row per kernel-set decision the compile took — its `identity`
 the kernel the fork was offered on, its `knobs` the arm's `PLACE@seam: cut` or split-carrying `REDUCE` value, its
-`emmy_us` the whole graph's isolated timing — and one child-identity schedule receipt per CUDA kernel (the tile
+`emmy_us` the summed isolated timings of the kernels the decision produced (`working_golden.kernel_set_prices`: the
+splice's minted kernels, a later decision that consumed one of them standing in with its own; the whole graph's
+timing only where a kernel of the set has no launch) — the units the kernel-set fork ranks it in against the replaced
+kernel's own receipt, so a measured split never loses to the unsplit kernel for carrying the program's total — and
+one child-identity schedule receipt per CUDA kernel (the tile
 kernel it lowered from, its realized schedule row, its own isolated launch timing), all under the seed realization's
-input regime with the greedy comparison row as `same-input-greedy` reference. A nested cut is a routing row of the
+input regime with the greedy comparison row as `same-input-greedy` reference. The PRECISION gates on that regime are
+the compile's own, not the seed's (`pins.measured_precision_pins`): a row measured with the reduced-accumulate or
+native-fp8 cell offered has to say so, or the replay republishes a regime that no longer enumerates it — measured
+evidence for a pick nothing can take again. A nested cut is a routing row of the
 piece it was offered on, so a cascade of cuts is as many routing rows, and the replay walks the set together: the entry
 whose identity a fork's kernel carries decides that fork, and the set's lead decides the rest. Receipts written this way
 carry NO route in `pins`, unlike the corpus convention above: seam spellings are kernel-local, and a cut key copied
@@ -1414,20 +1427,6 @@ same row on different kernels. Recorded this way, a strict-evidence compile of t
 again from the file's rows alone (no tune DB, no prior): that 10-kernel twin, whose unseeded pick spends minutes
 pricing, resolves from its 19 recorded rows in seconds.
 
-**The realization those rows belong to lists them.** `record_greedy_pick` writes `kernel_set` onto that seed
-realization — the one `--realization NAME` named: the routing rows' names, in the order the compile took the
-decisions, and nothing at all when the compile took none. The list is what lets the file say a realization ran as a
-kernel SET rather than as one kernel, and three readers follow it. `golden_set_state` marks the realization `VERIFIED`
-when every row it lists carries measurements and so does every schedule-carrying row of the same target, which is the
-reading a promotion applies. `compile.golden_row` publishes the listed rows' knobs — a placement cut's `PLACE` key and
-a split's `REDUCE` value alike — as the hand pin for that one compile, so a bench of the realization by name reaches
-the kernel set the recording measured rather than whatever the unpinned fork picks under its name; the whole-file
-bench walk selects its rows through that same reading. And `_replay` folds the listed knobs into the record's
-spelling: where no row of the set names a fork's kernel by identity, that spelling is what answers the fork, so the
-row spells its cuts and splits instead of reading as fuse. A row that took no kernel-set decision still reads as fuse,
-which is the right answer for it. The list holds every decision rather than the first because a cascade takes its
-later cuts on the pieces the earlier ones mint, spelled on those pieces' own trees: the first decision alone neither
-describes the set nor pins it back.
 The preferred reference is the runnable Torch slice (`torch-eager`) or the applicable library kernel (`cublas`). A
 Loop IR fallback has no frontend callable by construction; an origin slice can also have synthetic boundaries whose
 post-fusion output geometry is not independently comparable to its Torch slice. Such a target may use a separately
@@ -1630,14 +1629,11 @@ boundary.
 
 `020_twisted` rewrites the exp-family composition over that canonical tree. The single `030_cut` pass reaches a
 fixpoint over two ordered domains: it offers the maximal tree and every semantically closed stored child-Fold seam
-through `PLACE` — and, on a kernel whose outputs each have one producing branch while some branch is not about a
-single reduce (`ops.owns_outputs_it_cannot_bind`), the full-projection cut beside them: one arm handing every
-contraction, every reduce evaluated ahead of an output sweep, and every owned output its own kernel, because each of
-those seams alone leaves the rest of the shape standing — then the unsplit tree beside every cross-CTA reduce split
-the head Fold admits. A selected cut writes the complete child state to workspaces; a selected split slices the same
-Fold and folds partial state tuples with its stored combine. Both return fresh unmapped TileOps. `040_schedule` then
-enumerates schedules over each stored Fold tree only. Independent roots stay fused and combine only schedules with
-matching physical output-axis tile widths and unit counts.
+through `PLACE`, then the unsplit tree beside every cross-CTA reduce split the head Fold admits. A selected cut writes
+the complete child state to workspaces; a selected split slices the same Fold and folds partial state tuples with its
+stored combine. Both return fresh unmapped TileOps. `040_schedule` then enumerates
+schedules over each stored Fold tree only. Independent roots stay fused and combine only schedules with matching
+physical output-axis tile widths and unit counts.
 
 The complete structural invariant is documented in
 [`ir/tile/ARCHITECTURE.md`](../ir/tile/ARCHITECTURE.md), and pass behavior in

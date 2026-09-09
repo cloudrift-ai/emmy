@@ -1,0 +1,4 @@
+comparison,system,system_ms_per_token,baseline,baseline_ms_per_token,normalized_system_latency,baseline_over_system
+published,mpk,12.5,vllm_or_sglang,14.5,0.862068966,1.160000000
+replayed,mpk_megakernel,9.8038,vllm_0.23.0,10.752,0.911811756,1.096717599
+controlled_replay,mpk_megakernel,9.8038,mpk_kernel_per_operator,33.136,0.295866731,3.379913911

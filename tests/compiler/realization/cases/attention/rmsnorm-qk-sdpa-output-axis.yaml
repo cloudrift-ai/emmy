@@ -54,8 +54,8 @@ configs:
       TILE: ''
       WORK: t128
       REDUCE: coop
-      REDUCE@map.1/twist.1/map.1/inner: ''
-      REDUCE@map.1/twist.1/map.1/inner.2/map.3/map.1/reduce: ''
+      REDUCE@map.1/twist.1/inner: ''
+      REDUCE@map.1/twist.1/inner.2/map.3/map.1/reduce: ''
       STAGE: ''
       RASTER: ''
-    identity: a1e7af8b547396835ed843e5ad10e1310e063dc736bb48b82142ed46cd0acbd6
+    identity: 3ccf06e8caeec7cd3f984fea3ac280b09d66a70c6d13b84141f4b1879eef7bd4

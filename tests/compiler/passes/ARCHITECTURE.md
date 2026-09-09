@@ -168,28 +168,25 @@ Loop target contain several kernels and the stored identity must select one. Dir
 contraction-operand cuts remain strict xfails until Tile IR represents their materialized workspace dtype.
 The output-owning cut has its own group there: which seams own an output, that realizing one leaves single-output
 pieces whose placements gain a grid axis, that a piece takes the projection statements its own store reads, and the
-two refusals — a shared epilogue statement no piece can own, and a split where no piece would gain an axis. The
+two refusals — a shared epilogue statement no piece can own, and a partition where no piece would gain an axis. The
 shared-epilogue shape is spelled in Python rather than taken from a case: both corpus shapes join their branches with
-an empty body at the tree's root, so the body-splitting half of the ownership rule has no case to exercise it.
-The full-projection cut shares that group, one test per condition it turns on: a projection whose outputs each have
-one producing branch while some branch is not about a single reduce gets exactly one offer covering several seams at
-once and nothing else does, taking it leaves at most one contraction per piece and every piece on a grid, the offer
-reads ownership rather than how many roots the binder found, and it hands away a reduce evaluated once ahead of an
-output sweep while leaving one each cell folds for itself. Two more shapes live in Python for the same reason the
-shared-epilogue one does — contractions summed into one store, and a branch reading a contraction and two folds
-together — because no corpus program carries them. The corpus holds the cut itself, on the NVFP4 encode
-(`fused/nvfp4-gate-up-requant-full-projection-cut.yaml`): ten kernels, eight of them contractions with one root each,
-and one kernel per output over the sweep its store rides. That case is also the only place the corpus exercises an
-OUTPUT-OWNING cut, because both of them are seams of the one decision it pins. It is expensive — 82 s at `offered`,
-104 s at `realized`, against 15 s and 21 s for the single-seam sibling — because each of its eleven entries enumerates
-the whole ten-kernel set. A cheaper case would have to pin fewer kernels, and there are no fewer: the shape is the
-claim. One limit stands beside it: a row naming a set of seams the fork offers no single alternative for still loses
-its route, because the replay takes one of those seams and the pieces it mints respell the rest
-(`attention/rmsnorm-qk-sdpa-composed-cut_xfail_realized.yaml` records that gap, which the full-projection cut answers
-only for the sets IT offers).
+an empty root body, so the body-splitting half of the ownership rule has no case to exercise it.
+This group is the ONLY coverage the output-owning cut has, and the corpus deliberately carries none. A case's
+`offered` stage materializes the complete row set of the kernel set it pins, and the cut's whole point is to give a
+multi-root kernel a real grid — the NVFP4 encode's packed-code piece then has six contraction roots offering ~1400
+rows each, and their composition is past enumerating. Pinning the contraction seams beside it shrinks every piece to
+at most two roots and does enumerate, and a route spelled on the parent's tree replays from evidence since the cut
+pass offers the composed arm a measured route row names (`attention/rmsnorm-qk-sdpa-composed-cut.yaml` closed that
+gap). So the numerics of a cut kernel set stay unproven on hardware until the first holds; the tests here prove the
+structure only.
 The recipe program's monoid laws are covered
 independently by `tests/compiler/ir/pure/test_twist.py`; end-to-end softmax and attention accuracy remain covered by
 the e2e suites.
+
+`test_volta_mma.py` covers the SM70 atom as one capability family: cooperative global and synchronous staged fragment
+loads, computed operands, C-to-A repacking for paired attention contractions, per-atom row reduction, and causal
+coordinate masking. The realization corpus supplies the exact-GPU build and correctness checks for the schedules
+that combine those paths.
 
 ## Adding a New Rule Test
 

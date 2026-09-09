@@ -1,0 +1,4 @@
+# Hardware-golden rows whose recorded schedule equals no enumerated leaf under the
+# current compiler. Strict xfails: closing one turns its node red until the line is
+# deleted. Never add a line to make a red row green — re-record the card, or fix the
+# enumeration. See test_golden.py.

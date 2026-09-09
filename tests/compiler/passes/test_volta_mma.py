@@ -11,7 +11,7 @@ from emmy.compiler.dtype import F16
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.atom import ATOM_REGISTRY, atoms_for
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.frontend.ir import LinearOp, MatmulOp, RmsNormOp
+from emmy.compiler.ir.frontend.ir import LinearOp, MatmulOp, RmsNormOp, SdpaOp
 from emmy.compiler.ir.schedule.catalog import MAX_FRAGMENT_REGISTERS, warp_tile_moves
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
@@ -46,11 +46,36 @@ def _norm_linear_graph(*, m: int = 16, n: int = 16, k: int = 16) -> Graph:
     return graph
 
 
+def _sdpa_graph(*, d: int = 32, causal: bool = False, dynamic: bool = False) -> Graph:
+    graph = Graph()
+    seq = Dim("seq_len") if dynamic else Dim(64)
+    for name in ("q", "k", "v"):
+        graph.add_node(InputOp(), [], Tensor(name, (Dim(1), Dim(1), seq, Dim(d)), dtype=F16), node_id=name)
+    graph.add_node(
+        SdpaOp(is_causal=causal),
+        ["q", "k", "v"],
+        Tensor("o", (Dim(1), Dim(1), seq, Dim(d)), dtype=F16),
+        node_id="o",
+    )
+    graph.inputs, graph.outputs = ["q", "k", "v"], ["o"]
+    return graph
+
+
 def _pin(monkeypatch, atom: str, *, tile: str = "f1x1", stage: str = "") -> None:
     monkeypatch.setenv("EMMY_TILE", f"{atom}/{tile}")
     monkeypatch.setenv("EMMY_WORK", "w1x1")
     monkeypatch.setenv("EMMY_STAGE", stage)
     monkeypatch.setenv("EMMY_REDUCE", "")
+
+
+def _pin_sdpa(monkeypatch) -> None:
+    monkeypatch.setenv("EMMY_WORK", "w1x1")
+    monkeypatch.setenv("EMMY_TILE@map.1/twist.1/inner", f"{VOLTA}/f1x1/k4")
+    monkeypatch.setenv("EMMY_TILE@map.1/twist", f"{VOLTA}/f1x1/k4")
+    monkeypatch.setenv("EMMY_STAGE@map.1/twist.1/inner", "")
+    monkeypatch.setenv("EMMY_STAGE@map.1/twist", "")
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    monkeypatch.setenv("EMMY_RASTER", "")
 
 
 def _source(graph: Graph, ctx: Context) -> tuple[str, dict]:
@@ -88,7 +113,7 @@ def test_volta_atom_separates_logical_and_instruction_shapes() -> None:
     assert atom.ptx_shape == (8, 8, 4)
     assert tuple(atom.fragment_nregs(role) for role in ("a", "b", "c")) == (2, 2, 8)
     assert atom.fragment_layout == "m8n8k4"
-    assert atom.sync_copy_staging and not atom.c_to_a_repack
+    assert atom.sync_copy_staging and atom.c_to_a_repack
 
     # The PTX C-fragment map covers the logical 16x16 output exactly once.
     coords = []
@@ -176,6 +201,31 @@ def test_sm70_sync_copy_composes_ring_and_register_pipelines(monkeypatch) -> Non
     assert "cp.async" not in src and "ldmatrix" not in src
 
 
+def test_sm70_ring_splits_the_blocking_copy_across_the_drain(monkeypatch) -> None:
+    """A ring on a target without ``cp.async`` puts its in-flight chunk in REGISTERS.
+
+    The fill issues the next chunk's global loads, the resident chunk's mma drain runs, and only
+    then do the registers land in the slab — so the drain covers the load latency and ONE barrier
+    per chunk publishes the deposit. Back-to-back load/store fills (what a ring emitted before)
+    leave the latency fully exposed and need two barriers, which measured slower than no ring at
+    all on every V100 shape tried."""
+    monkeypatch.setenv("EMMY_TILE", f"{VOLTA}/f2x2/k4")
+    monkeypatch.setenv("EMMY_WORK", "w2x2")  # 128 threads: the slabs stripe evenly, so the split engages
+    monkeypatch.setenv("EMMY_STAGE", "d2/smem")
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    src, knobs = _source(_graph(m=64, n=64, k=32), Context(compute_capability=(7, 0)))
+    assert family_value(knobs, "STAGE") == "d2/smem"
+    prologue, _, body = src.partition("for (int _ks")
+    issue = body.index("_v__a_stage0_0")  # the staged gmem load of the PREFETCH chunk
+    drain = body.index("emmy_mma_m8n8k4_f16_f32")
+    deposit = body.index("*reinterpret_cast<uint4*>(&_a_smem[")
+    assert issue < drain < deposit, "the drain must sit between the staged load and its slab store"
+    assert body.count("__syncthreads();") == 1, "the deposit's barrier is the whole per-chunk handshake"
+    assert prologue.count("__syncthreads();") == 1, "the primed slot is published once before the loop"
+    for forbidden in NEWER_INSTRUCTIONS:
+        assert forbidden not in src
+
+
 def test_sm70_register_tile_keeps_the_volta_fragment_layout_through_the_reroll(monkeypatch) -> None:
     """A register tile wide enough to ROLL back into a loop still drains and stores as Volta.
 
@@ -191,6 +241,29 @@ def test_sm70_register_tile_keeps_the_volta_fragment_layout_through_the_reroll(m
     assert "const int _vr = " in src and "const int _vc = " in src  # the m8n8k4 C-fragment store map
     for forbidden in NEWER_INSTRUCTIONS:
         assert forbidden not in src
+
+
+def test_sm70_attention_uses_the_volta_fragment_layout(monkeypatch) -> None:
+    """The softmax algebra and its P-to-A handoff use all eight Volta C registers and the lane
+    butterflies that join one logical row."""
+    _pin_sdpa(monkeypatch)
+    src, _ = _source(_sdpa_graph(), Context(compute_capability=(7, 0)))
+    assert "emmy_c_to_a_f16_m8n8k4<0>" in src
+    assert "for (int _e = 0; _e < 8; _e++)" in src
+    assert "__shfl_xor_sync(0xffffffff" in src
+    assert ", 4)" in src and ", 2)" in src
+    for forbidden in NEWER_INSTRUCTIONS:
+        assert forbidden not in src
+
+
+def test_sm70_causal_attention_selects_the_mask_per_fragment_element(monkeypatch) -> None:
+    _pin_sdpa(monkeypatch)
+    src, _ = _source(_sdpa_graph(d=256, causal=True, dynamic=True), Context(compute_capability=(7, 0)))
+    assert "float _w0_0_v3[8]" in src
+    assert "if (a1__ck + 0 + _vc >" in src
+    assert "_w0_0_v3[0] = -1e+30f; else _w0_0_v3[0] = _w0_0_v3[0] + __half2float(in1);" in src
+    assert "__frow" not in src and "__fcol" not in src
+    assert "emmy_c_to_a_f16_m8n8k4" in src
 
 
 @pytest.mark.parametrize("stage", ["d1/smem", "d2/smem"])

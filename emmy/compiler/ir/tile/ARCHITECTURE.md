@@ -85,6 +85,15 @@ seam wherever it is closed at the axes of every occurrence, and kernel lowering 
 statements that read them. A computed operand (the RMSNorm'd, RoPE'd K vector) is materializable once per key rather
 than recomputed per query row because it is such a closed cone.
 
+An operand result component NO READER READS is dropped, and the edge's body cut to what its surviving results need.
+A reader is a consuming lift or a kernel-boundary store, so a sweep's per-cell projection keeps what its `Write` names
+even though no lift binds it. The dead components are rewrite residue: the twisted fusion re-seats a carrier's channels
+and mints `_unread<i>` for a slot its reader stopped binding, and an epilogue cone beside it keeps exposing a scale that
+was live when it was formed and went dead when the folds fused. Only a zero-axis operand is restricted — a reducing
+one's components ARE its carried states, and dropping one changes the monoid, which is why attention's running maximum
+stays spelled as the `_unread` it honestly is. The rule is tree-wide and unions over readers, because restricting per
+occurrence would sever the object sharing the next paragraph restores.
+
 An identity pass-through — a projection that only re-exposes its single operand's results — dissolves wherever a
 projection is formed or revisited. That is not cosmetic: a pass-through is what makes two occurrences of the same
 computation compare unequal, and the placement fork's value clustering (`lowering/tile/_cut.py`) relies on
@@ -236,26 +245,45 @@ which contraction normalization has placed those statistics inside a computed no
 Normalization factors remain in the projection epilogue, while a directly loaded expectation value becomes a Fold
 operand.
 
-What the fused fold STORES is the recipe's own vocabulary: the BASE monoid's per-element contribution as its `lift`,
-that monoid's componentwise ⊕ as its `base`, and the recipe itself — bound to this term's roles — as its `twist`. Both
-halves the term does not store follow from that pair: the stable ⊕ (`Fold.combine`) and the ψ-image of the lift
-(`Fold.injected`), which is the singleton the serial step actually folds. Storing the base is what leaves attention's
-expectation channel spelled as `weight ⊗ value` in the term rather than buried in a rescale program, and the weight's
-cone becomes an operand of its own, so the channel is a bare product of two operand edges. Nothing may see through ψ:
-the base form denotes `Sum exp(score)`, so the step reads the recipe's authored per-channel injections instead of
-evaluating ψ on it, and an operand no rendered statement reads — the weight cone, on the serial nest — is not placed
-at all.
+The fused fold stores its contribution in STABLE coordinates — the carrier's own state space. Its `lift` is the
+recipe's authored injection at the singleton, where the pivot IS the score and softmax's `exp(s)·v` has already
+simplified to `v`; its `init` is that carrier's seed; and the recipe, bound to this term's roles, is its `twist`. So
+softmax's carrier spells `(score, 1, value)` and no term anywhere holds an `exp` of an unshifted score. The stable ⊕
+(`Fold.combine`) derives from the recipe, and `Fold.injected` is the lift itself: the term stores what the step folds.
+
+The base monoid rides beside it as a HELPER — `base` is its componentwise ⊕, and ψ comes from the recipe. `Fold.based`
+is the reading they exist for: `psi_inv` applied to the stored lift, restoring `(s, exp s, exp(s)·v)` so a matcher can
+see the expectation channel as a bare product. Bilinearity lives in base coordinates and nowhere else, because ψ
+divides the product away at the singleton. That reading is RECOGNITION ONLY — the base form denotes `Sum exp(score)`
+and overflows — so `bilinear_channels` and `as_contraction` ask for it and nothing emits it. ψ⁻¹ is written over the
+recipe's full carrier and is restricted to the channels a term actually holds, since a half-fused carrier is the
+ordinary case during the rewrite's own fixpoint.
+
+Nothing is minted to make that reading work. A is what `operands[0]` SUPPLIES, not what it exposes: the left factor
+may be a component of that edge or a value the reading derives from those components and kernel-uniform ones (a scale,
+an epsilon — one contributes no variation, so the factor varies exactly as A does).
 
 ### One reading for "a tier folds this whole"
 
-`Fold.tiles_whole` decides whether a node is a TILE site (`TileOp.contracts`), which schedule domain it takes, what
-transport catalog its edges get, whether it holds a fragment at a seam (`contraction_facts`), and whether a root has
-a chain. Two shapes answer yes. A PLANAR carrier qualifies when every carried state is a bilinear channel — the
-tile's accumulators ARE the carrier. A TWISTED one qualifies through `Fold.chunked`: the recipe names a pattern for
+`TileOp.contracts` — `Fold.tiles_whole` plus the one-slab-per-tile reading of the coordinates the pair shares —
+decides whether a node is a TILE site, which schedule domain it takes, what transport catalog its edges get, and
+whether it holds a fragment at a seam (`contraction_facts` is populated for exactly those sites); `tiles_whole` alone
+decides whether a root has a chain. A B slab that changes with the row it is contracted against folds whole and is
+still no tile site: an mma B fragment is one `B[k, n]` for every row, and a catalog read off `tiles_whole` alone
+placed such a site on the grid's trailing pair and emitted B's address with the unsplit row axis. Two shapes fold
+whole. A PLANAR carrier qualifies when every carried state is a bilinear channel — the tile's accumulators ARE the
+carrier. A TWISTED one qualifies through `Fold.chunked`: the recipe names a pattern for
 every state past the pivot, supplies `advance` / `rescale` (the stable ⊕ at an open channel count, which is what a
 per-chunk merge needs), and leaves exactly one bilinear channel, so every other state rides as a per-row scalar and
 the one accumulator is the expectation. Neither reading mentions attention or softmax: a recipe that folded nothing
 but products passes the first, and one shaped like softmax passes the second.
+
+A carrier that qualifies as NEITHER, because its channels multiply different operand pairs, is not a tile site and
+does not stay one term: normalization hands it back as one fold per state under a projection re-exposing the state
+tuple (`Fold.per_state`). Two matmuls loop fusion put in one nest fold whole one at a time and not together — a tile
+holds one A fragment against a B slab per channel — and the mma tier the pair is refused is the one each of them
+alone already has. Only what refuses comes apart, and only when every state that comes out folds whole on its own,
+which is what leaves the fused shared-A form and a carrier of plain statistics as they were.
 
 ## Kernel identity
 

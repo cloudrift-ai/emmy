@@ -403,17 +403,20 @@ _CHUNK_ROW = {
     "PLACE": "fuse",
     "WORK": "w1x1",
     "TILE@map.1/twist": "mma_m16n8k16_f16_f32/f2x1/k2",
-    "TILE@map.1/twist.1/map.1/inner": "mma_m16n8k16_f16_f32/f2x4",
+    "TILE@map.1/twist.1/inner": "mma_m16n8k16_f16_f32/f2x4",
     "REDUCE@map.1/twist": "",
-    "REDUCE@map.1/twist.1/map.1/inner": "",
-    "STAGE": "",
+    "REDUCE@map.1/twist.1/inner": "",
+    # By ROUTE, like the two families above: the kernel spells STAGE at both contraction sites, and
+    # a bare key would bind at whichever one can carry it and leave the other OFF.
+    "STAGE@map.1/twist": "",
+    "STAGE@map.1/twist.1/inner": "",
     "RASTER": "",
 }
 
 
-def _chunk_kernel(module, args, dynamic_shapes=None):
+def _chunk_kernel(module, args, dynamic_shapes=None, stage: str = ""):
     """Compile ``module`` on the pinned chunk row and assert the shape of what came out."""
-    with pinned_knobs(_CHUNK_ROW):
+    with pinned_knobs({**_CHUNK_ROW, "STAGE@map.1/twist": stage}):
         backend, compiled, _graph, kernels = _trace(module, args, dynamic_shapes=dynamic_shapes)
     assert len(kernels) == 1, f"the chunk tier fuses the whole attention: {kernels}"
     source = compiled.nodes[kernels[0]].op.kernel_source
@@ -458,6 +461,37 @@ def test_chunk_tier_takes_a_symbolic_key_extent():
     feed = {"q": q.numpy(), "k": k.numpy(), "v": v.numpy()}
     cuda = {name: torch.from_numpy(array).cuda() for name, array in feed.items()}
     backend, compiled = _chunk_kernel(_Sdpa(), (q, k, v), dynamic_shapes={"q": {}, "k": {2: kv}, "v": {2: kv}})
+    assert _max_diff(backend, compiled, feed, _sdpa_ref(cuda)) < 1e-2
+
+
+@requires_cuda
+@pytest.mark.parametrize("transport", ["smem-async", "smem-tma"])
+def test_chunk_tier_stages_a_symbolic_key_extent(transport):
+    """The streamed value stages against a key extent known only at runtime — the serving shape.
+
+    Every copy gate used to demand a static, chunk-divisible K, so a KV-cache-length attention
+    stayed gmem-direct; on an RTX 5090 that is 2.5x on the ``attention.hd64.softmax_v`` golden
+    target (28.7 us gmem-direct against 11.4 us at ``d1/smem-tma``). 100 keys is not a multiple of
+    the 32-wide chunk, so the last chunk overhangs: the fill clamps onto the last valid key row (a
+    TMA box zero-fills instead) and the boundary mask has already put those keys at the pivot
+    identity, so the duplicates weigh nothing.
+
+    A sweep of one symbolic kernel across runtime sizes is exactly what the realization corpus has
+    no spelling for, which is why this stays in Python."""
+    from emmy.compiler.context import Context  # noqa: PLC0415
+
+    if transport == "smem-tma" and not Context.probe().has_tma:
+        pytest.skip("TMA requires sm_90 or newer")
+    torch.manual_seed(0)
+    q = torch.randn(1, 2, 64, 64, dtype=torch.float16)
+    k, v = (torch.randn(1, 2, 100, 64, dtype=torch.float16) for _ in range(2))
+    kv = torch.export.Dim("kv", min=64, max=512)
+    feed = {"q": q.numpy(), "k": k.numpy(), "v": v.numpy()}
+    cuda = {name: torch.from_numpy(array).cuda() for name, array in feed.items()}
+    backend, compiled = _chunk_kernel(_Sdpa(), (q, k, v), dynamic_shapes={"q": {}, "k": {2: kv}, "v": {2: kv}}, stage=f"d1/{transport}")
+    source = next(compiled.nodes[n].op.kernel_source for n in compiled.nodes if getattr(compiled.nodes[n].op, "kernel_source", None))
+    issued = "cp.async.bulk.tensor" if transport == "smem-tma" else "cp.async.ca"
+    assert issued in source, f"the streamed value moves through {transport}"
     assert _max_diff(backend, compiled, feed, _sdpa_ref(cuda)) < 1e-2
 
 

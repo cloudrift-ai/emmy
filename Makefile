@@ -23,7 +23,7 @@ help:
 	@echo "  serve-models    - List the models with a pinned release config"
 	@echo "  test-durations - Re-measure tests/durations.json (the CI test-balancing baseline)"
 	@echo "  test-corpus-regen - Restamp the realization corpus after an identity / codec change (COMPLETE=1 adds entries)"
-	@echo "  test-goldens   - Strict-decode every checked-in golden (off the default lane, no GPU needed)"
+	@echo "  test-goldens   - Strict-decode the checked-in model goldens (off the default lane, no GPU needed)"
 	@echo "  clean          - Remove virtual environment and generated files"
 	@echo "  test-compose   - Test docker-compose generation with sample config"
 
@@ -72,13 +72,13 @@ format: setup
 # ~12% cold / ~6% warm on a 5090 (923s vs 1031s cold), not the "~3x" this comment used
 # to claim — that predated the WMMA->mma.sync migration which removed the cicc unroll
 # blowup it rested on. See AGENTS.md for the measurement.
-# --durations: the slowest tests are printed on every run (CI included), so a new long
-# pole is visible in the log the moment it lands rather than after someone profiles.
+# --durations=0 plus --durations-min=1 prints every test taking at least 1s on each
+# run (CI included); the session gate still rejects unbaselined tests at 5s.
 # `EMMY_GOLDEN_FILE=` (set, empty) deploys no repository golden in this lane: the correctness lane never asks how
 # fast a pick is, and importing a card's goldens is work every worker process would repeat. Tests that need golden
 # evidence scope it themselves (`--golden PATH`, `records_override`), which takes precedence.
 test: setup
-	EMMY_NVCC_FLAGS="-Xcicc -O1" EMMY_GOLDEN_FILE= ./venv/bin/pytest tests/ -v -n auto --dist=loadgroup --durations=25
+	EMMY_NVCC_FLAGS="-Xcicc -O1" EMMY_GOLDEN_FILE= ./venv/bin/pytest tests/ -v -n auto --dist=loadgroup --durations=0 --durations-min=1
 
 # Restamp the realization corpus's derived half (program wire, name, identity, canonical knobs)
 # after a kernel-identity or schedule-codec change. `make test` DETECTS staleness on any machine,
@@ -87,11 +87,12 @@ test: setup
 test-corpus-regen: setup
 	./venv/bin/python -m tests.compiler.realization.regen $(if $(COMPLETE),--complete,)
 
-# Strict-decode every checked-in golden. Off the default lane: a full pass re-derives every
-# recorded row's enumeration, minutes per file. Run it after a tuning round has re-recorded a
-# card's rows, to see which files the compiler can replay again. Needs no GPU — decoding targets
-# each record's DECLARED capability, so a stale row is detectable anywhere; re-recording it is
-# what needs the card.
+# Strict-decode the checked-in MODEL goldens. Off the default lane: a model inventory is hundreds
+# of rows and the widest file is a multi-megabyte parse. Run it after a tuning round has
+# re-recorded a card's rows, to see which files the compiler can replay again. Needs no GPU —
+# decoding targets each record's DECLARED capability, so a stale row is detectable anywhere;
+# re-recording it is what needs the card. The hardware goldens are decoded row by row by
+# `make test`.
 test-goldens: setup
 	./venv/bin/pytest tests/compiler/pipeline/search/test_golden.py -m goldens -n auto --dist=loadgroup -v -p no:randomly --no-header
 
@@ -99,7 +100,7 @@ test-goldens: setup
 # LPT-buckets on, so CI's first (cache-less) run is balanced. Runs through one xdist
 # worker: loadgroup stamps the canonical @cuda group suffixes the parallel suite
 # looks up, without concurrent workers inflating the measurements. Commit the result
-# when the balance has drifted (a new heavy test, a big pass-cost change).
+# when the balance has drifted (a newly reported slow test, a big pass-cost change).
 test-durations: setup
 	EMMY_NVCC_FLAGS="-Xcicc -O1" EMMY_GOLDEN_FILE= ./venv/bin/pytest tests/ -q -p no:randomly -n 1 --dist=loadgroup --write-durations
 

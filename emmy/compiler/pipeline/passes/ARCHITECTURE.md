@@ -124,7 +124,12 @@ so the unpinned placement fork never returns under a pin-driven compile. A pin t
 realizes is an addressing error. Only unpinned cuts leave the pieces undecided, so search can explore their smaller
 seams before scheduling. The environment is the pass's one pin source (`knob.family_pins`); a measured route row
 never becomes a pin — the deploy's evidence pick takes one of the pass's own offered arms with it
-(`pins.spelled_arm`), and every piece the arm mints is a brand-new kernel whose own forks consult its own rows.
+(`pins.spelled_arm`), and every piece the arm mints is a brand-new kernel whose own forks consult its own rows. A
+row that names several of a kernel's seams (the composed decision a pinned compile consumed them as, written by
+`run --record-greedy`) can only be taken if that composition is on the ballot, so beside its single seams the pass
+offers one composed arm per such route registered for the kernel's signature (`pins.composed_routes`, filled by the
+greedy strategy from the evidence index and by a golden record's replay from its own keys); its pieces are decided
+like a pinned cut's, since they are the kernels the row measured.
 `040_schedule` is the classic assignment boundary. The model under `ir/schedule` projects direct, plain-reduction,
 scalar-contraction, precision-gated tensor-core, materialized-operand copy, computed-operand and multi-channel smem
 compute-fill, and kernel-global raster domains. `ClassicScheduleContext` alone composes their compatibility. The pass
@@ -537,10 +542,11 @@ without a placement or value-cut analysis.
 `020_twisted` is a separate algebraic rewrite over the canonical tree. It fuses every reduce that reads a reduce
 into the twisted monoid a recipe recognizes (`Fold.fuse` — the pivot's state is the operand binding, the score the
 sub-cone alpha-equal to the pivot's own map, the rest a channel's pattern by canonical form), hoisting factors
-constant along the axis out of the fold first. The fused fold stores the recipe's BASE contribution as its lift and
-names the recipe in its `twist`, so the stable ⊕ and the ψ-image the step folds are both derived rather than baked in;
-a channel whose base contribution is a product gets the other factor's cone as an operand of its own, which is what
-leaves attention's expectation channel spelled as one monomial over two operand edges. Softmax, SDPA, and causal SDPA
+constant along the axis out of the fold first. The fused fold stores the recipe's authored INJECTION as its lift —
+the singleton in the carrier's own coordinates — and names the recipe in its `twist`, so the stable ⊕ derives from it
+and the base contribution is a derived reading (`Fold.based`) that only a matcher asks for. Nothing is hoisted to make
+attention's expectation channel read bilinear: A is what `operands[0]` supplies, so the weight may stay a value the
+reading derives. Softmax, SDPA, and causal SDPA
 differ only in carrier arity and score/value lambdas; there is no operation-family matcher. Nor is there an
 attention emitter: a carrier the recipe folds chunk by chunk (`Fold.chunked`) is a TILE site like any other, and
 the tier that folds it reads the recipe's patterns and its stable ⊕, never a named shape. `040_schedule` enumerates the complete
@@ -615,9 +621,11 @@ the compute fill writes the plain row-major slab the cooperative gather already 
 and a materialized `a` whose dtype the atom cannot bind, through the converting fill — reaches the tier here exactly
 as it does on the newer families. The generic staged-loop scheduler still owns `d<n>` slot rotation and `/p<n>`
 register-fragment pipelining; blocking copies make deeper shared rings correct but do not promise copy/compute
-overlap. C-to-A repacking still declines this atom. Target capability predicates select this family below SM80 and
-the established `m16n8k16` families on SM80 and newer; an incompatible atom or copy-transport pin fails instead of
-lowering through instructions the target cannot execute.
+overlap. The chunk tier also repacks a Volta C fragment into each four-column A slice with warp shuffles, so paired
+attention contractions stay on tensor cores; the scheduler admits only chunks that contain a complete logical C
+fragment. Target capability predicates select this family below SM80 and the established `m16n8k16` families on
+SM80 and newer; an incompatible atom or copy-transport pin fails instead of lowering through instructions the target
+cannot execute.
 
 **The f16-accumulate atom sibling** (`mma_m16n8k16_f16_f16`, C→f16 — atom names follow
 `mma_<shape>_<ab_dtype>_<acc_dtype>`, the compressed PTX/CUTLASS D.A.B.C order, with no acc-unspecified alias): on

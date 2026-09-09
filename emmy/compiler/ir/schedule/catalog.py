@@ -51,12 +51,17 @@ def scalar_tile_moves() -> list[Tile]:
     return moves
 
 
+# ``fn`` runs past ``fm``'s widest point because a register row is what covers an output axis a
+# single warp column has to span whole: attention's expectation tiles the value's head dim on N, and
+# at head_dim 256 the score's seam allows exactly one warp column there, so the 32 atoms are the only
+# spelling of it. Both are still bounded by ``MAX_FRAGMENT_CELLS`` and, per atom, by
+# ``MAX_FRAGMENT_REGISTERS`` below — the wide points are grid gaps under those limits, not a raise.
 _WARP_TILE_SPACE = Space(
     dims=(
         Dimension("wm", (1, 2, 4, 8, 16)),
         Dimension("wn", (1, 2, 4, 8, 16)),
         Dimension("fm", (1, 2, 4, 8)),
-        Dimension("fn", (1, 2, 4, 8)),
+        Dimension("fn", (1, 2, 4, 8, 16, 32)),
         Dimension("bk", (1, 2, 4, 8)),
     ),
     bounds=(
@@ -84,25 +89,29 @@ def warp_tile_moves(atom_names: tuple[str, ...]) -> list[Tile]:
     return moves
 
 
+#: The staging pipeline's parametrizations. ``transport`` is how gmem bytes reach the slab,
+#: ``depth`` how many chunks that hop keeps in flight, ``reg_depth`` the smem→register
+#: double-buffer beneath it. Independent knobs over one pipeline, so the domain is their PRODUCT.
+STAGE_TRANSPORTS = ("smem", "smem-async", "smem-tma")
+STAGE_DEPTHS = (1, 2, 3, 4)
+STAGE_REG_DEPTHS = (1, 2)
+
+
 def stage_moves(*, warp: bool, ctx=None) -> list[Stage]:
-    """Return the finite staging domain, filtered to transports available on ``ctx``."""
-    depths = [
-        Stage.parse(spelling)
-        for spelling in (
-            "d1/smem-async",
-            "d2/smem-async",
-            "d3/smem-async",
-            "d4/smem-async",
-            "d1/smem-tma",
-            "d2/smem-tma",
-            "d3/smem-tma",
-            "d4/smem-tma",
-        )
+    """Return the finite staging domain — every combination the hardware allows.
+
+    Nothing here picks which pairings are worth trying: :meth:`Stage.available_on` drops the
+    transports the card cannot issue, the resolvers cap what a shape cannot size (the smem budget,
+    and a split blocking copy's one-chunk register ring), and measured evidence ranks what survives.
+    ``reg_depth >= 2`` is the fragment ping-pong under the mma drain, so it is warp-tier only."""
+    reg_depths = STAGE_REG_DEPTHS if warp else (1,)
+    moves = [
+        Stage(depth=depth, transport=transport, reg_depth=reg_depth)
+        for transport in STAGE_TRANSPORTS
+        for depth in STAGE_DEPTHS
+        for reg_depth in reg_depths
     ]
-    if warp:
-        smem = [Stage.parse(spelling) for spelling in ("d1/smem", "d2/smem", "d3/smem", "d4/smem", "d1/smem/p2", "d2/smem/p2")]
-        depths = [*smem, *depths, Stage.parse("d2/smem-async/p2"), Stage.parse("d2/smem-tma/p2")]
-    return depths if ctx is None else [move for move in depths if move.available_on(ctx)]
+    return moves if ctx is None else [move for move in moves if move.available_on(ctx)]
 
 
 def raster_moves() -> tuple[str, ...]:

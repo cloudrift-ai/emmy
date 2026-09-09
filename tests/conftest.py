@@ -255,7 +255,14 @@ def pytest_sessionfinish(session):
             print(f"\nERROR: {len(missing)} test(s) at or over {_GATE_SECONDS:g}s are missing from {_DURATIONS_FILE}:")
             for d, n in missing:
                 print(f"  {d:7.1f}s  {n}")
-            print("Run `make test-durations` and commit the result, so the worker bucketing plans around them.")
+            print(
+                f"Add each to {_DURATIONS_FILE} at the seconds shown, keyed by the id EXACTLY as printed\n"
+                "above — under --dist=loadgroup a nodeid carries its group suffix (`@cuda`), and a key without\n"
+                "one is never found. This bar reads the RUNNER's clock, so when adding tests by hand record\n"
+                f"everything over ~{_GATE_SECONDS / 10:g}s on a dev box, not just what crosses {_GATE_SECONDS:g}s here.\n"
+                "`make test-durations` re-measures the whole suite serially and REPLACES the file — that is for\n"
+                "drift, not for landing a handful of new tests."
+            )
 
     cache = getattr(session.config, "cache", None)
     if cache is None or not _CALL_DURATIONS:

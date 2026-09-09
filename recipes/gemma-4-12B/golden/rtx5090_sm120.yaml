@@ -8711,7 +8711,7 @@ configs:
       FAST_MATH: false
     name: post-sym.k_linear_mean_reduce_1831ce.901b51c12c65.m1
     knobs:
-      REDUCE@a0: coop
+      REDUCE@map.2/inner: coop
       WORK: t512
       TILE: ''
       STAGE: ''
@@ -8727,7 +8727,7 @@ configs:
       FAST_MATH: true
     name: post-sym.k_linear_mean_reduce_1831ce.901b51c12c65.m1.fm
     knobs:
-      REDUCE@a0: coop
+      REDUCE@map.2/inner: coop
       WORK: t512
       TILE: ''
       STAGE: ''
