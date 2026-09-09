@@ -377,6 +377,8 @@
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[rtx5090_sm120.yaml/attention.hd128.qk#2]": 3.18,
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[rtx5090_sm120.yaml/attention.hd128.softmax_v#1]": 0.32,
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[rtx5090_sm120.yaml/attention.hd128.softmax_v#2]": 0.32,
+ "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[rtx5090_sm120.yaml/attention.hd256.causal.fused#1]": 6.44,
+ "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[rtx5090_sm120.yaml/attention.hd256.causal.fused#2]": 11.77,
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[rtx5090_sm120.yaml/attention.hd64.causal.fused#1]": 8.48,
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[rtx5090_sm120.yaml/attention.hd64.causal.fused#2]": 4.66,
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[rtx5090_sm120.yaml/attention.hd64.dynM.qk#1]": 2.25,
