@@ -710,6 +710,8 @@ def _record_rows(destination: Path, name: str, *, decisions, kernels, reference_
         else:
             recorded["measurements"] = row["measurements"]
         written.append(row["name"])
+    if decisions:
+        seed["kernel_set"] = written[: len(decisions)]
     dump_golden_file(document, destination, overwrite=True, incremental=True)
     return written
 
