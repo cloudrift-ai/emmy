@@ -283,6 +283,9 @@ def test_sm70_ring_splits_the_blocking_copy_across_the_drain(monkeypatch) -> Non
     assert issue < drain < deposit, "the drain must sit between the staged load and its slab store"
     assert "int _a_smem_store = emmy_volta_crosswise(" in prologue
     assert "int _b_smem_store = emmy_volta_b_congruous(" in prologue
+    assert "auto _a_gmem_stride" in prologue and "auto _a_gmem0" in prologue
+    assert "auto _b_gmem_stride" in prologue and "auto _b_gmem0" in prologue
+    assert "_a_gmem0 +" in body and "_b_gmem0 +" in body
     assert "emmy_volta_crosswise(" not in body and "emmy_volta_b_congruous(" not in body
     assert body.count("__syncthreads();") == 1, "the deposit's barrier is the whole per-chunk handshake"
     assert prologue.count("__syncthreads();") == 1, "the primed slot is published once before the loop"
@@ -298,6 +301,7 @@ def test_sm70_shallow_k_tile_keeps_store_addresses_near_the_deposit(monkeypatch)
     monkeypatch.setenv("EMMY_REDUCE", "")
     src, _ = _source(_graph(m=64, n=64, k=32), Context(compute_capability=(7, 0)))
     assert "int _a_smem_store" not in src and "int _b_smem_store" not in src
+    assert "_a_gmem_stride" not in src and "_b_gmem_stride" not in src
     assert "*reinterpret_cast<uint2*>(&_a_smem[emmy_volta_crosswise(" in src
 
 

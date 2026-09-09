@@ -56,6 +56,7 @@ from emmy.compiler.ir.kernel.ir import (
     CpAsyncCommit,
     CpAsyncCopy,
     CpAsyncWait,
+    FlatIndexDecl,
     IndexDecl,
     MbarrierArrive,
     MbarrierArriveExpectTx,
@@ -251,7 +252,42 @@ def _volta_store_decl(*, op, ring: int, cta: CtaTile, elem_bytes: int) -> IndexD
     return IndexDecl(name=name, value=value)
 
 
-def sync_copy_issue(*, shape: tuple[int, int], src: str, gmem_index, cta: CtaTile, elem_bytes: int, name: str) -> list[Stmt] | None:
+def _volta_gmem_bases(*, op, cta: CtaTile, elem_bytes: int) -> tuple[list[tuple[Expr, Expr]], list[tuple[Expr, ...]]] | None:
+    """Return per-lane copy coordinates and bases when every trip advances equally and affinely in K."""
+    eb = op.elem_bytes or elem_bytes
+    if _volta_store_plan(slab=op.slab, shape=op.shape, cta=cta, elem_bytes=eb, swizzle=op.swizzle) is None:
+        return None
+    v, trips = _sync_copy_runs(op.shape, cta, eb)
+    coords = [_sync_copy_coords(trip, v, op.shape[1], cta) for trip in range(trips)]
+    probe = Var("__gk")
+    strides: list[tuple[int, ...]] = []
+    for coord in coords:
+        forms = [affine_form(expr, {probe.name}) for expr in op.index(probe)(*coord)]
+        if any(form is None for form in forms):
+            return None
+        strides.append(tuple(form[1].get(probe.name, 0) for form in forms))
+    if any(stride != strides[0] for stride in strides[1:]):
+        return None
+    bases = [tuple(op.index(_lit(0))(*coord)) for coord in coords]
+    return coords, bases
+
+
+def _volta_gmem_decls(*, op, cta: CtaTile, elem_bytes: int) -> list[FlatIndexDecl]:
+    """Precompute each lane's invariant global-copy bases and its K stride."""
+    planned = _volta_gmem_bases(op=op, cta=cta, elem_bytes=elem_bytes)
+    if planned is None:
+        return []
+    coords, bases = planned
+    step = tuple(op.index(_lit(1))(*coords[0]))
+    return [
+        FlatIndexDecl(name=f"_{op.tag}_gmem_stride", buffer=op.buf, index=step, origin=bases[0]),
+        *(FlatIndexDecl(name=f"_{op.tag}_gmem{trip}", buffer=op.buf, index=base) for trip, base in enumerate(bases)),
+    ]
+
+
+def sync_copy_issue(
+    *, shape: tuple[int, int], src: str, gmem_index, cta: CtaTile, elem_bytes: int, name: str, k0: Expr | None = None
+) -> list[Stmt] | None:
     """The gmem→REGISTER half of :func:`sync_copy_fill`: every lane vector-LOADS each of its
     ``V``-element chunks and STOPS, leaving the values in registers for :func:`sync_copy_deposit`.
 
@@ -269,7 +305,12 @@ def sync_copy_issue(*, shape: tuple[int, int], src: str, gmem_index, cta: CtaTil
     out: list[Stmt] = []
     for trip in range(trips):
         row, col = _sync_copy_coords(trip, v, cols, cta)
-        out.append(Load(names=_staged_regs(name, trip, v), input=src, index=tuple(gmem_index(row, col))))
+        if k0 is not None:
+            flat = _add(Var(f"_{name}_gmem{trip}"), _mul(k0, Var(f"_{name}_gmem_stride")))
+            index = (flat,)
+        else:
+            index = tuple(gmem_index(row, col))
+        out.append(Load(names=_staged_regs(name, trip, v), input=src, index=index))
     return out
 
 
@@ -738,6 +779,7 @@ class SyncTransport:
                 for op in self.copy_operands
                 if (decl := _volta_store_decl(op=op, ring=ring, cta=self.cta, elem_bytes=self.elem_bytes)) is not None
             ]
+            decls += [decl for op in self.copy_operands for decl in _volta_gmem_decls(op=op, cta=self.cta, elem_bytes=self.elem_bytes)]
         return decls
 
     def prologue(self, ring: int) -> list[Stmt]:  # noqa: ARG002
@@ -848,6 +890,7 @@ class SyncTransport:
                     cta=self.cta,
                     elem_bytes=op.elem_bytes or self.elem_bytes,
                     name=op.tag,
+                    k0=k0 if _volta_gmem_bases(op=op, cta=self.cta, elem_bytes=self.elem_bytes) is not None else None,
                 )
                 continue
             out += copy(

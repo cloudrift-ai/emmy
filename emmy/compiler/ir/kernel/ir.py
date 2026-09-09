@@ -151,6 +151,43 @@ class IndexDecl(Stmt):
 
 
 @dataclass(frozen=True)
+class FlatIndexDecl(Stmt):
+    """Bind a buffer coordinate's flattened index, optionally relative to another coordinate."""
+
+    name: str
+    buffer: str
+    index: tuple[Expr, ...]
+    origin: tuple[Expr, ...] = ()
+
+    pure = True
+
+    def defines(self) -> tuple[str, ...]:
+        return (self.name,)
+
+    def exprs(self) -> tuple[Expr, ...]:
+        return (*self.index, *self.origin)
+
+    def external_reads(self) -> tuple[str, ...]:
+        return (self.buffer,)
+
+    def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
+        new = rename.get(self.buffer, self.buffer)
+        return self if new == self.buffer else replace(self, buffer=new)
+
+    def pretty(self, indent: str = "") -> list[str]:
+        index = ", ".join(expr.pretty() for expr in self.index)
+        return [f"{indent}FlatIndex {self.name} = {self.buffer}[{index}]"]
+
+    def render(self, ctx: RenderCtx) -> list[str]:
+        from emmy.compiler.ir.stmt import render_index  # noqa: PLC0415
+
+        value = render_index(self.buffer, self.index, ctx)
+        if self.origin:
+            value = f"({value}) - ({render_index(self.buffer, self.origin, ctx)})"
+        return [f"{_pad(ctx.indent)}auto {self.name} = {value};"]
+
+
+@dataclass(frozen=True)
 class Sync(Stmt):
     """Thread-group barrier.
 
@@ -2702,6 +2739,7 @@ __all__ = [
     "Tile",
     "Smem",
     "IndexDecl",
+    "FlatIndexDecl",
     "Sync",
     "TreeHalve",
     "WarpShuffle",
@@ -2779,6 +2817,17 @@ def _(s: Smem, rename, sigma, axis_fn):
 @_rewrite_kind.register
 def _(s: IndexDecl, rename, sigma, axis_fn):
     return IndexDecl(name=rename(s.name), value=_rename_ssa_vars_in_expr(sigma.apply(s.value), rename))
+
+
+@_rewrite_kind.register
+def _(s: FlatIndexDecl, rename, sigma, axis_fn):
+    rewrite = lambda expr: _rename_ssa_vars_in_expr(sigma.apply(expr), rename)
+    return FlatIndexDecl(
+        name=rename(s.name),
+        buffer=s.buffer,
+        index=tuple(rewrite(expr) for expr in s.index),
+        origin=tuple(rewrite(expr) for expr in s.origin),
+    )
 
 
 @_rewrite_kind.register
