@@ -207,6 +207,61 @@ latency over max(weight-streaming floor, compute floor) for that kernel's weight
 decomposes an end-to-end decode gap into per-kernel code headroom versus inter-kernel launch and scheduling gaps.
 This recipe preserves the raw MPK and vLLM outputs; any separate analysis owns the roofline calculations.
 
+## RTX 5090 attention comparison
+
+`compiler_attention_rtx5090` compares recorded Emmy schedules with current attention libraries on one RTX 5090. It
+is a full-attention Q, K, V to output experiment and is separate from the fragment kernels in `kernels`. The operator
+set is global prefill, causal prefill, causal GQA prefill, noncausal MHA decode, and noncausal GQA decode. Every setup
+uses FP16, head dimension 128, batch 1 or 8, and sequence lengths 1024 through 32768 in powers of two. MHA uses 32
+query and KV heads. GQA uses 64 query heads and 8 KV heads.
+
+The axes follow the public [Nautilus paper](https://arxiv.org/abs/2604.14825), but this is not an exact Nautilus
+reproduction. Nautilus publishes RTX 5090 aggregate plots but no runnable artifact, raw per-setup timings, or exact
+per-model head dimensions. Report this experiment as a comparison against the named public libraries, and use the
+paper's aggregate speedups only as external context. Where this experiment departs from the paper it does so
+deliberately, and the departures are these:
+
+| | Nautilus paper | this experiment |
+| --- | --- | --- |
+| PyTorch / Inductor | 2.11.0 | 2.14.0 — the current production stack, not the paper's |
+| FlashAttention (Tri Dao) | 2.8.3 | 2.8.3 |
+| TileLang | 0.1.8 | 0.1.8 |
+| cuDNN | 9.11.0, called directly | whatever PyTorch bundles, through its SDPA backend selector |
+| other baselines | Triton, Helion, Tawa, TVM, FlashInfer, ThunderKittens | none of them |
+| precision | FP16 and FP8-E4M3 | FP16 |
+| repeats | mean of 10 after 1 warmup | the same |
+
+Nothing here reproduces the paper's own numbers, and the missing baselines mean the paper's "best baseline" is not
+this experiment's best baseline. What it does support is the narrower claim its name carries: how Emmy compares with
+the named public libraries, on this card, on today's stack.
+
+FlashAttention 2.8.3 predates PyTorch 2.14 and pins `-std=c++17`, which its headers no longer accept, so the lane
+builds it from the pinned source with the standard bumped. That changes a build flag, never a kernel.
+
+The baseline lane measures eager SDPA, a `torch.compile` SDPA wrapper, compiled FlexAttention, FlashAttention-2,
+cuDNN through PyTorch's backend selector, and the unchanged TileLang 0.1.8 prefill examples. It also pins the TVM FFI
+release TileLang 0.1.8 still works against, because a newer one stops it importing. A backend with no kernel for a
+setup records why instead of a number: TileLang has no full-attention decode example with this operator contract, and
+cuDNN serves only the shapes its own kernels cover. Do not substitute TileLang's paged or split-KV decode examples.
+PyTorch Inductor is the normalization anchor: the recorded normalized value is Inductor latency divided by backend
+latency, so a value above one favors the named backend.
+
+Each setup has one process and one measurement window, and the window follows the paper: one warmup, then 10
+CUDA-event measurements, reported as their mean over the captured whole forward. The raw record also retains the
+minimum, the median, and every sample — Emmy's own `--bench` reports a minimum, so a cross-lane comparison must pick
+one statistic from the samples both lanes keep rather than compare a mean against a minimum. A failure of
+correctness, exact package versions, or common CUDA graph capture makes the row incomplete. There are no
+fresh-process repeats, so the result is a direct engineering comparison rather than a confidence-interval claim.
+
+One setup is withheld rather than measured. GQA prefill at batch 8 and 32768 holds a 4.3 GB query tensor in both
+layouts beside a reference and a candidate output, which does not fit the 32 GB an RTX 5090 has; a comparison missing
+backends is not evidence, so `operators.sh` does not offer that setup to either lane.
+
+The Emmy lane never searches. It requires one recorded RTX 5090 golden for every setup, replays each golden once at
+deployable `-O3`, and measures the same source once with eager PyTorch, current Inductor, and untuned Emmy for the
+direct correctness boundary. Missing goldens fail the row. Tuning, validation, and golden recording happen before
+the experiment and remain separate from its measurements.
+
 ## Neptune compiler comparison
 
 `compiler_neptune_emmy_pytorch_a100` owns both parts of the A100 comparison and produces one artifact archive for one
