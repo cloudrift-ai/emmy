@@ -281,8 +281,10 @@ fill for materialized and computed f16 A/B edges. For a materialized canonical-B
 counts, lowering derives CUTLASS's crosswise-A and B-congruous layouts together: one 128-bit shared load drains each
 adjacent fragment pair, the MMA uses row/row B, and the store uses the coupled interleaved 32×32 accumulator map. This
 is the SM70 default lowering, not a schedule-codec choice; the existing `PAIR_LDMATRIX` policy override disables the
-whole combination. Computed operands, transposed B, and an odd fragment count retain the cooperative gather path.
-Newer instruction families stay disabled. The
+whole combination. For deep K slabs, the blocking copy also binds each lane's affine global-copy bases and K stride,
+plus the paired shared-store layout bases, once outside the K loop. Shallow slabs retain inline address calculation;
+the extra live indices cost more than they save there. Computed operands, transposed B, and an odd fragment count
+retain the cooperative gather path. Newer instruction families stay disabled. The
 **`smem-tma`** transport
 additionally requires **sm_90+**
 (Hopper/Blackwell): below it (the schedule's TMA gate, mirroring the frontend TMA-fold gate) the `d*/smem-tma*` moves

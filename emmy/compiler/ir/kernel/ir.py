@@ -2821,7 +2821,9 @@ def _(s: IndexDecl, rename, sigma, axis_fn):
 
 @_rewrite_kind.register
 def _(s: FlatIndexDecl, rename, sigma, axis_fn):
-    rewrite = lambda expr: _rename_ssa_vars_in_expr(sigma.apply(expr), rename)
+    def rewrite(expr):
+        return _rename_ssa_vars_in_expr(sigma.apply(expr), rename)
+
     return FlatIndexDecl(
         name=rename(s.name),
         buffer=s.buffer,
