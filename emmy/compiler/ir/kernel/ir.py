@@ -2294,14 +2294,20 @@ class RegStore(Stmt):
         if self.n_guard is not None:
             nbase, nbound = (e.render(ctx) for e in self.n_guard)
         vec2 = {"f16": "__half2", "bf16": "__nv_bfloat162", "f32": "float2"}.get(dst_dt)
-        if mbound is None and nbound is None and ldn == 1 and vec2 is not None and not (self.atomic and dst_dt == "f32"):
+        if nbound is None and ldn == 1 and vec2 is not None and not (self.atomic and dst_dt == "f32"):
             packer = {"f16": "__floats2half2_rn", "bf16": "__floats2bfloat162_rn", "f32": "make_float2"}[dst_dt]
             coords = self._element_coords()
             for pair in range(0, len(coords), 2):
                 row, col, _row_expr, _col_expr = coords[pair]
-                lines.extend(f"{pad}  {ln}" for ln in (*pre[pair], *pre[pair + 1]))
+                indent = f"{pad}  "
+                if mbound is not None:
+                    lines.append(f"{indent}if (({mbase}) + {row} < ({mbound})) {{")
+                    indent += "  "
+                lines.extend(f"{indent}{ln}" for ln in (*pre[pair], *pre[pair + 1]))
                 addr = self._addr(flat, row, col, ldm, ldn)
-                lines.append(f"{pad}  {self._pair_store(addr, vals[pair], vals[pair + 1], vec2, packer)}")
+                lines.append(f"{indent}{self._pair_store(addr, vals[pair], vals[pair + 1], vec2, packer)}")
+                if mbound is not None:
+                    lines.append(f"{pad}  }}")
             lines.append(f"{pad}}}")
             return lines
         for i, (row, col, _row_expr, _col_expr) in enumerate(self._element_coords()):

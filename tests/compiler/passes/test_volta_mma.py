@@ -204,6 +204,14 @@ def test_sm70_output_stores_contiguous_fragment_pairs(monkeypatch) -> None:
     assert src.count("*reinterpret_cast<__half2*>(&c[") == 4
 
 
+def test_sm70_masked_rows_keep_contiguous_fragment_pairs(monkeypatch) -> None:
+    """A row guard covers both adjacent values, so it does not split their half2 store."""
+    _pin(monkeypatch, VOLTA)
+    src, _ = _source(_graph(m=Dim("seq_len", hint=512)), Context(compute_capability=(7, 0)))
+    assert src.count("*reinterpret_cast<__half2*>(&c[") == 4
+    assert "< (seq_len))" in src
+
+
 def test_sm70_sync_copy_composes_ring_and_register_pipelines(monkeypatch) -> None:
     _pin(monkeypatch, VOLTA, tile="f1x1/k2", stage="d2/smem/p2")
     src, knobs = _source(_graph(k=32), Context(compute_capability=(7, 0)))
