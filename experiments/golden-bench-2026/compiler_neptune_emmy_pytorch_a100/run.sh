@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # Neptune lane: tune + Nsight-profile one operator's sequence sweep inside the pinned artifact
-# image. One operator per invocation so a failed or timed-out operator costs only its own row.
+# image, or replay a supplied tuning archive without searching. One operator per invocation so a
+# failed or timed-out operator costs only its own row.
 set -euo pipefail
 
-if [ "$#" -ne 1 ]; then
-  echo "usage: $0 OPERATOR" >&2
+if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
+  echo "usage: $0 OPERATOR [TUNING_ARCHIVE]" >&2
   exit 2
 fi
 
 operator=$1
+tuning_archive=${2:-}
 
 source /workspace/venv/bin/activate
 cd /workspace/neptune
@@ -46,9 +48,17 @@ grep -Fq "torch.compile(flex_attention)" scripts/neptune_bench/torch/flex.py
 nvidia-smi -q > /results/nvidia-smi.txt
 nsys --version > /results/nsys-version.txt
 
-test ! -e logs/neptune-tuning
 test ! -e logs/profiles
 mkdir -p /results/tune-logs /results/profile-logs /results/profiles
+if [ -n "$tuning_archive" ]; then
+  test -f "$tuning_archive"
+  test ! -e logs/neptune-tuning
+  mkdir -p logs
+  tar -xzf "$tuning_archive" -C logs --wildcards "neptune-tuning/${operator}-*"
+  test -d logs/neptune-tuning
+else
+  test ! -e logs/neptune-tuning
+fi
 status_file=/results/neptune-setup-status.tsv
 printf "operator\tsequence_length\ttune\tprofile\n" > "$status_file"
 successful_profiles=0
@@ -58,19 +68,23 @@ sequence_lengths=(256 512 1024 2048 4096 8192 16384 32768)
 
 for sequence_length in "${sequence_lengths[@]}"; do
   setup="${operator}-b1-s${sequence_length}"
-  if timeout --signal=TERM --kill-after=1m "$tune_timeout" \
-    python -u /experiment/run_neptune.py tune "$operator" "1,$sequence_length" --n-trials 128 \
-    2>&1 | tee "/results/tune-logs/$setup.log"; then
-    tune_status=ok
-    if grep -Fq "Top 0 schedules" "/results/tune-logs/$setup.log"; then
-      tune_status=ok:no-valid-schedule
-    fi
+  if [ -n "$tuning_archive" ]; then
+    tune_status=reused
   else
-    tune_rc=$?
-    if [ "$tune_rc" -eq 124 ]; then
-      tune_status=timed-out
+    if timeout --signal=TERM --kill-after=1m "$tune_timeout" \
+      python -u /experiment/run_neptune.py tune "$operator" "1,$sequence_length" --n-trials 128 \
+      2>&1 | tee "/results/tune-logs/$setup.log"; then
+      tune_status=ok
+      if grep -Fq "Top 0 schedules" "/results/tune-logs/$setup.log"; then
+        tune_status=ok:no-valid-schedule
+      fi
     else
-      tune_status="failed:$tune_rc"
+      tune_rc=$?
+      if [ "$tune_rc" -eq 124 ]; then
+        tune_status=timed-out
+      else
+        tune_status="failed:$tune_rc"
+      fi
     fi
   fi
   if timeout --signal=TERM --kill-after=1m "$profile_timeout" \
@@ -83,6 +97,9 @@ for sequence_length in "${sequence_lengths[@]}"; do
     fi
     if grep -Fq "failed with exception" "/results/profile-logs/$setup.log"; then
       profile_status="$profile_status:runner-failure"
+    fi
+    if [ -n "$tuning_archive" ] && ! grep -Fq "Loaded schedule from" "/results/profile-logs/$setup.log"; then
+      profile_status="$profile_status:no-saved-optimized-kernel"
     fi
     successful_profiles=$((successful_profiles + 1))
   else

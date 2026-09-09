@@ -475,16 +475,22 @@ readings the tier would otherwise refuse. Its LEAVES are read once ahead of the 
 one needs no gmem address at all: a causal mask's fill / zero constants are a computed pair, and only the pivot source
 and the streamed value are ever asked for a slab. And a `Select` on the score fragment's OWN coordinates — the row the
 carrier folds and the chunk it folds over — is per ELEMENT, not cell-uniform, so `_residence` lands it as a
-a `FragmentMask` under the same coordinate substitution the boundary mask performs. That same `Select` is also read
-ONCE, ahead of the loop, for what it says about whole chunks (`_mask_key_end`): a mask whose masked branch reads
+a `FragmentMask` under the same coordinate substitution the boundary mask performs. The same `Select`s are also read
+ONCE, ahead of the loop, for what they say about whole chunks (`_mask_key_bounds`): a mask whose masked branch reads
 `key > row + c` (or `>=`) with `c ≥ 0` masks every key from the CTA's block end onward for every row the CTA holds,
-so the chunk loop stops there — the skeleton's `k_end`, CTA-uniform in the grid var alone, bit-identical because a
-masked chunk folds the carrier identity exactly. A causal stream gets about half its work back that way — on a launch
-of more CTAs than the card has SMs. A launch that fits in one wave takes as long as its longest CTA whatever the
-others skip, and the dynamic trip count alone cost 9% at the 128-CTA head-width-256 shape, so `_factor` keeps the
-stream whole there (`launch_ctas` against `Context.sm_count`; the CTA-per-SM half of the test is ptxas's to know, so
-fewer CTAs than SMs is the conservative reading). A mask that bounds the keys from below, or whose lead could stop a
-block before its first chunk, keeps the whole stream and the per-element mask alone. Without those readings a
+so the chunk loop stops there; one whose masked branch reads `key < row − c` (or `<=`) masks every key before the
+CTA's block base for every row, so the loop starts on the chunk that key falls in. Both are the skeleton's
+`k_first` / `k_end`, CTA-uniform in the grid var alone, bit-identical because a masked chunk folds the carrier
+identity exactly — and derived here, stored nowhere. The mask `Select` in the body is the bound's one source: an
+axis's domain is its extent in the kernel's axis table, and a row-dependent bound is a relation between two axes
+that only becomes a range once widened to the CTA's rows, so neither the term, the loop IR nor the axis carries it.
+A causal stream gets about half its work back that way, a banded one its band — on a launch of more CTAs than the
+card has SMs. A launch that fits in one wave takes as long as its longest CTA whatever the others skip, and the
+dynamic trip count alone cost 9% at the 128-CTA head-width-256 shape, so `_factor` marks it (`launch_ctas` against
+`Context.sm_count`; the CTA-per-SM half of the test is ptxas's to know, so fewer CTAs than SMs is the conservative
+reading) and the tier keeps a stream bounded at ONE end whole there; bounded at both, every CTA shortens and the
+bounds stay. A mask that could take a row's own key — a lead that stops a block before its last row, a lag that starts
+it after its first — keeps the whole stream and the per-element mask alone. Without those readings a
 masked carrier fell to the scalar tier whole, which is what `attention.hd256.dynM.pv` on the RTX 4090 recorded and
 then stopped decoding.
 

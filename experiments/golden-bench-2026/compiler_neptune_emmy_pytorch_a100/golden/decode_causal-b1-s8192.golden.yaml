@@ -24,29 +24,36 @@ configs:
   target:
     loop: 0
   realizations:
-  - name: k_sdpa_reduce_b30180.75f6e2e9788e
+  - name: k_sdpa_reduce_b30180.75f6e2e9788e.d2c13b33303c
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: coop/r2
-      STAGE: ''
-      TILE: ''
       WORK: t128
+      REDUCE: coop
+      RASTER: ''
+    identity: d2c13b33303c888b3ab55c9a0560a3a459c903d311ab32992d9322bb1e8d1dea
     measurements:
-      emmy_us: 187.5968
-      reference_us: 221.184
-      reference_backend: emmy-reference
+      emmy_us: 262.4000012874603
+      reference_us: 262.4000012874603
+      reference_backend: same-input-greedy
 - program: 0
   target:
     loop: 1
   realizations:
-  - name: k_sdpa_reduce_73d500.fa5193c2857c
+  - name: k_sdpa_reduce_73d500.fa5193c2857c.b6b087e9a76f
     bindings: {}
     pins:
       FAST_MATH: false
+    knobs:
+      WORK: t128
+      REDUCE: coop
+      RASTER: ''
+    identity: b6b087e9a76f51c00332dfade160907212f20a28360ffa1d237d44111f75e5e9
+    measurements:
+      emmy_us: 441.3439929485321
+      reference_us: 442.8800046443939
+      reference_backend: same-input-greedy
 loops:
 - inputs: [k, q]
   outputs: [scaled_dot_product_attention_scaled]
@@ -287,4 +294,4 @@ loops:
       name: k_sdpa_reduce_73d500
     inputs: [scaled_dot_product_attention_scaled, v]
     outputs: [[scaled_dot_product_attention, f16, [1, 32, 1, 128]]]
-gpu_name: NVIDIA A100 80GB
+gpu_name: NVIDIA A100 40GB

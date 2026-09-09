@@ -1021,7 +1021,7 @@ def mask_select_predicate(select: Select) -> Expr | None:
     keep, mask = select.branches
     if not isinstance(keep.select, BinaryExpr) or not isinstance(mask.select, BinaryExpr):
         return None
-    if (keep.select.op, mask.select.op) not in (("<", ">="), ("<=", ">")):
+    if (keep.select.op, mask.select.op) not in (("<", ">="), ("<=", ">"), (">", "<="), (">=", "<")):
         return None
     if keep.select.left != mask.select.left or keep.select.right != mask.select.right:
         return None

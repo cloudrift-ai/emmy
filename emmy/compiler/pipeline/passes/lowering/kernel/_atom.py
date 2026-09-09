@@ -524,6 +524,18 @@ def clamp_last(idx: Expr, ext: Expr) -> Expr:
     return TernaryExpr(cond=BinaryExpr("<", idx, ext), if_true=idx, if_false=BinaryExpr("-", ext, Literal(1, "int")))
 
 
+def _min(a: Expr, b: Expr) -> Expr:
+    return TernaryExpr(cond=BinaryExpr("<", a, b), if_true=a, if_false=b)
+
+
+def _max(a: Expr, b: Expr) -> Expr:
+    return TernaryExpr(cond=BinaryExpr(">", a, b), if_true=a, if_false=b)
+
+
+def _shifted(expr: Expr, by: int) -> Expr:
+    return expr if by == 0 else BinaryExpr("+" if by > 0 else "-", expr, Literal(abs(by), "int"))
+
+
 def _side_base(side: Side) -> Expr:
     """The CTA's tile-base coordinate on ``side`` — ``block·tile`` (always in-bounds: the block
     count is ``ceil(extent / tile)``, so ``block·tile < extent``)."""
@@ -1138,19 +1150,25 @@ def _affine_term(expr: Expr) -> tuple[str, int] | None:
     return None
 
 
-def _mask_key_end(stmts, held: str, key: Axis, row: str, offset) -> Expr | None:
-    """The chunk base past which every key is masked for every row of this CTA — the causal
-    early stop's ``k_end`` — or ``None`` when the score carries no such mask.
+def _mask_key_bounds(stmts, held: str, key: Axis, row: str, offset, bk: int) -> tuple[Expr | None, Expr | None]:
+    """The chunk range outside which every key is masked for every row of this CTA — the stream's
+    ``(k_first, k_end)``, each ``None`` when no mask bounds the keys on that side.
 
-    The mask is the coordinate ``Select`` the prefix adds to the score (the same statement pair
-    :func:`_residence` turns into a ``FragmentMask``), and it stops the stream when its masked
-    branch reads ``key + ck > row + cr`` (or ``>=``): a key at or past ``block_end + cr − ck`` is
-    masked for the block's last row and so for every row before it. Chunks from there on fold the
-    carrier identity exactly, so the loop stops there bit-identically. A mask that bounds the keys
-    from BELOW (a window's near edge) or one with a negative lead — which could stop a block before
-    its own first chunk — is left to the per-element mask."""
+    The masks are the coordinate ``Select`` statements the prefix adds to the score (the pairs
+    :func:`_residence` turns into a ``FragmentMask``), each read ONCE, ahead of the loop, for what
+    its masked branch says about whole chunks. ``key + ck > row + cr`` (or ``>=``) masks every key
+    from ``block_end + cr − ck`` on for the block's last row, and so for every row before it: the
+    stream stops there. ``key + ck < row + cr`` (or ``<=``) masks every key before
+    ``block_base + cr − ck`` for the block's first row, and so for every row after it: the stream
+    starts on the chunk that key falls in. Both are CTA-uniform in the grid var alone, and
+    bit-identical because a masked chunk folds the carrier identity exactly. The bound is derived
+    here and stored nowhere — the ``Select`` in the body is its one source. A mask that could take
+    a row's OWN key (a lead that stops a block before its last row, a lag that starts it after its
+    first) could empty a row's stream, and is left to the per-element mask."""
     selects = {stmt.name: stmt for stmt in stmts if isinstance(stmt, Select)}
     fragments = {held}  # the score and every value the prefix derives from it (its scaling, say)
+    first: Expr | None = None
+    end: Expr | None = None
     for stmt in stmts:
         if not isinstance(stmt, Assign):
             continue
@@ -1161,20 +1179,25 @@ def _mask_key_end(stmts, held: str, key: Axis, row: str, offset) -> Expr | None:
         if stmt.op.name != "add" or len(selected) != 1 or len(source) != 1:
             continue
         predicate = mask_select_predicate(selects[selected[0]])
-        if predicate is None:
-            return None
-        key_side, row_side = _affine_term(predicate.left), _affine_term(predicate.right)
-        if key_side is None or row_side is None or key_side[0] != key.name or row_side[0] != row:
-            return None
-        lead = row_side[1] - key_side[1] - (1 if predicate.op == ">=" else 0)
-        if lead < 0:
-            return None
-        end: Expr = offset.block_end()
-        if lead:
-            end = BinaryExpr("+", end, Literal(lead, "int"))
-        extent = key.extent_expr()
-        return TernaryExpr(cond=BinaryExpr("<", end, extent), if_true=end, if_false=extent)
-    return None
+        sides = (_affine_term(predicate.left), _affine_term(predicate.right)) if predicate is not None else (None, None)
+        if sides[0] is None or sides[1] is None or sides[0][0] != key.name or sides[1][0] != row:
+            continue
+        shift = sides[1][1] - sides[0][1]  # the masked branch reads ``key OP row + shift``
+        if predicate.op in (">", ">="):
+            lead = shift - (predicate.op == ">=")
+            if lead >= 0:
+                stop = _shifted(offset.block_end(), lead)
+                end = stop if end is None else _min(end, stop)
+        else:
+            lag = shift + (predicate.op == "<=")
+            if lag <= 0:
+                start = _shifted(offset.block_base(), lag)
+                first = start if first is None else _max(first, start)
+    if end is not None:
+        end = _min(end, key.extent_expr())
+    if first is not None:
+        first = BinaryExpr("*", BinaryExpr("/", _max(first, Literal(0, "int")), Literal(bk, "int")), Literal(bk, "int"))
+    return first, end
 
 
 def _chunk_stream(k_axis: Axis, bk: int):
@@ -2418,12 +2441,16 @@ class _FlashOps(_MmaOps):
         )
         pre = [stmt for edge in leaves for stmt in edge.lower(axes=self.axes)]
         pre += self._query(offset, mn)
-        # A causal mask makes every chunk past this CTA's last row pure identity work: the loop
-        # stops there (``k_end``), which is what gives a causal stream half its work back — unless
-        # the launch is one wave, where the kernel takes as long as its longest CTA anyway and the
-        # dynamic trip count only costs (9% measured at the 128-CTA head-width-256 shape).
+        # A coordinate mask makes every chunk outside this CTA's rows pure identity work, and the
+        # loop skips it: it stops at a causal diagonal (``k_end``) and starts at a band's near edge
+        # (``k_first``), which gives a causal stream half its work back and a banded one its band.
+        # Not with one bound alone on a one-wave launch: the kernel takes as long as its longest
+        # CTA, which walks the whole stream there, and the dynamic trip count only costs (9%
+        # measured at the 128-CTA head-width-256 shape). Bounded at both ends, every CTA shortens.
         scored_name = (score if score is not None else self.c.operands[0]).exposes[0]
-        k_end = None if self.one_wave else _mask_key_end(prefix.body, scored_name, key, m.axis.name, offset[0])
+        k_first, k_end = _mask_key_bounds(prefix.body, scored_name, key, m.axis.name, offset[0], bk)
+        if self.one_wave and (k_first is None or k_end is None):
+            k_first = k_end = None
 
         chunk = Axis(name=f"{key.name}__ck", extent=key.extent)
         base = Var(chunk.name)
@@ -2527,7 +2554,8 @@ class _FlashOps(_MmaOps):
         # — the pivot's is not ``maximum``'s neutral element — so the loop must not re-seed it.
         if streams is None:
             gmem = Body(tuple(chunk_body(None)))
-            loop = StridedLoop(axis=chunk, start=Literal(0, "int"), step=Literal(bk, "int"), body=gmem, unroll=False, seed=False, end=k_end)
+            start = k_first if k_first is not None else Literal(0, "int")
+            loop = StridedLoop(axis=chunk, start=start, step=Literal(bk, "int"), body=gmem, unroll=False, seed=False, end=k_end)
             return pre, [loop]
         # The staged form is the same body under the shared fill→drain skeleton, with the chunk loop
         # built by it: one operand group, one segment, and ``k0`` keeping this tier's own axis name
@@ -2548,6 +2576,7 @@ class _FlashOps(_MmaOps):
             k_extent=k_extent,
             k0=chunk.name,
             k_end=k_end,
+            k_first=k_first,
             seed=False,
         )
         return [*pre, *decls], region
