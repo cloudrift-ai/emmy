@@ -206,6 +206,9 @@ def test_sm70_materialized_tiles_use_paired_volta_layout_loads(monkeypatch) -> N
     assert "emmy_mma884_load_a_crosswise_pair(_a0, _a1" in src
     assert "emmy_mma884_load_b_congruous_pair(_b0, _b1" in src
     assert src.count("emmy_mma_m8n8k4_f16_f32_brow(_c") == 4
+    assert "access ^ ((k_group >> 2) & 1)" in src
+    assert "const int _vq = _vl >> 2;" in src
+    assert "((_vq >> 1) & 1) * 8" in src
 
 
 def test_sm70_output_stores_contiguous_fragment_pairs(monkeypatch) -> None:
@@ -273,6 +276,7 @@ def test_sm70_register_tile_keeps_the_volta_fragment_layout_through_the_reroll(m
     assert "unsigned _b[2][2]" in src  # the ROLLED fragment family (count > 1)
     assert "emmy_mma884_load_a_crosswise_pair(_a0, _a1" in src
     assert "emmy_mma884_load_b_congruous_pair(_b[0], _b[1]" in src
+    assert "emmy_mma_m8n8k4_f16_f32_brow(_c" in src
     assert "const int _vr = " in src and "const int _vc = " in src  # the m8n8k4 C-fragment store map
     for forbidden in NEWER_INSTRUCTIONS:
         assert forbidden not in src

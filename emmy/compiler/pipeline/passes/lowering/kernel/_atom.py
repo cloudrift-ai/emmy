@@ -1668,9 +1668,17 @@ class _MmaOps(_AtomOps):
                 return isinstance(slab.load if slab is not None else edge, Load)
 
             b_copied = all(copied_b(edge) for edge, _ in self.channels)
-            a = VOLTA_CROSSWISE if a_copied and mn[0].reg % 2 == 0 else "NONE"
-            b = VOLTA_B_CONGRUOUS if b_copied and not self.c.as_contraction().b_trans and mn[1].reg % 2 == 0 else "NONE"
-            return a, b
+            paired = (
+                a_copied
+                and b_copied
+                and not self.c.as_contraction().b_trans
+                and mn[0].reg % 2 == 0
+                and mn[1].reg % 2 == 0
+            )
+            return (
+                VOLTA_CROSSWISE if paired else "NONE",
+                *((VOLTA_B_CONGRUOUS if paired else "NONE") for _ in self.channels),
+            )
         b_inner = self.stage.bk_elems if self.c.as_contraction().b_trans else mn[1].tile
         return tuple(self.slab_swizzle(inner, e.nbytes) for e, inner in zip(self.slab_elems(), (self.stage.bk_elems, b_inner), strict=True))
 
@@ -1883,6 +1891,10 @@ class _MmaOps(_AtomOps):
         :class:`RegEpilogue` and guarding overhanging M/N rows. A multi-fold node binds its extra C
         fragments as additional epilogue accumulators (the combine — SwiGLU — reads them per cell)."""
         atom = self.tile.atom
+        volta_interleaved = False
+        if atom.fragment_layout == "m8n8k4":
+            swizzles = self.slab_swizzles(mn, atom.operand_dtype("a").nbytes)
+            volta_interleaved = swizzles == (VOLTA_CROSSWISE, *((VOLTA_B_CONGRUOUS,) * len(self.channels)))
         m, n = mn
         mcell, ncell = offset[0].base(i), offset[1].base(j)
         tail = list(self.epilogue)
@@ -1927,7 +1939,8 @@ class _MmaOps(_AtomOps):
                     n_guard=_guard(n, ncell),
                     atomic=write.atomic,
                     swizzle=write.swizzle,
-                    fragment_layout=atom.fragment_layout,
+                    fragment_layout="m8n8k4_interleaved" if volta_interleaved else atom.fragment_layout,
+                    fragment_index=(i, j),
                     row_dim=_axis_dim(write.index, m.axis.name),
                     col_dim=_axis_dim(write.index, n.axis.name),
                 )

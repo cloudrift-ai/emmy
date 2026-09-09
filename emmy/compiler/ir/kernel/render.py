@@ -357,7 +357,7 @@ static __device__ __forceinline__ void emmy_mma884_load_a_crosswise_pair(
     int lane_in_quad = lane & 3;
     int access = ((quad & 4) << 1) + (lane_in_quad << 1) + ((quad & 1) ^ ((quad & 4) >> 2));
     int k_group = k >> 2;
-    int offset = row * 4 + access * 8 + k_group * rows * 4 + (((k_group >> 2) & 1) * 8);
+    int offset = row * 4 + (access ^ ((k_group >> 2) & 1)) * 8 + k_group * rows * 4;
     uint4 packed = *reinterpret_cast<const uint4*>(s + offset);
     if (k_group & 2) {
         uint2 tmp = make_uint2(packed.x, packed.y);

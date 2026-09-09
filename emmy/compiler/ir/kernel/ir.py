@@ -2092,6 +2092,9 @@ class RegStore(Stmt):
     n_guard: tuple[Expr, Expr] | None = None
     atomic: bool = False
     fragment_layout: str = "m16n8k16"
+    # Cell position inside the warp register tile. The paired Volta layout groups adjacent cells
+    # into CUTLASS's interleaved 32x32 accumulator map; other fragment layouts ignore it.
+    fragment_index: tuple[int, int] = (0, 0)
     # Software smem slab swizzle mode ("NONE"/"B32"/"B64"/"B128") — the fragment fill's producer
     # side, when this store's destination is a swizzled smem SLAB rather than the kernel's output
     # (the fused flash weight tile: the score's C fragments land in the A slab the ``ldmatrix``
@@ -2174,6 +2177,23 @@ class RegStore(Stmt):
         """Per-lane ``(row C text, col C text, row Expr, col Expr)`` for this fragment layout."""
         from emmy.compiler.ir.expr import BinaryExpr, Var  # noqa: PLC0415
 
+        if self.fragment_layout == "m8n8k4_interleaved":
+            mi, ni = (x & 1 for x in self.fragment_index)
+            row_adjust, col_adjust = -12 * mi, -12 * ni
+
+            def coord(base: str, offset: int) -> tuple[str, Expr]:
+                if offset == 0:
+                    return base, Var(base)
+                op = "+" if offset > 0 else "-"
+                amount = abs(offset)
+                return f"({base} {op} {amount})", BinaryExpr(op, Var(base), Literal(amount, "int"))
+
+            out = []
+            for i in range(8):
+                row, row_expr = coord("_vr", row_adjust + (i & 2))
+                col, col_expr = coord("_vc", col_adjust + (16 if i & 4 else 0) + (i & 1))
+                out.append((row, col, row_expr, col_expr))
+            return out
         if self.fragment_layout == "m8n8k4":
             out = []
             for i in range(8):
@@ -2283,7 +2303,7 @@ class RegStore(Stmt):
         pad = _pad(ctx.indent)
         lane = "(threadIdx.x & 31)"
         pre, vals = self._element_values(ctx)
-        if self.fragment_layout == "m8n8k4":
+        if self.fragment_layout in ("m8n8k4", "m8n8k4_interleaved"):
             return self._render_m8n8k4(ctx, flat=flat, ldm=ldm, ldn=ldn, dst_dt=dst_dt, pre=pre, vals=vals)
         # C is 16×8: lane owns (row g, cols 2t,2t+1) and (row g+8, cols 2t,2t+1)
         # with g = lane/4, t = lane%4. The two cols per row are CONTIGUOUS, so
@@ -2325,16 +2345,23 @@ class RegStore(Stmt):
         return head + body
 
     def _render_m8n8k4(self, ctx: RenderCtx, *, flat: str, ldm, ldn, dst_dt: str, pre: list[list[str]], vals: list[str]) -> list[str]:
-        """Store the four m8n8k4 computation groups arranged as one logical 16x16 cell."""
+        """Store an m8n8k4 accumulator under the selected Volta warp-tile arrangement."""
         pad = _pad(ctx.indent)
         lane = "(threadIdx.x & 31)"
         # Each four-lane group and its +16 partner own one 8x8 computation. Place the four
         # groups as quadrants; _vr/_vc are this lane's base row/column within the 16x16 cell.
-        lines = [
-            f"{pad}{{ const int _vl = {lane}; const int _vq = (_vl & 15) >> 2;",
-            f"{pad}  const int _vr = (_vq >> 1) * 8 + (_vl >> 4) * 4 + (_vl & 1);",
-            f"{pad}  const int _vc = (_vq & 1) * 8 + (_vl & 2);",
-        ]
+        if self.fragment_layout == "m8n8k4_interleaved":
+            lines = [
+                f"{pad}{{ const int _vl = {lane}; const int _vq = _vl >> 2;",
+                f"{pad}  const int _vr = (((_vq & 4) >> 1) + (_vq & 1)) * 8 + (_vl & 1);",
+                f"{pad}  const int _vc = ((_vq >> 1) & 1) * 8 + (_vl & 2);",
+            ]
+        else:
+            lines = [
+                f"{pad}{{ const int _vl = {lane}; const int _vq = (_vl & 15) >> 2;",
+                f"{pad}  const int _vr = (_vq >> 1) * 8 + (_vl >> 4) * 4 + (_vl & 1);",
+                f"{pad}  const int _vc = (_vq & 1) * 8 + (_vl & 2);",
+            ]
         mbase = mbound = nbase = nbound = None
         if self.m_guard is not None:
             mbase, mbound = (e.render(ctx) for e in self.m_guard)
@@ -2873,6 +2900,7 @@ def _(s: LdmatrixLoad, rename, sigma, axis_fn):
         scale_index=tuple(sigma.apply(e) for e in s.scale_index),
         scale_ldm=s.scale_ldm,
         fragment_layout=s.fragment_layout,
+        fragment_index=s.fragment_index,
     )
 
 
@@ -2885,6 +2913,7 @@ def _(s: MmaSyncPtx, rename, sigma, axis_fn):
         shape=s.shape,
         ab_dtype=s.ab_dtype,
         c_dtype=s.c_dtype,
+        b_row_major=s.b_row_major,
         # The block-scaled form's scale registers are fragments like any other and must be
         # renamed with them: dropping them here would silently rewrite the instruction into its
         # plain three-operand sibling, which renders with the wrong arity.
