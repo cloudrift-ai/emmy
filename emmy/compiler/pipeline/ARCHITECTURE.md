@@ -676,7 +676,10 @@ pinned measurement (`run --golden PATH --bench`, `--ab`), training data for the 
 At deploy a record is rows, nothing more, and every row is keyed by the kernel it decides (`golden.evidence_rows`).
 A record that decorates one kernel is that kernel's schedule row under the target's signature. Any other record is
 read through its replay (`golden._replay`): the target is resolved through the tile passes under the record's pins
-(the environment it was measured under), its knobs followed fork by fork through the same `pins.spelled_arm` the
+(the environment it was measured under) and with the live decision pins withdrawn (`pins.unpinned_decisions` — a
+replay reconstructs what a record measured, so it is a function of the record and the compiler alone, and its
+persisted result serves every pinned compile instead of going cold per pin; the live pins decide the live forks,
+where a row they contradict finds no leaf), its knobs followed fork by fork through the same `pins.spelled_arm` the
 deploy reads a route row with — the seams an entry of the set marks `cut` together offered as one composed arm on the
 replay's kernels, exactly as the deploy offers them. Each kernel-set arm the knobs spelled is a route row under the
 signature of the kernel that fork was offered on; its schedule row is keyed under the child its stored identity

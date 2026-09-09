@@ -37,6 +37,7 @@ tests/compiler/passes/
 ├── test_placement_routing.py       # frontend placement pins, routing rows, and MIMO preservation
 ├── test_split_fresh_kernels.py    # generic cross-CTA Fold splitting and fresh-piece invariants
 ├── test_masked_tile.py             # masked-tile pass (dynamic-shape boundary guard)
+├── test_chunk_early_stop.py        # the chunk tier's stream bounds, read off the coordinate masks where the loop opens
 ├── test_stage_inputs_classify.py   # Stage-input classifier
 ├── test_lowering_accuracy.py       # 040 / 060 / 070 + TMA end-to-end CUDA accuracy
 ├── test_knob_pinning.py            # EMMY_KNOBS-pinned regression configs (article-reproduction tile/transport sweep)
@@ -183,10 +184,11 @@ The recipe program's monoid laws are covered
 independently by `tests/compiler/ir/pure/test_twist.py`; end-to-end softmax and attention accuracy remain covered by
 the e2e suites.
 
-`test_volta_mma.py` covers the SM70 atom as one capability family: cooperative global and synchronous staged fragment
-loads, computed operands, C-to-A repacking for paired attention contractions, per-atom row reduction, and causal
-coordinate masking. The realization corpus supplies the exact-GPU build and correctness checks for the schedules
-that combine those paths.
+`test_volta_mma.py` covers the SM70 atom as one capability family: cooperative global loads, paired crosswise and
+congruous staged layouts with their interleaved accumulator map, the policy-off and gmem-direct gather fallbacks,
+packed output stores including M-only tails, computed operands, C-to-A repacking for paired attention contractions,
+per-atom row reduction, and causal coordinate masking. The realization corpus supplies the exact-GPU build and
+correctness checks for the schedules that combine those paths.
 
 ## Adding a New Rule Test
 

@@ -16,6 +16,7 @@ artifacts exist and an intelligent reviewer accepts them against the checklist b
 | End-to-end serving | Pinned recipes below | Consumer single GPU; datacenter TP8 except the V100 TP8xPP2 lane | System performance for explicitly matched stock and Emmy arms |
 | Megakernel decode pair | Qwen3-8B, one 128/512 single-stream point | A100 | Cross-harness kernel-launch-overhead comparison |
 | Neptune compiler comparison | 10 artifact operators and a five-operator Emmy/PyTorch subset | A100 80GB | One archived cross-compiler result |
+| Neptune schedule replay | Five paper-table operators and current PyTorch | A100 40GB | Saved-schedule replay on the paper's GPU product |
 
 The BF16 sets produce separate tables and separate geometric means. The unsharded large-layer corpus is not TP8,
 quantization, or serving evidence and cannot explain an end-to-end result. Dynamic-FP8 layer traces are preserved as
@@ -333,6 +334,13 @@ extract the same statistic from Neptune's 15 raw NVTX calls, match rows by opera
 artifact's PyTorch 2.6.0 results separate from the current-PyTorch arm. The combined experiment remains planned
 evidence until its common archive exists and passes intelligent review; it is not part of the common-kernel geometric
 mean.
+
+`compiler_neptune_replay_a100` is the focused follow-up on the A100-SXM4-40GB product used by the paper. It runs the
+stock Neptune evaluator for the five paper-table operators with the fixed schedules and saved schedules from the
+prior A100 80GB search; it does not tune. A separate PyTorch-only lane measures eager and full-graph
+`torch.compile` twice per shape under PyTorch 2.13.0. The recipe does not run Emmy. Its durable archive contains all
+40 Neptune profiles, 80 current-PyTorch measurements, the converted Nsight tables, and the system-only experiment
+records. `RESULTS.md` owns the paper bridge and the no-retuning limitation.
 
 ## Intelligent publication review
 

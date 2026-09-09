@@ -47,21 +47,24 @@ configs:
     - reshape_1
     - scaled_dot_product_attention
   realizations:
-  - name: k_sdpa_reduce_145281.c89c866da112
+  - name: k_sdpa_reduce_145281.c89c866da112.80f7cf80772a
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: d1/smem
-      TILE: mma_m16n8k16_f16_f32/f1x4/k8
+      TILE@map.1/twist: mma_m16n8k16_f16_f32/f1x2/k2
+      TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x4/k4
+      REDUCE@map.1/twist: ''
+      REDUCE@map.1/twist.1/inner: ''
+      STAGE@map.1/twist: d3/smem-async
+      STAGE@map.1/twist.1/inner: d3/smem-async
       WORK: w2x1
+      RASTER: ''
+    identity: 80f7cf80772aa0541b56067995ede3789848b93ff04028cff64896423c24e022
     measurements:
-      emmy_us: 37.0759
-      reference_us: 197.4918
-      reference_backend: torch-eager
+      emmy_us: 33.72373183568319
+      reference_us: 33.79199902216593
+      reference_backend: same-input-greedy
 - program: 0
   target:
     origins:
@@ -69,8 +72,22 @@ configs:
     - reshape_3
     - scaled_dot_product_attention
   realizations:
-  - name: k_sdpa_reduce_033a3e.d74afc99d28d
+  - name: k_sdpa_reduce_033a3e.d74afc99d28d.f69e5493360b
     bindings: {}
     pins:
       FAST_MATH: false
-gpu_name: NVIDIA A100 80GB
+    knobs:
+      TILE@map.1/twist: mma_m16n8k16_f16_f32/f1x16/k4
+      TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x8/k4
+      REDUCE@map.1/twist: ''
+      REDUCE@map.1/twist.1/inner: ''
+      STAGE@map.1/twist: d1/smem-async
+      STAGE@map.1/twist.1/inner: d1/smem-async
+      WORK: w4x1
+      RASTER: ''
+    identity: f69e5493360b995ca71e7c1907647bc668bba3c3c2e75f1ef5a169be63804828
+    measurements:
+      emmy_us: 43.4977386308753
+      reference_us: 43.4977386308753
+      reference_backend: same-input-greedy
+gpu_name: NVIDIA A100 40GB

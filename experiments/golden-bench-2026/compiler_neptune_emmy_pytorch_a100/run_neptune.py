@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the pinned Neptune CLI on the A100 80GB using its published A100 target."""
+"""Run the pinned Neptune CLI on either A100 SXM4 model using its published target."""
 
 import runpy
 import sys
@@ -20,8 +20,8 @@ def _artifact_device_name(device=None):
 
 def main() -> None:
     actual_name = _get_device_name(0)
-    if actual_name != _A100_80GB:
-        raise RuntimeError(f"Expected {_A100_80GB}, found {actual_name}")
+    if actual_name not in {_A100_40GB, _A100_80GB}:
+        raise RuntimeError(f"Expected an A100 SXM4, found {actual_name}")
     # Neptune recognizes only the 40GB product string. Both cards use its sm_80 A100 target;
     # keep the pinned source unchanged and narrow the alias to this artifact process.
     torch.cuda.get_device_name = _artifact_device_name

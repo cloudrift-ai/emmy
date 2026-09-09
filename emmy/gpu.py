@@ -257,7 +257,7 @@ KNOWN_GPUS: tuple[GpuSpec, ...] = (
     ),
     GpuSpec(
         name="NVIDIA A100 40GB",
-        pci_device_ids=("20f1",),
+        pci_device_ids=("20b0", "20f1"),
         short_name="a100",
         compute_capability=(8, 0),
         sm_count=108,

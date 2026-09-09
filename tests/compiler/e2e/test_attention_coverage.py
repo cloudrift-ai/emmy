@@ -471,6 +471,25 @@ def test_chunk_tier_stages_a_symbolic_key_extent(transport):
 # --------------------------------------------------------------------------- #
 
 
+@requires_cuda
+@pytest.mark.parametrize("stage", ["", "d2/smem-async"])
+def test_chunk_tier_skips_the_chunks_a_causal_band_masks(stage):
+    """A causal sliding-window SDPA on the chunk tier runs ONE loop bounded at both ends — it starts
+    on the chunk holding the CTA's first row's near edge and stops at its diagonal — and matches torch
+    under the same band, gmem-direct and staged alike. 16 CTAs fit any card in one wave, which is
+    where a stream bounded at one end alone would stay whole."""
+    torch.manual_seed(0)
+    q, k, v = (torch.randn(1, 2, 256, 64, dtype=torch.float16) for _ in range(3))
+    with pinned_knobs({**_CHUNK_ROW, "STAGE@map.1/twist": stage}):
+        backend, compiled, graph, kernels = _stamp_window(_Sdpa(), (q, k, v), window=64)
+    assert len(kernels) == 1, f"the chunk tier fuses the whole attention: {kernels}"
+    source = compiled.nodes[kernels[0]].op.kernel_source
+    loop = next(line.strip() for line in source.splitlines() if "for (int " in line and "__ck" in line)
+    assert "__ck_end" in loop and "__ck = 0" not in loop, loop
+    out = _run_flash(backend, compiled, graph, (q, k, v))
+    assert np.abs(out.astype(np.float32) - _banded_ref(q, k, v, 64)()).max() < 1e-2
+
+
 def _run_flash(backend, compiled, graph, tensors) -> np.ndarray:
     data = {n: t.numpy() for n, t in zip(graph.inputs, tensors, strict=True)}
     run_result, _ = backend.run(compiled, input_data=data)
@@ -487,6 +506,8 @@ def _stamp_window(module, args, window, dynamic_shapes=None):
     the HF-wrapper stamp path; ``F.scaled_dot_product_attention`` has no window arg to trace it
     from. ``window=None`` stamps ``is_causal`` alone (the full-attention layer's shape: the
     causal end-skip through an opaque bias operand)."""
+    from dataclasses import replace  # noqa: PLC0415
+
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
     from emmy.compiler.ir.frontend.ir import SdpaOp  # noqa: PLC0415
     from emmy.compiler.trace.torch import trace_module  # noqa: PLC0415
@@ -494,8 +515,7 @@ def _stamp_window(module, args, window, dynamic_shapes=None):
     graph = trace_module(module.cpu(), args, dynamic_shapes=dynamic_shapes)
     for n in graph.nodes.values():
         if isinstance(n.op, SdpaOp):
-            n.op.sliding_window = window
-            n.op.is_causal = True
+            n.op = replace(n.op, sliding_window=window, is_causal=True)
     backend = CudaBackend()
     compiled = backend.compile(graph)
     kernels = [nid for nid in compiled.nodes if getattr(compiled.nodes[nid].op, "kernel_source", None)]

@@ -45,21 +45,26 @@ configs:
     origins:
     - reshape
     - reshape_1
-    - scaled_dot_product_attention
-  realizations:
-  - name: k_sdpa_reduce_121651.b460607ef546
-    bindings: {}
-    pins:
-      FAST_MATH: false
-- program: 0
-  target:
-    origins:
     - reshape_2
     - reshape_3
     - scaled_dot_product_attention
   realizations:
-  - name: k_sdpa_reduce_9a6457.0f307d57b54b
+  - name: k_sdpa_e9429e.be1bcfbb7f8a.46739bb3c5ae
     bindings: {}
     pins:
       FAST_MATH: false
-gpu_name: NVIDIA A100 80GB
+    knobs:
+      TILE@map.1/twist: mma_m16n8k16_f16_f32/f1x4/k8
+      TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x16/k8
+      REDUCE@map.1/twist: ''
+      REDUCE@map.1/twist.1/inner: ''
+      STAGE@map.1/twist: d1/smem-async/p2
+      STAGE@map.1/twist.1/inner: d4/smem-async/p2
+      WORK: w2x1
+      RASTER: gm8
+    identity: 46739bb3c5ae52030a986ab39680a78ccf95b452d3d5c38ddc80de306633dd60
+    measurements:
+      emmy_us: 47.05523876916794
+      reference_us: 47.299047311147056
+      reference_backend: same-input-greedy
+gpu_name: NVIDIA A100 40GB

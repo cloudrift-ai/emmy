@@ -35,7 +35,7 @@ from emmy.compiler.ir.address import BYTE_SLAB_PAD
 from emmy.compiler.ir.atom import AtomKind, wide_accumulate
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, TernaryExpr, Var
+from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, TernaryExpr, Var, affine_form
 from emmy.compiler.ir.kernel.ir import (
     FRAG,
     FRAG_COL,
@@ -43,6 +43,8 @@ from emmy.compiler.ir.kernel.ir import (
     M16N8,
     ROW,
     UNIFORM,
+    VOLTA_B_CONGRUOUS,
+    VOLTA_CROSSWISE,
     BlockScaleLoad,
     EpilogueLoad,
     FragLayout,
@@ -95,7 +97,7 @@ from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     staged_kloop,
     sync_stat_fill,
 )
-from emmy.compiler.pipeline.search.space import UNROLL
+from emmy.compiler.pipeline.search.space import PAIR_LDMATRIX, UNROLL
 
 #: The contraction semiring — multiply ⊗ then accumulate ⊕ (add). The same multiply-add ``mma.sync``
 #: realizes; in the scalar tier it is a plain scalar fma loop.
@@ -465,6 +467,7 @@ def _staged_inner_atom_loop(
                         scale_index=scale_index,
                         scale_ldm=scale_ldm,
                         fragment_layout=atom.fragment_layout,
+                        fragment_index=x,
                     )
                 )
         return reads
@@ -478,6 +481,7 @@ def _staged_inner_atom_loop(
                 shape=atom.ptx_shape,
                 ab_dtype=atom.ab_dtype,
                 c_dtype=atom.operand_dtype("c").name,
+                b_row_major=atom.fragment_layout == "m8n8k4" and swizzles[1 + f] == VOLTA_B_CONGRUOUS,
                 sfa_frag=f"_sfa{i}{suffix}" if block_scaled else None,
                 sfb_frag=f"{_fold_frag(f'_sfb{j}', f)}{suffix}" if block_scaled else None,
             )
@@ -518,6 +522,18 @@ def clamp_last(idx: Expr, ext: Expr) -> Expr:
     reads an in-bounds (duplicate) operand, and its store is discarded by the guard (``RegStore`` /
     ``Cond``)."""
     return TernaryExpr(cond=BinaryExpr("<", idx, ext), if_true=idx, if_false=BinaryExpr("-", ext, Literal(1, "int")))
+
+
+def _min(a: Expr, b: Expr) -> Expr:
+    return TernaryExpr(cond=BinaryExpr("<", a, b), if_true=a, if_false=b)
+
+
+def _max(a: Expr, b: Expr) -> Expr:
+    return TernaryExpr(cond=BinaryExpr(">", a, b), if_true=a, if_false=b)
+
+
+def _shifted(expr: Expr, by: int) -> Expr:
+    return expr if by == 0 else BinaryExpr("+" if by > 0 else "-", expr, Literal(abs(by), "int"))
 
 
 def _side_base(side: Side) -> Expr:
@@ -1121,6 +1137,69 @@ def _block_scaled_operands(
     return (a_bits, *b_bits), copies, fills
 
 
+def _mask_add(stmt, selects: dict, frags) -> tuple[Select, str] | None:
+    """The coordinate mask ``stmt`` adds to a fragment value, with the value's name — the statement
+    pair the chunk tier lands as a ``FragmentMask`` and reads for its stream bounds — or ``None``
+    for any other statement."""
+    if not isinstance(stmt, Assign) or stmt.op.name != "add":
+        return None
+    selected = [arg for arg in stmt.args if arg in selects]
+    source = [arg for arg in stmt.args if arg in frags]
+    return (selects[selected[0]], source[0]) if len(selected) == len(source) == 1 else None
+
+
+def _mask_affine(predicate: BinaryExpr, names: frozenset[str]) -> tuple[dict[str, int], Expr] | None:
+    """A comparison's ``left − right`` as integer coefficients over ``names`` plus the anchor left
+    when those read zero — ``None`` unless it is affine in them."""
+    form = affine_form(BinaryExpr("-", predicate.left, predicate.right), names)
+    return None if form is None else (form[1], form[0])
+
+
+def _mask_key_bounds(stmts, held: str, key: Axis, row: str, offset, bk: int) -> tuple[Expr | None, Expr | None]:
+    """The chunk range outside which every key is masked for every row of this CTA — the stream's
+    ``(k_first, k_end)``, each ``None`` when no mask bounds the keys on that side.
+
+    The masks are the coordinate ``Select`` statements the prefix adds to the score (the pairs
+    :func:`_residence` turns into a ``FragmentMask``), each read ONCE, ahead of the loop, for what
+    its masked branch says about whole chunks. ``key + ck > row + cr`` (or ``>=``) masks every key
+    from ``block_end + cr − ck`` on for the block's last row, and so for every row before it: the
+    stream stops there. ``key + ck < row + cr`` (or ``<=``) masks every key before
+    ``block_base + cr − ck`` for the block's first row, and so for every row after it: the stream
+    starts on the chunk that key falls in. Both are CTA-uniform in the grid var alone, and
+    bit-identical because a masked chunk folds the carrier identity exactly. The bound is derived
+    here and stored nowhere — the ``Select`` in the body is its one source. A mask that could take
+    a row's OWN key (a lead that stops a block before its last row, a lag that starts it after its
+    first) could empty a row's stream, and is left to the per-element mask."""
+    selects = {stmt.name: stmt for stmt in stmts if isinstance(stmt, Select)}
+    fragments = {held}  # the score and every value the prefix derives from it (its scaling, say)
+    first: Expr | None = None
+    end: Expr | None = None
+    for stmt in stmts:
+        if isinstance(stmt, Assign) and set(stmt.args) & fragments:
+            fragments.add(stmt.name)
+        masked = _mask_add(stmt, selects, fragments)
+        predicate = mask_select_predicate(masked[0]) if masked is not None else None
+        affine = _mask_affine(predicate, frozenset({key.name, row})) if predicate is not None else None
+        if affine is None or affine[0] != {key.name: 1, row: -1} or affine[1].free_vars():
+            continue
+        shift = -int(affine[1].eval({}))  # the masked branch reads ``key OP row + shift``
+        if predicate.op in (">", ">="):
+            lead = shift - (predicate.op == ">=")
+            if lead >= 0:
+                stop = _shifted(offset.block_end(), lead)
+                end = stop if end is None else _min(end, stop)
+        else:
+            lag = shift + (predicate.op == "<=")
+            if lag <= 0:
+                start = _shifted(offset.block_base(), lag)
+                first = start if first is None else _max(first, start)
+    if end is not None:
+        end = _min(end, key.extent_expr())
+    if first is not None:
+        first = BinaryExpr("*", BinaryExpr("/", _max(first, Literal(0, "int")), Literal(bk, "int")), Literal(bk, "int"))
+    return first, end
+
+
 def _chunk_stream(k_axis: Axis, bk: int):
     """The staged K stream as the loop skeleton takes it — ``(extent, chunk count)``. A static
     extent unrolls a literal count; a SYMBOLIC one hands the skeleton its ``Dim`` and the runtime
@@ -1532,6 +1611,8 @@ class _AtomOps:
     # The NESTED contraction this node folds a chunk of at a time, as ``(node, placed Tile)`` — the
     # twisted carrier's score, whose own site the schedule decided. ``None`` everywhere else.
     inner: tuple | None = None
+    # The launch fits the card in one wave: the chunk tier keeps its stream whole (see ``_factor``).
+    one_wave: bool = False
 
     def frag(self, name: str) -> str:
         """``name`` in this emission's fragment namespace (:attr:`frag_ns`)."""
@@ -1636,7 +1717,25 @@ class _MmaOps(_AtomOps):
         scale = getattr(op, "scale", None)
         return None if scale is None else (scale[0], self.stage.bk_elems // scale[1], scale[1])
 
-    def slab_swizzles(self, mn, elem_bytes: int) -> tuple[str, str]:  # noqa: ARG002 — per-operand widths come from slab_elems
+    def _volta_pair_layout(self, mn) -> bool:
+        """Whether this staged cell can use the coupled Volta operand and accumulator layouts."""
+        if self.stage is None or self.tile.atom.fragment_layout != "m8n8k4" or PAIR_LDMATRIX.narrow((True,)) != (True,):
+            return False
+        a_copied = self.c.operands[0].as_slab() is not None
+
+        def copied_b(edge) -> bool:
+            slab = edge.as_slab() if isinstance(edge, Fold) else None
+            return isinstance(slab.load if slab is not None else edge, Load)
+
+        return (
+            a_copied
+            and all(copied_b(edge) for edge, _ in self.channels)
+            and not self.c.as_contraction().b_trans
+            and mn[0].reg % 2 == 0
+            and mn[1].reg % 2 == 0
+        )
+
+    def slab_swizzles(self, mn, elem_bytes: int) -> tuple[str, ...]:  # noqa: ARG002 — per-operand widths come from slab_elems
         """The smem swizzle mode per operand slab, from each slab's inner (contiguous) row
         span — A's is ``bk_elems`` (the K chunk), B's ``tile_n``. TMA applies the mode in
         hardware (in-copy); the cp.async transport applies the identical XOR in software on
@@ -1651,15 +1750,27 @@ class _MmaOps(_AtomOps):
         stages N-major on EVERY transport (cp.async / TMA / the sync transport's async B fills),
         so its inner row span is the K chunk (``bk_elems``) like A's. A 1-byte (fp8) slab stays
         ``NONE`` — its cooperative byte-gather drain applies no address XOR (the ldmatrix XOR is
-        b16-indexed); the cp.async byte slab's bank spread is the row pad instead."""
+        b16-indexed); the cp.async byte slab's bank spread is the row pad instead. Complete paired
+        Volta tiles instead use the crosswise A and B-congruous layouts together; the existing
+        ``PAIR_LDMATRIX`` policy pin can disable that lowering and retain the ordinary gather."""
+        if self.tile.atom.fragment_layout == "m8n8k4":
+            # Volta has no ldmatrix. A materialized row-major A uses CUTLASS's crosswise layout;
+            # a materialized canonical row-major B uses its B-congruous layout and the row/row
+            # mma form. Each layout is enabled only when the warp tile contains complete pairs
+            # of logical 16-row/column fragments, because one ordinary LDS.128 drains each pair.
+            paired = self._volta_pair_layout(mn)
+            return (
+                VOLTA_CROSSWISE if paired else "NONE",
+                *((VOLTA_B_CONGRUOUS if paired else "NONE") for _ in self.channels),
+            )
         b_inner = self.stage.bk_elems if self.c.as_contraction().b_trans else mn[1].tile
         return tuple(self.slab_swizzle(inner, e.nbytes) for e, inner in zip(self.slab_elems(), (self.stage.bk_elems, b_inner), strict=True))
 
     def slab_swizzle(self, inner: int, nbytes: int) -> str:
         """One slab's swizzle mode from its inner (contiguous) row span — the reading
         :meth:`slab_swizzles` applies to A and B, and the chunk tier to each of its two streams."""
-        if nbytes == 1 or self.tile.atom.fragment_layout == "m8n8k4":
-            return "NONE"  # the Volta gather drain and the byte gather both read unswizzled rows
+        if nbytes == 1:
+            return "NONE"  # the byte gather reads an ordinary padded row
         # A TMA slab keeps the hardware spelling (the copy engine fixes its permutation, and the
         # descriptor splits its box down to the atom); every other transport writes the slab in
         # software, so its XOR reads the row index at the slab's OWN stride.
@@ -1864,6 +1975,7 @@ class _MmaOps(_AtomOps):
         :class:`RegEpilogue` and guarding overhanging M/N rows. A multi-fold node binds its extra C
         fragments as additional epilogue accumulators (the combine — SwiGLU — reads them per cell)."""
         atom = self.tile.atom
+        volta_interleaved = self._volta_pair_layout(mn)
         m, n = mn
         mcell, ncell = offset[0].base(i), offset[1].base(j)
         tail = list(self.epilogue)
@@ -1909,6 +2021,8 @@ class _MmaOps(_AtomOps):
                     atomic=write.atomic,
                     swizzle=write.swizzle,
                     fragment_layout=atom.fragment_layout,
+                    volta_interleaved=volta_interleaved,
+                    fragment_index=(i, j),
                     row_dim=_axis_dim(write.index, m.axis.name),
                     col_dim=_axis_dim(write.index, n.axis.name),
                 )
@@ -2106,30 +2220,29 @@ def _residence(
         if isinstance(stmt, Select) and select_sigma is not None:
             selects[stmt.name] = stmt
             continue
-        if isinstance(stmt, Assign) and stmt.op.name == "add" and mask_fill is not None and select_sigma is not None:
-            selected = [arg for arg in stmt.args if arg in selects]
-            source = [arg for arg in stmt.args if arg in frags]
-            if len(selected) == len(source) == 1 and row_base is not None and col_base is not None:
-                mask = selects.pop(selected[0])
-                predicate = mask_select_predicate(mask)
-                if predicate is None:
-                    raise RuleSkipped("the chunk tier needs complementary branches for a coordinate mask")
-                name = f"{frag_tag}{stmt.name}"
-                out.append(FragmentApply(out=name, op=ElementwiseImpl("copy"), args=(frags[source[0]],), kinds=(FRAG,), layout=layout))
-                out.append(
-                    FragmentMask(
-                        frag=name,
-                        mask_when=select_sigma.apply(predicate),
-                        row_base=row_base,
-                        col_base=col_base,
-                        fill=mask_fill,
-                        keep=mask.branches[0].value,
-                        keep_op=stmt.op,
-                        layout=layout,
-                    )
+        masked = _mask_add(stmt, selects, frags) if mask_fill is not None and select_sigma is not None else None
+        if masked is not None and row_base is not None and col_base is not None:
+            mask, source = masked
+            del selects[mask.name]
+            predicate = mask_select_predicate(mask)
+            if predicate is None:
+                raise RuleSkipped("the chunk tier needs complementary branches for a coordinate mask")
+            name = f"{frag_tag}{stmt.name}"
+            out.append(FragmentApply(out=name, op=ElementwiseImpl("copy"), args=(frags[source],), kinds=(FRAG,), layout=layout))
+            out.append(
+                FragmentMask(
+                    frag=name,
+                    mask_when=select_sigma.apply(predicate),
+                    row_base=row_base,
+                    col_base=col_base,
+                    fill=mask_fill,
+                    keep=mask.branches[0].value,
+                    keep_op=stmt.op,
+                    layout=layout,
                 )
-                frags[stmt.name] = name
-                continue
+            )
+            frags[stmt.name] = name
+            continue
         accum = isinstance(stmt, Accum)
         if not isinstance(stmt, (Assign, Accum)):
             if not frags_only:
@@ -2193,15 +2306,20 @@ def _slab_row(operand, slot, row: Expr) -> Expr:
 
 @dataclass(frozen=True)
 class _ChunkStreams:
-    """The chunk tier's staged operand group — the value the carrier folds against, its score's key
-    when that one slabs too (:func:`chunk_key_stage`), and the one transport that fills both.
+    """The chunk tier's staged operands — the value the carrier folds against, its score's key when
+    that one slabs too (:func:`chunk_key_stage`) — and one transport PER operand.
 
-    Each drain reads its slab off the :class:`Operand` the fill wrote (name, row stride, swizzle,
-    ring-slot row), so the two cannot disagree about where a chunk landed."""
+    At a single slot they are two groups: the key is dead once the score is contracted and the
+    value once the expectation is, so each refills at its own kill point and the copy overlaps the
+    other's phase — FlashAttention-2's single-slab schedule — where one group live across the
+    whole body could only fill and wait. A deeper ring prefetches both at the top of the body, so
+    there they stay one group and pay one release barrier per chunk, not two. Each drain reads its
+    slab off the :class:`Operand` the fill wrote (name, row stride, swizzle, ring-slot row), so
+    the two cannot disagree about where a chunk landed."""
 
     value: object
     key: object | None
-    transport: object
+    transports: tuple  # one group, or the key's then the value's at a single slot
 
 
 class _FlashOps(_MmaOps):
@@ -2327,6 +2445,16 @@ class _FlashOps(_MmaOps):
         )
         pre = [stmt for edge in leaves for stmt in edge.lower(axes=self.axes)]
         pre += self._query(offset, mn)
+        # A coordinate mask makes every chunk outside this CTA's rows pure identity work, and the
+        # loop skips it: it stops at a causal diagonal (``k_end``) and starts at a band's near edge
+        # (``k_first``), which gives a causal stream half its work back and a banded one its band.
+        # Not with one bound alone on a one-wave launch: the kernel takes as long as its longest
+        # CTA, which walks the whole stream there, and the dynamic trip count only costs (9%
+        # measured at the 128-CTA head-width-256 shape). Bounded at both ends, every CTA shortens.
+        scored_name = (score if score is not None else self.c.operands[0]).exposes[0]
+        k_first, k_end = _mask_key_bounds(prefix.body, scored_name, key, m.axis.name, offset[0], bk)
+        if self.one_wave and (k_first is None or k_end is None):
+            k_first = k_end = None
 
         chunk = Axis(name=f"{key.name}__ck", extent=key.extent)
         base = Var(chunk.name)
@@ -2341,16 +2469,21 @@ class _FlashOps(_MmaOps):
 
         streams = self._streams(mn, bk)
 
-        def chunk_body(slot) -> list[Stmt]:
-            """The chunk's whole body at ring ``slot`` — score, pivot, channels, expectation,
-            merge. Built once, by the skeleton that knows which slot this iteration drains."""
+        def chunk_segments(slots) -> list[tuple[list[Stmt], frozenset[str]]]:
+            """The chunk's body as the skeleton's segments — the score, reading the key's slab at
+            its group's ring slot, then pivot, channels, expectation and merge, reading the value's
+            at its own — each tagged with the slab it drains, so the skeleton places every group's
+            fill, wait and barrier off its live range. Built once, by the skeleton that knows which
+            slot each group drains this iteration."""
+            key_slot, value_slot = slots[0], slots[-1]  # one group: the same slot; two: each its own
             memo: dict = {}
-            body: list[Stmt] = (
-                self._score_tile(offset, mn, base, cols, bound, streams, slot)
+            scored_stmts: list[Stmt] = (
+                self._score_tile(offset, mn, base, cols, bound, streams, key_slot)
                 if score is not None
                 else self._gathered_score(offset, mn, base, cols, bound)
             )
-            held = (score if score is not None else self.c.operands[0]).exposes[0]
+            body: list[Stmt] = []
+            held = scored_name
             scored, pivots = {}, {}
             for i in range(m.reg):
                 for j in range(cols):
@@ -2422,33 +2555,43 @@ class _FlashOps(_MmaOps):
                                 layout=layout,
                             )
                         )
-            body += self._expectation(offset, mn, base, weights, steps, bound, streams, slot)
+            body += self._expectation(offset, mn, base, weights, steps, bound, streams, value_slot)
             body += self._merge(mn, pivots, partials)
-            return body
+            if streams is None:
+                return [(scored_stmts + body, frozenset())]
+            if len(streams.transports) == 1:
+                slabs = frozenset(op.slab for op in streams.transports[0].operands)
+                return [(scored_stmts + body, slabs)]
+            return [(scored_stmts, frozenset({streams.key.slab})), (body, frozenset({streams.value.slab}))]
 
         # ``seed=False``: the carrier is declared once outside this loop at the seeds the TERM names
         # — the pivot's is not ``maximum``'s neutral element — so the loop must not re-seed it.
         if streams is None:
-            gmem = Body(tuple(chunk_body(None)))
-            return pre, [StridedLoop(axis=chunk, start=Literal(0, "int"), step=Literal(bk, "int"), body=gmem, unroll=False, seed=False)]
+            gmem = Body(tuple(stmt for stmts, _ in chunk_segments((None,)) for stmt in stmts))
+            start = k_first if k_first is not None else Literal(0, "int")
+            loop = StridedLoop(axis=chunk, start=start, step=Literal(bk, "int"), body=gmem, unroll=False, seed=False, end=k_end)
+            return pre, [loop]
         # The staged form is the same body under the shared fill→drain skeleton, with the chunk loop
-        # built by it: one operand group, one segment, and ``k0`` keeping this tier's own axis name
-        # so everything the body reads off ``base`` still resolves. Every slab read rides the
-        # skeleton's own read slot, so a ring deeper than one prefetches the next chunk's key and
-        # value ACROSS the softmax between this chunk's fill and drain.
+        # built by it: one operand group per staged operand, the score and the expectation as the
+        # two segments that drain them, and ``k0`` keeping this tier's own axis name so everything
+        # the body reads off ``base`` still resolves. Every slab read rides its group's own read
+        # slot, so a ring deeper than one prefetches the next chunk's key and value ACROSS the
+        # softmax, and a single slot refills each at its kill point — the key under the softmax
+        # and expectation, the value under the next score.
         # A RAGGED key extent stages too (``_chunk_warp_stage`` states when): the last chunk
         # overhangs, its value rows read the last valid key, and the boundary ``FragmentMask``
         # above has already put those keys at the pivot identity — so they weigh exactly zero and
         # the duplicates fold to nothing, the same discipline the gmem-direct arm carries.
         k_extent, n_chunks = _chunk_stream(key, bk)
-        decls, region = staged_kloop(
-            transport=streams.transport,
-            drain=chunk_body,
-            depth=self.stage.depth,
+        decls, region = pipelined_kloop(
+            operands=tuple((transport, self.stage.depth) for transport in streams.transports),
+            build_segments=chunk_segments,
             bk_elems=bk,
             n_chunks=n_chunks,
             k_extent=k_extent,
             k0=chunk.name,
+            k_end=k_end,
+            k_first=k_first,
             seed=False,
         )
         return [*pre, *decls], region
@@ -2483,7 +2626,7 @@ class _FlashOps(_MmaOps):
             b_trans=trans,
             roles=(1,),
         )
-        operands, key = (value,), None
+        key = None
         if (staged_key := self._key_stage()) is not None:
             k_load, span = staged_key
             span_axis = self._score_k
@@ -2500,15 +2643,21 @@ class _FlashOps(_MmaOps):
                 rows=(False, trans),
                 roles=(0,),
             )
-            operands = (key, value)
-        common = dict(
-            operands=operands,
-            slab_dtype=cuda_name(elem),
-            elem_bytes=elem.nbytes,
-            cta=_cta(mn, self.tile.atom.lanes, self.tile.launch_threads),
-        )
-        transport = TmaTransport(**common) if self.stage.transport == "smem-tma" else CpAsyncTransport(**common)
-        return _ChunkStreams(value=value, key=key, transport=transport)
+        cta = _cta(mn, self.tile.atom.lanes, self.tile.launch_threads)
+
+        def group(operands: tuple, tag: str = ""):
+            common = dict(operands=operands, slab_dtype=cuda_name(elem), elem_bytes=elem.nbytes, cta=cta)
+            # A TMA group parity-waits its own barrier, so two groups in one loop take two names.
+            return TmaTransport(mbar=f"_mbar{tag}", **common) if self.stage.transport == "smem-tma" else CpAsyncTransport(**common)
+
+        # Two groups buy their kill-point refills only at a SINGLE slot: a deeper ring prefetches
+        # both operands at the top of the body whatever the grouping, and a second group there
+        # would only add its own release barrier between the score and the softmax on every chunk.
+        if key is not None and self.stage.depth == 1:
+            transports = (group((key,), "_k"), group((value,), "_v"))
+        else:
+            transports = (group((value,) if key is None else (key, value)),)
+        return _ChunkStreams(value=value, key=key, transports=transports)
 
     @property
     def _score_atom(self):
@@ -2866,6 +3015,7 @@ def _atom_ops(
     k_axis: Axis | None = None,
     axes: tuple = (),
     inner: tuple | None = None,
+    one_wave: bool = False,
 ) -> _AtomOps:
     """The **one** atom dispatch — select the codegen strategy off the atom kind. ``c`` is the
     stored algebra, ``tile`` the PLACED schedule slice (``Tile.at``) the geometry derives from.
@@ -2897,7 +3047,22 @@ def _atom_ops(
         # contraction takes the ordinary one. The reading is the term's (:meth:`Fold.chunked`),
         # the same one ``TileOp.contracts`` offered the site on.
         cls = _FlashOps if c.chunked() else _MmaOps
-    return cls(c, tile, stage, inputs, workers, lead, Body(()) if epilogue is None else epilogue, seam, frag_ns, slabs, k_axis, axes, inner)
+    return cls(
+        c,
+        tile,
+        stage,
+        inputs,
+        workers,
+        lead,
+        Body(()) if epilogue is None else epilogue,
+        seam,
+        frag_ns,
+        slabs,
+        k_axis,
+        axes,
+        inner,
+        one_wave,
+    )
 
 
 def reduce_codegen(
@@ -2913,6 +3078,7 @@ def reduce_codegen(
     k_axis: Axis | None = None,
     axes: tuple = (),
     inner: tuple | None = None,
+    one_wave: bool = False,
 ):
     """The reusable, **sink-agnostic** ``(state_decls, reduce_region)`` from the atom strategy — the
     accumulator decls + the contraction K-loop (the ONE :meth:`_AtomOps.reduce` driver: the shared
@@ -2920,7 +3086,9 @@ def reduce_codegen(
     ``stage`` / ``inputs`` bind operand staging (both atoms stage the same smem slab off it, differing
     only in the drain leaf — ``ldmatrix`` vs plain ``Load``); ``workers`` splits the staged phases
     across producer / compute warp bands (the resolved :class:`WarpSpec`; ``None`` = uniform)."""
-    ops = _atom_ops(c, tile, stage, inputs, workers, seam=seam, lead=lead, frag_ns=frag_ns, k_axis=k_axis, axes=axes, inner=inner)
+    ops = _atom_ops(
+        c, tile, stage, inputs, workers, seam=seam, lead=lead, frag_ns=frag_ns, k_axis=k_axis, axes=axes, inner=inner, one_wave=one_wave
+    )
     return ops.state, ops.reduce
 
 
@@ -2931,6 +3099,7 @@ def store_sink(
     lead: tuple = (),
     frag_ns: str = "",
     *,
+    stage: Stage | None = None,
     k_axis: Axis | None = None,
     axes: tuple = (),
     inner: tuple | None = None,
@@ -2938,5 +3107,16 @@ def store_sink(
     """The default **matmul sink** — the per-cell ``store(i, j, offset, mn)`` from the atom strategy
     (an mma ``RegStore`` / the replicated scalar ``epilogue`` tail), folding in the ``epilogue`` (the
     projection off the node's zero-axis ``Fold`` wrapper + the store glue). A caller may replace
-    the sink while reusing the shared ``reduce`` emission."""
-    return _atom_ops(c, tile, epilogue=epilogue, lead=lead, frag_ns=frag_ns, k_axis=k_axis, axes=axes, inner=inner).store
+    the sink while reusing the shared ``reduce`` emission. ``stage`` reaches the sink only because
+    a paired Volta operand layout and its accumulator map are one coupled lowering choice."""
+    return _atom_ops(
+        c,
+        tile,
+        stage,
+        epilogue=epilogue,
+        lead=lead,
+        frag_ns=frag_ns,
+        k_axis=k_axis,
+        axes=axes,
+        inner=inner,
+    ).store

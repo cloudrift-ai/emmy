@@ -165,13 +165,16 @@ reduce_region)` (operand fragments + the K-loop) — and a per-cell **sink** `st
 default is the matmul `_atom.store_sink`; `factorize(c, store=…)` swaps it. The K-loop itself is **one driver** on the
 strategy base (`_AtomOps.reduce`), deciding nothing: the **scheduler-resolved** `Stage` picks its form — gmem-direct
 (`None`) through the shared `_contract_kloop` `read → ⊗ → fold` spine, or staged through the shared `_staged`
-fill→drain skeleton — and the atom contributes only leaves, never a loop. Per-atom diff:
+fill→drain skeleton — and the atom contributes only leaves, never a loop. The same resolved stage reaches the default
+sink so a paired Volta operand layout and its accumulator map remain one coupled lowering choice. Per-atom diff:
 
 - **mma** (`_MmaOps`) — atom `(16, 8, 16)`, `lanes == 32`. The UNIT is a **warp**; its leaves emit `RegFragment` /
   `LdmatrixLoad` / `MmaSyncPtx` / `RegStore` and decode the atom-lane offset at render. `RegStore` derives both
   algebraic M/N strides from the output index: contiguous N keeps packed stores, while a reversed physical orientation
-  uses scalar strided stores. A multi-channel root partitions its projection by output dependence and emits one store
-  sink per output.
+  uses scalar strided stores. On Volta, each adjacent accumulator pair stays packed under an M-only tail guard; an N
+  guard still splits the pair. Complete paired Volta tiles derive the interleaved 32×32 accumulator map that matches
+  their operand layouts. A multi-channel root partitions its projection by output dependence and emits one store sink
+  per output.
 - **scalar** (`_ScalarOps`) — atom `(1, 1, 1)`, `lanes == 1`. The UNIT is a **single thread** (so there is no `_lane`
   axis); its leaves are plain `Load`s + an fma cell, the projection `tail` replicated per register cell with its
   operand loads deduped (the arithmetic-intensity reuse). One A read per register ROW and one B read per COLUMN is a
@@ -198,7 +201,15 @@ The warp (mma) tier stages its reused gmem operands through an smem slab, driven
 `schedule.Stage`. The CHUNK tier stages the two it streams along its carrier axis — the value it folds against and its
 score's KEY, both B-shaped slabs of `bk_elems` key rows, the key's columns spanning the score's whole contraction so
 one chunk covers it in a single pass (`chunk_key_stage` states the reading once; the resolver sizes the ring with it
-and the emission builds the slabs off it). The score's own fragments are never copied: they repack in registers out of
+and the emission builds the slabs off it). At a SINGLE slot they are two operand groups of the skeleton — the score
+is the segment that drains the key's slab and the expectation the one that drains the value's — so each group's
+fill, wait and release derive from its own live range: the key refills right after the score, under the softmax and
+the expectation, and the value after the expectation, under the next score (FlashAttention-2's single-slab
+schedule; a TMA group parity-waits its own barrier, `_mbar_k` / `_mbar_v`). One group live across the whole body
+filled and waited with nothing to overlap, which is why the single-slot rows ran 56-100 us at head width 256 against
+the ring's 39. A deeper ring prefetches both at the top of the body whatever the grouping, so there they stay ONE
+group: a second would only add its own release barrier between the score and the softmax on every chunk.
+The score's own fragments are never copied: they repack in registers out of
 the chunk's C fragments, or come off a stored probability tile at the fragment lane map, and that shape has no key at
 all — the value then stages alone. The QUERY is not staged either, for the opposite reason: its index never carries the
 carrier's key, so it is loop-INVARIANT and rides hoisted registers instead, one A fragment per score-K step read once
@@ -237,8 +248,8 @@ array**, so `depth` is a free knob for TMA too). The three producers —
 structurally different primitives — sit behind one `fill`/`commit`/`wait` seam, and
 **one atom-agnostic driver** (`_atom._staged`) builds the operand pair + the transport for either atom; the atom
 supplies only the slab drain leaf via `_AtomOps.staged_drain` (the shared inner fragment drain
-`_staged_inner_atom_loop` — `ldmatrix` on modern atoms, a cooperative shared gather on Volta — or the scalar
-`_scalar_drain`). A fill's σ binds **every** tiled output axis, not just the operand's own: the tile
+`_staged_inner_atom_loop` — `ldmatrix` on modern atoms, paired wide loads or a cooperative gather on Volta — or the
+scalar `_scalar_drain`). A fill's σ binds **every** tiled output axis, not just the operand's own: the tile
 axis at `tile_base + cell` (masked axes clamp in-bounds) and the SIBLING axis at its block base — a slab is
 CTA-shared across the sibling, so a sibling var can only survive as a value-dead occurrence: a flat-index reshape
 residue on a merged / reshaped weight row, or, in a packed weight's block-scale fill, a per-tensor scale a placement
@@ -274,8 +285,14 @@ loss against no ring at all (474 vs 468 us on a 512x4096x4096 projection) into 3
 512x4096x28672 one, whose 896 CTAs already hide the latency and whose doubled slab costs occupancy. Which deploys is
 evidence's call per shape, which is the point: before the split, `depth >= 2` was a pessimization everywhere on that
 card. `/p<n>` remains the independent smem→register fragment pipeline. The Volta m8n8k4 atom enables the synchronous
-fill for materialized and computed f16
-A/B edges; its cooperative gather drains either slab, while newer instruction families stay disabled. The
+fill for materialized and computed f16 A/B edges. For a materialized canonical-B tile with even M/N register-fragment
+counts, lowering derives CUTLASS's crosswise-A and B-congruous layouts together: one 128-bit shared load drains each
+adjacent fragment pair, the MMA uses row/row B, and the store uses the coupled interleaved 32×32 accumulator map. This
+is the SM70 default lowering, not a schedule-codec choice; the existing `PAIR_LDMATRIX` policy override disables the
+whole combination. For deep K slabs, the blocking copy also binds each lane's affine global-copy bases and K stride,
+plus the paired shared-store layout bases, once outside the K loop. Shallow slabs retain inline address calculation;
+the extra live indices cost more than they save there. Computed operands, transposed B, and an odd fragment count
+retain the cooperative gather path. Newer instruction families stay disabled. The
 **`smem-tma`** transport
 additionally requires **sm_90+**
 (Hopper/Blackwell): below it (the schedule's TMA gate, mirroring the frontend TMA-fold gate) the `d*/smem-tma*` moves
@@ -466,7 +483,25 @@ readings the tier would otherwise refuse. Its LEAVES are read once ahead of the 
 one needs no gmem address at all: a causal mask's fill / zero constants are a computed pair, and only the pivot source
 and the streamed value are ever asked for a slab. And a `Select` on the score fragment's OWN coordinates — the row the
 carrier folds and the chunk it folds over — is per ELEMENT, not cell-uniform, so `_residence` lands it as a
-a `FragmentMask` under the same coordinate substitution the boundary mask performs. Without those two a
+a `FragmentMask` under the same coordinate substitution the boundary mask performs. The same `Select`s are also read
+ONCE, ahead of the loop, for what they say about whole chunks (`_mask_key_bounds`): a mask whose masked branch reads
+`key > row + c` (or `>=`) with `c ≥ 0` masks every key from the CTA's block end onward for every row the CTA holds,
+so the chunk loop stops there; one whose masked branch reads `key < row − c` (or `<=`) masks every key before the
+CTA's block base for every row, so the loop starts on the chunk that key falls in. Both are the skeleton's
+`k_first` / `k_end`, CTA-uniform in the grid var alone, bit-identical because a masked chunk folds the carrier
+identity exactly — and derived here, stored nowhere. The mask `Select` in the body is the bound's one source: an
+axis's domain is its extent in the kernel's axis table, and a row-dependent bound is a relation between two axes
+that only becomes a range once widened to the CTA's rows, so neither the term, the loop IR nor the axis carries it.
+A causal stream gets about half its work back that way, a banded one its band — on a launch of more CTAs than the
+card has SMs. A launch that fits in one wave takes as long as its longest CTA whatever the others skip, and the
+dynamic trip count alone cost 9% at the 128-CTA head-width-256 shape, so `_factor` marks it (`launch_ctas` against
+`Context.sm_count`; the CTA-per-SM half of the test is ptxas's to know, so fewer CTAs than SMs is the conservative
+reading) and the tier keeps a stream bounded at ONE end whole there; bounded at both, every CTA shortens and the
+bounds stay. A mask that could take a row's own key — a lead that stops a block before its last row, a lag that starts
+it after its first — keeps the whole stream and the per-element mask alone. The per-element mask itself still runs on
+every chunk: confining it to the chunks that can hold a masked element (the FA-2 guard, the mask's predicate at the
+chunk's and the block's extreme coordinates) measured no difference on an A100 40GB at 256 to 8192 keys, so it is not
+carried. Without those readings a
 masked carrier fell to the scalar tier whole, which is what `attention.hd256.dynM.pv` on the RTX 4090 recorded and
 then stopped decoding.
 
@@ -508,10 +543,11 @@ the two apply paths stay distinct on a coop-K contraction.
 `030_stamp_types` resolves element dtypes. Integer algebra is always restamped from its typed operands, repairing a
 stale float stamp that a structurally cloned, previously untyped body can carry. `050_vectorize_loads` /
 `080_vectorize_stores` /
-`095_interleave_loads` pack/reorder memory ops; `096_pair_ldmatrix_loads` fuses slab-adjacent staged `x2` B-fragment
-`LdmatrixLoad`s into one `x4` (`pair_frag` — plain `x4` for an N-adjacent transposed-B pair, `x4.trans` for a
-col-adjacent canonical pair; equal swizzle modes pair too — the per-lane address XOR commutes with the paired lane
-map; halves the staged drains' LSU count, bit-identical; fires on the matmul tier's staged drains);
+`095_interleave_loads` pack/reorder memory ops; `096_pair_ldmatrix_loads` fuses adjacent staged fragment loads. On
+modern atoms, two B `x2` loads become one `x4` (plain for N-adjacent transposed B, transposed for col-adjacent canonical
+B). On Volta, adjacent A or B fragments under the derived crosswise/congruous layouts become one 128-bit shared load.
+The transform halves the staged drain's LSU instructions and is bit-identical; equal modern swizzle modes remain
+pairable because their per-lane address XOR commutes with the paired lane map;
 `110_drop_redundant_syncs` collapses the defensive `Sync`s the
 cooperative / shared-row templates emit (body-level only — a slab `Smem` decl flags `smem_seen`, so a load-bearing
 prologue `Sync` is correctly retained; `with_bodies` preserves the cooperative tile's `block_threads`).

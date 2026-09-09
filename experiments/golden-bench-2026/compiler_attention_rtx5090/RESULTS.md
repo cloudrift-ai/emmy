@@ -5,13 +5,53 @@
 ### Status
 
 The baseline lane is complete: 59 of 59 offered setups measured, every one with whole-forward CUDA graph capture and
-every backend passing its correctness check against eager SDPA. The Emmy lane has not run: it requires one recorded
-golden per setup and none exist yet.
+every backend passing its correctness check against eager SDPA. The Emmy lane has goldens for the setups listed below
+(`golden/README.md` says how each was recorded), and the recipe's Emmy lane has not been re-run over them yet: the
+Emmy numbers here are the recording runs themselves — the fastest hand-pinned row of each setup, timed on the card
+beside eager in one process, whole forward captured, over 20 iterations after 3 warmups where the recipe takes 10
+after 1. Plain decode (`decode_causal`) has no golden: with one query row the fused kernel offers
+no tensor-core tile, so nothing worth replaying can be recorded yet.
 
-The blocker recorded against this lane earlier — a traced attention reaching a kernel no recorded row could name —
-no longer reproduces on `origin/main`, and `golden/README.md` now carries what was measured in its place. What is left
-is the recording work itself. Until those goldens exist, this file reports a library comparison and says nothing about
-Emmy.
+### Emmy, recorded rows
+
+| setup | eager (FA-2) µs | Emmy µs | Emmy vs eager |
+| --- | ---: | ---: | ---: |
+| decode_gqa-b1-s1024 | 102 | 33 | 3.08x |
+| decode_gqa-b1-s2048 | 264 | 63 | 4.17x |
+| decode_gqa-b1-s4096 | 563 | 120 | 4.68x |
+| decode_gqa-b1-s8192 | 1124 | 345 | 3.26x |
+| decode_gqa-b1-s16384 | 2224 | 2928 | 0.76x |
+| decode_gqa-b1-s32768 | 4451 | 1267 | 3.51x |
+| decode_gqa-b8-s1024 | 1153 | 28 | 41.76x |
+| decode_gqa-b8-s2048 | 2299 | 77 | 29.81x |
+| decode_gqa-b8-s4096 | 4598 | 113 | 40.65x |
+| decode_gqa-b8-s8192 | 9118 | 210 | 43.35x |
+| decode_gqa-b8-s16384 | 17947 | 566 | 31.70x |
+| prefill_causal-b1-s1024 | 94 | 76 | 1.24x |
+| prefill_causal-b1-s2048 | 275 | 271 | 1.02x |
+| prefill_causal-b1-s4096 | 894 | 878 | 1.02x |
+| prefill_causal-b1-s8192 | 3150 | 3066 | 1.03x |
+| prefill_causal-b1-s16384 | 10401 | 10722 | 0.97x |
+| prefill_causal-b8-s1024 | 474 | 452 | 1.05x |
+| prefill_causal-b8-s2048 | 1628 | 1533 | 1.06x |
+| prefill_global-b1-s1024 | 126 | 127 | 0.99x |
+| prefill_global-b1-s2048 | 484 | 429 | 1.13x |
+| prefill_global-b1-s8192 | 6066 | 5642 | 1.08x |
+| prefill_global-b8-s1024 | 808 | 748 | 1.08x |
+| prefill_global-b8-s2048 | 2983 | 2800 | 1.07x |
+| prefill_gqa-b1-s1024 | 148 | 140 | 1.06x |
+| prefill_gqa-b1-s2048 | 465 | 450 | 1.03x |
+| prefill_gqa-b1-s4096 | 1421 | 1420 | 1.00x |
+| prefill_gqa-b1-s8192 | 5990 | 5778 | 1.04x |
+| prefill_gqa-b8-s1024 | 892 | 827 | 1.08x |
+| prefill_gqa-b8-s2048 | 3148 | 2942 | 1.07x |
+
+For the decode rows the eager column is PyTorch's SDPA on the broadcast source, which falls to the math path (125 us
+at batch 1, 1024 keys) rather than FlashAttention-2; the baseline lane's FA-2 numbers are the fair comparison there:
+12.0 / 15.3 / 25.0 / 34.6 / 58.1 / 101.2 us at batch 1 from 1024 to 32768 keys, and 29.2 / 52.1 / 92.9 / 171.8 / 335.8
+us at batch 8 from 1024 to 16384. Emmy's GQA decode is at parity with FA-2 at batch 8 and 1024 keys (28 us), 1.2-1.7x
+behind it at the longer batch-8 lengths, and 2.7-4x behind at batch 1, where the kernel runs on eight CTAs and FA-2
+splits the key range.
 
 ### Protocol
 

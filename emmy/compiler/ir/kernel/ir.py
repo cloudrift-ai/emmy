@@ -129,6 +129,65 @@ class Smem(Stmt):
 
 
 @dataclass(frozen=True)
+class IndexDecl(Stmt):
+    """Declare one kernel-local integer index before a nested hot loop."""
+
+    name: str
+    value: Expr
+
+    pure = True
+
+    def defines(self) -> tuple[str, ...]:
+        return (self.name,)
+
+    def exprs(self) -> tuple[Expr, ...]:
+        return (self.value,)
+
+    def pretty(self, indent: str = "") -> list[str]:
+        return [f"{indent}Index {self.name} = {self.value.pretty()}"]
+
+    def render(self, ctx: RenderCtx) -> list[str]:
+        return [f"{_pad(ctx.indent)}int {self.name} = {self.value.render(ctx)};"]
+
+
+@dataclass(frozen=True)
+class FlatIndexDecl(Stmt):
+    """Bind a buffer coordinate's flattened index, optionally relative to another coordinate."""
+
+    name: str
+    buffer: str
+    index: tuple[Expr, ...]
+    origin: tuple[Expr, ...] = ()
+
+    pure = True
+
+    def defines(self) -> tuple[str, ...]:
+        return (self.name,)
+
+    def exprs(self) -> tuple[Expr, ...]:
+        return (*self.index, *self.origin)
+
+    def external_reads(self) -> tuple[str, ...]:
+        return (self.buffer,)
+
+    def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
+        new = rename.get(self.buffer, self.buffer)
+        return self if new == self.buffer else replace(self, buffer=new)
+
+    def pretty(self, indent: str = "") -> list[str]:
+        index = ", ".join(expr.pretty() for expr in self.index)
+        return [f"{indent}FlatIndex {self.name} = {self.buffer}[{index}]"]
+
+    def render(self, ctx: RenderCtx) -> list[str]:
+        from emmy.compiler.ir.stmt import render_index  # noqa: PLC0415
+
+        value = render_index(self.buffer, self.index, ctx)
+        if self.origin:
+            value = f"({value}) - ({render_index(self.buffer, self.origin, ctx)})"
+        return [f"{_pad(ctx.indent)}auto {self.name} = {value};"]
+
+
+@dataclass(frozen=True)
 class Sync(Stmt):
     """Thread-group barrier.
 
@@ -1432,6 +1491,13 @@ LDMATRIX_SWIZZLE_XOR: dict[str, tuple[int, int]] = {
     "B32": (6, 0x1),
 }
 
+#: The two software-written Volta operand layouts. Unlike the modern ``B*`` XOR modes, these
+#: permute complete logical ``(row, col)`` coordinates so an SM70 warp can drain the slab through
+#: ordinary 128-bit shared loads. They are internal lowering choices, not schedule knobs.
+VOLTA_CROSSWISE = "V70A"
+VOLTA_B_CONGRUOUS = "V70B"
+VOLTA_SMEM_LAYOUTS = frozenset((VOLTA_CROSSWISE, VOLTA_B_CONGRUOUS))
+
 #: A SOFTWARE-swizzled mode may override the element shift, spelled ``<mode>@<shift>``. The shift
 #: above is ``log2(atom elems)``, which reads the row index only while a slab row IS one swizzle
 #: atom. A WIDER row (the flash slabs: a 128-elem fp16 head-dim row is two 128 B atoms) leaves the
@@ -1465,6 +1531,28 @@ def swizzle_fn(mode: str) -> str:
     ``(mask, shift)`` pair, so two slabs sharing a spelling share the emitted function."""
     base = swizzle_base(mode)
     return f"emmy_swizzle_{base.lower()}" + ("" if mode == base else f"_s{swizzle_xor(mode)[0]}")
+
+
+def smem_layout_index(mode: str, flat: str, buffer: str, ctx: RenderCtx, indices: tuple[Expr, ...] = ()) -> str:
+    """Render ``flat`` through the slab layout selected by ``mode``.
+
+    Modern layouts are the existing one-argument XOR. Volta A needs both logical dimensions:
+    the crosswise physical stride is the slab's row count, while Volta B's congruous layout uses
+    the ordinary logical row stride. Their writer already has those dimensions, so pass them to
+    the layout directly instead of flattening and dividing the result apart again in every K-loop
+    deposit. ``NONE`` and unknown spellings stay row-major.
+    """
+    if mode == VOLTA_CROSSWISE:
+        assert len(indices) == 2, "the Volta A layout needs a logical (row, column) index"
+        rows, _ = ctx.shapes[buffer]
+        row, col = (e.render(ctx) for e in indices)
+        return f"emmy_volta_crosswise({row}, {col}, {rows})"
+    if mode == VOLTA_B_CONGRUOUS:
+        assert len(indices) == 2, "the Volta B layout needs a logical (row, column) index"
+        cols = ctx.shapes[buffer][-1]
+        row, col = (e.render(ctx) for e in indices)
+        return f"emmy_volta_b_congruous({row}, {col}, {cols})"
+    return flat if not swizzle_xor(mode) else f"{swizzle_fn(mode)}({flat})"
 
 
 @dataclass(frozen=True)
@@ -1589,6 +1677,9 @@ class LdmatrixLoad(Stmt):
     scale_index: tuple = ()
     scale_ldm: int = 0
     fragment_layout: str = "m16n8k16"
+    # Position inside this warp operand's register tile. Volta pairs even/odd logical fragments
+    # after slot offsets have made structural coordinate-delta matching needlessly fragile.
+    fragment_index: int = 0
 
     def deps(self) -> tuple[str, ...]:
         return (self.frag,) if self.pair_frag is None else (self.frag, self.pair_frag)
@@ -1726,11 +1817,26 @@ class LdmatrixLoad(Stmt):
             # global and shared addresses, so point its inlined gather at the staged slab; ptxas
             # resolves the generic pointer to ordinary LDS instructions. Fill-side clamps make
             # the slab exact, and the first implementation intentionally keeps it unswizzled.
-            assert self.pair_frag is None and not self.byte_slab, "the Volta staged drain is an unpacked f16 gather"
-            assert self.swizzle == "NONE", "the Volta shared-memory gather has no swizzled layout"
+            assert not self.byte_slab, "the Volta staged drain is an unpacked f16 gather"
             slab_dt = ctx.buffer_dtypes.get(self.src_buffer, "f16")
             frag_dt = frag_dtype(ctx, self.frag) or slab_dt
             targs = "" if slab_dt == frag_dt else f"<{ctx.type_name(slab_dt)}, {ctx.type_name(frag_dt)}>"
+            if self.swizzle == VOLTA_CROSSWISE:
+                assert self.role == "a" and self.pair_frag is not None and slab_dt == frag_dt == "f16"
+                row, col = (e.render(ctx) for e in self.src_index)
+                rows = ctx.shapes[self.src_buffer][0]
+                return [
+                    f"{_pad(ctx.indent)}emmy_mma884_load_a_crosswise_pair({self.frag}, {self.pair_frag}, "
+                    f"{self.src_buffer}, {row}, {col}, {rows});"
+                ]
+            if self.swizzle == VOLTA_B_CONGRUOUS:
+                assert self.role == "b" and self.pair_frag is not None and slab_dt == frag_dt == "f16"
+                row, col = (e.render(ctx) for e in self.src_index)
+                return [
+                    f"{_pad(ctx.indent)}emmy_mma884_load_b_congruous_pair({self.frag}, {self.pair_frag}, "
+                    f"{self.src_buffer}, {row}, {col}, {ldm});"
+                ]
+            assert self.pair_frag is None and self.swizzle == "NONE"
             helper = (
                 "emmy_mma884_load_a_smem"
                 if self.role == "a"
@@ -1847,6 +1953,9 @@ class MmaSyncPtx(Stmt):
     shape: tuple[int, int, int]
     ab_dtype: str = "f16"
     c_dtype: str = "f32"
+    # The Volta canonical-B fast path uses the row-major B fragment mapping. Every other atom and
+    # the Volta N-major B path keep the established column-major B mapping.
+    b_row_major: bool = False
     # The BLOCK-SCALED form's two extra register operands (one packed b32 of ue4m3 block scales
     # per side), set together or not at all. Present only for the fp4 atom, whose instruction
     # applies the per-16-element scales itself; every other mma leaves them ``None``.
@@ -1877,6 +1986,9 @@ class MmaSyncPtx(Stmt):
         # Wrapper names follow the atom convention's <ab>_<acc> dtype pair (emmy_mma_m16n8k16_f16_f32).
         # ``c`` is passed for both the ``d`` (out) and ``c`` (in) operands.
         wrapper = f"emmy_mma_m{m}n{n}k{k}_{self.ab_dtype}_{self.c_dtype}"
+        if self.b_row_major:
+            assert (m, n, k) == (8, 8, 4), "only the Volta atom has a row-major B wrapper"
+            wrapper += "_brow"
         if self.block_scaled:
             # The block-scaled wrapper accumulates in place, so it takes the scale registers
             # where the others take ``c`` a second time.
@@ -2028,6 +2140,10 @@ class RegStore(Stmt):
     whose shared operand varies along the output's trailing axis stores a transposed fragment with
     scalar strided writes, while the ordinary contiguous-N case keeps packed pairs.
 
+    A staged Volta tile using paired operand layouts also derives ``volta_interleaved`` and its
+    register-cell ``fragment_index``. Together they select the coupled 32×32 accumulator map;
+    neither is a schedule choice or a wire-codec field.
+
     ``atomic`` renders each store as an ``atomicAdd`` accumulate instead of a
     plain assign — ``030_cut``'s atomic finalize on the mma tier: every
     split partition's C fragment adds into the (per-launch zero-init'd) output.
@@ -2045,6 +2161,12 @@ class RegStore(Stmt):
     n_guard: tuple[Expr, Expr] | None = None
     atomic: bool = False
     fragment_layout: str = "m16n8k16"
+    # The paired Volta operand layouts require CUTLASS's interleaved 32x32 accumulator map. This
+    # is a derived SM70 lowering choice, not another atom fragment-layout or schedule spelling.
+    volta_interleaved: bool = False
+    # Cell position inside the warp register tile. The paired Volta layout groups adjacent cells
+    # into CUTLASS's interleaved 32x32 accumulator map; other fragment layouts ignore it.
+    fragment_index: tuple[int, int] = (0, 0)
     # Software smem slab swizzle mode ("NONE"/"B32"/"B64"/"B128") — the fragment fill's producer
     # side, when this store's destination is a swizzled smem SLAB rather than the kernel's output
     # (the fused flash weight tile: the score's C fragments land in the A slab the ``ldmatrix``
@@ -2127,6 +2249,23 @@ class RegStore(Stmt):
         """Per-lane ``(row C text, col C text, row Expr, col Expr)`` for this fragment layout."""
         from emmy.compiler.ir.expr import BinaryExpr, Var  # noqa: PLC0415
 
+        if self.volta_interleaved:
+            mi, ni = (x & 1 for x in self.fragment_index)
+            row_adjust, col_adjust = -12 * mi, -12 * ni
+
+            def coord(base: str, offset: int) -> tuple[str, Expr]:
+                if offset == 0:
+                    return base, Var(base)
+                op = "+" if offset > 0 else "-"
+                amount = abs(offset)
+                return f"({base} {op} {amount})", BinaryExpr(op, Var(base), Literal(amount, "int"))
+
+            out = []
+            for i in range(8):
+                row, row_expr = coord("_vr", row_adjust + (i & 2))
+                col, col_expr = coord("_vc", col_adjust + (16 if i & 4 else 0) + (i & 1))
+                out.append((row, col, row_expr, col_expr))
+            return out
         if self.fragment_layout == "m8n8k4":
             out = []
             for i in range(8):
@@ -2278,21 +2417,45 @@ class RegStore(Stmt):
         return head + body
 
     def _render_m8n8k4(self, ctx: RenderCtx, *, flat: str, ldm, ldn, dst_dt: str, pre: list[list[str]], vals: list[str]) -> list[str]:
-        """Store the four m8n8k4 computation groups arranged as one logical 16x16 cell."""
+        """Store an m8n8k4 accumulator under the selected Volta warp-tile arrangement."""
         pad = _pad(ctx.indent)
         lane = "(threadIdx.x & 31)"
-        # Each four-lane group and its +16 partner own one 8x8 computation. Place the four
-        # groups as quadrants; _vr/_vc are this lane's base row/column within the 16x16 cell.
-        lines = [
-            f"{pad}{{ const int _vl = {lane}; const int _vq = (_vl & 15) >> 2;",
-            f"{pad}  const int _vr = (_vq >> 1) * 8 + (_vl >> 4) * 4 + (_vl & 1);",
-            f"{pad}  const int _vc = (_vq & 1) * 8 + (_vl & 2);",
-        ]
+        # Each four-lane group and its +16 partner own one 8x8 computation. _vr/_vc are the lane's
+        # base coordinates under either the ordinary 16x16 cell or paired 32x32 warp-tile map.
+        if self.volta_interleaved:
+            lines = [
+                f"{pad}{{ const int _vl = {lane}; const int _vq = _vl >> 2;",
+                f"{pad}  const int _vr = (((_vq & 4) >> 1) + (_vq & 1)) * 8 + (_vl & 1);",
+                f"{pad}  const int _vc = ((_vq >> 1) & 1) * 8 + (_vl & 2);",
+            ]
+        else:
+            lines = [
+                f"{pad}{{ const int _vl = {lane}; const int _vq = (_vl & 15) >> 2;",
+                f"{pad}  const int _vr = (_vq >> 1) * 8 + (_vl >> 4) * 4 + (_vl & 1);",
+                f"{pad}  const int _vc = (_vq & 1) * 8 + (_vl & 2);",
+            ]
         mbase = mbound = nbase = nbound = None
         if self.m_guard is not None:
             mbase, mbound = (e.render(ctx) for e in self.m_guard)
         if self.n_guard is not None:
             nbase, nbound = (e.render(ctx) for e in self.n_guard)
+        vec2 = {"f16": "__half2", "bf16": "__nv_bfloat162", "f32": "float2"}.get(dst_dt)
+        if nbound is None and ldn == 1 and vec2 is not None and not (self.atomic and dst_dt == "f32"):
+            packer = {"f16": "__floats2half2_rn", "bf16": "__floats2bfloat162_rn", "f32": "make_float2"}[dst_dt]
+            coords = self._element_coords()
+            for pair in range(0, len(coords), 2):
+                row, col, _row_expr, _col_expr = coords[pair]
+                indent = f"{pad}  "
+                if mbound is not None:
+                    lines.append(f"{indent}if (({mbase}) + {row} < ({mbound})) {{")
+                    indent += "  "
+                lines.extend(f"{indent}{ln}" for ln in (*pre[pair], *pre[pair + 1]))
+                addr = self._addr(flat, row, col, ldm, ldn)
+                lines.append(f"{indent}{self._pair_store(addr, vals[pair], vals[pair + 1], vec2, packer)}")
+                if mbound is not None:
+                    lines.append(f"{pad}  }}")
+            lines.append(f"{pad}}}")
+            return lines
         for i, (row, col, _row_expr, _col_expr) in enumerate(self._element_coords()):
             preds = []
             if mbound is not None:
@@ -2575,6 +2738,8 @@ __all__ = [
     # Kernel-IR statements
     "Tile",
     "Smem",
+    "IndexDecl",
+    "FlatIndexDecl",
     "Sync",
     "TreeHalve",
     "WarpShuffle",
@@ -2612,7 +2777,7 @@ __all__ = [
 # / ``CpAsyncWait``) are stateless and return themselves.
 
 
-from emmy.compiler.ir.stmt.passes import _rewrite_kind  # noqa: E402
+from emmy.compiler.ir.stmt.passes import _rename_ssa_vars_in_expr, _rewrite_kind  # noqa: E402
 from emmy.compiler.ir.stmt.passes import rewrite as _rewrite  # noqa: E402
 
 
@@ -2647,6 +2812,24 @@ def _(s: Tile, rename, sigma, axis_fn):
 @_rewrite_kind.register
 def _(s: Smem, rename, sigma, axis_fn):
     return s
+
+
+@_rewrite_kind.register
+def _(s: IndexDecl, rename, sigma, axis_fn):
+    return IndexDecl(name=rename(s.name), value=_rename_ssa_vars_in_expr(sigma.apply(s.value), rename))
+
+
+@_rewrite_kind.register
+def _(s: FlatIndexDecl, rename, sigma, axis_fn):
+    def rewrite(expr):
+        return _rename_ssa_vars_in_expr(sigma.apply(expr), rename)
+
+    return FlatIndexDecl(
+        name=rename(s.name),
+        buffer=s.buffer,
+        index=tuple(rewrite(expr) for expr in s.index),
+        origin=tuple(rewrite(expr) for expr in s.origin),
+    )
 
 
 @_rewrite_kind.register
@@ -2809,6 +2992,7 @@ def _(s: LdmatrixLoad, rename, sigma, axis_fn):
         scale_index=tuple(sigma.apply(e) for e in s.scale_index),
         scale_ldm=s.scale_ldm,
         fragment_layout=s.fragment_layout,
+        fragment_index=s.fragment_index,
     )
 
 
@@ -2821,6 +3005,7 @@ def _(s: MmaSyncPtx, rename, sigma, axis_fn):
         shape=s.shape,
         ab_dtype=s.ab_dtype,
         c_dtype=s.c_dtype,
+        b_row_major=s.b_row_major,
         # The block-scaled form's scale registers are fragments like any other and must be
         # renamed with them: dropping them here would silently rewrite the instruction into its
         # plain three-operand sibling, which renders with the wrong arity.
