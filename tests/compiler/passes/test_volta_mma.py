@@ -270,21 +270,35 @@ def test_sm70_ring_splits_the_blocking_copy_across_the_drain(monkeypatch) -> Non
     per chunk publishes the deposit. Back-to-back load/store fills (what a ring emitted before)
     leave the latency fully exposed and need two barriers, which measured slower than no ring at
     all on every V100 shape tried."""
-    monkeypatch.setenv("EMMY_TILE", f"{VOLTA}/f2x2/k4")
+    monkeypatch.setenv("EMMY_TILE", f"{VOLTA}/f2x2/k8")
     monkeypatch.setenv("EMMY_WORK", "w2x2")  # 128 threads: the slabs stripe evenly, so the split engages
     monkeypatch.setenv("EMMY_STAGE", "d2/smem")
     monkeypatch.setenv("EMMY_REDUCE", "")
-    src, knobs = _source(_graph(m=64, n=64, k=32), Context(compute_capability=(7, 0)))
+    src, knobs = _source(_graph(m=64, n=64, k=64), Context(compute_capability=(7, 0)))
     assert family_value(knobs, "STAGE") == "d2/smem"
     prologue, _, body = src.partition("for (int _ks")
     issue = body.index("_v__a_stage0_0")  # the staged gmem load of the PREFETCH chunk
     drain = body.index("emmy_mma_m8n8k4_f16_f32")
-    deposit = body.index("*reinterpret_cast<uint2*>(&_a_smem[emmy_volta_crosswise(")
+    deposit = body.index("*reinterpret_cast<uint2*>(&_a_smem[_a_smem_store")
     assert issue < drain < deposit, "the drain must sit between the staged load and its slab store"
+    assert "int _a_smem_store = emmy_volta_crosswise(" in prologue
+    assert "int _b_smem_store = emmy_volta_b_congruous(" in prologue
+    assert "emmy_volta_crosswise(" not in body and "emmy_volta_b_congruous(" not in body
     assert body.count("__syncthreads();") == 1, "the deposit's barrier is the whole per-chunk handshake"
     assert prologue.count("__syncthreads();") == 1, "the primed slot is published once before the loop"
     for forbidden in NEWER_INSTRUCTIONS:
         assert forbidden not in src
+
+
+def test_sm70_shallow_k_tile_keeps_store_addresses_near_the_deposit(monkeypatch) -> None:
+    """Hoisting Volta store addresses slows the shallower K tile despite reducing its SASS."""
+    monkeypatch.setenv("EMMY_TILE", f"{VOLTA}/f2x2/k4")
+    monkeypatch.setenv("EMMY_WORK", "w2x2")
+    monkeypatch.setenv("EMMY_STAGE", "d2/smem")
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    src, _ = _source(_graph(m=64, n=64, k=32), Context(compute_capability=(7, 0)))
+    assert "int _a_smem_store" not in src and "int _b_smem_store" not in src
+    assert "*reinterpret_cast<uint2*>(&_a_smem[emmy_volta_crosswise(" in src
 
 
 def test_sm70_register_tile_keeps_the_volta_fragment_layout_through_the_reroll(monkeypatch) -> None:

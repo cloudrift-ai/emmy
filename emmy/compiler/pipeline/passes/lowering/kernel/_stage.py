@@ -49,11 +49,14 @@ from dataclasses import dataclass
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import BinaryExpr, Builtin, Expr, Literal, SimplifyCtx, TernaryExpr, Var, affine_form
+from emmy.compiler.ir.expr import BinaryExpr, Builtin, Expr, FuncCallExpr, Literal, SimplifyCtx, TernaryExpr, Var, affine_form
 from emmy.compiler.ir.kernel.ir import (
+    VOLTA_B_CONGRUOUS,
+    VOLTA_CROSSWISE,
     CpAsyncCommit,
     CpAsyncCopy,
     CpAsyncWait,
+    IndexDecl,
     MbarrierArrive,
     MbarrierArriveExpectTx,
     MbarrierInit,
@@ -215,6 +218,39 @@ def _staged_regs(name: str, trip: int, v: int) -> tuple[str, ...]:
     return tuple(f"_{name}_stage{trip}_{i}" for i in range(v))
 
 
+def _volta_store_plan(*, slab: str, shape: tuple[int, int], cta: CtaTile, elem_bytes: int, swizzle: str):
+    """Return one reusable store base plus constant trip and ring strides when possible."""
+    run = _sync_copy_runs(shape, cta, elem_bytes)
+    if run is None:
+        return None
+    v, _ = run
+    rows, cols = shape
+    moved = cta.n_threads * v
+    if v != 8 or moved % cols:
+        return None
+    row_step = moved // cols
+    if swizzle == VOLTA_CROSSWISE and cols >= 32 and row_step % 32 == 0:
+        return f"{slab}_store", row_step * 4, rows * 4
+    if swizzle == VOLTA_B_CONGRUOUS and rows >= 32 and row_step % 4 == 0:
+        return f"{slab}_store", row_step * cols, rows * cols
+    return None
+
+
+def _volta_store_decl(*, op, ring: int, cta: CtaTile, elem_bytes: int) -> IndexDecl | None:
+    """Precompute trip zero's physical shared address for a paired Volta copy."""
+    eb = op.elem_bytes or elem_bytes
+    plan = _volta_store_plan(slab=op.slab, shape=op.shape, cta=cta, elem_bytes=eb, swizzle=op.swizzle)
+    if plan is None:
+        return None
+    name, _, _ = plan
+    row, col = _sync_copy_coords(0, 8, op.shape[1], cta)
+    if op.swizzle == VOLTA_CROSSWISE:
+        value = FuncCallExpr("emmy_volta_crosswise", [row, col, _lit(ring * op.shape[0])])
+    else:
+        value = FuncCallExpr("emmy_volta_b_congruous", [row, col, _lit(op.shape[1])])
+    return IndexDecl(name=name, value=value)
+
+
 def sync_copy_issue(*, shape: tuple[int, int], src: str, gmem_index, cta: CtaTile, elem_bytes: int, name: str) -> list[Stmt] | None:
     """The gmem→REGISTER half of :func:`sync_copy_fill`: every lane vector-LOADS each of its
     ``V``-element chunks and STOPS, leaving the values in registers for :func:`sync_copy_deposit`.
@@ -246,6 +282,8 @@ def sync_copy_deposit(
     name: str,
     row_offset: Expr | None = None,
     swizzle: str = "NONE",
+    ring: int = 1,
+    slot: Expr | None = None,
 ) -> list[Stmt] | None:
     """The REGISTER→smem half — one vector store per staged chunk, into ring row ``row_offset``.
     Pairs with :func:`sync_copy_issue` off the same striping, so the slab it leaves is identical to
@@ -255,8 +293,20 @@ def sync_copy_deposit(
         return None
     v, trips = run
     cols = shape[1]
+    volta = _volta_store_plan(slab=slab, shape=shape, cta=cta, elem_bytes=elem_bytes, swizzle=swizzle)
     out: list[Stmt] = []
     for trip in range(trips):
+        if volta is not None:
+            name_base, trip_stride, slot_stride = volta
+            physical = _add(Var(name_base), _lit(trip * trip_stride))
+            physical = _add(physical, _mul(slot if slot is not None else _lit(0), _lit(slot_stride)))
+            values = _staged_regs(name, trip, v)
+            if swizzle == VOLTA_CROSSWISE:
+                out.append(Write(output=slab, index=(physical,), values=values[:4]))
+                out.append(Write(output=slab, index=(_add(physical, _lit(ring * shape[0] * 4)),), values=values[4:]))
+            else:
+                out.append(Write(output=slab, index=(physical,), values=values))
+            continue
         row, col = _sync_copy_coords(trip, v, cols, cta)
         smem_row = _add(row_offset, row) if row_offset is not None else row
         out.append(Write(output=slab, index=(smem_row, col), values=_staged_regs(name, trip, v), swizzle=swizzle))
@@ -674,7 +724,7 @@ class SyncTransport:
                 align=_fill_align(op.shape[1], eb, op.swizzle),
             )
 
-        return [
+        decls = [
             *(
                 slab_smem(op.slab, op.shape[0], op.shape[1], self.slab_dtype, align=_fill_align(op.shape[1], self.elem_bytes, op.swizzle))
                 for op in self.operands
@@ -682,6 +732,13 @@ class SyncTransport:
             *(peer(op, ring * op.shape[0]) for op in self.copy_operands),
             *(peer(op, op.shape[0]) for op in self.invariant_operands),
         ]
+        if self.register_staged:
+            decls += [
+                decl
+                for op in self.copy_operands
+                if (decl := _volta_store_decl(op=op, ring=ring, cta=self.cta, elem_bytes=self.elem_bytes)) is not None
+            ]
+        return decls
 
     def prologue(self, ring: int) -> list[Stmt]:  # noqa: ARG002
         # The invariant peers first, closed by their own handshake: every later reader — the stat
@@ -862,7 +919,7 @@ class SyncTransport:
             out.append(StridedLoop(axis=fe, start=self.cta.linear_tid, step=_lit(self.cta.n_threads), body=Body(tuple(body)), unroll=False))
         return out
 
-    def deposit(self, *, slot: Expr) -> list[Stmt]:
+    def deposit(self, *, slot: Expr, ring: int) -> list[Stmt]:
         """Land the registers :meth:`fill` issued into ring ``slot`` — the second half of the split
         blocking copy, placed by :func:`pipelined_kloop` past the resident chunk's drain. Empty on
         every unsplit transport, whose bytes land in their own ``wait``."""
@@ -878,6 +935,8 @@ class SyncTransport:
                 name=op.tag,
                 row_offset=op.slot_row(slot),
                 swizzle=op.swizzle,
+                ring=ring,
+                slot=slot,
             )
         return out
 
@@ -1177,7 +1236,7 @@ def _deposit(group: _Group, slot: Expr) -> list[Stmt]:
     """The transport's register→smem landing, or nothing for a transport whose fill is not split
     (cp.async / TMA leave their in-flight bytes with the copy engine, not in registers)."""
     land = getattr(group.transport, "deposit", None)
-    return land(slot=slot) if land is not None else []
+    return land(slot=slot, ring=group.ring) if land is not None else []
 
 
 def pipelined_kloop(

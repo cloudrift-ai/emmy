@@ -129,6 +129,28 @@ class Smem(Stmt):
 
 
 @dataclass(frozen=True)
+class IndexDecl(Stmt):
+    """Declare one kernel-local integer index before a nested hot loop."""
+
+    name: str
+    value: Expr
+
+    pure = True
+
+    def defines(self) -> tuple[str, ...]:
+        return (self.name,)
+
+    def exprs(self) -> tuple[Expr, ...]:
+        return (self.value,)
+
+    def pretty(self, indent: str = "") -> list[str]:
+        return [f"{indent}Index {self.name} = {self.value.pretty()}"]
+
+    def render(self, ctx: RenderCtx) -> list[str]:
+        return [f"{_pad(ctx.indent)}int {self.name} = {self.value.render(ctx)};"]
+
+
+@dataclass(frozen=True)
 class Sync(Stmt):
     """Thread-group barrier.
 
@@ -2679,6 +2701,7 @@ __all__ = [
     # Kernel-IR statements
     "Tile",
     "Smem",
+    "IndexDecl",
     "Sync",
     "TreeHalve",
     "WarpShuffle",
@@ -2716,7 +2739,7 @@ __all__ = [
 # / ``CpAsyncWait``) are stateless and return themselves.
 
 
-from emmy.compiler.ir.stmt.passes import _rewrite_kind  # noqa: E402
+from emmy.compiler.ir.stmt.passes import _rename_ssa_vars_in_expr, _rewrite_kind  # noqa: E402
 from emmy.compiler.ir.stmt.passes import rewrite as _rewrite  # noqa: E402
 
 
@@ -2751,6 +2774,11 @@ def _(s: Tile, rename, sigma, axis_fn):
 @_rewrite_kind.register
 def _(s: Smem, rename, sigma, axis_fn):
     return s
+
+
+@_rewrite_kind.register
+def _(s: IndexDecl, rename, sigma, axis_fn):
+    return IndexDecl(name=rename(s.name), value=_rename_ssa_vars_in_expr(sigma.apply(s.value), rename))
 
 
 @_rewrite_kind.register
