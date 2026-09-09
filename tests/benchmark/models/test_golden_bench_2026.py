@@ -476,9 +476,7 @@ def test_rtx5090_attention_comparison_is_recorded_and_bounded(project_root) -> N
     assert 'test "$successful_setups" -eq "${#sequence_lengths[@]}"' in emmy_runner
 
     baseline_runner = (directory / "run_baselines.py").read_text()
-    assert '"torch": "2.14.0", "flash_attn": "2.8.3", "tilelang": "0.1.8", "apache-tvm-ffi": "0.1.8.post2"}' in (
-        baseline_runner
-    )
+    assert '"torch": "2.14.0", "flash_attn": "2.8.3", "tilelang": "0.1.8", "apache-tvm-ffi": "0.1.8.post2"}' in (baseline_runner)
     assert "SDPBackend.CUDNN_ATTENTION" in baseline_runner
     assert '"latency_estimator": "mean"' in baseline_runner
     assert 'mode="max-autotune-no-cudagraphs"' in baseline_runner
