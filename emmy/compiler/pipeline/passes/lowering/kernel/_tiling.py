@@ -69,6 +69,12 @@ class AxisOffset:
             return BinaryExpr("+", e, reg_term)
         return BinaryExpr("+", BinaryExpr("*", Var(self.block_var), Literal(self.reg, "int")), reg_term)  # no unit level
 
+    def block_end(self) -> Expr:
+        """The exclusive end of this CTA's tile along the axis — ``(block + 1)·tile`` in the grid var
+        alone, so it is CTA-uniform wherever :meth:`base` is not."""
+        tile = self.unit_count * self.reg * self.atom_dim if self.unit_var is not None else self.reg
+        return BinaryExpr("*", BinaryExpr("+", Var(self.block_var), Literal(1, "int")), Literal(tile, "int"))
+
 
 @dataclass(frozen=True)
 class Tiling:

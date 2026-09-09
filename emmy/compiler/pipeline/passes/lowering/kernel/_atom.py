@@ -1125,6 +1125,58 @@ def _block_scaled_operands(
     return (a_bits, *b_bits), copies, fills
 
 
+def _affine_term(expr: Expr) -> tuple[str, int] | None:
+    """``expr`` as ``(axis var, constant)`` when it is a var plus or minus a literal, else ``None``."""
+    if isinstance(expr, Var):
+        return expr.name, 0
+    if isinstance(expr, BinaryExpr) and expr.op in ("+", "-"):
+        sides = (expr.left, expr.right)
+        if isinstance(sides[0], Var) and isinstance(sides[1], Literal):
+            return sides[0].name, int(sides[1].value) * (1 if expr.op == "+" else -1)
+        if expr.op == "+" and isinstance(sides[0], Literal) and isinstance(sides[1], Var):
+            return sides[1].name, int(sides[0].value)
+    return None
+
+
+def _mask_key_end(stmts, held: str, key: Axis, row: str, offset) -> Expr | None:
+    """The chunk base past which every key is masked for every row of this CTA — the causal
+    early stop's ``k_end`` — or ``None`` when the score carries no such mask.
+
+    The mask is the coordinate ``Select`` the prefix adds to the score (the same statement pair
+    :func:`_residence` turns into a ``FragmentMask``), and it stops the stream when its masked
+    branch reads ``key + ck > row + cr`` (or ``>=``): a key at or past ``block_end + cr − ck`` is
+    masked for the block's last row and so for every row before it. Chunks from there on fold the
+    carrier identity exactly, so the loop stops there bit-identically. A mask that bounds the keys
+    from BELOW (a window's near edge) or one with a negative lead — which could stop a block before
+    its own first chunk — is left to the per-element mask."""
+    selects = {stmt.name: stmt for stmt in stmts if isinstance(stmt, Select)}
+    fragments = {held}  # the score and every value the prefix derives from it (its scaling, say)
+    for stmt in stmts:
+        if not isinstance(stmt, Assign):
+            continue
+        selected = [arg for arg in stmt.args if arg in selects]
+        source = [arg for arg in stmt.args if arg in fragments]
+        if source:
+            fragments.add(stmt.name)
+        if stmt.op.name != "add" or len(selected) != 1 or len(source) != 1:
+            continue
+        predicate = mask_select_predicate(selects[selected[0]])
+        if predicate is None:
+            return None
+        key_side, row_side = _affine_term(predicate.left), _affine_term(predicate.right)
+        if key_side is None or row_side is None or key_side[0] != key.name or row_side[0] != row:
+            return None
+        lead = row_side[1] - key_side[1] - (1 if predicate.op == ">=" else 0)
+        if lead < 0:
+            return None
+        end: Expr = offset.block_end()
+        if lead:
+            end = BinaryExpr("+", end, Literal(lead, "int"))
+        extent = key.extent_expr()
+        return TernaryExpr(cond=BinaryExpr("<", end, extent), if_true=end, if_false=extent)
+    return None
+
+
 def _chunk_stream(k_axis: Axis, bk: int):
     """The staged K stream as the loop skeleton takes it — ``(extent, chunk count)``. A static
     extent unrolls a literal count; a SYMBOLIC one hands the skeleton its ``Dim`` and the runtime
@@ -2364,6 +2416,10 @@ class _FlashOps(_MmaOps):
         )
         pre = [stmt for edge in leaves for stmt in edge.lower(axes=self.axes)]
         pre += self._query(offset, mn)
+        # A causal mask makes every chunk past this CTA's last row pure identity work: the loop
+        # stops there (``k_end``), which is what gives a causal stream half its work back.
+        scored_name = (score if score is not None else self.c.operands[0]).exposes[0]
+        k_end = _mask_key_end(prefix.body, scored_name, key, m.axis.name, offset[0])
 
         chunk = Axis(name=f"{key.name}__ck", extent=key.extent)
         base = Var(chunk.name)
@@ -2387,7 +2443,7 @@ class _FlashOps(_MmaOps):
                 if score is not None
                 else self._gathered_score(offset, mn, base, cols, bound)
             )
-            held = (score if score is not None else self.c.operands[0]).exposes[0]
+            held = scored_name
             scored, pivots = {}, {}
             for i in range(m.reg):
                 for j in range(cols):
@@ -2467,7 +2523,8 @@ class _FlashOps(_MmaOps):
         # — the pivot's is not ``maximum``'s neutral element — so the loop must not re-seed it.
         if streams is None:
             gmem = Body(tuple(chunk_body(None)))
-            return pre, [StridedLoop(axis=chunk, start=Literal(0, "int"), step=Literal(bk, "int"), body=gmem, unroll=False, seed=False)]
+            loop = StridedLoop(axis=chunk, start=Literal(0, "int"), step=Literal(bk, "int"), body=gmem, unroll=False, seed=False, end=k_end)
+            return pre, [loop]
         # The staged form is the same body under the shared fill→drain skeleton, with the chunk loop
         # built by it: one operand group, one segment, and ``k0`` keeping this tier's own axis name
         # so everything the body reads off ``base`` still resolves. Every slab read rides the
@@ -2486,6 +2543,7 @@ class _FlashOps(_MmaOps):
             n_chunks=n_chunks,
             k_extent=k_extent,
             k0=chunk.name,
+            k_end=k_end,
             seed=False,
         )
         return [*pre, *decls], region

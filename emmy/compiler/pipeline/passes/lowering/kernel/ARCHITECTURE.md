@@ -475,7 +475,13 @@ readings the tier would otherwise refuse. Its LEAVES are read once ahead of the 
 one needs no gmem address at all: a causal mask's fill / zero constants are a computed pair, and only the pivot source
 and the streamed value are ever asked for a slab. And a `Select` on the score fragment's OWN coordinates — the row the
 carrier folds and the chunk it folds over — is per ELEMENT, not cell-uniform, so `_residence` lands it as a
-a `FragmentMask` under the same coordinate substitution the boundary mask performs. Without those two a
+a `FragmentMask` under the same coordinate substitution the boundary mask performs. That same `Select` is also read
+ONCE, ahead of the loop, for what it says about whole chunks (`_mask_key_end`): a mask whose masked branch reads
+`key > row + c` (or `>=`) with `c ≥ 0` masks every key from the CTA's block end onward for every row the CTA holds,
+so the chunk loop stops there — the skeleton's `k_end`, CTA-uniform in the grid var alone, bit-identical because a
+masked chunk folds the carrier identity exactly. A causal stream gets about half its work back that way; a mask that
+bounds the keys from below, or whose lead could stop a block before its first chunk, keeps the whole stream and the
+per-element mask alone. Without those readings a
 masked carrier fell to the scalar tier whole, which is what `attention.hd256.dynM.pv` on the RTX 4090 recorded and
 then stopped decoding.
 
