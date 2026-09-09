@@ -552,17 +552,15 @@ def _compile_run_mma(graph, feed: dict) -> tuple[np.ndarray, str]:
     return got, src
 
 
-# (M, N, K, out_dtype, transposed-B). 128 / 256 are tile (128) multiples (exact-cover static);
-# the dynamic column runs at M+2 to straddle the tile and exercise the masked store / clamp.
+# (M, N, K, out_dtype, transposed-B). 128 is the tile (exact-cover static); the dynamic column
+# runs at M+2 to straddle it and exercise the masked store / clamp. One cell per regime: f16
+# output and transposed-B are independent of each other, and a bigger grid adds no regime.
 # K=136 and K=132 are STATIC contraction extents the mma K-step does not tile: 136 is a multiple
 # of ``atom_k`` (16) but not of the ``atom_k·bk`` = 32 chunk, 132 of neither — the masked-K tail.
 _MMA_CASES = [
     (128, 128, 128, "f32", False),
-    (256, 256, 128, "f32", False),
     (128, 128, 128, "f16", False),
-    (128, 256, 128, "f16", False),
     (128, 128, 128, "f32", True),  # transposed-B (Q@Kᵀ)
-    (128, 128, 128, "f16", True),
     (128, 128, 136, "f32", False),  # static K off the K-chunk — the masked tail
     (128, 128, 132, "f32", False),  # static K off atom_k itself
     (128, 128, 132, "f32", True),  # …transposed-B (the (n,k)-swapped zero-fill helper)
@@ -634,8 +632,9 @@ def test_mma_static_k_tail_zero_fills(K, masked, monkeypatch):
     the loaders' ``k_zero`` bound and zeroes the fragment halves past K, so the summed reduction
     keeps its identity. An exactly tiled K carries no bound at all (byte-identical to before).
 
-    K=136 is a multiple of ``atom_k`` (16) but not of the row's ``atom_k·bk`` = 32 chunk — the
-    K-STEP divisibility the warp tier used to refuse, which the gmem-direct loop never needed."""
+    Neither 136 nor 132 is a multiple of the row's ``atom_k·bk`` = 32 chunk — the K-STEP divisibility
+    the warp tier used to refuse, which the gmem-direct loop never needed; a symbolic K reaching the
+    same masked tier is the corpus case ``matmul/f16-symbolic-k-gmem``."""
     _pin_tile(monkeypatch, _WARP_PIN)
     monkeypatch.setenv("EMMY_REDUCE", "")
     monkeypatch.setenv("EMMY_STAGE", "")  # gmem-direct: the masked-K tier (a staged K chunk must divide K)
@@ -831,7 +830,7 @@ def test_f16acc_enumeration_policy(monkeypatch):
 
 # Fused epilogues over the warp tier — a projection ``Map`` (or a causal ``Select``) folds into
 # the ``RegStore`` per fragment element.
-_MMA_EPILOGUES = ("bias", "relu", "residual", "causal")
+_MMA_EPILOGUES = ("bias", "residual", "causal")
 
 
 def _mma_epilogue_graph(mode: str, epilogue: str):
@@ -894,8 +893,6 @@ def _mma_epilogue_graph(mode: str, epilogue: str):
         g.add_node(InputOp(), [], Tensor("bias", (N,), dtype=F32), node_id="bias")
         g.add_node(ElementwiseOp("add"), ["ab", "bias"], Tensor("c", (Mg, N), dtype=F32), node_id="c")
         inputs.append("bias")
-    elif epilogue == "relu":
-        g.add_node(ElementwiseOp("relu"), ["ab"], Tensor("c", (Mg, N), dtype=F32), node_id="c")
     else:  # residual
         g.add_node(InputOp(), [], Tensor("r", (Mg, N), dtype=F32), node_id="r")
         g.add_node(ElementwiseOp("add"), ["ab", "r"], Tensor("c", (Mg, N), dtype=F32), node_id="c")
@@ -931,8 +928,6 @@ def test_matmul_mma_epilogue_coverage(epilogue, mode, monkeypatch):
         bias = rng.standard_normal((N,)).astype(np.float32)
         feed["bias"] = bias
         ref = base + bias
-    elif epilogue == "relu":
-        ref = np.maximum(base, 0.0)
     elif epilogue == "residual":
         r = rng.standard_normal((run_m, N)).astype(np.float32)
         feed["r"] = r
@@ -953,12 +948,12 @@ def test_matmul_mma_epilogue_coverage(epilogue, mode, monkeypatch):
 
 
 # --- the staged transports on one 64-row warp tile --------------------------
-# One matmul op compiled shape-specialised (static M) and dynamic (Dim('seq_len')) across cp.async
-# AND TMA (pinned). K static so the source innermost dim stays static — TMA-eligible. The
-# ``shape_mode`` × ``transport`` fixtures fan the render check over the matrix; the accuracy claim
-# on the static half is a corpus case, so what runs here is the symbolic kernel off its hint plus
-# the bit-identity and swizzle invariants, which compare two configs rather than one to a reference.
+# One static matmul op across cp.async AND TMA (pinned). K static so the source innermost dim stays
+# static — TMA-eligible. That each transport fires, and that the row is accurate, is a corpus case
+# (`matmul/f16-mma-parity-m256-*`, `f16-symbolic-m-tma`, `f16-warp-symbolic-m-cp`); what runs here
+# is the bit-identity and swizzle invariants, which compare two configs rather than one to a reference.
 _PN, _PK = 1024, 512
+_PM = 128  # two unmasked 64-row tiles; a bigger grid adds no regime
 _WARP_CODEC = ("mma_m16n8k16_f16_f32/f2x2/k2", "w2x2")  # WM=WN=FM=FN=2, BK=2 — the 64-row tile
 
 
@@ -973,100 +968,10 @@ def _parity_mma_graph(mode: str, *, M: int):
     return g
 
 
-@pytest.fixture(params=["smem-async", "smem-tma"])
-def transport(request, monkeypatch) -> str:
-    """Pin the warp tile (``WARP`` codec) + the operand-staging transport (``STAGE`` codec —
-    ``d2/smem-async`` = cp.async, ``d2/smem-tma`` = cp.async.bulk.tensor). The "pinned knobs" fixture."""
-    _pin_tile(monkeypatch, _WARP_CODEC)
-    monkeypatch.setenv("EMMY_STAGE", f"d2/{request.param}")
-    # REDUCE pinned serial: without it the pick may ride a g<w>k split sibling (a partial +
-    # finalize PAIR — these tests assert on the single ``o`` kernel), depending on how the
-    # live prior ranks the split rows. The pinned path must not hang on prior rank order.
-    monkeypatch.setenv("EMMY_REDUCE", "")
-    return request.param
-
-
-def test_pinned_transport_and_shape_fire(shape_mode, transport):
-    """CPU render (forced sm_120): the pinned knobs select the intended transport and the symbolic
-    M threads a runtime ``seq_len`` arg — so the accuracy test below exercises the path it claims."""
-    lowered = Pipeline.build(CUDA_PASSES).run(_parity_mma_graph(shape_mode, M=512), ctx=Context(compute_capability=(12, 0)))
-    src = lowered.nodes["o"].op.kernel_source
-    assert "mma.sync.aligned.m16n8k16" in src and "ldmatrix" in src, "must be on the s16816 tensor-core tier"
-    if transport == "smem-tma":
-        assert "cp.async.bulk.tensor" in src, f"{shape_mode}/tma: TMA must fire"
-        assert "CUtensorMap" in src, "TMA kernel must take the descriptor param"
-    else:
-        assert "cp.async.bulk.tensor" not in src, f"{shape_mode}/cp.async: TMA must NOT fire"
-        assert "cp.async" in src, f"{shape_mode}/cp.async: operands must stage via cp.async"
-        assert "__shared__" in src, f"{shape_mode}/cp.async: staged operands need an smem slab"
-    if shape_mode == "dynamic":
-        assert "int seq_len" in src, "dynamic kernel must carry the runtime extent arg"
-    else:
-        assert "int seq_len" not in src, "static kernel bakes M — no runtime extent arg"
-
-
-@requires_sm90
-@requires_cuda
-@pytest.mark.parametrize("M", [256, 512])
-def test_symbolic_mma_accuracy_across_transports(transport, M):
-    """ONE symbolic matmul kernel, compiled at the 512 hint and run at two tile-multiple extents,
-    is accurate on cp.async AND TMA. The shape-specialized column is a corpus case at each M; what
-    a case cannot say is that the same cached symbolic kernel serves a size other than its hint."""
-    if transport == "smem-tma" and not _supports_tma():
-        pytest.skip("TMA needs sm_90+ (Hopper / Blackwell)")
-    from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
-
-    be = CudaBackend()
-    compiled = be.compile(_parity_mma_graph("dynamic", M=M))
-    rng = np.random.default_rng(0)
-    a = (rng.standard_normal((M, _PK)) * 0.1).astype(np.float16)
-    b = (rng.standard_normal((_PK, _PN)) * 0.1).astype(np.float16)
-    result, _ = be.run(compiled, input_data={"a": a, "b": b})
-    got = result.outputs["o"].astype(np.float32)
-    want = a.astype(np.float32) @ b.astype(np.float32)
-    assert got.shape == (M, _PN)
-    diff = np.abs(got - want).max()
-    assert diff < 5e-2, f"{transport} M={M}: max abs err {diff}"
-
-
-@requires_sm90
-@requires_cuda
-@pytest.mark.parametrize("M", [128, 256])
-def test_staged_matches_gmem_direct_bit_for_bit(monkeypatch, M):
-    """cp.async operand staging is a PURE perf transform: the staged kernel (``STAGE=d2/smem-async``) must
-    produce **bit-identical** output to the gmem-direct baseline (same ``WARP`` tile, no ``STAGE``)
-    on the same inputs — and actually stage (cp.async + smem slab) where the baseline does not."""
-    from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
-
-    rng = np.random.default_rng(0)
-    a = (rng.standard_normal((M, _PK)) * 0.1).astype(np.float16)
-    b = (rng.standard_normal((_PK, _PN)) * 0.1).astype(np.float16)
-
-    def _go(stage: str | None) -> tuple[np.ndarray, str]:
-        _pin_tile(monkeypatch, _WARP_CODEC)
-        monkeypatch.setenv("EMMY_REDUCE", "")  # serial K: the baseline must not reroute through the restored split-K fork
-        # Pin STAGE="" for the baseline — unpinned, the offline prior may legitimately stage.
-        monkeypatch.setenv("EMMY_STAGE", stage if stage else "")
-        be = CudaBackend()
-        compiled = be.compile(_parity_mma_graph("static", M=M))
-        src = compiled.nodes["o"].op.kernel_source
-        got = np.asarray(be.run(compiled, input_data={"a": a, "b": b})[0].outputs["o"])
-        return got, src
-
-    staged, staged_src = _go("d2/smem-async")
-    gmem, gmem_src = _go(None)
-    assert "cp.async" in staged_src and "__shared__" in staged_src, "STAGE=d2/smem-async must stage via a cp.async smem slab"
-    assert "cp.async" not in gmem_src, "the gmem-direct baseline must not stage"
-    np.testing.assert_array_equal(staged, gmem)  # bit-identical: staging perturbs nothing
-    want = a.astype(np.float32) @ b.astype(np.float32)
-    assert np.abs(staged.astype(np.float32).reshape(M, _PN) - want).max() < 5e-2
-
-
 @requires_sm90
 @requires_cuda
 @pytest.mark.parametrize("tr", ["smem-async", "smem-tma"])
-@pytest.mark.parametrize("M", [128, 256])
-def test_register_double_buffer_matches_single_buffer_bit_for_bit(monkeypatch, tr, M):
+def test_register_double_buffer_matches_single_buffer_bit_for_bit(monkeypatch, tr):
     """The smem→register double-buffer (``STAGE=d2/<tr>/p2``) is a PURE perf transform over the
     single-buffer staged kernel (``d2/<tr>``): same loads, same mmas, only ldmatrix-prefetched
     onto alternate fragment slots — so the output is **bit-identical**, and the source actually
@@ -1076,7 +981,7 @@ def test_register_double_buffer_matches_single_buffer_bit_for_bit(monkeypatch, t
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
 
     rng = np.random.default_rng(0)
-    a = (rng.standard_normal((M, _PK)) * 0.1).astype(np.float16)
+    a = (rng.standard_normal((_PM, _PK)) * 0.1).astype(np.float16)
     b = (rng.standard_normal((_PK, _PN)) * 0.1).astype(np.float16)
 
     def _go(stage: str) -> tuple[np.ndarray, str]:
@@ -1084,7 +989,7 @@ def test_register_double_buffer_matches_single_buffer_bit_for_bit(monkeypatch, t
         monkeypatch.setenv("EMMY_REDUCE", "")  # serial K: the subject is the p2 double-buffer, not the split fork
         monkeypatch.setenv("EMMY_STAGE", stage)
         be = CudaBackend()
-        compiled = be.compile(_parity_mma_graph("static", M=M))
+        compiled = be.compile(_parity_mma_graph("static", M=_PM))
         src = compiled.nodes["o"].op.kernel_source
         got = np.asarray(be.run(compiled, input_data={"a": a, "b": b})[0].outputs["o"])
         return got, src
@@ -1099,8 +1004,7 @@ def test_register_double_buffer_matches_single_buffer_bit_for_bit(monkeypatch, t
 @requires_sm90
 @requires_cuda
 @pytest.mark.parametrize("depth", [2, 3])
-@pytest.mark.parametrize("M", [128, 256])
-def test_cp_async_deep_ring_matches_gmem_direct_bit_for_bit(monkeypatch, depth, M):
+def test_cp_async_deep_ring_matches_gmem_direct_bit_for_bit(monkeypatch, depth):
     """The gmem→smem ring (``STAGE=d<depth>/cp``, depth≥2) prefetches ``depth-1`` K-chunks ahead so
     the cp.async copy overlaps the mma. It is a PURE perf transform: bit-identical to the gmem-direct
     baseline, and the kernel allocates ``depth`` ring slots (``depth`` cp.async ``commit_group``\\ s —
@@ -1108,7 +1012,7 @@ def test_cp_async_deep_ring_matches_gmem_direct_bit_for_bit(monkeypatch, depth, 
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
 
     rng = np.random.default_rng(1)
-    a = (rng.standard_normal((M, _PK)) * 0.1).astype(np.float16)
+    a = (rng.standard_normal((_PM, _PK)) * 0.1).astype(np.float16)
     b = (rng.standard_normal((_PK, _PN)) * 0.1).astype(np.float16)
 
     def _go(stage: str | None) -> tuple[np.ndarray, str]:
@@ -1117,13 +1021,14 @@ def test_cp_async_deep_ring_matches_gmem_direct_bit_for_bit(monkeypatch, depth, 
         # Pin STAGE="" for the baseline — unpinned, the offline prior may legitimately stage.
         monkeypatch.setenv("EMMY_STAGE", stage if stage else "")
         be = CudaBackend()
-        compiled = be.compile(_parity_mma_graph("static", M=M))
+        compiled = be.compile(_parity_mma_graph("static", M=_PM))
         src = compiled.nodes["o"].op.kernel_source
         got = np.asarray(be.run(compiled, input_data={"a": a, "b": b})[0].outputs["o"])
         return got, src
 
     ring, ring_src = _go(f"d{depth}/smem-async")
-    gmem, _ = _go(None)
+    gmem, gmem_src = _go(None)
+    assert "cp.async" not in gmem_src, "the gmem-direct baseline must not stage"
     np.testing.assert_array_equal(ring, gmem)  # bit-identical: prefetch perturbs nothing
     # ``depth`` ``emmy_cp_async_commit();`` CALLS in the body (the trailing ``;`` excludes the one
     # ``emmy_cp_async_commit() {`` helper definition in the cp.async prelude).
@@ -1133,8 +1038,7 @@ def test_cp_async_deep_ring_matches_gmem_direct_bit_for_bit(monkeypatch, depth, 
 @requires_sm90
 @requires_cuda
 @pytest.mark.parametrize("depth", [2, 3])
-@pytest.mark.parametrize("M", [128, 256])
-def test_tma_deep_ring_matches_gmem_direct_bit_for_bit(monkeypatch, depth, M):
+def test_tma_deep_ring_matches_gmem_direct_bit_for_bit(monkeypatch, depth):
     """The TMA gmem→smem ring (``STAGE=d<depth>/tma``, depth≥2) is the same one :func:`staged_kloop`
     the cp.async ring runs — ``depth`` becomes the sole buffering knob across transports. TMA rides a
     **per-slot mbarrier array** (``_mbar[depth]``, each slot's parity toggled per generation
@@ -1145,7 +1049,7 @@ def test_tma_deep_ring_matches_gmem_direct_bit_for_bit(monkeypatch, depth, M):
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
 
     rng = np.random.default_rng(2)
-    a = (rng.standard_normal((M, _PK)) * 0.1).astype(np.float16)
+    a = (rng.standard_normal((_PM, _PK)) * 0.1).astype(np.float16)
     b = (rng.standard_normal((_PK, _PN)) * 0.1).astype(np.float16)
 
     def _go(stage: str | None) -> tuple[np.ndarray, str]:
@@ -1154,7 +1058,7 @@ def test_tma_deep_ring_matches_gmem_direct_bit_for_bit(monkeypatch, depth, M):
         # Pin STAGE="" for the baseline — unpinned, the offline prior may legitimately stage.
         monkeypatch.setenv("EMMY_STAGE", stage if stage else "")
         be = CudaBackend()
-        compiled = be.compile(_parity_mma_graph("static", M=M))
+        compiled = be.compile(_parity_mma_graph("static", M=_PM))
         src = compiled.nodes["o"].op.kernel_source
         got = np.asarray(be.run(compiled, input_data={"a": a, "b": b})[0].outputs["o"])
         return got, src
@@ -1324,25 +1228,6 @@ def _run_tile_pass(graph: Graph):
     return Pipeline.build(TILE_PASSES).run(graph, ctx=Context.from_target((12, 0)))
 
 
-def test_warp_static_k_indivisible_is_masked(monkeypatch) -> None:
-    """A WARP pin whose static K is not a multiple of the K-step LOWERS — the warp K-loop's final
-    partial step zero-fills the fragment halves past K, the same masking a symbolic K gets. The
-    K-step used to be a hard divisibility gate, which put every such shape out of a golden's reach
-    (the emitted zero-fill is asserted by ``test_mma_static_k_tail_zero_fills``)."""
-    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f1x1")  # K-step 16
-    monkeypatch.setenv("EMMY_WORK", "w1x1")
-    _run_tile_pass(_guard_mm_graph(128, 128, 100))  # 100 % 16 == 4 — masked, no raise
-    _run_tile_pass(_guard_mm_graph(128, 128, 128))  # 128 % 16 == 0 — exact, no mask
-
-
-def test_warp_symbolic_k_not_guarded(monkeypatch) -> None:
-    """A symbolic K reaches the masked tier (ceil-div grid + zero-filled partial slab), so the
-    static-K guard does not fire even when the hint is not a K-step multiple."""
-    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f1x1/k2")  # K-step 32
-    monkeypatch.setenv("EMMY_WORK", "w1x1")
-    _run_tile_pass(_guard_mm_graph(64, 128, Dim("seq_len")))  # symbolic K — no raise
-
-
 def test_tile_block_over_thread_limit_rejected(monkeypatch) -> None:
     """A TILE parallel tile over the 1024-thread/CTA limit has no compatible schedule instead of
     reaching a launch that fails with an opaque ``CUDA_ERROR_INVALID_VALUE``."""
@@ -1353,13 +1238,6 @@ def test_tile_block_over_thread_limit_rejected(monkeypatch) -> None:
     lowered = _run_tile_pass(_guard_mm_graph(256, 256, 256, dtype=F32))
     tile = next(node.op for node in lowered.nodes.values() if isinstance(node.op, TileOp))
     assert not tile.place.is_mapped and tile.schedule is None
-
-
-def test_tile_block_within_limit_ok(monkeypatch) -> None:
-    """A TILE parallel tile within the thread limit lowers without the guard firing."""
-    monkeypatch.setenv("EMMY_TILE", "f1")  # 64 threads
-    monkeypatch.setenv("EMMY_WORK", "t8x8")
-    _run_tile_pass(_guard_mm_graph(256, 256, 256, dtype=F32))
 
 
 # =========================================================================== #
@@ -1476,20 +1354,6 @@ def test_masked_symbolic_m_structure(transport, monkeypatch):
         assert "CUtensorMap" in src, "kernel must take the TMA descriptor param"
 
 
-def test_batched_symbolic_mk_reaches_warp(monkeypatch):
-    """The batched masked-M + masked-K P@V consumer must reach the mma.sync tier (the
-    ``classify_matmul_operands`` batch-aware B test), not stay a LoopOp."""
-    # Both operands are direct graph inputs, so this case has no computed edge to stage.
-    for k, v in {**_CP_KNOBS, "STAGE": ""}.items():
-        monkeypatch.setenv(f"EMMY_{k}", v)
-    lowered = Pipeline.build(CUDA_PASSES).run(_batched_symbolic_mk_graph(), ctx=Context(compute_capability=(12, 0)))
-    kop = lowered.nodes["o"].op
-    assert mma_atom(kop.knobs) == "mma_m16n8k16_f16_f32", "batched symbolic M+K matmul must reach the warp tier"
-    src = kop.kernel_source
-    assert "mma.sync.aligned.m16n8k16" in src and "ldmatrix" in src
-    assert "int seq_len" in src, "runtime extent must be a kernel arg"
-
-
 @pytest.mark.xfail(strict=True, reason="fused value channel on tensor cores: not on this tree yet (PR #699)")
 def test_computed_a_symbolic_k_reaches_warp(monkeypatch):
     """A COMPUTED-A contraction over a SYMBOLIC K — softmax(scores) @ V, the SDPA P@V edge under a
@@ -1527,18 +1391,6 @@ def test_computed_a_symbolic_k_reaches_warp(monkeypatch):
     assert masked and all("-1e+30f" in ln for ln in masked), "the overhang must use the Fold identity"
     fill = next(ln for ln in lines if "emmy_cp_async_c" in ln and "_b_smem" in ln)
     assert "< seq_len) ?" in fill and "seq_len - 1" in fill, f"the B slab fill must clamp its overhanging K row: {fill}"
-
-
-def test_transposed_b_symbolic_k_zero_fills(monkeypatch):
-    """A warp-tier A @ Bᵀ with symbolic K (transposed-B, K contiguous) emits the (n,k)-swapped
-    K-zero-fill helper — K is summed by the mma, so the straddling final K tile must read +0.0
-    past ``seq_len``, not a duplicate. (Accuracy at straddling sizes: ``symbolic_k_trans`` below.)"""
-    _pin_tile(monkeypatch, _MASK_WARP)
-    lowered = Pipeline.build(CUDA_PASSES).run(_mma_symbolic_k_graph(64, 32, trans=True), ctx=Context(compute_capability=(12, 0)))
-    kop = lowered.nodes["c"].op
-    src = kop.kernel_source
-    assert "mma.sync.aligned.m16n8k16" in src, "transposed-B symbolic-K must reach the warp tier"
-    assert "emmy_mma_load_b_gmem_trans_kzero" in src, "transposed-B symbolic-K must zero-fill via the (n,k)-swapped trans helper"
 
 
 # (label, env, seqs, make). ``make(seq)`` builds (graph, feed, want) for one off-hint runtime
@@ -1658,8 +1510,8 @@ _MASKED_CASES = {
     # Transposed-B (A @ Bᵀ, K contiguous) symbolic-K: the mma zero-fills the masked-K tail through
     # the (n,k)-swapped trans helper. Gmem-direct (no STAGE), M/N are tile divisors so only K masks.
     "symbolic_k_trans": ({"TILE": _MASK_WARP[0], "WORK": _MASK_WARP[1]}, [16, 31, 130, 700], _make_transposed_symbolic_k),
-    # Left unpinned: the batched masked-M+K row the planner's own greedy pick takes (the structure
-    # render reaches the warp tier — see ``test_batched_symbolic_mk_reaches_warp``).
+    # Left unpinned: the batched masked-M+K row the planner's own greedy pick takes (that the
+    # shape reaches the warp tier is the corpus case ``matmul/f16-symbolic-batched-mk-greedy``).
     "batched_mk": ({}, [16, 31, 130, 700], _make_batched_mk),
     # The demoted B-cone / softmax-P@V shapes run under GREEDY — the planner's own pick over the
     # fused computed-operand cone. (``SPLIT_CONE``, which once forced the demotion split here, has

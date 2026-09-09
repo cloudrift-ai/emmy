@@ -30,6 +30,12 @@ A case earns a place in the corpus in either of two ways:
   names, and stop once the main paths have live coverage. This proves those rows still build and run; it does not
   qualify the full golden.
 
+One case per regime. A second size of a row the corpus already realizes (a bigger grid on the same tile, a batch that
+only multiplies the launch) or a second spelling of the same identity and row (an output dtype the identity does not
+distinguish, the same program at another tile width) is not a case: it walks the same code four more times and catches
+nothing the first did not. A sweep that exists to be measured belongs to the perf lane, which reads the corpus, and
+`cases/qwen3emb/` is that sweep; a family that is not one keeps one size per regime.
+
 Two neighbouring failure classes deliberately do **not** earn a case, because admitting them would make the ratchet
 meaningless:
 
