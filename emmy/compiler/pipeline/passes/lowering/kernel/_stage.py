@@ -366,7 +366,11 @@ def _swizzle_align(swizzle: str) -> int:
     (``0``), so an unswizzled slab packs where it did before this table reached the sync path.
 
     This is only half of a copied slab's requirement; :func:`_fill_align` adds the other half."""
-    return 0 if swizzle == "NONE" else _SWIZZLE_SLAB_ALIGN[swizzle_base(swizzle)]
+    if swizzle == "NONE":
+        return 0
+    if swizzle in ("V70A", "V70B"):
+        return 16
+    return _SWIZZLE_SLAB_ALIGN[swizzle_base(swizzle)]
 
 
 def _fill_align(cols: int, elem_bytes: int, swizzle: str) -> int:

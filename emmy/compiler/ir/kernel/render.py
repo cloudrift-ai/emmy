@@ -207,6 +207,27 @@ _MMA_M8N8K4_PRELUDE = """\
 // Volta m8n8k4: one warp instruction performs four independent 8x8 MMAs.
 // The lane's four-lane computation group selects one quadrant of a logical
 // 16x16 output cell; groups in the same quadrant row/column duplicate A/B.
+static __device__ __forceinline__ int emmy_volta_crosswise(int e, int ldm, int rows) {
+    int row = e / ldm;
+    int col = e - row * ldm;
+    int vec = col >> 2;
+    int within = vec & 7;
+    int permuted_row = (row & ~15) + ((row & 3) << 2) + (((row >> 2) ^ ((row & 16) >> 3)) & 3);
+    permuted_row ^= (within >> 1) & 3;
+    return (vec * rows + permuted_row) * 4 + (col & 3);
+}
+
+static __device__ __forceinline__ int emmy_volta_b_congruous(int e, int ldm) {
+    int row = e / ldm;
+    int col = e - row * ldm;
+    int vec = col >> 3;
+    int vec_row = vec & 3;
+    int permuted_vec = ((row & 3) ^ vec_row) | (vec & 4);
+    int physical_row = (row & ~3) + vec_row;
+    int physical_col = ((vec & ~7) + permuted_vec) * 8 + (col & 7);
+    return physical_row * ldm + physical_col;
+}
+
 template <typename T, typename F = T>
 static __device__ __forceinline__ void emmy_mma884_load_a_impl(
     unsigned* r, const T* g, int ldm, int rows_left, int k_left) {
@@ -325,6 +346,45 @@ static __device__ __forceinline__ void emmy_mma884_load_b_smem_trans(unsigned* r
     emmy_mma884_load_smem4(r, s + col * ldm);
 }
 
+// CUTLASS's Volta layouts turn two logical 16-row/column fragments into one
+// conflict-free LDS.128. A's k-group 2 bit swaps the loaded 64-bit halves;
+// B's congruous layout feeds the row-major-B mma form directly.
+template <typename T>
+static __device__ __forceinline__ void emmy_mma884_load_a_crosswise_pair(
+    unsigned* r0, unsigned* r1, const T* s, int row, int k, int rows) {
+    int lane = threadIdx.x & 31;
+    int quad = lane >> 2;
+    int lane_in_quad = lane & 3;
+    int access = ((quad & 4) << 1) + (lane_in_quad << 1) + ((quad & 1) ^ ((quad & 4) >> 2));
+    int k_group = k >> 2;
+    int offset = row * 4 + access * 8 + k_group * rows * 4 + (((k_group >> 2) & 1) * 8);
+    uint4 packed = *reinterpret_cast<const uint4*>(s + offset);
+    if (k_group & 2) {
+        uint2 tmp = make_uint2(packed.x, packed.y);
+        packed.x = packed.z;
+        packed.y = packed.w;
+        packed.z = tmp.x;
+        packed.w = tmp.y;
+    }
+    r0[0] = packed.x;
+    r0[1] = packed.y;
+    r1[0] = packed.z;
+    r1[1] = packed.w;
+}
+
+template <typename T>
+static __device__ __forceinline__ void emmy_mma884_load_b_congruous_pair(
+    unsigned* r0, unsigned* r1, const T* s, int row, int col, int ldm) {
+    int lane = threadIdx.x & 31;
+    int access_row = (lane >> 3) & 3;
+    int access_col = (lane ^ (lane >> 3)) & 3;
+    uint4 packed = *reinterpret_cast<const uint4*>(s + (row + access_row) * ldm + col + access_col * 8);
+    r0[0] = packed.x;
+    r0[1] = packed.y;
+    r1[0] = packed.z;
+    r1[1] = packed.w;
+}
+
 // Volta C->A register repack. One logical m8n8k4 C fragment covers 16x16 through
 // four computation groups. An A fragment needs one row's four adjacent columns;
 // those values live in two lanes of the computation group for that column quarter.
@@ -364,6 +424,19 @@ static __device__ __forceinline__ void emmy_c_to_a_f16_m8n8k4(unsigned* a, const
 static __device__ __forceinline__ void emmy_mma_m8n8k4_f16_f32(
     float* d, const unsigned* a, const unsigned* b, const float* c) {
     asm volatile("mma.sync.aligned.m8n8k4.row.col.f32.f16.f16.f32 "
+                 "{%0, %1, %2, %3, %4, %5, %6, %7}, {%8, %9}, {%10, %11}, "
+                 "{%12, %13, %14, %15, %16, %17, %18, %19};\\n"
+                 : "=f"(d[0]), "=f"(d[1]), "=f"(d[2]), "=f"(d[3]),
+                   "=f"(d[4]), "=f"(d[5]), "=f"(d[6]), "=f"(d[7])
+                 : "r"(a[0]), "r"(a[1]), "r"(b[0]), "r"(b[1]),
+                   "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]),
+                   "f"(c[4]), "f"(c[5]), "f"(c[6]), "f"(c[7]));
+}
+
+
+static __device__ __forceinline__ void emmy_mma_m8n8k4_f16_f32_brow(
+    float* d, const unsigned* a, const unsigned* b, const float* c) {
+    asm volatile("mma.sync.aligned.m8n8k4.row.row.f32.f16.f16.f32 "
                  "{%0, %1, %2, %3, %4, %5, %6, %7}, {%8, %9}, {%10, %11}, "
                  "{%12, %13, %14, %15, %16, %17, %18, %19};\\n"
                  : "=f"(d[0]), "=f"(d[1]), "=f"(d[2]), "=f"(d[3]),

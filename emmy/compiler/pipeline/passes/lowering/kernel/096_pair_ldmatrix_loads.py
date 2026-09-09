@@ -33,9 +33,9 @@ from __future__ import annotations
 from dataclasses import replace
 
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal
+from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, SimplifyCtx, affine_form
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.kernel.ir import LdmatrixLoad, MbarrierWait, Sync
+from emmy.compiler.ir.kernel.ir import VOLTA_B_CONGRUOUS, VOLTA_CROSSWISE, LdmatrixLoad, MbarrierWait, Sync
 from emmy.compiler.ir.stmt import Body, Cond, Loop, Stmt, StridedLoop, Write
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 from emmy.compiler.pipeline.search.space import PAIR_LDMATRIX
@@ -98,6 +98,12 @@ def _delta(a: Expr, b: Expr) -> int | None:
     """The structural constant difference ``b - a``, or ``None`` (not provably constant)."""
     if a == b:
         return 0
+    free = a.free_vars() | b.free_vars()
+    af, bf = affine_form(a, free), affine_form(b, free)
+    if af is not None and bf is not None and af[1] == bf[1]:
+        diff = BinaryExpr("-", bf[0], af[0]).simplify(SimplifyCtx.empty())
+        if isinstance(diff, Literal) and isinstance(diff.value, int):
+            return diff.value
     (ab, ac), (bb, bc) = _split(a), _split(b)
     if ab == bb and ac is not None and bc is not None:
         return bc - ac
@@ -106,15 +112,25 @@ def _delta(a: Expr, b: Expr) -> int | None:
 
 def _candidate(s: Stmt) -> bool:
     # A staged byte-slab (fp8) drain is a cooperative gather, not an ldmatrix — nothing to pair.
-    return isinstance(s, LdmatrixLoad) and s.staged and not s.byte_slab and s.role == "b" and s.pair_frag is None and len(s.src_index) == 2
+    if not isinstance(s, LdmatrixLoad) or not s.staged or s.byte_slab or s.pair_frag is not None or len(s.src_index) != 2:
+        return False
+    if s.fragment_layout == "m8n8k4":
+        return (s.role == "a" and s.swizzle == VOLTA_CROSSWISE) or (s.role == "b" and s.swizzle == VOLTA_B_CONGRUOUS)
+    return s.role == "b"
 
 
 def _pairs_with(a: LdmatrixLoad, b: LdmatrixLoad) -> bool:
     """``b`` is ``a``'s slab-adjacent partner: the SECOND fragment of one x4 (the ``+8``
     matrices lanes 16-31 address)."""
-    if a.src_buffer != b.src_buffer or a.ldm != b.ldm or a.b_trans != b.b_trans or a.swizzle != b.swizzle:
+    if a.src_buffer != b.src_buffer or a.role != b.role or a.ldm != b.ldm or a.b_trans != b.b_trans or a.swizzle != b.swizzle:
         return False
     row_d, col_d = _delta(a.src_index[0], b.src_index[0]), _delta(a.src_index[1], b.src_index[1])
+    if a.fragment_layout == "m8n8k4":
+        if b.fragment_index != a.fragment_index + 1:
+            return False
+        if a.role == "a":
+            return a.swizzle == VOLTA_CROSSWISE and col_d == 0
+        return a.swizzle == VOLTA_B_CONGRUOUS and row_d == 0
     if a.b_trans:  # N-major slab: N rows adjacent, same K col
         return row_d == _ATOM8 and col_d == 0
     return row_d == 0 and col_d == _ATOM8  # K-major slab: same K row, cols adjacent
@@ -143,6 +159,9 @@ def _pair(stmts: list[Stmt]) -> list[Stmt] | None:
     while i < len(out):
         a = out[i]
         if not _candidate(a):
+            i += 1
+            continue
+        if isinstance(a, LdmatrixLoad) and a.fragment_layout == "m8n8k4" and a.fragment_index % 2:
             i += 1
             continue
         j = i + 1

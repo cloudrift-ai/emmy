@@ -852,13 +852,11 @@ class Write(Stmt):
     def has_side_effects(self) -> bool:
         return True
 
-    def _swizzled(self, flat: str) -> str:
-        """The flattened store index, XOR-permuted through the slab's swizzle helper when this
-        Write targets a swizzled smem slab (the sync compute-fill's producer side) — inert at
-        the default ``"NONE"``."""
-        from emmy.compiler.ir.kernel.ir import swizzle_fn, swizzle_xor  # noqa: PLC0415 — kernel IR imports this module
+    def _swizzled(self, flat: str, ctx: RenderCtx) -> str:
+        """The flattened store index under this shared slab's derived physical layout."""
+        from emmy.compiler.ir.kernel.ir import smem_layout_index  # noqa: PLC0415 — kernel IR imports this module
 
-        return flat if not swizzle_xor(self.swizzle) else f"{swizzle_fn(self.swizzle)}({flat})"
+        return smem_layout_index(self.swizzle, flat, self.output, ctx)
 
     def pretty(self, indent: str = "") -> list[str]:
         idx = ", ".join(e.pretty() for e in self.index)
@@ -879,7 +877,7 @@ class Write(Stmt):
             # Scalar path. Convert at the store boundary only when the
             # value's SSA dtype disagrees with the destination buffer's
             # dtype — native chains write through with no conversion.
-            flat = self._swizzled(render_index(self.output, self.index, ctx))
+            flat = self._swizzled(render_index(self.output, self.index, ctx), ctx)
             value_dt = stamped_value_dt or ctx.ssa_dtypes.get(self.value, "f32")
             rhs = ctx.target.convert(_resolve_value(self.value, ctx), value_dt, out_dt)
             if self.atomic:
@@ -903,11 +901,12 @@ class Write(Stmt):
             lines: list[str] = []
             for k in range(n):
                 idx_k = tuple(self.index[:-1]) + (BinaryExpr("+", self.index[-1], Literal(k, "int")),)
-                flat = self._swizzled(render_index(self.output, idx_k, ctx))
+                flat = self._swizzled(render_index(self.output, idx_k, ctx), ctx)
                 lines.append(f"{pad}{self.output}[{flat}] = {converted[k]};")
             return lines
         vec_type, _elem_type = vec_pair
-        flat = self._swizzled(render_index(self.output, self.index, ctx))
+        logical_flat = render_index(self.output, self.index, ctx)
+        flat = self._swizzled(logical_flat, ctx)
         # Native-width vectors (``float2`` / ``float4`` / ``__half2``) take
         # a positional constructor — ``make_float2(a, b)`` for fp32 paths,
         # ``__halves2half2(a, b)`` for the fp16 pair. Wider packed vectors
@@ -938,6 +937,21 @@ class Write(Stmt):
             return [
                 f"{pad}{vec_type} {temp} = make_{vec_type}({args});",
                 f"{pad}*reinterpret_cast<{vec_type}*>(&{self.output}[{flat}]) = {temp};",
+            ]
+        # Volta A's crosswise layout is 64-bit-granular: an eight-half logical fill run becomes
+        # two separately permuted uint2 stores. The gmem side remains one 128-bit Load; only the
+        # shared deposit splits. Four-half runs already fit one crosswise access.
+        from emmy.compiler.ir.kernel.ir import VOLTA_CROSSWISE  # noqa: PLC0415 — kernel IR imports this module
+
+        if self.swizzle == VOLTA_CROSSWISE and n == 8:
+            elem_type = ctx.type_name(out_dt)
+            arr = temp
+            init = ", ".join(converted)
+            flat_hi = self._swizzled(f"({logical_flat}) + 4", ctx)
+            return [
+                f"{pad}{elem_type} {arr}[{n}] = {{ {init} }};",
+                f"{pad}*reinterpret_cast<uint2*>(&{self.output}[{flat}]) = *reinterpret_cast<const uint2*>({arr});",
+                f"{pad}*reinterpret_cast<uint2*>(&{self.output}[{flat_hi}]) = *reinterpret_cast<const uint2*>({arr} + 4);",
             ]
         # Packed widths (uint2 / uint4) over fp16: stage through a local
         # array of ``__half`` so we never need to construct a uint{2,4}

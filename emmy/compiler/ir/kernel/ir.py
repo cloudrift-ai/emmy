@@ -1432,6 +1432,13 @@ LDMATRIX_SWIZZLE_XOR: dict[str, tuple[int, int]] = {
     "B32": (6, 0x1),
 }
 
+#: The two software-written Volta operand layouts. Unlike the modern ``B*`` XOR modes, these
+#: permute complete logical ``(row, col)`` coordinates so an SM70 warp can drain the slab through
+#: ordinary 128-bit shared loads. They are internal lowering choices, not schedule knobs.
+VOLTA_CROSSWISE = "V70A"
+VOLTA_B_CONGRUOUS = "V70B"
+VOLTA_SMEM_LAYOUTS = frozenset((VOLTA_CROSSWISE, VOLTA_B_CONGRUOUS))
+
 #: A SOFTWARE-swizzled mode may override the element shift, spelled ``<mode>@<shift>``. The shift
 #: above is ``log2(atom elems)``, which reads the row index only while a slab row IS one swizzle
 #: atom. A WIDER row (the flash slabs: a 128-elem fp16 head-dim row is two 128 B atoms) leaves the
@@ -1465,6 +1472,22 @@ def swizzle_fn(mode: str) -> str:
     ``(mask, shift)`` pair, so two slabs sharing a spelling share the emitted function."""
     base = swizzle_base(mode)
     return f"emmy_swizzle_{base.lower()}" + ("" if mode == base else f"_s{swizzle_xor(mode)[0]}")
+
+
+def smem_layout_index(mode: str, flat: str, buffer: str, ctx: RenderCtx) -> str:
+    """Render ``flat`` through the slab layout selected by ``mode``.
+
+    Modern layouts are the existing one-argument XOR. Volta A needs both logical dimensions:
+    the crosswise physical stride is the slab's row count, while Volta B's congruous layout uses
+    the ordinary logical row stride. ``NONE`` and unknown spellings stay row-major.
+    """
+    if mode == VOLTA_CROSSWISE:
+        rows, cols = ctx.shapes[buffer]
+        return f"emmy_volta_crosswise({flat}, {cols}, {rows})"
+    if mode == VOLTA_B_CONGRUOUS:
+        cols = ctx.shapes[buffer][-1]
+        return f"emmy_volta_b_congruous({flat}, {cols})"
+    return flat if not swizzle_xor(mode) else f"{swizzle_fn(mode)}({flat})"
 
 
 @dataclass(frozen=True)
@@ -1589,6 +1612,9 @@ class LdmatrixLoad(Stmt):
     scale_index: tuple = ()
     scale_ldm: int = 0
     fragment_layout: str = "m16n8k16"
+    # Position inside this warp operand's register tile. Volta pairs even/odd logical fragments
+    # after slot offsets have made structural coordinate-delta matching needlessly fragile.
+    fragment_index: int = 0
 
     def deps(self) -> tuple[str, ...]:
         return (self.frag,) if self.pair_frag is None else (self.frag, self.pair_frag)
@@ -1726,11 +1752,26 @@ class LdmatrixLoad(Stmt):
             # global and shared addresses, so point its inlined gather at the staged slab; ptxas
             # resolves the generic pointer to ordinary LDS instructions. Fill-side clamps make
             # the slab exact, and the first implementation intentionally keeps it unswizzled.
-            assert self.pair_frag is None and not self.byte_slab, "the Volta staged drain is an unpacked f16 gather"
-            assert self.swizzle == "NONE", "the Volta shared-memory gather has no swizzled layout"
+            assert not self.byte_slab, "the Volta staged drain is an unpacked f16 gather"
             slab_dt = ctx.buffer_dtypes.get(self.src_buffer, "f16")
             frag_dt = frag_dtype(ctx, self.frag) or slab_dt
             targs = "" if slab_dt == frag_dt else f"<{ctx.type_name(slab_dt)}, {ctx.type_name(frag_dt)}>"
+            if self.swizzle == VOLTA_CROSSWISE:
+                assert self.role == "a" and self.pair_frag is not None and slab_dt == frag_dt == "f16"
+                row, col = (e.render(ctx) for e in self.src_index)
+                rows = ctx.shapes[self.src_buffer][0]
+                return [
+                    f"{_pad(ctx.indent)}emmy_mma884_load_a_crosswise_pair({self.frag}, {self.pair_frag}, "
+                    f"{self.src_buffer}, {row}, {col}, {rows});"
+                ]
+            if self.swizzle == VOLTA_B_CONGRUOUS:
+                assert self.role == "b" and self.pair_frag is not None and slab_dt == frag_dt == "f16"
+                row, col = (e.render(ctx) for e in self.src_index)
+                return [
+                    f"{_pad(ctx.indent)}emmy_mma884_load_b_congruous_pair({self.frag}, {self.pair_frag}, "
+                    f"{self.src_buffer}, {row}, {col}, {ldm});"
+                ]
+            assert self.pair_frag is None and self.swizzle == "NONE"
             helper = (
                 "emmy_mma884_load_a_smem"
                 if self.role == "a"
@@ -1847,6 +1888,9 @@ class MmaSyncPtx(Stmt):
     shape: tuple[int, int, int]
     ab_dtype: str = "f16"
     c_dtype: str = "f32"
+    # The Volta canonical-B fast path uses the row-major B fragment mapping. Every other atom and
+    # the Volta N-major B path keep the established column-major B mapping.
+    b_row_major: bool = False
     # The BLOCK-SCALED form's two extra register operands (one packed b32 of ue4m3 block scales
     # per side), set together or not at all. Present only for the fp4 atom, whose instruction
     # applies the per-16-element scales itself; every other mma leaves them ``None``.
@@ -1877,6 +1921,9 @@ class MmaSyncPtx(Stmt):
         # Wrapper names follow the atom convention's <ab>_<acc> dtype pair (emmy_mma_m16n8k16_f16_f32).
         # ``c`` is passed for both the ``d`` (out) and ``c`` (in) operands.
         wrapper = f"emmy_mma_m{m}n{n}k{k}_{self.ab_dtype}_{self.c_dtype}"
+        if self.b_row_major:
+            assert (m, n, k) == (8, 8, 4), "only the Volta atom has a row-major B wrapper"
+            wrapper += "_brow"
         if self.block_scaled:
             # The block-scaled wrapper accumulates in place, so it takes the scale registers
             # where the others take ``c`` a second time.

@@ -43,6 +43,8 @@ from emmy.compiler.ir.kernel.ir import (
     M16N8,
     ROW,
     UNIFORM,
+    VOLTA_B_CONGRUOUS,
+    VOLTA_CROSSWISE,
     BlockScaleLoad,
     EpilogueLoad,
     FragLayout,
@@ -465,6 +467,7 @@ def _staged_inner_atom_loop(
                         scale_index=scale_index,
                         scale_ldm=scale_ldm,
                         fragment_layout=atom.fragment_layout,
+                        fragment_index=x,
                     )
                 )
         return reads
@@ -478,6 +481,7 @@ def _staged_inner_atom_loop(
                 shape=atom.ptx_shape,
                 ab_dtype=atom.ab_dtype,
                 c_dtype=atom.operand_dtype("c").name,
+                b_row_major=atom.fragment_layout == "m8n8k4" and swizzles[1 + f] == VOLTA_B_CONGRUOUS,
                 sfa_frag=f"_sfa{i}{suffix}" if block_scaled else None,
                 sfb_frag=f"{_fold_frag(f'_sfb{j}', f)}{suffix}" if block_scaled else None,
             )
@@ -1652,14 +1656,29 @@ class _MmaOps(_AtomOps):
         so its inner row span is the K chunk (``bk_elems``) like A's. A 1-byte (fp8) slab stays
         ``NONE`` — its cooperative byte-gather drain applies no address XOR (the ldmatrix XOR is
         b16-indexed); the cp.async byte slab's bank spread is the row pad instead."""
+        if self.tile.atom.fragment_layout == "m8n8k4":
+            # Volta has no ldmatrix. A materialized row-major A uses CUTLASS's crosswise layout;
+            # a materialized canonical row-major B uses its B-congruous layout and the row/row
+            # mma form. Each layout is enabled only when the warp tile contains complete pairs
+            # of logical 16-row/column fragments, because one ordinary LDS.128 drains each pair.
+            a_copied = self.c.operands[0].as_slab() is not None
+
+            def copied_b(edge) -> bool:
+                slab = edge.as_slab() if isinstance(edge, Fold) else None
+                return isinstance(slab.load if slab is not None else edge, Load)
+
+            b_copied = all(copied_b(edge) for edge, _ in self.channels)
+            a = VOLTA_CROSSWISE if a_copied and mn[0].reg % 2 == 0 else "NONE"
+            b = VOLTA_B_CONGRUOUS if b_copied and not self.c.as_contraction().b_trans and mn[1].reg % 2 == 0 else "NONE"
+            return a, b
         b_inner = self.stage.bk_elems if self.c.as_contraction().b_trans else mn[1].tile
         return tuple(self.slab_swizzle(inner, e.nbytes) for e, inner in zip(self.slab_elems(), (self.stage.bk_elems, b_inner), strict=True))
 
     def slab_swizzle(self, inner: int, nbytes: int) -> str:
         """One slab's swizzle mode from its inner (contiguous) row span — the reading
         :meth:`slab_swizzles` applies to A and B, and the chunk tier to each of its two streams."""
-        if nbytes == 1 or self.tile.atom.fragment_layout == "m8n8k4":
-            return "NONE"  # the Volta gather drain and the byte gather both read unswizzled rows
+        if nbytes == 1:
+            return "NONE"  # the byte gather reads an ordinary padded row
         # A TMA slab keeps the hardware spelling (the copy engine fixes its permutation, and the
         # descriptor splits its box down to the atom); every other transport writes the slab in
         # software, so its XOR reads the row index at the slab's OWN stride.

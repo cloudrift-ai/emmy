@@ -197,6 +197,17 @@ def test_sm70_contiguous_staged_fragments_use_one_wide_load(monkeypatch) -> None
     assert "emmy_mma884_load_smem4(r, s + col * ldm);" in src
 
 
+def test_sm70_materialized_tiles_use_paired_volta_layout_loads(monkeypatch) -> None:
+    """Even Volta register tiles derive the coupled CUTLASS fill/drain layouts by default."""
+    _pin(monkeypatch, VOLTA, tile="f2x2", stage="d1/smem")
+    src, _ = _source(_graph(m=32, n=32, k=16), Context(compute_capability=(7, 0)))
+    assert "_a_smem[emmy_volta_crosswise(" in src
+    assert "_b_smem[emmy_volta_b_congruous(" in src
+    assert "emmy_mma884_load_a_crosswise_pair(_a0, _a1" in src
+    assert "emmy_mma884_load_b_congruous_pair(_b0, _b1" in src
+    assert src.count("emmy_mma_m8n8k4_f16_f32_brow(_c") == 4
+
+
 def test_sm70_output_stores_contiguous_fragment_pairs(monkeypatch) -> None:
     """The eight Volta accumulator elements leave registers as four contiguous half2 pairs."""
     _pin(monkeypatch, VOLTA)
@@ -242,7 +253,7 @@ def test_sm70_ring_splits_the_blocking_copy_across_the_drain(monkeypatch) -> Non
     prologue, _, body = src.partition("for (int _ks")
     issue = body.index("_v__a_stage0_0")  # the staged gmem load of the PREFETCH chunk
     drain = body.index("emmy_mma_m8n8k4_f16_f32")
-    deposit = body.index("*reinterpret_cast<uint4*>(&_a_smem[")
+    deposit = body.index("*reinterpret_cast<uint2*>(&_a_smem[emmy_volta_crosswise(")
     assert issue < drain < deposit, "the drain must sit between the staged load and its slab store"
     assert body.count("__syncthreads();") == 1, "the deposit's barrier is the whole per-chunk handshake"
     assert prologue.count("__syncthreads();") == 1, "the primed slot is published once before the loop"
@@ -259,9 +270,9 @@ def test_sm70_register_tile_keeps_the_volta_fragment_layout_through_the_reroll(m
     _pin(monkeypatch, VOLTA, tile="f2x2", stage="d1/smem")
     monkeypatch.setenv("EMMY_LOOPIFY", "2")
     src, _ = _source(_graph(m=32, n=32, k=16), Context(compute_capability=(7, 0)))
-    assert "unsigned _a[2][2]" in src  # the ROLLED fragment family (count > 1)
-    assert "emmy_mma884_load_a_smem(_a[" in src
-    assert "emmy_mma884_load_b_smem(_b[" in src
+    assert "unsigned _b[2][2]" in src  # the ROLLED fragment family (count > 1)
+    assert "emmy_mma884_load_a_crosswise_pair(_a0, _a1" in src
+    assert "emmy_mma884_load_b_congruous_pair(_b[0], _b[1]" in src
     assert "const int _vr = " in src and "const int _vc = " in src  # the m8n8k4 C-fragment store map
     for forbidden in NEWER_INSTRUCTIONS:
         assert forbidden not in src
