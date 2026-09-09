@@ -430,7 +430,17 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         sink = (
             store
             if store is not None
-            else store_sink(c, tile, Body(tuple(epi)), lead, frag_ns, k_axis=k_axis, axes=ctx.sched.tile.axes, inner=inner)
+            else store_sink(
+                c,
+                tile,
+                Body(tuple(epi)),
+                lead,
+                frag_ns,
+                stage=stage,
+                k_axis=k_axis,
+                axes=ctx.sched.tile.axes,
+                inner=inner,
+            )
         )
         t = unit_tile(register_tile(atomize(tile.atom.shape[:2]), tile.mn), tile.mn)
         mn, bt, lanes = tile.mn, tile.launch_threads, tile.atom.lanes

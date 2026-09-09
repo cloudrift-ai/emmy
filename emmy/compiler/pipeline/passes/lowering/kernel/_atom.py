@@ -43,6 +43,8 @@ from emmy.compiler.ir.kernel.ir import (
     M16N8,
     ROW,
     UNIFORM,
+    VOLTA_B_CONGRUOUS,
+    VOLTA_CROSSWISE,
     BlockScaleLoad,
     EpilogueLoad,
     FragLayout,
@@ -95,7 +97,7 @@ from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     staged_kloop,
     sync_stat_fill,
 )
-from emmy.compiler.pipeline.search.space import UNROLL
+from emmy.compiler.pipeline.search.space import PAIR_LDMATRIX, UNROLL
 
 #: The contraction semiring — multiply ⊗ then accumulate ⊕ (add). The same multiply-add ``mma.sync``
 #: realizes; in the scalar tier it is a plain scalar fma loop.
@@ -465,6 +467,7 @@ def _staged_inner_atom_loop(
                         scale_index=scale_index,
                         scale_ldm=scale_ldm,
                         fragment_layout=atom.fragment_layout,
+                        fragment_index=x,
                     )
                 )
         return reads
@@ -478,6 +481,7 @@ def _staged_inner_atom_loop(
                 shape=atom.ptx_shape,
                 ab_dtype=atom.ab_dtype,
                 c_dtype=atom.operand_dtype("c").name,
+                b_row_major=atom.fragment_layout == "m8n8k4" and swizzles[1 + f] == VOLTA_B_CONGRUOUS,
                 sfa_frag=f"_sfa{i}{suffix}" if block_scaled else None,
                 sfb_frag=f"{_fold_frag(f'_sfb{j}', f)}{suffix}" if block_scaled else None,
             )
@@ -1636,7 +1640,25 @@ class _MmaOps(_AtomOps):
         scale = getattr(op, "scale", None)
         return None if scale is None else (scale[0], self.stage.bk_elems // scale[1], scale[1])
 
-    def slab_swizzles(self, mn, elem_bytes: int) -> tuple[str, str]:  # noqa: ARG002 — per-operand widths come from slab_elems
+    def _volta_pair_layout(self, mn) -> bool:
+        """Whether this staged cell can use the coupled Volta operand and accumulator layouts."""
+        if self.stage is None or self.tile.atom.fragment_layout != "m8n8k4" or PAIR_LDMATRIX.narrow((True,)) != (True,):
+            return False
+        a_copied = self.c.operands[0].as_slab() is not None
+
+        def copied_b(edge) -> bool:
+            slab = edge.as_slab() if isinstance(edge, Fold) else None
+            return isinstance(slab.load if slab is not None else edge, Load)
+
+        return (
+            a_copied
+            and all(copied_b(edge) for edge, _ in self.channels)
+            and not self.c.as_contraction().b_trans
+            and mn[0].reg % 2 == 0
+            and mn[1].reg % 2 == 0
+        )
+
+    def slab_swizzles(self, mn, elem_bytes: int) -> tuple[str, ...]:  # noqa: ARG002 — per-operand widths come from slab_elems
         """The smem swizzle mode per operand slab, from each slab's inner (contiguous) row
         span — A's is ``bk_elems`` (the K chunk), B's ``tile_n``. TMA applies the mode in
         hardware (in-copy); the cp.async transport applies the identical XOR in software on
@@ -1651,15 +1673,27 @@ class _MmaOps(_AtomOps):
         stages N-major on EVERY transport (cp.async / TMA / the sync transport's async B fills),
         so its inner row span is the K chunk (``bk_elems``) like A's. A 1-byte (fp8) slab stays
         ``NONE`` — its cooperative byte-gather drain applies no address XOR (the ldmatrix XOR is
-        b16-indexed); the cp.async byte slab's bank spread is the row pad instead."""
+        b16-indexed); the cp.async byte slab's bank spread is the row pad instead. Complete paired
+        Volta tiles instead use the crosswise A and B-congruous layouts together; the existing
+        ``PAIR_LDMATRIX`` policy pin can disable that lowering and retain the ordinary gather."""
+        if self.tile.atom.fragment_layout == "m8n8k4":
+            # Volta has no ldmatrix. A materialized row-major A uses CUTLASS's crosswise layout;
+            # a materialized canonical row-major B uses its B-congruous layout and the row/row
+            # mma form. Each layout is enabled only when the warp tile contains complete pairs
+            # of logical 16-row/column fragments, because one ordinary LDS.128 drains each pair.
+            paired = self._volta_pair_layout(mn)
+            return (
+                VOLTA_CROSSWISE if paired else "NONE",
+                *((VOLTA_B_CONGRUOUS if paired else "NONE") for _ in self.channels),
+            )
         b_inner = self.stage.bk_elems if self.c.as_contraction().b_trans else mn[1].tile
         return tuple(self.slab_swizzle(inner, e.nbytes) for e, inner in zip(self.slab_elems(), (self.stage.bk_elems, b_inner), strict=True))
 
     def slab_swizzle(self, inner: int, nbytes: int) -> str:
         """One slab's swizzle mode from its inner (contiguous) row span — the reading
         :meth:`slab_swizzles` applies to A and B, and the chunk tier to each of its two streams."""
-        if nbytes == 1 or self.tile.atom.fragment_layout == "m8n8k4":
-            return "NONE"  # the Volta gather drain and the byte gather both read unswizzled rows
+        if nbytes == 1:
+            return "NONE"  # the byte gather reads an ordinary padded row
         # A TMA slab keeps the hardware spelling (the copy engine fixes its permutation, and the
         # descriptor splits its box down to the atom); every other transport writes the slab in
         # software, so its XOR reads the row index at the slab's OWN stride.
@@ -1864,6 +1898,7 @@ class _MmaOps(_AtomOps):
         :class:`RegEpilogue` and guarding overhanging M/N rows. A multi-fold node binds its extra C
         fragments as additional epilogue accumulators (the combine — SwiGLU — reads them per cell)."""
         atom = self.tile.atom
+        volta_interleaved = self._volta_pair_layout(mn)
         m, n = mn
         mcell, ncell = offset[0].base(i), offset[1].base(j)
         tail = list(self.epilogue)
@@ -1909,6 +1944,8 @@ class _MmaOps(_AtomOps):
                     atomic=write.atomic,
                     swizzle=write.swizzle,
                     fragment_layout=atom.fragment_layout,
+                    volta_interleaved=volta_interleaved,
+                    fragment_index=(i, j),
                     row_dim=_axis_dim(write.index, m.axis.name),
                     col_dim=_axis_dim(write.index, n.axis.name),
                 )
@@ -2931,6 +2968,7 @@ def store_sink(
     lead: tuple = (),
     frag_ns: str = "",
     *,
+    stage: Stage | None = None,
     k_axis: Axis | None = None,
     axes: tuple = (),
     inner: tuple | None = None,
@@ -2938,5 +2976,16 @@ def store_sink(
     """The default **matmul sink** — the per-cell ``store(i, j, offset, mn)`` from the atom strategy
     (an mma ``RegStore`` / the replicated scalar ``epilogue`` tail), folding in the ``epilogue`` (the
     projection off the node's zero-axis ``Fold`` wrapper + the store glue). A caller may replace
-    the sink while reusing the shared ``reduce`` emission."""
-    return _atom_ops(c, tile, epilogue=epilogue, lead=lead, frag_ns=frag_ns, k_axis=k_axis, axes=axes, inner=inner).store
+    the sink while reusing the shared ``reduce`` emission. ``stage`` reaches the sink only because
+    a paired Volta operand layout and its accumulator map are one coupled lowering choice."""
+    return _atom_ops(
+        c,
+        tile,
+        stage,
+        epilogue=epilogue,
+        lead=lead,
+        frag_ns=frag_ns,
+        k_axis=k_axis,
+        axes=axes,
+        inner=inner,
+    ).store
