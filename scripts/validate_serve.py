@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import signal
 import subprocess
 import sys
@@ -44,8 +45,20 @@ def _hf_refs(model: str, prompts: list[str], max_tokens: int) -> list[dict]:
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    tok = AutoTokenizer.from_pretrained(model)
-    m = AutoModelForCausalLM.from_pretrained(model, dtype=torch.float16).to("cuda").eval()
+    from emmy.compiler.loader.safetensors import split_revision
+    from emmy.compiler.trace.huggingface import load_quantized_twin, quantized_checkpoint_dir
+
+    repo, revision = split_revision(model)
+    tok = AutoTokenizer.from_pretrained(repo, revision=revision)
+    quant_dir = quantized_checkpoint_dir(model)
+    if quant_dir is not None:
+        # Packed checkpoints are not runnable HF modules: loading them directly either engages a
+        # transformers quantizer or puts the packed carrier into a dense weight. Emmy's established
+        # accuracy twin strips that engine declaration and loads the independently decoded values.
+        m = load_quantized_twin(quant_dir, torch.float16)
+    else:
+        m = AutoModelForCausalLM.from_pretrained(repo, revision=revision, dtype=torch.float16)
+    m = m.to("cuda").eval()
     refs = []
     for p in prompts:
         ids = tok(p, return_tensors="pt").to("cuda")
@@ -92,6 +105,30 @@ def _first_token(s: str) -> str:
     return parts[0] if parts else ""
 
 
+def _serve_invocation(args) -> tuple[list[str], dict[str, str]]:
+    """The serving command and environment whose exact shape the reference gates."""
+    cmd = [
+        args.emmy,
+        "serve",
+        "--generate",
+        args.model,
+        "--max-model-len",
+        args.max_model_len,
+        "--port",
+        args.port,
+        "--gpu-memory-utilization",
+        args.gpu_mem_util,
+    ]
+    if args.max_num_batched_tokens:
+        cmd += ["--max-num-batched-tokens", args.max_num_batched_tokens]
+    if args.golden:
+        cmd += ["--golden", args.golden]
+    env = os.environ.copy()
+    if args.decode_bucket is not None:
+        env["EMMY_GEN_DECODE_BUCKET"] = str(args.decode_bucket)
+    return cmd, env
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", required=True, help="HF checkpoint to serve + reference.")
@@ -109,6 +146,12 @@ def main() -> int:
         "--gpu-mem-util", default="0.9", help="vLLM --gpu-memory-utilization (lower to leave room for the emmy runner's on-GPU weights)."
     )
     ap.add_argument("--health-timeout", type=int, default=1800, help="seconds to wait for first-boot compile.")
+    ap.add_argument("--golden", help="golden YAML whose measured routes the serving comparison must deploy.")
+    ap.add_argument(
+        "--decode-bucket",
+        type=int,
+        help="static decode width (sets EMMY_GEN_DECODE_BUCKET for the serving subprocess).",
+    )
     ap.add_argument("--hf-worker", action="store_true", help=argparse.SUPPRESS)  # internal: emit HF refs as JSON
     args = ap.parse_args()
 
@@ -122,21 +165,8 @@ def main() -> int:
     )
 
     print("[2/3] starting `emmy serve --generate` (first boot compiles every layer — minutes)...", flush=True)
-    serve_cmd = [
-        args.emmy,
-        "serve",
-        "--generate",
-        args.model,
-        "--max-model-len",
-        args.max_model_len,
-        "--port",
-        args.port,
-        "--gpu-memory-utilization",
-        args.gpu_mem_util,
-    ]
-    if args.max_num_batched_tokens:
-        serve_cmd += ["--max-num-batched-tokens", args.max_num_batched_tokens]
-    serve = subprocess.Popen(serve_cmd)
+    serve_cmd, serve_env = _serve_invocation(args)
+    serve = subprocess.Popen(serve_cmd, env=serve_env)
     try:
         _wait_health(args.port, serve, args.health_timeout)
         print("[3/3] querying emmy /v1/completions and comparing to HF...\n", flush=True)
