@@ -222,14 +222,16 @@ operand-group is a `(transport, depth)` pair, and the fill / wait / barrier plac
 live range (`[first reader, last reader]` over the segments) — wait before the first reader, a CTA barrier past the
 last, `depth >= 2` prefetching chunk `i+ring-1` at the top of the body, whole-body `depth == 1` filling the current
 chunk (the single-buffer degenerate), and a `depth == 1` group live in a PROPER sub-interval refilling chunk `i+1` at
-its kill point so the copy overlaps every segment outside the live range. cp.async `wait_group(N)` counts are a
+its kill point so the copy overlaps every segment outside the live range. A transport whose fill is SPLIT also offers a
+**deposit**, placed past its last reader and just ahead of that barrier — the copy's second half, landing the registers
+its fill issued. Offering one IS the seam: nothing else marks such a group. cp.async `wait_group(N)` counts are a
 static pass over the placed schedule (the commits younger than a group's fill at its wait point); the prologue primes
 exactly the fills the pre-loop iterations would have issued. `staged_kloop` is the whole-body single-group entry
 (the matmul tier's classic `fill → commit → wait → drain → Sync` phases fall out of the derivation). Behind it, a
 `Transport` strategy: `SyncTransport` (the `smem` fill — a producer cone evaluated per thread into its slab, its
 materialized peers copied underneath it, closed by one CTA barrier; `copy_sync` swaps those peer copies from
 `cp.async` to the blocking vector load/store on a target without it, which is also how a fully materialized term
-stages on sm_70), `CpAsyncTransport`
+stages on sm_70, and `staged` splits that copy across the drain), `CpAsyncTransport`
 (fill → commit → wait-group), and `TmaTransport` (an `arrive.expect_tx` + box copy gated by a **per-slot mbarrier
 array**, so `depth` is a free knob for TMA too). The three producers —
 structurally different primitives — sit behind one `fill`/`commit`/`wait` seam, and
@@ -252,15 +254,27 @@ materialization. The `state` builder (which slots the operand fragments) and sha
 apply the resolved facts verbatim. The `Stage` choice names the intermediate storage and its fill mechanism — `smem`
 (the synchronous thread fill), `smem-async` (cp.async), `smem-tma` (TMA); an EMPTY `STAGE` is no intermediate at all
 (gmem→register on a materialized operand, register-to-register on a computed one) — and spells two buffering levels:
-`d<depth>` is the gmem→smem ring (blocking synchronous slot fill / cp.async commit group / TMA mbarrier-phased
-prefetch over the K-slab loop),
-`p<reg_depth>` is the smem→register double-buffer (the fragment-load ping-pong over the inner atom-K steps). Staging is a
+`d<depth>` is the gmem→smem ring — **chunks in flight**, whatever holds them: registers on the blocking copy, the
+commit group on cp.async, the mbarrier-phased box on TMA;
+`p<reg_depth>` is the smem→register double-buffer (the fragment-load ping-pong over the inner atom-K steps). The two
+are independent, and so is the transport, so `stage_moves` offers their PRODUCT rather than a hand-picked list —
+`Stage.available_on` drops what the card cannot issue, the resolvers cap what a shape cannot size, and measured
+evidence ranks the rest. Staging is a
 **pure perf transform** — an ineligible kernel (masked N, or a symbolic / non-divisible K on a BYTE-COPIED
 operand, whose chunk runs along K; a transposed B stages N-major on every transport since the serving-layout work)
 silently falls back to gmem-direct, and a staged kernel is
-**bit-identical** to its gmem-direct baseline. A synchronous `smem` ring uses the same slot rotation and barriers, but
-the fill runs on the consumer threads and therefore cannot overlap the current drain; `/p<n>` remains the independent
-smem→register fragment pipeline. The Volta m8n8k4 atom enables the synchronous fill for materialized and computed f16
+**bit-identical** to its gmem-direct baseline. A synchronous `smem` ring uses the same slot rotation, and overlaps the
+drain the only way a target without `cp.async` can: the blocking copy SPLITS across it. The fill issues the prefetch
+chunk's global loads into registers, the resident chunk drains, and the deposit stores those registers into the
+prefetch slot — one barrier per chunk, since the slot it writes was freed two chunks back. The split is
+all-or-nothing per transport and needs every per-chunk slab to stripe evenly over the CTA (its staged values live in
+unrolled registers); a slab that does not keeps the one-phase fill, and the ring caps at `SPLIT_COPY_DEPTH` slots
+because exactly one chunk is ever in flight in registers. Measured on a V100, the split turned `d2/smem` from a small
+loss against no ring at all (474 vs 468 us on a 512x4096x4096 projection) into 306 us — and into a loss on a
+512x4096x28672 one, whose 896 CTAs already hide the latency and whose doubled slab costs occupancy. Which deploys is
+evidence's call per shape, which is the point: before the split, `depth >= 2` was a pessimization everywhere on that
+card. `/p<n>` remains the independent smem→register fragment pipeline. The Volta m8n8k4 atom enables the synchronous
+fill for materialized and computed f16
 A/B edges; its cooperative gather drains either slab, while newer instruction families stay disabled. The
 **`smem-tma`** transport
 additionally requires **sm_90+**

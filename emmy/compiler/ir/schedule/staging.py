@@ -56,6 +56,15 @@ def stage_target(stage: Stage, ctx) -> str | None:
     return f"STAGE {stage.spell()}: {need}"
 
 
+#: The deepest ring a SPLIT blocking copy can run. Its in-flight chunk rides REGISTERS — issued at
+#: the top of the loop body and landed at the bottom of the same body — so exactly one chunk is ever
+#: in flight, however many slots the codec asks for. A third slot would hold no extra chunk, only
+#: idle smem, so the ring caps here the way it caps at the smem budget. Both resolvers apply it; the
+#: staged K-loop skeleton asserts it (a split fill primes exactly one chunk, and two primes would
+#: redeclare the same staging registers).
+SPLIT_COPY_DEPTH = 2
+
+
 def _clamp_depth(depth: int, slot_bytes: int, budget: int) -> int:
     """The deepest ring the smem ``budget`` affords at ``slot_bytes`` per ringed slot, never deeper
     than asked. Shared by the warp copy ring and the fill's B-slab ring; the scalar resolver
@@ -477,6 +486,8 @@ def resolve_warp_stage(
     if slot_bytes > budget:
         return None
     depth = _clamp_depth(stage.depth, slot_bytes, budget)
+    if sync_ok:
+        depth = min(depth, SPLIT_COPY_DEPTH)
     choice = replace(stage, depth=depth, reg_depth=min(stage.reg_depth, tile.bk))
     return ResolvedStage(choice, bk_elems=bk_elems)
 
@@ -521,7 +532,9 @@ def resolve_scalar_stage(c: Fold, tile: Tile, stage: Stage, inputs, budget: int,
     if not n_ext.is_static or (k * elem_bytes) % _TMA_ALIGN or (n_ext.as_static() * elem_bytes) % _TMA_ALIGN:
         return None
     b_bytes = inputs[c.operands[1].as_slab().load.input].dtype.nbytes if c.operands[1].as_slab().load.input in inputs else elem_bytes
-    depth, bk_elems = max(1, stage.depth), 0
+    # A scalar tile always copies with the blocking load/store, so its ``smem`` ring splits too.
+    requested = min(stage.depth, SPLIT_COPY_DEPTH) if stage.transport == "smem" else stage.depth
+    depth, bk_elems = max(1, requested), 0
     while depth >= 1:
         cap = budget // (depth * max(1, tile.m.tile * elem_bytes + tile.n.tile * b_bytes))
         bk_elems = next((v for v in (128, 64, 32, 16, 8, 4) if v <= cap and k % v == 0), 0)

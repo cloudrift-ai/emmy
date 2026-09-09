@@ -192,6 +192,77 @@ def sync_copy_fill(
     return [StridedLoop(axis=fe, start=cta.linear_tid, step=_lit(cta.n_threads), body=body, unroll=False)]
 
 
+def _sync_copy_runs(shape: tuple[int, int], cta: CtaTile, elem_bytes: int) -> tuple[int, int] | None:
+    """``(V, trips)`` for the SPLIT blocking copy — the chunk width and the number of ``V``-element
+    chunks each lane carries. ``None`` when the striped chunks do not divide evenly over the CTA:
+    the split unrolls the lane's trips so the staged values stay in registers, and a ragged tail has
+    no unrolled shape (such a slab keeps the one-phase :func:`sync_copy_fill`)."""
+    rows, cols = shape
+    v = _cp_async_width(cols, elem_bytes)
+    chunks = (rows * cols) // v
+    return (v, chunks // cta.n_threads) if chunks % cta.n_threads == 0 else None
+
+
+def _sync_copy_coords(trip: int, v: int, cols: int, cta: CtaTile) -> tuple[Expr, Expr]:
+    """The ``(row, col)`` slab coordinates of lane-local ``trip`` — the unrolled form of the
+    one-phase fill's ``for e = tid; e < chunks; e += n_threads`` stride."""
+    base = _mul(_add(cta.linear_tid, _lit(trip * cta.n_threads)), _lit(v))
+    return BinaryExpr("/", base, _lit(cols)), BinaryExpr("%", base, _lit(cols))
+
+
+def _staged_regs(name: str, trip: int, v: int) -> tuple[str, ...]:
+    """The register names one lane's ``trip`` stages between issue and deposit."""
+    return tuple(f"_{name}_stage{trip}_{i}" for i in range(v))
+
+
+def sync_copy_issue(*, shape: tuple[int, int], src: str, gmem_index, cta: CtaTile, elem_bytes: int, name: str) -> list[Stmt] | None:
+    """The gmem→REGISTER half of :func:`sync_copy_fill`: every lane vector-LOADS each of its
+    ``V``-element chunks and STOPS, leaving the values in registers for :func:`sync_copy_deposit`.
+
+    Splitting the copy is what puts a chunk IN FLIGHT on a target without ``cp.async``. The resident
+    chunk's drain runs between the two halves and covers the load latency, so ``depth`` counts
+    chunks in flight here exactly as it counts commit groups on the cp.async ring and mbarrier slots
+    on TMA's — one meaning of the knob across all three transports, differing only in WHERE the
+    in-flight bytes sit (registers / the copy engine / the descriptor's box). ``None`` when the
+    lane's chunks do not divide evenly (:func:`_sync_copy_runs`)."""
+    run = _sync_copy_runs(shape, cta, elem_bytes)
+    if run is None:
+        return None
+    v, trips = run
+    cols = shape[1]
+    out: list[Stmt] = []
+    for trip in range(trips):
+        row, col = _sync_copy_coords(trip, v, cols, cta)
+        out.append(Load(names=_staged_regs(name, trip, v), input=src, index=tuple(gmem_index(row, col))))
+    return out
+
+
+def sync_copy_deposit(
+    *,
+    slab: str,
+    shape: tuple[int, int],
+    cta: CtaTile,
+    elem_bytes: int,
+    name: str,
+    row_offset: Expr | None = None,
+    swizzle: str = "NONE",
+) -> list[Stmt] | None:
+    """The REGISTER→smem half — one vector store per staged chunk, into ring row ``row_offset``.
+    Pairs with :func:`sync_copy_issue` off the same striping, so the slab it leaves is identical to
+    the one-phase fill's."""
+    run = _sync_copy_runs(shape, cta, elem_bytes)
+    if run is None:
+        return None
+    v, trips = run
+    cols = shape[1]
+    out: list[Stmt] = []
+    for trip in range(trips):
+        row, col = _sync_copy_coords(trip, v, cols, cta)
+        smem_row = _add(row_offset, row) if row_offset is not None else row
+        out.append(Write(output=slab, index=(smem_row, col), values=_staged_regs(name, trip, v), swizzle=swizzle))
+    return out
+
+
 def cp_async_commit() -> list[Stmt]:
     """Close the current cp.async batch into a commit-group (the depth-``D`` ring commits one
     group per filled slot, so ``CpAsyncWait(group=D-1)`` can drain exactly the slot it needs)."""
@@ -523,9 +594,16 @@ class SyncTransport:
     ``CpAsyncWait`` + CTA barrier), or the BLOCKING vector load/store (:func:`sync_copy_fill`,
     closed by the CTA barrier alone) on a target without ``cp.async``. The slab layout, the
     striping and the drain are identical either way; only the copy instruction and the handshake
-    differ. Under a blocking copy a depth above one is correct but cannot overlap the copy with the
-    current drain on the same threads; it stays a searchable schedule rather than a promised
-    latency-hiding mechanism.
+    differ.
+
+    ``staged`` SPLITS that blocking copy into :func:`sync_copy_issue` (gmem→register) and
+    :meth:`deposit` (register→smem), which is how ``depth`` buys overlap without ``cp.async``: the
+    lane loads chunk ``i+ring-1`` into registers, the resident chunk's drain runs, and only then do
+    the registers land in the slab. The in-flight bytes sit in registers instead of the copy engine
+    — the same ``depth`` knob, one level further down the hierarchy — and the deposit's own CTA
+    barrier is the whole handshake, so the pipelined loop carries ONE barrier per chunk rather than
+    the two an unsplit fill needs. Requested by a ``depth >= 2`` schedule and confirmed per slab:
+    see :attr:`register_staged`.
 
     ``depth >= 2`` is the **asymmetric (peer-only) prefetch ring**: only the ``copy_operands``
     slabs ring (the copies for chunk ``i+ring-1`` fly under the compute fill AND the drain of chunk
@@ -556,6 +634,23 @@ class SyncTransport:
     elem_bytes: int = 2
     # ``True`` → the peers copy with the BLOCKING vector load/store (no ``cp.async`` on the target).
     copy_sync: bool = False
+    # ``True`` → the schedule asked for a ring (``depth >= 2``), so split that blocking copy across
+    # the drain. :attr:`register_staged` is the confirmed answer.
+    staged: bool = False
+
+    @property
+    def register_staged(self) -> bool:
+        """Whether the peer copies actually split (issue → drain → deposit). A ring on a blocking
+        copy asks for it; every per-chunk peer must also stripe evenly over the CTA, because the
+        staged values live in unrolled registers (:func:`_sync_copy_runs`). All-or-nothing across
+        the peers: one unsplit slab would need its own barrier before the drain, which is the very
+        cost the split exists to remove."""
+        return (
+            self.staged
+            and self.copy_sync
+            and bool(self.copy_operands)
+            and all(_sync_copy_runs(op.shape, self.cta, op.elem_bytes or self.elem_bytes) is not None for op in self.copy_operands)
+        )
 
     def slab_decls(self, ring: int) -> list[Stmt]:
         # Sync-filled slabs are single-buffer (see :meth:`SyncOperand.slot_row`); of the copied
@@ -681,6 +776,18 @@ class SyncTransport:
         copy = sync_copy_fill if self.copy_sync else cp_async_fill
         for op in self.copy_operands:
             assert op.swizzle == "NONE" or op.pad_cols == 0, "a padded slab must stay NONE-swizzle"
+            if self.register_staged:
+                # The issue half only — :meth:`deposit` stores these registers into ``slot`` past
+                # the drain the skeleton places between the two.
+                out += sync_copy_issue(
+                    shape=op.shape,
+                    src=op.buf,
+                    gmem_index=op.index(k0),
+                    cta=self.cta,
+                    elem_bytes=op.elem_bytes or self.elem_bytes,
+                    name=op.tag,
+                )
+                continue
             out += copy(
                 slab=op.slab,
                 shape=op.shape,
@@ -750,10 +857,31 @@ class SyncTransport:
             out.append(StridedLoop(axis=fe, start=self.cta.linear_tid, step=_lit(self.cta.n_threads), body=Body(tuple(body)), unroll=False))
         return out
 
+    def deposit(self, *, slot: Expr) -> list[Stmt]:
+        """Land the registers :meth:`fill` issued into ring ``slot`` — the second half of the split
+        blocking copy, placed by :func:`pipelined_kloop` past the resident chunk's drain. Empty on
+        every unsplit transport, whose bytes land in their own ``wait``."""
+        if not self.register_staged:
+            return []
+        out: list[Stmt] = []
+        for op in self.copy_operands:
+            out += sync_copy_deposit(
+                slab=op.slab,
+                shape=op.shape,
+                cta=self.cta,
+                elem_bytes=op.elem_bytes or self.elem_bytes,
+                name=op.tag,
+                row_offset=op.slot_row(slot),
+                swizzle=op.swizzle,
+            )
+        return out
+
     def commit(self) -> list[Stmt]:
         return cp_async_commit() if self.copy_operands and not self.copy_sync else []
 
     def wait(self, *, in_flight: int, slot: Expr, phase: Expr) -> list[Stmt]:  # noqa: ARG002
+        if self.register_staged:
+            return []  # the deposit's own barrier past the drain is this group's whole handshake
         return cp_async_wait(in_flight) if self.copy_operands and not self.copy_sync else [Sync()]
 
 
@@ -1037,6 +1165,14 @@ class _Group:
     kind: str = "current"
     lag: int = 0
     n_flight: int = 0  # cp.async wait_group count (the static counting pass below)
+    fill_slot: Expr = Literal(0, "int")  # the slot this iteration's fill targets — where a split fill lands
+
+
+def _deposit(group: _Group, slot: Expr) -> list[Stmt]:
+    """The transport's register→smem landing, or nothing for a transport whose fill is not split
+    (cp.async / TMA leave their in-flight bytes with the copy engine, not in registers)."""
+    land = getattr(group.transport, "deposit", None)
+    return land(slot=slot) if land is not None else []
 
 
 def pipelined_kloop(
@@ -1153,10 +1289,21 @@ def pipelined_kloop(
         decls += g.transport.slab_decls(g.ring)
     for g in groups:
         pre += g.transport.prologue(g.ring)
+    primed_slots = False
     for g in groups:  # prime exactly ``lag`` chunks per group — what iterations -lag..-1 would have filled
         for c in range(g.lag):
             pre += g.transport.fill(k0=_prime_k0(c), slot=_lit(c))
+            # A split fill has no copy engine to leave the prime in flight, and no drain ahead of
+            # the loop to hide it behind — land it right here. Its staging registers are named per
+            # LANE, not per slot, so a second prime would redeclare them; the resolvers guarantee
+            # there is never one by capping such a ring at ``SPLIT_COPY_DEPTH`` slots.
+            landing = _deposit(g, _lit(c))
+            assert not (landing and c), f"a split fill primes one chunk, but this ring asked for {g.ring} slots"
+            pre += landing
             pre += g.transport.commit()
+            primed_slots |= bool(landing)
+    if primed_slots:
+        pre.append(Sync())  # every primed slot visible to every lane before the first drain reads it
 
     # The wait-group counting pass: lay the committing fills out in body order (top fills first,
     # then the kill-point refills by segment), and for each group count the commits issued between
@@ -1181,8 +1328,8 @@ def pipelined_kloop(
     body: list[Stmt] = []
     for g in groups:  # top fills: the ring prefetch / the single-buffer current-chunk fill
         if g.kind == "ring":
-            fill_slot = BinaryExpr("%", BinaryExpr("+", i_expr, _lit(g.lag)), _lit(g.ring))
-            body += g.transport.fill(k0=_fill_k0(g.lag), slot=fill_slot, k0_cur=Var(k0))
+            g.fill_slot = BinaryExpr("%", BinaryExpr("+", i_expr, _lit(g.lag)), _lit(g.ring))
+            body += g.transport.fill(k0=_fill_k0(g.lag), slot=g.fill_slot, k0_cur=Var(k0))
             body += g.transport.commit()
         elif g.kind == "current":
             body += g.transport.fill(k0=Var(k0), slot=_lit(0), k0_cur=Var(k0))
@@ -1194,6 +1341,11 @@ def pipelined_kloop(
         body += stmts
         enders = [g for g in groups if g.last == s]
         if enders:
+            # A split fill lands HERE — past every reader of the resident slot, ahead of the barrier
+            # that publishes it. It targets the PREFETCH slot, which no lane is reading, so this one
+            # barrier serves both the landing and the slab protection: the group needs no other.
+            for g in enders:
+                body += _deposit(g, g.fill_slot)
             body.append(Sync())  # every reader past the slab(s) before a refill / later prefetch overwrites them
             for g in enders:
                 if g.kind == "kill":
