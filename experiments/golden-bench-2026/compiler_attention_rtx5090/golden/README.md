@@ -38,5 +38,18 @@ golden here is for.
 
 Each offered setup still needs its schedule measured and recorded. The routes the recorded rows use are now the routes
 a trace produces, so a hand pin reaches them (`EMMY_KNOBS="TILE@map.1/twist=…,WORK=…"`) and
-`emmy run --golden PATH --bench --record-greedy` can write what it measures back. Compile time at the larger sequence
-lengths is the practical obstacle, not reachability.
+`emmy run --golden PATH --bench --record-greedy` can write what it measures back. Two practical obstacles remain, and
+neither is reachability.
+
+**Pinning is slow at the longer sequences.** Causal prefill at 32 heads and 1024 keys compiles to CUDA in 34 s
+unpinned; the same program under a hand pin resolved in 1629 s. Recording every offered setup this way is a long
+campaign.
+
+**Decode has no schedule worth recording yet.** A one-query attention against a long key length fuses into the same
+twisted carrier, but the fused kernel offers only `WORK`, `REDUCE`, `LOOPIFY` and `RASTER` — no `TILE`, so the output
+tile cannot be widened to give a whole head to one CTA. At one batch, 32 heads and 4096 keys the greedy pick runs at
+**15863 us** against **59 us** eager. `origin/main` picks the same kernel with the same knobs and measures 15921 us,
+so this is a schedule-space gap the orientation fix does not touch. An earlier sweep over the families the kernel does
+offer, at `366caa52d`, landed every reachable pin within four percent of one wall, the cross-CTA split included: it
+adds CTAs that each still recompute the softmax. Widening the output tile is a design question to settle before decode
+goldens are worth recording.
