@@ -34,6 +34,15 @@ def test_a_tma_staged_chunk_loop_gives_the_key_and_the_value_their_own_barrier()
     assert "mbarrier_wait_parity(&_mbar_k" in loop and "mbarrier_wait_parity(&_mbar_v" in loop
 
 
+def test_a_deeper_ring_keeps_one_group_and_one_barrier() -> None:
+    """A ring of two or more prefetches both operands at the top of the body whatever the grouping,
+    so a second group there would only add a release barrier between the score and the softmax on
+    every chunk: the key and the value stay one group with one barrier."""
+    loop = _chunk_loop("d2/smem-tma")
+    assert "_mbar_k" not in loop and "_mbar_v" not in loop
+    assert "mbarrier_wait_parity(&_mbar[" in loop
+
+
 def test_a_single_slot_ring_refills_each_operand_at_its_own_kill_point() -> None:
     """At ring depth one the key is dead once the score is contracted and the value once the
     expectation is, so the key's refill is issued between the score and the value's drain — the

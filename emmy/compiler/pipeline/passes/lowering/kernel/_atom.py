@@ -2309,16 +2309,17 @@ class _ChunkStreams:
     """The chunk tier's staged operands — the value the carrier folds against, its score's key when
     that one slabs too (:func:`chunk_key_stage`) — and one transport PER operand.
 
-    Two groups, not one: the key is dead once the score is contracted and the value once the
-    expectation is, so each refills at its own kill point and the copy overlaps the other's
-    phase — FlashAttention-2's single-slab schedule at ring depth one, and the ring's usual
-    prefetch at two or more. One group live across the whole body would fill and wait with
-    nothing to overlap. Each drain reads its slab off the :class:`Operand` the fill wrote (name,
-    row stride, swizzle, ring-slot row), so the two cannot disagree about where a chunk landed."""
+    At a single slot they are two groups: the key is dead once the score is contracted and the
+    value once the expectation is, so each refills at its own kill point and the copy overlaps the
+    other's phase — FlashAttention-2's single-slab schedule — where one group live across the
+    whole body could only fill and wait. A deeper ring prefetches both at the top of the body, so
+    there they stay one group and pay one release barrier per chunk, not two. Each drain reads its
+    slab off the :class:`Operand` the fill wrote (name, row stride, swizzle, ring-slot row), so
+    the two cannot disagree about where a chunk landed."""
 
     value: object
     key: object | None
-    transports: tuple  # the key's group first when it stages, then the value's
+    transports: tuple  # one group, or the key's then the value's at a single slot
 
 
 class _FlashOps(_MmaOps):
@@ -2474,7 +2475,7 @@ class _FlashOps(_MmaOps):
             at its own — each tagged with the slab it drains, so the skeleton places every group's
             fill, wait and barrier off its live range. Built once, by the skeleton that knows which
             slot each group drains this iteration."""
-            key_slot, value_slot = (slots[0] if streams is not None and streams.key is not None else None), slots[-1]
+            key_slot, value_slot = slots[0], slots[-1]  # one group: the same slot; two: each its own
             memo: dict = {}
             scored_stmts: list[Stmt] = (
                 self._score_tile(offset, mn, base, cols, bound, streams, key_slot)
@@ -2558,8 +2559,10 @@ class _FlashOps(_MmaOps):
             body += self._merge(mn, pivots, partials)
             if streams is None:
                 return [(scored_stmts + body, frozenset())]
-            key_slabs = frozenset() if streams.key is None else frozenset({streams.key.slab})
-            return [(scored_stmts, key_slabs), (body, frozenset({streams.value.slab}))]
+            if len(streams.transports) == 1:
+                slabs = frozenset(op.slab for op in streams.transports[0].operands)
+                return [(scored_stmts + body, slabs)]
+            return [(scored_stmts, frozenset({streams.key.slab})), (body, frozenset({streams.value.slab}))]
 
         # ``seed=False``: the carrier is declared once outside this loop at the seeds the TERM names
         # — the pivot's is not ``maximum``'s neutral element — so the loop must not re-seed it.
@@ -2642,12 +2645,18 @@ class _FlashOps(_MmaOps):
             )
         cta = _cta(mn, self.tile.atom.lanes, self.tile.launch_threads)
 
-        def group(operand, tag: str):
-            common = dict(operands=(operand,), slab_dtype=cuda_name(elem), elem_bytes=elem.nbytes, cta=cta)
+        def group(operands: tuple, tag: str = ""):
+            common = dict(operands=operands, slab_dtype=cuda_name(elem), elem_bytes=elem.nbytes, cta=cta)
             # A TMA group parity-waits its own barrier, so two groups in one loop take two names.
             return TmaTransport(mbar=f"_mbar{tag}", **common) if self.stage.transport == "smem-tma" else CpAsyncTransport(**common)
 
-        transports = (*(() if key is None else (group(key, "_k"),)), group(value, "_v"))
+        # Two groups buy their kill-point refills only at a SINGLE slot: a deeper ring prefetches
+        # both operands at the top of the body whatever the grouping, and a second group there
+        # would only add its own release barrier between the score and the softmax on every chunk.
+        if key is not None and self.stage.depth == 1:
+            transports = (group((key,), "_k"), group((value,), "_v"))
+        else:
+            transports = (group((value,) if key is None else (key, value)),)
         return _ChunkStreams(value=value, key=key, transports=transports)
 
     @property
