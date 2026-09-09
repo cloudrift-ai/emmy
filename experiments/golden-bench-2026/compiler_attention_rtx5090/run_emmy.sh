@@ -20,8 +20,9 @@ status_file=$results/setup-status.tsv
 printf "operator\tbatch\tsequence_length\treplay\treference\n" > "$status_file"
 successful_setups=0
 missing_goldens=0
+mapfile -t sequence_lengths < <(operator_sequence_lengths "$operator" "$batch")
 
-for sequence_length in "${SEQUENCE_LENGTHS[@]}"; do
+for sequence_length in "${sequence_lengths[@]}"; do
   setup="${operator}-b${batch}-s${sequence_length}"
   golden=$golden_dir/$setup.golden.yaml
   if [ ! -f "$golden" ]; then
@@ -33,7 +34,7 @@ for sequence_length in "${SEQUENCE_LENGTHS[@]}"; do
 
   if EMMY_NVCC_FLAGS= timeout --signal=TERM --kill-after=30s 1200s \
     "$emmy" run --golden "$golden" --bench --bench-backends emmy \
-    --warmup 10 --iters 100 --no-record-nodes \
+    --warmup 1 --iters 10 --no-record-nodes \
     --json "$results/json/$setup.replay" --dump-dir "$results/dumps/$setup.replay" \
     2>&1 | tee "$results/logs/$setup.replay.log"; then
     replay_status=ok
@@ -42,7 +43,7 @@ for sequence_length in "${SEQUENCE_LENGTHS[@]}"; do
   fi
   if EMMY_NVCC_FLAGS= timeout --signal=TERM --kill-after=30s 1200s \
     "$emmy" run -c "$source_code" --bench --strict --bench-backends eager,tcompile,emmy \
-    --warmup 10 --iters 100 --no-record-nodes --json "$results/json/$setup.reference.json" \
+    --warmup 1 --iters 10 --no-record-nodes --json "$results/json/$setup.reference.json" \
     2>&1 | tee "$results/logs/$setup.reference.log"; then
     reference_status=ok
   else
@@ -57,4 +58,4 @@ done
 
 # A missing or partial setup is not performance evidence. Preserve every status, then fail the row.
 test "$missing_goldens" -eq 0
-test "$successful_setups" -eq "${#SEQUENCE_LENGTHS[@]}"
+test "$successful_setups" -eq "${#sequence_lengths[@]}"

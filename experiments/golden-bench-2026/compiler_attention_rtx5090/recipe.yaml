@@ -41,10 +41,10 @@ command:
         if [ ! -x venv/bin/python ]; then
           python3.12 -m venv venv --prompt emmy
         fi
-        if ! venv/bin/python -c 'import torch, sys; sys.exit(torch.__version__.split("+")[0] != "2.13.0")' 2>/dev/null; then
-          venv/bin/pip install -e ".[dev]" torch==2.13.0 2>&1 | tee "$$EVIDENCE/install.log"
+        if ! venv/bin/python -c 'import torch, sys; sys.exit(torch.__version__.split("+")[0] != "2.14.0")' 2>/dev/null; then
+          venv/bin/pip install -e ".[dev]" torch==2.14.0 2>&1 | tee "$$EVIDENCE/install.log"
         fi
-        test "$$(venv/bin/python -c 'import torch; print(torch.__version__.split("+")[0])')" = "2.13.0"
+        test "$$(venv/bin/python -c 'import torch; print(torch.__version__.split("+")[0])')" = "2.14.0"
         export EMMY_TUNE_DB=$task_dir/autotune.db
         export EMMY_ONLINE_FILE=$task_dir/online.json
         export EMMY_CUBIN_CACHE=$task_dir/cubins
@@ -63,12 +63,28 @@ command:
         if [ ! -x "$$BASELINE_VENV/bin/python" ]; then
           python3.12 -m venv "$$BASELINE_VENV"
         fi
-        if ! "$$BASELINE_VENV/bin/python" -c 'import importlib.metadata, sys; expected={"torch":"2.13.0", \
+        if ! "$$BASELINE_VENV/bin/python" -c 'import importlib.metadata, sys; expected={"torch":"2.14.0", \
           "flash_attn":"2.8.3", "tilelang":"0.1.8", "apache-tvm-ffi":"0.1.8.post2"}; \
           sys.exit(any(importlib.metadata.version(k) != v for k, v in expected.items()))' 2>/dev/null; then
-          "$$BASELINE_VENV/bin/pip" install torch==2.13.0 packaging ninja einops 2>&1 | tee "$$EVIDENCE/install.log"
-          MAX_JOBS=4 FLASH_ATTN_CUDA_ARCHS=120 "$$BASELINE_VENV/bin/pip" install \
-            --no-build-isolation flash-attn==2.8.3 2>&1 | tee -a "$$EVIDENCE/install.log"
+          "$$BASELINE_VENV/bin/pip" install torch==2.14.0 packaging ninja einops 2>&1 | tee "$$EVIDENCE/install.log"
+          # FlashAttention 2.8.3 predates PyTorch 2.14, whose ATen headers require C++20 while this
+          # release compiles at C++17. Build the pinned source with only that standard raised; no
+          # kernel is touched. Neither NVCC_APPEND_FLAGS nor CXXFLAGS reaches the host compile,
+          # which is why the flag is changed in the source rather than passed in.
+          FLASH_SOURCE=$repo_dir/.cache-attention-rtx5090/flash_attn-2.8.3
+          if [ ! -f "$$FLASH_SOURCE/setup.py" ]; then
+            mkdir -p "$$(dirname "$$FLASH_SOURCE")"
+            FLASH_ARCHIVE=$$(dirname "$$FLASH_SOURCE")/flash_attn-2.8.3.tar.gz
+            curl -fsSL \
+              https://files.pythonhosted.org/packages/3b/b2/8d76c41ad7974ee264754709c22963447f7f8134613fd9ce80984ed0dab7/flash_attn-2.8.3.tar.gz \
+              -o "$$FLASH_ARCHIVE"
+            printf '%s  %s\n' 1e71dd64a9e0280e0447b8a0c2541bad4bf6ac65bdeaa2f90e51a9e57de0370d \
+              "$$FLASH_ARCHIVE" | sha256sum -c -
+            tar -xzf "$$FLASH_ARCHIVE" -C "$$(dirname "$$FLASH_SOURCE")"
+            sed -i 's/-std=c++17/-std=c++20/g' "$$FLASH_SOURCE/setup.py"
+          fi
+          MAX_JOBS=4 FLASH_ATTN_CUDA_ARCHS=120 "$$BASELINE_VENV/bin/pip" install --no-cache-dir \
+            --no-build-isolation "$$FLASH_SOURCE" 2>&1 | tee -a "$$EVIDENCE/install.log"
           "$$BASELINE_VENV/bin/pip" install tilelang==0.1.8 apache-tvm-ffi==0.1.8.post2 2>&1 \
             | tee -a "$$EVIDENCE/install.log"
         fi
@@ -87,15 +103,17 @@ command:
           for name in ("torch", "flash_attn", "tilelang", "apache-tvm-ffi")))' \
           > "$$EVIDENCE/versions.txt"
         "$$BASELINE_VENV/bin/pip" freeze --all > "$$EVIDENCE/requirements.freeze.txt"
-        sha256sum "$$EXPERIMENT/run_baselines.py" > "$$EVIDENCE/experiment-input.sha256"
+        sha256sum "$$EXPERIMENT/run_baselines.py" "$$EXPERIMENT/operators.sh" > "$$EVIDENCE/experiment-input.sha256"
         mkdir -p "$$EVIDENCE/json" "$$EVIDENCE/logs"
         printf "operator\tbatch\tsequence_length\tstatus\n" > "$$EVIDENCE/setup-status.tsv"
         failures=0
-        for sequence_length in 1024 2048 4096 8192 16384 32768; do
+        source "$$EXPERIMENT/operators.sh"
+        export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+        for sequence_length in $$(operator_sequence_lengths "$operator" "$batch"); do
           setup=$operator-b$batch-s$$sequence_length
           if timeout --signal=TERM --kill-after=30s 1200s "$$BASELINE_VENV/bin/python" \
             "$$EXPERIMENT/run_baselines.py" "$operator" "$batch" "$$sequence_length" \
-            --warmup 10 --iters 100 --tilelang-source "$$TILELANG_SOURCE" \
+            --warmup 1 --iters 10 --tilelang-source "$$TILELANG_SOURCE" \
             --json "$$EVIDENCE/json/$$setup.json" 2>&1 | tee "$$EVIDENCE/logs/$$setup.log"; then
             status=ok
           else

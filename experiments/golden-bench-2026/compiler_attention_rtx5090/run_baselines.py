@@ -9,7 +9,6 @@ import importlib.util
 import json
 import logging
 import statistics
-import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -17,9 +16,11 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 OPERATORS = ("prefill_global", "prefill_causal", "prefill_gqa", "decode_causal", "decode_gqa")
+#: Why cuDNN declined a setup, when it did. Read once, into that setup's record.
+_CUDNN_REFUSAL: dict[str, str] = {}
 # TileLang 0.1.8 bundles a TVM whose Python half breaks against apache-tvm-ffi 0.1.12 and newer, so the
 # release contemporaneous with it is pinned as tightly as the libraries themselves.
-VERSIONS = {"torch": "2.13.0", "flash_attn": "2.8.3", "tilelang": "0.1.8", "apache-tvm-ffi": "0.1.8.post2"}
+VERSIONS = {"torch": "2.14.0", "flash_attn": "2.8.3", "tilelang": "0.1.8", "apache-tvm-ffi": "0.1.8.post2"}
 
 
 def _parse_args() -> argparse.Namespace:
@@ -110,10 +111,15 @@ def _load_tilelang_kernel(source: Path, operator: str, batch: int, sequence_leng
 def _build_functions(args: argparse.Namespace, q: Any, k: Any, v: Any) -> dict[str, Callable[[], Any]]:
     import torch
     from flash_attn import flash_attn_func
+    from torch.nn.attention import SDPBackend, sdpa_kernel
     from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 
     def sdpa() -> Any:
         return _sdpa(args.operator, q, k, v)
+
+    def cudnn() -> Any:
+        with sdpa_kernel(SDPBackend.CUDNN_ATTENTION):
+            return _sdpa(args.operator, q, k, v)
 
     torch._dynamo.reset()
     compiled_sdpa = torch.compile(sdpa, fullgraph=True, mode="max-autotune-no-cudagraphs")
@@ -161,6 +167,16 @@ def _build_functions(args: argparse.Namespace, q: Any, k: Any, v: Any) -> dict[s
         "FlexAttention": compiled_flex,
         "FlashAttention-2": flash_attention_2,
     }
+    # cuDNN is the library the paper's headline claim is measured against. It serves only the
+    # shapes its own kernels cover, and an unsupported one raises here rather than silently
+    # dispatching elsewhere -- that setup records why instead of a number.
+    try:
+        cudnn()
+    except Exception as error:  # noqa: BLE001 - any refusal means this shape has no cuDNN kernel
+        functions["cuDNN"] = None
+        _CUDNN_REFUSAL[args.operator] = f"{type(error).__name__}: {error}"
+    else:
+        functions["cuDNN"] = cudnn
 
     if args.operator.startswith("prefill"):
         tilelang_kernel = _load_tilelang_kernel(args.tilelang_source, args.operator, args.batch, args.sequence_length)
@@ -169,7 +185,7 @@ def _build_functions(args: argparse.Namespace, q: Any, k: Any, v: Any) -> dict[s
             return tilelang_kernel(q_bshd, k_bshd, v_bshd).transpose(1, 2)
 
         functions["TileLang"] = tilelang
-    return functions
+    return {name: function for name, function in functions.items() if function is not None}
 
 
 def _check_outputs(functions: dict[str, Callable[[], Any]]) -> dict[str, dict[str, Any]]:
@@ -232,9 +248,7 @@ def _capture_all(functions: dict[str, Callable[[], Any]]) -> tuple[dict[str, Cal
     return replays, graphs
 
 
-def _measure(
-    functions: dict[str, Callable[[], Any]], warmup: int, iters: int
-) -> tuple[dict[str, list[float]], bool, str | None]:
+def _measure(functions: dict[str, Callable[[], Any]], warmup: int, iters: int) -> tuple[dict[str, list[float]], bool, str | None]:
     import torch
 
     graphs = []
@@ -262,10 +276,7 @@ def _measure(
             if iteration >= warmup:
                 events[name].append((start, stop))
     torch.cuda.synchronize()
-    samples = {
-        name: [start.elapsed_time(stop) * 1000 for start, stop in backend_events]
-        for name, backend_events in events.items()
-    }
+    samples = {name: [start.elapsed_time(stop) * 1000 for start, stop in backend_events] for name, backend_events in events.items()}
     del graphs
     return samples, captured, capture_error
 
@@ -280,10 +291,7 @@ def _run(args: argparse.Namespace) -> int:
         raise ValueError("batch must be 1 or 8")
 
     torch.manual_seed(0)
-    q, k, v = (
-        torch.randn(shape, device="cuda", dtype=torch.float16)
-        for shape in _shape(args.operator, args.batch, args.sequence_length)
-    )
+    q, k, v = (torch.randn(shape, device="cuda", dtype=torch.float16) for shape in _shape(args.operator, args.batch, args.sequence_length))
     functions = _build_functions(args, q, k, v)
     with torch.no_grad():
         for function in functions.values():
@@ -291,13 +299,13 @@ def _run(args: argparse.Namespace) -> int:
                 function()
     checks = _check_outputs(functions)
     samples, captured, capture_error = _measure(functions, args.warmup, args.iters)
-    estimates = {name: min(values) for name, values in samples.items()}
+    estimates = {name: statistics.fmean(values) for name, values in samples.items()}
     inductor_us = estimates["PyTorch Inductor"]
     backends = {
         name: {
             "status": "ok",
             "latency_us": estimate,
-            "mean_us": statistics.fmean(samples[name]),
+            "min_us": min(samples[name]),
             "median_us": statistics.median(samples[name]),
             "samples_us": samples[name],
             "inductor_normalized_speedup": inductor_us / estimate,
@@ -310,6 +318,8 @@ def _run(args: argparse.Namespace) -> int:
             "status": "not-applicable",
             "reason": "TileLang 0.1.8 has no matching full-attention decode example for this contract",
         }
+    if args.operator in _CUDNN_REFUSAL:
+        backends["cuDNN"] = {"status": "not-applicable", "reason": _CUDNN_REFUSAL[args.operator]}
 
     payload = {
         "schema_version": 1,
@@ -322,18 +332,21 @@ def _run(args: argparse.Namespace) -> int:
         "head_dim": q.shape[-1],
         "warmup": args.warmup,
         "iters": args.iters,
-        "latency_estimator": "minimum",
+        "latency_estimator": "mean",
         "timing_semantics": "captured_whole_forward" if captured else "uncaptured_forward",
         "capture_error": capture_error,
         "normalization": "PyTorch Inductor latency divided by backend latency; values above one favor the backend",
         "gpu": torch.cuda.get_device_name(0),
-        "versions": {package: importlib.metadata.version(package) for package in VERSIONS},
+        "versions": {package: importlib.metadata.version(package) for package in VERSIONS} | {"cudnn": torch.backends.cudnn.version()},
         "backends": backends,
     }
     args.json.parent.mkdir(parents=True, exist_ok=True)
     args.json.write_text(json.dumps(payload, indent=2) + "\n")
     for name, estimate in estimates.items():
         logger.info("%s: %.3f us (%.4fx Inductor-normalized)", name, estimate, inductor_us / estimate)
+    for name, entry in backends.items():
+        if entry["status"] == "not-applicable":
+            logger.info("%s: not applicable (%s)", name, entry["reason"])
     if not captured:
         logger.error("CUDA graph capture failed: %s", capture_error)
         return 1

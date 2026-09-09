@@ -3,6 +3,22 @@
 
 SEQUENCE_LENGTHS=(1024 2048 4096 8192 16384 32768)
 
+# The sequence lengths one operator and batch is measured at. Every setup is offered except GQA
+# prefill at batch 8 and 32768: its query tensor alone is 4.3 GB, the comparison holds it in both
+# layouts beside a reference and a candidate output, and that does not fit the 32 GB an RTX 5090
+# has. A partial comparison is not evidence, so the setup is withheld rather than measured short.
+operator_sequence_lengths() {
+  local operator=$1
+  local batch=$2
+  local length
+  for length in "${SEQUENCE_LENGTHS[@]}"; do
+    if [ "$operator" = prefill_gqa ] && [ "$batch" -eq 8 ] && [ "$length" -eq 32768 ]; then
+      continue
+    fi
+    printf '%s\n' "$length"
+  done
+}
+
 operator_code() {
   local operator=$1
   local batch=$2
