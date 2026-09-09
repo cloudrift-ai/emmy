@@ -34,8 +34,17 @@ puts the causal rows ahead of eager at 1024 keys and above; a global setup runs 
 
 ## Coverage
 
-Prefill setups (`prefill_causal`, `prefill_global`, `prefill_gqa`) at batch 1 and 8 are recorded as they land; the
-measured numbers are in `../RESULTS.md`. GQA decode (`decode_gqa`) is recorded through its broadcast form, whose
-eight query heads per group become the row axis of the same fused kernel. Plain decode (`decode_causal`) is not
-recordable today: with one query row the carrier offers no tensor-core tile at all — only `WORK`, `REDUCE` and
-`RASTER` — so there is no schedule worth a golden until its output tile can be widened to a whole head per CTA.
+Prefill setups (`prefill_causal`, `prefill_global`, `prefill_gqa`) at batch 1 and 8 and GQA decode (`decode_gqa`) are
+recorded where the recording run fits the bench worker's budget; the measured numbers are in `../RESULTS.md`, and a
+setup without a golden is one whose record run failed (an out-of-memory or wall-budget failure at the longest
+sequences), not one withheld. GQA decode records through its broadcast form, whose eight query heads per group
+become the row axis of the same fused kernel, at three times eager's speed on eight CTAs. Plain decode
+(`decode_causal`) is not recordable today: with one query row the carrier offers no tensor-core tile at all — only
+`WORK`, `REDUCE` and `RASTER` — so there is no schedule worth a golden until its output tile can be widened to a
+whole head per CTA.
+
+Two things shaped the recording. A causal setup's kernel stops its key stream at the CTA's own diagonal (the chunk
+tier's early stop), which is what puts the causal rows ahead of eager at 1024 keys and above. And the sweeps that
+picked a row by `--ab` only work while the greedy baseline — the unscheduled loop a shape without evidence deploys —
+finishes inside the bench watchdog; past 4096 keys and at batch 8 it does not, so those goldens were recorded
+directly under the winning pin (`EMMY_KNOBS`), which makes the pinned kernel the greedy pick.
