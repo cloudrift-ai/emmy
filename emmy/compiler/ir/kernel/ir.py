@@ -2092,6 +2092,9 @@ class RegStore(Stmt):
     n_guard: tuple[Expr, Expr] | None = None
     atomic: bool = False
     fragment_layout: str = "m16n8k16"
+    # The paired Volta operand layouts require CUTLASS's interleaved 32x32 accumulator map. This
+    # is a derived SM70 lowering choice, not another atom fragment-layout or schedule spelling.
+    volta_interleaved: bool = False
     # Cell position inside the warp register tile. The paired Volta layout groups adjacent cells
     # into CUTLASS's interleaved 32x32 accumulator map; other fragment layouts ignore it.
     fragment_index: tuple[int, int] = (0, 0)
@@ -2177,7 +2180,7 @@ class RegStore(Stmt):
         """Per-lane ``(row C text, col C text, row Expr, col Expr)`` for this fragment layout."""
         from emmy.compiler.ir.expr import BinaryExpr, Var  # noqa: PLC0415
 
-        if self.fragment_layout == "m8n8k4_interleaved":
+        if self.volta_interleaved:
             mi, ni = (x & 1 for x in self.fragment_index)
             row_adjust, col_adjust = -12 * mi, -12 * ni
 
@@ -2303,7 +2306,7 @@ class RegStore(Stmt):
         pad = _pad(ctx.indent)
         lane = "(threadIdx.x & 31)"
         pre, vals = self._element_values(ctx)
-        if self.fragment_layout in ("m8n8k4", "m8n8k4_interleaved"):
+        if self.fragment_layout == "m8n8k4":
             return self._render_m8n8k4(ctx, flat=flat, ldm=ldm, ldn=ldn, dst_dt=dst_dt, pre=pre, vals=vals)
         # C is 16×8: lane owns (row g, cols 2t,2t+1) and (row g+8, cols 2t,2t+1)
         # with g = lane/4, t = lane%4. The two cols per row are CONTIGUOUS, so
@@ -2350,7 +2353,7 @@ class RegStore(Stmt):
         lane = "(threadIdx.x & 31)"
         # Each four-lane group and its +16 partner own one 8x8 computation. Place the four
         # groups as quadrants; _vr/_vc are this lane's base row/column within the 16x16 cell.
-        if self.fragment_layout == "m8n8k4_interleaved":
+        if self.volta_interleaved:
             lines = [
                 f"{pad}{{ const int _vl = {lane}; const int _vq = _vl >> 2;",
                 f"{pad}  const int _vr = (((_vq & 4) >> 1) + (_vq & 1)) * 8 + (_vl & 1);",
