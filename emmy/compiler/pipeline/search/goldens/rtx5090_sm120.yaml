@@ -639,6 +639,36 @@ programs:
     attrs: {is_causal: true, sliding_window: null, scale: null}
     inputs: [x0, x1, x2]
     outputs: [[scaled_dot_product_attention, f16, [1, 8, 512, 64]]]
+- inputs: [x0, x1, x2]
+  outputs: [scaled_dot_product_attention]
+  nodes:
+  - id: scaled_dot_product_attention_c3
+    op: constant
+    attrs:
+      name: scaled_dot_product_attention_c3
+      value: 0.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[scaled_dot_product_attention_c3, f16, [1]]]
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 16, 512, 256]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [1, 16, 512, 256]]]
+  - id: x2
+    op: input
+    outputs: [[x2, f16, [1, 16, 512, 256]]]
+  - id: scaled_dot_product_attention
+    op: torch.sdpa
+    attrs: {is_causal: true, sliding_window: null, scale: null}
+    inputs: [x0, x1, x2]
+    outputs: [[scaled_dot_product_attention, f16, [1, 16, 512, 256]]]
 configs:
 - program: 0
   target:
@@ -1960,6 +1990,47 @@ configs:
     measurements:
       emmy_us: 8.77
       reference_us: 8.78
+      reference_backend: same-input-greedy
+- program: 38
+  target:
+    origins:
+    - scaled_dot_product_attention
+  realizations:
+  - name: attention.hd256.causal.fused
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE@map.1/twist: mma_m16n8k16_f16_f32/f1x32/k2
+      TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x4/k8
+      REDUCE@map.1/twist: ''
+      REDUCE@map.1/twist.1/inner: ''
+      STAGE@map.1/twist: d2/smem-tma
+      STAGE@map.1/twist.1/inner: d2/smem-tma
+      WORK: w4x1
+      RASTER: gm8
+    identity: 0a70290317cb20a440dffff1bcbad216e289a3320c9c88732f2ba7d73cdc5fdf
+    measurements:
+      emmy_us: 39.11936044692993
+      reference_us: 39.14367914199829
+      reference_backend: same-input-greedy
+  - name: attention.hd256.causal.fused
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      TILE@map.1/twist: mma_m16n8k16_f16_f32/f1x32/k2
+      TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x4/k4
+      REDUCE@map.1/twist: ''
+      REDUCE@map.1/twist.1/inner: ''
+      STAGE@map.1/twist: d2/smem-tma
+      STAGE@map.1/twist.1/inner: d2/smem-tma
+      WORK: w4x1
+      RASTER: ''
+    identity: 0a70290317cb20a440dffff1bcbad216e289a3320c9c88732f2ba7d73cdc5fdf
+    measurements:
+      emmy_us: 39.10399913787842
+      reference_us: 39.22559976577759
       reference_backend: same-input-greedy
 loops:
 - inputs: [x0, x1]
