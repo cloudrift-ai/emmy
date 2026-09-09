@@ -35,7 +35,7 @@ from emmy.compiler.ir.address import BYTE_SLAB_PAD
 from emmy.compiler.ir.atom import AtomKind, wide_accumulate
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, TernaryExpr, Var
+from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, TernaryExpr, Var, affine_form
 from emmy.compiler.ir.kernel.ir import (
     FRAG,
     FRAG_COL,
@@ -1137,17 +1137,22 @@ def _block_scaled_operands(
     return (a_bits, *b_bits), copies, fills
 
 
-def _affine_term(expr: Expr) -> tuple[str, int] | None:
-    """``expr`` as ``(axis var, constant)`` when it is a var plus or minus a literal, else ``None``."""
-    if isinstance(expr, Var):
-        return expr.name, 0
-    if isinstance(expr, BinaryExpr) and expr.op in ("+", "-"):
-        sides = (expr.left, expr.right)
-        if isinstance(sides[0], Var) and isinstance(sides[1], Literal):
-            return sides[0].name, int(sides[1].value) * (1 if expr.op == "+" else -1)
-        if expr.op == "+" and isinstance(sides[0], Literal) and isinstance(sides[1], Var):
-            return sides[1].name, int(sides[0].value)
-    return None
+def _mask_add(stmt, selects: dict, frags) -> tuple[Select, str] | None:
+    """The coordinate mask ``stmt`` adds to a fragment value, with the value's name — the statement
+    pair the chunk tier lands as a ``FragmentMask`` and reads for its stream bounds — or ``None``
+    for any other statement."""
+    if not isinstance(stmt, Assign) or stmt.op.name != "add":
+        return None
+    selected = [arg for arg in stmt.args if arg in selects]
+    source = [arg for arg in stmt.args if arg in frags]
+    return (selects[selected[0]], source[0]) if len(selected) == len(source) == 1 else None
+
+
+def _mask_affine(predicate: BinaryExpr, names: frozenset[str]) -> tuple[dict[str, int], Expr] | None:
+    """A comparison's ``left − right`` as integer coefficients over ``names`` plus the anchor left
+    when those read zero — ``None`` unless it is affine in them."""
+    form = affine_form(BinaryExpr("-", predicate.left, predicate.right), names)
+    return None if form is None else (form[1], form[0])
 
 
 def _mask_key_bounds(stmts, held: str, key: Axis, row: str, offset, bk: int) -> tuple[Expr | None, Expr | None]:
@@ -1170,19 +1175,14 @@ def _mask_key_bounds(stmts, held: str, key: Axis, row: str, offset, bk: int) -> 
     first: Expr | None = None
     end: Expr | None = None
     for stmt in stmts:
-        if not isinstance(stmt, Assign):
-            continue
-        selected = [arg for arg in stmt.args if arg in selects]
-        source = [arg for arg in stmt.args if arg in fragments]
-        if source:
+        if isinstance(stmt, Assign) and set(stmt.args) & fragments:
             fragments.add(stmt.name)
-        if stmt.op.name != "add" or len(selected) != 1 or len(source) != 1:
+        masked = _mask_add(stmt, selects, fragments)
+        predicate = mask_select_predicate(masked[0]) if masked is not None else None
+        affine = _mask_affine(predicate, frozenset({key.name, row})) if predicate is not None else None
+        if affine is None or affine[0] != {key.name: 1, row: -1} or affine[1].free_vars():
             continue
-        predicate = mask_select_predicate(selects[selected[0]])
-        sides = (_affine_term(predicate.left), _affine_term(predicate.right)) if predicate is not None else (None, None)
-        if sides[0] is None or sides[1] is None or sides[0][0] != key.name or sides[1][0] != row:
-            continue
-        shift = sides[1][1] - sides[0][1]  # the masked branch reads ``key OP row + shift``
+        shift = -int(affine[1].eval({}))  # the masked branch reads ``key OP row + shift``
         if predicate.op in (">", ">="):
             lead = shift - (predicate.op == ">=")
             if lead >= 0:
@@ -2220,30 +2220,29 @@ def _residence(
         if isinstance(stmt, Select) and select_sigma is not None:
             selects[stmt.name] = stmt
             continue
-        if isinstance(stmt, Assign) and stmt.op.name == "add" and mask_fill is not None and select_sigma is not None:
-            selected = [arg for arg in stmt.args if arg in selects]
-            source = [arg for arg in stmt.args if arg in frags]
-            if len(selected) == len(source) == 1 and row_base is not None and col_base is not None:
-                mask = selects.pop(selected[0])
-                predicate = mask_select_predicate(mask)
-                if predicate is None:
-                    raise RuleSkipped("the chunk tier needs complementary branches for a coordinate mask")
-                name = f"{frag_tag}{stmt.name}"
-                out.append(FragmentApply(out=name, op=ElementwiseImpl("copy"), args=(frags[source[0]],), kinds=(FRAG,), layout=layout))
-                out.append(
-                    FragmentMask(
-                        frag=name,
-                        mask_when=select_sigma.apply(predicate),
-                        row_base=row_base,
-                        col_base=col_base,
-                        fill=mask_fill,
-                        keep=mask.branches[0].value,
-                        keep_op=stmt.op,
-                        layout=layout,
-                    )
+        masked = _mask_add(stmt, selects, frags) if mask_fill is not None and select_sigma is not None else None
+        if masked is not None and row_base is not None and col_base is not None:
+            mask, source = masked
+            del selects[mask.name]
+            predicate = mask_select_predicate(mask)
+            if predicate is None:
+                raise RuleSkipped("the chunk tier needs complementary branches for a coordinate mask")
+            name = f"{frag_tag}{stmt.name}"
+            out.append(FragmentApply(out=name, op=ElementwiseImpl("copy"), args=(frags[source],), kinds=(FRAG,), layout=layout))
+            out.append(
+                FragmentMask(
+                    frag=name,
+                    mask_when=select_sigma.apply(predicate),
+                    row_base=row_base,
+                    col_base=col_base,
+                    fill=mask_fill,
+                    keep=mask.branches[0].value,
+                    keep_op=stmt.op,
+                    layout=layout,
                 )
-                frags[stmt.name] = name
-                continue
+            )
+            frags[stmt.name] = name
+            continue
         accum = isinstance(stmt, Accum)
         if not isinstance(stmt, (Assign, Accum)):
             if not frags_only:

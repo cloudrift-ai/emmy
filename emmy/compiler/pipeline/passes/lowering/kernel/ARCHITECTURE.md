@@ -490,7 +490,10 @@ dynamic trip count alone cost 9% at the 128-CTA head-width-256 shape, so `_facto
 `Context.sm_count`; the CTA-per-SM half of the test is ptxas's to know, so fewer CTAs than SMs is the conservative
 reading) and the tier keeps a stream bounded at ONE end whole there; bounded at both, every CTA shortens and the
 bounds stay. A mask that could take a row's own key — a lead that stops a block before its last row, a lag that starts
-it after its first — keeps the whole stream and the per-element mask alone. Without those readings a
+it after its first — keeps the whole stream and the per-element mask alone. The per-element mask itself still runs on
+every chunk: confining it to the chunks that can hold a masked element (the FA-2 guard, the mask's predicate at the
+chunk's and the block's extreme coordinates) measured no difference on an A100 40GB at 256 to 8192 keys, so it is not
+carried. Without those readings a
 masked carrier fell to the scalar tier whole, which is what `attention.hd256.dynM.pv` on the RTX 4090 recorded and
 then stopped decoding.
 
