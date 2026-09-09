@@ -197,6 +197,13 @@ def test_sm70_contiguous_staged_fragments_use_one_wide_load(monkeypatch) -> None
     assert "emmy_mma884_load_smem4(r, s + col * ldm);" in src
 
 
+def test_sm70_output_stores_contiguous_fragment_pairs(monkeypatch) -> None:
+    """The eight Volta accumulator elements leave registers as four contiguous half2 pairs."""
+    _pin(monkeypatch, VOLTA)
+    src, _ = _source(_graph(), Context(compute_capability=(7, 0)))
+    assert src.count("*reinterpret_cast<__half2*>(&c[") == 4
+
+
 def test_sm70_sync_copy_composes_ring_and_register_pipelines(monkeypatch) -> None:
     _pin(monkeypatch, VOLTA, tile="f1x1/k2", stage="d2/smem/p2")
     src, knobs = _source(_graph(k=32), Context(compute_capability=(7, 0)))
