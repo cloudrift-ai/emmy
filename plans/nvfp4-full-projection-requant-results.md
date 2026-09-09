@@ -33,8 +33,9 @@ Pinned route measurements at decode widths 1 and 16:
 | output + norm + requant | over 2 s / timeout | 119-123 us | 11 kernels with MMA rows |
 
 The sweep found 27 applicable realizations. It recorded 24 of them after two raised-budget retries,
-producing 213 measured routing/child rows. The remaining three `ead322` rows were hand-authored and
-unmeasured; they must not be published as evidence.
+producing 213 measured routing/child rows. The cleaned working artifact attaches all 24 seeds to measured
+routing rows through `kernel_set` and removes the route knobs from the three hand-authored, unmeasured
+`ead322` seeds. Its SHA-256 is `a684ffeee8caedf02b3fafb69b4f181ca284ecfeb4ff495aa8b23d6be8ebc2c5`.
 
 The other 27 formerly unmeasured realizations correctly do not offer this arm. Their projections bind,
 and their remaining gap belongs to split-route recording rather than this cut.
@@ -74,17 +75,23 @@ Use a bucket represented by measured evidence. Bucket 32 is not covered by this 
 also prevents vLLM graph-capture probes at widths 24 and 32 from leaving the bucket-16 twin; it removes
 about 13 minutes of irrelevant first-boot capture from this correctness check.
 
-The observed fresh bucket-16 validation completed in about 30 minutes: roughly 10 minutes of Emmy
-compilation/model setup, 13 minutes of avoidable graph capture, and the serving checks. With
-`--enforce-eager`, a cold verifier should budget approximately 10-15 minutes; a matching plan pack makes
-later boots faster.
+The first bucket-16 validation completed in about 30 minutes: roughly 10 minutes of Emmy compilation/model
+setup, 13 minutes of avoidable graph capture, and the serving checks. The final one-prompt validation used
+the cleaned artifact, hit the 288-plan pack, rebuilt all 36 layers in about 17 seconds, loaded the model in
+44 seconds, initialized the engine in 92 seconds, and returned the matching token about three minutes after
+starting the server. Independent reference loading and decoding remains a separate few-minute phase.
 
-## Remaining publication work
+## Verification status
 
-- Attach each measured realization to its routing rows through `kernel_set`.
-- Remove the three unmeasured `ead322` authored rows.
-- Decode, replay, and run the short serving gate against that cleaned artifact.
-- Record the final commands and artifacts in the PR description.
+- Focused validator tests: 2 passed; focused lint and format checks passed.
+- Golden-recording CLI tests after fixing cross-regime row aliasing: 23 passed; focused lint and format
+  checks passed.
+- Broad golden/search/realization/cut subset: 1480 passed, 54 skipped, 17 xfailed. One CUDA worker died in
+  the parallel run; its NVFP4 slab-loopify case passed when rerun serially. One RMS-norm reference case
+  still fails serially because its NumPy reference lacks `p_weight`; that fixture and its execution path
+  are unchanged from this PR's base.
+- Cleaned-artifact serving gate: 1/1 exact first-token match, with routed Emmy programs visible in the
+  server's compiled-program log.
 
 Steady-state TPOT optimization, comparison against PyTorch, prefill improvements, value CSE across cut
 seams, and the unrelated split-route gaps are follow-up work rather than acceptance criteria for this PR.
