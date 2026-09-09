@@ -842,15 +842,15 @@ def decode_record(record: GoldenRecord, siblings: Sequence[GoldenRecord] = ()) -
     except Exception as exc:  # noqa: BLE001 — the reason IS the product here
         if not record.is_receipt:
             return _remember_verdict(verdict_key, f"{type(exc).__name__}: {exc}")
-    replay = _replay(record, siblings=siblings, exhaustive=True)
-    if record.is_routing:
-        reason = f"routing key {replay.unresolved[0]!r} does not resolve to an offered cut seam" if replay.unresolved else None
-        return _remember_verdict(verdict_key, reason)
-    candidates = replay.rows
     # The piece row, not the recorded one: a ``g<n>`` cross-CTA half names the kernel-set arm the
     # replay already resolved, and the pieces it mints cannot stamp it, so comparing it to a leaf
     # asks a piece to spell its parent's decision.
     row = schedule_match_key(piece_row(record.knobs))
+    replay = _replay(record, siblings=siblings, exhaustive=True, wanted=row)
+    if record.is_routing:
+        reason = f"routing key {replay.unresolved[0]!r} does not resolve to an offered cut seam" if replay.unresolved else None
+        return _remember_verdict(verdict_key, reason)
+    candidates = replay.rows
     if record.is_receipt and (tile is None or record.identity != tile.identity_key(with_io=True)):
         child_rows = candidates.get(record.identity)
         if child_rows is None:
@@ -952,7 +952,12 @@ def _set_key(record: GoldenRecord) -> tuple:
 
 
 def _replay(
-    record: GoldenRecord, *, siblings: Sequence[GoldenRecord] = (), lead: GoldenRecord | None = None, exhaustive: bool = False
+    record: GoldenRecord,
+    *,
+    siblings: Sequence[GoldenRecord] = (),
+    lead: GoldenRecord | None = None,
+    exhaustive: bool = False,
+    wanted: tuple[tuple[str, str], ...] | None = None,
 ) -> _Replay:
     """Replay ``record``'s target through the tile passes — see :class:`_Replay`. The record's input
     pins are the regime it was measured under and go to the environment; its route (the ``PLACE``
@@ -968,7 +973,11 @@ def _replay(
     kernel it never described. So a set of per-kernel entries — the parent's cut, each piece's
     row — walks one path together, and the record's own rows are what this replay reports.
     ``exhaustive`` flattens every schedule pool for ``rows`` (the strict decode's question); the
-    evidence import asks only ``holders`` and descends."""
+    evidence import asks only ``holders`` and descends. ``wanted`` names the ONE match key the
+    caller will ask ``rows`` about, which the descent answers without flattening — a pool that
+    holds it files just it, and only a pool that does not is walked whole. How much the descent
+    saves is the pool's to decide: it skips a branch that has already decided against the row, so a
+    pool whose branches leave the row open is still walked widely."""
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
     from emmy.compiler.pipeline import TILE_PASSES, Pipeline  # noqa: PLC0415
@@ -998,7 +1007,17 @@ def _replay(
     # The identity is part of the key: two entries of one set can spell the same row and pins on
     # different kernels — a seam spelling recurs on a residual as earlier cuts renumber its tree —
     # and each replays its own fork.
-    cache_key = (_record_cache_key(record), record.pins, canonical_row_key(record.knobs), record.identity, set_digest, exhaustive)
+    # ``wanted`` is part of the key: a pool that answered one key holds only that key, and reusing
+    # it for another question would read a pruned walk as a complete one.
+    cache_key = (
+        _record_cache_key(record),
+        record.pins,
+        canonical_row_key(record.knobs),
+        record.identity,
+        set_digest,
+        exhaustive,
+        wanted,
+    )
     cached = _REPLAY_CACHE.get(cache_key)
     if cached is not None:
         return cached
@@ -1077,6 +1096,20 @@ def _replay(
             if hit is not None and identity is not None and decider is record:
                 holders.add(identity)
             return hit[0] if hit is not None else next(iter_leaves(fp.options))
+        # The strict decode asks this pool ONE question — does ``wanted`` equal an enumerated leaf.
+        # The keyed descent answers it by refusing the branches that cannot carry the record's row
+        # (``Fork.admits``), and ``skip`` keeps the answer exact where the descent alone would take
+        # a leaf the partial row merely vouches for. The hit has to be one the walk below would have
+        # filed: a leaf with no row of its own keys as the empty match, which a wholly OFF record
+        # equals, and a structural option never enters ``buckets`` at all. Pruning can only lose a
+        # leaf, never invent one, so a miss falls through to the whole walk — and a row that equals
+        # nothing still counts every candidate it did not equal.
+        if wanted is not None and piece:
+            hit = leaf_for(fp.options, piece, skip=lambda knobs: not knobs or schedule_match_key(knobs) != wanted)
+            if hit is not None and not _is_structural_option(hit[0]):
+                buckets.setdefault(identity, set()).add(wanted)
+                chosen = next((leaf for leaf in iter_leaves(fp.options) if not _is_structural_option(leaf)), None)
+                return chosen if chosen is not None else next(iter_leaves(fp.options))
         leaves = flatten_leaves(fp.options)
         ops = [o for o in leaves if not _is_structural_option(o)]
         for leaf in ops:
