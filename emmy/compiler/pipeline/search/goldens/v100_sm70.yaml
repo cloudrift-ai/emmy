@@ -879,11 +879,11 @@ configs:
       WORK: w2x2
       TILE: mma_m8n8k4_f16_f32/f4x4/k8
       REDUCE: ''
-      RASTER: gm8
+      RASTER: ''
       STAGE: d2/smem
     measurements:
-      emmy_us: 323.07
-      reference_us: 216.75
+      emmy_us: 325.12
+      reference_us: 206.51
       reference_backend: cublas
   - name: matmul.square.2048.fp16
     bindings: {}
@@ -893,11 +893,11 @@ configs:
       WORK: w2x2
       TILE: mma_m8n8k4_f16_f32/f4x4/k8
       REDUCE: ''
-      RASTER: gm8
+      RASTER: ''
       STAGE: d2/smem
     measurements:
-      emmy_us: 319.83
-      reference_us: 216.75
+      emmy_us: 323.58
+      reference_us: 206.51
       reference_backend: cublas
 - program: 7
   target:
@@ -912,11 +912,11 @@ configs:
       WORK: w2x2
       TILE: mma_m8n8k4_f16_f32/f4x4/k8
       REDUCE: ''
-      RASTER: gm8
+      RASTER: ''
       STAGE: d2/smem
     measurements:
-      emmy_us: 1904.64
-      reference_us: 1324.03
+      emmy_us: 1915.9
+      reference_us: 1314.82
       reference_backend: cublas
   - name: matmul.square.4096.fp16
     bindings: {}
@@ -926,11 +926,11 @@ configs:
       WORK: w2x2
       TILE: mma_m8n8k4_f16_f32/f4x4/k8
       REDUCE: ''
-      RASTER: gm8
+      RASTER: ''
       STAGE: d2/smem
     measurements:
-      emmy_us: 1904.64
-      reference_us: 1324.03
+      emmy_us: 1916.93
+      reference_us: 1314.82
       reference_backend: cublas
 - program: 8
   target:
@@ -1030,10 +1030,10 @@ configs:
       WORK: w2x2
       TILE: mma_m8n8k4_f16_f32/f4x4/k4
       REDUCE: ''
-      RASTER: gm8
+      RASTER: ''
       STAGE: d2/smem
     measurements:
-      emmy_us: 1699.84
+      emmy_us: 1728.51
       reference_us: 1157.12
       reference_backend: cublas
   - name: matmul.mlp_gate_up.h4096
@@ -1044,10 +1044,10 @@ configs:
       WORK: w2x2
       TILE: mma_m8n8k4_f16_f32/f4x4/k4
       REDUCE: ''
-      RASTER: gm8
+      RASTER: ''
       STAGE: d2/smem
     measurements:
-      emmy_us: 1700.86
+      emmy_us: 1726.46
       reference_us: 1157.12
       reference_backend: cublas
 - program: 12
