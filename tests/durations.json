@@ -264,6 +264,7 @@
  "tests/compiler/passes/test_volta_mma.py::test_sm70_newer_stage_pin_refuses[d1/smem-async]": 0.77,
  "tests/compiler/passes/test_volta_mma.py::test_sm70_newer_stage_pin_refuses[d1/smem-tma]": 0.77,
  "tests/compiler/passes/test_volta_mma.py::test_sm70_register_tile_keeps_the_volta_fragment_layout_through_the_reroll": 0.78,
+ "tests/compiler/passes/test_volta_mma.py::test_sm70_ring_splits_the_blocking_copy_across_the_drain": 0.54,
  "tests/compiler/passes/test_volta_mma.py::test_sm70_source_uses_only_the_volta_mma_family[False]": 0.78,
  "tests/compiler/passes/test_volta_mma.py::test_sm70_source_uses_only_the_volta_mma_family[True]": 0.78,
  "tests/compiler/passes/test_volta_mma.py::test_sm70_sync_copy_composes_ring_and_register_pipelines": 0.78,

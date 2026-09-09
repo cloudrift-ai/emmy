@@ -49,10 +49,7 @@ def test_warp_stage_catalog_is_the_product_of_its_parametrizations() -> None:
     measured evidence do that."""
     hopper = stage_moves(warp=True, ctx=Context.from_target((9, 0)))
     assert {(stage.transport, stage.depth, stage.reg_depth) for stage in hopper} == {
-        (transport, depth, reg_depth)
-        for transport in ("smem", "smem-async", "smem-tma")
-        for depth in (1, 2, 3, 4)
-        for reg_depth in (1, 2)
+        (transport, depth, reg_depth) for transport in ("smem", "smem-async", "smem-tma") for depth in (1, 2, 3, 4) for reg_depth in (1, 2)
     }
     # sm_70 issues neither cp.async nor TMA; the register ping-pong still pairs with what is left.
     volta = stage_moves(warp=True, ctx=Context.from_target((7, 0)))
