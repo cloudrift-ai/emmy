@@ -5,13 +5,22 @@
 ### Status
 
 The baseline lane is complete: 59 of 59 offered setups measured, every one with whole-forward CUDA graph capture and
-every backend passing its correctness check against eager SDPA. The Emmy lane has not run: it requires one recorded
-golden per setup and none exist yet.
+every backend passing its correctness check against eager SDPA. The Emmy lane has goldens for the setups listed below
+(`golden/README.md` says how each was recorded), and the recipe's Emmy lane has not been re-run over them yet: the
+Emmy numbers here are the recording runs themselves — the fastest hand-pinned row of each setup, timed on the card
+beside eager in one process, whole forward captured, over 20 iterations after 3 warmups where the recipe takes 10
+after 1. Plain decode (`decode_causal`) has no golden: with one query row the fused kernel offers
+no tensor-core tile, so nothing worth replaying can be recorded yet.
 
-The blocker recorded against this lane earlier — a traced attention reaching a kernel no recorded row could name —
-no longer reproduces on `origin/main`, and `golden/README.md` now carries what was measured in its place. What is left
-is the recording work itself. Until those goldens exist, this file reports a library comparison and says nothing about
-Emmy.
+### Emmy, recorded rows
+
+| setup | eager (FA-2) µs | Emmy µs | Emmy vs eager |
+| --- | ---: | ---: | ---: |
+| prefill_causal-b1-s1024 | 94 | 76 | 1.24x |
+| prefill_causal-b1-s2048 | 275 | 271 | 1.02x |
+| prefill_causal-b1-s4096 | 894 | 878 | 1.02x |
+| prefill_global-b1-s1024 | 126 | 127 | 0.99x |
+| prefill_gqa-b1-s1024 | 148 | 140 | 1.06x |
 
 ### Protocol
 
