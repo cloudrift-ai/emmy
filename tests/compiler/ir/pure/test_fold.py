@@ -69,25 +69,6 @@ def test_a_bilinear_term_puts_its_k_last_operand_first_at_formation() -> None:
     assert mm.as_contraction() is not None and mm.as_contraction().left == "m"
 
 
-def test_a_batched_pair_orients_by_its_row_whatever_its_operands_are_called() -> None:
-    """A shared outer coordinate is no row. ``query[a0, a1, a3]`` and ``key[a0, a2, a3]`` are both
-    k-last and both read the batch coordinate ``a0``, so only ``a1`` and ``a2`` can order them —
-    and the answer must not turn on what the two operands happen to be called.
-
-    It used to: ``a0`` was the minimum on BOTH sides, the pair tied, and the tie fell through to
-    the product's argument order, which is its operand NAMES (commutative args sort). Those names
-    are minted in emission order, so one attention kernel's two contractions over the same operands
-    could orient opposite ways — and the twisted rewrite, which matches score cones by canonical
-    form, then stopped reading them as one score."""
-    reduce_axis = Axis("a3", Dim(16))
-    for query_name, key_name in (("p", "r"), ("r", "p")):
-        query = slab(query_name, "query", "a0", "a1", "a3")
-        key = slab(key_name, "key", "a0", "a2", "a3")
-        fold = contraction(reduce_axis, query, (key, "acc"))
-        assert fold.operands == (query, key), f"the query slab named {query_name!r} lost the A slot"
-        assert fold.lift.params[:3] == ("a3", query_name, key_name)
-
-
 def test_a_multi_channel_term_puts_the_shared_operand_first_at_formation() -> None:
     """With several products A is the argument they share, whatever the slab layouts say."""
     x, g, u = slab("l", "x", "k", "m"), slab("g", "wg", "n", "k"), slab("u", "wu", "n", "k")

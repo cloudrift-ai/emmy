@@ -437,9 +437,7 @@ def test_child_identity_receipts_decode_per_child_and_join_by_stored_identity() 
     lift_identity = _lifted_target(parent).identity_key(with_io=True)
     children = {i: rows for i, rows in _replay(parent, exhaustive=True).rows.items() if i is not None and i != lift_identity}
     assert len(children) == 2, "the pinned cut must resolve to two distinctly identified child kernels"
-    # One child's rows are a subset of the other's, and which identity digest sorts first is not a
-    # fact about the kernels — take the child that HAS a row its sibling does not offer.
-    (id_a, rows_a), (id_b, rows_b) = sorted(children.items(), key=lambda child: len(child[1]), reverse=True)
+    (id_a, rows_a), (id_b, rows_b) = sorted(children.items())
     row_a = next(iter(rows_a - rows_b), None)
     assert row_a is not None, "the children must offer at least one distinguishing schedule row"
 

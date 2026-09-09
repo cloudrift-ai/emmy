@@ -299,12 +299,9 @@ class Fold:
                 # Two SLABS orient by layout; a computed operand keeps the order its former chose.
                 slabs = len(pair) == 2 and all(e.as_slab() is not None for e in pair)
                 k_last = [e for e in pair if slabs and self.axis in e.as_slab().load.index[-1].free_vars()]
-                # Both k-last (a matmul): A is the one reading the earlier ROW — the coordinate the
-                # other operand does NOT read. A coordinate BOTH read (a batched matmul's batch and
-                # head) is no row: comparing it ties every batched pair, and the tie falls through
-                # to what the operands are called, which is emission order.
-                rows = pair[0].free_axes ^ pair[1].free_axes if slabs else frozenset()
-                k_last.sort(key=lambda e: min(e.free_axes & rows, default=""))
+                # Both k-last (a matmul): A is the one reading the earlier free coordinate — the
+                # row, under the lift's declaration order — so alpha-equal terms orient alike.
+                k_last.sort(key=lambda e: min((n for n in e.free_axes if n != self.axis), default=""))
                 a_edge = k_last[0] if len(pair) == 2 and k_last else None
             if a_edge is not None and self.operands[0] is not a_edge:
                 reordered = (a_edge, *(edge for edge in self.operands if edge is not a_edge))

@@ -8,9 +8,10 @@ The baseline lane is complete: 59 of 59 offered setups measured, every one with 
 every backend passing its correctness check against eager SDPA. The Emmy lane has not run: it requires one recorded
 golden per setup and none exist yet.
 
-What stopped them being recordable at all is fixed — a traced SDPA now builds the same fused structure the card's
-recorded attention rows describe, and a hand pin reaches it. `golden/README.md` carries the detail and what is left to
-do. Until those goldens are recorded, this file reports a library comparison and says nothing about Emmy.
+The blocker recorded against this lane earlier — a traced attention reaching a kernel no recorded row could name —
+no longer reproduces on `origin/main`, and `golden/README.md` now carries what was measured in its place. What is left
+is the recording work itself. Until those goldens exist, this file reports a library comparison and says nothing about
+Emmy.
 
 ### Protocol
 
