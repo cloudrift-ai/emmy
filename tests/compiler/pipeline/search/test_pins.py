@@ -63,3 +63,31 @@ def test_a_row_marking_several_offered_seams_spells_the_composed_arm() -> None:
     assert spelled_arm(options, {**both, "PLACE@map.9/twist": "cut"}) == (cut_ab, both), "a seam this kernel does not offer is free"
     assert spelled_arm(options, {"PLACE@map.1/map": "cut"}) == (cut_a, {"PLACE@map.1/map": "cut"}), "one seam: its single arm"
     assert spelled_arm([fuse, cut_a, cut_b], both) == (cut_a, {"PLACE@map.1/map": "cut"}), "no composed arm offered: as before"
+
+
+def test_unpinned_decisions_withdraws_live_decision_pins_and_restores_them(monkeypatch) -> None:
+    """An evidence replay runs with every kernel-decision pin withdrawn — the family vars, their
+    scoped forms and their ``EMMY_KNOBS`` entries — while precision and emission pins stay, and the
+    environment comes back exactly as it was."""
+    import os
+
+    from emmy import config
+    from emmy.compiler.pipeline.knob import family_pins
+    from emmy.compiler.pipeline.search.pins import unpinned_decisions
+
+    scoped = config.knob_var("TILE@map.1/twist")
+    monkeypatch.setenv(scoped, "mma_m16n8k16_f16_f32/f1x8/k4")
+    monkeypatch.setenv(config.knob_var("WORK"), "w4x1")
+    monkeypatch.setenv(config.knob_var("PLACE"), "cut")
+    monkeypatch.setenv(config.knob_var("FAST_MATH"), "1")
+    monkeypatch.setenv(config.KNOBS, "STAGE@map.1/twist=d2/smem-tma,FAST_MATH=1,LOOPIFY=1")
+    assert family_pins("TILE") and family_pins("WORK")
+    with unpinned_decisions():
+        assert scoped not in os.environ and config.knob_var("WORK") not in os.environ and config.knob_var("PLACE") not in os.environ
+        assert not family_pins("TILE") and not family_pins("WORK") and not family_pins("STAGE")
+        assert os.environ[config.knob_var("FAST_MATH")] == "1"
+        assert os.environ[config.KNOBS] == "FAST_MATH=1,LOOPIFY=1"
+    assert os.environ[scoped] == "mma_m16n8k16_f16_f32/f1x8/k4"
+    assert os.environ[config.knob_var("WORK")] == "w4x1"
+    assert os.environ[config.knob_var("PLACE")] == "cut"
+    assert os.environ[config.KNOBS] == "STAGE@map.1/twist=d2/smem-tma,FAST_MATH=1,LOOPIFY=1"
