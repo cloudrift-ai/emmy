@@ -181,6 +181,19 @@ def test_working_file_golden_conflicts_with_direct_input(run_cli, tmp_path):
     assert "mutually exclusive" in stdout + stderr
 
 
+def test_a_realization_substring_resolves_to_the_exact_name_on_args(tmp_path):
+    """``--realization`` accepts an unambiguous substring, and everything after resolution — the
+    record path above all — must see the exact name it selected."""
+    from emmy.commands.compile import resolve_golden_arg
+
+    path = tmp_path / "working.yaml"
+    _working_loop(path)
+    args = _args(path)
+    args.realization = "relu"
+    resolve_golden_arg(args)
+    assert args.realization == "working.relu"
+
+
 def test_duplicate_name_requires_target_scoped_working_file(tmp_path, caplog):
     """A repeated shape name must not silently choose between distinct embedded targets."""
     from emmy.commands.compile import resolve_golden_arg
