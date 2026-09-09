@@ -773,3 +773,46 @@ def test_record_greedy_pick_appends_routing_rows_and_receipts_once(tmp_path, mon
     monkeypatch.setattr(working_golden, "is_repository_golden_path", lambda _path: True)
     with pytest.raises(ValueError, match="canonical repository golden"):
         record_greedy_pick(path, document, "mm", decisions=decisions, kernels=kernels, reference_backend="same-input-greedy")
+
+
+def test_record_greedy_pick_does_not_alias_rows_between_input_regimes(tmp_path):
+    """The same routed kernel and schedule can win under several bindings or pins. Each seed must
+    name a row carrying its own regime and timings; otherwise a later recording silently updates
+    the earlier row and writes a dangling ``kernel_set`` name."""
+    from emmy.compiler.pipeline.search.working_golden import record_greedy_pick
+
+    path = tmp_path / "working.yaml"
+    dump_golden_file(
+        _document(
+            _matmul("mm.strict", pins={"FAST_MATH": False}),
+            _matmul("mm.fast", pins={"FAST_MATH": True}),
+        ),
+        path,
+    )
+    document = load_golden_file(path)
+    identity = "1" * 64
+    decisions = [(identity, {"PLACE@map.1/map": "cut"}, 30.0, 33.0)]
+
+    strict_names = record_greedy_pick(
+        path,
+        document,
+        "mm.strict",
+        decisions=decisions,
+        kernels=[],
+        reference_backend="same-input-greedy",
+    )
+    fast_names = record_greedy_pick(
+        path,
+        document,
+        "mm.fast",
+        decisions=decisions,
+        kernels=[],
+        reference_backend="same-input-greedy",
+    )
+
+    realizations = load_golden_file(path)["configs"][0]["realizations"]
+    assert strict_names != fast_names
+    assert next(row for row in realizations if row["name"] == "mm.strict")["kernel_set"] == strict_names
+    assert next(row for row in realizations if row["name"] == "mm.fast")["kernel_set"] == fast_names
+    assert next(row for row in realizations if row["name"] == strict_names[0])["pins"] == {"FAST_MATH": False}
+    assert next(row for row in realizations if row["name"] == fast_names[0])["pins"] == {"FAST_MATH": True}

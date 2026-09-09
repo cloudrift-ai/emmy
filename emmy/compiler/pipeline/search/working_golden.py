@@ -593,8 +593,9 @@ def record_greedy_pick(
     timings. Every row takes the seed realization's bindings and input regime and no route: seam
     spellings are kernel-local, so a cut key copied onto every receipt would re-cut any piece that
     offers a same-spelled seam; the replay follows the routing rows, each naming its kernel by
-    identity. A row already recorded for the same kernel and knobs takes the new timings, anything
-    else is appended, so a re-record never duplicates. Returns the names written, in order.
+    identity. A row already recorded for the same input regime, kernel, and knobs takes the new
+    timings; anything else is appended, so a re-record never duplicates or aliases measurements
+    from another width or pin regime. Returns the names written, in order.
 
     The SEED then lists those routing rows by name, in that order (``kernel_set``). That list is
     what lets the file say a realization ran as a kernel SET rather than as one kernel:
@@ -624,8 +625,15 @@ def record_greedy_pick(
             "identity": identity,
             "measurements": {"emmy_us": float(emmy_us), "reference_us": float(reference_us), "reference_backend": reference_backend},
         }
-        key = (identity, canonical_row_key(row["knobs"]))
-        recorded = next((r for r in entry["realizations"] if (r.get("identity"), canonical_row_key(r.get("knobs") or {})) == key), None)
+        key = (row["bindings"], row["pins"], identity, canonical_row_key(row["knobs"]))
+        recorded = next(
+            (
+                r
+                for r in entry["realizations"]
+                if (r.get("bindings"), r.get("pins"), r.get("identity"), canonical_row_key(r.get("knobs") or {})) == key
+            ),
+            None,
+        )
         if recorded is None:
             entry["realizations"].append(row)
         else:
