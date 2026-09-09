@@ -241,8 +241,9 @@ def _chunk_refusal(tile: TileOp, node) -> str | None:
     if any(node.axis in edge.free_axes for edge in leaves):
         return "the score's prefix reads an operand that varies over the chunk"
     # The tier holds ONE accumulator — the expectation — and every other carried state as a per-row
-    # register the store may read but not write out. A cross-CTA split's partial writes the whole
-    # carrier to its workspace, which is a kernel this tier cannot produce.
+    # register. A projection may read those registers, and a cross-CTA split's partial stores each
+    # of them WHOLE to its workspace (broadcast per row into a fragment); what the tier cannot write
+    # is a per-row state computed into an output of its own beside the expectation.
     tail = projection_tail(tile)
     body = Body(tail)
     states = set(node.base.results)
