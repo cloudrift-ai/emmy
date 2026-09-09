@@ -203,6 +203,7 @@ def test_sm70_materialized_tiles_use_paired_volta_layout_loads(monkeypatch) -> N
     src, _ = _source(_graph(m=32, n=32, k=16), Context(compute_capability=(7, 0)))
     assert "_a_smem[emmy_volta_crosswise(" in src
     assert "_b_smem[emmy_volta_b_congruous(" in src
+    assert "int row = e / ldm;" not in src
     assert "emmy_mma884_load_a_crosswise_pair(_a0, _a1" in src
     assert "emmy_mma884_load_b_congruous_pair(_b0, _b1" in src
     assert src.count("emmy_mma_m8n8k4_f16_f32_brow(_c") == 4

@@ -1474,19 +1474,25 @@ def swizzle_fn(mode: str) -> str:
     return f"emmy_swizzle_{base.lower()}" + ("" if mode == base else f"_s{swizzle_xor(mode)[0]}")
 
 
-def smem_layout_index(mode: str, flat: str, buffer: str, ctx: RenderCtx) -> str:
+def smem_layout_index(mode: str, flat: str, buffer: str, ctx: RenderCtx, indices: tuple[Expr, ...] = ()) -> str:
     """Render ``flat`` through the slab layout selected by ``mode``.
 
     Modern layouts are the existing one-argument XOR. Volta A needs both logical dimensions:
     the crosswise physical stride is the slab's row count, while Volta B's congruous layout uses
-    the ordinary logical row stride. ``NONE`` and unknown spellings stay row-major.
+    the ordinary logical row stride. Their writer already has those dimensions, so pass them to
+    the layout directly instead of flattening and dividing the result apart again in every K-loop
+    deposit. ``NONE`` and unknown spellings stay row-major.
     """
     if mode == VOLTA_CROSSWISE:
-        rows, cols = ctx.shapes[buffer]
-        return f"emmy_volta_crosswise({flat}, {cols}, {rows})"
+        assert len(indices) == 2, "the Volta A layout needs a logical (row, column) index"
+        rows, _ = ctx.shapes[buffer]
+        row, col = (e.render(ctx) for e in indices)
+        return f"emmy_volta_crosswise({row}, {col}, {rows})"
     if mode == VOLTA_B_CONGRUOUS:
+        assert len(indices) == 2, "the Volta B layout needs a logical (row, column) index"
         cols = ctx.shapes[buffer][-1]
-        return f"emmy_volta_b_congruous({flat}, {cols})"
+        row, col = (e.render(ctx) for e in indices)
+        return f"emmy_volta_b_congruous({row}, {col}, {cols})"
     return flat if not swizzle_xor(mode) else f"{swizzle_fn(mode)}({flat})"
 
 

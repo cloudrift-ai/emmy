@@ -207,9 +207,7 @@ _MMA_M8N8K4_PRELUDE = """\
 // Volta m8n8k4: one warp instruction performs four independent 8x8 MMAs.
 // The lane's four-lane computation group selects one quadrant of a logical
 // 16x16 output cell; groups in the same quadrant row/column duplicate A/B.
-static __device__ __forceinline__ int emmy_volta_crosswise(int e, int ldm, int rows) {
-    int row = e / ldm;
-    int col = e - row * ldm;
+static __device__ __forceinline__ int emmy_volta_crosswise(int row, int col, int rows) {
     int vec = col >> 2;
     int within = vec & 7;
     int permuted_row = (row & ~15) + ((row & 3) << 2) + (((row >> 2) ^ ((row & 16) >> 3)) & 3);
@@ -217,9 +215,7 @@ static __device__ __forceinline__ int emmy_volta_crosswise(int e, int ldm, int r
     return (vec * rows + permuted_row) * 4 + (col & 3);
 }
 
-static __device__ __forceinline__ int emmy_volta_b_congruous(int e, int ldm) {
-    int row = e / ldm;
-    int col = e - row * ldm;
+static __device__ __forceinline__ int emmy_volta_b_congruous(int row, int col, int ldm) {
     int vec = col >> 3;
     int vec_row = vec & 3;
     int permuted_vec = ((row & 3) ^ vec_row) | (vec & 4);

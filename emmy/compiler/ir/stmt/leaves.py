@@ -852,11 +852,11 @@ class Write(Stmt):
     def has_side_effects(self) -> bool:
         return True
 
-    def _swizzled(self, flat: str, ctx: RenderCtx) -> str:
+    def _swizzled(self, flat: str, ctx: RenderCtx, index: tuple[Expr, ...] | None = None) -> str:
         """The flattened store index under this shared slab's derived physical layout."""
         from emmy.compiler.ir.kernel.ir import smem_layout_index  # noqa: PLC0415 — kernel IR imports this module
 
-        return smem_layout_index(self.swizzle, flat, self.output, ctx)
+        return smem_layout_index(self.swizzle, flat, self.output, ctx, self.index if index is None else index)
 
     def pretty(self, indent: str = "") -> list[str]:
         idx = ", ".join(e.pretty() for e in self.index)
@@ -901,7 +901,7 @@ class Write(Stmt):
             lines: list[str] = []
             for k in range(n):
                 idx_k = tuple(self.index[:-1]) + (BinaryExpr("+", self.index[-1], Literal(k, "int")),)
-                flat = self._swizzled(render_index(self.output, idx_k, ctx), ctx)
+                flat = self._swizzled(render_index(self.output, idx_k, ctx), ctx, idx_k)
                 lines.append(f"{pad}{self.output}[{flat}] = {converted[k]};")
             return lines
         vec_type, _elem_type = vec_pair
@@ -947,7 +947,8 @@ class Write(Stmt):
             elem_type = ctx.type_name(out_dt)
             arr = temp
             init = ", ".join(converted)
-            flat_hi = self._swizzled(f"({logical_flat}) + 4", ctx)
+            idx_hi = (*self.index[:-1], BinaryExpr("+", self.index[-1], Literal(4, "int")))
+            flat_hi = self._swizzled(render_index(self.output, idx_hi, ctx), ctx, idx_hi)
             return [
                 f"{pad}{elem_type} {arr}[{n}] = {{ {init} }};",
                 f"{pad}*reinterpret_cast<uint2*>(&{self.output}[{flat}]) = *reinterpret_cast<const uint2*>({arr});",
