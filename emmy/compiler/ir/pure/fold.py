@@ -380,8 +380,15 @@ class Fold:
         """
         if self.axis is not None or self.exposes == names:
             return self
-        members = tuple(self.lift.body.backward_cone(names).members)
-        return replace(self, lift=replace(self.lift, body=Body(members), results=names))
+        # ``names`` are EXPOSED names — what :attr:`applied` spells — while the body and the lift's
+        # own results are in the term's private spelling. The two coincide wherever the body defines
+        # the result, and part exactly where a result is a bound param passed straight through (the
+        # projection over one term per carried state, once a cut renames a child's state to its
+        # workspace). They stay positional, so translate before cutting: writing an exposed name
+        # into the lift's results leaves a result nothing defines.
+        keep = tuple(self.lift.results[self.exposes.index(name)] for name in names)
+        members = tuple(self.lift.body.backward_cone(keep).members)
+        return replace(self, lift=replace(self.lift, body=Body(members), results=keep))
 
     def binds_axes(self) -> frozenset[str]:
         """The axis this term binds — what the statement-door ``rewrite`` drops from σ for the subtree."""
