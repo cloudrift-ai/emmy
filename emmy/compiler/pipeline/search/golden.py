@@ -957,7 +957,7 @@ def _replay(
     siblings: Sequence[GoldenRecord] = (),
     lead: GoldenRecord | None = None,
     exhaustive: bool = False,
-    wanted: str | None = None,
+    wanted: tuple[tuple[str, str], ...] | None = None,
 ) -> _Replay:
     """Replay ``record``'s target through the tile passes — see :class:`_Replay`. The record's input
     pins are the regime it was measured under and go to the environment; its route (the ``PLACE``
@@ -975,7 +975,9 @@ def _replay(
     ``exhaustive`` flattens every schedule pool for ``rows`` (the strict decode's question); the
     evidence import asks only ``holders`` and descends. ``wanted`` names the ONE match key the
     caller will ask ``rows`` about, which the descent answers without flattening — a pool that
-    holds it files just it, and only a pool that does not is walked whole."""
+    holds it files just it, and only a pool that does not is walked whole. How much the descent
+    saves is the pool's to decide: it skips a branch that has already decided against the row, so a
+    pool whose branches leave the row open is still walked widely."""
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
     from emmy.compiler.pipeline import TILE_PASSES, Pipeline  # noqa: PLC0415
@@ -1095,13 +1097,16 @@ def _replay(
                 holders.add(identity)
             return hit[0] if hit is not None else next(iter_leaves(fp.options))
         # The strict decode asks this pool ONE question — does ``wanted`` equal an enumerated leaf.
-        # The keyed descent answers it without entering the branches that cannot carry the record's
-        # row (``Fork.admits``, O(path) rather than the pool), and ``skip`` keeps the answer exact
-        # where the descent alone would take a leaf the partial row merely vouches for. Pruning can
-        # only lose a leaf, never invent one, so a miss falls through to the whole walk below — and
-        # a row that equals nothing still counts every candidate it did not equal.
+        # The keyed descent answers it by refusing the branches that cannot carry the record's row
+        # (``Fork.admits``), and ``skip`` keeps the answer exact where the descent alone would take
+        # a leaf the partial row merely vouches for. The hit has to be one the walk below would have
+        # filed: a leaf with no row of its own keys as the empty match, which a wholly OFF record
+        # equals, and a structural option never enters ``buckets`` at all. Pruning can only lose a
+        # leaf, never invent one, so a miss falls through to the whole walk — and a row that equals
+        # nothing still counts every candidate it did not equal.
         if wanted is not None and piece:
-            if leaf_for(fp.options, piece, skip=lambda knobs: schedule_match_key(knobs) != wanted) is not None:
+            hit = leaf_for(fp.options, piece, skip=lambda knobs: not knobs or schedule_match_key(knobs) != wanted)
+            if hit is not None and not _is_structural_option(hit[0]):
                 buckets.setdefault(identity, set()).add(wanted)
                 chosen = next((leaf for leaf in iter_leaves(fp.options) if not _is_structural_option(leaf)), None)
                 return chosen if chosen is not None else next(iter_leaves(fp.options))
