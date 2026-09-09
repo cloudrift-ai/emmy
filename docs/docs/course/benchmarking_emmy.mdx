@@ -1,6 +1,6 @@
 ---
 sidebar_position: 3
-validated_against_commit: ec0ca0213378dcba6d3ea2cd16ba66e1a34c2c9c
+validated_against_commit: 261039d9161f9349b1c6fef0678ec98ce04b433d
 title: Benchmarking and Comparing Emmy
 description: >-
   Measure Emmy kernels and deployed model servers, compare them fairly with PyTorch, and understand the resulting
@@ -135,6 +135,17 @@ The JSON records the backend comparison, per-kernel measurements, selected sched
 important run flags. The dump directory contains compiler-stage artifacts; its benchmark comparison is also written
 as `60_bench_compare.json`. Keep the command, JSON, generated CUDA, GPU identity, software revision, shapes, and data
 type together when sharing a result.
+
+Clean pinned benchmark rows and the greedy isolated re-benchmark can also write deployment measurements to the tune
+DB. Set `EMMY_TUNE_DB=/tmp/emmy-course-bench.db` on learning runs to keep those measurements separate from your usual
+cache. `--no-record-nodes` disables this automatic DB recording, including both node and `perf` rows. Clean rows
+require at least 5 warmups and 20 measurement iterations; deployment evidence also requires the `-O3` regime.
+
+For a golden inventory, `run --golden PATH --bench` walks every realization. With multiple realization names, a
+supplied `--json PATH` names an empty output directory; a single name produces one JSON file. Add `--realization NAME`
+to select one. With the file and `--bench`, `--record` explicitly writes measured latency entries into the golden;
+`--record-greedy` records the selected kernel set as route rows and child schedule receipts. Use a mutable working file
+for this learning workflow.
 
 Generated CUDA can also be inspected without timing it:
 
@@ -337,9 +348,9 @@ Those measurements remain in the workload's raw artifacts.
 
 This boundary is deliberate. `emmy bench` records what ran and preserves its evidence; it does not judge request
 counts, accuracy, latency, throughput, or coverage, and it does not generate `RESULTS.md`. The repository's
-`run-experiment` skill validates row coverage, archives the raw run under Git LFS, and writes the durable interpretation.
-Use the observed GPU, CUDA/driver, CPU, memory, and container facts in the record when deciding whether two raw files
-are comparable.
+`run-experiment` skill validates row coverage, archives the raw run under Git LFS, and writes the durable
+interpretation. Use the observed GPU, CUDA/driver, CPU, memory, and container facts in the record when deciding
+whether two raw files are comparable.
 
 For an apples-to-apples recipe comparison, keep these constant unless they are the intended experiment variable:
 

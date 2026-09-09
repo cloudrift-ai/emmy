@@ -1,6 +1,6 @@
 ---
 sidebar_position: 6
-validated_against_commit: ec0ca0213378dcba6d3ea2cd16ba66e1a34c2c9c
+validated_against_commit: 261039d9161f9349b1c6fef0678ec98ce04b433d
 title: Emmy Course Glossary
 description: >-
   Plain-language definitions of the machine-learning, compiler, GPU, deployment, and tuning terms used in the Emmy
@@ -79,7 +79,8 @@ Representing model weights or activations with fewer bits to reduce memory and b
 serving paths include FP8, NVFP4, MXFP4, AWQ INT4, and EXL3; each format has its own scaling and layout contract.
 
 **NVFP4 / MXFP4 / EXL3**
-Low-bit weight formats. NVFP4 and MXFP4 are four-bit floating-point formats with different block-scaling conventions.
+Low-bit formats. NVFP4 and MXFP4 are four-bit floating-point formats with different block-scaling conventions.
+An NVFP4 checkpoint can also declare four-bit activations; Emmy preserves that W4A4 computation when loading it.
 EXL3 is a mixed-rate coded format whose allocation can vary by tensor. Emmy decomposes their decoding into generic
 compiler algebra at the loader boundary.
 
@@ -129,9 +130,9 @@ The same outer Emmy `Graph` after tensor operations have been lifted into explic
 have been fused. Its compute nodes carry `LoopOp` operations.
 
 **Fold**
-Tile IR's one stored pure reduction term: an optional iteration axis, a lift lambda that produces one contribution, an
-initial state, an associative state-combine lambda, and operand edges. Pointwise maps, ordinary reductions, twisted
-state, and contractions are derived readings of this single representation.
+Tile IR's pure reduction term: a lift lambda, initial state, base monoid, optional twist recipe, and operand edges.
+The iteration axis and associative combine are derived; axis extents belong to the kernel's axis table. Pointwise
+maps, ordinary reductions, twisted state, and contractions are readings of this single representation.
 
 **Total lift**
 The Loop-to-Tile invariant that every reduction loop becomes a Fold and every output effect becomes an output
@@ -441,8 +442,9 @@ Forcing a tuning choice instead of letting the compiler decide it, through an `E
 replay. A pinned benchmark must prove that the requested row actually realized before its timing is evidence.
 
 **Schedule key**
-The path-aware name of one schedule choice, such as bare `TILE` for the primary site or `REDUCE@<axis>` when one Fold
-tree contains several choices from the same family. Golden files, the tune DB, and pins use the shortest unambiguous key.
+The name of one schedule choice. A family is bare when it has one applicable site; with several sites its key
+includes the route, such as `TILE@map.1/twist.1/inner`. Route segments identify operand positions and derived node
+kinds, not axis names. Golden files, the tune DB, and pins share the codec.
 
 **Realize**
 A recorded configuration realizes when the current compiler offers an exact candidate matching it at the decision
@@ -484,7 +486,7 @@ knobs, and optional measurements and ranking feedback.
 
 **Working golden file**
 A mutable local YAML inventory containing program targets, unverified realizations, proposals, and tuning feedback. It
-is search state, not trusted deployment evidence.
+is search state. Its measured rows supply evidence when a command names the file with `--golden PATH`.
 
 **Canonical golden file**
 A reviewed per-GPU YAML in a recipe's `golden/` directory or the model-agnostic hardware-golden directory. Every
@@ -492,7 +494,8 @@ realization has verified deployable measurements, and `emmy tune` refuses to mut
 
 **Child-identity schedule receipt**
 A realization that freezes structural cuts in its pins, records one resulting child kernel's schedule row, and stores
-that child's deploy identity. It lets verified evidence describe per-child schedules without flattening a kernel tree.
+that child's deploy identity. Strict decode selects the child by that identity. As evidence it supplies a route row
+for the parent and a schedule row for the child.
 
 **Evidence**
 A compatible recorded measurement used to select between schedule candidates.
@@ -506,8 +509,16 @@ A checksum- and vocabulary-pinned snapshot of node measurements used for reprodu
 mutable tune DB or reservoir, the same freeze yields the same evaluation dataset wherever it is read.
 
 **Deploy evidence hierarchy**
-The fixed greedy-compile order: exact verified goldens, compatible reservoir measurements, compatible tune-DB `perf`
-rows, the prior prediction, and finally the rule's first emitted option when every other tier is silent.
+The greedy-compile order: compatible reservoir measurements, then the fastest compatible tune-DB or golden row in
+scope, then the prior prediction, and finally the rule's first emitted option. Goldens have no separate priority.
+
+**Route row**
+A measured row spelling a placement or cross-CTA split. It prices that structural choice; the resulting child kernels
+choose their own schedules from their own evidence.
+
+**Strict evidence**
+A mode selected by `--strict-evidence` or `EMMY_STRICT_EVIDENCE`. A fork that no measurement decides raises an error
+instead of using a prior prediction or emission order.
 
 **Calibration**
 A check of whether a learned model ranks measured candidates well enough to influence compilation.

@@ -1,6 +1,6 @@
 ---
 sidebar_position: 5
-validated_against_commit: ec0ca0213378dcba6d3ea2cd16ba66e1a34c2c9c
+validated_against_commit: 261039d9161f9349b1c6fef0678ec98ce04b433d
 title: Integrating Emmy with vLLM
 description: >-
   Learn how Emmy plugs compiled embedding and generation programs into vLLM, then run and validate both serving paths.
@@ -203,6 +203,24 @@ The dry-run output is shell-pastable and exposes hidden defaults. Include it whe
 flag routing and A/B symmetry are visible without requiring a GPU.
 :::
 
+### Evidence used during startup
+
+`--golden PATH` selects the golden file whose measured rows the serving compiler reads. The command forwards it to the
+vLLM child through `EMMY_GOLDEN_FILE`. Those rows join local tune-DB evidence after reservoir lookup; the fastest
+compatible DB or golden row wins. Without the flag, the compiler reads the live GPU's repository goldens.
+
+`--strict-evidence` forwards `EMMY_STRICT_EVIDENCE` and fails startup if a fork has no measured choice. Without that
+mode the prior supplies unmeasured choices. Inspect the forwarded settings without starting a server:
+
+```bash
+./venv/bin/emmy serve TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
+  --generate --strict-evidence --dry-run
+```
+
+For a release, `emmy eval golden --golden PATH --serving-config PATH` goes further: it checks the exact live GPU,
+realization coverage, and schedule decode, then compiles the serving twins using only that file's evidence. Local
+measurements cannot hide a gap in the release file. See [How Emmy Chooses Fast GPU Schedules](./prior_and_goldens).
+
 ### Stock mode
 
 `--stock` removes the Emmy model override and plugin-specific execution flags:
@@ -361,6 +379,11 @@ global attention, supports routed-expert models through the MoE third seam, and 
 vLLM tensor and pipeline ranks. Current serving paths include compressed expert formats and the published DeepSeek V4
 checkpoint; uniform sliding-window and dual-chunk configurations remain rejected. A clean startup error is safer than
 producing plausible but incorrect tokens.
+
+For an NVFP4 checkpoint declaring static four-bit activations, the compiler spells both the packed weights and the
+activation quantize/dequantize operations into the pre/post graphs. Serving and tuning twins use the same checkpoint
+scales and spelling order so their kernel identities agree. Such twins need the checkpoint headers and calibrated
+scales; a config-only capture cannot describe them fully.
 
 Read `emmy/serving/ARCHITECTURE.md` before adding a new architecture. The important question is not merely whether
 Hugging Face can load it; the model must also expose a sound split around vLLM attention.

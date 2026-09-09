@@ -1,6 +1,6 @@
 ---
 sidebar_position: 1
-validated_against_commit: ec0ca0213378dcba6d3ea2cd16ba66e1a34c2c9c
+validated_against_commit: 261039d9161f9349b1c6fef0678ec98ce04b433d
 title: "Learn Emmy: A Code-First Course"
 description: >-
   A beginner-friendly, code-first course on Emmy's compiler, deployment, benchmarking, provisioning, and serving
@@ -29,6 +29,10 @@ run correctly and quickly.
 Technical terms are defined when they first become important. The [Course glossary](./glossary) is also available as a
 quick reference. When a term is shown in `code font`, it is usually a name that appears literally in the source code.
 :::
+
+The frontmatter field `validated_against_commit` records the code revision used for the source and CLI review.
+GPU execution and release qualification still require the exact target hardware; the stamp does not certify those
+labs or published performance numbers.
 
 The course describes the current `emmy/` Python package—the main application code in the `emmy/` directory.
 `pyproject.toml` tells Python which package to install and connects the terminal command `emmy` to the function
@@ -159,8 +163,8 @@ putting reusable compiler behavior inside a command handler.
 
 1. `pyproject.toml`: `[project]`, `[project.optional-dependencies]`, `[project.scripts]`, and the vLLM entry point.
 2. `Makefile`: `setup`, `test`, `lint`, `bench`, `bench-kernels`, and image-building targets.
-3. `README.md`: Compile, Benchmark, Deploy, Serve, Generate, and Recipe examples.
-4. `CLAUDE.md`: documentation conventions, test lanes, and contribution rules.
+3. `README.md`: Compile, Benchmark, Deploy, Serve, and Recipe examples.
+4. `AGENTS.md`: documentation conventions, test lanes, and contribution rules.
 5. `STYLE.md`: code conventions before changing implementation files.
 
 ### Lab — local orientation
@@ -816,15 +820,16 @@ you for dynamic serving in lesson 12.
 ### Checkpoint
 
 You can explain why PyTorch—not a handwritten Emmy source parser—captures the initial computation, what Emmy's custom
-FX walker adds, why mutable graphs require an uncached structural key, why names are excluded from it, and how a symbolic
-dimension remains an expression until launch time.
+FX walker adds, why mutable graphs require an uncached structural key, why names are excluded from it, and how a
+symbolic dimension remains an expression until launch time.
 
 ## Lesson 7 — Capture PyTorch operations and decompose them
 
 ### Learn
 
-In this lesson, **tracing** names the whole capture boundary, not one function owned entirely by PyTorch or Emmy. PyTorch
-provides the mechanism that discovers tensor operations; Emmy provides the wrapper, conversion, and command around it.
+In this lesson, **tracing** names the whole capture boundary, not one function owned entirely by PyTorch or Emmy.
+PyTorch provides the mechanism that discovers tensor operations; Emmy provides the wrapper, conversion, and command
+around it.
 
 | Name | Owner | Job |
 |---|---|---|
@@ -1165,9 +1170,9 @@ the rewrite access to graph nodes, and a rule returns one of three shapes:
 Rules must be idempotent because the engine can revisit the pipeline from its beginning. `Run.resolve` chooses one path
 deterministically for normal compilation. `Run.drive` explores paths for tuning.
 
-**Provenance** is metadata that links generated kernels back to original frontend operations. Decomposition creates pieces;
-fusion aggregates them; lowering keeps the metadata attached. It drives stable kernel names and per-kernel PyTorch
-reproducers without entering cache keys.
+**Provenance** is metadata that links generated kernels back to original frontend operations. Decomposition creates
+pieces; fusion aggregates them; lowering keeps the metadata attached. It drives stable kernel names and per-kernel
+PyTorch reproducers without entering cache keys.
 
 ### Small example — one rewrite rule
 
@@ -1392,7 +1397,8 @@ CPU-safe tests:
 ```
 
 This is a quick development measurement. Before reporting a comparison, follow the warmup, backend, JSON, profiling,
-and fairness guidance in [Benchmarking and Comparing Emmy](./benchmarking_emmy#part-1--compare-generated-tensor-programs).
+and fairness guidance in [Benchmarking and Comparing
+Emmy](./benchmarking_emmy#part-1--compare-generated-tensor-programs).
 
 If this fails, use the fault-isolation order: inspect final CUDA, compare loop versus numpy, then inspect CUDA dispatch
 and emitted launch geometry. Do not begin by changing tile heuristics.
@@ -1472,7 +1478,8 @@ configs:
 
 Model goldens live under each recipe's `golden/` directory; model-agnostic hardware goldens live under
 `emmy/compiler/pipeline/search/goldens/`. A mutable working golden may contain inventory, proposals, and ranking
-feedback, but only a reviewed canonical file is verified deployment evidence.
+feedback. Its measured rows become deployment evidence when a command names it with `--golden PATH`. Canonical files
+are reviewed evidence loaded by default for the live GPU.
 
 ### How a golden is created
 
@@ -1493,7 +1500,7 @@ flowchart LR
 The important steps are:
 
 1. Create a working golden inventory for the exact program, bindings, pins, and target GPU.
-2. Run `emmy tune --golden-file` to explore valid schedules at the default deployable `-O3` settings.
+2. Run `emmy tune --golden PATH` to explore valid schedules at the default deployable `-O3` settings.
 3. Pin a candidate's exact knobs and compare it through the A/B path.
 4. Require three integrity checks: the requested knobs were actually realized, the output matches the reference, and
    the reported speed is physically plausible for the GPU.
@@ -1501,23 +1508,26 @@ The important steps are:
    timing from another benchmark path.
 6. Promote the complete program-backed record into the correct canonical per-GPU YAML and run its release audit.
 
-A new candidate workflow has this general shape; the actual knob string comes from tuning output:
+A new candidate workflow has this general shape; the working inventory supplies its programs and recorded knobs:
 
 ```bash
 # 1. Search every target in a mutable working inventory.
 EMMY_TUNE_DB=/tmp/emmy-golden-course.db \
   ./venv/bin/emmy tune \
-  --golden-file /tmp/model-working.golden.yaml \
+  --golden /tmp/model-working.golden.yaml \
   --patience 8
 
-# 2. Re-run a promising exact configuration through integrity-checked A/B measurement.
-./venv/bin/emmy run \
-  --golden matmul.square.512.fp16 \
-  --bench --warmup 5 --iters 20 \
-  --json /tmp/matmul-golden-candidate.json
+# 2. Check and benchmark the inventory on its recorded GPU.
+EMMY_TUNE_DB=/tmp/emmy-golden-course.db \
+  ./venv/bin/emmy run \
+  --golden /tmp/model-working.golden.yaml \
+  --bench --strict --warmup 5 --iters 20 \
+  --json /tmp/emmy-golden-candidates
 ```
 
-Do not copy the illustrative knob string blindly: valid knobs depend on current enumeration, shape, dtype, and GPU.
+The working file must already exist. Add `--realization NAME` to replay one row; a whole-file `--json PATH` names an
+output directory when more than one realization name is selected. Valid knobs depend on current enumeration, shape,
+dtype, and GPU.
 Inspect the JSON status and integrity flags, confirm the run again, and copy the emitted `record_knobs` only after all
 checks pass.
 
@@ -1525,19 +1535,20 @@ checks pass.
 
 Goldens have three main consumers:
 
-1. **Deployment-time schedule selection.** Greedy selection first checks for a verified record on the live GPU whose
-   strict deploy identity matches the current schedule-free Loop program and whose schedule row equals one exact
-   enumerated leaf. It is stronger evidence than ordinary tune measurements or model predictions.
-2. **Reproduction and release checks.** `compile` and `run` accept `--golden NAME`; `tune` and strict multi-target runs
-   accept a working `--golden-file`. `emmy eval golden FILE --serving-config FILE` performs the file-scoped release
-   audit against a pinned serving realization matrix.
+1. **Deployment-time schedule selection.** Reservoir measurements are consulted first. Next, compatible tune-DB and
+   golden rows compete on latency in one evidence index. Goldens do not outrank local measurements automatically.
+   `--strict-evidence` rejects a fork that no measurement decides instead of falling back to the prior.
+2. **Reproduction and release checks.** `--golden PATH` selects a file; `--realization NAME` selects a realization in
+   that file or the live card's repository corpus. `run --golden PATH --bench` walks all realizations; `tune --golden
+   PATH` updates a working inventory. `emmy eval golden --golden FILE --serving-config FILE` checks the release matrix,
+   then compiles serving twins using only that file's measured evidence.
 3. **Offline-prior fitting and evaluation.** `emmy fit` reconstructs each canonical golden's candidate pool to train
    the offline prior. Goldens do not enter the online reservoir, which learns from ordinary tuning measurements.
 
 ```bash
 # Reproduce a checked-in golden on its recorded GPU.
 ./venv/bin/emmy run \
-  --golden matmul.square.512.fp16 \
+  --realization matmul.square.512.fp16 \
   --bench --warmup 5 --iters 20 \
   --json /tmp/matmul-golden-reproduction.json
 
@@ -1545,19 +1556,20 @@ Goldens have three main consumers:
 ./venv/bin/emmy eval prior --dataset golden --kernel matmul.square.512 --pool-sample 2000
 ```
 
-A golden never forces an impossible or stale schedule. If its program identity matches but no live leaf exactly equals
-the recorded schedule row, Emmy warns about drift and falls through to weaker evidence instead of replaying it
-approximately. Goldens arbitrate only the deployable `-O3` lane and matching pin regime.
-
-This gives the evidence order a useful shape:
+A golden never forces an impossible schedule. A row must match choices the compiler actually offers. Strict replay
+checks recorded schedule spelling; an ordinary compile can use other evidence when a row does not match. With
+`--strict-evidence`, missing measurements become an error. Evidence requires the deployable `-O3` lane and a compatible
+pin regime.
 
 ```text
-matching, realizable golden for this GPU
-    -> compatible reservoir measurements
-    -> compatible tune-DB perf measurements
+compatible reservoir measurements
+    -> fastest compatible tune-DB or golden row in scope
     -> global Prior (online checkpoint with offline cold-start fallback)
     -> rule fallback option
 ```
+
+Structural forks follow the same order. A route row records the measured cost of a placement or cross-CTA split;
+its child kernels choose their own schedules from their own evidence.
 
 The dedicated [How Emmy Chooses Fast GPU Schedules](./prior_and_goldens) chapter traces this hierarchy from a compiler
 fork through feature construction, MCTS labels, persistence, live-card matching, and safe golden recording.
@@ -1588,7 +1600,7 @@ Normal `emmy compile` selects from existing evidence; it does not run this exper
 8. `emmy/commands/tune.py` and `emmy/commands/eval.py`: user-facing drivers.
 9. `emmy/compiler/pipeline/search/golden.py`: generic program-backed canonical records and strict decode.
 10. `emmy/compiler/pipeline/search/working_golden.py`: mutable inventories, proposals, and tune feedback.
-11. `emmy/compiler/pipeline/search/policy/greedy.py`: verified evidence and the full hierarchy.
+11. `emmy/compiler/pipeline/search/policy/greedy.py`: measured evidence and the full hierarchy.
 12. `emmy/commands/run.py`: pinned A/B checks, `record_knobs`, and machine-readable JSON output.
 
 ### Lab — inspect the search system without tuning a GPU
@@ -1619,8 +1631,9 @@ tuning cache until you understand the evidence and compiler-flag keys.
 ### Checkpoint
 
 You can distinguish a rule fork from a knob, exploration from greedy resolution, and offline from online priors. You
-can also explain the verified, reservoir, DB, and prior tiers; what a program-backed golden stores; why promotion
-requires repeated integrity-checked measurement; and why canonical goldens fit the offline half but not the online one.
+can also explain measured evidence, prior fallback, and strict-evidence mode; what a program-backed golden stores; why
+promotion requires repeated integrity-checked measurement; and why canonical goldens fit the offline half but not the
+online one.
 
 ## Lesson 13 — Bridge compiled programs into vLLM serving
 

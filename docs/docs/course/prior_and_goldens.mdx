@@ -1,6 +1,6 @@
 ---
 sidebar_position: 4
-validated_against_commit: ec0ca0213378dcba6d3ea2cd16ba66e1a34c2c9c
+validated_against_commit: 261039d9161f9349b1c6fef0678ec98ce04b433d
 title: How Emmy Chooses Fast GPU Schedules
 description: Learn how Emmy ranks compiler forks, learns from measurements, deploys goldens, and diagnoses regressions.
 keywords: [Emmy, compiler, prior, goldens, CatBoost, MCTS, autotuning, CUDA]
@@ -27,7 +27,7 @@ and measurements for one exact GPU platform.
 By the end of this chapter, you should be able to explain:
 
 - what a compiler fork, knob, candidate, and candidate pool are;
-- the four tiers in the deploy evidence hierarchy;
+- the measured-evidence order and strict-evidence mode;
 - how the offline and online halves of the prior are trained and composed;
 - why tuning measurements always use the deployable `-O3` regime;
 - how a program-backed golden joins a current compiler fork;
@@ -78,36 +78,35 @@ which kernels exist is priced by the summed cost of resolving those kernels, not
 
 ## 2. The deploy evidence hierarchy
 
-`emmy compile` and `emmy run` make one greedy choice at each fork without measuring. Pins sit above the hierarchy: an
-explicit `--golden`, `--ab`, or `EMMY_<KNOB>` value settles the named family before normal ranking reaches it.
+Ordinary compilation makes one greedy choice at each fork without benchmarking alternatives. Explicit hand pins
+(`--ab` or `EMMY_<KNOB>`) constrain the named choices. `--golden PATH` selects a file of measured evidence; it does not
+force every recorded schedule. `--realization NAME` selects an embedded program for reproduction.
 
-For unpinned choices, `search/policy/greedy.py` uses these tiers in order:
+For unpinned choices, `search/policy/greedy.py` uses this order:
 
 ```mermaid
 flowchart TB
-    Start[Complete candidates] --> G{Exact verified golden on this GPU?}
-    G -->|yes| PickG[Use the recorded schedule]
-    G -->|no| R{Compatible reservoir measurement?}
-    R -->|yes| PickR[Use the fastest measured candidate]
-    R -->|no| DB{Compatible tune-DB perf row?}
-    DB -->|yes| PickDB[Use the fastest measured candidate]
-    DB -->|no| P{Usable prior?}
+    Start[Complete candidates] --> R{Compatible reservoir measurement?}
+    R -->|yes| PickR[Use the fastest matching reservoir row]
+    R -->|no| Index{Compatible tune-DB or golden row?}
+    Index -->|yes| PickM[Use the fastest matching measured row]
+    Index -->|no| Strict{Strict evidence enabled?}
+    Strict -->|yes| Error[Raise EvidenceError]
+    Strict -->|no| P{Usable prior?}
     P -->|yes| PickP[Use the prior's argmin]
     P -->|no| First[Use the rule's first emitted option]
 ```
 
-The exact tiers are:
+1. **Reservoir evidence.** The online checkpoint's fastest compatible measured row that matches an offered schedule.
+2. **Tune-DB and golden evidence.** The fastest compatible row in the shared evidence index. The DB's `perf` rows and
+   golden rows compete on measured microseconds; a canonical golden has no separate priority. By default the golden
+   rows come from the live card's repository files; `--golden PATH` replaces that scope with the named file.
+3. **Prior prediction.** The trustworthy online half, or the fitted offline half during cold start or quarantine.
+4. **Emission order.** If no evidence or prior decides, use the first emitted option. This is a validity fallback,
+   not a performance policy. Equal scores use deterministic candidate ordering.
 
-1. **Verified golden configurations.** A repository record for the live GPU must match the current kernel's strict
-   deploy identity and decode to one exact enumerated schedule row. Matching identity with no exact row is drift: Emmy
-   warns and fails closed instead of guessing.
-2. **Reservoir evidence.** The online checkpoint's fastest compatible measured row for the operation.
-3. **Tune-DB evidence.** The fastest compatible `perf` row under this compile's exact context key.
-4. **Prior prediction.** The trustworthy online half, or the fitted offline half during cold start or quarantine.
-
-If the whole prior cannot load and no evidence decides, Emmy uses the first emitted option. That is a validity fallback,
-not a performance policy; rule order carries no promise of speed. Ties within every tier break by canonical candidate
-content rather than unstable enumeration order.
+`--strict-evidence` refuses steps 3 and 4: an unmeasured fork raises `EvidenceError` naming the kernel. It does not
+perform tuning or repair missing evidence.
 
 All measured deploy evidence uses the deployable `-O3` regime. `emmy tune` also defaults to `-O3`, so its measurement
 is the one a normal deploy can use. A deliberately different `--nvcc-flags` value creates a separate context and is
@@ -130,7 +129,7 @@ A latency matters only in the context where it was measured. Emmy uses different
 
 | Identity | Purpose |
 |---|---|
-| deploy identity | Joins a verified golden to the complete schedule-free Loop-IR body and its I/O |
+| deploy identity | Selects the exact kernel for strict recorded-schedule decode, including child receipts |
 | operation signature | Groups equivalent offer sites for measured evidence and training |
 | context key | Separates GPU, compiler flags, fast math, and other performance regimes |
 | schedule row key | Distinguishes exact realized knob alternatives |
@@ -138,7 +137,8 @@ A latency matters only in the context where it was measured. Emmy uses different
 
 The deploy identity is stricter than an operation name or shape. It digests the complete schedule-free Loop-IR body,
 including output behavior and I/O dtypes and shapes. The record derives it through the same total Loop-to-Tile lift as
-the live fork. A verified row must then equal one exact schedule row the current compiler offers.
+the live fork. Strict replay must decode its recorded schedule against the current compiler. Ordinary evidence
+selection joins structural signatures and offered knob choices; it does not install a golden as a pin.
 
 Measured reservoir and DB joins are deliberately tolerant of added `S_*` stamps: old evidence should not disappear
 merely because the current compiler learned one more structural feature. They still require the operation, context,
@@ -274,8 +274,10 @@ flowchart TB
 
 The outer search chooses graph-changing alternatives. Each terminal kernel set is evaluated by tuning every unique
 kernel independently; identical kernels across layers or structural candidates reuse cached DB measurements. Minted
-child kernels become first-class tuning targets. A structural total is not implicit deploy evidence because one flat
-parent row cannot encode the ordered child schedule tree.
+child kernels become first-class tuning targets. A measured **route row** spells a placement or cross-CTA split and
+prices that structural decision. The child kernels then resolve from their own evidence; a parent row does not encode
+all child schedules. A measured arm outranks arms priced by nested predictions. If every measured variant of a child
+failed, that evidence can disqualify its arm.
 
 `--gpus N` or `--devices 0,1,3` runs independent per-kernel work concurrently on homogeneous GPUs. The shared DB and
 prior remain on one event loop, and each GPU has at most one in-flight benchmark.
@@ -286,9 +288,9 @@ Do not treat these stores as interchangeable:
 
 | Store | Default location | Written by | Used by |
 |---|---|---|---|
-| canonical goldens | recipe-local `golden/` or `search/goldens/` | reviewed promotion | verified deploy tier, replay, offline fit |
+| canonical goldens | recipe-local `golden/` or `search/goldens/` | reviewed promotion | measured evidence, replay, offline fit |
 | reservoir and online model | `~/.cache/emmy/online.json` | `emmy tune` | measured tier, online training and prediction |
-| tune DB `perf` table | `~/.cache/emmy/autotune.db` | `emmy tune` | measured tier and benchmark cache |
+| tune DB `perf` table | `~/.cache/emmy/autotune.db` | `emmy tune`, clean pinned and greedy re-bench rows from `run --bench` | measured evidence and benchmark cache |
 | tune DB `node` table | same SQLite file | `emmy tune`, pinned `run --bench` | diagnostics only, never deploy |
 
 `EMMY_TUNE_DB` and `EMMY_ONLINE_FILE` override the mutable local paths. Only canonical goldens and the fitted offline
@@ -343,31 +345,30 @@ symbolic program, not a static shape evaluated at one hint.
 ### Working versus canonical files
 
 A **working golden file** is mutable local search state. It can contain inventory-only rows, proposed knob rows,
-ranking feedback, and measured tune winners. `emmy tune --golden-file FILE` updates it atomically and refuses to mutate
+ranking feedback, and measured tune winners. `emmy tune --golden FILE` updates it atomically and refuses to mutate
 a canonical repository golden directly.
 
 A **canonical golden file** is reviewed per-GPU evidence. Model goldens live under
 `recipes/<model>/golden/<gpu>_<capability>.yaml`; model-agnostic hardware goldens live under
 `emmy/compiler/pipeline/search/goldens/`. Every realization must have verified deployable measurements.
 
-A placement cut changes one parent into several kernels. Its flat parent row is not verified deploy evidence. A
-**child-identity schedule receipt** instead freezes the cut in input pins, records one child's schedule knobs, and
-stores that child's deploy identity. One receipt therefore decorates exactly one child kernel.
+A placement cut changes one parent into several kernels. A **child-identity schedule receipt** freezes the cut in
+input pins, records one child's schedule knobs, and stores that child's deploy identity. Strict decode uses that
+identity to select the child. As deployment evidence the receipt contributes a route row for the parent and a schedule
+row for the child. Measured rows in a working file also participate when the command names it with `--golden PATH`;
+unmeasured inventory and proposals do not.
 
 ### How a golden matches a live fork
 
-The verified tier requires all of the following:
+The measured-evidence index requires compatible GPU, compile context, structural signature, and offered knob choices.
+A row that cannot reach an offered arm or leaf does not settle the fork. Strict recorded-schedule decode separately
+checks the persisted program and exact schedule spelling, using a child identity when the row describes a split child.
 
-1. the exact live GPU and deployable compile regime;
-2. the same input pin regime;
-3. the same strict deploy identity derived from the persisted program and the current fork; and
-4. exact equality between the recorded schedule row and one enumerated live leaf.
+A name selects a realization for replay; it is not the evidence join. Missing usable evidence permits the prior to
+rank candidates unless `--strict-evidence` is enabled. Use strict replay and the release audit to expose stale rows
+rather than assuming that an ordinary compile proves every golden row remains usable.
 
-A name is a replay selector, not the deploy join. A matching identity with no exact live leaf produces a drift warning
-and falls through to weaker evidence. This prevents an old schedule spelling from being fuzzily applied to a changed
-compiler.
-
-Goldens serve both as verified deploy evidence and as the dataset for fitting the offline prior. They do not enter the
+Measured goldens serve both as deploy evidence and as the dataset for fitting the offline prior. They do not enter the
 online reservoir; the online half trains on ordinary tuning measurements.
 
 ## 10. Record and replay safely
@@ -378,14 +379,14 @@ report plausible timing. Use an existing golden or a working golden rather than 
 ```bash
 # Replay one named canonical realization.
 ./venv/bin/emmy run \
-  --golden matmul.square.512.fp16 \
+  --realization matmul.square.512.fp16 \
   --bench --warmup 5 --iters 20 \
   --json /tmp/emmy-golden-replay.json
 
 # Tune all targets in a mutable working file.
 EMMY_TUNE_DB=/tmp/emmy-golden-course.db \
   ./venv/bin/emmy tune \
-  --golden-file /tmp/model-working.golden.yaml \
+  --golden /tmp/model-working.golden.yaml \
   --patience 8
 ```
 
@@ -423,11 +424,13 @@ The current `emmy eval` surface is:
 ```
 
 `emmy eval golden` is now a file-scoped release audit, not a name-only rank report. It validates one canonical golden
-against the pinned serving configuration and its expected verified-tier consultations:
+against the pinned serving configuration, exact live GPU, model provenance, realization coverage, and schedule decode.
+It then compiles the serving twins with the file's rows as the sole evidence: every reachable fork must be decided
+without a prior prediction or local DB/reservoir measurements:
 
 ```bash
 ./venv/bin/emmy eval golden \
-  recipes/MODEL/golden/GPU.yaml \
+  --golden recipes/MODEL/golden/GPU.yaml \
   --serving-config recipes/MODEL/model.env
 ```
 
@@ -459,7 +462,7 @@ which regret exposes.
 | golden identity matches but no leaf decodes | enumeration drift | exact schedule row and compiler vocabulary |
 | fitted online model does not own ranking | calibration quarantine | `emmy eval prior`, checkpoint calibration |
 | known tune result is not deployed | operation/context/evidence join | `H_opt`, context key, evidence logs |
-| placement parent appears to be ignored | structural evidence contract | child-identity schedule receipts |
+| placement parent appears to be ignored | structural evidence contract | route-row spelling and child schedule evidence |
 | candidate looks impossibly fast | measurement integrity | plausibility flag, launch grouping, correctness |
 | predictions collapse after compiler change | vocabulary drift | feature version and artifact/checkpoint load |
 | two reported prior runs disagree | mutable dataset drift | use the same measurement freeze and pool sample |
@@ -498,7 +501,7 @@ evidence order, structural pricing, golden promotion, and tuning workflow.
   tests/compiler/pipeline/search/test_two_level_strategy.py -q
 ```
 
-For each test, identify whether it protects exact verified evidence, measured evidence, prediction, fitting, frozen
+For each test, identify whether it protects strict schedule decode, measured evidence, prediction, fitting, frozen
 evaluation, or structural search.
 
 ### Lab B — inspect the shipped prior and goldens
@@ -558,7 +561,7 @@ candidates while the offline half ranks unmeasured rows.
 2. Tune and benchmark every required realization at deployable `-O3`.
 3. Reject pin mismatches, failures, wrong answers, and implausible timings.
 4. Preserve complete knobs, pins, bindings, program/Loop IR, and paired reference measurements.
-5. Use child-identity schedule receipts for schedules behind placement cuts.
+5. Preserve route rows and child-identity schedule receipts for schedules behind placement cuts.
 6. Run the file-scoped `emmy eval golden` release audit with the pinned serving configuration.
 7. Re-run the relevant model qualification workflow on the exact target GPU.
 
@@ -566,7 +569,7 @@ candidates while the offline half ranks unmeasured rows.
 
 ```mermaid
 flowchart TB
-    Enum[Compiler enumeration<br/>defines legal candidates] --> Verified[Verified goldens<br/>exactly decode trusted schedules]
+    Enum[Compiler enumeration<br/>defines legal candidates] --> Verified[Measured goldens<br/>record reviewed schedules]
     Tune[emmy tune<br/>explores and measures] --> Local[Reservoir and tune DB<br/>record local evidence]
     Verified --> Deploy[Greedy deploy choice]
     Local --> Deploy
@@ -577,6 +580,7 @@ flowchart TB
     Enum --> Deploy
 ```
 
-A golden does not bypass the compiler: the current enumeration must still offer its exact row for the same program,
-GPU, and pin regime. The online model does not replace measurement; it ranks gaps between observations. The offline
-model provides a fitted cold-start order. If every layer is silent, emission order is only a last resort.
+A golden does not bypass the compiler: its measured rows must still match offered choices for the same work, GPU,
+and pin regime. Strict replay additionally checks the exact recorded schedule. The online model does not replace
+measurement; it ranks gaps between observations. The offline model provides a fitted cold-start order. If every layer
+is silent, emission order is only a last resort.
