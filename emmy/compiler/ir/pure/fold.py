@@ -307,7 +307,7 @@ class Fold:
                 # over the same operands could orient opposite ways, and the twisted rewrite —
                 # which matches score cones by canonical form — stopped recognizing them as one
                 # score, silently demoting flash attention to its two-pass form.
-                rows = pair[0].free_axes ^ pair[1].free_axes
+                rows = pair[0].free_axes ^ pair[1].free_axes if slabs else frozenset()
                 k_last.sort(key=lambda e: min(e.free_axes & rows, default=""))
                 a_edge = k_last[0] if len(pair) == 2 and k_last else None
             if a_edge is not None and self.operands[0] is not a_edge:
