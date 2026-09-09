@@ -2,31 +2,67 @@
 
 ## Conclusion
 
-The starter comparison is feasible and reproducible, but it does not support a broad Neptune advantage over current
-PyTorch. Across the three prefill families shared by both systems, PyTorch 2.13 Inductor was faster than the fastest
-available Neptune schedule by 11–20% geometric mean. Neptune was approximately tied on ordinary decode: its best
-available schedules were 1.07x faster than Inductor, while its fixed manual schedules were 0.99x as fast.
+Manual schedules make all 40 Emmy shapes correct and runnable on the same NVIDIA A100-SXM4-40GB used by the Neptune
+paper. They do not close the performance gap. Emmy is 1.20--1.23x slower than Neptune on the three prefill families,
+3.54x slower on causal decode, and 6.31x slower on GQA decode by geometric mean. Neptune wins every matched shape.
 
-This prefill result agrees with the Neptune paper once its baselines are separated correctly. The paper compares
-Neptune with tensor compilers in Table 2 and with manually optimized libraries in Table 4. On A100, its library table
-also reports that the best library beats Neptune on global, causal, and GQA prefill. The current PyTorch lane is a new
-comparison with `torch.compile`, not a reproduction of the paper's tensor-compiler table.
+Relative to PyTorch 2.13, Emmy is 1.41--1.54x slower on prefill and 3.47x slower than Inductor on causal decode. GQA
+decode is the exception against eager PyTorch: Emmy is 3.16x faster. It is still 2.55x slower than Inductor on that
+family. The result is therefore a successful manual qualification and a clear compiler performance gap, not parity.
 
-Decode GQA is the clear Neptune result. Neptune was 3.01x faster than Inductor by geometric mean across all eight
-sequence lengths, with per-shape speedups from 1.68x to 4.54x. Inductor itself was 7.67x faster than eager PyTorch on
-that family, so Neptune's advantage remains after using a recent compiler baseline rather than the PyTorch 2.6 stack
-inside the published artifact.
+The main implementation result is the causal early stop on the chunk tier: the coordinate mask the frontend adds to
+the score is read once where the chunk loop opens, and the loop stops at the CTA's diagonal, so masked chunks are
+skipped instead of folded while the per-element mask still guards the boundary tile. This reduced the 32768
+causal-prefill row from about 130.7 ms to 70.0 ms and the GQA-prefill row from about 258.5 ms to 137.7 ms. The remaining
+prefill gap is schedule and generated-code quality after masked work has already been removed.
 
-Untuned Emmy is not competitive in the starter run, as expected. It produced correct captured timings for 22 of 24
-prefill setups, but those rows were much slower than PyTorch. Its two largest causal/GQA prefill kernels tripped the
-watchdog, and all 16 decode setups failed strict eager correctness. Those failures are retained as results, not silently
-dropped; an independent PyTorch fallback preserved eager and Inductor measurements for every affected setup.
+The Neptune schedules and current PyTorch baselines also reproduce on this exact 40GB card. The five published
+library-relative family ratios differ from the paper by 1.3--5.1%, with the same direction in every family. There is
+no hardware-difference qualification on the current comparison.
 
-A later tuned decode-causal row passed every required replay and strict source check. The tuned schedules were 4.32x
-faster than untuned greedy Emmy by geometric mean, but eager PyTorch and `torch.compile` remained 3.82x and 4.02x
-faster, respectively. This is a substantial Emmy tuning result, not parity with the external baselines.
+## Manually tuned Emmy on A100 40GB
 
-## Tuned Emmy decode-causal follow-up
+The full run measured revision `326fb0210f65d6d373ea72e2f8b2cfbad8e2359a`. A second complete GQA-decode row at
+`1b1d6aa0cdc3a0e8d5fd4070c82daaa17c60cd9c` replaces its 2048 schedule with the qualified fused schedule. No result
+uses `emmy tune`: each golden was selected manually, checked with five warmups and 20 measurements, then accepted only
+after two fresh correct measurements.
+
+All 40 shapes completed two deployable-O3 strict golden replays and two source-reference measurements. Every source
+run passed eager correctness at `rtol=1e-3, atol=1e-3`. Each latency is the arithmetic mean of the two repetitions;
+each repetition reports the minimum of 15 captured GPU measurements. Decode latency sums the realized golden kernels.
+
+| Operator | Emmy / eager | Emmy / `torch.compile` | Emmy / Neptune | Emmy wins vs Neptune |
+| --- | ---: | ---: | ---: | ---: |
+| Prefill global | 1.54x | 1.54x | 1.23x | 0/8 |
+| Prefill causal | 1.41x | 1.42x | 1.20x | 0/8 |
+| Prefill GQA | 1.44x | 1.44x | 1.23x | 0/8 |
+| Decode causal | 3.12x | 3.47x | 3.54x | 0/8 |
+| Decode GQA | 0.32x | 2.55x | 6.31x | 0/8 |
+
+Lower ratios favor Emmy. The corresponding per-shape Emmy latency is:
+
+| Sequence | Prefill global (us) | Prefill causal (us) | Prefill GQA (us) | Decode causal (us) | Decode GQA (us) |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 256 | 26.435 | 28.032 | 38.183 | 24.680 | 23.988 |
+| 512 | 70.473 | 66.731 | 93.510 | 38.841 | 40.917 |
+| 1024 | 203.366 | 172.459 | 274.432 | 73.169 | 76.296 |
+| 2048 | 728.576 | 462.592 | 844.800 | 148.541 | 47.080 |
+| 4096 | 2670.592 | 1582.592 | 3007.488 | 294.468 | 304.677 |
+| 8192 | 8174.592 | 5226.496 | 8929.280 | 607.300 | 654.037 |
+| 16384 | 33263.617 | 17671.679 | 35146.751 | 1384.960 | 1457.664 |
+| 32768 | 172432.899 | 70041.088 | 137703.423 | 2775.040 | 2891.264 |
+
+After the early stop moved from the loop IR to the chunk tier (revision `4598f8f17`), the same goldens replayed on the
+same card: causal prefill measured 28.0 us at 256 keys (28.032 above), 61.8 at 512 (66.731), 1233.9 at 4096 (1582.592)
+and 4542.5 at 8192 (5226.496); GQA prefill measured 2337.8 at 4096 (3007.488). Repeated replays of the 256-key row spread
+from 22.5 to 29.4 us and the 512-key row from 55.0 to 66.9, so the short rows carry a run-to-run spread of about 20% on
+this VM. The tables above keep the full-run values.
+
+`paper-emmy-a10040.csv` contains the exact 40 Emmy, eager, Inductor, and Neptune values behind both tables. The fused
+2048 GQA-decode schedule is 47.080 us, 3.15x faster than the earlier 148.215 us split schedule. The other GQA-decode
+shapes retain split schedules because the fused alternative was slower in direct trials.
+
+## Historical tuned Emmy decode-causal follow-up
 
 The follow-up measured the eight committed decode-causal goldens at revision
 `5642d020259d0e09d49cbdab04e8e96408616b3e`. All eight shapes completed two deployable-O3 golden replays and two
@@ -53,7 +89,7 @@ Across the eight shapes, tuned replay was 4.32x faster than untuned greedy Emmy 
 slower than eager and 4.02x slower than `torch.compile`. This row qualifies decode-causal only; it does not qualify the
 other four Emmy operator families or change the broader Neptune comparison.
 
-## Common operator measurements
+## Historical starter comparison
 
 This table retains the full starter sweep. Its Emmy column describes the original untuned run; the tuned decode-causal
 follow-up above is reported separately so historical failures are not rewritten.
@@ -82,19 +118,17 @@ the 15 projected GPU times for each implementation and then the geometric mean a
 This is the closest aggregation available in the durable Nsight exports to the paper's mean-of-15 kernel rule. Values
 above 1.00x favor Neptune.
 
-| Operator | Paper, A100 | This artifact replay | Difference |
+| Operator | Paper, A100 | A100 40GB replay | Difference |
 | --- | ---: | ---: | ---: |
-| Prefill global | 0.84x | 0.79x | -5.5% |
-| Prefill causal | 0.81x | 0.79x | -2.7% |
-| Prefill GQA | 0.80x | 0.78x | -3.1% |
-| Decode causal | 0.99x | 1.05x | +6.1% |
-| Decode GQA | 1.24x | 1.19x | -3.9% |
-| Prefill windowed | 0.70x | 0.68x | -2.3% |
+| Prefill global | 0.84x | 0.80x | -5.1% |
+| Prefill causal | 0.81x | 0.78x | -4.0% |
+| Prefill GQA | 0.80x | 0.79x | -1.3% |
+| Decode causal | 0.99x | 1.03x | +3.7% |
+| Decode GQA | 1.24x | 1.21x | -2.4% |
 
-The six comparable library results agree within 2.3–6.1%. In particular, both the paper and this replay find that
-optimized libraries beat Neptune on the three common A100 prefill operators, while Neptune is competitive on causal
-decode and ahead on GQA decode. The paper used an A100-SXM4-40GB, whereas this run used an A100-SXM4-80GB; the GPUs
-have the same compute architecture but different memory systems, so exact latency equality is not expected.
+The five comparable library results agree within 1.3--5.1%. Both the paper and this exact-card replay find that
+optimized libraries beat Neptune on the three common prefill operators, while Neptune is competitive on causal
+decode and ahead on GQA decode.
 
 ### Reconstructing the normalized paper table
 
@@ -102,7 +136,7 @@ have the same compute architecture but different memory systems, so exact latenc
 is the arithmetic mean of 15 projected GPU ranges for each available manual or tuned schedule, followed by selection
 of the lower schedule mean. The Inductor value is the minimum of 15 captured, whole-forward CUDA-event measurements.
 The per-family reproduced value is the geometric mean of `neptune_mean_us / inductor_min_us` over the eight sequence
-lengths. This gives 1.21, 1.13, 1.16, 0.97, and 0.34 for global prefill, causal prefill, GQA prefill, causal decode,
+lengths. This gives 1.20, 1.14, 1.15, 0.99, and 0.34 for global prefill, causal prefill, GQA prefill, causal decode,
 and GQA decode, respectively. Lower values favor Neptune because current Inductor is normalized to one.
 
 `paper-table.csv` records the published library-relative ratios, their artifact replay, and the displayed values after
@@ -118,10 +152,9 @@ paper Neptune / current Inductor
 The Neptune paper publishes only two-decimal family ratios. The final column in `paper-table.csv` therefore records
 the displayed paper value directly; recomputing from the rounded intermediate columns can differ by 0.01.
 
-To audit `paper-baselines.csv`, extract `results.tar.gz`, then extract
-`2026-08-16_00-41-38/a100x1_artifacts.tar.gz`. Neptune ranges are in
-`2026-08-16_00-41-38/nsys-stats/<operator>-b1-s<sequence>.csv`. Inductor JSON filenames are listed in the CSV and
-live under `evidence/emmy-tcompile/json/` in the nested archive. Warmup ranges are excluded.
+To audit `paper-baselines.csv`, use the sibling `compiler_neptune_replay_a100/results_a10040.tar.gz` archive. Neptune
+ranges are under `nsys-stats/<operator>-b1-s<sequence>.csv`; current PyTorch JSON rows are under
+`evidence/emmy-tcompile/json/`. Warmup ranges are excluded.
 
 The paper's Table 2 reports Neptune relative to Triton, FlexAttention, TVM, and Mirage, rather than to the manually
 optimized libraries. The pinned artifact revision leaves its TVM runners disabled, so this experiment cannot claim a
@@ -129,17 +162,17 @@ complete reproduction of every Table 2 cell. Its PyTorch 2.6 runners also select
 paths; they are not equivalent to the full-graph PyTorch 2.13 lane added here.
 
 The paper does not publish per-shape latency tables or raw plot data. Its absolute attention results are throughput
-plots at sequence length 8192 over varying batch sizes. Representative absolute minima from this run are below,
-reported as `Neptune / torch.compile` in microseconds. These use the experiment's minimum-of-15 convention, not the
-paper-style means in the alignment table.
+plots at sequence length 8192 over varying batch sizes. Representative measurements from the 40GB replay are below,
+reported as `Neptune / torch.compile` in microseconds. Neptune is the mean of 15 projected GPU ranges; Inductor is the
+mean of two independently launched minimum-of-15 measurements.
 
 | Operator | Sequence 2048 | Sequence 32768 |
 | --- | ---: | ---: |
-| Prefill global | 479.8 / 364.5 | 83,978.9 / 75,066.4 |
-| Prefill causal | 298.0 / 243.7 | 45,798.3 / 40,020.0 |
-| Prefill GQA | 488.7 / 405.5 | 91,127.6 / 79,070.2 |
-| Decode causal | 35.3 / 30.7 | 320.7 / 322.6 |
-| Decode GQA | 15.8 / 41.0 | 111.1 / 503.8 |
+| Prefill global | 551.7 / 453.6 | 92,427.5 / 84,806.1 |
+| Prefill causal | 375.4 / 334.8 | 61,207.6 / 45,048.8 |
+| Prefill GQA | 619.2 / 563.2 | 100,425.6 / 88,315.4 |
+| Decode causal | 45.5 / 38.9 | 410.3 / 395.8 |
+| Decode GQA | 19.8 / 57.3 | 143.2 / 615.9 |
 
 The absolute trend is coherent with the ratios: prefill remains close but favors current PyTorch, causal decode
 converges toward parity, and Neptune's decode-GQA advantage grows with context length.
@@ -180,20 +213,32 @@ SoftCap, so this result should not be treated as reproduced until that differenc
 - Neptune ran revision `3aa55c12ac822337e630b809b0d9eabb11eee5d3` in the pinned image
   `evanzhao16/neptune-env@sha256:724d07594bc817f0fe94267b2d0dbdc6e29d3ae4a7e3516e553a6d9327bfebca`.
   The artifact environment recorded PyTorch 2.6.0 with CUDA 12.4 and Nsight Systems 2025.3.1.
-- The common lane reconstructed global, causal, and GQA attention for prefill and decode through `emmy run -c ...
-  --bench`. It used PyTorch 2.13.0 with CUDA 13.0, full-graph Inductor in `max-autotune-no-cudagraphs` mode, untuned
-  Emmy, one warmup, 15 measured iterations, and strict correctness.
-- When Emmy failed before producing a shared table, the fallback measured only eager and Inductor after checking the
-  compiled output against eager at `rtol=1e-3, atol=1e-3`. All 40 Inductor rows passed, and every PyTorch timing used
-  CUDA-graph-captured whole-forward semantics.
-- Neptune latency is the minimum projected GPU time over 15 measured NVTX ranges. The PyTorch/Emmy lane uses the
-  minimum CUDA-event time over 15 interleaved or fallback measurements. Both are GPU-time measurements, but they came
-  from separate processes and software environments; cross-system ratios should be treated as kernel-level evidence,
-  not an end-to-end application result.
+- The current Emmy lane reconstructs global, causal, and GQA attention for prefill and decode through
+  `emmy run -c ... --bench`. It uses PyTorch 2.13.0 with CUDA 13.0, deployable O3, full-graph Inductor in
+  `max-autotune-no-cudagraphs` mode, one warmup, 15 measured iterations, and strict correctness.
+- The old starter lane used untuned Emmy and retained its failures. The current table replaces only that Emmy result;
+  it does not rewrite the historical run below.
+- The paper comparison uses the arithmetic mean of 15 projected Neptune GPU ranges. The PyTorch/Emmy lane uses the
+  mean of two independent minimum-of-15 CUDA-event measurements. Both are GPU-time measurements from separate
+  processes and software environments, so their ratios are kernel-level evidence rather than an end-to-end result.
 - The softcap, ALiBi, and windowed families have no current PyTorch/Emmy twin in this experiment. Their table only
   reproduces the runners shipped in Neptune's artifact.
 
 ## Run and system
+
+- Status: 5/5 full rows succeeded; the corrected GQA-decode row also succeeded
+- Full run: `20260909T081524Z`; corrected GQA-decode run: `20260909T093117Z`
+- Full-run Git revision: `326fb0210f65d6d373ea72e2f8b2cfbad8e2359a`; dirty: false
+- Corrected-row Git revision: `1b1d6aa0cdc3a0e8d5fd4070c82daaa17c60cd9c`; dirty: false
+- Host: `bench-codex-a100-0908-0933-d43f`; Ubuntu 24.04.4 LTS; kernel `6.17.0-1022-gcp`
+- CPU: Intel Xeon at 2.20 GHz, x86_64, 12 logical CPUs; memory: 89616363520 bytes
+- GPU: NVIDIA A100-SXM4-40GB, 40960 MiB, UUID `GPU-be299b90-0ff5-e1b4-db53-28465b6f874b`
+- NVIDIA driver: `580.173.02`; host NVCC: `12.9.41`; host cuBLAS: `12.9.0.13`
+- Docker client/server: `29.8.0` / `29.8.0`
+
+The host was supplied for this work and remains running.
+
+## Historical starter run and system
 
 - Status: succeeded
 - Result timestamp: 2026-08-16T00:41:38Z; run ID: `20260816T004138Z`
@@ -212,17 +257,21 @@ only the missing host lane. The durable `recipe.yaml` contains the corrected wor
 
 ## Durable files
 
-- Paper reconstruction: `paper-baselines.csv` and `paper-table.csv`
+- Exact A100 40GB comparison: `paper-emmy-a10040.csv`
+- Neptune paper reconstruction: `paper-baselines.csv` and `paper-table.csv`
+- Current system records and composite task artifacts: five rows under `2026-09-09_08-15-24/` and the corrected
+  GQA-decode row under `2026-09-09_09-31-17/`, both retained in the raw-results archive
 - Starter experiment record: `a100x1_e246bb6279fd.experiment.yaml`
 - Tuned decode-causal experiment record: `a100x1_lemmy_od-c_9f8816b4a4fb.experiment.yaml`; SHA-256
   `07a4b79cf046bfb16b766bc830974dc42f5cc291c87874c3de7f25d7fb7b81d3`
 - Raw-results archive: `results.tar.gz`; SHA-256
-  `f3d9047ce43f84b64470430b36085b9de135f26ded73bae74e9ec5138ec080e0`
-- Archived roots: `2026-08-16_00-41-38/` and `2026-08-24_22-35-24/`
+  `0871843d4d8eb9232c3260143f7da63322a2978318895a54a570a9f91f6dafc8`
+- Archived roots: `2026-08-16_00-41-38/`, `2026-08-24_22-35-24/`, `2026-09-09_08-15-24/`, and
+  `2026-09-09_09-31-17/`
 - Starter composite task artifact: `a100x1_artifacts.tar.gz`; SHA-256
   `015951d7cccf187c69dd2712bcaf966f3de179b53508942312a0e8e6cc31e4b5`
 - Tuned decode-causal composite task artifact: `a100x1_lemmy_od-c_9f8816b4a4fb_artifacts.tar.gz`; SHA-256
   `6c288facacb05cf46b20c4d7be8a6bf56c1495a96ffdbe58c79f41b744412d4b`
 - Raw evidence includes 80 `.nsys-rep` profiles, 80 CSV exports, all tune/profile logs, 40 modern PyTorch JSON rows,
-  Emmy dumps and logs, the tuned decode-causal replay/reference JSON rows, environment freezes, runner hashes,
-  source/recovery status files, and all run records/logs.
+  Emmy dumps and logs, all current replay/reference JSON rows, environment freezes, runner hashes, source/recovery
+  status files, and all run records/logs.

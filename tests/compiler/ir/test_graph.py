@@ -188,7 +188,7 @@ def test_kernel_op_windowed_axis_roundtrip():
     """A dumped kernel-stage graph must rehydrate a ``Tile`` whose axes carry a ``Window``.
 
     ``repr(Axis)`` spells the ``window`` field in full, so every register-tiled or cross-CTA-split
-    kernel dumps ``Window(parent=Axis(...), base=..., bound=...)`` inside ``KernelOp.body``.
+    kernel dumps ``Window(parent=Axis(...), partition=...)`` inside ``KernelOp.body``.
     ``Window`` lives in ``ir/axis.py``, which the eval scope's auto-populate loop did not cover, so
     ``Graph.from_dict`` on ``07_lowering_kernel.json`` raised ``NameError: name 'Window' is not
     defined`` — and with it every ``emmy run --ir <kernel.json>``."""

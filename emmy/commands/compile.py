@@ -235,6 +235,7 @@ def resolve_golden_arg(args) -> None:
     if len(distinct) > 1:
         logger.error("golden %r is ambiguous — matches %d shapes: %s\nNarrow it to one.", name, len(distinct), ", ".join(distinct))
         sys.exit(2)
+    args.realization = distinct[0]  # the exact name from here on — what ``--record-greedy`` writes under
     targets: list[tuple[dict, tuple[str, ...], dict | None]] = []
     for match in matches:
         if not any(

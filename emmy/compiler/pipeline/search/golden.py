@@ -987,11 +987,10 @@ def _replay(
         evidence_row_vouches,
         family_of,
         schedule_match_key,
-        schedule_pin_fingerprint,  # noqa: PLC0415
         schedule_row_key,
     )
     from emmy.compiler.pipeline.pipeline import Run, _is_structural_option  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.pins import composed_routes, pinned_knobs, spelled_arm  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import composed_routes, pinned_knobs, spelled_arm, unpinned_decisions  # noqa: PLC0415
 
     def _spelling(entry: GoldenRecord) -> dict[str, str]:
         return {**entry.route, **{str(key): str(value) for key, value in entry.knobs.items()}}
@@ -1021,9 +1020,9 @@ def _replay(
     cached = _REPLAY_CACHE.get(cache_key)
     if cached is not None:
         return cached
-    # The evidence replay is a pure function of the record, its set, the compiler and the live
-    # enumeration pins, so it persists beside identities and verdicts; the exhaustive one stays in
-    # memory.
+    # The evidence replay is a pure function of the record, its set and the compiler — it runs
+    # with the live decision pins withdrawn (``unpinned_decisions``) — so it persists beside
+    # identities and verdicts and serves every pinned compile; the exhaustive one stays in memory.
     store = _identity_store()["replays"]
     store_key = digest(
         _record_fingerprint(record),
@@ -1031,7 +1030,6 @@ def _replay(
         str(record.pins),
         record.identity or "",
         set_digest,
-        str(schedule_pin_fingerprint()),
     )
     if not exhaustive and (kept := store.get(store_key)) is not None:
         result = _Replay(
@@ -1127,7 +1125,7 @@ def _replay(
         keys = tuple(sorted(key for key, value in _spelling(entry).items() if family_of(key) == "PLACE" and value == "cut"))
         if len(keys) > 1 and (None, keys) not in composed:
             composed.append((None, keys))
-    with pinned_knobs(regime), composed_routes(composed):
+    with unpinned_decisions(), pinned_knobs(regime), composed_routes(composed):
         out, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(record.target_program.copy(), decide)
     for node in out.nodes.values():
         if isinstance(node.op, TileOp):

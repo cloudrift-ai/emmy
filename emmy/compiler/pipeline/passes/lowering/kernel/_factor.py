@@ -108,6 +108,25 @@ class Ctx:
     # split off ``workers`` and a cooperating reduce off its own ``coop``; this is the third case,
     # where nothing else claims the inventory (see the degenerate arm of :func:`_factorize`).
     sweep_workers: int = 1
+    # The device's SM count (0 = unknown) — the one-wave test behind the chunk tier's causal early stop.
+    sm_count: int = 0
+
+
+def launch_ctas(lead: tuple, mn: tuple) -> int | None:
+    """The CTA count of a launch over the ``lead`` grid axes and the ``(m, n)`` block sides — the
+    lead extents times each side's block count — or ``None`` when an extent is symbolic."""
+    count = 1
+    for axis in lead:
+        if not axis.extent.is_static:
+            return None
+        count *= axis.extent.as_static()
+    for side in mn:
+        if side is None:
+            continue
+        if not side.axis.extent.is_static:
+            return None
+        count *= -(-side.axis.extent.as_static() // side.tile)
+    return count
 
 
 def _wire(op: Fold) -> Handle:
@@ -131,7 +150,7 @@ def _sweep_workers(tile) -> int:
     return work.units[0] if work.kind == "thread" and work.units[1] == 1 else 1
 
 
-def factorize(tile, root, store=None) -> Tile:
+def factorize(tile, root, store=None, sm_count: int = 0) -> Tile:
     """The entry to the recursive emitter — build the ambient :class:`Ctx` from the ``TileOp`` and its
     root graph node, then dispatch its ``op`` into a bound ``Tile`` via :func:`_factorize`. ``out_val``
     (the kernel's finalized output SSA name — the root node's produced :class:`Handle`) is resolved
@@ -158,6 +177,7 @@ def factorize(tile, root, store=None) -> Tile:
         # (m, n) block grid makes it meaningful.
         raster=Raster.parse((tile.knobs or {}).get("RASTER", "")),
         sweep_workers=_sweep_workers(tile),
+        sm_count=sm_count,
     )
     out_val = _wire(op).name if op is not None else ""
     return _factorize(op, ctx, tail=(), out_val=out_val, store=store, output_specs=tuple(tile.output_specs))
@@ -424,8 +444,25 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         # agree (one warp column on the score, its N tile the chunk); the emission needs the node
         # and its placed geometry to build the chunk's score tile.
         inner = _inner_site(c, ctx)
+        # A launch that fits the card in one wave at one CTA per SM takes as long as its longest
+        # CTA, so a per-CTA early stop cannot shorten it and only costs the static trip count;
+        # the chunk tier keeps the whole stream there. The CTA-per-SM half is not known here
+        # (registers are ptxas's), so the test is the conservative one: fewer CTAs than SMs.
+        ctas = launch_ctas(lead, tile.mn)
+        one_wave = ctas is not None and 0 < ctx.sm_count and ctas <= ctx.sm_count
         state_decls, reduce_region = reduce_codegen(
-            c, tile, stage, ctx.inputs, ctx.workers, seam, lead, frag_ns, k_axis=k_axis, axes=ctx.sched.tile.axes, inner=inner
+            c,
+            tile,
+            stage,
+            ctx.inputs,
+            ctx.workers,
+            seam,
+            lead,
+            frag_ns,
+            k_axis=k_axis,
+            axes=ctx.sched.tile.axes,
+            inner=inner,
+            one_wave=one_wave,
         )
         sink = (
             store

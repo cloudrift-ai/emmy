@@ -39,14 +39,13 @@ class Window:
     factorization, the scope-walk origin derivation) group surrounding axes by that identity
     instead of by name-suffix convention.
 
-    ``base`` / ``bound`` are the slice's ABSOLUTE start / end in the parent's coordinates, set
-    when a cross-CTA split hands each CTA its own window of a reduce stream (``030_cut``
-    shrinks the axis to the slice length): the fold walks its local ``[0, extent)`` and any
-    consumer needing the absolute coordinate — gmem / TMA operand bases, the causal mask's key
-    columns — adds ``base``. ``bound`` additionally stops a SYMBOLIC slice whose end falls
-    mid-tensor (``min((s+1)·B, S)``): the realizer runs ``bound − base`` local steps and masks
-    against it, since a mid-tensor slice end reads VALID keys belonging to the next slice, which
-    the extent-only tail machinery would not exclude. ``None`` on both = the whole parent.
+    ``base`` / ``bound`` were declared as a cross-CTA slice's absolute start / end in the parent's
+    coordinates. No pass writes or reads them: an axis walks its local ``[0, extent)``, a slice
+    rebases through its partition coordinate, and a data-independent early stop or late start is
+    the kernel loop's own ``start`` / ``end`` (``StridedLoop``), derived where that loop opens from
+    the mask in the body. They stay declared because every recorded identity that holds a window
+    spells its fields structurally (``structural.form``): dropping them would re-key every stored
+    cross-CTA split row, which is a re-record, not a cleanup.
 
     ``partition`` marks the one window a CROSS-CTA SPLIT produced: this axis is one CTA's share of
     a reduce stream, not a tile of an iteration space. Every other window — the partition planner's
@@ -73,8 +72,8 @@ class Axis:
     keeps working.
 
     ``window`` is the slice of a parent axis this one walks (:class:`Window` — its ``parent``
-    provenance and, for a cross-CTA slice, the absolute ``base`` / ``bound``). ONE windowing
-    concept, read by the realizer and the mask machinery alike. Excluded from equality / hashing so
+    provenance and whether it is a cross-CTA ``partition``). ONE windowing concept, read by the
+    factorization and the schedule alike. Excluded from equality / hashing so
     Var-rename invariance is preserved — two Axes with the same name and extent are the same axis
     regardless of which window of what they walk.
     """
