@@ -52,6 +52,12 @@ Lower ratios favor Emmy. The corresponding per-shape Emmy latency is:
 | 16384 | 33263.617 | 17671.679 | 35146.751 | 1384.960 | 1457.664 |
 | 32768 | 172432.899 | 70041.088 | 137703.423 | 2775.040 | 2891.264 |
 
+After the early stop moved from the loop IR to the chunk tier (revision `4598f8f17`), the same goldens replayed on the
+same card: causal prefill measured 28.0 us at 256 keys (28.032 above), 61.8 at 512 (66.731), 1233.9 at 4096 (1582.592)
+and 4542.5 at 8192 (5226.496); GQA prefill measured 2337.8 at 4096 (3007.488). Repeated replays of the 256-key row spread
+from 22.5 to 29.4 us and the 512-key row from 55.0 to 66.9, so the short rows carry a run-to-run spread of about 20% on
+this VM. The tables above keep the full-run values.
+
 `paper-emmy-a10040.csv` contains the exact 40 Emmy, eager, Inductor, and Neptune values behind both tables. The fused
 2048 GQA-decode schedule is 47.080 us, 3.15x faster than the earlier 148.215 us split schedule. The other GQA-decode
 shapes retain split schedules because the fused alternative was slower in direct trials.

@@ -94,6 +94,8 @@
  "tests/compiler/cli/test_trace.py::test_trace_inventory_keeps_fused_sdpa_as_one_frontend_target": 0.08,
  "tests/compiler/cli/test_trace.py::test_trace_inventory_replays_depthwise_conv1d_program": 0.05,
  "tests/compiler/cli/test_trace.py::test_trace_target_resolves_in_original_multi_op_fusion_context": 0.06,
+ "tests/compiler/e2e/test_attention_coverage.py::test_chunk_tier_skips_the_chunks_a_causal_band_masks[]@cuda": 3.42,
+ "tests/compiler/e2e/test_attention_coverage.py::test_chunk_tier_skips_the_chunks_a_causal_band_masks[d2/smem-async]@cuda": 0.79,
  "tests/compiler/e2e/test_attention_coverage.py::test_chunk_tier_stages_a_symbolic_key_extent[smem-async]@cuda": 58.22,
  "tests/compiler/e2e/test_attention_coverage.py::test_chunk_tier_stages_a_symbolic_key_extent[smem-tma]@cuda": 54.87,
  "tests/compiler/e2e/test_knob_pinning.py::test_flat_output_sweep_lowers_with_its_axis_bound": 0.28,
