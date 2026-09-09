@@ -433,7 +433,7 @@ def test_rtx5090_attention_comparison_is_recorded_and_bounded(project_root) -> N
     run = recipe.command.run
     assert "torch==2.13.0" in run
     assert "flash-attn==2.8.3" in run
-    assert "tilelang==0.1.8" in run
+    assert "tilelang==0.1.8 apache-tvm-ffi==0.1.8.post2" in run
     assert "FLASH_ATTN_CUDA_ARCHS=120" in run
     assert "da967821698eb7a79a76d27fbe25e314a3273f2b12ba4833e981658139d0e6d9" in run
     assert 'case "$lane" in' in run
@@ -470,7 +470,7 @@ def test_rtx5090_attention_comparison_is_recorded_and_bounded(project_root) -> N
     assert 'test "$successful_setups" -eq "${#SEQUENCE_LENGTHS[@]}"' in emmy_runner
 
     baseline_runner = (directory / "run_baselines.py").read_text()
-    assert 'VERSIONS = {"torch": "2.13.0", "flash_attn": "2.8.3", "tilelang": "0.1.8"}' in baseline_runner
+    assert '"tilelang": "0.1.8", "apache-tvm-ffi": "0.1.8.post2"}' in baseline_runner
     assert 'mode="max-autotune-no-cudagraphs"' in baseline_runner
     assert "flash_attn_func" in baseline_runner
     assert "flex_attention" in baseline_runner

@@ -64,12 +64,13 @@ command:
           python3.12 -m venv "$$BASELINE_VENV"
         fi
         if ! "$$BASELINE_VENV/bin/python" -c 'import importlib.metadata, sys; expected={"torch":"2.13.0", \
-          "flash_attn":"2.8.3", "tilelang":"0.1.8"}; sys.exit(any(importlib.metadata.version(k) != v \
-          for k, v in expected.items()))' 2>/dev/null; then
+          "flash_attn":"2.8.3", "tilelang":"0.1.8", "apache-tvm-ffi":"0.1.8.post2"}; \
+          sys.exit(any(importlib.metadata.version(k) != v for k, v in expected.items()))' 2>/dev/null; then
           "$$BASELINE_VENV/bin/pip" install torch==2.13.0 packaging ninja einops 2>&1 | tee "$$EVIDENCE/install.log"
           MAX_JOBS=4 FLASH_ATTN_CUDA_ARCHS=120 "$$BASELINE_VENV/bin/pip" install \
             --no-build-isolation flash-attn==2.8.3 2>&1 | tee -a "$$EVIDENCE/install.log"
-          "$$BASELINE_VENV/bin/pip" install tilelang==0.1.8 2>&1 | tee -a "$$EVIDENCE/install.log"
+          "$$BASELINE_VENV/bin/pip" install tilelang==0.1.8 apache-tvm-ffi==0.1.8.post2 2>&1 \
+            | tee -a "$$EVIDENCE/install.log"
         fi
         if [ ! -f "$$TILELANG_SOURCE/examples/flash_attention/example_mha_fwd_bshd.py" ]; then
           mkdir -p "$$(dirname "$$TILELANG_SOURCE")"
@@ -82,7 +83,8 @@ command:
           tar -xzf "$$SOURCE_ARCHIVE" -C "$$(dirname "$$TILELANG_SOURCE")"
         fi
         "$$BASELINE_VENV/bin/python" -c 'import importlib.metadata; print("\n".join( \
-          f"{name}={importlib.metadata.version(name)}" for name in ("torch", "flash_attn", "tilelang")))' \
+          f"{name}={importlib.metadata.version(name)}" \
+          for name in ("torch", "flash_attn", "tilelang", "apache-tvm-ffi")))' \
           > "$$EVIDENCE/versions.txt"
         "$$BASELINE_VENV/bin/pip" freeze --all > "$$EVIDENCE/requirements.freeze.txt"
         sha256sum "$$EXPERIMENT/run_baselines.py" > "$$EVIDENCE/experiment-input.sha256"

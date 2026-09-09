@@ -220,7 +220,8 @@ reproduction. Nautilus publishes RTX 5090 aggregate plots but no runnable artifa
 per-model head dimensions. Report this experiment as a comparison against the named public libraries, and use the
 paper's aggregate speedups only as external context.
 
-The baseline lane pins PyTorch 2.13.0, FlashAttention-2 2.8.3, and TileLang 0.1.8. It measures eager SDPA, a
+The baseline lane pins PyTorch 2.13.0, FlashAttention-2 2.8.3, and TileLang 0.1.8, plus the TVM FFI release
+TileLang 0.1.8 still works against, because a newer one stops it importing. It measures eager SDPA, a
 `torch.compile` SDPA wrapper, compiled FlexAttention, FlashAttention-2, and the unchanged TileLang 0.1.8 prefill
 examples. TileLang decode is not part of the denominator because that release has no full-attention decode example
 with the same operator contract. Do not substitute its paged or split-KV decode examples. PyTorch Inductor is the

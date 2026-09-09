@@ -17,7 +17,9 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 OPERATORS = ("prefill_global", "prefill_causal", "prefill_gqa", "decode_causal", "decode_gqa")
-VERSIONS = {"torch": "2.13.0", "flash_attn": "2.8.3", "tilelang": "0.1.8"}
+# TileLang 0.1.8 bundles a TVM whose Python half breaks against apache-tvm-ffi 0.1.12 and newer, so the
+# release contemporaneous with it is pinned as tightly as the libraries themselves.
+VERSIONS = {"torch": "2.13.0", "flash_attn": "2.8.3", "tilelang": "0.1.8", "apache-tvm-ffi": "0.1.8.post2"}
 
 
 def _parse_args() -> argparse.Namespace:

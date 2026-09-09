@@ -2,6 +2,9 @@
 venv/
 venv
 venv-serving/
+# the attention-comparison baseline lane builds its pinned libraries inside the repo
+.venv-attention-rtx5090/
+.cache-attention-rtx5090/
 
 # Python cache
 __pycache__/
