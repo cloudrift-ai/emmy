@@ -23,6 +23,7 @@ def test_serving_reference_deploys_the_named_golden_at_the_named_decode_width(mo
         max_num_batched_tokens="256",
         golden="sweep.yaml",
         decode_bucket=16,
+        enforce_eager=True,
     )
 
     cmd, env = validate_serve._serve_invocation(args)
@@ -42,6 +43,7 @@ def test_serving_reference_deploys_the_named_golden_at_the_named_decode_width(mo
         "256",
         "--golden",
         "sweep.yaml",
+        "--enforce-eager",
     ]
     assert env["EMMY_GEN_DECODE_BUCKET"] == "16"
     assert os.environ["EMMY_GEN_DECODE_BUCKET"] == "32"
@@ -58,10 +60,12 @@ def test_serving_reference_leaves_unspecified_evidence_and_width_alone(monkeypat
         max_num_batched_tokens=None,
         golden=None,
         decode_bucket=None,
+        enforce_eager=False,
     )
 
     cmd, env = validate_serve._serve_invocation(args)
 
     assert "--golden" not in cmd
     assert "--max-num-batched-tokens" not in cmd
+    assert "--enforce-eager" not in cmd
     assert "EMMY_GEN_DECODE_BUCKET" not in env
