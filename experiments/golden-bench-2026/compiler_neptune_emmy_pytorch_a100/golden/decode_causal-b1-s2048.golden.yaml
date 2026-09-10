@@ -24,10 +24,6 @@ configs:
   target:
     loop: 0
   realizations:
-  - name: k_sdpa_c2ea2e.20637ae417bf
-    bindings: {}
-    pins:
-      FAST_MATH: false
   - name: k_sdpa_c2ea2e.20637ae417bf.978aeda1c320
     bindings: {}
     pins:
