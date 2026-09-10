@@ -109,6 +109,28 @@ What the measurement says to do next, in order:
   decode where the archived lane measured 48.1. So 42.6 us beats Neptune's recorded 45.5 on raw microseconds and
   loses to it on the eager-normalized ratio (1.4x against 0.95x). Re-run Neptune on the same box before either
   number goes in a paper.
+- **The key-range split is the biggest single lever — and pin BOTH route spellings or the measurement is a lie.**
+  A `TILE@map.1/twist` pin does not resolve on a split PIECE, whose tree spells the route `@twist`; the pin is
+  ignored without complaint and the compiler picks that piece's geometry itself. Pinning both spellings holds the
+  geometry fixed (`f1x8/k8` + `f1x16/k8` realized on every row below) and the answer is then consistent:
+
+  | keys | unsplit | `g8k` | `g16k` |
+  | ---: | ---: | ---: | ---: |
+  | 1024 | 28 | **20** | refused |
+  | 2048 | 64 | **39** | 45 |
+  | 4096 | 136 | 69 | **66** |
+
+  1.4x to 2x at every length. Sweeping with only the one spelling produced 137 us at 1024 and 511 at 4096 and
+  looked like evidence AGAINST the split; it was measuring the piece's own geometry choice. The `g16k` refusal at
+  1024 is honest — 64 keys per partition leaves the staging depth nothing to resolve against.
+
+- **Registers.** The split row runs at 128 registers and 25% occupancy — the fused row's 254 registers against the
+  255 spill wall is gone. Still not memory-bound: 33.5 MB at 2048 keys is a 21.5 us roofline against 42.6 measured.
+  Item 2's exp folding is the remaining register lever.
+- **Settle the eager reference before claiming the family.** This box measures eager at 31-33 us on the 2048-key
+  decode where the archived lane measured 48.1. So 42.6 us beats Neptune's recorded 45.5 on raw microseconds and
+  loses to it on the eager-normalized ratio (1.4x against 0.95x). Re-run Neptune on the same box before either
+  number goes in a paper.
 - **A split row is NOT a controlled measurement, and this invalidated two readings before it was noticed.** A
   `TILE@map.1/twist` pin does not resolve on a split PIECE — the piece's tree spells the route `twist`, so the
   compiler picks the piece's geometry itself and the pin is silently ignored. Every split row below therefore varies
