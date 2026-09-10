@@ -207,6 +207,14 @@ The H100 hardware golden, H100 rows in the node freeze, model goldens for the se
 model the recipes already target on H100, and a prior refit if rank correlation on the H100 rows says so. Then the
 paper's evaluation gains its Hopper numbers, or its abstract loses the word.
 
+## Next step: the wide N-contiguous B
+
+Measured 2026-09-10: an N-contiguous B is right only at a 64-column tile. The row-major slab does not store each
+further swizzle atom as its own eight K rows, which the descriptor's MN-major layout expects. The fix is a per-atom
+TMA deposit in `TmaTransport.fill`: one `(64 K × 64 N)` box per atom landing at `atom · 64 · 128` bytes, so the
+descriptor's leading offset is that block stride and the K core-group stride stays 1024. It frees `n128` / `n256`
+on `[K, N]` weights, which is every linear of the golden-bench corpus.
+
 ## Out of scope, deliberately
 
 - FA-3's overlap: two consumer warp groups alternating through named barriers, and issuing the next QK^T before the
