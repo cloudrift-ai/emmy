@@ -23,6 +23,7 @@ Tile IR and are materialized away before reaching this layer. A
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, replace
 from functools import cached_property
 
@@ -531,6 +532,13 @@ class CpAsyncCopy(Stmt):
     # element index via ``emmy_swizzle_<mode>`` — the same address-based permutation the
     # ``LdmatrixLoad`` drain applies, so a swizzled slab round-trips (``LDMATRIX_SWIZZLE_XOR``).
     swizzle: str = "NONE"
+    # The lane's own ``(row, col)`` within a CTA-wide copy stripe of ``lane_rows`` rows, when the
+    # fill is unrolled per stripe: ``smem_index`` is then the stripe's base and the render adds the
+    # lane through the swizzle split (:func:`swizzled_slab_index`) — the swizzle of the lane's part
+    # computed once, the stripe base an immediate — where a loop over the flat chunk index
+    # re-swizzled every copy's whole index. ``None`` addresses the whole chunk in ``smem_index``.
+    lane_index: tuple | None = None
+    lane_rows: int = 0
 
     def external_reads(self) -> tuple[str, ...]:
         return (self.src,)
@@ -543,14 +551,24 @@ class CpAsyncCopy(Stmt):
         smem_idx = ", ".join(e.pretty() for e in self.smem_index)
         src_idx = ", ".join(e.pretty() for e in self.src_index)
         swz = f" swz={self.swizzle}" if swizzle_xor(self.swizzle) else ""
-        return [f"{indent}cp.async[{self.nbytes}B] {self.smem}[{smem_idx}]{swz} <- {self.src}[{src_idx}]"]
+        lane = f" + lane({', '.join(e.pretty() for e in self.lane_index)})" if self.lane_index is not None else ""
+        return [f"{indent}cp.async[{self.nbytes}B] {self.smem}[{smem_idx}]{lane}{swz} <- {self.src}[{src_idx}]"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
         from emmy.compiler.ir.stmt import render_index
 
         smem_flat = render_index(self.smem, self.smem_index, ctx)
         src_flat = render_index(self.src, self.src_index, ctx)
-        if swizzle_xor(self.swizzle):
+        if self.lane_index is not None:
+            cols = ctx.shapes[self.smem][-1]
+            lane = f"({self.lane_index[0].render(ctx)}) * {cols} + ({self.lane_index[1].render(ctx)})"
+            split = swizzled_slab_index(
+                self.swizzle, cols, lane, self.smem_index[0], self.smem_index[1], ctx, lane_rows=self.lane_rows, lane_col_mod=cols
+            )
+            smem_flat = split if split is not None else f"{smem_flat} + {lane}"
+            if split is None and swizzle_xor(self.swizzle):
+                smem_flat = f"{swizzle_fn(self.swizzle)}({smem_flat})"
+        elif swizzle_xor(self.swizzle):
             smem_flat = f"{swizzle_fn(self.swizzle)}({smem_flat})"
         pad = _pad(ctx.indent)
         # ``emmy_cp_async_{cg,ca}`` (the cp.async prelude) does the ``cvta`` internally, so this is a
@@ -1533,6 +1551,47 @@ def swizzle_fn(mode: str) -> str:
     return f"emmy_swizzle_{base.lower()}" + ("" if mode == base else f"_s{swizzle_xor(mode)[0]}")
 
 
+def _multiple_of(expr: Expr, d: int) -> bool:
+    """Whether ``expr`` is provably a multiple of ``d``: a literal that is, a sum or difference of
+    two that are, or a product one of whose literal factors supplies what the other need not."""
+    if d == 1:
+        return True
+    if isinstance(expr, Literal):
+        return isinstance(expr.value, int) and expr.value % d == 0
+    if isinstance(expr, BinaryExpr) and expr.op in ("+", "-"):
+        return _multiple_of(expr.left, d) and _multiple_of(expr.right, d)
+    if isinstance(expr, BinaryExpr) and expr.op == "*":
+        for lit, other in ((expr.left, expr.right), (expr.right, expr.left)):
+            if isinstance(lit, Literal) and isinstance(lit.value, int) and lit.value and _multiple_of(other, d // math.gcd(lit.value, d)):
+                return True
+    return False
+
+
+def swizzled_slab_index(mode: str, ldm: int, lane: str, row: Expr, col: Expr, ctx: RenderCtx, *, lane_rows: int, lane_col_mod: int) -> str | None:
+    """The swizzled slab element index of ``(row, col)`` plus a lane's own ``lane`` offset, split so
+    the swizzle is applied to the lane's part ONCE — ``None`` when the split does not apply.
+
+    The XOR swizzle ``e ^ (((e >> s) & m) << 3)`` is linear over bit-disjoint parts:
+    ``swz(a | b) = swz(a) ^ swz(b)``. A lane's offset spans ``lane_rows`` rows and the column
+    positions ``lane_col_mod`` apart, so a tile base whose row is a multiple of ``lane_rows`` and
+    whose column is a multiple of ``lane_col_mod`` (within the row) shares no bit with it, and
+    once the base row also clears the XOR's own field (a multiple of eight rows on every mode), its
+    row lands above every swizzled bit and adds: ``(swz(lane) ^ swz(col)) + row·ldm``. ``swz(lane)``
+    is one per-lane value a loop hoists, ``swz(col)`` a constant nvcc folds, and the row an
+    immediate offset of the load — where re-applying the swizzle to every load's full index
+    recomputed the XOR from ``threadIdx`` each time and was a fifth of an attention chunk's
+    instructions."""
+    xor = swizzle_xor(mode)
+    if xor is None or ldm < 8 or ldm & (ldm - 1) or lane_rows & (lane_rows - 1) or lane_col_mod & (lane_col_mod - 1):
+        return None
+    shift, mask = xor
+    field_mod = 1 << max(0, shift + (mask + 1).bit_length() - ldm.bit_length())
+    if not (_multiple_of(row, max(lane_rows, field_mod)) and _multiple_of(col, lane_col_mod)):
+        return None
+    fn = swizzle_fn(mode)
+    return f"({fn}({lane}) ^ {fn}({col.render(ctx)})) + ({row.render(ctx)}) * {ldm}"
+
+
 def smem_layout_index(mode: str, flat: str, buffer: str, ctx: RenderCtx, indices: tuple[Expr, ...] = ()) -> str:
     """Render ``flat`` through the slab layout selected by ``mode``.
 
@@ -1894,17 +1953,16 @@ class LdmatrixLoad(Stmt):
             # ``frag``'s col, lanes 16-31 at col+8 (x4.trans).
             assert self.role == "b" and self.staged, "paired ldmatrix is a staged B-operand fusion"
             if self.b_trans:
-                elem = f"{flat} + (({lane} % 8) + ({lane} / 16) * 8) * {ldm} + (({lane} / 8) % 2) * 8"
+                elem = f"(({lane} % 8) + ({lane} / 16) * 8) * {ldm} + (({lane} / 8) % 2) * 8"
                 helper = "emmy_ldmatrix_x4_pair"
             else:
-                elem = f"{flat} + ({lane} % 16) * {ldm} + ({lane} / 16) * 8"
+                elem = f"({lane} % 16) * {ldm} + ({lane} / 16) * 8"
                 helper = "emmy_ldmatrix_x4_trans_pair"
             # The helper loads both fragments' registers directly (no ``_p4`` staging temp / block).
-            return [f"{_pad(ctx.indent)}{helper}({self.frag}, {self.pair_frag}, {self._swizzled_addr(elem)});"]
+            return [f"{_pad(ctx.indent)}{helper}({self.frag}, {self.pair_frag}, {self._swizzled_addr(flat, elem, ctx, 16, 16)});"]
         if self.role == "a":
             # 16×16 A: x4 — lane addresses M-row (lane%16), K-col block (lane/16)*8.
-            elem = f"{flat} + ({lane} % 16) * {ldm} + ({lane} / 16) * 8"
-            addr = self._swizzled_addr(elem)
+            addr = self._swizzled_addr(flat, f"({lane} % 16) * {ldm} + ({lane} / 16) * 8", ctx, 16, 16)
             return [f"{_pad(ctx.indent)}emmy_ldmatrix_x4({self.frag}, {addr});"]
         # Transposed-B (Q@K^T): the slab keeps the operand's native N-major layout
         # (N rows × K cols), which IS the mma's col-major B — a plain x2 (no
@@ -1912,21 +1970,28 @@ class LdmatrixLoad(Stmt):
         # half 0, lanes 8-15 the same rows at K col 8 (each 8x8 matrix's rows land
         # as the fragment's (k, k+1) pairs, cf. ``emmy_mma_load_b_gmem_trans``).
         if self.b_trans:
-            elem = f"{flat} + ({lane} % 8) * {ldm} + (({lane} / 8) % 2) * 8"
-            addr = self._swizzled_addr(elem)
+            addr = self._swizzled_addr(flat, f"({lane} % 8) * {ldm} + (({lane} / 8) % 2) * 8", ctx, 8, 16)
             return [f"{_pad(ctx.indent)}emmy_ldmatrix_x2({self.frag}, {addr});"]
         # 16×8 B: x2.trans — lane addresses K-row (lane%16); .trans yields col-major.
-        elem = f"{flat} + ({lane} % 16) * {ldm}"
-        addr = self._swizzled_addr(elem)
+        addr = self._swizzled_addr(flat, f"({lane} % 16) * {ldm}", ctx, 16, 8)
         return [f"{_pad(ctx.indent)}emmy_ldmatrix_x2_trans({self.frag}, {addr});"]
 
-    def _swizzled_addr(self, elem: str) -> str:
+    def _swizzled_addr(self, flat: str, lane: str, ctx: RenderCtx, lane_rows: int, lane_col_mod: int) -> str:
+        """The lane's slab address: the tile base ``flat`` plus the lane's own ``lane`` offset,
+        which spans ``lane_rows`` rows and columns ``lane_col_mod`` apart, through the slab's
+        swizzle — split per :func:`swizzled_slab_index` wherever the tile base allows, so the
+        swizzle of the lane's part is computed once for the whole drain."""
         if not swizzle_xor(self.swizzle):
-            return f"&{self.src_buffer}[{elem}]"
+            return f"&{self.src_buffer}[{flat} + {lane}]"
+        split = None
+        if len(self.src_index) == 2 and ctx.shapes.get(self.src_buffer, (0, 0))[-1] == self.ldm:
+            split = swizzled_slab_index(
+                self.swizzle, self.ldm, lane, self.src_index[0], self.src_index[1], ctx, lane_rows=lane_rows, lane_col_mod=lane_col_mod
+            )
         # ``emmy_swizzle_<mode>`` (preamble, built from ``LDMATRIX_SWIZZLE_XOR``) applies
         # ``e ^ (((e >> shift) & mask) << 3)`` — the helper spells the (often long) element
         # index once instead of inlining it twice around the XOR.
-        return f"&{self.src_buffer}[{swizzle_fn(self.swizzle)}({elem})]"
+        return f"&{self.src_buffer}[{split if split is not None else f'{swizzle_fn(self.swizzle)}({flat} + {lane})'}]"
 
 
 @dataclass(frozen=True)
@@ -2856,6 +2921,8 @@ def _(s: CpAsyncCopy, rename, sigma, axis_fn):
         src_index=tuple(sigma.apply(e) for e in s.src_index),
         nbytes=s.nbytes,
         swizzle=s.swizzle,
+        lane_index=None if s.lane_index is None else tuple(sigma.apply(e) for e in s.lane_index),
+        lane_rows=s.lane_rows,
     )
 
 
