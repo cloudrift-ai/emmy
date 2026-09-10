@@ -739,18 +739,24 @@ _IDENTITY_STORE_DIRTY: bool = False
 _WIRE_DIGESTS: dict[int, tuple[dict, str]] = {}
 
 
+def _tree_fingerprint(root: Path) -> str:
+    """Path plus CONTENT digest of every ``*.py`` under ``root``.
+
+    Content, not mtime: the memo this keys is ONE file per machine and every checkout of the same
+    revision reads it — an agent worktree beside the main tree, the re-exported tree a serving
+    container mounts. Byte-identical sources with different mtimes fingerprinted differently, so
+    each checkout discarded the other's derivations and the next process re-derived every identity
+    from scratch. Hashing the 3.7 MB the compiler occupies costs about 6 ms, once per process.
+    """
+    return digest("\n".join(f"{path.relative_to(root)}:{digest(path.read_bytes())}" for path in sorted(root.rglob("*.py"))))
+
+
 def _compiler_fingerprint() -> str:
-    """A cheap fingerprint of the compiler tree — (path, mtime, size) of every ``emmy/compiler``
-    source file. Any edit invalidates the persisted identity memo, so a derivation can never be
-    replayed across compiler versions."""
+    """The compiler tree's fingerprint. Any edit invalidates the persisted identity memo, so a
+    derivation can never be replayed across compiler versions."""
     import emmy.compiler as _pkg  # noqa: PLC0415
 
-    root = Path(_pkg.__file__).parent
-    parts = []
-    for path in sorted(root.rglob("*.py")):
-        st = path.stat()
-        parts.append(f"{path.relative_to(root)}:{st.st_mtime_ns}:{st.st_size}")
-    return digest("\n".join(parts))
+    return _tree_fingerprint(Path(_pkg.__file__).parent)
 
 
 def _identity_store() -> dict:

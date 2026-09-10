@@ -12,6 +12,7 @@ magnitude more rows, and the widest of them is a multi-megabyte parse. Run those
 ``make test-goldens`` after a tuning round has re-recorded a card's rows.
 """
 
+import os
 from collections import Counter
 from pathlib import Path
 
@@ -175,3 +176,29 @@ def test_every_recorded_row_of_a_model_golden_decodes(path: Path) -> None:
     listed = "\n".join(failures[:20])
     more = f"\n  ... and {len(failures) - 20} more" if len(failures) > 20 else ""
     assert not failures, f"{len(failures)}/{len(records)} recorded rows equal no enumerated leaf:\n{listed}{more}"
+
+
+def test_compiler_fingerprint_ignores_mtime_so_two_checkouts_share_one_memo(tmp_path):
+    """Two byte-identical trees fingerprint alike however their mtimes differ.
+
+    The identity memo is one file per machine, and every checkout of the same revision reads it:
+    an agent worktree beside the main tree, the re-exported host tree a serving container mounts.
+    Keyed by mtime those checkouts disagreed, so each discarded the other's derivations and the
+    next process re-derived every identity from scratch.
+    """
+    from emmy.compiler.pipeline.search.golden import _tree_fingerprint
+
+    first, second = tmp_path / "a", tmp_path / "b"
+    for root in (first, second):
+        (root / "pkg").mkdir(parents=True)
+        (root / "pkg" / "rule.py").write_text("VALUE = 1\n")
+    stamp = (1, 1)
+    os.utime(second / "pkg" / "rule.py", stamp)
+
+    assert _tree_fingerprint(first) == _tree_fingerprint(second)
+
+    # Same length and the SAME mtime as the equal case: only content differs, so a fingerprint that
+    # went back to hashing metadata would fail here instead of passing unnoticed.
+    (second / "pkg" / "rule.py").write_text("VALUE = 2\n")
+    os.utime(second / "pkg" / "rule.py", stamp)
+    assert _tree_fingerprint(first) != _tree_fingerprint(second)
