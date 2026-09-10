@@ -650,6 +650,9 @@ def _run_golden_targets(args) -> None:
         except SystemExit as exc:
             if exc.code:
                 failed.append(name)
+        except Exception as exc:  # noqa: BLE001 — one target's lowering error must not hide the rest
+            logger.error("%s: %s", name, exc)
+            failed.append(name)
     if failed:
         logger.error("%d of %d realizations failed: %s", len(failed), len(names), ", ".join(failed))
         sys.exit(1)

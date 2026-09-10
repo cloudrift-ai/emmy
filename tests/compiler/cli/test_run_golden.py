@@ -82,6 +82,8 @@ def test_golden_walk_reports_every_target_before_failing(monkeypatch, tmp_path):
         calls.append(args.realization)
         if args.realization == "linear.layer0":
             raise SystemExit(1)
+        if args.realization == "linear.layer1":
+            raise ValueError("Tile.aux_threads requires a cooperative block_threads")
 
     monkeypatch.setattr(run_mod, "_handle_run_once", run_once)
 
