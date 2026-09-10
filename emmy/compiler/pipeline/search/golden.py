@@ -203,8 +203,15 @@ class GoldenRecord:
 
     @property
     def is_routing(self) -> bool:
-        """Whether this row records a kernel-placement decision rather than a kernel schedule."""
-        return bool(self.knobs) and all(str(key).split("@", 1)[0] == "PLACE" for key in self.knobs)
+        """Whether this row records a kernel-set decision — a placement cut, or a cross-CTA split's
+        ``g<n>`` arm, which mints its pieces the same way — rather than a kernel schedule."""
+        from emmy.compiler.pipeline.search.pins import stampable_reduce  # noqa: PLC0415
+
+        def arm(key: str, value) -> bool:
+            family = str(key).split("@", 1)[0]
+            return family == "PLACE" or (family == "REDUCE" and stampable_reduce(str(value)) == "")
+
+        return bool(self.knobs) and all(arm(key, value) for key, value in self.knobs.items())
 
     @property
     def is_receipt(self) -> bool:

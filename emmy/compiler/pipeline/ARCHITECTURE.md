@@ -1074,9 +1074,13 @@ promotion never fabricates their heterogeneous schedules into one row or falls b
 cross-CTA parent becomes a tune
 winner only when its ordinary schedule pins reproduce the decisions on every directly measured child kernel; a
 parent whose pins
-name a different independently tuned child is left unpromoted. A `PLACE`-only row is a routing row: it does not claim
+name a different independently tuned child is left unpromoted. A `PLACE`-only row is a routing row, and so is a row spelling only a
+cross-CTA `REDUCE` arm (`g<n>k` / `g<n>a`, which mints its pieces the way a cut does): it does not claim
 the child schedules, and once measured it is a route row — the measured price of that kernel set, the arm the greedy
-compile takes at that kernel's fork (Part 3). A search number never populates `emmy_us` / `cublas_us`; promotion
+compile takes at that kernel's fork (Part 3). A receipt `--record-greedy` writes carries no route of its own, so the
+golden's per-row bench replays a receipt whose identity no routing row names under the target's routing rows
+composed (plus `PLACE=fuse` when no cut was recorded, the state a set with no placement row ran in); a receipt
+replayed bare would spell its piece keys against the unsplit program and match nothing. A search number never populates `emmy_us` / `cublas_us`; promotion
 still requires the separate repeated, correct, deployable A/B gate.
 
 Hybrid-vs-MCTS baselines start from identical inventory-only working files: verified rows are not copied into either
