@@ -362,11 +362,7 @@ def _contraction_domain(
     allowed_atoms = _warp_atoms(tile, target, node)
 
     def warp_plan_ok(plan: Tile) -> bool:
-        view = node.as_contraction()
-        if (
-            _kstep_refusal(facts.k_axis, plan) is not None
-            or _wgmma_refusal(plan, b_trans=None if view is None else view.b_trans) is not None
-        ):
+        if _kstep_refusal(facts.k_axis, plan) is not None or _wgmma_refusal(plan) is not None:
             return False
         chunk = plan.atom.atom_k * plan.bk
         return not node.chunked() or (chunk >= plan.atom.atom_n and chunk % plan.atom.atom_n == 0)

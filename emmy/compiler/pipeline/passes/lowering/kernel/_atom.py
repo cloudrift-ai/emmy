@@ -533,10 +533,9 @@ def _wgmma_drain(*, operands, slot, mn, atom, bk_elems: int, frag_ns: str, n_fol
     Descriptor geometry (128-byte swizzle, 16-bit elements): a K-major slab (A, or a transposed B)
     stores one swizzle row per tile row, so the stride between 8-row core groups is
     ``8 · bk · 2`` bytes and the leading offset is unused; an N-contiguous B slab is MN-major
-    (``trans_b``), its core groups are eight K rows apart (``8 · row pitch``) and adjacent
-    64-column atoms sit 128 bytes apart. The software swizzle of a cp.async fill reads the ROW
-    index, not the address bits, once a row exceeds one atom, so an MN-major B wider than one
-    atom must arrive by TMA; that case is declined here rather than mis-read."""
+    (``trans_b``) and atom-major (``Operand.atoms``): one swizzle row per K row, its core groups
+    eight rows (1024 bytes) apart and each further 64-column atom its own ``bk`` rows down, which
+    is the leading offset."""
     (a_op, *b_ops), (m, n) = operands, mn
     cells = atom.cells_per_instruction
     if m.reg != 1 or n.reg % cells:
@@ -545,6 +544,8 @@ def _wgmma_drain(*, operands, slot, mn, atom, bk_elems: int, frag_ns: str, n_fol
     elem_bytes = atom.operand_dtype("a").nbytes
     atom_cols = 128 // elem_bytes  # one 128-byte swizzle row, in elements
     n_steps = bk_elems // atom_k
+    if any(not getattr(b_op, "trans", False) and b_op.shape != (n.tile // atom_cols * bk_elems, atom_cols) for b_op in b_ops):
+        raise ValueError("wgmma reads an N-contiguous B through an atom-major slab (one swizzle row per K row, atoms stacked along the rows)")
 
     def flat(row: Expr, col: Expr, cols: int) -> Expr:
         return BinaryExpr("+", BinaryExpr("*", row, Literal(cols, "int")), col)
@@ -576,14 +577,10 @@ def _wgmma_drain(*, operands, slot, mn, atom, bk_elems: int, frag_ns: str, n_fol
                 if trans:  # K-major (tile_n × bk): the tile coordinate is the slab row, K the column
                     b_cols = bk_elems + getattr(b_op, "pad_cols", 0)
                     index, lbo, sbo = flat(offset(nbase, b_op.slot_row(slot)), kcol, b_cols), 16, 8 * b_cols * elem_bytes
-                else:  # MN-major (bk × tile_n): K is the slab row, the tile coordinate the column
-                    b_cols = n.tile + getattr(b_op, "pad_cols", 0)
-                    if n.tile > atom_cols:
-                        raise ValueError(
-                            "wgmma: an N-contiguous B slab wider than one swizzle atom does not store each atom as its own K rows; "
-                            "the schedule rule should have declined this row"
-                        )
-                    index, lbo, sbo = flat(offset(kcol, b_op.slot_row(slot)), nbase, b_cols), 128, 8 * b_cols * elem_bytes
+                else:  # MN-major, atom-major (atoms·bk × atom): atom ``nbase / atom`` starts ``bk`` rows per atom down
+                    row = BinaryExpr("+", BinaryExpr("*", BinaryExpr("/", nbase, Literal(atom_cols, "int")), Literal(bk_elems, "int")), kcol)
+                    index = flat(offset(row, b_op.slot_row(slot)), Literal(0, "int"), atom_cols)
+                    lbo, sbo = bk_elems * atom_cols * elem_bytes, 8 * atom_cols * elem_bytes
                 stmts.append(
                     WgmmaDescriptor(name=b_desc, smem=b_op.slab, smem_index=index, swizzle=b_op.swizzle, lbo_bytes=lbo, sbo_bytes=sbo)
                 )
@@ -676,6 +673,24 @@ def _slab_index(operand_index, *, tile: Side, tile_base, k_axis, tile_is_row: bo
     return at
 
 
+def _atom_major(rows: int, atom: int):
+    """The ``(row, col) → (K row, tile col)`` map of an ATOM-MAJOR B slab (:attr:`Operand.atoms`): slab
+    row ``r`` is K row ``r % rows`` of the atom whose tile columns start at ``(r // rows) · atom``.
+    Composed under a fill's slab map, so every fill kind writes the stacked layout unchanged."""
+
+    def cell(row: Expr, col: Expr) -> tuple[Expr, Expr]:
+        atom_at = BinaryExpr("*", BinaryExpr("/", row, Literal(rows, "int")), Literal(atom, "int"))
+        return BinaryExpr("%", row, Literal(rows, "int")), BinaryExpr("+", atom_at, col)
+
+    return cell
+
+
+def _stacked(at, rows: int, atom: int):
+    """A ``k0 -> ((row, col) -> gmem index)`` slab map (:func:`_slab_index`) over the atom-major fold."""
+    cell = _atom_major(rows, atom)
+    return lambda k0: (lambda row, col, gmem=at(k0): gmem(*cell(row, col)))
+
+
 def _tile_base(mn: tuple[Side, Side]) -> tuple[Expr, Expr]:
     """The CTA tile's ``(row_base, col_base)`` top-left origin — ``(m_b·tile_m, n_b·tile_n)``."""
     return tuple(_side_base(s) for s in mn)
@@ -706,6 +721,7 @@ def _slab_operands(
     swizzles: tuple[str, str] = ("NONE", "NONE"),
     elems: tuple = (None, None),
     b_trans: bool = False,
+    b_atoms: int = 1,
     pads: tuple[int, int] = (0, 0),
     roles: tuple[int, ...] = (0, 1),
     rows: tuple[bool, bool] | None = None,
@@ -716,7 +732,9 @@ def _slab_operands(
     origin. A transposed B (``b_trans``, the serving ``F.linear`` layout — K gmem-contiguous) takes
     A's geometry instead: an N-MAJOR ``(tile_n × bk)`` slab whose inner dim maps stride-1 to gmem K,
     so the fill's chunks stay contiguous; the ``Operand.trans`` stamp routes the drain to the plain
-    (no ``.trans``) ldmatrix. ``base`` is the ``(row_base, col_base)`` CTA tile origin; ``index_srcs``
+    (no ``.trans``) ldmatrix. An N-contiguous B a ``wgmma`` descriptor reads stacks its ``b_atoms``
+    swizzle atoms along the slab rows instead (:attr:`Operand.atoms`, :func:`_atom_major`).
+    ``base`` is the ``(row_base, col_base)`` CTA tile origin; ``index_srcs``
     are the operands' gmem index expressions (``load.index``); ``swizzles`` the per-operand smem
     swizzle modes (the mma tier's :meth:`_MmaOps.slab_swizzles` — ``("NONE", "NONE")`` everywhere
     else). ``elems`` are the per-operand element dtypes (``DataType`` or ``None`` = the
@@ -735,25 +753,28 @@ def _slab_operands(
         if i not in roles:
             continue
         tile, tile_base, sibling = mn[i], base[i], mn[1 - i]
-        shape = (tile.tile, bk_elems) if is_row else (bk_elems, tile.tile)
+        atoms = b_atoms if i == 1 and not is_row else 1
+        block = (tile.tile, bk_elems) if is_row else (bk_elems, tile.tile // atoms)
         elem = elems[i]
         # A >2-D operand (batched / unit-batch view) boxes as rank-N with leading extent-1 dims;
         # ``_box_origin`` already yields the full-rank origin (the leading index exprs ride
         # through σ untouched — the stage resolvers gated them tile/K-invariant). The flash K/V
         # ``(1, 1, bn, head_dim)`` convention, extended to the matmul tiers.
-        box = (1,) * (len(index_srcs[i]) - 2) + shape if len(index_srcs[i]) > 2 else None
+        box = (1,) * (len(index_srcs[i]) - 2) + block if len(index_srcs[i]) > 2 else None
+        index = _slab_index(index_srcs[i], tile=tile, tile_base=tile_base, k_axis=k_axis, tile_is_row=is_row, sibling=sibling)
         ops.append(
             Operand(
                 tag=tag,
                 buf=bufs[i],
-                shape=shape,
+                shape=(block[0] * atoms, block[1]),
                 box=box,
                 coords=_box_origin(index_srcs[i], tile=tile, tile_base=tile_base, k_axis=k_axis, sibling=sibling),
-                index=_slab_index(index_srcs[i], tile=tile, tile_base=tile_base, k_axis=k_axis, tile_is_row=is_row, sibling=sibling),
+                index=_stacked(index, bk_elems, block[1]) if atoms > 1 else index,
                 swizzle=swizzles[i],
                 dtype=cuda_name(elem) if elem is not None else None,
                 elem_bytes=elem.nbytes if elem is not None else None,
                 trans=i == 1 and b_trans,
+                atoms=atoms,
                 pad_cols=pads[i],
             )
         )
@@ -886,6 +907,7 @@ def _sync_operands(
     *,
     k_axis: Axis,
     axes: tuple = (),
+    b_atoms: int = 1,
 ) -> tuple[tuple, tuple[SyncOperand, ...], tuple[Operand, ...], list[Stmt]]:
     """The ``smem`` compute fill's drain-ordered, computed, copied, and prologue operands.
 
@@ -963,30 +985,32 @@ def _sync_operands(
         if not isinstance(bl, Load):
             b_body = bl.lower(axes=axes)
 
-            def b_value(k0, row, col, *, body=b_body, edge=bl):
+            def b_value(k0, row, col, *, body=b_body, edge=bl, cell=_atom_major(bk_elems, mn[1].tile // b_atoms)):
+                row, col = cell(row, col) if b_atoms > 1 else (row, col)
                 k = BinaryExpr("+", k0, row)
                 sigma = Sigma({k_name: k_coord(k), n_name: n_coord(col)})
                 return _k_masked([s.substitute(sigma) for s in body], edge.exposes[-1], k, k_ext)
 
-            op = SyncOperand(tag=tag, shape=(bk_elems, mn[1].tile), value=b_value, swizzle=swizzles[1])
+            op = SyncOperand(tag=tag, shape=(bk_elems * b_atoms, mn[1].tile // b_atoms), value=b_value, swizzle=swizzles[1])
             sync_ops.append(op)
             drain.append(op)
             continue
-        # A transposed B stages N-major (``tile_n × bk`` — its own gmem orientation, K stride-1 in
-        # gmem and smem alike), so its cp.async chunks are contiguous exactly like the canonical
-        # K-major slab's (row-base alignment holds: B's row stride K is a multiple of ``bk_elems``).
-        shape = (mn[1].tile, bk_elems) if c.as_contraction().b_trans else (bk_elems, mn[1].tile)
-        op = Operand(
-            tag=tag,
-            buf=bl.input,
-            shape=shape,
-            coords=_box_origin(bl.index, tile=mn[1], tile_base=col_base, k_axis=k_axis, sibling=mn[0]),
-            index=_slab_index(
-                bl.index, tile=mn[1], tile_base=col_base, k_axis=k_axis, tile_is_row=c.as_contraction().b_trans, sibling=mn[0]
-            ),
-            swizzle=swizzles[1],
-            trans=c.as_contraction().b_trans,
+        # A materialized B is the copied operand the staged matmul tiers build, under this channel's
+        # slab name: transposed it stages N-major (``tile_n × bk``, its own gmem orientation, so its
+        # cp.async chunks stay contiguous), otherwise K-major, atom-major under a wgmma drain.
+        (op,) = _slab_operands(
+            index_srcs=(None, bl.index),
+            bufs=(None, bl.input),
+            mn=mn,
+            k_axis=k_axis,
+            bk_elems=bk_elems,
+            base=(row_base, col_base),
+            swizzles=swizzles,
+            b_trans=c.as_contraction().b_trans,
+            b_atoms=b_atoms,
+            roles=(1,),
         )
+        op = replace(op, tag=tag)
         async_ops.append(op)
         drain.append(op)
     return tuple(drain), tuple(sync_ops), tuple(async_ops), prologue
@@ -1424,7 +1448,17 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
         # that work — with ``cp.async``, or with the blocking vector copy on an atom whose target
         # has none. A term with no inline edge at all lands here too: then it is only the copy.
         operands, sync_ops, copy_ops, stat_pro = _sync_operands(
-            c, stage.bk_elems, mn, cta, ops.slab_swizzles(mn, elem.nbytes), ops.channels, ops.cone, ops.inputs, k_axis=k_axis, axes=ops.axes
+            c,
+            stage.bk_elems,
+            mn,
+            cta,
+            ops.slab_swizzles(mn, elem.nbytes),
+            ops.channels,
+            ops.cone,
+            ops.inputs,
+            k_axis=k_axis,
+            axes=ops.axes,
+            b_atoms=ops.b_atoms(mn),
         )
         transport = SyncTransport(
             operands=sync_ops,
@@ -1455,6 +1489,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             swizzles=ops.slab_swizzles(mn, elem.nbytes),
             elems=elems,
             b_trans=c.as_contraction().b_trans,
+            b_atoms=ops.b_atoms(mn),
             pads=pads,
         )
         common = dict(
@@ -1859,8 +1894,17 @@ class _MmaOps(_AtomOps):
                 VOLTA_CROSSWISE if paired else "NONE",
                 *((VOLTA_B_CONGRUOUS if paired else "NONE") for _ in self.channels),
             )
-        b_inner = self.stage.bk_elems if self.c.as_contraction().b_trans else mn[1].tile
+        b_inner = self.stage.bk_elems if self.c.as_contraction().b_trans else mn[1].tile // self.b_atoms(mn)
         return tuple(self.slab_swizzle(inner, e.nbytes) for e, inner in zip(self.slab_elems(), (self.stage.bk_elems, b_inner), strict=True))
+
+    def b_atoms(self, mn) -> int:
+        """How many 128-byte swizzle atoms the B slab stacks along its rows (:attr:`Operand.atoms`):
+        ``tile_n / 64`` for an N-contiguous B a ``wgmma`` descriptor reads — the MN-major canonical
+        layout stores each atom as its own eight-row core groups, which a row-major slab wider than
+        one atom is not — and 1 for every slab an ldmatrix drain reads row-major."""
+        if not self.tile.atom.is_wgmma or self.c.as_contraction().b_trans:
+            return 1
+        return max(1, mn[1].tile // (128 // self.tile.atom.operand_dtype("b").nbytes))
 
     def slab_swizzle(self, inner: int, nbytes: int) -> str:
         """One slab's swizzle mode from its inner (contiguous) row span — the reading
