@@ -62,9 +62,9 @@ from emmy.compiler.ir.tile import FoldMove, Level, Reduce, ReduceStage
 from emmy.compiler.ir.tile.ir import apply_output_specs, observed_result_names
 from emmy.compiler.ir.tile.ops import UnbindableProjection, chain_form, chain_members, projection_regions, sched_of, tiled_edges
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import (
+    _atom_ops,
     clamp_last,
     copy_cell,
-    reduce_codegen,
     store_sink,
 )
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import sync_row_fill
@@ -450,20 +450,21 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         # (registers are ptxas's), so the test is the conservative one: fewer CTAs than SMs.
         ctas = launch_ctas(lead, tile.mn)
         one_wave = ctas is not None and 0 < ctx.sm_count and ctas <= ctx.sm_count
-        state_decls, reduce_region = reduce_codegen(
+        ops = _atom_ops(
             c,
             tile,
             stage,
             ctx.inputs,
             ctx.workers,
-            seam,
-            lead,
-            frag_ns,
+            seam=seam,
+            lead=lead,
+            frag_ns=frag_ns,
             k_axis=k_axis,
             axes=ctx.sched.tile.axes,
             inner=inner,
             one_wave=one_wave,
         )
+        state_decls, reduce_region, descending = ops.state, ops.reduce, ops.longest_block_last()
         sink = (
             store
             if store is not None
@@ -487,7 +488,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         # ``Fold`` node (a projecting zero-axis
         # ``Fold`` was already peeled off by :func:`_factorize`).
         plan = (ctx.sched.get("REDUCE", op) or Reduce()) if isinstance(op, Fold) else None
-        t, mn, lead, lanes = atomize((1, 1)), (None, None), grid, 1
+        t, mn, lead, lanes, descending = atomize((1, 1)), (None, None), grid, 1, False
         # A CHAIN root's members carry their own partitions; every partitioned member and the root
         # stride around ONE lane axis, in body order (:func:`_tile_chain_members`).
         members = chain_members(op) if isinstance(op, Fold) and op.axis is not None else ()
@@ -559,6 +560,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         # ``None`` — safe to thread unconditionally.
         workers=ctx.workers,
         raster=ctx.raster,
+        descending=descending,
     )
 
 

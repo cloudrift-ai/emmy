@@ -132,6 +132,7 @@ def grid_tile(
     store: Callable[..., list[Stmt]],
     workers: object = None,
     raster: object = None,
+    descending: bool = False,
 ) -> Tile:
     """The GRID level + finalize — the ONE seal every kernel binds through: bind the block axes (the
     shrunk grid), set the per-axis grid term ``block·tile``, append any leading (untiled) grid axes
@@ -149,7 +150,11 @@ def grid_tile(
 
     ``workers`` (a resolved :class:`WarpSpec`) appends its producer band as ``Tile.aux_threads`` and
     guards the stores to the compute band — an aux thread's wrapped decode aliases a compute cell,
-    so an unguarded ``store`` would double-write it."""
+    so an unguarded ``store`` would double-write it.
+
+    ``descending`` decodes the ``m`` block axis from its far end (``Tile.descending_axis``): the
+    tier asks for it when its stream stops at a bound that grows with the block, so the blocks
+    with the most work launch first and the launch's tail wave holds the short ones."""
     offset = tuple(replace(o, block_var=s.block) if s is not None else o for o, s in zip(t.offset, mn, strict=True))
     block_axes = tuple(
         shrink_axis(Axis(name=s.block, extent=s.axis.extent, window=Window(parent=s.axis)), s.tile) for s in mn if s is not None
@@ -178,4 +183,5 @@ def grid_tile(
         raster_axes=raster_axes,
         raster_group=(raster.group if raster is not None and not raster.is_direct and raster_axes is not None else None),
         raster_orient=(raster.orient if raster is not None and not raster.is_direct else "m"),
+        descending_axis=mn[0].block if descending and mn[0] is not None else None,
     )
