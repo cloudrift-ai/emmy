@@ -109,11 +109,22 @@ What the measurement says to do next, in order:
   decode where the archived lane measured 48.1. So 42.6 us beats Neptune's recorded 45.5 on raw microseconds and
   loses to it on the eager-normalized ratio (1.4x against 0.95x). Re-run Neptune on the same box before either
   number goes in a paper.
-- **The key-range split is the biggest single lever, and its width is a cliff.** At 2048 keys on the matched
-  diagonal: unsplit 57 us, `g4k` 192, **`g8k` 44**, `g16k` 52. The recorded set is a 1024-block partial at 40.7 us
-  plus a 1.9 us finalize. Sweep the width per length — the fused row leaves 64 CTAs on a 108-SM card, and the loss
-  to Neptune grew with sequence length exactly as an unfillable grid predicts. An earlier reading that the split
-  hurt was taken off `g4k` rows carried on an OFF-diagonal geometry, and was wrong on both counts.
+- **A split row is NOT a controlled measurement, and this invalidated two readings before it was noticed.** A
+  `TILE@map.1/twist` pin does not resolve on a split PIECE — the piece's tree spells the route `twist`, so the
+  compiler picks the piece's geometry itself and the pin is silently ignored. Every split row below therefore varies
+  geometry and split together:
+
+  | keys | unsplit | `g4k` | `g8k` | `g16k` |
+  | ---: | ---: | ---: | ---: | ---: |
+  | 1024 | 28 | — | 137 | 3498 |
+  | 2048 | 57 | 192 | **44** | 52 |
+  | 4096 | 123 | — | 511 | 335 |
+
+  At 2048 the compiler's own choice for the piece (`f1x4/k4` + `f1x8/k4`, chunk 64 — on the diagonal) beat the
+  unsplit row and is what the committed golden records. At 1024 and 4096 its choice was bad. So the recorded 2048
+  win is real as a measurement and unexplained as a mechanism: whether the split helps, or whether the piece simply
+  landed on a better geometry, is not resolved. To sweep it properly, pin BOTH route spellings (`@map.1/twist` and
+  `@twist`) so one of them binds whichever shape the placement takes.
 - **The geometry is a matched diagonal, not a cross.** The score tile's column count must equal the carrier's chunk
   width (`16 * k`). Off it — 64/128 or 128/64 — the same kernel measures about 9300 us, 160x worse. Any sweep that
   crosses `TILE@map.1/twist` against `TILE@map.1/twist.1/inner` freely wastes most of its rows.
