@@ -7,6 +7,7 @@ from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import Match, Pattern
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op
+from emmy.compiler.pipeline.passes.lowering.tile._row import ROW_AXIS, row_bound_body, row_candidates, rowless
 
 PATTERN = [Pattern("root", LoopOp)]
 
@@ -17,4 +18,12 @@ def rewrite(match: Match, root: Node, ctx=None) -> TileOp:
 
     loop: LoopOp = root.op
     tile = lift_loop_op(loop, name=loop.name)
+    # A contraction that owns no free axis has no row for any tier to tile. Its row is a size-one
+    # output dimension Loop-IR normalization inlined; bound back, the term keeps every per-cell
+    # choice it had and gains the fragment ones beside them.
+    for position in row_candidates(loop, tile):
+        bound = lift_loop_op(loop, name=loop.name, body=row_bound_body(loop, position, ROW_AXIS))
+        if not rowless(bound):
+            tile = bound
+            break
     return replace(tile, outputs={root.output.name: root.output})
