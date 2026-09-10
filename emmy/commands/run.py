@@ -615,6 +615,16 @@ def _run_golden_targets(args) -> None:
     if not names:
         logger.error("--golden contains no realizations: %s", args.golden)
         sys.exit(2)
+    # Bench each TARGET once. A row named ``<target>.<identity>`` (a routing row or a child-identity
+    # schedule receipt) is evidence for its target's walk, not a target of its own: benched as a
+    # whole-target pin it measures nothing real and multiplies the walk by the receipt count.
+    targets: list[str] = []
+    for name in names:
+        parent = ".".join(name.split(".")[:2])
+        target = parent if parent in names else name
+        if target not in targets:
+            targets.append(target)
+    names = targets
 
     output_dir = None
     if len(names) > 1 and args.json:

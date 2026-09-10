@@ -61,6 +61,18 @@ def test_golden_runs_every_distinct_target_in_process(monkeypatch, tmp_path):
     assert all(args.golden.endswith("working.yaml") and args._explicit_realization is False for args in calls)
 
 
+def test_golden_walk_benches_each_target_once_not_its_receipts(monkeypatch, tmp_path):
+    """Routing rows and child-identity receipts (``<target>.<identity>``) are evidence for their target's
+    walk, not targets: the walk names the target once and leaves the rows to the evidence pick."""
+    _patch_records(monkeypatch, ["k_mean.aaaa", "k_mean.aaaa.c5cd", "k_lin.bbbb", "k_lin.bbbb.8270", "k_lin.bbbb.4d7f", "orphan.cccc.dddd"])
+    calls = []
+    monkeypatch.setattr(run_mod, "_handle_run_once", calls.append)
+
+    run_mod._run_golden_targets(_args(tmp_path))
+
+    assert [args.realization for args in calls] == ["k_mean.aaaa", "k_lin.bbbb", "orphan.cccc.dddd"]
+
+
 def test_golden_walk_reports_every_target_before_failing(monkeypatch, tmp_path):
     """A target that fails does not hide the targets after it: the walk runs them all and exits 1."""
     _patch_records(monkeypatch, ["linear.layer0", "linear.layer1", "linear.layer2"])
