@@ -395,13 +395,59 @@ def test_is_runnable_accepts_indexmap():
     assert torch_ref.is_runnable(g)
 
 
-def test_is_runnable_rejects_gather():
+@pytest.mark.parametrize(
+    "data_shape,index_shape,axis",
+    [((4, 8), (4, 3), 1), ((256, 2), (2, 3, 4), 0), ((2, 8, 3), (2, 4), 1), ((2, 8), (), -1)],
+)
+def test_gather_matches_numpy(data_shape, index_shape, axis):
     g = Graph()
-    g.add_node(InputOp(), [], Tensor("x", (4, 8)), node_id="x")
-    g.add_node(InputOp(), [], Tensor("idx", (4, 8)), node_id="idx")
-    g.add_node(GatherOp(axis=0), ["x", "idx"], Tensor("o", (4, 8)), node_id="o")
+    data = np.arange(np.prod(data_shape), dtype=np.float32).reshape(data_shape)
+    indices = np.random.default_rng(1).integers(-data_shape[axis], data_shape[axis], size=index_shape)
+    expected = GatherOp(axis=axis).forward(data, indices)
+    g.add_node(InputOp(), [], Tensor("x", data_shape), node_id="x")
+    g.add_node(InputOp(), [], Tensor("idx", index_shape, "i64"), node_id="idx")
+    g.add_node(GatherOp(axis=axis), ["x", "idx"], Tensor("o", expected.shape), node_id="o")
     g.inputs, g.outputs = ["x", "idx"], ["o"]
-    assert not torch_ref.is_runnable(g)
+    assert torch_ref.is_runnable(g)
+    fn, inputs = torch_ref.build_callable(g, {"x": torch.from_numpy(data), "idx": torch.from_numpy(indices)})
+    torch.testing.assert_close(fn(*inputs), torch.from_numpy(expected), rtol=0, atol=0)
+
+
+def test_fp4_rounding_boundaries_and_all_codes():
+    from emmy.compiler.dtype import F4_VALUES, encode_f4
+
+    midpoints = np.array([0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0], dtype=np.float32)
+    positive = np.concatenate((np.nextafter(midpoints, -np.inf), midpoints, np.nextafter(midpoints, np.inf)))
+    values = np.concatenate((positive, -positive, np.array([0.0, -0.0, np.inf, -np.inf], dtype=np.float32)))
+    encode = torch_ref._elementwise_callable("to_f4e2m1")
+    decode = torch_ref._elementwise_callable("from_f4e2m1")
+    np.testing.assert_array_equal(encode([torch.from_numpy(values)]).numpy(), encode_f4(values))
+    codes = torch.arange(16, dtype=torch.uint8)
+    decoded = decode([codes])
+    torch.testing.assert_close(decoded, torch.tensor(F4_VALUES), rtol=0, atol=0)
+    assert torch.signbit(decoded[8])
+    torch.testing.assert_close(encode([decoded]), codes, rtol=0, atol=0)
+
+
+def test_fp4_reference_rejects_nan():
+    with pytest.raises(RuntimeError, match="NaN"):
+        torch_ref._elementwise_callable("to_f4e2m1")([torch.tensor([float("nan")])])
+
+
+def test_packed_fp4_table_lookup():
+    from emmy.compiler.dtype import F4_VALUES, decode_f4x2
+
+    bits = torch.arange(256, dtype=torch.uint8).reshape(16, 16)
+    table = torch.tensor([[F4_VALUES[b & 15], F4_VALUES[b >> 4]] for b in range(256)])
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("table", (256, 2)), node_id="table")
+    g.add_node(InputOp(), [], Tensor("bits", (16, 16), "f4e2m1x2"), node_id="bits")
+    g.add_node(GatherOp(axis=0), ["table", "bits"], Tensor("out", (16, 16, 2)), node_id="out")
+    g.inputs, g.outputs = ["table", "bits"], ["out"]
+    fn, inputs = torch_ref.build_callable(g, {"table": table, "bits": bits})
+    assert torch_ref.is_runnable(g)
+    assert torch_ref.torch_dtype("f4e2m1x2") == torch.uint8
+    np.testing.assert_array_equal(fn(*inputs).reshape(16, 32).numpy(), decode_f4x2(bits.numpy()))
 
 
 def test_is_runnable_accepts_frontend():

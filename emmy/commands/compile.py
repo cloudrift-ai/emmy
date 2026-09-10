@@ -242,6 +242,10 @@ def resolve_golden_arg(args) -> None:
     if len(distinct) > 1:
         logger.error("golden %r is ambiguous — matches %d shapes: %s\nNarrow it to one.", name, len(distinct), ", ".join(distinct))
         sys.exit(2)
+    # Preserve the canonical matched name for writers. ``--realization`` accepts
+    # an unambiguous substring, while working-golden mutation is deliberately
+    # exact-name only so it cannot update a similarly named sibling.
+    args._resolved_realization = distinct[0]
     targets: list[tuple[dict, tuple[str, ...], dict | None]] = []
     for match in matches:
         if not any(
@@ -312,7 +316,7 @@ def golden_row(record, records=()):
 
 
 def add_quantize_arg(parser) -> None:
-    """``--quantize`` — offered by the commands that ACT on it (``compile`` / ``run``), not by
+    """``--quantize`` — offered by the commands that ACT on it (``compile`` / ``run`` / ``trace``), not by
     every command sharing the input parser. A flag that says it will quantize and does not is
     worse than its absence."""
     parser.add_argument(
@@ -320,7 +324,7 @@ def add_quantize_arg(parser) -> None:
         choices=SCHEMES,
         default=None,
         help=(
-            "Quantize the traced module's linear weights to this scheme and compile the result. "
+            "Quantize the traced module's linear weights to this scheme before compiling or tracing the result. "
             "Writes a real checkpoint (into --dump-dir when given, else a temp dir whose path is logged) "
             "and runs the ordinary spellers over it, so the program is the one that checkpoint would give. "
             "'nvfp4' declares static 4-bit activations (W4A4, the native block-scaled path); "
@@ -560,9 +564,9 @@ def _quantize_traced(graph: Graph, bundle, args) -> str:
     """``--quantize``: quantize a TRACED graph's linear weights, then spell the result.
 
     Deliberately not a second way to build a quantized graph. It writes a real checkpoint and
-    runs the ordinary spellers over it, so what compiles is exactly what compiling that directory
-    would give — and the directory is on disk to be read. ``--dump-dir`` keeps it; otherwise it
-    lands in a temp dir whose path is logged."""
+    runs the ordinary spellers over it, so the resulting compile or trace is exactly what reading
+    that directory would produce. ``--dump-dir`` keeps it; otherwise it lands in a temp directory
+    whose path is logged."""
     import tempfile  # noqa: PLC0415
 
     from emmy.compiler.loader.synthesize import quantize_and_spell, summarize  # noqa: PLC0415

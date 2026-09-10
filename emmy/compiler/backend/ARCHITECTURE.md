@@ -38,8 +38,10 @@ also keep their Torch integer dtypes, which lets loader-spelled reconstruction a
 reference. A source-free `RangeOp` graph defaults to a CPU tensor; otherwise range construction and scalar-only
 `IndexMapOp` broadcasts follow the supplied input tensors' device. `is_runnable(graph)` is `True` only when every compute
 op and every elementwise operation name has a
-mapping. Data-dependent `GatherOp` / `ScatterOp` remain unsupported, so `run --ir` falls back to emmy-only benchmarking
-for those graphs. `build_callable(graph, input_tensors)` returns a pure `fn(*tensors)` (scalar constants read inline)
+mapping. `GatherOp` supports both elementwise selection and table lookup, including the NVFP4 pair table.
+`ScatterOp` remains unsupported. Packed FP4 uses a uint8 carrier; FP4 encode rounds to nearest even with saturation
+and preserves signed zero, while decode indexes the 16 representable values. This is a decomposed PyTorch reference,
+not a native NVFP4 matmul implementation. `build_callable(graph, input_tensors)` returns a pure `fn(*tensors)` (scalar constants read inline)
 so `torch.compile` can trace it. A single-output graph returns its tensor directly; a multi-output graph returns an
 ordered tuple following `graph.outputs`, matching the backend result boundary. Symbolic
 graphs work too: `build_callable` binds every symbolic axis name to its concrete extent read off the supplied tensors
