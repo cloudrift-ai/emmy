@@ -61,6 +61,25 @@ def test_golden_runs_every_distinct_target_in_process(monkeypatch, tmp_path):
     assert all(args.golden.endswith("working.yaml") and args._explicit_realization is False for args in calls)
 
 
+def test_golden_walk_reports_every_target_before_failing(monkeypatch, tmp_path):
+    """A target that fails does not hide the targets after it: the walk runs them all and exits 1."""
+    _patch_records(monkeypatch, ["linear.layer0", "linear.layer1", "linear.layer2"])
+    calls = []
+
+    def run_once(args):
+        calls.append(args.realization)
+        if args.realization == "linear.layer0":
+            raise SystemExit(1)
+
+    monkeypatch.setattr(run_mod, "_handle_run_once", run_once)
+
+    with pytest.raises(SystemExit) as exc:
+        run_mod._run_golden_targets(_args(tmp_path))
+
+    assert exc.value.code == 1
+    assert calls == ["linear.layer0", "linear.layer1", "linear.layer2"]
+
+
 def test_naming_one_target_skips_the_multi_target_walk(run_cli):
     """``--realization NAME`` goes straight down the single-run path — the walk is for a bare file."""
     rc, stdout, stderr = run_cli("run", "--realization", "linear.layer0", "--code", "torch.randn(4, 4)")
