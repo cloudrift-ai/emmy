@@ -58,17 +58,22 @@ the goldens committed under `golden/`: every kernel's schedule was pinned by han
 and recorded with `--record-greedy`, so the row re-measures one fixed kernel set at deployable `-O3` against eager.
 
 Coverage is per target and partial by design. The decode (seq=1) golden is complete: its two decode projections, which
-the greedy scheduled as a scalar tile (the k projection greedy ran 416 ms), are hand-pinned to a cooperative fold and
-beat eager 2.0-2.7x, while the norm-plus-fp8-quant kernel wins 6.8x. Three targets stay documented gaps rather than
-recorded: the fused decode-tail kernel over-fuses the whole layer into one kernel that hangs at runtime and offers no
-placement cut, and the prefill (seq=512) matmul and fused-attention targets are untuned (they need M-tiled tensor-core
-schedules); the prefill golden therefore covers only the pointwise and norm targets. Eager is the correctness oracle
-here, not a vendor-kernel speed baseline: a single-layer trace cannot reach vLLM's FlashInfer or CUTLASS FP8 kernels,
-which live on the serving path.
+the greedy scheduled as a scalar tile (the k projection greedy ran 416 ms), are hand-pinned to a cooperative fold.
+That schedule beats naive eager but is about 4x slower than a real fused FP8 pipeline (torch.compile): block-scaled
+FP8 is a support-and-correctness result here, not a speed win, because the 128-along-K weight scale cannot ride the
+matmul epilogue and Emmy has no tensor-core block-FP8 atom yet. See
+evaluation_results/2026-09-10_fp8-block-linear-rtx5090.md for the numbers, the cause, and why the matched vLLM
+block-FP8 baseline needs a serving host. Three targets stay documented gaps rather than recorded: the fused
+decode-tail kernel over-fuses the whole layer into one kernel that hangs at runtime and offers no placement cut, and
+the prefill (seq=512) matmul and fused-attention targets are untuned (they need M-tiled tensor-core schedules); the
+prefill golden therefore covers only the pointwise and norm targets. Eager is the correctness oracle here, not a
+vendor-kernel speed baseline: a single-layer trace cannot reach vLLM's FlashInfer or CUTLASS FP8 kernels, which live
+on the serving path.
 
 The NVFP4, AWQ, and Trellis rows have no tuned latency claim. The block-FP8 rows carry one per-layer eager comparison
 on the RTX 5090 only, not a cross-platform geometric mean. The support check also has no native vendor-kernel
-comparison, BF16 quality study, or instruction-level proof. Report the reference kind saved for each target: runnable frontend targets compare against
+comparison, BF16 quality study, or instruction-level proof. Report the reference kind saved for each target: runnable
+frontend targets compare against
 the same graph-algebra computation, while an exact Loop target can only use same-input greedy replay. A failure in
 trace, lowering, build, execution, strict comparison, or packed-storage review makes that format unsupported in this
 experiment.
@@ -88,7 +93,8 @@ is a separate task, so a failed case preserves its partial evidence and does not
 
 The directly searched winner must match its measured knob map exactly. The recipe invokes
 `emmy run --golden working.yaml --strict` five times at deployable `-O3`, with 10 warmups and 100 measured iterations.
-Each ordinary invocation is an independent process; the CLI contains no repetition or child-process wrapper. It records the exact searched winner and deploy-path
+Each ordinary invocation is an independent process; the CLI contains no repetition or child-process wrapper. It
+records the exact searched winner and deploy-path
 Emmy timing and compares with eager PyTorch and Inductor. Inductor uses the installed PyTorch equivalent of
 `mode="max-autotune-no-cudagraphs"` with `fullgraph=True`; the benchmark harness supplies the shared outer CUDA graph.
 Inductor must compile the full graph and match eager output on the same inputs before its latency is accepted. Any
@@ -178,7 +184,8 @@ compatibility and deliberately fail to imply a compiler speedup by themselves.
 
 ### Gemma estimator and claim rule
 
-Pair stock and Emmy by workload and the neutral matrix label `repeat`, independent of their balanced execution order. The
+Pair stock and Emmy by workload and the neutral matrix label `repeat`, independent of their balanced execution order.
+The
 primary metric is output-token throughput for `(256,256,64)`, median end-to-end latency for `(4096,4096,1)`,
 output-token throughput for `(4096,4096,8)`, and median time to first token for `(8192,256,4)`. Other recorded
 throughput, TTFT, TPOT, ITL, and latency fields are secondary diagnostics and cannot substitute for a primary metric.
