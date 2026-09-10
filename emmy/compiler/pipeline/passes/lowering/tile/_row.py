@@ -28,7 +28,7 @@ ROW_AXIS = "_row"
 
 def rowless(tile: TileOp) -> bool:
     """Whether some contraction shares a coordinate with its B and owns no free axis."""
-    return any((view := node.as_contraction()) is not None and view.shared_axes and not view.left_axes for node in tile.views)
+    return any((view := node.as_contraction()) is not None and not view.left_axes for node in tile.views)
 
 
 def _unit_positions(op: LoopOp) -> tuple[int, ...]:
