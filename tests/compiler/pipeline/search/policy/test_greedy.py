@@ -431,6 +431,11 @@ def test_price_memo_keys_on_exact_identity_not_the_term_hash(monkeypatch) -> Non
     from emmy.compiler.pipeline import TILE_PASSES, Pipeline
     from emmy.compiler.pipeline.search.db import SearchDB
 
+    # Disable the wall-clock price budget: this test asserts exact memo behavior over the whole
+    # priced chain, which must not depend on how fast the runner prices it (a slow CI box otherwise
+    # truncates the pricing and drops memo entries). The budget is exercised by its own path elsewhere.
+    monkeypatch.setenv("EMMY_PRICE_BUDGET_S", "100000")
+
     identity_keys, memo_keys, calls = set(), set(), []
     orig = greedy._price_kernel
 

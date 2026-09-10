@@ -593,7 +593,7 @@ def bench_compile_timeout_s(default: float = 30.0) -> float:
     return float_env(BENCH_COMPILE_TIMEOUT_S, default)
 
 
-def price_budget_s(default: float = 30.0) -> float:
+def price_budget_s(default: float = 120.0) -> float:
     """``EMMY_PRICE_BUDGET_S`` — wall-clock budget for the greedy compile's kernel-set pricing:
     the nested resolutions that price every cut arm of a placement fork. Past the budget an arm
     prices as unpriceable and the fork falls to the ordinary ranking, which is the contract the
