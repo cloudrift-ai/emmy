@@ -613,6 +613,8 @@
  "tests/compiler/realization/test_realization.py::test_realization[fused/norm-linear-f16-warp-masked-m.yaml-realized]": 1.98,
  "tests/compiler/realization/test_realization.py::test_realization[fused/norm-weight-linear-f16-computed-b.yaml-offered]": 2.86,
  "tests/compiler/realization/test_realization.py::test_realization[fused/norm-weight-linear-f16-computed-b.yaml-realized]": 2.08,
+ "tests/compiler/realization/test_realization.py::test_realization[fused/nvfp4-gate-up-requant-full-projection-cut.yaml-offered]": 119.8,
+ "tests/compiler/realization/test_realization.py::test_realization[fused/nvfp4-gate-up-requant-full-projection-cut.yaml-realized]": 19.1,
  "tests/compiler/realization/test_realization.py::test_realization[fused/nvfp4-gate-up-requant-place-cut.yaml-offered]": 2.43,
  "tests/compiler/realization/test_realization.py::test_realization[fused/nvfp4-gate-up-requant-place-cut.yaml-realized]": 3.59,
  "tests/compiler/realization/test_realization.py::test_realization[fused/nvfp4-quantize-cut-shared-normalizer.yaml-offered]": 0.13,
