@@ -379,6 +379,54 @@ def test_bench_golden_variants_retraces_with_dynamic_spec(monkeypatch):
     assert seen[1] is None
 
 
+def test_bench_golden_variants_quantizes_each_retraced_ab(monkeypatch):
+    """A ``--quantize`` A/B row must spell the fresh trace before compiling it.
+
+    Otherwise an NVFP4 schedule pin can appear in the table while the row actually
+    benchmarks the ordinary floating-point linear produced by ``graph_from_code``.
+    """
+    from types import SimpleNamespace
+
+    from emmy.commands import trace as trace_mod
+    from emmy.commands.run import _bench_golden_variants
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.cuda.ir import CudaOp
+    from emmy.compiler.loader import synthesize
+
+    traced = object()
+    bundle = (object(), (), {})
+    calls = []
+    monkeypatch.setattr(trace_mod, "graph_from_code", lambda code, dynamic_shapes=None: (traced, "slug", bundle))
+
+    def quantize_and_spell(graph, got_bundle, out, *, scheme):
+        calls.append((graph, got_bundle, scheme, out))
+
+    monkeypatch.setattr(synthesize, "quantize_and_spell", quantize_and_spell)
+
+    compiled = Graph()
+    compiled.add_node(
+        op=CudaOp(kernel_name="k", knobs={"TILE": "nvfp4"}),
+        inputs=[],
+        output=Tensor("o", (4,)),
+        node_id="n0",
+    )
+
+    async def bench(_graph, *, run_inputs=None, run_inputs_key=None, warmup, num_iters):
+        return SimpleNamespace(min_ms=0.1, time_ms=0.1, per_launch=[]), None
+
+    backend = SimpleNamespace(compile=lambda graph: compiled, bench_pinned_async=bench)
+    sample = SimpleNamespace(name="ab", knobs={"TILE": "nvfp4"}, pins={}, shape=None, dynamic=None, flops=None)
+
+    rows = asyncio.run(
+        _bench_golden_variants(backend, "torch linear", [sample], warmup=1, iters=2, quantize="nvfp4")
+    )
+
+    assert len(rows) == 1 and rows[0].status == "ok"
+    assert len(calls) == 1
+    assert calls[0][:3] == (traced, bundle, "nvfp4")
+    assert Path(calls[0][3]).name.startswith("emmy-ab-")
+
+
 def test_intensity_floor_flags_impossible_row(monkeypatch):
     """The finding-4 gate: a benched row whose CONFIG-implied FLOP/s exceeds the device's
     recorded peak is flagged (the sixth sweep's 8.2 µs "2 PFLOP/s" 2048³ golden row); a

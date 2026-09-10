@@ -218,10 +218,11 @@ def test_named_proposal_is_pinned_and_a_file_walk_leaves_it_to_the_tuner(tmp_pat
 
     path = tmp_path / "working.yaml"
     _working_loop(path, state="proposal")
-    args = _args(path)
+    args = _args(path, realization="relu")
 
     resolve_golden_arg(args)
 
+    assert args._resolved_realization == "working.relu"
     assert isinstance(args._golden_graph.nodes["y"].op, LoopOp)
     assert args._golden_graph.nodes["y"].op.name == "working_exact_loop"
     (row,) = args.golden_configs

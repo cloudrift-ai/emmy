@@ -1,0 +1,16 @@
+NVFP4 CUTLASS-like TMA probe, RTX 5090
+======================================
+
+Shape/contract: M=16, K=5120, N=17408, BF16 output, NVFP4 W4A4 group-16 scales.
+
+Pins:
+  WORK=w2x2
+  TILE=mma_m16n8k64_e2m1_f32/f4x8/k4
+  STAGE=d1/smem-tma
+  RASTER=gm8
+
+Compiler verdict:
+  ValueError: STAGE pin 'd1/smem-tma' does not resolve for this contraction
+
+This is a schedule-space boundary result, not a benchmark. The corresponding cp.async schedule
+is legal and its Kernel IR is default_08_kernel_linear.txt.

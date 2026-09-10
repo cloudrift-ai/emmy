@@ -185,6 +185,37 @@ def test_trace_command_writes_only_golden_yaml(monkeypatch, tmp_path) -> None:
     assert sorted(path.name for path in tmp_path.iterdir()) == ["trace.yaml"]
 
 
+def test_trace_quantize_spells_before_writing_inventory(monkeypatch, tmp_path) -> None:
+    import emmy.commands.compile as compile_command
+    import emmy.compiler.loader.quant as quant_loader
+
+    graph = trace_inline_code("torch.relu(torch.randn(8))")["graph"]
+    bundle = (object(), (), {})
+    seen = {}
+
+    def load_or_trace(_args, *, architecture_only):
+        seen["architecture_only"] = architecture_only
+        return graph, "quantized", bundle
+
+    def quantize_traced(got_graph, got_bundle, _args):
+        seen["quantize"] = (got_graph, got_bundle)
+        return str(tmp_path / "checkpoint")
+
+    monkeypatch.setattr(compile_command, "load_or_trace", load_or_trace)
+    monkeypatch.setattr(compile_command, "_quantize_traced", quantize_traced)
+    monkeypatch.setattr(quant_loader, "checkpoint_quant_digest", lambda path: "0123456789abcdef")
+
+    output = tmp_path / "trace.yaml"
+    handle_trace(
+        _parser().parse_args(
+            ["trace", "--code", "unused", "--quantize", "nvfp4", "--target", "sm_89", "-o", str(output)]
+        )
+    )
+
+    assert seen == {"architecture_only": False, "quantize": (graph, bundle)}
+    assert load_golden_file(output)["model_quant_digest"] == "0123456789abcdef"
+
+
 def test_trace_accepts_debug_graph_json_as_input_but_emits_yaml(monkeypatch, tmp_path) -> None:
     source_graph = trace_inline_code("torch.relu(torch.randn(8))")["graph"]
     source = tmp_path / "source.json"
@@ -291,13 +322,13 @@ def test_trace_inventory_keeps_fused_sdpa_as_one_frontend_target(tmp_path) -> No
     assert record.name.startswith("k_sdpa")
 
 
-def test_trace_serializes_target_without_a_torch_reference_mapping(tmp_path) -> None:
+def test_trace_serializes_gather_target_with_a_torch_reference_mapping(tmp_path) -> None:
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (4, 8)), node_id="x")
     graph.add_node(InputOp(), [], Tensor("index", (4, 8), "i64"), node_id="index")
     graph.add_node(GatherOp(axis=1), ["x", "index"], Tensor("gather", (4, 8)), node_id="gather")
     graph.inputs, graph.outputs = ["x", "index"], ["gather"]
-    assert torch_ref.is_runnable(graph) is False
+    assert torch_ref.is_runnable(graph) is True
 
     path = tmp_path / "working.yaml"
     write_trace_inventory(graph, path, ctx=_TARGET_CTX)
