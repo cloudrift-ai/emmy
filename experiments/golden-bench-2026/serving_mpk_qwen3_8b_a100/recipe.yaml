@@ -6,6 +6,9 @@
 #   mpk_base  — MPK's own kernel-per-operator harness: demo/qwen3/demo.py (Triton/FlashInfer)
 #   mpk_mega  — the same harness compiled to a megakernel: demo/qwen3/demo.py --use-mirage
 #   stock     — vLLM serve (pip vllm==0.23.0) driven by `vllm bench serve`, 128 in / 512 out, c=1
+#   emmy      — the same vLLM and the same client, served through the emmy plugin (EmmyGenModel).
+#               Only the model class differs from `stock`, so those two are the controlled pair;
+#               the plugin forces fp16, which `stock` does not run, and that is the one difference.
 #
 # Repro on a pre-allocated A100 (no cloud provisioning):
 #   emmy bench experiments/golden-bench-2026/serving_mpk_qwen3_8b_a100 --local
@@ -73,11 +76,25 @@ command:
       bench stock_r$$repeat.txt
       stop
     done
+
+    # --- Emmy vLLM plugin: fresh server per repeat, same client and workload as the stock arm.
+    # `emmy serve --generate` forces `--runner generate` + the EmmyGenModel override + fp16, which is
+    # the plugin's only supported seam, so this arm runs fp16 where the stock arm runs bf16.
+    for repeat in 0 1 2 3 4; do
+      stop
+      setsid ./venv/bin/emmy serve $$MODEL --generate -- --revision $$REV --max-model-len 4096 \
+        --no-enable-prefix-caching --port 8010 > $task_dir/emmy_serve_r$$repeat.log 2>&1 &
+      server_pid=$$!
+      wait_health $task_dir/emmy_serve_r$$repeat.log
+      bench emmy_r$$repeat.txt
+      stop
+    done
     stop
     trap - EXIT
 
     ./venv/bin/pip freeze --all > $task_dir/requirements.freeze.txt
     $task_dir/venv-mpk/bin/pip freeze --all > $task_dir/mpk.freeze.txt
+    nvidia-smi --query-gpu=name,memory.total --format=csv,noheader > $task_dir/gpu.txt
     ls ~/.cache/huggingface/hub > $task_dir/hf_snapshots.txt 2>/dev/null || true
     echo MPK_LANE_DONE
   result_files:
