@@ -191,12 +191,22 @@ retained reduce — DeepSeek-V4 post4096's two-cut piece was the live case, ever
 nvcc).
 
 A matrix row that Loop IR elided because its static extent is one remains algebraic information, and the total lift
-restores it (`lowering/tile/_row.py`) rather than post-init: the coordinate is BOUND back into the indices that read
-it, so the row is an axis an operand carries and not merely one the placement lists. A contraction that owns no free
-axis is what asks for it — everything such a term reads it shares with the operand it multiplies, and a B that moves
-with its row is no slab per tile (`contracts`), so the whole family would otherwise fall to the per-cell tier. The
-rule is boundary-derived and general: it recognizes no model or operation family, and a candidate is kept only when
-binding it actually gives some contraction a row.
+restores it in TWO ways, and which one applies is decided by what the term can support.
+
+The lift BINDS it (`lowering/tile/_row.py`) when an operand has a unit dimension to bind into: the coordinate goes
+back into the indices that read it, so the row is an axis an operand carries and not merely one the placement lists.
+A contraction that owns no free axis is what asks for it — everything such a term reads it shares with the operand it
+multiplies, and a B that moves with its row is no slab per tile (`contracts`), so the family would otherwise fall to
+the per-cell tier. A candidate is kept only when the BOUND axis is itself a contraction's left axis; asking merely
+whether some contraction gained one accepts a binding that handed the row to the other side, because a contraction
+reorients.
+
+Post-init ANNOUNCES it (`_implicit_unit_row`) when the stores prove a leading zero prefix and a dense column. The row
+is then unbound — no operand reads it — which gives the placement a fragment geometry without giving any contraction
+a left axis. That is the weaker statement, and it is the only one available where there is nothing to bind: a matvec
+whose A is a bare vector. The binding yields to it, firing only where the placement carries no extent-one free axis.
+
+Both rules are boundary-derived and general: neither recognizes a model or operation family.
 
 Factoring preserves the pure cone's statement order. If a scalar projection between two nested Folds feeds the later
 Fold, the earlier Fold and scalar become a nested source projection; both Folds are never flattened ahead of that

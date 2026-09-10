@@ -530,8 +530,10 @@ The Tile IR boundary is one structural operation:
    contraction's shared argument, merge overlapping cones into multi-result edges, and apply the closed-child rules
    over the complete tree.
 
-When a contraction in the lifted tree owns no free axis, `_row` binds a size-one output coordinate back as an
-extent-one axis and lifts again, keeping the result only if some contraction gains its row. This is output-boundary
+When a contraction in the lifted tree owns no free axis and the placement carries no extent-one axis already,
+`_row` binds a size-one output coordinate back as an extent-one axis and lifts again, keeping the result only if the
+BOUND axis is a contraction's left axis. Where there is nothing to bind into, post-init's `_implicit_unit_row`
+announces an unbound row instead. This is output-boundary
 evidence, not a schedule view or shape matcher, and it widens the catalog rather than choosing inside it: the
 per-cell choices stay beside the fragment ones the bound row makes reachable. Decode attention is the standing case
 — one query row per head, whose score would otherwise be re-contracted once per output channel.

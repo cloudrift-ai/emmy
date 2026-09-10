@@ -90,7 +90,7 @@ fragment load per K step, cheap at `k2`), and the exp folding above, which shrin
 ### 4. Plain decode: the bound row — DONE in part, and here is where it stopped
 
 The lift now binds the elided query coordinate back as an extent-one axis whenever a contraction owns no row
-(`lowering/tile/_row.py`), which subsumed and replaced `_implicit_unit_row`. Decode then traces to ONE fused
+(`lowering/tile/_row.py`), beside `_implicit_unit_row` rather than instead of it. Decode then traces to ONE fused
 chunk-tier kernel instead of two per-cell ones. Re-recorded A100 40GB goldens, against the archived
 Emmy and Neptune columns, in raw microseconds:
 
@@ -111,6 +111,13 @@ row is the isolated re-bench and the sum of its receipts (117.6 us at 8192), whi
 measured alongside everything else (143.6). Reading `TOTAL` made 8192-32768 look 1.16-1.25x behind Neptune when they
 are level. Read the eager caveat before calling the family on raw microseconds at all: this box's eager reference
 does not match the archived lane's.
+
+`_implicit_unit_row` cannot be folded into the binding, and the full suite is what said so: a matvec whose A is a
+bare VECTOR has no unit dimension to bind a row into, so only the announce can serve it, and deleting it dropped
+`matmul/f16-matvec-reshaped-output-tma` off the mma tier. The binding therefore fires only where the placement
+carries no extent-one free axis at all — where the announce has already declined — and it accepts a candidate only
+when the BOUND axis is a contraction's left axis, since a contraction reorients and the looser question is satisfied
+by a binding that handed the row to the other side.
 
 The reading that mattered was not `_inner_free` or `_node_refusal` — neither is reached. It is `TileOp.contracts`:
 with the query coordinate gone, the term's only shared axis is the HEAD, `left_axes` is empty, and a B that moves
