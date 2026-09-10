@@ -1,4 +1,4 @@
-"""Known stopping gaps: failed lowering must be bounded and cache replay must leave room for new evidence."""
+"""Search stopping: failed lowering must be bounded and cache replay must leave room for new evidence."""
 
 from types import SimpleNamespace
 
@@ -14,7 +14,6 @@ from emmy.compiler.pipeline.search.policy.terminal_bench import point_stats
 from tests.compiler.helpers import drain_tune
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="Run.drive drops lowering failures without advancing search patience")
 def test_patience_bounds_consecutive_lowering_failures() -> None:
     patience = 3
     attempted = []
@@ -47,7 +46,6 @@ def test_patience_bounds_consecutive_lowering_failures() -> None:
     assert 0 < len(attempted) <= patience, f"lowering attempted {len(attempted)} candidates despite patience={patience}"
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason="Cached terminals exhaust patience before a new candidate is measured")
 def test_cached_replay_does_not_exhaust_live_measurement_patience() -> None:
     search = TuningSearch(patience=3, max_measurements=1)
     # Equal-prior sibling leaves are visited in order. Four cached rows precede one new, faster row.
@@ -56,9 +54,43 @@ def test_cached_replay_does_not_exhaust_live_measurement_patience() -> None:
     while (popped := search.pop()) is not None:
         token, candidate = popped
         measured = candidate.resolved_knobs["WORK"] == "t5"
-        search.note_bench(measured=measured)
-        search.observe(token, point_stats(5.0 if measured else 10.0), "ok")
+        search.observe(token, point_stats(5.0 if measured else 10.0), "ok", measured=measured)
         observed.append(candidate.resolved_knobs["WORK"])
 
     assert search.measurements == 1, f"stopped after {observed} with no new measurement: {search.stop_reason}"
     assert search.tree.best_reward == pytest.approx(1 / 5.0)
+
+
+@pytest.mark.parametrize(
+    "events,limits,expected,reason",
+    [
+        (["live"] * 8, {}, 4, "patience"),
+        (["reject"] * 8, {}, 3, "patience"),
+        (["fail"] * 8, {}, 3, "patience"),
+        (["cached"] * 8, {}, 8, None),
+        (["live", "reject", "cached", "reject", "cached", "reject", "live"], {}, 6, "patience"),
+        (["live", "reject", "reject", "better", "reject", "reject", "live", "live"], {}, 7, "patience"),
+        (["cached"] * 8, {"max_visits": 2}, 2, "max_visits"),
+        (["reject"] * 8, {"max_visits": 2}, 2, "max_visits"),
+        (["cached", "live", "cached", "live", "live"], {"max_measurements": 2}, 4, "max_measurements"),
+    ],
+)
+def test_stopping_accounts_for_evaluation_origin(events, limits, expected, reason) -> None:
+    search = TuningSearch(patience=3, **limits)
+    search.push(*(SimpleNamespace(fork=None, resolved_knobs={}) for _ in events))
+    for event in events[:expected]:
+        token, _ = search.pop()
+        if event == "reject":
+            search.reject(token)
+            assert token.bench_stats is None
+        else:
+            search.observe(
+                token,
+                point_stats(5.0 if event == "better" else 10.0),
+                "bench_fail" if event == "fail" else "ok",
+                measured=event not in {"cached", "better"},
+            )
+    assert search.pop() is None
+    assert search.tree.root.visits == expected
+    assert search.measurements == sum(event in {"live", "fail"} for event in events[:expected])
+    assert (search.stop_reason.split(" ")[0] if search.stop_reason else None) == reason

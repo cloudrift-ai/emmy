@@ -261,3 +261,19 @@ async def test_an_unattributable_failure_is_replayed_for_its_kernel_set() -> Non
 
     assert solo.calls == [(1, "auto")], "a kernel of the set is not condemned — on its own it still benches"
     assert status == "ok"
+
+
+async def test_search_cache_replay_preserves_patience() -> None:
+    from emmy.compiler.pipeline.search.policy.mcts import TuningSearch
+
+    search = TuningSearch(patience=2)
+    candidate, backend, db = _candidate(), _BudgetedBackend(iter_ms=1.0), SearchDB()
+    search.push(*(SimpleNamespace(fork=None, resolved_knobs={}) for _ in range(5)))
+    while (popped := search.pop()) is not None:
+        token, _ = popped
+        await search.evaluate(token, candidate, backend=backend, db=db)
+
+    assert backend.calls == [(1, "auto")]
+    assert search.measurements == 1
+    assert search.tree.root.visits == 5
+    assert search.stop_reason is None
