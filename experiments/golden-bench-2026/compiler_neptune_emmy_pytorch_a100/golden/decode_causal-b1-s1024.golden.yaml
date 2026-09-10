@@ -29,18 +29,42 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE@map.1/twist: mma_m16n8k16_f16_f32/f1x8/k8
-      TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x16/k8
-      REDUCE@map.1/twist: ''
-      REDUCE@map.1/twist.1/inner: ''
-      STAGE@map.1/twist: d1/smem-async
-      STAGE@map.1/twist.1/inner: d1/smem-async
-      WORK: w4x1
-      RASTER: ''
+      REDUCE@map.1/twist: g8k
     identity: a0bfaa4db7db8ca04925b6187149fd66733eabe5a734ad8c5c69ec58def77abe
     measurements:
-      emmy_us: 28.81828716823033
-      reference_us: 28.84754453386579
+      emmy_us: 18.725011035019676
+      reference_us: 18.761633626048003
+      reference_backend: same-input-greedy
+  - name: k_sdpa_3c2f56.5595751d6418.d1ba1d12feb4
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE@twist: mma_m16n8k16_f16_f32/f1x8/k8
+      TILE@twist.1/inner: mma_m16n8k16_f16_f32/f1x16/k8
+      REDUCE@twist: ''
+      REDUCE@twist.1/inner: ''
+      STAGE@twist: d1/smem-async
+      STAGE@twist.1/inner: d1/smem-async
+      WORK: w4x1
+      RASTER: gm8
+    identity: d1ba1d12feb46b7f140085c71f8e43bb89d359d57be643d561ead0a096ef856a
+    measurements:
+      emmy_us: 16.86996625641645
+      reference_us: 16.904678385136492
+      reference_backend: same-input-greedy
+  - name: k_sdpa_3c2f56.5595751d6418.a601cd72f203
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: a601cd72f2035b6807149cd351db243109a88b41defb3e6820797f4316ff5ebe
+    measurements:
+      emmy_us: 1.8550447786032263
+      reference_us: 1.8569552409115122
       reference_backend: same-input-greedy
 loops:
 - inputs: [k, q, v]
