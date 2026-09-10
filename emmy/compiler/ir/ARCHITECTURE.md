@@ -168,7 +168,8 @@ kernel it produced went on to read.
   `PLANAR` / `TWISTED` reduce is cooperation-eligible (degenerate
   `sum`/`max`/`mean` AND twisted online-softmax, scalar AND
   full-row outputs), and the schedule enumerates the serial fold beside every
-  band the reduce extent can feed, whatever the grid measures.
+  band the reduce extent can feed, whatever the grid measures. The one exception is a split's finalize, whose merge axis
+  windows its whole parent: one partial per split per cell, serial only — its parallelism is the cells.
 - **Tile → kernel** (after `lowering/kernel`): `TileOp` materialized to
   `KernelOp` whose body is a `Tile` (the thread-grid decode) over the
   lowered op tree. A cooperative `Reduce` lowers the reduce as a

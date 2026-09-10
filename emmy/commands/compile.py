@@ -263,7 +263,26 @@ def resolve_golden_arg(args) -> None:
             sys.exit(2)
         if not getattr(args, "_explicit_realization", True):
             pinned = verified or winners
-    args.golden_configs = [golden_row(match) for match in pinned]
+    # A receipt of a kernel a routing decision minted (its identity is no routing row's) replays under
+    # that decision: its piece keys compose with nothing on the unsplit program. The route is the
+    # target's routing rows, when they agree; conflicting arms leave the receipt to replay bare.
+    routing = [record for record in args._golden_records if record.is_routing]
+    route: dict[str, str] | None = {}
+    for record in routing:
+        for key, value in record.knobs.items():
+            if route is not None and route.setdefault(str(key), str(value)) != str(value):
+                route = None
+    minted = {record.identity for record in routing}
+    if route is not None and not any(str(key).split("@", 1)[0] == "PLACE" for key in route):
+        route["PLACE"] = "fuse"  # no placement row means the set ran fused; a cut taken would have been recorded
+
+    def row(match):
+        sample = golden_row(match)
+        if route and match.identity is not None and (match.is_routing or match.identity not in minted):
+            sample.route = {key: value for key, value in route.items() if key not in match.knobs}
+        return sample
+
+    args.golden_configs = [row(match) for match in pinned]
     logger.info(
         "[golden] %s%s → embedded %s target %s (%d matching row%s, %d automatic pin%s)",
         name,

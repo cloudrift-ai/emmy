@@ -240,6 +240,7 @@
  "tests/compiler/passes/test_shared_constant_cone.py::test_sibling_cones_share_one_declaration_of_a_broadcast_constant": 17.02,
  "tests/compiler/passes/test_spell_store_rounding.py::test_public_copy_of_private_reduction_keeps_its_rounding_through_placement": 0.11,
  "tests/compiler/passes/test_split_fresh_kernels.py::test_a_pieces_features_are_read_off_its_reconstituted_body": 3.54,
+ "tests/compiler/passes/test_split_fresh_kernels.py::test_a_twisted_carrier_split_partial_binds_a_tensor_core_tile": 1.2,
  "tests/compiler/passes/test_split_fresh_kernels.py::test_each_piece_carries_its_own_structural_identity": 3.53,
  "tests/compiler/passes/test_split_fresh_kernels.py::test_each_piece_decides_its_own_row": 3.37,
  "tests/compiler/passes/test_split_fresh_kernels.py::test_finalize_keeps_projection_input_edges": 3.53,

@@ -476,7 +476,11 @@ chain runs at the consumer-die full rate while the running sum stays f32. The sc
 either way — its C fragments are what the pivot, the denominator and every channel's pattern are read off.
 
 A projection that reads no per-row carrier state is the ordinary sink's (a placement cut materializes the
-denominator, and the tail is then a per-cell chain like any other).
+denominator, and the tail is then a per-cell chain like any other). A carried state stored WHOLE — a cross-CTA
+split's partial writing the pivot and the denominator to its workspace beside the expectation — broadcasts its
+row pair into a fragment and takes the same fragment store, which is what lets the key-range split
+(`REDUCE@map.1/twist=g<n>k`, FlashAttention-2's split-KV) keep the chunk tier for its partial: decode's few query
+rows then spread over `n` times the CTAs, and the finalize folds the per-cell states through the recipe's merge.
 
 The score's own PREFIX — the carrier's lift cut to its score role — is where an SDPA mask arrives, and it takes two
 readings the tier would otherwise refuse. Its LEAVES are read once ahead of the chunk loop, so an operand that feeds

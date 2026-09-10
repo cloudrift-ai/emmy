@@ -538,6 +538,10 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
     _allow_f16_accumulate: bool = field(default=True, repr=False, compare=False)
     _allow_fp8: bool = field(default=True, repr=False, compare=False)
     _ignore_unsupported_global: bool = field(default=False, repr=False, compare=False)
+    # A split's finalize reads a bare WORK / RASTER / REDUCE pin as the partial's: it spells its reduce
+    # serially only and its work at the thread level, so a warp WORK or a band names its sibling, and
+    # the finalize keeps its own domain instead of refusing every row.
+    _tolerate_kernel_pins: bool = field(default=False, repr=False, compare=False)
     _allowed_works: frozenset[tuple[str, tuple[int, ...]]] | None = field(default=None, repr=False, compare=False)
     _unsupported_global: bool | None = field(default=None, repr=False, compare=False)
     _restricted_kernels: tuple[KernelSchedule, ...] | None = field(default=None, repr=False, compare=False)
@@ -580,6 +584,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
                     and any(
                         key == family and value and not self._supports_global(family, value)
                         for family, pins in self._pins.items()
+                        if not (self._tolerate_kernel_pins and family in ("WORK", "RASTER", "REDUCE"))
                         for key, value in pins
                     ),
                 )
@@ -705,6 +710,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         allow_f16_accumulate: bool = True,
         allow_fp8: bool = True,
         validate_pins: bool = True,
+        tolerate_kernel_pins: bool = False,
     ) -> ClassicScheduleContext:
         """Return ``c + p + t`` with raw schedule parameters normalized exactly once."""
         values = {family: tuple(pins.get(family, ())) for family in ("WORK", "TILE", "REDUCE", "STAGE", "RASTER")}
@@ -718,6 +724,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             _allow_f16_accumulate=allow_f16_accumulate,
             _allow_fp8=allow_fp8,
             _ignore_unsupported_global=not validate_pins,
+            _tolerate_kernel_pins=tolerate_kernel_pins,
             _allowed_works=None,
             _unsupported_global=None,
             _restricted_kernels=None,

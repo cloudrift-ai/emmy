@@ -358,3 +358,36 @@ def test_sweep_resident_head_fold_refuses_the_split(monkeypatch) -> None:
     monkeypatch.setenv("EMMY_REDUCE", "g2k")
     with pytest.raises(ValueError, match="cannot strip"):
         split_forks(None, root)
+
+
+def test_a_twisted_carrier_split_partial_binds_a_tensor_core_tile() -> None:
+    """The key-range split of a fused attention kernel (FlashAttention-2's split-KV): the partial
+    stores the carrier's three states — pivot, denominator, expectation — to the workspace, so the
+    chunk tier must write its per-row states whole, broadcast into a fragment, beside the
+    expectation's own fragment. Before, that write fell the partial to scalar tiles."""
+    from emmy.commands.trace import graph_from_code
+    from emmy.compiler.ir.cuda import CudaOp
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    q, kv = "torch.randn(1, 16, 1, 64, dtype=torch.float16)", "torch.randn(1, 2, 256, 64, dtype=torch.float16)"
+    code = (
+        f"q={q}; k={kv}; v={kv}; F.scaled_dot_product_attention(q.reshape(1, 2, 8, 1, 64), k.reshape(1, 2, 1, 256, 64), "
+        "v.reshape(1, 2, 1, 256, 64), is_causal=False).reshape(1, 16, 1, 64)"
+    )
+    pins = {
+        "PLACE": "fuse",
+        "REDUCE@map.1/twist": "g2k",
+        "TILE@twist": "mma_m16n8k16_f16_f32/f1x8/k2",
+        "TILE@twist.1/inner": "mma_m16n8k16_f16_f32/f1x4/k4",
+        "STAGE@twist": "d2/smem-async",
+        "STAGE@twist.1/inner": "d2/smem-async",
+        "WORK": "w1x1",
+    }
+    with pinned_knobs(pins):
+        lowered = Pipeline.build(CUDA_PASSES).run(graph_from_code(code)[0], ctx=_CTX)
+    sources = {nid: node.op.kernel_source for nid, node in lowered.nodes.items() if isinstance(node.op, CudaOp)}
+    partial = next(src for nid, src in sources.items() if nid.endswith("__partial"))
+    assert len(sources) == 2, sorted(sources)
+    assert "mma_m16n8k16" in partial and "__ck" in partial, "the partial folds its key slice on the chunk tier"
+    for state in ("acc1", "acc3"):  # the pivot and the denominator: per-row registers, broadcast into a fragment to store
+        assert f"? ({state}__r0_0) : ({state}__r0_1)" in partial, f"{state} reaches the workspace whole"

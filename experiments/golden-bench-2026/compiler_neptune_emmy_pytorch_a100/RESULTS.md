@@ -3,12 +3,15 @@
 ## Conclusion
 
 Manual schedules make all 40 Emmy shapes correct and runnable on the same NVIDIA A100-SXM4-40GB used by the Neptune
-paper. They do not close the performance gap. Emmy is 1.20--1.23x slower than Neptune on the three prefill families,
-3.54x slower on causal decode, and 6.31x slower on GQA decode by geometric mean. Neptune wins every matched shape.
+paper. They do not close the performance gap. Emmy is 1.20--1.23x slower than Neptune on the three prefill families
+and 3.54x slower on causal decode by geometric mean. On GQA decode, replayed from the split-KV goldens recorded
+after the chunk tier learned to store its row states (see the section below), Emmy is 0.93x of Neptune's time and
+wins 5 of 8 shapes.
 
 Relative to PyTorch 2.13, Emmy is 1.41--1.54x slower on prefill and 3.47x slower than Inductor on causal decode. GQA
-decode is the exception against eager PyTorch: Emmy is 3.16x faster. It is still 2.55x slower than Inductor on that
-family. The result is therefore a successful manual qualification and a clear compiler performance gap, not parity.
+decode is 2.39x faster than Inductor and 20.6x faster than eager. On the paper's scale the family's
+geometric mean over Inductor is 0.31 for Emmy against 0.34 for Neptune. Prefill and causal decode
+remain a compiler performance gap, not parity.
 
 The main implementation result is the causal early stop on the chunk tier: the coordinate mask the frontend adds to
 the score is read once where the chunk loop opens, and the loop stops at the CTA's diagonal, so masked chunks are
@@ -19,6 +22,42 @@ prefill gap is schedule and generated-code quality after masked work has already
 The Neptune schedules and current PyTorch baselines also reproduce on this exact 40GB card. The five published
 library-relative family ratios differ from the paper by 1.3--5.1%, with the same direction in every family. There is
 no hardware-difference qualification on the current comparison.
+
+## Split-KV GQA decode
+
+The eight GQA-decode goldens now pin FlashAttention-2's split-KV: the key range splits across `n` CTAs
+(`REDUCE@map.1/twist=g<n>k`, about 256 keys per CTA, `n` = 2 at 256 keys through 32 at 16384 and 32768), the partial
+keeps the fused kernel's tensor-core chunk tier and writes its three carrier states to an f32 workspace, and a
+serial finalize merges them per cell. This became recordable when the chunk tier learned to store a per-row carried
+state whole (the pivot and the denominator broadcast into a fragment beside the expectation); before, the split's
+partial fell to scalar tiles and the fused single-wave row ran on eight CTAs. The lane re-ran over the new goldens at
+revision `38f7f6d9e` on 2026-09-10 on the same host: all eight setups completed both deployable-O3 replays and
+both strict source references. Each Emmy latency is the replay's kernel sum, the mean over the two repetitions of the
+minimum of 15.
+
+| keys | Emmy replay, kernel sum (us) | Emmy whole (us) | Inductor, lane (us) | Inductor, paper baseline (us) | Neptune (us) | Emmy / Inductor | Neptune / Inductor |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 256 | 9.2 | 10.3 | 15.5 | 25.6 | 13.1 | 0.36 | 0.51 |
+| 512 | 17.5 | 19.1 | 19.5 | 39.9 | 13.6 | 0.44 | 0.34 |
+| 1024 | 17.3 | 18.9 | 26.8 | 41.5 | 16.7 | 0.42 | 0.40 |
+| 2048 | 18.5 | 20.0 | 41.9 | 57.3 | 19.8 | 0.32 | 0.35 |
+| 4096 | 25.2 | 26.9 | 92.4 | 95.2 | 30.2 | 0.26 | 0.32 |
+| 8192 | 42.6 | 43.8 | 132.1 | 164.9 | 52.9 | 0.26 | 0.32 |
+| 16384 | 82.3 | 84.4 | 310.3 | 314.9 | 87.8 | 0.26 | 0.28 |
+| 32768 | 146.5 | 149.7 | 555.5 | 615.9 | 143.2 | 0.24 | 0.23 |
+
+geometric mean over 8 lengths: Emmy / Inductor = 0.312, Neptune / Inductor = 0.335
+
+Emmy is ahead of Neptune at 5 of the eight lengths and at 0.93x of its time by geometric mean; on the paper's
+scale (Neptune's mean of 15 over Inductor's minimum, `paper-baselines.csv`) the family reads 0.31 for Emmy
+against 0.34 for Neptune. The lane's own Inductor column is the reference arm's whole-forward capture in the
+same process; the paper-baseline column is the earlier replay experiment's, which the paper table normalizes by.
+The reference arm's Emmy number is not reported for decode: without golden evidence the greedy deploys the prior's
+pick. The 64-way split at 32768 keys recorded well by hand pin but is outside the cut pass's offered widths, so the
+unpinned deploy fell through to a scalar loop; the golden pins the 32-way split, which deploys.
+
+The raw lane records are in `results_a10040_split_kv_decode_gqa.tar.gz`; `emmy_decode_gqa_lane.csv` carries the table
+as numbers.
 
 ## Manually tuned Emmy on A100 40GB
 
@@ -37,20 +76,20 @@ each repetition reports the minimum of 15 captured GPU measurements. Decode late
 | Prefill causal | 1.41x | 1.42x | 1.20x | 0/8 |
 | Prefill GQA | 1.44x | 1.44x | 1.23x | 0/8 |
 | Decode causal | 3.12x | 3.47x | 3.54x | 0/8 |
-| Decode GQA | 0.32x | 2.55x | 6.31x | 0/8 |
+| Decode GQA | 0.05x | 0.42x | 0.93x | 5/8 |
 
 Lower ratios favor Emmy. The corresponding per-shape Emmy latency is:
 
 | Sequence | Prefill global (us) | Prefill causal (us) | Prefill GQA (us) | Decode causal (us) | Decode GQA (us) |
 | ---: | ---: | ---: | ---: | ---: | ---: |
-| 256 | 26.435 | 28.032 | 38.183 | 24.680 | 23.988 |
-| 512 | 70.473 | 66.731 | 93.510 | 38.841 | 40.917 |
-| 1024 | 203.366 | 172.459 | 274.432 | 73.169 | 76.296 |
-| 2048 | 728.576 | 462.592 | 844.800 | 148.541 | 47.080 |
-| 4096 | 2670.592 | 1582.592 | 3007.488 | 294.468 | 304.677 |
-| 8192 | 8174.592 | 5226.496 | 8929.280 | 607.300 | 654.037 |
-| 16384 | 33263.617 | 17671.679 | 35146.751 | 1384.960 | 1457.664 |
-| 32768 | 172432.899 | 70041.088 | 137703.423 | 2775.040 | 2891.264 |
+| 256 | 26.435 | 28.032 | 38.183 | 24.680 | 9.200 |
+| 512 | 70.473 | 66.731 | 93.510 | 38.841 | 17.500 |
+| 1024 | 203.366 | 172.459 | 274.432 | 73.169 | 17.300 |
+| 2048 | 728.576 | 462.592 | 844.800 | 148.541 | 18.500 |
+| 4096 | 2670.592 | 1582.592 | 3007.488 | 294.468 | 25.200 |
+| 8192 | 8174.592 | 5226.496 | 8929.280 | 607.300 | 42.600 |
+| 16384 | 33263.617 | 17671.679 | 35146.751 | 1384.960 | 82.300 |
+| 32768 | 172432.899 | 70041.088 | 137703.423 | 2775.040 | 146.500 |
 
 After the early stop moved from the loop IR to the chunk tier (revision `4598f8f17`), the same goldens replayed on the
 same card: causal prefill measured 28.0 us at 256 keys (28.032 above), 61.8 at 512 (66.731), 1233.9 at 4096 (1582.592)
@@ -58,9 +97,8 @@ and 4542.5 at 8192 (5226.496); GQA prefill measured 2337.8 at 4096 (3007.488). R
 from 22.5 to 29.4 us and the 512-key row from 55.0 to 66.9, so the short rows carry a run-to-run spread of about 20% on
 this VM. The tables above keep the full-run values.
 
-`paper-emmy-a10040.csv` contains the exact 40 Emmy, eager, Inductor, and Neptune values behind both tables. The fused
-2048 GQA-decode schedule is 47.080 us, 3.15x faster than the earlier 148.215 us split schedule. The other GQA-decode
-shapes retain split schedules because the fused alternative was slower in direct trials.
+`paper-emmy-a10040.csv` contains the exact 40 Emmy, eager, Inductor, and Neptune values behind both tables; its
+GQA-decode Emmy column carries the split-KV lane values above, which replace the earlier fused and split rows.
 
 ## Historical tuned Emmy decode-causal follow-up
 
@@ -226,6 +264,7 @@ SoftCap, so this result should not be treated as reproduced until that differenc
 
 ## Run and system
 
+- Split-KV GQA-decode lane: 8/8 setups succeeded on 2026-09-10 at revision `38f7f6d9e`, same host as below
 - Status: 5/5 full rows succeeded; the corrected GQA-decode row also succeeded
 - Full run: `20260909T081524Z`; corrected GQA-decode run: `20260909T093117Z`
 - Full-run Git revision: `326fb0210f65d6d373ea72e2f8b2cfbad8e2359a`; dirty: false
@@ -258,6 +297,8 @@ only the missing host lane. The durable `recipe.yaml` contains the corrected wor
 ## Durable files
 
 - Exact A100 40GB comparison: `paper-emmy-a10040.csv`
+- Split-KV GQA-decode lane: `emmy_decode_gqa_lane.csv` and `results_a10040_split_kv_decode_gqa.tar.gz` (per-setup JSON
+  records, logs and the status table)
 - Neptune paper reconstruction: `paper-baselines.csv` and `paper-table.csv`
 - Current system records and composite task artifacts: five rows under `2026-09-09_08-15-24/` and the corrected
   GQA-decode row under `2026-09-09_09-31-17/`, both retained in the raw-results archive

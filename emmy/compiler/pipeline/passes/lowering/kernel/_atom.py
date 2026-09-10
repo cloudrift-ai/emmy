@@ -2968,20 +2968,23 @@ class _FlashOps(_MmaOps):
         frags = {self.c.base.results[bilinear]: self.frag(f"_c{i}_{j}")}
         rows = {state: _row_pair(self.frag(state), i) for index, state, _ in self._carried() if index != bilinear}
         tail = [stmt for stmt in self.epilogue if not isinstance(stmt, Write)]
-        if not (set(rows) & {name for stmt in tail for name in stmt.deps()}):
+        writes = [stmt for stmt in self.epilogue if isinstance(stmt, Write)]
+        if not (set(rows) & ({name for stmt in tail for name in stmt.deps()} | {write.value for write in writes})):
             return super().store(i, j, offset, mn)
         cell = {m.axis.name, n.axis.name}
         if any(isinstance(stmt, Load) and cell & {name for e in stmt.index for name in e.free_vars()} for stmt in tail):
             raise RuleSkipped("the chunk tier's projection reads a per-cell operand beside a per-row carrier state", reject=True)
-        stmts, frags, _rows = _residence(
-            tail,
-            frags=frags,
-            rows=rows,
-            tag=f"_ep{i}_{j}_",
-            layout=frag_layout(atom.fragment_layout),
-        )
+        layout = frag_layout(atom.fragment_layout)
+        stmts, frags, _rows = _residence(tail, frags=frags, rows=rows, tag=f"_ep{i}_{j}_", layout=layout)
         out = list(stmts)
-        for write in (stmt for stmt in self.epilogue if isinstance(stmt, Write)):
+        for write in writes:
+            if write.value in rows:
+                # A carried row state stored WHOLE — a split partial's workspace write. The pair
+                # broadcasts into a fragment so the store is the ordinary fragment store, one value
+                # per cell of the row it stands for.
+                name = f"_ep{i}_{j}_{write.value}"
+                out.append(FragmentApply(out=name, op=ElementwiseImpl("copy"), args=(rows[write.value],), kinds=(ROW,), layout=layout))
+                frags[write.value] = name
             out.append(
                 RegStore(
                     dst_buffer=write.output,
