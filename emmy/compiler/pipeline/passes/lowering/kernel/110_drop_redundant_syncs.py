@@ -27,6 +27,9 @@ from emmy.compiler.ir.kernel.ir import (
     TmaLoad,
     TreeHalve,
     WarpShuffle,
+    WgmmaDescriptor,
+    WgmmaMma,
+    WgmmaWait,
 )
 from emmy.compiler.ir.stmt import Body, Stmt
 from emmy.compiler.pipeline import Pattern, RuleSkipped
@@ -45,6 +48,9 @@ _SMEM_TOUCHING = (
     CpAsyncWait,
     TreeHalve,
     WarpShuffle,
+    WgmmaDescriptor,
+    WgmmaMma,
+    WgmmaWait,
 )
 
 

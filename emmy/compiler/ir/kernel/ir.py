@@ -2122,6 +2122,180 @@ class FragmentRepack(Stmt):
         return [f"{_pad(ctx.indent)}emmy_c_to_a_{self.ab_dtype}({self.frag}, {self.srcs[0]}, {self.srcs[1]});"]
 
 
+# ---------------------------------------------------------------------------
+# Hopper warp-group MMA (``wgmma``): the asynchronous instruction discipline
+# ---------------------------------------------------------------------------
+
+#: PTX ``wgmma`` matrix-descriptor layout type (descriptor bits 62-63) per shared-memory swizzle
+#: mode — the same modes the TMA fill and the ldmatrix drain are keyed on.
+WGMMA_LAYOUT_TYPE: dict[str, int] = {"NONE": 0, "B128": 1, "B64": 2, "B32": 3}
+
+
+def wgmma_descriptor_bits(addr: int, lbo: int, sbo: int, mode: int) -> int:
+    """The 64-bit ``wgmma`` shared-memory matrix descriptor (PTX ISA "Matrix Descriptor Format"):
+    bits 0-13 the start address >> 4, 16-29 the leading byte offset >> 4, 32-45 the stride byte
+    offset >> 4, 49-51 the base offset (0 — every slab is aligned to its swizzle period), 62-63 the
+    layout type (:data:`WGMMA_LAYOUT_TYPE`).
+
+    The Python twin of ``emmy_wgmma_desc`` in the render prelude, which is what the kernel runs;
+    the two spell one formula so a test can check the bits without a Hopper card."""
+    return ((addr >> 4) & 0x3FFF) | (((lbo >> 4) & 0x3FFF) << 16) | (((sbo >> 4) & 0x3FFF) << 32) | (mode << 62)
+
+
+@dataclass(frozen=True)
+class WgmmaDescriptor(Stmt):
+    """``unsigned long long name = emmy_wgmma_desc(...)`` — the shared-memory matrix descriptor a
+    ``wgmma.mma_async`` operand is read through (:func:`wgmma_descriptor_bits`). Replaces
+    :class:`LdmatrixLoad` on a descriptor-fed operand: the tensor core reads the slab itself, so no
+    per-lane registers are filled. ``smem_index`` (elements into ``smem``) selects the ring slot and
+    the k step; ``lbo_bytes`` / ``sbo_bytes`` are the leading / stride byte offsets between core
+    matrices, which the lowering derives from the slab's layout."""
+
+    name: str
+    smem: str
+    smem_index: Expr | None
+    swizzle: str
+    lbo_bytes: int
+    sbo_bytes: int
+
+    def defines(self) -> tuple[str, ...]:
+        return (self.name,)
+
+    def external_reads(self) -> tuple[str, ...]:
+        return (self.smem,)
+
+    def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
+        new = rename.get(self.smem, self.smem)
+        return self if new == self.smem else replace(self, smem=new)
+
+    def exprs(self) -> tuple[Expr, ...]:
+        return () if self.smem_index is None else (self.smem_index,)
+
+    def pretty(self, indent: str = "") -> list[str]:
+        idx = "" if self.smem_index is None else f"[{self.smem_index.pretty()}]"
+        return [f"{indent}WgmmaDescriptor {self.name} <- {self.smem}{idx} ({self.swizzle}, lbo={self.lbo_bytes}, sbo={self.sbo_bytes})"]
+
+    def render(self, ctx: RenderCtx) -> list[str]:
+        mode = WGMMA_LAYOUT_TYPE[swizzle_base(self.swizzle)]
+        src = self.smem if self.smem_index is None else f"&{self.smem}[{self.smem_index.render(ctx)}]"
+        args = f"emmy_smem_u32({src}), {self.lbo_bytes}, {self.sbo_bytes}, {mode}"
+        return [f"{_pad(ctx.indent)}unsigned long long {self.name} = emmy_wgmma_desc({args});"]
+
+
+@dataclass(frozen=True)
+class WgmmaMma(Stmt):
+    """``wgmma.mma_async.sync.aligned.m64n{N}k16.f32.{ab}.{ab}`` — one warp-group tensor-core MMA,
+    issued asynchronously by the four warps of a group together.
+
+    ``c_frags`` is the accumulator: per warp, the ``m64nN`` instruction's ``N / 2`` f32 registers
+    are the ``N / 8`` ordinary ``m16n8`` C fragments (:class:`RegFragment`, ``float c[4]``) side by
+    side — instruction register ``d[4j + k]`` is fragment ``j``, register ``k`` — so the epilogue,
+    the softmax rescale and the P→A repack keep their lane maps. Exactly one of ``a_desc`` (the
+    shared-memory form, ``_ss``) and ``a_frag`` (the register form, ``_rs`` — the ``m16n8k16`` A
+    fragment, K-major only) names the A operand; ``b_desc`` is always a :class:`WgmmaDescriptor`.
+    ``scale_d = 0`` discards the old accumulator (``d = a·b``, the first step of a fresh
+    accumulator); ``trans_a`` / ``trans_b`` are the descriptor operands' MN-major transpose bits.
+
+    The discipline around the cells (:class:`WgmmaFence`, :class:`WgmmaCommit`,
+    :class:`WgmmaWait`) is the lowering's: nothing here orders the accumulator read."""
+
+    c_frags: tuple[str, ...]
+    b_desc: str
+    shape: tuple[int, int, int]
+    ab_dtype: str = "f16"
+    a_desc: str | None = None
+    a_frag: str | None = None
+    scale_d: int = 1
+    trans_a: int = 0
+    trans_b: int = 0
+
+    def __post_init__(self) -> None:
+        m, n, k = self.shape
+        if (m, k) != (64, 16) or n % 8 or not 8 <= n <= 256:
+            raise ValueError(f"wgmma: the shape is m64n<8..256, a multiple of 8>k16, got {self.shape}")
+        if len(self.c_frags) != n // 8:
+            raise ValueError(f"wgmma m64n{n}: the accumulator is {n // 8} m16n8 C fragments, got {len(self.c_frags)}")
+        if (self.a_desc is None) == (self.a_frag is None):
+            raise ValueError("wgmma: exactly one of a_desc / a_frag names the A operand")
+        if self.a_frag is not None and self.trans_a:
+            raise ValueError("wgmma: the register-form A operand is K-major (no transpose bit)")
+
+    @property
+    def form(self) -> str:
+        """``"ss"`` (both operands through descriptors) or ``"rs"`` (A in registers)."""
+        return "ss" if self.a_desc is not None else "rs"
+
+    @property
+    def wrapper(self) -> str:
+        """The prelude wrapper this cell calls — one per ``(N, ab_dtype, form)`` a kernel uses."""
+        return f"emmy_wgmma_m64n{self.shape[1]}k16_{self.ab_dtype}_f32_{self.form}"
+
+    def _a(self) -> str:
+        return self.a_desc if self.a_desc is not None else self.a_frag
+
+    def deps(self) -> tuple[str, ...]:
+        return (*self.c_frags, self._a(), self.b_desc)
+
+    def defines(self) -> tuple[str, ...]:
+        # Accumulates into the C fragments in place — a definition, like MmaSyncPtx.
+        return self.c_frags
+
+    def pretty(self, indent: str = "") -> list[str]:
+        m, n, k = self.shape
+        flags = ("" if self.scale_d else " scale_d=0") + (" trans_a" if self.trans_a else "") + (" trans_b" if self.trans_b else "")
+        acc = ", ".join(self.c_frags)
+        return [f"{indent}WgmmaMma {{{acc}}} += {self._a()} @ {self.b_desc} (m{m}n{n}k{k} {self.ab_dtype} {self.form}{flags})"]
+
+    def render(self, ctx: RenderCtx) -> list[str]:
+        # The transpose bits are PTX immediates, which nvcc accepts only as integral constant
+        # expressions — template arguments of the wrapper, not function parameters.
+        tnsp = f"<{self.trans_a}, {self.trans_b}>" if self.form == "ss" else f"<{self.trans_b}>"
+        return [f"{_pad(ctx.indent)}{self.wrapper}{tnsp}({', '.join(self.c_frags)}, {self._a()}, {self.b_desc}, {self.scale_d});"]
+
+
+@dataclass(frozen=True)
+class WgmmaFence(Stmt):
+    """``wgmma.fence.sync.aligned`` — orders the group's earlier register and shared-memory accesses
+    before the ``wgmma.mma_async`` that follows. The lowering issues it before the first cell after
+    anything else touched the accumulator (the epilogue, the softmax rescale)."""
+
+    def pretty(self, indent: str = "") -> list[str]:
+        return [f"{indent}WgmmaFence"]
+
+    def render(self, ctx: RenderCtx) -> list[str]:
+        return [f'{_pad(ctx.indent)}asm volatile("wgmma.fence.sync.aligned;\\n" ::: "memory");']
+
+
+@dataclass(frozen=True)
+class WgmmaCommit(Stmt):
+    """``wgmma.commit_group.sync.aligned`` — closes the ``wgmma.mma_async`` cells issued since the
+    last commit into one group for :class:`WgmmaWait` to count. The lowering commits after a
+    chunk's cells."""
+
+    def pretty(self, indent: str = "") -> list[str]:
+        return [f"{indent}WgmmaCommit"]
+
+    def render(self, ctx: RenderCtx) -> list[str]:
+        return [f'{_pad(ctx.indent)}asm volatile("wgmma.commit_group.sync.aligned;\\n" ::: "memory");']
+
+
+@dataclass(frozen=True)
+class WgmmaWait(Stmt):
+    """``wgmma.wait_group.sync.aligned N`` — block until at most ``group`` committed groups are still
+    in flight. Carries no deps: the accumulator it completes is the ``c_frags`` of the cells before
+    it, and the lowering places the wait before any read of those fragments and before the slot's
+    release on the "empty" mbarrier. The redundant-sync and ldmatrix-pairing passes treat it as a
+    barrier."""
+
+    group: int = 0
+
+    def pretty(self, indent: str = "") -> list[str]:
+        return [f"{indent}WgmmaWait({self.group})"]
+
+    def render(self, ctx: RenderCtx) -> list[str]:
+        return [f'{_pad(ctx.indent)}asm volatile("wgmma.wait_group.sync.aligned {self.group};\\n" ::: "memory");']
+
+
 @dataclass(frozen=True)
 class EpilogueLoad:
     """One leaf operand of a fused pointwise epilogue (see :class:`RegEpilogue`).
@@ -2820,6 +2994,11 @@ __all__ = [
     "MbarrierArrive",
     "MbarrierWait",
     "SetMaxNReg",
+    "WgmmaDescriptor",
+    "WgmmaMma",
+    "WgmmaFence",
+    "WgmmaCommit",
+    "WgmmaWait",
     "StridedLoop",
     "Stmt",
     # Top-level
@@ -3081,6 +3260,38 @@ def _(s: MmaSyncPtx, rename, sigma, axis_fn):
         sfa_frag=rename(s.sfa_frag) if s.sfa_frag is not None else None,
         sfb_frag=rename(s.sfb_frag) if s.sfb_frag is not None else None,
     )
+
+
+@_rewrite_kind.register
+def _(s: WgmmaDescriptor, rename, sigma, axis_fn):
+    index = None if s.smem_index is None else _rename_ssa_vars_in_expr(sigma.apply(s.smem_index), rename)
+    return replace(s, name=rename(s.name), smem_index=index)
+
+
+@_rewrite_kind.register
+def _(s: WgmmaMma, rename, sigma, axis_fn):
+    return replace(
+        s,
+        c_frags=tuple(rename(c) for c in s.c_frags),
+        b_desc=rename(s.b_desc),
+        a_desc=None if s.a_desc is None else rename(s.a_desc),
+        a_frag=None if s.a_frag is None else rename(s.a_frag),
+    )
+
+
+@_rewrite_kind.register
+def _(s: WgmmaFence, rename, sigma, axis_fn):
+    return s
+
+
+@_rewrite_kind.register
+def _(s: WgmmaCommit, rename, sigma, axis_fn):
+    return s
+
+
+@_rewrite_kind.register
+def _(s: WgmmaWait, rename, sigma, axis_fn):
+    return s
 
 
 @_rewrite_kind.register

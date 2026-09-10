@@ -287,6 +287,7 @@
  "tests/compiler/passes/test_volta_mma.py::test_sm70_sync_copy_stages_fragments_without_newer_instructions[False]": 0.78,
  "tests/compiler/passes/test_volta_mma.py::test_sm70_sync_copy_stages_fragments_without_newer_instructions[True]": 0.78,
  "tests/compiler/passes/test_warp_eligible_stamp.py::test_materialized_op_carries_warp_eligibility_stamp": 1.57,
+ "tests/compiler/passes/test_wgmma_mma.py::test_env_pins_reach_the_wgmma_rules_and_a_legal_row_schedules": 12.7,
  "tests/compiler/pipeline/search/data/test_freeze.py::test_freeze_digest_insertion_order_independent": 0.11,
  "tests/compiler/pipeline/search/data/test_freeze.py::test_freeze_twice_same_digest": 0.1,
  "tests/compiler/pipeline/search/data/test_freeze.py::test_load_freeze_digest_mismatch_hard_error": 0.05,

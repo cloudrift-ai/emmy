@@ -21,6 +21,7 @@ from emmy.compiler.ir.kernel.ir import (
     RegStore,
     Smem,
     TmaDescriptor,
+    WgmmaMma,
     pack_smem,
     swizzle_fn,
     swizzle_xor,
@@ -1122,6 +1123,74 @@ def _swizzle_prelude(kernel_op: KernelOp) -> str:
     return "".join(chunks)
 
 
+# Hopper warp-group MMA prelude (``WgmmaMma``): the shared-memory address helper, the matrix
+# descriptor builder, and one inline-PTX wrapper per (N, operand dtype, form) the kernel uses.
+# Joins only when a ``WgmmaMma`` is present (the kernel-source digest gate).
+_WGMMA_PRELUDE = """\
+static __device__ __forceinline__ unsigned emmy_smem_u32(const void* p) {
+    return (unsigned)__cvta_generic_to_shared(p);
+}
+
+// The wgmma shared-memory matrix descriptor (PTX ISA "Matrix Descriptor Format"): bits 0-13 the
+// start address >> 4, 16-29 the leading byte offset >> 4, 32-45 the stride byte offset >> 4,
+// 49-51 the base offset (0: every slab is aligned to its swizzle period), 62-63 the layout type
+// (0 none, 1 B128, 2 B64, 3 B32). ``wgmma_descriptor_bits`` (ir.py) is the Python twin of this
+// formula; keep the two identical.
+static __device__ __forceinline__ unsigned long long emmy_wgmma_desc(unsigned addr, unsigned lbo, unsigned sbo,
+                                                                     unsigned long long mode) {
+    return (unsigned long long)((addr >> 4) & 0x3FFF) | ((unsigned long long)((lbo >> 4) & 0x3FFF) << 16)
+         | ((unsigned long long)((sbo >> 4) & 0x3FFF) << 32) | (mode << 62);
+}
+
+"""
+
+
+def _wgmma_wrapper(n: int, ab_dtype: str, form: str) -> str:
+    """The ``emmy_wgmma_m64n{n}k16_{ab}_f32_{form}`` wrapper: the N/8 ``float[4]`` C fragments
+    (fragment-major, register-minor — the instruction's ``d0..d(N/2-1)`` order), then the A operand
+    (a descriptor for ``ss``, the four ``m16n8k16`` A registers for ``rs``), the B descriptor and
+    ``scale_d``. ``scale_d`` is a runtime predicate the way CUTLASS's ``SM90_64xNx16_F32F16F16_SS``
+    spells it; the transpose bits are PTX immediates, which nvcc accepts only as integral constant
+    expressions, so they are template arguments. The scale-A / scale-B immediates are 1."""
+    frags = n // 8
+    c_params = ", ".join(f"float* c{j}" for j in range(frags))
+    d_regs = ", ".join(f"%{i}" for i in range(n // 2))
+    c_operands = ", ".join(f'"+f"(c{j}[{k}])' for j in range(frags) for k in range(4))
+    base = n // 2  # the first input operand's number
+    if form == "ss":
+        template = "template <int TnspA, int TnspB>"
+        params = f"{c_params}, unsigned long long a_desc, unsigned long long b_desc, int scale_d"
+        operands = f"%{base}, %{base + 1}, p, 1, 1, %{base + 3}, %{base + 4}"
+        pred = f"%{base + 2}"
+        inputs = '"l"(a_desc), "l"(b_desc), "r"(scale_d), "n"(TnspA), "n"(TnspB)'
+    else:
+        template = "template <int TnspB>"
+        params = f"{c_params}, const unsigned* a, unsigned long long b_desc, int scale_d"
+        a_regs = ", ".join(f"%{base + i}" for i in range(4))
+        operands = f"{{{a_regs}}}, %{base + 4}, p, 1, 1, %{base + 6}"
+        pred = f"%{base + 5}"
+        inputs = '"r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(b_desc), "r"(scale_d), "n"(TnspB)'
+    instruction = f"wgmma.mma_async.sync.aligned.m64n{n}k16.f32.{ab_dtype}.{ab_dtype}"
+    return (
+        f"{template}\n"
+        f"static __device__ __forceinline__ void emmy_wgmma_m64n{n}k16_{ab_dtype}_f32_{form}({params}) {{\n"
+        f'    asm volatile("{{\\n.reg .pred p;\\nsetp.ne.b32 p, {pred}, 0;\\n"\n'
+        f'                 "{instruction} {{{d_regs}}}, {operands};\\n}}\\n"\n'
+        f"                 : {c_operands}\n"
+        f"                 : {inputs});\n"
+        f"}}\n\n"
+    )
+
+
+def _wgmma_prelude(kernel_op: KernelOp) -> str:
+    """The wgmma helpers plus one wrapper per ``(N, ab_dtype, form)`` the body's ``WgmmaMma`` cells
+    use; empty when none is present, so every other kernel's source stays byte-identical."""
+    forms = sorted({(s.shape[1], s.ab_dtype, s.form) for s in kernel_op.body.iter() if isinstance(s, WgmmaMma)})
+    if not forms:
+        return ""
+    return _WGMMA_PRELUDE + "".join(_wgmma_wrapper(n, ab_dtype, form) for n, ab_dtype, form in forms)
+
+
 _INTRINSIC_TO_CUDA: dict[str, str] = {
     "exp": "expf",
     "exp_fast": "__expf",
@@ -1324,7 +1393,10 @@ def render_kernelop(
     cp_async_prelude = _CP_ASYNC_PRELUDE if uses_cp_async else ""
     bitcast_prelude = _BITCAST_PRELUDE if any(isinstance(s, Assign) and s.op.name == "bitcast" for s in kernel_op.body.iter()) else ""
     f4_encode = _F4_ENCODE_PRELUDE if any(isinstance(s, Assign) and s.op.name == "to_f4e2m1" for s in kernel_op.body.iter()) else ""
-    preludes = f"{includes}{bitcast_prelude}{f4_encode}{mma_sync_prelude}{cp_async_prelude}{_swizzle_prelude(kernel_op)}{prelude}"
+    preludes = (
+        f"{includes}{bitcast_prelude}{f4_encode}{mma_sync_prelude}{_wgmma_prelude(kernel_op)}"
+        f"{cp_async_prelude}{_swizzle_prelude(kernel_op)}{prelude}"
+    )
     header = f'{preludes}extern "C" __global__{launch_bounds} void {kernel_op.name}({params_text})'
     return f"{header} {{\n{body_text}\n}}\n"
 

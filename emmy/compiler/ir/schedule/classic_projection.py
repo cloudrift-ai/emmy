@@ -50,6 +50,7 @@ from emmy.compiler.ir.schedule.classic import (
     _needs_fill,
     _plan_node_refusal,
     _resolve_stage,
+    _wgmma_refusal,
     edge_site_spelling,
     no_site_claims_inventory,
     node_id_spelling,
@@ -361,7 +362,7 @@ def _contraction_domain(
     allowed_atoms = _warp_atoms(tile, target, node)
 
     def warp_plan_ok(plan: Tile) -> bool:
-        if _kstep_refusal(facts.k_axis, plan) is not None:
+        if _kstep_refusal(facts.k_axis, plan) is not None or _wgmma_refusal(plan) is not None:
             return False
         chunk = plan.atom.atom_k * plan.bk
         return not node.chunked() or (chunk >= plan.atom.atom_n and chunk % plan.atom.atom_n == 0)
