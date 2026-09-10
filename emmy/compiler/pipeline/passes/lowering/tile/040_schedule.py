@@ -46,23 +46,23 @@ from emmy.compiler.structural import digest
 PATTERN = [Pattern("root", TileOp)]
 
 
-def classic_forks(tile: TileOp, name: str, knobs: dict, ctx, *, peer: bool = False) -> list[Fork]:
-    """Adapt the classic semantic enumeration to the pipeline's lazy search tree. ``peer`` says
-    the kernel is one of several in its graph."""
+def classic_forks(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
+    """Adapt the classic semantic enumeration to the pipeline's lazy search tree."""
     from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, FP8_MMA, precision_pin  # noqa: PLC0415
 
     try:
         domains = project_classic(tile, ctx)
     except ClassicProjectionError:
         return []
-    # A bare pin is published across the peer kernels of a multi-kernel graph and names the ones
-    # that can spell it (a warp ``WORK`` names a split's partial, not its thread-style finalize):
-    # a peer that cannot keeps its own domain instead of refusing every row and falling unmapped.
-    # The post-compile pin check still asks that SOME kernel realized the pin; a lone kernel that
-    # cannot is the user error the refusal is for.
+    # A bare pin is published across the peer kernels a kernel-set decision minted — a split's
+    # partial and finalize — and names the one that can spell it (a warp ``WORK`` names the partial,
+    # not the thread-style finalize): the peer that cannot keeps its own domain instead of refusing
+    # every row and falling unmapped. The post-compile pin check still asks that SOME kernel realized
+    # the pin; any other kernel that cannot spell it keeps the refusal, the user error it is for.
+    peer = tile.split_consumed and carries_partition(tile)
     context = ClassicScheduleContext(tile, ctx, domains).restrict(
         {family: family_pins(family) for family in ("WORK", "TILE", "REDUCE", "STAGE", "RASTER")},
-        split_consumed=carries_partition(tile) or tile.split_consumed,
+        split_consumed=tile.split_consumed or carries_partition(tile),
         allow_f16_accumulate=precision_pin(F16_MMA_F32_ACC) is True,
         allow_fp8=precision_pin(FP8_MMA) is True,
         validate_pins=ctx.validate_pins and not peer,
@@ -102,6 +102,7 @@ def classic_forks(tile: TileOp, name: str, knobs: dict, ctx, *, peer: bool = Fal
 
 
 def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp:
+    del match  # the scheduled op replaces the matched node in place — no graph surgery here
     tile: TileOp = root.op
     if tile.op is None or tile.place.is_mapped:
         raise RuleSkipped("TileOp already scheduled / nothing to map")
@@ -114,8 +115,7 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp:
     assert any(k.startswith(STRUCT_PREFIX) for k in tile.knobs), (
         f"{tile.name!r}: scheduling a kernel with no structural identity — the IdentityStrategy stamps at birth"
     )
-    peer = sum(isinstance(node.op, TileOp) for node in match.graph.nodes.values()) > 1
-    options = classic_forks(tile, tile.name, tile.knobs, ctx, peer=peer)
+    options = classic_forks(tile, tile.name, tile.knobs, ctx)
     if not options:
         raise RuleSkipped("no enumerable schedule row for this term — leave it unmapped")
     return options if len(options) > 1 else options[0]

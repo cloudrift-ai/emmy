@@ -253,10 +253,11 @@ def _chunk_refusal(tile: TileOp, node) -> str | None:
     tail = projection_tail(tile)
     body = Body(tail)
     states = set(node.base.results)
+    cell = {axis.name for axis in tile.place.free}
     expectation = node.base.results[node.bilinear_channels()[0][0]]
     for write in (stmt for stmt in tail if isinstance(stmt, Write)):
-        if set(write.values) <= states:
-            continue  # a carried state stored WHOLE — a split partial's workspace write, broadcast per row
+        if set(write.values) <= states and cell <= {name for index in write.index for name in index.free_vars()}:
+            continue  # a carried state stored WHOLE per cell — a split partial's workspace write, broadcast per row
         reads = set(write.values) | set(body.backward_cone(tuple(write.values)).external_reads)
         if expectation not in reads:
             return "the chunk tier writes its expectation; a carried state beside it has no output of its own"
