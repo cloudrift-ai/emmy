@@ -58,7 +58,16 @@ from emmy.compiler.ir.schedule.views import ContractionFacts
 from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Select, Write, mask_select_predicate
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.ir.tile.ops import Sched, chain_form, chain_members, edge_dtypes, kernel_roots, projection_tail, scheduled
+from emmy.compiler.ir.tile.ops import (
+    Sched,
+    chain_form,
+    chain_members,
+    edge_dtypes,
+    kernel_roots,
+    merges_partition,
+    projection_tail,
+    scheduled,
+)
 
 
 class ClassicProjectionError(RuntimeError):
@@ -96,11 +105,9 @@ def _reduction_domain(tile: TileOp, node) -> tuple[Reduce, ...]:
         return (Reduce(),)  # the binder partitions the roots it peels and their chain members; any other reduce lowers serially
     if {axis.name for spec in tile.output_specs for axis in spec.sweep} & node.free_axes:
         return (Reduce(),)
-    axis = tile.axis_of(node.axis)
-    if axis.window is not None and axis.window.partition and axis.window.parent.extent == axis.extent:
-        # A split's deferred finalize merges the partitions of a split that already happened — its
-        # axis windows its WHOLE parent, where a partial walks a slice. One partial per split per
-        # cell: the parallelism is the cells, and a band over the few partials pays a barrier per cell.
+    if is_root and merges_partition(tile):
+        # A split's deferred finalize: one partial per split per cell, the parallelism is the cells,
+        # and a band over the few partials pays a barrier per cell.
         return (Reduce(),)
     transposed_ok = _transposed_reduction_ok(tile) and is_root and not chain_form(node)
     return (

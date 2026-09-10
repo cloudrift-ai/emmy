@@ -31,7 +31,7 @@ from emmy.compiler.ir.schedule.classic_projection import (
     project_classic,
 )
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.ir.tile.ops import carries_partition
+from emmy.compiler.ir.tile.ops import carries_partition, merges_partition
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.fork import SCHEDULE_FORK_STAMPS, Fork
 
@@ -54,18 +54,19 @@ def classic_forks(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
         domains = project_classic(tile, ctx)
     except ClassicProjectionError:
         return []
-    # A bare pin is published across the peer kernels a kernel-set decision minted — a split's
-    # partial and finalize — and names the one that can spell it (a warp ``WORK`` names the partial,
-    # not the thread-style finalize): the peer that cannot keeps its own domain instead of refusing
-    # every row and falling unmapped. The post-compile pin check still asks that SOME kernel realized
-    # the pin; any other kernel that cannot spell it keeps the refusal, the user error it is for.
-    peer = tile.split_consumed and carries_partition(tile)
+    # A bare WORK / RASTER / REDUCE pin is published across the kernels a split minted and names the
+    # partial (a warp ``WORK``, a ``coop`` band), not its finalize, which folds one partial per split
+    # per cell serially: the finalize keeps its own domain instead of refusing every row and falling
+    # unmapped. The partial, like every other kernel, keeps every verdict, and the post-compile pin
+    # check still asks that SOME kernel realized the pin.
+    peer = merges_partition(tile)
     context = ClassicScheduleContext(tile, ctx, domains).restrict(
         {family: family_pins(family) for family in ("WORK", "TILE", "REDUCE", "STAGE", "RASTER")},
         split_consumed=tile.split_consumed or carries_partition(tile),
         allow_f16_accumulate=precision_pin(F16_MMA_F32_ACC) is True,
         allow_fp8=precision_pin(FP8_MMA) is True,
-        validate_pins=ctx.validate_pins and not peer,
+        validate_pins=ctx.validate_pins,
+        tolerate_kernel_pins=peer,
     )
     codec = ClassicScheduleCodec(context)
     pool_id = digest(

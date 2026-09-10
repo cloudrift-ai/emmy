@@ -601,9 +601,9 @@ path for additive and exp-family folds. Each piece receives a fresh structural i
 The finalize's reduce enumerates serially only: it merges the partitions of a split that already happened, over an
 axis that windows its whole parent, one partial per split per cell — its parallelism is the cells, and a band over
 the few partials would pay a barrier per cell (the A100's prior picked one at seven times the serial row's time).
-The pieces also read a bare pin as one kernel set: a piece that cannot spell it (the finalize's thread-style work
-under the partial's warp `WORK`) keeps its own domain instead of refusing every row, and the post-compile pin check
-still asks that some kernel realized the pin. Every other kernel keeps the refusal.
+The finalize also reads a bare `WORK`, `RASTER` or `REDUCE` pin as the partial's — a warp `WORK` or a `coop` band
+names the sibling that can spell it — and keeps its own domain instead of refusing every row; the post-compile pin
+check still asks that some kernel realized the pin. The partial and every other kernel keep the refusal.
 
 A selected cross-CTA split is recorded structurally by an axis `Window`. The scheduler refuses to repartition an
 axis that is already a slice, including partition axes nested inside the complete Fold tree. The one-kernel atomic arm

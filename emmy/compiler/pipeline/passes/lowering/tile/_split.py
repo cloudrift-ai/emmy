@@ -404,11 +404,10 @@ def _with_axes(axes: tuple, *new: Axis) -> tuple:
 
 def _piece(op: Fold, free, *, output_specs: tuple = (), axes: tuple) -> TileOp:
     """One fresh unscheduled Tile kernel preserving its Fold algebra verbatim, over the axis table ``axes``."""
-    piece = TileOp(op=op, place=Placement(free=tuple(free)), output_specs=output_specs, axes=axes, split_consumed=True)
+    piece = TileOp(op=op, place=Placement(free=tuple(free)), output_specs=output_specs, axes=axes)
     # A split CONSUMES the kernel it replaces: the piece drops its schedule row and its structural
-    # identity, and carries the consumed split (beside the partition receipt on its axis) so the
-    # schedule pass reads it as one peer of a kernel set. Built fresh here, so this states the
-    # contract rather than doing work — and the rule that mints a kernel is where that has to be said.
+    # identity. Built fresh here, so this states the contract rather than doing work — and the rule
+    # that mints a kernel is where that has to be said.
     return replace(piece, knobs=consume_kernel_row(piece.knobs))
 
 
