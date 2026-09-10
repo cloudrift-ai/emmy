@@ -20,7 +20,9 @@ command:
     - Makefile
   run: |
     set -e
-    export PATH=/usr/local/cuda/bin:$$PATH
+    # The venv's bin joins PATH because vLLM's engine subprocess invokes `ninja` BY NAME:
+    # installing it into the venv is not enough, and the failure is a boot abort at KV-cache init.
+    export PATH=$repo_dir/venv/bin:/usr/local/cuda/bin:$$PATH
     cd $repo_dir
     [ -d venv ] || make setup
     # ninja is not a vllm dependency but its compile path shells out to it, and without it the
