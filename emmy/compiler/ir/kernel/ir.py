@@ -295,11 +295,6 @@ class Tile(Stmt):
     # transpose — A streamed). ``None`` = the plain N-fastest row-major order.
     raster_group: int | None = None
     raster_orient: str = "m"
-    # A block axis decoded in DESCENDING order — ``extent − 1 − index`` — so the CTAs at its far
-    # end launch first. Stamped by ``grid_tile`` for a stream that stops at a bound growing with
-    # the block (a causal diagonal): the last blocks walk the longest streams, and issued last
-    # they alone fill the launch's tail wave, where issued first the short ones do.
-    descending_axis: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.body, Body):
@@ -320,7 +315,6 @@ class Tile(Stmt):
             raster_axes=self.raster_axes,
             raster_group=self.raster_group,
             raster_orient=self.raster_orient,
-            descending_axis=self.descending_axis,
         )
 
     def binds_axes(self) -> frozenset[str]:
@@ -500,8 +494,6 @@ class Tile(Stmt):
             term = "_gid" if s == 1 else f"_gid / {s}"
             # The outermost axis needs no modulo (``_gid / s0 < e0`` since _gid < N).
             expr = term if i == 0 else f"({term}) % {e}"
-            if a.name == self.descending_axis:
-                expr = f"{e - 1} - ({expr})"
             out.append(f"{ipad}int {a.name} = {expr};")
         out.extend(render_body(self.body, inner))
         if guard:
@@ -2869,9 +2861,9 @@ def _(s: Tile, rename, sigma, axis_fn):
     # ungrouped N-fastest raster — the exact silent-loss this handler's comment
     # has always warned about).
     new_axes = tuple(axis_fn(a) for a in s.axes)
-    renames = {old.name: new.name for old, new in zip(s.axes, new_axes, strict=True)}
     raster_axes = s.raster_axes
     if raster_axes is not None:
+        renames = {old.name: new.name for old, new in zip(s.axes, new_axes, strict=True)}
         raster_axes = (renames.get(raster_axes[0], raster_axes[0]), renames.get(raster_axes[1], raster_axes[1]))
     return Tile(
         axes=new_axes,
@@ -2881,7 +2873,6 @@ def _(s: Tile, rename, sigma, axis_fn):
         raster_axes=raster_axes,
         raster_group=s.raster_group,
         raster_orient=s.raster_orient,
-        descending_axis=renames.get(s.descending_axis, s.descending_axis),
     )
 
 

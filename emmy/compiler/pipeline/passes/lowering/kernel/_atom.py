@@ -1155,10 +1155,9 @@ def _mask_affine(predicate: BinaryExpr, names: frozenset[str]) -> tuple[dict[str
     return None if form is None else (form[1], form[0])
 
 
-def _mask_key_shifts(stmts, held: str, key: Axis, row: str) -> tuple[int | None, int | None]:
-    """What the coordinate masks say about whole chunks, as ``(lag, lead)``: the stream starts
-    ``lag`` (≤ 0) keys past the block's first row and stops ``lead`` (≥ 0) keys past its last, each
-    ``None`` when no mask bounds the keys on that side.
+def _mask_key_bounds(stmts, held: str, key: Axis, row: str, offset, bk: int) -> tuple[Expr | None, Expr | None]:
+    """The chunk range outside which every key is masked for every row of this CTA — the stream's
+    ``(k_first, k_end)``, each ``None`` when no mask bounds the keys on that side.
 
     The masks are the coordinate ``Select`` statements the prefix adds to the score (the pairs
     :func:`_residence` turns into a ``FragmentMask``), each read ONCE, ahead of the loop, for what
@@ -1166,13 +1165,15 @@ def _mask_key_shifts(stmts, held: str, key: Axis, row: str) -> tuple[int | None,
     from ``block_end + cr − ck`` on for the block's last row, and so for every row before it: the
     stream stops there. ``key + ck < row + cr`` (or ``<=``) masks every key before
     ``block_base + cr − ck`` for the block's first row, and so for every row after it: the stream
-    starts on the chunk that key falls in. A mask that could take a row's OWN key (a lead that
-    stops a block before its last row, a lag that starts it after its first) could empty a row's
-    stream, and is left to the per-element mask."""
+    starts on the chunk that key falls in. Both are CTA-uniform in the grid var alone, and
+    bit-identical because a masked chunk folds the carrier identity exactly. The bound is derived
+    here and stored nowhere — the ``Select`` in the body is its one source. A mask that could take
+    a row's OWN key (a lead that stops a block before its last row, a lag that starts it after its
+    first) could empty a row's stream, and is left to the per-element mask."""
     selects = {stmt.name: stmt for stmt in stmts if isinstance(stmt, Select)}
     fragments = {held}  # the score and every value the prefix derives from it (its scaling, say)
-    lag: int | None = None
-    lead: int | None = None
+    first: Expr | None = None
+    end: Expr | None = None
     for stmt in stmts:
         if isinstance(stmt, Assign) and set(stmt.args) & fragments:
             fragments.add(stmt.name)
@@ -1183,25 +1184,17 @@ def _mask_key_shifts(stmts, held: str, key: Axis, row: str) -> tuple[int | None,
             continue
         shift = -int(affine[1].eval({}))  # the masked branch reads ``key OP row + shift``
         if predicate.op in (">", ">="):
-            stop = shift - (predicate.op == ">=")
-            if stop >= 0:
-                lead = stop if lead is None else min(lead, stop)
+            lead = shift - (predicate.op == ">=")
+            if lead >= 0:
+                stop = _shifted(offset.block_end(), lead)
+                end = stop if end is None else _min(end, stop)
         else:
-            start = shift + (predicate.op == "<=")
-            if start <= 0:
-                lag = start if lag is None else max(lag, start)
-    return lag, lead
-
-
-def _mask_key_bounds(shifts: tuple[int | None, int | None], key: Axis, offset, bk: int) -> tuple[Expr | None, Expr | None]:
-    """The chunk range outside which every key is masked for every row of this CTA — the stream's
-    ``(k_first, k_end)`` off :func:`_mask_key_shifts`' reading, each ``None`` on an unbounded
-    side. Both are CTA-uniform in the grid var alone, and bit-identical because a masked chunk
-    folds the carrier identity exactly. The bound is derived here and stored nowhere — the
-    ``Select`` in the body is its one source."""
-    lag, lead = shifts
-    first = None if lag is None else _shifted(offset.block_base(), lag)
-    end = None if lead is None else _min(_shifted(offset.block_end(), lead), key.extent_expr())
+            lag = shift + (predicate.op == "<=")
+            if lag <= 0:
+                start = _shifted(offset.block_base(), lag)
+                first = start if first is None else _max(first, start)
+    if end is not None:
+        end = _min(end, key.extent_expr())
     if first is not None:
         first = BinaryExpr("*", BinaryExpr("/", _max(first, Literal(0, "int")), Literal(bk, "int")), Literal(bk, "int"))
     return first, end
@@ -1650,11 +1643,6 @@ class _AtomOps:
         if self.stage is not None:
             return _staged(self, cells, offset, mn)
         return _contract_kloop(self.c, cells, **self.gmem_leaves(offset, mn))
-
-    def longest_block_last(self) -> bool:
-        """Whether the tier's work per CTA grows with the row block, so a launch should issue the
-        last blocks first — the chunk tier's causal stream says yes; a contraction never does."""
-        return False
 
     def slab_swizzles(self, mn, elem_bytes: int) -> tuple[str, str]:  # noqa: ARG002
         """The per-operand TMA smem swizzle modes for the ``(A, B)`` slabs — ``NONE`` on this
@@ -2474,7 +2462,7 @@ class _FlashOps(_MmaOps):
         # CTA, which walks the whole stream there, and the dynamic trip count only costs (9%
         # measured at the 128-CTA head-width-256 shape). Bounded at both ends, every CTA shortens.
         scored_name = (score if score is not None else self.c.operands[0]).exposes[0]
-        k_first, k_end = _mask_key_bounds(_mask_key_shifts(prefix.body, scored_name, key, m.axis.name), key, offset[0], bk)
+        k_first, k_end = _mask_key_bounds(prefix.body, scored_name, key, m.axis.name, offset[0], bk)
         if self.one_wave and (k_first is None or k_end is None):
             k_first = k_end = None
 
@@ -2621,18 +2609,6 @@ class _FlashOps(_MmaOps):
             seed=False,
         )
         return [*pre, *decls], region
-
-    def longest_block_last(self) -> bool:
-        """Whether this tier's stream stops at a bound that grows with the row block and starts
-        nowhere else — a causal diagonal — so the last blocks walk the longest streams and a
-        multi-wave launch should issue them first (``grid_tile``'s ``descending``)."""
-        if self.one_wave:
-            return False
-        score = self.inner[0] if self.inner is not None else None
-        scored_name = (score if score is not None else self.c.operands[0]).exposes[0]
-        prefix = self.c.applied.cone(self.c.roles[0])
-        lag, lead = _mask_key_shifts(prefix.body, scored_name, self.k_axis, self.tile.mn[0].axis.name)
-        return lead is not None and lag is None
 
     def _streams(self, mn, bk: int):
         """The chunk tier's staged operand group, or ``None`` when this row reads gmem-direct.

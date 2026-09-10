@@ -253,7 +253,7 @@ still no tile site: an mma B fragment is one `B[k, n]` for every row, and a cata
 placed such a site on the grid's trailing pair and emitted B's address with the unsplit row axis. Two shapes fold
 whole. A PLANAR carrier qualifies when every carried state is a bilinear channel — the tile's accumulators ARE the
 carrier. A TWISTED one qualifies through `Fold.chunked`: the recipe names a pattern for
-every state past the pivot, supplies `advance` / `rescale` (the stable ⊕ at an open channel count, which is what a
+every state past the pivot, supplies `advance` / `scale` (the stable ⊕ at an open channel count, which is what a
 per-chunk merge needs), and leaves exactly one bilinear channel, so every other state rides as a per-row scalar and
 the one accumulator is the expectation. Neither reading mentions attention or softmax: a recipe that folded nothing
 but products passes the first, and one shaped like softmax passes the second.
