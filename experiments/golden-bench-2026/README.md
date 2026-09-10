@@ -57,6 +57,15 @@ per-channel dynamic form stays in the kernels recipe's `fp8-common` study. Inste
 the goldens committed under `golden/`: every kernel's schedule was pinned by hand with `emmy run --ab` on the RTX 5090
 and recorded with `--record-greedy`, so the row re-measures one fixed kernel set at deployable `-O3` against eager.
 
+Coverage is per target and partial by design. The decode (seq=1) golden is complete: its two decode projections, which
+the greedy scheduled as a scalar tile (the k projection greedy ran 416 ms), are hand-pinned to a cooperative fold and
+beat eager 2.0-2.7x, while the norm-plus-fp8-quant kernel wins 6.8x. Three targets stay documented gaps rather than
+recorded: the fused decode-tail kernel over-fuses the whole layer into one kernel that hangs at runtime and offers no
+placement cut, and the prefill (seq=512) matmul and fused-attention targets are untuned (they need M-tiled tensor-core
+schedules); the prefill golden therefore covers only the pointwise and norm targets. Eager is the correctness oracle
+here, not a vendor-kernel speed baseline: a single-layer trace cannot reach vLLM's FlashInfer or CUTLASS FP8 kernels,
+which live on the serving path.
+
 The NVFP4, AWQ, and Trellis rows have no tuned latency claim. The block-FP8 rows carry one per-layer eager comparison
 on the RTX 5090 only, not a cross-platform geometric mean. The support check also has no native vendor-kernel
 comparison, BF16 quality study, or instruction-level proof. Report the reference kind saved for each target: runnable frontend targets compare against

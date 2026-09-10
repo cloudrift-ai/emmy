@@ -1,11 +1,8 @@
 """Configuration checks for the 2026 compiler-submission experiments."""
 
-import shutil
 import subprocess
 import sys
 from pathlib import Path
-
-import pytest
 
 from emmy.benchmark.command_workload import build_substitution_map, render_command
 from emmy.benchmark.tasks import enumerate_tasks
