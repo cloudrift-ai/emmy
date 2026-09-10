@@ -7,7 +7,7 @@ from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import Match, Pattern
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op
-from emmy.compiler.pipeline.passes.lowering.tile._row import ROW_AXIS, row_bound_body, row_candidates, rowless
+from emmy.compiler.pipeline.passes.lowering.tile._row import ROW_AXIS, binds_the_row, row_bound_body, row_candidates
 
 PATTERN = [Pattern("root", LoopOp)]
 
@@ -23,7 +23,7 @@ def rewrite(match: Match, root: Node, ctx=None) -> TileOp:
     # choice it had and gains the fragment ones beside them.
     for position in row_candidates(loop, tile):
         bound = lift_loop_op(loop, name=loop.name, body=row_bound_body(loop, position, ROW_AXIS))
-        if not rowless(bound):
+        if binds_the_row(bound, ROW_AXIS):
             tile = bound
             break
     return replace(tile, outputs={root.output.name: root.output})

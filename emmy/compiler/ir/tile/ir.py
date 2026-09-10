@@ -35,9 +35,10 @@ from functools import cached_property
 
 from frozendict import frozendict
 
+from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import Op
-from emmy.compiler.ir.expr import Interval, SimplifyCtx
+from emmy.compiler.ir.expr import BinaryExpr, Interval, Literal, SimplifyCtx, Var
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule import Placement, WarpSpec
 from emmy.compiler.ir.schedule.base import Schedule
@@ -153,6 +154,37 @@ def _shares_prefix(later, path: tuple, length: int) -> bool:
     return any(spec.sweep[:length] == path[:length] for spec in later)
 
 
+def _dense_axis_suffix(index: tuple, name: str) -> bool:
+    """Whether ``index`` is one dense coordinate, directly or split by a row-major reshape."""
+    if not index:
+        return False
+    stride = 1
+    for position in reversed(range(len(index))):
+        expr = index[position]
+        dim = None
+        if position:
+            if not (
+                isinstance(expr, BinaryExpr)
+                and expr.op == "%"
+                and isinstance(expr.right, Literal)
+                and isinstance(expr.right.value, int)
+                and expr.right.value > 0
+            ):
+                return False
+            expr, dim = expr.left, expr.right.value
+        if stride != 1:
+            if not (
+                isinstance(expr, BinaryExpr) and expr.op in ("/", "//") and isinstance(expr.right, Literal) and expr.right.value == stride
+            ):
+                return False
+            expr = expr.left
+        if expr != Var(name):
+            return False
+        if dim is not None:
+            stride *= dim
+    return True
+
+
 def promoted_sweep(op, output_specs: tuple[OutputSpec, ...]) -> set[str]:
     """The output-sweep axes ``op``'s grid binds instead of sweeping — the kernel's grid RANK above
     its free axes, and the reason a contraction site can name an ``(m, n)`` pair at all.
@@ -173,6 +205,29 @@ def promoted_sweep(op, output_specs: tuple[OutputSpec, ...]) -> set[str]:
         return set()
     contractions = tuple(site.node for site in sites(op) if site.node.as_contraction() is not None)
     return {name for name in shared if any(any(name in edge.free_axes for edge in con.operands) for con in contractions)}
+
+
+def _implicit_unit_row(specs: tuple[OutputSpec, ...], free: tuple[Axis, ...]) -> Axis | None:
+    """Recover an elided matrix row when every boundary write proves ``[0..., n]``.
+
+    The column axis may already be free or may still be the one shared output sweep that
+    contraction canonicalization will promote. The unit coordinates must be a non-empty leading
+    zero prefix, followed by the dense column coordinate directly or through a row-major reshape.
+    """
+    if not specs:
+        return None
+    if len(free) == 1 and all(not spec.sweep for spec in specs):
+        n_name = free[0].name
+    elif not free and all(len(spec.sweep) == 1 for spec in specs) and len({spec.sweep[0].name for spec in specs}) == 1:
+        n_name = specs[0].sweep[0].name
+    else:
+        return None
+    for spec in specs:
+        index = spec.write.index
+        split = next((position for position, expr in enumerate(index) if not (isinstance(expr, Literal) and expr.value == 0)), len(index))
+        if split == 0 or not _dense_axis_suffix(index[split:], n_name):
+            return None
+    return Axis("_um", Dim(1))
 
 
 def _sweep_specs(loop: Loop, outer: tuple) -> tuple[list, list[OutputSpec]] | None:
@@ -315,6 +370,14 @@ class TileOp(Op):
     def __post_init__(self) -> None:
         Op.__post_init__(self)
         normalized = normalize_fold_tree(self.op, self.output_specs)
+        # A row the lift could not BIND — a bare vector A has no unit dimension to bind one into —
+        # is still provable from the stores, and the placement needs one to carry a fragment
+        # geometry (:func:`_implicit_unit_row`). Binding and announcing answer different questions:
+        # the bound row gives a contraction its missing LEFT axis, this one gives a term with no row
+        # at all a geometry, and a matvec against a 1-D operand can only be served by the latter.
+        unit_row = _implicit_unit_row(self.output_specs, self.place.free)
+        if unit_row is not None and any(site.node.as_contraction() is not None for site in sites(normalized)):
+            object.__setattr__(self, "place", replace(self.place, free=(unit_row, *self.place.free)))
         if self.schedule is not None and normalized != self.op:
             raise ValueError("cannot canonicalize a TileOp after a schedule has been attached")
         object.__setattr__(self, "op", normalized)

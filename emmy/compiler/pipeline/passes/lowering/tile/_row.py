@@ -75,6 +75,26 @@ def row_bound_body(op: LoopOp, position: int, name: str) -> Body:
     return Body((Loop(axis=axis, body=_bind(Body.coerce(op.body), axis, position, shapes)),))
 
 
+def binds_the_row(tile: TileOp, name: str) -> bool:
+    """Whether ``name`` is the OWN free axis of some contraction — the row it was missing.
+
+    Stated of the named axis rather than of the tile, because a contraction reorients: asking only
+    whether some term now has a left axis accepts a binding that gave it to the other side, and a
+    row an operand does not read is exactly the shape this module exists to stop producing.
+    """
+    return any((view := node.as_contraction()) is not None and name in view.left_axes for node in tile.views)
+
+
 def row_candidates(op: LoopOp, tile: TileOp) -> tuple[int, ...]:
-    """The output positions worth binding: none unless a contraction is missing its row."""
+    """The output positions worth binding: none unless a contraction is missing its row ENTIRELY.
+
+    A placement that already carries an extent-one free axis has been served by
+    ``_implicit_unit_row``, which proves the row from the stores and announces it without binding.
+    That is the weaker statement, but it is the only one available where there is nothing to bind
+    into — a matvec whose A is a bare vector — and rebinding those terms costs them the schedule
+    they had: the reshaped-output matvec loses its TMA store descriptor and falls off the mma tier.
+    So the two readings divide by what the term can support, and this one yields.
+    """
+    if any(axis.extent.is_static and axis.extent.as_static() == 1 for axis in tile.place.free):
+        return ()
     return _unit_positions(op) if rowless(tile) else ()
