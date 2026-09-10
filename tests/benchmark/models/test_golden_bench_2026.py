@@ -503,7 +503,7 @@ def test_every_command_variant_renders(project_root) -> None:
             assert "/task" in command
             subprocess.run(["bash", "-n"], input=command, text=True, check=True)
             rendered += 1
-    assert rendered == 84  # FIXME-rebase: recompute
+    assert rendered == 86
 
 
 def test_gemma_serving_ab_has_four_points_per_lane(project_root) -> None:
