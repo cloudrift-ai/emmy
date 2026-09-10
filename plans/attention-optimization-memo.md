@@ -8,7 +8,14 @@ effort. Done and dropped: the per-chunk swizzle address math (hoisted per lane),
 chunk now folds at the advanced pivot), and the 64-way split offer; a descending causal launch order measured 0-2%
 and was not carried; fast math measured 1% on the A100 prefill row.
 
-## 1. Plain decode (one query row per head): keep the unit query axis as the fragment's M
+## 1. Global prefill on the A100: retune the goldens per length
+
+The global family's goldens (256-16384 keys) pin `f1x16/k4` + `f1x8/k4` with the key unstaged; the causal row's
+geometry (`f1x16/k8` + `f1x16/k4`, both `d1/smem-async`) measured 497.7 us against 555.5 at 2048 keys (eager 455)
+but 50.4 against 44.8 at 512, so the retune is per length, not one pin. The family is the one still behind
+FlashAttention-2 (1.07-1.28x of eager) after the 2026-09-10 lane; causal and GQA prefill are at parity.
+
+## 2. Plain decode (one query row per head): keep the unit query axis as the fragment's M
 
 `decode_causal` forms the twisted carrier and even takes the split, but the placement drops the extent-1 query axis
 (`_workspace_axes` and the placement's free set), leaving (head, head width) as the free pair. The fragment's M would
@@ -17,7 +24,7 @@ be the head axis, whose keys differ per row, so no tensor-core atom binds and th
 FlashAttention-2's decode does) lets the chunk tier bind, and the same key-range split then applies. Touch points:
 the placement's free-axis rule for unit extents and `_node_refusal`'s "no output-axis pair" reading.
 
-## 2. Split-KV housekeeping
+## 3. Split-KV housekeeping
 
 - `WORK` left unpinned picks `w8x1+p1` for the partial and the producer warp double-arrives on the TMA barrier: its
   `_gid` folds onto warp 0 (`threadIdx.x % block_threads`). No golden uses `+p1`; fix its elected-thread condition
@@ -29,7 +36,7 @@ the placement's free-axis rule for unit extents and `_node_refusal`'s "no output
   the partials only pays when cells are few, so this is fine for decode; revisit if a split lands on a small-output
   reduce.
 
-## 3. Prefill one-wave shapes (the article's Gemma shape)
+## 4. Prefill one-wave shapes (the article's Gemma shape)
 
 Tried on 2026-09-10 (RTX 5090, `REDUCE@map.1/twist=g2k` and `g4k` on (1, 16, 512, 256) causal): the split rows
 return WRONG answers (relative error 1.1 against the fused row), and the serial finalize alone costs as much as the
