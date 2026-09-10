@@ -16,7 +16,7 @@ Acceptance, measured on one H100 SXM with the CLI (`emmy run --bench`, `--golden
 
 | kernel | shape | target |
 | --- | --- | --- |
-| bf16 GEMM, fp32 accumulate | 4096 × 4096 × 4096 | ≥ 0.9× cuBLAS latency (cuBLAS reaches 70-80% of the 989 TFLOPS peak) |
+| bf16 GEMM, fp32 accumulate | 4096 × 4096 × 4096 | ≥ 0.9× cuBLAS latency (cuBLAS reaches 70-80% of the 989 TFLOPS peak). Measured 2026-09-10 at 2048³ f16, K-contiguous weight, strict: n256 `w8x1 f1x32/k4 d3/smem-tma` 34.0 µs vs cuBLAS 24.6 (0.73×); the best mma.sync row 69.3 |
 | causal prefill attention, hd 128 | batch 1, 32 heads, 2048 keys | ≤ 0.7× eager FA-2 latency (about 1.4× faster) |
 
 Beyond that is FA-3's overlap of softmax with the two GEMMs, which is a separate scheduling change (see "Out of scope").
