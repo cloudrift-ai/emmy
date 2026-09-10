@@ -2,6 +2,8 @@
 Pure CPU: the CUDA-touching measurement helpers are stubbed."""
 
 import logging
+import sys
+import types
 
 import pytest
 
@@ -78,7 +80,7 @@ def test_audit_counts_weight_inputs(monkeypatch, caplog):
     only the constant side would give it a zero floor and audit nothing."""
     monkeypatch.setattr(roofline, "measure_copy_bw", lambda: 1000 * GB)
     monkeypatch.setattr(roofline, "measure_matmul_flops", lambda: 210e12)
-    monkeypatch.setattr(roofline, "time_program_us", lambda program: 50_000.0)  # 500x its 100 µs floor
+    monkeypatch.setattr(roofline, "time_program_us", lambda program, **kw: 50_000.0)  # 500x its 100 µs floor
     with caplog.at_level(logging.WARNING, logger="emmy.serving.roofline"):
         audit_boot_programs([("moe.expert.one", _Prog(0, input_weight_bytes=100_000_000), 1)])
     assert len(caplog.records) == 1
@@ -89,7 +91,7 @@ def test_audit_warns_on_outlier_and_stays_quiet_on_healthy(monkeypatch, caplog):
     monkeypatch.setattr(roofline, "measure_copy_bw", lambda: 1000 * GB)
     monkeypatch.setattr(roofline, "measure_matmul_flops", lambda: 210e12)
     times = iter([50_000.0, 150.0])  # slow program then healthy program, both floor 100 µs
-    monkeypatch.setattr(roofline, "time_program_us", lambda program: next(times))
+    monkeypatch.setattr(roofline, "time_program_us", lambda program, **kw: next(times))
     with caplog.at_level(logging.WARNING, logger="emmy.serving.roofline"):
         audit_boot_programs([("L0.post.decode.m8", _Prog(100_000_000), 8), ("L0.pre.decode.m8", _Prog(100_000_000), 8)])
     assert len(caplog.records) == 1
@@ -103,7 +105,7 @@ def test_audit_compute_bound_chunk_twin_is_silent(monkeypatch, caplog):
     monkeypatch.setattr(roofline, "measure_copy_bw", lambda: 1000 * GB)
     monkeypatch.setattr(roofline, "measure_matmul_flops", lambda: 210e12)
     times = iter([1_620.0, 4_500.0])  # chunk.m4096 then the mispicked decode.m1
-    monkeypatch.setattr(roofline, "time_program_us", lambda program: next(times))
+    monkeypatch.setattr(roofline, "time_program_us", lambda program, **kw: next(times))
     with caplog.at_level(logging.WARNING, logger="emmy.serving.roofline"):
         audit_boot_programs([("L0.post.chunk.m4096", _Prog(68_000_000), 4096), ("L0.post.decode.m1", _Prog(46_000_000), 1)])
     assert len(caplog.records) == 1
@@ -114,7 +116,7 @@ def test_audit_degrades_to_weight_floor_without_matmul_calibration(monkeypatch, 
     """A failed compute-throughput calibration must not kill the audit — the weight floor still warns."""
     monkeypatch.setattr(roofline, "measure_copy_bw", lambda: 1000 * GB)
     monkeypatch.setattr(roofline, "measure_matmul_flops", lambda: (_ for _ in ()).throw(RuntimeError("no cublas")))
-    monkeypatch.setattr(roofline, "time_program_us", lambda program: 50_000.0)
+    monkeypatch.setattr(roofline, "time_program_us", lambda program, **kw: 50_000.0)
     with caplog.at_level(logging.WARNING, logger="emmy.serving.roofline"):
         audit_boot_programs([("L0.post.decode.m8", _Prog(100_000_000), 8)])
     assert len(caplog.records) == 1
@@ -139,3 +141,53 @@ def test_audit_never_raises(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING, logger="emmy.serving.roofline"):
         audit_boot_programs([("L0.pre.decode.m8", _Prog(100_000_000), 8)])
     assert not caplog.records  # swallowed to debug level — a boot warning is never a boot blocker
+
+
+class _FakeEvent:
+    def record(self):
+        pass
+
+    def synchronize(self):
+        pass
+
+
+def _fake_cupy(elapsed_ms):
+    """A cupy stand-in whose event timer yields these millisecond readings, one per call."""
+    readings = iter(elapsed_ms)
+    cuda = types.SimpleNamespace(Event=_FakeEvent, get_elapsed_time=lambda a, b: next(readings))
+    return types.SimpleNamespace(cuda=cuda)
+
+
+def test_time_program_us_stops_after_a_warmup_that_blows_the_budget(monkeypatch):
+    """The mispick this audit exists to report is also the most expensive thing to measure. Once
+    the warmup alone is past the budget the verdict is settled, so the timed runs are skipped —
+    the V100 incident ran one such program four times and held the boot for six hours."""
+    monkeypatch.setitem(sys.modules, "cupy", _fake_cupy([2.0]))
+    runs = []
+    program = types.SimpleNamespace(run_once=lambda: runs.append(1))
+    assert roofline.time_program_us(program, budget_us=1000.0) == pytest.approx(2000.0)
+    assert len(runs) == 1, "a program past its budget is run once, not four times"
+
+
+def test_time_program_us_medians_the_timed_runs_inside_the_budget(monkeypatch):
+    monkeypatch.setitem(sys.modules, "cupy", _fake_cupy([0.1, 0.3, 0.2, 0.4]))
+    runs = []
+    program = types.SimpleNamespace(run_once=lambda: runs.append(1))
+    assert roofline.time_program_us(program, budget_us=1000.0) == pytest.approx(300.0)
+    assert len(runs) == 4, "warmup plus three timed runs"
+
+
+def test_audit_bounds_each_measurement_by_the_warn_threshold(monkeypatch):
+    """The audit derives the floor BEFORE measuring and hands it down: nothing is worth timing
+    past the ratio that would warn anyway."""
+    monkeypatch.setattr(roofline, "measure_copy_bw", lambda: 1000 * GB)
+    monkeypatch.setattr(roofline, "measure_matmul_flops", lambda: 210e12)
+    seen = {}
+
+    def _timer(program, *, budget_us=None):
+        seen["budget_us"] = budget_us
+        return 150.0
+
+    monkeypatch.setattr(roofline, "time_program_us", _timer)
+    audit_boot_programs([("L0.post.decode.m8", _Prog(100_000_000), 8)])
+    assert seen["budget_us"] == pytest.approx(roofline.WARN_RATIO * 100.0)
