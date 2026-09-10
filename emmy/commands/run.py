@@ -291,6 +291,12 @@ def _handle_run_once(args):
     # Model ID or --code: trace to a frontend graph + keep the runnable module
     # (+ example inputs) so accuracy / --bench compare against real torch.
     graph, _base_name, bundle = load_or_trace(args)
+
+    # Resolve the dump before placing a synthesized checkpoint inside it.
+    # ``CompilerDump.__post_init__`` deliberately clears a stale dump directory;
+    # constructing it after ``_quantize_traced`` therefore deleted the checkpoint
+    # that the isolated bench worker needs to bind packed weights and scales.
+    dump = CompilerDump.resolve(args.dump_dir)
     quantized_checkpoint = None
     if getattr(args, "quantize", None):
         from emmy.commands.compile import _quantize_traced  # noqa: PLC0415
@@ -298,7 +304,6 @@ def _handle_run_once(args):
         quantized_checkpoint = _quantize_traced(graph, bundle, args)
     module, example_args, example_kwargs = bundle
 
-    dump = CompilerDump.resolve(args.dump_dir)
     if dump:
         dump.dump_input_graph(graph)
 
@@ -415,7 +420,9 @@ def _handle_run_once(args):
                 if greedy_fail:
                     logger.error("%s — greedy row marked bench_fail; pinned rows still bench in the worker", greedy_fail)
                 greedy_iso = await _bench_greedy_isolated(backend, compiled, warmup=args.warmup, iters=args.iters)
-                golden_benches = await _bench_golden_variants(backend, args.code, pinned, warmup=args.warmup, iters=args.iters, ref=ab_ref)
+                golden_benches = await _bench_golden_variants(
+                    backend, args.code, pinned, warmup=args.warmup, iters=args.iters, ref=ab_ref, quantize=args.quantize
+                )
         finally:
             await backend.aclose_async_worker()
         return (
@@ -1070,6 +1077,7 @@ async def _bench_golden_variants(
     ref=None,
     strict_correctness=False,
     strict_reference="eager",
+    quantize=None,
 ):
     """Compile + bench each recorded golden config with its knobs pinned — one
     ``_GoldenBench`` per config so :func:`_print_kernel_stats` can show each as a measured
@@ -1126,7 +1134,18 @@ async def _bench_golden_variants(
             with pinned_knobs(replay_knobs):
                 # Fresh graph; lowering mutates it and bakes the pins into the kernel.
                 if isinstance(source, str):
-                    graph, _, _ = graph_from_code(source, dynamic_shapes=dynamic_shapes)
+                    graph, _, bundle = graph_from_code(source, dynamic_shapes=dynamic_shapes)
+                    if quantize:
+                        # ``--ab`` must re-lower the same quantized program as the primary
+                        # compile. The old path re-traced only the unquantized module, so its
+                        # rows silently benchmarked ordinary float linear kernels under NVFP4
+                        # knob names. Keep the temporary checkpoint private to this variant;
+                        # pinned timing has no eager correctness reference for quantized code.
+                        import tempfile
+
+                        from emmy.compiler.loader.synthesize import quantize_and_spell
+
+                        quantize_and_spell(graph, bundle, tempfile.mkdtemp(prefix="emmy-ab-"), scheme=quantize)
                 else:
                     graph = source.copy()
                 g_compiled = backend.compile(graph)

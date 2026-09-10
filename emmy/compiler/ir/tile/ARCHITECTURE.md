@@ -111,23 +111,43 @@ construction. Copies that differ in captured axis names cannot share an object a
 that differ in exposed result names stay distinct because unifying them would rename their consumers.
 
 The kernel's SHARED output sweep — an axis on every store's sweep path — is promoted into the Tile's free-axis
-placement when any nested contraction operand reads it: the coordinate is that contraction's output coordinate, and
-promoting an axis every store rides replicates nothing but the statistics evaluated ahead of the sweep. A sibling
-output nest's axis is never promoted, however many contractions read it: the other nests do not ride it, so promoting
-it would evaluate them once per cell — DeepSeek-V4 post4096's residual root holds four sibling nests, and promoting
-all seven of their axes made its grid their product, 2^56 cells, which no launch can cover. A contraction under a
-sibling nest stays under its sweep loop, where `Fold.lower` places it like any term reading the axis, and the
+placement on either of two grounds, and both answer one question: what would the grid replicate. A nested contraction
+operand reading the axis is the first — the coordinate is that contraction's output coordinate, so the tiles do that
+work per cell whatever the placement says, and a statistic evaluated ahead of the sweep beside them is cheap against
+it. Every reduce in the term reading the axis is the second: each cell folds its own, so binding the axis replicates
+none of them. A term with NO reduce satisfies that second ground vacuously, and then it promotes only where the
+placement has no free axis at all — a kernel with no free axis launches one block whatever it does, so its shared
+sweep is the only axis the launch could spread over. Where the placement already has an axis, a bare elementwise sweep
+stays a sweep: the kernel materializer distributes exactly that across a worker inventory, and binding it here would
+decide for the schedule that measured the alternative (`cases/reduce/rms-norm-cut-sweep-work.yaml`, 885.9 us walked in
+one thread against 4.2 us split across 512). The complement is what the reduce clause protects: a reduce that does NOT
+read the axis is the row's statistic, evaluated once for the whole sweep, and binding the sweep would recompute it per
+output element, which is why softmax's maximum and rms-norm's sum of squares keep their loops.
+
+A sibling output nest's axis is never promoted, however many contractions read it: the other nests do not ride it, so
+promoting it would evaluate them once per cell — DeepSeek-V4 post4096's residual root holds four sibling nests, and
+promoting all seven of their axes made its grid their product, 2^56 cells, which no launch can cover. A contraction
+under a sibling nest stays under its sweep loop, where `Fold.lower` places it like any term reading the axis, and the
 placement fork cuts it out at its own free coordinates. Promotion expands the enclosing-axis context, so construction
 normalizes the Fold tree once more under that final scope; one construction and a reconstruction therefore expose the
-same closed operand edges and placement seams. The invariant also applies when a schedule row constructs or reloads
-an already-mapped Tile: promotion extends the grid in lockstep with the free axes, so per-cell replication never
-mistakes the swept coordinate for an SSA name.
+same closed operand edges and placement seams. The invariant also applies when a schedule row constructs or reloads an
+already-mapped Tile: promotion extends the grid in lockstep with the free axes, so per-cell replication never mistakes
+the swept coordinate for an SSA name.
 
-That rule is `promoted_sweep`, and it has two readers. Construction applies it. The placement fork asks it of a
+That rule is `promoted_sweep`, and it has three readers. Construction applies it. The placement fork asks it of a
 CANDIDATE piece: where a kernel's stores ride axes with no axis in common, nothing promotes and the whole kernel keeps
 its one-axis grid, yet each store taken alone may promote its own — the NVFP4 encode, whose packed codes ride the
-feature axis and whose block scales ride one sixteenth of it. That is the question the output-owning cut is offered
-on (`lowering/tile/_cut.py`). Stating the rule once keeps the two answers one rule rather than two copies of it.
+feature axis and whose block scales ride one sixteenth of it. That is the question the output-owning cut is offered on
+(`lowering/tile/_cut.py`). And the full-projection cut reads the refusal from the other side: a reduce this rule will
+not bind past is one that cut hands its own kernel, after which the piece reads a single stored value and its sweep
+binds. Stating the rule once keeps all three answers one rule rather than copies of it.
+
+Root ownership is asked twice, in two shapes, and the answers differ. `refused_roots` names the contraction roots the
+binder will not bind together, and the schedule projection refuses a prefix that output-tiles a second of them.
+`owns_outputs_it_cannot_bind` asks what the full-projection cut is offered on: every output has one producing branch,
+and some branch is not about a single reduce — it reads several, or none. Both are needed. A projection whose outputs
+do not partition at all still refuses roots, and a projection the binder found one root in refuses none here yet is
+exactly what that cut takes apart. Neither reader changes the binder's own rule.
 
 **Storage-decode factors hoist to the epilogue.** A product argument whose cone is a STORAGE DECODE
 (`ElementwiseImpl.decodes` — the trait, never an op-name list) times factors constant along the fold
