@@ -11,7 +11,7 @@ retuned), geometric means over 256-32768 keys, lower favors Emmy:
 | prefill GQA | 1.03x | 0.88x (7/8) | 1.44x / 1.23x |
 | prefill global | 1.17x | 0.94x (6/8) | 1.54x / 1.23x |
 | decode GQA | 0.04x | 0.81x (8/8) | 0.05x / 0.93x |
-| decode causal (2048 keys only, re-recorded) | 1.66x | 1.75x | was 3.09x / 3.26x |
+| decode causal (256-2048 re-recorded; see the eager-reference caveat) | 1.29x | 0.94x | was 3.09x / 3.26x |
 
 RTX 5090: the cp.async causal row at 32 heads / 2048 keys / hd 128 runs 1.13x faster than eager (242 vs 274 us), at
 16 heads 1.28x; the article's one-wave shape (16 heads, 512 keys, hd 256, causal) is 0.92x of eager (38 vs 35 us).
@@ -91,8 +91,10 @@ fragment load per K step, cheap at `k2`), and the exp folding above, which shrin
 
 The lift now binds the elided query coordinate back as an extent-one axis whenever a contraction owns no row
 (`lowering/tile/_row.py`), which subsumed and replaced `_implicit_unit_row`. Decode then traces to ONE fused
-chunk-tier kernel instead of two per-cell ones. A100 40GB, 2048 keys, 32 heads, hd 128: **141 us -> 57.2 us**, or
-3.09x of eager down to 1.66x. Neptune is 0.95x of eager, so the family is no longer lost badly but is not yet won.
+chunk-tier kernel instead of two per-cell ones. A100 40GB, 2048 keys, 32 heads, hd 128: **141 us -> 42.6 us** with the
+key-range split below. Re-recorded lengths, against the archived Neptune column: 256 keys 9 us (Neptune 15.2),
+512 keys 16 (19.0), 1024 keys 29 (27.5), 2048 keys 42.6 (45.5). Short lengths win outright; read the eager caveat
+below before calling the family.
 
 The reading that mattered was not `_inner_free` or `_node_refusal` — neither is reached. It is `TileOp.contracts`:
 with the query coordinate gone, the term's only shared axis is the HEAD, `left_axes` is empty, and a B that moves
@@ -100,13 +102,18 @@ with its row is no slab per tile, so the catalog never offers a fragment.
 
 What the measurement says to do next, in order:
 
-- **Registers, then occupancy.** The recorded row runs at 254 registers (255 is the spill wall) and 12% occupancy,
-  grid 64 on 108 SMs. That is the whole remaining gap to Neptune: the kernel is not memory-bound yet (33.5 MB at
-  2048 keys is a 21.5 us roofline; we are at 57). Item 2's exp folding is the register lever and should be done
-  before any more geometry sweeping.
-- **Fill the grid.** `PLACE=fuse` forbids the key-range split, and 64 CTAs cannot fill the card. The unpinned split
-  measured about the same (58 us) but under a different geometry; a split walked along the matched diagonal below
-  has not been tried.
+- **Registers.** The split row runs at 128 registers and 25% occupancy — the fused row's 254 registers against the
+  255 spill wall is gone. Still not memory-bound: 33.5 MB at 2048 keys is a 21.5 us roofline against 42.6 measured.
+  Item 2's exp folding is the remaining register lever.
+- **Settle the eager reference before claiming the family.** This box measures eager at 31-33 us on the 2048-key
+  decode where the archived lane measured 48.1. So 42.6 us beats Neptune's recorded 45.5 on raw microseconds and
+  loses to it on the eager-normalized ratio (1.4x against 0.95x). Re-run Neptune on the same box before either
+  number goes in a paper.
+- **The key-range split is the biggest single lever, and its width is a cliff.** At 2048 keys on the matched
+  diagonal: unsplit 57 us, `g4k` 192, **`g8k` 44**, `g16k` 52. The recorded set is a 1024-block partial at 40.7 us
+  plus a 1.9 us finalize. Sweep the width per length — the fused row leaves 64 CTAs on a 108-SM card, and the loss
+  to Neptune grew with sequence length exactly as an unfillable grid predicts. An earlier reading that the split
+  hurt was taken off `g4k` rows carried on an OFF-diagonal geometry, and was wrong on both counts.
 - **The geometry is a matched diagonal, not a cross.** The score tile's column count must equal the carrier's chunk
   width (`16 * k`). Off it — 64/128 or 128/64 — the same kernel measures about 9300 us, 160x worse. Any sweep that
   crosses `TILE@map.1/twist` against `TILE@map.1/twist.1/inner` freely wastes most of its rows.
