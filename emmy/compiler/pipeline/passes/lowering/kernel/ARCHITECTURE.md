@@ -249,7 +249,15 @@ structurally different primitives — sit behind one `fill`/`commit`/`wait` seam
 **one atom-agnostic driver** (`_atom._staged`) builds the operand pair + the transport for either atom; the atom
 supplies only the slab drain leaf via `_AtomOps.staged_drain` (the shared inner fragment drain
 `_staged_inner_atom_loop` — `ldmatrix` on modern atoms, paired wide loads or a cooperative gather on Volta — or the
-scalar `_scalar_drain`). A fill's σ binds **every** tiled output axis, not just the operand's own: the tile
+scalar `_scalar_drain`, or the warp-group drain `_wgmma_drain` on a `wgmma` atom: no operand fragments, one
+matrix descriptor per operand and k16 step, one `WgmmaMma` per group of N/8 accumulator cells, the chunk closed
+by a commit and a wait so the ring slot may be released; the four warps of a group emit the same descriptors,
+addressing the slot's 64-row block `64·(warp/4)`, and the hardware hands warp `i` rows `16i..16i+15` of it, which
+is the m16n8 row the epilogue expects at `f1`. The descriptor geometry follows the slab: a K-major slab (A, or a
+transposed B) has one 128-byte swizzle row per tile row, so core groups are `8·bk·2` bytes apart; an N-contiguous
+B is MN-major (`trans_b`), its core groups eight K rows apart and adjacent 64-column atoms 128 bytes apart, and
+wider than one atom it must arrive by TMA, whose swizzle is a function of the address, not of the row index the
+cp.async software swizzle reads). A fill's σ binds **every** tiled output axis, not just the operand's own: the tile
 axis at `tile_base + cell` (masked axes clamp in-bounds) and the SIBLING axis at its block base — a slab is
 CTA-shared across the sibling, so a sibling var can only survive as a value-dead occurrence: a flat-index reshape
 residue on a merged / reshaped weight row, or, in a packed weight's block-scale fill, a per-tensor scale a placement

@@ -1,7 +1,10 @@
 # Hopper: the warp-group MMA (`wgmma`) tier for GEMM and attention
 
-Status: proposed, 2026-09-10. Nothing below has run on an H100; the repo holds no sm_90 golden, no sm_90 freeze row
-and no sm_90 realization case. The paper draft claims Hopper measurements. This plan is what backs that claim.
+Status: stages 1-3 landed 2026-09-10 (PR #775): the six atoms, the legality rules, the five kernel-IR statements with
+the generated PTX prelude, the warp-group drain, and the corpus case `matmul/f16-wgmma-ss-tma-sm90.yaml`, which
+passes offered, realized, built and correct on the rented H100. Stage 0 became the golden-bench H100 lane in the
+same PR (the mma.sync tier's numbers). Stage 4 (attention: Q staged once, P in registers) and stage 5 (H100
+hardware golden, freeze rows, the paper) are open.
 
 ## Goal
 
