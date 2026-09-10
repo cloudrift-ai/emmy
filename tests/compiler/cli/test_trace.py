@@ -206,11 +206,7 @@ def test_trace_quantize_spells_before_writing_inventory(monkeypatch, tmp_path) -
     monkeypatch.setattr(quant_loader, "checkpoint_quant_digest", lambda path: "0123456789abcdef")
 
     output = tmp_path / "trace.yaml"
-    handle_trace(
-        _parser().parse_args(
-            ["trace", "--code", "unused", "--quantize", "nvfp4", "--target", "sm_89", "-o", str(output)]
-        )
-    )
+    handle_trace(_parser().parse_args(["trace", "--code", "unused", "--quantize", "nvfp4", "--target", "sm_89", "-o", str(output)]))
 
     assert seen == {"architecture_only": False, "quantize": (graph, bundle)}
     assert load_golden_file(output)["model_quant_digest"] == "0123456789abcdef"

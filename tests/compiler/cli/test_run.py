@@ -417,9 +417,7 @@ def test_bench_golden_variants_quantizes_each_retraced_ab(monkeypatch):
     backend = SimpleNamespace(compile=lambda graph: compiled, bench_pinned_async=bench)
     sample = SimpleNamespace(name="ab", knobs={"TILE": "nvfp4"}, pins={}, shape=None, dynamic=None, flops=None)
 
-    rows = asyncio.run(
-        _bench_golden_variants(backend, "torch linear", [sample], warmup=1, iters=2, quantize="nvfp4")
-    )
+    rows = asyncio.run(_bench_golden_variants(backend, "torch linear", [sample], warmup=1, iters=2, quantize="nvfp4"))
 
     assert len(rows) == 1 and rows[0].status == "ok"
     assert len(calls) == 1
