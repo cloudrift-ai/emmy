@@ -374,3 +374,51 @@ def test_multi_pass_cell_defines_every_name_before_it_is_read() -> None:
 
     for tile in tiles:
         check(list(tile.op.lower(_grid(tile), tile.output_specs, tile.axes)), {axis.name for axis in tile.place.free})
+
+
+def _tile_with_shapes(body: Body, out_shape: tuple, inputs: dict) -> object:
+    """Lift ``body`` with REAL operand and output shapes, which the size-one row reading needs."""
+    graph = Graph()
+    for name, shape in inputs.items():
+        graph.add_node(InputOp(), [], Tensor(name, shape), node_id=name)
+    graph.add_node(LoopOp(body=body), list(inputs), Tensor("out", out_shape), node_id="out")
+    graph.outputs = ["out"]
+    return Pipeline.build(["lowering/tile"], select=["lift"]).run(graph).nodes["out"].op
+
+
+def _vector_matrix_body() -> Body:
+    """``out[0, n] = Σ_k x[0, k] · w[n, k]`` — the shape whose row Loop IR elides at extent one."""
+    n, k = Axis("n", Dim(64)), Axis("k", Dim(128))
+    inner = Body(
+        (
+            Load(name="xv", input="x", index=(Literal(0, "int"), Var("k"))),
+            Load(name="wv", input="w", index=(Var("n"), Var("k"))),
+            Assign(name="prod", op=ElementwiseImpl("multiply"), args=("xv", "wv")),
+            Accum(name="acc", value="prod", op=ElementwiseImpl("add"), axes=("k",)),
+        )
+    )
+    cell = (Loop(axis=k, body=inner), Write(output="out", index=(Literal(0, "int"), Var("n")), value="acc"))
+    return Body((Loop(axis=n, body=Body(cell)),))
+
+
+def test_a_contraction_with_no_row_binds_the_size_one_output_coordinate() -> None:
+    """A term whose A owns no free axis has no row for any tier to tile, and the coordinate that
+    would have been one is the size-one output dimension normalization inlined. The lift binds it
+    back — into the OPERAND's index too, since an announced row an operand never reads leaves
+    ``left_axes`` empty and refuses the fragment tiers just the same."""
+    tile = _tile_with_shapes(_vector_matrix_body(), (1, 64), {"x": (1, 128), "w": (64, 128)})
+    bound = [axis for axis in tile.place.free if axis.extent == Dim(1)]
+    assert len(bound) == 1, f"expected one bound row, got {[axis.name for axis in tile.place.free]}"
+    row = bound[0].name
+    view = tile.op.as_contraction()
+    assert view is not None and view.left_axes == frozenset({row})
+    a_edge = tile.op.operands[0]
+    assert a_edge.as_slab().load.input == "x"
+    assert Var(row) in a_edge.as_slab().load.index, "the row must be READ by A, not merely declared"
+
+
+def test_a_contraction_that_owns_a_row_gains_no_bound_axis() -> None:
+    """The binding fires on a missing row only: a matmul already has one, and adding an extent-one
+    axis there would change every such kernel's identity for nothing."""
+    tile = _tile_with_shapes(_matmul_body(), (32, 64), {"x": (32, 128), "w": (64, 128)})
+    assert [axis.extent for axis in tile.place.free] == [Dim(32), Dim(64)]
