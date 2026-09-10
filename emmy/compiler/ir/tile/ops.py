@@ -189,14 +189,13 @@ class Sched:
         #: position in the tree — so the binding belongs here, on the scheduling structure, and
         #: not at each reader (:meth:`tile_of`).
         self.place = place
-        self._sites = None
         self._site_by_id = None
         self._mn_by_id = {}
 
     def _all_sites(self):
-        if self._sites is None:
-            self._sites = sites(self.root)
-        return self._sites
+        # The tile already walked its term once (``TileOp.sites``); a second walk here would only
+        # rebuild the same records under a different owner.
+        return self.tile.sites
 
     def site_of(self, node):
         """The :class:`~emmy.compiler.ir.tile.path.Site` of ``node`` on this tree — how a consumer

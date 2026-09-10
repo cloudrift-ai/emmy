@@ -440,6 +440,20 @@ class TileOp(Op):
         validate(self.schedule, self, place=self.place, workers=self.workers)
 
     @cached_property
+    def grid_sched(self):
+        """This kernel read on the grid — the view a legality check offers a CANDIDATE plan to.
+
+        Built ONCE per kernel, like :attr:`sites`, and for the same reason: everything it caches is
+        a site fact, and a candidate plan changes tile sizes, never which output axes a slice tiles.
+        The schedule search asks for placed geometry once per frontier extension, so a view built
+        per candidate re-walked the whole term and rebuilt its ``(m, n)`` table every time — on a
+        deep ``post`` kernel that was the search's dominant cost, and the kernel never finished.
+        """
+        from emmy.compiler.ir.tile.ops import Sched  # noqa: PLC0415
+
+        return Sched(self, place=self.place.on_grid())
+
+    @cached_property
     def sites(self) -> tuple[Site, ...]:
         """The ONE walk over this kernel's term, one record per node identity, indexed by node id.
 

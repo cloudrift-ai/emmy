@@ -995,9 +995,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             return None
         if len(set(edges.values())) > 1:
             self._refuse("one contraction currently requires one transport choice across its operands", site)
-        from emmy.compiler.ir.tile.ops import Sched  # noqa: PLC0415
-
-        geometry = Sched(tile_op, place=tile_op.place.on_grid()).placed(fold, node.tile)
+        geometry = tile_op.grid_sched.placed(fold, node.tile)
         if node.tile.is_tiled and not isinstance(geometry, PlacedTile):
             cache[key] = None
             return None
