@@ -977,8 +977,10 @@ def greedy_decide(
     decisions = {} if decisions is None else decisions
     from emmy import config  # noqa: PLC0415
 
-    # One pricing budget per compile attempt, shared into every nested pricing resolve.
-    deadline = time.monotonic() + config.price_budget_s() if deadline is None else deadline
+    # One optional pricing budget per compile attempt, shared into every nested pricing resolve.
+    # Unset by default: pricing runs to completion (deterministic, machine-speed-independent).
+    if deadline is None and (budget := config.price_budget_s()) is not None:
+        deadline = time.monotonic() + budget
     loaded = prior is not _LOAD_PRIOR
     the_prior = prior if loaded else None
     # Lazily-built per-compile measured-evidence index (needs a fork point's ctx for the

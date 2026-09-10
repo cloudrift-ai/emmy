@@ -77,6 +77,11 @@ k_proj 61 us. `coop-t` and `coop/r2` are worse. The committed decode golden reco
 
 ## Compiler fixes already landed on this branch (keep, do not redo)
 
-- `EMMY_PRICE_BUDGET_S` (wall-clock budget on greedy kernel-set pricing, default 120 s) + a shared grid-placed
-  schedule view per kernel: together they make the fused decode-tail COMPILE in bounded time (it was >30 min unbounded).
+- A shared grid-placed schedule view per kernel (always on): the enumeration reused one view instead of rebuilding it
+  per support query, a deterministic speedup that shortens every compile.
+- `EMMY_PRICE_BUDGET_S`: an OPT-IN wall-clock budget on greedy kernel-set pricing, UNSET by default (pricing runs to
+  completion — deterministic, machine-speed-independent, what every test and recipe uses). Set it only to bound a
+  manual compile of the fused decode-tail, whose pricing explodes (>30 min unbounded); past it an arm prices as
+  unpriceable and the fork falls to the ordinary ranking. A default budget was tried and reverted: a wall-clock
+  default makes compilation machine-speed-dependent and timed out CI.
 - Strict-bench accepts an embedded Loop target whose reference is same-input-greedy, not eager.
