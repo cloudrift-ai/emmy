@@ -83,47 +83,70 @@ def test_rules_read_the_tile_and_its_stage(work, tile, stage, message) -> None:
     assert (why is None) if message is None else (message in why), why
 
 
-def _matmul() -> TileOp:
+def test_an_n_contiguous_b_keeps_the_n_tile_one_atom_wide() -> None:
+    """The slab is row-major, so an N-contiguous B is atom-major only at one 64-element atom per K row;
+    a K-contiguous (transposed) B has one atom per N row whatever the tile."""
+    wide = Tile.parse(f"{N128}/f1x16/k4", Work.parse("w8x1"))
+    narrow = Tile.parse("wgmma_m64n64k16_bf16_f32/f1x8/k4", Work.parse("w8x1"))
+    assert "N tile is 64 elements" in _wgmma_refusal(wide, b_trans=False)
+    assert _wgmma_refusal(wide, b_trans=True) is None
+    assert _wgmma_refusal(narrow, b_trans=False) is None
+    assert _wgmma_refusal(wide) is None  # orientation unknown: not this rule's call
+
+
+def _matmul(b_trans: bool = False) -> TileOp:
+    """A bf16 matmul whose B is N-contiguous (``[K, N]``) or, with ``b_trans``, K-contiguous (``[N, K]``,
+    the serving ``F.linear`` weight layout)."""
     m, n, k = Axis("m", M), Axis("n", N), Axis("k", K)
     a = Load(name="a_e", input="a", index=(Var("m"), Var("k")))
-    root = contraction(k, a, (Load(name="b_e", input="b", index=(Var("k"), Var("n"))), "acc"))
+    b_index, b_shape = ((Var("n"), Var("k")), (N, K)) if b_trans else ((Var("k"), Var("n")), (K, N))
+    root = contraction(k, a, (Load(name="b_e", input="b", index=b_index), "acc"))
     return TileOp(
         op=root,
         place=Placement(free=(m, n)),
         axes=(m, n, k),
-        inputs={"a": Tensor("a", (M, K), "bf16"), "b": Tensor("b", (K, N), "bf16")},
+        inputs={"a": Tensor("a", (M, K), "bf16"), "b": Tensor("b", b_shape, "bf16")},
         outputs={"out": Tensor("out", (M, N), "bf16")},
     )
 
 
-def _domains(monkeypatch):
+def _domains(monkeypatch, b_trans: bool = False):
     """The bf16 matmul's sm_90 domains over a catalog cut to three warp grids and one TMA stage."""
     moves = classic.warp_tile_moves
     monkeypatch.setattr(classic, "scalar_tile_moves", lambda: [Tile()])
     monkeypatch.setattr(classic, "warp_tile_moves", lambda atoms: [plan for plan in moves(atoms) if plan.units in ((2, 4), (4, 1), (8, 1))])
     monkeypatch.setattr(classic, "stage_moves", lambda *, warp, ctx=None: [Stage(depth=2, transport="smem-tma")])
-    tile, target = _matmul(), Context.from_target((9, 0))
+    tile, target = _matmul(b_trans), Context.from_target((9, 0))
     return tile, target, project_classic(tile, target)
+
+
+FULL_WGMMA_ROWS = {
+    (64, (1, 8), 4),
+    (64, (1, 16), 4),
+    (64, (1, 32), 4),
+    (128, (1, 16), 4),
+    (128, (1, 32), 4),
+    (256, (1, 32), 4),
+}
 
 
 def test_domain_offers_only_group_aligned_wgmma_rows_and_stages_them(monkeypatch) -> None:
     """The catalog keeps every wgmma row whose grid, fragment grid and K chunk the group allows,
     and the compatibility join lets none of them read a direct stage — while the mma.sync rows
-    beside them still do, so the drop is the rule's, not the stage domain's."""
+    beside them still do, so the drop is the rule's, not the stage domain's. An N-contiguous B
+    keeps only the one-atom-wide N tile; a K-contiguous B keeps the whole family."""
     tile, target, domains = _domains(monkeypatch)
     site = tile.node_sites[0]
 
     rows = tuple(choice.tile for choice in domains.nodes[site] if isinstance(choice, ReductionSchedule) and choice.tile.is_warp)
     wgmma = tuple(plan for plan in rows if plan.atom.is_wgmma)
     assert {plan.units for plan in wgmma} == {(4, 1), (8, 1)}
-    assert {(plan.atom.ptx_shape[1], plan.regs, plan.bk) for plan in wgmma} == {
-        (64, (1, 8), 4),
-        (64, (1, 16), 4),
-        (64, (1, 32), 4),
-        (128, (1, 16), 4),
-        (128, (1, 32), 4),
-        (256, (1, 32), 4),
-    }
+    assert {(plan.atom.ptx_shape[1], plan.regs, plan.bk) for plan in wgmma} == {(64, (1, 8), 4)}
+    tile_t, _, domains_t = _domains(monkeypatch, b_trans=True)
+    rows_t = tuple(
+        choice.tile for choice in domains_t.nodes[tile_t.node_sites[0]] if isinstance(choice, ReductionSchedule) and choice.tile.is_warp
+    )
+    assert {(plan.atom.ptx_shape[1], plan.regs, plan.bk) for plan in rows_t if plan.atom.is_wgmma} == FULL_WGMMA_ROWS
     assert {(2, 4), (4, 1), (8, 1)} <= {plan.units for plan in rows if not plan.atom.is_wgmma}
     assert any(plan.bk == 8 for plan in rows if not plan.atom.is_wgmma)
 
@@ -131,7 +154,7 @@ def test_domain_offers_only_group_aligned_wgmma_rows_and_stages_them(monkeypatch
     picks = tuple(context.extensions())
     staged = {pick.nodes[site].tile.atom.name for pick in picks if all(not choice.stage.is_direct for choice in pick.edges.values())}
     direct = {pick.nodes[site].tile.atom.name for pick in picks if any(choice.stage.is_direct for choice in pick.edges.values())}
-    assert set(WGMMA) & staged == set(_family(atoms_for(BF16, ctx=target)))
+    assert set(WGMMA) & staged == {"wgmma_m64n64k16_bf16_f32"}  # the N-contiguous B admits only the one-atom N tile
     assert not set(WGMMA) & direct and "mma_m16n8k16_bf16_f32" in direct
 
 
@@ -169,7 +192,8 @@ def test_env_pins_reach_the_wgmma_rules_and_a_legal_row_schedules(monkeypatch) -
     with pytest.raises(ValueError, match="w<4k>x1 warp grid"):
         Pipeline.build(TILE_PASSES).run(_graph(128, 256, 256), ctx=Context.from_target((9, 0)))
     monkeypatch.setenv("EMMY_WORK", "w4x1")
+    monkeypatch.setenv("EMMY_TILE", "wgmma_m64n64k16_bf16_f32/f1x8/k4")  # the graph's B is N-contiguous: one atom wide
     out = Pipeline.build(TILE_PASSES).run(_graph(128, 256, 256), ctx=Context.from_target((9, 0)))
     tile_op = next(node.op for node in out.nodes.values() if isinstance(node.op, TileOp))
     (placed,) = tile_op.materialization.tiles.values()
-    assert placed.choice.atom.name == N128 and placed.choice.units == (4, 1)
+    assert placed.choice.atom.name == "wgmma_m64n64k16_bf16_f32" and placed.choice.units == (4, 1)

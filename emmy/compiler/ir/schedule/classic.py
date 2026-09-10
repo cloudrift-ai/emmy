@@ -246,10 +246,11 @@ def _kstep_refusal(k_axis, plan: Tile) -> str | None:
     return None if extent % step == 0 else f"warp TILE K-step {step} does not divide the static contraction K={extent}"
 
 
-def _wgmma_refusal(plan: Tile, stage: Stage | None = None) -> str | None:
+def _wgmma_refusal(plan: Tile, stage: Stage | None = None, b_trans: bool | None = None) -> str | None:
     """Why a warp-group cell cannot run under ``plan`` — and under ``stage``, once the operand
-    transport is known — or ``None``. The ONE statement of the wgmma legality rules: the catalog
-    filter and the compatibility join drop a row through it, the pin path raises its message."""
+    transport is known, and under the B orientation ``b_trans``, once the node is known — or
+    ``None``. The ONE statement of the wgmma legality rules: the catalog filter and the
+    compatibility join drop a row through it, the pin path raises its message."""
     if not (plan.is_warp and plan.atom.is_wgmma):
         return None
     atom = plan.atom
@@ -259,6 +260,14 @@ def _wgmma_refusal(plan: Tile, stage: Stage | None = None) -> str | None:
         return "wgmma issues whole m64nN instructions: the fragment grid must be f1x<C> with C a multiple of N/8"
     if atom.atom_k * plan.bk * atom.operand_dtype("a").nbytes != 128:
         return "wgmma reads one 128-byte swizzle row per descriptor: the K chunk must be 64 elements (k4)"
+    if b_trans is False and plan.reg_n * atom.atom_n * atom.operand_dtype("b").nbytes > 128:
+        # The slab is deposited row-major, so an N-contiguous B holds one 128-byte swizzle atom per
+        # K row only while the N tile is one atom wide; the descriptor's MN-major canonical layout
+        # wants every further atom stored as its own eight contiguous K rows, which no fill does.
+        return (
+            "wgmma reads an N-contiguous B through one 128-byte swizzle atom per K row: its N tile is 64 elements "
+            "(f1x8); a wider tile needs a K-contiguous (transposed) B"
+        )
     if stage is not None and stage.is_direct:
         return "wgmma reads its operands through shared-memory descriptors: a direct stage cannot feed it"
     return None
@@ -267,7 +276,8 @@ def _wgmma_refusal(plan: Tile, stage: Stage | None = None) -> str | None:
 def _plan_node_refusal(tile_op, node: Fold, plan: Tile, placed: PlacedTile, facts: ContractionFacts) -> str | None:
     from . import staging  # noqa: PLC0415
 
-    refusal = _kstep_refusal(facts.k_axis, plan) or _wgmma_refusal(plan)
+    view = node.as_contraction()
+    refusal = _kstep_refusal(facts.k_axis, plan) or _wgmma_refusal(plan, b_trans=None if view is None else view.b_trans)
     if refusal is not None or not _needs_fill(tile_op, node, plan):
         return refusal
     converting = staging.converting_a(node, plan.atom, tile_op.inputs)
@@ -1046,7 +1056,8 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
                 return None
         stage = next(iter(edges.values())).stage if edges else Stage.direct()
         resolved_stage = None
-        if _wgmma_refusal(node.tile, stage) is not None:
+        contraction = view.as_contraction()
+        if _wgmma_refusal(node.tile, stage, b_trans=None if contraction is None else contraction.b_trans) is not None:
             cache[key] = None
             return None
         if view.as_contraction() is None or not node.tile.is_tiled:
