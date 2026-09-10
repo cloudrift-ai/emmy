@@ -195,9 +195,6 @@ def test_serving_systems_are_pinned_and_controlled(project_root) -> None:
         assert all(repeats == {0, 1, 2, 3, 4} for repeats in repeats_by_point.values())
 
 
-
-
-
 def test_large_layer_corpus_is_bounded_and_not_labeled_tp8(project_root) -> None:
     tasks = _kernel_tasks(project_root, "large-layer")
     assert len(tasks) == 8
@@ -486,7 +483,6 @@ def test_rtx5090_attention_comparison_is_recorded_and_bounded(project_root) -> N
     assert '"inductor_normalized_speedup"' in baseline_runner
     assert '"TileLang"] = {' in baseline_runner
     subprocess.run([sys.executable, str(directory / "run_baselines.py"), "--smoke"], check=True)
-
 
 
 def test_every_command_variant_renders(project_root) -> None:
