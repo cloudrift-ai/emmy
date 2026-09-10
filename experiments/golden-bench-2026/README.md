@@ -9,7 +9,7 @@ artifacts exist and an intelligent reviewer accepts them against the checklist b
 
 | Evidence set | Workload | Platforms | Permitted interpretation |
 | --- | --- | --- | --- |
-| Common kernel corpus | Qwen3-0.6B layer 0, sequence lengths 1 and 512 | V100, A100, RTX 4090, RTX 5090, H200, B200 | Identical, portable model-derived kernel comparison |
+| Common kernel corpus | Qwen3-0.6B layer 0, sequence lengths 1 and 512 | V100, A100, H100, RTX 4090, RTX 5090, H200, B200 | Identical, portable model-derived kernel comparison |
 | Dynamic-FP8 checkpoint layer | Qwen3-0.6B-FP8-dynamic layer 0, sequence lengths 1 and 512 | RTX 4090, RTX 5090, H200, B200 | Complete layer inventory; W8A8-only claim deferred |
 | Dynamic-FP8 large-layer trace | Qwen3-32B-FP8-dynamic layer 0, sequence lengths 1 and 512 | H200 and B200 | Complete large-layer inventory; W8A8-only claim deferred |
 | Large-layer shape stress | Qwen3.6-27B layers 0 and 3, sequence lengths 1 and 512 | H200 and B200 | Unsharded BF16 large-shape stress only |
