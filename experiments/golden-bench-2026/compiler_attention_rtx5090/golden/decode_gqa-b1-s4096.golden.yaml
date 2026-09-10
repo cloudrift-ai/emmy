@@ -58,17 +58,41 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE@map.1/twist: mma_m16n8k16_f16_f32/f1x16/k4
-      TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x8/k4
-      REDUCE@map.1/twist: ''
-      REDUCE@map.1/twist.1/inner: ''
-      STAGE@map.1/twist: d1/smem-tma
-      STAGE@map.1/twist.1/inner: d3/smem-async
-      WORK: w1x1
-      RASTER: ''
+      REDUCE@map.1/twist: g16k
     identity: 84cbbbf36d3eb0b0edddb81549a720e76e023737b384eb33b7158eb7a4c1ade7
     measurements:
-      emmy_us: 119.9520006775856
-      reference_us: 120.27599662542343
+      emmy_us: 10.698008567395837
+      reference_us: 10.702105550793338
+      reference_backend: same-input-greedy
+  - name: k_sdpa_e02804.64971ac1661d.dc3c43a256b4
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE@twist: mma_m16n8k16_f16_f32/f1x16/k4
+      TILE@twist.1/inner: mma_m16n8k16_f16_f32/f1x8/k4
+      REDUCE@twist: ''
+      REDUCE@twist.1/inner: ''
+      STAGE@twist: d2/smem-tma
+      STAGE@twist.1/inner: d2/smem-tma
+      WORK: w4x1
+      RASTER: ''
+    identity: dc3c43a256b48c7b94a7f85a2d41090db588331ec5bf75ca92a6ed85083e9b9c
+    measurements:
+      emmy_us: 9.282963143454658
+      reference_us: 9.286878264953042
+      reference_backend: same-input-greedy
+  - name: k_sdpa_e02804.64971ac1661d.5f12c2abe135
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: 5f12c2abe13542f88767a80990b872f147de7f8bbf0dc3614ac1963d7a38f70c
+    measurements:
+      emmy_us: 1.4150454239411787
+      reference_us: 1.4152272858402946
       reference_backend: same-input-greedy
 gpu_name: NVIDIA GeForce RTX 5090
