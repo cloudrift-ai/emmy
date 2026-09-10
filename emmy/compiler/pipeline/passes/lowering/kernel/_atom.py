@@ -580,7 +580,7 @@ def _wgmma_drain(*, operands, slot, mn, atom, bk_elems: int, frag_ns: str, n_fol
                     b_cols = n.tile + getattr(b_op, "pad_cols", 0)
                     if n.tile > atom_cols:
                         raise ValueError(
-                            "wgmma: an N-contiguous B slab wider than one swizzle atom is not atom-major; "
+                            "wgmma: an N-contiguous B slab wider than one swizzle atom does not store each atom as its own K rows; "
                             "the schedule rule should have declined this row"
                         )
                     index, lbo, sbo = flat(offset(kcol, b_op.slot_row(slot)), nbase, b_cols), 128, 8 * b_cols * elem_bytes

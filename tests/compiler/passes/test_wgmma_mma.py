@@ -84,7 +84,7 @@ def test_rules_read_the_tile_and_its_stage(work, tile, stage, message) -> None:
 
 
 def test_an_n_contiguous_b_keeps_the_n_tile_one_atom_wide() -> None:
-    """The slab is row-major, so an N-contiguous B is atom-major only at one 64-element atom per K row;
+    """The slab is row-major, so an N-contiguous B matches the descriptor's layout only at one 64-element atom per K row;
     a K-contiguous (transposed) B has one atom per N row whatever the tile."""
     wide = Tile.parse(f"{N128}/f1x16/k4", Work.parse("w8x1"))
     narrow = Tile.parse("wgmma_m64n64k16_bf16_f32/f1x8/k4", Work.parse("w8x1"))
