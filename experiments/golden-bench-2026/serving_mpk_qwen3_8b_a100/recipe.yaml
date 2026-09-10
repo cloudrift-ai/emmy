@@ -23,7 +23,9 @@ command:
     export PATH=/usr/local/cuda/bin:$$PATH
     cd $repo_dir
     [ -d venv ] || make setup
-    ./venv/bin/pip install -q vllm==0.23.0
+    # ninja is not a vllm dependency but its compile path shells out to it, and without it the
+    # engine dies at KV-cache init with FileNotFoundError: 'ninja'.
+    ./venv/bin/pip install -q vllm==0.23.0 ninja
 
     MODEL=Qwen/Qwen3-8B
     REV=b968826d9c46dd6066d109eabc6255188de91218
