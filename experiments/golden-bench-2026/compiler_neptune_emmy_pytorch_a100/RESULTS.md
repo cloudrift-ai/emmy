@@ -32,7 +32,8 @@ serial finalize merges them per cell. This became recordable when the chunk tier
 state whole (the pivot and the denominator broadcast into a fragment beside the expectation); before, the split's
 partial fell to scalar tiles and the fused single-wave row ran on eight CTAs. The lane re-ran over the new goldens at
 revision `38f7f6d9e` on 2026-09-10 on the same host: all eight setups completed both deployable-O3 replays and
-both strict source references. Each Emmy latency is the replay's kernel sum, the mean over the two repetitions of the minimum of 15.
+both strict source references. Each Emmy latency is the replay's kernel sum, the mean over the two repetitions of the
+minimum of 15.
 
 | keys | Emmy replay, kernel sum (us) | Emmy whole (us) | Inductor, lane (us) | Inductor, paper baseline (us) | Neptune (us) | Emmy / Inductor | Neptune / Inductor |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
