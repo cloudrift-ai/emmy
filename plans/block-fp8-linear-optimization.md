@@ -48,7 +48,8 @@ NOT 128-block scales, and vLLM is not in the compiler venv. To get the matched b
   `cutlass_scaled_mm` / the w8a8 block GEMM (`vllm.model_executor.layers.quantization.utils.fp8_utils`). This is
   what `scripts/bench_nvfp4_linear.py` binds for NVFP4; the block-FP8 analog would call the fp8 block path. Heavy
   install, version-sensitive; the NVFP4 showcase ran it on a serving host, not the compiler box. Recommended path:
-  run the matched comparison on a serving host, not locally.
+  run the matched comparison on a serving host, or install it into the local venv (`./venv/bin/pip install vllm`)
+  since the box has CUDA 13 + nvcc.
 - **DeepGEMM** (`deep_gemm`) for a standalone block-FP8 GEMM reference, if a lighter local baseline than full vLLM
   is wanted. Also needs a matching CUDA/torch build.
 
