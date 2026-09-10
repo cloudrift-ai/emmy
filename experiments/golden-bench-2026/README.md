@@ -11,13 +11,12 @@ artifacts exist and an intelligent reviewer accepts them against the checklist b
 | --- | --- | --- | --- |
 | Common kernel corpus | Qwen3-0.6B layer 0, sequence lengths 1 and 512 | V100, A100, H100, RTX 4090, RTX 5090, H200, B200 | Identical, portable model-derived kernel comparison |
 | Dynamic-FP8 checkpoint layer | Qwen3-0.6B-FP8-dynamic layer 0, sequence lengths 1 and 512 | RTX 4090, RTX 5090, H200, B200 | Complete layer inventory; W8A8-only claim deferred |
-| Quantized checkpoint kernels | Qwen3-8B NVFP4 layer 0 at 1 and 512; Llama 3.1 AWQ and Laguna EXL3 layer 0 at 1 | RTX 5090 | Compiler support and correctness only |
+| Quantized checkpoint kernels | Qwen3-8B NVFP4 and Qwen3-0.6B block-scaled FP8 layer 0 at 1 and 512; Llama 3.1 AWQ and Laguna EXL3 layer 0 at 1 | RTX 5090 | Compiler support and correctness; the block-FP8 rows replay hand-tuned goldens against eager |
 | Dynamic-FP8 large-layer trace | Qwen3-32B-FP8-dynamic layer 0, sequence lengths 1 and 512 | H200 and B200 | Complete large-layer inventory; W8A8-only claim deferred |
 | Large-layer shape stress | Qwen3.6-27B layers 0 and 3, sequence lengths 1 and 512 | H200 and B200 | Unsharded BF16 large-shape stress only |
-| End-to-end serving | Pinned recipes below | Consumer single GPU; datacenter TP8 except the V100 TP8xPP2 lane | System performance for explicitly matched stock and Emmy arms |
+| End-to-end serving | Pinned recipes below | Consumer single GPU and the V100 TP8xPP2 lane | System performance for explicitly matched stock and Emmy arms |
 | Megakernel decode pair | Qwen3-8B, one 128/512 single-stream point | A100 | Cross-harness kernel-launch-overhead comparison |
 | Neptune compiler comparison | 10 artifact operators and a five-operator Emmy/PyTorch subset | A100 80GB | One archived cross-compiler result |
-| Neptune schedule replay | Five paper-table operators and current PyTorch | A100 40GB | Saved-schedule replay on the paper's GPU product |
 
 The BF16 sets produce separate tables and separate geometric means. The unsharded large-layer corpus is not TP8,
 quantization, or serving evidence and cannot explain an end-to-end result. Dynamic-FP8 layer traces are preserved as
@@ -46,14 +45,21 @@ select targets by stable graph properties, freeze the selected denominator, and 
 the paper admits a W8A8 table. The three `fp8-convergence` rows and the Qwen3-32B `fp8-large-layer` supplement have
 the same limitation; they do not currently support W8A8-only stability or large-shape claims.
 
-The RTX 5090-only `quantized_kernels_rtx5090` recipe is the minimal compiler support check. Its four tasks trace one
-pinned checkpoint layer, retain every distinct post-fusion target, skip search, and run one strict deployable `-O3`
-replay. NVFP4 covers sequence lengths 1 and 512. AWQ and Trellis/EXL3 cover the decode-shaped sequence length 1 only.
-The working YAML and cubin cache are retained so review can verify the declared packed checkpoint inputs survive into
-the compiled programs instead of becoming dense checkpoint weights.
+The RTX 5090-only `quantized_kernels_rtx5090` recipe is the minimal compiler support check. Its six tasks cover one
+pinned checkpoint layer each, retain every distinct post-fusion target, skip search, and run one strict deployable
+`-O3` replay. NVFP4 and block-scaled FP8 cover sequence lengths 1 and 512. AWQ and Trellis/EXL3 cover the
+decode-shaped sequence length 1 only. The working YAML and cubin cache are retained so review can verify the declared
+packed checkpoint inputs survive into the compiled programs instead of becoming dense checkpoint weights.
 
-This support check has no tuned latency claim. It also has no native vendor-kernel comparison, BF16 quality study, or
-instruction-level proof. Report the reference kind saved for each target: runnable frontend targets compare against
+The two block-scaled FP8 tasks trace `Qwen/Qwen3-0.6B-FP8`: 128×128 weight blocks with per-token dynamic activations,
+the form of the official Qwen, DeepSeek, and GLM FP8 releases and of the datacenter serving rows, while the
+per-channel dynamic form stays in the kernels recipe's `fp8-common` study. Instead of tracing, these two rows replay
+the goldens committed under `golden/`: every kernel's schedule was pinned by hand with `emmy run --ab` on the RTX 5090
+and recorded with `--record-greedy`, so the row re-measures one fixed kernel set at deployable `-O3` against eager.
+
+The NVFP4, AWQ, and Trellis rows have no tuned latency claim. The block-FP8 rows carry one per-layer eager comparison
+on the RTX 5090 only, not a cross-platform geometric mean. The support check also has no native vendor-kernel
+comparison, BF16 quality study, or instruction-level proof. Report the reference kind saved for each target: runnable frontend targets compare against
 the same graph-algebra computation, while an exact Loop target can only use same-input greedy replay. A failure in
 trace, lowering, build, execution, strict comparison, or packed-storage review makes that format unsupported in this
 experiment.
@@ -124,43 +130,30 @@ must add a native vendor or framework kernel baseline, a separate BF16 quality d
 the timed cubin, and a denominator fixed from graph properties before tuning. Decoded BF16, Marlin, or emulation is
 not acceptable evidence for that stronger claim.
 
-The executable end-to-end NVFP4-checkpoint recipes are narrower system qualifications. The pinned Qwen3.6
-checkpoint is mixed precision: FP8 attention and W4A16 NVFP4 MLP projections. Its exact vLLM route deliberately uses
-`MarlinNvFp4LinearKernel`, so the RTX 5090 result is labeled W4A16-NVFP4/Marlin compatibility and throughput, not
-native Blackwell FP4-MMA evidence. The separate Qwen3-8B checkpoint declares W4A4 for every transformer Linear and is
-the native RTX 5090 qualification. Intelligent review must confirm an exact optimized NVFP4 GEMM selection and reject
-Marlin and emulation. The B200 GLM checkpoint uses W4A4 routed experts. Review of the complete run logs must confirm
-the exact optimized RTX 5090 GEMM and native B200 NVFP4 MoE selections and reject Marlin, emulation,
-unsupported-hardware, or fallback evidence where those paths contradict the lane's claim. These stock lanes do not
-measure Emmy compiler speedup and are not inputs to the compiler kernel support check.
+## MXFP4 kernel claim boundary
+
+No row covers MXFP4: the routed experts of OpenAI gpt-oss and the native FP4 experts of DeepSeek V4. Emmy spells that
+format only on the serving-twin capture path, where each routed expert matrix is a forward-argument input of an expert
+program. A single-layer trace of such a checkpoint decodes the experts to dense weights for the reference twin, so a
+kernel row built the way the other formats are would prove nothing about the packed format. Covering it needs a
+serving-twin capture (`emmy trace CHECKPOINT --serving-twins --serving-config PATH`) of a gpt-oss checkpoint on the
+target GPU, which this suite does not include. Mixed FP8+NVFP4 checkpoints add recognition only and no new kernel
+form; the separate FP8 and NVFP4 rows cover them.
 
 ## End-to-end matrix
 
 | Platform | Recipe | Purpose | Claim status |
 | --- | --- | --- | --- |
-| RTX 4090 | Qwen3.8-27B W4A16, TP1 | Recent consumer qualification | Stock baseline; no Emmy arm is possible yet |
 | RTX 5090 | Gemma-4-12B-it, TP1 | Same-image stock and Emmy A/B | Primary matched-system result after semantic review |
-| RTX 5090 | Qwen3.6-27B mixed FP8/W4A16-NVFP4, TP1 | Requested quantized checkpoint | W4A16/Marlin compatibility and throughput only |
-| RTX 5090 | Qwen3-8B NVFP4, TP1 | Native W4A4 consumer qualification | Stock capability result until an Emmy arm exists |
 | 16x V100 | DeepSeek-V4-Flash-0731, TP8xPP2 | New checkpoint on the proven SM70 serving path | Portability result until a matched stock arm exists |
-| 8x A100 | DeepSeek-V4-Flash-0731 EXL3 3.04 bpw, TP8 | New checkpoint on an older serving platform | Stretch compatibility/refusal study; requires an Emmy arm |
-| 8x H200 | GLM-5.2 FP8, TP8 | Primary datacenter serving system | Stock qualification until an Emmy arm and TP8 manifest exist |
-| 8x B200 | GLM-5.2 NVFP4, TP8 with expert parallelism | Same architecture on Blackwell | Optional stock qualification until matched evidence exists |
 | 1x A100 | Qwen3-8B BF16, TP1 | vLLM and megakernel (MPK) decode comparison | MPK harness pair and stock vLLM |
 
 All serving points disable prefix caching and use seed 0, temperature 0, and ignored EOS. Each point expands to five
 tasks with `benchmark.repeats: 1`, so every observation receives a fresh deployed server instead of five clients
 against one process. Preserve latency, time to first token, inter-token latency, throughput, engine logs, image
-digests, driver/CUDA state, and failures. A compatibility fallback is not native NVFP4 or EXL3 evidence. General fast
+digests, driver/CUDA state, and failures. General fast
 math is outside this preregistered suite; the exact `FP8_MMA` pin is confined to the dynamic-FP8 checkpoint layer
 traces and does not establish a W8A8-only result without the deferred target filter.
-
-The RTX 4090 row is stock-only for a structural reason rather than a scheduling one. Qwen3.8-27B is a hybrid
-checkpoint whose 48 Gated DeltaNet linear-attention layers do not lower, so this row admits no matched Emmy arm; its
-16 full-attention layers, MLP, norms, and head do. The depthwise `conv1d` and the delta-rule `einsum` those layers
-open with now decompose, but the chunked delta rule behind them still does not: it builds its chunk masks with
-`triu`/`tril`, which have no tracer mapping, and then unrolls a sequential 64-step recurrence. That is an algorithm
-to absorb rather than an operation to add, so treat the row as consumer-platform system qualification only.
 
 The Gemma stock and Emmy arms use identical per-workload `--max-num-batched-tokens` settings and the same immutable
 `cloudriftai/vllm-emmy-gemma-4-12b-it@sha256:5add12d3b7f4673790b435b76635082433538e3615fbc40227fa1c0db64c9ff3`
@@ -344,13 +337,6 @@ extract the same statistic from Neptune's 15 raw NVTX calls, match rows by opera
 artifact's PyTorch 2.6.0 results separate from the current-PyTorch arm. The combined experiment remains planned
 evidence until its common archive exists and passes intelligent review; it is not part of the common-kernel geometric
 mean.
-
-`compiler_neptune_replay_a100` is the focused follow-up on the A100-SXM4-40GB product used by the paper. It runs the
-stock Neptune evaluator for the five paper-table operators with the fixed schedules and saved schedules from the
-prior A100 80GB search; it does not tune. A separate PyTorch-only lane measures eager and full-graph
-`torch.compile` twice per shape under PyTorch 2.13.0. The recipe does not run Emmy. Its durable archive contains all
-40 Neptune profiles, 80 current-PyTorch measurements, the converted Nsight tables, and the system-only experiment
-records. `RESULTS.md` owns the paper bridge and the no-retuning limitation.
 
 ## Intelligent publication review
 
