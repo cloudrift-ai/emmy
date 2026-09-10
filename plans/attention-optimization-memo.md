@@ -101,14 +101,16 @@ Emmy and Neptune columns, in raw microseconds:
 | 1024 | 73.2 | 27.5 | **18.7** | `g8k` |
 | 2048 | 148.5 | 45.5 | **42.6** | `g8k` |
 | 4096 | 294.5 | 74.3 | **64.0** | `g16k` |
-| 8192 | 607.3 | 122.3 | 143.6 | `g32k` |
-| 16384 | 1385.0 | 216.7 | 270.6 | `g64k` |
-| 32768 | 2775.0 | 410.3 | 475.6 | `g64k` |
+| 8192 | 607.3 | 122.3 | **117.6** | `g32k` |
+| 16384 | 1385.0 | 216.7 | 220.9 | `g64k` |
+| 32768 | 2775.0 | 410.3 | 410.8 | `g64k` |
 
-All eight lengths are 2.8x to 5.8x faster than the rows they replace. Emmy leads Neptune's recorded microseconds
-through 4096 and trails it above, by a flat 1.16-1.25x — a constant factor, not a scaling problem, which is what
-the register work below is for. Read the eager caveat before calling the family on raw microseconds at all: this
-box's eager reference does not match the archived lane's.
+0.84x of Neptune by geometric mean, ahead at six of eight lengths and level at the two longest; 2.5x to 6.8x faster
+than the rows replaced. Quote the golden's ROUTING row, not the `TOTAL` line of a `--record-greedy` log: the routing
+row is the isolated re-bench and the sum of its receipts (117.6 us at 8192), while `TOTAL` is the in-process figure
+measured alongside everything else (143.6). Reading `TOTAL` made 8192-32768 look 1.16-1.25x behind Neptune when they
+are level. Read the eager caveat before calling the family on raw microseconds at all: this box's eager reference
+does not match the archived lane's.
 
 The reading that mattered was not `_inner_free` or `_node_refusal` — neither is reached. It is `TileOp.contracts`:
 with the query coordinate gone, the term's only shared axis is the HEAD, `left_axes` is empty, and a B that moves

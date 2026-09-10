@@ -9,14 +9,18 @@ is 1.02x of eager and 0.87x of Neptune by geometric mean over the eight lengths,
 ahead of Neptune at seven of eight lengths. Global prefill, whose stream has no early stop, improved from 1.54x to
 1.17x of eager and is ahead of Neptune at six of eight lengths (0.94x) but still trails FlashAttention-2. GQA decode,
 replayed from the split-KV goldens, is 0.81x of Neptune and ahead at all eight lengths; on the paper's scale the
-family's geometric mean over Inductor is 0.27 for Emmy against 0.34 for Neptune. Causal decode was not re-measured:
-its goldens are scalar-tier rows the change does not touch, and it remains 3.5x behind Neptune.
+family's geometric mean over Inductor is 0.27 for Emmy against 0.34 for Neptune. Causal decode, the one family the
+compiler could not schedule at all, is now ahead of Neptune too: binding the size-one query row it had lost lets it
+reach the fragment tiers, and its eight re-recorded goldens are 0.84x of Neptune by geometric mean, ahead at six of
+eight lengths, each shape 2.5x to 6.8x faster than the row it replaces. That column is a manual re-recording rather
+than a lane rerun; the section below says what that costs.
 
 The two earlier implementation results still stand under the new numbers: the causal early stop on the chunk tier
 (masked chunks skipped rather than folded), which halved the long causal and GQA rows, and the split-KV partial that
 stores the chunk tier's row states whole, which is what put GQA decode ahead. The remaining gaps are global prefill's
 schedule (its goldens pin a weaker row than causal's; the causal geometry measured 10% faster at 2048 keys and 12%
-slower at 512, so the retune is per length) and causal decode's scalar tiers.
+slower at 512, so the retune is per length) and causal decode's register pressure, which is what keeps its two
+longest lengths level with Neptune rather than ahead.
 
 ## Prefill and GQA decode after the chunk-loop density change
 
@@ -112,6 +116,56 @@ and short-row ratios within a few percent of 1.00 are ties.
   venv
 - Archive: `results_a100x1.tar.gz` (both run directories with their records, per-row artifacts and logs); SHA-256
   `41115796b3f07a6958b505fa4ffeef922d5c9057a9832fb3a9eed6cf67401872`
+
+## Causal decode after the bound row
+
+Causal decode was the one family the compiler could not schedule. A query of one token per head leaves no axis for
+the loop nest to iterate, so normalization inlined that coordinate as a constant and the contraction that remained
+shared every coordinate it had with the value it multiplies. `TileOp.contracts` refuses such a term — a B that moves
+with the row it is contracted against is no slab per tile — so the family fell to the per-cell tier, where each of
+the 128 output channels re-ran the score's own 128-step contraction. No pin in the schedule space avoided that, so
+the committed goldens were the best rows of a space that could not express the kernel.
+
+Binding the coordinate back as an extent-one axis gives the term a row, and decode then traces to the same fused
+chunk-tier kernel prefill uses. All eight goldens were re-traced and re-recorded on 2026-09-10 on the same
+A100-SXM4-40GB host. Five of the eight also take a cross-CTA key-range split, whose width scales to hold roughly 256
+keys per partition.
+
+| Sequence | Emmy (us) | Eager (us) | `torch.compile` (us) | Neptune (us) | Emmy / Neptune | Split | Emmy before (us) |
+| ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: |
+| 256 | 8.817 | 22.528 | 19.456 | 15.162 | 0.58x | none | 24.680 |
+| 512 | 15.360 | 27.648 | 24.576 | 19.027 | 0.81x | none | 38.841 |
+| 1024 | 18.725 | 35.840 | 30.720 | 27.484 | 0.68x | `g8k` | 73.169 |
+| 2048 | 42.583 | 48.128 | 41.984 | 45.496 | 0.94x | `g8k` | 148.541 |
+| 4096 | 63.982 | 70.144 | 62.976 | 74.266 | 0.86x | `g16k` | 294.468 |
+| 8192 | 117.617 | 119.296 | 110.592 | 122.328 | 0.96x | `g32k` | 607.300 |
+| 16384 | 220.910 | 218.112 | 203.264 | 216.662 | 1.02x | `g64k` | 1384.960 |
+| 32768 | 410.820 | 409.088 | 390.144 | 410.271 | 1.00x | `g64k` | 2775.040 |
+
+By geometric mean over the eight lengths Emmy is 0.84x of Neptune and 0.74x of eager, ahead of Neptune at six of
+eight lengths and level with it at the two longest. Every shape is 2.5x to 6.8x faster than the row it replaces. The
+family that was 3.5x behind Neptune is now ahead of it.
+
+**How these numbers were produced, and what that costs.** The Emmy column is not a lane rerun. Each value is the
+routing row of a re-recorded golden — the kernel-set total from `emmy run --golden … --bench --record-greedy`'s
+isolated re-bench, equal to the sum of its per-kernel receipts — measured during a manual pin sweep, not by
+`emmy bench` on this recipe. The eager, `torch.compile` and Neptune columns are unchanged from the archived lane. So
+every ratio in the table pairs a fresh Emmy measurement against a reference measured in a different session, and the
+references are not neutral: this host measured eager at 31-35 us on the 2048-key shape during the sweep, against the
+48.128 us the archived lane recorded. Taking that faster eager instead would move the 2048 row from 0.88x of eager to
+about 1.3x. Rerunning `emmy bench … --filter lane=emmy --filter operator=decode_causal` would put both halves in one
+process and settle it; until that runs, read the Emmy-versus-Neptune column as indicative rather than as a paired
+measurement.
+
+**The two schedule facts the sweep established**, both of which make a naive sweep of this family misleading:
+
+- The geometry is a matched diagonal. The score tile's column count must equal the carrier's chunk width (`16 * k`).
+  Off it — chunk 64 against 128 columns, or 128 against 64 — the identical kernel measures about 9300 us at 2048
+  keys, 160x slower.
+- A `TILE@map.1/twist` pin does not resolve on a split PIECE, whose tree spells the route `@twist`. The pin is
+  ignored without complaint and the compiler picks that piece's geometry itself. Pinning only the one spelling made
+  the split look harmful (137 us at 1024 keys, 511 at 4096); pinning both holds the geometry fixed, and the split is
+  then worth 1.4x to 2x at every length.
 
 ## Split-KV GQA decode
 
@@ -389,7 +443,13 @@ only the missing host lane. The durable `recipe.yaml` contains the corrected wor
 ## Durable files
 
 - Exact A100 40GB comparison: `paper-emmy-a10040.csv` (prefill and GQA-decode Emmy, eager and Inductor columns from
-  the 2026-09-10 lane; causal decode from the 2026-09-09 run)
+  the 2026-09-10 lane; causal decode's Emmy column re-recorded 2026-09-10 after the bound row, its eager, Inductor
+  and Neptune columns still from the 2026-09-09 run)
+- Causal-decode bound-row sweep: `results_a10040_decode_causal_bound_row.tar.gz`; SHA-256
+  `e92d9b0f49963597c94931cc0ad3edf44f3dbbe37272965177750c264f79d9b5`. Holds the pin-sweep and split-width tables, every
+  `--record-greedy` and trace log behind the eight re-recorded goldens, the environment freeze and the revision.
+  Logs and tables only — this was a manual sweep, so it carries no experiment record, JSON rows or Nsight profiles,
+  and the lane has NOT been rerun for this family.
 - 2026-09-10 prefill and GQA-decode lane: `results_a100x1.tar.gz`
 - Split-KV GQA-decode lane: `emmy_decode_gqa_lane.csv` and `results_a10040_split_kv_decode_gqa.tar.gz` (per-setup JSON
   records, logs and the status table)
