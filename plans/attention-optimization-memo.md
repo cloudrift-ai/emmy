@@ -91,10 +91,19 @@ fragment load per K step, cheap at `k2`), and the exp folding above, which shrin
 
 The lift now binds the elided query coordinate back as an extent-one axis whenever a contraction owns no row
 (`lowering/tile/_row.py`), which subsumed and replaced `_implicit_unit_row`. Decode then traces to ONE fused
-chunk-tier kernel instead of two per-cell ones. A100 40GB, 2048 keys, 32 heads, hd 128: **141 us -> 42.6 us** with the
-key-range split below. Re-recorded lengths, against the archived Neptune column: 256 keys 9 us (Neptune 15.2),
-512 keys 16 (19.0), 1024 keys 29 (27.5), 2048 keys 42.6 (45.5). Short lengths win outright; read the eager caveat
-below before calling the family.
+chunk-tier kernel instead of two per-cell ones. Re-recorded A100 40GB goldens, against the archived
+Emmy and Neptune columns, in raw microseconds:
+
+| keys | committed before | Neptune | now | split |
+| ---: | ---: | ---: | ---: | --- |
+| 256 | 24.7 | 15.2 | **8.8** | none |
+| 512 | 38.8 | 19.0 | **15.4** | none |
+| 1024 | 73.2 | 27.5 | **18.7** | `g8k` |
+| 2048 | 148.5 | 45.5 | **42.6** | `g8k` |
+| 4096 | 294.5 | 74.3 | **64.0** | `g16k` |
+
+Every re-recorded length beats Neptune's recorded microseconds. Read the eager caveat below before calling the
+family on that basis: this box's eager reference does not match the archived lane's.
 
 The reading that mattered was not `_inner_free` or `_node_refusal` — neither is reached. It is `TileOp.contracts`:
 with the query coordinate gone, the term's only shared axis is the HEAD, `left_axes` is empty, and a B that moves
