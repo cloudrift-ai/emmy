@@ -11,7 +11,7 @@ retuned), geometric means over 256-32768 keys, lower favors Emmy:
 | prefill GQA | 1.03x | 0.88x (7/8) | 1.44x / 1.23x |
 | prefill global | 1.17x | 0.94x (6/8) | 1.54x / 1.23x |
 | decode GQA | 0.04x | 0.81x (8/8) | 0.05x / 0.93x |
-| decode causal (not re-measured; scalar tiers) | 3.12x | 3.54x (0/8) | same |
+| decode causal (2048 keys only, re-recorded) | 1.66x | 1.75x | was 3.09x / 3.26x |
 
 RTX 5090: the cp.async causal row at 32 heads / 2048 keys / hd 128 runs 1.13x faster than eager (242 vs 274 us), at
 16 heads 1.28x; the article's one-wave shape (16 heads, 512 keys, hd 256, causal) is 0.92x of eager (38 vs 35 us).
@@ -87,13 +87,36 @@ from a slab (FA-2's `sQ`, 32 KB; +25% smem traffic but −64 registers) or from 
 fragment load per K step, cheap at `k2`), and the exp folding above, which shrinks the per-chunk temporaries. Try
 `f2x16/k2` first (score chunk 32 registers). Expected: 10-20% over FA-2 on the A100 prefill families.
 
-### 4. Plain decode: the unit query axis as the fragment's M
+### 4. Plain decode: the bound row — DONE in part, and here is where it stopped
 
-Decode with one query row per head folds on the scalar tier (A100: 3.5x behind Neptune, the one family still lost).
-The loop IR carries no axis for the unit query dimension at all — `q[0, a0, 0, a2]` — so the placement never sees
-one to keep: the change starts at the lift (a unit axis kept as a masked 16-row fragment row, FA-2's decode), then
-the projection's `_inner_free` (which skips unit axes) and `_node_refusal`'s output-axis-pair reading. The same
-key-range split then applies. Expected: 2048 keys from 148 us to 30-40 (Neptune 45).
+The lift now binds the elided query coordinate back as an extent-one axis whenever a contraction owns no row
+(`lowering/tile/_row.py`), which subsumed and replaced `_implicit_unit_row`. Decode then traces to ONE fused
+chunk-tier kernel instead of two per-cell ones. A100 40GB, 2048 keys, 32 heads, hd 128: **141 us -> 57.2 us**, or
+3.09x of eager down to 1.66x. Neptune is 0.95x of eager, so the family is no longer lost badly but is not yet won.
+
+The reading that mattered was not `_inner_free` or `_node_refusal` — neither is reached. It is `TileOp.contracts`:
+with the query coordinate gone, the term's only shared axis is the HEAD, `left_axes` is empty, and a B that moves
+with its row is no slab per tile, so the catalog never offers a fragment.
+
+What the measurement says to do next, in order:
+
+- **Registers, then occupancy.** The recorded row runs at 254 registers (255 is the spill wall) and 12% occupancy,
+  grid 64 on 108 SMs. That is the whole remaining gap to Neptune: the kernel is not memory-bound yet (33.5 MB at
+  2048 keys is a 21.5 us roofline; we are at 57). Item 2's exp folding is the register lever and should be done
+  before any more geometry sweeping.
+- **Fill the grid.** `PLACE=fuse` forbids the key-range split, and 64 CTAs cannot fill the card. The unpinned split
+  measured about the same (58 us) but under a different geometry; a split walked along the matched diagonal below
+  has not been tried.
+- **The geometry is a matched diagonal, not a cross.** The score tile's column count must equal the carrier's chunk
+  width (`16 * k`). Off it — 64/128 or 128/64 — the same kernel measures about 9300 us, 160x worse. Any sweep that
+  crosses `TILE@map.1/twist` against `TILE@map.1/twist.1/inner` freely wastes most of its rows.
+- **Re-record the other seven lengths.** Only 2048 was re-recorded. A golden cannot take this change by replay:
+  `005_replay_lowered` restores stored Tile IR and never reaches the lift, and a replayed row re-applies its own
+  recorded pins. Re-recording is `emmy trace --loop-targets -c … -o work.yaml`, then
+  `run --golden … --realization … --bench --record-greedy` under the pins.
+- **A bug the widened space exposes.** Some candidates abort the bench worker with `scratch buffer … has no
+  consuming launch (dead scratch)`. `emmy tune` routes around it by pinning `bench_fail`, but it is a real refusal
+  that should not be reachable.
 
 ### 5. Fix the causal split, then the one-wave shape
 
