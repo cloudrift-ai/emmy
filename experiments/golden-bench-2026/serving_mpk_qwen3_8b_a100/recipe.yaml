@@ -103,5 +103,10 @@ command:
   timeout: 86400
 
 matrices:
+  # The archived MPK/stock rows were measured on the 80GB SXM4 part. The 40GB part is the same
+  # architecture at 1555 GB/s instead of 2039, so a row measured on it is internally consistent and
+  # is NOT comparable to the 80GB archive: select one with --filter deploy.gpu=<name>.
   - deploy.gpu: "NVIDIA A100 80GB"
+    deploy.gpu_count: 1
+  - deploy.gpu: "NVIDIA A100 40GB"
     deploy.gpu_count: 1
