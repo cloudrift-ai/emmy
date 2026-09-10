@@ -11,6 +11,7 @@ artifacts exist and an intelligent reviewer accepts them against the checklist b
 | --- | --- | --- | --- |
 | Common kernel corpus | Qwen3-0.6B layer 0, sequence lengths 1 and 512 | V100, A100, H100, RTX 4090, RTX 5090, H200, B200 | Identical, portable model-derived kernel comparison |
 | Dynamic-FP8 checkpoint layer | Qwen3-0.6B-FP8-dynamic layer 0, sequence lengths 1 and 512 | RTX 4090, RTX 5090, H200, B200 | Complete layer inventory; W8A8-only claim deferred |
+| Quantized checkpoint kernels | Qwen3-8B NVFP4 layer 0 at 1 and 512; Llama 3.1 AWQ and Laguna EXL3 layer 0 at 1 | RTX 5090 | Compiler support and correctness only |
 | Dynamic-FP8 large-layer trace | Qwen3-32B-FP8-dynamic layer 0, sequence lengths 1 and 512 | H200 and B200 | Complete large-layer inventory; W8A8-only claim deferred |
 | Large-layer shape stress | Qwen3.6-27B layers 0 and 3, sequence lengths 1 and 512 | H200 and B200 | Unsharded BF16 large-shape stress only |
 | End-to-end serving | Pinned recipes below | Consumer single GPU; datacenter TP8 except the V100 TP8xPP2 lane | System performance for explicitly matched stock and Emmy arms |
@@ -44,6 +45,18 @@ geometric mean or require native FP8 instructions from unrelated targets. A late
 select targets by stable graph properties, freeze the selected denominator, and preserve unsupported targets before
 the paper admits a W8A8 table. The three `fp8-convergence` rows and the Qwen3-32B `fp8-large-layer` supplement have
 the same limitation; they do not currently support W8A8-only stability or large-shape claims.
+
+The RTX 5090-only `quantized_kernels_rtx5090` recipe is the minimal compiler support check. Its four tasks trace one
+pinned checkpoint layer, retain every distinct post-fusion target, skip search, and run one strict deployable `-O3`
+replay. NVFP4 covers sequence lengths 1 and 512. AWQ and Trellis/EXL3 cover the decode-shaped sequence length 1 only.
+The working YAML and cubin cache are retained so review can verify the declared packed checkpoint inputs survive into
+the compiled programs instead of becoming dense checkpoint weights.
+
+This support check has no tuned latency claim. It also has no native vendor-kernel comparison, BF16 quality study, or
+instruction-level proof. Report the reference kind saved for each target: runnable frontend targets compare against
+the same graph-algebra computation, while an exact Loop target can only use same-input greedy replay. A failure in
+trace, lowering, build, execution, strict comparison, or packed-storage review makes that format unsupported in this
+experiment.
 
 The `large-layer` tasks create H200 and B200 variants that trace Qwen3.6-27B layers 0 and 3 at the pinned revision.
 Layer 0 represents the 48 of 64 linear-attention layers; layer 3 represents the 16 of 64 full-attention layers. Both
@@ -103,16 +116,13 @@ unsharded common-corpus and large-shape kernel claims above; the 8-GPU recipes a
 A later TP8 kernel study must first add runtime capture as a reusable Emmy CLI feature and independently reconcile
 decode and prefill coverage. It must not synthesize serving shapes from model configuration alone.
 
-## NVFP4 kernel admission lane
+## NVFP4 kernel claim boundary
 
-The NVFP4 kernel lane is protocol-only until Emmy can ingest the exact ModelOpt NVFP4 weight, scale, and activation
-semantics as runnable graph algebra. It produces no compiler timing today. Admission requires one pinned
-`nvidia/Qwen3-8B-NVFP4@ccd10a893cbca613259517c3efe08e151ddf2b8e` layer at sequence lengths 1 and 512 on RTX 5090
-and B200, a denominator fixed from graph
-properties before tuning, correctness against the same quantized computation, a separate BF16 quality delta, and a
-native vendor or framework kernel baseline. Every accepted winner must preserve compressed storage, reject decoded
-BF16/Marlin fallback, and record both native FP4 instruction evidence and proof that the timed launch executed that
-cubin. Only the same-model RTX 5090/B200 set may support a cross-platform NVFP4 kernel summary.
+The `nvfp4-support` rows ingest the exact ModelOpt checkpoint and are sufficient only for the compiler support check
+above. They do not establish native FP4 instruction use or a performance result. A later NVFP4 performance experiment
+must add a native vendor or framework kernel baseline, a separate BF16 quality delta, instruction evidence tied to
+the timed cubin, and a denominator fixed from graph properties before tuning. Decoded BF16, Marlin, or emulation is
+not acceptable evidence for that stronger claim.
 
 The executable end-to-end NVFP4-checkpoint recipes are narrower system qualifications. The pinned Qwen3.6
 checkpoint is mixed precision: FP8 attention and W4A16 NVFP4 MLP projections. Its exact vLLM route deliberately uses
@@ -122,7 +132,7 @@ the native RTX 5090 qualification. Intelligent review must confirm an exact opti
 Marlin and emulation. The B200 GLM checkpoint uses W4A4 routed experts. Review of the complete run logs must confirm
 the exact optimized RTX 5090 GEMM and native B200 NVFP4 MoE selections and reject Marlin, emulation,
 unsupported-hardware, or fallback evidence where those paths contradict the lane's claim. These stock lanes do not
-measure Emmy compiler speedup and are not inputs to the protocol-only kernel lane.
+measure Emmy compiler speedup and are not inputs to the compiler kernel support check.
 
 ## End-to-end matrix
 

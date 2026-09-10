@@ -1,0 +1,65 @@
+# Minimal compiler support check for packed NVFP4, AWQ, and Trellis/EXL3 checkpoints on one RTX 5090. Each row
+# traces one pinned layer and strictly executes every distinct post-fusion target against its available reference.
+command:
+  stage:
+    - emmy
+    - pyproject.toml
+    - requirements.txt
+    - Makefile
+    - experiments/golden-bench-2026/quantized_kernels_rtx5090/recipe.yaml
+  strict: true
+  run: |
+    set -euo pipefail
+    export PATH=/usr/local/cuda/bin:$$PATH
+    cd $repo_dir
+    finalize() {
+      final_status=$$?
+      trap - EXIT
+      if [ -x ./venv/bin/pip ]; then
+        ./venv/bin/pip freeze --all > $task_dir/requirements.freeze.txt || final_status=1
+      else
+        echo "venv pip unavailable" > $task_dir/requirements.freeze.txt
+        final_status=1
+      fi
+      printf 'format=%s\nstatus=%s\n' "$format" "$$final_status" > $task_dir/status.txt
+      archive_tmp=$task_dir.artifacts.tar.gz
+      tar -C $task_dir -czf "$$archive_tmp" . || final_status=1
+      mv "$$archive_tmp" $task_dir/artifacts.tar.gz || final_status=1
+      exit "$$final_status"
+    }
+    trap finalize EXIT
+
+    [ -d venv ] || make setup
+    export EMMY_TUNE_DB=$task_dir/autotune.db
+    export EMMY_ONLINE_FILE=$task_dir/online.json
+    export EMMY_CUBIN_CACHE=$task_dir/cubins
+
+    ./venv/bin/emmy trace "$model_ref" --layer 0 --seq-len "$seq_len" \
+      --model-provenance "$model_ref" --output $task_dir/working.yaml 2>&1 | tee $task_dir/trace.log
+    EMMY_NVCC_FLAGS= CUDA_VISIBLE_DEVICES="$gpu_device_ids" ./venv/bin/emmy run \
+      --golden $task_dir/working.yaml --bench --strict --no-record-nodes \
+      --json $task_dir/verification --warmup 5 --iters 20 \
+      --bench-backends eager,emmy 2>&1 | tee $task_dir/verification.log
+  result_files:
+    - artifacts.tar.gz
+  timeout: 86400
+
+matrices:
+  - cross:
+      format: nvfp4
+      model_ref: nvidia/Qwen3-8B-NVFP4@ccd10a893cbca613259517c3efe08e151ddf2b8e
+      seq_len: [1, 512]
+      deploy.gpu: "NVIDIA GeForce RTX 5090"
+      deploy.gpu_count: 1
+
+  - format: awq
+    model_ref: hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4@db1f81ad4b8c7e39777509fac66c652eb0a52f91
+    seq_len: 1
+    deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1
+
+  - format: trellis
+    model_ref: riftstack/Laguna-S-2.1-exl3@45c1f34a8c3ae3025a8bce2b1decea4991a6a239
+    seq_len: 1
+    deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1
