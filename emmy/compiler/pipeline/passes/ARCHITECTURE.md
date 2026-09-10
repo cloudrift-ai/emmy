@@ -598,6 +598,9 @@ that canonical input:
 for the partial and, when required, the finalize. The partial keeps the same `Fold(init, combine)` over an axis
 slice; the finalize identity-lifts stored state tuples through that same monoid. This is one carrier-independent
 path for additive and exp-family folds. Each piece receives a fresh structural identity and chooses its own schedule.
+The finalize's reduce enumerates serially only: it merges the partitions of a split that already happened, over an
+axis that windows its whole parent, one partial per split per cell — its parallelism is the cells, and a band over
+the few partials would pay a barrier per cell (the A100's prior picked one at seven times the serial row's time).
 
 A selected cross-CTA split is recorded structurally by an axis `Window`. The scheduler refuses to repartition an
 axis that is already a slice, including partition axes nested inside the complete Fold tree. The one-kernel atomic arm
