@@ -280,3 +280,28 @@ def test_admits_reads_a_level_projection_and_a_schedule_prefix() -> None:
     )
     assert not sited.admits({"REDUCE": "coop"}), "a bare row key prunes a site that decided another non-OFF value"
     assert _ScheduleFork(tree=SimpleNamespace(branch_knobs={}), context=None, row={"REDUCE@map.1/twist": "coop"}).admits({"REDUCE": "coop"})
+
+
+def test_admits_prunes_a_site_this_branch_already_decided_OFF() -> None:
+    """A branch that DECIDED a site OFF cannot reach a leaf carrying a value there.
+
+    ``admits`` reads a branch's value as a PREFIX of what its leaves will spell, and every string
+    extends the empty one — so an OFF the branch had already settled admitted every request and the
+    descent only failed at leaf matching. With one such site per fork that is a factor of two, and
+    the kernels this bites have dozens: a 16-rank serving boot sat in the schedule search for 45
+    minutes without compiling a single kernel. An OFF the branch merely INHERITED is still
+    undecided and still admits, and so does a site the row names only by its bare family key.
+    """
+    from types import SimpleNamespace
+
+    from emmy.compiler.pipeline.fork import _ScheduleFork
+
+    decided = _ScheduleFork(tree=SimpleNamespace(branch_knobs={}), context=None, row={"STAGE@map.1/inner": ""})
+    assert not decided.admits({"STAGE@map.1/inner": "d1/smem"})
+    assert decided.admits({"STAGE@map.1/inner": ""})
+
+    inherited = _ScheduleFork(tree=SimpleNamespace(branch_knobs={"STAGE@map.1/inner": ""}), context=None, row={})
+    assert inherited.admits({"STAGE@map.1/inner": "d1/smem"}), "an inherited OFF is undecided, not a decision"
+
+    bare = _ScheduleFork(tree=SimpleNamespace(branch_knobs={}), context=None, row={"REDUCE@map.1/inner": ""})
+    assert bare.admits({"REDUCE": "coop"}), "a bare family key still reads as a bare pin: OFF or the value"
