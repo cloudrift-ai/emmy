@@ -59,6 +59,11 @@ from emmy.compiler.ir.kernel.ir import (
     RegEpilogue,
     RegFragment,
     RegStore,
+    WgmmaCommit,
+    WgmmaDescriptor,
+    WgmmaFence,
+    WgmmaMma,
+    WgmmaWait,
     frag_layout,
 )
 from emmy.compiler.ir.pure.fold import Fold
@@ -514,6 +519,87 @@ def _staged_inner_atom_loop(
         if nxt < n_steps:  # prefetch depth-1 ahead, into the slot the mma below frees
             stmts += ldms(kcol(nxt), f"_s{nxt % depth}")
         stmts += mmas(f"_s{step % depth}")
+    return stmts
+
+
+def _wgmma_drain(*, operands, slot, mn, atom, bk_elems: int, frag_ns: str, n_folds: int) -> list[Stmt]:
+    """The warp-group drain — the ``wgmma`` leaf reading ring ``slot``. Both operands stay in
+    shared memory: each k16 step builds one matrix descriptor per operand and issues one
+    ``wgmma.mma_async`` per group of ``cells_per_instruction`` accumulator cells along N, and the
+    chunk closes with a commit and a wait so the slot can be released. The four warps of a group
+    emit the same descriptors (the row block ``64·(warp/4)`` of the slot); the hardware hands warp
+    ``i`` rows ``16i..16i+15`` of it, which is exactly the m16n8 row the epilogue expects at ``f1``.
+
+    Descriptor geometry (128-byte swizzle, 16-bit elements): a K-major slab (A, or a transposed B)
+    stores one swizzle row per tile row, so the stride between 8-row core groups is
+    ``8 · bk · 2`` bytes and the leading offset is unused; an N-contiguous B slab is MN-major
+    (``trans_b``), its core groups are eight K rows apart (``8 · row pitch``) and adjacent
+    64-column atoms sit 128 bytes apart. The software swizzle of a cp.async fill reads the ROW
+    index, not the address bits, once a row exceeds one atom, so an MN-major B wider than one
+    atom must arrive by TMA; that case is declined here rather than mis-read."""
+    (a_op, *b_ops), (m, n) = operands, mn
+    cells = atom.cells_per_instruction
+    if m.reg != 1 or n.reg % cells:
+        raise ValueError(f"wgmma drain needs f1x<C> with C a multiple of {cells}, got f{m.reg}x{n.reg}")
+    _, _, atom_k = atom.shape
+    elem_bytes = atom.operand_dtype("a").nbytes
+    atom_cols = 128 // elem_bytes  # one 128-byte swizzle row, in elements
+    n_steps = bk_elems // atom_k
+
+    def flat(row: Expr, col: Expr, cols: int) -> Expr:
+        return BinaryExpr("+", BinaryExpr("*", row, Literal(cols, "int")), col)
+
+    def offset(base: Expr, off: Expr | None) -> Expr:
+        return base if off is None else BinaryExpr("+", off, base)
+
+    grp_row = BinaryExpr("*", BinaryExpr("/", Var(m.unit), Literal(4, "int")), Literal(64, "int"))
+    a_cols = bk_elems + getattr(a_op, "pad_cols", 0)
+    stmts: list[Stmt] = [WgmmaFence()]
+    for step in range(n_steps):
+        kcol = Literal(step * atom_k, "int")
+        a_desc = f"{frag_ns}_da{step}"
+        stmts.append(
+            WgmmaDescriptor(
+                name=a_desc,
+                smem=a_op.slab,
+                smem_index=flat(offset(grp_row, a_op.slot_row(slot)), kcol, a_cols),
+                swizzle=a_op.swizzle,
+                lbo_bytes=16,
+                sbo_bytes=8 * a_cols * elem_bytes,
+            )
+        )
+        for f, b_op in enumerate(b_ops):
+            trans = getattr(b_op, "trans", False)
+            for jg in range(n.reg // cells):
+                nbase = BinaryExpr("+", BinaryExpr("*", Var(n.unit), Literal(n.reg * 8, "int")), Literal(jg * cells * 8, "int"))
+                b_desc = f"{frag_ns}_db{f}_{jg}_{step}"
+                if trans:  # K-major (tile_n × bk): the tile coordinate is the slab row, K the column
+                    b_cols = bk_elems + getattr(b_op, "pad_cols", 0)
+                    index, lbo, sbo = flat(offset(nbase, b_op.slot_row(slot)), kcol, b_cols), 16, 8 * b_cols * elem_bytes
+                else:  # MN-major (bk × tile_n): K is the slab row, the tile coordinate the column
+                    b_cols = n.tile + getattr(b_op, "pad_cols", 0)
+                    if n.tile > atom_cols:
+                        raise ValueError(
+                            "wgmma: an N-contiguous B slab wider than one swizzle atom does not store each atom as its own K rows; "
+                            "the schedule rule should have declined this row"
+                        )
+                    index, lbo, sbo = flat(offset(kcol, b_op.slot_row(slot)), nbase, b_cols), 128, 8 * b_cols * elem_bytes
+                stmts.append(
+                    WgmmaDescriptor(name=b_desc, smem=b_op.slab, smem_index=index, swizzle=b_op.swizzle, lbo_bytes=lbo, sbo_bytes=sbo)
+                )
+                stmts.append(
+                    WgmmaMma(
+                        c_frags=tuple(_fold_frag(f"{frag_ns}{_mma_c_base(atom, 0, j)}", f) for j in range(jg * cells, (jg + 1) * cells)),
+                        a_desc=a_desc,
+                        b_desc=b_desc,
+                        shape=atom.ptx_shape,
+                        ab_dtype=atom.ab_dtype,
+                        scale_d=1,
+                        trans_a=0,
+                        trans_b=0 if trans else 1,
+                    )
+                )
+    stmts += [WgmmaCommit(), WgmmaWait(0)]
     return stmts
 
 
@@ -1692,6 +1778,16 @@ class _MmaOps(_AtomOps):
         (``Operand.scale``) additionally hands the drain its block-scale slab. An f16-accumulate
         atom promote-folds its packed f16 fragments into the f32 shadows once per drain — the
         bk chunk IS the promote cadence (the last chunk's fold doubles as the final one)."""
+        if self.tile.atom.is_wgmma:
+            return _wgmma_drain(
+                operands=operands,
+                slot=slot,
+                mn=mn,
+                atom=self.tile.atom,
+                bk_elems=self.stage.bk_elems,
+                frag_ns=self.frag_ns,
+                n_folds=len(self.channels),
+            )
         stmts = _staged_inner_atom_loop(
             slabs=tuple(op.slab for op in operands),
             offs=tuple(op.slot_row(slot) for op in operands),
@@ -1792,27 +1888,29 @@ class _MmaOps(_AtomOps):
         # One A fragment set; one B and one C fragment set PER fold channel (the multi-B node's
         # shared-A / per-channel-accumulate drain).
         n_folds = len(self.channels)
-        decls: list[Stmt] = [
-            RegFragment(
-                name=nm,
-                role="a",
-                shape=atom.ptx_shape,
-                dtype=atom.operand_dtype("a"),
-                nregs=atom.fragment_nregs("a"),
-            )
-            for nm in frags(lambda i: self.frag(f"_a{i}"), m.reg)
-        ]
-        for f in range(n_folds):
+        decls: list[Stmt] = []
+        if not atom.is_wgmma:  # a descriptor-fed atom reads its operands from shared memory, not fragments
             decls += [
                 RegFragment(
                     name=nm,
-                    role="b",
+                    role="a",
                     shape=atom.ptx_shape,
-                    dtype=atom.operand_dtype("b"),
-                    nregs=atom.fragment_nregs("b"),
+                    dtype=atom.operand_dtype("a"),
+                    nregs=atom.fragment_nregs("a"),
                 )
-                for nm in frags(lambda i, ff=f: _fold_frag(self.frag(f"_b{i}"), ff), n.reg)
+                for nm in frags(lambda i: self.frag(f"_a{i}"), m.reg)
             ]
+            for f in range(n_folds):
+                decls += [
+                    RegFragment(
+                        name=nm,
+                        role="b",
+                        shape=atom.ptx_shape,
+                        dtype=atom.operand_dtype("b"),
+                        nregs=atom.fragment_nregs("b"),
+                    )
+                    for nm in frags(lambda i, ff=f: _fold_frag(self.frag(f"_b{i}"), ff), n.reg)
+                ]
         if block_scaled_atom(atom):
             # The block-scale fragments — one 32-bit register per operand fragment, reloaded per
             # k-step into the same name (``BlockScaleLoad`` assigns), so they are declared here once.

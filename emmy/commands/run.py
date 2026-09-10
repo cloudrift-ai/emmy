@@ -615,6 +615,16 @@ def _run_golden_targets(args) -> None:
     if not names:
         logger.error("--golden contains no realizations: %s", args.golden)
         sys.exit(2)
+    # Bench each TARGET once. A row named ``<target>.<identity>`` (a routing row or a child-identity
+    # schedule receipt) is evidence for its target's walk, not a target of its own: benched as a
+    # whole-target pin it measures nothing real and multiplies the walk by the receipt count.
+    targets: list[str] = []
+    for name in names:
+        parent = ".".join(name.split(".")[:2])
+        target = parent if parent in names else name
+        if target not in targets:
+            targets.append(target)
+    names = targets
 
     output_dir = None
     if len(names) > 1 and args.json:
@@ -624,6 +634,9 @@ def _run_golden_targets(args) -> None:
             sys.exit(2)
         output_dir.mkdir(parents=True, exist_ok=True)
 
+    # One target's failure (a compile error, a wrong answer, a hung bench) must not hide the
+    # targets after it: every realization runs and reports, and the walk exits non-zero at the end.
+    failed: list[str] = []
     for index, name in enumerate(names):
         target_args = copy(args)
         target_args._golden_document = document
@@ -632,7 +645,17 @@ def _run_golden_targets(args) -> None:
         if output_dir is not None:
             safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("._") or "target"
             target_args.json = str(output_dir / f"{index:03d}-{safe_name}.json")
-        _handle_run_once(target_args)
+        try:
+            _handle_run_once(target_args)
+        except SystemExit as exc:
+            if exc.code:
+                failed.append(name)
+        except Exception as exc:  # noqa: BLE001 — one target's lowering error must not hide the rest
+            logger.error("%s: %s", name, exc)
+            failed.append(name)
+    if failed:
+        logger.error("%d of %d realizations failed: %s", len(failed), len(names), ", ".join(failed))
+        sys.exit(1)
 
 
 def _recordable_bench_leaves(golden_benches, greedy_iso) -> list:

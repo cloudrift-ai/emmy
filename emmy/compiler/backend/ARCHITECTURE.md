@@ -117,8 +117,9 @@ buffer a launch produces; the slab planner's first-write test reads it, falling 
 stored before the field existed), symbolic-axis plumbing, kernel refs (source and/or a content-addressed
 cubin-cache key), and per-weight checkpoint bindings (`source_path` + a pack-own load-op vocabulary applied
 with pure numpy). A kernel ref also records `arch_specific` — whether it must compile for the arch-SUFFIXED
-target (`sm_120a`). Two unrelated instruction families need that suffix: TMA, which announces itself through
-the launch's descriptors, and the block-scaled fp4 mma, which a plan can only recognize by its wrapper name in
+target (`sm_120a`, `sm_90a`). Three unrelated instruction families need that suffix: TMA, which announces itself
+through the launch's descriptors, and the block-scaled fp4 mma and Hopper's `wgmma`, which a plan can only recognize
+by their wrapper names in
 the rendered source. Plans stored under the older `uses_tma` key still read, since the meaning is the same and
 only the name narrowed. A deterministic source-free bind record is the third binding kind: `plan_from_graph`
 evaluates it once and its bytes ride the plan (`WeightSpec.generated`), so no checkpoint can supply it and

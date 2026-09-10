@@ -37,7 +37,17 @@ from dataclasses import replace
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, SimplifyCtx, affine_form
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.kernel.ir import VOLTA_B_CONGRUOUS, VOLTA_CROSSWISE, LdmatrixLoad, MbarrierWait, Sync
+from emmy.compiler.ir.kernel.ir import (
+    VOLTA_B_CONGRUOUS,
+    VOLTA_CROSSWISE,
+    LdmatrixLoad,
+    MbarrierWait,
+    Sync,
+    WgmmaCommit,
+    WgmmaFence,
+    WgmmaMma,
+    WgmmaWait,
+)
 from emmy.compiler.ir.stmt import Body, Cond, Loop, Stmt, StridedLoop, Write
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 from emmy.compiler.pipeline.search.space import PAIR_LDMATRIX
@@ -151,7 +161,7 @@ def _blocks(s: Stmt, a_frag: str, moved_frag: str | None, moved_deps: set[str]) 
     moved fragment (its pre-move value — e.g. the previous streaming step's — would be
     clobbered early); or a definition of a name the moved load's index reads. Reading the
     KEPT fragment is fine — the pair fills it at its original position."""
-    if s.nested() or isinstance(s, (Sync, MbarrierWait, Write, Loop, StridedLoop, Cond)):
+    if s.nested() or isinstance(s, (Sync, MbarrierWait, Write, Loop, StridedLoop, Cond, WgmmaFence, WgmmaCommit, WgmmaWait, WgmmaMma)):
         return True
     defs = set(s.defines())
     if a_frag in defs or (moved_frag is not None and moved_frag in defs):
