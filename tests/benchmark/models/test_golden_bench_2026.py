@@ -127,6 +127,8 @@ def test_quantized_support_check_covers_four_formats_and_replays_block_fp8(proje
     assert {task.variant.params["model_ref"] for task in by_format["fp8-block"]} == {
         "Qwen/Qwen3-0.6B-FP8@e5be08033360965ceca7b0ffd72d521a51331ce0"
     }
+    # The decode (seq=1) golden is committed and fully tuned; the prefill (seq=512) golden is a documented
+    # partial recorded in the same directory.
     for name in replayed:
         assert (Path(recipe_dir) / "golden" / f"{name}.golden.yaml").is_file()
 
@@ -134,7 +136,9 @@ def test_quantized_support_check_covers_four_formats_and_replays_block_fp8(proje
     assert "./venv/bin/emmy trace" in run
     assert "./venv/bin/emmy tune" not in run
     assert 'if [ -n "$golden" ]' in run
-    assert "--golden $task_dir/working.yaml --bench --strict" in run
+    # Each post-fusion target is benched on its own so a committed golden's per-target evidence deploys.
+    assert '--realization "$$seed"' in run
+    assert "--bench --strict --no-record-nodes" in run
     assert "--bench-backends eager,emmy" in run
     assert "tcompile" not in run
     assert recipe.command.stage == [

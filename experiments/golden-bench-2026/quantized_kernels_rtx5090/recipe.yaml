@@ -49,10 +49,29 @@ command:
       ./venv/bin/emmy trace "$model_ref" --layer 0 --seq-len "$seq_len" \
         --model-provenance "$model_ref" --output $task_dir/working.yaml 2>&1 | tee $task_dir/trace.log
     fi
-    EMMY_NVCC_FLAGS= CUDA_VISIBLE_DEVICES="$gpu_device_ids" ./venv/bin/emmy run \
-      --golden $task_dir/working.yaml --bench --strict --no-record-nodes \
-      --json $task_dir/verification --warmup 5 --iters 20 \
-      --bench-backends eager,emmy 2>&1 | tee $task_dir/verification.log
+
+    # Bench each seed realization (one per post-fusion target) on its own. A committed golden carries
+    # the winning schedule as measured evidence rows beside each unmeasured seed; the seed's greedy
+    # deploys that evidence, so a per-seed strict run reproduces the tuned kernel set. A raw trace has
+    # only seeds, so the same loop benches every target's greedy pick. Reading each realization by
+    # field (unmeasured name) is structural selection, not result interpretation.
+    mkdir -p $task_dir/verification
+    ./venv/bin/python -c 'import sys, yaml; d = yaml.safe_load(open(sys.argv[1])); print("\n".join(r["name"] for c in d["configs"] for r in c["realizations"] if not (r.get("measurements") or {}).get("emmy_us")))' \
+      "$task_dir/working.yaml" > $task_dir/seeds.txt
+    verification_status=0
+    while IFS= read -r seed; do
+      [ -z "$$seed" ] && continue
+      if EMMY_NVCC_FLAGS= EMMY_BENCH_RUN_TIMEOUT_S=60 EMMY_KERNEL_TIMEOUT_MS=120000 \
+        CUDA_VISIBLE_DEVICES="$gpu_device_ids" ./venv/bin/emmy run \
+        --golden $task_dir/working.yaml --realization "$$seed" --bench --strict --no-record-nodes \
+        --json $task_dir/verification/$$seed --warmup 5 --iters 20 \
+        --bench-backends eager,emmy 2>&1 | tee $task_dir/verification/$$seed.log; then
+        :
+      else
+        verification_status=$$?
+      fi
+    done < $task_dir/seeds.txt
+    exit "$$verification_status"
   result_files:
     - artifacts.tar.gz
   timeout: 86400
