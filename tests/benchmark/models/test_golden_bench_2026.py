@@ -27,11 +27,13 @@ def test_common_kernel_corpus_is_small_and_identical(project_root) -> None:
     platforms = {
         "NVIDIA Tesla V100 SXM3 32GB",
         "NVIDIA A100 80GB",
+        "NVIDIA H100 80GB",
         "NVIDIA GeForce RTX 4090",
         "NVIDIA GeForce RTX 5090",
         "NVIDIA H200 141GB",
         "NVIDIA B200",
     }
+    replayed = {"NVIDIA A100 80GB": "a100", "NVIDIA H100 80GB": "h100"}
     recipe_dir = _experiment(project_root, "kernels")
     recipe = load_recipe(recipe_dir)
     tasks = _kernel_tasks(project_root, "common")
@@ -41,14 +43,15 @@ def test_common_kernel_corpus_is_small_and_identical(project_root) -> None:
     assert all(task.recipe.deploy.gpu_count == 1 for task in tasks)
     assert {task.variant.params["seq_len"] for task in tasks} == {1, 512}
     assert {task.variant.params["model_ref"] for task in tasks} == {"Qwen/Qwen3-0.6B@c1899de289a04d12100db370d81485cdf75e47ca"}
-    a100_tasks = [task for task in tasks if task.recipe.deploy.gpu == "NVIDIA A100 80GB"]
-    searched_tasks = [task for task in tasks if task.recipe.deploy.gpu != "NVIDIA A100 80GB"]
-    assert {task.variant.params["golden"] for task in a100_tasks} == {
-        "qwen3-06b-s1_a100",
-        "qwen3-06b-s512_a100",
-    }
-    assert all(task.variant.params["budget"] == 0 for task in a100_tasks)
-    assert all(task.variant.params["patience"] == 0 for task in a100_tasks)
+    replay_tasks = [task for task in tasks if task.recipe.deploy.gpu in replayed]
+    searched_tasks = [task for task in tasks if task.recipe.deploy.gpu not in replayed]
+    for gpu, short in replayed.items():
+        assert {task.variant.params["golden"] for task in replay_tasks if task.recipe.deploy.gpu == gpu} == {
+            f"qwen3-06b-s1_{short}",
+            f"qwen3-06b-s512_{short}",
+        }
+    assert all(task.variant.params["budget"] == 0 for task in replay_tasks)
+    assert all(task.variant.params["patience"] == 0 for task in replay_tasks)
     assert all(task.variant.params["golden"] == "" for task in searched_tasks)
     assert all(task.variant.params["budget"] == 12 for task in searched_tasks)
     assert all(task.variant.params["patience"] == 4 for task in searched_tasks)
@@ -597,7 +600,7 @@ def test_every_command_variant_renders(project_root) -> None:
             assert "/task" in command
             subprocess.run(["bash", "-n"], input=command, text=True, check=True)
             rendered += 1
-    assert rendered == 93
+    assert rendered == 95
 
 
 def test_gemma_serving_ab_has_four_points_per_lane(project_root) -> None:
