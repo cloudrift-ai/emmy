@@ -2,26 +2,116 @@
 
 ## Conclusion
 
-Manual schedules make all 40 Emmy shapes correct and runnable on the same NVIDIA A100-SXM4-40GB used by the Neptune
-paper. They do not close the performance gap. Emmy is 1.20--1.23x slower than Neptune on the three prefill families
-and 3.54x slower on causal decode by geometric mean. On GQA decode, replayed from the split-KV goldens recorded
-after the chunk tier learned to store its row states (see the section below), Emmy is 0.93x of Neptune's time and
-wins 5 of 8 shapes.
+The compiler now matches FlashAttention-2 on causal and GQA prefill and is ahead of Neptune on both, on the same
+NVIDIA A100-SXM4-40GB the Neptune paper used. Re-measured on 2026-09-10 after the chunk-loop density change (the
+staged slab swizzle hoisted per lane, each chunk folded at the advanced pivot), with no golden retuned: causal prefill
+is 1.02x of eager and 0.87x of Neptune by geometric mean over the eight lengths, GQA prefill 1.03x and 0.88x, each
+ahead of Neptune at seven of eight lengths. Global prefill, whose stream has no early stop, improved from 1.54x to
+1.17x of eager and is ahead of Neptune at six of eight lengths (0.94x) but still trails FlashAttention-2. GQA decode,
+replayed from the split-KV goldens, is 0.81x of Neptune and ahead at all eight lengths; on the paper's scale the
+family's geometric mean over Inductor is 0.27 for Emmy against 0.34 for Neptune. Causal decode was not re-measured:
+its goldens are scalar-tier rows the change does not touch, and it remains 3.5x behind Neptune.
 
-Relative to PyTorch 2.13, Emmy is 1.41--1.54x slower on prefill and 3.47x slower than Inductor on causal decode. GQA
-decode is 2.39x faster than Inductor and 20.6x faster than eager. On the paper's scale the family's
-geometric mean over Inductor is 0.31 for Emmy against 0.34 for Neptune. Prefill and causal decode
-remain a compiler performance gap, not parity.
+The two earlier implementation results still stand under the new numbers: the causal early stop on the chunk tier
+(masked chunks skipped rather than folded), which halved the long causal and GQA rows, and the split-KV partial that
+stores the chunk tier's row states whole, which is what put GQA decode ahead. The remaining gaps are global prefill's
+schedule (its goldens pin a weaker row than causal's; the causal geometry measured 10% faster at 2048 keys and 12%
+slower at 512, so the retune is per length) and causal decode's scalar tiers.
 
-The main implementation result is the causal early stop on the chunk tier: the coordinate mask the frontend adds to
-the score is read once where the chunk loop opens, and the loop stops at the CTA's diagonal, so masked chunks are
-skipped instead of folded while the per-element mask still guards the boundary tile. This reduced the 32768
-causal-prefill row from about 130.7 ms to 70.0 ms and the GQA-prefill row from about 258.5 ms to 137.7 ms. The remaining
-prefill gap is schedule and generated-code quality after masked work has already been removed.
+## Prefill and GQA decode after the chunk-loop density change
 
-The Neptune schedules and current PyTorch baselines also reproduce on this exact 40GB card. The five published
-library-relative family ratios differ from the paper by 1.3--5.1%, with the same direction in every family. There is
-no hardware-difference qualification on the current comparison.
+The three prefill families and GQA decode were re-measured on 2026-09-10 on the same host at revision
+`3394fd03cbeac90b76e812875d2812b801c683d6`, after the compiler learned to hoist the staged slab swizzle per lane and
+to fold each attention chunk at the advanced pivot, so the chunk's P·V accumulates straight into the carrier. No golden
+was retuned: the lane replayed the committed rows, and the difference to the previous section is the compiler's.
+
+The lane ran through `emmy bench --local --filter lane=emmy`, one invocation for `operator=prefill_*` and one for
+`operator=decode_gqa`, each setup measured twice at deployable `-O3` with one warmup and 15 captured iterations and
+strict eager correctness at `rtol=1e-3, atol=1e-3`. All 32 setups completed both repetitions and every Emmy
+measurement passed correctness. Each latency below is the mean over the two repetitions of the minimum of 15; Neptune
+is the replay experiment's mean of 15 (`paper-baselines.csv`). For GQA decode the Emmy latency is the replay's kernel
+sum for the full kernel-set receipt row, as in the split-KV section below.
+
+| Operator | Emmy / eager | Emmy / `torch.compile` | Emmy / Neptune | Emmy wins vs Neptune | previous Emmy / eager |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Prefill global | 1.17x | 1.17x | 0.94x | 6/8 | 1.54x |
+| Prefill causal | 1.02x | 1.02x | 0.87x | 7/8 | 1.41x |
+| Prefill GQA | 1.03x | 1.03x | 0.88x | 7/8 | 1.44x |
+| Decode GQA | 0.04x | 0.34x | 0.81x | 8/8 | 0.05x |
+
+Lower ratios favor Emmy; the summaries are geometric means over the eight lengths, and the previous column is the
+section below this one, measured 2026-09-09.
+
+**Prefill causal**
+
+| keys | Emmy (us) | eager (us) | Inductor (us) | Neptune (us) | Emmy / eager | Emmy / Neptune | previous Emmy / eager |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 256 | 24.4 | 23.8 | 24.3 | 26.6 | 1.02 | 0.92 | 1.15 |
+| 512 | 58.6 | 58.8 | 58.7 | 54.2 | 1.00 | 1.08 | 1.13 |
+| 1024 | 124.7 | 122.4 | 120.3 | 129.3 | 1.02 | 0.96 | 1.42 |
+| 2048 | 315.6 | 335.4 | 336.4 | 375.4 | 0.94 | 0.84 | 1.39 |
+| 4096 | 1056.3 | 1042.4 | 1040.9 | 1129.8 | 1.01 | 0.93 | 1.50 |
+| 8192 | 3438.6 | 3362.8 | 3360.8 | 4389.3 | 1.02 | 0.78 | 1.56 |
+| 16384 | 11872.8 | 11354.1 | 11311.1 | 16581.8 | 1.05 | 0.72 | 1.60 |
+| 32768 | 47180.8 | 44305.4 | 44499.5 | 61207.6 | 1.06 | 0.77 | 1.63 |
+
+**Prefill GQA**
+
+| keys | Emmy (us) | eager (us) | Inductor (us) | Neptune (us) | Emmy / eager | Emmy / Neptune | previous Emmy / eager |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 256 | 36.1 | 36.1 | 36.3 | 35.8 | 1.00 | 1.01 | 1.06 |
+| 512 | 69.7 | 70.6 | 70.2 | 81.3 | 0.99 | 0.86 | 1.31 |
+| 1024 | 197.8 | 193.1 | 192.3 | 217.8 | 1.02 | 0.91 | 1.41 |
+| 2048 | 578.0 | 567.0 | 561.4 | 619.2 | 1.02 | 0.93 | 1.51 |
+| 4096 | 2017.8 | 1925.6 | 1922.0 | 2113.7 | 1.05 | 0.95 | 1.56 |
+| 8192 | 6015.5 | 5710.8 | 5708.3 | 8522.9 | 1.05 | 0.71 | 1.58 |
+| 16384 | 23493.6 | 22295.0 | 22136.3 | 28992.0 | 1.05 | 0.81 | 1.62 |
+| 32768 | 93751.8 | 88208.9 | 88154.1 | 100425.6 | 1.06 | 0.93 | 1.60 |
+
+**Prefill global**
+
+| keys | Emmy (us) | eager (us) | Inductor (us) | Neptune (us) | Emmy / eager | Emmy / Neptune | previous Emmy / eager |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 256 | 22.9 | 20.1 | 20.0 | 24.1 | 1.14 | 0.95 | 1.31 |
+| 512 | 57.7 | 54.0 | 53.6 | 64.9 | 1.07 | 0.89 | 1.30 |
+| 1024 | 160.8 | 149.6 | 148.5 | 191.8 | 1.07 | 0.84 | 1.36 |
+| 2048 | 556.0 | 454.7 | 452.6 | 551.7 | 1.22 | 1.01 | 1.59 |
+| 4096 | 1999.9 | 1721.3 | 1716.2 | 2001.6 | 1.16 | 1.00 | 1.54 |
+| 8192 | 6612.5 | 5508.6 | 5492.7 | 7502.6 | 1.20 | 0.88 | 1.61 |
+| 16384 | 25008.6 | 20663.3 | 20809.2 | 29564.6 | 1.21 | 0.85 | 1.63 |
+| 32768 | 103875.1 | 81058.8 | 84664.8 | 92427.5 | 1.28 | 1.12 | 2.11 |
+
+**Decode GQA** (the replay's kernel sum; the whole-forward capture, eager and Inductor from the same lane)
+
+| keys | Emmy, kernel sum (us) | Emmy, whole (us) | eager (us) | Inductor (us) | Neptune (us) | Emmy / Inductor | Emmy / Neptune | previous kernel sum (us) |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 256 | 9.7 | 11.4 | 74.8 | 17.2 | 13.1 | 0.57 | 0.74 | 9.2 |
+| 512 | 11.1 | 12.5 | 110.0 | 27.5 | 13.6 | 0.40 | 0.81 | 17.5 |
+| 1024 | 13.1 | 14.7 | 206.3 | 28.6 | 16.7 | 0.46 | 0.79 | 17.3 |
+| 2048 | 14.7 | 16.3 | 392.2 | 41.8 | 19.8 | 0.35 | 0.74 | 18.5 |
+| 4096 | 22.3 | 24.3 | 915.5 | 94.7 | 30.2 | 0.24 | 0.74 | 25.2 |
+| 8192 | 45.0 | 46.7 | 1509.4 | 131.1 | 52.9 | 0.34 | 0.85 | 42.6 |
+| 16384 | 78.7 | 80.7 | 3511.8 | 312.8 | 87.8 | 0.25 | 0.90 | 82.3 |
+| 32768 | 137.0 | 141.6 | 6739.5 | 564.7 | 143.2 | 0.24 | 0.96 | 146.5 |
+
+Each decode setup's replay directory holds one record per golden row; the finalize's receipt and the routing row
+pin the partial kernel's knobs only through the route and replay it on a scalar tile there (hundreds of
+microseconds to milliseconds), exactly as in the previous archive, so the table reads the full kernel-set receipt.
+The reference arm's Emmy number is again not reported for decode: without golden evidence the greedy deploys the
+prior's pick. The two `op-g` rows (global and GQA prefill) share one task directory name, so the GQA row's artifact
+archive also carries the global row's evidence files; each setup file was read once.
+
+The run-to-run spread on this host is the one noted below: eager itself moved by up to 25% between separate
+processes at 2048 keys during the development measurements, so the same-process ratios are what the tables rest on,
+and short-row ratios within a few percent of 1.00 are ties.
+
+- Prefill run: `2026-09-10_07-23-33`, run ID `20260910T072333Z`; GQA-decode run: `2026-09-10_07-41-21`, run ID
+  `20260910T074121Z`
+- Git revision: `3394fd03cbeac90b76e812875d2812b801c683d6`; dirty: false
+- Host, GPU, driver and toolkit as in "Run and system" below; PyTorch 2.13.0 with CUDA 13.0 in the staged repo's
+  venv
+- Archive: `results_a100x1.tar.gz` (both run directories with their records, per-row artifacts and logs); SHA-256
+  `41115796b3f07a6958b505fa4ffeef922d5c9057a9832fb3a9eed6cf67401872`
 
 ## Split-KV GQA decode
 
@@ -264,6 +354,8 @@ SoftCap, so this result should not be treated as reproduced until that differenc
 
 ## Run and system
 
+- Chunk-loop density lane (prefill and GQA decode): 4/4 rows succeeded on 2026-09-10 at revision `3394fd03c`, same
+  host as below
 - Split-KV GQA-decode lane: 8/8 setups succeeded on 2026-09-10 at revision `38f7f6d9e`, same host as below
 - Status: 5/5 full rows succeeded; the corrected GQA-decode row also succeeded
 - Full run: `20260909T081524Z`; corrected GQA-decode run: `20260909T093117Z`
@@ -296,7 +388,9 @@ only the missing host lane. The durable `recipe.yaml` contains the corrected wor
 
 ## Durable files
 
-- Exact A100 40GB comparison: `paper-emmy-a10040.csv`
+- Exact A100 40GB comparison: `paper-emmy-a10040.csv` (prefill and GQA-decode Emmy, eager and Inductor columns from
+  the 2026-09-10 lane; causal decode from the 2026-09-09 run)
+- 2026-09-10 prefill and GQA-decode lane: `results_a100x1.tar.gz`
 - Split-KV GQA-decode lane: `emmy_decode_gqa_lane.csv` and `results_a10040_split_kv_decode_gqa.tar.gz` (per-setup JSON
   records, logs and the status table)
 - Neptune paper reconstruction: `paper-baselines.csv` and `paper-table.csv`

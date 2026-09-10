@@ -124,7 +124,7 @@ def producer_band_moves() -> tuple[int, ...]:
     return 0, 1, 2
 
 
-SPLITK_WIDTHS: tuple[int, ...] = (2, 4, 8, 16, 32)
+SPLITK_WIDTHS: tuple[int, ...] = (2, 4, 8, 16, 32, 64)
 
 
 def splitk_moves() -> list[Reduce]:

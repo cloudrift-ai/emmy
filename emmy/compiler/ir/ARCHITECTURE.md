@@ -399,8 +399,9 @@ per-element lift, ψ and ψ⁻¹ — and beside the definition stores what conju
 channel (the per-element map a dependent reduce's lift must spell, over ROLES — `exp(s − g)` for a denominator,
 `exp(s − g)·v` for an expectation, `(s − g·c)²` for Welford's deviation), what each state is at the singleton (`1`,
 `v`, `0`), any state the two-pass form never had (Welford's count and running mean), and the fused ⊕ in its stable
-spelling: two lambdas over roles for an open channel count (softmax's pivot advance and per-channel rescale, one
-recipe for softmax and flash attention alike) or one lambda over every state pair (Welford's fixed carrier
+spelling: two lambdas over roles for an open channel count (softmax's pivot advance and the one-sided scale each
+channel takes to the advanced pivot, the two sides then joined by the channels' shared ⊕ — one recipe for softmax
+and flash attention alike) or one lambda over every state pair (Welford's fixed carrier
 `(sum, count, mean, M2)`). `Recipe.program(states)` instantiates either over a fold's state names by renaming, and
 the definition certifies the data: the program is the conjugate of the base on random states, the seeds are the base
 identities under ψ⁻¹, the injections are the lift seen through ψ. `Fold.fuse(recipe)`

@@ -302,6 +302,17 @@ schedule fork enumerates the resolver-gated stage grid (`ir/schedule/catalog.sta
 moves;
 an `EMMY_STAGE` pin stays authoritative.
 
+**Slab addresses.** A swizzled slab's element index is permuted by an XOR of its own row bits into its 16-byte
+chunk bits, and that XOR is linear over bit-disjoint parts: `swz(a | b) = swz(a) ^ swz(b)`. Every staged address is
+such a sum — a tile base the IR spells (a fragment's row block and K step, a copy stripe's base row, a ring slot's
+row offset) plus the lane's own offset the render adds — and a base whose row is a multiple of the lane's row span
+and whose column clears the lane's column bits shares no bit with it. So the drain reads
+`(swz(lane) ^ swz(col)) + row·ldm` and an evenly striped cp.async fill, unrolled per stripe, writes
+`swz(lane) + base` (`swizzled_slab_index`): the lane's swizzle is one hoisted per-lane value, the column's a
+constant nvcc folds, the row an immediate of the load. Re-applying the swizzle to every load's whole index had nvcc
+recompute the XOR from `threadIdx` per load — a fifth of an attention chunk's instructions on the A100, and the
+spills that came with holding the results. A base the reading cannot prove keeps the whole-index form.
+
 **Computed operands and nested Folds.** Every computed edge remains a schedule site. Scalar rows evaluate a pure
 producer in registers. Warp rows place a producer either in a synchronous shared-memory slab or, when the child is a
 scheduled contraction, directly in fragments before storing the slab consumed by `ldmatrix`. Materialized peers keep
@@ -452,9 +463,15 @@ The tier folds the RECIPE's patterns per chunk, not the stored lift — that lif
 (`(score, 1, value)` for softmax), which is the right thing for a serial step and says nothing about a chunk. The
 chunk is `TILE`'s own K width, which is also what the stage resolver derives `bk_elems` as — one number, two
 readers, so a `STAGE` at this site names the transport and never a second block. Per chunk it emits the score,
-reduces it per row into the chunk's pivot, instantiates each channel's `pattern` against that pivot, folds a channel
-that is no product per row and the bilinear one on tensor cores, and merges the chunk's partial through the recipe's
-stable ⊕ (`Fold.merge`) once per chunk.
+reduces it per row into the chunk's pivot, and runs the recipe's `advance` on the carrier's pivot against it — the
+advanced pivot and the carrier's factor for the move, per row. Every channel's `pattern` is instantiated at the
+ADVANCED pivot, so the chunk's contribution already stands where the carrier moves to and takes no factor of its own
+(a side at the merged pivot is scaled by the identity — transport of structure, not a softmax fact). The carrier is
+then scaled by its factor (the recipe's `scale`, once per chunk) and the chunk joins it through each channel's base
+⊕: a channel that is no product folds its row reduce into its per-row register, and the bilinear one's `mma.sync`
+accumulates straight into the expectation's fragment. That is FlashAttention-2's loop, derived: no chunk-local
+accumulator, no per-element rescale of the chunk, which on the A100 was 64 registers and a third of the chunk's
+float instructions.
 
 Three things make it small. The SCORE is the nested contraction the tree already carries as a site of its own, and
 the fragment seam already ties the two together — the score's N tile must equal the consumer's chunk, one warp column

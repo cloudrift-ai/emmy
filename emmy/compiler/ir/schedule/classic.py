@@ -1054,7 +1054,10 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
                 else ()
             ),
             raster_eligible=node.tile.is_tiled and view.as_contraction() is not None,
-            producer_eligible=not (tile_op.packed_reading(fold)[0] is not None and stage.transport == "smem-tma"),
+            # A producer band splits the staged K-loop's phases across warp bands, which only the
+            # contraction tier's skeleton drives; the chunk tier runs every warp through one uniform
+            # ring, where an aux band decoding onto warp 0 would re-issue its elected TMA arrive.
+            producer_eligible=not fold.chunked() and not (tile_op.packed_reading(fold)[0] is not None and stage.transport == "smem-tma"),
         )
         cache[key] = support
         return support
