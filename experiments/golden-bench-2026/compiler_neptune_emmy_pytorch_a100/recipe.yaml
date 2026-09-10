@@ -7,7 +7,7 @@
 #   EXP=experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100
 #   emmy bench $EXP --local                                       # every lane, every operator
 #   emmy bench $EXP --local --filter lane=emmy                    # only the PyTorch/Emmy comparison
-#   emmy bench $EXP --local --filter lane=tune --filter operator=decode_gqa
+#   emmy bench $EXP --local --filter lane=emmy --filter operator=decode_gqa
 #
 # Every row for one GPU shares a single execution group, so the split costs one VM, not one per row.
 #
@@ -15,13 +15,11 @@
 #   neptune  the pinned artifact's own tune + Nsight profile for one operator (10 operators)
 #   emmy     bench eager / torch.compile / Emmy, with Emmy replaying a pre-tuned golden (5 operators)
 #
-# The emmy lane runs two repeated arms per setup: golden replay times the committed tuned schedules
-# twice, and a `emmy run -c` reference arm supplies two eager, torch.compile, and strict whole-program
-# Emmy-vs-eager correctness observations. They are separate because `emmy trace --code` stores a
-# single-op program's post-fusion targets as Loop IR — every kernel of an SDPA snippet shares one
-# provenance selector — and a Loop IR target carries no torch twin for direct eager proof. Replay
-# instead checks each exact pin against same-input greedy Emmy; benchmark conclusions use its repeated
-# deployable-O3 timings.
+# The emmy lane runs two repeated exact-pin measurements per setup. Prefill's `emmy run -c` arm reads
+# its one-kernel golden schedule and supplies eager, torch.compile, and strict whole-program
+# Emmy-vs-eager correctness observations without moving the 32768-token payload between processes.
+# Decode additionally uses `emmy run --golden` because its committed schedule may span multiple kernels; its
+# source arm keeps the validated named-operand trace as the separate eager proof.
 #
 # Tuning happens outside this recipe, through the tune-kernels skill: trace each setup from
 # operators.sh (`./operators.sh OPERATOR SEQUENCE_LENGTH` prints the exact module source this
@@ -88,13 +86,15 @@ command:
           python3.12 -m venv venv --prompt emmy
         fi
         # The staged repo is shared by every row in the group, so only the first host row installs.
-        if ! venv/bin/python -c 'import torch, sys; sys.exit(torch.__version__.split("+")[0] != "2.13.0")' 2>/dev/null; then
+        if [ ! -x venv/bin/emmy ] || \
+          ! venv/bin/python -c 'import numpy, torch, sys; sys.exit(torch.__version__.split("+")[0] != "2.13.0")' \
+            2>/dev/null; then
           venv/bin/pip install -e ".[dev]" torch==2.13.0 2>&1 | tee "$$EVIDENCE/emmy-install.log"
         fi
         test "$$(venv/bin/python -c 'import torch; print(torch.__version__.split("+")[0])')" = "2.13.0"
         export CUDA_VISIBLE_DEVICES=$gpu_device_ids
-        # Task-local search state, so the greedy row is untuned by construction and the golden's
-        # pins are the only searched schedules this lane reports.
+        # Task-local state prevents machine-local evidence from affecting the replay. The golden's
+        # measured rows and the source arm's exact pins are the only tuned schedules this lane reports.
         export EMMY_TUNE_DB=$task_dir/autotune.db
         export EMMY_ONLINE_FILE=$task_dir/online.json
         export EMMY_CUBIN_CACHE=$task_dir/cubins
@@ -121,7 +121,7 @@ command:
   timeout: 28800
 
 matrices:
-  - deploy.gpu: "NVIDIA A100 80GB"
+  - deploy.gpu: "NVIDIA A100 40GB"
     deploy.gpu_count: 1
     lane: neptune
     operator:
@@ -135,7 +135,7 @@ matrices:
       - prefill_softcap
       - decode_softcap
       - prefill_windowed
-  - deploy.gpu: "NVIDIA A100 80GB"
+  - deploy.gpu: "NVIDIA A100 40GB"
     deploy.gpu_count: 1
     lane: emmy
     operator:

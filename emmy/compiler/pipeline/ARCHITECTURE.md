@@ -676,7 +676,10 @@ pinned measurement (`run --golden PATH --bench`, `--ab`), training data for the 
 At deploy a record is rows, nothing more, and every row is keyed by the kernel it decides (`golden.evidence_rows`).
 A record that decorates one kernel is that kernel's schedule row under the target's signature. Any other record is
 read through its replay (`golden._replay`): the target is resolved through the tile passes under the record's pins
-(the environment it was measured under), its knobs followed fork by fork through the same `pins.spelled_arm` the
+(the environment it was measured under) and with the live decision pins withdrawn (`pins.unpinned_decisions` — a
+replay reconstructs what a record measured, so it is a function of the record and the compiler alone, and its
+persisted result serves every pinned compile instead of going cold per pin; the live pins decide the live forks,
+where a row they contradict finds no leaf), its knobs followed fork by fork through the same `pins.spelled_arm` the
 deploy reads a route row with — the seams an entry of the set marks `cut` together offered as one composed arm on the
 replay's kernels, exactly as the deploy offers them. Each kernel-set arm the knobs spelled is a route row under the
 signature of the kernel that fork was offered on; its schedule row is keyed under the child its stored identity
@@ -1071,10 +1074,14 @@ promotion never fabricates their heterogeneous schedules into one row or falls b
 cross-CTA parent becomes a tune
 winner only when its ordinary schedule pins reproduce the decisions on every directly measured child kernel; a
 parent whose pins
-name a different independently tuned child is left unpromoted. A `PLACE`-only row is a routing row: it does not claim
-the child schedules, and once measured it is a route row — the measured price of that kernel set, the arm the greedy
-compile takes at that kernel's fork (Part 3). A search number never populates `emmy_us` / `cublas_us`; promotion
-still requires the separate repeated, correct, deployable A/B gate.
+name a different independently tuned child is left unpromoted. A `PLACE`-only row is a routing row, and so is a row
+spelling only a cross-CTA `REDUCE` arm (`g<n>k` / `g<n>a`, which mints its pieces the way a cut does): it does not
+claim the child schedules, and once measured it is a route row — the measured price of that kernel set, the arm the
+greedy compile takes at that kernel's fork (Part 3). A receipt `--record-greedy` writes carries no route of its own,
+so the golden's per-row bench replays a receipt whose identity no route row names under the target's route rows
+composed (plus `PLACE=fuse` when no cut was recorded, the state a set with no placement row ran in); a receipt
+replayed bare would spell its piece keys against the unsplit program and match nothing. A search number never
+populates `emmy_us` / `cublas_us`; promotion still requires the separate repeated, correct, deployable A/B gate.
 
 Hybrid-vs-MCTS baselines start from identical inventory-only working files: verified rows are not copied into either
 proposal set. Canonical repository goldens remain the common implicit deploy context for both runs.

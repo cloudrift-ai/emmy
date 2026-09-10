@@ -125,6 +125,40 @@ def test_decode_ignores_off_anchors_but_not_a_decided_value() -> None:
     assert _decode(replace(record, knobs={**record.knobs, decided: "not-a-real-value"}), records) is not None
 
 
+def test_a_pool_that_holds_the_recorded_row_is_not_walked_whole() -> None:
+    """The strict decode asks one question of a schedule pool, and pays for one answer.
+
+    A recorded row decodes when it equals an enumerated leaf, which is a membership test — so the
+    replay descends only the branches that can carry the row and stops at the leaf whose match key
+    equals it, instead of keying every leaf of a pool that runs to millions on a fused attention
+    target. Pruning can only lose a leaf, never invent one, so the answer stays exact: a row that
+    equals nothing misses everywhere and is still counted against the whole pool.
+    """
+    from dataclasses import replace
+
+    from emmy.compiler.pipeline.knob import schedule_match_key
+    from emmy.compiler.pipeline.search.golden import _replay, piece_row
+
+    # The same smallest target the anchor test stands on: every assertion here replays it.
+    records = _records_of(_HARDWARE_GOLDENS_DIR / "rtx5090_sm120.yaml")
+    record = next(r for r in records if r.name == "matmul.square.512" and _decode(r, records) is None)
+    siblings = siblings_of(record, records)
+
+    def rows(entry, wanted=None):
+        return frozenset().union(*_replay(entry, siblings=siblings, exhaustive=True, wanted=wanted).rows.values())
+
+    wanted = schedule_match_key(piece_row(record.knobs))
+    assert wanted in rows(record), "the whole pool holds the recorded row"
+    assert wanted in rows(record, wanted), "and asking for that one row still finds it"
+    assert len(rows(record, wanted)) < len(rows(record)), "having filed it without keying the pool's every leaf"
+
+    decided = next(key for key, value in record.knobs.items() if value not in ("", "0"))
+    missing = replace(record, knobs={**record.knobs, decided: "not-a-real-value"})
+    absent = schedule_match_key(piece_row(missing.knobs))
+    assert absent not in rows(missing), "a row no leaf spells equals nothing in the pool"
+    assert rows(missing, absent) == rows(missing), "and having missed, is counted against every candidate"
+
+
 def _recipe_paths() -> list[Path]:
     """The recipe-local model goldens — the repository set minus the hardware files above."""
     with _repository_golden_paths() as paths:

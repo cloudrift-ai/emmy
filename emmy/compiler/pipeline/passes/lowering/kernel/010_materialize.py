@@ -39,7 +39,7 @@ from emmy.compiler.pipeline.passes.lowering.kernel._factor import factorize
 PATTERN = [Pattern("root", TileOp)]
 
 
-def rewrite(match: Match, root: Node) -> KernelOp | None:
+def rewrite(match: Match, root: Node, ctx=None) -> KernelOp | None:
     tile: TileOp = root.op
     # By the kernel pass no schedule slice can carry a cross-CTA ``GRID`` stage: the split is the
     # structural ``tile/030_cut`` fork's, decided BEFORE scheduling (the walk's catalog
@@ -48,7 +48,7 @@ def rewrite(match: Match, root: Node) -> KernelOp | None:
     rplan = reduce_plan(tile) if tile.op is not None else None
     assert rplan is None or not rplan.needs_split, "materialize: a GRID split stage reached the kernel pass past 030_cut"
     try:
-        materialized = _pointwise_strip(tile, factorize(tile, root))
+        materialized = _pointwise_strip(tile, factorize(tile, root, sm_count=getattr(ctx, "sm_count", 0)))
         body = _drop_repeated_declarations(Body((materialized,)))
         unbound = _unbound_names(tile, root, body)
         assert not unbound, f"materialize: kernel {tile.name!r} reads names it never binds: {sorted(unbound)}"

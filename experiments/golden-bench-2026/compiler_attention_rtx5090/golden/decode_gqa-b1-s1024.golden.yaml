@@ -1,0 +1,98 @@
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [q, k, v]
+  outputs: [reshape_3]
+  nodes:
+  - id: k
+    op: input
+    outputs: [[k, f16, [1, 8, 1024, 128]]]
+  - id: q
+    op: input
+    outputs: [[q, f16, [1, 64, 1, 128]]]
+  - id: reshape
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [1, 8, 8, 1, 128]}}
+    inputs: [q]
+    outputs: [[reshape, f16, [1, 8, 8, 1, 128]]]
+  - id: reshape_1
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [1, 8, 1, 1024, 128]}}
+    inputs: [k]
+    outputs: [[reshape_1, f16, [1, 8, 1, 1024, 128]]]
+  - id: v
+    op: input
+    outputs: [[v, f16, [1, 8, 1024, 128]]]
+  - id: reshape_2
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [1, 8, 1, 1024, 128]}}
+    inputs: [v]
+    outputs: [[reshape_2, f16, [1, 8, 1, 1024, 128]]]
+  - id: scaled_dot_product_attention
+    op: torch.sdpa
+    attrs: {is_causal: false, sliding_window: null, scale: null}
+    inputs: [reshape, reshape_1, reshape_2]
+    outputs: [[scaled_dot_product_attention, f16, [1, 8, 8, 1, 128]]]
+  - id: reshape_3
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [1, 64, 1, 128]}}
+    inputs: [scaled_dot_product_attention]
+    outputs: [[reshape_3, f16, [1, 64, 1, 128]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - reshape
+    - reshape_1
+    - reshape_2
+    - reshape_3
+    - scaled_dot_product_attention
+  realizations:
+  - name: k_sdpa_19e64e.8f0649977e38
+    bindings: {}
+    pins:
+      FAST_MATH: false
+  - name: k_sdpa_19e64e.8f0649977e38.add6065f6120
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@map.1/twist: g8k
+    identity: add6065f6120443b77ee103fbfe9744118e90529d3d811f88be174300bea152e
+    measurements:
+      emmy_us: 6.47623829826175
+      reference_us: 6.4788677699557775
+      reference_backend: same-input-greedy
+  - name: k_sdpa_19e64e.8f0649977e38.820e2d0ddb71
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE@twist: mma_m16n8k16_f16_f32/f1x16/k4
+      TILE@twist.1/inner: mma_m16n8k16_f16_f32/f1x8/k4
+      REDUCE@twist: ''
+      REDUCE@twist.1/inner: ''
+      STAGE@twist: d2/smem-tma
+      STAGE@twist.1/inner: d2/smem-tma
+      WORK: w4x1
+      RASTER: gm8
+    identity: 820e2d0ddb71feda17236a3832d123dd5159be4984c0be130bf409d02e484f5c
+    measurements:
+      emmy_us: 5.412000028983406
+      reference_us: 5.414918951086095
+      reference_backend: same-input-greedy
+  - name: k_sdpa_19e64e.8f0649977e38.04182de39979
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: 04182de39979c2c877523806ec129b61eb6d30f02a2c18f1bcc07ae9ab2cbee2
+    measurements:
+      emmy_us: 1.0642382692783436
+      reference_us: 1.0639488188696822
+      reference_backend: same-input-greedy
+gpu_name: NVIDIA GeForce RTX 5090

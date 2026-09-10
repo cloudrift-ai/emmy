@@ -188,6 +188,67 @@ def test_sm70_sync_copy_stages_fragments_without_newer_instructions(monkeypatch,
         assert forbidden not in src
 
 
+def test_sm70_contiguous_staged_fragments_use_one_wide_load(monkeypatch) -> None:
+    """A and N-major B fragments are contiguous in their staged slabs, so each drains as one uint2."""
+    _pin(monkeypatch, VOLTA, stage="d1/smem")
+    src, _ = _source(_graph(k=16, trans=True), Context(compute_capability=(7, 0)))
+    assert "uint2 packed = *reinterpret_cast<const uint2*>(s);" in src
+    assert "emmy_mma884_load_smem4(r, s + row * ldm);" in src
+    assert "emmy_mma884_load_smem4(r, s + col * ldm);" in src
+
+
+def test_sm70_materialized_tiles_use_paired_volta_layout_loads(monkeypatch) -> None:
+    """Even Volta register tiles derive the coupled CUTLASS fill/drain layouts by default."""
+    _pin(monkeypatch, VOLTA, tile="f2x2", stage="d1/smem")
+    src, _ = _source(_graph(m=32, n=32, k=16), Context(compute_capability=(7, 0)))
+    assert "_a_smem[emmy_volta_crosswise(" in src
+    assert "_b_smem[emmy_volta_b_congruous(" in src
+    assert "int row = e / ldm;" not in src
+    assert "emmy_mma884_load_a_crosswise_pair(_a0, _a1" in src
+    assert "emmy_mma884_load_b_congruous_pair(_b0, _b1" in src
+    assert src.count("emmy_mma_m8n8k4_f16_f32_brow(_c") == 4
+    assert "access ^ ((k_group >> 2) & 1)" in src
+    assert "const int _vq = _vl >> 2;" in src
+    assert "((_vq >> 1) & 1) * 8" in src
+
+
+def test_sm70_pair_policy_off_retains_the_unpaired_gather(monkeypatch) -> None:
+    """The existing policy override disables the coupled layout as one complete choice."""
+    _pin(monkeypatch, VOLTA, tile="f2x2", stage="d1/smem")
+    monkeypatch.setenv("EMMY_PAIR_LDMATRIX", "0")
+    src, knobs = _source(_graph(m=32, n=32, k=16), Context(compute_capability=(7, 0)))
+    assert "_a_smem[emmy_volta_crosswise(" not in src
+    assert "_b_smem[emmy_volta_b_congruous(" not in src
+    assert "emmy_mma884_load_a_smem(_a0" in src
+    assert "emmy_mma884_load_b_smem(_b0" in src
+    assert "emmy_mma_m8n8k4_f16_f32(_c" in src
+    assert knobs["PAIR_LDMATRIX"] is False
+
+
+def test_sm70_gmem_direct_tile_keeps_the_ordinary_accumulator_map(monkeypatch) -> None:
+    """The paired accumulator map is coupled to a staged operand layout, never used alone."""
+    _pin(monkeypatch, VOLTA, tile="f2x2")
+    src, _ = _source(_graph(m=32, n=32, k=16), Context(compute_capability=(7, 0)))
+    assert "emmy_mma_m8n8k4_f16_f32_brow(_c" not in src
+    assert src.count("emmy_mma_m8n8k4_f16_f32(_c") == 4
+    assert "const int _vq = (_vl & 15) >> 2;" in src
+
+
+def test_sm70_output_stores_contiguous_fragment_pairs(monkeypatch) -> None:
+    """The eight Volta accumulator elements leave registers as four contiguous half2 pairs."""
+    _pin(monkeypatch, VOLTA)
+    src, _ = _source(_graph(), Context(compute_capability=(7, 0)))
+    assert src.count("*reinterpret_cast<__half2*>(&c[") == 4
+
+
+def test_sm70_masked_rows_keep_contiguous_fragment_pairs(monkeypatch) -> None:
+    """A row guard covers both adjacent values, so it does not split their half2 store."""
+    _pin(monkeypatch, VOLTA)
+    src, _ = _source(_graph(m=Dim("seq_len", hint=512)), Context(compute_capability=(7, 0)))
+    assert src.count("*reinterpret_cast<__half2*>(&c[") == 4
+    assert "< (seq_len))" in src
+
+
 def test_sm70_sync_copy_composes_ring_and_register_pipelines(monkeypatch) -> None:
     _pin(monkeypatch, VOLTA, tile="f1x1/k2", stage="d2/smem/p2")
     src, knobs = _source(_graph(k=32), Context(compute_capability=(7, 0)))
@@ -209,21 +270,39 @@ def test_sm70_ring_splits_the_blocking_copy_across_the_drain(monkeypatch) -> Non
     per chunk publishes the deposit. Back-to-back load/store fills (what a ring emitted before)
     leave the latency fully exposed and need two barriers, which measured slower than no ring at
     all on every V100 shape tried."""
-    monkeypatch.setenv("EMMY_TILE", f"{VOLTA}/f2x2/k4")
+    monkeypatch.setenv("EMMY_TILE", f"{VOLTA}/f2x2/k8")
     monkeypatch.setenv("EMMY_WORK", "w2x2")  # 128 threads: the slabs stripe evenly, so the split engages
     monkeypatch.setenv("EMMY_STAGE", "d2/smem")
     monkeypatch.setenv("EMMY_REDUCE", "")
-    src, knobs = _source(_graph(m=64, n=64, k=32), Context(compute_capability=(7, 0)))
+    src, knobs = _source(_graph(m=64, n=64, k=64), Context(compute_capability=(7, 0)))
     assert family_value(knobs, "STAGE") == "d2/smem"
     prologue, _, body = src.partition("for (int _ks")
     issue = body.index("_v__a_stage0_0")  # the staged gmem load of the PREFETCH chunk
     drain = body.index("emmy_mma_m8n8k4_f16_f32")
-    deposit = body.index("*reinterpret_cast<uint4*>(&_a_smem[")
+    deposit = body.index("*reinterpret_cast<uint2*>(&_a_smem[_a_smem_store")
     assert issue < drain < deposit, "the drain must sit between the staged load and its slab store"
+    assert "int _a_smem_store = emmy_volta_crosswise(" in prologue
+    assert "int _b_smem_store = emmy_volta_b_congruous(" in prologue
+    assert "auto _a_gmem_stride" in prologue and "auto _a_gmem0" in prologue
+    assert "auto _b_gmem_stride" in prologue and "auto _b_gmem0" in prologue
+    assert "_a_gmem0 +" in body and "_b_gmem0 +" in body
+    assert "emmy_volta_crosswise(" not in body and "emmy_volta_b_congruous(" not in body
     assert body.count("__syncthreads();") == 1, "the deposit's barrier is the whole per-chunk handshake"
     assert prologue.count("__syncthreads();") == 1, "the primed slot is published once before the loop"
     for forbidden in NEWER_INSTRUCTIONS:
         assert forbidden not in src
+
+
+def test_sm70_shallow_k_tile_keeps_store_addresses_near_the_deposit(monkeypatch) -> None:
+    """Hoisting Volta store addresses slows the shallower K tile despite reducing its SASS."""
+    monkeypatch.setenv("EMMY_TILE", f"{VOLTA}/f2x2/k4")
+    monkeypatch.setenv("EMMY_WORK", "w2x2")
+    monkeypatch.setenv("EMMY_STAGE", "d2/smem")
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    src, _ = _source(_graph(m=64, n=64, k=32), Context(compute_capability=(7, 0)))
+    assert "int _a_smem_store" not in src and "int _b_smem_store" not in src
+    assert "_a_gmem_stride" not in src and "_b_gmem_stride" not in src
+    assert "*reinterpret_cast<uint2*>(&_a_smem[emmy_volta_crosswise(" in src
 
 
 def test_sm70_register_tile_keeps_the_volta_fragment_layout_through_the_reroll(monkeypatch) -> None:
@@ -235,9 +314,10 @@ def test_sm70_register_tile_keeps_the_volta_fragment_layout_through_the_reroll(m
     _pin(monkeypatch, VOLTA, tile="f2x2", stage="d1/smem")
     monkeypatch.setenv("EMMY_LOOPIFY", "2")
     src, _ = _source(_graph(m=32, n=32, k=16), Context(compute_capability=(7, 0)))
-    assert "unsigned _a[2][2]" in src  # the ROLLED fragment family (count > 1)
-    assert "emmy_mma884_load_a_smem(_a[" in src
-    assert "emmy_mma884_load_b_smem(_b[" in src
+    assert "unsigned _b[2][2]" in src  # the ROLLED fragment family (count > 1)
+    assert "emmy_mma884_load_a_crosswise_pair(_a0, _a1" in src
+    assert "emmy_mma884_load_b_congruous_pair(_b[0], _b[1]" in src
+    assert "emmy_mma_m8n8k4_f16_f32_brow(_c" in src
     assert "const int _vr = " in src and "const int _vc = " in src  # the m8n8k4 C-fragment store map
     for forbidden in NEWER_INSTRUCTIONS:
         assert forbidden not in src

@@ -1,0 +1,63 @@
+compute_cap:
+- 12
+- 0
+programs:
+- inputs: [q, k, v]
+  outputs: [scaled_dot_product_attention]
+  nodes:
+  - id: k
+    op: input
+    outputs: [[k, f16, [8, 8, 1024, 128]]]
+  - id: q
+    op: input
+    outputs: [[q, f16, [8, 64, 1024, 128]]]
+  - id: scaled_dot_product_attention_c3
+    op: constant
+    attrs:
+      name: scaled_dot_product_attention_c3
+      value: 0.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[scaled_dot_product_attention_c3, f16, [1]]]
+  - id: v
+    op: input
+    outputs: [[v, f16, [8, 8, 1024, 128]]]
+  - id: scaled_dot_product_attention
+    op: torch.sdpa
+    attrs: {is_causal: true, sliding_window: null, scale: null}
+    inputs: [q, k, v]
+    outputs: [[scaled_dot_product_attention, f16, [8, 64, 1024, 128]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - scaled_dot_product_attention
+  realizations:
+  - name: k_sdpa_a0910a.ed6e3651649a
+    bindings: {}
+    pins:
+      FAST_MATH: false
+  - name: k_sdpa_a0910a.ed6e3651649a.dfa7ea9707df
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE@map.1/twist: mma_m16n8k16_f16_f32/f1x16/k2
+      TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x4/k4
+      REDUCE@map.1/twist: ''
+      REDUCE@map.1/twist.1/inner: ''
+      STAGE@map.1/twist: d2/smem-tma
+      STAGE@map.1/twist.1/inner: d2/smem-tma
+      WORK: w4x1
+      RASTER: ''
+    identity: dfa7ea9707df924524aea2075f0601d016f16c6df5b0ec16905df8f276e23b6d
+    measurements:
+      emmy_us: 851.5840172767639
+      reference_us: 827.0400166511536
+      reference_backend: same-input-greedy
+gpu_name: NVIDIA GeForce RTX 5090

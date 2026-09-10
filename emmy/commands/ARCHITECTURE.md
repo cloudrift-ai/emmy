@@ -183,7 +183,9 @@ substring — inside `--golden PATH`, or, on `run` / `compile` without it, insid
 There is no second spelling: no file flag beside `--golden`, no name flag beside `--realization`.
 
 `run --golden PATH` without `--realization` walks every realization name in one process, benching each name's
-verified rows or its one valid direct tune winner (proposals stay the tuner's). It parses and validates the
+verified rows or its one valid direct tune winner (proposals stay the tuner's). A receipt of a piece a route row
+minted (its identity is no route row's) replays under the target's route rows composed, plus `PLACE=fuse` when no
+cut was recorded: bare, its piece keys would spell against the unsplit program and match nothing. It parses and validates the
 document once and hands that object to each name's resolution step, because a whole-model inventory is large
 enough that re-reading it per target dominates the replay: the 279-target DeepSeek V4 Flash golden costs about
 15 s per load, so reloading turned a four-minute replay into more than an hour of redundant parsing. Only this

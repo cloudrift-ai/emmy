@@ -45,21 +45,54 @@ configs:
     origins:
     - reshape
     - reshape_1
-    - scaled_dot_product_attention
-  realizations:
-  - name: k_sdpa_reduce_121651.b460607ef546
-    bindings: {}
-    pins:
-      FAST_MATH: false
-- program: 0
-  target:
-    origins:
     - reshape_2
     - reshape_3
     - scaled_dot_product_attention
   realizations:
-  - name: k_sdpa_reduce_9a6457.0f307d57b54b
+  - name: k_sdpa_e9429e.be1bcfbb7f8a
     bindings: {}
     pins:
       FAST_MATH: false
-gpu_name: NVIDIA A100 80GB
+  - name: k_sdpa_e9429e.be1bcfbb7f8a.bfdd8ab385c5
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@map.1/twist: g8k
+    identity: bfdd8ab385c5aad84f5025217d26995079dba16879f1ae857b14e9d453651c6c
+    measurements:
+      emmy_us: 18.3125010347248
+      reference_us: 18.3125010347248
+      reference_backend: same-input-greedy
+  - name: k_sdpa_e9429e.be1bcfbb7f8a.e2f40472354e
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE@twist: mma_m16n8k16_f16_f32/f1x16/k4
+      TILE@twist.1/inner: mma_m16n8k16_f16_f32/f1x8/k4
+      REDUCE@twist: ''
+      REDUCE@twist.1/inner: ''
+      STAGE@twist: d2/smem-async
+      STAGE@twist.1/inner: d2/smem-async
+      WORK: w4x1
+      RASTER: ''
+    identity: e2f40472354e827c321356cb9ccb0dbd7751f9eebbab769878667a92e46d4a5c
+    measurements:
+      emmy_us: 16.053677566589847
+      reference_us: 16.053677566589847
+      reference_backend: same-input-greedy
+  - name: k_sdpa_e9429e.be1bcfbb7f8a.04182de39979
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: 04182de39979c2c877523806ec129b61eb6d30f02a2c18f1bcc07ae9ab2cbee2
+    measurements:
+      emmy_us: 2.2588234681349535
+      reference_us: 2.2588234681349535
+      reference_backend: same-input-greedy
+gpu_name: NVIDIA A100 40GB

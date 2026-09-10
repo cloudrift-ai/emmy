@@ -45,32 +45,54 @@ configs:
     origins:
     - reshape
     - reshape_1
-    - scaled_dot_product_attention
-  realizations:
-  - name: k_sdpa_reduce_145281.c89c866da112
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: d1/smem
-      TILE: mma_m16n8k16_f16_f32/f1x4/k8
-      WORK: w2x1
-    measurements:
-      emmy_us: 37.0759
-      reference_us: 197.4918
-      reference_backend: torch-eager
-- program: 0
-  target:
-    origins:
     - reshape_2
     - reshape_3
     - scaled_dot_product_attention
   realizations:
-  - name: k_sdpa_reduce_033a3e.d74afc99d28d
+  - name: k_sdpa_19e64e.8f0649977e38
     bindings: {}
     pins:
       FAST_MATH: false
-gpu_name: NVIDIA A100 80GB
+  - name: k_sdpa_19e64e.8f0649977e38.add6065f6120
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@map.1/twist: g4k
+    identity: add6065f6120443b77ee103fbfe9744118e90529d3d811f88be174300bea152e
+    measurements:
+      emmy_us: 15.5514230890138
+      reference_us: 15.552035566570831
+      reference_backend: same-input-greedy
+  - name: k_sdpa_19e64e.8f0649977e38.73c36001f44a
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE@twist: mma_m16n8k16_f16_f32/f1x16/k4
+      TILE@twist.1/inner: mma_m16n8k16_f16_f32/f1x8/k4
+      REDUCE@twist: ''
+      REDUCE@twist.1/inner: ''
+      STAGE@twist: d2/smem-async
+      STAGE@twist.1/inner: d2/smem-async
+      WORK: w4x1
+      RASTER: ''
+    identity: 73c36001f44aef8cf63a0ec10bc547fdbec05148c0d1563989a415be59e760b6
+    measurements:
+      emmy_us: 13.86666629049513
+      reference_us: 13.86666629049513
+      reference_backend: same-input-greedy
+  - name: k_sdpa_19e64e.8f0649977e38.c1eaae897a5e
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: c1eaae897a5ef78f244ec79c0b2843b7f0f1cec19b53b52584444dd1f6aa828e
+    measurements:
+      emmy_us: 1.6847567985186707
+      reference_us: 1.6853692760757009
+      reference_backend: same-input-greedy
+gpu_name: NVIDIA A100 40GB

@@ -210,13 +210,23 @@ composed placement cut builds exactly this shape (the consumer piece's workspace
 retained reduce — DeepSeek-V4 post4096's two-cut piece was the live case, every capture an undefined identifier at
 nvcc).
 
-A matrix row that Loop IR elided because its static extent is one remains algebraic information when every output
-specification starts with one or more literal-zero coordinates followed by the dense `n` coordinate, directly or
-split into row-major quotient/remainder coordinates by a pure reshape. The `n` coordinate may already be free or may
-still be the one shared output sweep. Post-init restores that proven unit free axis before contraction canonicalization,
-even when a sibling reduction is the root-most Fold and the contraction is nested. A zero after `n` or a strided `n`
-does not prove a unit matrix row. The rule is boundary-derived and general: it does not recognize a model or operation
-family, and it does not alter a term whose output specifications disagree about the missing coordinate.
+A matrix row that Loop IR elided because its static extent is one remains algebraic information, and the total lift
+restores it in TWO ways, and which one applies is decided by what the term can support.
+
+The lift BINDS it (`lowering/tile/_row.py`) when an operand has a unit dimension to bind into: the coordinate goes
+back into the indices that read it, so the row is an axis an operand carries and not merely one the placement lists.
+A contraction that owns no free axis is what asks for it — everything such a term reads it shares with the operand it
+multiplies, and a B that moves with its row is no slab per tile (`contracts`), so the family would otherwise fall to
+the per-cell tier. A candidate is kept only when the BOUND axis is itself a contraction's left axis; asking merely
+whether some contraction gained one accepts a binding that handed the row to the other side, because a contraction
+reorients.
+
+Post-init ANNOUNCES it (`_implicit_unit_row`) when the stores prove a leading zero prefix and a dense column. The row
+is then unbound — no operand reads it — which gives the placement a fragment geometry without giving any contraction
+a left axis. That is the weaker statement, and it is the only one available where there is nothing to bind: a matvec
+whose A is a bare vector. The binding yields to it, firing only where the placement carries no extent-one free axis.
+
+Both rules are boundary-derived and general: neither recognizes a model or operation family.
 
 Factoring preserves the pure cone's statement order. If a scalar projection between two nested Folds feeds the later
 Fold, the earlier Fold and scalar become a nested source projection; both Folds are never flattened ahead of that
@@ -273,7 +283,7 @@ still no tile site: an mma B fragment is one `B[k, n]` for every row, and a cata
 placed such a site on the grid's trailing pair and emitted B's address with the unsplit row axis. Two shapes fold
 whole. A PLANAR carrier qualifies when every carried state is a bilinear channel — the tile's accumulators ARE the
 carrier. A TWISTED one qualifies through `Fold.chunked`: the recipe names a pattern for
-every state past the pivot, supplies `advance` / `rescale` (the stable ⊕ at an open channel count, which is what a
+every state past the pivot, supplies `advance` / `scale` (the stable ⊕ at an open channel count, which is what a
 per-chunk merge needs), and leaves exactly one bilinear channel, so every other state rides as a per-row scalar and
 the one accumulator is the expectation. Neither reading mentions attention or softmax: a recipe that folded nothing
 but products passes the first, and one shaped like softmax passes the second.

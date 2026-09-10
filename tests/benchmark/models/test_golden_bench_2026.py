@@ -2,6 +2,7 @@
 
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -292,7 +293,7 @@ def test_neptune_emmy_pytorch_a100_share_one_experiment(project_root) -> None:
     tasks = enumerate_tasks([directory])
     recipe = load_recipe(directory)
     assert recipe.kind == "command"
-    assert {task.recipe.deploy.gpu for task in tasks} == {"NVIDIA A100 80GB"}
+    assert {task.recipe.deploy.gpu for task in tasks} == {"NVIDIA A100 40GB"}
     assert all(task.recipe.deploy.gpu_count == 1 for task in tasks)
 
     # One row per (lane, operator): the artifact's ten operators, and the five common operators
@@ -312,6 +313,8 @@ def test_neptune_emmy_pytorch_a100_share_one_experiment(project_root) -> None:
     assert "evanzhao16/neptune-env@sha256:724d07594bc817f0fe94267b2d0dbdc6e29d3ae4a7e3516e553a6d9327bfebca" in run
     assert "3aa55c12ac822337e630b809b0d9eabb11eee5d3" in run
     assert "torch==2.13.0" in run
+    assert "[ ! -x venv/bin/emmy ]" in run
+    assert "import numpy, torch, sys" in run
     assert "EMMY_TUNE_DB=$task_dir/autotune.db" in run
     assert "pip freeze --all" in run
     assert "tar -C $task_dir" in run
@@ -353,6 +356,9 @@ def test_neptune_emmy_pytorch_a100_share_one_experiment(project_root) -> None:
     assert "tune_status=ok:no-valid-schedule" in neptune_runner
     assert 'profile_status="$profile_status:mismatch"' in neptune_runner
     assert 'profile_status="$profile_status:runner-failure"' in neptune_runner
+    assert 'profile_status="$profile_status:no-saved-optimized-kernel"' in neptune_runner
+    assert "tune_status=reused" in neptune_runner
+    assert 'tar -xzf "$tuning_archive" -C logs --wildcards "neptune-tuning/${operator}-*"' in neptune_runner
     assert 'test "$successful_profiles" -gt 0' in neptune_runner
     assert 'torch.__version__.split("+")[0]' in neptune_runner
     assert '"2.6.0"' in neptune_runner
@@ -376,9 +382,19 @@ def test_neptune_emmy_pytorch_a100_share_one_experiment(project_root) -> None:
     assert "SEQUENCE_LENGTHS=(256 512 1024 2048 4096 8192 16384 32768)" in operators
     assert "enable_gqa=True" in operators
     assert "q_length=1" in operators
-    assert "q.reshape(1,8,8,1,128)" in operators
+    assert '"$q_input.reshape(1,8,8,1,128)' in operators
+    assert '"$q_input,$k_input,$v_input,is_causal=$is_causal' in operators
+    assert "q_input=q" in operators
+    assert "local q_input=$q" in operators
+    assert '"q=$q;"' in operators
     assert "is_causal=False).reshape(1,64,1,128)" in operators
     assert 'operator_code "$1" "$2" || exit' in operators
+    prefill_source = subprocess.check_output([operators_path, "prefill_causal", "256"], text=True)
+    decode_source = subprocess.check_output([operators_path, "decode_causal", "256"], text=True)
+    assert "q=torch.randn" not in prefill_source
+    assert "F.scaled_dot_product_attention(torch.randn" in prefill_source
+    assert "q=torch.randn" in decode_source
+    assert "F.scaled_dot_product_attention(q,k,v" in decode_source
     assert not (Path(directory) / "run_tune.sh").exists()
 
     # The comparison lane only measures: it replays the committed golden and never tunes.
@@ -389,15 +405,17 @@ def test_neptune_emmy_pytorch_a100_share_one_experiment(project_root) -> None:
     assert '"$emmy" run --golden "$golden" --bench --bench-backends emmy' in emmy_runner
     assert 'run --golden "$golden" --bench --strict' not in emmy_runner
     assert '"$emmy" run -c "$source_code" --bench --strict --bench-backends eager,tcompile,emmy' in emmy_runner
+    assert 'EMMY_KNOBS="$reference_knobs"' in emmy_runner
+    assert "golden_reference_knobs" in emmy_runner
     assert "emmy tune" not in emmy_runner
-    assert "timeout --signal=TERM --kill-after=30s 600s" in emmy_runner
+    assert "timeout --signal=TERM --kill-after=30s 1500s" in emmy_runner
     assert "setup-status.tsv" in emmy_runner
     assert "replay_1\\treplay_2\\treference_1\\treference_2" in emmy_runner
     assert emmy_runner.count("for repetition in 1 2") == 2
     assert '"$results/json/$setup.replay-$repetition"' in emmy_runner
     assert '"$results/json/$setup.reference-$repetition.json"' in emmy_runner
-    assert '"${replay_statuses[0]}" = ok' in emmy_runner
-    assert '"${replay_statuses[1]}" = ok' in emmy_runner
+    assert "replay_statuses=(exact-pin-reference exact-pin-reference)" in emmy_runner
+    assert '[[ "$operator" == prefill_* ]]' in emmy_runner
     assert '"${reference_statuses[0]}" = ok' in emmy_runner
     assert '"${reference_statuses[1]}" = ok' in emmy_runner
     assert 'test "$missing_goldens" -eq 0' in emmy_runner
@@ -411,6 +429,122 @@ def test_neptune_emmy_pytorch_a100_share_one_experiment(project_root) -> None:
     assert '"captured_whole_forward"' in pytorch_runner
 
 
+def test_rtx5090_attention_comparison_is_recorded_and_bounded(project_root) -> None:
+    directory = Path(project_root) / EXP / "compiler_attention_rtx5090"
+    tasks = enumerate_tasks([str(directory)])
+    recipe = load_recipe(str(directory))
+
+    assert len(tasks) == 20
+    assert {task.recipe.deploy.gpu for task in tasks} == {"NVIDIA GeForce RTX 5090"}
+    assert all(task.recipe.deploy.gpu_count == 1 for task in tasks)
+    assert {task.variant.params["lane"] for task in tasks} == {"emmy", "baselines"}
+    assert {task.variant.params["operator"] for task in tasks} == {
+        "prefill_global",
+        "prefill_causal",
+        "prefill_gqa",
+        "decode_causal",
+        "decode_gqa",
+    }
+    assert {task.variant.params["batch"] for task in tasks} == {1, 8}
+
+    run = recipe.command.run
+    assert "torch==2.14.0" in run
+    assert "flash_attn-2.8.3.tar.gz" in run
+    assert "tilelang==0.1.8 apache-tvm-ffi==0.1.8.post2" in run
+    assert "FLASH_ATTN_CUDA_ARCHS=120" in run
+    assert "da967821698eb7a79a76d27fbe25e314a3273f2b12ba4833e981658139d0e6d9" in run
+    assert "1e71dd64a9e0280e0447b8a0c2541bad4bf6ac65bdeaa2f90e51a9e57de0370d" in run
+    assert "s/-std=c++17/-std=c++20/g" in run
+    assert 'case "$lane" in' in run
+    assert "emmy tune" not in run
+    assert "for repeat" not in run
+    assert "--warmup 1 --iters 10" in run
+    assert "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True" in run
+    assert 'operator_sequence_lengths "$operator" "$batch"' in run
+    assert recipe.command.strict is True
+    assert recipe.command.result_files == ["artifacts.tar.gz"]
+    assert recipe.command.stage == [
+        "emmy",
+        "pyproject.toml",
+        "README.md",
+        "LICENSE",
+        "experiments/golden-bench-2026/compiler_attention_rtx5090/operators.sh",
+        "experiments/golden-bench-2026/compiler_attention_rtx5090/run_emmy.sh",
+        "experiments/golden-bench-2026/compiler_attention_rtx5090/run_baselines.py",
+        "experiments/golden-bench-2026/compiler_attention_rtx5090/golden",
+    ]
+
+    operators_path = directory / "operators.sh"
+    assert operators_path.stat().st_mode & 0o111
+    operators = operators_path.read_text()
+    assert "SEQUENCE_LENGTHS=(1024 2048 4096 8192 16384 32768)" in operators
+    assert "operator_sequence_lengths()" in operators
+    assert 'operator_code "$1" "$2" "$3" || exit' in operators
+    assert "q.reshape($batch,8,8,1,128)" in operators
+
+    emmy_runner_path = directory / "run_emmy.sh"
+    assert emmy_runner_path.stat().st_mode & 0o111
+    emmy_runner = emmy_runner_path.read_text()
+    assert '"$emmy" run --golden "$golden" --bench --bench-backends emmy' in emmy_runner
+    assert '"$emmy" run -c "$source_code" --bench --strict --bench-backends eager,tcompile,emmy' in emmy_runner
+    assert "--warmup 1 --iters 10" in emmy_runner
+    assert "for repetition" not in emmy_runner
+    assert 'test "$missing_goldens" -eq 0' in emmy_runner
+    assert 'test "$successful_setups" -eq "${#sequence_lengths[@]}"' in emmy_runner
+
+    baseline_runner = (directory / "run_baselines.py").read_text()
+    assert '"torch": "2.14.0", "flash_attn": "2.8.3", "tilelang": "0.1.8", "apache-tvm-ffi": "0.1.8.post2"}' in (baseline_runner)
+    assert "SDPBackend.CUDNN_ATTENTION" in baseline_runner
+    assert '"latency_estimator": "mean"' in baseline_runner
+    assert 'mode="max-autotune-no-cudagraphs"' in baseline_runner
+    assert "flash_attn_func" in baseline_runner
+    assert "flex_attention" in baseline_runner
+    assert '"inductor_normalized_speedup"' in baseline_runner
+    assert '"TileLang"] = {' in baseline_runner
+    subprocess.run([sys.executable, str(directory / "run_baselines.py"), "--smoke"], check=True)
+
+
+def test_neptune_a10040_replays_saved_search(project_root) -> None:
+    directory = _experiment(project_root, "compiler_neptune_replay_a100")
+    tasks = enumerate_tasks([directory])
+    recipe = load_recipe(directory)
+    assert recipe.kind == "command"
+    assert len(tasks) == 15
+    assert {task.recipe.deploy.gpu for task in tasks} == {"NVIDIA A100 40GB"}
+    assert all(task.recipe.deploy.gpu_count == 1 for task in tasks)
+    assert {task.variant.params["lane"] for task in tasks} == {"neptune", "pytorch"}
+    assert {task.variant.params["operator"] for task in tasks} == {
+        "prefill_global",
+        "prefill_causal",
+        "prefill_gqa",
+        "decode_causal",
+        "decode_gqa",
+        "prefill_alibi",
+        "decode_alibi",
+        "prefill_softcap",
+        "decode_softcap",
+        "prefill_windowed",
+    }
+
+    run = recipe.command.run
+    assert 'bash /experiment/run.sh "$operator" /experiment/tuning_a10080.tar.gz' in run
+    assert '"$$SOURCE/run_pytorch.py" "$operator" "$$sequence"' in run
+    assert "for repetition in 1 2" in run
+    assert "torch==2.13.0" in run
+    assert "sudo apt-get install -y python3.12-dev python3.12-venv" in run
+    assert "--n-trials" not in run
+    assert "venv/bin/emmy" not in run
+    assert recipe.command.stage == [
+        "experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/run.sh",
+        "experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/run_neptune.py",
+        "experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/run_pytorch.py",
+        "experiments/golden-bench-2026/compiler_neptune_replay_a100/recipe.yaml",
+        "experiments/golden-bench-2026/compiler_neptune_replay_a100/tuning_a10080.tar.gz",
+    ]
+    assert recipe.command.strict is True
+    assert recipe.command.result_files == ["artifacts.tar.gz"]
+
+
 @pytest.mark.skipif(shutil.which("timeout") is None, reason="run_emmy.sh needs GNU coreutils `timeout`")
 def test_neptune_emmy_runner_fails_when_one_setup_is_incomplete(project_root, tmp_path) -> None:
     directory = Path(project_root) / EXP / "compiler_neptune_emmy_pytorch_a100"
@@ -422,7 +556,7 @@ def test_neptune_emmy_runner_fails_when_one_setup_is_incomplete(project_root, tm
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     emmy = fake_bin / "emmy"
-    emmy.write_text('#!/usr/bin/env bash\nif [[ " $* " == *" --golden "*"s32768.golden.yaml"* ]]; then\n  exit 1\nfi\n')
+    emmy.write_text('#!/usr/bin/env bash\nif [[ " $* " == *"torch.randn(1,32,32768,128"* ]]; then\n  exit 1\nfi\n')
     emmy.chmod(0o755)
     python = fake_bin / "python"
     python.write_text("#!/usr/bin/env bash\nexit 0\n")
@@ -439,8 +573,10 @@ def test_neptune_emmy_runner_fails_when_one_setup_is_incomplete(project_root, tm
 
     assert completed.returncode == 1
     statuses = (results / "setup-status.tsv").read_text().splitlines()
-    assert statuses[-2] == "prefill_global\t16384\tok\tok\tok\tok"
-    assert statuses[-1] == "prefill_global\t32768\tfailed:1\tfailed:1\tok\tok"
+    assert statuses[-2] == "prefill_global\t16384\texact-pin-reference\texact-pin-reference\tok\tok"
+    assert statuses[-1] == (
+        "prefill_global\t32768\texact-pin-reference\texact-pin-reference\tpytorch-only:emmy-failed:1\tpytorch-only:emmy-failed:1"
+    )
 
 
 def test_every_command_variant_renders(project_root) -> None:
@@ -461,7 +597,7 @@ def test_every_command_variant_renders(project_root) -> None:
             assert "/task" in command
             subprocess.run(["bash", "-n"], input=command, text=True, check=True)
             rendered += 1
-    assert rendered == 58
+    assert rendered == 93
 
 
 def test_gemma_serving_ab_has_four_points_per_lane(project_root) -> None:

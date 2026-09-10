@@ -299,9 +299,16 @@ class Fold:
                 # Two SLABS orient by layout; a computed operand keeps the order its former chose.
                 slabs = len(pair) == 2 and all(e.as_slab() is not None for e in pair)
                 k_last = [e for e in pair if slabs and self.axis in e.as_slab().load.index[-1].free_vars()]
-                # Both k-last (a matmul): A is the one reading the earlier free coordinate — the
-                # row, under the lift's declaration order — so alpha-equal terms orient alike.
-                k_last.sort(key=lambda e: min((n for n in e.free_axes if n != self.axis), default=""))
+                # Both k-last (a matmul): A is the one reading the earlier ROW — the coordinate the
+                # other operand does NOT read. A shared outer coordinate (a batched matmul's batch
+                # and head) is no row and must not be compared: it is the minimum on BOTH sides, so
+                # comparing every free axis left every batched pair tied and oriented by whichever
+                # spelling the lift happened to declare first. Then one kernel's two contractions
+                # over the same operands could orient opposite ways, and the twisted rewrite —
+                # which matches score cones by canonical form — stopped recognizing them as one
+                # score, silently demoting flash attention to its two-pass form.
+                rows = pair[0].free_axes ^ pair[1].free_axes if slabs else frozenset()
+                k_last.sort(key=lambda e: min(e.free_axes & rows, default=""))
                 a_edge = k_last[0] if len(pair) == 2 and k_last else None
             if a_edge is not None and self.operands[0] is not a_edge:
                 reordered = (a_edge, *(edge for edge in self.operands if edge is not a_edge))
@@ -373,8 +380,15 @@ class Fold:
         """
         if self.axis is not None or self.exposes == names:
             return self
-        members = tuple(self.lift.body.backward_cone(names).members)
-        return replace(self, lift=replace(self.lift, body=Body(members), results=names))
+        # ``names`` are EXPOSED names — what :attr:`applied` spells — while the body and the lift's
+        # own results are in the term's private spelling. The two coincide wherever the body defines
+        # the result, and part exactly where a result is a bound param passed straight through (the
+        # projection over one term per carried state, once a cut renames a child's state to its
+        # workspace). They stay positional, so translate before cutting: writing an exposed name
+        # into the lift's results leaves a result nothing defines.
+        keep = tuple(self.lift.results[self.exposes.index(name)] for name in names)
+        members = tuple(self.lift.body.backward_cone(keep).members)
+        return replace(self, lift=replace(self.lift, body=Body(members), results=keep))
 
     def binds_axes(self) -> frozenset[str]:
         """The axis this term binds — what the statement-door ``rewrite`` drops from σ for the subtree."""
@@ -593,7 +607,7 @@ class Fold:
           ``(score, pivot, *extras)`` the chunk folds, which is what stands in for the stored base
           contribution the tier may not touch;
         - a state count the recipe covers, so no carried state is left without one;
-        - ``advance`` and ``rescale`` — the stable ⊕ at an open channel count, applied once per
+        - ``advance`` and ``scale`` — the stable ⊕ at an open channel count, applied once per
           chunk rather than once per element (a recipe spelling one fixed-arity ``combine`` merges
           whole carriers, which is not what a chunk hands back);
         - exactly ONE bilinear channel, since the tier holds one accumulator and every other state
@@ -603,7 +617,7 @@ class Fold:
         if twist is None or self.base is None or not twist.channels:
             return False
         recipe = twist.recipe
-        if recipe.advance is None or recipe.rescale is None:
+        if recipe.advance is None or recipe.scale is None:
             return False
         if len(twist.channels) != len(self.base.results) - 1:
             return False

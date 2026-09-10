@@ -289,6 +289,55 @@ tiled first, and a strict boot needs a measured route for every serving twin: 28
 one, so `emmy serve --strict-evidence` would raise at their first fork. Stage 4 cannot warm or bake until that
 lands and gate (c) is re-run on the host, and the golden re-record should follow it, not precede it.
 
+### Round seven — the twins were the wrong width (2026-09-09/10) — golden CLOSED, serving OPEN
+
+**The whole evidence base described programs the server never compiles.** `emmy.serving.twins` defaults its decode
+bucket to 32; `config.gen_decode_bucket()` defaults to 16, and `emmy serve` deploys that. Nothing compared the two,
+so every round before this one tuned a width no deployment runs. Measured, not inferred: a boot pointed at the round-six
+golden compiled 117 kernels, the file held 24, and **zero** of them matched — same kernel families, every identity hash
+different. With no row to elect, the prior priced those forks, logged latency exponents outside the range it can
+represent, and the boot roofline audit then spent six hours on 16 GPUs timing one of its picks without ever reporting.
+
+The fix is a pinned serving config (`docker/vllm-emmy-serve/models/deepseek-v4-flash-0731.env`), the same mechanism the
+other served models use: `emmy trace --serving-twins --serving-config` reads the widths from
+`ServingConfig.static_widths`, so the capture and the deployment cannot disagree. Verified against a running boot —
+42 of the 43 kernels it compiles now have a twin; the exception is `k_view_3`, serving glue outside the pre/post/expert
+twins, about 5 µs.
+
+**The re-recorded golden is done.** 152 distinct kernels, 291 measured rows, the decode gate green, and a
+strict-evidence compile resolving 149 of 152 realizations from a recorded row. The other three resolve too but need
+more than fifteen minutes to EMIT — one is 817 KB of CUDA. Two shapes are dropped from the file and both matter:
+the trace emits a placeholder realization per graph and width that no command fills (the recorder writes a receipt row
+per kernel instead), and one hand-pinned `pre4096` route that no enumerated leaf equals — reachable under `EMMY_KNOBS`,
+not by the free enumeration, which is a gap in its own right. Nothing was lost: that kernel carries seven other rows and
+the fastest measures 79.9 µs against the pinned route's 1.09 s.
+
+**Two compiler findings came out of the round.** The schedule search rebuilt a kernel's whole site table for every
+candidate it considered — `_local_support` constructed a fresh `Sched` per frontier extension, and each one re-walked
+the term. `TileOp.grid_sched` builds it once (#770): a `post1` divide reduction that had been killed twice at 45
+minutes benches in 11, and `make test` drops 20–30%. The boot audit had no time budget, so the mispick it exists to
+report was the one thing it could not report (#771).
+
+**Gate (c) re-run: the server BOOTS and cannot serve.** Application startup complete, KV cache 68,738 / 70,886 tokens,
+160 deterministic resolves and **zero** prior fall-throughs. A four-token completion then dies on vLLM's
+`TimeoutError: RPC call to sample_tokens timed out` — one forward still exceeds 300 s.
+
+**The decisive measurement of the round: full evidence did not move the picks.** Boot audit ratios, prior-only against
+the recorded golden:
+
+| program | prior only | recorded golden |
+| --- | ---: | ---: |
+| `pre` chunk m4096 | 64,594× | 64,700× |
+| `post` chunk m4096 | 329× | 329× |
+| `post` decode | 1,509× (m32) | 1,155× (m16) |
+| `post` decode m1 | 1,285× | 1,283× |
+| `moe.expert` m1 | 36,108× | 38,075× |
+
+Every measured arm for these programs is as slow as the prior's guess. The evidence was never the bottleneck: the
+compiler cannot currently produce a fast schedule for `pre@4096` (~1.94 s), the single-token expert program (~4.9 s)
+or `post@decode`, and across 43 layers any one of them exceeds the RPC budget on its own. That is the whole remaining
+gap, and it is compiler work, not another measurement round.
+
 ### Operations handoff — how the Stage 0 host loop is run (for a fresh session or another machine)
 
 The V100 host's address is deliberately absent from this repo; it lives in the operator's notes and is used only
@@ -438,9 +487,10 @@ expert destinations, PP transport, and mixed scheduling — token IDs either agr
 
 ### Gate (c) — PASSED (2026-08-26, real checkpoint at TP8 × PP2, at `ab1ad4592`)
 
-**Does not reproduce on current main** — see Stage 0 round three. The result below stands as evidence that the seam,
-the loader and the plugin are correct; re-running it needs `post4096`'s selected plan to be executable at serving
-speed (the partitioned composed-cut route).
+**Re-run 2026-09-10 (round seven): boots, does not serve.** The server reaches `Application startup complete` on the
+re-recorded golden with zero prior fall-throughs, then a completion dies on vLLM's 300 s `sample_tokens` RPC budget —
+one forward is still too slow. The result below stands as evidence that the seam, the loader and the plugin are
+correct; what it now needs is a fast schedule for three programs, not more evidence.
 
 `deepseek-ai/DeepSeek-V4-Flash-0731` serves through `EmmyGenModel` on the 16× V100 SXM3 host, in the pinned 1Cat
 image, at TP8 × PP2 with `--max-model-len 4096 --kv-cache-dtype fp8 --block-size 256` and eager execution:
@@ -556,16 +606,18 @@ shows expert weight streaming dominates and the fused-unpack GEMM can plausibly 
 Stage −1: DONE (~2 h). Stage 0 round one: DONE (fixed upstream by #602). Stage 1: DONE (#651). Stage 2: DONE (#656).
 Stage 3 in-repo: DONE (#662); gate (c) passed once at `ab1ad4592`, gate (d)'s token-ID half with it.
 
-**Stage 0 round three is no longer a compiler gap — what is left is measurement.** Partitioning (#693/#694), the
-compiling composed cut (#700), the serial-work stamp (#702), the composed route rows (#739), the route-row pricing
-(#741), the recorder's lock (#751), the carrier taken apart (#752) and the tail's own name (#757) have all landed.
-The `post4096` forward measures **74.9 ms** as the file's own unpinned strict-evidence election, against 238.8 ms
-before the carrier came apart. What holds everything now, in order: give `run --golden` finite inputs and an
-independent reference for a correctness verdict; re-measure the recorded routes under the split (a carrier that
-comes apart needs a cut per child, and its seam paths shift one level) and pin routes for the realizations that
-still have none — the second `post` kernel family at m1 / m32 / dynamic, the `pre` twin at m32 / dynamic, and the
-two `post1` reduces #757 unblocks; then re-run gate (c). None of that reproduces from the checked-in
-`recipes/DeepSeek-V4-Flash-0731/golden/v100_sm70.yaml`, whose whole-model programs cat the sibling gate/up linears
-into one weight, so every step needs the V100 host. Then Stage 4: 2–4 days on-host (re-run gate (c), re-record
-the golden, warm/bake/verify). Stage 5: 1–2 days. Adding stage 6 (MXFP4 + tuning) is a further 1–3 weeks. The
-evidence the deploy reads, not the fork ABI and no longer the compiler, is now the dominant uncertainty.
+**Stage 0 is no longer an evidence gap — what is left is kernel quality.** Partitioning (#693/#694), the compiling
+composed cut (#700), the serial-work stamp (#702), the composed route rows (#739), the route-row pricing (#741), the
+recorder's lock (#751), the carrier taken apart (#752), the tail's own name (#757), the projection's own spelling
+(#759) and the per-kernel grid view (#770) have all landed. Round seven closed the evidence question outright: the
+golden now carries a measured row for every kernel the server compiles, serving elects from it with zero prior
+fall-throughs, and the boot reaches `Application startup complete`.
+
+What holds serving now is a compiler gap with three named programs — `pre` at the 4096 chunk (~1.94 s per layer), the
+single-token expert program (~4.9 s) and `post` at the decode widths (~76 ms). Across 43 layers any one of them
+exceeds vLLM's 300 s `sample_tokens` RPC budget, which is what a completion request dies on today. Measuring them
+harder will not help: the recorded arms and the prior's guesses land within a percent of each other. Also still owed,
+and now on the critical path rather than beside it: `run --golden` needs finite inputs and an independent reference,
+because `--strict` refuses these twins — the expert output is non-finite on random inputs, so no bench can carry a
+correctness verdict. Then Stage 4 (warm/bake/verify), Stage 5 (1–2 days), and stage 6 (MXFP4 + tuning) a further
+1–3 weeks.

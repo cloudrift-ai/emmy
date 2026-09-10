@@ -145,7 +145,8 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   the recipe stores what conjugation does not give stably: one pattern per channel (the per-element map a dependent
   reduce's lift must spell, over roles), what each state is at the singleton, any state the two-pass form never had
   (Welford's count and running mean), and the fused ⊕ program in its stable spelling — two lambdas over roles for an
-  open channel count (softmax's pivot advance and per-channel rescale) or one lambda over every state pair. The
+  open channel count (softmax's pivot advance and the one-sided scale to the advanced pivot, the channels joining
+  by their shared ⊕) or one lambda over every state pair. The
   definition certifies the data. `Fold.twist(recipe)` finds the pivot among the term's operands and matches by
   position and canonical form, never by a term's names.
 - **Structural identity / structural key** — A fingerprint based on computation and data flow rather than cosmetic

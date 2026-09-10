@@ -374,3 +374,58 @@ def test_multi_pass_cell_defines_every_name_before_it_is_read() -> None:
 
     for tile in tiles:
         check(list(tile.op.lower(_grid(tile), tile.output_specs, tile.axes)), {axis.name for axis in tile.place.free})
+
+
+def _tile_with_shapes(body: Body, out_shape: tuple, inputs: dict) -> object:
+    """Lift ``body`` with REAL operand and output shapes, which the size-one row reading needs."""
+    graph = Graph()
+    for name, shape in inputs.items():
+        graph.add_node(InputOp(), [], Tensor(name, shape), node_id=name)
+    graph.add_node(LoopOp(body=body), list(inputs), Tensor("out", out_shape), node_id="out")
+    graph.outputs = ["out"]
+    return Pipeline.build(["lowering/tile"], select=["lift"]).run(graph).nodes["out"].op
+
+
+def _decode_body() -> Body:
+    """``out[0, h, 0, n] = Σ_k q[0, h, 0, k] · v[0, h, k, n]`` — decode's expectation, whose row
+    Loop IR elides at extent one and whose only other free axis, the head, BOTH operands read."""
+    h, n, k = Axis("h", Dim(8)), Axis("n", Dim(16)), Axis("k", Dim(32))
+    zero = Literal(0, "int")
+    inner = Body(
+        (
+            Load(name="qv", input="q", index=(zero, Var("h"), zero, Var("k"))),
+            Load(name="vv", input="v", index=(zero, Var("h"), Var("k"), Var("n"))),
+            Assign(name="prod", op=ElementwiseImpl("multiply"), args=("qv", "vv")),
+            Accum(name="acc", value="prod", op=ElementwiseImpl("add"), axes=("k",)),
+        )
+    )
+    cell = (Loop(axis=k, body=inner), Write(output="out", index=(zero, Var("h"), zero, Var("n")), value="acc"))
+    return Body((Loop(axis=h, body=Body((Loop(axis=n, body=Body(cell)),))),))
+
+
+def test_a_contraction_with_no_row_binds_the_size_one_output_coordinate() -> None:
+    """A term whose A owns no free axis has no row for any tier to tile: everything it reads it
+    shares with the operand it multiplies, and a B that moves with its row is no slab per tile. The
+    coordinate that would have been the row is the size-one output dimension normalization inlined,
+    and the lift binds it back — into the OPERAND's index too, since a row an operand never reads
+    leaves ``left_axes`` empty and is refused just the same.
+
+    ``_implicit_unit_row`` cannot serve this shape: it proves a row only from a leading zero prefix
+    and a dense column, which the head coordinate between the zeros denies.
+    """
+    tile = _tile_with_shapes(_decode_body(), (1, 8, 1, 16), {"q": (1, 8, 1, 32), "v": (1, 8, 32, 16)})
+    bound = [axis for axis in tile.place.free if axis.extent == Dim(1)]
+    assert len(bound) == 1, f"expected one bound row, got {[axis.name for axis in tile.place.free]}"
+    row = bound[0].name
+    view = tile.op.as_contraction()
+    assert view is not None and view.left_axes == frozenset({row})
+    reads = [edge.as_slab().load for edge in tile.op.operands if edge.as_slab() is not None]
+    assert any(load.input == "q" and Var(row) in load.index for load in reads), "the row must be READ by A"
+    assert all(load.input != "v" or Var(row) not in load.index for load in reads), "the value must not read the row"
+
+
+def test_a_contraction_that_owns_a_row_gains_no_bound_axis() -> None:
+    """The binding fires on a missing row only: a matmul already has one, and adding an extent-one
+    axis there would change every such kernel's identity for nothing."""
+    tile = _tile_with_shapes(_matmul_body(), (32, 64), {"x": (32, 128), "w": (64, 128)})
+    assert [axis.extent for axis in tile.place.free] == [Dim(32), Dim(64)]

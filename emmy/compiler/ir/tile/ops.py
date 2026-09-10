@@ -705,6 +705,17 @@ def carries_partition(tile) -> bool:
     return False
 
 
+def merges_partition(tile) -> bool:
+    """Whether this kernel is a split's deferred finalize: its head fold's axis is a partition window
+    over its WHOLE parent — the merge over every partition of a split that already happened, where a
+    partial's slice windows a fraction of the parent."""
+    node = head(tile.op)
+    if node is None or getattr(node, "axis", None) is None:
+        return False
+    axis = tile.axis_of(node.axis)
+    return axis.window is not None and axis.window.partition and axis.window.parent.extent == axis.extent
+
+
 def reduce_plan(tile):
     """The tile's reduce partition (:class:`~emmy.compiler.ir.schedule.Reduce`), read from
     ``TileOp.schedule`` for the primary :class:`~emmy.compiler.ir.pure.fold.Fold` — when ``tile.op``

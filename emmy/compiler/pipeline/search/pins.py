@@ -8,7 +8,16 @@ import os
 from emmy import config
 from emmy.compiler.ir.schedule import Level, Reduce, Work
 from emmy.compiler.ir.schedule.classic import CLASSIC_FAMILIES
-from emmy.compiler.pipeline.knob import axis_of, family_of, get, is_off_value, pin_key_matches, values_equal
+from emmy.compiler.pipeline.knob import (
+    KERNEL_DECISION_FAMILIES,
+    axis_of,
+    family_of,
+    get,
+    is_off_value,
+    parse_knob_spec,
+    pin_key_matches,
+    values_equal,
+)
 
 #: A synthetic thread inventory so ``Reduce.parse`` accepts a ``coop`` token here. The width
 #: value never matters — ``spell`` is site-local and drops it — but a count > 1 is load-bearing:
@@ -204,6 +213,31 @@ def measured_precision_pins() -> dict[str, bool]:
 
     live = ((knob, knob.raw()) for knob in (FAST_MATH, F16_MMA_F32_ACC, FP8_MMA))
     return {knob.name: knob.parse(raw) for knob, raw in live if raw is not None}
+
+
+@contextlib.contextmanager
+def unpinned_decisions():
+    """Temporarily withdraw every live kernel-decision pin — the ``EMMY_<FAMILY>`` and
+    ``EMMY_<FAMILY>@site`` vars of :data:`~emmy.compiler.pipeline.knob.KERNEL_DECISION_FAMILIES` and
+    their entries in the ``EMMY_KNOBS`` aggregate — so an evidence replay reads a record against the
+    unrestricted enumeration. A replay reconstructs what a record measured; the live compile's pins
+    decide the live forks, where a row the pin contradicts finds no leaf and is not picked. Keeping
+    the pins out of the replay makes it a function of the record and the compiler alone, which is
+    what lets its persisted result serve every pinned compile instead of going cold per pin."""
+    prefixes = tuple(config.knob_var(family) for family in KERNEL_DECISION_FAMILIES)
+    saved = {key: value for key, value in os.environ.items() if any(key == p or key.startswith(p + "@") for p in prefixes)}
+    aggregate = os.environ.get(config.KNOBS)
+    try:
+        for key in saved:
+            del os.environ[key]
+        if aggregate is not None:
+            kept = [f"{k}={v}" for k, v in parse_knob_spec(aggregate).items() if family_of(k) not in KERNEL_DECISION_FAMILIES]
+            os.environ[config.KNOBS] = ",".join(kept)
+        yield
+    finally:
+        os.environ.update(saved)
+        if aggregate is not None:
+            os.environ[config.KNOBS] = aggregate
 
 
 @contextlib.contextmanager

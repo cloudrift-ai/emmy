@@ -58,7 +58,16 @@ from emmy.compiler.ir.schedule.views import ContractionFacts
 from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Select, Write, mask_select_predicate
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.ir.tile.ops import Sched, chain_form, chain_members, edge_dtypes, kernel_roots, projection_tail, scheduled
+from emmy.compiler.ir.tile.ops import (
+    Sched,
+    chain_form,
+    chain_members,
+    edge_dtypes,
+    kernel_roots,
+    merges_partition,
+    projection_tail,
+    scheduled,
+)
 
 
 class ClassicProjectionError(RuntimeError):
@@ -95,6 +104,10 @@ def _reduction_domain(tile: TileOp, node) -> tuple[Reduce, ...]:
     if node.observe is not None or not (is_root or any(node is member for root in roots for member in chain_members(root))):
         return (Reduce(),)  # the binder partitions the roots it peels and their chain members; any other reduce lowers serially
     if {axis.name for spec in tile.output_specs for axis in spec.sweep} & node.free_axes:
+        return (Reduce(),)
+    if is_root and merges_partition(tile):
+        # A split's deferred finalize: one partial per split per cell, the parallelism is the cells,
+        # and a band over the few partials pays a barrier per cell.
         return (Reduce(),)
     transposed_ok = _transposed_reduction_ok(tile) and is_root and not chain_form(node)
     return (
@@ -241,12 +254,17 @@ def _chunk_refusal(tile: TileOp, node) -> str | None:
     if any(node.axis in edge.free_axes for edge in leaves):
         return "the score's prefix reads an operand that varies over the chunk"
     # The tier holds ONE accumulator — the expectation — and every other carried state as a per-row
-    # register the store may read but not write out. A cross-CTA split's partial writes the whole
-    # carrier to its workspace, which is a kernel this tier cannot produce.
+    # register. A projection may read those registers, and a cross-CTA split's partial stores each
+    # of them WHOLE to its workspace (broadcast per row into a fragment); what the tier cannot write
+    # is a per-row state computed into an output of its own beside the expectation.
     tail = projection_tail(tile)
     body = Body(tail)
+    states = set(node.base.results)
+    cell = {axis.name for axis in tile.place.free}
     expectation = node.base.results[node.bilinear_channels()[0][0]]
     for write in (stmt for stmt in tail if isinstance(stmt, Write)):
+        if set(write.values) <= states and cell <= {name for index in write.index for name in index.free_vars()}:
+            continue  # a carried state stored WHOLE per cell — a split partial's workspace write, broadcast per row
         reads = set(write.values) | set(body.backward_cone(tuple(write.values)).external_reads)
         if expectation not in reads:
             return "the chunk tier writes its expectation; a carried state beside it has no output of its own"

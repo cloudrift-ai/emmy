@@ -1,0 +1,163 @@
+# RTX 5090 full-attention comparison. Emmy replays recorded goldens; the external lane measures
+# current SDPA, Inductor, FlexAttention, FlashAttention-2 2.8.3, and TileLang 0.1.8 prefill.
+#
+# Trace and tune outside this recipe, then commit every setup under golden/. Missing goldens fail the
+# Emmy row. PyTorch Inductor is the normalization anchor for every reported backend.
+command:
+  stage:
+    - emmy
+    - pyproject.toml
+    - README.md
+    - LICENSE
+    - experiments/golden-bench-2026/compiler_attention_rtx5090/operators.sh
+    - experiments/golden-bench-2026/compiler_attention_rtx5090/run_emmy.sh
+    - experiments/golden-bench-2026/compiler_attention_rtx5090/run_baselines.py
+    - experiments/golden-bench-2026/compiler_attention_rtx5090/golden
+  strict: true
+  run: |
+    set -euo pipefail
+    EXPERIMENT=$repo_dir/experiments/golden-bench-2026/compiler_attention_rtx5090
+    EVIDENCE=$task_dir/evidence
+    mkdir -p "$$EVIDENCE"
+    finalize() {
+      final_status=$$?
+      trap - EXIT
+      printf 'status=%s\n' "$$final_status" > $task_dir/status.txt
+      archive_tmp=$task_dir.artifacts.tar.gz
+      tar -C $task_dir -czf "$$archive_tmp" . || final_status=1
+      mv "$$archive_tmp" $task_dir/artifacts.tar.gz || final_status=1
+      exit "$$final_status"
+    }
+    trap finalize EXIT
+
+    export CUDA_VISIBLE_DEVICES=$gpu_device_ids
+    nvidia-smi -q > "$$EVIDENCE/nvidia-smi.txt"
+    nvcc --version > "$$EVIDENCE/nvcc-version.txt"
+
+    case "$lane" in
+      emmy)
+        export PATH=/usr/local/cuda/bin:$$PATH
+        cd $repo_dir
+        if [ ! -x venv/bin/python ]; then
+          python3.12 -m venv venv --prompt emmy
+        fi
+        if ! venv/bin/python -c 'import torch, sys; sys.exit(torch.__version__.split("+")[0] != "2.14.0")' 2>/dev/null; then
+          venv/bin/pip install -e ".[dev]" torch==2.14.0 2>&1 | tee "$$EVIDENCE/install.log"
+        fi
+        test "$$(venv/bin/python -c 'import torch; print(torch.__version__.split("+")[0])')" = "2.14.0"
+        export EMMY_TUNE_DB=$task_dir/autotune.db
+        export EMMY_ONLINE_FILE=$task_dir/online.json
+        export EMMY_CUBIN_CACHE=$task_dir/cubins
+        venv/bin/pip freeze --all > "$$EVIDENCE/requirements.freeze.txt"
+        venv/bin/python -c 'import torch; print(f"torch={torch.__version__}"); print(f"cuda={torch.version.cuda}"); \
+          print(f"gpu={torch.cuda.get_device_name(0)}")' > "$$EVIDENCE/torch-environment.txt"
+        sha256sum "$$EXPERIMENT/operators.sh" "$$EXPERIMENT/run_emmy.sh" > "$$EVIDENCE/experiment-input.sha256"
+        sha256sum "$$EXPERIMENT"/golden/$operator-b$batch-*.golden.yaml > "$$EVIDENCE/golden.sha256" 2>&1 || true
+        "$$EXPERIMENT/run_emmy.sh" $repo_dir/venv/bin/emmy "$operator" "$batch" \
+          "$$EVIDENCE/emmy" "$$EXPERIMENT/golden"
+        ;;
+      baselines)
+        export PATH=/usr/local/cuda/bin:$$PATH
+        BASELINE_VENV=$repo_dir/.venv-attention-rtx5090
+        TILELANG_SOURCE=$repo_dir/.cache-attention-rtx5090/tilelang-0.1.8
+        if [ ! -x "$$BASELINE_VENV/bin/python" ]; then
+          python3.12 -m venv "$$BASELINE_VENV"
+        fi
+        if ! "$$BASELINE_VENV/bin/python" -c 'import importlib.metadata, sys; expected={"torch":"2.14.0", \
+          "flash_attn":"2.8.3", "tilelang":"0.1.8", "apache-tvm-ffi":"0.1.8.post2"}; \
+          sys.exit(any(importlib.metadata.version(k) != v for k, v in expected.items()))' 2>/dev/null; then
+          "$$BASELINE_VENV/bin/pip" install torch==2.14.0 packaging ninja einops 2>&1 | tee "$$EVIDENCE/install.log"
+          # FlashAttention 2.8.3 predates PyTorch 2.14, whose ATen headers require C++20 while this
+          # release compiles at C++17. Build the pinned source with only that standard raised; no
+          # kernel is touched. Neither NVCC_APPEND_FLAGS nor CXXFLAGS reaches the host compile,
+          # which is why the flag is changed in the source rather than passed in.
+          FLASH_SOURCE=$repo_dir/.cache-attention-rtx5090/flash_attn-2.8.3
+          if [ ! -f "$$FLASH_SOURCE/setup.py" ]; then
+            mkdir -p "$$(dirname "$$FLASH_SOURCE")"
+            FLASH_ARCHIVE=$$(dirname "$$FLASH_SOURCE")/flash_attn-2.8.3.tar.gz
+            curl -fsSL \
+              https://files.pythonhosted.org/packages/3b/b2/8d76c41ad7974ee264754709c22963447f7f8134613fd9ce80984ed0dab7/flash_attn-2.8.3.tar.gz \
+              -o "$$FLASH_ARCHIVE"
+            printf '%s  %s\n' 1e71dd64a9e0280e0447b8a0c2541bad4bf6ac65bdeaa2f90e51a9e57de0370d \
+              "$$FLASH_ARCHIVE" | sha256sum -c -
+            tar -xzf "$$FLASH_ARCHIVE" -C "$$(dirname "$$FLASH_SOURCE")"
+            sed -i 's/-std=c++17/-std=c++20/g' "$$FLASH_SOURCE/setup.py"
+          fi
+          MAX_JOBS=4 FLASH_ATTN_CUDA_ARCHS=120 "$$BASELINE_VENV/bin/pip" install --no-cache-dir \
+            --no-build-isolation "$$FLASH_SOURCE" 2>&1 | tee -a "$$EVIDENCE/install.log"
+          "$$BASELINE_VENV/bin/pip" install tilelang==0.1.8 apache-tvm-ffi==0.1.8.post2 2>&1 \
+            | tee -a "$$EVIDENCE/install.log"
+        fi
+        if [ ! -f "$$TILELANG_SOURCE/examples/flash_attention/example_mha_fwd_bshd.py" ]; then
+          mkdir -p "$$(dirname "$$TILELANG_SOURCE")"
+          SOURCE_ARCHIVE=$$(dirname "$$TILELANG_SOURCE")/tilelang-0.1.8.tar.gz
+          curl -fsSL \
+            https://files.pythonhosted.org/packages/e6/27/6e363f48f878389078e2899756b8fecc326388b585122fd7f8a86590dfab/tilelang-0.1.8.tar.gz \
+            -o "$$SOURCE_ARCHIVE"
+          printf '%s  %s\n' da967821698eb7a79a76d27fbe25e314a3273f2b12ba4833e981658139d0e6d9 \
+            "$$SOURCE_ARCHIVE" | sha256sum -c -
+          tar -xzf "$$SOURCE_ARCHIVE" -C "$$(dirname "$$TILELANG_SOURCE")"
+        fi
+        "$$BASELINE_VENV/bin/python" -c 'import importlib.metadata; print("\n".join( \
+          f"{name}={importlib.metadata.version(name)}" \
+          for name in ("torch", "flash_attn", "tilelang", "apache-tvm-ffi")))' \
+          > "$$EVIDENCE/versions.txt"
+        "$$BASELINE_VENV/bin/pip" freeze --all > "$$EVIDENCE/requirements.freeze.txt"
+        sha256sum "$$EXPERIMENT/run_baselines.py" "$$EXPERIMENT/operators.sh" > "$$EVIDENCE/experiment-input.sha256"
+        mkdir -p "$$EVIDENCE/json" "$$EVIDENCE/logs"
+        printf "operator\tbatch\tsequence_length\tstatus\n" > "$$EVIDENCE/setup-status.tsv"
+        failures=0
+        source "$$EXPERIMENT/operators.sh"
+        export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+        for sequence_length in $$(operator_sequence_lengths "$operator" "$batch"); do
+          setup=$operator-b$batch-s$$sequence_length
+          if timeout --signal=TERM --kill-after=30s 1200s "$$BASELINE_VENV/bin/python" \
+            "$$EXPERIMENT/run_baselines.py" "$operator" "$batch" "$$sequence_length" \
+            --warmup 1 --iters 10 --tilelang-source "$$TILELANG_SOURCE" \
+            --json "$$EVIDENCE/json/$$setup.json" 2>&1 | tee "$$EVIDENCE/logs/$$setup.log"; then
+            status=ok
+          else
+            status=failed:$$?
+            failures=$$((failures + 1))
+          fi
+          printf "%s\t%s\t%s\t%s\n" "$operator" "$batch" "$$sequence_length" \
+            "$$status" >> "$$EVIDENCE/setup-status.tsv"
+        done
+        test "$$failures" -eq 0
+        ;;
+      *)
+        echo "unknown lane: $lane" >&2
+        exit 2
+        ;;
+    esac
+  result_files:
+    - artifacts.tar.gz
+  timeout: 43200
+
+matrices:
+  - cross:
+      deploy.gpu: "NVIDIA GeForce RTX 5090"
+      deploy.gpu_count: 1
+      lane: emmy
+      operator:
+        - prefill_global
+        - prefill_causal
+        - prefill_gqa
+        - decode_causal
+        - decode_gqa
+      batch:
+        - 1
+        - 8
+  - cross:
+      deploy.gpu: "NVIDIA GeForce RTX 5090"
+      deploy.gpu_count: 1
+      lane: baselines
+      operator:
+        - prefill_global
+        - prefill_causal
+        - prefill_gqa
+        - decode_causal
+        - decode_gqa
+      batch:
+        - 1
+        - 8

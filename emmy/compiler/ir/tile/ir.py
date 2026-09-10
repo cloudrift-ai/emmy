@@ -397,8 +397,11 @@ class TileOp(Op):
     def __post_init__(self) -> None:
         Op.__post_init__(self)
         normalized = normalize_fold_tree(self.op, self.output_specs)
-        # A matrix row Loop IR elided at extent one is restored as a free axis when the stores
-        # prove it and the tree holds a contraction to orient on it (:func:`_implicit_unit_row`).
+        # A row the lift could not BIND — a bare vector A has no unit dimension to bind one into —
+        # is still provable from the stores, and the placement needs one to carry a fragment
+        # geometry (:func:`_implicit_unit_row`). Binding and announcing answer different questions:
+        # the bound row gives a contraction its missing LEFT axis, this one gives a term with no row
+        # at all a geometry, and a matvec against a 1-D operand can only be served by the latter.
         unit_row = _implicit_unit_row(self.output_specs, self.place.free)
         if unit_row is not None and any(site.node.as_contraction() is not None for site in sites(normalized)):
             object.__setattr__(self, "place", replace(self.place, free=(unit_row, *self.place.free)))

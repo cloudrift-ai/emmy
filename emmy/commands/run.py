@@ -525,16 +525,15 @@ def _record_golden_latency(args, results: dict, golden_benches) -> None:
         sys.exit(2)
     emmy_us = _bench_total_us(measured[0].bench)[0] if measured else results.get("Emmy")
     tcompile_us = results.get("torch.compile")
-    realization = getattr(args, "_resolved_realization", args.realization)
     if not emmy_us:
-        logger.error("--record measured no Emmy timing for %s", realization)
+        logger.error("--record measured no Emmy timing for %s", args.realization)
         sys.exit(2)
     if not tcompile_us:
         # Not fatal: the ratchet is `emmy_us`, and some targets have no torch twin to compile.
-        logger.warning("--record: no torch.compile timing for %s; storing the Emmy latency alone", realization)
+        logger.warning("--record: no torch.compile timing for %s; storing the Emmy latency alone", args.realization)
     record_latency(
         args.golden,
-        realization,
+        args.realization,
         hardware_id=Context.probe().hardware_id(),
         emmy_us=emmy_us,
         tcompile_us=tcompile_us,
@@ -543,7 +542,7 @@ def _record_golden_latency(args, results: dict, golden_benches) -> None:
     )
     logger.info(
         "recorded %s: emmy %.2f us (%s)%s",
-        realization,
+        args.realization,
         emmy_us,
         "pinned row" if measured else "greedy pick",
         f", torch.compile {tcompile_us:.2f} us" if tcompile_us else "",
@@ -1054,7 +1053,7 @@ def _sample_replay_knobs(sample) -> dict:
     """All exact knob pins needed to reproduce a golden winner or explicit A/B row."""
     from emmy.compiler.pipeline.knob import tuning_knob_items  # noqa: PLC0415
 
-    return {**getattr(sample, "pins", {}), **dict(tuning_knob_items(sample.knobs))}
+    return {**getattr(sample, "pins", {}), **getattr(sample, "route", {}), **dict(tuning_knob_items(sample.knobs))}
 
 
 def _failed_bench_status(exc: BaseException) -> str:

@@ -178,7 +178,7 @@ PAIR_LDMATRIX = Knob(
     "PAIR_LDMATRIX",
     KnobType.BOOL,
     hints=(True,),  # on by default; not a search dimension — manual override only via the env var
-    help="Pair slab-adjacent staged ldmatrix.x2 B-fragment loads into one ldmatrix.x4.",
+    help="Pair adjacent staged fragment loads into one wide shared-memory instruction.",
     off=False,
 )
 

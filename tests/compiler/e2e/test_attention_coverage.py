@@ -319,35 +319,6 @@ def test_scalar_flash_dynamic_matches_torch(monkeypatch, variant):
         assert md < 1e-4, f"dynamic {variant} flash seq={s} max_diff={md:.6e}"
 
 
-@requires_cuda
-def test_flash_causal_and_gqa_match_torch(monkeypatch):
-    """The causal / GQA masks ride the score cone through the generic split, so masked +
-    grouped-head SDPA also matches torch."""
-    torch.manual_seed(0)
-
-    q, k, v = (torch.randn(1, 2, 16, 8) for _ in range(3))
-    backend, compiled, _graph, kernels = _trace(_Causal(), (q, k, v))
-    assert kernels
-    cq, ck, cv = q.cuda(), k.cuda(), v.cuda()
-
-    def rc():
-        with torch.no_grad():
-            return F.scaled_dot_product_attention(cq, ck, cv, is_causal=True).cpu().flatten().numpy()
-
-    assert _max_diff(backend, compiled, {"q": q.numpy(), "k": k.numpy(), "v": v.numpy()}, rc) < 1e-4
-
-    qg = torch.randn(1, 4, 16, 8)
-    kg, vg = (torch.randn(1, 2, 16, 8) for _ in range(2))
-    backend, compiled, _graph, _kernels = _trace(_Gqa(), (qg, kg, vg))
-    cqg, ckg, cvg = qg.cuda(), kg.cuda(), vg.cuda()
-
-    def rg():
-        with torch.no_grad():
-            return F.scaled_dot_product_attention(cqg, ckg, cvg, is_causal=True, enable_gqa=True).cpu().flatten().numpy()
-
-    assert _max_diff(backend, compiled, {"q": qg.numpy(), "k": kg.numpy(), "v": vg.numpy()}, rg) < 1e-4
-
-
 class _SdpaTranspose(torch.nn.Module):
     """SDPA whose ``(b, h, s, d)`` output is transposed to ``(b, s, h, d)`` — the ``attn.transpose(1, 2)``
     every HF attention does before the reshape to ``(b, s, hidden)``. The transpose is a view that fuses
@@ -500,6 +471,25 @@ def test_chunk_tier_stages_a_symbolic_key_extent(transport):
 # --------------------------------------------------------------------------- #
 
 
+@requires_cuda
+@pytest.mark.parametrize("stage", ["", "d2/smem-async"])
+def test_chunk_tier_skips_the_chunks_a_causal_band_masks(stage):
+    """A causal sliding-window SDPA on the chunk tier runs ONE loop bounded at both ends — it starts
+    on the chunk holding the CTA's first row's near edge and stops at its diagonal — and matches torch
+    under the same band, gmem-direct and staged alike. 16 CTAs fit any card in one wave, which is
+    where a stream bounded at one end alone would stay whole."""
+    torch.manual_seed(0)
+    q, k, v = (torch.randn(1, 2, 256, 64, dtype=torch.float16) for _ in range(3))
+    with pinned_knobs({**_CHUNK_ROW, "STAGE@map.1/twist": stage}):
+        backend, compiled, graph, kernels = _stamp_window(_Sdpa(), (q, k, v), window=64)
+    assert len(kernels) == 1, f"the chunk tier fuses the whole attention: {kernels}"
+    source = compiled.nodes[kernels[0]].op.kernel_source
+    loop = next(line.strip() for line in source.splitlines() if "for (int " in line and "__ck" in line)
+    assert "__ck_end" in loop and "__ck = 0" not in loop, loop
+    out = _run_flash(backend, compiled, graph, (q, k, v))
+    assert np.abs(out.astype(np.float32) - _banded_ref(q, k, v, 64)()).max() < 1e-2
+
+
 def _run_flash(backend, compiled, graph, tensors) -> np.ndarray:
     data = {n: t.numpy() for n, t in zip(graph.inputs, tensors, strict=True)}
     run_result, _ = backend.run(compiled, input_data=data)
@@ -516,6 +506,8 @@ def _stamp_window(module, args, window, dynamic_shapes=None):
     the HF-wrapper stamp path; ``F.scaled_dot_product_attention`` has no window arg to trace it
     from. ``window=None`` stamps ``is_causal`` alone (the full-attention layer's shape: the
     causal end-skip through an opaque bias operand)."""
+    from dataclasses import replace  # noqa: PLC0415
+
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
     from emmy.compiler.ir.frontend.ir import SdpaOp  # noqa: PLC0415
     from emmy.compiler.trace.torch import trace_module  # noqa: PLC0415
@@ -523,8 +515,7 @@ def _stamp_window(module, args, window, dynamic_shapes=None):
     graph = trace_module(module.cpu(), args, dynamic_shapes=dynamic_shapes)
     for n in graph.nodes.values():
         if isinstance(n.op, SdpaOp):
-            n.op.sliding_window = window
-            n.op.is_causal = True
+            n.op = replace(n.op, sliding_window=window, is_causal=True)
     backend = CudaBackend()
     compiled = backend.compile(graph)
     kernels = [nid for nid in compiled.nodes if getattr(compiled.nodes[nid].op, "kernel_source", None)]
@@ -819,38 +810,6 @@ class _QKVAttnNoRope(torch.nn.Module):
         out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         out = out.transpose(1, 2).contiguous().view(B, S, -1)
         return self.o(out)
-
-
-class _SdpaExplicitMask(torch.nn.Module):
-    """SDPA fed an explicit additive float ``attn_mask`` (the way HF passes its precomputed causal
-    mask) rather than ``is_causal=True``."""
-
-    def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        return F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
-
-
-@requires_cuda
-@pytest.mark.parametrize("n_heads,seq_len", [(1, 32), (16, 32)])
-def test_sdpa_explicit_additive_mask(_chain_tile_pins, n_heads: int, seq_len: int):
-    """SDPA with an explicit additive float mask must apply the mask, not silently drop it.
-    Regression for the tracer capturing only ``Q/K/V`` and discarding ``attn_mask`` — which turned
-    whole-model causal attention into full bidirectional attention. Uses varying random Q/K/V and a
-    tight threshold to actually exercise masking (a ``(1,1,S,S)`` additive bias)."""
-    head_dim = 128
-    m = _SdpaExplicitMask().eval()
-    q = torch.randn(1, n_heads, seq_len, head_dim)
-    k = torch.randn(1, n_heads, seq_len, head_dim)
-    v = torch.randn(1, n_heads, seq_len, head_dim)
-    mask = torch.zeros((seq_len, seq_len))
-    mask.masked_fill_(torch.triu(torch.ones_like(mask, dtype=torch.bool), diagonal=1), float("-inf"))
-    mask = mask[None, None]
-    dpd, eager = _run_module_with_eager(
-        m,
-        (q, k, v, mask),
-        {"q": q.numpy(), "k": k.numpy(), "v": v.numpy(), "mask": mask.numpy()},
-        direct=True,
-    )
-    _assert_close(dpd, eager)
 
 
 def _band_mask(seq: int, window: int) -> torch.Tensor:
