@@ -2289,6 +2289,8 @@ def _strict_benchmark_errors(
     errors = []
     display_names = {"eager": "Eager PyTorch", "tcompile": "torch.compile", "emmy": "Emmy"}
     for backend in _resolve_backends(args.bench_backends):
+        if backend != "emmy" and not frontend_runnable:
+            continue  # an embedded Loop target has no Torch twin; its reference is the same-input greedy replay
         name = display_names[backend]
         latency = (results or {}).get(name)
         if isinstance(latency, bool) or not isinstance(latency, int | float) or latency <= 0:

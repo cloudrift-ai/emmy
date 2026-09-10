@@ -1046,7 +1046,13 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             self._refuse("one contraction currently requires one transport choice across its operands", site)
         from emmy.compiler.ir.tile.ops import Sched  # noqa: PLC0415
 
-        geometry = Sched(tile_op, place=tile_op.place.on_grid()).placed(fold, node.tile)
+        # One grid-placed view per (tile, target): the view caches the tree's site walk and each
+        # node's (m, n) pair, and a fresh view per support query re-walked the whole tree — on a
+        # decode-tail kernel fusing five projections that walk alone kept a compile from finishing.
+        grid = _target_memo(tile_op, self.target, "_memo_grid_sched")
+        if "sched" not in grid:
+            grid["sched"] = Sched(tile_op, place=tile_op.place.on_grid())
+        geometry = grid["sched"].placed(fold, node.tile)
         if node.tile.is_tiled and not isinstance(geometry, PlacedTile):
             cache[key] = None
             return None
