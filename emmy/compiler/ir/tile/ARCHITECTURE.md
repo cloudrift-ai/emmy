@@ -190,13 +190,13 @@ composed placement cut builds exactly this shape (the consumer piece's workspace
 retained reduce — DeepSeek-V4 post4096's two-cut piece was the live case, every capture an undefined identifier at
 nvcc).
 
-A matrix row that Loop IR elided because its static extent is one remains algebraic information when every output
-specification starts with one or more literal-zero coordinates followed by the dense `n` coordinate, directly or
-split into row-major quotient/remainder coordinates by a pure reshape. The `n` coordinate may already be free or may
-still be the one shared output sweep. Post-init restores that proven unit free axis before contraction canonicalization,
-even when a sibling reduction is the root-most Fold and the contraction is nested. A zero after `n` or a strided `n`
-does not prove a unit matrix row. The rule is boundary-derived and general: it does not recognize a model or operation
-family, and it does not alter a term whose output specifications disagree about the missing coordinate.
+A matrix row that Loop IR elided because its static extent is one remains algebraic information, and the total lift
+restores it (`lowering/tile/_row.py`) rather than post-init: the coordinate is BOUND back into the indices that read
+it, so the row is an axis an operand carries and not merely one the placement lists. A contraction that owns no free
+axis is what asks for it — everything such a term reads it shares with the operand it multiplies, and a B that moves
+with its row is no slab per tile (`contracts`), so the whole family would otherwise fall to the per-cell tier. The
+rule is boundary-derived and general: it recognizes no model or operation family, and a candidate is kept only when
+binding it actually gives some contraction a row.
 
 Factoring preserves the pure cone's statement order. If a scalar projection between two nested Folds feeds the later
 Fold, the earlier Fold and scalar become a nested source projection; both Folds are never flattened ahead of that
