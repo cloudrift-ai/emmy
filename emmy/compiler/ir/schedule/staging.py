@@ -665,8 +665,8 @@ def resolve_fill_stage(
     byte-copy / cp.async / TMA transports move bytes and cannot evaluate a producer cone), so it
     has no gmem-direct ``""`` sibling and a ``STAGE`` pin can only choose its DEPTH. ``None`` when
     the slabs exceed ``budget``: one A slab, one B slab per channel, and one fp32 row per bridged
-    statistic (:func:`~emmy.compiler.ir.pure.fold.cone_seam`'s ``stats`` — the same node boundary the materializer fills
-    through).
+    statistic (:func:`~emmy.compiler.ir.pure.fold.cone_seam`'s ``stats`` and its per-chunk ``chunk`` stats — the same
+    node boundary the materializer fills through).
 
     ``want_depth >= 2`` is the asymmetric B-only prefetch ring: only the B cp.async slabs ring
     (their copies for chunk ``i+d-1`` fly under chunk ``i``'s compute fill and drain), while the
@@ -693,11 +693,16 @@ def resolve_fill_stage(
         return None
     a_nbytes = atom.operand_dtype("a").nbytes
     b_nbytes = atom.operand_dtype("b").nbytes
-    _, _, stats = (
-        seam if seam is not None else cone_seam(c.operands[0], k_axis.name, axes) if c.operands[0].as_slab() is None else ((), (), ())
+    _, _, stats, chunk = (
+        seam if seam is not None else cone_seam(c.operands[0], k_axis.name, axes) if c.operands[0].as_slab() is None else ((), (), (), ())
     )
+    if chunk and chunk[2] % bk_elems:
+        # The chunk statistic is evaluated once per staged chunk, which is only its value when the
+        # chunk sits inside one K group.
+        _decline(why, f"the fill's per-chunk statistic spans {chunk[2]}-element K groups, which a {bk_elems}-element chunk does not tile")
+        return None
     a_bytes = tile.m.tile * bk_elems * a_nbytes
-    stat_bytes = len(stats) * tile.m.tile * 4
+    stat_bytes = (len(stats) + (len(chunk[1]) if chunk else 0)) * tile.m.tile * 4
     sync_bytes = stat_bytes
     async_bytes = 0
     # A materialized A whose dtype the atom cannot bind rides the CONVERTING synchronous fill —

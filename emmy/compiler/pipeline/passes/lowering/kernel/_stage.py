@@ -416,6 +416,12 @@ def sync_row_fill(*, slab: str, src: str, extent: int, grid_vars: tuple, linear_
     return [Smem(name=slab, extents=(extent,), dtype=dtype), loop, Sync()]
 
 
+def stat_rows(stats: tuple[str, ...], slab_of, row_axis: Axis, dtype: str = "float", dtypes: dict[str, str] | None = None) -> list[Stmt]:
+    """One length-``rows`` smem row per bridged statistic, each at its own C type."""
+    per = dtypes or {}
+    return [Smem(name=slab_of(nm), extents=(row_axis.extent.as_static(),), dtype=per.get(nm, dtype)) for nm in stats]
+
+
 def sync_stat_fill(
     *,
     stats: tuple[str, ...],
@@ -426,6 +432,7 @@ def sync_stat_fill(
     stat=None,
     dtype: str = "float",
     dtypes: dict[str, str] | None = None,
+    declare: bool = True,
 ) -> list[Stmt]:
     """The ``smem`` compute fill's per-row STATISTIC prologue — the fused norm→linear warp edge's
     cooperative prologue, run ONCE before the staged K-loop: the CTA stripes the tile's rows **one
@@ -440,9 +447,11 @@ def sync_stat_fill(
     A row is declared at its OWN bridged value's C type (``dtypes``, name → C type; ``dtype`` for
     anything absent). The declaration is where a bridged value's dtype is stated — ``Smem.render``
     registers it and the cell's read picks it up — so a row declared float would put the cell's
-    arithmetic in f32 whatever crossed it, and the bit operations have no f32 spelling."""
-    per = dtypes or {}
-    decls: list[Stmt] = [Smem(name=slab_of(nm), extents=(row_axis.extent.as_static(),), dtype=per.get(nm, dtype)) for nm in stats]
+    arithmetic in f32 whatever crossed it, and the bit operations have no f32 spelling.
+
+    ``declare=False`` leaves the rows' declarations out — a per-chunk statistic refills rows the
+    kernel declared once, ahead of its K loop (:func:`stat_rows`)."""
+    decls: list[Stmt] = stat_rows(stats, slab_of, row_axis, dtype, dtypes) if declare else []
     writes = tuple(Write(output=slab_of(nm), index=(Var(row_axis.name),), value=nm) for nm in stats)
     rl_i = next((i for i, s in enumerate(row_body) if isinstance(s, Loop) and s.is_reduce), None)
     if rl_i is None or stat is None or cta.n_threads % 32 or cta.n_threads < 32:
@@ -707,6 +716,10 @@ class SyncOperand:
     # slabs. ``None`` inherits the transport's.
     dtype: str | None = None
     elem_bytes: int | None = None
+    # ``k0 -> stmts`` run once per chunk ahead of this slab's cells, barrier included — the cone's
+    # per-chunk statistic (:func:`~emmy.compiler.ir.schedule.views.cone_seam`'s ``chunk``), whose
+    # rows the cells read back. ``None`` when the cone has none.
+    before: Callable[[Expr], list[Stmt]] | None = None
 
     @property
     def slab(self) -> str:
@@ -963,6 +976,8 @@ class SyncTransport:
         for op in self.operands:
             if op.producer is not None:
                 continue  # a scheduled producer fills the whole slab in its own segment
+            if op.before is not None:
+                out += op.before(k0_cur)
             rows, cols = op.shape
             v = _cp_async_width(cols, op.elem_bytes or self.elem_bytes)
             fe = Axis(name=f"_f{op.tag}", extent=(rows * cols) // v)

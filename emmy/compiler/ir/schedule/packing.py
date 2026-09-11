@@ -66,7 +66,7 @@ class PackedKBlockB:
         return max(1, bk_elems // self.block)
 
 
-def _k_block_guard(expr, k_name: str) -> tuple[bool, set[int]]:
+def k_block_guard(expr, k_name: str) -> tuple[bool, set[int]]:
     """Walk ``expr`` for the k-block-invariance proof: ``(k_seen_naked, guards)``.
 
     A ``k`` occurrence is GUARDED by ``(X + k) / B`` (a literal ``B``) when ``X`` is a
@@ -128,7 +128,7 @@ def match_packed_kblock_b(cone: list, k_name: str, inputs, *, codes_may_compute:
     byte feeds an index copy and a pair-table gather reads it by data-dependent index. A one-value
     byte (the fp8 block-scaled form): a stored fp8 load feeds its dtype's decode cast. Either way
     the final multiply combines the decoded value with a factor whose every ``k`` reference is
-    block-guarded (:func:`_k_block_guard`). Everything else returns ``None``, and a k-invariant
+    block-guarded (:func:`k_block_guard`). Everything else returns ``None``, and a k-invariant
     factor in particular does too: that scale commutes out of the fold onto the epilogue instead.
 
     The byte is normally a ``Load`` — a stored weight, or an activation whose codes a fan-out
@@ -189,7 +189,7 @@ def match_packed_kblock_b(cone: list, k_name: str, inputs, *, codes_may_compute:
     for st in sides[factor]:
         exprs = st.index if isinstance(st, Load) else ()
         for e in exprs:
-            naked, guards = _k_block_guard(e, k_name)
+            naked, guards = k_block_guard(e, k_name)
             if naked:
                 return None
             blocks |= guards
@@ -358,6 +358,7 @@ def packed_readings(nodes, inputs) -> frozendict:
 
 __all__ = [
     "BlockScaledOperand",
+    "k_block_guard",
     "block_scaled_atom",
     "BlockScaledPair",
     "PackedKBlockB",

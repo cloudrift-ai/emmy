@@ -100,6 +100,7 @@ from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     pipelined_kloop,
     software_swizzle,
     staged_kloop,
+    stat_rows,
     sync_stat_fill,
 )
 from emmy.compiler.pipeline.search.space import PAIR_LDMATRIX, UNROLL
@@ -856,8 +857,13 @@ def _a_slab_operand(
     moves, never in how A does, and keeping one A side is what lets a packed weight sit behind a
     fused activation: the bits still copy verbatim while the activation evaluates into its slab.
 
+    A per-chunk statistic (the seam's ``chunk`` — a per-row statistic over each K group) declares
+    its rows in the prologue and refills them at the head of every chunk's fill, from the chunk's
+    base K: the resolver admits only a chunk inside one group, so that K names the group.
+
     Returns ``(operand, copied, prologue)``."""
-    pro, cell, stats = seam
+    pro, cell, stats, chunk = seam
+    chunk_pro, chunk_stats, _block = chunk or ((), (), 0)
     m_name, k_name = mn[0].axis.name, k_axis.name
     if c.operands[0].as_slab() is not None:
         shape = (mn[0].tile, bk_elems)
@@ -885,13 +891,13 @@ def _a_slab_operand(
         # σ is hygienic (:meth:`Stmt.substitute`): a cone statistic re-binding the contraction axis
         # name (attention's k-norm inside the K cone) keeps its own iteration var.
         sigma = Sigma({m_name: m_coord(row), k_name: k_coord(k)})
-        stmts: list[Stmt] = [Load(names=(nm,), input=_stat_slab(nm), index=(row,)) for nm in stats]
+        stmts: list[Stmt] = [Load(names=(nm,), input=_stat_slab(nm), index=(row,)) for nm in (*stats, *chunk_stats)]
         stmts += [s.substitute(sigma) for s in cell]
         return _k_masked(stmts, c.operands[0].exposes[-1], k, k_ext)
 
     prologue: list[Stmt] = []
+    row_axis = Axis(name="_sr", extent=mn[0].tile)
     if stats:
-        row_axis = Axis(name="_sr", extent=mn[0].tile)
         sigma = Sigma({m_name: m_coord(Var(row_axis.name))})
         row_body = [s.substitute(sigma) for s in pro]
         prologue = sync_stat_fill(
@@ -903,7 +909,29 @@ def _a_slab_operand(
             stat=cone_stat(c.operands[0], axes),
             dtypes={nm: cuda_name(dt) for nm, dt in cone_stat_dtypes(pro, stats, inputs).items()},
         )
-    return SyncOperand(tag="a", shape=(mn[0].tile, bk_elems), value=a_value, swizzle=swizzle), False, prologue
+    before = None
+    if chunk_stats:
+        chunk_dtypes = {nm: cuda_name(dt) for nm, dt in cone_stat_dtypes(chunk_pro, chunk_stats, inputs).items()}
+        prologue += stat_rows(chunk_stats, _stat_slab, row_axis, dtypes=chunk_dtypes)
+        reads = [nm for nm in stats if nm in Body(chunk_pro).ssa_uses]
+        stat = next(edge for edge in c.operands[0].operands if set(chunk_stats) & set(edge.exposes))
+
+        def before(k0):
+            sigma = Sigma({m_name: m_coord(Var(row_axis.name)), k_name: k_coord(k0)})
+            row_body = [Load(names=(nm,), input=_stat_slab(nm), index=(Var(row_axis.name),)) for nm in reads]
+            row_body += [s.substitute(sigma) for s in chunk_pro]
+            return sync_stat_fill(
+                stats=chunk_stats,
+                slab_of=_stat_slab,
+                row_axis=row_axis,
+                row_body=row_body,
+                cta=cta,
+                stat=stat,
+                dtypes=chunk_dtypes,
+                declare=False,
+            )
+
+    return SyncOperand(tag="a", shape=(mn[0].tile, bk_elems), value=a_value, swizzle=swizzle, before=before), False, prologue
 
 
 def _sync_operands(
@@ -913,7 +941,7 @@ def _sync_operands(
     cta: CtaTile,
     swizzles: tuple[str, str] = ("NONE", "NONE"),
     channels=(),
-    seam: tuple = ((), (), ()),
+    seam: tuple = ((), (), (), ()),
     inputs=None,
     *,
     k_axis: Axis,
@@ -1038,7 +1066,7 @@ def _packed_operands(
     *,
     pad: int,
     cta: CtaTile,
-    seam: tuple = ((), (), ()),
+    seam: tuple = ((), (), (), ()),
     inputs=None,
     k_axis: Axis,
     axes: tuple = (),
@@ -1770,9 +1798,9 @@ class _AtomOps:
 
     @property
     def cone(self) -> tuple:
-        """The A cone's ``(row-invariant prologue, per-cell body, bridged stats)`` — the node
+        """The A cone's ``(row-invariant prologue, per-cell body, bridged stats, per-chunk statistic)`` — the node
         boundary, or the whole operand body when there is no cone to split."""
-        return self.seam if self.seam is not None else ((), self.c.operands[0].lower(axes=self.axes), ())
+        return self.seam if self.seam is not None else ((), self.c.operands[0].lower(axes=self.axes), (), ())
 
     def reduce(self, cells, offset, mn):
         """The contraction K-loop — the ONE driver both atoms flow through, deciding nothing: a
