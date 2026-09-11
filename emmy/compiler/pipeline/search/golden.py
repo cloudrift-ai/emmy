@@ -861,12 +861,14 @@ def _record_cache_key(record: GoldenRecord) -> tuple:
 
 def _whole_op_origins(program, ctx) -> dict[str, tuple[tuple[str, ...], tuple[str, ...]]]:
     """Each kernel ``program`` lowers to, keyed by its Loop IR wire, mapped to the frontend origins
-    it computes whole and its outputs — a PyTorch slice of those origins exposing those outputs
-    computes exactly the kernel. A kernel holding part of an op has no such slice and no entry."""
+    it computes whole and its outputs — a PyTorch slice of those origins exposing those outputs, and
+    reading nothing the kernel does not, computes exactly the kernel. A kernel holding part of an op,
+    or recomputing a value its slice would read, has no such slice and no entry."""
     from emmy.compiler import provenance  # noqa: PLC0415
+    from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
     from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
     from emmy.compiler.loop_wire import loop_graph_to_wire  # noqa: PLC0415
-    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline  # noqa: PLC0415
+    from emmy.compiler.pipeline import LOOP_PASSES, CompilerDump, Pipeline  # noqa: PLC0415
     from emmy.compiler.pipeline.search.slice import single_node_graph  # noqa: PLC0415
 
     source = program.copy()
@@ -882,7 +884,10 @@ def _whole_op_origins(program, ctx) -> dict[str, tuple[tuple[str, ...], tuple[st
         if not origins or not all(coverage[origin][2] for origin in origins):
             continue
         kernel = single_node_graph(fused, node_id)
-        if set(kernel.outputs) <= {buffer for origin in origins for buffer in source.nodes[origin].buffer_names()}:
+        computed = {buffer for origin in origins for buffer in source.nodes[origin].buffer_names()}
+        reads = CompilerDump.frontend_reproducer_from_origins(source, set(origins)).inputs
+        bound = {input_id for input_id, input_node in kernel.nodes.items() if isinstance(input_node.op, InputOp)}
+        if set(kernel.outputs) <= computed and set(reads) <= bound:
             found[json.dumps(loop_graph_to_wire(kernel), sort_keys=True)] = (origins, tuple(kernel.outputs))
     return found
 
