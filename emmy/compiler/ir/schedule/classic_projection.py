@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
-from functools import cached_property
+from functools import cache, cached_property
 
 from frozendict import frozendict
 
@@ -397,16 +397,11 @@ def _contraction_domain(
     )
 
 
-_SCALAR_CATALOG: frozenset[Tile] | None = None
-
-
-def _scalar_plan_in_catalog(plan: Tile) -> bool:
-    """Whether a parsed scalar spelling names a plan the scalar catalog offers — a row can select
-    a catalog value, never manufacture one."""
-    global _SCALAR_CATALOG  # noqa: PLW0603 — the catalog is a constant; built once, read per parse
-    if _SCALAR_CATALOG is None:
-        _SCALAR_CATALOG = frozenset(scalar_tile_moves())
-    return plan in _SCALAR_CATALOG
+@cache
+def _scalar_catalog() -> frozenset[Tile]:
+    """The scalar tile catalog as a set — what a parsed scalar spelling is checked against, so a
+    row can select a catalog value, never manufacture one."""
+    return frozenset(scalar_tile_moves())
 
 
 def _atom_policy_ok(atom: AtomKind, *, allow_f16_accumulate: bool, allow_fp8: bool) -> bool:
@@ -456,7 +451,7 @@ def _contraction_plans(node, facts: ContractionFacts, atoms: tuple[str, ...]) ->
 def _contraction_plan_allowed(node, facts: ContractionFacts, atoms: tuple[str, ...], plan: Tile) -> bool:
     """Whether one parsed contraction plan is a value the catalog would have offered."""
     if not plan.is_warp:
-        return _scalar_plan_in_catalog(plan) if _uniform_extras(node) else plan == Tile()
+        return plan in _scalar_catalog() if _uniform_extras(node) else plan == Tile()
     if plan.atom.name not in atoms or not _warp_plan_ok(node, facts, plan):
         return False
     return warp_tile_in_catalog(plan) or (plan.regs == (26, 4) and plan.bk == 2)
@@ -622,7 +617,7 @@ class ClassicNodeSite(Site[ClassicAssignment]):
             catalog = tuple(dict.fromkeys(plan for plan in scalar_tile_moves() if legal(plan)))
             return tuple(
                 ProjectionSchedule(plan)
-                for plan in self._select_plans(self._named("TILE"), catalog, allowed=lambda p: legal(p) and _scalar_plan_in_catalog(p))
+                for plan in self._select_plans(self._named("TILE"), catalog, allowed=lambda p: legal(p) and p in _scalar_catalog())
             )
         reductions = self._reductions()
         facts = tile.contractions.get(self.id)
