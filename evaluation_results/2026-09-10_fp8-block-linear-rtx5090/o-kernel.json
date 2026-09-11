@@ -1,0 +1,313 @@
+{
+  "inputs": [
+    "input"
+  ],
+  "outputs": [
+    "linear"
+  ],
+  "nodes": {
+    "input": {
+      "op": "InputOp",
+      "op_fields": {},
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "input",
+          "shape": [
+            16,
+            2048
+          ],
+          "dtype": "bf16"
+        }
+      ]
+    },
+    "p_weight_bits": {
+      "op": "ConstantOp",
+      "op_fields": {
+        "name": "p_weight",
+        "value": null,
+        "context_value": null,
+        "load_ops": [],
+        "source_path": "l0.weight",
+        "source_parts": [],
+        "source_shape": [
+          1024,
+          2048
+        ],
+        "source_dtype": "f8e4m3",
+        "source_graph": null
+      },
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "p_weight_bits",
+          "shape": [
+            1024,
+            2048
+          ],
+          "dtype": "f8e4m3"
+        }
+      ]
+    },
+    "p_weight_scale": {
+      "op": "ConstantOp",
+      "op_fields": {
+        "name": "p_weight_scale",
+        "value": null,
+        "context_value": null,
+        "load_ops": [
+          {
+            "__op__": "ReshapeOp",
+            "fields": {
+              "shape": [
+                8,
+                1,
+                16,
+                1
+              ]
+            }
+          }
+        ],
+        "source_path": "l0.weight_scale_inv",
+        "source_parts": [],
+        "source_shape": [
+          8,
+          16
+        ],
+        "source_dtype": "f32",
+        "source_graph": null
+      },
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "p_weight_scale",
+          "shape": [
+            8,
+            1,
+            16,
+            1
+          ],
+          "dtype": "f32"
+        }
+      ]
+    },
+    "input_dynamic_fp8_floor": {
+      "op": "ConstantOp",
+      "op_fields": {
+        "name": "input_dynamic_fp8_floor",
+        "value": 1e-12,
+        "context_value": null,
+        "load_ops": [],
+        "source_path": null,
+        "source_parts": [],
+        "source_shape": null,
+        "source_dtype": null,
+        "source_graph": null
+      },
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "input_dynamic_fp8_floor",
+          "shape": [
+            1
+          ],
+          "dtype": "f32"
+        }
+      ]
+    },
+    "input_dynamic_fp8_finite_max": {
+      "op": "ConstantOp",
+      "op_fields": {
+        "name": "input_dynamic_fp8_finite_max",
+        "value": 448.0,
+        "context_value": null,
+        "load_ops": [],
+        "source_path": null,
+        "source_parts": [],
+        "source_shape": null,
+        "source_dtype": null,
+        "source_graph": null
+      },
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "input_dynamic_fp8_finite_max",
+          "shape": [
+            1
+          ],
+          "dtype": "f32"
+        }
+      ]
+    },
+    "linear__place_4f05f9b0bf_0": {
+      "op": "KernelOp",
+      "op_fields": {
+        "body": [
+          "Tile(axes=(Axis(name='a0', extent=Dim(16), window=None), Axis(name='a2', extent=Dim(2048), window=None)), body=(Loop(axis=Axis(name='a3', extent=Dim(128), window=None), body=(Load(names=('in3',), input='input', index=(Var(name='a0'), BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='/', left=Var(name='a2'), right=Literal(value=128, dtype='int')), right=Literal(value=128, dtype='int')), right=Var(name='a3'))), dtype=DataType(name='bf16', np=dtype('uint16'), nbytes=2)), Assign(name='v1', op=ElementwiseImpl('abs'), args=('in3',), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Accum(name='acc0', value='v1', op=ElementwiseImpl('maximum'), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4), axes=('a3',), base=None)), unroll=False, seed=True), Load(names=('in1',), input='input_dynamic_fp8_finite_max', index=(Literal(value=0, dtype='int'),), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Assign(name='v0', op=ElementwiseImpl('reciprocal'), args=('in1',), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Load(names=('in0',), input='input_dynamic_fp8_floor', index=(Literal(value=0, dtype='int'),), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Assign(name='v2', op=ElementwiseImpl('maximum'), args=('acc0', 'in0'), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Assign(name='v3', op=ElementwiseImpl('multiply'), args=('v0', 'v2'), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Load(names=('in2',), input='input', index=(Var(name='a0'), Var(name='a2')), dtype=DataType(name='bf16', np=dtype('uint16'), nbytes=2)), Assign(name='v4', op=ElementwiseImpl('divide'), args=('in2', 'v3'), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Assign(name='v5', op=ElementwiseImpl('to_f8e4m3'), args=('v4',), dtype=DataType(name='f8e4m3', np=dtype('uint8'), nbytes=1)), Assign(name='v6', op=ElementwiseImpl('from_f8e4m3'), args=('v5',), dtype=DataType(name='bf16', np=dtype('uint16'), nbytes=2)), Assign(name='v8', op=ElementwiseImpl('multiply'), args=('v3', 'v6'), dtype=DataType(name='bf16', np=dtype('uint16'), nbytes=2)), Write(output='linear__place_4f05f9b0bf_0', index=(Var(name='a0'), Var(name='a2')), values=('v8',), value_dtype=DataType(name='bf16', np=dtype('uint16'), nbytes=2), atomic=False, swizzle='NONE')), block_threads=None, aux_threads=0, raster_axes=None, raster_group=None, raster_orient='m')"
+        ],
+        "name": "k_linear_8539b8__place_4f05f9b0bf",
+        "zero_delegated": []
+      },
+      "inputs": [
+        "input_dynamic_fp8_floor",
+        "input_dynamic_fp8_finite_max",
+        "input"
+      ],
+      "outputs": [
+        {
+          "name": "linear__place_4f05f9b0bf_0",
+          "shape": [
+            16,
+            2048
+          ],
+          "dtype": "bf16"
+        }
+      ]
+    },
+    "linear": {
+      "op": "KernelOp",
+      "op_fields": {
+        "body": [
+          "Tile(axes=(Axis(name='a0_b', extent=Dim(1), window=Window(parent=Axis(name='a0', extent=Dim(16), window=None), base=None, bound=None, partition=False)), Axis(name='a1_b', extent=Dim(64), window=Window(parent=Axis(name='a1', extent=Dim(1024), window=None), base=None, bound=None, partition=False)), Axis(name='a0_u', extent=Dim(1), window=None), Axis(name='a1_u', extent=Dim(2), window=None), Axis(name='_lane', extent=Dim(32), window=None)), body=(RegFragment(name='_a0', role='a', shape=(16, 8, 16), dtype=DataType(name='bf16', np=dtype('uint16'), nbytes=2), count=1, nregs=None), RegFragment(name='_b0', role='b', shape=(16, 8, 16), dtype=DataType(name='bf16', np=dtype('uint16'), nbytes=2), count=1, nregs=None), RegFragment(name='_c0_0', role='c', shape=(16, 8, 16), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4), count=1, nregs=None), Smem(name='_bs_smem', extents=(16, 1), dtype='float', align=4), Smem(name='_a_smem', extents=(32, 128), dtype='__nv_bfloat16', align=1024), Smem(name='_b_smem', extents=(32, 144), dtype='__nv_fp8_e4m3', align=16), CpAsyncCopy(smem='_a_smem', smem_index=(Literal(value=0, dtype='int'), Literal(value=0, dtype='int')), src='linear__place_4f05f9b0bf_0', src_index=(BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_b'), right=Literal(value=16, dtype='int')), right=BinaryExpr(op='+', left=BinaryExpr(op='/', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=8, dtype='int')), right=Literal(value=128, dtype='int')), right=Literal(value=0, dtype='int'))), BinaryExpr(op='+', left=Literal(value=0, dtype='int'), right=BinaryExpr(op='%', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=8, dtype='int')), right=Literal(value=128, dtype='int')))), nbytes=16, swizzle='B128@7', lane_index=(BinaryExpr(op='/', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=8, dtype='int')), right=Literal(value=128, dtype='int')), BinaryExpr(op='%', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=8, dtype='int')), right=Literal(value=128, dtype='int'))), lane_rows=4), CpAsyncCopy(smem='_a_smem', smem_index=(Literal(value=4, dtype='int'), Literal(value=0, dtype='int')), src='linear__place_4f05f9b0bf_0', src_index=(BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_b'), right=Literal(value=16, dtype='int')), right=BinaryExpr(op='+', left=BinaryExpr(op='/', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=8, dtype='int')), right=Literal(value=128, dtype='int')), right=Literal(value=4, dtype='int'))), BinaryExpr(op='+', left=Literal(value=0, dtype='int'), right=BinaryExpr(op='%', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=8, dtype='int')), right=Literal(value=128, dtype='int')))), nbytes=16, swizzle='B128@7', lane_index=(BinaryExpr(op='/', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=8, dtype='int')), right=Literal(value=128, dtype='int')), BinaryExpr(op='%', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=8, dtype='int')), right=Literal(value=128, dtype='int'))), lane_rows=4), CpAsyncCopy(smem='_a_smem', smem_index=(Literal(value=8, dtype='int'), Literal(value=0, dtype='int')), src='linear__place_4f05f9b0bf_0', src_index=(BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_b'), right=Literal(value=16, dtype='int')), right=BinaryExpr(op='+', left=BinaryExpr(op='/', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=8, dtype='int')), right=Literal(value=128, dtype='int')), right=Literal(value=8, dtype='int'))), BinaryExpr(op='+', left=Literal(value=0, dtype='int'), right=BinaryExpr(op='%', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=8, dtype='int')), right=Literal(value=128, dtype='int')))), nbytes=16, swizzle='B128@7', lane_index=(BinaryExpr(op='/', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=8, dtype='int')), right=Literal(value=128, dtype='int')), BinaryExpr(op='%', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=8, dtype='int')), right=Literal(value=128, dtype='int'))), lane_rows=4), CpAsyncCopy(smem='_a_smem', smem_index=(Literal(value=12, dtype='int'), Literal(value=0, dtype='int')), src='linear__place_4f05f9b0bf_0', src_index=(BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_b'), right=Literal(value=16, dtype='int')), right=BinaryExpr(op='+', left=BinaryExpr(op='/', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=8, dtype='int')), right=Literal(value=128, dtype='int')), right=Literal(value=12, dtype='int'))), BinaryExpr(op='+', left=Literal(value=0, dtype='int'), right=BinaryExpr(op='%', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=8, dtype='int')), right=Literal(value=128, dtype='int')))), nbytes=16, swizzle='B128@7', lane_index=(BinaryExpr(op='/', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=8, dtype='int')), right=Literal(value=128, dtype='int')), BinaryExpr(op='%', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=8, dtype='int')), right=Literal(value=128, dtype='int'))), lane_rows=4), CpAsyncCopy(smem='_b_smem', smem_index=(Literal(value=0, dtype='int'), Literal(value=0, dtype='int')), src='p_weight_bits', src_index=(BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a1_b'), right=Literal(value=16, dtype='int')), right=BinaryExpr(op='+', left=BinaryExpr(op='/', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=16, dtype='int')), right=Literal(value=128, dtype='int')), right=Literal(value=0, dtype='int'))), BinaryExpr(op='+', left=Literal(value=0, dtype='int'), right=BinaryExpr(op='*', left=BinaryExpr(op='%', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=16, dtype='int')), right=Literal(value=128, dtype='int')), right=Literal(value=1, dtype='int')))), nbytes=16, swizzle='NONE', lane_index=(BinaryExpr(op='/', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=16, dtype='int')), right=Literal(value=128, dtype='int')), BinaryExpr(op='%', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=16, dtype='int')), right=Literal(value=128, dtype='int'))), lane_rows=8), CpAsyncCopy(smem='_b_smem', smem_index=(Literal(value=8, dtype='int'), Literal(value=0, dtype='int')), src='p_weight_bits', src_index=(BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a1_b'), right=Literal(value=16, dtype='int')), right=BinaryExpr(op='+', left=BinaryExpr(op='/', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=16, dtype='int')), right=Literal(value=128, dtype='int')), right=Literal(value=8, dtype='int'))), BinaryExpr(op='+', left=Literal(value=0, dtype='int'), right=BinaryExpr(op='*', left=BinaryExpr(op='%', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=16, dtype='int')), right=Literal(value=128, dtype='int')), right=Literal(value=1, dtype='int')))), nbytes=16, swizzle='NONE', lane_index=(BinaryExpr(op='/', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=16, dtype='int')), right=Literal(value=128, dtype='int')), BinaryExpr(op='%', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=16, dtype='int')), right=Literal(value=128, dtype='int'))), lane_rows=8), CpAsyncCommit(), StridedLoop(axis=Axis(name='_ks', extent=Dim(2048), window=None), start=Literal(value=0, dtype='int'), step=Literal(value=128, dtype='int'), body=(CpAsyncCopy(smem='_a_smem', smem_index=(BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='%', left=BinaryExpr(op='+', left=BinaryExpr(op='/', left=Var(name='_ks'), right=Literal(value=128, dtype='int')), right=Literal(value=1, dtype='int')), right=Literal(value=2, dtype='int')), right=Literal(value=16, dtype='int')), right=Literal(value=0, dtype='int')), Literal(value=0, dtype='int')), src='linear__place_4f05f9b0bf_0', src_index=(BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_b'), right=Literal(value=16, dtype='int')), right=BinaryExpr(op='+', left=BinaryExpr(op='/', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=8, dtype='int')), right=Literal(value=128, dtype='int')), right=Literal(value=0, dtype='int'))), BinaryExpr(op='+', left=TernaryExpr(cond=BinaryExpr(op='<', left=BinaryExpr(op='+', left=Var(name='_ks'), right=Literal(value=128, dtype='int')), right=Literal(value=2048, dtype='int')), if_true=BinaryExpr(op='+', left=Var(name='_ks'), right=Literal(value=128, dtype='int')), if_false=Literal(value=1920, dtype='int')), right=BinaryExpr(op='%', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=8, dtype='int')), right=Literal(value=128, dtype='int')))), nbytes=16, swizzle='B128@7', lane_index=(BinaryExpr(op='/', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=8, dtype='int')), right=Literal(value=128, dtype='int')), BinaryExpr(op='%', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=8, dtype='int')), right=Literal(value=128, dtype='int'))), lane_rows=4), CpAsyncCopy(smem='_a_smem', smem_index=(BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='%', left=BinaryExpr(op='+', left=BinaryExpr(op='/', left=Var(name='_ks'), right=Literal(value=128, dtype='int')), right=Literal(value=1, dtype='int')), right=Literal(value=2, dtype='int')), right=Literal(value=16, dtype='int')), right=Literal(value=4, dtype='int')), Literal(value=0, dtype='int')), src='linear__place_4f05f9b0bf_0', src_index=(BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_b'), right=Literal(value=16, dtype='int')), right=BinaryExpr(op='+', left=BinaryExpr(op='/', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=8, dtype='int')), right=Literal(value=128, dtype='int')), right=Literal(value=4, dtype='int'))), BinaryExpr(op='+', left=TernaryExpr(cond=BinaryExpr(op='<', left=BinaryExpr(op='+', left=Var(name='_ks'), right=Literal(value=128, dtype='int')), right=Literal(value=2048, dtype='int')), if_true=BinaryExpr(op='+', left=Var(name='_ks'), right=Literal(value=128, dtype='int')), if_false=Literal(value=1920, dtype='int')), right=BinaryExpr(op='%', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=8, dtype='int')), right=Literal(value=128, dtype='int')))), nbytes=16, swizzle='B128@7', lane_index=(BinaryExpr(op='/', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=8, dtype='int')), right=Literal(value=128, dtype='int')), BinaryExpr(op='%', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=8, dtype='int')), right=Literal(value=128, dtype='int'))), lane_rows=4), CpAsyncCopy(smem='_a_smem', smem_index=(BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='%', left=BinaryExpr(op='+', left=BinaryExpr(op='/', left=Var(name='_ks'), right=Literal(value=128, dtype='int')), right=Literal(value=1, dtype='int')), right=Literal(value=2, dtype='int')), right=Literal(value=16, dtype='int')), right=Literal(value=8, dtype='int')), Literal(value=0, dtype='int')), src='linear__place_4f05f9b0bf_0', src_index=(BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_b'), right=Literal(value=16, dtype='int')), right=BinaryExpr(op='+', left=BinaryExpr(op='/', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=8, dtype='int')), right=Literal(value=128, dtype='int')), right=Literal(value=8, dtype='int'))), BinaryExpr(op='+', left=TernaryExpr(cond=BinaryExpr(op='<', left=BinaryExpr(op='+', left=Var(name='_ks'), right=Literal(value=128, dtype='int')), right=Literal(value=2048, dtype='int')), if_true=BinaryExpr(op='+', left=Var(name='_ks'), right=Literal(value=128, dtype='int')), if_false=Literal(value=1920, dtype='int')), right=BinaryExpr(op='%', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=8, dtype='int')), right=Literal(value=128, dtype='int')))), nbytes=16, swizzle='B128@7', lane_index=(BinaryExpr(op='/', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=8, dtype='int')), right=Literal(value=128, dtype='int')), BinaryExpr(op='%', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=8, dtype='int')), right=Literal(value=128, dtype='int'))), lane_rows=4), CpAsyncCopy(smem='_a_smem', smem_index=(BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='%', left=BinaryExpr(op='+', left=BinaryExpr(op='/', left=Var(name='_ks'), right=Literal(value=128, dtype='int')), right=Literal(value=1, dtype='int')), right=Literal(value=2, dtype='int')), right=Literal(value=16, dtype='int')), right=Literal(value=12, dtype='int')), Literal(value=0, dtype='int')), src='linear__place_4f05f9b0bf_0', src_index=(BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_b'), right=Literal(value=16, dtype='int')), right=BinaryExpr(op='+', left=BinaryExpr(op='/', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=8, dtype='int')), right=Literal(value=128, dtype='int')), right=Literal(value=12, dtype='int'))), BinaryExpr(op='+', left=TernaryExpr(cond=BinaryExpr(op='<', left=BinaryExpr(op='+', left=Var(name='_ks'), right=Literal(value=128, dtype='int')), right=Literal(value=2048, dtype='int')), if_true=BinaryExpr(op='+', left=Var(name='_ks'), right=Literal(value=128, dtype='int')), if_false=Literal(value=1920, dtype='int')), right=BinaryExpr(op='%', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=8, dtype='int')), right=Literal(value=128, dtype='int')))), nbytes=16, swizzle='B128@7', lane_index=(BinaryExpr(op='/', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=8, dtype='int')), right=Literal(value=128, dtype='int')), BinaryExpr(op='%', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=8, dtype='int')), right=Literal(value=128, dtype='int'))), lane_rows=4), CpAsyncCopy(smem='_b_smem', smem_index=(BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='%', left=BinaryExpr(op='+', left=BinaryExpr(op='/', left=Var(name='_ks'), right=Literal(value=128, dtype='int')), right=Literal(value=1, dtype='int')), right=Literal(value=2, dtype='int')), right=Literal(value=16, dtype='int')), right=Literal(value=0, dtype='int')), Literal(value=0, dtype='int')), src='p_weight_bits', src_index=(BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a1_b'), right=Literal(value=16, dtype='int')), right=BinaryExpr(op='+', left=BinaryExpr(op='/', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=16, dtype='int')), right=Literal(value=128, dtype='int')), right=Literal(value=0, dtype='int'))), BinaryExpr(op='+', left=TernaryExpr(cond=BinaryExpr(op='<', left=BinaryExpr(op='+', left=Var(name='_ks'), right=Literal(value=128, dtype='int')), right=Literal(value=2048, dtype='int')), if_true=BinaryExpr(op='+', left=Var(name='_ks'), right=Literal(value=128, dtype='int')), if_false=Literal(value=1920, dtype='int')), right=BinaryExpr(op='*', left=BinaryExpr(op='%', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=16, dtype='int')), right=Literal(value=128, dtype='int')), right=Literal(value=1, dtype='int')))), nbytes=16, swizzle='NONE', lane_index=(BinaryExpr(op='/', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=16, dtype='int')), right=Literal(value=128, dtype='int')), BinaryExpr(op='%', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=16, dtype='int')), right=Literal(value=128, dtype='int'))), lane_rows=8), CpAsyncCopy(smem='_b_smem', smem_index=(BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='%', left=BinaryExpr(op='+', left=BinaryExpr(op='/', left=Var(name='_ks'), right=Literal(value=128, dtype='int')), right=Literal(value=1, dtype='int')), right=Literal(value=2, dtype='int')), right=Literal(value=16, dtype='int')), right=Literal(value=8, dtype='int')), Literal(value=0, dtype='int')), src='p_weight_bits', src_index=(BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a1_b'), right=Literal(value=16, dtype='int')), right=BinaryExpr(op='+', left=BinaryExpr(op='/', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=16, dtype='int')), right=Literal(value=128, dtype='int')), right=Literal(value=8, dtype='int'))), BinaryExpr(op='+', left=TernaryExpr(cond=BinaryExpr(op='<', left=BinaryExpr(op='+', left=Var(name='_ks'), right=Literal(value=128, dtype='int')), right=Literal(value=2048, dtype='int')), if_true=BinaryExpr(op='+', left=Var(name='_ks'), right=Literal(value=128, dtype='int')), if_false=Literal(value=1920, dtype='int')), right=BinaryExpr(op='*', left=BinaryExpr(op='%', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=16, dtype='int')), right=Literal(value=128, dtype='int')), right=Literal(value=1, dtype='int')))), nbytes=16, swizzle='NONE', lane_index=(BinaryExpr(op='/', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=16, dtype='int')), right=Literal(value=128, dtype='int')), BinaryExpr(op='%', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), right=Literal(value=16, dtype='int')), right=Literal(value=128, dtype='int'))), lane_rows=8), StridedLoop(axis=Axis(name='_fbs', extent=Dim(16), window=None), start=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=2, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), step=Literal(value=64, dtype='int'), body=(Load(names=('in5__c0',), input='p_weight_scale', index=(BinaryExpr(op='/', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a1_b'), right=Literal(value=16, dtype='int')), right=BinaryExpr(op='/', left=BinaryExpr(op='*', left=Var(name='_fbs'), right=Literal(value=1, dtype='int')), right=Literal(value=1, dtype='int'))), right=Literal(value=128, dtype='int')), Literal(value=0, dtype='int'), BinaryExpr(op='/', left=BinaryExpr(op='+', left=Var(name='_ks'), right=BinaryExpr(op='*', left=BinaryExpr(op='%', left=BinaryExpr(op='*', left=Var(name='_fbs'), right=Literal(value=1, dtype='int')), right=Literal(value=1, dtype='int')), right=Literal(value=128, dtype='int'))), right=Literal(value=128, dtype='int')), Literal(value=0, dtype='int')), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Write(output='_bs_smem', index=(BinaryExpr(op='/', left=BinaryExpr(op='*', left=Var(name='_fbs'), right=Literal(value=1, dtype='int')), right=Literal(value=1, dtype='int')), BinaryExpr(op='%', left=BinaryExpr(op='*', left=Var(name='_fbs'), right=Literal(value=1, dtype='int')), right=Literal(value=1, dtype='int'))), values=('in5__c0',), value_dtype=DataType(name='f32', np=dtype('float32'), nbytes=4), atomic=False, swizzle='NONE')), unroll=False, end=None, seed=True), CpAsyncCommit(), CpAsyncWait(group=1), Sync(barrier_id=0, count=None, warp=False), StridedLoop(axis=Axis(name='_ki', extent=Dim(128), window=None), start=Literal(value=0, dtype='int'), step=Literal(value=16, dtype='int'), body=(LdmatrixLoad(frag='_a0', src_buffer='_a_smem', src_index=(BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='%', left=BinaryExpr(op='/', left=Var(name='_ks'), right=Literal(value=128, dtype='int')), right=Literal(value=2, dtype='int')), right=Literal(value=16, dtype='int')), right=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=16, dtype='int')), right=Literal(value=0, dtype='int'))), Var(name='_ki')), role='a', ldm=128, swizzle='B128@7', staged=True, gmem_guard=None, k_zero=None, b_trans=False, pair_frag=None, byte_slab=False, scale_buffer=None, scale_index=(), scale_ldm=0, fragment_layout='m16n8k16', fragment_index=0), LdmatrixLoad(frag='_b0', src_buffer='_b_smem', src_index=(BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='%', left=BinaryExpr(op='/', left=Var(name='_ks'), right=Literal(value=128, dtype='int')), right=Literal(value=2, dtype='int')), right=Literal(value=16, dtype='int')), right=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a1_u'), right=Literal(value=8, dtype='int')), right=Literal(value=0, dtype='int'))), Var(name='_ki')), role='b', ldm=144, swizzle='NONE', staged=True, gmem_guard=None, k_zero=None, b_trans=True, pair_frag=None, byte_slab=True, scale_buffer='_bs_smem', scale_index=(BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a1_u'), right=Literal(value=8, dtype='int')), right=Literal(value=0, dtype='int')), BinaryExpr(op='/', left=Var(name='_ki'), right=Literal(value=128, dtype='int'))), scale_ldm=1, fragment_layout='m16n8k16', fragment_index=0), MmaSyncPtx(c_frag='_c0_0', a_frag='_a0', b_frag='_b0', shape=(16, 8, 16), ab_dtype='bf16', c_dtype='f32', b_row_major=False, sfa_frag=None, sfb_frag=None)), unroll=True, end=None, seed=True), Sync(barrier_id=0, count=None, warp=False)), unroll=False, end=None, seed=True), RegStore(dst_buffer='linear', dst_index=(BinaryExpr(op='+', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_b'), right=Literal(value=16, dtype='int')), right=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=16, dtype='int'))), right=Literal(value=0, dtype='int')), BinaryExpr(op='+', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a1_b'), right=Literal(value=16, dtype='int')), right=BinaryExpr(op='*', left=Var(name='a1_u'), right=Literal(value=8, dtype='int'))), right=Literal(value=0, dtype='int'))), frag='_c0_0', shape=(16, 8, 16), ldm=0, epilogue=None, m_guard=None, n_guard=None, atomic=False, fragment_layout='m16n8k16', volta_interleaved=False, fragment_index=(0, 0), swizzle='NONE', row_dim=0, col_dim=1)), block_threads=64, aux_threads=0, raster_axes=('a0_b', 'a1_b'), raster_group=None, raster_orient='m')"
+        ],
+        "name": "k_linear_8539b8",
+        "zero_delegated": []
+      },
+      "inputs": [
+        "linear__place_4f05f9b0bf_0",
+        "p_weight_bits",
+        "p_weight_scale"
+      ],
+      "outputs": [
+        {
+          "name": "linear",
+          "shape": [
+            16,
+            1024
+          ],
+          "dtype": "bf16"
+        }
+      ],
+      "hints": {
+        "prov": {
+          "linear": {
+            "kind": "LinearOp",
+            "pieces": [
+              "linear",
+              "linear_a_unsq",
+              "linear_a_unsq_bc",
+              "linear_b_unsq",
+              "linear_b_unsq_bc",
+              "linear_ew",
+              "linear_reduce",
+              "linear_wt"
+            ]
+          },
+          "input_dynamic_fp8_blk": {
+            "kind": "ReshapeOp",
+            "pieces": [
+              "input_dynamic_fp8_blk"
+            ]
+          },
+          "input_dynamic_fp8_scale": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_dynamic_fp8_scale"
+            ]
+          },
+          "input_dynamic_fp8_abs": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_dynamic_fp8_abs"
+            ]
+          },
+          "input_dynamic_fp8_amax": {
+            "kind": "ReduceOp",
+            "pieces": [
+              "input_dynamic_fp8_amax"
+            ]
+          },
+          "input_dynamic_fp8_scale_bc": {
+            "kind": "IndexMapOp",
+            "pieces": [
+              "input_dynamic_fp8_scale_bc"
+            ]
+          },
+          "input_dynamic_fp8_bits": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_dynamic_fp8_bits"
+            ]
+          },
+          "input_dynamic_fp8_decoded": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_dynamic_fp8_decoded"
+            ]
+          },
+          "input_dynamic_fp8_stable_amax": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_dynamic_fp8_stable_amax"
+            ]
+          },
+          "input_dynamic_fp8_normalized": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_dynamic_fp8_normalized"
+            ]
+          },
+          "input_dynamic_fp8_value": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_dynamic_fp8_value"
+            ]
+          },
+          "input_dynamic_fp8_finite_max_bc": {
+            "kind": "IndexMapOp",
+            "pieces": [
+              "input_dynamic_fp8_finite_max_bc"
+            ]
+          },
+          "input_dynamic_fp8_floor_bc": {
+            "kind": "IndexMapOp",
+            "pieces": [
+              "input_dynamic_fp8_floor_bc"
+            ]
+          },
+          "p_weight_blk": {
+            "kind": "ReshapeOp",
+            "pieces": [
+              "p_weight_blk"
+            ]
+          },
+          "p_weight_dq": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "p_weight_dq"
+            ]
+          },
+          "p_weight": {
+            "kind": "ReshapeOp",
+            "pieces": [
+              "p_weight"
+            ]
+          },
+          "p_weight_sblk": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "p_weight_sblk"
+            ]
+          },
+          "p_weight_scale_bc": {
+            "kind": "IndexMapOp",
+            "pieces": [
+              "p_weight_scale_bc"
+            ]
+          }
+        },
+        "trace.materialize": true
+      }
+    }
+  }
+}

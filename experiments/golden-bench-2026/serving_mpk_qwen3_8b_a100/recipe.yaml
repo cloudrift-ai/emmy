@@ -7,6 +7,10 @@
 #   mpk_mega  — the same harness compiled to a megakernel: demo/qwen3/demo.py --use-mirage
 #   stock     — vLLM serve (pip vllm==0.23.0) driven by `vllm bench serve`, 128 in / 512 out, c=1
 #
+# An `emmy` arm belongs beside `stock` — same vLLM, same client, only the model class differing —
+# and is NOT here yet: the generative plugin cannot boot Qwen3-8B on sm_80 (issue #785 — two
+# multi-channel projection refusals remain after this branch's staged-transport fix).
+#
 # Repro on a pre-allocated A100 (no cloud provisioning):
 #   emmy bench experiments/golden-bench-2026/serving_mpk_qwen3_8b_a100 --local
 command:
@@ -17,10 +21,14 @@ command:
     - Makefile
   run: |
     set -e
-    export PATH=/usr/local/cuda/bin:$$PATH
+    # The venv's bin joins PATH because vLLM's engine subprocess invokes `ninja` BY NAME:
+    # installing it into the venv is not enough, and the failure is a boot abort at KV-cache init.
+    export PATH=$repo_dir/venv/bin:/usr/local/cuda/bin:$$PATH
     cd $repo_dir
     [ -d venv ] || make setup
-    ./venv/bin/pip install -q vllm==0.23.0
+    # ninja is not a vllm dependency but its compile path shells out to it, and without it the
+    # engine dies at KV-cache init with FileNotFoundError: 'ninja'.
+    ./venv/bin/pip install -q vllm==0.23.0 ninja
 
     MODEL=Qwen/Qwen3-8B
     REV=b968826d9c46dd6066d109eabc6255188de91218
@@ -73,11 +81,13 @@ command:
       bench stock_r$$repeat.txt
       stop
     done
+
     stop
     trap - EXIT
 
     ./venv/bin/pip freeze --all > $task_dir/requirements.freeze.txt
     $task_dir/venv-mpk/bin/pip freeze --all > $task_dir/mpk.freeze.txt
+    nvidia-smi --query-gpu=name,memory.total --format=csv,noheader > $task_dir/gpu.txt
     ls ~/.cache/huggingface/hub > $task_dir/hf_snapshots.txt 2>/dev/null || true
     echo MPK_LANE_DONE
   result_files:
@@ -86,5 +96,10 @@ command:
   timeout: 86400
 
 matrices:
+  # The archived MPK/stock rows were measured on the 80GB SXM4 part. The 40GB part is the same
+  # architecture at 1555 GB/s instead of 2039, so a row measured on it is internally consistent and
+  # is NOT comparable to the 80GB archive: select one with --filter deploy.gpu=<name>.
   - deploy.gpu: "NVIDIA A100 80GB"
+    deploy.gpu_count: 1
+  - deploy.gpu: "NVIDIA A100 40GB"
     deploy.gpu_count: 1

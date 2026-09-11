@@ -346,9 +346,10 @@ def add_quantize_arg(parser) -> None:
             "Writes a real checkpoint (into --dump-dir when given, else a temp dir whose path is logged) "
             "and runs the ordinary spellers over it, so the program is the one that checkpoint would give. "
             "'nvfp4' declares static 4-bit activations (W4A4, the native block-scaled path); "
-            "'nvfp4-w4a16' declares weights only, leaving activations 16-bit. The weight side is derived "
-            "from each tensor; the activation scale is calibrated over the trace's ONE example input — "
-            "a real calibration, and a poor one."
+            "'nvfp4-w4a16' declares weights only, leaving activations 16-bit; 'fp8-block' is the official FP8 "
+            "form (e4m3 weights, one scale per 128x128 block, per-token dynamic e4m3 activations). The weight "
+            "side is derived from each tensor; the NVFP4 activation scale is calibrated over the trace's ONE "
+            "example input — a real calibration, and a poor one."
         ),
     )
 
@@ -599,7 +600,7 @@ def _quantize_traced(graph: Graph, bundle, args) -> str:
         logger.error("--quantize: %s", e)
         sys.exit(2)
     logger.info("%s checkpoint at %s\n%s", args.quantize, ckpt, summarize(ckpt))
-    logger.info("spelled %d quantized weight(s); %d linear(s) marked for 4-bit activations", spelled, marked)
+    logger.info("spelled %d quantized weight(s); %d linear(s) marked for quantized activations", spelled, marked)
     # The isolated bench worker re-traces from ``--code`` and binds the packed constants through a
     # checkpoint path; this is the one it needs (``load_or_trace`` prefers ``code``, so naming the
     # directory here does not redirect the trace).

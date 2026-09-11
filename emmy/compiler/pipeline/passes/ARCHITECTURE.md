@@ -251,8 +251,9 @@ scalar contraction tier evaluates every channel serially and keeps direct edges.
 computed-B decode cone) rides the same mandatory multi-channel fill — the fill evaluates every non-materialized B
 channel into its slab, nested reduce included — while a nested A, or a nested B on a single-channel node, keeps the
 refusal: no transport realizes a nested scheduling site without a fill mandated to evaluate it. ONE computed operand
-has byte-transport siblings beside the fill: a packed-pair (NVFP4) weight cone, whose packed 4-bit values copy
-verbatim as a raw byte slab while only its block scales are compute-filled, so `resolve_warp_stage` answers for it
+has byte-transport siblings beside the fill: a byte-slab weight cone — packed 4-bit pairs, or fp8 bytes under a
+K-block scale — whose bytes copy verbatim as a raw byte slab while only its block scales are compute-filled, so
+`resolve_warp_stage` answers for it
 and the cp.async and TMA rows sit beside the fill's depths as fork siblings. Which reading applies is a fact about
 the NODE, not about the transport a pin names — a multi-channel product carrying a cp.async or TMA pin still RAISES,
 since the single-sided byte-transport emitters carry one channel — and a shape the byte slab declines keeps the

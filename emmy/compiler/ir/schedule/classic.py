@@ -233,7 +233,14 @@ def _needs_fill(tile_op, node: Fold, plan: Tile) -> bool:
         # The chunk tier's A is the WEIGHT, which never leaves registers: it is what the chunk's
         # own score fragments repack into. There is no operand to fill and no slab to fill it from.
         return False
-    return plan.is_warp and (_computed_edge(node) or (len(node.operands) - 1) > 1 or staging.converting_a(node, plan.atom, tile_op.inputs))
+    # CHANNELS, not operand slots. The staged transports fill one slab per fold, so a fold count
+    # above one belongs on the smem compute fill — and a B slab reused by several channels occupies
+    # ONE operand slot, so counting operands reads a two-channel node as single-fold, offers it
+    # cp.async, and the materializer then asserts on the channel count it actually emits (Qwen3-8B
+    # decode on sm_80, channels=2 operands=2). The channel count subsumes the operand one.
+    return plan.is_warp and (
+        _computed_edge(node) or len(node.bilinear_channels()) > 1 or staging.converting_a(node, plan.atom, tile_op.inputs)
+    )
 
 
 def _kstep_refusal(k_axis, plan: Tile) -> str | None:

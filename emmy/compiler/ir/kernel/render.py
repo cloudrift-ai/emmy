@@ -22,6 +22,7 @@ from emmy.compiler.ir.kernel.ir import (
     Smem,
     TmaDescriptor,
     WgmmaMma,
+    frag_dtype,
     pack_smem,
     swizzle_fn,
     swizzle_xor,
@@ -1087,6 +1088,37 @@ def _f4_lut_bits(dtype: str) -> list[int]:
     return [int(b) for b in np.array(F4_VALUES, dtype=np.float16).view(np.uint16)]
 
 
+# The staged BLOCK-SCALED fp8 B drain — the one-value-byte form of the packed drain above, appended
+# only for the fragment dtypes a kernel's fp8 scale-bearing byte-slab ``LdmatrixLoad``s use. A
+# lane's (k, k+1) byte pair converts to two exact 16-bit values with one hardware cvt, as the plain
+# W8A16 drain does, and both multiply the k block's f32 scale before ONE round to the fragment —
+# the fill's own ``bf16(scale * decode)``, so the staged form is bit-identical to it. The block
+# holds whole atom steps (the staged offer requires it), so a lane's K positions never leave the
+# block and every lane reads the scale at its row alone.
+_F8S_LOADER = """\
+template <typename T, typename T2>
+static __device__ __forceinline__ void emmy_mma_load_b_smem_trans_f8s_{sfx}(
+    unsigned* r, const T* g, int ldm, const float* s, int sldm) {{
+    int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
+    float sc = s[grp * sldm];
+    #pragma unroll
+    for (int i = 0; i < 2; ++i) {{
+        int k = (tig << 1) + (i ? 8 : 0);            // K: 2*threadID_in_group, +8 for the k16 half
+        float2 f = __half22float2(__half2(*reinterpret_cast<const T2*>(g + grp * ldm + k)));
+        {T2} v = {PACK}(f.x * sc, f.y * sc);
+        r[i] = *reinterpret_cast<unsigned*>(&v);
+    }}
+}}
+
+"""
+
+#: Per-fragment-dtype spellings of the fp8 scaled drain: the two-value vector and its rounding pack.
+_F8S_SPELLINGS: dict[str, dict[str, str]] = {
+    "f16": {"T2": "__half2", "PACK": "__floats2half2_rn"},
+    "bf16": {"T2": "__nv_bfloat162", "PACK": "__floats2bfloat162_rn"},
+}
+
+
 def _f4_staged_prelude(dtypes: tuple[str, ...]) -> str:
     """The packed drain(s) this kernel needs — one per fragment dtype, in the order given."""
     out = []
@@ -1386,9 +1418,14 @@ def render_kernelop(
         mma_sync_prelude += _F8_STAGED_PRELUDE
     # A packed drain's fragment dtype IS its scale slab's — the fill writes that slab at the atom's
     # own operand width — and the body render above already recorded every slab's dtype on ``ctx``.
-    packed = tuple(dict.fromkeys(ctx.buffer_dtypes.get(s.scale_buffer, "f16") for s in byte_drains if s.scale_buffer is not None))
+    # An fp8 bits slab's scale slab is f32 instead, so its drain names the fragment's own dtype.
+    scaled = [s for s in byte_drains if s.scale_buffer is not None]
+    f8 = [s for s in scaled if ctx.buffer_dtypes.get(s.src_buffer) in ("f8e4m3", "f8e5m2")]
+    packed = tuple(dict.fromkeys(ctx.buffer_dtypes.get(s.scale_buffer, "f16") for s in scaled if s not in f8))
     if packed:
         mma_sync_prelude += _f4_staged_prelude(packed)
+    for dt in dict.fromkeys(frag_dtype(ctx, s.frag) or "f16" for s in f8):
+        mma_sync_prelude += _F8S_LOADER.format(sfx=dt, **_F8S_SPELLINGS[dt])
     uses_cp_async = any(isinstance(s, (CpAsyncCopy, CpAsyncCommit, CpAsyncWait)) for s in kernel_op.body.iter())
     cp_async_prelude = _CP_ASYNC_PRELUDE if uses_cp_async else ""
     bitcast_prelude = _BITCAST_PRELUDE if any(isinstance(s, Assign) and s.op.name == "bitcast" for s in kernel_op.body.iter()) else ""

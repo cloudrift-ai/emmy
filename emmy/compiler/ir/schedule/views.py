@@ -101,8 +101,29 @@ __all__ = [
 # which the term does not know — it knows the axis it reduces over and nothing more. It sat in
 # ``ir/pure/fold`` only because the schedule layer needed it and ``ir/tile/ops`` could not be
 # imported from here; the schedule layer is where it belonged all along.
-def cone_seam(cone, k_name: str, axes: tuple = ()) -> tuple[tuple, tuple, tuple[str, ...]]:
-    """The computed-A cone's ``(prologue, cell, stats)`` — read off the NODE BOUNDARY, not by
+def _chunk_block(edge: Fold, k_name: str, axes: tuple) -> int | None:
+    """The K block a REDUCE edge is constant over — every ``k_name`` it reads sits under one
+    block guard (:func:`~emmy.compiler.ir.schedule.packing.k_block_guard`) — or ``None``: a
+    statistic over a K group, which one staged chunk inside that group evaluates once per row."""
+    from emmy.compiler.ir.schedule.packing import k_block_guard  # noqa: PLC0415
+
+    if edge.axis is None:
+        return None
+    blocks: set[int] = set()
+    for stmt in Body(tuple(edge.lower(axes=axes))).iter():
+        exprs = tuple(stmt.exprs())
+        if k_name in stmt.deps() and not any(k_name in expr.free_vars() for expr in exprs):
+            return None  # K read as a value, not as a coordinate
+        for expr in exprs:
+            naked, guards = k_block_guard(expr, k_name)
+            if naked:
+                return None
+            blocks |= guards
+    return next(iter(blocks)) if len(blocks) == 1 else None
+
+
+def cone_seam(cone, k_name: str, axes: tuple = ()) -> tuple[tuple, tuple, tuple[str, ...], tuple]:
+    """The computed-A cone's ``(prologue, cell, stats, chunk)`` — read off the NODE BOUNDARY, not by
     scanning stmts: the cone is a zero-axis term over ``<the per-cell normalize>`` with ``<the row-invariant
     prologue>, <any per-cell producer>…))``, and the prologue node IS the per-row statistic (its
     own zero-axis ``Fold`` over the stat ``Fold``) plus any row-invariant cone prefix, placed there
@@ -122,17 +143,37 @@ def cone_seam(cone, k_name: str, axes: tuple = ()) -> tuple[tuple, tuple, tuple[
 
     Two cell edges may lower one traced fold twice — attention's output and its own row sum, read
     through the normalize and through a derived edge — and the cell keeps the first lowering only
-    (:func:`dedup_recomputes`): the per-cell fill would otherwise declare that fold's states twice."""
+    (:func:`dedup_recomputes`): the per-cell fill would otherwise declare that fold's states twice.
+
+    ``chunk`` is the same bridge one level down, ``(prologue, stats, block)`` or ``()``: a reduce
+    edge that varies with K only through one block guard — a per-row statistic over each K group,
+    the shape a grouped activation scale spells — is constant inside every staged chunk the group
+    holds, so the fill evaluates it once per row per chunk instead of once per cell. Which chunks a
+    group holds is the stage's choice, so the resolver refuses a chunk that does not tile the
+    block."""
     if not isinstance(cone, Fold) or cone.axis is not None or not cone.operands:
-        return (), tuple(cone.lift.body) if isinstance(cone, Fold) and cone.axis is None else (), ()
+        return (), tuple(cone.lift.body) if isinstance(cone, Fold) and cone.axis is None else (), (), ()
     # Split by DECLARATION: an edge whose index space holds the reduction axis varies with it and
     # rides the cell; the rest are row-invariant and lower once into the prologue. Same reading as
     # ``Fold.lower``'s hoist, asked of the same property.
     varying = [k_name in edge.free_axes for edge in cone.operands]
+    blocks = [_chunk_block(edge, k_name, axes) if varies else None for edge, varies in zip(cone.operands, varying, strict=True)]
+    block = next((b for b in blocks if b is not None), None)
+    chunked = [b is not None and b == block for b in blocks]
     pro = tuple(s for e, k in zip(cone.operands, varying, strict=True) if not k for s in e.lower(axes=axes))
+    chunk_pro = tuple(s for e, c in zip(cone.operands, chunked, strict=True) if c for s in e.lower(axes=axes))
     cell = dedup_recomputes(
-        [stmt for edge, varies in zip(cone.operands, varying, strict=True) if varies for stmt in edge.lower(axes=axes)] + list(cone.step())
+        [
+            stmt
+            for edge, varies, c in zip(cone.operands, varying, chunked, strict=True)
+            if varies and not c
+            for stmt in edge.lower(axes=axes)
+        ]
+        + list(cone.step())
     )
+    chunk_results = {nm for edge, c in zip(cone.operands, chunked, strict=True) if c for nm in edge.exposes}
+    chunk_stats = tuple(sorted(chunk_results & Body(cell).ssa_uses))
+    chunk = (chunk_pro, chunk_stats, block) if chunk_stats else ()
     pro_results = {nm for edge, varies in zip(cone.operands, varying, strict=True) if not varies for nm in edge.exposes}
-    stats = tuple(sorted(pro_results & Body(cell).ssa_uses))
-    return (pro, cell, stats) if stats else ((), cell, ())
+    stats = tuple(sorted(pro_results & (Body(cell).ssa_uses | Body(chunk_pro).ssa_uses)))
+    return (pro, cell, stats, chunk) if stats else ((), cell, (), chunk)
