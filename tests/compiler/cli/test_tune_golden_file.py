@@ -773,6 +773,31 @@ def test_record_greedy_pick_appends_routing_rows_and_receipts_once(tmp_path, mon
         record_greedy_pick(path, "mm", decisions=decisions, kernels=kernels, reference_backend="same-input-greedy")
 
 
+def test_record_greedy_pick_does_not_alias_rows_between_input_regimes(tmp_path):
+    """Rows with the same route and schedule remain distinct when their pins differ."""
+    from emmy.compiler.pipeline.search.working_golden import record_greedy_pick
+
+    path = tmp_path / "working.yaml"
+    dump_golden_file(
+        _document(
+            _matmul("mm.strict", pins={"FAST_MATH": False}),
+            _matmul("mm.fast", pins={"FAST_MATH": True}),
+        ),
+        path,
+    )
+    identity = "1" * 64
+    decisions = [(identity, {"PLACE@map.1/map": "cut"}, 30.0, 33.0)]
+    strict_names = record_greedy_pick(path, "mm.strict", decisions=decisions, kernels=[], reference_backend="same-input-greedy")
+    fast_names = record_greedy_pick(path, "mm.fast", decisions=decisions, kernels=[], reference_backend="same-input-greedy")
+
+    realizations = load_golden_file(path)["configs"][0]["realizations"]
+    assert strict_names != fast_names
+    assert next(row for row in realizations if row["name"] == "mm.strict")["kernel_set"] == strict_names
+    assert next(row for row in realizations if row["name"] == "mm.fast")["kernel_set"] == fast_names
+    assert next(row for row in realizations if row["name"] == strict_names[0])["pins"] == {"FAST_MATH": False}
+    assert next(row for row in realizations if row["name"] == fast_names[0])["pins"] == {"FAST_MATH": True}
+
+
 def test_a_recorder_keeps_the_rows_another_writer_added_after_it_read(tmp_path):
     """Two runs recording into one file — the host loop's parallel devices — each load it, add
     their rows and write the whole document back. Every write reloads the file under an exclusive

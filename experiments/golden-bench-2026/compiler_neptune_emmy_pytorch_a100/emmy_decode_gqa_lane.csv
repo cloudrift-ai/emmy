@@ -1,0 +1,9 @@
+setup,replay_kernel_sum_us,replay_whole_us,eager_us,tcompile_us,emmy_reference_us,reps
+decode_gqa-b1-s256,9.7,11.4,74.8,17.2,187.1,2
+decode_gqa-b1-s512,11.1,12.5,110.0,27.5,350.7,2
+decode_gqa-b1-s1024,13.1,14.7,206.3,28.6,686.1,2
+decode_gqa-b1-s2048,14.7,16.3,392.2,41.8,1398.3,2
+decode_gqa-b1-s4096,22.3,24.3,915.5,94.7,681.5,2
+decode_gqa-b1-s8192,45.0,46.7,1509.4,131.1,78356.0,2
+decode_gqa-b1-s16384,78.7,80.7,3511.8,312.8,1997.8,2
+decode_gqa-b1-s32768,137.0,141.6,6739.5,564.7,1611603.5,2

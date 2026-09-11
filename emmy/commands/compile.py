@@ -201,7 +201,14 @@ def resolve_golden_arg(args) -> None:
     if getattr(args, "dynamic", None):
         logger.error("--dynamic is incompatible with --golden (a dynamic golden's spec is part of its config)")
         sys.exit(2)
-    from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS, goldens_for_live_gpu, load_golden_file, load_golden_records
+    from emmy.compiler.pipeline.search.golden import (
+        GOLDEN_RECORDS,
+        GoldenEntryState,
+        golden_set_state,
+        goldens_for_live_gpu,
+        load_golden_file,
+        load_golden_records,
+    )
 
     # Canonical replay scopes to the live card as before. An explicit working file is
     # intentionally literal: no repository union and no live-card filtering, because its
@@ -235,7 +242,9 @@ def resolve_golden_arg(args) -> None:
     if len(distinct) > 1:
         logger.error("golden %r is ambiguous — matches %d shapes: %s\nNarrow it to one.", name, len(distinct), ", ".join(distinct))
         sys.exit(2)
-    args.realization = distinct[0]  # the exact name from here on — what ``--record-greedy`` writes under
+    # ``--realization`` accepts an unambiguous substring; working-golden mutation is exact-name
+    # only, so it cannot update a similarly named sibling.
+    args.realization = distinct[0]  # the exact name from here on — what ``--record`` / ``--record-greedy`` write under
     targets: list[tuple[dict, tuple[str, ...], dict | None]] = []
     for match in matches:
         if not any(
@@ -249,7 +258,12 @@ def resolve_golden_arg(args) -> None:
     args._golden_records = [record for record in records if record.target_key == matches[0].target_key]
     pinned = matches
     if document is not None:
-        verified = [record for record in matches if record.measurements is not None]
+        states = {
+            realization["name"]: golden_set_state(realization, config["realizations"])
+            for config in document["configs"]
+            for realization in config["realizations"]
+        }
+        verified = [record for record in matches if states.get(record.name) is GoldenEntryState.VERIFIED]
         winners = [record for record in matches if record.ranking is not None and record.ranking.get("tune_winner") is True]
         valid_winner = (
             len(winners) == 1
@@ -263,7 +277,26 @@ def resolve_golden_arg(args) -> None:
             sys.exit(2)
         if not getattr(args, "_explicit_realization", True):
             pinned = verified or winners
-    args.golden_configs = [golden_row(match) for match in pinned]
+    # A receipt of a kernel a routing decision minted (its identity is no routing row's) replays under
+    # that decision: its piece keys compose with nothing on the unsplit program. The route is the
+    # target's routing rows, when they agree; conflicting arms leave the receipt to replay bare.
+    routing = [record for record in args._golden_records if record.is_routing]
+    route: dict[str, str] | None = {}
+    for record in routing:
+        for key, value in record.knobs.items():
+            if route is not None and route.setdefault(str(key), str(value)) != str(value):
+                route = None
+    minted = {record.identity for record in routing}
+    if route is not None and not any(str(key).split("@", 1)[0] == "PLACE" for key in route):
+        route["PLACE"] = "fuse"  # no placement row means the set ran fused; a cut taken would have been recorded
+
+    def row(match):
+        sample = golden_row(match, records)
+        if route and match.identity is not None and (match.is_routing or match.identity not in minted):
+            sample.route = {key: value for key, value in route.items() if key not in match.knobs}
+        return sample
+
+    args.golden_configs = [row(match) for match in pinned]
     logger.info(
         "[golden] %s%s → embedded %s target %s (%d matching row%s, %d automatic pin%s)",
         name,
@@ -277,20 +310,31 @@ def resolve_golden_arg(args) -> None:
     )
 
 
-def golden_row(record):
+def golden_row(record, records=()):
     """A golden record as the duck-typed pinned row ``run`` benches and reports: the
     :class:`~emmy.compiler.pipeline.search.data.Sample` view (``name`` / ``pins`` / ``knobs`` /
     ``shape`` / ``dynamic``) plus the ``record`` itself — the row ``run`` measures under a hand pin and records as
-    deploy evidence."""
+    deploy evidence.
+
+    A record listing a ``kernel_set`` usually carries no row of its own, so its pin comes from the
+    routing rows it lists (:func:`~emmy.compiler.pipeline.search.golden.kernel_set_pins`, resolved
+    against ``records``). Those arms ride the row's ``pins`` beside the input regime, and the bench
+    publishes both: the compile then reaches the kernel set the recording measured, rather than
+    whatever the unpinned fork picks under the realization's name."""
     from types import SimpleNamespace  # noqa: PLC0415
 
     from emmy.compiler.pipeline.search.data import Sample  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import kernel_set_pins  # noqa: PLC0415
 
-    return SimpleNamespace(**vars(Sample.from_golden(record)), record=record)
+    sample = vars(Sample.from_golden(record))
+    arms = kernel_set_pins(record, records)
+    if arms:
+        sample["pins"] = {**sample["pins"], **arms}
+    return SimpleNamespace(**sample, record=record)
 
 
 def add_quantize_arg(parser) -> None:
-    """``--quantize`` — offered by the commands that ACT on it (``compile`` / ``run``), not by
+    """``--quantize`` — offered by the commands that ACT on it (``compile`` / ``run`` / ``trace``), not by
     every command sharing the input parser. A flag that says it will quantize and does not is
     worse than its absence."""
     parser.add_argument(
@@ -298,7 +342,7 @@ def add_quantize_arg(parser) -> None:
         choices=SCHEMES,
         default=None,
         help=(
-            "Quantize the traced module's linear weights to this scheme and compile the result. "
+            "Quantize the traced module's linear weights to this scheme before compiling or tracing the result. "
             "Writes a real checkpoint (into --dump-dir when given, else a temp dir whose path is logged) "
             "and runs the ordinary spellers over it, so the program is the one that checkpoint would give. "
             "'nvfp4' declares static 4-bit activations (W4A4, the native block-scaled path); "
@@ -538,9 +582,9 @@ def _quantize_traced(graph: Graph, bundle, args) -> str:
     """``--quantize``: quantize a TRACED graph's linear weights, then spell the result.
 
     Deliberately not a second way to build a quantized graph. It writes a real checkpoint and
-    runs the ordinary spellers over it, so what compiles is exactly what compiling that directory
-    would give — and the directory is on disk to be read. ``--dump-dir`` keeps it; otherwise it
-    lands in a temp dir whose path is logged."""
+    runs the ordinary spellers over it, so the resulting compile or trace is exactly what reading
+    that directory would produce. ``--dump-dir`` keeps it; otherwise it lands in a temp directory
+    whose path is logged."""
     import tempfile  # noqa: PLC0415
 
     from emmy.compiler.loader.synthesize import quantize_and_spell, summarize  # noqa: PLC0415

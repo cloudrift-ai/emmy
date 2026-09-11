@@ -144,6 +144,31 @@ def cp_async_fill(
     slab_rows, slab_cols = shape
     v = _cp_async_width(slab_cols, elem_bytes)
     n_chunks = (slab_rows * slab_cols) // v
+    stripe = cta.n_threads * v  # the elements one trip of the whole CTA copies
+    if n_chunks % cta.n_threads == 0 and stripe % slab_cols == 0:
+        # Every lane carries the same number of chunks and a CTA-wide trip covers whole rows: the
+        # trips unroll, each copy addressing its stripe's base row plus the lane's own coordinate,
+        # which the render keeps apart so the destination's swizzle is applied to the lane once
+        # and the stripe base stays an immediate (the same split the ldmatrix drain takes).
+        lane = _mul(cta.linear_tid, _lit(v))
+        lane_row, lane_col = BinaryExpr("/", lane, _lit(slab_cols)), BinaryExpr("%", lane, _lit(slab_cols))
+        stripe_rows = stripe // slab_cols
+        out: list[Stmt] = []
+        for trip in range(n_chunks // cta.n_threads):
+            trip_row = _lit(trip * stripe_rows)
+            out.append(
+                CpAsyncCopy(
+                    smem=slab,
+                    smem_index=(_add(row_offset, trip_row) if row_offset is not None else trip_row, _lit(0)),
+                    lane_index=(lane_row, lane_col),
+                    lane_rows=stripe_rows,
+                    src=src,
+                    src_index=tuple(gmem_index(_add(lane_row, trip_row), lane_col)),
+                    nbytes=v * elem_bytes,
+                    swizzle=swizzle,
+                )
+            )
+        return out
     fe = Axis(name=f"_f{name}", extent=n_chunks)
     base = _mul(Var(fe.name), _lit(v))  # flat element offset of this chunk
     row = BinaryExpr("/", base, _lit(slab_cols))

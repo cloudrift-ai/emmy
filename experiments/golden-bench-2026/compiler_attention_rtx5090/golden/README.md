@@ -38,7 +38,12 @@ Prefill setups (`prefill_causal`, `prefill_global`, `prefill_gqa`) at batch 1 an
 recorded where the recording run fits the bench worker's budget; the measured numbers are in `../RESULTS.md`, and a
 setup without a golden is one whose record run failed (an out-of-memory or wall-budget failure at the longest
 sequences), not one withheld. GQA decode records through its broadcast form, whose eight query heads per group
-become the row axis of the same fused kernel, at three times eager's speed on eight CTAs. Plain decode
+become the row axis of the same fused kernel, split across the key range: the pin is
+`PLACE=fuse,REDUCE@map.1/twist=g<n>k,TILE@twist=…/f1x16/k4,TILE@twist.1/inner=…/f1x8/k4,STAGE@twist=d2/smem-tma,
+STAGE@twist.1/inner=d2/smem-tma,WORK=w4x1` with `n` chosen for about 256 keys per CTA (g8k at 2048 keys, g32k at
+16384), and the recording writes a routing row priced at the set plus a receipt per piece. `WORK` must be pinned:
+left to the prior the partial takes the producer-warp variant, which hangs. The batch-8 setup at 32768 keys did not
+record (the greedy worker returned no outputs at that size). Plain decode
 (`decode_causal`) is not recordable today: with one query row the carrier offers no tensor-core tile at all — only
 `WORK`, `REDUCE` and `RASTER` — so there is no schedule worth a golden until its output tile can be widened to a
 whole head per CTA.

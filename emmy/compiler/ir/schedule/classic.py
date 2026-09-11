@@ -14,7 +14,7 @@ from functools import cached_property
 
 from frozendict import frozendict
 
-from emmy.compiler.ir.atom import wide_accumulate
+from emmy.compiler.ir.atom import ATOM_REGISTRY, wide_accumulate
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.structural import instance_memo
 from emmy.utils import cached_method
@@ -246,10 +246,38 @@ def _kstep_refusal(k_axis, plan: Tile) -> str | None:
     return None if extent % step == 0 else f"warp TILE K-step {step} does not divide the static contraction K={extent}"
 
 
+def _wgmma_refusal(plan: Tile, stage: Stage | None = None, b_trans: bool | None = None) -> str | None:
+    """Why a warp-group cell cannot run under ``plan`` — and under ``stage``, once the operand
+    transport is known, and under the B orientation ``b_trans``, once the node is known — or
+    ``None``. The ONE statement of the wgmma legality rules: the catalog filter and the
+    compatibility join drop a row through it, the pin path raises its message."""
+    if not (plan.is_warp and plan.atom.is_wgmma):
+        return None
+    atom = plan.atom
+    if plan.units_n != 1 or plan.units_m % 4:
+        return "wgmma needs a w<4k>x1 warp grid: four M-adjacent warps issue one instruction"
+    if plan.reg_m != 1 or plan.reg_n % atom.cells_per_instruction:
+        return "wgmma issues whole m64nN instructions: the fragment grid must be f1x<C> with C a multiple of N/8"
+    if atom.atom_k * plan.bk * atom.operand_dtype("a").nbytes != 128:
+        return "wgmma reads one 128-byte swizzle row per descriptor: the K chunk must be 64 elements (k4)"
+    if b_trans is False and plan.reg_n * atom.atom_n * atom.operand_dtype("b").nbytes > 128:
+        # The slab is deposited row-major, so an N-contiguous B holds one 128-byte swizzle atom per
+        # K row only while the N tile is one atom wide; the descriptor's MN-major canonical layout
+        # wants every further atom stored as its own eight contiguous K rows, which no fill does.
+        return (
+            "wgmma reads an N-contiguous B through one 128-byte swizzle atom per K row: its N tile is 64 elements "
+            "(f1x8); a wider tile needs a K-contiguous (transposed) B"
+        )
+    if stage is not None and stage.is_direct:
+        return "wgmma reads its operands through shared-memory descriptors: a direct stage cannot feed it"
+    return None
+
+
 def _plan_node_refusal(tile_op, node: Fold, plan: Tile, placed: PlacedTile, facts: ContractionFacts) -> str | None:
     from . import staging  # noqa: PLC0415
 
-    refusal = _kstep_refusal(facts.k_axis, plan)
+    view = node.as_contraction()
+    refusal = _kstep_refusal(facts.k_axis, plan) or _wgmma_refusal(plan, b_trans=None if view is None else view.b_trans)
     if refusal is not None or not _needs_fill(tile_op, node, plan):
         return refusal
     converting = staging.converting_a(node, plan.atom, tile_op.inputs)
@@ -538,6 +566,10 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
     _allow_f16_accumulate: bool = field(default=True, repr=False, compare=False)
     _allow_fp8: bool = field(default=True, repr=False, compare=False)
     _ignore_unsupported_global: bool = field(default=False, repr=False, compare=False)
+    # A split's finalize reads a bare WORK / RASTER / REDUCE pin as the partial's: it spells its reduce
+    # serially only and its work at the thread level, so a warp WORK or a band names its sibling, and
+    # the finalize keeps its own domain instead of refusing every row.
+    _tolerate_kernel_pins: bool = field(default=False, repr=False, compare=False)
     _allowed_works: frozenset[tuple[str, tuple[int, ...]]] | None = field(default=None, repr=False, compare=False)
     _unsupported_global: bool | None = field(default=None, repr=False, compare=False)
     _restricted_kernels: tuple[KernelSchedule, ...] | None = field(default=None, repr=False, compare=False)
@@ -580,6 +612,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
                     and any(
                         key == family and value and not self._supports_global(family, value)
                         for family, pins in self._pins.items()
+                        if not (self._tolerate_kernel_pins and family in ("WORK", "RASTER", "REDUCE"))
                         for key, value in pins
                     ),
                 )
@@ -611,6 +644,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
                     frozenset((kernel.work.kind, kernel.work.units) for kernel in self._restricted_kernels),
                 )
             if self.position == 0 and not self.assignment.nodes:
+                self._validate_tile_restriction()
                 self._validate_stage_restriction()
 
     @property
@@ -705,6 +739,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         allow_f16_accumulate: bool = True,
         allow_fp8: bool = True,
         validate_pins: bool = True,
+        tolerate_kernel_pins: bool = False,
     ) -> ClassicScheduleContext:
         """Return ``c + p + t`` with raw schedule parameters normalized exactly once."""
         values = {family: tuple(pins.get(family, ())) for family in ("WORK", "TILE", "REDUCE", "STAGE", "RASTER")}
@@ -718,6 +753,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             _allow_f16_accumulate=allow_f16_accumulate,
             _allow_fp8=allow_fp8,
             _ignore_unsupported_global=not validate_pins,
+            _tolerate_kernel_pins=tolerate_kernel_pins,
             _allowed_works=None,
             _unsupported_global=None,
             _restricted_kernels=None,
@@ -845,6 +881,26 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             edge_domains = tuple((edge, self._restricted_edges[edge]) for edge in self.incident_edges(site))
             if not self._compatible_frontier(site, self._restricted_nodes[site], edge_domains):
                 raise ValueError(f"STAGE pin {pins[-1]!r} does not resolve for this contraction")
+
+    def _validate_tile_restriction(self) -> None:
+        """Refuse a pinned warp-group TILE that its WORK, fragment grid, K chunk or STAGE pin
+        cannot feed, with that rule's own message: the catalog never offers such a row, so the
+        restriction alone could only report an unsupported pin. Loud under every flag, like the
+        STAGE target refusal — the spelling is wrong wherever it is published."""
+        assert self._pins is not None
+        work = next((Work.parse(value) for _, value in self._pins["WORK"] if value), None)
+        for key, spelling in self._pins["TILE"]:
+            atom = ATOM_REGISTRY.get(spelling.partition("/")[0])
+            if atom is None or not atom.is_wgmma:
+                continue
+            plan = Tile.parse(spelling, work if work is not None and work.kind == "warp" else Work(kind="warp", units=(4, 1)))
+            # A bare STAGE pin reaches every site; a scoped one only its own, and a bare TILE pin
+            # names a site the restriction has not decided yet, so only bare STAGE pins reach it.
+            site = key.partition("@")[2]
+            stages = tuple(Stage.parse(value) for stage_key, value in self._pins["STAGE"] if stage_key.partition("@")[2] in ("", site))
+            for stage in stages or (None,):
+                if why := _wgmma_refusal(plan, stage):
+                    raise ValueError(why)
 
     def extend(self, pick: ClassicAssignment) -> ClassicScheduleContext:
         """Compose a frontier pick or validate and accept one complete assignment."""
@@ -990,7 +1046,13 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             self._refuse("one contraction currently requires one transport choice across its operands", site)
         from emmy.compiler.ir.tile.ops import Sched  # noqa: PLC0415
 
-        geometry = Sched(tile_op, place=tile_op.place.on_grid()).placed(fold, node.tile)
+        # One grid-placed view per (tile, target): the view caches the tree's site walk and each
+        # node's (m, n) pair, and a fresh view per support query re-walked the whole tree — on a
+        # decode-tail kernel fusing five projections that walk alone kept a compile from finishing.
+        grid = _target_memo(tile_op, self.target, "_memo_grid_sched")
+        if "sched" not in grid:
+            grid["sched"] = Sched(tile_op, place=tile_op.place.on_grid())
+        geometry = grid["sched"].placed(fold, node.tile)
         if node.tile.is_tiled and not isinstance(geometry, PlacedTile):
             cache[key] = None
             return None
@@ -1000,6 +1062,10 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
                 return None
         stage = next(iter(edges.values())).stage if edges else Stage.direct()
         resolved_stage = None
+        contraction = view.as_contraction()
+        if _wgmma_refusal(node.tile, stage, b_trans=None if contraction is None else contraction.b_trans) is not None:
+            cache[key] = None
+            return None
         if view.as_contraction() is None or not node.tile.is_tiled:
             if not stage.is_direct:
                 cache[key] = None
@@ -1047,7 +1113,10 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
                 else ()
             ),
             raster_eligible=node.tile.is_tiled and view.as_contraction() is not None,
-            producer_eligible=not (tile_op.packed_reading(fold)[0] is not None and stage.transport == "smem-tma"),
+            # A producer band splits the staged K-loop's phases across warp bands, which only the
+            # contraction tier's skeleton drives; the chunk tier runs every warp through one uniform
+            # ring, where an aux band decoding onto warp 0 would re-issue its elected TMA arrive.
+            producer_eligible=not fold.chunked() and not (tile_op.packed_reading(fold)[0] is not None and stage.transport == "smem-tma"),
         )
         cache[key] = support
         return support
@@ -1091,22 +1160,17 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
 
     @cached_property
     def _shared_roots(self) -> frozenset[NodeId]:
-        """The contraction roots that may not be output-tiled together. The kernel binder builds a
-        kernel around several output-tiled roots only where the projection partitions its outputs
-        by root (:func:`~emmy.compiler.ir.tile.ops.projection_regions`); where it does not, one
-        tiled root is the kernel's root and every other reduce lowers serially inside the
-        projection, so a row tiling a second root spells a kernel the binder never builds. The
-        binder's rule, applied at the offer."""
-        from emmy.compiler.ir.tile.ops import UnbindableProjection, kernel_roots, projection_regions  # noqa: PLC0415
+        """The contraction roots that may not be output-tiled together
+        (:func:`~emmy.compiler.ir.tile.ops.refused_roots`): one of them is the kernel's root and
+        every other reduce lowers serially inside the projection, so a row tiling a second root
+        spells a kernel the binder never builds. The binder's rule, applied at the offer. The
+        placement lane asks a NEIGHBOURING question of the same projection
+        (:func:`~emmy.compiler.ir.tile.ops.owns_outputs_it_cannot_bind`) and the two answers
+        differ — a projection this one finds nothing shared in can still be one that cut takes
+        apart."""
+        from emmy.compiler.ir.tile.ops import refused_roots  # noqa: PLC0415
 
-        roots = kernel_roots(self.tile_op.op)
-        if len(roots) < 2:
-            return frozenset()
-        try:
-            projection_regions(self.tile_op.op, tuple(self.tile_op.output_specs))
-        except UnbindableProjection:
-            return frozenset(self.tile_op.node_id(root) for root in roots)
-        return frozenset()
+        return frozenset(self.tile_op.node_id(root) for root in refused_roots(self.tile_op.op, tuple(self.tile_op.output_specs)))
 
     def _support_refusal(self, site: NodeId, support: _LocalSupport) -> str | None:
         """Return why one locally supported pick cannot extend this prefix."""

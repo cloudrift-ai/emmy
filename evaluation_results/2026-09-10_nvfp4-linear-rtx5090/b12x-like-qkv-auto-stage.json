@@ -1,0 +1,62 @@
+{
+  "input": "torch.nn.Linear(4096,6144,bias=False,dtype=torch.bfloat16)(torch.randn(16,4096,dtype=torch.bfloat16))",
+  "golden": null,
+  "dynamic": [],
+  "gpu": "NVIDIA GeForce RTX 5090",
+  "warmup": 2,
+  "iters": 5,
+  "backends": {
+    "Emmy": {
+      "latency_us": 1583.9680433273315,
+      "captured": true,
+      "timing_semantics": "captured_whole_forward"
+    }
+  },
+  "greedy": {
+    "status": "ok",
+    "lane": "std",
+    "total_us": 1583.9680433273315,
+    "timing_semantics": "whole_program_e2e",
+    "captured": true,
+    "num_launches": 3,
+    "kernels": [
+      {
+        "kernel": "k_reshape_reduce_46015e",
+        "us": 1.1155315347619958,
+        "smem_bytes": 0,
+        "knobs": {
+          "LOOPIFY": "0"
+        },
+        "record_knobs": {
+          "LOOPIFY": "0"
+        },
+        "source_sha256": "3e0b658977b82bfb5f2a2cefe4bd0b9c199fbd921804a90e412a7788001487f4"
+      },
+      {
+        "kernel": "k_reshape_reduce_46015e__place_b87aae0fba",
+        "us": 0.9233351648130567,
+        "smem_bytes": 0,
+        "knobs": {
+          "LOOPIFY": "0"
+        },
+        "record_knobs": {
+          "LOOPIFY": "0"
+        },
+        "source_sha256": "473f6c2581ce4f2c160ccadd8884aa42a023a825611c8fbd84e637cf51b3cd55"
+      },
+      {
+        "kernel": "k_linear_511417",
+        "us": 1581.9519758224487,
+        "smem_bytes": 0,
+        "knobs": {
+          "LOOPIFY": "0"
+        },
+        "record_knobs": {
+          "LOOPIFY": "0"
+        },
+        "source_sha256": "426867f9207c97a79f397b2bbb591fee527aac971456af5a594e3c7cb5121947"
+      }
+    ]
+  },
+  "pinned": []
+}

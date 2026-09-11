@@ -291,6 +291,12 @@ def _handle_run_once(args):
     # Model ID or --code: trace to a frontend graph + keep the runnable module
     # (+ example inputs) so accuracy / --bench compare against real torch.
     graph, _base_name, bundle = load_or_trace(args)
+
+    # Resolve the dump before placing a synthesized checkpoint inside it.
+    # ``CompilerDump.__post_init__`` deliberately clears a stale dump directory;
+    # constructing it after ``_quantize_traced`` therefore deleted the checkpoint
+    # that the isolated bench worker needs to bind packed weights and scales.
+    dump = CompilerDump.resolve(args.dump_dir)
     quantized_checkpoint = None
     if getattr(args, "quantize", None):
         from emmy.commands.compile import _quantize_traced  # noqa: PLC0415
@@ -298,7 +304,6 @@ def _handle_run_once(args):
         quantized_checkpoint = _quantize_traced(graph, bundle, args)
     module, example_args, example_kwargs = bundle
 
-    dump = CompilerDump.resolve(args.dump_dir)
     if dump:
         dump.dump_input_graph(graph)
 
@@ -415,7 +420,9 @@ def _handle_run_once(args):
                 if greedy_fail:
                     logger.error("%s — greedy row marked bench_fail; pinned rows still bench in the worker", greedy_fail)
                 greedy_iso = await _bench_greedy_isolated(backend, compiled, warmup=args.warmup, iters=args.iters)
-                golden_benches = await _bench_golden_variants(backend, args.code, pinned, warmup=args.warmup, iters=args.iters, ref=ab_ref)
+                golden_benches = await _bench_golden_variants(
+                    backend, args.code, pinned, warmup=args.warmup, iters=args.iters, ref=ab_ref, quantize=args.quantize
+                )
         finally:
             await backend.aclose_async_worker()
         return (
@@ -608,6 +615,16 @@ def _run_golden_targets(args) -> None:
     if not names:
         logger.error("--golden contains no realizations: %s", args.golden)
         sys.exit(2)
+    # Bench each TARGET once. A row named ``<target>.<identity>`` (a routing row or a child-identity
+    # schedule receipt) is evidence for its target's walk, not a target of its own: benched as a
+    # whole-target pin it measures nothing real and multiplies the walk by the receipt count.
+    targets: list[str] = []
+    for name in names:
+        parent = ".".join(name.split(".")[:2])
+        target = parent if parent in names else name
+        if target not in targets:
+            targets.append(target)
+    names = targets
 
     output_dir = None
     if len(names) > 1 and args.json:
@@ -617,6 +634,9 @@ def _run_golden_targets(args) -> None:
             sys.exit(2)
         output_dir.mkdir(parents=True, exist_ok=True)
 
+    # One target's failure (a compile error, a wrong answer, a hung bench) must not hide the
+    # targets after it: every realization runs and reports, and the walk exits non-zero at the end.
+    failed: list[str] = []
     for index, name in enumerate(names):
         target_args = copy(args)
         target_args._golden_document = document
@@ -625,7 +645,17 @@ def _run_golden_targets(args) -> None:
         if output_dir is not None:
             safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("._") or "target"
             target_args.json = str(output_dir / f"{index:03d}-{safe_name}.json")
-        _handle_run_once(target_args)
+        try:
+            _handle_run_once(target_args)
+        except SystemExit as exc:
+            if exc.code:
+                failed.append(name)
+        except Exception as exc:  # noqa: BLE001 — one target's lowering error must not hide the rest
+            logger.error("%s: %s", name, exc)
+            failed.append(name)
+    if failed:
+        logger.error("%d of %d realizations failed: %s", len(failed), len(names), ", ".join(failed))
+        sys.exit(1)
 
 
 def _recordable_bench_leaves(golden_benches, greedy_iso) -> list:
@@ -1046,7 +1076,7 @@ def _sample_replay_knobs(sample) -> dict:
     """All exact knob pins needed to reproduce a golden winner or explicit A/B row."""
     from emmy.compiler.pipeline.knob import tuning_knob_items  # noqa: PLC0415
 
-    return {**getattr(sample, "pins", {}), **dict(tuning_knob_items(sample.knobs))}
+    return {**getattr(sample, "pins", {}), **getattr(sample, "route", {}), **dict(tuning_knob_items(sample.knobs))}
 
 
 def _failed_bench_status(exc: BaseException) -> str:
@@ -1070,6 +1100,7 @@ async def _bench_golden_variants(
     ref=None,
     strict_correctness=False,
     strict_reference="eager",
+    quantize=None,
 ):
     """Compile + bench each recorded golden config with its knobs pinned — one
     ``_GoldenBench`` per config so :func:`_print_kernel_stats` can show each as a measured
@@ -1126,7 +1157,18 @@ async def _bench_golden_variants(
             with pinned_knobs(replay_knobs):
                 # Fresh graph; lowering mutates it and bakes the pins into the kernel.
                 if isinstance(source, str):
-                    graph, _, _ = graph_from_code(source, dynamic_shapes=dynamic_shapes)
+                    graph, _, bundle = graph_from_code(source, dynamic_shapes=dynamic_shapes)
+                    if quantize:
+                        # ``--ab`` must re-lower the same quantized program as the primary
+                        # compile. The old path re-traced only the unquantized module, so its
+                        # rows silently benchmarked ordinary float linear kernels under NVFP4
+                        # knob names. Keep the temporary checkpoint private to this variant;
+                        # pinned timing has no eager correctness reference for quantized code.
+                        import tempfile
+
+                        from emmy.compiler.loader.synthesize import quantize_and_spell
+
+                        quantize_and_spell(graph, bundle, tempfile.mkdtemp(prefix="emmy-ab-"), scheme=quantize)
                 else:
                     graph = source.copy()
                 g_compiled = backend.compile(graph)
@@ -2247,6 +2289,8 @@ def _strict_benchmark_errors(
     errors = []
     display_names = {"eager": "Eager PyTorch", "tcompile": "torch.compile", "emmy": "Emmy"}
     for backend in _resolve_backends(args.bench_backends):
+        if backend != "emmy" and not frontend_runnable:
+            continue  # an embedded Loop target has no Torch twin; its reference is the same-input greedy replay
         name = display_names[backend]
         latency = (results or {}).get(name)
         if isinstance(latency, bool) or not isinstance(latency, int | float) or latency <= 0:

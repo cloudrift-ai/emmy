@@ -161,6 +161,25 @@ def test_no_repro_without_input_graph(tmp_path):
     assert dump.frontend_reproducers() == {}
 
 
+def test_reproducer_preserves_secondary_boundary_buffer():
+    g = Graph()
+    g.add_node(InputOp(), [], outputs=[Tensor("packed", (4,)), Tensor("bits", (4,))], node_id="packed")
+    g.add_node(ElementwiseOp(op="copy"), ["bits"], Tensor("decode", (4,)), node_id="decode")
+    g.inputs, g.outputs = ["packed", "bits"], ["decode"]
+    sub = CompilerDump.frontend_reproducer_from_origins(g, {"decode"})
+    assert sub.inputs == ["packed", "bits"]
+    assert sub.outputs == ["decode"]
+    assert sub.producer("bits").id == "packed"
+
+
+def test_reproducer_preserves_all_origin_outputs():
+    g = Graph()
+    g.add_node(InputOp(), [], outputs=[Tensor("packed", (4,)), Tensor("bits", (4,))], node_id="packed")
+    g.inputs, g.outputs = ["packed", "bits"], ["packed", "bits"]
+    sub = CompilerDump.frontend_reproducer_from_origins(g, {"packed"})
+    assert sub.outputs == ["packed", "bits"]
+
+
 def test_repro_keeps_constant_derived_boundaries(tmp_path):
     """A non-origin feed that is a pure function of constants (e.g. the
     broadcast of a pow-exponent scalar) keeps its constant chain in the slice;

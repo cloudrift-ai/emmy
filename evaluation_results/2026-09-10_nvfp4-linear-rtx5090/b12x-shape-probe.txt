@@ -1,0 +1,31 @@
+B12x schedule-equivalence probe, RTX 5090
+==========================================
+
+FlashInfer 0.6.18 source selector:
+  _select_default_dense_gemm_plan(m=16, n={34816,5120,6144,4096}, k=..., sm_count=170)
+  -> _DenseGemmPlan(mma_tiler_mn=(64, 128), load_path='tma', swap_ab=False)
+
+The source constructs a 64x128x128 CTA from an m16n8k64 NVFP4 MMA atom, eight MMA warps,
+one TMA load warp, an asynchronous TMA pipeline, and a persistent tile scheduler.
+
+Closest Emmy tile geometry:
+  WORK=w4x2
+  TILE=mma_m16n8k64_e2m1_f32/f1x8/k2
+
+The factors spell the same 64x128x128 CTA and eight compute warps. They do not form a legal
+staged packed-FP4 schedule in the current compiler:
+
+  STAGE=d1/smem-async -> ValueError: STAGE pin ... does not resolve for this contraction
+  STAGE=d2/smem-async -> ValueError: STAGE pin ... does not resolve for this contraction
+  STAGE=d1/smem-tma   -> unavailable for the packed-FP4 contraction
+
+Leaving STAGE unpinned does not realize the requested tensor-core tile. It falls back to a scalar
+matmul with zero shared memory and takes 1583.97 us on merged QKV. The raw receipt is
+b12x-like-qkv-auto-stage.json.
+
+The tested command was:
+
+  EMMY_KNOBS='PLACE=cut,WORK=w4x2,TILE=mma_m16n8k64_e2m1_f32/f1x8/k2,RASTER=gm8' \
+    emmy run \
+      --code 'torch.nn.Linear(4096,6144,bias=False,dtype=torch.bfloat16)(torch.randn(16,4096,dtype=torch.bfloat16))' \
+      --quantize nvfp4 --bench --bench-backends emmy --warmup 2 --iters 5 --no-record-nodes

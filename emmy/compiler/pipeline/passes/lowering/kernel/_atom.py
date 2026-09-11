@@ -59,6 +59,11 @@ from emmy.compiler.ir.kernel.ir import (
     RegEpilogue,
     RegFragment,
     RegStore,
+    WgmmaCommit,
+    WgmmaDescriptor,
+    WgmmaFence,
+    WgmmaMma,
+    WgmmaWait,
     frag_layout,
 )
 from emmy.compiler.ir.pure.fold import Fold
@@ -514,6 +519,87 @@ def _staged_inner_atom_loop(
         if nxt < n_steps:  # prefetch depth-1 ahead, into the slot the mma below frees
             stmts += ldms(kcol(nxt), f"_s{nxt % depth}")
         stmts += mmas(f"_s{step % depth}")
+    return stmts
+
+
+def _wgmma_drain(*, operands, slot, mn, atom, bk_elems: int, frag_ns: str, n_folds: int) -> list[Stmt]:
+    """The warp-group drain — the ``wgmma`` leaf reading ring ``slot``. Both operands stay in
+    shared memory: each k16 step builds one matrix descriptor per operand and issues one
+    ``wgmma.mma_async`` per group of ``cells_per_instruction`` accumulator cells along N, and the
+    chunk closes with a commit and a wait so the slot can be released. The four warps of a group
+    emit the same descriptors (the row block ``64·(warp/4)`` of the slot); the hardware hands warp
+    ``i`` rows ``16i..16i+15`` of it, which is exactly the m16n8 row the epilogue expects at ``f1``.
+
+    Descriptor geometry (128-byte swizzle, 16-bit elements): a K-major slab (A, or a transposed B)
+    stores one swizzle row per tile row, so the stride between 8-row core groups is
+    ``8 · bk · 2`` bytes and the leading offset is unused; an N-contiguous B slab is MN-major
+    (``trans_b``), its core groups are eight K rows apart (``8 · row pitch``) and adjacent
+    64-column atoms sit 128 bytes apart. The software swizzle of a cp.async fill reads the ROW
+    index, not the address bits, once a row exceeds one atom, so an MN-major B wider than one
+    atom must arrive by TMA; that case is declined here rather than mis-read."""
+    (a_op, *b_ops), (m, n) = operands, mn
+    cells = atom.cells_per_instruction
+    if m.reg != 1 or n.reg % cells:
+        raise ValueError(f"wgmma drain needs f1x<C> with C a multiple of {cells}, got f{m.reg}x{n.reg}")
+    _, _, atom_k = atom.shape
+    elem_bytes = atom.operand_dtype("a").nbytes
+    atom_cols = 128 // elem_bytes  # one 128-byte swizzle row, in elements
+    n_steps = bk_elems // atom_k
+
+    def flat(row: Expr, col: Expr, cols: int) -> Expr:
+        return BinaryExpr("+", BinaryExpr("*", row, Literal(cols, "int")), col)
+
+    def offset(base: Expr, off: Expr | None) -> Expr:
+        return base if off is None else BinaryExpr("+", off, base)
+
+    grp_row = BinaryExpr("*", BinaryExpr("/", Var(m.unit), Literal(4, "int")), Literal(64, "int"))
+    a_cols = bk_elems + getattr(a_op, "pad_cols", 0)
+    stmts: list[Stmt] = [WgmmaFence()]
+    for step in range(n_steps):
+        kcol = Literal(step * atom_k, "int")
+        a_desc = f"{frag_ns}_da{step}"
+        stmts.append(
+            WgmmaDescriptor(
+                name=a_desc,
+                smem=a_op.slab,
+                smem_index=flat(offset(grp_row, a_op.slot_row(slot)), kcol, a_cols),
+                swizzle=a_op.swizzle,
+                lbo_bytes=16,
+                sbo_bytes=8 * a_cols * elem_bytes,
+            )
+        )
+        for f, b_op in enumerate(b_ops):
+            trans = getattr(b_op, "trans", False)
+            for jg in range(n.reg // cells):
+                nbase = BinaryExpr("+", BinaryExpr("*", Var(n.unit), Literal(n.reg * 8, "int")), Literal(jg * cells * 8, "int"))
+                b_desc = f"{frag_ns}_db{f}_{jg}_{step}"
+                if trans:  # K-major (tile_n × bk): the tile coordinate is the slab row, K the column
+                    b_cols = bk_elems + getattr(b_op, "pad_cols", 0)
+                    index, lbo, sbo = flat(offset(nbase, b_op.slot_row(slot)), kcol, b_cols), 16, 8 * b_cols * elem_bytes
+                else:  # MN-major (bk × tile_n): K is the slab row, the tile coordinate the column
+                    b_cols = n.tile + getattr(b_op, "pad_cols", 0)
+                    if n.tile > atom_cols:
+                        raise ValueError(
+                            "wgmma: an N-contiguous B slab wider than one swizzle atom does not store each atom as its own K rows; "
+                            "the schedule rule should have declined this row"
+                        )
+                    index, lbo, sbo = flat(offset(kcol, b_op.slot_row(slot)), nbase, b_cols), 128, 8 * b_cols * elem_bytes
+                stmts.append(
+                    WgmmaDescriptor(name=b_desc, smem=b_op.slab, smem_index=index, swizzle=b_op.swizzle, lbo_bytes=lbo, sbo_bytes=sbo)
+                )
+                stmts.append(
+                    WgmmaMma(
+                        c_frags=tuple(_fold_frag(f"{frag_ns}{_mma_c_base(atom, 0, j)}", f) for j in range(jg * cells, (jg + 1) * cells)),
+                        a_desc=a_desc,
+                        b_desc=b_desc,
+                        shape=atom.ptx_shape,
+                        ab_dtype=atom.ab_dtype,
+                        scale_d=1,
+                        trans_a=0,
+                        trans_b=0 if trans else 1,
+                    )
+                )
+    stmts += [WgmmaCommit(), WgmmaWait(0)]
     return stmts
 
 
@@ -1692,6 +1778,16 @@ class _MmaOps(_AtomOps):
         (``Operand.scale``) additionally hands the drain its block-scale slab. An f16-accumulate
         atom promote-folds its packed f16 fragments into the f32 shadows once per drain — the
         bk chunk IS the promote cadence (the last chunk's fold doubles as the final one)."""
+        if self.tile.atom.is_wgmma:
+            return _wgmma_drain(
+                operands=operands,
+                slot=slot,
+                mn=mn,
+                atom=self.tile.atom,
+                bk_elems=self.stage.bk_elems,
+                frag_ns=self.frag_ns,
+                n_folds=len(self.channels),
+            )
         stmts = _staged_inner_atom_loop(
             slabs=tuple(op.slab for op in operands),
             offs=tuple(op.slot_row(slot) for op in operands),
@@ -1792,27 +1888,29 @@ class _MmaOps(_AtomOps):
         # One A fragment set; one B and one C fragment set PER fold channel (the multi-B node's
         # shared-A / per-channel-accumulate drain).
         n_folds = len(self.channels)
-        decls: list[Stmt] = [
-            RegFragment(
-                name=nm,
-                role="a",
-                shape=atom.ptx_shape,
-                dtype=atom.operand_dtype("a"),
-                nregs=atom.fragment_nregs("a"),
-            )
-            for nm in frags(lambda i: self.frag(f"_a{i}"), m.reg)
-        ]
-        for f in range(n_folds):
+        decls: list[Stmt] = []
+        if not atom.is_wgmma:  # a descriptor-fed atom reads its operands from shared memory, not fragments
             decls += [
                 RegFragment(
                     name=nm,
-                    role="b",
+                    role="a",
                     shape=atom.ptx_shape,
-                    dtype=atom.operand_dtype("b"),
-                    nregs=atom.fragment_nregs("b"),
+                    dtype=atom.operand_dtype("a"),
+                    nregs=atom.fragment_nregs("a"),
                 )
-                for nm in frags(lambda i, ff=f: _fold_frag(self.frag(f"_b{i}"), ff), n.reg)
+                for nm in frags(lambda i: self.frag(f"_a{i}"), m.reg)
             ]
+            for f in range(n_folds):
+                decls += [
+                    RegFragment(
+                        name=nm,
+                        role="b",
+                        shape=atom.ptx_shape,
+                        dtype=atom.operand_dtype("b"),
+                        nregs=atom.fragment_nregs("b"),
+                    )
+                    for nm in frags(lambda i, ff=f: _fold_frag(self.frag(f"_b{i}"), ff), n.reg)
+                ]
         if block_scaled_atom(atom):
             # The block-scale fragments — one 32-bit register per operand fragment, reloaded per
             # k-step into the same name (``BlockScaleLoad`` assigns), so they are declared here once.
@@ -2161,6 +2259,10 @@ class _ScalarOps(_AtomOps):
 #: written over ROLES, and these are the two the tier supplies rather than the term.
 _SCORE = "__score"
 _PIVOT = "__pivot"
+_CHUNK_PIVOT = "__chunk_pivot"
+_FACTOR = "__factor"
+_PARTIAL = "__partial"
+_SCALED = "__scaled"
 
 
 def _row_pair(state: str, i: int) -> tuple[str, str]:
@@ -2336,11 +2438,17 @@ class _FlashOps(_MmaOps):
       prefix over it — A IS that contraction, so the operand exposes the raw accumulator and the
       lift is what scales it. Its output tile is the ``(m, chunk)`` pair, which is why the fragment
       seam requires one warp column on it and its N tile to equal this node's chunk;
-    - the chunk's PIVOT is that score's ⊕ over the chunk, one :class:`FragmentRowReduce` per row;
-    - each channel folds the recipe's own ``pattern`` against that pivot — a row reduce for a
-      channel that is no product, an ``mma.sync`` against the streamed operand for the one that is;
-    - the chunk's partial merges through the recipe's stable ⊕ (:meth:`Fold.merge`), applied once
-      per chunk rather than once per element.
+    - the chunk's PIVOT is that score's ⊕ over the chunk, one :class:`FragmentRowReduce` per row,
+      and the recipe's ``advance`` moves the carrier's pivot past it at once — the carrier's factor
+      for the move is the one per-row value the merge needs;
+    - each channel folds the recipe's own ``pattern`` against the ADVANCED pivot — a row reduce
+      for a channel that is no product, an ``mma.sync`` against the streamed operand for the one
+      that is — so the chunk's contribution is already at the pivot the carrier moves to and
+      takes no factor of its own;
+    - the carrier is scaled by its factor (the recipe's ``scale``, once per chunk) and the chunk
+      joins it through each channel's base ⊕: the row states fold their partial, the expectation
+      IS the ``mma.sync``'s accumulator. FlashAttention-2's loop, derived from the recipe: no
+      chunk-local accumulator, no per-element rescale of the chunk.
 
     The streamed value reads from a shared-memory slab when the row spells a transport, and
     gmem-direct otherwise; every other operand reads gmem-direct through the ordinary fragment
@@ -2484,7 +2592,7 @@ class _FlashOps(_MmaOps):
             )
             body: list[Stmt] = []
             held = scored_name
-            scored, pivots = {}, {}
+            scored, pivots, advanced, factors = {}, {}, {}, {}
             for i in range(m.reg):
                 for j in range(cols):
                     stmts, frags, _ = _residence(
@@ -2521,7 +2629,9 @@ class _FlashOps(_MmaOps):
                         layout=layout,
                     )
                 )
-            weights, partials = {}, {}
+                stmts, advanced[i], factors[i] = self._advance(i, pivots[i], layout)
+                body += stmts
+            weights = {}
             for index, state, _seed in self._carried():
                 if index == 0:
                     continue
@@ -2533,7 +2643,7 @@ class _FlashOps(_MmaOps):
                         cell, frags, _ = _residence(
                             stmts[:-1] if product is not None else stmts,
                             frags={_SCORE: scored[i, j]},
-                            rows={_PIVOT: pivots[i]},
+                            rows={_PIVOT: advanced[i]},
                             tag=f"_ch{i}_{j}_",
                             memo=memo[i, j],
                             layout=layout,
@@ -2545,18 +2655,20 @@ class _FlashOps(_MmaOps):
                         (held,) = [arg for arg in product.args if arg in frags]
                         weights[i, j] = frags[held]
                     if product is None:
-                        partials[index, i] = (f"{self.frag(state)}__p{i}_0", f"{self.frag(state)}__p{i}_1")
+                        partial = (f"{self.frag(state)}__p{i}_0", f"{self.frag(state)}__p{i}_1")
                         body.append(
                             FragmentRowReduce(
-                                top=partials[index, i][0],
-                                bot=partials[index, i][1],
+                                top=partial[0],
+                                bot=partial[1],
                                 frags=tuple(folded),
                                 op=self.c.base.components()[index],
                                 layout=layout,
                             )
                         )
+                        body += self._fold_row(index, i, partial, factors[i], layout)
+            body += self._scale_expectation(mn, factors, layout)
             body += self._expectation(offset, mn, base, weights, steps, bound, streams, value_slot)
-            body += self._merge(mn, pivots, partials)
+            body += self._fold_pivot(mn, pivots, layout)
             if streams is None:
                 return [(scored_stmts + body, frozenset())]
             if len(streams.transports) == 1:
@@ -2822,8 +2934,9 @@ class _FlashOps(_MmaOps):
 
     def _expectation(self, offset, mn, base, weights, steps, bound, streams, slot) -> list[Stmt]:
         """The bilinear channel's product: the weight repacks into an A operand IN REGISTERS and
-        ``mma.sync``\\ s against the streamed operand, into the chunk's own accumulator so the merge
-        can rescale both sides of the ⊕.
+        ``mma.sync``\\ s against the streamed operand, straight into the carrier's accumulator —
+        already scaled to the advanced pivot (:meth:`_scale_expectation`), and the weights formed
+        at that pivot, so the chunk's product is exactly what the channel's ⊕ adds.
 
         ``streams`` carries the streamed operand's staged slab (:meth:`_streams`) or is ``None``
         for the gmem-direct read. Staged, the coordinates become slab-local — the chunk's own K step
@@ -2833,12 +2946,11 @@ class _FlashOps(_MmaOps):
         staged = None if streams is None else streams.value
         v_load = self.c.operands[1].as_slab().load
         # The mma's own target. On a REDUCED-accumulate cell that is the packed ``_ph`` fragment,
-        # promoted into the f32 ``_p`` the merge folds once this chunk's mmas are done — the chunk
-        # IS the promote cadence, so the reduced chain never accumulates past one chunk of keys.
-        cell = "_ph" if _f16acc(atom) else "_p"
+        # promoted into the f32 carrier once this chunk's mmas are done — the chunk IS the promote
+        # cadence, so the reduced chain never accumulates past one chunk of keys.
+        cell = "_ph" if _f16acc(atom) else "_c"
         out: list[Stmt] = [self._frag(f"_a{i}_{t}", "a") for i in range(m.reg) for t in range(steps)]
         out += [self._frag(f"_b{j}_{t}", "b") for j in range(n.reg) for t in range(steps)]
-        out += [self._frag(f"_p{i}_{j}", "c", self._score_atom) for i in range(m.reg) for j in range(n.reg)]
         if _f16acc(atom):
             out += [self._frag(f"{cell}{i}_{j}", "c") for i in range(m.reg) for j in range(n.reg)]
         for t in range(steps):
@@ -2878,7 +2990,7 @@ class _FlashOps(_MmaOps):
             ]
         if _f16acc(atom):
             out += [
-                FragmentPromote(dst=self.frag(f"_p{i}_{j}"), src=self.frag(f"{cell}{i}_{j}")) for i in range(m.reg) for j in range(n.reg)
+                FragmentPromote(dst=self.frag(f"_c{i}_{j}"), src=self.frag(f"{cell}{i}_{j}")) for i in range(m.reg) for j in range(n.reg)
             ]
         return out
 
@@ -2918,37 +3030,68 @@ class _FlashOps(_MmaOps):
             fragment_layout=atom.fragment_layout,
         )
 
-    def _merge(self, mn, pivots, partials) -> list[Stmt]:
-        """The recipe's own stable ⊕ (:meth:`Fold.merge`), applied once per chunk at each state's
-        residence: the pivot and every summed channel are per-row registers, the expectation the
-        accumulator fragment. The row half stands for the whole register row, so it is emitted for
-        the first output column alone and the later columns take the fragment half only."""
+    def _advance(self, i: int, chunk_pivot: tuple[str, str], layout) -> tuple[list[Stmt], tuple[str, str], tuple[str, str]]:
+        """The recipe's pivot advance at row ``i`` — the carrier's pivot against the chunk's — as
+        per-row statements, with the advanced pivot's register pair and the carrier's factor's.
+        The chunk's own factor is never spelled: every channel folds the chunk AT the advanced
+        pivot, where that factor is the identity."""
+        advance = self._recipe.advance
+        pivot = self.c.base.results[0]
+        bound = {advance.params[0]: pivot, advance.params[1]: _CHUNK_PIVOT}
+        instance = advance.rename(lambda name: bound.get(name, name))
+        moved, factor = instance.results[0], instance.results[1]
+        rows = {pivot: _row_pair(self.frag(pivot), i), _CHUNK_PIVOT: chunk_pivot}
+        stmts, _frags, rows = _residence(tuple(instance.cone(factor).body), frags={}, rows=rows, tag=f"_mg{i}_", layout=layout)
+        return stmts, rows[moved], rows[factor]
+
+    def _fold_row(self, index: int, i: int, partial: tuple[str, str], factor: tuple[str, str], layout) -> list[Stmt]:
+        """Fold row ``i``'s chunk partial of carried state ``index`` into the carrier: the state
+        scaled to the advanced pivot, then the channel's own ⊕ with the partial, which is there
+        already."""
+        state = self.c.base.results[index]
+        scale = self._recipe.scale
+        bound = {scale.params[0]: state, scale.params[1]: _FACTOR, scale.results[0]: _SCALED}
+        instance = scale.rename(lambda name: bound.get(name, f"{state}__{name}"))
+        program = (*instance.body, Accum(name=state, value=_PARTIAL, op=self.c.base.components()[index], base=_SCALED))
+        rows = {state: _row_pair(self.frag(state), i), _FACTOR: factor, _PARTIAL: partial}
+        stmts, _frags, _rows = _residence(program, frags={}, rows=rows, tag=f"_mg{i}_{state}_", layout=layout)
+        return stmts
+
+    def _scale_expectation(self, mn, factors: dict, layout) -> list[Stmt]:
+        """Scale the expectation's accumulator to the advanced pivot, in place, ahead of the chunk's
+        product: the ``mma.sync`` then accumulates the chunk straight into the carrier."""
         m, n = mn
-        states = self.c.base.results
-        bilinear = self._bilinear
-        other = tuple(f"__ck_{state}" for state in states)
-        program = tuple(self.c.merge(other))
+        state = self.c.base.results[self._bilinear]
+        scale = self._recipe.scale
+        bound = {scale.params[0]: state, scale.params[1]: _FACTOR}
+        instance = scale.rename(lambda name: bound.get(name, name))
         out: list[Stmt] = []
         for i in range(m.reg):
-            rows = {states[0]: _row_pair(self.frag(states[0]), i), other[0]: pivots[i]}
-            for index, state, _seed in self._carried():
-                if index in (0, bilinear):
-                    continue
-                rows[state] = _row_pair(self.frag(state), i)
-                rows[other[index]] = partials[index, i]
             for j in range(n.reg):
                 held = self.frag(f"_c{i}_{j}")
-                cell, _f, _r = _residence(
-                    program,
-                    frags={states[bilinear]: held, other[bilinear]: self.frag(f"_p{i}_{j}")},
-                    rows=rows,
+                stmts, _frags, _rows = _residence(
+                    tuple(instance.body),
+                    frags={state: held},
+                    rows={_FACTOR: factors[i]},
                     tag=f"_mg{i}_",
                     frag_tag=f"_mg{i}_{j}_",
                     hold=held,
                     frags_only=j > 0,
-                    layout=frag_layout(self.tile.atom.fragment_layout),
+                    layout=layout,
                 )
-                out += cell
+                out += stmts
+        return out
+
+    def _fold_pivot(self, mn, pivots: dict, layout) -> list[Stmt]:
+        """Move the carrier's pivot past the chunk's — the pivot's own ⊕, per row."""
+        m, _n = mn
+        pivot = self.c.base.results[0]
+        out: list[Stmt] = []
+        for i in range(m.reg):
+            rows = {pivot: _row_pair(self.frag(pivot), i), _CHUNK_PIVOT: pivots[i]}
+            program = (Accum(name=pivot, value=_CHUNK_PIVOT, op=self.c.base.components()[0]),)
+            stmts, _frags, _rows = _residence(program, frags={}, rows=rows, tag=f"_mg{i}_", layout=layout)
+            out += stmts
         return out
 
     # ---- the sink ------------------------------------------------------------------------------ #
@@ -2968,20 +3111,23 @@ class _FlashOps(_MmaOps):
         frags = {self.c.base.results[bilinear]: self.frag(f"_c{i}_{j}")}
         rows = {state: _row_pair(self.frag(state), i) for index, state, _ in self._carried() if index != bilinear}
         tail = [stmt for stmt in self.epilogue if not isinstance(stmt, Write)]
-        if not (set(rows) & {name for stmt in tail for name in stmt.deps()}):
+        writes = [stmt for stmt in self.epilogue if isinstance(stmt, Write)]
+        if not (set(rows) & ({name for stmt in tail for name in stmt.deps()} | {write.value for write in writes})):
             return super().store(i, j, offset, mn)
         cell = {m.axis.name, n.axis.name}
         if any(isinstance(stmt, Load) and cell & {name for e in stmt.index for name in e.free_vars()} for stmt in tail):
             raise RuleSkipped("the chunk tier's projection reads a per-cell operand beside a per-row carrier state", reject=True)
-        stmts, frags, _rows = _residence(
-            tail,
-            frags=frags,
-            rows=rows,
-            tag=f"_ep{i}_{j}_",
-            layout=frag_layout(atom.fragment_layout),
-        )
+        layout = frag_layout(atom.fragment_layout)
+        stmts, frags, _rows = _residence(tail, frags=frags, rows=rows, tag=f"_ep{i}_{j}_", layout=layout)
         out = list(stmts)
-        for write in (stmt for stmt in self.epilogue if isinstance(stmt, Write)):
+        for write in writes:
+            if write.value in rows:
+                # A carried row state stored WHOLE — a split partial's workspace write. The pair
+                # broadcasts into a fragment so the store is the ordinary fragment store, one value
+                # per cell of the row it stands for.
+                name = f"_ep{i}_{j}_{write.value}"
+                out.append(FragmentApply(out=name, op=ElementwiseImpl("copy"), args=(rows[write.value],), kinds=(ROW,), layout=layout))
+                frags[write.value] = name
             out.append(
                 RegStore(
                     dst_buffer=write.output,

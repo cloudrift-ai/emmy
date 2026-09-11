@@ -16,7 +16,7 @@ from emmy.compiler.ir.tile.path import MissingSiteError, resolve, sites
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.fork import SCHEDULE_FORK_STAMPS, DeferredFork, fork_signature
 from emmy.compiler.pipeline.knob import family_of, family_pins
-from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams, output_map, realize
+from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams, full_projection_seams, output_map, realize
 from emmy.compiler.pipeline.passes.lowering.tile._split import split_forks
 from emmy.compiler.pipeline.search.pins import composed_cuts_for
 
@@ -188,6 +188,9 @@ def _placement_forks(match: Match, root: Node, tile: TileOp, ctx=None):
 
     options = [DeferredFork(lambda: replace(tile, placement_decided=True), {"PLACE": "fuse"})]
     options.extend(DeferredFork(lambda seam=seam: realize(match, root, (seam,)), {seam.spelling: "cut"}, structural=True) for seam in seams)
+    whole = full_projection_seams(tile, seams)
+    if whole:
+        options.append(DeferredFork(lambda: realize(match, root, whole), {seam.spelling: "cut" for seam in whole}, structural=True))
     options.extend(_composed_forks(match, root, tile, seams, ctx))
     return options
 
