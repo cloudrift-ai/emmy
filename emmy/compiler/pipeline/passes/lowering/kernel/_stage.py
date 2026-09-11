@@ -635,6 +635,13 @@ class Operand:
     # coordinates (the load's own batch/head index exprs — GQA's ``h // group`` rides through).
     # ``None`` = the 2-D ``shape`` (the matmul tier's plain operands).
     box: tuple[int, ...] | None = None
+    # An N-contiguous B a ``wgmma`` descriptor reads is stored ATOM-MAJOR: the N tile's 128-byte
+    # swizzle atoms stack along the slab rows (``shape = (atoms · bk, atom)``, atom ``a`` at rows
+    # ``a·bk``), so every atom is its own eight-row core groups — the descriptor's MN-major
+    # canonical layout — and the slab's own row is one swizzle row, the plain B128 both transports
+    # already spell. ``index`` / ``coords`` fold the atom into the row; the TMA fill deposits one
+    # ``(bk, atom)`` box per atom because a box cannot step its gmem column between row blocks.
+    atoms: int = 1
     # This operand's OWN element dtype / size, when it differs from the transport-level
     # ``slab_dtype`` / ``elem_bytes`` (a mixed-dtype scalar contraction — fp32 A × fp16 B, the
     # norm→linear split-combine shape). ``None`` inherits the transport's. Sizing the B fill with
@@ -656,6 +663,12 @@ class Operand:
     @property
     def desc(self) -> str:
         return f"_desc_{self.tag}"
+
+    @property
+    def box_extents(self) -> tuple[int, ...]:
+        """The TMA box: the explicit ``box``, else one atom block of the slab (the whole slot at
+        ``atoms == 1``)."""
+        return self.box or (self.shape[0] // self.atoms, self.shape[1])
 
     def slot_row(self, slot: Expr) -> Expr | None:
         """The ring-slot row offset into this operand's multi-slot slab (``None`` for slot 0)."""
@@ -1103,7 +1116,7 @@ class TmaTransport:
             tma_descriptor(
                 op.desc,
                 op.buf,
-                op.box or op.shape,
+                op.box_extents,
                 op.dtype or self.slab_dtype,
                 swizzle=op.swizzle,
                 elem_bytes=op.elem_bytes or self.elem_bytes,
@@ -1128,7 +1141,7 @@ class TmaTransport:
         coords = op.coords(k0)
         if op.swizzle == "NONE":
             return coords
-        inner = (op.box or op.shape)[-1]
+        inner = op.box_extents[-1]
         atom, _ = pick_swizzle_atom(inner, op.elem_bytes or self.elem_bytes)
         if atom >= inner:
             return coords
@@ -1143,16 +1156,21 @@ class TmaTransport:
     def fill(self, *, k0: Expr, slot: Expr, k0_cur: Expr | None = None) -> list[Stmt]:  # noqa: ARG002 — k0_cur is the sync transport's current-chunk handle
         body: list[Stmt] = [MbarrierArriveExpectTx(mbar=self.mbar, bytes_=self._total_bytes, slot=slot)]
         for op in self.operands:
-            body.append(
-                TmaLoad(
-                    smem=op.slab,
-                    smem_index=(op.slot_row(slot) or _lit(0), _lit(0)),
-                    desc=op.desc,
-                    coords=self._box_coords(op, k0),
-                    mbar=self.mbar,
-                    mbar_slot=slot,
+            # One box per slot, or one per atom of an atom-major slab: block ``a`` lands ``a`` box
+            # heights down the slot and reads ``a`` atom widths along the operand's contiguous dim.
+            coords, base, rows = self._box_coords(op, k0), op.slot_row(slot), op.box_extents[-2]
+            for a in range(op.atoms):
+                row = base if a == 0 else _lit(a * rows) if base is None else _add(base, _lit(a * rows))
+                body.append(
+                    TmaLoad(
+                        smem=op.slab,
+                        smem_index=(row or _lit(0), _lit(0)),
+                        desc=op.desc,
+                        coords=coords if a == 0 else (*coords[:-1], _add(coords[-1], _lit(a * op.shape[1]))),
+                        mbar=self.mbar,
+                        mbar_slot=slot,
+                    )
                 )
-            )
         return [Cond(cond=self._tid0, body=tuple(body))]
 
     def commit(self) -> list[Stmt]:
