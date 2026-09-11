@@ -279,8 +279,7 @@ def _rows(node, inputs, axes, ka, pins=None):
     )
     ctx = Context.from_target((8, 9))
     tile = _tile(K16, "f2x2/k2", "w1x4", axes)
-    from emmy.compiler.ir.schedule.classic import ClassicDomains
-    from emmy.compiler.ir.schedule.classic_projection import ClassicProblem, project_classic
+    from emmy.compiler.ir.schedule.classic import ClassicDomains, ClassicProblem, project_classic
 
     domains = project_classic(op, ctx)
     site = op.node_id(node)
@@ -814,8 +813,7 @@ def test_a_packed_byte_slab_refuses_a_producer_band_under_tma():
         output_specs=(OutputSpec(write=Write(output="y", index=(Var("m"), Var("n")), value="acc")),),
     )
     target = Context.from_target((9, 0))
-    from emmy.compiler.ir.schedule.classic import ClassicDomains
-    from emmy.compiler.ir.schedule.classic_projection import ClassicProblem, project_classic
+    from emmy.compiler.ir.schedule.classic import ClassicDomains, ClassicProblem, project_classic
 
     domains = project_classic(op, target)
     site = op.node_id(node)

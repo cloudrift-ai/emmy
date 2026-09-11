@@ -8,14 +8,15 @@ from emmy.compiler.graph import Tensor
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.schedule import Reduce, ScheduleContext, ScheduleRefused, Stage, Tile, Work, schedule
-from emmy.compiler.ir.schedule import classic_projection as classic
 from emmy.compiler.ir.schedule.catalog import coop_reduce_moves, scalar_tile_moves
 from emmy.compiler.ir.schedule.classic import (
+    ClassicProblem,
     ClassicScheduleCodec,
     ClassicScheduleContext,
     ReductionSchedule,
+    project_classic,
 )
-from emmy.compiler.ir.schedule.classic_projection import ClassicProblem, project_classic
+from emmy.compiler.ir.schedule.classic import refusals as classic
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.tile import Placement, TileOp
 from emmy.compiler.ir.tile.ops import carries_partition

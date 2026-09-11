@@ -18,14 +18,14 @@ matched here on the next sweep, and so is every unmapped ``TileOp`` a structural
 That is exactly why none of them needs a special case: each arrives as a kernel with no schedule,
 like any other, and this rule cannot tell them apart.
 
-An empty enumeration offers a root that expands to nothing, never a guessed schedule.
+An unpinned enumeration is one lazy root; only a pool SAMPLE can come back empty, and an empty enumeration
+remains a skip rather than a guessed schedule.
 """
 
 from __future__ import annotations
 
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.schedule.classic import ClassicScheduleCodec, ClassicScheduleContext
-from emmy.compiler.ir.schedule.classic_projection import ClassicProblem, materialize_classic
+from emmy.compiler.ir.schedule.classic import ClassicProblem, ClassicScheduleCodec, ClassicScheduleContext, materialize_classic
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.ops import carries_partition, merges_partition
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
@@ -104,7 +104,7 @@ def classic_forks(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
     )
 
 
-def rewrite(match: Match, root: Node, ctx=None) -> Fork:
+def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[Fork]:
     del match  # the scheduled op replaces the matched node in place — no graph surgery here
     tile: TileOp = root.op
     if tile.op is None or tile.place.is_mapped:
@@ -118,5 +118,7 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork:
     assert any(k.startswith(STRUCT_PREFIX) for k in tile.knobs), (
         f"{tile.name!r}: scheduling a kernel with no structural identity — the IdentityStrategy stamps at birth"
     )
-    (root,) = classic_forks(tile, tile.name, tile.knobs, ctx)
-    return root
+    options = classic_forks(tile, tile.name, tile.knobs, ctx)
+    if not options:
+        raise RuleSkipped("no enumerable schedule row for this term — leave it unmapped")
+    return options if len(options) > 1 else options[0]

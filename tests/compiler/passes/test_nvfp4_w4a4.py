@@ -443,7 +443,7 @@ def _pair_terms(tmp_path):
 
 def _pair_refusal(tile, ctx, con, pair):
     """Why static node facts rule out every tensor-core atom, asked with ``pair`` as the reading."""
-    from emmy.compiler.ir.schedule import classic_projection as sched
+    from emmy.compiler.ir.schedule.classic import refusals as sched
     from emmy.compiler.ir.tile.ops import projection_tail
 
     tail = projection_tail(tile)

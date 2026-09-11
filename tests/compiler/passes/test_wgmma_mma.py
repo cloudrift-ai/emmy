@@ -27,9 +27,9 @@ from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.ir.kernel.ir import Smem, TmaDescriptor, WgmmaDescriptor
 from emmy.compiler.ir.schedule import Stage, Tile, Work
-from emmy.compiler.ir.schedule import classic_projection as classic
-from emmy.compiler.ir.schedule.classic import ClassicScheduleContext, ReductionSchedule, _wgmma_refusal
-from emmy.compiler.ir.schedule.classic_projection import ClassicProblem, project_classic
+from emmy.compiler.ir.schedule.classic import ClassicProblem, ClassicScheduleContext, ReductionSchedule, project_classic
+from emmy.compiler.ir.schedule.classic import refusals as classic
+from emmy.compiler.ir.schedule.classic.refusals import _wgmma_refusal
 from emmy.compiler.ir.stmt import Load
 from emmy.compiler.ir.stmt.leaves import Assign
 from emmy.compiler.ir.tile import Placement, TileOp
