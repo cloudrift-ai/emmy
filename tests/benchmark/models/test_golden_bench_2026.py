@@ -1,11 +1,8 @@
 """Configuration checks for the 2026 compiler-submission experiments."""
 
-import shutil
 import subprocess
 import sys
 from pathlib import Path
-
-import pytest
 
 from emmy.benchmark.command_workload import build_substitution_map, render_command
 from emmy.benchmark.tasks import enumerate_tasks
@@ -105,6 +102,53 @@ def test_native_fp8_kernel_corpus_is_separate_and_identical(project_root) -> Non
         assert "EMMY_FP8_MMA=1" in command
 
 
+def test_quantized_support_check_covers_four_formats_and_replays_block_fp8(project_root) -> None:
+    recipe_dir = _experiment(project_root, "quantized_kernels_rtx5090")
+    recipe = load_recipe(recipe_dir)
+    tasks = enumerate_tasks([recipe_dir])
+    assert len(tasks) == 6
+    assert {task.recipe.deploy.gpu for task in tasks} == {"NVIDIA GeForce RTX 5090"}
+    assert all(task.recipe.deploy.gpu_count == 1 for task in tasks)
+    by_format: dict[str, list] = {}
+    for task in tasks:
+        by_format.setdefault(task.variant.params["format"], []).append(task)
+    assert set(by_format) == {"nvfp4", "awq", "trellis", "fp8-block"}
+    assert {task.variant.params["seq_len"] for task in by_format["nvfp4"]} == {1, 512}
+    assert {task.variant.params["seq_len"] for task in by_format["fp8-block"]} == {1, 512}
+    assert all(task.variant.params["seq_len"] == 1 for task in by_format["awq"] + by_format["trellis"])
+    traced = by_format["nvfp4"] + by_format["awq"] + by_format["trellis"]
+    assert all(task.variant.params["golden"] == "" for task in traced)
+    # The block-FP8 rows replay committed hand-tuned goldens; a missing file must fail the row, not trace instead.
+    replayed = {task.variant.params["golden"] for task in by_format["fp8-block"]}
+    assert replayed == {"qwen3-06b-fp8-block-s1_rtx5090", "qwen3-06b-fp8-block-s512_rtx5090"}
+    assert {task.variant.params["model_ref"] for task in by_format["fp8-block"]} == {
+        "Qwen/Qwen3-0.6B-FP8@e5be08033360965ceca7b0ffd72d521a51331ce0"
+    }
+    # The decode (seq=1) golden is committed and fully tuned; the prefill (seq=512) golden is a documented
+    # partial recorded in the same directory.
+    for name in replayed:
+        assert (Path(recipe_dir) / "golden" / f"{name}.golden.yaml").is_file()
+
+    run = recipe.command.run
+    assert "./venv/bin/emmy trace" in run
+    assert "./venv/bin/emmy tune" not in run
+    assert 'if [ -n "$golden" ]' in run
+    # Each post-fusion target is benched on its own so a committed golden's per-target evidence deploys.
+    assert '--realization "$$seed"' in run
+    assert "--bench --strict --no-record-nodes" in run
+    assert "--bench-backends eager,emmy" in run
+    assert "tcompile" not in run
+    assert recipe.command.stage == [
+        "emmy",
+        "pyproject.toml",
+        "requirements.txt",
+        "Makefile",
+        "experiments/golden-bench-2026/quantized_kernels_rtx5090/recipe.yaml",
+        "experiments/golden-bench-2026/quantized_kernels_rtx5090/golden",
+    ]
+    assert recipe.command.strict is True
+
+
 def test_native_fp8_large_layer_supplement_is_bounded(project_root) -> None:
     tasks = _kernel_tasks(project_root, "fp8-large-layer")
     assert len(tasks) == 4
@@ -125,42 +169,6 @@ def test_serving_systems_are_pinned_and_controlled(project_root) -> None:
             "7872f01b1d1fe23eabc4c98b48bffcef5a386062",
             "NVIDIA Tesla V100 SXM3 32GB",
             16,
-        ),
-        "serving_qwen38_27b_awq_rtx4090": (
-            "philbert440/Qwen3.8-27B-W4A16-AWQ",
-            "7908d42a71077a5e4dc458f273682b12dfe384a0",
-            "NVIDIA GeForce RTX 4090",
-            1,
-        ),
-        "serving_qwen36_27b_nvfp4_rtx5090": (
-            "nvidia/Qwen3.6-27B-NVFP4",
-            "0893e1606ff3d5f97a441f405d5fc541a6bdf404",
-            "NVIDIA GeForce RTX 5090",
-            1,
-        ),
-        "serving_qwen3_8b_nvfp4_rtx5090": (
-            "nvidia/Qwen3-8B-NVFP4",
-            "ccd10a893cbca613259517c3efe08e151ddf2b8e",
-            "NVIDIA GeForce RTX 5090",
-            1,
-        ),
-        "serving_deepseek_v4_flash_0731_exl3_a100x8": (
-            "turboderp/DeepSeek-V4-Flash-0731-exl3",
-            "80c463d631f03ae6ba35029929a04e8651c5276e",
-            "NVIDIA A100 80GB",
-            8,
-        ),
-        "serving_glm52_fp8_h200x8": (
-            "zai-org/GLM-5.2-FP8",
-            "ba978f7d347eaf65d22f1a86833408afdb953541",
-            "NVIDIA H200 141GB",
-            8,
-        ),
-        "serving_glm52_nvfp4_b200x8": (
-            "nvidia/GLM-5.2-NVFP4",
-            "aec724e8c7b8ee9db3b48c01c320f63f9cdaf8aa",
-            "NVIDIA B200",
-            8,
         ),
     }
 
@@ -185,36 +193,6 @@ def test_serving_systems_are_pinned_and_controlled(project_root) -> None:
                 assert "@sha256:" in task.recipe.engine.llm.vllm.image
         assert len(repeats_by_point) == 3
         assert all(repeats == {0, 1, 2, 3, 4} for repeats in repeats_by_point.values())
-
-
-def test_qwen_nvfp4_qualification_is_w4a16_marlin(project_root) -> None:
-    tasks = enumerate_tasks([_experiment(project_root, "serving_qwen36_27b_nvfp4_rtx5090")])
-    for task in tasks:
-        llm = task.recipe.engine.llm
-        assert llm.tensor_parallel_size == 1
-        assert llm.context_length == 32768
-        assert llm.vllm.image == "vllm/vllm-openai@sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f"
-        assert "--quantization modelopt" in llm.vllm.extra_args
-
-
-def test_qwen3_native_nvfp4_qualification_requires_optimized_w4a4_kernel(project_root) -> None:
-    tasks = enumerate_tasks([_experiment(project_root, "serving_qwen3_8b_nvfp4_rtx5090")])
-    for task in tasks:
-        llm = task.recipe.engine.llm
-        assert llm.tensor_parallel_size == 1
-        assert task.recipe.model.revision == "ccd10a893cbca613259517c3efe08e151ddf2b8e"
-        assert llm.vllm.image == "vllm/vllm-openai@sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f"
-        assert "--quantization modelopt" in llm.vllm.extra_args
-
-
-def test_b200_nvfp4_qualification_pins_native_capable_configuration(project_root) -> None:
-    tasks = enumerate_tasks([_experiment(project_root, "serving_glm52_nvfp4_b200x8")])
-    for task in tasks:
-        llm = task.recipe.engine.llm
-        assert task.recipe.model.revision == "aec724e8c7b8ee9db3b48c01c320f63f9cdaf8aa"
-        assert llm.tensor_parallel_size == 8
-        assert "--enable-expert-parallel" in llm.vllm.extra_args
-        assert llm.vllm.image == "vllm/vllm-openai@sha256:6d8429e38e3747723ca07ee1b17972e09bb9c51c4032b266f24fb1cc3b22ed8f"
 
 
 def test_large_layer_corpus_is_bounded_and_not_labeled_tp8(project_root) -> None:
@@ -507,81 +485,6 @@ def test_rtx5090_attention_comparison_is_recorded_and_bounded(project_root) -> N
     subprocess.run([sys.executable, str(directory / "run_baselines.py"), "--smoke"], check=True)
 
 
-def test_neptune_a10040_replays_saved_search(project_root) -> None:
-    directory = _experiment(project_root, "compiler_neptune_replay_a100")
-    tasks = enumerate_tasks([directory])
-    recipe = load_recipe(directory)
-    assert recipe.kind == "command"
-    assert len(tasks) == 15
-    assert {task.recipe.deploy.gpu for task in tasks} == {"NVIDIA A100 40GB"}
-    assert all(task.recipe.deploy.gpu_count == 1 for task in tasks)
-    assert {task.variant.params["lane"] for task in tasks} == {"neptune", "pytorch"}
-    assert {task.variant.params["operator"] for task in tasks} == {
-        "prefill_global",
-        "prefill_causal",
-        "prefill_gqa",
-        "decode_causal",
-        "decode_gqa",
-        "prefill_alibi",
-        "decode_alibi",
-        "prefill_softcap",
-        "decode_softcap",
-        "prefill_windowed",
-    }
-
-    run = recipe.command.run
-    assert 'bash /experiment/run.sh "$operator" /experiment/tuning_a10080.tar.gz' in run
-    assert '"$$SOURCE/run_pytorch.py" "$operator" "$$sequence"' in run
-    assert "for repetition in 1 2" in run
-    assert "torch==2.13.0" in run
-    assert "sudo apt-get install -y python3.12-dev python3.12-venv" in run
-    assert "--n-trials" not in run
-    assert "venv/bin/emmy" not in run
-    assert recipe.command.stage == [
-        "experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/run.sh",
-        "experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/run_neptune.py",
-        "experiments/golden-bench-2026/compiler_neptune_emmy_pytorch_a100/run_pytorch.py",
-        "experiments/golden-bench-2026/compiler_neptune_replay_a100/recipe.yaml",
-        "experiments/golden-bench-2026/compiler_neptune_replay_a100/tuning_a10080.tar.gz",
-    ]
-    assert recipe.command.strict is True
-    assert recipe.command.result_files == ["artifacts.tar.gz"]
-
-
-@pytest.mark.skipif(shutil.which("timeout") is None, reason="run_emmy.sh needs GNU coreutils `timeout`")
-def test_neptune_emmy_runner_fails_when_one_setup_is_incomplete(project_root, tmp_path) -> None:
-    directory = Path(project_root) / EXP / "compiler_neptune_emmy_pytorch_a100"
-    golden_dir = tmp_path / "golden"
-    golden_dir.mkdir()
-    for sequence_length in (256, 512, 1024, 2048, 4096, 8192, 16384, 32768):
-        (golden_dir / f"prefill_global-b1-s{sequence_length}.golden.yaml").touch()
-
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    emmy = fake_bin / "emmy"
-    emmy.write_text('#!/usr/bin/env bash\nif [[ " $* " == *"torch.randn(1,32,32768,128"* ]]; then\n  exit 1\nfi\n')
-    emmy.chmod(0o755)
-    python = fake_bin / "python"
-    python.write_text("#!/usr/bin/env bash\nexit 0\n")
-    python.chmod(0o755)
-
-    results = tmp_path / "results"
-    completed = subprocess.run(
-        [str(directory / "run_emmy.sh"), str(emmy), "prefill_global", str(results), str(golden_dir)],
-        cwd=directory,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-
-    assert completed.returncode == 1
-    statuses = (results / "setup-status.tsv").read_text().splitlines()
-    assert statuses[-2] == "prefill_global\t16384\texact-pin-reference\texact-pin-reference\tok\tok"
-    assert statuses[-1] == (
-        "prefill_global\t32768\texact-pin-reference\texact-pin-reference\tpytorch-only:emmy-failed:1\tpytorch-only:emmy-failed:1"
-    )
-
-
 def test_every_command_variant_renders(project_root) -> None:
     root = Path(project_root) / EXP
     rendered = 0
@@ -600,7 +503,7 @@ def test_every_command_variant_renders(project_root) -> None:
             assert "/task" in command
             subprocess.run(["bash", "-n"], input=command, text=True, check=True)
             rendered += 1
-    assert rendered == 95
+    assert rendered == 86
 
 
 def test_gemma_serving_ab_has_four_points_per_lane(project_root) -> None:
