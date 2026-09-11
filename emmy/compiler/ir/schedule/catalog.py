@@ -89,6 +89,16 @@ def warp_tile_moves(atom_names: tuple[str, ...]) -> list[Tile]:
     return moves
 
 
+def warp_tile_in_catalog(plan: Tile) -> bool:
+    """Whether a parsed warp plan is a point of the warp tile domain — the same grid and budgets
+    :func:`warp_tile_moves` enumerates, asked of one value instead of walked."""
+    point = {"wm": plan.units[0], "wn": plan.units[1], "fm": plan.regs[0], "fn": plan.regs[1], "bk": plan.bk}
+    return (
+        _WARP_TILE_SPACE.contains(point)
+        and plan.regs[0] * plan.regs[1] * plan.atom.accumulator_registers_per_lane <= MAX_FRAGMENT_REGISTERS
+    )
+
+
 #: The staging pipeline's parametrizations. ``transport`` is how gmem bytes reach the slab,
 #: ``depth`` how many chunks that hop keeps in flight, ``reg_depth`` the smem→register
 #: double-buffer beneath it. Independent knobs over one pipeline, so the domain is their PRODUCT.
@@ -154,5 +164,6 @@ __all__ = [
     "scalar_tile_moves",
     "splitk_moves",
     "stage_moves",
+    "warp_tile_in_catalog",
     "warp_tile_moves",
 ]

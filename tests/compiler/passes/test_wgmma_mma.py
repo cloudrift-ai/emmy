@@ -29,7 +29,7 @@ from emmy.compiler.ir.kernel.ir import Smem, TmaDescriptor, WgmmaDescriptor
 from emmy.compiler.ir.schedule import Stage, Tile, Work
 from emmy.compiler.ir.schedule import classic_projection as classic
 from emmy.compiler.ir.schedule.classic import ClassicScheduleContext, ReductionSchedule, _wgmma_refusal
-from emmy.compiler.ir.schedule.classic_projection import project_classic
+from emmy.compiler.ir.schedule.classic_projection import ClassicProblem, project_classic
 from emmy.compiler.ir.stmt import Load
 from emmy.compiler.ir.stmt.leaves import Assign
 from emmy.compiler.ir.tile import Placement, TileOp
@@ -144,7 +144,7 @@ def test_domain_offers_only_group_aligned_wgmma_rows_and_stages_them(monkeypatch
     assert {(2, 4), (4, 1), (8, 1)} <= {plan.units for plan in rows if not plan.atom.is_wgmma}
     assert any(plan.bk == 8 for plan in rows if not plan.atom.is_wgmma)
 
-    context = ClassicScheduleContext(tile, target, domains).restrict({}, allow_f16_accumulate=False, allow_fp8=False)
+    context = ClassicScheduleContext(tile, target, ClassicProblem(tile, target, allow_f16_accumulate=False, allow_fp8=False))
     picks = tuple(context.extensions())
     staged = {pick.nodes[site].tile.atom.name for pick in picks if all(not choice.stage.is_direct for choice in pick.edges.values())}
     direct = {pick.nodes[site].tile.atom.name for pick in picks if any(choice.stage.is_direct for choice in pick.edges.values())}
@@ -165,9 +165,9 @@ def test_domain_offers_only_group_aligned_wgmma_rows_and_stages_them(monkeypatch
 def test_pinned_wgmma_row_refuses_with_its_rule(monkeypatch, pins, message) -> None:
     """A pin the catalog never offered is refused with the rule's message, not as an unsupported
     pin; a wgmma TILE with no WORK pin still meets the rules that do not read the grid."""
-    tile, target, domains = _domains(monkeypatch)
+    tile, target, _ = _domains(monkeypatch)
     with pytest.raises(ValueError, match=message):
-        ClassicScheduleContext(tile, target, domains).restrict({family: ((family, value),) for family, value in pins.items()})
+        _ = ClassicProblem(tile, target, row=pins).domains
 
 
 def _graph(m: int, n: int, k: int) -> Graph:

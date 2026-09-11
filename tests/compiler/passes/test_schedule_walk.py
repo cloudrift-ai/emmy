@@ -9,6 +9,7 @@ split choices remain separate from classic schedule choices.
 
 from __future__ import annotations
 
+import functools
 import importlib
 from dataclasses import replace as dc_replace
 from types import SimpleNamespace
@@ -135,18 +136,20 @@ def test_the_prescan_asks_each_catalog_question_once(case, unpinned, monkeypatch
     leaf, so a reintroduced per-branch re-ask shows up here as a repeated question, not as a slow
     test somebody eventually notices."""
     asked: list[tuple] = []
-    original = _classic._options
+    original = _classic.ClassicNodeSite.nodes.func
 
-    def spy(state, node):
-        asked.append((state.tile, node))  # strong refs, so ids below cannot alias freed objects
-        return original(state, node)
+    def spy(site):
+        asked.append((site.problem.tile, site.node))  # strong refs, so ids below cannot alias freed objects
+        return original(site)
 
-    monkeypatch.setattr(_classic, "_options", spy)
+    spied = functools.cached_property(spy)
+    spied.__set_name__(_classic.ClassicNodeSite, "nodes")
+    monkeypatch.setattr(_classic.ClassicNodeSite, "nodes", spied)
     assert _rows(FIXTURES[case]())
     assert asked, "the fixture built no catalog at all"
     keys = [(id(tile), id(node)) for tile, node in asked]
     repeats = len(keys) - len(set(keys))
-    assert not repeats, f"_options was asked the same question {repeats} time(s) over ({len(keys)} calls)"
+    assert not repeats, f"a site was asked its options {repeats} time(s) over ({len(keys)} calls)"
 
 
 def test_the_prescan_reads_each_computed_a_seam_once(unpinned, monkeypatch) -> None:

@@ -41,7 +41,7 @@ as it is for the curated grids.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 
 
@@ -122,6 +122,20 @@ class Space:
             unknown = sorted({d for d in b.dims if d not in set(names)})
             if unknown:
                 raise ValueError(f"bound {b.spell()} names undeclared dimension(s) {unknown}")
+
+    def contains(self, point: Mapping[str, int]) -> bool:
+        """Whether ``point`` is one of the legal points: every dimension at a declared value and
+        every bound satisfied — the membership question a parsed value asks of the space that
+        :meth:`__iter__` walks."""
+        if set(point) != {dim.name for dim in self.dims} or any(point[dim.name] not in dim.values for dim in self.dims):
+            return False
+        for bound in self.bounds:
+            product = bound.coeff
+            for name in bound.dims:
+                product *= point[name]
+            if not bound.holds(product):
+                return False
+        return True
 
     def __iter__(self) -> Iterator[dict[str, int]]:
         # Per bound: how many times each dimension occurs in it.

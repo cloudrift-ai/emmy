@@ -154,19 +154,12 @@ def _load_prior_safe():
 
 
 def _find_decided_leaf(options: list, want: dict) -> object | None:
-    """The leaf carrying exactly the memoized row ``want`` — replayed by DESCENDING the lazy fork
-    tree: a branch expands only when every knob it pins matches the row, so the walk instantiates
-    O(path × siblings) Forks, never the flat leaf set. ``None`` when no leaf matches — emission
-    drift between two offers of one key — and the caller re-decides."""
-    for o in options:
-        if isinstance(o, Fork) and not o.is_leaf:
-            if o.admits(want):
-                found = _find_decided_leaf(o.expand(), want)
-                if found is not None:
-                    return found
-        elif leaf_knobs(o) == want:
-            return o
-    return None
+    """The leaf carrying exactly the memoized row ``want`` — the row-directed descent
+    (:func:`~emmy.compiler.pipeline.fork.leaf_for`: the schedule root re-sourced to the row, so
+    the walk is one path), held to an exact match at the leaf. ``None`` when no leaf matches —
+    emission drift between two offers of one key — and the caller re-decides."""
+    hit = leaf_for(options, want)
+    return hit[0] if hit is not None and hit[1] == want else None
 
 
 def _leaf_op(leaf: object):
