@@ -383,6 +383,14 @@ types an edge's results; a name whose statement kind carries no dtype keeps the 
 mask — returns as f32, and the bit operations reading it have no f32 spelling at all, so the kernel fails to render
 rather than computing something wrong.
 
+**A statistic over a K group is bridged per chunk.** A reduce edge that varies with K only through one block guard
+— the maximum a grouped activation scale takes over each 128-wide K group — is neither row-invariant nor worth a
+per-cell evaluation, which would re-read the whole group for every slab cell. The seam splits it off as its `chunk`
+part: its rows are declared once with the prologue's, and the A operand's fill (`SyncOperand.before`) refills them at
+the head of every chunk from the chunk's base K, one warp per row, before the cells read them back. That is the
+group's value only when the chunk sits inside one group, so `resolve_fill_stage` refuses a chunk that does not tile
+the block.
+
 **Staged fp8 (1-byte) operand slabs.** A storage-dtype (fp8) operand stages as a RAW BYTE slab — each `Operand`
 sized at its OWN element width (the mixed-dtype seam the scalar tier already had), the cp.async fill running 16 B
 16-element chunks. ldmatrix is b16-only below sm_100a, so the drain is a **cooperative byte gather** instead
@@ -422,6 +430,14 @@ carries the bf16 form. Legality (`resolve_warp_stage`'s packed arm) scopes the s
 written for — a copy transport, an N-major weight of 16-value blocks under an f16 or bf16 atom whose K step is that
 same 16, an A already at the atom's dtype, and the byte row's 16-divisibility for the same chunking reason the fp8
 slab has. Everything outside the scope declines and keeps the general reading.
+
+**Block-scaled fp8 weights ride the same three slabs.** The reading also takes a single fp8 byte per element: a stored fp8 load
+whose own decode cast feeds the multiply by a block-guarded factor (`PackedKBlockB.per_byte == 1`). The bits slab is
+then the full K width in bytes, and the scale slab holds f32 — the dtype the fill multiplies the decoded value in
+before its round to the fragment — with one column per block the chunk spans; a 128-wide block holds whole atom
+steps and tiles every legal chunk or is tiled by it, so each drain step reads one scale. Its loader
+(`emmy_mma_load_b_smem_trans_f8s_<dtype>`) converts a lane's `(k, k+1)` byte pair with one hardware cvt, multiplies
+both by the f32 scale and rounds once — the compute fill's arithmetic, so the two are bit-identical.
 
 Both copy transports carry it, differing in one thing: a cp.async fill pads the byte rows (`BYTE_SLAB_PAD`, for the
 drain's bank spread) while a TMA box deposits DENSE, so its slab is unpadded and its drain reads the narrower row

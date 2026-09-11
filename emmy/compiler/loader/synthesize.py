@@ -25,19 +25,28 @@ from pathlib import Path
 
 import numpy as np
 
+from emmy.compiler.dtype import F8E4M3, encode_f8
 from emmy.compiler.graph import Graph
 from emmy.compiler.ir.base import ConstantOp
 from emmy.compiler.loader.quant import _E4M3_MAX, _F4_MAX, NVFP4_BLOCK, quantize_nvfp4
 
 logger = logging.getLogger(__name__)
 
-#: The scheme names ``--quantize`` accepts. The two differ ONLY in what the config declares about
-#: activations, which is the whole difference between the two deployable NVFP4 programs: with a
-#: static 4-bit declaration the activation speller marks each linear and the native block-scaled
-#: cell becomes reachable (W4A4); without it the weights stay packed against 16-bit activations and
-#: the packed byte-slab drain is the path (W4A16). Same weights, same checkpoint layout, so the two
-#: are directly comparable on one shape. The fp8 spellers would slot in beside them.
-SCHEMES = ("nvfp4", "nvfp4-w4a16")
+#: The scheme names ``--quantize`` accepts. The two NVFP4 ones differ ONLY in what the config
+#: declares about activations, which is the whole difference between the two deployable NVFP4
+#: programs: with a static 4-bit declaration the activation speller marks each linear and the native
+#: block-scaled cell becomes reachable (W4A4); without it the weights stay packed against 16-bit
+#: activations and the packed byte-slab drain is the path (W4A16). Same weights, same checkpoint
+#: layout, so the two are directly comparable on one shape. ``fp8-block`` is the official FP8 form
+#: (Qwen, DeepSeek and GLM releases): e4m3 weights under one f32 scale per 128x128 block, with
+#: per-token dynamic e4m3 activations.
+SCHEMES = ("nvfp4", "nvfp4-w4a16", "fp8-block")
+
+#: The weight block one ``fp8-block`` scale covers, on both axes.
+FP8_BLOCK = 128
+
+#: The official FP8 declaration, the shape Qwen/Qwen3-0.6B-FP8 ships.
+_FP8_BLOCK_CONFIG = {"quant_method": "fp8", "activation_scheme": "dynamic", "fmt": "e4m3", "weight_block_size": [FP8_BLOCK, FP8_BLOCK]}
 
 #: modelopt's NVFP4 declaration, the shape ``_fp4_quant_config`` and the static activation reader
 #: both recognize — the same one nvidia/Qwen3-8B-NVFP4 ships.
@@ -83,6 +92,17 @@ def _linear_weights(graph: Graph) -> list[tuple[str, str]]:
     return out
 
 
+def _quantize_fp8_block(w: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """``(e4m3 bits, f32 scales)`` for one ``[N, K]`` weight: each 128x128 block's scale is its
+    amax over the e4m3 maximum, floored like the dynamic activation scale, and the stored scale is
+    the dequant multiplier (what the checkpoint names ``weight_scale_inv``)."""
+    n, k = w.shape
+    blocks = w.reshape(n // FP8_BLOCK, FP8_BLOCK, k // FP8_BLOCK, FP8_BLOCK)
+    scale = (np.maximum(np.abs(blocks).max(axis=(1, 3)), 1e-12) / _E4M3_MAX).astype(np.float32)
+    bits = encode_f8(blocks / scale[:, None, :, None], F8E4M3.name)
+    return bits.reshape(n, k), scale
+
+
 def _activation_amax(module, args, kwargs, paths: set[str]) -> dict[str, float]:
     """Each named submodule's input amax over the trace's ONE example input.
 
@@ -117,8 +137,8 @@ def write_quantized_checkpoint(graph: Graph, bundle, out_dir: str | Path, *, sch
     ``l<i>.weight`` in it, so the caller runs the ordinary spellers over that directory and gets
     exactly the program a real checkpoint of the same shape would give.
 
-    Declines nothing quietly: a linear whose weight is not a pristine trace constant, or whose K
-    is not a multiple of the 16-element block, is left unquantized and logged.
+    Declines nothing quietly: a linear whose weight is not a pristine trace constant, or whose
+    shape the scheme's block cannot tile, is left unquantized and logged.
     """
     if scheme not in SCHEMES:
         raise ValueError(f"unknown quantization scheme {scheme!r} (have {', '.join(SCHEMES)})")
@@ -144,17 +164,23 @@ def write_quantized_checkpoint(graph: Graph, bundle, out_dir: str | Path, *, sch
             logger.warning("--quantize: no state_dict entry %r; leaving that linear unquantized", key)
             continue
         w = value.detach().to(torch.float32).numpy()
-        if w.ndim != 2 or w.shape[-1] % NVFP4_BLOCK:
-            logger.warning("--quantize: %s has shape %s, which the 16-element block cannot carry", key, w.shape)
+        blocks = (FP8_BLOCK, FP8_BLOCK) if scheme == "fp8-block" else (1, NVFP4_BLOCK)
+        if w.ndim != 2 or any(d % b for d, b in zip(w.shape, blocks, strict=True)):
+            logger.warning("--quantize: %s has shape %s, which the %s block cannot carry", key, w.shape, "x".join(map(str, blocks)))
             continue
-        packed, scale_bits, scale_2 = quantize_nvfp4(w)
         name = f"l{i}"
-        tensors[f"{name}.weight"] = torch.from_numpy(packed)
-        tensors[f"{name}.weight_scale"] = torch.from_numpy(np.ascontiguousarray(scale_bits)).view(torch.float8_e4m3fn)
-        tensors[f"{name}.weight_scale_2"] = torch.from_numpy(scale_2)
-        # The activation's calibrated level, in modelopt's units. A zero-amax input would divide
-        # the block quantize by zero, so it floors the same way the weight side's amax does.
-        tensors[f"{name}.input_scale"] = torch.tensor(max(amax.get(path, 0.0), 1e-12) / (_F4_MAX * _E4M3_MAX), dtype=torch.float32)
+        if scheme == "fp8-block":
+            bits, scale = _quantize_fp8_block(w)
+            tensors[f"{name}.weight"] = torch.from_numpy(bits).view(torch.float8_e4m3fn)
+            tensors[f"{name}.weight_scale_inv"] = torch.from_numpy(scale)
+        else:
+            packed, scale_bits, scale_2 = quantize_nvfp4(w)
+            tensors[f"{name}.weight"] = torch.from_numpy(packed)
+            tensors[f"{name}.weight_scale"] = torch.from_numpy(np.ascontiguousarray(scale_bits)).view(torch.float8_e4m3fn)
+            tensors[f"{name}.weight_scale_2"] = torch.from_numpy(scale_2)
+            # The activation's calibrated level, in modelopt's units. A zero-amax input would divide
+            # the block quantize by zero, so it floors the same way the weight side's amax does.
+            tensors[f"{name}.input_scale"] = torch.tensor(max(amax.get(path, 0.0), 1e-12) / (_F4_MAX * _E4M3_MAX), dtype=torch.float32)
         graph.nodes[graph.producer(buf).id].op = ConstantOp(
             name=graph.producer(buf).op.name,
             source_path=f"{name}.weight",
@@ -165,24 +191,30 @@ def write_quantized_checkpoint(graph: Graph, bundle, out_dir: str | Path, *, sch
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     save_file(tensors, str(out / "model.safetensors"))
-    config = _NVFP4_CONFIG if scheme == "nvfp4" else _NVFP4_W4A16_CONFIG
+    config = {"nvfp4": _NVFP4_CONFIG, "nvfp4-w4a16": _NVFP4_W4A16_CONFIG, "fp8-block": _FP8_BLOCK_CONFIG}[scheme]
     (out / "config.json").write_text(json.dumps({"model_type": "synthetic", "quantization_config": config}, indent=1))
-    logger.info("wrote a %s checkpoint for %d linear(s): %s", scheme, len(tensors) // 4, out)
+    logger.info("wrote a %s checkpoint for %d linear(s): %s", scheme, len({k.split(".")[0] for k in tensors}), out)
     return out
 
 
 def quantize_and_spell(graph: Graph, bundle, out_dir: str | Path, *, scheme: str = "nvfp4") -> tuple[Path, int, int]:
     """Write the checkpoint for ``graph``'s linear weights and spell the graph against it —
-    returning ``(checkpoint path, weights spelled, linears marked for 4-bit activations)``.
+    returning ``(checkpoint path, weights spelled, linears marked for quantized activations)``.
 
     The pairing is the whole point of the module: writing a checkpoint and then reading it back
     through the ORDINARY spellers is what keeps one producer of quantized graphs. Callers that did
     the two halves themselves would be free to drift from `emmy compile --quantize`, which is the
-    drift this module exists to prevent."""
-    from emmy.compiler.loader.quant import spell_quantized_constants, spell_static_fp4_activations  # noqa: PLC0415
+    drift this module exists to prevent. Each activation speller is a no-op on the other scheme's
+    checkpoint."""
+    from emmy.compiler.loader.quant import (  # noqa: PLC0415
+        spell_dynamic_fp8_activations,
+        spell_quantized_constants,
+        spell_static_fp4_activations,
+    )
 
     ckpt = write_quantized_checkpoint(graph, bundle, out_dir, scheme=scheme)
-    return ckpt, spell_quantized_constants(graph, str(ckpt)), spell_static_fp4_activations(graph, str(ckpt))
+    spelled = spell_quantized_constants(graph, str(ckpt))
+    return ckpt, spelled, spell_dynamic_fp8_activations(graph, str(ckpt)) + spell_static_fp4_activations(graph, str(ckpt))
 
 
 def summarize(out: Path) -> str:
@@ -190,13 +222,16 @@ def summarize(out: Path) -> str:
     from safetensors import safe_open  # noqa: PLC0415
 
     with safe_open(str(out / "model.safetensors"), framework="numpy") as f:
-        names = sorted({k.split(".")[0] for k in f.keys()})  # noqa: SIM118 — safetensors handle, not a dict
+        keys = set(f.keys())
         rows = []
-        for n in names:
-            packed = f.get_slice(f"{n}.weight").get_shape()
+        for n in sorted({k.split(".")[0] for k in keys}):
+            weight = tuple(f.get_slice(f"{n}.weight").get_shape())
+            if f"{n}.weight_scale_inv" in keys:
+                rows.append(f"  {n}: e4m3 {weight}  block scales {tuple(f.get_slice(f'{n}.weight_scale_inv').get_shape())}")
+                continue
             s2 = float(np.asarray(f.get_tensor(f"{n}.weight_scale_2"), dtype=np.float32).reshape(-1)[0])
             i_s = float(np.asarray(f.get_tensor(f"{n}.input_scale"), dtype=np.float32).reshape(-1)[0])
-            rows.append(f"  {n}: packed {tuple(packed)}  weight_scale_2 {s2:.6g}  input_scale {i_s:.6g}")
+            rows.append(f"  {n}: packed {weight}  weight_scale_2 {s2:.6g}  input_scale {i_s:.6g}")
     return "\n".join(rows)
 
 

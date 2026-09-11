@@ -1767,7 +1767,7 @@ class LdmatrixLoad(Stmt):
             pair = f"({self.frag}, {self.pair_frag})"
             return [f"{indent}LdmatrixLoad {pair} <- {self.src_buffer}[{idx}] ({variant}, ldm={self.ldm or 'auto'})"]
         if self.scale_buffer is not None:
-            variant = f"pair decode x {self.scale_buffer}"
+            variant = f"byte decode x {self.scale_buffer}"
         elif self.byte_slab:
             variant = "byte gather"
         elif self.fragment_layout == "m8n8k4" and self.staged:
@@ -1915,14 +1915,19 @@ class LdmatrixLoad(Stmt):
             slab_dt = ctx.buffer_dtypes.get(self.src_buffer, "f8e4m3")
             frag_dt = frag_dtype(ctx, self.frag) or "f16"
             if self.scale_buffer is not None:
+                scale_flat = render_index(self.scale_buffer, self.scale_index, ctx)
+                args = f"&{self.src_buffer}[{flat}], {ldm}, &{self.scale_buffer}[{scale_flat}], {self.scale_ldm}"
+                if slab_dt in ("f8e4m3", "f8e5m2"):
+                    # Block-scaled fp8 B: each byte pair converts to two exact 16-bit values, both
+                    # multiply the k block's f32 scale, and the product rounds once to the fragment.
+                    x2 = {"f8e4m3": "__nv_fp8x2_e4m3", "f8e5m2": "__nv_fp8x2_e5m2"}[slab_dt]
+                    call = f"emmy_mma_load_b_smem_trans_f8s_{frag_dt}<{ctx.type_name(slab_dt)}, {x2}>"
+                    return [f"{_pad(ctx.indent)}{call}({self.frag}, {args});"]
                 # Packed-pair (NVFP4) B: each byte decodes to two values through the e2m1 value
                 # table and both take the k block's scale, read from the companion slab. The scale
                 # slab carries the fragment's own dtype, so it names which drain form to call.
                 scale_dt = ctx.buffer_dtypes.get(self.scale_buffer, "f16")
-                scale_flat = render_index(self.scale_buffer, self.scale_index, ctx)
-                call = f"emmy_mma_load_b_smem_trans_f4s_{scale_dt}"
-                args = f"&{self.src_buffer}[{flat}], {ldm}, &{self.scale_buffer}[{scale_flat}], {self.scale_ldm}"
-                return [f"{_pad(ctx.indent)}{call}({self.frag}, {args});"]
+                return [f"{_pad(ctx.indent)}emmy_mma_load_b_smem_trans_f4s_{scale_dt}({self.frag}, {args});"]
             k_contig = self.role == "a" or self.b_trans  # each lane's K run is slab-contiguous
             if frag_dt in ("f8e4m3", "f8e5m2", "f4e2m1x2"):
                 # Raw-byte repack, no per-element convert: the mma consumes storage bits. The k64

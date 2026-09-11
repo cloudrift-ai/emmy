@@ -43,7 +43,7 @@ def _cone():
 
 
 def test_the_seam_lowers_a_twice_read_fold_once() -> None:
-    _, cell, _ = cone_seam(_cone(), "k", axes=(S,))
+    _, cell, _, _ = cone_seam(_cone(), "k", axes=(S,))
     loops = [stmt for stmt in cell if isinstance(stmt, Loop)]
     assert len(loops) == 1
     defined = [name for stmt in cell for name in stmt.defines()]

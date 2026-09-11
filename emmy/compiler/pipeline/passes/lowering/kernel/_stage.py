@@ -416,6 +416,12 @@ def sync_row_fill(*, slab: str, src: str, extent: int, grid_vars: tuple, linear_
     return [Smem(name=slab, extents=(extent,), dtype=dtype), loop, Sync()]
 
 
+def stat_rows(stats: tuple[str, ...], slab_of, row_axis: Axis, dtype: str = "float", dtypes: dict[str, str] | None = None) -> list[Stmt]:
+    """One length-``rows`` smem row per bridged statistic, each at its own C type."""
+    per = dtypes or {}
+    return [Smem(name=slab_of(nm), extents=(row_axis.extent.as_static(),), dtype=per.get(nm, dtype)) for nm in stats]
+
+
 def sync_stat_fill(
     *,
     stats: tuple[str, ...],
@@ -426,6 +432,7 @@ def sync_stat_fill(
     stat=None,
     dtype: str = "float",
     dtypes: dict[str, str] | None = None,
+    declare: bool = True,
 ) -> list[Stmt]:
     """The ``smem`` compute fill's per-row STATISTIC prologue — the fused norm→linear warp edge's
     cooperative prologue, run ONCE before the staged K-loop: the CTA stripes the tile's rows **one
@@ -440,9 +447,11 @@ def sync_stat_fill(
     A row is declared at its OWN bridged value's C type (``dtypes``, name → C type; ``dtype`` for
     anything absent). The declaration is where a bridged value's dtype is stated — ``Smem.render``
     registers it and the cell's read picks it up — so a row declared float would put the cell's
-    arithmetic in f32 whatever crossed it, and the bit operations have no f32 spelling."""
-    per = dtypes or {}
-    decls: list[Stmt] = [Smem(name=slab_of(nm), extents=(row_axis.extent.as_static(),), dtype=per.get(nm, dtype)) for nm in stats]
+    arithmetic in f32 whatever crossed it, and the bit operations have no f32 spelling.
+
+    ``declare=False`` leaves the rows' declarations out — a per-chunk statistic refills rows the
+    kernel declared once, ahead of its K loop (:func:`stat_rows`)."""
+    decls: list[Stmt] = stat_rows(stats, slab_of, row_axis, dtype, dtypes) if declare else []
     writes = tuple(Write(output=slab_of(nm), index=(Var(row_axis.name),), value=nm) for nm in stats)
     rl_i = next((i for i, s in enumerate(row_body) if isinstance(s, Loop) and s.is_reduce), None)
     if rl_i is None or stat is None or cta.n_threads % 32 or cta.n_threads < 32:
@@ -649,12 +658,13 @@ class Operand:
     # misaligned addresses + overlapped data (the Gemma ``k_linear_reduce`` bench_fail cluster).
     dtype: str | None = None
     elem_bytes: int | None = None
-    # The companion BLOCK-SCALE slab of a PACKED-PAIR operand (NVFP4 weights) — ``(slab name, the
-    # k block the scale spans)``. One stored byte is two logical K elements and every ``block`` of
-    # them share one scale, so the drain reads this slab beside the bits and applies the scale as
-    # it decodes. The scale slab itself is a :class:`SyncOperand`: its values are DECODED from the
-    # checkpoint's e4m3 codes, which is compute, not a copy. ``None`` on every other operand.
-    scale: tuple[str, int] | None = None
+    # The companion BLOCK-SCALE slab of a byte-slab operand (NVFP4 or block-scaled fp8 weights) —
+    # ``(slab name, the k block the scale spans, logical k per byte)``. One stored byte is one or
+    # two logical K elements and every ``block`` of them share one scale, so the drain reads this
+    # slab beside the bits and applies the scale as it decodes. The scale slab itself is a
+    # :class:`SyncOperand`: its values are evaluated off the weight's scale cone, which is compute,
+    # not a copy. ``None`` on every other operand.
+    scale: tuple[str, int, int] | None = None
 
     @property
     def slab(self) -> str:
@@ -696,11 +706,20 @@ class SyncOperand:
     # cp.async fill uses) and read back by the ``ldmatrix`` drain. NONE outside the mma tier
     # (a plain-``Load`` drain cannot read a swizzled slab).
     swizzle: str = "NONE"
-    # The companion block-scale slab, ``(slab, block)`` — the same fact the copied :class:`Operand`
-    # carries, on the filled side. A block-scaled operand whose codes this matmul COMPUTES fills
-    # its own slab and still hands the drain the stored scales beside it, so the drain must read
-    # the pairing off either kind.
+    # The companion block-scale slab, ``(slab, block, per_byte)`` — the same fact the copied
+    # :class:`Operand` carries, on the filled side. A block-scaled operand whose codes this matmul
+    # COMPUTES fills its own slab and still hands the drain the stored scales beside it, so the
+    # drain must read the pairing off either kind.
     scale: tuple | None = None
+    # This slab's OWN element dtype / size, when it differs from the transport's ``slab_dtype`` /
+    # ``elem_bytes`` — an fp8 weight's block-scale slab keeps its f32 scale beside 16-bit operand
+    # slabs. ``None`` inherits the transport's.
+    dtype: str | None = None
+    elem_bytes: int | None = None
+    # ``k0 -> stmts`` run once per chunk ahead of this slab's cells, barrier included — the cone's
+    # per-chunk statistic (:func:`~emmy.compiler.ir.schedule.views.cone_seam`'s ``chunk``), whose
+    # rows the cells read back. ``None`` when the cone has none.
+    before: Callable[[Expr], list[Stmt]] | None = None
 
     @property
     def slab(self) -> str:
@@ -805,7 +824,13 @@ class SyncTransport:
 
         decls = [
             *(
-                slab_smem(op.slab, op.shape[0], op.shape[1], self.slab_dtype, align=_fill_align(op.shape[1], self.elem_bytes, op.swizzle))
+                slab_smem(
+                    op.slab,
+                    op.shape[0],
+                    op.shape[1],
+                    op.dtype or self.slab_dtype,
+                    align=_fill_align(op.shape[1], op.elem_bytes or self.elem_bytes, op.swizzle),
+                )
                 for op in self.operands
             ),
             *(peer(op, ring * op.shape[0]) for op in self.copy_operands),
@@ -951,8 +976,10 @@ class SyncTransport:
         for op in self.operands:
             if op.producer is not None:
                 continue  # a scheduled producer fills the whole slab in its own segment
+            if op.before is not None:
+                out += op.before(k0_cur)
             rows, cols = op.shape
-            v = _cp_async_width(cols, self.elem_bytes)
+            v = _cp_async_width(cols, op.elem_bytes or self.elem_bytes)
             fe = Axis(name=f"_f{op.tag}", extent=(rows * cols) // v)
             base = _mul(Var(fe.name), _lit(v))
             row = BinaryExpr("/", base, _lit(cols))  # constant across the run: v divides cols
