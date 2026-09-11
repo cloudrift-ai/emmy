@@ -2517,8 +2517,8 @@ configs:
       RASTER: ''
     identity: c5cdc0dee4a37427835f9a35ee2a9f9701060db2deaea9238465d43250282e06
     measurements:
-      emmy_us: 2.281195404885829
-      reference_us: 2.279981732095679
+      emmy_us: 2.267200025645169
+      reference_us: 2.2612850590528946
       reference_backend: same-input-greedy
 - program: 0
   target:
@@ -2529,6 +2529,8 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
+    kernel_set:
+    - k_linear_reduce_7ef15d.37e7fb9e7dd5.827097d61334
   - name: k_linear_reduce_7ef15d.37e7fb9e7dd5.827097d61334
     bindings: {}
     pins:
@@ -2537,23 +2539,23 @@ configs:
       REDUCE: g16k
     identity: 827097d61334e798341b4420d70f756ca0d982707aaf6de4cae03ccbfeb34a06
     measurements:
-      emmy_us: 3.1115097041983377
-      reference_us: 3.077172532412699
+      emmy_us: 3.020906131671251
+      reference_us: 3.0166903163617884
       reference_backend: same-input-greedy
   - name: k_linear_reduce_7ef15d.37e7fb9e7dd5.4d7f846ee43f
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      WORK: t128
+      WORK: t256
       TILE: ''
       REDUCE: coop-t
       STAGE: ''
       RASTER: ''
     identity: 4d7f846ee43f82691d2c45c69df50d908dae862fcad7907c40ff6203e01a4763
     measurements:
-      emmy_us: 2.046298639418401
-      reference_us: 2.0199007978124066
+      emmy_us: 1.963482417312323
+      reference_us: 1.9602101258557252
       reference_backend: same-input-greedy
   - name: k_linear_reduce_7ef15d.37e7fb9e7dd5.afe14833ed3d
     bindings: {}
@@ -2565,8 +2567,8 @@ configs:
       RASTER: ''
     identity: afe14833ed3d8fdd50be8b1600c79bdab676f23b798afaf90be2d02f8d18ba22
     measurements:
-      emmy_us: 1.0652110647799364
-      reference_us: 1.0572717346002924
+      emmy_us: 1.0574237143589278
+      reference_us: 1.0564801905060632
       reference_backend: same-input-greedy
 - program: 0
   target:
@@ -2579,6 +2581,8 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
+    kernel_set:
+    - k_linear_49a16b.119bca97a211.0cf051efabac
   - name: k_linear_49a16b.119bca97a211.0cf051efabac
     bindings: {}
     pins:
@@ -2587,8 +2591,8 @@ configs:
       REDUCE: g8k
     identity: 0cf051efabacb3198c6c06ab50d8108ebf0d12d6baea5143f081a2ff73362eef
     measurements:
-      emmy_us: 4.1317229237107735
-      reference_us: 4.12177740584237
+      emmy_us: 4.1167013976850715
+      reference_us: 4.119361350634691
       reference_backend: same-input-greedy
   - name: k_linear_49a16b.119bca97a211.4f5372d428c0
     bindings: {}
@@ -2602,8 +2606,8 @@ configs:
       RASTER: ''
     identity: 4f5372d428c071d794de913bd82f6578900336099e70441c4efc60e87a3384ef
     measurements:
-      emmy_us: 2.896973879440971
-      reference_us: 2.886751483630583
+      emmy_us: 2.8804637383723604
+      reference_us: 2.8825970663540605
       reference_backend: same-input-greedy
   - name: k_linear_49a16b.119bca97a211.f986efbc2159
     bindings: {}
@@ -2615,8 +2619,8 @@ configs:
       RASTER: ''
     identity: f986efbc2159451f5c0a5d3a3e431526ad1b16da3860cc43b57c7f6d79745863
     measurements:
-      emmy_us: 1.2347490442698024
-      reference_us: 1.2350259222117872
+      emmy_us: 1.236237659312711
+      reference_us: 1.2367642842806303
       reference_backend: same-input-greedy
 - program: 0
   target:
@@ -2629,18 +2633,20 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
+    kernel_set:
+    - k_linear_dfb21f.68dcd44586ec.24ffdc93f8e3
   - name: k_linear_dfb21f.68dcd44586ec.24ffdc93f8e3
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE: g8k
+      REDUCE: g16k
     identity: 24ffdc93f8e382ad47b5ee676867f5c0e3458fafaba220810387e04cd2cc42cf
     measurements:
-      emmy_us: 3.4827666246033644
-      reference_us: 3.4798006967901123
+      emmy_us: 3.4467668685697967
+      reference_us: 3.4412531028116558
       reference_backend: same-input-greedy
-  - name: k_linear_dfb21f.68dcd44586ec.963d5f14e05c
+  - name: k_linear_dfb21f.68dcd44586ec.4d7f846ee43f
     bindings: {}
     pins:
       FAST_MATH: false
@@ -2650,12 +2656,12 @@ configs:
       REDUCE: coop-t
       STAGE: ''
       RASTER: ''
-    identity: 963d5f14e05c616c7704417c9dc98b187877d04643ed573871e8ecb443af3cb0
+    identity: 4d7f846ee43f82691d2c45c69df50d908dae862fcad7907c40ff6203e01a4763
     measurements:
-      emmy_us: 2.2952660508112075
-      reference_us: 2.2910825156290597
+      emmy_us: 2.1954385334985296
+      reference_us: 2.1891227939672637
       reference_backend: same-input-greedy
-  - name: k_linear_dfb21f.68dcd44586ec.ae532077f24d
+  - name: k_linear_dfb21f.68dcd44586ec.b279ebc322e4
     bindings: {}
     pins:
       FAST_MATH: false
@@ -2663,10 +2669,10 @@ configs:
       WORK: ''
       REDUCE: ''
       RASTER: ''
-    identity: ae532077f24d561ac24063b7e5616124da9c03d0674216d70780dd2bab9ad53c
+    identity: b279ebc322e416865f99cf5d043b0e34ea6f9ea999cdd4029fd6dc430f7f5278
     measurements:
-      emmy_us: 1.187500573792157
-      reference_us: 1.1887181811610525
+      emmy_us: 1.2513283350712674
+      reference_us: 1.2521303088443918
       reference_backend: same-input-greedy
 - program: 0
   target:
@@ -2680,33 +2686,32 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
+    kernel_set:
+    - k_sdpa_linear_reduce_d0f5c0.128c6f715151.6f035e8c511f
+    - k_sdpa_linear_reduce_d0f5c0.128c6f715151.7c7910e5507d
   - name: k_sdpa_linear_reduce_d0f5c0.128c6f715151.6f035e8c511f
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      PLACE@map.2/inner: cut
+      PLACE@map.1/map.1/reduce: cut
     identity: 6f035e8c511fe3a4c1982940892796db5c4d3316266dd0fb3d04a04c58f38132
     measurements:
-      emmy_us: 9.543634139753818
-      reference_us: 9.526461744905644
+      emmy_us: 9.72935571426159
+      reference_us: 9.751712913266278
       reference_backend: same-input-greedy
-  - name: k_sdpa_linear_reduce_d0f5c0.128c6f715151.9509f50aff9f
+  - name: k_sdpa_linear_reduce_d0f5c0.128c6f715151.7c7910e5507d
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      WORK: t128
-      TILE: f1
-      REDUCE: ''
-      STAGE: d2/smem-tma
-      RASTER: ''
-    identity: 9509f50aff9f7e91d3aa68659e3aad51e8eb238a8ffa4645476e0cb2e3c40bb3
+      REDUCE: g8a
+    identity: 7c7910e5507d66fae48636dcd3aac64aec1176d5b91f9453a31e5b0885c1b6a8
     measurements:
-      emmy_us: 7.039774471605328
-      reference_us: 7.023883126948001
+      emmy_us: 3.191735176061163
+      reference_us: 3.259339764666017
       reference_backend: same-input-greedy
-  - name: k_sdpa_linear_reduce_d0f5c0.128c6f715151.57b0b9e41655
+  - name: k_sdpa_linear_reduce_d0f5c0.128c6f715151.34b78757a51c
     bindings: {}
     pins:
       FAST_MATH: false
@@ -2714,10 +2719,25 @@ configs:
       WORK: t128
       REDUCE: coop
       RASTER: ''
-    identity: 57b0b9e41655e5d52e1bab037e44b5a5d4299ce3ebc80a8f3ac56944ebf1f9d1
+    identity: 34b78757a51ce4c8dc900c0fecb097abe5aba20f44979fce3474d5dbb07d34ec
     measurements:
-      emmy_us: 2.50385966814849
-      reference_us: 2.502578617957643
+      emmy_us: 3.191735176061163
+      reference_us: 3.259339764666017
+      reference_backend: same-input-greedy
+  - name: k_sdpa_linear_reduce_d0f5c0.128c6f715151.74f1ebe03d62
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x4
+      TILE: mma_m16n8k16_f16_f32/f1x4/k8
+      REDUCE: ''
+      STAGE: d2/smem-async/p2
+      RASTER: gm8
+    identity: 74f1ebe03d62560f29e33509dbe417a3b2adcbf6c16aee7848db943bf1c32587
+    measurements:
+      emmy_us: 6.537620538200428
+      reference_us: 6.492373148600261
       reference_backend: same-input-greedy
 - program: 0
   target:
@@ -2732,6 +2752,10 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
+    kernel_set:
+    - k_linear_sdpa_reduce_14c8c7.b69c5cc0ab9b.61885659297e
+    - k_linear_sdpa_reduce_14c8c7.b69c5cc0ab9b.9eaa8fb794cf
+    - k_linear_sdpa_reduce_14c8c7.b69c5cc0ab9b.265ea11d2d22
   - name: k_linear_sdpa_reduce_14c8c7.b69c5cc0ab9b.61885659297e
     bindings: {}
     pins:
@@ -2740,8 +2764,8 @@ configs:
       PLACE@map.1/inner.2/map: cut
     identity: 61885659297e29a065deccd82d94b978436859a29b052a59d625616f956e286f
     measurements:
-      emmy_us: 7.18994361961013
-      reference_us: 7.141269807636152
+      emmy_us: 7.1974879363606545
+      reference_us: 7.122249830499482
       reference_backend: same-input-greedy
   - name: k_linear_sdpa_reduce_14c8c7.b69c5cc0ab9b.9eaa8fb794cf
     bindings: {}
@@ -2751,8 +2775,8 @@ configs:
       REDUCE: g16k
     identity: 9eaa8fb794cf04f5bc97ed666fd7b8e40b1e6bd1a4d6a1b8586f96423fd78a88
     measurements:
-      emmy_us: 3.1177215554215203
-      reference_us: 3.0979408558770407
+      emmy_us: 3.1181002522361148
+      reference_us: 3.0917466526870747
       reference_backend: same-input-greedy
   - name: k_linear_sdpa_reduce_14c8c7.b69c5cc0ab9b.265ea11d2d22
     bindings: {}
@@ -2762,8 +2786,8 @@ configs:
       REDUCE: g16k
     identity: 265ea11d2d222299ef8897e4c5b0f8d8086e8a16c2314ef8492bcd8c409b680b
     measurements:
-      emmy_us: 4.072222064188609
-      reference_us: 4.043328951759111
+      emmy_us: 4.079387684124541
+      reference_us: 4.030503177812408
       reference_backend: same-input-greedy
   - name: k_linear_sdpa_reduce_14c8c7.b69c5cc0ab9b.9b6e994332fa
     bindings: {}
@@ -2775,8 +2799,8 @@ configs:
       RASTER: ''
     identity: 9b6e994332faf05380c40b5927662e5bcf3ec3f9bbed2edd24de6cc903392157
     measurements:
-      emmy_us: 1.7632282940687332
-      reference_us: 1.7513143164770943
+      emmy_us: 1.764361098804305
+      reference_us: 1.7469608062526933
       reference_backend: same-input-greedy
   - name: k_linear_sdpa_reduce_14c8c7.b69c5cc0ab9b.aa6bfc58cba3
     bindings: {}
@@ -2788,8 +2812,8 @@ configs:
       RASTER: ''
     identity: aa6bfc58cba36da1abee3ded35770d712bc4ff12b7affcc4b7fc13d54c27934a
     measurements:
-      emmy_us: 1.3544932613527871
-      reference_us: 1.3466265393999466
+      emmy_us: 1.3537391534318095
+      reference_us: 1.3447858464343811
       reference_backend: same-input-greedy
   - name: k_linear_sdpa_reduce_14c8c7.b69c5cc0ab9b.26d14bc34a74
     bindings: {}
@@ -2803,8 +2827,8 @@ configs:
       RASTER: ''
     identity: 26d14bc34a742ee9776c67a8dc42272dded99be2b9275c6d77cc051f0f298e80
     measurements:
-      emmy_us: 2.8265761790302513
-      reference_us: 2.8041037771131534
+      emmy_us: 2.832226645169785
+      reference_us: 2.7937192288374146
       reference_backend: same-input-greedy
   - name: k_linear_sdpa_reduce_14c8c7.b69c5cc0ab9b.5491a21174b4
     bindings: {}
@@ -2816,8 +2840,8 @@ configs:
       RASTER: ''
     identity: 5491a21174b46b739df02a2811410b7fa039afc1f90d5222ce75e834047fd1fd
     measurements:
-      emmy_us: 1.245645885158358
-      reference_us: 1.2392251746459577
+      emmy_us: 1.2471610389547552
+      reference_us: 1.2367839489749928
       reference_backend: same-input-greedy
 - program: 0
   target:
@@ -2842,44 +2866,46 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
+    kernel_set:
+    - k_linear_mean_reduce_549927.f3a20e07e940.63e76be34df0
   - name: k_linear_mean_reduce_549927.f3a20e07e940.63e76be34df0
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      PLACE@map.2/inner.1/map: cut
+      PLACE@map.2/inner.1/map.3/map: cut
     identity: 63e76be34df045fa69b5ac14e440b6e8526b1e4260f0289340f0dc3e8cd4dcc7
     measurements:
-      emmy_us: 23.656584867616978
-      reference_us: 23.888192262994238
+      emmy_us: 22.26648900243971
+      reference_us: 22.62365564450368
       reference_backend: same-input-greedy
-  - name: k_linear_mean_reduce_549927.f3a20e07e940.01a429eb4a02
+  - name: k_linear_mean_reduce_549927.f3a20e07e940.5eb8c39a7621
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      WORK: ''
-      REDUCE: ''
+      WORK: t128
+      REDUCE: coop
       RASTER: ''
-    identity: 01a429eb4a021f4d1a0cc4feca2ee0d9c71d1746cdf9cdcf56af9e8572ee8923
+    identity: 5eb8c39a7621af92e8dc0db69764d037d1504d2c1b983d6fde11408a748570a4
     measurements:
-      emmy_us: 11.64995097532505
-      reference_us: 11.96375884205462
+      emmy_us: 1.5958082942536083
+      reference_us: 1.6066965203696546
       reference_backend: same-input-greedy
-  - name: k_linear_mean_reduce_549927.f3a20e07e940.ebab4497bb6d
+  - name: k_linear_mean_reduce_549927.f3a20e07e940.372436f61a41
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w1x8
-      TILE: mma_m16n8k16_f16_f32/f2x1/k4
+      WORK: w2x1
+      TILE: mma_m16n8k16_f16_f32/f1x2/k4
       REDUCE: ''
       STAGE: d2/smem
       RASTER: ''
-    identity: ebab4497bb6d366ad1f0393c4635e8d0bb05fe9779b7f4983e90a7e25e7ea90d
+    identity: 372436f61a417f49dc975b525ef860c8441f8cdb78ea23a5e29d2ccd3ca3a544
     measurements:
-      emmy_us: 12.00663389229193
-      reference_us: 11.924433420939618
+      emmy_us: 13.294933636983234
+      reference_us: 13.425729564718297
       reference_backend: same-input-greedy
 - program: 0
   target:
@@ -2891,6 +2917,44 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
+    kernel_set:
+    - k_linear_2dcd0c.28b342e368a5.43286bf5010d
+  - name: k_linear_2dcd0c.28b342e368a5.43286bf5010d
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE: g16k
+    identity: 43286bf5010d23ba616d5c4068223e6c0329f44ac8938fc1a587800a526b2c0b
+    measurements:
+      emmy_us: 4.610914555049482
+      reference_us: 4.604487368490554
+      reference_backend: same-input-greedy
+  - name: k_linear_2dcd0c.28b342e368a5.3b3ed7b95b53
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x1
+      TILE: mma_m16n8k16_f16_f32/f1x8/k4
+      REDUCE: ''
+      STAGE: d2/smem-tma
+      RASTER: gm8
+    identity: 3b3ed7b95b530e77773a953d663517387c20817d0f66cfeb9e82eb8265c5e200
+    measurements:
+      emmy_us: 3.564685795988355
+      reference_us: 3.5560287588791883
+      reference_backend: same-input-greedy
+  - name: k_linear_2dcd0c.28b342e368a5.5491a21174b4
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs: {}
+    identity: 5491a21174b46b739df02a2811410b7fa039afc1f90d5222ce75e834047fd1fd
+    measurements:
+      emmy_us: 1.0462287590611268
+      reference_us: 1.0484586096113655
+      reference_backend: same-input-greedy
 - program: 0
   target:
     origins:
@@ -2953,8 +3017,8 @@ configs:
       RASTER: ''
     identity: d647fa52c515dd6e603586c21515eb626ccada06afd0050c9a8314dbe90eea33
     measurements:
-      emmy_us: 2.582987149556478
-      reference_us: 2.5800930129157176
+      emmy_us: 2.5774845757435276
+      reference_us: 2.575835001837347
       reference_backend: same-input-greedy
 gpu_name: NVIDIA H100 80GB
 model: Qwen/Qwen3-0.6B@c1899de289a04d12100db370d81485cdf75e47ca
