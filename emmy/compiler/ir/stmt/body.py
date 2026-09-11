@@ -76,6 +76,23 @@ def _exposed_defines(s: Stmt) -> set[str]:
     return out
 
 
+def dedup_recomputes(stmts: Iterable[Stmt]) -> tuple[Stmt, ...]:
+    """``stmts`` with every defining statement equal to an earlier one dropped.
+
+    A cone that reads one traced value through two edges — attention's output normalized by its
+    own row sum — lowers the fold behind it once per edge, and a fill that replicates the cone per
+    cell then declares the fold's states twice in one scope, which nvcc refuses. Two equal
+    statements over the same inputs bind the same names to the same values, so the second binds
+    nothing new. Only a statement that defines something is a candidate: a repeated store is a
+    repeated effect and stays."""
+    kept: list[Stmt] = []
+    for stmt in stmts:
+        if _exposed_defines(stmt) and any(stmt == earlier for earlier in kept):
+            continue
+        kept.append(stmt)
+    return tuple(kept)
+
+
 def free_names(s: Stmt) -> frozenset[str]:
     """Every name ``s`` (whole subtree) reads from its enclosing scope — SSA reads AND index
     coordinates, less what the subtree defines or binds.
