@@ -598,6 +598,20 @@ def test_tile_op_caches_the_stable_schedule_inventory() -> None:
     assert sum(site.node is shared for site in tile.sites) == 1 and tile.sites[tile.node_id(shared)].node is shared
 
 
+def test_one_grid_view_serves_every_candidate_and_every_target() -> None:
+    """The grid-placed view is a SITE fact — a candidate plan changes tile sizes, never which output
+    axes a slice tiles — so the kernel owns it. Building it per frontier extension re-walked the whole
+    term, and keying it by target built one view per target for a reading that takes no target: the
+    property has no target parameter, which is what makes one view serve every compile of this kernel.
+    """
+    tile, _ = _problem(_contraction())
+
+    assert tile.grid_sched is tile.grid_sched  # once per kernel, not once per candidate
+    assert tile.grid_sched._all_sites() is tile.sites  # the kernel's one walk, not a second under a new owner
+    assert tile.grid_sched.place == tile.place.on_grid()
+    assert tile.grid_sched.schedule is None and tile.grid_sched.materialization is None  # no assignment-specific state
+
+
 def test_tile_requires_complete_materialization() -> None:
     root = _contraction()
     context = ClassicScheduleContext(*_problem(root))
