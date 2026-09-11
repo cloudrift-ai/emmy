@@ -546,7 +546,10 @@ At a **schedule fork** (one kernel's row):
    leaf, whether it came from the tune DB or from a golden file — `_direct_measured_pick` descends the lazy tree
    straight to it, asking each branch whether it admits the row (`Fork.admits`: a schedule branch spells a prefix of
    what its leaves will spell, a level branch a projection of it, and a knob the row leaves undecided is free), so a
-   partial row reaches its leaf whatever the pool size. The index is built once per compile and memoized per process on
+   partial row reaches its leaf whatever the pool size. The prefix reading excludes the empty spelling: a site the
+   branch itself DECIDED off admits only off, since every string extends the empty one and the descent would otherwise
+   fail no earlier than leaf matching. An off merely inherited down the branch is a pin rather than a decision and
+   still admits. The index is built once per compile and memoized per process on
    the DB path and mtime, the context key and the golden scope. It holds the tune DB's CUDA `perf` rows for this
    compile's context key (one lane, because a sweep measures in the regime a deploy compiles in; rows from a
    deliberately non-deployable `--nvcc-flags` run key elsewhere and are simply never consulted) and the **golden rows**
