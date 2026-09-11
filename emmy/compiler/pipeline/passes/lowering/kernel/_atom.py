@@ -1276,7 +1276,9 @@ def _block_scaled_operands(
     a_bits = (
         filled(m, n, row_base, pair.a.codes, pair.a.cone, "a", scale=(a_scale.slab, block, 2))
         if pair.a.bits is None
-        else build(m, n, row_base, pair.a.bits, "a", cols=bk_elems // 2, step=2, dtype=bits_dtype, trans=False, scale=(a_scale.slab, block, 2))
+        else build(
+            m, n, row_base, pair.a.bits, "a", cols=bk_elems // 2, step=2, dtype=bits_dtype, trans=False, scale=(a_scale.slab, block, 2)
+        )
     )
     # One codes + one scales slab per channel, over the shared A pair. Channel 0 keeps the bare
     # ``b`` / ``bs`` tags so a single-channel cell stages byte-identical slabs to before.
