@@ -57,7 +57,7 @@ command:
     # field (unmeasured name) is structural selection, not result interpretation.
     mkdir -p $task_dir/verification
     ./venv/bin/python -c 'import sys, yaml; d = yaml.safe_load(open(sys.argv[1])); print("\n".join(r["name"] for c in d["configs"] for r in c["realizations"] if not (r.get("measurements") or {}).get("emmy_us")))' \
-      "$task_dir/working.yaml" > $task_dir/seeds.txt
+      $task_dir/working.yaml > $task_dir/seeds.txt
     verification_status=0
     while IFS= read -r seed; do
       [ -z "$$seed" ] && continue
