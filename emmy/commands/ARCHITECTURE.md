@@ -140,10 +140,11 @@ identically for all four commands (see `compiler/ARCHITECTURE.md`, "Quantized ch
 `compile --quantize <scheme>` quantizes a TRACED module's linear weights and compiles the result. It is deliberately
 not a second way to build a quantized graph: `loader/synthesize.py` writes a real checkpoint and the ordinary
 spellers read it, so the program is the one that checkpoint would give and the directory is on disk to inspect
-(`--dump-dir` keeps it, else a temp dir whose path is logged). The weight side is derived from each tensor; the
-activation scale is calibrated over the trace's ONE example input, by modelopt's own formula, and written into the
-checkpoint so the number is readable rather than implied. It needs a linear whose weight is a module parameter —
-`a @ b` over two tensors has none, and says so.
+(`--dump-dir` keeps it, else a temp dir whose path is logged). The weight side is derived from each tensor. The two
+NVFP4 schemes calibrate the activation scale over the trace's ONE example input, by modelopt's own formula, and write
+it into the checkpoint so the number is readable rather than implied; `fp8-block` declares the official FP8 form, whose
+activations are quantized dynamically, so it has nothing to calibrate. It needs a linear whose weight is a module
+parameter — `a @ b` over two tensors has none, and says so.
 For isolated frontend-graph runs, the worker returns the symbolic environment used for execution with its benchmark
 result; `run` uses that same binding when rendering dynamic per-kernel grid statistics.
 For a single-layer trace, the loader derives a missing attention `layer_type` from

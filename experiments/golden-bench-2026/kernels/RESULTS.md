@@ -73,8 +73,10 @@ rows are the cold greedy's own picks (their recorded rows failed strict or did n
   The corpus weights are N-contiguous, which pins the tier to one 64-column swizzle atom per K row: every wider
   N-contiguous tile measured wrong wholesale, because the row-major slab does not store each further atom as its own
   eight K rows the way the descriptor's MN-major layout expects. A K-contiguous 2048³ f16 GEMM runs the n256 row at
-  34.0 µs against cuBLAS's 24.6 (0.73×) and the best mma.sync row's 69.3, all strict. A per-atom TMA deposit is the
-  next step for the wide tiles.
+  34.0 µs against cuBLAS's 24.6 (0.73×) and the best mma.sync row's 69.3, all strict. Follow-up, same day: the
+  atom-major B slab lifted that restriction (the N-contiguous 2048³ GEMM goes from 48.2 µs at n64 to 32.9 at n128,
+  strict), but the corpus rows above do not move — at S=512 a 128-wide N tile halves an already short grid (k_proj
+  8.4 → 9.7 µs, v_proj 7.7 → 8.8, down_proj 18.6 → 23.8 at `w4x1`), and a `g2k` / `g4k` split lands at 19 µs.
 - **The two fused decode attention forms recover with a materializing cut.** 1-key SDPA + o_proj + residual: 7.2 ms
   cold → 8.7 µs with `PLACE@map.1/inner.2/map=cut` and a split GEMV on the children, beating Inductor. v_proj + 1-key
   SDPA: 32.8 → 10.9 µs. The post-norm MLP cut (`PLACE@map.2/inner.1/map=cut`) helps at both lengths but its

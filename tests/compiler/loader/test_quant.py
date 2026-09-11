@@ -1652,9 +1652,10 @@ def _run_e2e(tmp_path, config, ref_sd):
 
     ref_model = transformers.AutoModelForCausalLM.from_config(config).float().eval()
     ref_model.load_state_dict(ref_sd)
-    enabled, fmt = _dynamic_activation_declaration(_fp8_quant_config(tmp_path))
+    enabled, fmt, group = _dynamic_activation_declaration(_fp8_quant_config(tmp_path))
     if enabled:
         assert fmt == "f8e4m3", f"the hook mirrors e4m3 only, checkpoint declares {fmt}"
+        assert group is None, "the hook mirrors one scale per row; a weight-block checkpoint scales per K group"
         for name, module in ref_model.named_modules():
             if isinstance(module, torch.nn.Linear) and ".layers." in name:  # the fp8-stored projections
                 module.register_forward_pre_hook(_dynamic_fp8_activation_hook)
