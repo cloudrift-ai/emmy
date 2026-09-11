@@ -28438,6 +28438,10 @@ configs:
       emmy_us: 7901.184141635895
       reference_us: 8638.464152812958
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 7836.671829223633
+        eager_us: 25610.240936279297
   - name: expert-sym@mxfp4.k_linear_reduce_0de949.7d644f512b51.dynamic.abd5de63cf1e
     bindings: {}
     pins:
@@ -28480,6 +28484,10 @@ configs:
       emmy_us: 1225.216031074524
       reference_us: 1222.1440076828003
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1226.7520427703857
+        eager_us: 25132.543563842773
   - name: expert-sym@mxfp4.k_linear_reduce_0de949.7d644f512b51.m16.20fa59175119
     bindings:
       num_tokens: 16
@@ -28524,6 +28532,10 @@ configs:
       emmy_us: 103973.88458251953
       reference_us: 105809.92126464844
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 107784.19494628906
+        eager_us: 29198.335647583008
   - name: expert-sym@mxfp4.k_linear_reduce_0de949.7d644f512b51.m4096.93f0a0e7072b
     bindings:
       num_tokens: 4096
@@ -28575,6 +28587,10 @@ configs:
       emmy_us: 1381783.5693359375
       reference_us: 1384111.083984375
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1377833.984375
+        eager_us: 25181.184768676758
 - program: 1
   target:
     loop: 1
@@ -28591,6 +28607,10 @@ configs:
       emmy_us: 4510.463908314705
       reference_us: 4744.448155164719
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 4765.696048736572
+        eager_us: 25149.18327331543
   - name: expert16@mxfp4.k_linear_reduce_4ff1f7.e35d83a9b08c.m16.a5e5a2d600ea
     bindings:
       num_tokens: 16
@@ -28646,6 +28666,10 @@ configs:
       emmy_us: 1326874.6337890625
       reference_us: 1383727.05078125
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1293945.80078125
+        eager_us: 25151.487350463867
 - program: 3
   target:
     loop: 3
@@ -28662,6 +28686,10 @@ configs:
       emmy_us: 206740.48519134521
       reference_us: 212396.03805541992
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 200190.97900390625
+        eager_us: 29217.792510986328
   - name: expert4096@mxfp4.k_linear_reduce_a3f064.592880680b39.m4096.ea9536b34e57
     bindings:
       num_tokens: 4096
@@ -28733,6 +28761,9 @@ configs:
       emmy_us: 97473.5336303711
       reference_us: 97514.49584960938
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 97521.66748046875
   - name: post-sym.k_linear_softmax_mean_matmul_reduce_dba017.deb454931ca7.m16.c8a6c12fa5e2
     bindings:
       num_tokens: 16
@@ -28769,6 +28800,9 @@ configs:
       emmy_us: 46920.70388793945
       reference_us: 46954.49447631836
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 46896.1296081543
   - name: post-sym.k_linear_softmax_mean_matmul_reduce_dba017.deb454931ca7.m1.5435f7d06742
     bindings:
       num_tokens: 1
@@ -28805,6 +28839,9 @@ configs:
       emmy_us: 30558.208465576172
       reference_us: 30718.975067138672
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 30520.320892333984
   - name: post-sym.k_linear_softmax_mean_matmul_reduce_dba017.deb454931ca7.m4096.f9d6a5b45f94
     bindings:
       num_tokens: 4096
@@ -28841,6 +28878,9 @@ configs:
       emmy_us: 106229.7592163086
       reference_us: 106486.78588867188
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 106259.45281982422
 - program: 4
   target:
     loop: 5
@@ -28858,6 +28898,9 @@ configs:
       emmy_us: 1.6225944403161359
       reference_us: 1.6313725047641332
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.6306270860602754
   - name: post-sym.k_div_pointwise.b71c40bb6826.m1.22f6bd3c4220
     bindings:
       num_tokens: 1
@@ -28872,6 +28915,9 @@ configs:
       emmy_us: 1.4772458687624528
       reference_us: 1.4531764914007748
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.4737091892197154
   - name: post-sym.k_div_pointwise.b71c40bb6826.m16.0e433e4d48fb
     bindings:
       num_tokens: 16
@@ -28886,6 +28932,9 @@ configs:
       emmy_us: 1.5534906653884035
       reference_us: 1.543975043519635
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.5612337471760325
   - name: post-sym.k_div_pointwise.b71c40bb6826.m4096.10f20ad89244
     bindings:
       num_tokens: 4096
@@ -28900,6 +28949,9 @@ configs:
       emmy_us: 2.012832357425882
       reference_us: 2.0149677030501825
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 2.0250590658479215
 - program: 4
   target:
     loop: 6
@@ -28935,6 +28987,11 @@ configs:
       emmy_us: 24.12643955975044
       reference_us: 24.10146375981773
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 20.981106352298816
+        tcompile_us: 6.348799996905857
+        eager_us: 247.46665954589844
   - name: post-sym.k_div_4_reduce.c54254fb669e.m16.df46d46f1359
     bindings:
       num_tokens: 16
@@ -28967,6 +29024,11 @@ configs:
       emmy_us: 3.9203346523779703
       reference_us: 3.8999998942017555
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 3.48084990358178
+        tcompile_us: 5.602950322712567
+        eager_us: 227.29143415178572
   - name: post-sym.k_div_4_reduce.c54254fb669e.m4096.b53219ea724d
     bindings:
       num_tokens: 4096
@@ -28999,6 +29061,10 @@ configs:
       emmy_us: 374.783992767334
       reference_us: 374.783992767334
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 376.8320083618164
+        eager_us: 340.992013613383
   - name: post-sym.k_div_4_reduce.c54254fb669e.m1.ef7eea3b7887
     bindings:
       num_tokens: 1
@@ -29053,6 +29119,11 @@ configs:
       emmy_us: 148.3337197984968
       reference_us: 148.3337197984968
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 150.3817183630807
+        tcompile_us: 7.021714534078326
+        eager_us: 254.82971327645438
 - program: 4
   target:
     loop: 7
@@ -29070,6 +29141,9 @@ configs:
       emmy_us: 1.620358880153488
       reference_us: 1.6098541224215366
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.6316852608665091
   - name: post-sym.k_div_5_pointwise.b71c40bb6826.m16.2b7b181ebda7
     bindings:
       num_tokens: 16
@@ -29084,6 +29158,9 @@ configs:
       emmy_us: 1.5600752494178223
       reference_us: 1.543950312626288
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.56820129673436
   - name: post-sym.k_div_5_pointwise.b71c40bb6826.m1.9d2bcad672a5
     bindings:
       num_tokens: 1
@@ -29098,6 +29175,9 @@ configs:
       emmy_us: 1.4615682953429818
       reference_us: 1.4440642656200995
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.468691287047754
   - name: post-sym.k_div_5_pointwise.b71c40bb6826.m4096.ec89a4ce01bc
     bindings:
       num_tokens: 4096
@@ -29112,6 +29192,9 @@ configs:
       emmy_us: 2.012832357425882
       reference_us: 2.014766721164479
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 2.0245821708948846
 - program: 4
   target:
     loop: 8
@@ -29129,6 +29212,11 @@ configs:
       emmy_us: 2.667935152311583
       reference_us: 2.6739303611878094
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 2.690075700347488
+        tcompile_us: 3.5448231609012333
+        eager_us: 3.7068247473786142
   - name: post-sym.k_sum_7_reduce.813453fe986f.m1.8e8e3d02ef13
     bindings:
       num_tokens: 1
@@ -29143,6 +29231,11 @@ configs:
       emmy_us: 1.8265434642375729
       reference_us: 1.8170794365366374
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.579004781181952
+        tcompile_us: 3.4486654725841586
+        eager_us: 3.5073420036301814
   - name: post-sym.k_sum_7_reduce.813453fe986f.m16.0d26c9c7dce2
     bindings:
       num_tokens: 16
@@ -29157,6 +29250,11 @@ configs:
       emmy_us: 1.87604528553081
       reference_us: 1.8612932889981377
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.7008219067364523
+        tcompile_us: 3.40007763464474
+        eager_us: 3.4517746527218125
   - name: post-sym.k_sum_7_reduce.813453fe986f.m4096.9bc01987ed5d
     bindings:
       num_tokens: 4096
@@ -29171,6 +29269,11 @@ configs:
       emmy_us: 27.53422160943349
       reference_us: 27.53422160943349
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 27.50577860408359
+        tcompile_us: 3.8265264347979895
+        eager_us: 4.042105455147593
 - program: 4
   target:
     loop: 9
@@ -29225,6 +29328,10 @@ configs:
       emmy_us: 11.275505751706241
       reference_us: 11.26400004611926
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 9.857292729194718
+        eager_us: 335.7900619506836
   - name: post-sym.k_div_11_reduce.900abf212ff5.m16.4e18a355bd66
     bindings:
       num_tokens: 16
@@ -29276,6 +29383,11 @@ configs:
       emmy_us: 11.704558549925338
       reference_us: 11.794070636524873
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 10.156408256413986
+        tcompile_us: 8.80428872157618
+        eager_us: 324.76635569149687
   - name: post-sym.k_div_11_reduce.900abf212ff5.m4096.b0e481e50019
     bindings:
       num_tokens: 4096
@@ -29327,6 +29439,10 @@ configs:
       emmy_us: 32.107355133179695
       reference_us: 32.140387642768125
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 27.99908603940691
+        eager_us: 438.9948283924776
 - program: 4
   target:
     loop: 10
@@ -29344,6 +29460,9 @@ configs:
       emmy_us: 1.6273387910496389
       reference_us: 1.6100943573122102
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.6377218906453115
   - name: post-sym.k_div_12_pointwise.b71c40bb6826.m16.2b7b181ebda7
     bindings:
       num_tokens: 16
@@ -29358,6 +29477,9 @@ configs:
       emmy_us: 1.5609952408497727
       reference_us: 1.5456000342965126
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.566687686962284
   - name: post-sym.k_div_12_pointwise.b71c40bb6826.m1.9d2bcad672a5
     bindings:
       num_tokens: 1
@@ -29372,6 +29494,9 @@ configs:
       emmy_us: 1.457923755617785
       reference_us: 1.4444105436375414
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.463717660483192
   - name: post-sym.k_div_12_pointwise.b71c40bb6826.m4096.ec89a4ce01bc
     bindings:
       num_tokens: 4096
@@ -29386,6 +29511,9 @@ configs:
       emmy_us: 2.014766721164479
       reference_us: 2.016843816087889
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 2.0146991421536704
 - program: 4
   target:
     loop: 11
@@ -29403,6 +29531,11 @@ configs:
       emmy_us: 2.6690243389407255
       reference_us: 2.664602091235499
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 2.456591193899145
+        tcompile_us: 3.4381074290121756
+        eager_us: 3.3472686685541624
   - name: post-sym.k_sum_14_reduce.6dc107e70aaf.m1.73144231d4d0
     bindings:
       num_tokens: 1
@@ -29417,6 +29550,11 @@ configs:
       emmy_us: 1.8239999737809687
       reference_us: 1.8121242741126247
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.579004781181952
+        tcompile_us: 3.442823448601891
+        eager_us: 3.5482353585607864
   - name: post-sym.k_sum_14_reduce.6dc107e70aaf.m16.010f65fac3b9
     bindings:
       num_tokens: 16
@@ -29431,6 +29569,11 @@ configs:
       emmy_us: 1.868317037258508
       reference_us: 1.8574436356250505
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.7384604955180458
+        tcompile_us: 3.527111063400904
+        eager_us: 3.495985170389059
   - name: post-sym.k_sum_14_reduce.6dc107e70aaf.m4096.d7b4a38faf89
     bindings:
       num_tokens: 4096
@@ -29445,6 +29588,11 @@ configs:
       emmy_us: 27.50577860408359
       reference_us: 27.53422160943349
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 27.50577860408359
+        tcompile_us: 4.044799879193306
+        eager_us: 4.3007999658584595
 - program: 4
   target:
     loop: 12
@@ -29499,6 +29647,10 @@ configs:
       emmy_us: 60.54399907588959
       reference_us: 60.60799956321716
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 55.35288982921176
+        eager_us: 390.7583872477214
   - name: post-sym.k_div_18_reduce.e08028a9e8ff.m16.e0734c31fcb5
     bindings:
       num_tokens: 16
@@ -29550,6 +29702,11 @@ configs:
       emmy_us: 8.515829204494118
       reference_us: 8.478372783984168
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 7.425954323688536
+        tcompile_us: 8.704000350200769
+        eager_us: 325.01300413217115
   - name: post-sym.k_div_18_reduce.e08028a9e8ff.m4096.58c14ac215f1
     bindings:
       num_tokens: 4096
@@ -29601,6 +29758,10 @@ configs:
       emmy_us: 1261.5679502487183
       reference_us: 1263.6159658432007
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1272.8320360183716
+        eager_us: 514.0479803085327
 - program: 4
   target:
     loop: 13
@@ -29618,6 +29779,9 @@ configs:
       emmy_us: 1.6209129825209945
       reference_us: 1.6138770626586618
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.6332800189654033
   - name: post-sym.k_div_19_pointwise.b71c40bb6826.m16.2b7b181ebda7
     bindings:
       num_tokens: 16
@@ -29632,6 +29796,9 @@ configs:
       emmy_us: 1.5610742719629176
       reference_us: 1.5511762891284389
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.5656463043977022
   - name: post-sym.k_div_19_pointwise.b71c40bb6826.m1.9d2bcad672a5
     bindings:
       num_tokens: 1
@@ -29646,6 +29813,9 @@ configs:
       emmy_us: 1.4626411074549621
       reference_us: 1.4466272126993485
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.4650372208141889
   - name: post-sym.k_div_19_pointwise.b71c40bb6826.m4096.ec89a4ce01bc
     bindings:
       num_tokens: 4096
@@ -29660,6 +29830,9 @@ configs:
       emmy_us: 2.0146991421536704
       reference_us: 2.0291533450651267
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 2.029230177038313
 - program: 4
   target:
     loop: 14
@@ -29677,6 +29850,11 @@ configs:
       emmy_us: 2.6707027409527755
       reference_us: 2.684540523065103
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 2.6834905955203503
+        tcompile_us: 3.516377464458949
+        eager_us: 3.6792237803621113
   - name: post-sym.k_sum_21_reduce.813453fe986f.m1.8e8e3d02ef13
     bindings:
       num_tokens: 1
@@ -29691,6 +29869,11 @@ configs:
       emmy_us: 1.826952084404076
       reference_us: 1.8177404046276588
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.6578236554506018
+        tcompile_us: 3.5097835260793704
+        eager_us: 3.529788232317158
   - name: post-sym.k_sum_21_reduce.813453fe986f.m16.0d26c9c7dce2
     bindings:
       num_tokens: 16
@@ -29705,6 +29888,11 @@ configs:
       emmy_us: 1.8757201998806179
       reference_us: 1.8585121520211763
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.7031295311883323
+        tcompile_us: 3.4760541104255838
+        eager_us: 3.511410129092817
   - name: post-sym.k_sum_21_reduce.813453fe986f.m4096.9bc01987ed5d
     bindings:
       num_tokens: 4096
@@ -29719,6 +29907,11 @@ configs:
       emmy_us: 27.591110931502445
       reference_us: 27.477333943049114
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 27.50577860408359
+        tcompile_us: 4.044799879193306
+        eager_us: 4.095999896526337
 - program: 4
   target:
     loop: 15
@@ -29773,6 +29966,10 @@ configs:
       emmy_us: 11.345454237677833
       reference_us: 11.31054555827921
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 9.808313612844431
+        eager_us: 337.9200182462993
 - program: 4
   target:
     loop: 16
@@ -29790,6 +29987,9 @@ configs:
       emmy_us: 1.6197818369904826
       reference_us: 1.6067642506545152
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.6264533003171284
   - name: post-sym.k_div_26_pointwise.b71c40bb6826.m16.2b7b181ebda7
     bindings:
       num_tokens: 16
@@ -29804,6 +30004,9 @@ configs:
       emmy_us: 1.5634573784536367
       reference_us: 1.5455700712411946
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.561924060688743
   - name: post-sym.k_div_26_pointwise.b71c40bb6826.m1.9d2bcad672a5
     bindings:
       num_tokens: 1
@@ -29818,6 +30021,9 @@ configs:
       emmy_us: 1.4551579080827055
       reference_us: 1.4461754706867953
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.468691287047754
   - name: post-sym.k_div_26_pointwise.b71c40bb6826.m4096.ec89a4ce01bc
     bindings:
       num_tokens: 4096
@@ -29832,6 +30038,9 @@ configs:
       emmy_us: 2.016716964861526
       reference_us: 2.01690691685387
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 2.027187042120026
 - program: 4
   target:
     loop: 17
@@ -29867,6 +30076,11 @@ configs:
       emmy_us: 23.966477030799503
       reference_us: 23.966477030799503
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 20.88533341884613
+        tcompile_us: 5.882046250409858
+        eager_us: 236.56780775203262
   - name: post-sym.k_div_30_reduce.c54254fb669e.m1.28022ea75f82
     bindings:
       num_tokens: 1
@@ -29921,6 +30135,11 @@ configs:
       emmy_us: 148.62629345485144
       reference_us: 148.62629345485144
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 150.67429201943534
+        tcompile_us: 6.875428770269666
+        eager_us: 252.3428542273385
   - name: post-sym.k_div_30_reduce.c54254fb669e.m16.4dd52085ecf5
     bindings:
       num_tokens: 16
@@ -29953,6 +30172,11 @@ configs:
       emmy_us: 3.9246192038308627
       reference_us: 3.9134265840515607
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 3.5387703049730495
+        tcompile_us: 5.558857321739197
+        eager_us: 227.13330765845072
   - name: post-sym.k_div_30_reduce.c54254fb669e.m4096.6c04fba08441
     bindings:
       num_tokens: 4096
@@ -29985,6 +30209,10 @@ configs:
       emmy_us: 375.12532869974774
       reference_us: 374.44265683492023
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 375.46666463216144
+        eager_us: 337.23731835683185
 - program: 4
   target:
     loop: 18
@@ -30002,6 +30230,9 @@ configs:
       emmy_us: 1.617647880731627
       reference_us: 1.6058182174509223
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.628159979979197
 - program: 4
   target:
     loop: 19
@@ -30037,6 +30268,10 @@ configs:
       emmy_us: 3.4550790735285917
       reference_us: 3.4785882076796364
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 3.11386172876418
+        eager_us: 234.55757430837124
 - program: 4
   target:
     loop: 20
@@ -30054,6 +30289,9 @@ configs:
       emmy_us: 1.6172831655524171
       reference_us: 1.6093811305415748
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.6312558587603394
 - program: 4
   target:
     loop: 21
@@ -30071,6 +30309,11 @@ configs:
       emmy_us: 5.09217381477356
       reference_us: 5.09360832037385
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 4.403680702890029
+        tcompile_us: 2.1514894163354916
+        eager_us: 41.526467242139454
 - program: 4
   target:
     loop: 22
@@ -30088,6 +30331,11 @@ configs:
       emmy_us: 1.6279407152430425
       reference_us: 1.6177198591760393
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.4186361457693544
+        tcompile_us: 3.5991082425977363
+        eager_us: 3.6563860959020156
 - program: 4
   target:
     loop: 23
@@ -30121,6 +30369,9 @@ configs:
       emmy_us: 117756.43697279904
       reference_us: 117156.5722323763
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 114202.62145996094
   - name: post-sym.k_linear_softmax_matmul_mean_reduce_3836f9.e906d92853d9.dynamic.64952f83ba8b
     bindings: {}
     pins:
@@ -30422,6 +30673,9 @@ configs:
       emmy_us: 1.6186883943504844
       reference_us: 1.6293201736237224
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.6211927231689656
 - program: 4
   target:
     loop: 25
@@ -30476,6 +30730,10 @@ configs:
       emmy_us: 49.4592010974884
       reference_us: 49.40800070762634
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 45.288728042082354
+        eager_us: 353.16620932685004
 - program: 4
   target:
     loop: 26
@@ -30493,6 +30751,9 @@ configs:
       emmy_us: 1.6196600946725583
       reference_us: 1.6072491804758708
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.6235789578211934
 - program: 4
   target:
     loop: 27
@@ -30510,6 +30771,11 @@ configs:
       emmy_us: 2.6852174297623015
       reference_us: 2.667935152311583
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 2.688000059646109
+        tcompile_us: 3.287288377869804
+        eager_us: 3.642709414164225
 - program: 4
   target:
     loop: 28
@@ -30564,6 +30830,10 @@ configs:
       emmy_us: 11.31002286846718
       reference_us: 11.240988634945301
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 9.809920191764832
+        eager_us: 336.6400146484375
 - program: 4
   target:
     loop: 29
@@ -30581,6 +30851,9 @@ configs:
       emmy_us: 1.618255748123419
       reference_us: 1.606080555109586
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.636026513497561
 - program: 4
   target:
     loop: 30
@@ -30598,6 +30871,11 @@ configs:
       emmy_us: 2.667354800367868
       reference_us: 2.665694373542438
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 2.684540523065103
+        tcompile_us: 3.359670184322239
+        eager_us: 3.4611752091071035
 - program: 4
   target:
     loop: 31
@@ -30652,6 +30930,10 @@ configs:
       emmy_us: 60.60799956321716
       reference_us: 60.41599722469554
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 55.12533254093594
+        eager_us: 389.93921279907227
 - program: 4
   target:
     loop: 32
@@ -30669,6 +30951,9 @@ configs:
       emmy_us: 1.6206350732356944
       reference_us: 1.6084293039833628
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.635986546474675
 - program: 4
   target:
     loop: 33
@@ -30686,6 +30971,11 @@ configs:
       emmy_us: 2.696347787328388
       reference_us: 2.678365636897343
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 2.3371293965507953
+        tcompile_us: 3.3679998790224395
+        eager_us: 3.7253334497412047
 - program: 4
   target:
     loop: 34
@@ -30740,6 +31030,10 @@ configs:
       emmy_us: 11.275505751706241
       reference_us: 11.26400004611926
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 9.815919278848051
+        eager_us: 336.5990447998047
 - program: 4
   target:
     loop: 35
@@ -30757,6 +31051,9 @@ configs:
       emmy_us: 1.6232918520442776
       reference_us: 1.6077294249849428
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.6301805558411973
 - program: 4
   target:
     loop: 36
@@ -30774,6 +31071,11 @@ configs:
       emmy_us: 2.6745444359483743
       reference_us: 2.667354800367868
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 2.6872928629922606
+        tcompile_us: 3.388558985084616
+        eager_us: 3.4436128472769134
 - program: 4
   target:
     loop: 37
@@ -30828,6 +31130,10 @@ configs:
       emmy_us: 60.60799956321716
       reference_us: 60.59670448303223
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 55.01155720816718
+        eager_us: 356.4122424406164
 - program: 4
   target:
     loop: 38
@@ -30845,6 +31151,9 @@ configs:
       emmy_us: 1.6216131507373248
       reference_us: 1.615089420380631
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.6256431337157482
 - program: 4
   target:
     loop: 39
@@ -30881,6 +31190,9 @@ configs:
       emmy_us: 73841.66717529297
       reference_us: 73859.06982421875
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 73835.51788330078
 - program: 5
   target:
     loop: 40
@@ -30917,6 +31229,9 @@ configs:
       emmy_us: 29936.6397857666
       reference_us: 30038.015365600586
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 29957.120895385742
 - program: 5
   target:
     loop: 41
@@ -30935,6 +31250,9 @@ configs:
       emmy_us: 1.4731496750951527
       reference_us: 1.4519179321803655
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.4825074530359523
 - program: 5
   target:
     loop: 42
@@ -30993,6 +31311,11 @@ configs:
       emmy_us: 148.77256325313024
       reference_us: 148.62629345485144
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 149.2114237376622
+        tcompile_us: 6.875428770269666
+        eager_us: 253.0742883682251
 - program: 5
   target:
     loop: 43
@@ -31011,6 +31334,9 @@ configs:
       emmy_us: 1.4594252333263498
       reference_us: 1.441959215670216
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.463504403741662
 - program: 5
   target:
     loop: 44
@@ -31027,6 +31353,11 @@ configs:
       emmy_us: 4.141511122385661
       reference_us: 4.112855887707369
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 4.1966496879219
+        tcompile_us: 3.5275933095964334
+        eager_us: 3.4538305411904546
   - name: post1.k_sum_7_reduce.6ceee5642fff.m1.4b9289a833c8
     bindings:
       num_tokens: 1
@@ -31172,6 +31503,11 @@ configs:
       emmy_us: 411.6480052471161
       reference_us: 411.6480052471161
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 413.1839871406555
+        tcompile_us: 12.28800043463707
+        eager_us: 371.71199917793274
 - program: 5
   target:
     loop: 46
@@ -31190,6 +31526,9 @@ configs:
       emmy_us: 1.460260364430896
       reference_us: 1.446989634770341
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.4652235543026644
 - program: 5
   target:
     loop: 47
@@ -31208,6 +31547,11 @@ configs:
       emmy_us: 1.8254732558740436
       reference_us: 1.8168954674257052
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.8069489593923527
+        tcompile_us: 3.5185985756616525
+        eager_us: 3.486832127953968
 - program: 5
   target:
     loop: 48
@@ -31339,6 +31683,11 @@ configs:
       emmy_us: 545.7919836044312
       reference_us: 546.3039875030518
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 546.3039875030518
+        tcompile_us: 12.28800043463707
+        eager_us: 369.6640133857727
 - program: 5
   target:
     loop: 49
@@ -31357,6 +31706,9 @@ configs:
       emmy_us: 1.457923755617785
       reference_us: 1.4440642656200995
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.462857133334445
 - program: 5
   target:
     loop: 50
@@ -31373,6 +31725,11 @@ configs:
       emmy_us: 4.187118704036131
       reference_us: 4.213152548014108
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 4.121707074312984
+        tcompile_us: 3.392282036432611
+        eager_us: 3.41032596411684
   - name: post1.k_sum_21_reduce.6ceee5642fff.m1.45dd73044e80
     bindings:
       num_tokens: 1
@@ -31518,6 +31875,11 @@ configs:
       emmy_us: 410.1119935512543
       reference_us: 410.6239974498749
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 411.1360013484955
+        tcompile_us: 12.28800043463707
+        eager_us: 367.1039938926697
 - program: 5
   target:
     loop: 52
@@ -31536,6 +31898,9 @@ configs:
       emmy_us: 1.4604838196858545
       reference_us: 1.4461754706867953
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.4742588295656092
 - program: 5
   target:
     loop: 53
@@ -31594,6 +31959,11 @@ configs:
       emmy_us: 148.91885008130754
       reference_us: 148.4800066266741
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 149.35771056583948
+        tcompile_us: 7.021714534078326
+        eager_us: 252.3428542273385
 - program: 5
   target:
     loop: 54
@@ -31612,6 +31982,9 @@ configs:
       emmy_us: 1.4551579080827055
       reference_us: 1.4446783832639283
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.468434012180899
 - program: 5
   target:
     loop: 55
@@ -31670,6 +32043,11 @@ configs:
       emmy_us: 19.90656018257141
       reference_us: 19.927040338516235
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 17.2463153537951
+        tcompile_us: 5.901963602412831
+        eager_us: 227.83069610595703
 - program: 5
   target:
     loop: 56
@@ -31688,6 +32066,9 @@ configs:
       emmy_us: 1.4611285405461862
       reference_us: 1.4443318569677537
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.4751013505126236
 - program: 5
   target:
     loop: 57
@@ -31706,6 +32087,11 @@ configs:
       emmy_us: 2.0543209319252047
       reference_us: 2.043820400627292
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.7315555984775226
+        tcompile_us: 2.1373672918839888
+        eager_us: 35.532798767089844
 - program: 5
   target:
     loop: 58
@@ -31724,6 +32110,11 @@ configs:
       emmy_us: 1.461786197533894
       reference_us: 1.4497921372577003
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.2525598909635411
+        tcompile_us: 3.5177746137425365
+        eager_us: 3.5220472471107196
 - program: 5
   target:
     loop: 59
@@ -31758,6 +32149,9 @@ configs:
       emmy_us: 45253.27428057075
       reference_us: 45270.94558411561
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 42223.61755371094
   - name: post1.k_linear_softmax_matmul_mean_reduce_9e578e.8595d2e73ba3.m1.4f8733587295
     bindings:
       num_tokens: 1
@@ -32094,6 +32488,9 @@ configs:
       emmy_us: 1.4560233937562819
       reference_us: 1.4691513794466011
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.2564897841336777
 - program: 5
   target:
     loop: 61
@@ -32191,6 +32588,11 @@ configs:
       emmy_us: 7.4183110837583195
       reference_us: 7.448652055528429
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 6.45802656809489
+        tcompile_us: 6.496635888585981
+        eager_us: 278.20248635399423
 - program: 5
   target:
     loop: 62
@@ -32209,6 +32611,9 @@ configs:
       emmy_us: 1.4596159736374104
       reference_us: 1.44425430738857
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.4840358228825812
 - program: 5
   target:
     loop: 63
@@ -32225,6 +32630,11 @@ configs:
       emmy_us: 4.205401636596419
       reference_us: 4.225075745782932
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 4.278237536802131
+        tcompile_us: 3.0633221238346424
+        eager_us: 3.3063050043784967
   - name: post1.k_sum_47_reduce.6ceee5642fff.m1.4b9289a833c8
     bindings:
       num_tokens: 1
@@ -32370,6 +32780,11 @@ configs:
       emmy_us: 411.6480052471161
       reference_us: 411.6480052471161
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 410.6239974498749
+        tcompile_us: 12.28800043463707
+        eager_us: 371.71199917793274
 - program: 5
   target:
     loop: 65
@@ -32388,6 +32803,9 @@ configs:
       emmy_us: 1.461349021703751
       reference_us: 1.4413508438821094
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.4562561695926226
 - program: 5
   target:
     loop: 66
@@ -32406,6 +32824,11 @@ configs:
       emmy_us: 1.826952084404076
       reference_us: 1.8162919874608952
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.5511762891284389
+        tcompile_us: 3.0317715236118863
+        eager_us: 3.1341714518410817
 - program: 5
   target:
     loop: 67
@@ -32537,6 +32960,11 @@ configs:
       emmy_us: 545.7919836044312
       reference_us: 548.3520030975342
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 546.3039875030518
+        tcompile_us: 12.28800043463707
+        eager_us: 366.07998609542847
 - program: 5
   target:
     loop: 68
@@ -32555,6 +32983,9 @@ configs:
       emmy_us: 1.4632899732984734
       reference_us: 1.4461754706867953
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.4626411074549621
 - program: 5
   target:
     loop: 69
@@ -32573,6 +33004,11 @@ configs:
       emmy_us: 1.8352940678596497
       reference_us: 1.8225320982276847
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.6633589598093685
+        tcompile_us: 3.4812262458522825
+        eager_us: 3.472160241885749
 - program: 5
   target:
     loop: 70
@@ -32704,6 +33140,11 @@ configs:
       emmy_us: 409.59998965263367
       reference_us: 409.08798575401306
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 411.1360013484955
+        tcompile_us: 12.28800043463707
+        eager_us: 368.1280016899109
 - program: 5
   target:
     loop: 71
@@ -32722,6 +33163,9 @@ configs:
       emmy_us: 1.469086620426038
       reference_us: 1.446793578554212
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.459199979024775
 - program: 5
   target:
     loop: 72
@@ -32740,6 +33184,11 @@ configs:
       emmy_us: 1.8273590897547827
       reference_us: 1.8158683611226474
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.8254732558740436
+        tcompile_us: 3.4521791472363828
+        eager_us: 3.473194010222136
 - program: 5
   target:
     loop: 73
@@ -32871,6 +33320,11 @@ configs:
       emmy_us: 545.7919836044312
       reference_us: 545.7919836044312
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 544.2559719085693
+        tcompile_us: 12.28800043463707
+        eager_us: 365.56801199913025
 - program: 5
   target:
     loop: 74
@@ -32889,6 +33343,9 @@ configs:
       emmy_us: 1.4607058728442472
       reference_us: 1.4466976876868758
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.4624281887434794
 - program: 5
   target:
     loop: 75
@@ -32948,6 +33405,9 @@ configs:
       emmy_us: 122.75200337171555
       reference_us: 123.26399981975555
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 122.75200337171555
 - program: 6
   target:
     loop: 76
@@ -32988,6 +33448,9 @@ configs:
       emmy_us: 46901.248931884766
       reference_us: 46897.151947021484
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 46940.15884399414
 - program: 6
   target:
     loop: 77
@@ -33006,6 +33469,9 @@ configs:
       emmy_us: 1.5520502033652182
       reference_us: 1.542420035993044
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.5577017044534487
 - program: 6
   target:
     loop: 78
@@ -33042,6 +33508,11 @@ configs:
       emmy_us: 3.9160501009250783
       reference_us: 3.895466774702072
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 3.4793978523609885
+        tcompile_us: 5.642893466543644
+        eager_us: 227.99614980711158
 - program: 6
   target:
     loop: 79
@@ -33060,6 +33531,9 @@ configs:
       emmy_us: 1.5626078515540895
       reference_us: 1.5463837409354224
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.563371071275675
 - program: 6
   target:
     loop: 80
@@ -33078,6 +33552,11 @@ configs:
       emmy_us: 1.878952618115767
       reference_us: 1.8647985494293962
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.7008219067364523
+        tcompile_us: 2.973649685890212
+        eager_us: 3.228203500507017
 - program: 6
   target:
     loop: 81
@@ -33133,6 +33612,11 @@ configs:
       emmy_us: 11.704558549925338
       reference_us: 11.794070636524873
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 10.115878750579526
+        tcompile_us: 8.909855921243883
+        eager_us: 326.03314979789184
 - program: 6
   target:
     loop: 82
@@ -33151,6 +33635,9 @@ configs:
       emmy_us: 1.5616802773131846
       reference_us: 1.5455403868456066
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.5658330729627232
 - program: 6
   target:
     loop: 83
@@ -33169,6 +33656,11 @@ configs:
       emmy_us: 1.8699130849712062
       reference_us: 1.856239659062932
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.8744406951573833
+        tcompile_us: 3.580982418097775
+        eager_us: 3.5025225641216884
 - program: 6
   target:
     loop: 84
@@ -33224,6 +33716,11 @@ configs:
       emmy_us: 8.49832479770367
       reference_us: 8.524350952683832
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 7.317489081055579
+        tcompile_us: 8.856835649974311
+        eager_us: 325.9223824116721
 - program: 6
   target:
     loop: 85
@@ -33242,6 +33739,9 @@ configs:
       emmy_us: 1.5586835296848152
       reference_us: 1.547200046479702
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.5618423182129484
 - program: 6
   target:
     loop: 86
@@ -33260,6 +33760,11 @@ configs:
       emmy_us: 1.8776559424084842
       reference_us: 1.8597222850649264
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.6689313516345257
+        tcompile_us: 4.986901453206125
+        eager_us: 4.914431366195822
 - program: 6
   target:
     loop: 87
@@ -33315,6 +33820,11 @@ configs:
       emmy_us: 11.692651482515558
       reference_us: 11.85619256582605
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 10.187754825669892
+        tcompile_us: 8.772618377331606
+        eager_us: 325.0830542180956
 - program: 6
   target:
     loop: 88
@@ -33333,6 +33843,9 @@ configs:
       emmy_us: 1.562691977803741
       reference_us: 1.5464162975782894
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.5577701133067214
 - program: 6
   target:
     loop: 89
@@ -33369,6 +33882,11 @@ configs:
       emmy_us: 3.9203346523779703
       reference_us: 3.912716060297035
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 3.462095182020586
+        tcompile_us: 5.757722566136262
+        eager_us: 227.5393611595724
 - program: 6
   target:
     loop: 90
@@ -33387,6 +33905,9 @@ configs:
       emmy_us: 1.5610742719629176
       reference_us: 1.5456000342965126
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.562691977803741
 - program: 6
   target:
     loop: 91
@@ -33423,6 +33944,11 @@ configs:
       emmy_us: 3.74783992767334
       reference_us: 3.696881879971722
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 3.4002508020567146
+        tcompile_us: 5.549305902723594
+        eager_us: 229.61879350065774
 - program: 6
   target:
     loop: 92
@@ -33441,6 +33967,9 @@ configs:
       emmy_us: 1.5634573784536367
       reference_us: 1.5456000342965126
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.5638974041510851
 - program: 6
   target:
     loop: 93
@@ -33459,6 +33988,11 @@ configs:
       emmy_us: 2.084648483677914
       reference_us: 2.071272735753335
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.796166353587863
+        tcompile_us: 2.1003635995315784
+        eager_us: 38.76848654313521
 - program: 6
   target:
     loop: 94
@@ -33477,6 +34011,11 @@ configs:
       emmy_us: 1.5383888366248337
       reference_us: 1.519634661972069
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.5391702806986522
+        tcompile_us: 4.689920131976788
+        eager_us: 4.828553933363694
 - program: 6
   target:
     loop: 95
@@ -33511,6 +34050,9 @@ configs:
       emmy_us: 18641.396124578157
       reference_us: 18866.593997267457
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 18847.74398803711
   - name: post16.k_linear_softmax_matmul_mean_reduce_8e1e80.ee59c5a2f07f.m16.c4fba2e16d08
     bindings:
       num_tokens: 16
@@ -33832,6 +34374,9 @@ configs:
       emmy_us: 1.525775719714421
       reference_us: 1.5265476703643799
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.5265476703643799
 - program: 6
   target:
     loop: 97
@@ -33887,6 +34432,11 @@ configs:
       emmy_us: 7.648492317933303
       reference_us: 7.632738351821899
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 6.621866623560587
+        tcompile_us: 6.8449934056941295
+        eager_us: 297.99774989185715
 - program: 6
   target:
     loop: 98
@@ -33905,6 +34455,9 @@ configs:
       emmy_us: 1.5600752494178223
       reference_us: 1.5487601266843136
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.5642204622584066
 - program: 6
   target:
     loop: 99
@@ -33923,6 +34476,11 @@ configs:
       emmy_us: 1.87604528553081
       reference_us: 1.8632180036458752
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.7031658408988237
+        tcompile_us: 3.5338809073772173
+        eager_us: 3.5307675543714785
 - program: 6
   target:
     loop: 100
@@ -33978,6 +34536,11 @@ configs:
       emmy_us: 11.680744415105776
       reference_us: 11.782023485969093
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 10.187754825669892
+        tcompile_us: 8.86716488953475
+        eager_us: 325.0302776847918
 - program: 6
   target:
     loop: 101
@@ -33996,6 +34559,9 @@ configs:
       emmy_us: 1.5650725327079604
       reference_us: 1.544731809187305
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.5650725327079604
 - program: 6
   target:
     loop: 102
@@ -34014,6 +34580,11 @@ configs:
       emmy_us: 1.8725122435618256
       reference_us: 1.8578011815140887
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.8783085686819896
+        tcompile_us: 3.588839379510717
+        eager_us: 3.6012583904052047
 - program: 6
   target:
     loop: 103
@@ -34069,6 +34640,11 @@ configs:
       emmy_us: 8.533333101843159
       reference_us: 8.53044097706423
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 7.326117771513322
+        tcompile_us: 8.734566951865581
+        eager_us: 324.6997150022592
 - program: 6
   target:
     loop: 104
@@ -34087,6 +34663,9 @@ configs:
       emmy_us: 1.5618423182129484
       reference_us: 1.5447863178580488
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.5659272953232317
 - program: 6
   target:
     loop: 105
@@ -34105,6 +34684,11 @@ configs:
       emmy_us: 1.877009529316448
       reference_us: 1.8597222850649264
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.6227231546022993
+        tcompile_us: 3.05464397940483
+        eager_us: 3.248819816270861
 - program: 6
   target:
     loop: 106
@@ -34160,6 +34744,11 @@ configs:
       emmy_us: 11.621209078056866
       reference_us: 11.769976335413315
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 10.136565776786417
+        tcompile_us: 8.8375651318094
+        eager_us: 327.14574233345365
 - program: 6
   target:
     loop: 107
@@ -34178,6 +34767,9 @@ configs:
       emmy_us: 1.5685079589722648
       reference_us: 1.5448137814636709
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.559309252015837
 - program: 6
   target:
     loop: 108
@@ -34196,6 +34788,11 @@ configs:
       emmy_us: 1.8737844573527518
       reference_us: 1.856598118755305
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.8757201998806179
+        tcompile_us: 3.4302123736985872
+        eager_us: 3.4692579294553134
 - program: 6
   target:
     loop: 109
@@ -34251,6 +34848,11 @@ configs:
       emmy_us: 8.48705081616418
       reference_us: 8.49572884834419
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 7.372800067619041
+        tcompile_us: 8.765134348798155
+        eager_us: 325.10472767388643
 - program: 6
   target:
     loop: 110
@@ -34269,6 +34871,9 @@ configs:
       emmy_us: 1.5635443261907072
       reference_us: 1.5520502033652182
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.5649811464285701
 - program: 6
   target:
     loop: 111
@@ -34306,6 +34911,9 @@ configs:
       emmy_us: 1855.4879426956177
       reference_us: 1856.511950492859
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1850.3680229187012
 - program: 7
   target:
     loop: 112
@@ -34346,6 +34954,9 @@ configs:
       emmy_us: 106342.39959716797
       reference_us: 106509.31549072266
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 106337.2802734375
 - program: 7
   target:
     loop: 113
@@ -34364,6 +34975,9 @@ configs:
       emmy_us: 2.010838759522284
       reference_us: 2.0190383448745264
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 2.0189209110112993
 - program: 7
   target:
     loop: 114
@@ -34400,6 +35014,10 @@ configs:
       emmy_us: 375.12532869974774
       reference_us: 375.12532869974774
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 376.14933649698895
+        eager_us: 337.5786542892456
 - program: 7
   target:
     loop: 115
@@ -34418,6 +35036,9 @@ configs:
       emmy_us: 2.010838759522284
       reference_us: 2.010838759522284
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 2.012473466444989
 - program: 7
   target:
     loop: 116
@@ -34436,6 +35057,11 @@ configs:
       emmy_us: 27.50577860408359
       reference_us: 27.477333943049114
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 27.53422160943349
+        tcompile_us: 4.1498945731865735
+        eager_us: 4.473263103710978
 - program: 7
   target:
     loop: 117
@@ -34491,6 +35117,10 @@ configs:
       emmy_us: 32.07432262359127
       reference_us: 32.27251575839135
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 27.818666564093693
+        eager_us: 453.30167585803616
 - program: 7
   target:
     loop: 118
@@ -34509,6 +35139,9 @@ configs:
       emmy_us: 2.014834026576054
       reference_us: 2.016716964861526
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 2.0189209110112993
 - program: 7
   target:
     loop: 119
@@ -34527,6 +35160,11 @@ configs:
       emmy_us: 27.477333943049114
       reference_us: 27.42044462098016
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 27.477333943049114
+        tcompile_us: 3.9253334204355874
+        eager_us: 4.266666869322459
 - program: 7
   target:
     loop: 120
@@ -34582,6 +35220,10 @@ configs:
       emmy_us: 1260.543942451477
       reference_us: 1265.663981437683
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1261.5679502487183
+        eager_us: 508.92800092697144
 - program: 7
   target:
     loop: 121
@@ -34600,6 +35242,9 @@ configs:
       emmy_us: 2.0066262495638147
       reference_us: 2.0170322348994594
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 2.014834026576054
 - program: 7
   target:
     loop: 122
@@ -34618,6 +35263,11 @@ configs:
       emmy_us: 27.448889282014633
       reference_us: 27.477333943049114
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 27.619555592536926
+        tcompile_us: 5.631999837027656
+        eager_us: 5.802666561471091
 - program: 7
   target:
     loop: 123
@@ -34673,6 +35323,10 @@ configs:
       emmy_us: 32.04129011400284
       reference_us: 31.909161998379613
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 27.76177724202474
+        eager_us: 438.65233830043246
 - program: 7
   target:
     loop: 124
@@ -34691,6 +35345,9 @@ configs:
       emmy_us: 2.012832357425882
       reference_us: 2.012832357425882
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 2.0188617754757887
 - program: 7
   target:
     loop: 125
@@ -34727,6 +35384,10 @@ configs:
       emmy_us: 374.783992767334
       reference_us: 374.44265683492023
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 376.14933649698895
+        eager_us: 335.1893424987793
 - program: 7
   target:
     loop: 126
@@ -34745,6 +35406,9 @@ configs:
       emmy_us: 2.0127611362982374
       reference_us: 2.010763654805193
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 2.0167804588147296
 - program: 7
   target:
     loop: 127
@@ -34781,6 +35445,10 @@ configs:
       emmy_us: 7.326117771513322
       reference_us: 7.332152537717164
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 6.325468232360067
+        eager_us: 292.232774708369
 - program: 7
   target:
     loop: 128
@@ -34799,6 +35467,9 @@ configs:
       emmy_us: 2.0066262495638147
       reference_us: 2.0190383448745264
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 2.01690691685387
 - program: 7
   target:
     loop: 129
@@ -34817,6 +35488,11 @@ configs:
       emmy_us: 27.619555592536926
       reference_us: 27.591110931502445
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 26.192842345488696
+        tcompile_us: 2.389333314365811
+        eager_us: 48.8391121228536
 - program: 7
   target:
     loop: 130
@@ -34835,6 +35511,11 @@ configs:
       emmy_us: 2.0065424654647885
       reference_us: 2.0190383448745264
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.7372070697315953
+        tcompile_us: 3.0018064764238175
+        eager_us: 3.1153547667687937
 - program: 7
   target:
     loop: 131
@@ -34869,6 +35550,9 @@ configs:
       emmy_us: 126101.87274637613
       reference_us: 126717.76480320233
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 126668.8003540039
   - name: post4096.k_linear_softmax_matmul_mean_reduce_366777.f0fc3dc05f5c.m4096.1ee8346ccfdc
     bindings:
       num_tokens: 4096
@@ -35190,6 +35874,9 @@ configs:
       emmy_us: 1.994752049446106
       reference_us: 1.9865599870681765
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.9928143171969048
 - program: 7
   target:
     loop: 133
@@ -35245,6 +35932,10 @@ configs:
       emmy_us: 1027.0719528198242
       reference_us: 1028.0959606170654
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1027.0719528198242
+        eager_us: 465.92000126838684
 - program: 7
   target:
     loop: 134
@@ -35263,6 +35954,9 @@ configs:
       emmy_us: 2.0208879546575296
       reference_us: 2.022819685154274
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 2.0235609040908997
 - program: 7
   target:
     loop: 135
@@ -35281,6 +35975,11 @@ configs:
       emmy_us: 27.50577860408359
       reference_us: 27.53422160943349
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 27.53422160943349
+        tcompile_us: 4.203789328273974
+        eager_us: 4.419368348623577
 - program: 7
   target:
     loop: 136
@@ -35336,6 +36035,10 @@ configs:
       emmy_us: 31.843096979202762
       reference_us: 31.87612948879119
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 27.76177724202474
+        eager_us: 437.067284303553
 - program: 7
   target:
     loop: 137
@@ -35354,6 +36057,9 @@ configs:
       emmy_us: 2.0106882460204214
       reference_us: 2.0189798071316862
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 2.0169696422538372
 - program: 7
   target:
     loop: 138
@@ -35372,6 +36078,11 @@ configs:
       emmy_us: 27.477333943049114
       reference_us: 27.42044462098016
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 27.53422160943349
+        tcompile_us: 3.4304000437259674
+        eager_us: 3.7888001650571823
 - program: 7
   target:
     loop: 139
@@ -35427,6 +36138,10 @@ configs:
       emmy_us: 1261.5679502487183
       reference_us: 1261.5679502487183
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1267.7119970321655
+        eager_us: 525.3120064735413
 - program: 7
   target:
     loop: 140
@@ -35445,6 +36160,9 @@ configs:
       emmy_us: 2.0106882460204214
       reference_us: 2.0189798071316862
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 2.012832357425882
 - program: 7
   target:
     loop: 141
@@ -35463,6 +36181,11 @@ configs:
       emmy_us: 27.477333943049114
       reference_us: 27.448889282014633
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 27.53422160943349
+        tcompile_us: 4.527157858798378
+        eager_us: 4.796631634235382
 - program: 7
   target:
     loop: 142
@@ -35518,6 +36241,10 @@ configs:
       emmy_us: 32.140387642768125
       reference_us: 32.07432262359127
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 27.960889869266087
+        eager_us: 436.7204723936139
 - program: 7
   target:
     loop: 143
@@ -35536,6 +36263,9 @@ configs:
       emmy_us: 2.008615355742605
       reference_us: 2.008615355742605
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 2.014834026576054
 - program: 7
   target:
     loop: 144
@@ -35554,6 +36284,11 @@ configs:
       emmy_us: 27.50577860408359
       reference_us: 27.50577860408359
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 27.477333943049114
+        tcompile_us: 3.5840000957250595
+        eager_us: 3.840000182390213
 - program: 7
   target:
     loop: 145
@@ -35609,6 +36344,10 @@ configs:
       emmy_us: 1261.5679502487183
       reference_us: 1261.5679502487183
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1261.5679502487183
+        eager_us: 514.0479803085327
 - program: 7
   target:
     loop: 146
@@ -35627,6 +36366,9 @@ configs:
       emmy_us: 2.012832357425882
       reference_us: 2.021107047495216
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 2.014766721164479
 - program: 7
   target:
     loop: 147
@@ -35664,6 +36406,9 @@ configs:
       emmy_us: 454829.0710449219
       reference_us: 453203.9794921875
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 453517.3034667969
 - program: 8
   target:
     loop: 148
@@ -35681,6 +36426,10 @@ configs:
       emmy_us: 257729.2005577021
       reference_us: 257721.24576866627
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 246934.5245361328
+        eager_us: 17562.623457475143
   - name: pre-sym.k_linear_mean_reduce_3e0f82.1aaf9cf804d0.dynamic.0003b1bd6d4c
     bindings: {}
     pins:
@@ -35771,6 +36520,10 @@ configs:
       emmy_us: 29693246.09375
       reference_us: 29698787.109375
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 29690269.53125
+        eager_us: 13863.936424255371
 - program: 10
   target:
     loop: 150
@@ -35798,6 +36551,10 @@ configs:
       emmy_us: 17179498.046875
       reference_us: 17178498.046875
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 17184826.171875
+        eager_us: 14291.96834564209
 - program: 11
   target:
     loop: 151
