@@ -524,28 +524,30 @@ def _record_golden_latency(args, results: dict, golden_benches) -> None:
         logger.error("--record needs exactly one pinned row to attribute the timing to, measured %d", len(measured))
         sys.exit(2)
     emmy_us = _bench_total_us(measured[0].bench)[0] if measured else results.get("Emmy")
-    tcompile_us = results.get("torch.compile")
+    tcompile_us, eager_us = results.get("torch.compile"), results.get("Eager PyTorch")
     if not emmy_us:
         logger.error("--record measured no Emmy timing for %s", args.realization)
         sys.exit(2)
     if not tcompile_us:
         # Not fatal: the ratchet is `emmy_us`, and some targets have no torch twin to compile.
-        logger.warning("--record: no torch.compile timing for %s; storing the Emmy latency alone", args.realization)
+        logger.warning("--record: no torch.compile timing for %s; storing the timings it has", args.realization)
     record_latency(
         args.golden,
         args.realization,
         hardware_id=Context.probe().hardware_id(),
         emmy_us=emmy_us,
         tcompile_us=tcompile_us,
+        eager_us=eager_us,
         knobs=measured[0].sample.knobs if measured else None,
         pins=measured[0].sample.pins if measured else None,
     )
     logger.info(
-        "recorded %s: emmy %.2f us (%s)%s",
+        "recorded %s: emmy %.2f us (%s)%s%s",
         args.realization,
         emmy_us,
         "pinned row" if measured else "greedy pick",
         f", torch.compile {tcompile_us:.2f} us" if tcompile_us else "",
+        f", eager {eager_us:.2f} us" if eager_us else "",
     )
 
 

@@ -239,7 +239,7 @@ class GoldenRecord:
     #: (:func:`kernel_set_pins`). Empty where the compile took no kernel-set decision, leaving a
     #: realization that carries its own measured row and needs no listing.
     kernel_set: tuple[str, ...] = ()
-    #: Measured microseconds per ``Context.hardware_id``: ``{card: {emmy_us, tcompile_us}}``. A
+    #: Measured microseconds per ``Context.hardware_id``: ``{card: {emmy_us, tcompile_us, eager_us}}``. A
     #: model golden is one file per card and uses the flat ``measurements`` block instead; a corpus
     #: case is one file across many cards, which a flat block cannot hold.
     latency: dict | None = None
@@ -473,11 +473,12 @@ def _positive_number(value, where: str) -> None:
 
 
 #: What one card's ``latency`` entry records. ``emmy_us`` is required — it is the ratchet, and a
-#: case without it stores nothing. ``tcompile_us`` is the "are we ahead of or behind torch" half
-#: and is OPTIONAL, because some targets have no torch twin to compile: a provenance-reconstructed
-#: frontend program benches against eager and Emmy only. Refusing to store the ratchet because the
+#: case without it stores nothing. ``tcompile_us`` and ``eager_us`` are the "are we ahead of or
+#: behind torch" half and are OPTIONAL, because some targets have no torch twin: a stored kernel
+#: holding part of an op benches Emmy alone, and torch.compile is dropped where it disagrees with
+#: eager (a random-input reproducer that produces NaN). Refusing to store the ratchet because the
 #: comparison is unavailable would discard the more important number of the two.
-LATENCY_FIELDS = ("emmy_us", "tcompile_us")
+LATENCY_FIELDS = ("emmy_us", "tcompile_us", "eager_us")
 _REQUIRED_LATENCY_FIELDS = ("emmy_us",)
 
 
