@@ -1362,8 +1362,6 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-    kernel_set:
-    - k_linear_mean_reduce_dc067d.a2e77bf96bb2.eff50cd7f0d7
   - name: k_linear_mean_reduce_dc067d.a2e77bf96bb2.eff50cd7f0d7
     bindings: {}
     pins:

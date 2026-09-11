@@ -1234,8 +1234,6 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-    kernel_set:
-    - k_linear_reduce_7ef15d.37e7fb9e7dd5.827097d61334
   - name: k_linear_reduce_7ef15d.37e7fb9e7dd5.827097d61334
     bindings: {}
     pins:
@@ -1286,8 +1284,6 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-    kernel_set:
-    - k_linear_49a16b.119bca97a211.0cf051efabac
   - name: k_linear_49a16b.119bca97a211.0cf051efabac
     bindings: {}
     pins:
@@ -1338,8 +1334,6 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-    kernel_set:
-    - k_linear_dfb21f.68dcd44586ec.24ffdc93f8e3
   - name: k_linear_dfb21f.68dcd44586ec.24ffdc93f8e3
     bindings: {}
     pins:
@@ -1420,9 +1414,6 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-    kernel_set:
-    - k_linear_sdpa_reduce_14c8c7.b69c5cc0ab9b.61885659297e
-    - k_linear_sdpa_reduce_14c8c7.b69c5cc0ab9b.265ea11d2d22
   - name: k_linear_sdpa_reduce_14c8c7.b69c5cc0ab9b.61885659297e
     bindings: {}
     pins:
@@ -1509,8 +1500,6 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-    kernel_set:
-    - k_linear_mean_reduce_549927.f3a20e07e940.63e76be34df0
   - name: k_linear_mean_reduce_549927.f3a20e07e940.63e76be34df0
     bindings: {}
     pins:
@@ -1557,8 +1546,6 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-    kernel_set:
-    - k_linear_2dcd0c.28b342e368a5.43286bf5010d
   - name: k_linear_2dcd0c.28b342e368a5.43286bf5010d
     bindings: {}
     pins:
