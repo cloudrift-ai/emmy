@@ -1767,7 +1767,7 @@ class LdmatrixLoad(Stmt):
             pair = f"({self.frag}, {self.pair_frag})"
             return [f"{indent}LdmatrixLoad {pair} <- {self.src_buffer}[{idx}] ({variant}, ldm={self.ldm or 'auto'})"]
         if self.scale_buffer is not None:
-            variant = f"pair decode x {self.scale_buffer}"
+            variant = f"byte decode x {self.scale_buffer}"
         elif self.byte_slab:
             variant = "byte gather"
         elif self.fragment_layout == "m8n8k4" and self.staged:
