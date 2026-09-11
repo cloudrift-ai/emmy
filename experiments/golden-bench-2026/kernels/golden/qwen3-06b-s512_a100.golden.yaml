@@ -1225,14 +1225,19 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
+  - name: k_mean_20f978.3ef4b7a3a671.cb232a189d49
+    bindings: {}
+    pins:
+      FAST_MATH: false
     knobs:
-      LOOPIFY: '0'
-      REDUCE: coop
       WORK: t256
+      REDUCE: coop
+      RASTER: ''
+    identity: cb232a189d494ef99b7825a087cb2ca05fe44c49cf0c1808a2843e396a704c9a
     measurements:
-      emmy_us: 3.1764
-      reference_us: 191.6096
-      reference_backend: torch-eager
+      emmy_us: 3.4226848654551048
+      reference_us: 3.4274090196668485
+      reference_backend: same-input-greedy
 - program: 0
   target:
     origins:
@@ -1242,15 +1247,21 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
+  - name: k_linear_reduce_06a42b.975d5314f1c7.32c04ea98e4c
+    bindings: {}
+    pins:
+      FAST_MATH: false
     knobs:
-      LOOPIFY: '0'
-      STAGE: d3/smem-async
-      TILE: mma_m16n8k16_f16_f32/f4x4/k8
       WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k4
+      REDUCE: ''
+      STAGE: d3/smem-async
+      RASTER: ''
+    identity: 32c04ea98e4c7882db20708a5a70e2ea82f7b186d317fe1f9b28388d7e8db561
     measurements:
-      emmy_us: 17.426
-      reference_us: 12.9707
-      reference_backend: torch-eager
+      emmy_us: 14.514086903005408
+      reference_us: 14.499246210291766
+      reference_backend: same-input-greedy
 - program: 0
   target:
     origins:
@@ -1262,15 +1273,21 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
+  - name: k_linear_1fd3d5.d0f217697284.6d9ba59e5b46
+    bindings: {}
+    pins:
+      FAST_MATH: false
     knobs:
-      LOOPIFY: '0'
-      STAGE: d1/smem-async
-      TILE: mma_m16n8k16_f16_f32/f1x4/k8
-      WORK: w4x1
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k4
+      REDUCE: ''
+      STAGE: d3/smem-async
+      RASTER: gm8
+    identity: 6d9ba59e5b46903e453243c6283561308d2e072494ca81562d4e19f7871b06ce
     measurements:
-      emmy_us: 22.2549
-      reference_us: 100.7909
-      reference_backend: torch-eager
+      emmy_us: 19.824639558792114
+      reference_us: 19.849845996269813
+      reference_backend: same-input-greedy
 - program: 0
   target:
     origins:
@@ -1282,15 +1299,21 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
+  - name: k_linear_a09c5a.f753cb04390b.0ee2f67cf7e7
+    bindings: {}
+    pins:
+      FAST_MATH: false
     knobs:
-      LOOPIFY: '0'
-      STAGE: d3/smem-async
-      TILE: mma_m16n8k16_f16_f32/f4x4/k8
       WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k4
+      REDUCE: ''
+      STAGE: d3/smem-async
+      RASTER: ''
+    identity: 0ee2f67cf7e783be81b91f98525022912628197ecf7c6765a45cdc7b9bc56fc0
     measurements:
-      emmy_us: 17.2844
-      reference_us: 60.1009
-      reference_backend: torch-eager
+      emmy_us: 14.35084101082622
+      reference_us: 14.354618029160934
+      reference_backend: same-input-greedy
 - program: 0
   target:
     origins:
@@ -1316,14 +1339,6 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-    knobs:
-      STAGE: d2/smem
-      TILE: mma_m16n8k16_f16_f32/f1x8/k8
-      WORK: w8x2
-    measurements:
-      emmy_us: 190.6688
-      reference_us: 60.2027
-      reference_backend: torch-eager
 - program: 0
   target:
     origins:
@@ -1347,6 +1362,44 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
+    kernel_set:
+    - k_linear_mean_reduce_dc067d.a2e77bf96bb2.eff50cd7f0d7
+  - name: k_linear_mean_reduce_dc067d.a2e77bf96bb2.eff50cd7f0d7
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      PLACE@map.2/inner.1/map: cut
+    identity: eff50cd7f0d7c7a4c7c9ffca85d54a6c3eaa71267c9ed9da915cfaa736b9beb8
+    measurements:
+      emmy_us: 193.13980922812507
+      reference_us: 195.16952548708235
+      reference_backend: same-input-greedy
+  - name: k_linear_mean_reduce_dc067d.a2e77bf96bb2.f4ecaca5386f
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs: {}
+    identity: f4ecaca5386f8203e938497e7bdb75ca0f95c0f01c2c33be319193c90638234b
+    measurements:
+      emmy_us: 152.13714327130998
+      reference_us: 154.11200126012167
+      reference_backend: same-input-greedy
+  - name: k_linear_mean_reduce_dc067d.a2e77bf96bb2.37cc5fb0a10c
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k4
+      REDUCE: ''
+      STAGE: d2/smem
+      RASTER: ''
+    identity: 37cc5fb0a10cf0bc84e4d4c860201354812a87f717d95af4a2ccc16688328e6e
+    measurements:
+      emmy_us: 41.002665956815086
+      reference_us: 41.05752422696069
+      reference_backend: same-input-greedy
 - program: 0
   target:
     origins:
@@ -1357,15 +1410,21 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
+  - name: k_linear_6b4b5f.a59ee74a4345.3bafd3d6e062
+    bindings: {}
+    pins:
+      FAST_MATH: false
     knobs:
-      LOOPIFY: '0'
-      STAGE: d3/smem-async
-      TILE: mma_m16n8k16_f16_f32/f4x4/k8
-      WORK: w2x2
+      WORK: w4x1
+      TILE: mma_m16n8k16_f16_f32/f1x4/k8
+      REDUCE: ''
+      STAGE: d2/smem-async
+      RASTER: ''
+    identity: 3bafd3d6e0623495f95310590955366ea5e853447953d18e345f5a3df7138e8c
     measurements:
-      emmy_us: 46.6651
-      reference_us: 32.4267
-      reference_backend: torch-eager
+      emmy_us: 38.95138318722065
+      reference_us: 39.01439905166626
+      reference_backend: same-input-greedy
 - program: 0
   target:
     origins:
@@ -1417,11 +1476,5 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-    knobs:
-      PLACE@b: cut
-    measurements:
-      emmy_us: 299.6907
-      reference_us: 745.472
-      reference_backend: torch-eager
-gpu_name: NVIDIA A100 80GB
+gpu_name: NVIDIA A100 40GB
 model: Qwen/Qwen3-0.6B@c1899de289a04d12100db370d81485cdf75e47ca
