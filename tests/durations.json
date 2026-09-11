@@ -1119,6 +1119,7 @@
  "tests/serving/test_attention_split.py::test_split_matches_eager_block[qwen3]": 5.3,
  "tests/serving/test_attention_split.py::test_split_matches_eager_gemma4": 6.6,
  "tests/serving/test_deepseek_native_loader.py::test_native_fp8_trunk_weight_loads_scaled": 1.64,
+ "tests/serving/test_deepseek_native_loader.py::test_native_routed_experts_stay_compressed_and_stacked": 5.3,
  "tests/serving/test_deepseek_v4_split.py::test_classic_carve_rejects_hyper_connection_block": 5.3,
  "tests/serving/test_deepseek_v4_split.py::test_hyper_connection_split_matches_eager_layer[0]": 1.02,
  "tests/serving/test_deepseek_v4_split.py::test_hyper_connection_split_matches_eager_layer[1]": 2.61,

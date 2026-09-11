@@ -524,28 +524,30 @@ def _record_golden_latency(args, results: dict, golden_benches) -> None:
         logger.error("--record needs exactly one pinned row to attribute the timing to, measured %d", len(measured))
         sys.exit(2)
     emmy_us = _bench_total_us(measured[0].bench)[0] if measured else results.get("Emmy")
-    tcompile_us = results.get("torch.compile")
+    tcompile_us, eager_us = results.get("torch.compile"), results.get("Eager PyTorch")
     if not emmy_us:
         logger.error("--record measured no Emmy timing for %s", args.realization)
         sys.exit(2)
     if not tcompile_us:
         # Not fatal: the ratchet is `emmy_us`, and some targets have no torch twin to compile.
-        logger.warning("--record: no torch.compile timing for %s; storing the Emmy latency alone", args.realization)
+        logger.warning("--record: no torch.compile timing for %s; storing the timings it has", args.realization)
     record_latency(
         args.golden,
         args.realization,
         hardware_id=Context.probe().hardware_id(),
         emmy_us=emmy_us,
         tcompile_us=tcompile_us,
+        eager_us=eager_us,
         knobs=measured[0].sample.knobs if measured else None,
         pins=measured[0].sample.pins if measured else None,
     )
     logger.info(
-        "recorded %s: emmy %.2f us (%s)%s",
+        "recorded %s: emmy %.2f us (%s)%s%s",
         args.realization,
         emmy_us,
         "pinned row" if measured else "greedy pick",
         f", torch.compile {tcompile_us:.2f} us" if tcompile_us else "",
+        f", eager {eager_us:.2f} us" if eager_us else "",
     )
 
 
@@ -617,14 +619,15 @@ def _run_golden_targets(args) -> None:
         sys.exit(2)
     # Bench each TARGET once. A row named ``<target>.<identity>`` (a routing row or a child-identity
     # schedule receipt) is evidence for its target's walk, not a target of its own: benched as a
-    # whole-target pin it measures nothing real and multiplies the walk by the receipt count.
-    targets: list[str] = []
-    for name in names:
-        parent = ".".join(name.split(".")[:2])
-        target = parent if parent in names else name
-        if target not in targets:
-            targets.append(target)
-    names = targets
+    # whole-target pin it measures nothing real and multiplies the walk by the receipt count. A file
+    # that keeps no seed row benches one of the target's rows instead — the one pricing the whole
+    # target: the fastest routing row, else the fastest row.
+    targets: dict[str, list] = {}
+    for record in records:
+        parent = record.name.rsplit(".", 1)[0]
+        target = parent if parent in names or getattr(record, "identity", None) else record.name
+        targets.setdefault(target, []).append(record)
+    names = [target if target in names else min(rows, key=lambda r: (not r.is_routing, r.emmy_us)).name for target, rows in targets.items()]
 
     output_dir = None
     if len(names) > 1 and args.json:
@@ -2372,8 +2375,11 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
     # Snapshot the pre-lowering frontend graph so we can build a torch
     # reference (eager + torch.compile) and compare accuracy/latency vs torch —
     # the same table the --code path produces for a debug Graph IR input.
-    # Non-frontend IR (loop/tile/…) has no torch twin → emmy-only bench.
-    frontend = graph.copy() if torch_ref.is_runnable(graph) else None
+    # Non-frontend IR (loop/tile/…) has no torch twin → emmy-only bench, unless it is a
+    # stored golden kernel whose embedded program holds the PyTorch slice it computes.
+    records = getattr(args, "_golden_records", None)
+    reference = graph if torch_ref.is_runnable(graph) else (records[0].reference_program if records else None)
+    frontend = reference.copy() if reference is not None and torch_ref.is_runnable(reference) else None
     same_input_greedy = strict_correctness and embedded is not None and frontend is None
 
     backend = CudaBackend(debug=args.debug or None, dump=dump, tune_db="auto")
@@ -2530,6 +2536,12 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
             same_input_reference,
         )
 
+    from emmy.compiler.pipeline.search.golden import records_override  # noqa: PLC0415
+
+    # Pinned rows compile under the golden scope the greedy row did — the target's records, not the
+    # card's whole corpus, which each pinned compile would otherwise replay row by row.
+    with records_override(getattr(args, "_golden_records", None) or None):
+        session = asyncio.run(_bench_session())
     (
         greedy_fail,
         results,
@@ -2544,7 +2556,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
         stats_sym_env,
         correctness,
         same_input_reference,
-    ) = asyncio.run(_bench_session())
+    ) = session
 
     if reference_error is not None:
         logger.error(reference_error)

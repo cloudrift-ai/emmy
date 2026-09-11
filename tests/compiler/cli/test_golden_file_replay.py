@@ -520,7 +520,12 @@ def test_embedded_loop_pins_receive_greedy_output_reference(monkeypatch, tmp_pat
     async def fake_isolated(*_args, **_kwargs):
         return None
 
+    scopes = []
+
     async def fake_pinned(_backend, _source, _pins, **kwargs):
+        from emmy.compiler.pipeline.search import golden
+
+        scopes.append(golden.RECORDS_OVERRIDE)  # the pinned rows compile under the target's own records
         seen["ref"] = kwargs["ref"]
         if kwargs["strict_correctness"]:
             seen["strict_reference"] = kwargs["strict_reference"]
@@ -534,6 +539,7 @@ def test_embedded_loop_pins_receive_greedy_output_reference(monkeypatch, tmp_pat
     run_module._handle_run_ir(args, FakeBackend, FakeDump)
 
     assert seen == {"want_ref": True, "ref": reference}
+    assert scopes == [args._golden_records]
 
     args.strict_correctness = True
     returned["accuracy_error"] = "strict eager correctness unavailable: frontend IR is not runnable"

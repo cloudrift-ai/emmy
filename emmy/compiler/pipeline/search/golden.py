@@ -34,6 +34,7 @@ _HARDWARE_GOLDENS_DIR = Path(__file__).parent / "goldens"
 _RECIPE_GOLDEN_DIR = "golden"
 _PROGRAM_GRAPH_CACHE: dict[int, tuple[dict, object]] = {}
 _LOOP_GRAPH_CACHE: dict[int, tuple[dict, object]] = {}
+_REFERENCE_CACHE: dict[int, tuple[dict, dict]] = {}
 _SAFE_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 
 
@@ -238,7 +239,7 @@ class GoldenRecord:
     #: (:func:`kernel_set_pins`). Empty where the compile took no kernel-set decision, leaving a
     #: realization that carries its own measured row and needs no listing.
     kernel_set: tuple[str, ...] = ()
-    #: Measured microseconds per ``Context.hardware_id``: ``{card: {emmy_us, tcompile_us}}``. A
+    #: Measured microseconds per ``Context.hardware_id``: ``{card: {emmy_us, tcompile_us, eager_us}}``. A
     #: model golden is one file per card and uses the flat ``measurements`` block instead; a corpus
     #: case is one file across many cards, which a flat block cannot hold.
     latency: dict | None = None
@@ -351,11 +352,37 @@ class GoldenRecord:
             else:
                 graph = cached[1]
             return specialize_program(graph, dict(self.bindings), loop=True)
+        return self._frontend_slice(self.origins)
 
+    @cached_property
+    def reference_program(self):
+        """The PyTorch slice a stored Loop IR kernel is compared against: the embedded program's ops
+        the kernel computes, every op whole, with the kernel's outputs in its order. ``None`` for a
+        kernel holding part of an op, or one the program no longer lowers to. Comparison only — the
+        stored kernel stays the identity."""
+        if self.loop_wire is None:
+            return None
+        from emmy.compiler.context import Context  # noqa: PLC0415
+
+        cached = _REFERENCE_CACHE.get(id(self.program_wire))
+        if cached is None or cached[0] is not self.program_wire:
+            cached = (
+                self.program_wire,
+                _whole_op_origins(self.program, Context.from_target(self.compute_cap, gpu_name=self.gpu_name or None)),
+            )
+            _REFERENCE_CACHE[id(self.program_wire)] = cached
+        found = cached[1].get(json.dumps(self.loop_wire, sort_keys=True))
+        if found is None:
+            return None
+        graph = self._frontend_slice(found[0])
+        graph.outputs = list(found[1])
+        return graph
+
+    def _frontend_slice(self, origins):
         from emmy.compiler.pipeline import CompilerDump  # noqa: PLC0415
+        from emmy.compiler.specialize import specialize_program  # noqa: PLC0415
 
-        graph = CompilerDump.frontend_reproducer_from_origins(self.program, set(self.origins))
-        return specialize_program(graph, dict(self.bindings))
+        return specialize_program(CompilerDump.frontend_reproducer_from_origins(self.program, set(origins)), dict(self.bindings))
 
     @property
     def target_key(self) -> tuple:
@@ -449,11 +476,12 @@ def _positive_number(value, where: str) -> None:
 
 
 #: What one card's ``latency`` entry records. ``emmy_us`` is required — it is the ratchet, and a
-#: case without it stores nothing. ``tcompile_us`` is the "are we ahead of or behind torch" half
-#: and is OPTIONAL, because some targets have no torch twin to compile: a provenance-reconstructed
-#: frontend program benches against eager and Emmy only. Refusing to store the ratchet because the
+#: case without it stores nothing. ``tcompile_us`` and ``eager_us`` are the "are we ahead of or
+#: behind torch" half and are OPTIONAL, because some targets have no torch twin: a stored kernel
+#: holding part of an op benches Emmy alone, and torch.compile is dropped where it disagrees with
+#: eager (a random-input reproducer that produces NaN). Refusing to store the ratchet because the
 #: comparison is unavailable would discard the more important number of the two.
-LATENCY_FIELDS = ("emmy_us", "tcompile_us")
+LATENCY_FIELDS = ("emmy_us", "tcompile_us", "eager_us")
 _REQUIRED_LATENCY_FIELDS = ("emmy_us",)
 
 
@@ -833,6 +861,39 @@ _DECODE_CTX_CACHE: dict[tuple, object] = {}
 def _record_cache_key(record: GoldenRecord) -> tuple:
     payload_id = id(record.loop_wire) if record.loop_wire is not None else id(record.program_wire)
     return (payload_id, record.target_key, record.compute_cap, record.bindings)
+
+
+def _whole_op_origins(program, ctx) -> dict[str, tuple[tuple[str, ...], tuple[str, ...]]]:
+    """Each kernel ``program`` lowers to, keyed by its Loop IR wire, mapped to the frontend origins
+    it computes whole and its outputs — a PyTorch slice of those origins exposing those outputs, and
+    reading nothing the kernel does not, computes exactly the kernel. A kernel holding part of an op,
+    or recomputing a value its slice would read, has no such slice and no entry."""
+    from emmy.compiler import provenance  # noqa: PLC0415
+    from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
+    from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
+    from emmy.compiler.loop_wire import loop_graph_to_wire  # noqa: PLC0415
+    from emmy.compiler.pipeline import LOOP_PASSES, CompilerDump, Pipeline  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.slice import single_node_graph  # noqa: PLC0415
+
+    source = program.copy()
+    provenance.seed(source)
+    fused = Pipeline.build(LOOP_PASSES).run(source.copy(), ctx=ctx)
+    totals = provenance.totals(fused)
+    found = {}
+    for node_id, node in fused.nodes.items():
+        if not isinstance(node.op, LoopOp):
+            continue
+        coverage = provenance.coverage(provenance.get(node), totals)
+        origins = tuple(sorted(origin for origin in coverage if origin in source.nodes))
+        if not origins or not all(coverage[origin][2] for origin in origins):
+            continue
+        kernel = single_node_graph(fused, node_id)
+        computed = {buffer for origin in origins for buffer in source.nodes[origin].buffer_names()}
+        reads = CompilerDump.frontend_reproducer_from_origins(source, set(origins)).inputs
+        bound = {input_id for input_id, input_node in kernel.nodes.items() if isinstance(input_node.op, InputOp)}
+        if set(kernel.outputs) <= computed and set(reads) <= bound:
+            found[json.dumps(loop_graph_to_wire(kernel), sort_keys=True)] = (origins, tuple(kernel.outputs))
+    return found
 
 
 def _target_kernel_nodes(record: GoldenRecord):

@@ -462,6 +462,21 @@ def test_is_runnable_accepts_frontend():
 def test_is_runnable_rejects_unmapped_elementwise():
     g = Graph()
     g.add_node(InputOp(), [], Tensor("x", (4, 8)), node_id="x")
-    g.add_node(ElementwiseOp(op="square"), ["x"], Tensor("o", (4, 8)), node_id="o")
+    g.add_node(ElementwiseOp(op="exp_fast"), ["x"], Tensor("o", (4, 8)), node_id="o")
     g.inputs, g.outputs = ["x"], ["o"]
     assert not torch_ref.is_runnable(g)
+
+
+def test_square_is_runnable_and_squares():
+    """A traced RMS statistic spells ``x ** 2`` as ``square``; without a mapping every program
+    holding one (DeepSeek V4's hyper-connection twins) had no PyTorch reference at all."""
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (4, 8)), node_id="x")
+    g.add_node(ElementwiseOp(op="square"), ["x"], Tensor("o", (4, 8)), node_id="o")
+    g.inputs, g.outputs = ["x"], ["o"]
+    x = torch.from_numpy(_rng().standard_normal((4, 8)).astype(np.float32))
+    fn, inputs = torch_ref.build_callable(g, {"x": x})
+    with torch.no_grad():
+        out = fn(*inputs)
+    assert torch_ref.is_runnable(g)
+    torch.testing.assert_close(out, x * x)

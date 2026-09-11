@@ -219,13 +219,18 @@ def test_record_latency_selects_the_measured_row_not_its_same_named_sibling(tmp_
         hardware_id="test-gpu",
         emmy_us=7.5,
         tcompile_us=8.0,
+        eager_us=9.0,
         knobs={"TILE": "f4x2"},
         pins={"FAST_MATH": False},
     )
 
     realizations = load_golden_file(path)["configs"][0]["realizations"]
     assert "latency" not in realizations[0]
-    assert realizations[1]["latency"] == {"test-gpu": {"emmy_us": 7.5, "tcompile_us": 8.0}}
+    assert realizations[1]["latency"] == {"test-gpu": {"emmy_us": 7.5, "tcompile_us": 8.0, "eager_us": 9.0}}
+
+    # A timing the run did not take is left out, not faked.
+    record_latency(path, "mm", hardware_id="test-gpu", emmy_us=7.0, tcompile_us=None, eager_us=9.5, knobs={"TILE": "f4x2"})
+    assert load_golden_file(path)["configs"][0]["realizations"][1]["latency"] == {"test-gpu": {"emmy_us": 7.0, "eager_us": 9.5}}
 
 
 def test_direct_winner_promotes_matching_proposal(tmp_path):

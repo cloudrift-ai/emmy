@@ -109,6 +109,7 @@ def test_trace_serving_twins_writes_one_exact_inventory_with_explicit_provenance
     assert document["model"] == "cloudriftai/model-exl3@0123456789abcdef0123456789abcdef01234567"
     assert {record.name.split(".", 1)[0] for record in records} == {"pre1@b2", "expert512@b2"}
     assert all(record.loop_wire is not None and not record.origins for record in records)
+    assert all(torch_ref.is_runnable(record.reference_program) for record in records)
     assert {(record.bindings, record.pins) for record in records} >= {
         ((("num_tokens", 64),), (("FAST_MATH", False),)),
         ((("num_tokens", 1024),), (("FAST_MATH", True),)),
@@ -395,6 +396,23 @@ def test_trace_inventory_can_force_exact_loop_targets(tmp_path) -> None:
 
     assert record.origins == ()
     assert record.loop_wire is not None
+    # The stored kernel stays the identity; the PyTorch slice it computes is derived for comparison.
+    assert torch_ref.is_runnable(record.reference_program)
+    assert record.reference_program.outputs == record.target_program.outputs == ["y"]
+
+
+def test_a_stored_kernel_holding_part_of_an_op_has_no_pytorch_reference(monkeypatch, tmp_path) -> None:
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (16,)), node_id="x")
+    graph.add_node(ElementwiseOp("relu"), ["x"], Tensor("y", (16,)), node_id="y")
+    graph.inputs, graph.outputs = ["x"], ["y"]
+    path = tmp_path / "working.yaml"
+    write_trace_inventory(graph, path, force_loop_targets=True, ctx=_TARGET_CTX)
+    monkeypatch.setattr(provenance, "coverage", lambda prov, _totals: {origin: (1, 2, False) for origin in prov})
+
+    (record,) = load_golden_records(load_golden_file(path))
+
+    assert record.reference_program is None
 
 
 def test_exact_loop_targets_disambiguate_same_body_at_distinct_cast_boundaries(tmp_path) -> None:
