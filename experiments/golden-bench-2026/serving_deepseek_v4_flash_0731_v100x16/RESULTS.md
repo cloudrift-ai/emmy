@@ -10,6 +10,9 @@ cannot complete a request: the first generation exceeds vLLM's `sample_tokens` R
 numbers here are per-kernel and per-program compiler measurements, not serving measurements, and they do not belong in
 the same table as the fork's throughput.
 
+The blocker is one program. `pre4096` costs 1.92 s per layer against a ~30 µs roofline floor, measured end to end and
+corroborated by the boot's own audit. Tuning did not move it, and no tuned row proved deployable.
+
 At a 4,096-token context the fork serves this checkpoint cleanly: 480 requests across fifteen rows, zero failures,
 and three workload shapes that differ far more in repeat stability than the shapes themselves suggest. Single-stream
 decode is the steadiest measurement on this stack by a wide margin — 6.46 tok/s on all five repeats, with mean time
@@ -98,22 +101,33 @@ per-kernel latencies within each program:
 The `pre` family dominates by three orders of magnitude, and every one of those programs is the same
 `k_linear_mean_reduce` kernel. `pre1` and `pre16` are the decode path, which is what the RPC deadline measures.
 
-### Tuning finds real headroom in that kernel
+### What `pre4096` actually costs
 
-A tuning run against freshly captured serving twins, scoped to `pre4096` and spread over all 16 cards, measured 24
-distinct schedules of its dominant kernel. They span **114 ms to 1,088 ms — a 9.5× spread**, with the fastest setting
-fewer schedule knobs than the slowest. None uses a placement cut.
+Benched end to end on one card, the greedy pick for this program is a two-kernel placement split:
 
-So the schedule search bites on this kernel family, and a large part of the gap is a pick problem rather than a
-compiler limit. It does not follow that serving is close: at 114 ms across 22 layers this one kernel still accounts for
-seconds of prefill against a ~30 µs floor, and the decode-path programs `pre1` and `pre16` were outside this run's
-scope.
+| Kernel | Latency | Share | Grid |
+| --- | ---: | ---: | ---: |
+| `k_linear_mean_reduce_00af35__place_4cc57b8fac` | 951,198 µs | 49.4% | 4,096 |
+| `k_linear_mean_reduce_00af35` | 972,401 µs | 50.6% | 65,536 |
+| **Total** | **1,923,598 µs** | | |
 
-One measurement note. `emmy tune` defaults to a 2 s cumulative-GPU-time bench budget for fast-fail sweeps. This
-kernel's baseline is about 1 s per launch, so warm-up plus one measured iteration exhausted it and the first attempt
-recorded **zero** valid latencies in eleven minutes — 70 variants failed on the budget and 28 on genuine hangs. Every
-number above comes from a re-run at `EMMY_BENCH_RUN_TIMEOUT_S=30`. A tuning result on a kernel this slow is not
-trustworthy without checking that the budget admitted it.
+Whole-program end to end: 1,923,912 µs. That agrees with the roofline audit's 64,604× against a ~30 µs floor, so the
+two independent measurements corroborate each other. **A 4,096-row mean-reduce costs 1.92 s where its roofline floor is
+30 µs.** That is the finding, and it is a compiler question rather than a search question.
+
+Tuning did not change it. Runs against this kernel produced `perf` rows as fast as 10 ms, but those time **one piece of
+one placement split**, not the program — a fragment row prices that fragment, not the parent's cut. Replaying the
+fastest row's knobs as a pinned A/B on the real target did not reproduce its latency; the pinned configuration hung and
+was recorded `bench_fail`. Nine hours of tuning across sixteen cards produced **zero** rows that deploy.
+
+Two measurement traps are worth recording, because either one alone yields numbers that look like results:
+
+- `emmy tune` defaults to a 2 s cumulative-GPU-time bench budget. This kernel's baseline is about 1 s per launch, so
+  warm-up plus one measured iteration exhausts it. A first attempt recorded **zero** valid latencies in eleven minutes
+  while appearing to search normally.
+- A `perf` row times one CUDA op. When the schedule under test splits a kernel, the row is a fragment, and reading it
+  as the program's latency overstates the result by orders of magnitude. The check that catches this is whether the
+  boot's roofline ratio moves; here it never did.
 
 ## What this run does not establish
 
