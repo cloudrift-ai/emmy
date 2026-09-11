@@ -347,7 +347,7 @@ placed geometry and exactly the edges whose accepted transport is non-direct. Ev
 geometry derived from the structural placement and its axis-free choice; every resolved stage must retain its edge's
 choice. Construction rejects missing, extra, mismatched, or partly attached facts.
 
-`ir/schedule/classic.py` owns the semantic contract for the ordinary grid/CTA/warp/thread/register schedule:
+`ir/schedule/classic/` owns the semantic contract for the ordinary grid/CTA/warp/thread/register schedule:
 
 - `ClassicScheduleContext` composes the unscheduled `TileOp` and its target. The `TileOp` itself is the site index:
   one stable integer id per Fold identity, one distinct `(consumer id, operand position)` tuple per edge (including

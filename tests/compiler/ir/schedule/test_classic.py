@@ -34,6 +34,7 @@ from emmy.compiler.ir.schedule.classic import (
     ClassicAssignment,
     ClassicDomains,
     ClassicMaterialization,
+    ClassicProblem,
     ClassicScheduleCodec,
     ClassicScheduleContext,
     EdgeSchedule,
@@ -45,7 +46,6 @@ from emmy.compiler.ir.schedule.classic import (
     parse_edge_site,
     parse_node_id,
 )
-from emmy.compiler.ir.schedule.classic_projection import ClassicProblem
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, TileOp
 from emmy.compiler.pipeline.fork import DeferredFork, iter_leaves, schedule_forks

@@ -24,7 +24,7 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Expr, Literal, Var
 from emmy.compiler.ir.kernel.ir import LdmatrixLoad
 from emmy.compiler.ir.schedule import Placement, Tile, Work
-from emmy.compiler.ir.schedule.classic_projection import project_classic
+from emmy.compiler.ir.schedule.classic import project_classic
 from emmy.compiler.ir.stmt import Body, Load, Write
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import reduce_codegen, store_sink

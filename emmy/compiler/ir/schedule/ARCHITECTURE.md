@@ -74,7 +74,13 @@ lowering, and a cache on the wrapper silently re-derives per wrapper. `schedule_
 
 ## Classic schedule
 
-`ClassicProblem` (`classic_projection`) is `p + t` and the row: the unscheduled TileOp, its target, and the knob row
+The classic family is the `classic/` package, one role per module: `assignment` (the choice types, the sites' wire
+spellings and keys, `ClassicDomains`), `refusals` (every per-choice legality rule), `sites` (the source),
+`context` (the join), `codec` (the wire boundary) and `materialize` (the lowering boundary). Imports flow in that
+order and nothing in the package imports the tile package at module level, which is what lets `ir/tile/ops` read
+the assignment names through the package.
+
+`ClassicProblem` (`classic/sites`) is `p + t` and the row: the unscheduled TileOp, its target, and the knob row
 whose values its sites offer where it names them. `ClassicScheduleContext` is the immutable `c + p + t` prefix over
 that problem. Everything a schedule choice cannot change is derived from the tile and the target and memoized on the
 term it derives from — a contraction's `ContractionFacts` on the Fold root (`TileOp.contractions`), the packed operand
