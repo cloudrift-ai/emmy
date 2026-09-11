@@ -431,7 +431,7 @@ written for — a copy transport, an N-major weight of 16-value blocks under an 
 same 16, an A already at the atom's dtype, and the byte row's 16-divisibility for the same chunking reason the fp8
 slab has. Everything outside the scope declines and keeps the general reading.
 
-**Block-scaled fp8 weights ride the same three slabs.** The reading also takes a ONE-value byte: a stored fp8 load
+**Block-scaled fp8 weights ride the same three slabs.** The reading also takes a single fp8 byte per element: a stored fp8 load
 whose own decode cast feeds the multiply by a block-guarded factor (`PackedKBlockB.per_byte == 1`). The bits slab is
 then the full K width in bytes, and the scale slab holds f32 — the dtype the fill multiplies the decoded value in
 before its round to the fragment — with one column per block the chunk spans; a 128-wide block holds whole atom

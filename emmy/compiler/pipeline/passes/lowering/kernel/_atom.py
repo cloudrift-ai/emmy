@@ -368,7 +368,7 @@ def _staged_inner_atom_loop(
     ``BYTE_SLAB_PAD``) rides the drain ``ldm`` so reads stride the padded rows.
 
     ``scales`` (per-slab, aligned with ``slabs``): a ``(scale slab, its row stride, the k block,
-    logical k per byte)`` quadruple on a BYTE-CODED slab (NVFP4 weights — one stored byte is two
+    logical k per byte)`` quadruple on a byte slab (NVFP4 weights — one stored byte is two
     logical K elements; block-scaled fp8 weights — one). The slab's K columns are then BYTE
     columns, so the drain divides its K coordinate by the per-byte count to address them and
     reads the block's scale at ``K / block`` of the companion slab; the loader decodes the byte
@@ -386,7 +386,7 @@ def _staged_inner_atom_loop(
     # atom dim, slot row off, swizzle, byte flag). A stacks the tile axis on the slab row (K the
     # col); B swaps (K the row, tile the col) — unless its slab is transposed (N-major: tile the
     # row, K the col, like A); the slot offset always lands on the ROW. All share ONE emission loop.
-    # A byte-coded slab's K columns are BYTE columns — ``1 / per_byte`` of the chunk's logical K —
+    # A byte slab's K columns are BYTE columns — ``1 / per_byte`` of the chunk's logical K —
     # on either side; only the W4A16 shape (packed B beside a 16-bit A) leaves A at full width.
     a_cols = bk_elems // scales[0][3] if scales[0] is not None else bk_elems
     specs = [
@@ -414,7 +414,7 @@ def _staged_inner_atom_loop(
         # name because it is genuinely shared.
         sf_of = (lambda ff: lambda x: _fold_frag(f"_sfb{x}", ff))(f)
         tr, sc = trans[1 + f], scales[1 + f]
-        # A byte-coded slab's K columns are BYTE columns — ``1 / per_byte`` of the chunk's logical K.
+        # A byte slab's K columns are BYTE columns — ``1 / per_byte`` of the chunk's logical K.
         k_cols = bk_elems // sc[3] if sc is not None else bk_elems
         ldm_b = (k_cols if tr else n.tile) + pads[1 + f]
         specs.append((frag_of, "b", bs, ldm_b, tr, n.reg, n.unit, atom_n, offs[1 + f], swizzles[1 + f], byte_slabs[1 + f], sc, sf_of))
@@ -1071,7 +1071,7 @@ def _packed_operands(
     k_axis: Axis,
     axes: tuple = (),
 ) -> tuple[tuple, tuple[SyncOperand, ...], tuple[Operand, ...], list[Stmt]]:
-    """The staged operands of a BYTE-CODED B contraction — the NVFP4 weight's byte-slab form, and the
+    """The staged operands of a byte-slab B contraction — the NVFP4 weight's byte-slab form, and the
     block-scaled fp8 weight's.
 
     Three slabs where the ordinary matmul has two, because the weight arrives as two tensors that
@@ -1898,7 +1898,7 @@ class _MmaOps(_AtomOps):
 
     def _drain_scale(self, op):
         """The drain's ``(scale slab, its row stride, the k block, logical k per byte)`` for a
-        BYTE-CODED operand, or ``None``. The stride is the chunk's block count — the scale slab is
+        byte-slab operand, or ``None``. The stride is the chunk's block count — the scale slab is
         ``tile × bk/block``, one column when a block holds the whole chunk."""
         scale = getattr(op, "scale", None)
         return None if scale is None else (scale[0], max(1, self.stage.bk_elems // scale[1]), scale[1], scale[2])

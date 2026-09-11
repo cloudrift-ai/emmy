@@ -1,4 +1,4 @@
-"""The BYTE-CODED k-block operand reading — the NVFP4 and block-scaled fp8 weights' shape, recognized once.
+"""The byte-slab k-block operand reading — the NVFP4 and block-scaled fp8 weights' shape, recognized once.
 
 One question, asked by consumers that must not drift apart: classic domain projection, the schedule
 stage resolver, and kernel materialization each ask :func:`packed_readings` and get the same answer
@@ -9,7 +9,7 @@ the cell binds on.
 
 It reads a SHAPE, never a checkpoint format: a 1-byte storage dtype decoded either through a
 data-dependent gather into a pair-value table (a packed pair, ``logical_elems == 2``) or by its own
-decode cast (a one-value byte), times a scale factor whose every ``k`` reference is block-guarded.
+decode cast (an fp8 byte, one element each), times a scale factor whose every ``k`` reference is block-guarded.
 Any weight spelled that way is recognized; nothing here names a quantization scheme.
 
 It is a CONSUMER'S reading of an already-built contraction — ``TileOp`` post-init binds the computed
@@ -41,7 +41,7 @@ class PackedKBlockB:
 
     ``bits`` is the 1-byte storage Load, ``table`` the statement that decodes it — for a
     packed-pair dtype (``logical_elems == 2``) the data-dependent pair-value gather it feeds, for
-    a one-value byte (an fp8 dtype) the dtype's own decode cast — ``factor`` the SSA name of the
+    an fp8 byte (one element each) the dtype's own decode cast — ``factor`` the SSA name of the
     scale factor, and ``block`` the k extent the factor is constant on. The packed byte-slab offer
     consumes this: the bits stage raw, and the drain decodes them and multiplies the factor into
     the decoded values at the fragment load (one factor read per k block).
@@ -122,11 +122,11 @@ def k_block_guard(expr, k_name: str) -> tuple[bool, set[int]]:
 
 
 def match_packed_kblock_b(cone: list, k_name: str, inputs, *, codes_may_compute: bool = False) -> PackedKBlockB | None:
-    """Recognize the byte-coded k-block shape in a computed-B cone.
+    """Recognize the byte-slab k-block shape in a computed-B cone.
 
     Two decodes read the same way. A packed pair (the NVFP4 speller's lowered form): the packed
-    byte feeds an index copy and a pair-table gather reads it by data-dependent index. A one-value
-    byte (the fp8 block-scaled form): a stored fp8 load feeds its dtype's decode cast. Either way
+    byte feeds an index copy and a pair-table gather reads it by data-dependent index. An fp8 byte,
+    one element each (the block-scaled fp8 form): a stored fp8 load feeds its dtype's decode cast. Either way
     the final multiply combines the decoded value with a factor whose every ``k`` reference is
     block-guarded (:func:`k_block_guard`). Everything else returns ``None``, and a k-invariant
     factor in particular does too: that scale commutes out of the fold onto the epilogue instead.
@@ -159,7 +159,7 @@ def match_packed_kblock_b(cone: list, k_name: str, inputs, *, codes_may_compute:
             return None
         table, per_byte = gathers[0], 2
     else:
-        # The one-value byte: its decode cast is itself one of the root's two factors, so the
+        # The fp8 byte: its decode cast is itself one of the root's two factors, so the
         # other one is the scale — a decode feeding anything else (a decoded scale byte) is not it.
         stored = {ld.names[0]: ld for ld in loads if len(ld.names) == 1 and inputs.get(ld.input) is not None}
         decodes = [

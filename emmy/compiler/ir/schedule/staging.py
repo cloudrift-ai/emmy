@@ -119,7 +119,7 @@ def _warp_tma(
 # The packed byte-slab stage's fixed geometry. The drain decodes an N-major slab through the k16
 # f16 B fragment map and reads one scale per 16 K elements, so the format's block, the atom's K
 # step and this constant are all the same 16; a different block or atom keeps the generic reading.
-# A one-value byte (fp8) reads its scale once per atom step instead, so its block only has to hold
+# An fp8 byte (one element each) reads its scale once per atom step instead, so its block only has to hold
 # whole atom steps and tile the chunk (or be tiled by it).
 _PACKED_BLOCK = 16
 
@@ -247,12 +247,12 @@ def _chunk_warp_stage(
 
 
 def _packed_warp_stage(c: Fold, tile: Tile, stage: Stage, budget: int, packed, inputs, k_axis: Axis) -> ResolvedStage | None:
-    """Resolve the PACKED byte-slab stage for a byte-coded k-block B — the NVFP4 weight cone, or a
+    """Resolve the PACKED byte-slab stage for a byte-slab k-block B — the NVFP4 weight cone, or a
     block-scaled fp8 weight.
 
     The scoped shape, which is what the fragment drain is written for: a copy transport (cp.async or
-    TMA), an N-major byte-coded weight under an f16 or bf16 atom with a K step of 16, and an A
-    already carrying the atom's dtype. A packed pair's block is that same 16; a one-value byte's
+    TMA), an N-major byte-slab weight under an f16 or bf16 atom with a K step of 16, and an A
+    already carrying the atom's dtype. A packed pair's block is that same 16; an fp8 byte's
     block holds whole atom steps and tiles the chunk or is tiled by it, so every drain step reads
     one scale. Everything outside it declines and stays on the generic computed-B reading, which
     computes the same values through the sync compute-fill.
@@ -264,7 +264,7 @@ def _packed_warp_stage(c: Fold, tile: Tile, stage: Stage, budget: int, packed, i
     per_byte`` bytes, so that span is 16-divisible too. On top of the ring the budget carries ONE
     scale slab, ``tile_n`` rows of one scale per block the chunk touches — single-buffer, because
     it is compute-filled and ringing a compute fill buys no overlap. A packed pair's scale slab
-    holds the atom's element width; a one-value byte's holds f32, the dtype its scale multiplies
+    holds the atom's element width; an fp8 byte's holds f32, the dtype its scale multiplies
     the decoded value in before the round to the fragment.
     """
     atom = tile.atom

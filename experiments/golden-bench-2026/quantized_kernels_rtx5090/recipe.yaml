@@ -99,8 +99,10 @@ matrices:
     deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
 
-  # Block-scaled dynamic FP8 (128x128 weight blocks, per-token activations): the form of the official Qwen, DeepSeek,
-  # and GLM FP8 releases and of the datacenter serving rows. Replays the hand-tuned goldens committed beside this file.
+  # Block-scaled dynamic FP8 (128x128 weight blocks, activations per token and 128-wide K group): the form of the
+  # official Qwen, DeepSeek, and GLM FP8 releases and of the datacenter serving rows. Replays the hand-tuned goldens
+  # committed beside this file; the layer's over-fused attention and MLP kernels are left out of both, as they do not
+  # run within the lane's budget.
   - format: fp8-block
     model_ref: Qwen/Qwen3-0.6B-FP8@e5be08033360965ceca7b0ffd72d521a51331ce0
     seq_len: [1, 512]

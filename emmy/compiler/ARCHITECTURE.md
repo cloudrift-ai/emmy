@@ -211,7 +211,7 @@ slab dense where cp.async pads each row, so the two forms differ in slab size an
 
 A block-scaled fp8 weight (one f32 scale per 128x128 block) takes the same stage one step further. Its scale varies
 along the contraction axis too, so the mul-hoist declines it, and the same reading recognizes its cone as a
-ONE-value byte: the stored fp8 load feeds its own decode cast instead of a pair table. Its bytes copy verbatim at a
+single fp8 byte per element: the stored fp8 load feeds its own decode cast instead of a pair table. Its bytes copy verbatim at a
 quarter of a 16-bit slab's traffic, its scales fill an f32 slab once per block — a block holds whole 16-wide atom
 steps, so every drain step reads one scale — and the fragment loader converts each byte pair with the hardware cvt,
 multiplies by the f32 scale and rounds once to the fragment dtype. That is the compute fill's own arithmetic, so the

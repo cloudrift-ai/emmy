@@ -658,7 +658,7 @@ class Operand:
     # misaligned addresses + overlapped data (the Gemma ``k_linear_reduce`` bench_fail cluster).
     dtype: str | None = None
     elem_bytes: int | None = None
-    # The companion BLOCK-SCALE slab of a BYTE-CODED operand (NVFP4 or block-scaled fp8 weights) —
+    # The companion BLOCK-SCALE slab of a byte-slab operand (NVFP4 or block-scaled fp8 weights) —
     # ``(slab name, the k block the scale spans, logical k per byte)``. One stored byte is one or
     # two logical K elements and every ``block`` of them share one scale, so the drain reads this
     # slab beside the bits and applies the scale as it decodes. The scale slab itself is a
