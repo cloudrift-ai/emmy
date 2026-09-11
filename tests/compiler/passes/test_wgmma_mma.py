@@ -230,7 +230,9 @@ def test_an_n_contiguous_b_stages_atom_major() -> None:
     k, n = b_op.index(_lit(0))(_lit(70), _lit(3))
     assert (_at(k), _at(n, n_b=2)) == (6, 2 * 128 + 64 + 3)
 
-    transport = TmaTransport(operands=(a_op, b_op), slab_dtype="__nv_bfloat16", elem_bytes=2, cta=CtaTile(linear_tid=Var("_t"), n_threads=256))
+    transport = TmaTransport(
+        operands=(a_op, b_op), slab_dtype="__nv_bfloat16", elem_bytes=2, cta=CtaTile(linear_tid=Var("_t"), n_threads=256)
+    )
     decls = transport.slab_decls(ring=2)
     assert next(d for d in decls if isinstance(d, TmaDescriptor) and d.name == b_op.desc).box_extents == (64, 64)
     assert next(d for d in decls if isinstance(d, Smem) and d.name == b_op.slab).extents == (2 * 128, 64)

@@ -255,11 +255,13 @@ by a commit and a wait so the ring slot may be released; the four warps of a gro
 addressing the slot's 64-row block `64·(warp/4)`, and the hardware hands warp `i` rows `16i..16i+15` of it, which
 is the m16n8 row the epilogue expects at `f1`. The descriptor geometry follows the slab: a K-major slab (A, or a
 transposed B) has one 128-byte swizzle row per tile row, so core groups are `8·bk·2` bytes apart; an N-contiguous
-B is MN-major (`trans_b`) with its core groups eight K rows apart, and its atoms lie the way the descriptor expects
-only while the N tile is one 64-element atom: the slab is deposited row-major, and the descriptor's MN-major
-canonical layout wants every further atom stored as its own eight contiguous K rows, so the schedule rule keeps
-such a B at `f1x8` and a wider
-N tile needs a K-contiguous B — measured on the H100, every wider N-contiguous tile was wrong wholesale). A
+B is MN-major (`trans_b`) and **atom-major** (`Operand.atoms`, `_MmaOps.b_atoms`): the N tile's 64-element swizzle
+atoms stack along the slab rows, each its own `bk` K rows, so the slab's row is one swizzle row under the plain
+B128 both transports already spell, core groups are eight rows (1 KiB) apart and the next atom `bk·128` bytes down,
+which is the descriptor's MN-major canonical layout at any N tile. The TMA fill deposits one `(bk, atom)` box per
+atom; the cp.async and compute fills write the same slab through `_atom_major`, the `(row, col)` map composed
+under theirs. A row-major deposit wider than one atom is not that layout — measured on the H100, every such tile
+was wrong wholesale — which is why the slab is reshaped rather than the descriptor re-strided). A
 fill's σ binds **every** tiled output axis, not just the operand's own: the tile
 axis at `tile_base + cell` (masked axes clamp in-bounds) and the SIBLING axis at its block base — a slab is
 CTA-shared across the sibling, so a sibling var can only survive as a value-dead occurrence: a flat-index reshape

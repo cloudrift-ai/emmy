@@ -207,13 +207,18 @@ The H100 hardware golden, H100 rows in the node freeze, model goldens for the se
 model the recipes already target on H100, and a prior refit if rank correlation on the H100 rows says so. Then the
 paper's evaluation gains its Hopper numbers, or its abstract loses the word.
 
-## Next step: the wide N-contiguous B
+## The wide N-contiguous B: landed 2026-09-10
 
-Measured 2026-09-10: an N-contiguous B is right only at a 64-column tile. The row-major slab does not store each
-further swizzle atom as its own eight K rows, which the descriptor's MN-major layout expects. The fix is a per-atom
-TMA deposit in `TmaTransport.fill`: one `(64 K × 64 N)` box per atom landing at `atom · 64 · 128` bytes, so the
-descriptor's leading offset is that block stride and the K core-group stride stays 1024. It frees `n128` / `n256`
-on `[K, N]` weights, which is every linear of the golden-bench corpus.
+Measured 2026-09-10: an N-contiguous B was right only at a 64-column tile, because the row-major slab does not
+store each further swizzle atom as its own eight K rows, which the descriptor's MN-major layout expects. Landed the
+same day: the slab is atom-major (`Operand.atoms`) — the N tile's atoms stack along the slab rows, one `(64 K × 64
+N)` TMA box per atom, the same stacked slab under the cp.async and compute fills — so the descriptor's leading
+offset is the atom block (`bk · 128` bytes) and the core-group stride stays 1024. Strict on the H100, 2048³ f16
+with a `[K, N]` weight: n64 48.2 µs (the only legal row before) → n128 32.9, n256 33.0, n64 `f1x16` 32.1, n128
+over cp.async 36.0; the K-contiguous n256 row unchanged at 33.4 (cuBLAS 24.4). The golden-bench corpus linears at
+S=512 do not move: a 128-wide N tile halves an already short grid (k_proj 8.4 → 9.7 µs at `w4x1`, v_proj 7.7 →
+8.8, down_proj 18.6 → 23.8), and a `g2k` / `g4k` split of the down_proj shape lands at 19 µs. The wide tile pays
+where the grid is long, not on this corpus; the corpus rows stay as recorded.
 
 ## Out of scope, deliberately
 

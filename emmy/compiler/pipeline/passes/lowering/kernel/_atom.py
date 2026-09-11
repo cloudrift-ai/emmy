@@ -545,7 +545,9 @@ def _wgmma_drain(*, operands, slot, mn, atom, bk_elems: int, frag_ns: str, n_fol
     atom_cols = 128 // elem_bytes  # one 128-byte swizzle row, in elements
     n_steps = bk_elems // atom_k
     if any(not getattr(b_op, "trans", False) and b_op.shape != (n.tile // atom_cols * bk_elems, atom_cols) for b_op in b_ops):
-        raise ValueError("wgmma reads an N-contiguous B through an atom-major slab (one swizzle row per K row, atoms stacked along the rows)")
+        raise ValueError(
+            "wgmma reads an N-contiguous B through an atom-major slab (one swizzle row per K row, atoms stacked along the rows)"
+        )
 
     def flat(row: Expr, col: Expr, cols: int) -> Expr:
         return BinaryExpr("+", BinaryExpr("*", row, Literal(cols, "int")), col)
@@ -578,7 +580,9 @@ def _wgmma_drain(*, operands, slot, mn, atom, bk_elems: int, frag_ns: str, n_fol
                     b_cols = bk_elems + getattr(b_op, "pad_cols", 0)
                     index, lbo, sbo = flat(offset(nbase, b_op.slot_row(slot)), kcol, b_cols), 16, 8 * b_cols * elem_bytes
                 else:  # MN-major, atom-major (atoms·bk × atom): atom ``nbase / atom`` starts ``bk`` rows per atom down
-                    row = BinaryExpr("+", BinaryExpr("*", BinaryExpr("/", nbase, Literal(atom_cols, "int")), Literal(bk_elems, "int")), kcol)
+                    row = BinaryExpr(
+                        "+", BinaryExpr("*", BinaryExpr("/", nbase, Literal(atom_cols, "int")), Literal(bk_elems, "int")), kcol
+                    )
                     index = flat(offset(row, b_op.slot_row(slot)), Literal(0, "int"), atom_cols)
                     lbo, sbo = bk_elems * atom_cols * elem_bytes, 8 * atom_cols * elem_bytes
                 stmts.append(
@@ -688,7 +692,12 @@ def _atom_major(rows: int, atom: int):
 def _stacked(at, rows: int, atom: int):
     """A ``k0 -> ((row, col) -> gmem index)`` slab map (:func:`_slab_index`) over the atom-major fold."""
     cell = _atom_major(rows, atom)
-    return lambda k0: (lambda row, col, gmem=at(k0): gmem(*cell(row, col)))
+
+    def stacked(k0):
+        gmem = at(k0)
+        return lambda row, col: gmem(*cell(row, col))
+
+    return stacked
 
 
 def _tile_base(mn: tuple[Side, Side]) -> tuple[Expr, Expr]:
@@ -985,8 +994,9 @@ def _sync_operands(
         if not isinstance(bl, Load):
             b_body = bl.lower(axes=axes)
 
-            def b_value(k0, row, col, *, body=b_body, edge=bl, cell=_atom_major(bk_elems, mn[1].tile // b_atoms)):
-                row, col = cell(row, col) if b_atoms > 1 else (row, col)
+            def b_value(k0, row, col, *, body=b_body, edge=bl):
+                if b_atoms > 1:
+                    row, col = _atom_major(bk_elems, mn[1].tile // b_atoms)(row, col)
                 k = BinaryExpr("+", k0, row)
                 sigma = Sigma({k_name: k_coord(k), n_name: n_coord(col)})
                 return _k_masked([s.substitute(sigma) for s in body], edge.exposes[-1], k, k_ext)
