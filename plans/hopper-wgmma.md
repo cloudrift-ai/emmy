@@ -220,6 +220,10 @@ S=512 do not move: a 128-wide N tile halves an already short grid (k_proj 8.4 �
 8.8, down_proj 18.6 → 23.8), and a `g2k` / `g4k` split of the down_proj shape lands at 19 µs. The wide tile pays
 where the grid is long, not on this corpus; the corpus rows stay as recorded.
 
+Next in this plan: stage 5's H100 hardware golden first (it is also what makes the H100 `make test` green — 20
+serving tests fail there under strict evidence without it), then stage 4, attention, whose B geometry is now settled
+for both orientations. The ranked list across all H100 work is in `plans/h100-memo-2026-09-10.md`.
+
 ## Out of scope, deliberately
 
 - FA-3's overlap: two consumer warp groups alternating through named barriers, and issuing the next QK^T before the
