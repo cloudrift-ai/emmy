@@ -112,7 +112,9 @@ declaration `copy_cell` does not rename), stay shared, so each copy re-declares 
 loop under the one name, while a name the replicated TAIL defines that is spelled like one of the term's carried
 states is renamed apart first (`_unshadowed`): both would take the same cell suffix and land on that cell's
 accumulator, two declarations of one name in one scope, and a tail that recomputes the carrier's own fold has
-exactly that shape; anything else tiles nothing and folds one thread per
+exactly that shape (a cone that reads one fold through two edges lowers it twice as EQUAL statements instead, which
+the seam and the computed-B fill collapse to the first — `stmt.body.dedup_recomputes` — before any replication);
+anything else tiles nothing and folds one thread per
 output cell (the degenerate `op.lower()` + `with_store`) — except a kernel whose ONLY work is a free output sweep,
 which distributes that sweep across its `WORK` threads through the same `_lane_close` a cooperating reduce uses for
 its projection: each lane owns a strided slice and writes its own cells, so there is no combine and no store guard.
@@ -255,11 +257,13 @@ by a commit and a wait so the ring slot may be released; the four warps of a gro
 addressing the slot's 64-row block `64·(warp/4)`, and the hardware hands warp `i` rows `16i..16i+15` of it, which
 is the m16n8 row the epilogue expects at `f1`. The descriptor geometry follows the slab: a K-major slab (A, or a
 transposed B) has one 128-byte swizzle row per tile row, so core groups are `8·bk·2` bytes apart; an N-contiguous
-B is MN-major (`trans_b`) with its core groups eight K rows apart, and its atoms lie the way the descriptor expects
-only while the N tile is one 64-element atom: the slab is deposited row-major, and the descriptor's MN-major
-canonical layout wants every further atom stored as its own eight contiguous K rows, so the schedule rule keeps
-such a B at `f1x8` and a wider
-N tile needs a K-contiguous B — measured on the H100, every wider N-contiguous tile was wrong wholesale). A
+B is MN-major (`trans_b`) and **atom-major** (`Operand.atoms`, `_MmaOps.b_atoms`): the N tile's 64-element swizzle
+atoms stack along the slab rows, each its own `bk` K rows, so the slab's row is one swizzle row under the plain
+B128 both transports already spell, core groups are eight rows (1 KiB) apart and the next atom `bk·128` bytes down,
+which is the descriptor's MN-major canonical layout at any N tile. The TMA fill deposits one `(bk, atom)` box per
+atom; the cp.async and compute fills write the same slab through `_atom_major`, the `(row, col)` map composed
+under theirs. A row-major deposit wider than one atom is not that layout — measured on the H100, every such tile
+was wrong wholesale — which is why the slab is reshaped rather than the descriptor re-strided). A
 fill's σ binds **every** tiled output axis, not just the operand's own: the tile
 axis at `tile_base + cell` (masked axes clamp in-bounds) and the SIBLING axis at its block base — a slab is
 CTA-shared across the sibling, so a sibling var can only survive as a value-dead occurrence: a flat-index reshape
@@ -379,6 +383,14 @@ types an edge's results; a name whose statement kind carries no dtype keeps the 
 mask — returns as f32, and the bit operations reading it have no f32 spelling at all, so the kernel fails to render
 rather than computing something wrong.
 
+**A statistic over a K group is bridged per chunk.** A reduce edge that varies with K only through one block guard
+— the maximum a grouped activation scale takes over each 128-wide K group — is neither row-invariant nor worth a
+per-cell evaluation, which would re-read the whole group for every slab cell. The seam splits it off as its `chunk`
+part: its rows are declared once with the prologue's, and the A operand's fill (`SyncOperand.before`) refills them at
+the head of every chunk from the chunk's base K, one warp per row, before the cells read them back. That is the
+group's value only when the chunk sits inside one group, so `resolve_fill_stage` refuses a chunk that does not tile
+the block.
+
 **Staged fp8 (1-byte) operand slabs.** A storage-dtype (fp8) operand stages as a RAW BYTE slab — each `Operand`
 sized at its OWN element width (the mixed-dtype seam the scalar tier already had), the cp.async fill running 16 B
 16-element chunks. ldmatrix is b16-only below sm_100a, so the drain is a **cooperative byte gather** instead
@@ -418,6 +430,14 @@ carries the bf16 form. Legality (`resolve_warp_stage`'s packed arm) scopes the s
 written for — a copy transport, an N-major weight of 16-value blocks under an f16 or bf16 atom whose K step is that
 same 16, an A already at the atom's dtype, and the byte row's 16-divisibility for the same chunking reason the fp8
 slab has. Everything outside the scope declines and keeps the general reading.
+
+**Block-scaled fp8 weights ride the same three slabs.** The reading also takes a single fp8 byte per element: a stored fp8 load
+whose own decode cast feeds the multiply by a block-guarded factor (`PackedKBlockB.per_byte == 1`). The bits slab is
+then the full K width in bytes, and the scale slab holds f32 — the dtype the fill multiplies the decoded value in
+before its round to the fragment — with one column per block the chunk spans; a 128-wide block holds whole atom
+steps and tiles every legal chunk or is tiled by it, so each drain step reads one scale. Its loader
+(`emmy_mma_load_b_smem_trans_f8s_<dtype>`) converts a lane's `(k, k+1)` byte pair with one hardware cvt, multiplies
+both by the f32 scale and rounds once — the compute fill's arithmetic, so the two are bit-identical.
 
 Both copy transports carry it, differing in one thing: a cp.async fill pads the byte rows (`BYTE_SLAB_PAD`, for the
 drain's bank spread) while a TMA box deposits DENSE, so its slab is unpadded and its drain reads the narrower row

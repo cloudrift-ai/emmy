@@ -51,24 +51,21 @@ pinned checkpoint layer each, retain every distinct post-fusion target, skip sea
 decode-shaped sequence length 1 only. The working YAML and cubin cache are retained so review can verify the declared
 packed checkpoint inputs survive into the compiled programs instead of becoming dense checkpoint weights.
 
-The two block-scaled FP8 tasks trace `Qwen/Qwen3-0.6B-FP8`: 128×128 weight blocks with per-token dynamic activations,
-the form of the official Qwen, DeepSeek, and GLM FP8 releases and of the datacenter serving rows, while the
-per-channel dynamic form stays in the kernels recipe's `fp8-common` study. Instead of tracing, these two rows replay
-the goldens committed under `golden/`: every kernel's schedule was pinned by hand with `emmy run --ab` on the RTX 5090
-and recorded with `--record-greedy`, so the row re-measures one fixed kernel set at deployable `-O3` against eager.
+The two block-scaled FP8 tasks trace `Qwen/Qwen3-0.6B-FP8`: 128×128 weight blocks with activations quantized per
+token and per 128-wide K group, the form of the official Qwen, DeepSeek, and GLM FP8 releases and of the datacenter
+serving rows, while the per-channel dynamic form stays in the kernels recipe's `fp8-common` study. Instead of tracing,
+these two rows replay the goldens committed under `golden/`: each kernel's schedule was recorded with
+`--record-greedy` on the RTX 5090, hand-pinned where the greedy was slow, so the row re-measures one fixed kernel set
+at deployable `-O3` against eager.
 
-Coverage is per target and partial by design. The decode (seq=1) golden is complete: its two decode projections, which
-the greedy scheduled as a scalar tile (the k projection greedy ran 416 ms), are hand-pinned to a cooperative fold.
-That schedule beats naive eager but is about 4x slower than a real fused FP8 pipeline (torch.compile): block-scaled
-FP8 is a support-and-correctness result here, not a speed win, because the 128-along-K weight scale cannot ride the
-matmul epilogue and Emmy has no tensor-core block-FP8 atom yet. See
-evaluation_results/2026-09-10_fp8-block-linear-rtx5090.md for the numbers, the cause, and why the matched vLLM
-block-FP8 baseline needs a serving host. Three targets stay documented gaps rather than recorded: the fused
-decode-tail kernel over-fuses the whole layer into one kernel that hangs at runtime and offers no placement cut, and
-the prefill (seq=512) matmul and fused-attention targets are untuned (they need M-tiled tensor-core schedules); the
-prefill golden therefore covers only the pointwise and norm targets. Eager is the correctness oracle here, not a
-vendor-kernel speed baseline: a single-layer trace cannot reach vLLM's FlashInfer or CUTLASS FP8 kernels, which live
-on the serving path.
+Coverage is per target and partial by design. Both goldens keep the targets that run within the lane's budget: the
+layer norms with the activation quantize fused into them, the quantize pointwise kernels, and the norm-weight
+broadcasts. The layer's projections are not among them. At both lengths they fuse into two over-fused kernels —
+attention with the q, k, v and o projections, and the MLP, whose down projection recomputes the gate and up products
+inside its operand — and neither runs within the budget. The prefill causal-mask kernel stays out too: its output is
+-inf by construction, which the strict check refuses. The projections' performance is measured on isolated linears
+against vLLM's block-FP8 kernels in evaluation_results/2026-09-10_fp8-block-linear-rtx5090.md. Eager is the
+correctness oracle here, not a vendor-kernel speed baseline: a single-layer trace cannot reach vLLM's kernels.
 
 The NVFP4, AWQ, and Trellis rows have no tuned latency claim. The block-FP8 rows carry one per-layer eager comparison
 on the RTX 5090 only, not a cross-platform geometric mean. The support check also has no native vendor-kernel

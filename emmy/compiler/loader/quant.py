@@ -23,7 +23,8 @@ MXFP4 (two nibbles per byte with one E8M0 scale per 32 values). Per family:
   (``032_fold_constant_subgraphs`` declines every storage-decode cone).
 - :func:`spell_dynamic_fp8_activations`: when the same checkpoint explicitly
   declares dynamic activation scaling, wrap each eligible linear input in the
-  per-row amax / encode / decode algebra. The graph then carries the checkpoint's
+  amax / encode / decode algebra — per row, or per row and weight-block-wide K group
+  when the checkpoint declares a weight block. The graph then carries the checkpoint's
   W8A8 computation directly; later passes still see only dtypes and tensor algebra.
 - :func:`spell_quantized_inputs`: the input-sourced twin of the constant
   speller for graphs whose weights are forward-argument ``InputOp``s (the MoE
@@ -1333,13 +1334,19 @@ def spell_quantized_constants(graph: Graph, model_id_or_path: str) -> int:
     return spelled
 
 
-def _dynamic_activation_declaration(qc: dict | None) -> tuple[bool, str | None]:
-    """Return ``(enabled, declared_fmt)`` for a supported dynamic FP8 activation scheme."""
+def _dynamic_activation_declaration(qc: dict | None) -> tuple[bool, str | None, int | None]:
+    """Return ``(enabled, declared_fmt, group)`` for a supported dynamic FP8 activation scheme.
+
+    ``group`` is the K extent one activation scale covers, ``None`` for a whole row. The official
+    declaration with a ``weight_block_size`` quantizes activations per token and per K block of
+    that size — what transformers, vLLM and SGLang all compute for those checkpoints — and without
+    one per token; compressed-tensors' ``strategy: token`` is per token."""
     if not qc:
-        return False, None
+        return False, None, None
     if qc.get("quant_method") == "fp8" and qc.get("activation_scheme") == "dynamic":
         fmt = {"e4m3": "f8e4m3", "e5m2": "f8e5m2", "f8e4m3": "f8e4m3", "f8e5m2": "f8e5m2"}.get(qc.get("fmt"))
-        return fmt is not None, fmt
+        block = qc.get("weight_block_size")
+        return fmt is not None, fmt, int(block[-1]) if block else None
     if qc.get("quant_method") == "compressed-tensors":
         groups = list((qc.get("config_groups") or {}).values())
         # Fail closed on mixed declarations: without resolving every group's target
@@ -1356,8 +1363,8 @@ def _dynamic_activation_declaration(qc: dict | None) -> tuple[bool, str | None]:
             and group["input_activations"].get("strategy") == "token"
             for group in groups
         ):
-            return True, None  # the paired weight's concrete f8 storage dtype selects the encode format
-    return False, None
+            return True, None, None  # the paired weight's concrete f8 storage dtype selects the encode format
+    return False, None, None
 
 
 def _cone_nodes(graph: Graph, start: str):
@@ -1401,9 +1408,17 @@ def _fresh_buffer_name(graph: Graph, base: str) -> str:
     return name
 
 
-def _spell_dynamic_activation(graph: Graph, activation: str, fmt: str) -> str:
-    """Spell one shared per-row dynamic FP8 activation value and return its decoded buffer."""
-    from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp  # noqa: PLC0415
+def _spell_dynamic_activation(graph: Graph, activation: str, fmt: str, group: int | None = None) -> str | None:
+    """Spell one shared dynamic FP8 activation value and return its decoded buffer.
+
+    One scale per row, or — with ``group`` — per row and per ``group`` elements of K. Only the
+    maximum reads the activation through a ``[..., K / group, group]`` reshape; the scale then
+    broadcasts back onto K by ``k / group``, so the encode, decode and the value every consumer
+    reads keep the activation's own layout and no reshape of the value ever needs a copy. ``None``
+    when K cannot carry the group (symbolic, or not a multiple of it)."""
+    from emmy.compiler.ir.expr import BinaryExpr, Literal, placeholder  # noqa: PLC0415
+    from emmy.compiler.ir.frontend.ir import ReshapeOp  # noqa: PLC0415
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp, IndexMapOp, IndexSource, ReduceOp  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.frontend.decomposition._helpers import const_bc  # noqa: PLC0415
     from emmy.compiler.tensor import Tensor  # noqa: PLC0415
@@ -1412,13 +1427,21 @@ def _spell_dynamic_activation(graph: Graph, activation: str, fmt: str) -> str:
     if source is None or not source.shape or source.dtype.name not in {"f16", "bf16", "f32"}:
         raise ValueError(f"dynamic FP8 activation {activation!r} must be a rank-1+ floating tensor")
     shape = tuple(source.shape)
-    scale_shape = (*shape[:-1], 1)
     stem = _fresh_buffer_name(graph, f"{activation}_dynamic_fp8")
+    grouped, reduced = activation, shape
+    if group is not None:
+        kd = shape[-1]
+        if not kd.is_static or kd.as_static() % group:
+            return None
+        shape = _shape_extents(shape)
+        reduced = (*shape[:-1], kd.as_static() // group, group)
+        grouped = graph.add_node(op=ReshapeOp(shape=reduced), inputs=[activation], output=Tensor(f"{stem}_blk", reduced, source.dtype))
+    scale_shape = (*reduced[:-1], 1)
 
     absolute = graph.add_node(
         op=ElementwiseOp(op="abs"),
-        inputs=[activation],
-        output=Tensor(f"{stem}_abs", shape, "f32"),
+        inputs=[grouped],
+        output=Tensor(f"{stem}_abs", reduced, "f32"),
     )
     amax = graph.add_node(
         op=ReduceOp(op="maximum", axis=-1),
@@ -1438,7 +1461,16 @@ def _spell_dynamic_activation(graph: Graph, activation: str, fmt: str) -> str:
         inputs=[stable_amax, denominator],
         output=Tensor(f"{stem}_scale", scale_shape, "f32"),
     )
-    scale_bc = broadcast_to(graph, scale, shape)
+    if group is None:
+        scale_bc = broadcast_to(graph, scale, shape)
+    else:
+        d = len(shape) - 1
+        by_group = (*(placeholder(i) for i in range(d)), BinaryExpr("/", placeholder(d), Literal(group, "int")), Literal(0, "int"))
+        scale_bc = graph.add_node(
+            op=IndexMapOp(out_shape=shape, sources=(IndexSource(input_idx=0, coord_map=by_group),)),
+            inputs=[scale],
+            output=Tensor(f"{stem}_scale_bc", shape, "f32"),
+        )
     normalized = graph.add_node(
         op=ElementwiseOp(op="divide"),
         inputs=[activation, scale_bc],
@@ -1474,15 +1506,16 @@ def spell_dynamic_fp8_activations(graph: Graph, model_id_or_path: str) -> int:
     The official ``quant_method: fp8`` declaration supplies both the activation
     scheme and format. A linear is eligible only when its already-spelled weight
     cone contains that same FP8 storage dtype. Shared projection inputs reuse one
-    quantized activation value. The zero-safe per-row scale is ``max(amax(abs(x)),
-    1e-12) / finite_max``. Returns the number of rewired linears; unsupported or
-    weight-only declarations are a no-op.
+    quantized activation value. The zero-safe scale is ``max(amax(abs(x)), 1e-12) /
+    finite_max`` over a row, or over each K group of a row when the declaration names a
+    weight block (:func:`_dynamic_activation_declaration`). Returns the number of rewired
+    linears; unsupported or weight-only declarations are a no-op.
     """
     from emmy.compiler.ir.frontend.ir import LinearOp  # noqa: PLC0415
     from emmy.compiler.loader.safetensors import _resolve_model_dir  # noqa: PLC0415
 
     model_dir = _resolve_model_dir(model_id_or_path)
-    enabled, declared_fmt = _dynamic_activation_declaration(_fp8_quant_config(model_dir))
+    enabled, declared_fmt, group = _dynamic_activation_declaration(_fp8_quant_config(model_dir))
     if not enabled:
         return 0
 
@@ -1496,17 +1529,22 @@ def spell_dynamic_fp8_activations(graph: Graph, model_id_or_path: str) -> int:
             continue
         eligible.append((node.id, activation, next(iter(formats))))
 
-    rewritten: dict[tuple[str, str], str] = {}
+    rewritten: dict[tuple[str, str], str | None] = {}
+    spelled = 0
     for linear_id, activation, fmt in eligible:
         key = (activation, fmt)
-        restored = rewritten.get(key)
-        if restored is None:
-            restored = rewritten[key] = _spell_dynamic_activation(graph, activation, fmt)
-        graph.replace_input(linear_id, activation, restored)
-    if eligible:
+        if key not in rewritten:
+            rewritten[key] = _spell_dynamic_activation(graph, activation, fmt, group)
+        if rewritten[key] is None:
+            logger.warning("dynamic %s activation %s: K cannot carry the %s-element group; linear left 16-bit", fmt, activation, group)
+            continue
+        graph.replace_input(linear_id, activation, rewritten[key])
+        spelled += 1
+    if spelled:
         formats = ", ".join(sorted({fmt for _linear, _activation, fmt in eligible}))
-        logger.info("spelled dynamic %s activation algebra for %d linear(s) from %s", formats, len(eligible), model_dir)
-    return len(eligible)
+        per = "row" if group is None else f"{group}-element K group"
+        logger.info("spelled dynamic %s activation algebra (one scale per %s) for %d linear(s) from %s", formats, per, spelled, model_dir)
+    return spelled
 
 
 def _static_fp4_activation_declared(qc: dict) -> bool:

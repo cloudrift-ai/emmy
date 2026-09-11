@@ -11,6 +11,11 @@ The stock vLLM reference reported 10.752 ms/token. Mirage's persistent-kernel la
 directional: the Mirage and vLLM lanes used different prompts, generation lengths, termination rules, client paths,
 and metric implementations. This run does not establish that MPK outperforms vLLM in an equivalent serving workload.
 
+The lane was rerun in full on a 40GB A100 on 2026-09-11 and reproduces this shape at that part's
+lower bandwidth: 3.022x controlled speedup, 0.906 normalized against stock. See the 40GB section
+below, which also records the two environment defects that rerun exposed and why the lane still has
+no Emmy arm.
+
 Correctness remains the main unresolved issue. The Mirage baseline produced the same 274-token response in every
 repeat, while the persistent-kernel path produced 258–273 tokens with visible wording changes despite temperature
 zero. The responses were coherent and on-topic on inspection, but the harness performed no token, logit, or numerical
@@ -27,6 +32,47 @@ equivalence check. The run therefore demonstrates a strong latency result, not c
 All five stock vLLM repeats completed eight requests with zero failed requests. Its per-token latency range spans only
 0.02 ms/token, while the persistent-kernel latency range spans 0.080 ms/token. The directly comparable Mirage baseline
 and persistent-kernel lanes are therefore both repeatable enough that run-to-run variation cannot explain their gap.
+
+## The 40GB A100 rerun
+
+The lane was rerun end to end on an **NVIDIA A100-SXM4-40GB** on 2026-09-11, as its own matrix row.
+That part has 1555 GB/s of bandwidth against the 80GB part's 2039, so these numbers are internally
+consistent and are **not** comparable with the 80GB rows above; they are recorded beside them rather
+than merged into them.
+
+| Lane | Repeats | Reported latency, mean | Per-repeat range | Same lane on the 80GB part |
+| --- | ---: | ---: | ---: | ---: |
+| Mirage kernel-per-operator | 5 | 35.595 ms/token | 35.039-36.231 | 33.136 |
+| Mirage persistent kernel | 5 | 11.780 ms/token | 11.723-11.891 | 9.804 |
+| Stock vLLM 0.23.0 | 5 | 13.008 ms/token | 13.00-13.01 | 10.752 |
+
+The controlled MPK speedup is `35.5948 / 11.7800 = 3.022x`, against 3.380x on the 80GB part. Every
+arm is slower and the speedup smaller, which is what the bandwidth ratio predicts. All five stock
+repeats completed eight requests with zero failures, and their TPOT spread is 0.01 ms/token.
+
+Against stock, the megakernel's normalized latency is 0.906 here and 0.912 on the 80GB part. The
+cross-system caveat from the 80GB run applies unchanged: the Mirage and vLLM lanes use different
+prompts, generation lengths, termination rules and metric implementations, so that ratio is
+directional and not a serving claim.
+
+**Two environment defects the rerun exposed**, both fixed in the recipe and both of which would stop
+this lane on any fresh host: vLLM's engine subprocess invokes `ninja` by name, so it must be
+installed AND on `PATH`. Missing either, the engine aborts at KV-cache init with
+`FileNotFoundError: 'ninja'` and every stock repeat fails. The first attempt at this rerun lost its
+whole stock arm that way.
+
+**There is still no Emmy arm.** One is written and was removed again: `emmy serve --generate` cannot
+boot Qwen3-8B on sm_80. A hard `cp.async / TMA staging is single-fold` assert in the kernel
+materializer is fixed on the branch that made this rerun, and two multi-channel projection refusals
+remain behind it — survivable, but each retry recompiles for about ten minutes and the boot does not
+reach a healthy server. Tracked as issue #785, whose acceptance test is that arm going back in.
+
+### Durable files for this row
+
+- Experiment record: `a100x1_1c0334106d66.experiment.yaml`
+- Raw-results archive: `results_a10040.tar.gz`; SHA-256 `c6f6aa90bb5e75dacaa56fba823d877a9770bf65af24a8c0e8725afeb8d49866`
+- Reconstruction: `paper-baselines-a10040.csv` (every retained per-repeat value) and
+  `paper-table-a10040.csv` (the two comparisons)
 
 ## Reconstructing the normalized paper table
 
