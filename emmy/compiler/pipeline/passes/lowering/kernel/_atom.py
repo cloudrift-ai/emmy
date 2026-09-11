@@ -1781,6 +1781,12 @@ class _AtomOps:
         the scalar tier's plain-``Load`` drain doesn't (:class:`_MmaOps` overrides)."""
         return ("NONE", "NONE")
 
+    def b_atoms(self, mn) -> int:  # noqa: ARG002
+        """How many 128-byte swizzle atoms the B slab stacks along its rows (:attr:`Operand.atoms`) —
+        one on this base: every slab a plain-``Load`` or ldmatrix drain reads is row-major. Only a
+        ``wgmma`` descriptor over an N-contiguous B asks for more (:class:`_MmaOps` overrides)."""
+        return 1
+
     def slab_elems(self) -> tuple:
         """The per-operand ``(A, B)`` slab element dtypes. The mma tier's operands share the atom
         dtype (16-bit fragments, dtype-gated at enumeration), so this base returns the one
@@ -1908,8 +1914,7 @@ class _MmaOps(_AtomOps):
         return tuple(self.slab_swizzle(inner, e.nbytes) for e, inner in zip(self.slab_elems(), (self.stage.bk_elems, b_inner), strict=True))
 
     def b_atoms(self, mn) -> int:
-        """How many 128-byte swizzle atoms the B slab stacks along its rows (:attr:`Operand.atoms`):
-        ``tile_n / 64`` for an N-contiguous B a ``wgmma`` descriptor reads — the MN-major canonical
+        """``tile_n / 64`` for an N-contiguous B a ``wgmma`` descriptor reads — the MN-major canonical
         layout stores each atom as its own eight-row core groups, which a row-major slab wider than
         one atom is not — and 1 for every slab an ldmatrix drain reads row-major."""
         if not self.tile.atom.is_wgmma or self.c.as_contraction().b_trans:
