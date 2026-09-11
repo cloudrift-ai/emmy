@@ -1680,8 +1680,9 @@ Two equivalent forms:
 
 For structural and kernel-lowering knobs, pinning replaces tuner choice through `Knob.narrow`; a value outside the
 knob's hint tuple can therefore remain authoritative while downstream structural gates still apply. Classic schedule
-parameters are deliberately stricter: `WORK`, `TILE`, `REDUCE`, `STAGE`, and `RASTER` restrict Algorithm 1's fixed
-domains and never add a member. A value absent from the applicable factor yields no schedule row. The replay paths
+parameters are deliberately stricter: `WORK`, `TILE`, `REDUCE`, `STAGE`, and `RASTER` are the values the sites of
+Algorithm 1 offer, checked with the catalog's own rules, and never add a member. A value the applicable site cannot
+take yields no schedule row. The replay paths
 (`run --bench --golden` / `--ab`) verify realized-vs-pinned knobs on every pinned row right after the pinned compile
 and fail a mismatch (`unreproducible pin … NOT benched`) instead of benching a fallback (see Part 7).
 

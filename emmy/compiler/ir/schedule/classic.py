@@ -19,7 +19,6 @@ from frozendict import frozendict
 from emmy.compiler.ir.atom import wide_accumulate
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.structural import instance_memo
-from emmy.utils import cached_method
 
 from .base import Schedule, ScheduleContext, ScheduleRefused
 from .choices import (
@@ -457,21 +456,6 @@ class ClassicDomains:
             size *= len(choices)
         return size
 
-    @cached_property
-    def kernel_set(self) -> frozenset[KernelSchedule]:
-        """Indexed kernel membership for compatibility checks."""
-        return frozenset(self.kernel)
-
-    @cached_method
-    def node_set(self, site: NodeId) -> frozenset[NodeSchedule]:
-        """Indexed node-domain membership for one site."""
-        return frozenset(self.nodes[site])
-
-    @cached_method
-    def edge_set(self, edge: EdgeSite) -> frozenset[EdgeSchedule]:
-        """Indexed edge-domain membership for one site."""
-        return frozenset(self.edges[edge])
-
 
 @dataclass(frozen=True)
 class ClassicMaterialization:
@@ -770,10 +754,9 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
     def _advance(self, **changed) -> ClassicScheduleContext:
         """This context with the fields ONE composition step changes, skipping ``__post_init__``.
 
-        Everything that ``__post_init__`` derives or proves belongs to ``tile_op``, ``domains`` or
-        ``_pins`` — the node order covering every site exactly once, the domains covering it, the
-        restriction tables and the works they allow — and a step touches none of the three, so a
-        step re-derives only conclusions it already carries. Its own remaining checks do not reach a
+        Everything that ``__post_init__`` derives or proves belongs to ``tile_op`` or ``problem`` —
+        the node order covering every site exactly once, the problem projected from this tile — and a
+        step touches neither, so a step re-derives only conclusions it already carries. Its own remaining checks do not reach a
         step either: the position bound holds because ``_extend_local`` advances only off a
         ``next_site``, and the stage restriction is validated at position 0. The caller passes
         ``_axes`` / ``_fragments`` already frozen, which is the one normalization lost with the

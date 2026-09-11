@@ -99,18 +99,20 @@ values and checks their canonical spelling, those values identify the separately
 constructing the complete `TileOp` then performs the one context validation. Parsing alone is never an acceptance
 boundary.
 
-Kernel, node, and edge domains are independent projections of static offers; none reads another selected choice.
-Their Cartesian product is the definition of the candidate space. For immutable schedule restriction `c`, unscheduled
-Fold program `p`, and target `t`, Algorithm 1 is exactly:
+A schedule problem is factored into sites, one per node and the kernel site last; each site projects its factor from
+static offers and the knob row, never from another selected choice. Their Cartesian product is the definition of the
+candidate space. For unscheduled Fold program `p`, target `t` and row, Algorithm 1 is exactly:
 
-    D(p, t) = K(p, t) × ∏ N(p, t, node) × ∏ E(p, t, edge)
-    Algorithm 1(c, p, t) = {a ∈ D(p, t) | extend(c + p + t, a) succeeds}
+    D(p, t, row) = K × ∏ N(node) × ∏ E(edge)
+    Algorithm 1(p, t, row) = {a ∈ D(p, t, row) | extend(c + p + t, a) succeeds}
 
-The one `ClassicScheduleContext` is the immutable `c + p + t` prefix. It owns restriction and compatibility state and
-composes each node and its incident edges, followed by the kernel factor, through `extend`. The generic enumerator
-never unpacks `c` or imports classic scheduling. The context retains derived physical-axis and fragment-seam facts outside the choice values. Domain membership uses immutable indexes; local support is derived
-only after the context has selected one node and its incident edge values, so a precise restriction does not construct
-the rest of the relation. Production may prune only prefixes whose `c + p + t` state proves they have no completion.
+The one `ClassicScheduleContext` is the immutable `c + p + t` prefix. It owns compatibility state only and composes
+each node and its incident edges, followed by the kernel factor, through `extend`; the row it never sees, because a
+site the row names offers the row's value alone. The generic enumerator never imports classic scheduling. The context
+retains derived physical-axis and fragment-seam facts outside the choice values. Domain membership uses the sites'
+immutable indexes; local support is derived only after the context has selected one node and its incident edge
+values, so a row that names a site does not construct the rest of the relation. Production may prune only prefixes
+whose `c + p + t` state proves they have no completion.
 The literal reference enumerator remains the oracle. Bounded-product checks and traversal-order tests require every
 traversal order to produce the same complete set; the lowering implementation must satisfy that product contract.
 
