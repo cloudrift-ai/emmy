@@ -6,10 +6,10 @@ scheduling fork — the second half of the Loop-IR → Tile-IR boundary.
 THIS rule picks that up and decides the schedule — the free-axis → grid mapping plus the per-node
 ``TILE`` / ``REDUCE`` / ``STAGE`` / ``WORK`` / ``RASTER`` families through the classic model.
 
-The fixed candidate-space contract is Algorithm 1(c, p, t): the schedule restriction, problem, and target form one
-immutable context over independently projected kernel, node, and edge domains. The generic traversal never unpacks
-that context. Its composition may reject a prefix only when the combined state proves there is no completion, and
-traversal order cannot change membership.
+The fixed candidate-space contract is Algorithm 1(p, t, row): the problem and target, factored into sites, offer the
+candidates — the row's value where the row names a site, the site's catalog where it does not — and one immutable
+context composes them. The generic traversal never unpacks that context. Its composition may reject a prefix only
+when the combined state proves there is no completion, and traversal order cannot change membership.
 
 Splitting the two halves is what makes the fork ONE thing: a kernel reaches scheduling by
 several routes — the ordinary lift and a cross-CTA split's partial and finalize — and all converge here. The engine restarts its
@@ -18,7 +18,7 @@ matched here on the next sweep, and so is every unmapped ``TileOp`` a structural
 That is exactly why none of them needs a special case: each arrives as a kernel with no schedule,
 like any other, and this rule cannot tell them apart.
 
-Empty enumeration remains a skip rather than a guessed schedule.
+An empty enumeration offers a root that expands to nothing, never a guessed schedule.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ from emmy.compiler.structural import digest
 PATTERN = [Pattern("root", TileOp)]
 
 
-def pin_row(*, split_consumed: bool, tolerate_kernel_pins: bool) -> dict[str, str]:
+def pin_row(*, split_consumed: bool) -> dict[str, str]:
     """The environment's schedule pins as one knob row — the source every site reads, the same
     way it reads a golden row. A kernel that consumed a split (``split_consumed``) reads a
     ``REDUCE`` pin without the ``g<n>`` half the split already took."""
@@ -57,7 +57,8 @@ def pin_row(*, split_consumed: bool, tolerate_kernel_pins: bool) -> dict[str, st
 
 def classic_forks(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
     """Adapt the classic semantic enumeration to the pipeline's lazy search tree: one unexpanded
-    root over the problem, its sites sourced from the environment's pins where they name them."""
+    root over the problem (a one-element list, the shape every fork builder returns), its sites
+    sourced from the environment's pins where they name them."""
     from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, FP8_MMA, precision_pin  # noqa: PLC0415
 
     # A bare WORK / RASTER / REDUCE pin is published across the kernels a split minted and names the
@@ -69,7 +70,7 @@ def classic_forks(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
     problem = ClassicProblem(
         tile,
         ctx,
-        row=pin_row(split_consumed=tile.split_consumed or carries_partition(tile), tolerate_kernel_pins=peer),
+        row=pin_row(split_consumed=tile.split_consumed or carries_partition(tile)),
         allow_f16_accumulate=precision_pin(F16_MMA_F32_ACC) is True,
         allow_fp8=precision_pin(FP8_MMA) is True,
         validate_pins=ctx.validate_pins,
@@ -103,7 +104,7 @@ def classic_forks(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
     )
 
 
-def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp:
+def rewrite(match: Match, root: Node, ctx=None) -> Fork:
     del match  # the scheduled op replaces the matched node in place — no graph surgery here
     tile: TileOp = root.op
     if tile.op is None or tile.place.is_mapped:
@@ -117,7 +118,5 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp:
     assert any(k.startswith(STRUCT_PREFIX) for k in tile.knobs), (
         f"{tile.name!r}: scheduling a kernel with no structural identity — the IdentityStrategy stamps at birth"
     )
-    options = classic_forks(tile, tile.name, tile.knobs, ctx)
-    if not options:
-        raise RuleSkipped("no enumerable schedule row for this term — leave it unmapped")
-    return options if len(options) > 1 else options[0]
+    (root,) = classic_forks(tile, tile.name, tile.knobs, ctx)
+    return root
