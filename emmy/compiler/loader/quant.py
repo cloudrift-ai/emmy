@@ -1411,11 +1411,14 @@ def _fresh_buffer_name(graph: Graph, base: str) -> str:
 def _spell_dynamic_activation(graph: Graph, activation: str, fmt: str, group: int | None = None) -> str | None:
     """Spell one shared dynamic FP8 activation value and return its decoded buffer.
 
-    One scale per row, or — with ``group`` — per row and per ``group`` elements of K, spelled as
-    the reshape pair around the same algebra that a weight's block scales use. ``None`` when K
-    cannot carry the group (symbolic, or not a multiple of it)."""
+    One scale per row, or — with ``group`` — per row and per ``group`` elements of K. Only the
+    maximum reads the activation through a ``[..., K / group, group]`` reshape; the scale then
+    broadcasts back onto K by ``k / group``, so the encode, decode and the value every consumer
+    reads keep the activation's own layout and no reshape of the value ever needs a copy. ``None``
+    when K cannot carry the group (symbolic, or not a multiple of it)."""
+    from emmy.compiler.ir.expr import BinaryExpr, Literal, placeholder  # noqa: PLC0415
     from emmy.compiler.ir.frontend.ir import ReshapeOp  # noqa: PLC0415
-    from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp  # noqa: PLC0415
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp, IndexMapOp, IndexSource, ReduceOp  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.frontend.decomposition._helpers import const_bc  # noqa: PLC0415
     from emmy.compiler.tensor import Tensor  # noqa: PLC0415
@@ -1425,19 +1428,20 @@ def _spell_dynamic_activation(graph: Graph, activation: str, fmt: str, group: in
         raise ValueError(f"dynamic FP8 activation {activation!r} must be a rank-1+ floating tensor")
     shape = tuple(source.shape)
     stem = _fresh_buffer_name(graph, f"{activation}_dynamic_fp8")
-    grouped = activation
+    grouped, reduced = activation, shape
     if group is not None:
         kd = shape[-1]
         if not kd.is_static or kd.as_static() % group:
             return None
-        shape = (*_shape_extents(shape[:-1]), kd.as_static() // group, group)
-        grouped = graph.add_node(op=ReshapeOp(shape=shape), inputs=[activation], output=Tensor(f"{stem}_blk", shape, source.dtype))
-    scale_shape = (*shape[:-1], 1)
+        shape = _shape_extents(shape)
+        reduced = (*shape[:-1], kd.as_static() // group, group)
+        grouped = graph.add_node(op=ReshapeOp(shape=reduced), inputs=[activation], output=Tensor(f"{stem}_blk", reduced, source.dtype))
+    scale_shape = (*reduced[:-1], 1)
 
     absolute = graph.add_node(
         op=ElementwiseOp(op="abs"),
         inputs=[grouped],
-        output=Tensor(f"{stem}_abs", shape, "f32"),
+        output=Tensor(f"{stem}_abs", reduced, "f32"),
     )
     amax = graph.add_node(
         op=ReduceOp(op="maximum", axis=-1),
@@ -1457,10 +1461,19 @@ def _spell_dynamic_activation(graph: Graph, activation: str, fmt: str, group: in
         inputs=[stable_amax, denominator],
         output=Tensor(f"{stem}_scale", scale_shape, "f32"),
     )
-    scale_bc = broadcast_to(graph, scale, shape)
+    if group is None:
+        scale_bc = broadcast_to(graph, scale, shape)
+    else:
+        d = len(shape) - 1
+        by_group = (*(placeholder(i) for i in range(d)), BinaryExpr("/", placeholder(d), Literal(group, "int")), Literal(0, "int"))
+        scale_bc = graph.add_node(
+            op=IndexMapOp(out_shape=shape, sources=(IndexSource(input_idx=0, coord_map=by_group),)),
+            inputs=[scale],
+            output=Tensor(f"{stem}_scale_bc", shape, "f32"),
+        )
     normalized = graph.add_node(
         op=ElementwiseOp(op="divide"),
-        inputs=[grouped, scale_bc],
+        inputs=[activation, scale_bc],
         output=Tensor(f"{stem}_normalized", shape, "f32"),
     )
     bits = graph.add_node(
@@ -1476,11 +1489,8 @@ def _spell_dynamic_activation(graph: Graph, activation: str, fmt: str, group: in
     restored = graph.add_node(
         op=ElementwiseOp(op="multiply"),
         inputs=[decoded, scale_bc],
-        output=Tensor(f"{stem}_value" if group is None else f"{stem}_value_blk", shape, source.dtype),
+        output=Tensor(f"{stem}_value", shape, source.dtype),
     )
-    if group is not None:
-        flat = _shape_extents(source.shape)
-        restored = graph.add_node(op=ReshapeOp(shape=flat), inputs=[restored], output=Tensor(f"{stem}_value", flat, source.dtype))
 
     # Trace inventories promote these intermediates to auxiliary outputs before
     # fusion. That preserves the genuine encode/scale boundary needed by a native
