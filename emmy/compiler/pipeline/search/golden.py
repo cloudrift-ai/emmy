@@ -34,6 +34,7 @@ _HARDWARE_GOLDENS_DIR = Path(__file__).parent / "goldens"
 _RECIPE_GOLDEN_DIR = "golden"
 _PROGRAM_GRAPH_CACHE: dict[int, tuple[dict, object]] = {}
 _LOOP_GRAPH_CACHE: dict[int, tuple[dict, object]] = {}
+_REFERENCE_CACHE: dict[int, tuple[dict, dict]] = {}
 _SAFE_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 
 
@@ -172,6 +173,40 @@ def golden_entry_state(entry: Mapping) -> GoldenEntryState:
     return GoldenEntryState.VERIFIED
 
 
+def golden_set_state(entry: Mapping, realizations: Sequence[Mapping]) -> GoldenEntryState:
+    """One realization's state, read over the rows its ``kernel_set`` lists.
+
+    An ordinary row decorates one kernel and answers for itself (:func:`golden_entry_state`). A
+    realization listing a kernel set usually carries no row of its own: a kernel SET ran, and the
+    listed routing rows hold its price beside the schedule-carrying rows of the same target. So this
+    answers ``VERIFIED`` only when it finds every listed row present with measurements, and finds
+    measurements on every schedule-carrying row of the target too. One member short of that and
+    nobody ever ran the set the listing describes.
+
+    A realization with neither measurements nor a listing stays ``INVENTORY``, as before. This is the
+    one reading of "verified" that a promotion, a whole-file bench walk and the tuner's
+    do-not-overwrite check share."""
+    state = golden_entry_state(entry)
+    if state is GoldenEntryState.VERIFIED or not entry.get("kernel_set"):
+        return state
+    by_name = {row.get("name"): row for row in realizations}
+    members = [by_name.get(name) for name in entry["kernel_set"]]
+    receipts = [row for row in realizations if row.get("identity") and row is not entry and _schedules_a_kernel(row)]
+    if any(member is None for member in members):
+        return state
+    if all(golden_entry_state(member) is GoldenEntryState.VERIFIED for member in [*members, *receipts]):
+        return GoldenEntryState.VERIFIED
+    return state
+
+
+def _schedules_a_kernel(realization: Mapping) -> bool:
+    """Whether a row's knobs say anything about a schedule — one key outside ``PLACE``. That covers
+    the child-identity receipts and, deliberately, a routing row whose decision is a cross-CTA
+    ``REDUCE`` split, which the recorder measures like any other."""
+    knobs = realization.get("knobs") or {}
+    return bool(knobs) and any(str(key).split("@", 1)[0] != "PLACE" for key in knobs)
+
+
 @dataclass(frozen=True)
 class GoldenRecord:
     name: str
@@ -196,7 +231,15 @@ class GoldenRecord:
     #: to several kernels, and only the stored identity says which child this row's schedule
     #: decorates (and so which kernel's ``S_*`` signature its row is evidence under).
     identity: str | None = None
-    #: Measured microseconds per ``Context.hardware_id``: ``{card: {emmy_us, tcompile_us}}``. A
+    #: The routing rows this realization's kernel set holds, by name — what ``record_greedy_pick``
+    #: listed for it, in the order the compile took the decisions. A realization listing them
+    #: usually carries no measurement of its own: those rows and the target's schedule-carrying
+    #: rows hold the measurements, so they decide whether it verifies (:func:`golden_set_state`),
+    #: what its replay spells (:func:`_replay`) and what a bench of it pins
+    #: (:func:`kernel_set_pins`). Empty where the compile took no kernel-set decision, leaving a
+    #: realization that carries its own measured row and needs no listing.
+    kernel_set: tuple[str, ...] = ()
+    #: Measured microseconds per ``Context.hardware_id``: ``{card: {emmy_us, tcompile_us, eager_us}}``. A
     #: model golden is one file per card and uses the flat ``measurements`` block instead; a corpus
     #: case is one file across many cards, which a flat block cannot hold.
     latency: dict | None = None
@@ -309,11 +352,37 @@ class GoldenRecord:
             else:
                 graph = cached[1]
             return specialize_program(graph, dict(self.bindings), loop=True)
+        return self._frontend_slice(self.origins)
 
+    @cached_property
+    def reference_program(self):
+        """The PyTorch slice a stored Loop IR kernel is compared against: the embedded program's ops
+        the kernel computes, every op whole, with the kernel's outputs in its order. ``None`` for a
+        kernel holding part of an op, or one the program no longer lowers to. Comparison only — the
+        stored kernel stays the identity."""
+        if self.loop_wire is None:
+            return None
+        from emmy.compiler.context import Context  # noqa: PLC0415
+
+        cached = _REFERENCE_CACHE.get(id(self.program_wire))
+        if cached is None or cached[0] is not self.program_wire:
+            cached = (
+                self.program_wire,
+                _whole_op_origins(self.program, Context.from_target(self.compute_cap, gpu_name=self.gpu_name or None)),
+            )
+            _REFERENCE_CACHE[id(self.program_wire)] = cached
+        found = cached[1].get(json.dumps(self.loop_wire, sort_keys=True))
+        if found is None:
+            return None
+        graph = self._frontend_slice(found[0])
+        graph.outputs = list(found[1])
+        return graph
+
+    def _frontend_slice(self, origins):
         from emmy.compiler.pipeline import CompilerDump  # noqa: PLC0415
+        from emmy.compiler.specialize import specialize_program  # noqa: PLC0415
 
-        graph = CompilerDump.frontend_reproducer_from_origins(self.program, set(self.origins))
-        return specialize_program(graph, dict(self.bindings))
+        return specialize_program(CompilerDump.frontend_reproducer_from_origins(self.program, set(origins)), dict(self.bindings))
 
     @property
     def target_key(self) -> tuple:
@@ -407,11 +476,12 @@ def _positive_number(value, where: str) -> None:
 
 
 #: What one card's ``latency`` entry records. ``emmy_us`` is required — it is the ratchet, and a
-#: case without it stores nothing. ``tcompile_us`` is the "are we ahead of or behind torch" half
-#: and is OPTIONAL, because some targets have no torch twin to compile: a provenance-reconstructed
-#: frontend program benches against eager and Emmy only. Refusing to store the ratchet because the
+#: case without it stores nothing. ``tcompile_us`` and ``eager_us`` are the "are we ahead of or
+#: behind torch" half and are OPTIONAL, because some targets have no torch twin: a stored kernel
+#: holding part of an op benches Emmy alone, and torch.compile is dropped where it disagrees with
+#: eager (a random-input reproducer that produces NaN). Refusing to store the ratchet because the
 #: comparison is unavailable would discard the more important number of the two.
-LATENCY_FIELDS = ("emmy_us", "tcompile_us")
+LATENCY_FIELDS = ("emmy_us", "tcompile_us", "eager_us")
 _REQUIRED_LATENCY_FIELDS = ("emmy_us",)
 
 
@@ -513,7 +583,7 @@ def validate_golden_file(
                 raise ValueError(f"{realization_where} must be a mapping")
             _require_keys(
                 realization,
-                {"name", "bindings", "pins", "knobs", "measurements", "ranking", "identity", "latency"},
+                {"name", "bindings", "pins", "knobs", "measurements", "ranking", "identity", "latency", "kernel_set"},
                 realization_where,
             )
             if not isinstance(realization.get("name"), str) or not realization["name"]:
@@ -576,17 +646,25 @@ def validate_golden_file(
                         f"{realization_where} schedules a kernel behind pinned cut(s) without naming it; "
                         "a child-identity schedule receipt must store the child kernel's identity"
                     )
+            if "kernel_set" in realization:
+                members = realization["kernel_set"]
+                if not isinstance(members, list) or not members or any(not isinstance(name, str) or not name for name in members):
+                    raise ValueError(f"{realization_where}.kernel_set must be a non-empty list of realization names")
+                names = {row.get("name") for row in entry["realizations"]}
+                unknown = [name for name in members if name not in names]
+                if unknown:
+                    raise ValueError(f"{realization_where}.kernel_set names no realization of this target: {', '.join(sorted(unknown))}")
             if "ranking" in realization and not isinstance(realization["ranking"], Mapping):
                 raise ValueError(f"{realization_where}.ranking must be a mapping")
             if strict and "ranking" in realization:
                 raise ValueError(f"{realization_where} working ranking metadata cannot be promoted")
             try:
-                state = golden_entry_state(realization)
+                state = golden_set_state(realization, entry["realizations"])
             except ValueError as exc:
                 raise ValueError(f"{realization_where} ({realization.get('name', '?')}): {exc}") from exc
             if strict and state != GoldenEntryState.VERIFIED:
                 raise ValueError(f"{realization_where} repository promotion requires knobs and paired positive timings")
-            if state == GoldenEntryState.VERIFIED:
+            if state == GoldenEntryState.VERIFIED and "measurements" in realization:
                 measurements = realization["measurements"]
                 _require_keys(measurements, {"emmy_us", "reference_us", "reference_backend"}, f"{realization_where}.measurements")
                 _positive_number(measurements["emmy_us"], f"{realization_where}.measurements.emmy_us")
@@ -628,6 +706,7 @@ def golden_record_from_entry(document: Mapping, entry: Mapping, realization: Map
         measurements=dict(realization["measurements"]) if realization.get("measurements") is not None else None,
         ranking=dict(realization["ranking"]) if realization.get("ranking") is not None else None,
         identity=realization.get("identity"),
+        kernel_set=tuple(realization.get("kernel_set") or ()),
         latency=dict(realization["latency"]) if realization.get("latency") is not None else None,
     )
 
@@ -644,6 +723,26 @@ def regime_pins(record: GoldenRecord) -> dict:
     (:func:`regime_live`). The schedule row and the route never travel this way; they are
     measured rows the evidence pick joins to the kernel they were recorded for."""
     return {str(key): value for key, value in record.pins if str(key).split("@", 1)[0] != "PLACE"}
+
+
+def kernel_set_pins(record: GoldenRecord, records: Sequence[GoldenRecord]) -> dict:
+    """The arms of the routing rows ``record``'s ``kernel_set`` lists, as one hand pin — what a
+    bench of that realization publishes so the compile reaches the kernel set the recording
+    measured.
+
+    A routing row's knobs ARE its arm — a placement cut's ``PLACE@seam: cut`` or a cross-CTA
+    split's ``REDUCE`` value — so both kinds travel. A cascade's later decisions are taken on the
+    pieces the earlier ones mint, and a scoped ``PLACE`` pin that resolves on no kernel addresses
+    another kernel of the graph (``030_cut._placement_restriction``), so publishing every routing
+    row's keys at once reproduces the whole cascade rather than only its first step. Empty for a
+    record that names no route, which is the ordinary row whose own knobs are its pin."""
+    by_name = {other.name: other for other in records}
+    pins: dict[str, str] = {}
+    for name in record.kernel_set:
+        referenced = by_name.get(name)
+        if referenced is not None:
+            pins.update({str(key): str(value) for key, value in referenced.knobs.items()})
+    return pins
 
 
 def shared_regime_pins(records: Sequence[GoldenRecord]) -> dict:
@@ -762,6 +861,39 @@ _DECODE_CTX_CACHE: dict[tuple, object] = {}
 def _record_cache_key(record: GoldenRecord) -> tuple:
     payload_id = id(record.loop_wire) if record.loop_wire is not None else id(record.program_wire)
     return (payload_id, record.target_key, record.compute_cap, record.bindings)
+
+
+def _whole_op_origins(program, ctx) -> dict[str, tuple[tuple[str, ...], tuple[str, ...]]]:
+    """Each kernel ``program`` lowers to, keyed by its Loop IR wire, mapped to the frontend origins
+    it computes whole and its outputs — a PyTorch slice of those origins exposing those outputs, and
+    reading nothing the kernel does not, computes exactly the kernel. A kernel holding part of an op,
+    or recomputing a value its slice would read, has no such slice and no entry."""
+    from emmy.compiler import provenance  # noqa: PLC0415
+    from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
+    from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
+    from emmy.compiler.loop_wire import loop_graph_to_wire  # noqa: PLC0415
+    from emmy.compiler.pipeline import LOOP_PASSES, CompilerDump, Pipeline  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.slice import single_node_graph  # noqa: PLC0415
+
+    source = program.copy()
+    provenance.seed(source)
+    fused = Pipeline.build(LOOP_PASSES).run(source.copy(), ctx=ctx)
+    totals = provenance.totals(fused)
+    found = {}
+    for node_id, node in fused.nodes.items():
+        if not isinstance(node.op, LoopOp):
+            continue
+        coverage = provenance.coverage(provenance.get(node), totals)
+        origins = tuple(sorted(origin for origin in coverage if origin in source.nodes))
+        if not origins or not all(coverage[origin][2] for origin in origins):
+            continue
+        kernel = single_node_graph(fused, node_id)
+        computed = {buffer for origin in origins for buffer in source.nodes[origin].buffer_names()}
+        reads = CompilerDump.frontend_reproducer_from_origins(source, set(origins)).inputs
+        bound = {input_id for input_id, input_node in kernel.nodes.items() if isinstance(input_node.op, InputOp)}
+        if set(kernel.outputs) <= computed and set(reads) <= bound:
+            found[json.dumps(loop_graph_to_wire(kernel), sort_keys=True)] = (origins, tuple(kernel.outputs))
+    return found
 
 
 def _target_kernel_nodes(record: GoldenRecord):
@@ -1000,7 +1132,11 @@ def _replay(
     from emmy.compiler.pipeline.search.pins import composed_routes, pinned_knobs, spelled_arm, unpinned_decisions  # noqa: PLC0415
 
     def _spelling(entry: GoldenRecord) -> dict[str, str]:
-        return {**entry.route, **{str(key): str(value) for key, value in entry.knobs.items()}}
+        # A routed realization measures nothing itself and carries no row, so read alone it would
+        # say "this kernel ran whole" — the fuse reading, which is right for a row that genuinely
+        # took no kernel-set decision and wrong for this one. It spells the route it names instead.
+        referenced = kernel_set_pins(entry, (record, *siblings))
+        return {**referenced, **entry.route, **{str(key): str(value) for key, value in entry.knobs.items()}}
 
     lead = record if lead is None else lead
     named = {entry.identity: entry for entry in siblings if entry.identity is not None}
@@ -1600,6 +1736,8 @@ def _live_gpu_key() -> tuple[str, tuple[int, int]] | None:
 __all__ = [
     "GOLDEN_RECORDS",
     "GoldenEntryState",
+    "golden_set_state",
+    "kernel_set_pins",
     "GoldenFileValidation",
     "GoldenRecord",
     "dump_golden_file",

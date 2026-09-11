@@ -490,6 +490,7 @@ def record_latency(
     hardware_id: str,
     emmy_us: float,
     tcompile_us: float | None,
+    eager_us: float | None = None,
     knobs: dict | None = None,
     pins: dict | None = None,
 ) -> None:
@@ -501,9 +502,9 @@ def record_latency(
     implied by the file) while a file measured on several cards needs a row each.
 
     Both numbers where both exist, because the block answers two questions and only one of them is
-    a ratchet: ``emmy_us`` against its own stored value says *did we regress*, and ``tcompile_us``
-    beside it says *are we ahead of or behind torch*, per case, per card. ``tcompile_us`` is
-    omitted rather than faked when the target has no torch twin to compile.
+    a ratchet: ``emmy_us`` against its own stored value says *did we regress*, and ``tcompile_us`` /
+    ``eager_us`` beside it say *are we ahead of or behind torch*, per case, per card. Each is
+    omitted rather than faked when the run did not time it.
 
     Read and written inside one :func:`exclusive_golden`, like every measurement this module writes
     back: a run passing both ``--record`` and ``--record-greedy`` writes twice, and a stale second
@@ -513,10 +514,11 @@ def record_latency(
     if is_repository_golden_path(destination):
         raise ValueError(f"refusing to write measurements into a canonical repository golden: {destination}")
     with exclusive_golden(destination):
-        _record_latency_row(destination, name, hardware_id=hardware_id, emmy_us=emmy_us, tcompile_us=tcompile_us, knobs=knobs, pins=pins)
+        torch_us = {"tcompile_us": tcompile_us, "eager_us": eager_us}
+        _record_latency_row(destination, name, hardware_id=hardware_id, emmy_us=emmy_us, torch_us=torch_us, knobs=knobs, pins=pins)
 
 
-def _record_latency_row(destination: Path, name: str, *, hardware_id, emmy_us, tcompile_us, knobs, pins) -> None:
+def _record_latency_row(destination: Path, name: str, *, hardware_id, emmy_us, torch_us, knobs, pins) -> None:
     """One card's latencies written into the file as it stands NOW. Runs under the lock."""
     from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
 
@@ -536,9 +538,7 @@ def _record_latency_row(destination: Path, name: str, *, hardware_id, emmy_us, t
             matches.append(realization)
     if len(matches) != 1:
         raise ValueError(f"{destination} resolves {name!r} to {len(matches)} latency rows; exact knobs and pins must select one")
-    timings = {"emmy_us": float(emmy_us)}
-    if tcompile_us:
-        timings["tcompile_us"] = float(tcompile_us)
+    timings = {"emmy_us": float(emmy_us), **{field: float(us) for field, us in torch_us.items() if us}}
     matches[0].setdefault("latency", {})[hardware_id] = timings
     dump_golden_file(document, destination, overwrite=True, incremental=True)
 
@@ -658,9 +658,10 @@ def record_greedy_pick(
     timings. Every row takes the seed realization's bindings and input regime and no route: seam
     spellings are kernel-local, so a cut key copied onto every receipt would re-cut any piece that
     offers a same-spelled seam; the replay follows the routing rows, each naming its kernel by
-    identity. A row already recorded for the same kernel and knobs takes the new timings, anything
-    else is appended, so a re-record never duplicates. The file is read and written back inside
-    one :func:`exclusive_golden`, so the rows a concurrent recorder wrote meanwhile survive.
+    identity. A row already recorded for the same input regime, kernel, and knobs takes the new
+    timings; anything else is appended, so a re-record never duplicates or aliases measurements
+    from another width or pin regime. The file is read and written back inside one
+    :func:`exclusive_golden`, so the rows a concurrent recorder wrote meanwhile survive.
     Returns the names written, in order.
     """
     destination = Path(path)
@@ -695,13 +696,22 @@ def _record_rows(destination: Path, name: str, *, decisions, kernels, reference_
             "identity": identity,
             "measurements": {"emmy_us": float(emmy_us), "reference_us": float(reference_us), "reference_backend": reference_backend},
         }
-        key = (identity, canonical_row_key(row["knobs"]))
-        recorded = next((r for r in entry["realizations"] if (r.get("identity"), canonical_row_key(r.get("knobs") or {})) == key), None)
+        key = (row["bindings"], row["pins"], identity, canonical_row_key(row["knobs"]))
+        recorded = next(
+            (
+                r
+                for r in entry["realizations"]
+                if (r.get("bindings"), r.get("pins"), r.get("identity"), canonical_row_key(r.get("knobs") or {})) == key
+            ),
+            None,
+        )
         if recorded is None:
             entry["realizations"].append(row)
         else:
             recorded["measurements"] = row["measurements"]
         written.append(row["name"])
+    if decisions:
+        seed["kernel_set"] = written[: len(decisions)]
     dump_golden_file(document, destination, overwrite=True, incremental=True)
     return written
 

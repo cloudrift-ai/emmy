@@ -32,8 +32,9 @@ jobs:
     runs-on:
       group: ubuntu-runners
     # The outer job includes dependency and cache setup; the test step below owns the stricter
-    # twenty-five-minute execution cap.
-    timeout-minutes: 33
+    # execution cap. The suite grew past the former 25-minute cap (model-golden and NVFP4 realization
+    # cases landed on the default lane), so both were raised to keep coverage rather than drop tests.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -67,7 +68,7 @@ jobs:
           key: hf-models-v1
 
       - name: Run tests
-        timeout-minutes: 25
+        timeout-minutes: 38
         run: make test
 
   package:

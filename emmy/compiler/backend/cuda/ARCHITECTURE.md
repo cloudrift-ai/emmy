@@ -227,7 +227,8 @@ eager — the verdict rides back as `accuracy_error` and a numeric failure skips
 The frontend-graph response also returns the exact symbolic environment used to specialize its hint-sized inputs, so
 the parent resolves dynamic launch geometry from the execution binding instead of reconstructing it from lowered
 graph inputs that may no longer carry the symbol.
-Embedded Loop replay has no Torch twin, so its Emmy-only greedy execution returns that same-input reference too. If
+Embedded Loop replay without a derived PyTorch slice has no Torch twin, so its Emmy-only greedy execution returns that
+same-input reference too. If
 this execution completes but later repeated timing crosses the watchdog, the worker returns the reference, single-run
 timing, and exact timing error. The command marks greedy ineligible while still reference-checking pinned rows; the
 parent retires that child before any pinned job, so a still-running kernel cannot share its context. It never raises

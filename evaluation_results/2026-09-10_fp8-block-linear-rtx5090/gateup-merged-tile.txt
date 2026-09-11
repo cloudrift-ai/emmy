@@ -1,0 +1,40 @@
+=== 0: k_linear_00f370__place_be5c0cc879 ===
+    place  free=(a0, a2)  unmapped
+    Fold  free
+    ├─ operand[acc0]: Fold[a3 in 0..128] reduce   ‹computed›
+    │  ├─ operand[in3]: load input[a0, (((a2 / 128) * 128) + a3)]   ‹materialized›
+    │  ├─ init: (-1e+30)
+    │  ├─ lift: λ(a3, in3) -> (v1)
+    │  │    v1 = abs(in3)
+    │  └─ combine: λ(acc0, acc0__o) -> (acc0)
+    │       acc0 = maximum(acc0, acc0__o)
+    ├─ operand[in2]: load input[a0, a2]   ‹materialized›
+    └─ lift: λ(acc0, in2) -> (v8)
+         v0 = reciprocal(448)
+         v2 = maximum(acc0, 1e-12)
+         v3 = multiply(v0, v2)
+         v4 = divide(in2, v3)
+         f8e4m3 v5 = to_f8e4m3(v4)
+         bf16 v6 = from_f8e4m3(v5)
+         bf16 v8 = multiply(v3, v6)
+    outputs
+    └─ linear__place_be5c0cc879_0[a0, a2] = v8
+
+=== 1: k_linear_00f370 ===
+    place  free=(a0, a1)  grid=(a0, a1)
+    work   w1x4
+    Fold[a2 in 0..1024] contraction   ⟨TILE=mma_m16n8k16_bf16_f32/f1x2/k8 STAGE=d2/smem-async⟩
+    ├─ operand[v8__wsbe5c0cc879]: load linear__place_be5c0cc879_0[a0, a2]   ‹materialized›
+    ├─ operand[v9]: Fold  free   ‹computed›
+    │  ├─ operand[in4]: load p_weight_bits[a1, a2]   ‹materialized›
+    │  ├─ operand[in5]: load p_weight_scale[(a1 / 128), 0, (a2 / 128), 0]   ‹materialized›
+    │  └─ lift: λ(in4, in5) -> (v9)
+    │       bf16 v7 = from_f8e4m3(in4)
+    │       bf16 v9 = multiply(in5, v7)
+    ├─ init: (0)
+    ├─ lift: λ(a2, v8__wsbe5c0cc879, v9) -> (v10)
+    │    bf16 v10 = multiply(v8__wsbe5c0cc879, v9)
+    └─ combine: λ(acc1, acc1__o) -> (acc1)
+         acc1 = add(acc1, acc1__o)
+    outputs
+    └─ linear[a0, a1] = acc1

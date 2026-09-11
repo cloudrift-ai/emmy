@@ -185,26 +185,53 @@ def _dense_axis_suffix(index: tuple, name: str) -> bool:
     return True
 
 
-def promoted_sweep(op, output_specs: tuple[OutputSpec, ...]) -> set[str]:
+def promoted_sweep(op, output_specs: tuple[OutputSpec, ...], *, free: tuple[Axis, ...] = ()) -> set[str]:
     """The output-sweep axes ``op``'s grid binds instead of sweeping — the kernel's grid RANK above
     its free axes, and the reason a contraction site can name an ``(m, n)`` pair at all.
 
-    Only an axis EVERY store rides promotes: hoisting a shared sweep replicates nothing but the
-    statistics ahead of it, while a sibling nest's own axis would replicate every other nest per
-    cell (DeepSeek-V4 post4096's root: four nests, a 2^56-cell grid). A shared axis promotes only
-    when a contraction operand reads it, so a purely pointwise sweep keeps its loop.
+    Only an axis EVERY store rides promotes: a sibling nest's own axis would replicate every other
+    nest per cell (DeepSeek-V4 post4096's root: four nests, a 2^56-cell grid). A shared axis then
+    promotes on either of two grounds, and what both answer is the same question — WHAT WOULD THE
+    GRID REPLICATE:
 
-    Two readers, one rule: :meth:`TileOp.__post_init__` applies it, and the cut pass asks it of a
-    candidate piece to decide whether peeling an output off a multi-output kernel would give that
-    piece a grid pair the fused kernel cannot have (``lowering/tile/_cut.py``).
+    - a contraction operand reads it. The coordinate is that contraction's own output coordinate,
+      so the tiles do that work per cell whatever the placement says, and a statistic evaluated
+      ahead of the sweep beside them is cheap against it.
+    - every reduce the term holds reads the axis, so each cell folds its own and binding the axis
+      replicates none of them — the NVFP4 encode's packed codes over a maximum taken across each
+      sixteen of them. A term with NO reduce satisfies that vacuously, and then it promotes only
+      when ``free`` is empty: a kernel with no free axis launches ONE block whatever it does, so
+      its shared sweep is the only axis the launch could spread over. Where the placement already
+      has an axis, a bare elementwise sweep stays a sweep — the kernel materializer distributes
+      exactly that across a worker inventory (``_lane_close``, the close a cooperating reduce's
+      projection takes), and binding it here would decide for the schedule that measured the
+      alternative (``cases/reduce/rms-norm-cut-sweep-work.yaml``: 885.9 us walked in one thread,
+      4.2 us split across 512).
+
+    The complement is what the reduce clause protects: a reduce that does NOT read the axis is the
+    row's statistic, evaluated once for the whole sweep — softmax's maximum, rms-norm's sum of
+    squares. Binding the sweep would recompute it per output element, so that sweep stays a loop.
+
+    Three readers, one rule. :meth:`TileOp.__post_init__` applies it. The cut pass asks it of a
+    candidate piece, to decide whether peeling an output off a multi-output kernel would give that
+    piece a grid pair the fused kernel cannot have. And the full-projection cut reads its refusal
+    from the other side: a reduce this will not bind past is one that cut hands its own kernel
+    (both in ``lowering/tile/_cut.py``).
     """
     if not output_specs:
         return set()
     shared = set.intersection(*({axis.name for axis in store.sweep} for store in output_specs))
     if not shared:
         return set()
-    contractions = tuple(site.node for site in sites(op) if site.node.as_contraction() is not None)
-    return {name for name in shared if any(any(name in edge.free_axes for edge in con.operands) for con in contractions)}
+    nodes = tuple(site.node for site in sites(op))
+    contractions = tuple(node for node in nodes if node.as_contraction() is not None)
+    reduces = tuple(node for node in nodes if isinstance(node, Fold) and node.axis is not None)
+    return {
+        name
+        for name in shared
+        if any(any(name in edge.free_axes for edge in con.operands) for con in contractions)
+        or (all(name in reduce.free_axes for reduce in reduces) and (reduces or not free))
+    }
 
 
 def _implicit_unit_row(specs: tuple[OutputSpec, ...], free: tuple[Axis, ...]) -> Axis | None:
@@ -370,8 +397,11 @@ class TileOp(Op):
     def __post_init__(self) -> None:
         Op.__post_init__(self)
         normalized = normalize_fold_tree(self.op, self.output_specs)
-        # A matrix row Loop IR elided at extent one is restored as a free axis when the stores
-        # prove it and the tree holds a contraction to orient on it (:func:`_implicit_unit_row`).
+        # A row the lift could not BIND — a bare vector A has no unit dimension to bind one into —
+        # is still provable from the stores, and the placement needs one to carry a fragment
+        # geometry (:func:`_implicit_unit_row`). Binding and announcing answer different questions:
+        # the bound row gives a contraction its missing LEFT axis, this one gives a term with no row
+        # at all a geometry, and a matvec against a 1-D operand can only be served by the latter.
         unit_row = _implicit_unit_row(self.output_specs, self.place.free)
         if unit_row is not None and any(site.node.as_contraction() is not None for site in sites(normalized)):
             object.__setattr__(self, "place", replace(self.place, free=(unit_row, *self.place.free)))
@@ -379,7 +409,7 @@ class TileOp(Op):
             raise ValueError("cannot canonicalize a TileOp after a schedule has been attached")
         object.__setattr__(self, "op", normalized)
 
-        promoted = promoted_sweep(normalized, self.output_specs)
+        promoted = promoted_sweep(normalized, self.output_specs, free=self.place.free)
         if not promoted:
             self._own_axes()
             self._validate_schedule()
@@ -438,6 +468,17 @@ class TileOp(Op):
         if not callable(validate):
             raise TypeError("schedule materialization must provide validate(schedule, source, place=..., workers=...)")
         validate(self.schedule, self, place=self.place, workers=self.workers)
+
+    @cached_property
+    def grid_sched(self):
+        """This kernel read on the grid — the view a legality check offers a CANDIDATE plan to.
+
+        Built ONCE per kernel, like :attr:`sites`: everything it caches is a site fact, and a
+        candidate plan changes tile sizes, never which output axes a slice tiles. The reading takes
+        no target either, so one view serves every compile of this kernel."""
+        from emmy.compiler.ir.tile.ops import Sched  # noqa: PLC0415
+
+        return Sched(self, place=self.place.on_grid())
 
     @cached_property
     def sites(self) -> tuple[Site, ...]:

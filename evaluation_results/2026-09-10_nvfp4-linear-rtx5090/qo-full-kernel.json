@@ -1,0 +1,1323 @@
+{
+  "inputs": [
+    "input"
+  ],
+  "outputs": [
+    "linear"
+  ],
+  "nodes": {
+    "input": {
+      "op": "InputOp",
+      "op_fields": {},
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "input",
+          "shape": [
+            16,
+            4096
+          ],
+          "dtype": "bf16"
+        }
+      ]
+    },
+    "p_weight_bits": {
+      "op": "ConstantOp",
+      "op_fields": {
+        "name": "p_weight",
+        "value": null,
+        "context_value": null,
+        "load_ops": [],
+        "source_path": "l0.weight",
+        "source_parts": [],
+        "source_shape": [
+          4096,
+          2048
+        ],
+        "source_dtype": "f4e2m1x2",
+        "source_graph": null
+      },
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "p_weight_bits",
+          "shape": [
+            4096,
+            2048
+          ],
+          "dtype": "f4e2m1x2"
+        }
+      ]
+    },
+    "p_weight_f4_pairs": {
+      "op": "ConstantOp",
+      "op_fields": {
+        "name": "p_weight_f4_pairs",
+        "value": null,
+        "context_value": null,
+        "load_ops": [],
+        "source_path": null,
+        "source_parts": [],
+        "source_shape": [
+          256,
+          2
+        ],
+        "source_dtype": "bf16",
+        "source_graph": {
+          "__graph__": {
+            "inputs": [],
+            "outputs": [
+              "pairs_cast"
+            ],
+            "nodes": {
+              "codes": {
+                "op": "RangeOp",
+                "op_fields": {
+                  "start": 0,
+                  "stop": 256,
+                  "step": 1,
+                  "dtype": "i32"
+                },
+                "inputs": [],
+                "outputs": [
+                  {
+                    "name": "codes",
+                    "shape": [
+                      256
+                    ],
+                    "dtype": "i32"
+                  }
+                ]
+              },
+              "mask": {
+                "op": "ConstantOp",
+                "op_fields": {
+                  "name": "mask",
+                  "value": 15,
+                  "context_value": null,
+                  "load_ops": [],
+                  "source_path": null,
+                  "source_parts": [],
+                  "source_shape": null,
+                  "source_dtype": null,
+                  "source_graph": null
+                },
+                "inputs": [],
+                "outputs": [
+                  {
+                    "name": "mask",
+                    "shape": [
+                      1
+                    ],
+                    "dtype": "i32"
+                  }
+                ]
+              },
+              "shift": {
+                "op": "ConstantOp",
+                "op_fields": {
+                  "name": "shift",
+                  "value": 4,
+                  "context_value": null,
+                  "load_ops": [],
+                  "source_path": null,
+                  "source_parts": [],
+                  "source_shape": null,
+                  "source_dtype": null,
+                  "source_graph": null
+                },
+                "inputs": [],
+                "outputs": [
+                  {
+                    "name": "shift",
+                    "shape": [
+                      1
+                    ],
+                    "dtype": "i32"
+                  }
+                ]
+              },
+              "mask_bc": {
+                "op": "IndexMapOp",
+                "op_fields": {
+                  "out_shape": [
+                    {
+                      "__dim__": 256
+                    }
+                  ],
+                  "sources": [
+                    "IndexSource(input_idx=0, coord_map=(Literal(value=0, dtype='int'),), select=None)"
+                  ]
+                },
+                "inputs": [
+                  "mask"
+                ],
+                "outputs": [
+                  {
+                    "name": "mask_bc",
+                    "shape": [
+                      256
+                    ],
+                    "dtype": "i32"
+                  }
+                ]
+              },
+              "low": {
+                "op": "ElementwiseOp",
+                "op_fields": {
+                  "op": "bitwise_and"
+                },
+                "inputs": [
+                  "codes",
+                  "mask_bc"
+                ],
+                "outputs": [
+                  {
+                    "name": "low",
+                    "shape": [
+                      256
+                    ],
+                    "dtype": "i32"
+                  }
+                ]
+              },
+              "shift_bc": {
+                "op": "IndexMapOp",
+                "op_fields": {
+                  "out_shape": [
+                    {
+                      "__dim__": 256
+                    }
+                  ],
+                  "sources": [
+                    "IndexSource(input_idx=0, coord_map=(Literal(value=0, dtype='int'),), select=None)"
+                  ]
+                },
+                "inputs": [
+                  "shift"
+                ],
+                "outputs": [
+                  {
+                    "name": "shift_bc",
+                    "shape": [
+                      256
+                    ],
+                    "dtype": "i32"
+                  }
+                ]
+              },
+              "high": {
+                "op": "ElementwiseOp",
+                "op_fields": {
+                  "op": "right_shift"
+                },
+                "inputs": [
+                  "codes",
+                  "shift_bc"
+                ],
+                "outputs": [
+                  {
+                    "name": "high",
+                    "shape": [
+                      256
+                    ],
+                    "dtype": "i32"
+                  }
+                ]
+              },
+              "vlow": {
+                "op": "ElementwiseOp",
+                "op_fields": {
+                  "op": "from_f4e2m1"
+                },
+                "inputs": [
+                  "low"
+                ],
+                "outputs": [
+                  {
+                    "name": "vlow",
+                    "shape": [
+                      256
+                    ],
+                    "dtype": "f32"
+                  }
+                ]
+              },
+              "vhigh": {
+                "op": "ElementwiseOp",
+                "op_fields": {
+                  "op": "from_f4e2m1"
+                },
+                "inputs": [
+                  "high"
+                ],
+                "outputs": [
+                  {
+                    "name": "vhigh",
+                    "shape": [
+                      256
+                    ],
+                    "dtype": "f32"
+                  }
+                ]
+              },
+              "pairs": {
+                "op": "IndexMapOp",
+                "op_fields": {
+                  "out_shape": [
+                    {
+                      "__dim__": 256
+                    },
+                    {
+                      "__dim__": 2
+                    }
+                  ],
+                  "sources": [
+                    "IndexSource(input_idx=0, coord_map=(Var(name='out_coord_0'),), select=BinaryExpr(op='<', left=Var(name='out_coord_1'), right=Literal(value=1, dtype='int')))",
+                    "IndexSource(input_idx=1, coord_map=(Var(name='out_coord_0'),), select=None)"
+                  ]
+                },
+                "inputs": [
+                  "vlow",
+                  "vhigh"
+                ],
+                "outputs": [
+                  {
+                    "name": "pairs",
+                    "shape": [
+                      256,
+                      2
+                    ],
+                    "dtype": "f32"
+                  }
+                ]
+              },
+              "pairs_cast": {
+                "op": "ElementwiseOp",
+                "op_fields": {
+                  "op": "copy"
+                },
+                "inputs": [
+                  "pairs"
+                ],
+                "outputs": [
+                  {
+                    "name": "pairs_cast",
+                    "shape": [
+                      256,
+                      2
+                    ],
+                    "dtype": "bf16"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "p_weight_f4_pairs",
+          "shape": [
+            256,
+            2
+          ],
+          "dtype": "bf16"
+        }
+      ]
+    },
+    "p_weight_scale_2": {
+      "op": "ConstantOp",
+      "op_fields": {
+        "name": "p_weight_scale_2",
+        "value": null,
+        "context_value": null,
+        "load_ops": [
+          {
+            "__op__": "ReshapeOp",
+            "fields": {
+              "shape": [
+                1,
+                1
+              ]
+            }
+          }
+        ],
+        "source_path": "l0.weight_scale_2",
+        "source_parts": [],
+        "source_shape": [
+          1
+        ],
+        "source_dtype": "f32",
+        "source_graph": null
+      },
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "p_weight_scale_2",
+          "shape": [
+            1,
+            1
+          ],
+          "dtype": "f32"
+        }
+      ]
+    },
+    "p_weight_scale_bits": {
+      "op": "ConstantOp",
+      "op_fields": {
+        "name": "p_weight_scale",
+        "value": null,
+        "context_value": null,
+        "load_ops": [],
+        "source_path": "l0.weight_scale",
+        "source_parts": [],
+        "source_shape": [
+          4096,
+          256
+        ],
+        "source_dtype": "f8e4m3",
+        "source_graph": null
+      },
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "p_weight_scale_bits",
+          "shape": [
+            4096,
+            256
+          ],
+          "dtype": "f8e4m3"
+        }
+      ]
+    },
+    "input_static_fp4_scale_2": {
+      "op": "ConstantOp",
+      "op_fields": {
+        "name": "input_static_fp4_scale_2",
+        "value": null,
+        "context_value": null,
+        "load_ops": [
+          {
+            "__op__": "ReshapeOp",
+            "fields": {
+              "shape": [
+                1,
+                1,
+                1
+              ]
+            }
+          }
+        ],
+        "source_path": "l0.input_scale",
+        "source_parts": [],
+        "source_shape": [],
+        "source_dtype": "f32",
+        "source_graph": null
+      },
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "input_static_fp4_scale_2",
+          "shape": [
+            1,
+            1,
+            1
+          ],
+          "dtype": "f32"
+        }
+      ]
+    },
+    "input_static_fp4_f4_max": {
+      "op": "ConstantOp",
+      "op_fields": {
+        "name": "input_static_fp4_f4_max",
+        "value": 6.0,
+        "context_value": null,
+        "load_ops": [],
+        "source_path": null,
+        "source_parts": [],
+        "source_shape": null,
+        "source_dtype": null,
+        "source_graph": null
+      },
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "input_static_fp4_f4_max",
+          "shape": [
+            1
+          ],
+          "dtype": "f32"
+        }
+      ]
+    },
+    "input_static_fp4_floor": {
+      "op": "ConstantOp",
+      "op_fields": {
+        "name": "input_static_fp4_floor",
+        "value": 1e-12,
+        "context_value": null,
+        "load_ops": [],
+        "source_path": null,
+        "source_parts": [],
+        "source_shape": null,
+        "source_dtype": null,
+        "source_graph": null
+      },
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "input_static_fp4_floor",
+          "shape": [
+            1
+          ],
+          "dtype": "f32"
+        }
+      ]
+    },
+    "input_static_fp4_shift": {
+      "op": "ConstantOp",
+      "op_fields": {
+        "name": "input_static_fp4_shift",
+        "value": 4,
+        "context_value": null,
+        "load_ops": [],
+        "source_path": null,
+        "source_parts": [],
+        "source_shape": null,
+        "source_dtype": null,
+        "source_graph": null
+      },
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "input_static_fp4_shift",
+          "shape": [
+            1
+          ],
+          "dtype": "i32"
+        }
+      ]
+    },
+    "input_static_fp4_r1_f4_pairs": {
+      "op": "ConstantOp",
+      "op_fields": {
+        "name": "input_static_fp4_r1_f4_pairs",
+        "value": null,
+        "context_value": null,
+        "load_ops": [],
+        "source_path": null,
+        "source_parts": [],
+        "source_shape": [
+          256,
+          2
+        ],
+        "source_dtype": "bf16",
+        "source_graph": {
+          "__graph__": {
+            "inputs": [],
+            "outputs": [
+              "pairs_cast"
+            ],
+            "nodes": {
+              "codes": {
+                "op": "RangeOp",
+                "op_fields": {
+                  "start": 0,
+                  "stop": 256,
+                  "step": 1,
+                  "dtype": "i32"
+                },
+                "inputs": [],
+                "outputs": [
+                  {
+                    "name": "codes",
+                    "shape": [
+                      256
+                    ],
+                    "dtype": "i32"
+                  }
+                ]
+              },
+              "mask": {
+                "op": "ConstantOp",
+                "op_fields": {
+                  "name": "mask",
+                  "value": 15,
+                  "context_value": null,
+                  "load_ops": [],
+                  "source_path": null,
+                  "source_parts": [],
+                  "source_shape": null,
+                  "source_dtype": null,
+                  "source_graph": null
+                },
+                "inputs": [],
+                "outputs": [
+                  {
+                    "name": "mask",
+                    "shape": [
+                      1
+                    ],
+                    "dtype": "i32"
+                  }
+                ]
+              },
+              "shift": {
+                "op": "ConstantOp",
+                "op_fields": {
+                  "name": "shift",
+                  "value": 4,
+                  "context_value": null,
+                  "load_ops": [],
+                  "source_path": null,
+                  "source_parts": [],
+                  "source_shape": null,
+                  "source_dtype": null,
+                  "source_graph": null
+                },
+                "inputs": [],
+                "outputs": [
+                  {
+                    "name": "shift",
+                    "shape": [
+                      1
+                    ],
+                    "dtype": "i32"
+                  }
+                ]
+              },
+              "mask_bc": {
+                "op": "IndexMapOp",
+                "op_fields": {
+                  "out_shape": [
+                    {
+                      "__dim__": 256
+                    }
+                  ],
+                  "sources": [
+                    "IndexSource(input_idx=0, coord_map=(Literal(value=0, dtype='int'),), select=None)"
+                  ]
+                },
+                "inputs": [
+                  "mask"
+                ],
+                "outputs": [
+                  {
+                    "name": "mask_bc",
+                    "shape": [
+                      256
+                    ],
+                    "dtype": "i32"
+                  }
+                ]
+              },
+              "low": {
+                "op": "ElementwiseOp",
+                "op_fields": {
+                  "op": "bitwise_and"
+                },
+                "inputs": [
+                  "codes",
+                  "mask_bc"
+                ],
+                "outputs": [
+                  {
+                    "name": "low",
+                    "shape": [
+                      256
+                    ],
+                    "dtype": "i32"
+                  }
+                ]
+              },
+              "shift_bc": {
+                "op": "IndexMapOp",
+                "op_fields": {
+                  "out_shape": [
+                    {
+                      "__dim__": 256
+                    }
+                  ],
+                  "sources": [
+                    "IndexSource(input_idx=0, coord_map=(Literal(value=0, dtype='int'),), select=None)"
+                  ]
+                },
+                "inputs": [
+                  "shift"
+                ],
+                "outputs": [
+                  {
+                    "name": "shift_bc",
+                    "shape": [
+                      256
+                    ],
+                    "dtype": "i32"
+                  }
+                ]
+              },
+              "high": {
+                "op": "ElementwiseOp",
+                "op_fields": {
+                  "op": "right_shift"
+                },
+                "inputs": [
+                  "codes",
+                  "shift_bc"
+                ],
+                "outputs": [
+                  {
+                    "name": "high",
+                    "shape": [
+                      256
+                    ],
+                    "dtype": "i32"
+                  }
+                ]
+              },
+              "vlow": {
+                "op": "ElementwiseOp",
+                "op_fields": {
+                  "op": "from_f4e2m1"
+                },
+                "inputs": [
+                  "low"
+                ],
+                "outputs": [
+                  {
+                    "name": "vlow",
+                    "shape": [
+                      256
+                    ],
+                    "dtype": "f32"
+                  }
+                ]
+              },
+              "vhigh": {
+                "op": "ElementwiseOp",
+                "op_fields": {
+                  "op": "from_f4e2m1"
+                },
+                "inputs": [
+                  "high"
+                ],
+                "outputs": [
+                  {
+                    "name": "vhigh",
+                    "shape": [
+                      256
+                    ],
+                    "dtype": "f32"
+                  }
+                ]
+              },
+              "pairs": {
+                "op": "IndexMapOp",
+                "op_fields": {
+                  "out_shape": [
+                    {
+                      "__dim__": 256
+                    },
+                    {
+                      "__dim__": 2
+                    }
+                  ],
+                  "sources": [
+                    "IndexSource(input_idx=0, coord_map=(Var(name='out_coord_0'),), select=BinaryExpr(op='<', left=Var(name='out_coord_1'), right=Literal(value=1, dtype='int')))",
+                    "IndexSource(input_idx=1, coord_map=(Var(name='out_coord_0'),), select=None)"
+                  ]
+                },
+                "inputs": [
+                  "vlow",
+                  "vhigh"
+                ],
+                "outputs": [
+                  {
+                    "name": "pairs",
+                    "shape": [
+                      256,
+                      2
+                    ],
+                    "dtype": "f32"
+                  }
+                ]
+              },
+              "pairs_cast": {
+                "op": "ElementwiseOp",
+                "op_fields": {
+                  "op": "copy"
+                },
+                "inputs": [
+                  "pairs"
+                ],
+                "outputs": [
+                  {
+                    "name": "pairs_cast",
+                    "shape": [
+                      256,
+                      2
+                    ],
+                    "dtype": "bf16"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "input_static_fp4_r1_f4_pairs",
+          "shape": [
+            256,
+            2
+          ],
+          "dtype": "bf16"
+        }
+      ]
+    },
+    "linear": {
+      "op": "KernelOp",
+      "op_fields": {
+        "body": [
+          "Tile(axes=(Axis(name='a0_b', extent=Dim(1), window=Window(parent=Axis(name='a0', extent=Dim(16), window=None), base=None, bound=None, partition=False)), Axis(name='a1_b', extent=Dim(64), window=Window(parent=Axis(name='a1', extent=Dim(4096), window=None), base=None, bound=None, partition=False)), Axis(name='a0_u', extent=Dim(1), window=None), Axis(name='a1_u', extent=Dim(4), window=None), Axis(name='_lane', extent=Dim(32), window=None)), body=(RegFragment(name='_a0', role='a', shape=(16, 8, 64), dtype=StructuredType(name='f4e2m1x2', np=dtype('uint8'), nbytes=1), count=1, nregs=4), RegFragment(name='_b0', role='b', shape=(16, 8, 64), dtype=StructuredType(name='f4e2m1x2', np=dtype('uint8'), nbytes=1), count=1, nregs=2), RegFragment(name='_b1', role='b', shape=(16, 8, 64), dtype=StructuredType(name='f4e2m1x2', np=dtype('uint8'), nbytes=1), count=1, nregs=2), RegFragment(name='_sfa0', role='a', shape=(16, 8, 64), dtype=StructuredType(name='f4e2m1x2', np=dtype('uint8'), nbytes=1), count=1, nregs=0), RegFragment(name='_sfb0', role='a', shape=(16, 8, 64), dtype=StructuredType(name='f4e2m1x2', np=dtype('uint8'), nbytes=1), count=1, nregs=0), RegFragment(name='_sfb1', role='a', shape=(16, 8, 64), dtype=StructuredType(name='f4e2m1x2', np=dtype('uint8'), nbytes=1), count=1, nregs=0), RegFragment(name='_c0_0', role='c', shape=(16, 8, 64), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4), count=1, nregs=4), RegFragment(name='_c0_1', role='c', shape=(16, 8, 64), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4), count=1, nregs=4), Smem(name='_a_smem', extents=(32, 272), dtype='unsigned char', align=16), Smem(name='_b_smem', extents=(128, 272), dtype='unsigned char', align=16), Smem(name='_as_smem', extents=(32, 32), dtype='__nv_fp8_e4m3', align=16), Smem(name='_bs_smem', extents=(128, 32), dtype='__nv_fp8_e4m3', align=16), StridedLoop(axis=Axis(name='_fa', extent=Dim(256), window=None), start=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=4, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), step=Literal(value=128, dtype='int'), body=(CpAsyncCopy(smem='_a_smem', smem_index=(BinaryExpr(op='/', left=BinaryExpr(op='*', left=Var(name='_fa'), right=Literal(value=16, dtype='int')), right=Literal(value=256, dtype='int')), BinaryExpr(op='%', left=BinaryExpr(op='*', left=Var(name='_fa'), right=Literal(value=16, dtype='int')), right=Literal(value=256, dtype='int'))), src='input_static_fp4_bits', src_index=(BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_b'), right=Literal(value=16, dtype='int')), right=BinaryExpr(op='/', left=BinaryExpr(op='*', left=Var(name='_fa'), right=Literal(value=16, dtype='int')), right=Literal(value=256, dtype='int'))), BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='/', left=BinaryExpr(op='+', left=Literal(value=0, dtype='int'), right=BinaryExpr(op='*', left=BinaryExpr(op='%', left=BinaryExpr(op='*', left=Var(name='_fa'), right=Literal(value=16, dtype='int')), right=Literal(value=256, dtype='int')), right=Literal(value=2, dtype='int'))), right=Literal(value=16, dtype='int')), right=Literal(value=8, dtype='int')), right=BinaryExpr(op='/', left=BinaryExpr(op='%', left=BinaryExpr(op='+', left=Literal(value=0, dtype='int'), right=BinaryExpr(op='*', left=BinaryExpr(op='%', left=BinaryExpr(op='*', left=Var(name='_fa'), right=Literal(value=16, dtype='int')), right=Literal(value=256, dtype='int')), right=Literal(value=2, dtype='int'))), right=Literal(value=16, dtype='int')), right=Literal(value=2, dtype='int')))), nbytes=16, swizzle='NONE'),), unroll=False, end=None, seed=True), StridedLoop(axis=Axis(name='_fb', extent=Dim(1024), window=None), start=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=4, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), step=Literal(value=128, dtype='int'), body=(CpAsyncCopy(smem='_b_smem', smem_index=(BinaryExpr(op='/', left=BinaryExpr(op='*', left=Var(name='_fb'), right=Literal(value=16, dtype='int')), right=Literal(value=256, dtype='int')), BinaryExpr(op='%', left=BinaryExpr(op='*', left=Var(name='_fb'), right=Literal(value=16, dtype='int')), right=Literal(value=256, dtype='int'))), src='p_weight_bits', src_index=(BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a1_b'), right=Literal(value=64, dtype='int')), right=BinaryExpr(op='/', left=BinaryExpr(op='*', left=Var(name='_fb'), right=Literal(value=16, dtype='int')), right=Literal(value=256, dtype='int'))), BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='/', left=BinaryExpr(op='+', left=Literal(value=0, dtype='int'), right=BinaryExpr(op='*', left=BinaryExpr(op='%', left=BinaryExpr(op='*', left=Var(name='_fb'), right=Literal(value=16, dtype='int')), right=Literal(value=256, dtype='int')), right=Literal(value=2, dtype='int'))), right=Literal(value=16, dtype='int')), right=Literal(value=8, dtype='int')), right=BinaryExpr(op='/', left=BinaryExpr(op='%', left=BinaryExpr(op='+', left=Literal(value=0, dtype='int'), right=BinaryExpr(op='*', left=BinaryExpr(op='%', left=BinaryExpr(op='*', left=Var(name='_fb'), right=Literal(value=16, dtype='int')), right=Literal(value=256, dtype='int')), right=Literal(value=2, dtype='int'))), right=Literal(value=16, dtype='int')), right=Literal(value=2, dtype='int')))), nbytes=16, swizzle='NONE'),), unroll=False, end=None, seed=True), StridedLoop(axis=Axis(name='_fas', extent=Dim(32), window=None), start=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=4, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), step=Literal(value=128, dtype='int'), body=(CpAsyncCopy(smem='_as_smem', smem_index=(BinaryExpr(op='/', left=BinaryExpr(op='*', left=Var(name='_fas'), right=Literal(value=16, dtype='int')), right=Literal(value=32, dtype='int')), BinaryExpr(op='%', left=BinaryExpr(op='*', left=Var(name='_fas'), right=Literal(value=16, dtype='int')), right=Literal(value=32, dtype='int'))), src='input_static_fp4_scale_bits', src_index=(BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_b'), right=Literal(value=16, dtype='int')), right=BinaryExpr(op='/', left=BinaryExpr(op='*', left=Var(name='_fas'), right=Literal(value=16, dtype='int')), right=Literal(value=32, dtype='int'))), BinaryExpr(op='/', left=BinaryExpr(op='+', left=Literal(value=0, dtype='int'), right=BinaryExpr(op='*', left=BinaryExpr(op='%', left=BinaryExpr(op='*', left=Var(name='_fas'), right=Literal(value=16, dtype='int')), right=Literal(value=32, dtype='int')), right=Literal(value=16, dtype='int'))), right=Literal(value=16, dtype='int')), Literal(value=0, dtype='int')), nbytes=16, swizzle='NONE'),), unroll=False, end=None, seed=True), StridedLoop(axis=Axis(name='_fbs', extent=Dim(128), window=None), start=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=4, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), step=Literal(value=128, dtype='int'), body=(CpAsyncCopy(smem='_bs_smem', smem_index=(BinaryExpr(op='/', left=BinaryExpr(op='*', left=Var(name='_fbs'), right=Literal(value=16, dtype='int')), right=Literal(value=32, dtype='int')), BinaryExpr(op='%', left=BinaryExpr(op='*', left=Var(name='_fbs'), right=Literal(value=16, dtype='int')), right=Literal(value=32, dtype='int'))), src='p_weight_scale_bits', src_index=(BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a1_b'), right=Literal(value=64, dtype='int')), right=BinaryExpr(op='/', left=BinaryExpr(op='*', left=Var(name='_fbs'), right=Literal(value=16, dtype='int')), right=Literal(value=32, dtype='int'))), BinaryExpr(op='/', left=BinaryExpr(op='+', left=Literal(value=0, dtype='int'), right=BinaryExpr(op='*', left=BinaryExpr(op='%', left=BinaryExpr(op='*', left=Var(name='_fbs'), right=Literal(value=16, dtype='int')), right=Literal(value=32, dtype='int')), right=Literal(value=16, dtype='int'))), right=Literal(value=16, dtype='int'))), nbytes=16, swizzle='NONE'),), unroll=False, end=None, seed=True), CpAsyncCommit(), StridedLoop(axis=Axis(name='_ks', extent=Dim(4096), window=None), start=Literal(value=0, dtype='int'), step=Literal(value=512, dtype='int'), body=(StridedLoop(axis=Axis(name='_fa', extent=Dim(256), window=None), start=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=4, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), step=Literal(value=128, dtype='int'), body=(CpAsyncCopy(smem='_a_smem', smem_index=(BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='%', left=BinaryExpr(op='+', left=BinaryExpr(op='/', left=Var(name='_ks'), right=Literal(value=512, dtype='int')), right=Literal(value=1, dtype='int')), right=Literal(value=2, dtype='int')), right=Literal(value=16, dtype='int')), right=BinaryExpr(op='/', left=BinaryExpr(op='*', left=Var(name='_fa'), right=Literal(value=16, dtype='int')), right=Literal(value=256, dtype='int'))), BinaryExpr(op='%', left=BinaryExpr(op='*', left=Var(name='_fa'), right=Literal(value=16, dtype='int')), right=Literal(value=256, dtype='int'))), src='input_static_fp4_bits', src_index=(BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_b'), right=Literal(value=16, dtype='int')), right=BinaryExpr(op='/', left=BinaryExpr(op='*', left=Var(name='_fa'), right=Literal(value=16, dtype='int')), right=Literal(value=256, dtype='int'))), BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='/', left=BinaryExpr(op='+', left=TernaryExpr(cond=BinaryExpr(op='<', left=BinaryExpr(op='+', left=Var(name='_ks'), right=Literal(value=512, dtype='int')), right=Literal(value=4096, dtype='int')), if_true=BinaryExpr(op='+', left=Var(name='_ks'), right=Literal(value=512, dtype='int')), if_false=Literal(value=3584, dtype='int')), right=BinaryExpr(op='*', left=BinaryExpr(op='%', left=BinaryExpr(op='*', left=Var(name='_fa'), right=Literal(value=16, dtype='int')), right=Literal(value=256, dtype='int')), right=Literal(value=2, dtype='int'))), right=Literal(value=16, dtype='int')), right=Literal(value=8, dtype='int')), right=BinaryExpr(op='/', left=BinaryExpr(op='%', left=BinaryExpr(op='+', left=TernaryExpr(cond=BinaryExpr(op='<', left=BinaryExpr(op='+', left=Var(name='_ks'), right=Literal(value=512, dtype='int')), right=Literal(value=4096, dtype='int')), if_true=BinaryExpr(op='+', left=Var(name='_ks'), right=Literal(value=512, dtype='int')), if_false=Literal(value=3584, dtype='int')), right=BinaryExpr(op='*', left=BinaryExpr(op='%', left=BinaryExpr(op='*', left=Var(name='_fa'), right=Literal(value=16, dtype='int')), right=Literal(value=256, dtype='int')), right=Literal(value=2, dtype='int'))), right=Literal(value=16, dtype='int')), right=Literal(value=2, dtype='int')))), nbytes=16, swizzle='NONE'),), unroll=False, end=None, seed=True), StridedLoop(axis=Axis(name='_fb', extent=Dim(1024), window=None), start=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=4, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), step=Literal(value=128, dtype='int'), body=(CpAsyncCopy(smem='_b_smem', smem_index=(BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='%', left=BinaryExpr(op='+', left=BinaryExpr(op='/', left=Var(name='_ks'), right=Literal(value=512, dtype='int')), right=Literal(value=1, dtype='int')), right=Literal(value=2, dtype='int')), right=Literal(value=64, dtype='int')), right=BinaryExpr(op='/', left=BinaryExpr(op='*', left=Var(name='_fb'), right=Literal(value=16, dtype='int')), right=Literal(value=256, dtype='int'))), BinaryExpr(op='%', left=BinaryExpr(op='*', left=Var(name='_fb'), right=Literal(value=16, dtype='int')), right=Literal(value=256, dtype='int'))), src='p_weight_bits', src_index=(BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a1_b'), right=Literal(value=64, dtype='int')), right=BinaryExpr(op='/', left=BinaryExpr(op='*', left=Var(name='_fb'), right=Literal(value=16, dtype='int')), right=Literal(value=256, dtype='int'))), BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='/', left=BinaryExpr(op='+', left=TernaryExpr(cond=BinaryExpr(op='<', left=BinaryExpr(op='+', left=Var(name='_ks'), right=Literal(value=512, dtype='int')), right=Literal(value=4096, dtype='int')), if_true=BinaryExpr(op='+', left=Var(name='_ks'), right=Literal(value=512, dtype='int')), if_false=Literal(value=3584, dtype='int')), right=BinaryExpr(op='*', left=BinaryExpr(op='%', left=BinaryExpr(op='*', left=Var(name='_fb'), right=Literal(value=16, dtype='int')), right=Literal(value=256, dtype='int')), right=Literal(value=2, dtype='int'))), right=Literal(value=16, dtype='int')), right=Literal(value=8, dtype='int')), right=BinaryExpr(op='/', left=BinaryExpr(op='%', left=BinaryExpr(op='+', left=TernaryExpr(cond=BinaryExpr(op='<', left=BinaryExpr(op='+', left=Var(name='_ks'), right=Literal(value=512, dtype='int')), right=Literal(value=4096, dtype='int')), if_true=BinaryExpr(op='+', left=Var(name='_ks'), right=Literal(value=512, dtype='int')), if_false=Literal(value=3584, dtype='int')), right=BinaryExpr(op='*', left=BinaryExpr(op='%', left=BinaryExpr(op='*', left=Var(name='_fb'), right=Literal(value=16, dtype='int')), right=Literal(value=256, dtype='int')), right=Literal(value=2, dtype='int'))), right=Literal(value=16, dtype='int')), right=Literal(value=2, dtype='int')))), nbytes=16, swizzle='NONE'),), unroll=False, end=None, seed=True), StridedLoop(axis=Axis(name='_fas', extent=Dim(32), window=None), start=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=4, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), step=Literal(value=128, dtype='int'), body=(CpAsyncCopy(smem='_as_smem', smem_index=(BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='%', left=BinaryExpr(op='+', left=BinaryExpr(op='/', left=Var(name='_ks'), right=Literal(value=512, dtype='int')), right=Literal(value=1, dtype='int')), right=Literal(value=2, dtype='int')), right=Literal(value=16, dtype='int')), right=BinaryExpr(op='/', left=BinaryExpr(op='*', left=Var(name='_fas'), right=Literal(value=16, dtype='int')), right=Literal(value=32, dtype='int'))), BinaryExpr(op='%', left=BinaryExpr(op='*', left=Var(name='_fas'), right=Literal(value=16, dtype='int')), right=Literal(value=32, dtype='int'))), src='input_static_fp4_scale_bits', src_index=(BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_b'), right=Literal(value=16, dtype='int')), right=BinaryExpr(op='/', left=BinaryExpr(op='*', left=Var(name='_fas'), right=Literal(value=16, dtype='int')), right=Literal(value=32, dtype='int'))), BinaryExpr(op='/', left=BinaryExpr(op='+', left=TernaryExpr(cond=BinaryExpr(op='<', left=BinaryExpr(op='+', left=Var(name='_ks'), right=Literal(value=512, dtype='int')), right=Literal(value=4096, dtype='int')), if_true=BinaryExpr(op='+', left=Var(name='_ks'), right=Literal(value=512, dtype='int')), if_false=Literal(value=3584, dtype='int')), right=BinaryExpr(op='*', left=BinaryExpr(op='%', left=BinaryExpr(op='*', left=Var(name='_fas'), right=Literal(value=16, dtype='int')), right=Literal(value=32, dtype='int')), right=Literal(value=16, dtype='int'))), right=Literal(value=16, dtype='int')), Literal(value=0, dtype='int')), nbytes=16, swizzle='NONE'),), unroll=False, end=None, seed=True), StridedLoop(axis=Axis(name='_fbs', extent=Dim(128), window=None), start=BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=4, dtype='int')), right=Var(name='a1_u')), right=Literal(value=32, dtype='int')), right=Var(name='_lane')), step=Literal(value=128, dtype='int'), body=(CpAsyncCopy(smem='_bs_smem', smem_index=(BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='%', left=BinaryExpr(op='+', left=BinaryExpr(op='/', left=Var(name='_ks'), right=Literal(value=512, dtype='int')), right=Literal(value=1, dtype='int')), right=Literal(value=2, dtype='int')), right=Literal(value=64, dtype='int')), right=BinaryExpr(op='/', left=BinaryExpr(op='*', left=Var(name='_fbs'), right=Literal(value=16, dtype='int')), right=Literal(value=32, dtype='int'))), BinaryExpr(op='%', left=BinaryExpr(op='*', left=Var(name='_fbs'), right=Literal(value=16, dtype='int')), right=Literal(value=32, dtype='int'))), src='p_weight_scale_bits', src_index=(BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a1_b'), right=Literal(value=64, dtype='int')), right=BinaryExpr(op='/', left=BinaryExpr(op='*', left=Var(name='_fbs'), right=Literal(value=16, dtype='int')), right=Literal(value=32, dtype='int'))), BinaryExpr(op='/', left=BinaryExpr(op='+', left=TernaryExpr(cond=BinaryExpr(op='<', left=BinaryExpr(op='+', left=Var(name='_ks'), right=Literal(value=512, dtype='int')), right=Literal(value=4096, dtype='int')), if_true=BinaryExpr(op='+', left=Var(name='_ks'), right=Literal(value=512, dtype='int')), if_false=Literal(value=3584, dtype='int')), right=BinaryExpr(op='*', left=BinaryExpr(op='%', left=BinaryExpr(op='*', left=Var(name='_fbs'), right=Literal(value=16, dtype='int')), right=Literal(value=32, dtype='int')), right=Literal(value=16, dtype='int'))), right=Literal(value=16, dtype='int'))), nbytes=16, swizzle='NONE'),), unroll=False, end=None, seed=True), CpAsyncCommit(), CpAsyncWait(group=1), Sync(barrier_id=0, count=None, warp=False), StridedLoop(axis=Axis(name='_ki', extent=Dim(512), window=None), start=Literal(value=0, dtype='int'), step=Literal(value=64, dtype='int'), body=(BlockScaleLoad(frag='_sfa0', src_buffer='_as_smem', src_index=(BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='%', left=BinaryExpr(op='/', left=Var(name='_ks'), right=Literal(value=512, dtype='int')), right=Literal(value=2, dtype='int')), right=Literal(value=16, dtype='int')), right=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=16, dtype='int')), right=Literal(value=0, dtype='int'))), BinaryExpr(op='/', left=Var(name='_ki'), right=Literal(value=16, dtype='int'))), role='a', ldm=32), LdmatrixLoad(frag='_a0', src_buffer='_a_smem', src_index=(BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='%', left=BinaryExpr(op='/', left=Var(name='_ks'), right=Literal(value=512, dtype='int')), right=Literal(value=2, dtype='int')), right=Literal(value=16, dtype='int')), right=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=16, dtype='int')), right=Literal(value=0, dtype='int'))), BinaryExpr(op='/', left=Var(name='_ki'), right=Literal(value=2, dtype='int'))), role='a', ldm=272, swizzle='NONE', staged=True, gmem_guard=None, k_zero=None, b_trans=False, pair_frag=None, byte_slab=True, scale_buffer=None, scale_index=(), scale_ldm=0, fragment_layout='m16n8k16'), BlockScaleLoad(frag='_sfb0', src_buffer='_bs_smem', src_index=(BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='%', left=BinaryExpr(op='/', left=Var(name='_ks'), right=Literal(value=512, dtype='int')), right=Literal(value=2, dtype='int')), right=Literal(value=64, dtype='int')), right=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a1_u'), right=Literal(value=16, dtype='int')), right=Literal(value=0, dtype='int'))), BinaryExpr(op='/', left=Var(name='_ki'), right=Literal(value=16, dtype='int'))), role='b', ldm=32), LdmatrixLoad(frag='_b0', src_buffer='_b_smem', src_index=(BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='%', left=BinaryExpr(op='/', left=Var(name='_ks'), right=Literal(value=512, dtype='int')), right=Literal(value=2, dtype='int')), right=Literal(value=64, dtype='int')), right=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a1_u'), right=Literal(value=16, dtype='int')), right=Literal(value=0, dtype='int'))), BinaryExpr(op='/', left=Var(name='_ki'), right=Literal(value=2, dtype='int'))), role='b', ldm=272, swizzle='NONE', staged=True, gmem_guard=None, k_zero=None, b_trans=True, pair_frag=None, byte_slab=True, scale_buffer=None, scale_index=(), scale_ldm=0, fragment_layout='m16n8k16'), BlockScaleLoad(frag='_sfb1', src_buffer='_bs_smem', src_index=(BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='%', left=BinaryExpr(op='/', left=Var(name='_ks'), right=Literal(value=512, dtype='int')), right=Literal(value=2, dtype='int')), right=Literal(value=64, dtype='int')), right=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a1_u'), right=Literal(value=16, dtype='int')), right=Literal(value=8, dtype='int'))), BinaryExpr(op='/', left=Var(name='_ki'), right=Literal(value=16, dtype='int'))), role='b', ldm=32), LdmatrixLoad(frag='_b1', src_buffer='_b_smem', src_index=(BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='%', left=BinaryExpr(op='/', left=Var(name='_ks'), right=Literal(value=512, dtype='int')), right=Literal(value=2, dtype='int')), right=Literal(value=64, dtype='int')), right=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a1_u'), right=Literal(value=16, dtype='int')), right=Literal(value=8, dtype='int'))), BinaryExpr(op='/', left=Var(name='_ki'), right=Literal(value=2, dtype='int'))), role='b', ldm=272, swizzle='NONE', staged=True, gmem_guard=None, k_zero=None, b_trans=True, pair_frag=None, byte_slab=True, scale_buffer=None, scale_index=(), scale_ldm=0, fragment_layout='m16n8k16'), MmaSyncPtx(c_frag='_c0_0', a_frag='_a0', b_frag='_b0', shape=(16, 8, 64), ab_dtype='e2m1', c_dtype='f32', sfa_frag='_sfa0', sfb_frag='_sfb0'), MmaSyncPtx(c_frag='_c0_1', a_frag='_a0', b_frag='_b1', shape=(16, 8, 64), ab_dtype='e2m1', c_dtype='f32', sfa_frag='_sfa0', sfb_frag='_sfb1')), unroll=True, end=None, seed=True), Sync(barrier_id=0, count=None, warp=False)), unroll=False, end=None, seed=True), Load(names=('_bs_alpha_l0',), input='input_static_fp4_scale_2', index=(Literal(value=0, dtype='int'), Literal(value=0, dtype='int'), Literal(value=0, dtype='int')), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Assign(name='_bs_alpha0', op=ElementwiseImpl('copy'), args=('_bs_alpha_l0',), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Load(names=('_bs_alpha_l1',), input='p_weight_scale_2', index=(Literal(value=0, dtype='int'), Literal(value=0, dtype='int')), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Assign(name='_bs_alpha1', op=ElementwiseImpl('multiply'), args=('_bs_alpha0', '_bs_alpha_l1'), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), FragmentApply(out='_c0_0', op=ElementwiseImpl('multiply'), args=('_c0_0', '_bs_alpha1'), kinds=('frag', 'uniform'), in_place=True, layout=FragLayout(n_elems=4, elem_row=(0, 0, 1, 1), reduce_xors=(2, 1), lane_decl='const int _g = (threadIdx.x & 31) >> 2, _t = (threadIdx.x & 31) & 3;', lane_names=('_g', '_t'), row_off=(Var(name='_g'), BinaryExpr(op='+', left=Var(name='_g'), right=Literal(value=8, dtype='int'))), col_off=(BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='_t'), right=Literal(value=2, dtype='int')), right=Literal(value=0, dtype='int')), BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='_t'), right=Literal(value=2, dtype='int')), right=Literal(value=1, dtype='int')), BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='_t'), right=Literal(value=2, dtype='int')), right=Literal(value=0, dtype='int')), BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='_t'), right=Literal(value=2, dtype='int')), right=Literal(value=1, dtype='int')))), post=()), FragmentApply(out='_c0_1', op=ElementwiseImpl('multiply'), args=('_c0_1', '_bs_alpha1'), kinds=('frag', 'uniform'), in_place=True, layout=FragLayout(n_elems=4, elem_row=(0, 0, 1, 1), reduce_xors=(2, 1), lane_decl='const int _g = (threadIdx.x & 31) >> 2, _t = (threadIdx.x & 31) & 3;', lane_names=('_g', '_t'), row_off=(Var(name='_g'), BinaryExpr(op='+', left=Var(name='_g'), right=Literal(value=8, dtype='int'))), col_off=(BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='_t'), right=Literal(value=2, dtype='int')), right=Literal(value=0, dtype='int')), BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='_t'), right=Literal(value=2, dtype='int')), right=Literal(value=1, dtype='int')), BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='_t'), right=Literal(value=2, dtype='int')), right=Literal(value=0, dtype='int')), BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='_t'), right=Literal(value=2, dtype='int')), right=Literal(value=1, dtype='int')))), post=()), RegStore(dst_buffer='linear', dst_index=(BinaryExpr(op='+', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_b'), right=Literal(value=16, dtype='int')), right=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=16, dtype='int'))), right=Literal(value=0, dtype='int')), BinaryExpr(op='+', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a1_b'), right=Literal(value=64, dtype='int')), right=BinaryExpr(op='*', left=Var(name='a1_u'), right=Literal(value=16, dtype='int'))), right=Literal(value=0, dtype='int'))), frag='_c0_0', shape=(16, 8, 64), ldm=0, epilogue=None, m_guard=None, n_guard=None, atomic=False, fragment_layout='m16n8k16', swizzle='NONE', row_dim=0, col_dim=1), RegStore(dst_buffer='linear', dst_index=(BinaryExpr(op='+', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a0_b'), right=Literal(value=16, dtype='int')), right=BinaryExpr(op='*', left=Var(name='a0_u'), right=Literal(value=16, dtype='int'))), right=Literal(value=0, dtype='int')), BinaryExpr(op='+', left=BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a1_b'), right=Literal(value=64, dtype='int')), right=BinaryExpr(op='*', left=Var(name='a1_u'), right=Literal(value=16, dtype='int'))), right=Literal(value=8, dtype='int'))), frag='_c0_1', shape=(16, 8, 64), ldm=0, epilogue=None, m_guard=None, n_guard=None, atomic=False, fragment_layout='m16n8k16', swizzle='NONE', row_dim=0, col_dim=1)), block_threads=128, aux_threads=0, raster_axes=('a0_b', 'a1_b'), raster_group=8, raster_orient='m')"
+        ],
+        "name": "k_linear_334cf2",
+        "zero_delegated": []
+      },
+      "inputs": [
+        "input_static_fp4_scale_2",
+        "p_weight_scale_2",
+        "p_weight_scale_bits",
+        "input_static_fp4_scale_bits",
+        "input_static_fp4_bits",
+        "p_weight_bits",
+        "input_static_fp4_r1_f4_pairs",
+        "p_weight_f4_pairs"
+      ],
+      "outputs": [
+        {
+          "name": "linear",
+          "shape": [
+            16,
+            4096
+          ],
+          "dtype": "bf16"
+        }
+      ],
+      "hints": {
+        "prov": {
+          "linear": {
+            "kind": "LinearOp",
+            "pieces": [
+              "linear",
+              "linear_a_unsq",
+              "linear_a_unsq_bc",
+              "linear_b_unsq",
+              "linear_b_unsq_bc",
+              "linear_ew",
+              "linear_reduce",
+              "linear_wt"
+            ]
+          },
+          "input_static_fp4_r1_fused_cast_bc": {
+            "kind": "IndexMapOp",
+            "pieces": [
+              "input_static_fp4_r1_fused_cast_bc"
+            ]
+          },
+          "input_static_fp4_r1_fused_cast": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_static_fp4_r1_fused_cast"
+            ]
+          },
+          "input_static_fp4_r1_scale_vals": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_static_fp4_r1_scale_vals"
+            ]
+          },
+          "input_static_fp4_r1_sblk": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_static_fp4_r1_sblk"
+            ]
+          },
+          "input_static_fp4_r1_fused32": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_static_fp4_r1_fused32"
+            ]
+          },
+          "input_static_fp4_r1_fused": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_static_fp4_r1_fused"
+            ]
+          },
+          "input_static_fp4_r1_value": {
+            "kind": "ReshapeOp",
+            "pieces": [
+              "input_static_fp4_r1_value"
+            ]
+          },
+          "input_static_fp4_r1_pairs": {
+            "kind": "GatherOp",
+            "pieces": [
+              "input_static_fp4_r1_pairs"
+            ]
+          },
+          "input_static_fp4_r1_vals": {
+            "kind": "ReshapeOp",
+            "pieces": [
+              "input_static_fp4_r1_vals"
+            ]
+          },
+          "input_static_fp4_r1_idx": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_static_fp4_r1_idx"
+            ]
+          },
+          "n1": {
+            "kind": "IndexMapOp",
+            "pieces": [
+              "n1"
+            ]
+          },
+          "p_weight_idx": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "p_weight_idx"
+            ]
+          },
+          "p_weight_sblk": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "p_weight_sblk"
+            ]
+          },
+          "p_weight": {
+            "kind": "ReshapeOp",
+            "pieces": [
+              "p_weight"
+            ]
+          },
+          "p_weight_blk": {
+            "kind": "ReshapeOp",
+            "pieces": [
+              "p_weight_blk"
+            ]
+          },
+          "p_weight_vals": {
+            "kind": "ReshapeOp",
+            "pieces": [
+              "p_weight_vals"
+            ]
+          },
+          "p_weight_pairs": {
+            "kind": "GatherOp",
+            "pieces": [
+              "p_weight_pairs"
+            ]
+          },
+          "p_weight_scale_2_bc": {
+            "kind": "IndexMapOp",
+            "pieces": [
+              "p_weight_scale_2_bc"
+            ]
+          },
+          "p_weight_fused": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "p_weight_fused"
+            ]
+          },
+          "p_weight_fused32": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "p_weight_fused32"
+            ]
+          },
+          "p_weight_fused_cast": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "p_weight_fused_cast"
+            ]
+          },
+          "p_weight_fused_r_bc": {
+            "kind": "IndexMapOp",
+            "pieces": [
+              "p_weight_fused_r_bc"
+            ]
+          },
+          "p_weight_fused_r": {
+            "kind": "ReshapeOp",
+            "pieces": [
+              "p_weight_fused_r"
+            ]
+          },
+          "p_weight_scale_vals": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "p_weight_scale_vals"
+            ]
+          }
+        }
+      }
+    },
+    "input_static_fp4_scale_bits": {
+      "op": "KernelOp",
+      "op_fields": {
+        "body": [
+          "Tile(axes=(Axis(name='a0', extent=Dim(16), window=None), Axis(name='a1_1', extent=Dim(256), window=None)), body=(Load(names=('in2',), input='input_static_fp4_f4_max', index=(Literal(value=0, dtype='int'),), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Load(names=('in3',), input='input_static_fp4_scale_2', index=(Literal(value=0, dtype='int'), Literal(value=0, dtype='int'), Literal(value=0, dtype='int')), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Assign(name='v3', op=ElementwiseImpl('multiply'), args=('in2', 'in3'), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Assign(name='v4', op=ElementwiseImpl('reciprocal'), args=('v3',), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Loop(axis=Axis(name='a3', extent=Dim(16), window=None), body=(Load(names=('in7',), input='input', index=(Var(name='a0'), BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a1_1'), right=Literal(value=16, dtype='int')), right=Var(name='a3'))), dtype=DataType(name='bf16', np=dtype('uint16'), nbytes=2)), Assign(name='v28', op=ElementwiseImpl('abs'), args=('in7',), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Accum(name='acc2', value='v28', op=ElementwiseImpl('maximum'), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4), axes=('a3',), base=None)), unroll=False, seed=True), Assign(name='v29', op=ElementwiseImpl('multiply'), args=('acc2', 'v4'), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Assign(name='v30', op=ElementwiseImpl('to_f8e4m3'), args=('v29',), dtype=DataType(name='f8e4m3', np=dtype('uint8'), nbytes=1)), Write(output='input_static_fp4_scale_bits', index=(Var(name='a0'), Var(name='a1_1'), Literal(value=0, dtype='int')), values=('v30',), value_dtype=DataType(name='f8e4m3', np=dtype('uint8'), nbytes=1), atomic=False, swizzle='NONE')), block_threads=None, aux_threads=0, raster_axes=None, raster_group=None, raster_orient='m')"
+        ],
+        "name": "k_reshape_reduce_46015e",
+        "zero_delegated": []
+      },
+      "inputs": [
+        "input_static_fp4_f4_max",
+        "input_static_fp4_scale_2",
+        "input"
+      ],
+      "outputs": [
+        {
+          "name": "input_static_fp4_scale_bits",
+          "shape": [
+            16,
+            256,
+            1
+          ],
+          "dtype": "f8e4m3"
+        }
+      ],
+      "hints": {
+        "prov": {
+          "input_static_fp4_scale_bits": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_static_fp4_scale_bits"
+            ]
+          },
+          "input_static_fp4_bits": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_static_fp4_bits"
+            ]
+          },
+          "input_static_fp4_ratio": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_static_fp4_ratio"
+            ]
+          },
+          "input_static_fp4_fused": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_static_fp4_fused"
+            ]
+          },
+          "input_static_fp4_div32": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_static_fp4_div32"
+            ]
+          },
+          "input_static_fp4_abs": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_static_fp4_abs"
+            ]
+          },
+          "input_static_fp4_blk": {
+            "kind": "ReshapeOp",
+            "pieces": [
+              "input_static_fp4_blk"
+            ]
+          },
+          "input_static_fp4_amax": {
+            "kind": "ReduceOp",
+            "pieces": [
+              "input_static_fp4_amax"
+            ]
+          },
+          "input_static_fp4_codes_flat": {
+            "kind": "ReshapeOp",
+            "pieces": [
+              "input_static_fp4_codes_flat"
+            ]
+          },
+          "input_static_fp4_byte": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_static_fp4_byte"
+            ]
+          },
+          "input_static_fp4_safe": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_static_fp4_safe"
+            ]
+          },
+          "input_static_fp4_norm": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_static_fp4_norm"
+            ]
+          },
+          "input_static_fp4_even": {
+            "kind": "IndexMapOp",
+            "pieces": [
+              "input_static_fp4_even"
+            ]
+          },
+          "input_static_fp4_odd": {
+            "kind": "IndexMapOp",
+            "pieces": [
+              "input_static_fp4_odd"
+            ]
+          },
+          "input_static_fp4_hi": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_static_fp4_hi"
+            ]
+          },
+          "input_static_fp4_scale_vals": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_static_fp4_scale_vals"
+            ]
+          },
+          "input_static_fp4_fused32": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_static_fp4_fused32"
+            ]
+          },
+          "input_static_fp4_codes": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_static_fp4_codes"
+            ]
+          },
+          "input_static_fp4_safe_bc": {
+            "kind": "IndexMapOp",
+            "pieces": [
+              "input_static_fp4_safe_bc"
+            ]
+          },
+          "input_static_fp4_denom": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_static_fp4_denom"
+            ]
+          },
+          "input_static_fp4_f4_max_bc": {
+            "kind": "IndexMapOp",
+            "pieces": [
+              "input_static_fp4_f4_max_bc"
+            ]
+          },
+          "input_static_fp4_floor_bc": {
+            "kind": "IndexMapOp",
+            "pieces": [
+              "input_static_fp4_floor_bc"
+            ]
+          },
+          "input_static_fp4_scale_2_bc": {
+            "kind": "IndexMapOp",
+            "pieces": [
+              "input_static_fp4_scale_2_bc"
+            ]
+          },
+          "input_static_fp4_shift_bc": {
+            "kind": "IndexMapOp",
+            "pieces": [
+              "input_static_fp4_shift_bc"
+            ]
+          }
+        }
+      }
+    },
+    "input_static_fp4_bits": {
+      "op": "KernelOp",
+      "op_fields": {
+        "body": [
+          "Tile(axes=(Axis(name='a0', extent=Dim(16), window=None), Axis(name='a1', extent=Dim(2048), window=None)), body=(Load(names=('in2',), input='input_static_fp4_f4_max', index=(Literal(value=0, dtype='int'),), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Load(names=('in3',), input='input_static_fp4_scale_2', index=(Literal(value=0, dtype='int'), Literal(value=0, dtype='int'), Literal(value=0, dtype='int')), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Assign(name='v0', op=ElementwiseImpl('multiply'), args=('in2', 'in3'), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Assign(name='v1', op=ElementwiseImpl('reciprocal'), args=('v0',), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Assign(name='v2', op=ElementwiseImpl('reciprocal'), args=('v0',), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Loop(axis=Axis(name='a2', extent=Dim(16), window=None), body=(Load(names=('in4',), input='input', index=(Var(name='a0'), BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='/', left=Var(name='a1'), right=Literal(value=8, dtype='int')), right=Literal(value=16, dtype='int')), right=Var(name='a2'))), dtype=DataType(name='bf16', np=dtype('uint16'), nbytes=2)), Assign(name='v5', op=ElementwiseImpl('abs'), args=('in4',), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Assign(name='v6', op=ElementwiseImpl('abs'), args=('in4',), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Accum(name='acc0', value='v5', op=ElementwiseImpl('maximum'), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4), axes=('a2',), base=None), Accum(name='acc1', value='v6', op=ElementwiseImpl('maximum'), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4), axes=('a2',), base=None)), unroll=False, seed=True), Assign(name='v7', op=ElementwiseImpl('multiply'), args=('acc0', 'v1'), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Assign(name='v9', op=ElementwiseImpl('multiply'), args=('acc1', 'v2'), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Assign(name='v8', op=ElementwiseImpl('to_f8e4m3'), args=('v7',), dtype=DataType(name='f8e4m3', np=dtype('uint8'), nbytes=1)), Assign(name='v10', op=ElementwiseImpl('from_f8e4m3'), args=('v8',), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Assign(name='v12', op=ElementwiseImpl('multiply'), args=('in3', 'v10'), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Assign(name='v14', op=ElementwiseImpl('copy'), args=('v12',), dtype=DataType(name='f16', np=dtype('float16'), nbytes=2)), Assign(name='v16', op=ElementwiseImpl('copy'), args=('v14',), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Load(names=('in0',), input='input_static_fp4_floor', index=(Literal(value=0, dtype='int'),), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Assign(name='v18', op=ElementwiseImpl('maximum'), args=('in0', 'v16'), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Assign(name='v11', op=ElementwiseImpl('to_f8e4m3'), args=('v9',), dtype=DataType(name='f8e4m3', np=dtype('uint8'), nbytes=1)), Assign(name='v13', op=ElementwiseImpl('from_f8e4m3'), args=('v11',), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Assign(name='v15', op=ElementwiseImpl('multiply'), args=('in3', 'v13'), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Assign(name='v17', op=ElementwiseImpl('copy'), args=('v15',), dtype=DataType(name='f16', np=dtype('float16'), nbytes=2)), Assign(name='v19', op=ElementwiseImpl('copy'), args=('v17',), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Assign(name='v21', op=ElementwiseImpl('maximum'), args=('in0', 'v19'), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Load(names=('in5',), input='input', index=(Var(name='a0'), BinaryExpr(op='+', left=BinaryExpr(op='*', left=Var(name='a1'), right=Literal(value=2, dtype='int')), right=Literal(value=1, dtype='int'))), dtype=DataType(name='bf16', np=dtype('uint16'), nbytes=2)), Assign(name='v20', op=ElementwiseImpl('divide'), args=('in5', 'v18'), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Assign(name='v22', op=ElementwiseImpl('to_f4e2m1'), args=('v20',), dtype=DataType(name='i32', np=dtype('int32'), nbytes=4)), Load(names=('in1',), input='input_static_fp4_shift', index=(Literal(value=0, dtype='int'),), dtype=DataType(name='i32', np=dtype('int32'), nbytes=4)), Assign(name='v24', op=ElementwiseImpl('left_shift'), args=('v22', 'in1'), dtype=DataType(name='i32', np=dtype('int32'), nbytes=4)), Load(names=('in6',), input='input', index=(Var(name='a0'), BinaryExpr(op='*', left=Var(name='a1'), right=Literal(value=2, dtype='int'))), dtype=DataType(name='bf16', np=dtype('uint16'), nbytes=2)), Assign(name='v23', op=ElementwiseImpl('divide'), args=('in6', 'v21'), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Assign(name='v25', op=ElementwiseImpl('to_f4e2m1'), args=('v23',), dtype=DataType(name='i32', np=dtype('int32'), nbytes=4)), Assign(name='v26', op=ElementwiseImpl('bitwise_or'), args=('v25', 'v24'), dtype=DataType(name='i32', np=dtype('int32'), nbytes=4)), Assign(name='v27', op=ElementwiseImpl('copy'), args=('v26',), dtype=StructuredType(name='f4e2m1x2', np=dtype('uint8'), nbytes=1)), Write(output='input_static_fp4_bits', index=(Var(name='a0'), Var(name='a1')), values=('v27',), value_dtype=StructuredType(name='f4e2m1x2', np=dtype('uint8'), nbytes=1), atomic=False, swizzle='NONE')), block_threads=None, aux_threads=0, raster_axes=None, raster_group=None, raster_orient='m')"
+        ],
+        "name": "k_reshape_reduce_46015e__place_b87aae0fba",
+        "zero_delegated": []
+      },
+      "inputs": [
+        "input_static_fp4_floor",
+        "input_static_fp4_shift",
+        "input_static_fp4_f4_max",
+        "input_static_fp4_scale_2",
+        "input"
+      ],
+      "outputs": [
+        {
+          "name": "input_static_fp4_bits",
+          "shape": [
+            16,
+            2048
+          ],
+          "dtype": "f4e2m1x2"
+        }
+      ],
+      "hints": {
+        "prov": {
+          "input_static_fp4_scale_bits": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_static_fp4_scale_bits"
+            ]
+          },
+          "input_static_fp4_bits": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_static_fp4_bits"
+            ]
+          },
+          "input_static_fp4_ratio": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_static_fp4_ratio"
+            ]
+          },
+          "input_static_fp4_fused": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_static_fp4_fused"
+            ]
+          },
+          "input_static_fp4_div32": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_static_fp4_div32"
+            ]
+          },
+          "input_static_fp4_abs": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_static_fp4_abs"
+            ]
+          },
+          "input_static_fp4_blk": {
+            "kind": "ReshapeOp",
+            "pieces": [
+              "input_static_fp4_blk"
+            ]
+          },
+          "input_static_fp4_amax": {
+            "kind": "ReduceOp",
+            "pieces": [
+              "input_static_fp4_amax"
+            ]
+          },
+          "input_static_fp4_codes_flat": {
+            "kind": "ReshapeOp",
+            "pieces": [
+              "input_static_fp4_codes_flat"
+            ]
+          },
+          "input_static_fp4_byte": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_static_fp4_byte"
+            ]
+          },
+          "input_static_fp4_safe": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_static_fp4_safe"
+            ]
+          },
+          "input_static_fp4_norm": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_static_fp4_norm"
+            ]
+          },
+          "input_static_fp4_even": {
+            "kind": "IndexMapOp",
+            "pieces": [
+              "input_static_fp4_even"
+            ]
+          },
+          "input_static_fp4_odd": {
+            "kind": "IndexMapOp",
+            "pieces": [
+              "input_static_fp4_odd"
+            ]
+          },
+          "input_static_fp4_hi": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_static_fp4_hi"
+            ]
+          },
+          "input_static_fp4_scale_vals": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_static_fp4_scale_vals"
+            ]
+          },
+          "input_static_fp4_fused32": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_static_fp4_fused32"
+            ]
+          },
+          "input_static_fp4_codes": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_static_fp4_codes"
+            ]
+          },
+          "input_static_fp4_safe_bc": {
+            "kind": "IndexMapOp",
+            "pieces": [
+              "input_static_fp4_safe_bc"
+            ]
+          },
+          "input_static_fp4_denom": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_static_fp4_denom"
+            ]
+          },
+          "input_static_fp4_f4_max_bc": {
+            "kind": "IndexMapOp",
+            "pieces": [
+              "input_static_fp4_f4_max_bc"
+            ]
+          },
+          "input_static_fp4_floor_bc": {
+            "kind": "IndexMapOp",
+            "pieces": [
+              "input_static_fp4_floor_bc"
+            ]
+          },
+          "input_static_fp4_scale_2_bc": {
+            "kind": "IndexMapOp",
+            "pieces": [
+              "input_static_fp4_scale_2_bc"
+            ]
+          },
+          "input_static_fp4_shift_bc": {
+            "kind": "IndexMapOp",
+            "pieces": [
+              "input_static_fp4_shift_bc"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

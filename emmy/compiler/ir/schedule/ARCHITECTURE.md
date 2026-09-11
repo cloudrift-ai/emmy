@@ -39,7 +39,11 @@ role-less side shares a coordinate with the other side qualifies only while that
 reshape residue); a B that changes with the row it is contracted against is no slab per tile. It derives stable
 node ids,
 operand-edge sites, each site's projection or reduction view, and each contraction's schedule-independent
-`ContractionFacts` — its effective K axis, computed-A cone seam, nested producer, and fragment need.
+`ContractionFacts` — its effective K axis, computed-A cone seam, nested producer, and fragment need. The seam
+(`cone_seam`) splits the cone's edges at the K axis into a row-invariant prologue, a per-chunk statistic (a reduce
+that reads K only through one block guard, such as a grouped activation scale's maximum) and a per-cell body, and
+keeps one lowering of a fold two cell edges read (attention's output and its own row sum): the tree forms that fold
+twice as equal nodes, and a fill that replicates the cell per output cell would otherwise declare its states twice.
 `ir/schedule/views` supplies the vocabulary (`node_view`, `Projection`, `Reduction`, `Contraction`,
 `ContractionFacts`) and the one derivation that is not a projection of the site table, `contraction_facts`; the tile
 layer reads through them. The composition context publishes the schedule-facing API (`node`, `site`, `operand`,
@@ -114,6 +118,14 @@ loader needs a gmem address: whatever supplies the pivot, and the streamed value
 read once ahead of the chunk loop, so a mask's fill / zero constants may be a computed pair with no slab at all, and
 its statements may include a `Select` on the score fragment's OWN coordinates, which the emitter evaluates per element.
 Both were blanket refusals, and either one sent a masked attention target to the scalar tier whole.
+
+A `wgmma` atom is a 16×8 warp sub-cell like `mma_m16n8k16`, but its instruction is issued by four M-adjacent warps
+over 64 rows and N columns, so `_wgmma_refusal` narrows the row it can hold: a `w<4k>x1` warp grid (the unit decode
+is N-fastest, so contiguous warp ids stack along M), one fragment row per warp (`f1x<C>`, a second row would sit
+64 rows down) with `C` a multiple of N/8 (whole instructions along N), a `k4` chunk (one 128-byte swizzle row per
+descriptor) and a shared-memory stage on every operand (the instruction reads descriptors, never fragments). The
+unpinned catalog drops such rows; a pin raises with the rule's message, and the tile check runs before the stage
+check so that message wins.
 
 `TileOp.stage_edges` offers a transport at every operand of every contracting site, a chunked carrier's included —
 which tier then puts which operand on a slab is the tier's own business. The chunked site used to be excluded on the

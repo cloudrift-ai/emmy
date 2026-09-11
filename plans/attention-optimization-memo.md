@@ -11,7 +11,7 @@ retuned), geometric means over 256-32768 keys, lower favors Emmy:
 | prefill GQA | 1.03x | 0.88x (7/8) | 1.44x / 1.23x |
 | prefill global | 1.17x | 0.94x (6/8) | 1.54x / 1.23x |
 | decode GQA | 0.04x | 0.81x (8/8) | 0.05x / 0.93x |
-| decode causal (not re-measured; scalar tiers) | 3.12x | 3.54x (0/8) | same |
+| decode causal (256-2048 re-recorded; see the eager-reference caveat) | 1.29x | 0.94x | was 3.09x / 3.26x |
 
 RTX 5090: the cp.async causal row at 32 heads / 2048 keys / hd 128 runs 1.13x faster than eager (242 vs 274 us), at
 16 heads 1.28x; the article's one-wave shape (16 heads, 512 keys, hd 256, causal) is 0.92x of eager (38 vs 35 us).
@@ -87,13 +87,99 @@ from a slab (FA-2's `sQ`, 32 KB; +25% smem traffic but −64 registers) or from 
 fragment load per K step, cheap at `k2`), and the exp folding above, which shrinks the per-chunk temporaries. Try
 `f2x16/k2` first (score chunk 32 registers). Expected: 10-20% over FA-2 on the A100 prefill families.
 
-### 4. Plain decode: the unit query axis as the fragment's M
+### 4. Plain decode: the bound row — DONE in part, and here is where it stopped
 
-Decode with one query row per head folds on the scalar tier (A100: 3.5x behind Neptune, the one family still lost).
-The loop IR carries no axis for the unit query dimension at all — `q[0, a0, 0, a2]` — so the placement never sees
-one to keep: the change starts at the lift (a unit axis kept as a masked 16-row fragment row, FA-2's decode), then
-the projection's `_inner_free` (which skips unit axes) and `_node_refusal`'s output-axis-pair reading. The same
-key-range split then applies. Expected: 2048 keys from 148 us to 30-40 (Neptune 45).
+The lift now binds the elided query coordinate back as an extent-one axis whenever a contraction owns no row
+(`lowering/tile/_row.py`), beside `_implicit_unit_row` rather than instead of it. Decode then traces to ONE fused
+chunk-tier kernel instead of two per-cell ones. Re-recorded A100 40GB goldens, against the archived
+Emmy and Neptune columns, in raw microseconds:
+
+| keys | committed before | Neptune | now | split |
+| ---: | ---: | ---: | ---: | --- |
+| 256 | 24.7 | 15.2 | **8.8** | none |
+| 512 | 38.8 | 19.0 | **15.4** | none |
+| 1024 | 73.2 | 27.5 | **18.7** | `g8k` |
+| 2048 | 148.5 | 45.5 | **42.6** | `g8k` |
+| 4096 | 294.5 | 74.3 | **64.0** | `g16k` |
+| 8192 | 607.3 | 122.3 | **117.6** | `g32k` |
+| 16384 | 1385.0 | 216.7 | 220.9 | `g64k` |
+| 32768 | 2775.0 | 410.3 | 410.8 | `g64k` |
+
+0.84x of Neptune by geometric mean, ahead at six of eight lengths and level at the two longest; 2.5x to 6.8x faster
+than the rows replaced. Quote the golden's ROUTING row, not the `TOTAL` line of a `--record-greedy` log: the routing
+row is the isolated re-bench and the sum of its receipts (117.6 us at 8192), while `TOTAL` is the in-process figure
+measured alongside everything else (143.6). Reading `TOTAL` made 8192-32768 look 1.16-1.25x behind Neptune when they
+are level. Read the eager caveat before calling the family on raw microseconds at all: this box's eager reference
+does not match the archived lane's.
+
+`_implicit_unit_row` cannot be folded into the binding, and the full suite is what said so: a matvec whose A is a
+bare VECTOR has no unit dimension to bind a row into, so only the announce can serve it, and deleting it dropped
+`matmul/f16-matvec-reshaped-output-tma` off the mma tier. The binding therefore fires only where the placement
+carries no extent-one free axis at all — where the announce has already declined — and it accepts a candidate only
+when the BOUND axis is a contraction's left axis, since a contraction reorients and the looser question is satisfied
+by a binding that handed the row to the other side.
+
+The reading that mattered was not `_inner_free` or `_node_refusal` — neither is reached. It is `TileOp.contracts`:
+with the query coordinate gone, the term's only shared axis is the HEAD, `left_axes` is empty, and a B that moves
+with its row is no slab per tile, so the catalog never offers a fragment.
+
+What the measurement says to do next, in order:
+
+- **Registers.** The split row runs at 128 registers and 25% occupancy — the fused row's 254 registers against the
+  255 spill wall is gone. Still not memory-bound: 33.5 MB at 2048 keys is a 21.5 us roofline against 42.6 measured.
+  Item 2's exp folding is the remaining register lever.
+- **Settle the eager reference before claiming the family.** This box measures eager at 31-33 us on the 2048-key
+  decode where the archived lane measured 48.1. So 42.6 us beats Neptune's recorded 45.5 on raw microseconds and
+  loses to it on the eager-normalized ratio (1.4x against 0.95x). Re-run Neptune on the same box before either
+  number goes in a paper.
+- **The key-range split is the biggest single lever — and pin BOTH route spellings or the measurement is a lie.**
+  A `TILE@map.1/twist` pin does not resolve on a split PIECE, whose tree spells the route `@twist`; the pin is
+  ignored without complaint and the compiler picks that piece's geometry itself. Pinning both spellings holds the
+  geometry fixed (`f1x8/k8` + `f1x16/k8` realized on every row below) and the answer is then consistent:
+
+  | keys | unsplit | `g8k` | `g16k` |
+  | ---: | ---: | ---: | ---: |
+  | 1024 | 28 | **20** | refused |
+  | 2048 | 64 | **39** | 45 |
+  | 4096 | 136 | 69 | **66** |
+
+  1.4x to 2x at every length. Sweeping with only the one spelling produced 137 us at 1024 and 511 at 4096 and
+  looked like evidence AGAINST the split; it was measuring the piece's own geometry choice. The `g16k` refusal at
+  1024 is honest — 64 keys per partition leaves the staging depth nothing to resolve against.
+
+- **Registers.** The split row runs at 128 registers and 25% occupancy — the fused row's 254 registers against the
+  255 spill wall is gone. Still not memory-bound: 33.5 MB at 2048 keys is a 21.5 us roofline against 42.6 measured.
+  Item 2's exp folding is the remaining register lever.
+- **Settle the eager reference before claiming the family.** This box measures eager at 31-33 us on the 2048-key
+  decode where the archived lane measured 48.1. So 42.6 us beats Neptune's recorded 45.5 on raw microseconds and
+  loses to it on the eager-normalized ratio (1.4x against 0.95x). Re-run Neptune on the same box before either
+  number goes in a paper.
+- **A split row is NOT a controlled measurement, and this invalidated two readings before it was noticed.** A
+  `TILE@map.1/twist` pin does not resolve on a split PIECE — the piece's tree spells the route `twist`, so the
+  compiler picks the piece's geometry itself and the pin is silently ignored. Every split row below therefore varies
+  geometry and split together:
+
+  | keys | unsplit | `g4k` | `g8k` | `g16k` |
+  | ---: | ---: | ---: | ---: | ---: |
+  | 1024 | 28 | — | 137 | 3498 |
+  | 2048 | 57 | 192 | **44** | 52 |
+  | 4096 | 123 | — | 511 | 335 |
+
+  At 2048 the compiler's own choice for the piece (`f1x4/k4` + `f1x8/k4`, chunk 64 — on the diagonal) beat the
+  unsplit row and is what the committed golden records. At 1024 and 4096 its choice was bad. So the recorded 2048
+  win is real as a measurement and unexplained as a mechanism: whether the split helps, or whether the piece simply
+  landed on a better geometry, is not resolved. To sweep it properly, pin BOTH route spellings (`@map.1/twist` and
+  `@twist`) so one of them binds whichever shape the placement takes.
+- **The geometry is a matched diagonal, not a cross.** The score tile's column count must equal the carrier's chunk
+  width (`16 * k`). Off it — 64/128 or 128/64 — the same kernel measures about 9300 us, 160x worse. Any sweep that
+  crosses `TILE@map.1/twist` against `TILE@map.1/twist.1/inner` freely wastes most of its rows.
+- **Re-record the other seven lengths.** Only 2048 was re-recorded. A golden cannot take this change by replay:
+  `005_replay_lowered` restores stored Tile IR and never reaches the lift, and a replayed row re-applies its own
+  recorded pins. Re-recording is `emmy trace --loop-targets -c … -o work.yaml`, then
+  `run --golden … --realization … --bench --record-greedy` under the pins.
+- **A bug the widened space exposes.** Some candidates abort the bench worker with `scratch buffer … has no
+  consuming launch (dead scratch)`. `emmy tune` routes around it by pinning `bench_fail`, but it is a real refusal
+  that should not be reachable.
 
 ### 5. Fix the causal split, then the one-wave shape
 

@@ -1100,8 +1100,12 @@ with max-Q normalized UCB1:
 - **Expansion** is implicit (one rule batch per pop, one child per alternative).
 - **Simulation** is the actual `await backend.benchmark_async(...)` on the terminal.
 - **Backprop** walks the popped candidate's parent chain updating `visits` and `best_reward`.
-- **Patience** counts terminals since the last new global best; when it exceeds `--patience N` (default 50), the level
-  exits.
+- **Patience** counts live benchmark attempts and failed expansion or lowering attempts since the last new global
+  best; the level exits when this count reaches `--patience N` (default 50). Cached and stub results still update the
+  tree but do not consume patience or the live measurement budget. A better cached result resets patience too.
+  Failed expansion or lowering backpropagates zero reward and a visit without inventing a latency or training row.
+  The optional visit limit counts all observations and these failures; the measurement limit counts only live
+  benchmark attempts. Cache-heavy searches can therefore explore more candidates before stopping.
 
 ### One measurement regime
 
@@ -1435,7 +1439,11 @@ again from the file's rows alone (no tune DB, no prior): that 10-kernel twin, wh
 pricing, resolves from its 19 recorded rows in seconds.
 
 The preferred reference is the runnable Torch slice (`torch-eager`) or the applicable library kernel (`cublas`). A
-Loop IR fallback has no frontend callable by construction; an origin slice can also have synthetic boundaries whose
+stored Loop IR kernel derives its slice from the embedded program (`GoldenRecord.reference_program`): the program is
+lowered once, the kernel is found by its Loop IR wire, and its provenance origins become the slice when it computes
+every one of them whole, reads only inputs it binds, and exposes its outputs. The slice is comparison only; identity
+stays the stored kernel. A kernel holding part of an op, or recomputing a value its slice would read, has no frontend
+callable; an origin slice can also have synthetic boundaries whose
 post-fusion output geometry is not independently comparable to its Torch slice. Such a target may use a separately
 compiled, repeated O3 `same-input-greedy` row as its positive reference only when the candidate and reference execute on
 identical deterministic inputs, their outputs pass the normal accuracy policy, and the model report discloses that

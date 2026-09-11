@@ -140,10 +140,11 @@ identically for all four commands (see `compiler/ARCHITECTURE.md`, "Quantized ch
 `compile --quantize <scheme>` quantizes a TRACED module's linear weights and compiles the result. It is deliberately
 not a second way to build a quantized graph: `loader/synthesize.py` writes a real checkpoint and the ordinary
 spellers read it, so the program is the one that checkpoint would give and the directory is on disk to inspect
-(`--dump-dir` keeps it, else a temp dir whose path is logged). The weight side is derived from each tensor; the
-activation scale is calibrated over the trace's ONE example input, by modelopt's own formula, and written into the
-checkpoint so the number is readable rather than implied. It needs a linear whose weight is a module parameter —
-`a @ b` over two tensors has none, and says so.
+(`--dump-dir` keeps it, else a temp dir whose path is logged). The weight side is derived from each tensor. The two
+NVFP4 schemes calibrate the activation scale over the trace's ONE example input, by modelopt's own formula, and write
+it into the checkpoint so the number is readable rather than implied; `fp8-block` declares the official FP8 form, whose
+activations are quantized dynamically, so it has nothing to calibrate. It needs a linear whose weight is a module
+parameter — `a @ b` over two tensors has none, and says so.
 For isolated frontend-graph runs, the worker returns the symbolic environment used for execution with its benchmark
 result; `run` uses that same binding when rendering dynamic per-kernel grid statistics.
 For a single-layer trace, the loader derives a missing attention `layer_type` from
@@ -182,9 +183,14 @@ spawns). `--realization NAME` (`run`, `compile`, `tune`) selects one realization
 substring — inside `--golden PATH`, or, on `run` / `compile` without it, inside the live card's repository goldens.
 There is no second spelling: no file flag beside `--golden`, no name flag beside `--realization`.
 
-`run --golden PATH` without `--realization` walks every realization name in one process, benching each name's
-verified rows or its one valid direct tune winner (proposals stay the tuner's). A receipt of a piece a route row
-minted (its identity is no route row's) replays under the target's route rows composed, plus `PLACE=fuse` when no
+`run --golden PATH` without `--realization` walks every target name in one process, benching each target's
+verified rows or its one valid direct tune winner (proposals stay the tuner's). A routing row or a
+child-identity receipt (`<target>.<identity>`) is evidence for its target's walk, not a target of its own; a file
+that dropped its seed rows (a promoted serving-twin golden) benches each target through the row pricing all of it,
+its fastest routing row, else its fastest row. A
+failing target does not stop the walk: every target reports, and the command exits non-zero at the end naming
+the failures. A receipt of a piece a route row minted (its identity is no route row's) replays under the target's
+route rows composed, plus `PLACE=fuse` when no
 cut was recorded: bare, its piece keys would spell against the unsplit program and match nothing. It parses and validates the
 document once and hands that object to each name's resolution step, because a whole-model inventory is large
 enough that re-reading it per target dominates the replay: the 279-target DeepSeek V4 Flash golden costs about
@@ -224,8 +230,8 @@ reference-available field is true; reference-free Loop slices remain timing evid
 `emmy compile --golden PATH --realization NAME` and `emmy run --golden PATH [--realization NAME]` are the
 verification counterparts. They resolve targets only in the explicit golden YAML and compile its exact provenance or
 Loop IR, without canonical-corpus or live-card filtering; `compile` requires the name (it prints one program), `run`
-visits every realization name sequentially in the current process unless `--realization` narrows the file to one
-exact or unambiguous substring match. With several names, `--json DIR` writes one readable JSON record per name;
+visits every target name sequentially in the current process unless `--realization` narrows the file to one
+exact or unambiguous substring match. With several targets, `--json DIR` writes one readable JSON record per target;
 there is no repeat or child-process orchestration layer. Invoke `emmy run` again when independent process
 observations are required. Which rows bench as pinned rows: a realization named explicitly is always benched,
 measurement state notwithstanding — the realization corpus and the perf lane replay unmeasured cases this way — while

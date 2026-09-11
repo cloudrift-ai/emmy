@@ -231,10 +231,11 @@ def test_named_proposal_is_pinned_and_a_file_walk_leaves_it_to_the_tuner(tmp_pat
 
     path = tmp_path / "working.yaml"
     _working_loop(path, state="proposal")
-    args = _args(path)
+    args = _args(path, realization="relu")
 
     resolve_golden_arg(args)
 
+    assert args.realization == "working.relu"  # the substring resolved to the exact name
     assert isinstance(args._golden_graph.nodes["y"].op, LoopOp)
     assert args._golden_graph.nodes["y"].op.name == "working_exact_loop"
     (row,) = args.golden_configs
@@ -519,7 +520,12 @@ def test_embedded_loop_pins_receive_greedy_output_reference(monkeypatch, tmp_pat
     async def fake_isolated(*_args, **_kwargs):
         return None
 
+    scopes = []
+
     async def fake_pinned(_backend, _source, _pins, **kwargs):
+        from emmy.compiler.pipeline.search import golden
+
+        scopes.append(golden.RECORDS_OVERRIDE)  # the pinned rows compile under the target's own records
         seen["ref"] = kwargs["ref"]
         if kwargs["strict_correctness"]:
             seen["strict_reference"] = kwargs["strict_reference"]
@@ -533,6 +539,7 @@ def test_embedded_loop_pins_receive_greedy_output_reference(monkeypatch, tmp_pat
     run_module._handle_run_ir(args, FakeBackend, FakeDump)
 
     assert seen == {"want_ref": True, "ref": reference}
+    assert scopes == [args._golden_records]
 
     args.strict_correctness = True
     returned["accuracy_error"] = "strict eager correctness unavailable: frontend IR is not runnable"

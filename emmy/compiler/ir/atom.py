@@ -7,7 +7,8 @@ ways (GRID / UNIT / REGISTER / ATOM). Two kinds, one interface (``shape`` + :att
   dtypes (``a``/``b`` the f16/bf16 multiplicands, ``c`` the accumulator — f32, or f16 on the
   ``..._f16_f16`` variant that runs the full-rate HMMA pipe with a chunked f32 register promotion
   in the lowering), and ``lanes == 32`` (the warp that executes one mma cooperatively — its 32
-  lanes hold the fixed PTX fragment layout).
+  lanes hold the fixed PTX fragment layout). The Hopper ``wgmma`` cell is the same 16x8 warp
+  cell whose PTX instruction four M-adjacent warps issue together (:attr:`AtomKind.is_wgmma`).
 - :class:`ScalarAtom` — a plain scalar fma cell: ``(1, 1, 1)`` and ``lanes == 1`` (one thread). No
   operand-dtype spec — the scalar cell folds the carrier directly, dtypes resolved by the body.
 
@@ -118,10 +119,22 @@ class AtomKind:
     def c_to_a_repack(self) -> bool:
         """Whether this atom has a C→A register repack for the flash P→A handoff.
 
-        The m16n8k16 layout is lane-aligned and converts two adjacent C fragments directly. The
-        Volta m8n8k4 layout selects each four-column A slice from its logical 16-column C fragment
-        with warp shuffles. Neither needs a shared-memory round trip."""
+        The m16n8k16 layout is lane-aligned and converts two adjacent C fragments directly — the
+        wgmma register-A form takes that same layout, so the warp-group cell repacks the same way.
+        The Volta m8n8k4 layout selects each four-column A slice from its logical 16-column C
+        fragment with warp shuffles. Neither needs a shared-memory round trip."""
         return self.shape == (16, 8, 16) or self.fragment_layout == "m8n8k4"
+
+    @property
+    def is_wgmma(self) -> bool:
+        """Whether this is the Hopper warp-group cell: its PTX instruction spans four warps' rows."""
+        return self.fragment_layout == "wgmma"
+
+    @property
+    def cells_per_instruction(self) -> int:
+        """How many logical cells one PTX instruction covers along N — ``N / 8`` for a
+        ``wgmma.m64nN`` cell, one for the warp-level families."""
+        return self.ptx_shape[1] // self.atom_n if self.is_wgmma else 1
 
 
 @dataclass(frozen=True)
@@ -199,6 +212,29 @@ ATOM_REGISTRY: dict[str, AtomKind] = {
         target_feature="has_bf16_mma",
     ),
     "mma_m16n8k16_f16_f16": AtomKind("mma_m16n8k16_f16_f16", (16, 8, 16), (("a", F16), ("b", F16), ("c", F16))),
+    # The Hopper warp-group cell. One ``wgmma.mma_async.m64nNk16`` is issued by four M-adjacent
+    # warps together, and per warp its accumulator is the m16n8 C fragment repeated N/8 times
+    # along N, register for register: the logical cell stays the m16n8k16 sub-cell and only
+    # ``instruction_shape`` says how many of them one instruction spans
+    # (``cells_per_instruction``), so the epilogue, the softmax row statistics and the P→A repack
+    # keep the mma.sync lane maps and the drain groups cells per instruction. The register counts
+    # are per logical cell, not derived from the 64-row PTX shape: A takes the m16n8k16 register
+    # layout (or a descriptor), B always arrives through a shared-memory descriptor. sm_90 only —
+    # the two Blackwell families have a different instruction or none (``has_wgmma``). Appended
+    # after the ``mma.sync`` family so no option-0 pick moves.
+    **{
+        f"wgmma_m64n{n}k16_{ab}_f32": AtomKind(
+            f"wgmma_m64n{n}k16_{ab}_f32",
+            (16, 8, 16),
+            (("a", dtype), ("b", dtype), ("c", F32)),
+            instruction_shape=(64, n, 16),
+            fragment_registers=(("a", 4), ("b", 0), ("c", 4)),
+            fragment_layout="wgmma",
+            target_feature="has_wgmma",
+        )
+        for ab, dtype in (("f16", F16), ("bf16", BF16))
+        for n in (64, 128, 256)
+    },
     "mma_m16n8k32_e4m3_f32": AtomKind(
         "mma_m16n8k32_e4m3_f32",
         (16, 8, 32),
