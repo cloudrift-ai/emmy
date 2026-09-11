@@ -933,6 +933,7 @@ class Run:
                 raise
             except Exception as exc:  # noqa: BLE001 — broad by design; this is the tune dead-end sink
                 self._dropped_candidates += 1
+                search.reject(token)
                 logger.warning(
                     "[tune] dropped un-lowerable candidate (%s: %s) — pruning branch, continuing search",
                     type(exc).__name__,

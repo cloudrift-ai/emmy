@@ -1100,8 +1100,12 @@ with max-Q normalized UCB1:
 - **Expansion** is implicit (one rule batch per pop, one child per alternative).
 - **Simulation** is the actual `await backend.benchmark_async(...)` on the terminal.
 - **Backprop** walks the popped candidate's parent chain updating `visits` and `best_reward`.
-- **Patience** counts terminals since the last new global best; when it exceeds `--patience N` (default 50), the level
-  exits.
+- **Patience** counts live benchmark attempts and failed expansion or lowering attempts since the last new global
+  best; the level exits when this count reaches `--patience N` (default 50). Cached and stub results still update the
+  tree but do not consume patience or the live measurement budget. A better cached result resets patience too.
+  Failed expansion or lowering backpropagates zero reward and a visit without inventing a latency or training row.
+  The optional visit limit counts all observations and these failures; the measurement limit counts only live
+  benchmark attempts. Cache-heavy searches can therefore explore more candidates before stopping.
 
 ### One measurement regime
 
