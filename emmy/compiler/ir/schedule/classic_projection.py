@@ -362,11 +362,7 @@ def _contraction_domain(
     allowed_atoms = _warp_atoms(tile, target, node)
 
     def warp_plan_ok(plan: Tile) -> bool:
-        view = node.as_contraction()
-        if (
-            _kstep_refusal(facts.k_axis, plan) is not None
-            or _wgmma_refusal(plan, b_trans=None if view is None else view.b_trans) is not None
-        ):
+        if _kstep_refusal(facts.k_axis, plan) is not None or _wgmma_refusal(plan) is not None:
             return False
         chunk = plan.atom.atom_k * plan.bk
         return not node.chunked() or (chunk >= plan.atom.atom_n and chunk % plan.atom.atom_n == 0)
@@ -460,6 +456,12 @@ def _edge_domain(state: _ProjectionState, site: int, choices: tuple) -> tuple[Ed
         for warp in {choice.tile.is_warp for choice in choices if choice.tile.is_tiled}
     }
     chunked = state.tile.views[site].chunked()
+    # The prefetching transports deposit ONE slab per fold, so a term folding several channels has
+    # no spelling there whatever tier carries it — the materializer emits a single deposit and then
+    # refuses the channel count it was handed. The warp tier states this as "needs the compute
+    # fill"; the per-cell tier has no fill to fall back to, so the refusal belongs on the transport.
+    prefetching = {"smem-async", "smem-tma"}
+    multifold = len(node.bilinear_channels()) > 1
     for choice in choices:
         if not choice.tile.is_tiled or (chunked and not choice.tile.is_warp):
             # A chunked carrier's transport belongs to its own tier, which is the tensor-core one.
@@ -475,6 +477,8 @@ def _edge_domain(state: _ProjectionState, site: int, choices: tuple) -> tuple[Ed
             supported.setdefault(direct, None)
             candidates = catalogs[choice.tile.is_warp]
         for stage in candidates:
+            if multifold and stage.transport in prefetching:
+                continue
             supported.setdefault(EdgeSchedule(stage), None)
     if not supported:
         raise ClassicProjectionError(f"classic site {node_id_spelling(site)} has no locally supported edge choice")

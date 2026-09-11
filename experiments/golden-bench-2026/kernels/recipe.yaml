@@ -121,7 +121,9 @@ matrices:
           - "NVIDIA B200"
         deploy.gpu_count: 1
 
-  # The same common corpus on the A100, replaying the committed tuned goldens instead of searching.
+  # The same common corpus on the A100, replaying the committed tuned goldens instead of searching. The goldens
+  # were tuned on the 80GB SXM4 part; the 40GB part is the same die at 1555 GB/s instead of 2039, so its row
+  # replays the same schedules but is not comparable to the 80GB archive: select one with --filter deploy.gpu=<name>.
   - cross:
       study: common
       model_ref: Qwen/Qwen3-0.6B@c1899de289a04d12100db370d81485cdf75e47ca
@@ -130,7 +132,7 @@ matrices:
       patience: 0
       seed: 0
       fp8_mma: 0
-      deploy.gpu: "NVIDIA A100 80GB"
+      deploy.gpu: ["NVIDIA A100 80GB", "NVIDIA A100 40GB"]
       deploy.gpu_count: 1
       zip:
         seq_len: [1, 512]

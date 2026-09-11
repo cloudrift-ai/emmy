@@ -57,7 +57,7 @@ command:
     # field (unmeasured name) is structural selection, not result interpretation.
     mkdir -p $task_dir/verification
     ./venv/bin/python -c 'import sys, yaml; d = yaml.safe_load(open(sys.argv[1])); print("\n".join(r["name"] for c in d["configs"] for r in c["realizations"] if not (r.get("measurements") or {}).get("emmy_us")))' \
-      "$task_dir/working.yaml" > $task_dir/seeds.txt
+      $task_dir/working.yaml > $task_dir/seeds.txt
     verification_status=0
     while IFS= read -r seed; do
       [ -z "$$seed" ] && continue
@@ -99,8 +99,10 @@ matrices:
     deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
 
-  # Block-scaled dynamic FP8 (128x128 weight blocks, per-token activations): the form of the official Qwen, DeepSeek,
-  # and GLM FP8 releases and of the datacenter serving rows. Replays the hand-tuned goldens committed beside this file.
+  # Block-scaled dynamic FP8 (128x128 weight blocks, activations per token and 128-wide K group): the form of the
+  # official Qwen, DeepSeek, and GLM FP8 releases and of the datacenter serving rows. Replays the hand-tuned goldens
+  # committed beside this file; the layer's over-fused attention and MLP kernels are left out of both, as they do not
+  # run within the lane's budget.
   - format: fp8-block
     model_ref: Qwen/Qwen3-0.6B-FP8@e5be08033360965ceca7b0ffd72d521a51331ce0
     seq_len: [1, 512]

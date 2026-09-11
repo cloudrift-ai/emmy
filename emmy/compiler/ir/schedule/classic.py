@@ -233,7 +233,14 @@ def _needs_fill(tile_op, node: Fold, plan: Tile) -> bool:
         # The chunk tier's A is the WEIGHT, which never leaves registers: it is what the chunk's
         # own score fragments repack into. There is no operand to fill and no slab to fill it from.
         return False
-    return plan.is_warp and (_computed_edge(node) or (len(node.operands) - 1) > 1 or staging.converting_a(node, plan.atom, tile_op.inputs))
+    # CHANNELS, not operand slots. The staged transports fill one slab per fold, so a fold count
+    # above one belongs on the smem compute fill — and a B slab reused by several channels occupies
+    # ONE operand slot, so counting operands reads a two-channel node as single-fold, offers it
+    # cp.async, and the materializer then asserts on the channel count it actually emits (Qwen3-8B
+    # decode on sm_80, channels=2 operands=2). The channel count subsumes the operand one.
+    return plan.is_warp and (
+        _computed_edge(node) or len(node.bilinear_channels()) > 1 or staging.converting_a(node, plan.atom, tile_op.inputs)
+    )
 
 
 def _kstep_refusal(k_axis, plan: Tile) -> str | None:
@@ -246,11 +253,10 @@ def _kstep_refusal(k_axis, plan: Tile) -> str | None:
     return None if extent % step == 0 else f"warp TILE K-step {step} does not divide the static contraction K={extent}"
 
 
-def _wgmma_refusal(plan: Tile, stage: Stage | None = None, b_trans: bool | None = None) -> str | None:
+def _wgmma_refusal(plan: Tile, stage: Stage | None = None) -> str | None:
     """Why a warp-group cell cannot run under ``plan`` — and under ``stage``, once the operand
-    transport is known, and under the B orientation ``b_trans``, once the node is known — or
-    ``None``. The ONE statement of the wgmma legality rules: the catalog filter and the
-    compatibility join drop a row through it, the pin path raises its message."""
+    transport is known — or ``None``. The ONE statement of the wgmma legality rules: the catalog
+    filter and the compatibility join drop a row through it, the pin path raises its message."""
     if not (plan.is_warp and plan.atom.is_wgmma):
         return None
     atom = plan.atom
@@ -260,14 +266,6 @@ def _wgmma_refusal(plan: Tile, stage: Stage | None = None, b_trans: bool | None 
         return "wgmma issues whole m64nN instructions: the fragment grid must be f1x<C> with C a multiple of N/8"
     if atom.atom_k * plan.bk * atom.operand_dtype("a").nbytes != 128:
         return "wgmma reads one 128-byte swizzle row per descriptor: the K chunk must be 64 elements (k4)"
-    if b_trans is False and plan.reg_n * atom.atom_n * atom.operand_dtype("b").nbytes > 128:
-        # The slab is deposited row-major, so an N-contiguous B holds one 128-byte swizzle atom per
-        # K row only while the N tile is one atom wide; the descriptor's MN-major canonical layout
-        # wants every further atom stored as its own eight contiguous K rows, which no fill does.
-        return (
-            "wgmma reads an N-contiguous B through one 128-byte swizzle atom per K row: its N tile is 64 elements "
-            "(f1x8); a wider tile needs a K-contiguous (transposed) B"
-        )
     if stage is not None and stage.is_direct:
         return "wgmma reads its operands through shared-memory descriptors: a direct stage cannot feed it"
     return None
@@ -276,8 +274,7 @@ def _wgmma_refusal(plan: Tile, stage: Stage | None = None, b_trans: bool | None 
 def _plan_node_refusal(tile_op, node: Fold, plan: Tile, placed: PlacedTile, facts: ContractionFacts) -> str | None:
     from . import staging  # noqa: PLC0415
 
-    view = node.as_contraction()
-    refusal = _kstep_refusal(facts.k_axis, plan) or _wgmma_refusal(plan, b_trans=None if view is None else view.b_trans)
+    refusal = _kstep_refusal(facts.k_axis, plan) or _wgmma_refusal(plan)
     if refusal is not None or not _needs_fill(tile_op, node, plan):
         return refusal
     converting = staging.converting_a(node, plan.atom, tile_op.inputs)
@@ -1044,15 +1041,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             return None
         if len(set(edges.values())) > 1:
             self._refuse("one contraction currently requires one transport choice across its operands", site)
-        from emmy.compiler.ir.tile.ops import Sched  # noqa: PLC0415
-
-        # One grid-placed view per (tile, target): the view caches the tree's site walk and each
-        # node's (m, n) pair, and a fresh view per support query re-walked the whole tree — on a
-        # decode-tail kernel fusing five projections that walk alone kept a compile from finishing.
-        grid = _target_memo(tile_op, self.target, "_memo_grid_sched")
-        if "sched" not in grid:
-            grid["sched"] = Sched(tile_op, place=tile_op.place.on_grid())
-        geometry = grid["sched"].placed(fold, node.tile)
+        geometry = tile_op.grid_sched.placed(fold, node.tile)
         if node.tile.is_tiled and not isinstance(geometry, PlacedTile):
             cache[key] = None
             return None
@@ -1062,8 +1051,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
                 return None
         stage = next(iter(edges.values())).stage if edges else Stage.direct()
         resolved_stage = None
-        contraction = view.as_contraction()
-        if _wgmma_refusal(node.tile, stage, b_trans=None if contraction is None else contraction.b_trans) is not None:
+        if _wgmma_refusal(node.tile, stage) is not None:
             cache[key] = None
             return None
         if view.as_contraction() is None or not node.tile.is_tiled:
