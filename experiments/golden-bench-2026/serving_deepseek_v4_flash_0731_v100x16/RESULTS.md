@@ -10,8 +10,9 @@ cannot complete a request: the first generation exceeds vLLM's `sample_tokens` R
 numbers here are per-kernel and per-program compiler measurements, not serving measurements, and they do not belong in
 the same table as the fork's throughput.
 
-The blocker is one program. `pre4096` costs 1.92 s per layer against a ~30 µs roofline floor, measured end to end and
-corroborated by the boot's own audit. Tuning did not move it, and no tuned row proved deployable.
+Three programs have since been fixed — `pre4096` by 594×, and the decode program's two hot kernels by 4.3× and
+5.6× — all confirmed by the deployed boot's own audit. The request still fails at the same 300 s deadline, and
+kernel latency no longer explains why: roughly a second of compute per decode step against a 300-second limit.
 
 At a 4,096-token context the fork serves this checkpoint cleanly: 480 requests across fifteen rows, zero failures,
 and three workload shapes that differ far more in repeat stability than the shapes themselves suggest. Single-stream
@@ -101,33 +102,59 @@ per-kernel latencies within each program:
 The `pre` family dominates by three orders of magnitude, and every one of those programs is the same
 `k_linear_mean_reduce` kernel. `pre1` and `pre16` are the decode path, which is what the RPC deadline measures.
 
-### What `pre4096` actually costs
+### Three programs were recomputing work inside sweeps
 
-Benched end to end on one card, the greedy pick for this program is a two-kernel placement split:
+Benched end to end on one card, `pre4096`'s greedy pick was a two-kernel placement split totalling 1,923,598 µs —
+whole-program 1,923,912 µs, agreeing with the boot audit's 64,604× against a ~30 µs floor. A 4,096-row mean-reduce
+costing 1.92 s is not a search problem, so we decoded what it computes.
 
-| Kernel | Latency | Share | Grid |
-| --- | ---: | ---: | ---: |
-| `k_linear_mean_reduce_00af35__place_4cc57b8fac` | 951,198 µs | 49.4% | 4,096 |
-| `k_linear_mean_reduce_00af35` | 972,401 µs | 50.6% | 65,536 |
-| **Total** | **1,923,598 µs** | | |
+It computes, per token, an RMS statistic over 16,384 hidden values and **four length-16,384 dot products**, then
+sigmoid-mixes four 4,096-wide streams using those four coefficients. The dots depend on token and stream only. The
+generated code recomputed them for **every one of 4,096 output channels** — 1.10 trillion dot-product terms per kernel
+against 268 million if computed once per token, or **8,192× redundant work**.
 
-Whole-program end to end: 1,923,912 µs. That agrees with the roofline audit's 64,604× against a ~30 µs floor, so the
-two independent measurements corroborate each other. **A 4,096-row mean-reduce costs 1.92 s where its roofline floor is
-30 µs.** That is the finding, and it is a compiler question rather than a search question.
+Four placement cuts hoist them out of the channel sweeps. The same shape appears in the decode program's two hot
+kernels: `9e578e` ran sixteen long dot products on a **single thread** (`if (_gid < 1)`), and `4e26cc` evaluated its
+sixteen mixing logits 352 times across four threads.
 
-Tuning did not change it. Runs against this kernel produced `perf` rows as fast as 10 ms, but those time **one piece of
-one placement split**, not the program — a fragment row prices that fragment, not the parent's cut. Replaying the
-fastest row's knobs as a pinned A/B on the real target did not reproduce its latency; the pinned configuration hung and
-was recorded `bench_fail`. Nine hours of tuning across sixteen cards produced **zero** rows that deploy.
+| Target | Greedy pick | With cuts | Factor | Correctness vs greedy |
+| --- | ---: | ---: | ---: | --- |
+| `pre4096` | 1,923,598 µs (2 kernels) | **3,238 µs** (5) | **594×** | pass, max abs 1.2e-4 (fp16 level) |
+| `post1` `9e578e` @ m1 | 42,278 µs (20 kernels) | **9,866 µs** (22) | **4.3×** | pass, exact (0.0 / 0.0) |
+| `post1` `4e26cc` @ m1 | 30,016 µs (1 kernel) | **5,347 µs** (7) | **5.6×** | pass, exact (0.0 / 0.0) |
 
-Two measurement traps are worth recording, because either one alone yields numbers that look like results:
+No new compiler capability was needed — the better structure was already expressible. The cuts move where work happens
+rather than reassociating reductions, which is why the two decode results are bit-exact; `pre4096` differs only at fp16
+rounding, and the golden's own alternative schedule for it shows the same magnitude.
 
-- `emmy tune` defaults to a 2 s cumulative-GPU-time bench budget. This kernel's baseline is about 1 s per launch, so
-  warm-up plus one measured iteration exhausts it. A first attempt recorded **zero** valid latencies in eleven minutes
-  while appearing to search normally.
-- A `perf` row times one CUDA op. When the schedule under test splits a kernel, the row is a fragment, and reading it
-  as the program's latency overstates the result by orders of magnitude. The check that catches this is whether the
-  boot's roofline ratio moves; here it never did.
+### The election picks them up unaided
+
+Recording each pick with `emmy run --golden … --bench --record-greedy` under the full pin list, merging those rows
+into the serving golden, and re-booting with `--strict-evidence` moves the boot's own audit:
+
+| Program | Before | After |
+| --- | ---: | ---: |
+| `pre.chunk.m4096` | 64,746× | **107×** |
+| `post.decode.m1` | 1,275× | **294×** |
+| `post.chunk.m4096` | 320× | 321× |
+| `post.decode.m16` | 1,156× | 1,156× |
+
+The last two are untouched because only the `m1` shapes were recorded. The first two match the bench measurements
+(605× and 4.35×) closely enough to corroborate them independently. Nothing was hand-pinned in the serving boot: the
+recorded rows win the election on price.
+
+### Four things that cost a day, recorded so they cost nobody else one
+
+- **A `perf` row times one CUDA op.** When the schedule under test splits a kernel, the row is a fragment. Reading it
+  as the program's latency overstates the result by orders of magnitude. The check that catches it is whether the
+  boot's roofline ratio moves.
+- **A `PLACE` pin replaces the entire placement decision**; it does not add to it. Pinning 2 of a program's 21 cuts
+  silently discards the other 19 and produced a hanging 3-kernel program with no diagnostic saying so.
+- **`emmy tune` defaults to a 2 s cumulative-GPU-time bench budget.** On a kernel whose baseline is ~1 s per launch,
+  warm-up plus one measured iteration exhausts it, and a run records **zero** valid latencies while appearing to search
+  normally. `EMMY_BENCH_RUN_TIMEOUT_S` raises it.
+- **A replay must use the golden the boot uses.** Benching one of these kernels against a golden with no rows for it
+  produced a 60-second hang for a program the boot runs at 42 ms.
 
 ## What this run does not establish
 
