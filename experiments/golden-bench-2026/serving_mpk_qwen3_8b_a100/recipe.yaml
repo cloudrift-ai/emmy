@@ -8,8 +8,8 @@
 #   stock     — vLLM serve (pip vllm==0.23.0) driven by `vllm bench serve`, 128 in / 512 out, c=1
 #
 # An `emmy` arm belongs beside `stock` — same vLLM, same client, only the model class differing —
-# and is NOT here yet: `emmy serve --generate` cannot boot Qwen3-8B on sm_80. See the serving issue
-# for the two multi-channel projection refusals that remain after the staged-transport fix.
+# and is NOT here yet: `emmy serve --generate` cannot boot Qwen3-8B on sm_80 (issue #785 — two
+# multi-channel projection refusals remain after this branch's staged-transport fix).
 #
 # Repro on a pre-allocated A100 (no cloud provisioning):
 #   emmy bench experiments/golden-bench-2026/serving_mpk_qwen3_8b_a100 --local
