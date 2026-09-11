@@ -3,7 +3,12 @@
 ## Conclusion
 
 This run characterizes the pinned 1Cat fork at the short serving envelope. It is **not** the Emmy-versus-fork A/B, and
-nothing here compares a compiler. The Emmy arm could not be deployed, so only one arm ran.
+nothing here compares a compiler. Only the fork arm produced serving numbers.
+
+The Emmy arm now boots and serves — that changed on 2026-09-11 and is recorded under "The Emmy arm" below — but it
+cannot complete a request: the first generation exceeds vLLM's `sample_tokens` RPC deadline and kills the engine. Its
+numbers here are per-kernel and per-program compiler measurements, not serving measurements, and they do not belong in
+the same table as the fork's throughput.
 
 At a 4,096-token context the fork serves this checkpoint cleanly: 480 requests across fifteen rows, zero failures,
 and three workload shapes that differ far more in repeat stability than the shapes themselves suggest. Single-stream
@@ -37,15 +42,92 @@ The single-stream row is the one worth building the Emmy comparison on. Its inte
 token agree to two decimal places within a repeat and to 0.2 ms across repeats, so a real difference between arms would
 be visible far below the noise floor of the other two shapes.
 
+## The Emmy arm
+
+These are compiler measurements, not serving measurements. They come from a serving boot and a kernel tuning run on the
+same host, not from `emmy bench`, so they have no experiment records and no archive. They are recorded here because they
+are the first measured Emmy evidence for this model on this GPU, and because they say precisely why the serving column
+is still empty.
+
+### The boot reaches a serving state
+
+On 2026-09-11 a boot with `--strict-evidence` came up: `/health` returned 200, `/v1/models` listed the checkpoint, and
+vLLM logged `Application startup complete`. Engine init — profile, KV-cache creation and model warm-up — took 949 s.
+
+The first chat completion then killed it. One 24-token greedy request returned HTTP 500 after 173.1 s with
+`TimeoutError: RPC call to sample_tokens timed out`, followed by `EngineDeadError`. The server is reachable and
+correctly configured; a forward pass simply does not fit inside the engine's RPC deadline.
+
+Strict evidence is what made the boot possible, and the mechanism is worth recording. An earlier boot without the flag
+logged 16 prior-clip warnings — one per worker — reporting a latency-proxy exponent of 996 against a shipped
+artifact that peaks near 28. Past that clip every candidate scores identically, so the ranking degenerates to
+enumeration order. The warning fires once per process, so it appeared once early and then held silently for the
+whole run. Under
+`--strict-evidence` that boot logged **zero** prior clips: every kernel that ran was decided by a measured row.
+
+Strict evidence refused exactly one fork, identically on all 16 workers — the expert `m256` twin, on its `030_cut`
+fork, with no measured row spelling a kernel-set arm. That width falls back to a wider tier and the boot continues; the
+`m256` expert program is absent from the golden entirely, because the runner's expert prefill tier is a hardcoded
+constant that the pinned serving config has no field to declare.
+
+### Where the time goes
+
+The boot's own roofline audit, consistent between the first and last layer:
+
+| Program | Over roofline floor | Floor |
+| --- | ---: | ---: |
+| `pre.chunk.m4096` | 64,604× | ~30 µs |
+| `post.decode.m1` | 1,273× | ~59 µs |
+| `post.decode.m16` | 1,154× | ~59 µs |
+| `post.chunk.m4096` | 343× | ~1,955 µs |
+
+The recorded golden the boot deployed from carries 903 realizations, 295 of them measured. Summing the measured
+per-kernel latencies within each program:
+
+| Program | Measured sum | Worst single kernel |
+| --- | ---: | ---: |
+| `pre4096` | 43.2 s | 19.6 s |
+| `pre1` | 29.7 s | 29.7 s |
+| `pre16` | 17.2 s | 17.2 s |
+| `expert-sym@mxfp4` | 1.61 s | 1.38 s |
+| `expert1@mxfp4` | 1.33 s | 1.33 s |
+| `post4096` | 0.82 s | 0.45 s |
+| `post1` | 0.12 s | 0.045 s |
+| `post16` | 0.086 s | 0.047 s |
+
+The `pre` family dominates by three orders of magnitude, and every one of those programs is the same
+`k_linear_mean_reduce` kernel. `pre1` and `pre16` are the decode path, which is what the RPC deadline measures.
+
+### Tuning finds real headroom in that kernel
+
+A tuning run against freshly captured serving twins, scoped to `pre4096` and spread over all 16 cards, measured 24
+distinct schedules of its dominant kernel. They span **114 ms to 1,088 ms — a 9.5× spread**, with the fastest setting
+fewer schedule knobs than the slowest. None uses a placement cut.
+
+So the schedule search bites on this kernel family, and a large part of the gap is a pick problem rather than a
+compiler limit. It does not follow that serving is close: at 114 ms across 22 layers this one kernel still accounts for
+seconds of prefill against a ~30 µs floor, and the decode-path programs `pre1` and `pre16` were outside this run's
+scope.
+
+One measurement note. `emmy tune` defaults to a 2 s cumulative-GPU-time bench budget for fast-fail sweeps. This
+kernel's baseline is about 1 s per launch, so warm-up plus one measured iteration exhausted it and the first attempt
+recorded **zero** valid latencies in eleven minutes — 70 variants failed on the budget and 28 on genuine hangs. Every
+number above comes from a re-run at `EMMY_BENCH_RUN_TIMEOUT_S=30`. A tuning result on a kernel this slow is not
+trustworthy without checking that the budget admitted it.
+
 ## What this run does not establish
 
 - **It is not an A/B.** One arm ran. A comparison needs both arms in one invocation with their order alternated inside
   each repeat, the way the RTX 5090 gemma-4 experiment balances time and thermal drift. Until then no claim about Emmy
   against the fork is supported by this evidence.
-- **The Emmy arm cannot deploy today.** Two separate blockers, both recorded in the serving plan: a whole-program
-  serving compile stalls in the schedule search and never reaches a serving state, and the last boot that did reach
-  serving lost a completion to vLLM's 300 s `sample_tokens` timeout. There is also no baked Emmy image for this model,
-  so the single-image, two-entrypoint mechanism the gemma-4 A/B uses does not exist here yet.
+- **The Emmy arm serves but cannot answer.** It reaches a serving state and then loses every completion to the
+  `sample_tokens` RPC deadline, so it produces no throughput, TTFT or TPOT to compare. An earlier claim that a
+  whole-program compile "stalls in the schedule search" was wrong: that boot was not stuck but grinding, because a
+  degenerate prior had collapsed the ranking to enumeration order and each refused row re-resolved the entire program.
+  There is also no baked Emmy image for this model, so the single-image, two-entrypoint mechanism the gemma-4 A/B uses
+  does not exist here yet.
+- **The Emmy numbers above are not serving numbers.** They are per-kernel and per-program latencies from a boot audit,
+  a recorded golden and a tuning run. Nothing in them can be compared against the fork's tokens per second.
 - **One envelope parameter is unreconciled.** This recipe runs at `gpu_memory_utilization` 0.80; the Emmy arm's last
   serving boot needed 0.90 to fit. Whichever value the joint recipe adopts, both arms must share it, and these numbers
   do not transfer to a run at 0.90.
