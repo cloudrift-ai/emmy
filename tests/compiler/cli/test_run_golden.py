@@ -81,7 +81,11 @@ def test_golden_walk_without_seeds_benches_the_row_pricing_the_whole_target(monk
     def row(name, routing, emmy_us):
         return SimpleNamespace(name=name, identity=name[-4:] * 16, is_routing=routing, emmy_us=emmy_us)
 
-    rows = [row("post16.k_a.1111.m16.aaaa", False, 4.0), row("post16.k_a.1111.m16.bbbb", True, 9.0), row("post16.k_a.1111.m16.cccc", True, 7.0)]
+    rows = [
+        row("post16.k_a.1111.m16.aaaa", False, 4.0),
+        row("post16.k_a.1111.m16.bbbb", True, 9.0),
+        row("post16.k_a.1111.m16.cccc", True, 7.0),
+    ]
     rows += [row("pre1.k_b.2222.m1.dddd", False, 30.0), row("pre1.k_b.2222.m1.eeee", False, 20.0)]
     monkeypatch.setattr(golden, "load_golden_file", lambda _path: {})
     monkeypatch.setattr(golden, "load_golden_records", lambda _document: rows)

@@ -366,7 +366,10 @@ class GoldenRecord:
 
         cached = _REFERENCE_CACHE.get(id(self.program_wire))
         if cached is None or cached[0] is not self.program_wire:
-            cached = (self.program_wire, _whole_op_origins(self.program, Context.from_target(self.compute_cap, gpu_name=self.gpu_name or None)))
+            cached = (
+                self.program_wire,
+                _whole_op_origins(self.program, Context.from_target(self.compute_cap, gpu_name=self.gpu_name or None)),
+            )
             _REFERENCE_CACHE[id(self.program_wire)] = cached
         found = cached[1].get(json.dumps(self.loop_wire, sort_keys=True))
         if found is None:
