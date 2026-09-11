@@ -185,7 +185,9 @@ There is no second spelling: no file flag beside `--golden`, no name flag beside
 
 `run --golden PATH` without `--realization` walks every target name in one process, benching each target's
 verified rows or its one valid direct tune winner (proposals stay the tuner's). A routing row or a
-child-identity receipt (`<target>.<identity>`) is evidence for its target's walk, not a target of its own. A
+child-identity receipt (`<target>.<identity>`) is evidence for its target's walk, not a target of its own; a file
+that dropped its seed rows (a promoted serving-twin golden) benches each target through the row pricing all of it,
+its fastest routing row, else its fastest row. A
 failing target does not stop the walk: every target reports, and the command exits non-zero at the end naming
 the failures. A receipt of a piece a route row minted (its identity is no route row's) replays under the target's
 route rows composed, plus `PLACE=fuse` when no
