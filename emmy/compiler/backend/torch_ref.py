@@ -154,6 +154,7 @@ def _build_elementwise_table() -> dict[str, Callable]:
         "negative": lambda a: -a[0],
         "abs": lambda a: torch.abs(a[0]),
         "reciprocal": lambda a: torch.reciprocal(a[0]),
+        "square": lambda a: torch.square(a[0]),
         "sqrt": lambda a: torch.sqrt(a[0]),
         "rsqrt": lambda a: torch.rsqrt(a[0]),
         "exp": lambda a: torch.exp(a[0]),

@@ -242,6 +242,10 @@ class GoldenRecord:
     #: model golden is one file per card and uses the flat ``measurements`` block instead; a corpus
     #: case is one file across many cards, which a flat block cannot hold.
     latency: dict | None = None
+    #: The frontend origins a Loop IR target is compared against: the PyTorch slice of the program
+    #: that computes exactly what the stored kernel computes. Comparison only — never read for
+    #: identity, which stays the stored kernel's.
+    reference_origins: tuple[str, ...] = ()
 
     @property
     def is_routing(self) -> bool:
@@ -351,10 +355,18 @@ class GoldenRecord:
             else:
                 graph = cached[1]
             return specialize_program(graph, dict(self.bindings), loop=True)
+        return self._frontend_slice(self.origins)
 
+    @cached_property
+    def reference_program(self):
+        """The PyTorch slice a Loop IR target is compared against, or ``None`` without one."""
+        return self._frontend_slice(self.reference_origins) if self.reference_origins else None
+
+    def _frontend_slice(self, origins: tuple[str, ...]):
         from emmy.compiler.pipeline import CompilerDump  # noqa: PLC0415
+        from emmy.compiler.specialize import specialize_program  # noqa: PLC0415
 
-        graph = CompilerDump.frontend_reproducer_from_origins(self.program, set(self.origins))
+        graph = CompilerDump.frontend_reproducer_from_origins(self.program, set(origins))
         return specialize_program(graph, dict(self.bindings))
 
     @property
@@ -474,19 +486,22 @@ def _validate_latency(latency: object, where: str) -> None:
                 _positive_number(timings[field], f"{where}.{card}.{field}")
 
 
+def _validate_origins(origins: object, *, where: str, program_wire: dict) -> None:
+    if not isinstance(origins, list) or not origins or not all(isinstance(origin, str) and origin for origin in origins):
+        raise ValueError(f"{where}.origins must be a non-empty list of node ids")
+    node_ids = {node["id"] for node in program_wire["nodes"]}
+    missing_origins = set(origins) - node_ids
+    if missing_origins:
+        raise ValueError(f"{where}.origins reference unknown program node(s): {', '.join(sorted(missing_origins))}")
+
+
 def _validate_target(target: object, *, index: int, program_wire: dict, loops: list[dict]) -> None:
     where = f"configs[{index}].target"
     if not isinstance(target, Mapping):
         raise ValueError(f"{where} must be a mapping")
     _require_keys(target, {"origins", "loop"}, where)
     if set(target) == {"origins"}:
-        origins = target["origins"]
-        if not isinstance(origins, list) or not origins or not all(isinstance(origin, str) and origin for origin in origins):
-            raise ValueError(f"{where}.origins must be a non-empty list of node ids")
-        node_ids = {node["id"] for node in program_wire["nodes"]}
-        missing_origins = set(origins) - node_ids
-        if missing_origins:
-            raise ValueError(f"{where}.origins reference unknown program node(s): {', '.join(sorted(missing_origins))}")
+        _validate_origins(target["origins"], where=where, program_wire=program_wire)
         return
     if set(target) == {"loop"}:
         loop_ref = target["loop"]
@@ -537,7 +552,7 @@ def validate_golden_file(
         where = f"configs[{index}]"
         if not isinstance(entry, Mapping):
             raise ValueError(f"{where} must be a mapping")
-        _require_keys(entry, {"model", "program", "target", "realizations"}, where)
+        _require_keys(entry, {"model", "program", "target", "reference", "realizations"}, where)
         if entry.get("model") is not None and not isinstance(entry["model"], str):
             raise ValueError(f"{where}.model must be a string")
         program_ref = entry.get("program")
@@ -546,6 +561,12 @@ def validate_golden_file(
         # The pool check above already decoded every program. A whole-model inventory points
         # hundreds of configurations at a handful of programs, so do not decode again per config.
         _validate_target(entry.get("target"), index=index, program_wire=programs[program_ref], loops=loops)
+        if "reference" in entry:
+            # An origins target is its own PyTorch slice; only a stored kernel needs one named.
+            reference = entry["reference"]
+            if not isinstance(reference, Mapping) or set(reference) != {"origins"} or "loop" not in entry["target"]:
+                raise ValueError(f"{where}.reference must be {{origins: [...]}} beside a loop target")
+            _validate_origins(reference["origins"], where=f"{where}.reference", program_wire=programs[program_ref])
         realizations = entry.get("realizations")
         if not isinstance(realizations, list) or not realizations:
             raise ValueError(f"{where}.realizations must be a non-empty list")
@@ -680,6 +701,7 @@ def golden_record_from_entry(document: Mapping, entry: Mapping, realization: Map
         identity=realization.get("identity"),
         kernel_set=tuple(realization.get("kernel_set") or ()),
         latency=dict(realization["latency"]) if realization.get("latency") is not None else None,
+        reference_origins=tuple((entry.get("reference") or {}).get("origins", ())),
     )
 
 

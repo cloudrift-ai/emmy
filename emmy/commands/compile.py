@@ -166,7 +166,8 @@ def resolve_golden_arg(args) -> None:
     """Resolve ``--realization NAME`` (inside ``--golden PATH`` or the live card's corpus) to its
     embedded stable Torch IR program and the golden records that are evidence for it.
 
-    Three things come out on ``args``: ``_golden_graph`` (the target program), ``_golden_records``
+    Four things come out on ``args``: ``_golden_graph`` (the target program), ``_golden_reference``
+    (the PyTorch slice a stored Loop IR kernel is compared against, or ``None``), ``_golden_records``
     (every record of the file recorded on that target — the golden evidence the compile's index
     loads, so a route's receipts come along with it) and ``golden_configs`` (the rows ``run``
     benches as pinned rows). Which rows bench: a realization the operator NAMED is always benched;
@@ -255,6 +256,7 @@ def resolve_golden_arg(args) -> None:
         logger.error("golden %r resolves to %d different embedded program targets", name, len(targets))
         sys.exit(2)
     args._golden_graph = matches[0].target_program.copy()
+    args._golden_reference = matches[0].reference_program
     args._golden_records = [record for record in records if record.target_key == matches[0].target_key]
     pinned = matches
     if document is not None:

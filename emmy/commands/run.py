@@ -2372,8 +2372,10 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
     # Snapshot the pre-lowering frontend graph so we can build a torch
     # reference (eager + torch.compile) and compare accuracy/latency vs torch —
     # the same table the --code path produces for a debug Graph IR input.
-    # Non-frontend IR (loop/tile/…) has no torch twin → emmy-only bench.
-    frontend = graph.copy() if torch_ref.is_runnable(graph) else None
+    # Non-frontend IR (loop/tile/…) has no torch twin → emmy-only bench, unless it
+    # is a stored golden kernel whose record names the PyTorch slice it computes.
+    reference = graph if torch_ref.is_runnable(graph) else getattr(args, "_golden_reference", None)
+    frontend = reference.copy() if reference is not None and torch_ref.is_runnable(reference) else None
     same_input_greedy = strict_correctness and embedded is not None and frontend is None
 
     backend = CudaBackend(debug=args.debug or None, dump=dump, tune_db="auto")
