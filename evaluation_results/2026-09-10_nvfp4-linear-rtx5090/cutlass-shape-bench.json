@@ -1,0 +1,20 @@
+{
+  "time_ms": 1.1339039921760559,
+  "min_ms": 1.1319679975509644,
+  "max_ms": null,
+  "num_launches": 2,
+  "e2e_ms": 1.1337600350379944,
+  "e2e_min_ms": 1.1275839805603027,
+  "per_launch": [
+    {
+      "idx": 0,
+      "kernel_name": "k_reshape_reduce_cf039c",
+      "time_ms": 0.9227679967880249
+    },
+    {
+      "idx": 1,
+      "kernel_name": "k_linear_53c197",
+      "time_ms": 0.21113599538803102
+    }
+  ]
+}

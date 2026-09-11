@@ -19,6 +19,12 @@ evidence to weigh:
   sibling nothing to do for them but copy, so this deletes a buffer and a copy. It also leaves both
   pieces single-output, which is what lets the shared-sweep promotion
   (:func:`~emmy.compiler.ir.tile.ir.promoted_sweep`) bind a sweep the fused kernel had to serialize.
+
+Several seams can also be ONE decision. :func:`realize` takes a group, and :func:`full_projection_seams` names one
+such group off the tree: on a projection that owns more outputs than the binder can bind, every contraction
+occurrence beside every output-owning branch. That group has to be one decision — each of its seams alone leaves the
+rest of the shape standing — which is also what makes the route recordable, since a measured row names a decision
+rather than a sequence of them.
 """
 
 from __future__ import annotations
@@ -38,7 +44,13 @@ from emmy.compiler.ir.schedule.packing import match_packed_pair_node
 from emmy.compiler.ir.stmt import Assign, Body, Load, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ir import promoted_sweep
-from emmy.compiler.ir.tile.ops import UnbindableProjection, carries_partition, edge_dtypes, output_regions
+from emmy.compiler.ir.tile.ops import (
+    UnbindableProjection,
+    carries_partition,
+    edge_dtypes,
+    output_regions,
+    owns_outputs_it_cannot_bind,
+)
 from emmy.compiler.ir.tile.path import family_sites, sites, spell
 from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.knob import consume_kernel_row
@@ -254,8 +266,12 @@ def _output_owners(tile: TileOp) -> dict[int, tuple]:
         regions = output_regions(op, tile.output_specs)
     except UnbindableProjection:
         return {}
-    fused = promoted_sweep(op, tile.output_specs)
-    return {id(region): (tail, stores) for region, tail, stores in regions if stores and not promoted_sweep(region, stores) <= fused}
+    fused = promoted_sweep(op, tile.output_specs, free=tile.place.free)
+    return {
+        id(region): (tail, stores)
+        for region, tail, stores in regions
+        if stores and not promoted_sweep(region, stores, free=tile.place.free) <= fused
+    }
 
 
 def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
@@ -349,6 +365,61 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
         out,
         {id(seam.node): seam.frontier is None and seam.owned is None and store_dtype_consumers.get(id(seam.node)) for seam in out},
     )
+
+
+def _hoisted_reduces(tile: TileOp) -> set[int]:
+    """The reduce nodes evaluated ONCE ahead of the output sweep of the branch that holds them,
+    keyed by identity — a branch's ROW STATISTIC, as opposed to a fold each cell of the sweep
+    performs for itself.
+
+    This is :func:`~emmy.compiler.ir.tile.ir.promoted_sweep`'s refusal read from the other side.
+    That rule will not bind a sweep past a reduce invariant in it, because each cell would then
+    recompute the whole statistic; so a piece holding one stays at a single grid axis however much
+    else is cut away from it. Naming them here is what lets the cut hand them their own kernels
+    instead, after which the piece reads one stored value and its sweep binds.
+    """
+    hoisted: set[int] = set()
+    for region, _tail, stores in output_regions(tile.op, tile.output_specs):
+        sweep = set.intersection(*({axis.name for axis in store.sweep} for store in stores)) if stores else set()
+        if not sweep:
+            continue
+        hoisted.update(
+            id(site.node)
+            for site in sites(region)
+            if isinstance(site.node, Fold) and site.node.axis is not None and not sweep <= site.node.free_axes
+        )
+    return hoisted
+
+
+def full_projection_seams(tile: TileOp, seams) -> tuple[CutSite, ...]:
+    """The seams of the FULL-PROJECTION cut — every contraction occurrence of this kernel, every
+    reduce hoisted ahead of an output sweep, and every output-owning branch — or ``()`` where the
+    kernel has no such cut to offer.
+
+    Offered on a projection that owns more outputs than it can bind
+    (:func:`~emmy.compiler.ir.tile.ops.owns_outputs_it_cannot_bind`). Such a kernel builds around
+    one reduce and lowers every other serially inside the projection, so all but one of its
+    contractions reach no tensor-core tier where they are — and its stores ride different axes, so
+    the fused grid promotes none of them and even that one root has no ``(m, n)`` pair to tile.
+    The cut answers both at once: each contraction becomes the sole root of its own kernel, and each
+    owned output becomes a pointwise-or-small-reduce kernel over the sweep its store rides.
+
+    It is ONE decision, not a sequence. Each seam alone leaves the rest of the shape standing, the
+    pieces a partial cut mints respell what is left, and the evidence a route is recorded as names a
+    decision rather than a sequence of them.
+
+    The seams are the ones :func:`cuttable_seams` already offers; nothing new becomes cuttable. A
+    contraction it does not offer stays where it is — the piece around it is no worse than the fused
+    kernel was — so this takes what is on the ballot rather than declining the whole cut. A reduce
+    each cell of a sweep performs for itself stays too: a block maximum over sixteen stored values is
+    the small-reduce half of the target shape, and cutting it would buy a launch and a workspace for
+    nothing.
+    """
+    if not owns_outputs_it_cannot_bind(tile.op, tile.output_specs):
+        return ()
+    hoisted = _hoisted_reduces(tile)
+    chosen = tuple(seam for seam in seams if seam.owned is not None or seam.node.as_contraction() is not None or id(seam.node) in hoisted)
+    return chosen if len(chosen) > 1 else ()
 
 
 def _cluster_value_seams(seams: list[CutSite], operand_of: dict[int, object]) -> tuple[CutSite, ...]:
@@ -750,4 +821,4 @@ def realize(
     return fragment
 
 
-__all__ = ["CutSite", "Frontier", "cuttable_seams", "output_map", "realize", "storage_frontier"]
+__all__ = ["CutSite", "Frontier", "cuttable_seams", "full_projection_seams", "output_map", "realize", "storage_frontier"]

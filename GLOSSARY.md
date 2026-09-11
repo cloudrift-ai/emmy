@@ -60,6 +60,12 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   workspace. Offered where the branch it cuts is that output's only producer and the piece would bind a grid axis the
   fused kernel cannot: it leaves single-output kernels, each free to bind its store's sweep axis when no axis rides
   every store.
+- **Full-projection cut** — A placement cut that hands every part of one kernel its own kernel in a single decision:
+  each contraction, each reduce evaluated once ahead of an output sweep (the row's statistic), and each output —
+  taking only seams the placement fork already offers. Offered where every output has one producing branch and some
+  branch is not about a single reduce: the compiler then builds the kernel around one reduce and runs the rest
+  serially inside it, where none reaches a tensor-core tier, while no axis rides every store's sweep path, so the
+  launch has nothing to spread over either.
 - **Output equivalence cluster** — A single-owner chain of same-dtype copies that preserves every element's flat
   address while changing only shape. With one terminal live output, the splicer may retarget the computed source's
   `Write` across the cluster instead of reconstructing its computation at the copies' loads.
@@ -139,7 +145,8 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   the recipe stores what conjugation does not give stably: one pattern per channel (the per-element map a dependent
   reduce's lift must spell, over roles), what each state is at the singleton, any state the two-pass form never had
   (Welford's count and running mean), and the fused ⊕ program in its stable spelling — two lambdas over roles for an
-  open channel count (softmax's pivot advance and per-channel rescale) or one lambda over every state pair. The
+  open channel count (softmax's pivot advance and the one-sided scale to the advanced pivot, the channels joining
+  by their shared ⊕) or one lambda over every state pair. The
   definition certifies the data. `Fold.twist(recipe)` finds the pivot among the term's operands and matches by
   position and canonical form, never by a term's names.
 - **Structural identity / structural key** — A fingerprint based on computation and data flow rather than cosmetic
@@ -288,13 +295,24 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   dimension bindings and input pin regimes that were tuned for that target. `--golden PATH` names the file such
   targets live in; `--realization NAME` selects one realization inside it.
 - **Realization** — One statically bound or symbolic instance of a golden configuration: named dimension bindings,
-  input knob pins, the selected schedule knobs, and (after verification) paired measurements. A measured realization
-  is a row of evidence; an unmeasured one becomes evidence once `emmy run --golden PATH --bench` has measured it.
-- **Child-identity schedule receipt** — A realization that records one split child's schedule: the route's cut(s)
-  frozen in its input pins, the child's schedule row in its knobs, and the child kernel's deploy identity stored as
-  its identity. The stored identity is the strict decode's kernel selector — one flat knobs map decorates exactly
-  one kernel, so conflicting per-child schedules persist as sibling receipts. As evidence a receipt is two rows: its
-  route for the parent kernel and its schedule row for the child.
+  input knob pins, the selected schedule knobs, and paired measurements once a bench has taken them. A measured
+  realization is a row of evidence; an unmeasured one becomes evidence once `emmy run --golden PATH --bench` measures
+  it, or once it lists the kernel set a recording measured for it.
+- **Child-identity schedule receipt** — A realization that records one kernel of a set: its schedule row in the knobs,
+  and that kernel's deploy identity stored as its identity. The stored identity says which kernel the row decorates —
+  one flat knobs map decorates exactly one kernel, so conflicting per-child schedules persist as sibling receipts —
+  and it is the strict decode's kernel selector. `run --record-greedy` writes receipts under the seed's input regime
+  alone, because a seam spelling is local to the kernel it was read off and a cut key copied onto every receipt would
+  re-cut any piece offering a same-spelled seam; such a receipt is one row of evidence, its schedule row for its own
+  kernel. A realization corpus case instead freezes the route in a receipt's input pins, and that receipt is two rows:
+  its route for the kernel the cut was offered on, its schedule row for the child.
+- **Kernel set listing** — The `kernel_set` field: the names of the routing rows one realization's kernel set holds,
+  in the order the compile took the decisions, one row per decision — a placement cut or a cross-CTA split. `run
+  --record-greedy` writes the list when it records a kernel set, beside a receipt per kernel. The listing realization
+  usually holds no measurement itself, so `golden_set_state` counts it verified only when every row it lists carries
+  measurements and so does every schedule-carrying row of the same target, and a bench of it publishes the listed
+  rows' knobs as its pin. A realization that also holds a measured row of its own verifies on that row; the list still
+  says what its kernel set held.
 - **Working golden file** — A mutable local YAML inventory used to exchange program targets, unmeasured
   realizations, proposed knob rows, and tune ranking feedback. It is search state; only its measured rows are
   evidence, and only when a command names the file with `--golden PATH`.
@@ -305,7 +323,7 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   reads.
 - **Evidence** — A compatible recorded measurement used to select between candidates: a reservoir row, a tune
   database row, or a measured golden row. All three enter one index and are read by one rule.
-- **Route row** — A measured row that spells a kernel-set decision — a `PLACE` key, or a `REDUCE` value carrying a
+- **Route row** (*routing row*, in `pipeline/ARCHITECTURE.md`) — A measured row that spells a kernel-set decision — a `PLACE` key, or a `REDUCE` value carrying a
   cross-CTA `g<n>` half. Its latency is the measured price of applying that decision to the kernel it was recorded
   on; at that kernel's fork a compile takes the offered arm the row spells, which outranks any arm priced by
   prediction, and the pieces the arm mints are decided from rows of their own.

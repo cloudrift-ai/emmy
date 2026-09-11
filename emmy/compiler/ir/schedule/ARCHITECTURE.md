@@ -115,6 +115,14 @@ read once ahead of the chunk loop, so a mask's fill / zero constants may be a co
 its statements may include a `Select` on the score fragment's OWN coordinates, which the emitter evaluates per element.
 Both were blanket refusals, and either one sent a masked attention target to the scalar tier whole.
 
+A `wgmma` atom is a 16×8 warp sub-cell like `mma_m16n8k16`, but its instruction is issued by four M-adjacent warps
+over 64 rows and N columns, so `_wgmma_refusal` narrows the row it can hold: a `w<4k>x1` warp grid (the unit decode
+is N-fastest, so contiguous warp ids stack along M), one fragment row per warp (`f1x<C>`, a second row would sit
+64 rows down) with `C` a multiple of N/8 (whole instructions along N), a `k4` chunk (one 128-byte swizzle row per
+descriptor) and a shared-memory stage on every operand (the instruction reads descriptors, never fragments). The
+unpinned catalog drops such rows; a pin raises with the rule's message, and the tile check runs before the stage
+check so that message wins.
+
 `TileOp.stage_edges` offers a transport at every operand of every contracting site, a chunked carrier's included —
 which tier then puts which operand on a slab is the tier's own business. The chunked site used to be excluded on the
 reading that it "takes its chunk off the `TILE`, so a transport spelling there would decide nothing"; a `Stage` never

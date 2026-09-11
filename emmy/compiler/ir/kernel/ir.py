@@ -23,6 +23,7 @@ Tile IR and are materialized away before reaching this layer. A
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, replace
 from functools import cached_property
 
@@ -531,6 +532,13 @@ class CpAsyncCopy(Stmt):
     # element index via ``emmy_swizzle_<mode>`` — the same address-based permutation the
     # ``LdmatrixLoad`` drain applies, so a swizzled slab round-trips (``LDMATRIX_SWIZZLE_XOR``).
     swizzle: str = "NONE"
+    # The lane's own ``(row, col)`` within a CTA-wide copy stripe of ``lane_rows`` rows, when the
+    # fill is unrolled per stripe: ``smem_index`` is then the stripe's base and the render adds the
+    # lane through the swizzle split (:func:`swizzled_slab_index`) — the swizzle of the lane's part
+    # computed once, the stripe base an immediate — where a loop over the flat chunk index
+    # re-swizzled every copy's whole index. ``None`` addresses the whole chunk in ``smem_index``.
+    lane_index: tuple | None = None
+    lane_rows: int = 0
 
     def external_reads(self) -> tuple[str, ...]:
         return (self.src,)
@@ -543,14 +551,24 @@ class CpAsyncCopy(Stmt):
         smem_idx = ", ".join(e.pretty() for e in self.smem_index)
         src_idx = ", ".join(e.pretty() for e in self.src_index)
         swz = f" swz={self.swizzle}" if swizzle_xor(self.swizzle) else ""
-        return [f"{indent}cp.async[{self.nbytes}B] {self.smem}[{smem_idx}]{swz} <- {self.src}[{src_idx}]"]
+        lane = f" + lane({', '.join(e.pretty() for e in self.lane_index)})" if self.lane_index is not None else ""
+        return [f"{indent}cp.async[{self.nbytes}B] {self.smem}[{smem_idx}]{lane}{swz} <- {self.src}[{src_idx}]"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
         from emmy.compiler.ir.stmt import render_index
 
         smem_flat = render_index(self.smem, self.smem_index, ctx)
         src_flat = render_index(self.src, self.src_index, ctx)
-        if swizzle_xor(self.swizzle):
+        if self.lane_index is not None:
+            cols = ctx.shapes[self.smem][-1]
+            lane = f"({self.lane_index[0].render(ctx)}) * {cols} + ({self.lane_index[1].render(ctx)})"
+            split = swizzled_slab_index(
+                self.swizzle, cols, lane, self.smem_index[0], self.smem_index[1], ctx, lane_rows=self.lane_rows, lane_col_mod=cols
+            )
+            smem_flat = split if split is not None else f"{smem_flat} + {lane}"
+            if split is None and swizzle_xor(self.swizzle):
+                smem_flat = f"{swizzle_fn(self.swizzle)}({smem_flat})"
+        elif swizzle_xor(self.swizzle):
             smem_flat = f"{swizzle_fn(self.swizzle)}({smem_flat})"
         pad = _pad(ctx.indent)
         # ``emmy_cp_async_{cg,ca}`` (the cp.async prelude) does the ``cvta`` internally, so this is a
@@ -1533,6 +1551,49 @@ def swizzle_fn(mode: str) -> str:
     return f"emmy_swizzle_{base.lower()}" + ("" if mode == base else f"_s{swizzle_xor(mode)[0]}")
 
 
+def _multiple_of(expr: Expr, d: int) -> bool:
+    """Whether ``expr`` is provably a multiple of ``d``: a literal that is, a sum or difference of
+    two that are, or a product one of whose literal factors supplies what the other need not."""
+    if d == 1:
+        return True
+    if isinstance(expr, Literal):
+        return isinstance(expr.value, int) and expr.value % d == 0
+    if isinstance(expr, BinaryExpr) and expr.op in ("+", "-"):
+        return _multiple_of(expr.left, d) and _multiple_of(expr.right, d)
+    if isinstance(expr, BinaryExpr) and expr.op == "*":
+        for lit, other in ((expr.left, expr.right), (expr.right, expr.left)):
+            if isinstance(lit, Literal) and isinstance(lit.value, int) and lit.value and _multiple_of(other, d // math.gcd(lit.value, d)):
+                return True
+    return False
+
+
+def swizzled_slab_index(
+    mode: str, ldm: int, lane: str, row: Expr, col: Expr, ctx: RenderCtx, *, lane_rows: int, lane_col_mod: int
+) -> str | None:
+    """The swizzled slab element index of ``(row, col)`` plus a lane's own ``lane`` offset, split so
+    the swizzle is applied to the lane's part ONCE — ``None`` when the split does not apply.
+
+    The XOR swizzle ``e ^ (((e >> s) & m) << 3)`` is linear over bit-disjoint parts:
+    ``swz(a | b) = swz(a) ^ swz(b)``. A lane's offset spans ``lane_rows`` rows and the column
+    positions ``lane_col_mod`` apart, so a tile base whose row is a multiple of ``lane_rows`` and
+    whose column is a multiple of ``lane_col_mod`` (within the row) shares no bit with it, and
+    once the base row also clears the XOR's own field (a multiple of eight rows on every mode), its
+    row lands above every swizzled bit and adds: ``(swz(lane) ^ swz(col)) + row·ldm``. ``swz(lane)``
+    is one per-lane value a loop hoists, ``swz(col)`` a constant nvcc folds, and the row an
+    immediate offset of the load — where re-applying the swizzle to every load's full index
+    recomputed the XOR from ``threadIdx`` each time and was a fifth of an attention chunk's
+    instructions."""
+    xor = swizzle_xor(mode)
+    if xor is None or ldm < 8 or ldm & (ldm - 1) or lane_rows & (lane_rows - 1) or lane_col_mod & (lane_col_mod - 1):
+        return None
+    shift, mask = xor
+    field_mod = 1 << max(0, shift + (mask + 1).bit_length() - ldm.bit_length())
+    if not (_multiple_of(row, max(lane_rows, field_mod)) and _multiple_of(col, lane_col_mod)):
+        return None
+    fn = swizzle_fn(mode)
+    return f"({fn}({lane}) ^ {fn}({col.render(ctx)})) + ({row.render(ctx)}) * {ldm}"
+
+
 def smem_layout_index(mode: str, flat: str, buffer: str, ctx: RenderCtx, indices: tuple[Expr, ...] = ()) -> str:
     """Render ``flat`` through the slab layout selected by ``mode``.
 
@@ -1894,17 +1955,16 @@ class LdmatrixLoad(Stmt):
             # ``frag``'s col, lanes 16-31 at col+8 (x4.trans).
             assert self.role == "b" and self.staged, "paired ldmatrix is a staged B-operand fusion"
             if self.b_trans:
-                elem = f"{flat} + (({lane} % 8) + ({lane} / 16) * 8) * {ldm} + (({lane} / 8) % 2) * 8"
+                elem = f"(({lane} % 8) + ({lane} / 16) * 8) * {ldm} + (({lane} / 8) % 2) * 8"
                 helper = "emmy_ldmatrix_x4_pair"
             else:
-                elem = f"{flat} + ({lane} % 16) * {ldm} + ({lane} / 16) * 8"
+                elem = f"({lane} % 16) * {ldm} + ({lane} / 16) * 8"
                 helper = "emmy_ldmatrix_x4_trans_pair"
             # The helper loads both fragments' registers directly (no ``_p4`` staging temp / block).
-            return [f"{_pad(ctx.indent)}{helper}({self.frag}, {self.pair_frag}, {self._swizzled_addr(elem)});"]
+            return [f"{_pad(ctx.indent)}{helper}({self.frag}, {self.pair_frag}, {self._swizzled_addr(flat, elem, ctx, 16, 16)});"]
         if self.role == "a":
             # 16×16 A: x4 — lane addresses M-row (lane%16), K-col block (lane/16)*8.
-            elem = f"{flat} + ({lane} % 16) * {ldm} + ({lane} / 16) * 8"
-            addr = self._swizzled_addr(elem)
+            addr = self._swizzled_addr(flat, f"({lane} % 16) * {ldm} + ({lane} / 16) * 8", ctx, 16, 16)
             return [f"{_pad(ctx.indent)}emmy_ldmatrix_x4({self.frag}, {addr});"]
         # Transposed-B (Q@K^T): the slab keeps the operand's native N-major layout
         # (N rows × K cols), which IS the mma's col-major B — a plain x2 (no
@@ -1912,21 +1972,28 @@ class LdmatrixLoad(Stmt):
         # half 0, lanes 8-15 the same rows at K col 8 (each 8x8 matrix's rows land
         # as the fragment's (k, k+1) pairs, cf. ``emmy_mma_load_b_gmem_trans``).
         if self.b_trans:
-            elem = f"{flat} + ({lane} % 8) * {ldm} + (({lane} / 8) % 2) * 8"
-            addr = self._swizzled_addr(elem)
+            addr = self._swizzled_addr(flat, f"({lane} % 8) * {ldm} + (({lane} / 8) % 2) * 8", ctx, 8, 16)
             return [f"{_pad(ctx.indent)}emmy_ldmatrix_x2({self.frag}, {addr});"]
         # 16×8 B: x2.trans — lane addresses K-row (lane%16); .trans yields col-major.
-        elem = f"{flat} + ({lane} % 16) * {ldm}"
-        addr = self._swizzled_addr(elem)
+        addr = self._swizzled_addr(flat, f"({lane} % 16) * {ldm}", ctx, 16, 8)
         return [f"{_pad(ctx.indent)}emmy_ldmatrix_x2_trans({self.frag}, {addr});"]
 
-    def _swizzled_addr(self, elem: str) -> str:
+    def _swizzled_addr(self, flat: str, lane: str, ctx: RenderCtx, lane_rows: int, lane_col_mod: int) -> str:
+        """The lane's slab address: the tile base ``flat`` plus the lane's own ``lane`` offset,
+        which spans ``lane_rows`` rows and columns ``lane_col_mod`` apart, through the slab's
+        swizzle — split per :func:`swizzled_slab_index` wherever the tile base allows, so the
+        swizzle of the lane's part is computed once for the whole drain."""
         if not swizzle_xor(self.swizzle):
-            return f"&{self.src_buffer}[{elem}]"
+            return f"&{self.src_buffer}[{flat} + {lane}]"
+        split = None
+        if len(self.src_index) == 2 and ctx.shapes.get(self.src_buffer, (0, 0))[-1] == self.ldm:
+            split = swizzled_slab_index(
+                self.swizzle, self.ldm, lane, self.src_index[0], self.src_index[1], ctx, lane_rows=lane_rows, lane_col_mod=lane_col_mod
+            )
         # ``emmy_swizzle_<mode>`` (preamble, built from ``LDMATRIX_SWIZZLE_XOR``) applies
         # ``e ^ (((e >> shift) & mask) << 3)`` — the helper spells the (often long) element
         # index once instead of inlining it twice around the XOR.
-        return f"&{self.src_buffer}[{swizzle_fn(self.swizzle)}({elem})]"
+        return f"&{self.src_buffer}[{split if split is not None else f'{swizzle_fn(self.swizzle)}({flat} + {lane})'}]"
 
 
 @dataclass(frozen=True)
@@ -2053,6 +2120,180 @@ class FragmentRepack(Stmt):
             return [f"{_pad(ctx.indent)}emmy_c_to_a_{self.ab_dtype}_m8n8k4<{self.part}>({self.frag}, {self.srcs[0]});"]
         assert len(self.srcs) == 2
         return [f"{_pad(ctx.indent)}emmy_c_to_a_{self.ab_dtype}({self.frag}, {self.srcs[0]}, {self.srcs[1]});"]
+
+
+# ---------------------------------------------------------------------------
+# Hopper warp-group MMA (``wgmma``): the asynchronous instruction discipline
+# ---------------------------------------------------------------------------
+
+#: PTX ``wgmma`` matrix-descriptor layout type (descriptor bits 62-63) per shared-memory swizzle
+#: mode — the same modes the TMA fill and the ldmatrix drain are keyed on.
+WGMMA_LAYOUT_TYPE: dict[str, int] = {"NONE": 0, "B128": 1, "B64": 2, "B32": 3}
+
+
+def wgmma_descriptor_bits(addr: int, lbo: int, sbo: int, mode: int) -> int:
+    """The 64-bit ``wgmma`` shared-memory matrix descriptor (PTX ISA "Matrix Descriptor Format"):
+    bits 0-13 the start address >> 4, 16-29 the leading byte offset >> 4, 32-45 the stride byte
+    offset >> 4, 49-51 the base offset (0 — every slab is aligned to its swizzle period), 62-63 the
+    layout type (:data:`WGMMA_LAYOUT_TYPE`).
+
+    The Python twin of ``emmy_wgmma_desc`` in the render prelude, which is what the kernel runs;
+    the two spell one formula so a test can check the bits without a Hopper card."""
+    return ((addr >> 4) & 0x3FFF) | (((lbo >> 4) & 0x3FFF) << 16) | (((sbo >> 4) & 0x3FFF) << 32) | (mode << 62)
+
+
+@dataclass(frozen=True)
+class WgmmaDescriptor(Stmt):
+    """``unsigned long long name = emmy_wgmma_desc(...)`` — the shared-memory matrix descriptor a
+    ``wgmma.mma_async`` operand is read through (:func:`wgmma_descriptor_bits`). Replaces
+    :class:`LdmatrixLoad` on a descriptor-fed operand: the tensor core reads the slab itself, so no
+    per-lane registers are filled. ``smem_index`` (elements into ``smem``) selects the ring slot and
+    the k step; ``lbo_bytes`` / ``sbo_bytes`` are the leading / stride byte offsets between core
+    matrices, which the lowering derives from the slab's layout."""
+
+    name: str
+    smem: str
+    smem_index: Expr | None
+    swizzle: str
+    lbo_bytes: int
+    sbo_bytes: int
+
+    def defines(self) -> tuple[str, ...]:
+        return (self.name,)
+
+    def external_reads(self) -> tuple[str, ...]:
+        return (self.smem,)
+
+    def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
+        new = rename.get(self.smem, self.smem)
+        return self if new == self.smem else replace(self, smem=new)
+
+    def exprs(self) -> tuple[Expr, ...]:
+        return () if self.smem_index is None else (self.smem_index,)
+
+    def pretty(self, indent: str = "") -> list[str]:
+        idx = "" if self.smem_index is None else f"[{self.smem_index.pretty()}]"
+        return [f"{indent}WgmmaDescriptor {self.name} <- {self.smem}{idx} ({self.swizzle}, lbo={self.lbo_bytes}, sbo={self.sbo_bytes})"]
+
+    def render(self, ctx: RenderCtx) -> list[str]:
+        mode = WGMMA_LAYOUT_TYPE[swizzle_base(self.swizzle)]
+        src = self.smem if self.smem_index is None else f"&{self.smem}[{self.smem_index.render(ctx)}]"
+        args = f"emmy_smem_u32({src}), {self.lbo_bytes}, {self.sbo_bytes}, {mode}"
+        return [f"{_pad(ctx.indent)}unsigned long long {self.name} = emmy_wgmma_desc({args});"]
+
+
+@dataclass(frozen=True)
+class WgmmaMma(Stmt):
+    """``wgmma.mma_async.sync.aligned.m64n{N}k16.f32.{ab}.{ab}`` — one warp-group tensor-core MMA,
+    issued asynchronously by the four warps of a group together.
+
+    ``c_frags`` is the accumulator: per warp, the ``m64nN`` instruction's ``N / 2`` f32 registers
+    are the ``N / 8`` ordinary ``m16n8`` C fragments (:class:`RegFragment`, ``float c[4]``) side by
+    side — instruction register ``d[4j + k]`` is fragment ``j``, register ``k`` — so the epilogue,
+    the softmax rescale and the P→A repack keep their lane maps. Exactly one of ``a_desc`` (the
+    shared-memory form, ``_ss``) and ``a_frag`` (the register form, ``_rs`` — the ``m16n8k16`` A
+    fragment, K-major only) names the A operand; ``b_desc`` is always a :class:`WgmmaDescriptor`.
+    ``scale_d = 0`` discards the old accumulator (``d = a·b``, the first step of a fresh
+    accumulator); ``trans_a`` / ``trans_b`` are the descriptor operands' MN-major transpose bits.
+
+    The discipline around the cells (:class:`WgmmaFence`, :class:`WgmmaCommit`,
+    :class:`WgmmaWait`) is the lowering's: nothing here orders the accumulator read."""
+
+    c_frags: tuple[str, ...]
+    b_desc: str
+    shape: tuple[int, int, int]
+    ab_dtype: str = "f16"
+    a_desc: str | None = None
+    a_frag: str | None = None
+    scale_d: int = 1
+    trans_a: int = 0
+    trans_b: int = 0
+
+    def __post_init__(self) -> None:
+        m, n, k = self.shape
+        if (m, k) != (64, 16) or n % 8 or not 8 <= n <= 256:
+            raise ValueError(f"wgmma: the shape is m64n<8..256, a multiple of 8>k16, got {self.shape}")
+        if len(self.c_frags) != n // 8:
+            raise ValueError(f"wgmma m64n{n}: the accumulator is {n // 8} m16n8 C fragments, got {len(self.c_frags)}")
+        if (self.a_desc is None) == (self.a_frag is None):
+            raise ValueError("wgmma: exactly one of a_desc / a_frag names the A operand")
+        if self.a_frag is not None and self.trans_a:
+            raise ValueError("wgmma: the register-form A operand is K-major (no transpose bit)")
+
+    @property
+    def form(self) -> str:
+        """``"ss"`` (both operands through descriptors) or ``"rs"`` (A in registers)."""
+        return "ss" if self.a_desc is not None else "rs"
+
+    @property
+    def wrapper(self) -> str:
+        """The prelude wrapper this cell calls — one per ``(N, ab_dtype, form)`` a kernel uses."""
+        return f"emmy_wgmma_m64n{self.shape[1]}k16_{self.ab_dtype}_f32_{self.form}"
+
+    def _a(self) -> str:
+        return self.a_desc if self.a_desc is not None else self.a_frag
+
+    def deps(self) -> tuple[str, ...]:
+        return (*self.c_frags, self._a(), self.b_desc)
+
+    def defines(self) -> tuple[str, ...]:
+        # Accumulates into the C fragments in place — a definition, like MmaSyncPtx.
+        return self.c_frags
+
+    def pretty(self, indent: str = "") -> list[str]:
+        m, n, k = self.shape
+        flags = ("" if self.scale_d else " scale_d=0") + (" trans_a" if self.trans_a else "") + (" trans_b" if self.trans_b else "")
+        acc = ", ".join(self.c_frags)
+        return [f"{indent}WgmmaMma {{{acc}}} += {self._a()} @ {self.b_desc} (m{m}n{n}k{k} {self.ab_dtype} {self.form}{flags})"]
+
+    def render(self, ctx: RenderCtx) -> list[str]:
+        # The transpose bits are PTX immediates, which nvcc accepts only as integral constant
+        # expressions — template arguments of the wrapper, not function parameters.
+        tnsp = f"<{self.trans_a}, {self.trans_b}>" if self.form == "ss" else f"<{self.trans_b}>"
+        return [f"{_pad(ctx.indent)}{self.wrapper}{tnsp}({', '.join(self.c_frags)}, {self._a()}, {self.b_desc}, {self.scale_d});"]
+
+
+@dataclass(frozen=True)
+class WgmmaFence(Stmt):
+    """``wgmma.fence.sync.aligned`` — orders the group's earlier register and shared-memory accesses
+    before the ``wgmma.mma_async`` that follows. The lowering issues it before the first cell after
+    anything else touched the accumulator (the epilogue, the softmax rescale)."""
+
+    def pretty(self, indent: str = "") -> list[str]:
+        return [f"{indent}WgmmaFence"]
+
+    def render(self, ctx: RenderCtx) -> list[str]:
+        return [f'{_pad(ctx.indent)}asm volatile("wgmma.fence.sync.aligned;\\n" ::: "memory");']
+
+
+@dataclass(frozen=True)
+class WgmmaCommit(Stmt):
+    """``wgmma.commit_group.sync.aligned`` — closes the ``wgmma.mma_async`` cells issued since the
+    last commit into one group for :class:`WgmmaWait` to count. The lowering commits after a
+    chunk's cells."""
+
+    def pretty(self, indent: str = "") -> list[str]:
+        return [f"{indent}WgmmaCommit"]
+
+    def render(self, ctx: RenderCtx) -> list[str]:
+        return [f'{_pad(ctx.indent)}asm volatile("wgmma.commit_group.sync.aligned;\\n" ::: "memory");']
+
+
+@dataclass(frozen=True)
+class WgmmaWait(Stmt):
+    """``wgmma.wait_group.sync.aligned N`` — block until at most ``group`` committed groups are still
+    in flight. Carries no deps: the accumulator it completes is the ``c_frags`` of the cells before
+    it, and the lowering places the wait before any read of those fragments and before the slot's
+    release on the "empty" mbarrier. The redundant-sync and ldmatrix-pairing passes treat it as a
+    barrier."""
+
+    group: int = 0
+
+    def pretty(self, indent: str = "") -> list[str]:
+        return [f"{indent}WgmmaWait({self.group})"]
+
+    def render(self, ctx: RenderCtx) -> list[str]:
+        return [f'{_pad(ctx.indent)}asm volatile("wgmma.wait_group.sync.aligned {self.group};\\n" ::: "memory");']
 
 
 @dataclass(frozen=True)
@@ -2753,6 +2994,11 @@ __all__ = [
     "MbarrierArrive",
     "MbarrierWait",
     "SetMaxNReg",
+    "WgmmaDescriptor",
+    "WgmmaMma",
+    "WgmmaFence",
+    "WgmmaCommit",
+    "WgmmaWait",
     "StridedLoop",
     "Stmt",
     # Top-level
@@ -2856,6 +3102,8 @@ def _(s: CpAsyncCopy, rename, sigma, axis_fn):
         src_index=tuple(sigma.apply(e) for e in s.src_index),
         nbytes=s.nbytes,
         swizzle=s.swizzle,
+        lane_index=None if s.lane_index is None else tuple(sigma.apply(e) for e in s.lane_index),
+        lane_rows=s.lane_rows,
     )
 
 
@@ -3012,6 +3260,38 @@ def _(s: MmaSyncPtx, rename, sigma, axis_fn):
         sfa_frag=rename(s.sfa_frag) if s.sfa_frag is not None else None,
         sfb_frag=rename(s.sfb_frag) if s.sfb_frag is not None else None,
     )
+
+
+@_rewrite_kind.register
+def _(s: WgmmaDescriptor, rename, sigma, axis_fn):
+    index = None if s.smem_index is None else _rename_ssa_vars_in_expr(sigma.apply(s.smem_index), rename)
+    return replace(s, name=rename(s.name), smem_index=index)
+
+
+@_rewrite_kind.register
+def _(s: WgmmaMma, rename, sigma, axis_fn):
+    return replace(
+        s,
+        c_frags=tuple(rename(c) for c in s.c_frags),
+        b_desc=rename(s.b_desc),
+        a_desc=None if s.a_desc is None else rename(s.a_desc),
+        a_frag=None if s.a_frag is None else rename(s.a_frag),
+    )
+
+
+@_rewrite_kind.register
+def _(s: WgmmaFence, rename, sigma, axis_fn):
+    return s
+
+
+@_rewrite_kind.register
+def _(s: WgmmaCommit, rename, sigma, axis_fn):
+    return s
+
+
+@_rewrite_kind.register
+def _(s: WgmmaWait, rename, sigma, axis_fn):
+    return s
 
 
 @_rewrite_kind.register

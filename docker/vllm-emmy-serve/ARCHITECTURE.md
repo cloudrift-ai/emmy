@@ -286,6 +286,15 @@ The full release session on a rented card (each step from the repo checkout; hos
        --max-model-len <pinned> --max-num-batched-tokens <pinned> --gpu-mem-util <pinned>
    ```
 
+   For a measured serving lane, pass its exact evidence and static width with ``--golden`` and
+   ``--decode-bucket``. The HF subprocess loads supported coded checkpoints through Emmy's decoded architecture twin,
+   so NVFP4 and the other loader-owned formats are compared against real checkpoint values rather than rejected by
+   the framework's unrelated quantizer. Pass ``--enforce-eager`` when the pinned serving lane disables vLLM CUDA
+   graphs; this setting is part of the comparison, not an incidental way to shorten its boot.
+
+   ``--prompt-count 1 --max-tokens 1`` is the smallest diagnostic: it proves or disproves the first-token result
+   before paying for the full four-prompt transcript.
+
 4. `HF_TOKEN=… make serve-warm MODEL=<id>` — fills `warm/` (first boot downloads the model + compiles all layers; minutes).
 5. Point the serving recipe at the canonical immutable reference, then `make serve-image MODEL=<id>` →
    `make serve-verify MODEL=<id>` (expect `PASS — served offline with zero new cubins`) →

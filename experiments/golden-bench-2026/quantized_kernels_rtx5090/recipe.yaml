@@ -1,0 +1,109 @@
+# Minimal compiler support check for packed NVFP4, AWQ, Trellis/EXL3, and block-scaled dynamic FP8 checkpoints on one
+# RTX 5090. Each row traces one pinned layer and strictly executes every distinct post-fusion target against its
+# available reference.
+#
+# A row that names a `golden` replays `golden/<golden>.golden.yaml` instead of tracing: those schedules were measured
+# by hand-pinned `emmy run --ab` rows and committed beside this recipe, and the row only re-measures them at
+# deployable -O3. Rows with `golden: ""` trace and deploy the greedy pick. Both paths end in the same strict
+# `emmy run --golden ... --bench --strict` replay against eager, so the two lanes produce the same correctness evidence.
+command:
+  stage:
+    - emmy
+    - pyproject.toml
+    - requirements.txt
+    - Makefile
+    - experiments/golden-bench-2026/quantized_kernels_rtx5090/recipe.yaml
+    - experiments/golden-bench-2026/quantized_kernels_rtx5090/golden
+  strict: true
+  run: |
+    set -euo pipefail
+    export PATH=/usr/local/cuda/bin:$$PATH
+    cd $repo_dir
+    finalize() {
+      final_status=$$?
+      trap - EXIT
+      if [ -x ./venv/bin/pip ]; then
+        ./venv/bin/pip freeze --all > $task_dir/requirements.freeze.txt || final_status=1
+      else
+        echo "venv pip unavailable" > $task_dir/requirements.freeze.txt
+        final_status=1
+      fi
+      printf 'format=%s\nstatus=%s\n' "$format" "$$final_status" > $task_dir/status.txt
+      archive_tmp=$task_dir.artifacts.tar.gz
+      tar -C $task_dir -czf "$$archive_tmp" . || final_status=1
+      mv "$$archive_tmp" $task_dir/artifacts.tar.gz || final_status=1
+      exit "$$final_status"
+    }
+    trap finalize EXIT
+
+    [ -d venv ] || make setup
+    export EMMY_TUNE_DB=$task_dir/autotune.db
+    export EMMY_ONLINE_FILE=$task_dir/online.json
+    export EMMY_CUBIN_CACHE=$task_dir/cubins
+
+    if [ -n "$golden" ]; then
+      cp $repo_dir/experiments/golden-bench-2026/quantized_kernels_rtx5090/golden/$golden.golden.yaml \
+        $task_dir/working.yaml
+      echo "replaying committed golden $golden" | tee $task_dir/trace.log
+    else
+      ./venv/bin/emmy trace "$model_ref" --layer 0 --seq-len "$seq_len" \
+        --model-provenance "$model_ref" --output $task_dir/working.yaml 2>&1 | tee $task_dir/trace.log
+    fi
+
+    # Bench each seed realization (one per post-fusion target) on its own. A committed golden carries
+    # the winning schedule as measured evidence rows beside each unmeasured seed; the seed's greedy
+    # deploys that evidence, so a per-seed strict run reproduces the tuned kernel set. A raw trace has
+    # only seeds, so the same loop benches every target's greedy pick. Reading each realization by
+    # field (unmeasured name) is structural selection, not result interpretation.
+    mkdir -p $task_dir/verification
+    ./venv/bin/python -c 'import sys, yaml; d = yaml.safe_load(open(sys.argv[1])); print("\n".join(r["name"] for c in d["configs"] for r in c["realizations"] if not (r.get("measurements") or {}).get("emmy_us")))' \
+      "$task_dir/working.yaml" > $task_dir/seeds.txt
+    verification_status=0
+    while IFS= read -r seed; do
+      [ -z "$$seed" ] && continue
+      if EMMY_NVCC_FLAGS= EMMY_BENCH_RUN_TIMEOUT_S=60 EMMY_KERNEL_TIMEOUT_MS=120000 \
+        CUDA_VISIBLE_DEVICES="$gpu_device_ids" ./venv/bin/emmy run \
+        --golden $task_dir/working.yaml --realization "$$seed" --bench --strict --no-record-nodes \
+        --json $task_dir/verification/$$seed --warmup 5 --iters 20 \
+        --bench-backends eager,emmy 2>&1 | tee $task_dir/verification/$$seed.log; then
+        :
+      else
+        verification_status=$$?
+      fi
+    done < $task_dir/seeds.txt
+    exit "$$verification_status"
+  result_files:
+    - artifacts.tar.gz
+  timeout: 86400
+
+matrices:
+  - cross:
+      format: nvfp4
+      model_ref: nvidia/Qwen3-8B-NVFP4@ccd10a893cbca613259517c3efe08e151ddf2b8e
+      seq_len: [1, 512]
+      golden: ""
+      deploy.gpu: "NVIDIA GeForce RTX 5090"
+      deploy.gpu_count: 1
+
+  - format: awq
+    model_ref: hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4@db1f81ad4b8c7e39777509fac66c652eb0a52f91
+    seq_len: 1
+    golden: ""
+    deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1
+
+  - format: trellis
+    model_ref: riftstack/Laguna-S-2.1-exl3@45c1f34a8c3ae3025a8bce2b1decea4991a6a239
+    seq_len: 1
+    golden: ""
+    deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1
+
+  # Block-scaled dynamic FP8 (128x128 weight blocks, per-token activations): the form of the official Qwen, DeepSeek,
+  # and GLM FP8 releases and of the datacenter serving rows. Replays the hand-tuned goldens committed beside this file.
+  - format: fp8-block
+    model_ref: Qwen/Qwen3-0.6B-FP8@e5be08033360965ceca7b0ffd72d521a51331ce0
+    seq_len: [1, 512]
+    golden: [qwen3-06b-fp8-block-s1_rtx5090, qwen3-06b-fp8-block-s512_rtx5090]
+    deploy.gpu: "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1

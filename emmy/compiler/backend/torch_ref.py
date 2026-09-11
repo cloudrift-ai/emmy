@@ -7,10 +7,9 @@ accuracy-checked and timed against torch — including torch.compile fusion — 
 just numpy. ``IndexMapOp`` (the post-decomposition layout primitive — broadcast,
 transpose/reshape/slice/cat, RoPE rotate) is supported as a vectorized
 gather over coordinate grids, so HF norms/RoPE (which trace to primitive
-sequences, not fused aten ops) are torch-comparable. Only the data-dependent
-``GatherOp`` / ``ScatterOp`` (indices come from a runtime tensor, not from the
-output coordinates) stay unsupported: :func:`is_runnable` returns ``False`` and
-the caller falls back to emmy-only benchmarking.
+sequences, not fused aten ops) are torch-comparable. ``GatherOp`` supports both
+element selection and table lookup, including packed NVFP4 decode tables.
+``ScatterOp`` stays unsupported.
 """
 
 from __future__ import annotations
@@ -23,7 +22,7 @@ if TYPE_CHECKING:
 
     from emmy.compiler.graph import Graph
 
-# Frontend / tensor ops with a torch twin. Everything else (GatherOp,
+# Frontend / tensor ops with a torch twin. Everything else (
 # ScatterOp, …) makes a graph non-runnable as a torch ref.
 SUPPORTED = frozenset(
     {
@@ -44,6 +43,7 @@ SUPPORTED = frozenset(
         "ScanOp",
         "RangeOp",
         "IndexMapOp",
+        "GatherOp",
     }
 )
 
@@ -65,6 +65,7 @@ def torch_dtype(dtype) -> torch.dtype | None:
         # numeric torch float8 value.
         "f8e4m3": torch.uint8,
         "f8e5m2": torch.uint8,
+        "f4e2m1x2": torch.uint8,
         "bool": torch.bool,
         "u8": torch.uint8,
         "i16": torch.int16,
@@ -111,6 +112,25 @@ def _build_elementwise_table() -> dict[str, Callable]:
         # 0x38 to 56 instead of decoding the FP8 value 1.0.
         return lambda a: a[0].contiguous().view(bits_dtype).to(torch.float32)
 
+    def to_f4(a):
+        x = a[0]
+        torch._assert_async(~torch.isnan(x).any(), "e2m1 cannot represent NaN")
+        magnitude = x.abs()
+        code = torch.zeros_like(x, dtype=torch.uint8)
+        # Midpoints alternate between a lower even code and an upper even code.
+        # Counting crossed boundaries implements round-to-nearest-even and saturation.
+        for i, midpoint in enumerate((0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0)):
+            crossed = magnitude >= midpoint if i % 2 else magnitude > midpoint
+            code = code + crossed.to(torch.uint8)
+        return code | (torch.signbit(x).to(torch.uint8) << 3)
+
+    def from_f4(a):
+        from emmy.compiler.dtype import F4_VALUES  # noqa: PLC0415
+
+        codes = a[0].long()
+        torch._assert_async(((codes >= 0) & (codes < 16)).all(), "e2m1 codes must be in [0, 16)")
+        return torch.tensor(F4_VALUES, dtype=torch.float32, device=codes.device)[codes]
+
     return {
         "add": lambda a: a[0] + a[1],
         "sum": lambda a: a[0] + a[1],
@@ -152,6 +172,8 @@ def _build_elementwise_table() -> dict[str, Callable]:
         "to_f8e5m2": to_f8(torch.float8_e5m2),
         "from_f8e4m3": from_f8(torch.float8_e4m3fn),
         "from_f8e5m2": from_f8(torch.float8_e5m2),
+        "to_f4e2m1": to_f4,
+        "from_f4e2m1": from_f4,
         "copy": lambda a: a[0],
         "pad": lambda a: a[0],
     }
@@ -198,6 +220,14 @@ def _eval(node, ins: list, sym_env: dict[str, int] | None = None, device=None):
         return _elementwise(op.op.name, ins)
     if name == "RangeOp":
         return torch.arange(op.start, op.stop, op.step, dtype=torch_dtype(op.dtype))
+    if name == "GatherOp":
+        data, indices = ins[0], ins[1].long()
+        axis = op.axis % data.ndim
+        indices = torch.where(indices < 0, indices + data.shape[axis], indices)
+        if data.ndim == indices.ndim and all(indices.shape[k] == data.shape[k] for k in range(data.ndim) if k != axis):
+            return torch.gather(data, axis, indices)
+        shape = (*data.shape[:axis], *indices.shape, *data.shape[axis + 1 :])
+        return torch.index_select(data, axis, indices.reshape(-1)).reshape(shape)
     if name == "ReduceOp":
         x, ax, fn = ins[0], op.axis, op.op.name
         if fn in ("sum", "add"):

@@ -62,6 +62,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from collections.abc import Callable
 from dataclasses import replace
 from functools import lru_cache
@@ -278,7 +279,14 @@ def _resolved_price(terminal: Graph, trace: list, ctx: Context, prior, failed: d
 
 
 def _price_kernel(
-    graph: Graph, nid: str, ctx: Context, prior, memo: dict[object, float | None], db: object | None = None, decisions: dict | None = None
+    graph: Graph,
+    nid: str,
+    ctx: Context,
+    prior,
+    memo: dict[object, float | None],
+    db: object | None = None,
+    decisions: dict | None = None,
+    deadline: float | None = None,
 ) -> float | None:
     """One kernel's price: a nested deterministic resolution of its
     single-node slice through ``lowering/tile`` only (the schedule fork is
@@ -302,9 +310,11 @@ def _price_kernel(
     key = op.identity_key(structural=False, with_io=True, with_knobs=True) or op.identity_key(with_io=True, with_knobs=True)
     if key in memo:
         return memo[key]
+    if deadline is not None and time.monotonic() > deadline:
+        return None  # over the pricing budget: unpriceable, not memoized — a later fork may still afford it
     us: float | None = None
     try:
-        nested = greedy_decide(prior=prior, price_structural=False, db=db, decisions=decisions)
+        nested = greedy_decide(prior=prior, price_structural=False, db=db, decisions=decisions, deadline=deadline)
         if getattr(ctx, "kernel_cache", None) is not None:
             from dataclasses import replace as _replace  # noqa: PLC0415
 
@@ -319,13 +329,19 @@ def _price_kernel(
 
 
 def _price_graph(
-    graph: Graph, ctx: Context, prior, memo: dict[object, float | None], db: object | None = None, decisions: dict | None = None
+    graph: Graph,
+    ctx: Context,
+    prior,
+    memo: dict[object, float | None],
+    db: object | None = None,
+    decisions: dict | None = None,
+    deadline: float | None = None,
 ) -> float | None:
     """Σ of per-kernel best-µs prices over ``graph``'s kernel-bearing
     nodes, or ``None`` when any kernel is unpriceable (no partition fork —
     e.g. a pre-tiled combine ``TileOp`` — or a failed nested resolve)."""
     prices = [
-        _price_kernel(graph, nid, ctx, prior, memo, db, decisions)
+        _price_kernel(graph, nid, ctx, prior, memo, db, decisions, deadline)
         for nid, n in graph.nodes.items()
         if n.op.identity_key(with_io=True, with_knobs=True) is not None
     ]
@@ -335,7 +351,13 @@ def _price_graph(
 
 
 def _price_op_leaf(
-    fp: ForkPoint, leaf: object, prior, memo: dict[object, float | None], db: object | None = None, decisions: dict | None = None
+    fp: ForkPoint,
+    leaf: object,
+    prior,
+    memo: dict[object, float | None],
+    db: object | None = None,
+    decisions: dict | None = None,
+    deadline: float | None = None,
 ) -> float | None:
     """The keep-fused side's price: the leaf's ``Op`` rebound into a
     single-node slice of the current graph, priced like any kernel."""
@@ -346,11 +368,17 @@ def _price_op_leaf(
         return None
     sub = single_node_graph(fp.match.graph, fp.node_id)
     sub.nodes[fp.node_id].op = option
-    return _price_graph(sub, fp.ctx, prior, memo, db, decisions)
+    return _price_graph(sub, fp.ctx, prior, memo, db, decisions, deadline)
 
 
 def _priced_pick(
-    fp: ForkPoint, leaves: list, prior, memo: dict[str, float | None], db: object | None = None, decisions: dict | None = None
+    fp: ForkPoint,
+    leaves: list,
+    prior,
+    memo: dict[str, float | None],
+    db: object | None = None,
+    decisions: dict | None = None,
+    deadline: float | None = None,
 ) -> object | None:
     """The priced argmin over a kernel-set fork's leaves — the structural
     (``Graph``-splicing) options and the keep-fused ``Op`` side alike — or
@@ -381,9 +409,9 @@ def _priced_pick(
     priced = [
         (
             o,
-            _price_graph(_leaf_graph(o), fp.ctx, prior, memo, db, decisions)
+            _price_graph(_leaf_graph(o), fp.ctx, prior, memo, db, decisions, deadline)
             if _is_structural_option(o)
-            else _price_op_leaf(fp, o, prior, memo, db, decisions),
+            else _price_op_leaf(fp, o, prior, memo, db, decisions, deadline),
         )
         for o in leaves
     ]
@@ -905,6 +933,7 @@ def greedy_decide(
     price_structural: bool = True,
     db: object | None = None,
     decisions: dict | None = None,
+    deadline: float | None = None,
 ) -> Callable[[ForkPoint], object]:
     """The greedy compile pick as a :meth:`Run.resolve` ``decide`` callback:
     descend directly to exact evidence when available, otherwise stream the complete rows in
@@ -946,6 +975,12 @@ def greedy_decide(
     #: re-scored one identical schedule pool N times; the key already carries the pool identity,
     #: the rule, and the blocklist, so sharing is exactly the replay the memo was built for).
     decisions = {} if decisions is None else decisions
+    from emmy import config  # noqa: PLC0415
+
+    # One optional pricing budget per compile attempt, shared into every nested pricing resolve.
+    # Unset by default: pricing runs to completion (deterministic, machine-speed-independent).
+    if deadline is None and (budget := config.price_budget_s()) is not None:
+        deadline = time.monotonic() + budget
     loaded = prior is not _LOAD_PRIOR
     the_prior = prior if loaded else None
     # Lazily-built per-compile measured-evidence index (needs a fork point's ctx for the
@@ -1093,7 +1128,7 @@ def greedy_decide(
                 leaves = [o for o in leaves if not _is_structural_option(o)] or leaves
             else:
                 _require_evidence(fp, "no measured row spells a kernel-set arm")
-                pick = _priced_pick(fp, leaves, the_prior, memo, db, decisions)
+                pick = _priced_pick(fp, leaves, the_prior, memo, db, decisions, deadline)
                 if pick is not None:
                     return pick
         if len(leaves) <= 1:

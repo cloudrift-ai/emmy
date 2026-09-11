@@ -1,5 +1,115 @@
 # Golden-bench kernel corpus
 
+## Platform h100x1 — hand-tuned common corpus and the wgmma tier (2026-09-10)
+
+### Question and scope
+
+Can the nine-target Qwen3-0.6B layer-0 corpus (sequence lengths 1 and 512, the same embedded programs as the A100
+goldens) beat Inductor on an H100 with hand-found schedules, and what does each loss come from? The H100 goldens
+were built from the A100 files with the card identity changed and every knob and measurement stripped, so the
+compared programs are identical across the two cards. Search was manual: seven rounds of `emmy run --ab` and pinned
+runs (about 150 measured rows), then `--record-greedy` under the winning pin into the working golden. The same PR
+adds the Hopper `wgmma` tensor-core tier, and the k-projection's recorded row uses it. Committed as
+`golden/qwen3-06b-s1_h100.golden.yaml` and `golden/qwen3-06b-s512_h100.golden.yaml`; the recipe replays them like
+the A100 row.
+
+### Protocol
+
+One `a3-highgpu-1g` SPOT VM (H100 80GB HBM3, GPU-b9509f7c, driver 580.173.02, nvcc 12.9, PyTorch 2.14.0+cu130,
+cupy 14.2). Every number is deployable `-O3`, 10 warmups, 100 iterations, eager and Emmy in one process; Inductor is
+the separate `torch.compile` lane the recipe runs once per task. The tuning rounds ran with a task-owned tune DB; the
+recorded rows were measured against a fresh DB (see the failure-row finding below). The lane is one
+`emmy bench experiments/golden-bench-2026/kernels --filter deploy.gpu=…` invocation against that host over SSH at
+source `2d4f9510`, run `20260910T210813Z` (21:08-22:06 UTC), five strict repeats per sequence length.
+
+### Result summary
+
+Medians of the five strict repeats; Inductor from the torch-compile lane of the same task. Decode: nine of nine
+targets correct on every repeat, task status succeeded. Prefill: seven of nine measured and correct on every repeat;
+the two attention forms below have no realizable row, so the task status is failed by design.
+
+| decode (sequence length 1) | eager | Inductor | Emmy | Inductor / Emmy | launches |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| input RMSNorm | 114.1 | 2.84 | **2.27** | **1.25** | 1 |
+| q_proj + q_norm statistic | 4.30 | 2.57 | 4.39 | 0.59 | 2 |
+| k_proj + cast | 29.6 | 4.47 | 5.31 | 0.84 | 2 |
+| v_proj | 30.1 | 3.99 | 4.78 | 0.83 | 2 |
+| v_proj + 1-key SDPA | 9.46 | 8.19 | 10.9 | 0.75 | 2 |
+| 1-key SDPA + o_proj + residual | 12.7 | 9.08 | **8.70** | **1.04** | 4 |
+| post-norm + gate/up + SiLU | 124.4 | 7.67 | 25.3 | 0.30 | 2 |
+| down_proj + residual | 7.80 | 3.69 | 222.9 | 0.02 | 2 |
+| q/k norm + RoPE + score statistics | 307.7 | Inductor compile failed | 2.58 | — | 1 |
+
+| prefill (sequence length 512) | eager | Inductor | Emmy | Inductor / Emmy | launches |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| input RMSNorm | 174.9 | 6.32 | **2.88** | **2.20** | 1 |
+| q_proj + statistic | 5.02 | 5.05 | 7.19 | 0.70 | 1 |
+| k_proj + cast (wgmma n64) | 66.5 | 8.97 | **8.70** | **1.03** | 1 |
+| v_proj | 42.2 | 7.32 | 7.41 | 0.99 | 1 |
+| softmax × V | 16.9 | 17.4 | 147.5 | 0.12 | 3 |
+| post-norm + gate/up + SiLU | 193.8 | 24.2 | 143.0 | 0.17 | 2 |
+| down_proj + residual | 11.5 | 11.8 | 18.7 | 0.63 | 1 |
+| SDPA + o_proj + residual | — | — | no realizable row | — | — |
+| q/k norm + RoPE + score statistics | — | — | fails to lower | — | — |
+
+Run-to-run spread over the five repeats stayed within 3% on every measured target; the softmax × V and the two MLP
+rows are the cold greedy's own picks (their recorded rows failed strict or did not exist), reported as measured.
+
+### What the sweep found
+
+- **Decode GEMVs are parallelism-bound, not bandwidth-bound.** With lanes on the output axis (`coop-t`) a
+  1024-output projection runs on four CTAs (6.9 µs for 2 MB of weights). A cross-CTA K split (`g8k`, `g16k`) fills
+  the 132 SMs and reaches 4.4-5.3 µs, but the finalize launch keeps the pair behind Inductor's single kernel
+  (2.6-4.5 µs). Atomic splits (`g<n>a`) fail to bench: the accumulator-reset gap already recorded for split-K.
+- **The decode down-projection's fast rows fail the strict gate.** Every cooperative row, split or not, is one element
+  in 1024 off eager by four fp16 ulps, over the 1e-3 gate: the fp16 rounding boundary before the residual add, the
+  defect recorded on V100. None may be promoted, so the file keeps an inventory row and the cold tensor-core pick
+  runs at 223 µs.
+- **Prefill GEMMs on mma.sync top out at the 64×64 CTA tile** (`w2x2`, `f2x4/k4`, three-deep cp.async ring): 128
+  CTAs, one wave. Bigger tiles leave SMs idle, K splits add a launch, TMA and producer bands do not beat cp.async at
+  these shapes. q_proj (N=2048) runs at 240 TFLOPS against a cuBLAS-class 433 TFLOPS Inductor kernel.
+- **The wgmma tier lands the k-projection.** `wgmma_m64n64k16` on `w8x1`, `f1x8/k4`, `d3/smem-tma` takes k_proj from
+  10.4 to 8.7 µs against Inductor's 9.0; on v_proj it measures 7.7 beside the mma.sync row's 7.4, so that row stays.
+  The corpus weights are N-contiguous, which pins the tier to one 64-column swizzle atom per K row: every wider
+  N-contiguous tile measured wrong wholesale, because the row-major slab does not store each further atom as its own
+  eight K rows the way the descriptor's MN-major layout expects. A K-contiguous 2048³ f16 GEMM runs the n256 row at
+  34.0 µs against cuBLAS's 24.6 (0.73×) and the best mma.sync row's 69.3, all strict. A per-atom TMA deposit is the
+  next step for the wide tiles.
+- **The two fused decode attention forms recover with a materializing cut.** 1-key SDPA + o_proj + residual: 7.2 ms
+  cold → 8.7 µs with `PLACE@map.1/inner.2/map=cut` and a split GEMV on the children, beating Inductor. v_proj + 1-key
+  SDPA: 32.8 → 10.9 µs. The post-norm MLP cut (`PLACE@map.2/inner.1/map=cut`) helps at both lengths but its
+  materialized norm still runs as a direct kernel: a bare `WORK`/`REDUCE` pin applies to both children of the cut,
+  and editing the producer's child receipt by hand did not reach it either.
+- **Failure rows poison pinned replays.** Once `bench_fail` rows for a kernel are in the tune DB, later pinned
+  compiles of that kernel silently drop the pinned tensor-core tile and emit the scalar form; the same pin realizes
+  against an empty DB. Every recorded row was measured against a fresh DB. The disqualification should be visible.
+- **Two prefill attention forms have no realizable row.** SDPA + o_proj + residual emits duplicate accumulator
+  declarations for every tensor-core pin: the online-softmax state is emitted twice inside the o_proj's computed-A
+  operand fill (the chain-form recompute already diagnosed on A100). The score-statistics form fails to lower in the
+  cold greedy (`lower: no extent for coordinates ['in6']`) and its cut routes exceed the 60 s bench watchdog. Both
+  stay inventory rows without measurements, as in the A100 file, and the walk now reports them without hiding the
+  targets after them.
+- **Softmax × V realizes on tensor cores through the corpus cut route** (`PLACE@map.1/twist.2/inner=cut`) at
+  148 µs against 17 µs Inductor; the hand-recorded version of that route failed strict, so the row stays the cold
+  pick's and is not promoted.
+
+### Systems and provenance
+
+- Host `bench-h100-wgmma-0910-0903-212a` (GCP `a3-highgpu-1g`, SPOT, us-central1-a), one H100 80GB HBM3
+  (`GPU-b9509f7c-dbfc-557b-daba-4eff2fb9420b`, PCI `2330`), driver 580.173.02, nvcc 12.9.41, cuBLAS 12.9.0.13,
+  Ubuntu 24.04.5, PyTorch 2.14.0+cu130, triton 3.8.0, cupy-cuda12x 14.2.0.
+- The single pass-through H100 fails CUDA initialization until NVLink is disabled in the driver
+  (`NVreg_NvLinkDisable=1`): the VM sees no NVSwitch for the fabric manager and the GPU's fabric state never leaves
+  "In Progress". The image also lacks `make`, `g++`, `python3.12-venv` and `python3.12-dev`.
+- Source `2d4f9510`, clean staged tree; run directory `2026-09-10_21-08-13`; both task records and both
+  `artifacts.tar.gz` are in the archive.
+
+### Durable files
+
+- Goldens: `golden/qwen3-06b-s1_h100.golden.yaml`, `golden/qwen3-06b-s512_h100.golden.yaml`.
+- Raw-results archive: `results_h100x1.tar.gz` (root member `2026-09-10_21-08-13/` with the two `*.experiment.yaml`
+  records and the two `*_artifacts.tar.gz`).
+
 ## Current-head corpus requalification (2026-08-29)
 
 The draft is based on current main `b88763fa`; the exact combined source for this pass is `857ba7e9`. Every hardware

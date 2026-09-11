@@ -55,6 +55,7 @@ FIRST_ITER_TIMEOUT_MS = "EMMY_FIRST_ITER_TIMEOUT_MS"
 BENCH_COMPILE_TIMEOUT_S = "EMMY_BENCH_COMPILE_TIMEOUT_S"
 BENCH_RUN_TIMEOUT_S = "EMMY_BENCH_RUN_TIMEOUT_S"
 BENCH_WALL_TIMEOUT_S = "EMMY_BENCH_WALL_TIMEOUT_S"
+PRICE_BUDGET_S = "EMMY_PRICE_BUDGET_S"
 GPU_LOCK = "EMMY_GPU_LOCK"
 NCU_CHILD = "EMMY_NCU_CHILD"
 SERVING_STATIC = "EMMY_SERVING_STATIC"
@@ -590,6 +591,18 @@ def bench_compile_timeout_s(default: float = 30.0) -> float:
     e.g. ``tune`` shrinks it for fast-fail single-kernel sweeps); the env var, when set,
     overrides every caller uniformly. Semantics live on ``Backend.bench_compile_timeout_s``."""
     return float_env(BENCH_COMPILE_TIMEOUT_S, default)
+
+
+def price_budget_s() -> float | None:
+    """``EMMY_PRICE_BUDGET_S`` — optional wall-clock budget for the greedy compile's kernel-set
+    pricing: the nested resolutions that price every cut arm of a placement fork. Unset (the
+    default) means NO budget — pricing runs to completion, which is deterministic and independent
+    of machine speed, so it is what every test and recipe path uses. Set it only to bound a
+    pathological manual compile whose pricing explodes (the fused decode-tail offered more cut
+    arms than a compile could price in half an hour); past the budget an arm prices as unpriceable
+    and the fork falls to the ordinary ranking, the same contract a failed nested resolve has."""
+    raw = os.environ.get(PRICE_BUDGET_S)
+    return float(raw) if raw else None
 
 
 def bench_run_timeout_s(default: float = 10.0) -> float:

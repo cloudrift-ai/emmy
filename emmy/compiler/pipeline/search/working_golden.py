@@ -658,9 +658,10 @@ def record_greedy_pick(
     timings. Every row takes the seed realization's bindings and input regime and no route: seam
     spellings are kernel-local, so a cut key copied onto every receipt would re-cut any piece that
     offers a same-spelled seam; the replay follows the routing rows, each naming its kernel by
-    identity. A row already recorded for the same kernel and knobs takes the new timings, anything
-    else is appended, so a re-record never duplicates. The file is read and written back inside
-    one :func:`exclusive_golden`, so the rows a concurrent recorder wrote meanwhile survive.
+    identity. A row already recorded for the same input regime, kernel, and knobs takes the new
+    timings; anything else is appended, so a re-record never duplicates or aliases measurements
+    from another width or pin regime. The file is read and written back inside one
+    :func:`exclusive_golden`, so the rows a concurrent recorder wrote meanwhile survive.
     Returns the names written, in order.
     """
     destination = Path(path)
@@ -695,13 +696,22 @@ def _record_rows(destination: Path, name: str, *, decisions, kernels, reference_
             "identity": identity,
             "measurements": {"emmy_us": float(emmy_us), "reference_us": float(reference_us), "reference_backend": reference_backend},
         }
-        key = (identity, canonical_row_key(row["knobs"]))
-        recorded = next((r for r in entry["realizations"] if (r.get("identity"), canonical_row_key(r.get("knobs") or {})) == key), None)
+        key = (row["bindings"], row["pins"], identity, canonical_row_key(row["knobs"]))
+        recorded = next(
+            (
+                r
+                for r in entry["realizations"]
+                if (r.get("bindings"), r.get("pins"), r.get("identity"), canonical_row_key(r.get("knobs") or {})) == key
+            ),
+            None,
+        )
         if recorded is None:
             entry["realizations"].append(row)
         else:
             recorded["measurements"] = row["measurements"]
         written.append(row["name"])
+    if decisions:
+        seed["kernel_set"] = written[: len(decisions)]
     dump_golden_file(document, destination, overwrite=True, incremental=True)
     return written
 

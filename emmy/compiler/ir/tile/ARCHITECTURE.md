@@ -111,23 +111,43 @@ construction. Copies that differ in captured axis names cannot share an object a
 that differ in exposed result names stay distinct because unifying them would rename their consumers.
 
 The kernel's SHARED output sweep — an axis on every store's sweep path — is promoted into the Tile's free-axis
-placement when any nested contraction operand reads it: the coordinate is that contraction's output coordinate, and
-promoting an axis every store rides replicates nothing but the statistics evaluated ahead of the sweep. A sibling
-output nest's axis is never promoted, however many contractions read it: the other nests do not ride it, so promoting
-it would evaluate them once per cell — DeepSeek-V4 post4096's residual root holds four sibling nests, and promoting
-all seven of their axes made its grid their product, 2^56 cells, which no launch can cover. A contraction under a
-sibling nest stays under its sweep loop, where `Fold.lower` places it like any term reading the axis, and the
+placement on either of two grounds, and both answer one question: what would the grid replicate. A nested contraction
+operand reading the axis is the first — the coordinate is that contraction's output coordinate, so the tiles do that
+work per cell whatever the placement says, and a statistic evaluated ahead of the sweep beside them is cheap against
+it. Every reduce in the term reading the axis is the second: each cell folds its own, so binding the axis replicates
+none of them. A term with NO reduce satisfies that second ground vacuously, and then it promotes only where the
+placement has no free axis at all — a kernel with no free axis launches one block whatever it does, so its shared
+sweep is the only axis the launch could spread over. Where the placement already has an axis, a bare elementwise sweep
+stays a sweep: the kernel materializer distributes exactly that across a worker inventory, and binding it here would
+decide for the schedule that measured the alternative (`cases/reduce/rms-norm-cut-sweep-work.yaml`, 885.9 us walked in
+one thread against 4.2 us split across 512). The complement is what the reduce clause protects: a reduce that does NOT
+read the axis is the row's statistic, evaluated once for the whole sweep, and binding the sweep would recompute it per
+output element, which is why softmax's maximum and rms-norm's sum of squares keep their loops.
+
+A sibling output nest's axis is never promoted, however many contractions read it: the other nests do not ride it, so
+promoting it would evaluate them once per cell — DeepSeek-V4 post4096's residual root holds four sibling nests, and
+promoting all seven of their axes made its grid their product, 2^56 cells, which no launch can cover. A contraction
+under a sibling nest stays under its sweep loop, where `Fold.lower` places it like any term reading the axis, and the
 placement fork cuts it out at its own free coordinates. Promotion expands the enclosing-axis context, so construction
 normalizes the Fold tree once more under that final scope; one construction and a reconstruction therefore expose the
-same closed operand edges and placement seams. The invariant also applies when a schedule row constructs or reloads
-an already-mapped Tile: promotion extends the grid in lockstep with the free axes, so per-cell replication never
-mistakes the swept coordinate for an SSA name.
+same closed operand edges and placement seams. The invariant also applies when a schedule row constructs or reloads an
+already-mapped Tile: promotion extends the grid in lockstep with the free axes, so per-cell replication never mistakes
+the swept coordinate for an SSA name.
 
-That rule is `promoted_sweep`, and it has two readers. Construction applies it. The placement fork asks it of a
+That rule is `promoted_sweep`, and it has three readers. Construction applies it. The placement fork asks it of a
 CANDIDATE piece: where a kernel's stores ride axes with no axis in common, nothing promotes and the whole kernel keeps
 its one-axis grid, yet each store taken alone may promote its own — the NVFP4 encode, whose packed codes ride the
-feature axis and whose block scales ride one sixteenth of it. That is the question the output-owning cut is offered
-on (`lowering/tile/_cut.py`). Stating the rule once keeps the two answers one rule rather than two copies of it.
+feature axis and whose block scales ride one sixteenth of it. That is the question the output-owning cut is offered on
+(`lowering/tile/_cut.py`). And the full-projection cut reads the refusal from the other side: a reduce this rule will
+not bind past is one that cut hands its own kernel, after which the piece reads a single stored value and its sweep
+binds. Stating the rule once keeps all three answers one rule rather than copies of it.
+
+Root ownership is asked twice, in two shapes, and the answers differ. `refused_roots` names the contraction roots the
+binder will not bind together, and the schedule projection refuses a prefix that output-tiles a second of them.
+`owns_outputs_it_cannot_bind` asks what the full-projection cut is offered on: every output has one producing branch,
+and some branch is not about a single reduce — it reads several, or none. Both are needed. A projection whose outputs
+do not partition at all still refuses roots, and a projection the binder found one root in refuses none here yet is
+exactly what that cut takes apart. Neither reader changes the binder's own rule.
 
 **Storage-decode factors hoist to the epilogue.** A product argument whose cone is a STORAGE DECODE
 (`ElementwiseImpl.decodes` — the trait, never an op-name list) times factors constant along the fold
@@ -190,13 +210,23 @@ composed placement cut builds exactly this shape (the consumer piece's workspace
 retained reduce — DeepSeek-V4 post4096's two-cut piece was the live case, every capture an undefined identifier at
 nvcc).
 
-A matrix row that Loop IR elided because its static extent is one remains algebraic information when every output
-specification starts with one or more literal-zero coordinates followed by the dense `n` coordinate, directly or
-split into row-major quotient/remainder coordinates by a pure reshape. The `n` coordinate may already be free or may
-still be the one shared output sweep. Post-init restores that proven unit free axis before contraction canonicalization,
-even when a sibling reduction is the root-most Fold and the contraction is nested. A zero after `n` or a strided `n`
-does not prove a unit matrix row. The rule is boundary-derived and general: it does not recognize a model or operation
-family, and it does not alter a term whose output specifications disagree about the missing coordinate.
+A matrix row that Loop IR elided because its static extent is one remains algebraic information, and the total lift
+restores it in TWO ways, and which one applies is decided by what the term can support.
+
+The lift BINDS it (`lowering/tile/_row.py`) when an operand has a unit dimension to bind into: the coordinate goes
+back into the indices that read it, so the row is an axis an operand carries and not merely one the placement lists.
+A contraction that owns no free axis is what asks for it — everything such a term reads it shares with the operand it
+multiplies, and a B that moves with its row is no slab per tile (`contracts`), so the family would otherwise fall to
+the per-cell tier. A candidate is kept only when the BOUND axis is itself a contraction's left axis; asking merely
+whether some contraction gained one accepts a binding that handed the row to the other side, because a contraction
+reorients.
+
+Post-init ANNOUNCES it (`_implicit_unit_row`) when the stores prove a leading zero prefix and a dense column. The row
+is then unbound — no operand reads it — which gives the placement a fragment geometry without giving any contraction
+a left axis. That is the weaker statement, and it is the only one available where there is nothing to bind: a matvec
+whose A is a bare vector. The binding yields to it, firing only where the placement carries no extent-one free axis.
+
+Both rules are boundary-derived and general: neither recognizes a model or operation family.
 
 Factoring preserves the pure cone's statement order. If a scalar projection between two nested Folds feeds the later
 Fold, the earlier Fold and scalar become a nested source projection; both Folds are never flattened ahead of that
@@ -253,7 +283,7 @@ still no tile site: an mma B fragment is one `B[k, n]` for every row, and a cata
 placed such a site on the grid's trailing pair and emitted B's address with the unsplit row axis. Two shapes fold
 whole. A PLANAR carrier qualifies when every carried state is a bilinear channel — the tile's accumulators ARE the
 carrier. A TWISTED one qualifies through `Fold.chunked`: the recipe names a pattern for
-every state past the pivot, supplies `advance` / `rescale` (the stable ⊕ at an open channel count, which is what a
+every state past the pivot, supplies `advance` / `scale` (the stable ⊕ at an open channel count, which is what a
 per-chunk merge needs), and leaves exactly one bilinear channel, so every other state rides as a per-row scalar and
 the one accumulator is the expectation. Neither reading mentions attention or softmax: a recipe that folded nothing
 but products passes the first, and one shaped like softmax passes the second.
