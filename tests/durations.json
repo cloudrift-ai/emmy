@@ -602,6 +602,7 @@
  "tests/compiler/realization/test_realization.py::test_case_derived_half_is_current[fused/gate-up-shared-a.yaml]": 0.09,
  "tests/compiler/realization/test_realization.py::test_case_derived_half_is_current[fused/norm-linear-f16-scalar-reduce.yaml]": 0.08,
  "tests/compiler/realization/test_realization.py::test_case_derived_half_is_current[fused/norm-weight-linear-f16-computed-b.yaml]": 0.08,
+ "tests/compiler/realization/test_realization.py::test_case_derived_half_is_current[fused/nvfp4-gate-up-requant-full-projection-cut.yaml]": 5.9,
  "tests/compiler/realization/test_realization.py::test_case_derived_half_is_current[fused/nvfp4-gate-up-requant-place-cut.yaml]": 1.66,
  "tests/compiler/realization/test_realization.py::test_case_derived_half_is_current[fused/nvfp4-quantize-cut-shared-normalizer.yaml]": 0.36,
  "tests/compiler/realization/test_realization.py::test_case_derived_half_is_current[matmul/f16-symbolic-computed-a-k-warp.yaml]": 0.06,
