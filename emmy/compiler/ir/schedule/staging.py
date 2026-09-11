@@ -119,6 +119,8 @@ def _warp_tma(
 # The packed byte-slab stage's fixed geometry. The drain decodes an N-major slab through the k16
 # f16 B fragment map and reads one scale per 16 K elements, so the format's block, the atom's K
 # step and this constant are all the same 16; a different block or atom keeps the generic reading.
+# A one-value byte (fp8) reads its scale once per atom step instead, so its block only has to hold
+# whole atom steps and tile the chunk (or be tiled by it).
 _PACKED_BLOCK = 16
 
 #: The fragment dtypes the packed drain is spelled for. Both hold every e2m1 value exactly, so the
@@ -245,26 +247,35 @@ def _chunk_warp_stage(
 
 
 def _packed_warp_stage(c: Fold, tile: Tile, stage: Stage, budget: int, packed, inputs, k_axis: Axis) -> ResolvedStage | None:
-    """Resolve the PACKED byte-slab stage for a packed-pair k-block B — the NVFP4 weight cone.
+    """Resolve the PACKED byte-slab stage for a byte-coded k-block B — the NVFP4 weight cone, or a
+    block-scaled fp8 weight.
 
     The scoped shape, which is what the fragment drain is written for: a copy transport (cp.async or
-    TMA), an
-    N-major packed weight of 16-value blocks under an f16 or bf16 atom whose K step is that same
-    16, and an A already carrying the atom's dtype. Everything outside it declines and stays on the generic
-    computed-B reading, which computes the same values through the sync compute-fill.
+    TMA), an N-major byte-coded weight under an f16 or bf16 atom with a K step of 16, and an A
+    already carrying the atom's dtype. A packed pair's block is that same 16; a one-value byte's
+    block holds whole atom steps and tiles the chunk or is tiled by it, so every drain step reads
+    one scale. Everything outside it declines and stays on the generic computed-B reading, which
+    computes the same values through the sync compute-fill.
 
-    The sizing is the fp8 byte slab's rule restated in the format's own units. One stored byte is
-    two K elements, so the bits row is ``bk_elems / 2`` BYTES plus the cp.async row pad, and it
-    must be 16-divisible for the same reason the fp8 one is: the fill copies 16 B chunks and a
-    chunk never straddles a row. The gmem rows those chunks stride are ``K / 2`` bytes, so that
-    span is 16-divisible too. On top of the ring the budget carries ONE scale slab, ``tile_n ×
-    bk_elems / block`` at the atom's element width — single-buffer, because it is compute-filled
-    and ringing a compute fill buys no overlap.
+    The sizing is the fp8 byte slab's rule restated in the weight's own units. One stored byte is
+    ``per_byte`` K elements, so the bits row is ``bk_elems / per_byte`` BYTES plus the cp.async
+    row pad, and it must be 16-divisible for the same reason the fp8 one is: the fill copies 16 B
+    chunks and a chunk never straddles a row. The gmem rows those chunks stride are ``K /
+    per_byte`` bytes, so that span is 16-divisible too. On top of the ring the budget carries ONE
+    scale slab, ``tile_n`` rows of one scale per block the chunk touches — single-buffer, because
+    it is compute-filled and ringing a compute fill buys no overlap. A packed pair's scale slab
+    holds the atom's element width; a one-value byte's holds f32, the dtype its scale multiplies
+    the decoded value in before the round to the fragment.
     """
     atom = tile.atom
     if stage.transport not in ("smem-async", "smem-tma"):
         return None  # the sync compute fill has nothing to copy under, and split cuts a group this fold has one of
-    if packed.block != _PACKED_BLOCK or atom.atom_k != _PACKED_BLOCK or atom.fragment_layout != "m16n8k16":
+    if atom.atom_k != _PACKED_BLOCK or atom.fragment_layout != "m16n8k16":
+        return None
+    bk_elems = tile.bk * atom.atom_k
+    if packed.per_byte == 2 and packed.block != _PACKED_BLOCK:
+        return None
+    if packed.block % atom.atom_k or (packed.block % bk_elems and bk_elems % packed.block):
         return None
     a_dtype, b_dtype = atom.operand_dtype("a"), atom.operand_dtype("b")
     if a_dtype != b_dtype or a_dtype.name not in _PACKED_FRAGMENT_DTYPES:
@@ -279,14 +290,15 @@ def _packed_warp_stage(c: Fold, tile: Tile, stage: Stage, budget: int, packed, i
     # A COMPUTED A has no gmem tensor to match: it evaluates into its slab at the atom's operand
     # dtype, converting on the store, which is the compute fill's own contract.
 
-    if bits.dtype.logical_elems != 2 or len(bits.shape) != 2 or len(packed.bits.index) != 2:
+    per_byte = packed.per_byte
+    if bits.dtype.nbytes != 1 or bits.dtype.logical_elems != per_byte or len(bits.shape) != 2 or len(packed.bits.index) != 2:
         return None
     if k_axis.name not in packed.bits.index[-1].free_vars():
         return None  # a K-strided packed weight is not the N-major layout the drain reads
     if not k_axis.extent.is_static:
         return None
-    k, bk_elems = k_axis.extent.as_static(), tile.bk * atom.atom_k
-    if tile.n.mask or k % bk_elems or (bk_elems // 2) % 16 or (k // 2) % 16:
+    k = k_axis.extent.as_static()
+    if tile.n.mask or k % bk_elems or (bk_elems // per_byte) % 16 or (k // per_byte) % 16:
         return None
     # A TMA box deposits DENSE, so the byte rows carry no pad — the same split the fp8 byte slab
     # makes. Its extra demands are the hardware's: every box dim within the 256 limit, and a
@@ -294,12 +306,12 @@ def _packed_warp_stage(c: Fold, tile: Tile, stage: Stage, budget: int, packed, i
     # already 16-divisible by the rule above; A's is ``bk_elems`` and ``k`` at two bytes each.
     pad = 0 if stage.transport == "smem-tma" else BYTE_SLAB_PAD
     if stage.transport == "smem-tma":
-        if max(tile.m.tile, tile.n.tile, bk_elems, bk_elems // 2) > _TMA_MAX_BOX:
+        if max(tile.m.tile, tile.n.tile, bk_elems, bk_elems // per_byte) > _TMA_MAX_BOX:
             return None
         if (bk_elems * a_dtype.nbytes) % _TMA_ALIGN or (k * a_dtype.nbytes) % _TMA_ALIGN:
             return None
-    slot_bytes = tile.m.tile * bk_elems * a_dtype.nbytes + tile.n.tile * (bk_elems // 2 + pad)
-    scale_bytes = tile.n.tile * (bk_elems // packed.block) * b_dtype.nbytes
+    slot_bytes = tile.m.tile * bk_elems * a_dtype.nbytes + tile.n.tile * (bk_elems // per_byte + pad)
+    scale_bytes = tile.n.tile * packed.scale_cols(bk_elems) * (b_dtype.nbytes if per_byte == 2 else 4)
     if scale_bytes + slot_bytes > budget:
         return None
     depth = _clamp_depth(stage.depth, slot_bytes, budget - scale_bytes)

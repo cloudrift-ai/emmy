@@ -649,12 +649,13 @@ class Operand:
     # misaligned addresses + overlapped data (the Gemma ``k_linear_reduce`` bench_fail cluster).
     dtype: str | None = None
     elem_bytes: int | None = None
-    # The companion BLOCK-SCALE slab of a PACKED-PAIR operand (NVFP4 weights) — ``(slab name, the
-    # k block the scale spans)``. One stored byte is two logical K elements and every ``block`` of
-    # them share one scale, so the drain reads this slab beside the bits and applies the scale as
-    # it decodes. The scale slab itself is a :class:`SyncOperand`: its values are DECODED from the
-    # checkpoint's e4m3 codes, which is compute, not a copy. ``None`` on every other operand.
-    scale: tuple[str, int] | None = None
+    # The companion BLOCK-SCALE slab of a BYTE-CODED operand (NVFP4 or block-scaled fp8 weights) —
+    # ``(slab name, the k block the scale spans, logical k per byte)``. One stored byte is one or
+    # two logical K elements and every ``block`` of them share one scale, so the drain reads this
+    # slab beside the bits and applies the scale as it decodes. The scale slab itself is a
+    # :class:`SyncOperand`: its values are evaluated off the weight's scale cone, which is compute,
+    # not a copy. ``None`` on every other operand.
+    scale: tuple[str, int, int] | None = None
 
     @property
     def slab(self) -> str:
@@ -696,11 +697,16 @@ class SyncOperand:
     # cp.async fill uses) and read back by the ``ldmatrix`` drain. NONE outside the mma tier
     # (a plain-``Load`` drain cannot read a swizzled slab).
     swizzle: str = "NONE"
-    # The companion block-scale slab, ``(slab, block)`` — the same fact the copied :class:`Operand`
-    # carries, on the filled side. A block-scaled operand whose codes this matmul COMPUTES fills
-    # its own slab and still hands the drain the stored scales beside it, so the drain must read
-    # the pairing off either kind.
+    # The companion block-scale slab, ``(slab, block, per_byte)`` — the same fact the copied
+    # :class:`Operand` carries, on the filled side. A block-scaled operand whose codes this matmul
+    # COMPUTES fills its own slab and still hands the drain the stored scales beside it, so the
+    # drain must read the pairing off either kind.
     scale: tuple | None = None
+    # This slab's OWN element dtype / size, when it differs from the transport's ``slab_dtype`` /
+    # ``elem_bytes`` — an fp8 weight's block-scale slab keeps its f32 scale beside 16-bit operand
+    # slabs. ``None`` inherits the transport's.
+    dtype: str | None = None
+    elem_bytes: int | None = None
 
     @property
     def slab(self) -> str:
@@ -805,7 +811,13 @@ class SyncTransport:
 
         decls = [
             *(
-                slab_smem(op.slab, op.shape[0], op.shape[1], self.slab_dtype, align=_fill_align(op.shape[1], self.elem_bytes, op.swizzle))
+                slab_smem(
+                    op.slab,
+                    op.shape[0],
+                    op.shape[1],
+                    op.dtype or self.slab_dtype,
+                    align=_fill_align(op.shape[1], op.elem_bytes or self.elem_bytes, op.swizzle),
+                )
                 for op in self.operands
             ),
             *(peer(op, ring * op.shape[0]) for op in self.copy_operands),
@@ -952,7 +964,7 @@ class SyncTransport:
             if op.producer is not None:
                 continue  # a scheduled producer fills the whole slab in its own segment
             rows, cols = op.shape
-            v = _cp_async_width(cols, self.elem_bytes)
+            v = _cp_async_width(cols, op.elem_bytes or self.elem_bytes)
             fe = Axis(name=f"_f{op.tag}", extent=(rows * cols) // v)
             base = _mul(Var(fe.name), _lit(v))
             row = BinaryExpr("/", base, _lit(cols))  # constant across the run: v divides cols
