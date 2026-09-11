@@ -628,6 +628,8 @@
  "tests/compiler/realization/test_realization.py::test_case_derived_half_is_current[reduce/cross-cta-flash-kernel.yaml]": 0.06,
  "tests/compiler/realization/test_realization.py::test_case_derived_half_is_current[reduce/fused-add-rms-norm-escaping-residual.yaml]": 0.06,
  "tests/compiler/realization/test_realization.py::test_case_derived_half_is_current[reduce/fused-add-rms-norm.yaml]": 0.06,
+ "tests/compiler/realization/test_realization.py::test_realization[attention/f16-sdpa-oproj-residual-computed-a-sm90.yaml-built]@cuda": 16.42,
+ "tests/compiler/realization/test_realization.py::test_realization[attention/f16-sdpa-oproj-residual-computed-a-sm90.yaml-offered]": 0.57,
  "tests/compiler/realization/test_realization.py::test_realization[attention/f16-sdpa-oproj-residual-computed-a-sm90.yaml-realized]": 9.06,
  "tests/compiler/realization/test_realization.py::test_realization[attention/rmsnorm-gqa-b-cut.yaml-offered]": 1.91,
  "tests/compiler/realization/test_realization.py::test_realization[attention/rmsnorm-gqa-b-cut.yaml-realized]": 2.5,
