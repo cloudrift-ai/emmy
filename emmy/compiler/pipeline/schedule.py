@@ -46,8 +46,6 @@ def fork_schedule(
     row_prefix: Mapping,
     materialize: Callable[[Schedule, dict], object],
     pool_id: str,
-    pool_bound: int,
-    pool_descent_bound: int,
     sample=None,
 ) -> list[Fork]:
     """Build and optionally sample a lazy fork tree from a semantic schedule context."""
@@ -62,8 +60,6 @@ def fork_schedule(
         row_delta=codec.delta,
         leaf=leaf,
         pool_id=pool_id,
-        pool_bound=pool_bound,
-        pool_descent_bound=pool_descent_bound,
     )
     if sample is None:
         return roots

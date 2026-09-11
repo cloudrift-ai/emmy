@@ -25,11 +25,7 @@ from __future__ import annotations
 
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.schedule.classic import ClassicScheduleCodec, ClassicScheduleContext
-from emmy.compiler.ir.schedule.classic_projection import (
-    ClassicProjectionError,
-    materialize_classic,
-    project_classic,
-)
+from emmy.compiler.ir.schedule.classic_projection import ClassicProblem, materialize_classic
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.ops import carries_partition, merges_partition
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
@@ -46,28 +42,40 @@ from emmy.compiler.structural import digest
 PATTERN = [Pattern("root", TileOp)]
 
 
+def pin_row(*, split_consumed: bool, tolerate_kernel_pins: bool) -> dict[str, str]:
+    """The environment's schedule pins as one knob row — the source every site reads, the same
+    way it reads a golden row. A kernel that consumed a split (``split_consumed``) reads a
+    ``REDUCE`` pin without the ``g<n>`` half the split already took."""
+    row: dict[str, str] = {}
+    for family in ("WORK", "TILE", "REDUCE", "STAGE", "RASTER"):
+        for key, value in family_pins(family):
+            if split_consumed and family == "REDUCE":
+                value = "/".join(part for part in value.split("/") if not part.startswith("g"))
+            row[key] = value
+    return row
+
+
 def classic_forks(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
-    """Adapt the classic semantic enumeration to the pipeline's lazy search tree."""
+    """Adapt the classic semantic enumeration to the pipeline's lazy search tree: one unexpanded
+    root over the problem, its sites sourced from the environment's pins where they name them."""
     from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, FP8_MMA, precision_pin  # noqa: PLC0415
 
-    try:
-        domains = project_classic(tile, ctx)
-    except ClassicProjectionError:
-        return []
     # A bare WORK / RASTER / REDUCE pin is published across the kernels a split minted and names the
     # partial (a warp ``WORK``, a ``coop`` band), not its finalize, which folds one partial per split
     # per cell serially: the finalize keeps its own domain instead of refusing every row and falling
     # unmapped. The partial, like every other kernel, keeps every verdict, and the post-compile pin
     # check still asks that SOME kernel realized the pin.
     peer = merges_partition(tile)
-    context = ClassicScheduleContext(tile, ctx, domains).restrict(
-        {family: family_pins(family) for family in ("WORK", "TILE", "REDUCE", "STAGE", "RASTER")},
-        split_consumed=tile.split_consumed or carries_partition(tile),
+    problem = ClassicProblem(
+        tile,
+        ctx,
+        row=pin_row(split_consumed=tile.split_consumed or carries_partition(tile), tolerate_kernel_pins=peer),
         allow_f16_accumulate=precision_pin(F16_MMA_F32_ACC) is True,
         allow_fp8=precision_pin(FP8_MMA) is True,
         validate_pins=ctx.validate_pins,
         tolerate_kernel_pins=peer,
     )
+    context = ClassicScheduleContext(tile, ctx, problem)
     codec = ClassicScheduleCodec(context)
     pool_id = digest(
         tile.identity_key(with_io=True) or "",
@@ -77,12 +85,7 @@ def classic_forks(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
         schedule_pin_fingerprint(),
         tile.split_consumed,
     )
-    warp = any(choice.tile.is_warp for choices in domains.nodes.values() for choice in choices)
-    prefix = dict.fromkeys(SCHEDULE_FORK_STAMPS, 1.0) if warp else {}
-    descent_bound = len(domains.kernel) + sum(
-        len(choices) * max((len(domains.edges[edge]) for edge in domains.edges if edge[0] == site), default=1)
-        for site, choices in domains.nodes.items()
-    )
+    prefix = dict.fromkeys(SCHEDULE_FORK_STAMPS, 1.0) if problem.warp_eligible else {}
     return fork_schedule(
         context,
         codec=codec,
@@ -96,8 +99,6 @@ def classic_forks(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
             assignment=assignment,
         ),
         pool_id=pool_id,
-        pool_bound=domains.product_size,
-        pool_descent_bound=descent_bound,
         sample=getattr(ctx, "pool_sample", None),
     )
 

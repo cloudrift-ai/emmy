@@ -45,6 +45,7 @@ from emmy.compiler.ir.schedule.classic import (
     parse_edge_site,
     parse_node_id,
 )
+from emmy.compiler.ir.schedule.classic_projection import ClassicProblem
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, TileOp
 from emmy.compiler.pipeline.fork import DeferredFork, iter_leaves, schedule_forks
@@ -78,6 +79,12 @@ def _leaf_nodes(tile: TileOp) -> dict:
     """The one schedule every zero-axis site takes — a slab is a site of its own, so a hand-built
     assignment covers it beside the reduce site it feeds."""
     return {site: ProjectionSchedule(Tile()) for site, view in enumerate(tile.views) if view.axis is None}
+
+
+def _literal(problem: tuple[TileOp, object], domains: ClassicDomains, *, order=None, **problem_fields) -> ClassicScheduleContext:
+    """A context over hand-written factors: the literal oracle the tests compose against."""
+    tile, target = problem
+    return ClassicScheduleContext(tile, target, ClassicProblem(tile, target, domains_literal=domains, **problem_fields), order=order)
 
 
 def _direct(context: ClassicScheduleContext) -> ClassicAssignment:
@@ -237,10 +244,11 @@ def test_domains_are_independent_projections_of_static_support() -> None:
     site = context.tile_op.node_sites[0]
     edge = context.tile_op.edge_sites[0]
 
-    projected = ClassicScheduleContext(*problem, domains)
-    assert projected.kernels == domains.kernel
-    assert projected.node_choices(site) == domains.nodes[site]
-    assert projected.edge_choices(edge) == domains.edges[edge]
+    projected = _literal(problem, domains).problem
+    assert projected.kernel_site.kernels == domains.kernel
+    assert projected.node_site(site).nodes == domains.nodes[site]
+    assert projected.node_site(edge[0]).edges == domains.edges[edge]
+    assert projected.domains == domains
 
 
 def test_context_indexes_finite_domain_membership(monkeypatch) -> None:
@@ -250,7 +258,7 @@ def test_context_indexes_finite_domain_membership(monkeypatch) -> None:
         KernelSchedule(Work(), Raster()),
     )
     domains = ClassicDomains(many_kernel_choices, domains.nodes, domains.edges)
-    context = ClassicScheduleContext(*problem, domains)
+    context = _literal(problem, domains)
     equals = KernelSchedule.__eq__
     calls = 0
 
@@ -270,7 +278,7 @@ def test_reference_is_the_compatible_cartesian_subset() -> None:
     problem = _problem(_contraction())
     domains = _finite_domains(problem)
 
-    context = ClassicScheduleContext(*problem, domains)
+    context = _literal(problem, domains)
     assignments = list(classic_cartesian_assignments(context))
 
     assert {_schedule_signature(schedule) for schedule, verdict in assignments if verdict} == {
@@ -282,31 +290,29 @@ def test_reference_is_the_compatible_cartesian_subset() -> None:
 def test_every_lazy_traversal_equals_the_cartesian_reference() -> None:
     problem = _problem(_contraction())
     domains = _finite_domains(problem)
-    context = ClassicScheduleContext(*problem, domains)
+    context = _literal(problem, domains)
     reference = {_schedule_signature(schedule) for schedule in enumerate_classic_reference(context)}
 
     for traversal in permutations(context.tile_op.node_sites):
-        reordered = ClassicScheduleContext(*problem, domains, order=traversal)
+        reordered = _literal(problem, domains, order=traversal)
         assert {_schedule_signature(schedule) for schedule in _enumerate_context(reordered)} == reference
 
 
 def test_every_lazy_traversal_equals_algorithm_one_under_pinned_c() -> None:
     problem = _problem(_contraction())
     domains = _finite_domains(problem)
-    pins = {family: () for family in ("WORK", "TILE", "REDUCE", "STAGE", "RASTER")}
-    pins["RASTER"] = (("RASTER", ""),)
-    context = ClassicScheduleContext(*problem, domains).restrict(pins)
+    context = _literal(problem, domains, row={"RASTER": ""})
     reference = {_schedule_signature(schedule) for schedule in enumerate_classic_reference(context)}
 
     for traversal in permutations(context.tile_op.node_sites):
-        actual = _enumerate_context(ClassicScheduleContext(*problem, domains, order=traversal).restrict(pins))
+        actual = _enumerate_context(_literal(problem, domains, order=traversal, row={"RASTER": ""}))
         assert {_schedule_signature(schedule) for schedule in actual} == reference
 
 
 def test_extend_accepts_a_complete_schedule_at_the_root_or_matching_prefix() -> None:
     problem = _problem(_contraction())
     domains = _finite_domains(problem)
-    context = ClassicScheduleContext(*problem, domains)
+    context = _literal(problem, domains)
     wanted = next(enumerate_classic_reference(context))
 
     assert context.extend(wanted).assignment == wanted
@@ -326,6 +332,9 @@ def test_context_rejects_incomplete_or_duplicate_composition_orders() -> None:
 
 
 def test_an_authored_tile_bypasses_enumeration_precision_policy() -> None:
+    """The precision policy filters the CATALOG: with f16 accumulation disallowed the site offers no
+    f16-accumulate atom. A row naming such a tile is an authored, legal independent choice and the
+    site offers exactly it — the policy is a property of unpinned enumeration, never of a parse."""
     root = _contraction()
     m, n = Axis("m", 8), Axis("n", 8)
     source = TileOp(
@@ -335,29 +344,18 @@ def test_an_authored_tile_bypasses_enumeration_precision_policy() -> None:
         inputs={"a": Tensor("a", (8, 16), "f16"), "b": Tensor("b", (16, 8), "f16")},
         outputs={"out": Tensor("out", (8, 8), "f16")},
     )
-    problem = (source, Context.from_target((12, 0)))
-    base = ClassicScheduleContext(*problem)
-    site = base.tile_op.node_sites[0]
+    target = Context.from_target((12, 0))
+    site = source.node_sites[0]
     tile = Tile(atom=ATOM_REGISTRY["mma_m16n8k16_f16_f16"], units=(1, 4), regs=(2, 2))
-    node = ReductionSchedule(tile, Reduce())
-    nodes = {**_leaf_nodes(base.tile_op), site: node}
-    edges = {edge: EdgeSchedule(Stage.direct()) for edge in base.tile_op.edge_sites}
-    domains = ClassicDomains(
-        kernel=(KernelSchedule(Work.parse("w1x4"), Raster()),),
-        nodes={site: (choice,) for site, choice in nodes.items()},
-        edges={edge: (choice,) for edge, choice in edges.items()},
-    )
-    schedule = Schedule(domains.kernel[0], nodes, edges)
 
-    policy_only = ClassicScheduleContext(*problem, domains).restrict({}, allow_f16_accumulate=False)
-    with pytest.raises(ScheduleRefused, match="precision restriction"):
-        policy_only.extend(schedule)
+    policy_only = ClassicProblem(source, target, allow_f16_accumulate=False)
+    offered = policy_only.node_site(site).nodes
+    assert offered and all(not (choice.tile.is_warp and choice.tile.atom.operand_dtype("c").nbytes == 2) for choice in offered)
 
-    authored = ClassicScheduleContext(*problem, domains).restrict(
-        {"TILE": (("TILE", tile.spell()),)},
-        allow_f16_accumulate=False,
-    )
-    assert authored.extend(schedule).assignment == schedule
+    authored = policy_only.with_row({"WORK": "w1x4", "TILE": tile.spell()})
+    assert [choice.tile for choice in authored.node_site(site).nodes] == [tile]
+    schedule = next(iter(_enumerate_context(ClassicScheduleContext(source, target, authored))))
+    assert schedule.nodes[site].tile == tile
 
 
 def test_node_ids_are_integers_with_one_wire_spelling() -> None:
@@ -515,8 +513,8 @@ def test_generic_fork_adapter_drives_a_schedule_context_lazily() -> None:
     problem = _problem(_sum())
     inventory = ClassicScheduleContext(*problem)
     direct = _direct(inventory)
-    context = ClassicScheduleContext(
-        *problem,
+    context = _literal(
+        problem,
         ClassicDomains(
             kernel=(direct.kernel,),
             nodes={site: (choice,) for site, choice in direct.nodes.items()},
@@ -535,11 +533,10 @@ def test_generic_fork_adapter_drives_a_schedule_context_lazily() -> None:
         row_delta=lambda before, after: {"position": str(after.position - before.position)},
         leaf=leaf,
         pool_id="test",
-        pool_bound=1,
-        pool_descent_bound=1,
     )
 
     assert forks and not accepted
+    assert forks[0].pool_bound == 1 and forks[0].pool_descent_bound == 2  # the bounds read off the problem, lazily
     assert tuple(iter_leaves(forks))
     assert accepted
 
