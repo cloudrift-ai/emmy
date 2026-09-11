@@ -1,6 +1,132 @@
 # Golden-bench kernel corpus
 
-## Platform h100x1 — hand-tuned common corpus and the wgmma tier (2026-09-10)
+## Platform h100x1 — retune on main after the wgmma fixes (2026-09-11)
+
+### Question and scope
+
+The 2026-09-10 rows below were recorded at `2d4f9510`, before the atom-major wgmma B (#782) and the H100 hardware
+golden (#787) landed. Replayed on main `f01a23e7` they no longer all deploy: the decode v_proj + 1-key SDPA target
+picks a 43 µs tensor-core child where its recorded route measured 10.9, because the child receipts name kernel
+identities the current lowering no longer produces, and the decode down_proj still runs the 223 µs cold pick. This
+pass re-tunes every losing target by hand (`emmy tune` was not used: eight rounds of pinned `emmy run --strict`,
+about 190 measured rows, fresh tune DB per row) and re-records all eighteen targets on main from a stripped
+inventory, so every row in the two files carries a main identity and a strict verdict. Same goldens, same lane form,
+same host as the section below.
+
+### Protocol
+
+The same `a3-highgpu-1g` SPOT VM as the section below (H100 80GB HBM3, driver 580.173.02, nvcc 12.9, PyTorch
+2.14.0+cu130). Tuning: every candidate is one `emmy run --golden <working copy> --realization <target> --bench
+--strict --bench-backends eager,emmy` process under an `EMMY_KNOBS` pin, against its own empty tune DB (a
+`bench_fail` row left by an earlier candidate silently disqualifies later pins of the same kernel), at deployable
+`-O3`, 10 warmups and 100 iterations. Recording: the two committed files were stripped to their inventory rows and
+every target re-recorded with `--record-greedy` under its winning pin, one run per kernel set and two for the MLP and
+softmax × V cuts; receipts that a later run of the same target superseded were pruned so each kernel identity keeps
+its fastest strict-correct receipt. Both files then replayed unpinned from a fresh DB (`--strict`, eager, Inductor
+and Emmy in one process) and deployed the intended kernel set on every target. The lane is one
+`emmy bench experiments/golden-bench-2026/kernels --ssh … --filter deploy.gpu=…` invocation from a clean checkout at
+`f8debb51`, run `20260911T091850Z`, five strict repeats per sequence length.
+
+### Result summary
+
+Medians of the five strict repeats; Inductor from the torch-compile lane of the same task; the 09-10 ratio is the
+section below. Decode: nine of nine targets correct on every repeat (the task status is failed because Inductor cannot
+compile the score-statistics target and the strict walk counts that). Prefill: seven of nine measured and correct on
+every repeat; softmax × V deploys a correct route but its inventory row's own pinned replay picks a wrong split, and
+the two attention forms below it have no runnable row, so the task status is failed by design.
+
+| decode (sequence length 1) | eager | Inductor | Emmy | Inductor / Emmy | 09-10 | launches |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| input RMSNorm | 114.1 | 2.77 | **2.25** | **1.23** | 1.25 | 1 |
+| q_proj + q_norm statistic | 4.22 | 2.73 | 4.21 | 0.65 | 0.59 | 2 |
+| k_proj + cast | 29.6 | 4.62 | 5.38 | 0.86 | 0.84 | 2 |
+| v_proj | 30.0 | 4.16 | 4.69 | 0.89 | 0.83 | 2 |
+| v_proj + 1-key SDPA (softmax-reduce cut) | 9.18 | 8.29 | 9.88 | 0.84 | 0.75 | 2 |
+| 1-key SDPA + o_proj + residual | 12.4 | 9.12 | **8.40** | **1.09** | 1.04 | 4 |
+| post-norm + gate/up + SiLU (statistic cut) | 124.5 | 7.48 | 15.97 | 0.47 | 0.30 | 2 |
+| down_proj + residual (tensor-core split) | 7.82 | 3.66 | 5.72 | 0.64 | 0.02 | 2 |
+| q/k norm + RoPE + score statistics | 307.4 | Inductor compile failed | 2.58 | — | — | 1 |
+
+| prefill (sequence length 512) | eager | Inductor | Emmy | Inductor / Emmy | 09-10 | launches |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| input RMSNorm | 175.0 | 6.02 | **2.87** | **2.10** | 2.20 | 1 |
+| q_proj + statistic (wgmma n64) | 5.08 | 5.00 | 5.66 | 0.88 | 0.70 | 1 |
+| k_proj + cast (wgmma n64) | 66.6 | 9.15 | **7.70** | **1.19** | 1.03 | 1 |
+| v_proj (wgmma n64) | 42.3 | 7.50 | **5.76** | **1.30** | 0.99 | 1 |
+| softmax × V (V-projection cut) | 16.9 | 17.1 | 110.4 | 0.15 | 0.12 (wrong) | 2 |
+| post-norm + gate/up + SiLU (statistic cut) | 194.8 | 23.4 | 41.5 | 0.56 | 0.17 | 2 |
+| down_proj + residual (wgmma n64, producer band) | 11.4 | 11.5 | 13.25 | 0.87 | 0.63 | 1 |
+| SDPA + o_proj + residual | — | — | every form hangs | — | — | — |
+| q/k norm + RoPE + score statistics | — | — | fails to lower | — | — | — |
+
+Run-to-run spread over the five repeats stayed within 3% on every measured target.
+
+### What the retune found
+
+- **A one-warpgroup wgmma tile over a two-deep TMA ring is the prefill linear row.** `w4x1`, `wgmma_m64n64k16`,
+  `f1x8/k4`, `d2/smem-tma`: 256 CTAs for q_proj, 128 for k_proj and v_proj, two waves or one. The 8-warp form, the
+  128- and 256-wide instruction tiles, deeper rings and a producer band all lose on these short grids (q_proj n128
+  9.3 µs, n256 13.8, `w8x1` 8.2-11.1; v_proj `d3` 7.0 vs `d2` 5.8). k_proj and v_proj now beat Inductor; q_proj, which
+  carries the q_norm statistic in its epilogue, closes from 0.70 to about 0.9.
+- **The prefill down_proj wants the producer band.** K=3072 on 128 CTAs: `w4x1+p2` over `d4/smem-tma` runs 13.3 µs
+  against 15.9 for the uniform 4-warp form and 18.7 for the recorded mma.sync row. Every split (`g2k`, `g4k`, with and
+  without the residual cut) fails strict by 8-12 elements at 4 fp16 ulps: the fused-residual rounding defect below.
+- **Both MLP forms cut at the norm's map, not at the norm.** The recorded `PLACE@map.2/inner.1/map=cut` seam of the
+  09-10 files leaves the whole RMSNorm in the producer piece, which lowers as a direct kernel with no schedule fork
+  (12 µs decode, 92 µs prefill for a 1024-wide norm). One level deeper, `PLACE@map.2/inner.1/map.3/map=cut` keeps only
+  the statistic in the producer, which schedules as an ordinary cooperative reduce (1.6 µs decode, 2.3 prefill), and
+  folds the scale into the GEMM's A operand. That A is computed, so only the synchronous `smem` fill resolves for the
+  GEMM piece (`smem-async` and TMA raise `STAGE pin does not resolve`), which keeps wgmma at 28.7 µs for the
+  512×6144×1024 gate/up GEMM (n128 33.2). The decode GEMV piece cannot split (`the head fold is nested inside the
+  projection's sweep loop`), so it runs a two-warp mma.sync strip at 13.4 µs; the cooperative form sits on 24 CTAs at
+  19 µs.
+- **A cut whose pieces want different rows is recorded in two pinned runs.** A bare `WORK` / `REDUCE` pin reaches
+  every piece of a cut, and a value one piece cannot spell drops that piece to its unscheduled form. Recording the
+  statistic piece under `WORK=t128,REDUCE=coop` and the GEMM piece under its tensor-core pin, into the same file,
+  leaves one routing row and two receipts per piece; the unpinned strict-evidence replay then takes the fastest
+  measured receipt per kernel (verified on the decode MLP: 1.6 + 19.0 µs from a file whose other receipts read
+  46.5 and 9.1).
+- **The decode down_proj's cooperative rows fail strict; its tensor-core rows pass.** Every `coop-t` row, split or
+  not, cut or not, is off at the same element (index 225, four fp16 ulps) — so the difference is in the GEMV's own
+  accumulation, not in where the residual rounds. An mma.sync strip accumulates like the reference and passes:
+  `w2x1`, `f1x8/k4`, `d2/smem-tma`, `g16k` runs 3.6 + 1.1 µs, from the 223 µs cold pick, at 0.64× Inductor.
+- **The decode v_proj + 1-key SDPA recovers through the softmax reduce.** `PLACE@map.1/map.1/reduce=cut`
+  materializes the one-key softmax statistic (3.2 µs) and leaves the projection and the weighted sum to one
+  tensor-core kernel (6.5 µs): 10.0 µs, against the recorded route's 10.9 and Inductor's 8.1. Pins on top of that
+  seam only hurt (a `coop-t` GEMV piece there runs 90 µs).
+- **The decode GEMVs stay at the two-launch floor.** The single-launch cooperative forms sit on 4-8 CTAs (6.7-6.9
+  µs); a cross-CTA split fills the card at the price of a combine launch (q_proj 2.0 + 1.1, k_proj 2.9 + 1.3, v_proj
+  2.2 + 1.3 µs). `t512`, `t32x8` and `coop-t/r2` are not rows for these shapes; `t64` runs 22 µs.
+- **The two prefill attention forms have no correct row on main.** Every route of softmax × V — the recorded
+  `PLACE@map.1/twist.2/inner=cut` route, its split-KV variant, a further score/softmax cut, the fused kernel and the
+  scalar fallback — returns a wholesale wrong answer at S=512 (97% of elements, max abs 3.2); the same failure
+  reproduces at the #775 and #782 merge commits, and the archived 09-10 lane already reported this target as
+  failing its strict repeats, so the 147.5 µs number in the section below was never a correct row. SDPA + o_proj +
+  residual builds since #782 but every form hangs past the 2 s kernel watchdog, including the o_proj cut and the
+  attention halves. Both stay inventory rows.
+- **The prefill score-statistics form** still fails to lower (`no extent for coordinates ['in6']`); its root-most
+  cut exceeds the 60 s bench watchdog. Inventory row.
+
+### Systems and provenance
+
+- Host `bench-h100-wgmma-0910-0903-212a` (GCP `a3-highgpu-1g`, SPOT, us-central1-a), one H100 80GB HBM3
+  (`GPU-b9509f7c-dbfc-557b-daba-4eff2fb9420b`), driver 580.173.02, nvcc 12.9.41, PyTorch 2.14.0+cu130, triton 3.8.0,
+  the same image as the 09-10 run; the `id_ed25519` key of the 09-10 memo is gone from the VM (Google rewrites
+  `authorized_keys` from instance metadata), the lane used the `google_compute_engine` key.
+- Tuning ran from a git worktree at main `f01a23e7` imported over the VM's shared venv; the lane staged the branch's
+  tree into `~/.local/share/emmy/h100_x_1/repo`, whose editable install had to be re-pointed at that tree (it pointed
+  at an rsync copy from the #787 session, which the recipe's `./venv/bin/emmy` would have imported instead).
+- Source `f8debb51`, clean staged tree; run directory `2026-09-11_09-18-50`; both task records and both `artifacts.tar.gz` are
+  in the archive. About 190 tuning rows and their `--json` records are host-local under `~/tune2/` on the VM.
+
+### Durable files
+
+- Goldens: `golden/qwen3-06b-s1_h100.golden.yaml`, `golden/qwen3-06b-s512_h100.golden.yaml`, every row recorded on
+  main `f01a23e7`.
+- Raw-results archive: `results_h100x1.tar.gz` (root member `2026-09-11_09-18-50/` with the two `*.experiment.yaml` records
+  and the two `*_artifacts.tar.gz`); it replaces the 2026-09-10 archive.
+
+## Platform h100x1 — earlier hand-tuned corpus and the wgmma tier (2026-09-10; goldens superseded above)
 
 ### Question and scope
 
