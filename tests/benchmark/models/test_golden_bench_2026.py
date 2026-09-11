@@ -267,12 +267,12 @@ def test_search_ablation_is_executable(project_root) -> None:
 def test_mpk_megakernel_lane_is_pinned_and_paired(project_root) -> None:
     directory = _experiment(project_root, "serving_mpk_qwen3_8b_a100")
     tasks = enumerate_tasks([directory])
-    assert len(tasks) == 1
-    task = tasks[0]
+    # One row per A100 part. The archived rows are the 80GB part's; the 40GB part has 1555 GB/s
+    # against 2039, so it measures the same lane at its own bandwidth and is never merged into them.
+    assert [task.recipe.deploy.gpu for task in tasks] == ["NVIDIA A100 80GB", "NVIDIA A100 40GB"]
+    assert all(task.recipe.deploy.gpu_count == 1 for task in tasks)
     recipe = load_recipe(directory)
     assert recipe.kind == "command"
-    assert task.recipe.deploy.gpu == "NVIDIA A100 80GB"
-    assert task.recipe.deploy.gpu_count == 1
 
     run = recipe.command.run
     # Pinned external sources: the mirage mpk-branch revision and the Qwen3-8B checkpoint revision.
@@ -282,8 +282,13 @@ def test_mpk_megakernel_lane_is_pinned_and_paired(project_root) -> None:
     assert "demo/qwen3/demo.py" in run
     assert "--use-mirage" in run
     assert "vllm==0.23.0" in run
+    # No Emmy arm runs here yet — the generative plugin cannot boot Qwen3-8B on sm_80 (#785).
     assert "emmy serve" not in run
     assert "EMMY_GEN_DECODE_BUCKET" not in run
+    # ninja is not a vllm dependency, and its engine shells out to it BY NAME: both the install and
+    # the venv bin on PATH are load-bearing, and without either every stock repeat fails to boot.
+    assert "vllm==0.23.0 ninja" in run
+    assert "export PATH=$repo_dir/venv/bin:" in run
     assert "for repeat in 0 1 2 3 4" in run
     # The suite's deterministic serving controls on the single-stream decode point.
     assert "--ignore-eos --temperature 0 --seed 0" in run
@@ -600,7 +605,7 @@ def test_every_command_variant_renders(project_root) -> None:
             assert "/task" in command
             subprocess.run(["bash", "-n"], input=command, text=True, check=True)
             rendered += 1
-    assert rendered == 95
+    assert rendered == 96
 
 
 def test_gemma_serving_ab_has_four_points_per_lane(project_root) -> None:
