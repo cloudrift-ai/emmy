@@ -2534,6 +2534,12 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
             same_input_reference,
         )
 
+    from emmy.compiler.pipeline.search.golden import records_override  # noqa: PLC0415
+
+    # Pinned rows compile under the golden scope the greedy row did — the target's records, not the
+    # card's whole corpus, which each pinned compile would otherwise replay row by row.
+    with records_override(getattr(args, "_golden_records", None) or None):
+        session = asyncio.run(_bench_session())
     (
         greedy_fail,
         results,
@@ -2548,7 +2554,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
         stats_sym_env,
         correctness,
         same_input_reference,
-    ) = asyncio.run(_bench_session())
+    ) = session
 
     if reference_error is not None:
         logger.error(reference_error)
