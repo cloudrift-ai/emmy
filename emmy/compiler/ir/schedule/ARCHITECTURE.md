@@ -39,7 +39,10 @@ role-less side shares a coordinate with the other side qualifies only while that
 reshape residue); a B that changes with the row it is contracted against is no slab per tile. It derives stable
 node ids,
 operand-edge sites, each site's projection or reduction view, and each contraction's schedule-independent
-`ContractionFacts` — its effective K axis, computed-A cone seam, nested producer, and fragment need.
+`ContractionFacts` — its effective K axis, computed-A cone seam, nested producer, and fragment need. The seam
+(`cone_seam`) splits the cone's edges at the K axis into a row-invariant prologue and a per-cell body, and keeps one
+lowering of a fold two cell edges read (attention's output and its own row sum): the tree forms that fold twice as
+equal nodes, and a fill that replicates the cell per output cell would otherwise declare its states twice.
 `ir/schedule/views` supplies the vocabulary (`node_view`, `Projection`, `Reduction`, `Contraction`,
 `ContractionFacts`) and the one derivation that is not a projection of the site table, `contraction_facts`; the tile
 layer reads through them. The composition context publishes the schedule-facing API (`node`, `site`, `operand`,

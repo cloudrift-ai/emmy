@@ -112,7 +112,9 @@ declaration `copy_cell` does not rename), stay shared, so each copy re-declares 
 loop under the one name, while a name the replicated TAIL defines that is spelled like one of the term's carried
 states is renamed apart first (`_unshadowed`): both would take the same cell suffix and land on that cell's
 accumulator, two declarations of one name in one scope, and a tail that recomputes the carrier's own fold has
-exactly that shape; anything else tiles nothing and folds one thread per
+exactly that shape (a cone that reads one fold through two edges lowers it twice as EQUAL statements instead, which
+the seam and the computed-B fill collapse to the first — `stmt.body.dedup_recomputes` — before any replication);
+anything else tiles nothing and folds one thread per
 output cell (the degenerate `op.lower()` + `with_store`) — except a kernel whose ONLY work is a free output sweep,
 which distributes that sweep across its `WORK` threads through the same `_lane_close` a cooperating reduce uses for
 its projection: each lane owns a strided slice and writes its own cells, so there is no combine and no store guard.
