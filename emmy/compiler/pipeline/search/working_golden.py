@@ -162,7 +162,7 @@ def _append_trace_inventory(
     from emmy.compiler import provenance  # noqa: PLC0415
     from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
     from emmy.compiler.loop_wire import intern_loop_program  # noqa: PLC0415
-    from emmy.compiler.pipeline import LOOP_PASSES, CompilerDump, Pipeline  # noqa: PLC0415
+    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline  # noqa: PLC0415
     from emmy.compiler.pipeline.search.slice import single_node_graph  # noqa: PLC0415
     from emmy.compiler.torch_wire import intern_program  # noqa: PLC0415
 
@@ -198,7 +198,6 @@ def _append_trace_inventory(
     # lowered (especially sibling linears and computed-A cones).  Provenance
     # selectors must therefore resolve against the original trace context.
     program_ref: int | None = None
-    totals = provenance.totals(fused)
     inventory = []
     for node_id, node in targets:
         origins = tuple(sorted(origin for origin in provenance.get(node) if origin in input_graph.nodes))
@@ -231,7 +230,6 @@ def _append_trace_inventory(
                 name = f"{base}.{duplicate}"
                 duplicate += 1
         used_names.add(name)
-        reference = None
         if origins and origin_counts[origins] == 1 and not force_loop_targets:
             target = {"origins": list(origins)}
         else:
@@ -242,17 +240,6 @@ def _append_trace_inventory(
             if seen_loops is not None:
                 seen_loops.add(loop_ref)
             target = {"loop": loop_ref}
-            # The stored kernel stays the identity. Its origins are kept for comparison only, and
-            # only when their PyTorch slice computes exactly what the kernel computes: every
-            # origin whole, the same outputs in the same order. A kernel holding part of an op has
-            # no PyTorch counterpart and keeps the same-input greedy reference.
-            coverage = provenance.coverage(provenance.get(node), totals)
-            if (
-                origins
-                and all(coverage[origin][2] for origin in origins)
-                and CompilerDump.frontend_reproducer_from_origins(input_graph, set(origins)).outputs == loop_graph.outputs
-            ):
-                reference = {"origins": list(origins)}
         if program_ref is None:
             program_ref = intern_program(programs, input_graph)
         if realizations is None:
@@ -264,7 +251,7 @@ def _append_trace_inventory(
                 suffix = row.pop("name")
                 row["name"] = f"{name}.{suffix}" if suffix else name
                 rows.append(row)
-        entry = {"program": program_ref, "target": target, **({"reference": reference} if reference else {}), "realizations": rows}
+        entry = {"program": program_ref, "target": target, "realizations": rows}
         entries.append(entry)
 
 

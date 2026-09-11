@@ -456,16 +456,13 @@ def test_emmy_only_benchmark_does_not_duplicate_inputs_on_torch(monkeypatch):
 
 
 def test_embedded_loop_pins_receive_greedy_output_reference(monkeypatch, tmp_path, caplog):
-    """An exact Loop target whose record names no PyTorch slice has no Torch twin, so pinned replay
-    must compare against the greedy Loop execution."""
+    """Exact Loop targets have no Torch twin, so pinned replay must compare against the greedy Loop execution."""
     from emmy.commands import run as run_module
     from emmy.commands.compile import resolve_golden_arg
     from emmy.compiler.pipeline import Pipeline
 
     path = tmp_path / "working.yaml"
-    document = _working_loop(path, state="verified")
-    document["configs"][0].pop("reference")
-    dump_golden_file(document, path, overwrite=True)
+    _working_loop(path, state="verified")
     args = _args(
         path,
         ir=None,
@@ -578,67 +575,6 @@ def test_embedded_loop_pins_receive_greedy_output_reference(monkeypatch, tmp_pat
     assert exc.value.code == 1
     assert seen == {"want_ref": True}
     assert "requires same-input greedy outputs" in caplog.text
-
-
-def test_embedded_loop_with_a_reference_benches_against_its_pytorch_slice(monkeypatch, tmp_path):
-    """A stored kernel whose record names its PyTorch slice is timed against PyTorch, while the
-    compiled target stays the stored kernel."""
-    from emmy.commands import run as run_module
-    from emmy.commands.compile import resolve_golden_arg
-    from emmy.compiler.backend import torch_ref
-    from emmy.compiler.pipeline import Pipeline
-
-    path = tmp_path / "working.yaml"
-    _working_loop(path)
-    args = _args(
-        path, ir=None, bench=True, ab=None, debug=False, dump_dir=None, bench_backends="emmy,eager", warmup=1, iters=1, seed=0, json=None, profile=False
-    )
-    resolve_golden_arg(args)
-    seen = {}
-
-    class FakePipeline:
-        def run(self, graph, **_kwargs):
-            seen["compiled"] = graph
-            return graph
-
-    class FakeBackend:
-        name = "cuda"
-        tune_db = None
-        bench_compile_timeout_s = 1.0
-        bench_run_timeout_s = 1.0
-
-        def __init__(self, **_kwargs):
-            pass
-
-        async def benchmark_compare_async(self, _graph, **kwargs):
-            seen["torch_spec"] = kwargs["torch_spec"]
-            run_io = ({"x": object()}, {"y": object()})
-            return {"results": {}, "result": None, "captured": False, "torch_available": True, "accuracy_error": None, "run_io": run_io}
-
-        async def aclose_async_worker(self):
-            pass
-
-    class FakeDump:
-        @staticmethod
-        def resolve(_path):
-            return None
-
-    async def no_isolated(*_args, **_kwargs):
-        return None
-
-    async def no_pinned(*_args, **_kwargs):
-        return []
-
-    monkeypatch.setattr(Pipeline, "build", lambda _passes: FakePipeline())
-    monkeypatch.setattr(run_module, "_bench_greedy_isolated", no_isolated)
-    monkeypatch.setattr(run_module, "_bench_golden_variants", no_pinned)
-    monkeypatch.setattr(run_module, "_print_kernel_stats", lambda *_args, **_kwargs: None)
-    run_module._handle_run_ir(args, FakeBackend, FakeDump)
-
-    kind, frontend = seen["torch_spec"]
-    assert kind == "frontend_graph"
-    assert torch_ref.is_runnable(frontend) and frontend.outputs == ["y"]
-    assert isinstance(seen["compiled"].nodes["y"].op, LoopOp)
 
 
 def test_replay_keys_its_cache_by_the_entry_identity(tmp_path):

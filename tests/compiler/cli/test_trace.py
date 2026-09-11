@@ -14,7 +14,7 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import Conv1dOp, LinearOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tensor.ir import CastOp, ElementwiseOp, GatherOp
-from emmy.compiler.pipeline.search.golden import load_golden_file, load_golden_records, validate_golden_file
+from emmy.compiler.pipeline.search.golden import load_golden_file, load_golden_records
 from emmy.compiler.pipeline.search.working_golden import load_working_targets, write_trace_inventories, write_trace_inventory
 
 # An inventory stamps the card its context is for, and reading a record back reconstructs that
@@ -109,8 +109,7 @@ def test_trace_serving_twins_writes_one_exact_inventory_with_explicit_provenance
     assert document["model"] == "cloudriftai/model-exl3@0123456789abcdef0123456789abcdef01234567"
     assert {record.name.split(".", 1)[0] for record in records} == {"pre1@b2", "expert512@b2"}
     assert all(record.loop_wire is not None and not record.origins for record in records)
-    # Each kernel computes one whole op, so each keeps a PyTorch slice to be compared against.
-    assert all(record.reference_origins and torch_ref.is_runnable(record.reference_program) for record in records)
+    assert all(torch_ref.is_runnable(record.reference_program) for record in records)
     assert {(record.bindings, record.pins) for record in records} >= {
         ((("num_tokens", 64),), (("FAST_MATH", False),)),
         ((("num_tokens", 1024),), (("FAST_MATH", True),)),
@@ -367,9 +366,7 @@ def test_trace_inventory_embeds_loop_ir_when_frontend_provenance_is_missing(monk
 
     assert set(document) == {"compute_cap", "programs", "loops", "configs"}
     assert document["configs"][0]["target"] == {"loop": 0}
-    assert "reference" not in document["configs"][0]
     assert record.origins == ()
-    assert record.reference_program is None
     assert isinstance(record.target_program.nodes["y"].op, LoopOp)
     assert record.structural_features["S_pw_relu"] == 1.0
     _document, targets = load_working_targets(path)
@@ -399,55 +396,23 @@ def test_trace_inventory_can_force_exact_loop_targets(tmp_path) -> None:
 
     assert record.origins == ()
     assert record.loop_wire is not None
-    # The stored kernel is the identity; its origins ride beside it for comparison only.
-    assert record.target_key == ("loop", 0)
-    assert record.reference_origins == ("y",)
+    # The stored kernel stays the identity; the PyTorch slice it computes is derived for comparison.
     assert torch_ref.is_runnable(record.reference_program)
     assert record.reference_program.outputs == record.target_program.outputs == ["y"]
 
 
-def test_a_stored_kernel_holding_part_of_an_op_keeps_no_pytorch_reference(monkeypatch, tmp_path) -> None:
+def test_a_stored_kernel_holding_part_of_an_op_has_no_pytorch_reference(monkeypatch, tmp_path) -> None:
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (16,)), node_id="x")
     graph.add_node(ElementwiseOp("relu"), ["x"], Tensor("y", (16,)), node_id="y")
     graph.inputs, graph.outputs = ["x"], ["y"]
+    path = tmp_path / "working.yaml"
+    write_trace_inventory(graph, path, force_loop_targets=True, ctx=_TARGET_CTX)
     monkeypatch.setattr(provenance, "coverage", lambda prov, _totals: {origin: (1, 2, False) for origin in prov})
 
-    path = tmp_path / "working.yaml"
-    write_trace_inventory(graph, path, force_loop_targets=True, ctx=_TARGET_CTX)
-    document = load_golden_file(path)
+    (record,) = load_golden_records(load_golden_file(path))
 
-    assert "reference" not in document["configs"][0]
-    assert load_golden_records(document)[0].reference_program is None
-
-
-@pytest.mark.parametrize(
-    ("reference", "error"),
-    [({"origins": ["missing"]}, "unknown program node"), ({"origins": []}, "non-empty list"), ({"loop": 0}, "beside a loop target")],
-)
-def test_golden_validation_rejects_a_malformed_reference(tmp_path, reference, error) -> None:
-    graph = Graph()
-    graph.add_node(InputOp(), [], Tensor("x", (16,)), node_id="x")
-    graph.add_node(ElementwiseOp("relu"), ["x"], Tensor("y", (16,)), node_id="y")
-    graph.inputs, graph.outputs = ["x"], ["y"]
-    path = tmp_path / "working.yaml"
-    write_trace_inventory(graph, path, force_loop_targets=True, ctx=_TARGET_CTX)
-    document = load_golden_file(path)
-    document["configs"][0]["reference"] = reference
-
-    with pytest.raises(ValueError, match=error):
-        validate_golden_file(document)
-
-
-def test_golden_validation_rejects_a_reference_beside_an_origins_target(tmp_path) -> None:
-    """An origins target is compiled from its own PyTorch slice; a second one would compete with it."""
-    path = tmp_path / "working.yaml"
-    write_trace_inventory(trace_inline_code("torch.relu(torch.randn(8))")["graph"], path, ctx=_TARGET_CTX)
-    document = load_golden_file(path)
-    document["configs"][0]["reference"] = {"origins": document["configs"][0]["target"]["origins"]}
-
-    with pytest.raises(ValueError, match="beside a loop target"):
-        validate_golden_file(document)
+    assert record.reference_program is None
 
 
 def test_exact_loop_targets_disambiguate_same_body_at_distinct_cast_boundaries(tmp_path) -> None:

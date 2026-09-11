@@ -617,14 +617,15 @@ def _run_golden_targets(args) -> None:
         sys.exit(2)
     # Bench each TARGET once. A row named ``<target>.<identity>`` (a routing row or a child-identity
     # schedule receipt) is evidence for its target's walk, not a target of its own: benched as a
-    # whole-target pin it measures nothing real and multiplies the walk by the receipt count.
-    targets: list[str] = []
-    for name in names:
-        parent = ".".join(name.split(".")[:2])
-        target = parent if parent in names else name
-        if target not in targets:
-            targets.append(target)
-    names = targets
+    # whole-target pin it measures nothing real and multiplies the walk by the receipt count. A file
+    # that keeps no seed row benches one of the target's rows instead — the one pricing the whole
+    # target: the fastest routing row, else the fastest row.
+    targets: dict[str, list] = {}
+    for record in records:
+        parent = record.name.rsplit(".", 1)[0]
+        target = parent if parent in names or getattr(record, "identity", None) else record.name
+        targets.setdefault(target, []).append(record)
+    names = [target if target in names else min(rows, key=lambda r: (not r.is_routing, r.emmy_us)).name for target, rows in targets.items()]
 
     output_dir = None
     if len(names) > 1 and args.json:
@@ -2372,9 +2373,10 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
     # Snapshot the pre-lowering frontend graph so we can build a torch
     # reference (eager + torch.compile) and compare accuracy/latency vs torch —
     # the same table the --code path produces for a debug Graph IR input.
-    # Non-frontend IR (loop/tile/…) has no torch twin → emmy-only bench, unless it
-    # is a stored golden kernel whose record names the PyTorch slice it computes.
-    reference = graph if torch_ref.is_runnable(graph) else getattr(args, "_golden_reference", None)
+    # Non-frontend IR (loop/tile/…) has no torch twin → emmy-only bench, unless it is a
+    # stored golden kernel whose embedded program holds the PyTorch slice it computes.
+    records = getattr(args, "_golden_records", None)
+    reference = graph if torch_ref.is_runnable(graph) else (records[0].reference_program if records else None)
     frontend = reference.copy() if reference is not None and torch_ref.is_runnable(reference) else None
     same_input_greedy = strict_correctness and embedded is not None and frontend is None
 

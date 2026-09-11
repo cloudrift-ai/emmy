@@ -34,6 +34,7 @@ _HARDWARE_GOLDENS_DIR = Path(__file__).parent / "goldens"
 _RECIPE_GOLDEN_DIR = "golden"
 _PROGRAM_GRAPH_CACHE: dict[int, tuple[dict, object]] = {}
 _LOOP_GRAPH_CACHE: dict[int, tuple[dict, object]] = {}
+_REFERENCE_CACHE: dict[int, tuple[dict, dict]] = {}
 _SAFE_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 
 
@@ -242,10 +243,6 @@ class GoldenRecord:
     #: model golden is one file per card and uses the flat ``measurements`` block instead; a corpus
     #: case is one file across many cards, which a flat block cannot hold.
     latency: dict | None = None
-    #: The frontend origins a Loop IR target is compared against: the PyTorch slice of the program
-    #: that computes exactly what the stored kernel computes. Comparison only — never read for
-    #: identity, which stays the stored kernel's.
-    reference_origins: tuple[str, ...] = ()
 
     @property
     def is_routing(self) -> bool:
@@ -359,15 +356,30 @@ class GoldenRecord:
 
     @cached_property
     def reference_program(self):
-        """The PyTorch slice a Loop IR target is compared against, or ``None`` without one."""
-        return self._frontend_slice(self.reference_origins) if self.reference_origins else None
+        """The PyTorch slice a stored Loop IR kernel is compared against: the embedded program's ops
+        the kernel computes, every op whole, with the kernel's outputs in its order. ``None`` for a
+        kernel holding part of an op, or one the program no longer lowers to. Comparison only — the
+        stored kernel stays the identity."""
+        if self.loop_wire is None:
+            return None
+        from emmy.compiler.context import Context  # noqa: PLC0415
 
-    def _frontend_slice(self, origins: tuple[str, ...]):
+        cached = _REFERENCE_CACHE.get(id(self.program_wire))
+        if cached is None or cached[0] is not self.program_wire:
+            cached = (self.program_wire, _whole_op_origins(self.program, Context.from_target(self.compute_cap, gpu_name=self.gpu_name or None)))
+            _REFERENCE_CACHE[id(self.program_wire)] = cached
+        found = cached[1].get(json.dumps(self.loop_wire, sort_keys=True))
+        if found is None:
+            return None
+        graph = self._frontend_slice(found[0])
+        graph.outputs = list(found[1])
+        return graph
+
+    def _frontend_slice(self, origins):
         from emmy.compiler.pipeline import CompilerDump  # noqa: PLC0415
         from emmy.compiler.specialize import specialize_program  # noqa: PLC0415
 
-        graph = CompilerDump.frontend_reproducer_from_origins(self.program, set(origins))
-        return specialize_program(graph, dict(self.bindings))
+        return specialize_program(CompilerDump.frontend_reproducer_from_origins(self.program, set(origins)), dict(self.bindings))
 
     @property
     def target_key(self) -> tuple:
@@ -486,22 +498,19 @@ def _validate_latency(latency: object, where: str) -> None:
                 _positive_number(timings[field], f"{where}.{card}.{field}")
 
 
-def _validate_origins(origins: object, *, where: str, program_wire: dict) -> None:
-    if not isinstance(origins, list) or not origins or not all(isinstance(origin, str) and origin for origin in origins):
-        raise ValueError(f"{where}.origins must be a non-empty list of node ids")
-    node_ids = {node["id"] for node in program_wire["nodes"]}
-    missing_origins = set(origins) - node_ids
-    if missing_origins:
-        raise ValueError(f"{where}.origins reference unknown program node(s): {', '.join(sorted(missing_origins))}")
-
-
 def _validate_target(target: object, *, index: int, program_wire: dict, loops: list[dict]) -> None:
     where = f"configs[{index}].target"
     if not isinstance(target, Mapping):
         raise ValueError(f"{where} must be a mapping")
     _require_keys(target, {"origins", "loop"}, where)
     if set(target) == {"origins"}:
-        _validate_origins(target["origins"], where=where, program_wire=program_wire)
+        origins = target["origins"]
+        if not isinstance(origins, list) or not origins or not all(isinstance(origin, str) and origin for origin in origins):
+            raise ValueError(f"{where}.origins must be a non-empty list of node ids")
+        node_ids = {node["id"] for node in program_wire["nodes"]}
+        missing_origins = set(origins) - node_ids
+        if missing_origins:
+            raise ValueError(f"{where}.origins reference unknown program node(s): {', '.join(sorted(missing_origins))}")
         return
     if set(target) == {"loop"}:
         loop_ref = target["loop"]
@@ -552,7 +561,7 @@ def validate_golden_file(
         where = f"configs[{index}]"
         if not isinstance(entry, Mapping):
             raise ValueError(f"{where} must be a mapping")
-        _require_keys(entry, {"model", "program", "target", "reference", "realizations"}, where)
+        _require_keys(entry, {"model", "program", "target", "realizations"}, where)
         if entry.get("model") is not None and not isinstance(entry["model"], str):
             raise ValueError(f"{where}.model must be a string")
         program_ref = entry.get("program")
@@ -561,12 +570,6 @@ def validate_golden_file(
         # The pool check above already decoded every program. A whole-model inventory points
         # hundreds of configurations at a handful of programs, so do not decode again per config.
         _validate_target(entry.get("target"), index=index, program_wire=programs[program_ref], loops=loops)
-        if "reference" in entry:
-            # An origins target is its own PyTorch slice; only a stored kernel needs one named.
-            reference = entry["reference"]
-            if not isinstance(reference, Mapping) or set(reference) != {"origins"} or "loop" not in entry["target"]:
-                raise ValueError(f"{where}.reference must be {{origins: [...]}} beside a loop target")
-            _validate_origins(reference["origins"], where=f"{where}.reference", program_wire=programs[program_ref])
         realizations = entry.get("realizations")
         if not isinstance(realizations, list) or not realizations:
             raise ValueError(f"{where}.realizations must be a non-empty list")
@@ -701,7 +704,6 @@ def golden_record_from_entry(document: Mapping, entry: Mapping, realization: Map
         identity=realization.get("identity"),
         kernel_set=tuple(realization.get("kernel_set") or ()),
         latency=dict(realization["latency"]) if realization.get("latency") is not None else None,
-        reference_origins=tuple((entry.get("reference") or {}).get("origins", ())),
     )
 
 
@@ -855,6 +857,34 @@ _DECODE_CTX_CACHE: dict[tuple, object] = {}
 def _record_cache_key(record: GoldenRecord) -> tuple:
     payload_id = id(record.loop_wire) if record.loop_wire is not None else id(record.program_wire)
     return (payload_id, record.target_key, record.compute_cap, record.bindings)
+
+
+def _whole_op_origins(program, ctx) -> dict[str, tuple[tuple[str, ...], tuple[str, ...]]]:
+    """Each kernel ``program`` lowers to, keyed by its Loop IR wire, mapped to the frontend origins
+    it computes whole and its outputs — a PyTorch slice of those origins exposing those outputs
+    computes exactly the kernel. A kernel holding part of an op has no such slice and no entry."""
+    from emmy.compiler import provenance  # noqa: PLC0415
+    from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
+    from emmy.compiler.loop_wire import loop_graph_to_wire  # noqa: PLC0415
+    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.slice import single_node_graph  # noqa: PLC0415
+
+    source = program.copy()
+    provenance.seed(source)
+    fused = Pipeline.build(LOOP_PASSES).run(source.copy(), ctx=ctx)
+    totals = provenance.totals(fused)
+    found = {}
+    for node_id, node in fused.nodes.items():
+        if not isinstance(node.op, LoopOp):
+            continue
+        coverage = provenance.coverage(provenance.get(node), totals)
+        origins = tuple(sorted(origin for origin in coverage if origin in source.nodes))
+        if not origins or not all(coverage[origin][2] for origin in origins):
+            continue
+        kernel = single_node_graph(fused, node_id)
+        if set(kernel.outputs) <= {buffer for origin in origins for buffer in source.nodes[origin].buffer_names()}:
+            found[json.dumps(loop_graph_to_wire(kernel), sort_keys=True)] = (origins, tuple(kernel.outputs))
+    return found
 
 
 def _target_kernel_nodes(record: GoldenRecord):

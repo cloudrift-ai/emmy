@@ -73,6 +73,26 @@ def test_golden_walk_benches_each_target_once_not_its_receipts(monkeypatch, tmp_
     assert [args.realization for args in calls] == ["k_mean.aaaa", "k_lin.bbbb", "orphan.cccc.dddd"]
 
 
+def test_golden_walk_without_seeds_benches_the_row_pricing_the_whole_target(monkeypatch, tmp_path):
+    """A file that dropped its seed rows still benches each target once: a split target through its
+    fastest routing row, an unsplit one through its fastest row — never a piece's receipt."""
+    from emmy.compiler.pipeline.search import golden
+
+    def row(name, routing, emmy_us):
+        return SimpleNamespace(name=name, identity=name[-4:] * 16, is_routing=routing, emmy_us=emmy_us)
+
+    rows = [row("post16.k_a.1111.m16.aaaa", False, 4.0), row("post16.k_a.1111.m16.bbbb", True, 9.0), row("post16.k_a.1111.m16.cccc", True, 7.0)]
+    rows += [row("pre1.k_b.2222.m1.dddd", False, 30.0), row("pre1.k_b.2222.m1.eeee", False, 20.0)]
+    monkeypatch.setattr(golden, "load_golden_file", lambda _path: {})
+    monkeypatch.setattr(golden, "load_golden_records", lambda _document: rows)
+    calls = []
+    monkeypatch.setattr(run_mod, "_handle_run_once", calls.append)
+
+    run_mod._run_golden_targets(_args(tmp_path))
+
+    assert [args.realization for args in calls] == ["post16.k_a.1111.m16.cccc", "pre1.k_b.2222.m1.eeee"]
+
+
 def test_golden_walk_reports_every_target_before_failing(monkeypatch, tmp_path):
     """A target that fails does not hide the targets after it: the walk runs them all and exits 1."""
     _patch_records(monkeypatch, ["linear.layer0", "linear.layer1", "linear.layer2"])
