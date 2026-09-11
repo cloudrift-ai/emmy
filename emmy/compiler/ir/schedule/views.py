@@ -8,6 +8,7 @@ from frozendict import frozendict
 
 from emmy.compiler.ir.pure.fold import ContractionView, Fold
 from emmy.compiler.ir.stmt import Body
+from emmy.compiler.ir.stmt.body import dedup_recomputes
 
 type NodeId = int
 type EdgeSite = tuple[NodeId, int]
@@ -117,7 +118,11 @@ def cone_seam(cone, k_name: str, axes: tuple = ()) -> tuple[tuple, tuple, tuple[
     rows. Internal definitions are excluded: the prologue and cell may independently use the same
     local SSA name. A prologue whose results go unread is dropped (nothing to bridge). The ONE seam
     both sides read: the scheduler sizes the stat rows into the sync stage's smem budget, the
-    materializer fills them (``sync_stat_fill``)."""
+    materializer fills them (``sync_stat_fill``).
+
+    Two cell edges may lower one traced fold twice — attention's output and its own row sum, read
+    through the normalize and through a derived edge — and the cell keeps the first lowering only
+    (:func:`dedup_recomputes`): the per-cell fill would otherwise declare that fold's states twice."""
     if not isinstance(cone, Fold) or cone.axis is not None or not cone.operands:
         return (), tuple(cone.lift.body) if isinstance(cone, Fold) and cone.axis is None else (), ()
     # Split by DECLARATION: an edge whose index space holds the reduction axis varies with it and
@@ -125,8 +130,8 @@ def cone_seam(cone, k_name: str, axes: tuple = ()) -> tuple[tuple, tuple, tuple[
     # ``Fold.lower``'s hoist, asked of the same property.
     varying = [k_name in edge.free_axes for edge in cone.operands]
     pro = tuple(s for e, k in zip(cone.operands, varying, strict=True) if not k for s in e.lower(axes=axes))
-    cell = tuple(stmt for edge, varies in zip(cone.operands, varying, strict=True) if varies for stmt in edge.lower(axes=axes)) + tuple(
-        cone.step()
+    cell = dedup_recomputes(
+        [stmt for edge, varies in zip(cone.operands, varying, strict=True) if varies for stmt in edge.lower(axes=axes)] + list(cone.step())
     )
     pro_results = {nm for edge, varies in zip(cone.operands, varying, strict=True) if not varies for nm in edge.exposes}
     stats = tuple(sorted(pro_results & Body(cell).ssa_uses))
