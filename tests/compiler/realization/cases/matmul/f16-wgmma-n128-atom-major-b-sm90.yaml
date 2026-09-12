@@ -1,0 +1,40 @@
+# An f16 128x128x128 matmul whose N-contiguous B is two swizzle atoms wide, on the Hopper warp-group tier:
+# eight warps (two warp groups) stack along M, one m64n128k16 instruction spans the sixteen accumulator cells,
+# K arrives in 64-element chunks through a two-slot TMA ring. The B slab is atom-major (each 64-column atom its
+# own 64 K rows, one TMA box per atom), which is the MN-major canonical layout the descriptor reads; the
+# row-major deposit put every element of this row wrong on the H100 (2026-09-10, plans/hopper-wgmma.md).
+compute_cap:
+- 9
+- 0
+programs:
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [128, 128]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [128, 128]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [128, 128]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: k_matmul_8d561e.905ec5a2342f
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w8x1
+      TILE: wgmma_m64n128k16_f16_f32/f1x16/k4
+      REDUCE: ''
+      STAGE: d2/smem-tma
+      RASTER: ''
+    identity: 0fdb0891222e7ea084fa09db34ee53a127f6a9fe3b0b398d4fb69efb2aa6ce88

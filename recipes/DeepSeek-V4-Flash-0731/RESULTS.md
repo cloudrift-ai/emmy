@@ -169,6 +169,28 @@ benchmark run.
 
 ## Compiler qualification
 
+The committed golden is now the serving-twin inventory: the 152 kernels the TP8 × PP2 server compiles, at widths 1,
+16 and 4096 and the dynamic width. The per-layer coverage, verification and tuning notes below describe the earlier
+279-target per-layer file it replaced.
+
+### Kernel reference numbers (2026-09-11)
+
+Each recorded row of the golden carries a `latency` block for this card: Emmy, eager PyTorch where the kernel has a
+PyTorch slice of the embedded program, and torch.compile where it agreed with eager. Measured on 8× Tesla
+V100-SXM3-32GB (CUDA 12.9, torch 2.13.0+cu126) with `emmy run --golden <copy> --bench --record --bench-backends
+eager,tcompile,emmy --warmup 3 --iters 10`, the file's own rows as evidence; 191 of 192 kernel-and-width rows record.
+Eager here runs the golden's program through PyTorch op by op, so it is an upper bound on PyTorch time.
+
+| Program | Width | Emmy, all kernels | Emmy / eager on kernels with a slice |
+| --- | --- | ---: | ---: |
+| Pre-attention | 1 / 16 / 4096 / dynamic | 29.7 s / 17.2 s / 1.94 s / 247 ms | 2,142× / 1,202× / 2.8× / 14× |
+| Routed expert | 1 / 16 / 4096 / dynamic | 1.29–1.38 s / 1.2–4.8 ms / 108–200 ms / 7.8 ms | 51–55× / 0.05–0.19× / 3.7–6.9× / 0.31× |
+| Post-attention | 1 / 16 / 4096 / dynamic | 76 ms / 68 ms / 692 ms / 286 ms | 1.0× / 0.03× / 1.2× / 0.09× (on 20 of 36 kernels) |
+
+Pre-attention at the decode widths and the single-token experts are where serving time goes. The post-attention
+normalization loop is 31× slower than torch.compile at one token. The large fused post-attention kernels, 99% of that
+program's time at 4096 tokens, have no PyTorch slice because each computes part of an op, so they are not compared.
+
 ### Coverage
 
 All 43 decoder layers reduce to three distinct traced graphs, set by `compress_ratios` in the model config. Tracing

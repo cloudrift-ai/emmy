@@ -1,6 +1,0 @@
-operator,paper_library_over_neptune,replayed_library_over_neptune,replayed_neptune_over_inductor,paper_neptune_over_inductor
-prefill_global,0.84,0.80,1.20,1.14
-prefill_causal,0.81,0.78,1.14,1.09
-prefill_gqa,0.80,0.79,1.15,1.14
-decode_causal,0.99,1.03,0.99,1.02
-decode_gqa,1.24,1.21,0.34,0.33

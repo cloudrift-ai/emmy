@@ -59,6 +59,10 @@ def spelled_arm(options, row) -> tuple[object, dict[str, str]] | None:
     if any(family_of(key) == "PLACE" for key in keys):
         route = {str(key): str(value) for key, value in row.items() if family_of(str(key)) == "PLACE"}
         cuts = {key for key, value in route.items() if value == "cut"}
+        ballot = cuts & keys
+        for option, knobs in arms:
+            if ballot and {key for key, value in knobs.items() if value == "cut"} == ballot:
+                return option, knobs
         wanted = {key for _, knobs in arms for key, value in knobs.items() if value == "cut" and key in cuts}
         if len(wanted) > 1:
             for option, knobs in arms:

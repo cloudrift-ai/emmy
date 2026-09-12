@@ -157,7 +157,11 @@ reconstruct the weight by multiplication. Only a checkpoint contract that explic
 multiplier may select the division path; the key suffix alone never does.
 
 When an official FP8 declaration also specifies dynamic activations, `loader.quant.spell_dynamic_fp8_activations`
-wraps each eligible linear input in the checkpoint's per-row amax, zero-safe scale, encode, decode, and scale algebra.
+wraps each eligible linear input in the checkpoint's amax, zero-safe scale, encode, decode, and scale algebra. The
+scale covers one row, or one row and one K group when the declaration names a `weight_block_size`: a 128x128-block
+checkpoint (the official Qwen, DeepSeek and GLM FP8 releases) quantizes activations per token and per 128-wide K group,
+which is what transformers, vLLM and SGLang compute for it. Only the group maximum reads the activation through a
+`[..., K/128, 128]` reshape; the scale broadcasts back onto K, so the value the linears read keeps its own layout.
 Linears sharing one projection input share the spelled value. A normal compile retains the model's original outputs;
 working-golden inventory generation alone promotes the marked bits and scale values to auxiliary outputs so fusion
 preserves the materialized W8A8 boundary. Native FP8 tensor-core enumeration remains explicitly gated by `FP8_MMA`,
@@ -204,6 +208,16 @@ contraction axis, so it does not commute out of the fold. The packed stage's sco
 written for — either copy transport, an N-major weight of 16-value blocks under a 16-bit atom whose K step is that
 same 16; anything else declines to the general reading, which computes the same values. A TMA box deposits its byte
 slab dense where cp.async pads each row, so the two forms differ in slab size and row stride, not in what they drain.
+
+A block-scaled fp8 weight (one f32 scale per 128x128 block) takes the same stage one step further. Its scale varies
+along the contraction axis too, so the mul-hoist declines it, and the same reading recognizes its cone as a
+single fp8 byte per element: the stored fp8 load feeds its own decode cast instead of a pair table. Its bytes copy verbatim at a
+quarter of a 16-bit slab's traffic, its scales fill an f32 slab once per block — a block holds whole 16-wide atom
+steps, so every drain step reads one scale — and the fragment loader converts each byte pair with the hardware cvt,
+multiplies by the f32 scale and rounds once to the fragment dtype. That is the compute fill's own arithmetic, so the
+staged form is bit-identical to it. The dynamic activation in front of it is a per-row statistic over each K group;
+fused into the matmul's A fill, it is evaluated once per row at the head of each staged chunk (the seam's per-chunk
+statistic), which requires a chunk that sits inside one group.
 
 **Static 4-bit activations (the declared W4A4 program).** An NVFP4 checkpoint that declares static 4-bit input
 activations and stores per-linear `input_scale` tensors (modelopt's calibrated activation `scale_2`, one f32 =

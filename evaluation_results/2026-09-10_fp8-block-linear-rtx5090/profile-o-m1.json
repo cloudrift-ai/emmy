@@ -1,0 +1,242 @@
+{
+  "format": "fp8-block",
+  "shape": {
+    "m": 1,
+    "k": 2048,
+    "n": 1024
+  },
+  "gpu": "NVIDIA GeForce RTX 5090",
+  "torch": "2.13.0+cu130",
+  "cuda": "13.0",
+  "vllm": "0.29.0",
+  "references": {
+    "vllm_selected_default": "CutlassFp8BlockScaledMMKernel",
+    "same_activation_quantization": [
+      "vllm_cutlass",
+      "vllm_triton"
+    ],
+    "weight_only_no_activation_quantization": [
+      "vllm_marlin_w8a16",
+      "vllm_humming_w8a16"
+    ]
+  },
+  "protocol": {
+    "warmup_rounds": 20,
+    "samples": 20,
+    "graph_replays_per_sample": 200,
+    "captured_calls_per_graph": 1,
+    "interleaved": true,
+    "timed_operation": "activation_quantize_and_matmul",
+    "weight_quantization_timed": false
+  },
+  "timing_us": {
+    "emmy": {
+      "median": 6.152160167694092,
+      "min": 6.148800253868103,
+      "max": 6.164799928665161,
+      "samples": [
+        6.164799928665161,
+        6.164320111274719,
+        6.158720254898071,
+        6.153600215911865,
+        6.154879927635193,
+        6.148800253868103,
+        6.151040196418762,
+        6.152480244636536,
+        6.15119993686676,
+        6.152160167694092,
+        6.153119802474976,
+        6.1529600620269775,
+        6.151679754257202,
+        6.148800253868103,
+        6.149280071258545,
+        6.149119734764099,
+        6.150720119476318,
+        6.149119734764099,
+        6.153920292854309,
+        6.152160167694092
+      ]
+    },
+    "vllm_cutlass": {
+      "median": 10.2400803565979,
+      "min": 10.238560438156128,
+      "max": 10.25007963180542,
+      "samples": [
+        10.243040323257446,
+        10.242559909820557,
+        10.25007963180542,
+        10.239360332489014,
+        10.247679948806763,
+        10.24783968925476,
+        10.247199535369873,
+        10.23967981338501,
+        10.249279737472534,
+        10.238879919052124,
+        10.243040323257446,
+        10.241440534591675,
+        10.240000486373901,
+        10.23967981338501,
+        10.2401602268219,
+        10.238720178604126,
+        10.239360332489014,
+        10.238560438156128,
+        10.239360332489014,
+        10.239839553833008
+      ]
+    },
+    "vllm_triton": {
+      "median": 22.67551898956299,
+      "min": 22.53999948501587,
+      "max": 22.862720489501953,
+      "samples": [
+        22.862720489501953,
+        22.761919498443604,
+        22.70832061767578,
+        22.695999145507812,
+        22.56239891052246,
+        22.63295888900757,
+        22.83008098602295,
+        22.634398937225342,
+        22.643840312957764,
+        22.65552043914795,
+        22.572801113128662,
+        22.67551898956299,
+        22.53999948501587,
+        22.593278884887695,
+        22.685599327087402,
+        22.685120105743408,
+        22.590880393981934,
+        22.746400833129883,
+        22.808799743652344,
+        22.67551898956299
+      ]
+    },
+    "vllm_marlin_w8a16": {
+      "median": 8.198879957199097,
+      "min": 8.190720081329346,
+      "max": 8.246880173683167,
+      "samples": [
+        8.246880173683167,
+        8.200640082359314,
+        8.190879821777344,
+        8.198879957199097,
+        8.200479745864868,
+        8.200160264968872,
+        8.190720081329346,
+        8.191199898719788,
+        8.191519975662231,
+        8.198879957199097,
+        8.191199898719788,
+        8.200640082359314,
+        8.200160264968872,
+        8.200799822807312,
+        8.191199898719788,
+        8.191999793052673,
+        8.200479745864868,
+        8.191840052604675,
+        8.191519975662231,
+        8.199520111083984
+      ]
+    },
+    "vllm_humming_w8a16": {
+      "median": 6.143519878387451,
+      "min": 6.1398398876190186,
+      "max": 6.149119734764099,
+      "samples": [
+        6.147519946098328,
+        6.141600012779236,
+        6.1398398876190186,
+        6.144480109214783,
+        6.147199869155884,
+        6.143519878387451,
+        6.14192008972168,
+        6.149119734764099,
+        6.141600012779236,
+        6.141120195388794,
+        6.143040060997009,
+        6.143519878387451,
+        6.143199801445007,
+        6.143680214881897,
+        6.14192008972168,
+        6.141440272331238,
+        6.144480109214783,
+        6.143680214881897,
+        6.143680214881897,
+        6.1479997634887695
+      ]
+    }
+  },
+  "correctness": {
+    "emmy_vs_vllm_cutlass_max_abs": 0.5,
+    "emmy_vs_vllm_cutlass_max_rel": 0.003205128205128205,
+    "emmy_vs_vllm_cutlass_exact_fraction": 0.5693359375,
+    "vllm_triton_vs_vllm_cutlass_max_abs": 0.0,
+    "vllm_triton_vs_vllm_cutlass_max_rel": 0.0,
+    "vllm_triton_vs_vllm_cutlass_exact_fraction": 1.0,
+    "vllm_marlin_w8a16_vs_vllm_cutlass_max_abs": 4.375,
+    "vllm_marlin_w8a16_vs_vllm_cutlass_max_rel": 0.028044871794871796,
+    "vllm_marlin_w8a16_vs_vllm_cutlass_exact_fraction": 0.0751953125,
+    "vllm_humming_w8a16_vs_vllm_cutlass_max_abs": 4.375,
+    "vllm_humming_w8a16_vs_vllm_cutlass_max_rel": 0.028044871794871796,
+    "vllm_humming_w8a16_vs_vllm_cutlass_exact_fraction": 0.0771484375
+  },
+  "profiles": {
+    "emmy": {
+      "per_call_us": 5.211149999999998,
+      "per_kernel": {
+        "k_linear_1f0c17__place_218cbcce95": {
+          "median_us": 1.7914999999999281,
+          "count": 20
+        },
+        "k_linear_1f0c17": {
+          "median_us": 3.4405000000000427,
+          "count": 20
+        }
+      }
+    },
+    "vllm_cutlass": {
+      "per_call_us": 8.814400000000035,
+      "per_kernel": {
+        "triton_per_fused__to_copy_abs_clamp_div_max_view_0": {
+          "median_us": 0.8959999999999582,
+          "count": 20
+        },
+        "void cutlass::device_kernel<vllm::cutlass_3x_gemm_fp8_blockwise<cutlass::bfloat16_t, 128, 1, 128, cute::tuple<cute::C<128>, cute::C<32>, cute::C<128> >, cute::tuple<cute::C<1>, cute::C<1>, cute::C<1> >, cutlass::epilogue::collective::EpilogueScheduleAuto, cutlass::gemm::KernelTmaWarpSpecializedBlockwiseCooperativeSm120, true>::GemmKernel>(vllm::cutlass_3x_gemm_fp8_blockwise<cutlass::bfloat16_t, 128, 1, 128, cute::tuple<cute::C<128>, cute::C<32>, cute::C<128> >, cute::tuple<cute::C<1>, cute::C<1>, cute::C<1> >, cutlass::epilogue::collective::EpilogueScheduleAuto, cutlass::gemm::KernelTmaWarpSpecializedBlockwiseCooperativeSm120, true>::GemmKernel::Params)": {
+          "median_us": 7.9360000000000355,
+          "count": 20
+        }
+      }
+    },
+    "vllm_triton": {
+      "per_call_us": 21.795899999999953,
+      "per_kernel": {
+        "triton_per_fused__to_copy_abs_clamp_div_max_view_0": {
+          "median_us": 0.8959999999999582,
+          "count": 20
+        },
+        "_w8a8_triton_block_scaled_mm": {
+          "median_us": 20.928999999999917,
+          "count": 20
+        }
+      }
+    },
+    "vllm_marlin_w8a16": {
+      "per_call_us": 7.13605,
+      "per_kernel": {
+        "void marlin::Marlin<1125899906909960l, 2814749767172868l, 1125899906909960l, 1125899906909960l, 128, 1, 4, 8, true, 4, 8, false>(int4 const*, int4 const*, int4*, int4*, int4 const*, float const*, int4 const*, float const*, int4 const*, int const*, int, int, int, int, int, int*, bool, bool, bool, int)": {
+          "median_us": 7.136000000000024,
+          "count": 20
+        }
+      }
+    },
+    "vllm_humming_w8a16": {
+      "per_call_us": 4.203300000000013,
+      "per_kernel": {
+        "void humming<MmaOpClass, Shape<0u, 1024u, 2048u>, Shape<16u, 64u, 128u>, Shape<16u, 32u, 32u>, Shape<0u, 0u, 0u>, FloatingPointType<16u, 8u, 7u>, FloatingPointType<8u, 4u, 3u>, FloatingPointType<16u, 8u, 7u>, FloatingPointType<32u, 8u, 23u>, LayerConfig, ComputeConfig, TuningConfig>(KernelTensorParamType<TuningConfig::kUseTmaA>::Type, KernelTensorParamType<TuningConfig::kUseTmaB>::Type, KernelTensorParamType<TuningConfig::kUseTmaC>::Type, KernelTensorParamType<TuningConfig::kUseTmaAS>::Type, KernelTensorParamType<TuningConfig::kUseTmaBS>::Type, KernelTensorParamType<TuningConfig::kUseTmaBZP>::Type, KernelTensorParamType<TuningConfig::kUseTmaBias>::Type, KernelTensorParamType<TuningConfig::kUseTmaBS2>::Type, unsigned int const*, unsigned int const*, unsigned int const*, unsigned int const*, CUtensorMap_st*, int*, unsigned int, unsigned int, bool)": {
+          "median_us": 4.192000000000007,
+          "count": 20
+        }
+      }
+    }
+  }
+}

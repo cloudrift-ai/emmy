@@ -15,13 +15,14 @@ logger = logging.getLogger(__name__)
 
 
 def register_trace_command(subparsers):
-    from emmy.commands.compile import add_input_args  # noqa: PLC0415
+    from emmy.commands.compile import add_input_args, add_quantize_arg  # noqa: PLC0415
 
     parser = subparsers.add_parser(
         "trace",
         help="Trace a model, debug IR, or inline torch module to golden YAML",
     )
     add_input_args(parser, include_dump_dir=False)
+    add_quantize_arg(parser)
     parser.add_argument("--output", "-o", help="Output golden YAML path (default: <trace-name>.golden.yaml)")
     parser.add_argument(
         "--loop-targets",
@@ -83,6 +84,8 @@ def handle_trace(args):
             conflicts.append("--layer")
         if args.dynamic:
             conflicts.append("--dynamic")
+        if args.quantize:
+            conflicts.append("--quantize")
         if args.adapter != "causal-lm":
             conflicts.append("--adapter dit")
         input_path = Path(args.input) if args.input else None
@@ -131,7 +134,14 @@ def handle_trace(args):
     # A trace inventory records programs and shapes, not checkpoint values. On a
     # multi-hundred-billion-parameter checkpoint, avoid materializing a
     # full eager architecture twin merely to export one requested layer.
-    graph, basename, _ = load_or_trace(args, architecture_only=True)
+    # Quantizing needs the traced module's real parameter tensors. An ordinary
+    # model inventory stays architecture-only so large checkpoints are not loaded.
+    graph, basename, bundle = load_or_trace(args, architecture_only=not bool(args.quantize))
+    quantized_checkpoint = None
+    if args.quantize:
+        from emmy.commands.compile import _quantize_traced  # noqa: PLC0415
+
+        quantized_checkpoint = _quantize_traced(graph, bundle, args)
     destination = args.output or f"{basename}.golden.yaml"
     try:
         preflight_trace_inventory(destination)
@@ -144,7 +154,11 @@ def handle_trace(args):
         args.input if input_path is not None and not (input_path.suffix == ".json" and input_path.exists()) else None
     )
     model_quant_digest = None
-    if args.input:
+    if quantized_checkpoint:
+        from emmy.compiler.loader.quant import checkpoint_quant_digest  # noqa: PLC0415
+
+        model_quant_digest = checkpoint_quant_digest(quantized_checkpoint)
+    elif args.input:
         from emmy.compiler.loader.quant import checkpoint_quant_digest  # noqa: PLC0415
         from emmy.compiler.trace.huggingface import quantized_checkpoint_dir  # noqa: PLC0415
 

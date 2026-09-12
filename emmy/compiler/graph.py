@@ -315,7 +315,7 @@ def _stmt_eval_scope() -> dict:
     import numpy as _np
 
     from emmy.compiler.dim import Dim
-    from emmy.compiler.dtype import DataType
+    from emmy.compiler.dtype import DataType, StructuredType
     from emmy.compiler.ir.axis import Axis, Window
     from emmy.compiler.ir.elementwise import ElementwiseImpl
     from emmy.compiler.ir.expr import (
@@ -378,6 +378,7 @@ def _stmt_eval_scope() -> dict:
         "ElementwiseImpl": ElementwiseImpl,
         "IndexSource": IndexSource,
         "DataType": DataType,
+        "StructuredType": StructuredType,
         # ``repr(np.dtype('float32'))`` is ``dtype('float32')`` — eval needs
         # ``dtype`` in scope to round-trip ``DataType.np``.
         "dtype": _np.dtype,

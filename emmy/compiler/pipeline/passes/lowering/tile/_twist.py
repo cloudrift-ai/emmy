@@ -95,6 +95,8 @@ def _hoist_invariant(fold: Fold) -> tuple[Fold, Fold] | None:
         return None
     spine_ids = {id(stmt) for stmt in spine}
     kept = [stmt for stmt in fold.lift.body if id(stmt) not in spine_ids]
+    if {stmt.name for stmt in spine} & {name for stmt in kept for name in stmt.deps()}:
+        return None  # a product the summand also reads elsewhere (a scale the encode divides by) stays in the fold
     product: list[Assign] = []
     value = varying[0]
     for index, leaf in enumerate(varying[1:]):

@@ -434,11 +434,11 @@ def test_price_memo_keys_on_exact_identity_not_the_term_hash(monkeypatch) -> Non
     identity_keys, memo_keys, calls = set(), set(), []
     orig = greedy._price_kernel
 
-    def spy(graph, nid, ctx, prior, memo, db=None, decisions=None):
+    def spy(graph, nid, ctx, prior, memo, db=None, decisions=None, deadline=None):
         op = graph.nodes[nid].op
         calls.append(nid)
         identity_keys.add(op.identity_key(structural=False, with_io=True, with_knobs=True))
-        out = orig(graph, nid, ctx, prior, memo, db, decisions)
+        out = orig(graph, nid, ctx, prior, memo, db, decisions, deadline)
         memo_keys.update(memo)
         return out
 

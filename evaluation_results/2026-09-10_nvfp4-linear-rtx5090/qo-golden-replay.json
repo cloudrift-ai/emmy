@@ -1,0 +1,186 @@
+{
+  "input": null,
+  "golden": "manual-narrow",
+  "dynamic": [],
+  "gpu": "NVIDIA GeForce RTX 5090",
+  "warmup": 10,
+  "iters": 50,
+  "backends": {
+    "Emmy": {
+      "latency_us": 76.77822916214066,
+      "captured": true,
+      "timing_semantics": "captured_whole_forward",
+      "correctness": {
+        "status": "pass",
+        "reference": "same-input-greedy",
+        "rtol": 0.001,
+        "atol": 0.001,
+        "max_abs_error": 0.0,
+        "mean_abs_error": 0.0,
+        "max_rel_error": 0.0
+      }
+    }
+  },
+  "greedy": {
+    "status": "ok",
+    "lane": "std",
+    "total_us": 77.91753915640024,
+    "timing_semantics": "whole_program_e2e",
+    "captured": true,
+    "num_launches": 2,
+    "kernels": [
+      {
+        "kernel": "k_linear__partial",
+        "us": 44.66618191112171,
+        "smem_bytes": 77824,
+        "knobs": {
+          "WORK": "w2x2",
+          "TILE": "mma_m16n8k64_e2m1_f32/f2x4/k8",
+          "REDUCE": "",
+          "STAGE": "d2/smem-async/p2",
+          "LOOPIFY": "0",
+          "RASTER": ""
+        },
+        "record_knobs": {
+          "WORK": "w2x2",
+          "TILE": "mma_m16n8k64_e2m1_f32/f2x4/k8",
+          "REDUCE": "",
+          "STAGE": "d2/smem-async/p2",
+          "LOOPIFY": "0",
+          "RASTER": ""
+        },
+        "source_sha256": "6cfe55752fd53043f6cbabcc61d33f987f060ff89c581e7f43e4c3e084548922"
+      },
+      {
+        "kernel": "k_linear",
+        "us": 31.96077385256367,
+        "smem_bytes": 16,
+        "knobs": {
+          "WORK": "t128",
+          "REDUCE": "coop",
+          "LOOPIFY": "0",
+          "RASTER": ""
+        },
+        "record_knobs": {
+          "WORK": "t128",
+          "REDUCE": "coop",
+          "LOOPIFY": "0",
+          "RASTER": ""
+        },
+        "source_sha256": "e8614f50b1d300fcc7458317409c869548c033492d7e4c46657c91bcf72bcf37"
+      }
+    ],
+    "reference_run_us": 126.78400427103043,
+    "isolated": {
+      "status": "ok",
+      "total_us": 77.8953845684345,
+      "timing_semantics": "whole_program_e2e",
+      "captured": true,
+      "num_launches": 2,
+      "e2e_us": 77.8953845684345,
+      "kernels": [
+        {
+          "kernel": "k_linear__partial",
+          "us": 44.62545568292791,
+          "smem_bytes": 77824,
+          "knobs": {
+            "WORK": "w2x2",
+            "TILE": "mma_m16n8k64_e2m1_f32/f2x4/k8",
+            "REDUCE": "",
+            "STAGE": "d2/smem-async/p2",
+            "LOOPIFY": "0",
+            "RASTER": ""
+          },
+          "record_knobs": {
+            "WORK": "w2x2",
+            "TILE": "mma_m16n8k64_e2m1_f32/f2x4/k8",
+            "REDUCE": "",
+            "STAGE": "d2/smem-async/p2",
+            "LOOPIFY": "0",
+            "RASTER": ""
+          },
+          "source_sha256": "6cfe55752fd53043f6cbabcc61d33f987f060ff89c581e7f43e4c3e084548922"
+        },
+        {
+          "kernel": "k_linear",
+          "us": 31.9473551165673,
+          "smem_bytes": 16,
+          "knobs": {
+            "WORK": "t128",
+            "REDUCE": "coop",
+            "LOOPIFY": "0",
+            "RASTER": ""
+          },
+          "record_knobs": {
+            "WORK": "t128",
+            "REDUCE": "coop",
+            "LOOPIFY": "0",
+            "RASTER": ""
+          },
+          "source_sha256": "e8614f50b1d300fcc7458317409c869548c033492d7e4c46657c91bcf72bcf37"
+        }
+      ],
+      "flags": []
+    }
+  },
+  "pinned": [
+    {
+      "name": "k_linear_334cf2.4ccefe211fb9.manual-narrow",
+      "kind": "golden",
+      "lane": "std",
+      "status": "ok",
+      "pinned_knobs": {
+        "FAST_MATH": "False",
+        "WORK": "w1x4",
+        "TILE": "mma_m16n8k64_e2m1_f32/f1x2/k8",
+        "STAGE": "d2/smem-async",
+        "RASTER": "gm8"
+      },
+      "total_us": 5.7155656814575195,
+      "timing_semantics": "single_launch",
+      "captured": true,
+      "num_launches": 1,
+      "e2e_us": null,
+      "kernels": [
+        {
+          "kernel": "k_linear_334cf2",
+          "us": 5.7155656814575195,
+          "smem_bytes": 48640,
+          "knobs": {
+            "WORK": "w1x4",
+            "TILE": "mma_m16n8k64_e2m1_f32/f1x2/k8",
+            "REDUCE": "",
+            "STAGE": "d2/smem-async",
+            "LOOPIFY": "0",
+            "RASTER": "gm8"
+          },
+          "record_knobs": {
+            "WORK": "w1x4",
+            "TILE": "mma_m16n8k64_e2m1_f32/f1x2/k8",
+            "REDUCE": "",
+            "STAGE": "d2/smem-async",
+            "LOOPIFY": "0",
+            "RASTER": "gm8"
+          },
+          "source_sha256": "4f91ebc12eec192764d0f7630a4e5e7eb19641d0d04ba2481f726e4243fb6ad7"
+        }
+      ],
+      "flags": [],
+      "correctness": {
+        "status": "pass",
+        "reference": "same-input-greedy",
+        "rtol": 0.001,
+        "atol": 0.001,
+        "max_abs_error": 0.0,
+        "mean_abs_error": 0.0,
+        "max_rel_error": 0.0
+      },
+      "recorded_emmy_us": 0.0,
+      "recorded_ref_us": 0.0
+    }
+  ],
+  "strict": {
+    "status": "pass",
+    "errors": []
+  }
+}

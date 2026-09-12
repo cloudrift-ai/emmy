@@ -114,12 +114,16 @@ class Recipe:
     pivot's first, then one per channel in recipe order — and ``lift`` is the base's per-element
     contribution over ``(score, *extras)``; ``psi`` / ``psi_inv`` conjugate it onto the carrier.
     The ``channels`` are every state beyond the pivot's, matched to a dependent fold or kept by the
-    recipe, and the fused ⊕ program takes one of two spellings. ``advance`` / ``rescale`` serve any
+    recipe, and the fused ⊕ program takes one of two spellings. ``advance`` / ``scale`` serve any
     channel count: ``advance`` takes the pivot pair ``(g, g′)`` to the advanced pivot and the
-    factors the move puts on every carried channel, ``rescale`` takes one channel pair and those
-    factors ``(s, s′, *factors)`` to the channel's merged value. ``combine`` is one lambda over
-    every state pair in role order — pivot, then the channels, then the same with ``__o`` — for a
-    carrier of fixed arity. Applied by the one generic algorithm, :meth:`Fold.fuse`."""
+    factor each side takes for the move, ``scale`` takes one channel's value and its factor
+    ``(s, factor)`` to the value at the advanced pivot, and a channel merges as the base ⊕ of the
+    two scaled sides — the ONE ⊕ every channel of that spelling shares, since the program is built
+    at an open channel count. A side already AT the advanced pivot takes the identity factor and needs
+    no scaling — which is what lets a chunk tier fold a chunk's contribution straight into the
+    carrier once the carrier is scaled. ``combine`` is one lambda over every state pair in role
+    order — pivot, then the channels, then the same with ``__o`` — for a carrier of fixed arity.
+    Applied by the one generic algorithm, :meth:`Fold.fuse`."""
 
     name: str
     base: tuple[str, ...]
@@ -128,7 +132,7 @@ class Recipe:
     psi_inv: Lambda
     channels: tuple[Channel, ...]
     advance: Lambda | None = None
-    rescale: Lambda | None = None
+    scale: Lambda | None = None
     combine: Lambda | None = None
 
     @property
@@ -139,8 +143,9 @@ class Recipe:
     def program(self, states: tuple[str, ...]) -> Lambda:
         """The fused ⊕ over these state names — ``S × S → S``, the second operand ``<n>__o``. Temps
         are namespaced on the second pivot's name, so two merges into one state never collide. The
-        advance/rescale spelling: the advance over the pivot pair, every channel rescaled by its
-        factors, the pivot written last (the channels read the old pivot through the factors)."""
+        advance/scale spelling: the advance over the pivot pair, each channel's two sides scaled by
+        their factors and joined by the channel's base ⊕, the pivot written last (the channels
+        read the old pivot through the factors)."""
         other = tuple(f"{name}__o" for name in states)
         key = other[0]
         if self.combine is not None:
@@ -151,10 +156,15 @@ class Recipe:
         advance = self.advance.rename(lambda name: roles.get(name, f"{key}__{name}"))
         pivot, *factors = advance.results
         body = list(advance.body)
+        (op,) = set(self.base[1:])  # one channel ⊕ for the open-count spelling
         for state, second in zip(states[1:], other[1:], strict=True):
-            names = dict(zip(self.rescale.params, (state, second, *factors), strict=True))
-            names[self.rescale.results[0]] = state
-            body.extend(self.rescale.rename(lambda name, names=names, state=state: names.get(name, f"{key}__{state}_{name}")).body)
+            sides = []
+            for side, factor, tag in ((state, factors[0], "sa"), (second, factors[1], "sb")):
+                names = dict(zip(self.scale.params, (side, factor), strict=True))
+                names[self.scale.results[0]] = f"{key}__{state}_{tag}"
+                body.extend(self.scale.rename(lambda name, names=names, state=state: names.get(name, f"{key}__{state}_{name}")).body)
+                sides.append(names[self.scale.results[0]])
+            body.append(Assign(name=state, op=op, args=tuple(sides)))
         body.append(Assign(name=states[0], op="copy", args=(pivot,)))
         return Lambda(params=states + other, body=Body(body), results=states)
 
@@ -220,12 +230,8 @@ SOFTMAX = Recipe(
         "alpha",
         "beta",
     ),
-    # A channel merges as the factor-weighted sum of its two sides.
-    rescale=_lam(
-        ("s", "s_o", "alpha", "beta"),
-        (Assign("sa", "multiply", ("s", "alpha")), Assign("sb", "multiply", ("s_o", "beta")), Assign("sn", "add", ("sa", "sb"))),
-        "sn",
-    ),
+    # A side moves to the advanced pivot by its factor; the channels' ⊕ (a sum) then joins the two.
+    scale=_lam(("s", "f"), (Assign("sa", "multiply", ("s", "f")),), "sa"),
 )
 
 # Welford's variance: ``mean = Σ_k x_k / N`` then ``Σ_k (x_k − mean)²``, fused into the carrier

@@ -45,49 +45,54 @@ configs:
     origins:
     - reshape
     - reshape_1
-    - scaled_dot_product_attention
-  realizations:
-  - name: k_sdpa_reduce_2df32e.0b00fb4f7cf6.93dfa2089939
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      TILE@map.1/twist: mma_m16n8k16_f16_f32/f1x2/k2
-      TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x4/k4
-      REDUCE@map.1/twist: ''
-      REDUCE@map.1/twist.1/inner: ''
-      STAGE@map.1/twist: d3/smem-async
-      STAGE@map.1/twist.1/inner: d3/smem-async
-      WORK: w2x1
-      RASTER: ''
-    identity: 93dfa20899395f4047a356ac7311f75308560e0d93d85c14ed5faa1fc421388c
-    measurements:
-      emmy_us: 1271.8080282211304
-      reference_us: 1271.8080282211304
-      reference_backend: same-input-greedy
-- program: 0
-  target:
-    origins:
     - reshape_2
     - reshape_3
     - scaled_dot_product_attention
   realizations:
-  - name: k_sdpa_reduce_5e8ce2.853df611f190.9565c19f89e6
+  - name: k_sdpa_7789e7.f858cfbaf185
+    bindings: {}
+    pins:
+      FAST_MATH: false
+  - name: k_sdpa_7789e7.f858cfbaf185.e5ec4585e0f5
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      TILE@map.1/twist: mma_m16n8k16_f16_f32/f1x16/k4
-      TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x8/k4
-      REDUCE@map.1/twist: ''
-      REDUCE@map.1/twist.1/inner: ''
-      STAGE@map.1/twist: d1/smem-async
-      STAGE@map.1/twist.1/inner: d1/smem-async
+      REDUCE@map.1/twist: g32k
+    identity: e5ec4585e0f5622bda29bf7a6a2fd386dff4cfb97092a66afb8d0d58b06fc6cd
+    measurements:
+      emmy_us: 146.4372543188242
+      reference_us: 146.43200299678705
+      reference_backend: same-input-greedy
+  - name: k_sdpa_7789e7.f858cfbaf185.653f03b5d9a7
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE@twist: mma_m16n8k16_f16_f32/f1x16/k4
+      TILE@twist.1/inner: mma_m16n8k16_f16_f32/f1x8/k4
+      REDUCE@twist: ''
+      REDUCE@twist.1/inner: ''
+      STAGE@twist: d2/smem-async
+      STAGE@twist.1/inner: d2/smem-async
       WORK: w4x1
       RASTER: ''
-    identity: 9565c19f89e60be73a09edb7b8b2a95c3a910c86623e27ddd3a85898550b07ed
+    identity: 653f03b5d9a7b640dfae74af90053da5a88cdd91d47367197245410ffc3ba639
     measurements:
-      emmy_us: 1619.968056678772
-      reference_us: 1618.9440488815308
+      emmy_us: 141.31200313568115
+      reference_us: 141.31200313568115
+      reference_backend: same-input-greedy
+  - name: k_sdpa_7789e7.f858cfbaf185.9b84b8c77b9c
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: 9b84b8c77b9c5a08c527fe2de6fabae8815845a52a21eca60323b3684ed85b26
+    measurements:
+      emmy_us: 5.125251183143028
+      reference_us: 5.119999861105894
       reference_backend: same-input-greedy
 gpu_name: NVIDIA A100 40GB

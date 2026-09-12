@@ -109,6 +109,7 @@ def test_trace_serving_twins_writes_one_exact_inventory_with_explicit_provenance
     assert document["model"] == "cloudriftai/model-exl3@0123456789abcdef0123456789abcdef01234567"
     assert {record.name.split(".", 1)[0] for record in records} == {"pre1@b2", "expert512@b2"}
     assert all(record.loop_wire is not None and not record.origins for record in records)
+    assert all(torch_ref.is_runnable(record.reference_program) for record in records)
     assert {(record.bindings, record.pins) for record in records} >= {
         ((("num_tokens", 64),), (("FAST_MATH", False),)),
         ((("num_tokens", 1024),), (("FAST_MATH", True),)),
@@ -183,6 +184,33 @@ def test_trace_command_writes_only_golden_yaml(monkeypatch, tmp_path) -> None:
     records = load_golden_records(load_golden_file(output))
     assert records and all(record.program.nodes for record in records)
     assert sorted(path.name for path in tmp_path.iterdir()) == ["trace.yaml"]
+
+
+def test_trace_quantize_spells_before_writing_inventory(monkeypatch, tmp_path) -> None:
+    import emmy.commands.compile as compile_command
+    import emmy.compiler.loader.quant as quant_loader
+
+    graph = trace_inline_code("torch.relu(torch.randn(8))")["graph"]
+    bundle = (object(), (), {})
+    seen = {}
+
+    def load_or_trace(_args, *, architecture_only):
+        seen["architecture_only"] = architecture_only
+        return graph, "quantized", bundle
+
+    def quantize_traced(got_graph, got_bundle, _args):
+        seen["quantize"] = (got_graph, got_bundle)
+        return str(tmp_path / "checkpoint")
+
+    monkeypatch.setattr(compile_command, "load_or_trace", load_or_trace)
+    monkeypatch.setattr(compile_command, "_quantize_traced", quantize_traced)
+    monkeypatch.setattr(quant_loader, "checkpoint_quant_digest", lambda path: "0123456789abcdef")
+
+    output = tmp_path / "trace.yaml"
+    handle_trace(_parser().parse_args(["trace", "--code", "unused", "--quantize", "nvfp4", "--target", "sm_89", "-o", str(output)]))
+
+    assert seen == {"architecture_only": False, "quantize": (graph, bundle)}
+    assert load_golden_file(output)["model_quant_digest"] == "0123456789abcdef"
 
 
 def test_trace_accepts_debug_graph_json_as_input_but_emits_yaml(monkeypatch, tmp_path) -> None:
@@ -291,13 +319,13 @@ def test_trace_inventory_keeps_fused_sdpa_as_one_frontend_target(tmp_path) -> No
     assert record.name.startswith("k_sdpa")
 
 
-def test_trace_serializes_target_without_a_torch_reference_mapping(tmp_path) -> None:
+def test_trace_serializes_gather_target_with_a_torch_reference_mapping(tmp_path) -> None:
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (4, 8)), node_id="x")
     graph.add_node(InputOp(), [], Tensor("index", (4, 8), "i64"), node_id="index")
     graph.add_node(GatherOp(axis=1), ["x", "index"], Tensor("gather", (4, 8)), node_id="gather")
     graph.inputs, graph.outputs = ["x", "index"], ["gather"]
-    assert torch_ref.is_runnable(graph) is False
+    assert torch_ref.is_runnable(graph) is True
 
     path = tmp_path / "working.yaml"
     write_trace_inventory(graph, path, ctx=_TARGET_CTX)
@@ -368,6 +396,23 @@ def test_trace_inventory_can_force_exact_loop_targets(tmp_path) -> None:
 
     assert record.origins == ()
     assert record.loop_wire is not None
+    # The stored kernel stays the identity; the PyTorch slice it computes is derived for comparison.
+    assert torch_ref.is_runnable(record.reference_program)
+    assert record.reference_program.outputs == record.target_program.outputs == ["y"]
+
+
+def test_a_stored_kernel_holding_part_of_an_op_has_no_pytorch_reference(monkeypatch, tmp_path) -> None:
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (16,)), node_id="x")
+    graph.add_node(ElementwiseOp("relu"), ["x"], Tensor("y", (16,)), node_id="y")
+    graph.inputs, graph.outputs = ["x"], ["y"]
+    path = tmp_path / "working.yaml"
+    write_trace_inventory(graph, path, force_loop_targets=True, ctx=_TARGET_CTX)
+    monkeypatch.setattr(provenance, "coverage", lambda prov, _totals: {origin: (1, 2, False) for origin in prov})
+
+    (record,) = load_golden_records(load_golden_file(path))
+
+    assert record.reference_program is None
 
 
 def test_exact_loop_targets_disambiguate_same_body_at_distinct_cast_boundaries(tmp_path) -> None:

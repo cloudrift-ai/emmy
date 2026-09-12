@@ -1,0 +1,311 @@
+{
+  "inputs": [
+    "input"
+  ],
+  "outputs": [
+    "linear"
+  ],
+  "nodes": {
+    "input": {
+      "op": "InputOp",
+      "op_fields": {},
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "input",
+          "shape": [
+            1,
+            3072
+          ],
+          "dtype": "bf16"
+        }
+      ]
+    },
+    "p_weight_bits": {
+      "op": "ConstantOp",
+      "op_fields": {
+        "name": "p_weight",
+        "value": null,
+        "context_value": null,
+        "load_ops": [],
+        "source_path": "l0.weight",
+        "source_parts": [],
+        "source_shape": [
+          1024,
+          3072
+        ],
+        "source_dtype": "f8e4m3",
+        "source_graph": null
+      },
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "p_weight_bits",
+          "shape": [
+            1024,
+            3072
+          ],
+          "dtype": "f8e4m3"
+        }
+      ]
+    },
+    "p_weight_scale": {
+      "op": "ConstantOp",
+      "op_fields": {
+        "name": "p_weight_scale",
+        "value": null,
+        "context_value": null,
+        "load_ops": [
+          {
+            "__op__": "ReshapeOp",
+            "fields": {
+              "shape": [
+                8,
+                1,
+                24,
+                1
+              ]
+            }
+          }
+        ],
+        "source_path": "l0.weight_scale_inv",
+        "source_parts": [],
+        "source_shape": [
+          8,
+          24
+        ],
+        "source_dtype": "f32",
+        "source_graph": null
+      },
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "p_weight_scale",
+          "shape": [
+            8,
+            1,
+            24,
+            1
+          ],
+          "dtype": "f32"
+        }
+      ]
+    },
+    "input_dynamic_fp8_floor": {
+      "op": "ConstantOp",
+      "op_fields": {
+        "name": "input_dynamic_fp8_floor",
+        "value": 1e-12,
+        "context_value": null,
+        "load_ops": [],
+        "source_path": null,
+        "source_parts": [],
+        "source_shape": null,
+        "source_dtype": null,
+        "source_graph": null
+      },
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "input_dynamic_fp8_floor",
+          "shape": [
+            1
+          ],
+          "dtype": "f32"
+        }
+      ]
+    },
+    "input_dynamic_fp8_finite_max": {
+      "op": "ConstantOp",
+      "op_fields": {
+        "name": "input_dynamic_fp8_finite_max",
+        "value": 448.0,
+        "context_value": null,
+        "load_ops": [],
+        "source_path": null,
+        "source_parts": [],
+        "source_shape": null,
+        "source_dtype": null,
+        "source_graph": null
+      },
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "input_dynamic_fp8_finite_max",
+          "shape": [
+            1
+          ],
+          "dtype": "f32"
+        }
+      ]
+    },
+    "linear__place_31a65fd872_0": {
+      "op": "KernelOp",
+      "op_fields": {
+        "body": [
+          "Tile(axes=(Axis(name='a1', extent=Dim(3072), window=None), Axis(name='a2_co', extent=Dim(32), window=None)), body=(StridedLoop(axis=Axis(name='a2', extent=Dim(128), window=None), start=Var(name='a2_co'), step=Literal(value=32, dtype='int'), body=(Load(names=('in3',), input='input', index=(Literal(value=0, dtype='int'), BinaryExpr(op='+', left=BinaryExpr(op='*', left=BinaryExpr(op='/', left=Var(name='a1'), right=Literal(value=128, dtype='int')), right=Literal(value=128, dtype='int')), right=Var(name='a2'))), dtype=DataType(name='bf16', np=dtype('uint16'), nbytes=2)), Assign(name='v1', op=ElementwiseImpl('abs'), args=('in3',), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Accum(name='acc0', value='v1', op=ElementwiseImpl('maximum'), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4), axes=('a2',), base=None)), unroll=False, end=None, seed=True), WarpShuffle(state=('acc0',), state_b=('acc0__o',), combine_states=(Assign(name='acc0', op=ElementwiseImpl('maximum'), args=('acc0', 'acc0__o'), dtype=None),), length=32, dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Cond(cond=BinaryExpr(op='==', left=Var(name='a2_co'), right=Literal(value=0, dtype='int')), body=(Load(names=('in1',), input='input_dynamic_fp8_finite_max', index=(Literal(value=0, dtype='int'),), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Assign(name='v0', op=ElementwiseImpl('reciprocal'), args=('in1',), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Load(names=('in0',), input='input_dynamic_fp8_floor', index=(Literal(value=0, dtype='int'),), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Assign(name='v2', op=ElementwiseImpl('maximum'), args=('acc0', 'in0'), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Assign(name='v3', op=ElementwiseImpl('multiply'), args=('v0', 'v2'), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Load(names=('in2',), input='input', index=(Literal(value=0, dtype='int'), Var(name='a1')), dtype=DataType(name='bf16', np=dtype('uint16'), nbytes=2)), Assign(name='v4', op=ElementwiseImpl('divide'), args=('in2', 'v3'), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Assign(name='v5', op=ElementwiseImpl('to_f8e4m3'), args=('v4',), dtype=DataType(name='f8e4m3', np=dtype('uint8'), nbytes=1)), Assign(name='v6', op=ElementwiseImpl('from_f8e4m3'), args=('v5',), dtype=DataType(name='bf16', np=dtype('uint16'), nbytes=2)), Assign(name='v8', op=ElementwiseImpl('multiply'), args=('v3', 'v6'), dtype=DataType(name='bf16', np=dtype('uint16'), nbytes=2)), Write(output='linear__place_31a65fd872_0', index=(Var(name='a1'),), values=('v8',), value_dtype=DataType(name='bf16', np=dtype('uint16'), nbytes=2), atomic=False, swizzle='NONE')), else_body=())), block_threads=32, aux_threads=0, raster_axes=None, raster_group=None, raster_orient='m')"
+        ],
+        "name": "k_linear_4985ce__place_31a65fd872",
+        "zero_delegated": []
+      },
+      "inputs": [
+        "input_dynamic_fp8_floor",
+        "input_dynamic_fp8_finite_max",
+        "input"
+      ],
+      "outputs": [
+        {
+          "name": "linear__place_31a65fd872_0",
+          "shape": [
+            3072
+          ],
+          "dtype": "bf16"
+        }
+      ]
+    },
+    "linear": {
+      "op": "KernelOp",
+      "op_fields": {
+        "body": [
+          "Tile(axes=(Axis(name='_um', extent=Dim(1), window=None), Axis(name='a0', extent=Dim(1024), window=None), Axis(name='a1_co', extent=Dim(32), window=None)), body=(StridedLoop(axis=Axis(name='a1', extent=Dim(3072), window=None), start=Var(name='a1_co'), step=Literal(value=32, dtype='int'), body=(Load(names=('in4',), input='p_weight_bits', index=(Var(name='a0'), Var(name='a1')), dtype=DataType(name='f8e4m3', np=dtype('uint8'), nbytes=1)), Assign(name='v7', op=ElementwiseImpl('from_f8e4m3'), args=('in4',), dtype=DataType(name='bf16', np=dtype('uint16'), nbytes=2)), Load(names=('in5',), input='p_weight_scale', index=(BinaryExpr(op='/', left=Var(name='a0'), right=Literal(value=128, dtype='int')), Literal(value=0, dtype='int'), BinaryExpr(op='/', left=Var(name='a1'), right=Literal(value=128, dtype='int')), Literal(value=0, dtype='int')), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Assign(name='v9', op=ElementwiseImpl('multiply'), args=('in5', 'v7'), dtype=DataType(name='bf16', np=dtype('uint16'), nbytes=2)), Load(names=('v8__ws31a65fd872',), input='linear__place_31a65fd872_0', index=(Var(name='a1'),), dtype=DataType(name='bf16', np=dtype('uint16'), nbytes=2)), Assign(name='v10', op=ElementwiseImpl('multiply'), args=('v8__ws31a65fd872', 'v9'), dtype=DataType(name='bf16', np=dtype('uint16'), nbytes=2)), Accum(name='acc1', value='v10', op=ElementwiseImpl('add'), dtype=DataType(name='f32', np=dtype('float32'), nbytes=4), axes=('a1',), base=None)), unroll=False, end=None, seed=True), WarpShuffle(state=('acc1',), state_b=('acc1__o',), combine_states=(Assign(name='acc1', op=ElementwiseImpl('add'), args=('acc1', 'acc1__o'), dtype=None),), length=32, dtype=DataType(name='f32', np=dtype('float32'), nbytes=4)), Cond(cond=BinaryExpr(op='==', left=Var(name='a1_co'), right=Literal(value=0, dtype='int')), body=(Write(output='linear', index=(Literal(value=0, dtype='int'), Var(name='a0')), values=('acc1',), value_dtype=DataType(name='f32', np=dtype('float32'), nbytes=4), atomic=False, swizzle='NONE'),), else_body=())), block_threads=32, aux_threads=0, raster_axes=None, raster_group=None, raster_orient='m')"
+        ],
+        "name": "k_linear_4985ce",
+        "zero_delegated": []
+      },
+      "inputs": [
+        "linear__place_31a65fd872_0",
+        "p_weight_bits",
+        "p_weight_scale"
+      ],
+      "outputs": [
+        {
+          "name": "linear",
+          "shape": [
+            1,
+            1024
+          ],
+          "dtype": "bf16"
+        }
+      ],
+      "hints": {
+        "prov": {
+          "linear": {
+            "kind": "LinearOp",
+            "pieces": [
+              "linear",
+              "linear_a_unsq",
+              "linear_a_unsq_bc",
+              "linear_b_unsq",
+              "linear_ew",
+              "linear_reduce",
+              "linear_wt"
+            ]
+          },
+          "input_dynamic_fp8_stable_amax": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_dynamic_fp8_stable_amax"
+            ]
+          },
+          "input_dynamic_fp8_scale_bc": {
+            "kind": "IndexMapOp",
+            "pieces": [
+              "input_dynamic_fp8_scale_bc"
+            ]
+          },
+          "input_dynamic_fp8_decoded": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_dynamic_fp8_decoded"
+            ]
+          },
+          "input_dynamic_fp8_scale": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_dynamic_fp8_scale"
+            ]
+          },
+          "input_dynamic_fp8_amax": {
+            "kind": "ReduceOp",
+            "pieces": [
+              "input_dynamic_fp8_amax"
+            ]
+          },
+          "input_dynamic_fp8_blk": {
+            "kind": "ReshapeOp",
+            "pieces": [
+              "input_dynamic_fp8_blk"
+            ]
+          },
+          "input_dynamic_fp8_abs": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_dynamic_fp8_abs"
+            ]
+          },
+          "input_dynamic_fp8_normalized": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_dynamic_fp8_normalized"
+            ]
+          },
+          "input_dynamic_fp8_bits": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_dynamic_fp8_bits"
+            ]
+          },
+          "input_dynamic_fp8_value": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "input_dynamic_fp8_value"
+            ]
+          },
+          "input_dynamic_fp8_finite_max_bc": {
+            "kind": "IndexMapOp",
+            "pieces": [
+              "input_dynamic_fp8_finite_max_bc"
+            ]
+          },
+          "input_dynamic_fp8_floor_bc": {
+            "kind": "IndexMapOp",
+            "pieces": [
+              "input_dynamic_fp8_floor_bc"
+            ]
+          },
+          "p_weight_blk": {
+            "kind": "ReshapeOp",
+            "pieces": [
+              "p_weight_blk"
+            ]
+          },
+          "p_weight": {
+            "kind": "ReshapeOp",
+            "pieces": [
+              "p_weight"
+            ]
+          },
+          "p_weight_dq": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "p_weight_dq"
+            ]
+          },
+          "p_weight_sblk": {
+            "kind": "ElementwiseOp",
+            "pieces": [
+              "p_weight_sblk"
+            ]
+          },
+          "p_weight_scale_bc": {
+            "kind": "IndexMapOp",
+            "pieces": [
+              "p_weight_scale_bc"
+            ]
+          }
+        },
+        "trace.materialize": true
+      }
+    }
+  }
+}

@@ -1,0 +1,123 @@
+{
+  "shape": {
+    "m": 16,
+    "k": 4096,
+    "n": 6144
+  },
+  "gpu": "NVIDIA GeForce RTX 5090",
+  "torch": "2.13.0+cu130",
+  "cuda": "13.0",
+  "vllm": "0.29.0",
+  "flashinfer": "0.6.18",
+  "references": {
+    "vllm_selected_default": "FlashInferCutlassNvFp4LinearKernel",
+    "faster_second_choice": "FlashInferB12xNvFp4LinearKernel"
+  },
+  "pad_cols": 0,
+  "protocol": {
+    "warmup_rounds": 5,
+    "samples": 5,
+    "graph_replays_per_sample": 100,
+    "captured_calls_per_graph": 1,
+    "interleaved": true,
+    "timed_operation": "activation_quantize_and_matmul",
+    "weight_quantization_timed": false
+  },
+  "timing_us": {
+    "emmy": {
+      "median": 10.415040254592896,
+      "min": 10.34432053565979,
+      "max": 10.577919483184814,
+      "samples": [
+        10.577919483184814,
+        10.484800338745117,
+        10.415040254592896,
+        10.371840000152588,
+        10.34432053565979
+      ]
+    },
+    "flashinfer_cutlass": {
+      "median": 18.85696053504944,
+      "min": 18.79263997077942,
+      "max": 19.073599576950073,
+      "samples": [
+        19.073599576950073,
+        18.91103982925415,
+        18.85696053504944,
+        18.79263997077942,
+        18.853119611740112
+      ]
+    },
+    "flashinfer_b12x": {
+      "median": 12.354880571365356,
+      "min": 12.34495997428894,
+      "max": 12.36448049545288,
+      "samples": [
+        12.36448049545288,
+        12.354880571365356,
+        12.349439859390259,
+        12.34495997428894,
+        12.36191987991333
+      ]
+    }
+  },
+  "correctness": {
+    "flashinfer_b12x_vs_cutlass_max_abs": 0.0,
+    "flashinfer_b12x_vs_cutlass_exact_fraction": 1.0,
+    "emmy_vs_cutlass_max_abs": 0.0,
+    "emmy_vs_cutlass_exact_fraction": 1.0
+  },
+  "profiles": {
+    "emmy": {
+      "per_call_us": 9.61984999999999,
+      "per_kernel": {
+        "k_reshape_reduce_46015e": {
+          "median_us": 1.1200000000001182,
+          "count": 20
+        },
+        "k_reshape_reduce_46015e__place_b87aae0fba": {
+          "median_us": 0.928000000000111,
+          "count": 20
+        },
+        "k_linear_511417": {
+          "median_us": 7.42349999999999,
+          "count": 20
+        }
+      }
+    },
+    "flashinfer_cutlass": {
+      "per_call_us": 18.182399999999962,
+      "per_kernel": {
+        "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)": {
+          "median_us": 0.5119999999999436,
+          "count": 20
+        },
+        "void vllm::cvt_fp16_to_fp4<__nv_bfloat16, false>(int, int, int, int, __nv_bfloat16 const*, float const*, unsigned int*, unsigned int*)": {
+          "median_us": 1.0559999999998126,
+          "count": 20
+        },
+        "_ZN7cutlass13device_kernelINS_4gemm6kernel13GemmUniversalIN4cute5tupleIJiiiiEEENS1_10collective13CollectiveMmaINS1_42MainloopSm120TmaWarpSpecializedBlockScaledILi2ELi3ENS5_IJNS4_1CILi1EEESB_SB_EEENS1_51KernelTmaWarpSpecializedCooperativeBlockScaledSm120ILi3EEEEENS5_IJNSA_ILi128EEESG_NSA_ILi256EEEEEENS5_IJNS_12float_e2m1_tENS_13float_ue4m3_tEEEENS5_IJNS5_IJlSB_lEEENS4_6LayoutINS5_IJNS5_IJNS5_IJNSA_ILi32EEENSA_ILi4EEEEEEiEEENS5_IJNS5_IJNSA_ILi16EEESP_EEEiEEENS5_IJSB_iEEEEEENS5_IJSU_NS5_IJNS5_IJNSA_ILi0EEESB_EEENSA_ILi512EEEEEENS5_IJSX_iEEEEEEEEEEESL_S14_NS4_8TiledMMAINS4_8MMA_AtomIJNS4_5SM12011BLOCKSCALED19SM120_16x8x64_TN_VSISJ_SJ_fSK_Li16EEEEEENSN_INS5_IJSP_NSA_ILi2EEESB_EEENS5_IJSB_SP_SX_EEEEENS5_IJSG_NSN_INS5_IJNSA_ILi8EEES1C_S1C_EEENS5_IJSB_SS_S1G_EEEEENSA_ILi64EEEEEEEENS5_IJNS4_13SM90_TMA_LOADES1N_EEENS5_IJNS4_14ComposedLayoutINS4_7SwizzleILi3ELi4ELi3EEENS4_18smem_ptr_flag_bitsILi4EEENSN_INS5_IJS1G_SH_EEENS5_IJSH_SB_EEEEEEENSN_INS5_IJNS5_IJSQ_SB_EEENS5_IJST_SB_SP_EEEEEENS5_IJNS5_IJST_SZ_EEENS5_IJSY_SP_SZ_EEEEEEEEEEENS5_IJNS4_9Copy_AtomIJNS4_17SM75_U32x4_LDSM_NENS_15integer_subbyteILi4ELb0EEEEEENS26_IJNS4_13UniversalCopyISK_SK_EESK_EEEEEENS4_8identityES1O_S25_S2E_S2F_EENS_8epilogue10collective18CollectiveEpilogueINS2H_22Sm90TmaWarpSpecializedILi2ELi2ELi4ELb0ELb1EEEJSI_NS5_IJS1K_SO_EEEvSM_NS_10bfloat16_tESM_NS2H_6fusion15FusionCallbacksINS2H_23Sm120TmaWarpSpecializedILi2ELi2ELi4ELb0ELb1EEENS2O_17LinearCombinationIS2N_fvfLNS_15FloatRoundStyleE2EEESI_S2M_JEEES1N_NS1P_INS1Q_ILi2ELi4ELi3EEENS1S_ILi16EEENSN_INS5_IJS1G_SO_EEENS5_IJSO_SB_EEEEEEENS4_17SM75_U32x2_LDSM_NENS4_14SM90_TMA_STOREES31_NS4_17SM90_U32x2_STSM_NENS26_IJS34_NS_6half_tEEEEvEEENS1_25StaticPersistentSchedulerEvEEEEvNT_6ParamsE": {
+          "median_us": 16.400499999999965,
+          "count": 20
+        }
+      }
+    },
+    "flashinfer_b12x": {
+      "per_call_us": 11.666950000000003,
+      "per_kernel": {
+        "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)": {
+          "median_us": 0.5120000000000573,
+          "count": 20
+        },
+        "void vllm::cvt_fp16_to_fp4<__nv_bfloat16, false>(int, int, int, int, __nv_bfloat16 const*, float const*, unsigned int*, unsigned int*)": {
+          "median_us": 0.9919999999999618,
+          "count": 20
+        },
+        "kernel_cutlass_kernel_flashinfergemmkernelsdense_blockscaled_gemm_sm120_b12xDenseGemmKernel_object_at__CopyAtom_ThrID10_TVLayoutSrc1819201_TVLayoutDst1819201_Valuetypef4E2M1FN_tensor00odi_0": {
+          "median_us": 10.12749999999994,
+          "count": 20
+        }
+      }
+    }
+  }
+}

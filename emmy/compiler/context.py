@@ -260,6 +260,15 @@ class Context:
         return self.compute_capability[0] == 12
 
     @property
+    def has_wgmma(self) -> bool:
+        """Whether the target has the warp-group ``wgmma.mma_async`` tensor-core instruction.
+
+        Hopper (sm_90) only, and NOT every cc 9.x-and-up card: datacenter Blackwell (sm_100) has a
+        different instruction and consumer Blackwell (sm_120) has neither, so this asks for the
+        9.0 family rather than a lower bound, like the fp4 gate."""
+        return self.compute_capability[0] == 9
+
+    @property
     def has_tma(self) -> bool:
         """Whether the target can issue TMA (``cp.async.bulk.tensor``) — a Hopper (sm_90) feature.
         Ada / Ampere have none, and nvcc has no ``sm_89a``, so a TMA stage below sm_90 fails to

@@ -18,6 +18,8 @@ import sys
 import textwrap
 import time
 
+import pytest
+
 from tests.compiler.helpers import requires_cuda
 
 
@@ -497,6 +499,51 @@ def test_run_job_trace_args_accuracy_gates_the_bench(monkeypatch) -> None:
     resp = asyncio.run(_run_job(dict(req)))
     assert resp["accuracy_error"] is None and resp["run_io"] == ({"x": [0.0]}, {"n0": [2.0]})
     assert benched and resp["results"] == {"Emmy": 1.0}
+
+
+def test_run_job_trace_args_want_ref_without_eager_accuracy(monkeypatch) -> None:
+    """Quantized ``--code --ab`` disables eager accuracy but still needs the greedy
+    Emmy run on identical inputs as the candidate rows' wrong-answer reference."""
+    from types import SimpleNamespace
+
+    import emmy.commands.compile as compile_mod
+    import emmy.commands.run as run_mod
+    import emmy.compiler.backend.cuda.backend as backend_mod
+    from emmy.compiler.backend.cuda._bench_worker import _run_job
+
+    class _FakeBackend:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def run(self, graph, *, input_data=None):
+            return SimpleNamespace(outputs={"n0": [2.0]}), None
+
+    async def _fake_full_model(module, args_t, kwargs, graph, backend, *, warmup, iters, bench_backends):
+        return {"Emmy": 1.0}, SimpleNamespace(captured=True), True
+
+    monkeypatch.setattr(compile_mod, "load_or_trace", lambda ns: (None, None, (object(), (), {})))
+    monkeypatch.setattr(backend_mod, "CudaBackend", _FakeBackend)
+    monkeypatch.setattr(run_mod, "_bind_inputs", lambda g, m, a, k, checkpoint=None: {"x": [0.0]})
+    monkeypatch.setattr(run_mod, "_eager_output", lambda *args: pytest.fail("eager accuracy must stay disabled"))
+    monkeypatch.setattr(run_mod, "bench_full_model_real", _fake_full_model)
+
+    resp = asyncio.run(
+        _run_job(
+            {
+                "graph": "G",
+                "torch_spec": ("trace_args", {}),
+                "bench_backends": "emmy",
+                "warmup": 1,
+                "iters": 2,
+                "accuracy": False,
+                "want_ref": True,
+            }
+        )
+    )
+
+    assert resp["accuracy_error"] is None
+    assert resp["run_io"] == ({"x": [0.0]}, {"n0": [2.0]})
+    assert resp["results"] == {"Emmy": 1.0}
 
 
 def test_run_job_trace_args_strict_accuracy_records_direct_proof(monkeypatch) -> None:

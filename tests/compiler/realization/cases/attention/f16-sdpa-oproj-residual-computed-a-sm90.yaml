@@ -1,0 +1,113 @@
+# Causal SDPA over two 64-wide heads, the o_proj over the merged heads, and the residual add, as one kernel: the
+# o_proj's A operand is the attention output normalized by its own row sum, a computed cone that reads the softmax
+# fold through two edges. With a tensor-core o_proj on the `d2/smem` compute fill, the fill replicated both
+# lowerings of that fold per cell and nvcc refused the kernel (`acc3__c3 has already been declared`) on every card;
+# the prefill SDPA + o_proj + residual target of the golden-bench corpus had no realizable row for that reason
+# (plans/h100-memo-2026-09-10.md, item 5). The seam now lowers the fold once.
+compute_cap:
+- 9
+- 0
+programs:
+- inputs: [x0, x1, x2, x3, x4]
+  outputs: [add]
+  nodes:
+  - id: scaled_dot_product_attention_c3
+    op: constant
+    attrs:
+      name: scaled_dot_product_attention_c3
+      value: 0.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[scaled_dot_product_attention_c3, f16, [1]]]
+  - id: transpose_c1
+    op: constant
+    attrs:
+      name: transpose_c1
+      value: 1.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[transpose_c1, f16, [1]]]
+  - id: transpose_c2
+    op: constant
+    attrs:
+      name: transpose_c2
+      value: 2.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[transpose_c2, f16, [1]]]
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 2, 64, 64]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [1, 2, 64, 64]]]
+  - id: x2
+    op: input
+    outputs: [[x2, f16, [1, 2, 64, 64]]]
+  - id: scaled_dot_product_attention
+    op: torch.sdpa
+    attrs: {is_causal: true, sliding_window: null, scale: null}
+    inputs: [x0, x1, x2]
+    outputs: [[scaled_dot_product_attention, f16, [1, 2, 64, 64]]]
+  - id: transpose
+    op: torch.transpose
+    attrs: {axes: {__tuple__: [1, 2]}}
+    inputs: [scaled_dot_product_attention]
+    outputs: [[transpose, f16, [1, 64, 2, 64]]]
+  - id: reshape
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [1, 64, 128]}}
+    inputs: [transpose]
+    outputs: [[reshape, f16, [1, 64, 128]]]
+  - id: x3
+    op: input
+    outputs: [[x3, f16, [128, 128]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [reshape, x3]
+    outputs: [[linear, f16, [1, 64, 128]]]
+  - id: x4
+    op: input
+    outputs: [[x4, f16, [1, 64, 128]]]
+  - id: add
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [linear, x4]
+    outputs: [[add, f16, [1, 64, 128]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - add
+    - linear
+    - reshape
+    - scaled_dot_product_attention
+    - transpose
+  realizations:
+  - name: k_sdpa_linear_reduce_40553d.8b1cb888d31b
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x2
+      TILE@map.1/inner: mma_m16n8k16_f16_f32/f8x1
+      STAGE@map.1/inner: d2/smem
+      TILE@map.1/inner.1/map.1/twist.1/inner: mma_m16n8k16_f16_f32/f8x2/k4
+      RASTER: ''
+    identity: c58a347d4bf605dbad89ad192b9fe41fc01a0d27fc2bb352cd647c5aeb466531

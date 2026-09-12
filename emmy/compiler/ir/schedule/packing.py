@@ -1,4 +1,4 @@
-"""The PACKED-PAIR k-block operand reading — the NVFP4 weight's shape, recognized once.
+"""The byte-slab k-block operand reading — the NVFP4 and block-scaled fp8 weights' shape, recognized once.
 
 One question, asked by consumers that must not drift apart: classic domain projection, the schedule
 stage resolver, and kernel materialization each ask :func:`packed_readings` and get the same answer
@@ -7,9 +7,10 @@ different purpose: a contraction that reads this way keeps its operand cones rat
 them as seams, because materializing one leaves the consumer without the codes and the block scale
 the cell binds on.
 
-It reads a SHAPE, never a checkpoint format: a packed-pair storage dtype (``logical_elems == 2``),
-a data-dependent gather into a pair-value table, and a scale factor whose every ``k`` reference is
-block-guarded. Any weight spelled that way is recognized; nothing here names a quantization scheme.
+It reads a SHAPE, never a checkpoint format: a 1-byte storage dtype decoded either through a
+data-dependent gather into a pair-value table (a packed pair, ``logical_elems == 2``) or by its own
+decode cast (an fp8 byte, one element each), times a scale factor whose every ``k`` reference is block-guarded.
+Any weight spelled that way is recognized; nothing here names a quantization scheme.
 
 It is a CONSUMER'S reading of an already-built contraction — ``TileOp`` post-init binds the computed
 B as a plain projection, and this asks what that projection contains — so it is not one of the
@@ -36,28 +37,36 @@ def _idx_vars(index) -> set[str]:
 
 @dataclass(frozen=True)
 class PackedKBlockB:
-    """A computed B recognized as ``pair-decode(packed bits) x k-block scale``.
+    """A computed B recognized as ``decode(stored bytes) x k-block scale``.
 
-    ``bits`` is the packed-pair storage Load (its input tensor's dtype has
-    ``logical_elems == 2``), ``table`` the data-dependent pair-value gather it feeds,
-    ``factor`` the SSA name of the scale factor, and ``block`` the k extent the factor
-    is constant on. The packed byte-slab offer consumes this: the bits stage raw, and
-    the drain decodes pairs and multiplies the factor into the decoded values at the
-    fragment load (one factor read per k block).
+    ``bits`` is the 1-byte storage Load, ``table`` the statement that decodes it — for a
+    packed-pair dtype (``logical_elems == 2``) the data-dependent pair-value gather it feeds, for
+    an fp8 byte (one element each) the dtype's own decode cast — ``factor`` the SSA name of the
+    scale factor, and ``block`` the k extent the factor is constant on. The packed byte-slab offer
+    consumes this: the bits stage raw, and the drain decodes them and multiplies the factor into
+    the decoded values at the fragment load (one factor read per k block).
     """
 
     bits: Load | None
-    table: Load
+    table: Load | Assign
     factor: str
     block: int
+    #: Logical k elements per stored byte — two for a packed pair, one for an fp8 byte. The slab's
+    #: byte columns and the drain's k-to-column step both divide by it.
+    per_byte: int = 2
     #: The SSA name when the codes are COMPUTED rather than stored — an operand whose quantize
     #: loop fusion inlined into the matmul, so its byte exists only as a value. ``None`` (and
     #: ``bits`` a real ``Load``) unless the caller passed ``codes_may_compute``; the packed
     #: byte-slab stage, whose bits COPY from gmem, never asks for it.
     codes: str | None = None
 
+    def scale_cols(self, bk_elems: int) -> int:
+        """The scale slab's columns per chunk: one per block the chunk spans, and a single one when
+        one block holds the whole chunk."""
+        return max(1, bk_elems // self.block)
 
-def _k_block_guard(expr, k_name: str) -> tuple[bool, set[int]]:
+
+def k_block_guard(expr, k_name: str) -> tuple[bool, set[int]]:
     """Walk ``expr`` for the k-block-invariance proof: ``(k_seen_naked, guards)``.
 
     A ``k`` occurrence is GUARDED by ``(X + k) / B`` (a literal ``B``) when ``X`` is a
@@ -113,44 +122,63 @@ def _k_block_guard(expr, k_name: str) -> tuple[bool, set[int]]:
 
 
 def match_packed_kblock_b(cone: list, k_name: str, inputs, *, codes_may_compute: bool = False) -> PackedKBlockB | None:
-    """Recognize the packed-pair k-block shape in a computed-B cone.
+    """Recognize the byte-slab k-block shape in a computed-B cone.
 
-    The shape (the NVFP4 speller's lowered form): the packed byte feeds an index copy, a
-    pair-table gather reads it by data-dependent index, and the final multiply combines the
-    gathered value with a factor whose every ``k`` reference is block-guarded
-    (:func:`_k_block_guard`). Everything else returns ``None``.
+    Two decodes read the same way. A packed pair (the NVFP4 speller's lowered form): the packed
+    byte feeds an index copy and a pair-table gather reads it by data-dependent index. An fp8 byte,
+    one element each (the block-scaled fp8 form): a stored fp8 load feeds its dtype's decode cast. Either way
+    the final multiply combines the decoded value with a factor whose every ``k`` reference is
+    block-guarded (:func:`k_block_guard`). Everything else returns ``None``, and a k-invariant
+    factor in particular does too: that scale commutes out of the fold onto the epilogue instead.
 
     The byte is normally a ``Load`` — a stored weight, or an activation whose codes a fan-out
-    forced into memory. ``codes_may_compute`` also admits one whose quantize loop fusion inlined
-    into this matmul, so the byte is an ``Assign`` at the packed dtype and there is no buffer to
-    copy: the operand's slab is then compute-filled from this very cone instead. Only the
-    block-scaled reading asks for that; the packed byte-slab stage copies its bits and would have
-    nothing to address.
+    forced into memory. ``codes_may_compute`` also admits a packed pair whose quantize loop fusion
+    inlined into this matmul, so the byte is an ``Assign`` at the packed dtype and there is no
+    buffer to copy: the operand's slab is then compute-filled from this very cone instead. Only
+    the block-scaled reading asks for that; the packed byte-slab stage copies its bits and would
+    have nothing to address.
     """
     if not cone or inputs is None:
+        return None
+    root = cone[-1]
+    if not isinstance(root, Assign) or root.op.name != "multiply" or len(root.args) != 2:
         return None
     loads = [st for st in cone if isinstance(st, Load)]
     packed = [ld for ld in loads if getattr(inputs.get(ld.input), "dtype", None) is not None and inputs[ld.input].dtype.logical_elems == 2]
     computed = (
         [st for st in cone if isinstance(st, Assign) and st.dtype is not None and st.dtype.logical_elems == 2] if codes_may_compute else []
     )
-    if len(packed) + len(computed) != 1:
+    if len(packed) + len(computed) > 1:
         return None
-    bits = packed[0] if packed else None
-    codes = None if bits is not None else computed[0].name
-    defined = {d for st in cone if isinstance(st, Assign) for d in st.defines()}
-    gathers = [ld for ld in loads if _idx_vars(ld.index) & defined]
-    if len(gathers) != 1:
-        return None
-    table = gathers[0]
-    root = cone[-1]
-    if not isinstance(root, Assign) or root.op.name != "multiply" or len(root.args) != 2:
-        return None
-    # One multiply arg's cone holds the gather; the other is the factor. The backward cone is the
+    if packed or computed:
+        bits = packed[0] if packed else None
+        codes = None if bits is not None else computed[0].name
+        defined = {d for st in cone if isinstance(st, Assign) for d in st.defines()}
+        gathers = [ld for ld in loads if _idx_vars(ld.index) & defined]
+        if len(gathers) != 1:
+            return None
+        table, per_byte = gathers[0], 2
+    else:
+        # The fp8 byte: its decode cast is itself one of the root's two factors, so the
+        # other one is the scale — a decode feeding anything else (a decoded scale byte) is not it.
+        stored = {ld.names[0]: ld for ld in loads if len(ld.names) == 1 and inputs.get(ld.input) is not None}
+        decodes = [
+            st
+            for st in cone
+            if isinstance(st, Assign)
+            and st.name in root.args
+            and len(st.args) == 1
+            and st.args[0] in stored
+            and st.op.decodes == inputs[stored[st.args[0]].input].dtype.name
+        ]
+        if len(decodes) != 1 or inputs[stored[decodes[0].args[0]].input].dtype.nbytes != 1:
+            return None
+        table, bits, codes, per_byte = decodes[0], stored[decodes[0].args[0]], None, 1
+    # One multiply arg's cone holds the decode; the other is the factor. The backward cone is the
     # tree-native reading — it replaced the old forward ``map_cone`` walk, and answers the same
     # question here: which stmts does this argument depend on.
     sides = {arg: list(Body(tuple(cone)).backward_cone([arg]).members) for arg in root.args}
-    gather_args = [a for a, sub in sides.items() if any(st is table for st in sub) or a in table.names]
+    gather_args = [a for a, sub in sides.items() if any(st is table for st in sub) or a in table.defines()]
     if len(gather_args) != 1:
         return None
     factors = [a for a in root.args if a != gather_args[0]]
@@ -161,13 +189,13 @@ def match_packed_kblock_b(cone: list, k_name: str, inputs, *, codes_may_compute:
     for st in sides[factor]:
         exprs = st.index if isinstance(st, Load) else ()
         for e in exprs:
-            naked, guards = _k_block_guard(e, k_name)
+            naked, guards = k_block_guard(e, k_name)
             if naked:
                 return None
             blocks |= guards
     if len(blocks) != 1:
         return None
-    return PackedKBlockB(bits=bits, table=table, factor=factor, block=next(iter(blocks)), codes=codes)
+    return PackedKBlockB(bits=bits, table=table, factor=factor, block=next(iter(blocks)), per_byte=per_byte, codes=codes)
 
 
 @dataclass(frozen=True)
@@ -330,6 +358,7 @@ def packed_readings(nodes, inputs) -> frozendict:
 
 __all__ = [
     "BlockScaledOperand",
+    "k_block_guard",
     "block_scaled_atom",
     "BlockScaledPair",
     "PackedKBlockB",

@@ -87,6 +87,9 @@ def test_place_only_golden_rows_are_routing_rows() -> None:
         ranking=None,
     )
     assert replace(base, knobs={"PLACE@inner.1/map": "cut"}).is_routing
+    assert replace(base, knobs={"REDUCE@map.1/twist": "g8k"}).is_routing, "a cross-CTA split arm mints pieces like a cut"
+    assert not replace(base, knobs={"REDUCE@map.1/twist": "g8k", "WORK": "w4x1"}).is_routing
+    assert not replace(base, knobs={"REDUCE": "coop-t"}).is_routing
     assert not replace(base, knobs={"TILE": "f4x8", "WORK": "t16x8"}).is_routing
     assert not replace(base, knobs={}).is_routing
 

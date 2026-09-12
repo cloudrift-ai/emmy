@@ -112,7 +112,9 @@ declaration `copy_cell` does not rename), stay shared, so each copy re-declares 
 loop under the one name, while a name the replicated TAIL defines that is spelled like one of the term's carried
 states is renamed apart first (`_unshadowed`): both would take the same cell suffix and land on that cell's
 accumulator, two declarations of one name in one scope, and a tail that recomputes the carrier's own fold has
-exactly that shape; anything else tiles nothing and folds one thread per
+exactly that shape (a cone that reads one fold through two edges lowers it twice as EQUAL statements instead, which
+the seam and the computed-B fill collapse to the first — `stmt.body.dedup_recomputes` — before any replication);
+anything else tiles nothing and folds one thread per
 output cell (the degenerate `op.lower()` + `with_store`) — except a kernel whose ONLY work is a free output sweep,
 which distributes that sweep across its `WORK` threads through the same `_lane_close` a cooperating reduce uses for
 its projection: each lane owns a strided slice and writes its own cells, so there is no combine and no store guard.
@@ -249,7 +251,20 @@ structurally different primitives — sit behind one `fill`/`commit`/`wait` seam
 **one atom-agnostic driver** (`_atom._staged`) builds the operand pair + the transport for either atom; the atom
 supplies only the slab drain leaf via `_AtomOps.staged_drain` (the shared inner fragment drain
 `_staged_inner_atom_loop` — `ldmatrix` on modern atoms, paired wide loads or a cooperative gather on Volta — or the
-scalar `_scalar_drain`). A fill's σ binds **every** tiled output axis, not just the operand's own: the tile
+scalar `_scalar_drain`, or the warp-group drain `_wgmma_drain` on a `wgmma` atom: no operand fragments, one
+matrix descriptor per operand and k16 step, one `WgmmaMma` per group of N/8 accumulator cells, the chunk closed
+by a commit and a wait so the ring slot may be released; the four warps of a group emit the same descriptors,
+addressing the slot's 64-row block `64·(warp/4)`, and the hardware hands warp `i` rows `16i..16i+15` of it, which
+is the m16n8 row the epilogue expects at `f1`. The descriptor geometry follows the slab: a K-major slab (A, or a
+transposed B) has one 128-byte swizzle row per tile row, so core groups are `8·bk·2` bytes apart; an N-contiguous
+B is MN-major (`trans_b`) and **atom-major** (`Operand.atoms`, `_MmaOps.b_atoms`): the N tile's 64-element swizzle
+atoms stack along the slab rows, each its own `bk` K rows, so the slab's row is one swizzle row under the plain
+B128 both transports already spell, core groups are eight rows (1 KiB) apart and the next atom `bk·128` bytes down,
+which is the descriptor's MN-major canonical layout at any N tile. The TMA fill deposits one `(bk, atom)` box per
+atom; the cp.async and compute fills write the same slab through `_atom_major`, the `(row, col)` map composed
+under theirs. A row-major deposit wider than one atom is not that layout — measured on the H100, every such tile
+was wrong wholesale — which is why the slab is reshaped rather than the descriptor re-strided). A
+fill's σ binds **every** tiled output axis, not just the operand's own: the tile
 axis at `tile_base + cell` (masked axes clamp in-bounds) and the SIBLING axis at its block base — a slab is
 CTA-shared across the sibling, so a sibling var can only survive as a value-dead occurrence: a flat-index reshape
 residue on a merged / reshaped weight row, or, in a packed weight's block-scale fill, a per-tensor scale a placement
@@ -301,6 +316,17 @@ are never offered and a `smem-tma` pin refuses — Ada/Ampere have no
 schedule fork enumerates the resolver-gated stage grid (`ir/schedule/catalog.stage_moves`) alongside the tile / reduce
 moves;
 an `EMMY_STAGE` pin stays authoritative.
+
+**Slab addresses.** A swizzled slab's element index is permuted by an XOR of its own row bits into its 16-byte
+chunk bits, and that XOR is linear over bit-disjoint parts: `swz(a | b) = swz(a) ^ swz(b)`. Every staged address is
+such a sum — a tile base the IR spells (a fragment's row block and K step, a copy stripe's base row, a ring slot's
+row offset) plus the lane's own offset the render adds — and a base whose row is a multiple of the lane's row span
+and whose column clears the lane's column bits shares no bit with it. So the drain reads
+`(swz(lane) ^ swz(col)) + row·ldm` and an evenly striped cp.async fill, unrolled per stripe, writes
+`swz(lane) + base` (`swizzled_slab_index`): the lane's swizzle is one hoisted per-lane value, the column's a
+constant nvcc folds, the row an immediate of the load. Re-applying the swizzle to every load's whole index had nvcc
+recompute the XOR from `threadIdx` per load — a fifth of an attention chunk's instructions on the A100, and the
+spills that came with holding the results. A base the reading cannot prove keeps the whole-index form.
 
 **Computed operands and nested Folds.** Every computed edge remains a schedule site. Scalar rows evaluate a pure
 producer in registers. Warp rows place a producer either in a synchronous shared-memory slab or, when the child is a
@@ -357,6 +383,14 @@ types an edge's results; a name whose statement kind carries no dtype keeps the 
 mask — returns as f32, and the bit operations reading it have no f32 spelling at all, so the kernel fails to render
 rather than computing something wrong.
 
+**A statistic over a K group is bridged per chunk.** A reduce edge that varies with K only through one block guard
+— the maximum a grouped activation scale takes over each 128-wide K group — is neither row-invariant nor worth a
+per-cell evaluation, which would re-read the whole group for every slab cell. The seam splits it off as its `chunk`
+part: its rows are declared once with the prologue's, and the A operand's fill (`SyncOperand.before`) refills them at
+the head of every chunk from the chunk's base K, one warp per row, before the cells read them back. That is the
+group's value only when the chunk sits inside one group, so `resolve_fill_stage` refuses a chunk that does not tile
+the block.
+
 **Staged fp8 (1-byte) operand slabs.** A storage-dtype (fp8) operand stages as a RAW BYTE slab — each `Operand`
 sized at its OWN element width (the mixed-dtype seam the scalar tier already had), the cp.async fill running 16 B
 16-element chunks. ldmatrix is b16-only below sm_100a, so the drain is a **cooperative byte gather** instead
@@ -396,6 +430,14 @@ carries the bf16 form. Legality (`resolve_warp_stage`'s packed arm) scopes the s
 written for — a copy transport, an N-major weight of 16-value blocks under an f16 or bf16 atom whose K step is that
 same 16, an A already at the atom's dtype, and the byte row's 16-divisibility for the same chunking reason the fp8
 slab has. Everything outside the scope declines and keeps the general reading.
+
+**Block-scaled fp8 weights ride the same three slabs.** The reading also takes a single fp8 byte per element: a stored fp8 load
+whose own decode cast feeds the multiply by a block-guarded factor (`PackedKBlockB.per_byte == 1`). The bits slab is
+then the full K width in bytes, and the scale slab holds f32 — the dtype the fill multiplies the decoded value in
+before its round to the fragment — with one column per block the chunk spans; a 128-wide block holds whole atom
+steps and tiles every legal chunk or is tiled by it, so each drain step reads one scale. Its loader
+(`emmy_mma_load_b_smem_trans_f8s_<dtype>`) converts a lane's `(k, k+1)` byte pair with one hardware cvt, multiplies
+both by the f32 scale and rounds once — the compute fill's arithmetic, so the two are bit-identical.
 
 Both copy transports carry it, differing in one thing: a cp.async fill pads the byte rows (`BYTE_SLAB_PAD`, for the
 drain's bank spread) while a TMA box deposits DENSE, so its slab is unpadded and its drain reads the narrower row
@@ -452,9 +494,15 @@ The tier folds the RECIPE's patterns per chunk, not the stored lift — that lif
 (`(score, 1, value)` for softmax), which is the right thing for a serial step and says nothing about a chunk. The
 chunk is `TILE`'s own K width, which is also what the stage resolver derives `bk_elems` as — one number, two
 readers, so a `STAGE` at this site names the transport and never a second block. Per chunk it emits the score,
-reduces it per row into the chunk's pivot, instantiates each channel's `pattern` against that pivot, folds a channel
-that is no product per row and the bilinear one on tensor cores, and merges the chunk's partial through the recipe's
-stable ⊕ (`Fold.merge`) once per chunk.
+reduces it per row into the chunk's pivot, and runs the recipe's `advance` on the carrier's pivot against it — the
+advanced pivot and the carrier's factor for the move, per row. Every channel's `pattern` is instantiated at the
+ADVANCED pivot, so the chunk's contribution already stands where the carrier moves to and takes no factor of its own
+(a side at the merged pivot is scaled by the identity — transport of structure, not a softmax fact). The carrier is
+then scaled by its factor (the recipe's `scale`, once per chunk) and the chunk joins it through each channel's base
+⊕: a channel that is no product folds its row reduce into its per-row register, and the bilinear one's `mma.sync`
+accumulates straight into the expectation's fragment. That is FlashAttention-2's loop, derived: no chunk-local
+accumulator, no per-element rescale of the chunk, which on the A100 was 64 registers and a third of the chunk's
+float instructions.
 
 Three things make it small. The SCORE is the nested contraction the tree already carries as a site of its own, and
 the fragment seam already ties the two together — the score's N tile must equal the consumer's chunk, one warp column
@@ -476,7 +524,11 @@ chain runs at the consumer-die full rate while the running sum stays f32. The sc
 either way — its C fragments are what the pivot, the denominator and every channel's pattern are read off.
 
 A projection that reads no per-row carrier state is the ordinary sink's (a placement cut materializes the
-denominator, and the tail is then a per-cell chain like any other).
+denominator, and the tail is then a per-cell chain like any other). A carried state stored WHOLE — a cross-CTA
+split's partial writing the pivot and the denominator to its workspace beside the expectation — broadcasts its
+row pair into a fragment and takes the same fragment store, which is what lets the key-range split
+(`REDUCE@map.1/twist=g<n>k`, FlashAttention-2's split-KV) keep the chunk tier for its partial: decode's few query
+rows then spread over `n` times the CTAs, and the finalize folds the per-cell states through the recipe's merge.
 
 The score's own PREFIX — the carrier's lift cut to its score role — is where an SDPA mask arrives, and it takes two
 readings the tier would otherwise refuse. Its LEAVES are read once ahead of the chunk loop, so an operand that feeds

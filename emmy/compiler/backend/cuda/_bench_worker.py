@@ -197,7 +197,7 @@ async def _run_job(req: dict) -> dict:
             if bundle is None:
                 raise RuntimeError("trace_args produced no runnable module (embedded or debug IR has none)")
             module, args_t, kwargs = bundle
-            if req.get("accuracy") or req.get("strict_accuracy"):
+            if req.get("accuracy") or req.get("strict_accuracy") or req.get("want_ref"):
                 # The run path's correctness gate, in-child: bind the rebuilt module's real
                 # inputs, run the emmy program on them, compare vs the eager forward. A
                 # numeric failure skips the bench — the parent aborts on the verdict, so
@@ -215,22 +215,23 @@ async def _run_job(req: dict) -> dict:
                 input_data = _bind_inputs(req["graph"], module, args_t, kwargs, checkpoint=payload.get("input"))
                 run_result, _ = backend.run(req["graph"], input_data=input_data)
                 run_outputs = _comparison_outputs(run_result.outputs, req["graph"])
-                eager_out = _eager_output(module, args_t, kwargs)
-                if req.get("strict_accuracy"):
-                    correctness = _strict_correctness_proof(run_outputs, eager_out)
-                    if correctness["status"] != "pass":
-                        accuracy_error = f"strict eager correctness failed: {correctness.get('error', 'tolerance exceeded')}"
-                else:
-                    accuracy_error = _check_accuracy(run_outputs, eager_out)
-                if accuracy_error is not None:
-                    return {
-                        "result": None,
-                        "results": None,
-                        "torch_available": True,
-                        "captured": False,
-                        "accuracy_error": accuracy_error,
-                        "run_io": None,
-                    }
+                if req.get("accuracy") or req.get("strict_accuracy"):
+                    eager_out = _eager_output(module, args_t, kwargs)
+                    if req.get("strict_accuracy"):
+                        correctness = _strict_correctness_proof(run_outputs, eager_out)
+                        if correctness["status"] != "pass":
+                            accuracy_error = f"strict eager correctness failed: {correctness.get('error', 'tolerance exceeded')}"
+                    else:
+                        accuracy_error = _check_accuracy(run_outputs, eager_out)
+                    if accuracy_error is not None:
+                        return {
+                            "result": None,
+                            "results": None,
+                            "torch_available": True,
+                            "captured": False,
+                            "accuracy_error": accuracy_error,
+                            "run_io": None,
+                        }
                 if req.get("want_ref"):
                     run_io = (input_data, run_outputs)
             results, bench, captured = await bench_full_model_real(

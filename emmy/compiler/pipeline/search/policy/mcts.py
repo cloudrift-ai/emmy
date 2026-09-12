@@ -46,7 +46,6 @@ from emmy.compiler.pipeline.search.candidate import LazyCandidate
 from emmy.compiler.pipeline.search.db import NodeRow, PerfStats
 from emmy.compiler.pipeline.search.pins import unreproducible_pin_flag
 from emmy.compiler.pipeline.search.policy.base import Search
-from emmy.compiler.pipeline.search.policy.terminal_bench import bench_terminal_async
 from emmy.compiler.structural import digest
 
 if TYPE_CHECKING:
@@ -158,8 +157,7 @@ class TuningSearch(Search):
         # the LoopOp) — merged under every node's accumulated fork deltas so the
         # GLOBAL prior sees op-structure and can tell kernels apart.
         self._base_knobs = dict(base_knobs) if base_knobs else {}
-        self._best_reward = 0.0
-        self._visits_at_best = 0
+        self._stagnant = 0
         # Why the search stopped (set by ``_should_stop``): a patience /
         # max_visits message, or ``None`` when the queue drained — the
         # exhaustion signal ``two_level.inner_reward`` records as ``inf``
@@ -173,15 +171,11 @@ class TuningSearch(Search):
         # Set in ``observe`` when a bench sets a new global best.
         self.last_improved_best = False
 
-    def note_bench(self, *, measured: bool) -> None:
-        """Count only terminals that reached the live backend.
-
-        A DB cache hit remains useful evidence and is observed by the tree, but
-        does not spend ``max_measurements``. This keeps a resumed tune's candidate
-        budget about new measurements rather than replay work.
-        """
-        if measured:
-            self.measurements += 1
+    def reject(self, token: object | None) -> None:
+        """Count a lowering dead end without fabricating a benchmark or training row."""
+        assert isinstance(token, SearchNode)
+        self.tree.record_terminal(token, 0.0)
+        self._stagnant += 1
 
     def prepare_ctx(self, ctx):
         """Policy-owned ctx setup, applied by the engine's run construction: the tune search is
@@ -195,18 +189,15 @@ class TuningSearch(Search):
             ctx = replace(ctx, validate_pins=False, kernel_cache=None)
         return ctx
 
-    async def evaluate(self, token: object | None, cand, *, backend, db) -> None:
-        """Value one terminal the engine's loop yielded — the whole of what a terminal is worth
-        is policy: bench every CudaOp (or serve the cache / stub), persist the per-kernel
-        ``perf`` / inventory / lowering rows, and feed the tree and the prior (:meth:`observe`).
-        Every bench is taken in the deployable regime, so a terminal earns exactly one
-        measurement. The engine awaits this and nothing else."""
-        stats, status, measured, per_kernel = await bench_terminal_async(cand, backend=backend, db=db)
-        self.note_bench(measured=measured)
-        self.observe(token, stats, status, candidate=cand, kernels=per_kernel)
-
     def observe(
-        self, token: object | None, stats: PerfStats, status: str, candidate: object | None = None, kernels: list | None = None
+        self,
+        token: object | None,
+        stats: PerfStats,
+        status: str,
+        candidate: object | None = None,
+        kernels: list | None = None,
+        *,
+        measured: bool = True,
     ) -> None:
         self.last_stats = stats
         self.last_status = status
@@ -224,6 +215,8 @@ class TuningSearch(Search):
         prev_best = self.tree.best_reward
         self.tree.record_terminal(token, reward)
         self.last_improved_best = status == "ok" and self.tree.best_reward > prev_best
+        self.measurements += int(measured)
+        self._stagnant = 0 if self.last_improved_best else self._stagnant + int(measured)
         if self.prior_model is not None:
             # Train on the rows that actually earned a latency: the terminal's own when it lowered
             # to one kernel, else one per KERNEL (its own decisions, its own measured µs, under
@@ -714,23 +707,13 @@ class TuningSearch(Search):
     def _should_stop(self) -> bool:
         if self.stop_reason is not None:
             return True
-        if self._max_measurements is not None and self.measurements >= self._max_measurements:
-            best_us = 1.0 / self._best_reward if self._best_reward > 0 else float("inf")
-            self.stop_reason = f"max_measurements ({self.measurements} reached, best {best_us:.2f} us)"
-            return True
-        visits = self.tree.root.visits
-        if visits == 0:
-            return False
-        if self._max_visits is not None and visits >= self._max_visits:
-            best_us = 1.0 / self._best_reward if self._best_reward > 0 else float("inf")
-            self.stop_reason = f"max_visits ({visits} reached, best {best_us:.2f} us)"
-            return True
-        if self.tree.best_reward > self._best_reward:
-            self._best_reward = self.tree.best_reward
-            self._visits_at_best = visits
-        stagnant = visits - self._visits_at_best
-        if stagnant >= self._patience:
-            best_us = 1.0 / self._best_reward if self._best_reward > 0 else float("inf")
-            self.stop_reason = f"patience ({stagnant} stagnant, best {best_us:.2f} us)"
-            return True
+        best_us = 1.0 / self.tree.best_reward if self.tree.best_reward > 0 else float("inf")
+        for name, count, limit in (
+            ("max_measurements", self.measurements, self._max_measurements),
+            ("max_visits", self.tree.root.visits, self._max_visits),
+            ("patience", self._stagnant, self._patience),
+        ):
+            if limit is not None and count >= limit:
+                self.stop_reason = f"{name} ({count} reached, best {best_us:.2f} us)"
+                return True
         return False

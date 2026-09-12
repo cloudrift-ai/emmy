@@ -38,8 +38,10 @@ page](./08-inside-the-prior.md) covers in full. It is the only signal used for t
 try every untested sibling once. A branch the prior is confident is slow simply sinks down the priority order, and the
 budget goes elsewhere.
 
-The second is when it stops. The search counts how many fully decided candidates it has benchmarked since the last
-time it found a new best. When that count passes `--patience` (50 by default), that part of the search is finished.
+The second is when it stops. The search counts live benchmark attempts and failed expansion or lowering attempts
+since it found a new best. When that count reaches `--patience` (50 by default), that part of the search is finished.
+Replaying cached results does not spend patience or the measurement budget, so it leaves room to try new candidates.
+A better result resets patience even when it comes from the cache.
 
 ## Two levels, not one
 

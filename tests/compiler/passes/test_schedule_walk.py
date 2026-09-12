@@ -388,7 +388,9 @@ def _chain_root(*members, results=("acc",)):
 
 
 def _tile_stub(root, output_specs=()):
-    return SimpleNamespace(output_specs=output_specs, op=root, place=SimpleNamespace(free=()))
+    return SimpleNamespace(
+        output_specs=output_specs, op=root, place=SimpleNamespace(free=()), axis_of=lambda name: Axis(name=name, extent=Dim(1))
+    )
 
 
 def _member_catalog() -> tuple:
@@ -478,6 +480,7 @@ def _per_cell_reductions(root, output_specs=()) -> set:
         inputs={},
         place=SimpleNamespace(free=()),
         packed_reading=lambda _node: (None, None),
+        axis_of=lambda name: Axis(name=name, extent=Dim(1)),
     )
     domain = _classic._contraction_domain(tile, None, con, ContractionFacts(k_axis=_K))
     return {choice.reduce for choice in domain if not choice.tile.is_tiled}

@@ -86,12 +86,30 @@ def measure_matmul_flops() -> float:
     return (2.0 * float(n) ** 3 * reps) / (ms / 1e3)
 
 
-def time_program_us(program, *, reps: int = 3) -> float:
-    """Median wall time of ``program.run_once()`` in µs (one warmup run outside the window)."""
+def time_program_us(program, *, reps: int = 3, budget_us: float | None = None) -> float:
+    """Median wall time of ``program.run_once()`` in µs, over ``reps`` runs after one warmup.
+
+    ``budget_us`` bounds the work. The warmup is timed, and a program already past the budget
+    returns that one measurement instead of being run ``reps`` more times: its verdict is decided,
+    and repeating the run only buys precision the warning never prints. That case is exactly the
+    one this audit exists to report AND the one where measuring costs most — on 2026-09-09 a
+    mispicked V100 decode program took over an hour per run, so the audit held 16 GPUs for six
+    hours and the boot never reached the profiling run.
+
+    A warmup carries one-time cost (module load, allocator growth) the timed runs do not, so a
+    program near the budget can bail on an inflated number. That is the deliberate direction: the
+    threshold is 10x a conservative floor, the warning is advisory and says to tune the twins, and
+    a boot that never finishes tells the operator nothing at all."""
     import cupy as cp
 
-    program.run_once()
     start, stop = cp.cuda.Event(), cp.cuda.Event()
+    start.record()
+    program.run_once()
+    stop.record()
+    stop.synchronize()
+    warmup_us = cp.cuda.get_elapsed_time(start, stop) * 1e3
+    if budget_us is not None and warmup_us > budget_us:
+        return warmup_us
     times = []
     for _ in range(reps):
         start.record()
@@ -102,6 +120,19 @@ def time_program_us(program, *, reps: int = 3) -> float:
     return sorted(times)[len(times) // 2]
 
 
+def roofline_floor_us(weight_bytes: int, bw_bytes_per_s: float, flops: float = 0.0, flops_per_s: float = 0.0) -> float | None:
+    """The floor one program is judged against — ``max(weight-streaming, compute)`` in µs — or
+    ``None`` when it cannot be formed or sits under :data:`MIN_FLOOR_US`. Split out from
+    :func:`flag_ratio` because the audit needs the floor BEFORE it measures, to bound the
+    measurement (:func:`time_program_us`)."""
+    if weight_bytes <= 0 or bw_bytes_per_s <= 0:
+        return None
+    floor_us = weight_bytes / bw_bytes_per_s * 1e6
+    if flops > 0 and flops_per_s > 0:
+        floor_us = max(floor_us, flops / flops_per_s * 1e6)
+    return None if floor_us < MIN_FLOOR_US else floor_us
+
+
 def flag_ratio(
     measured_us: float, weight_bytes: int, bw_bytes_per_s: float, flops: float = 0.0, flops_per_s: float = 0.0
 ) -> tuple[float, float] | None:
@@ -109,12 +140,8 @@ def flag_ratio(
     The floor is ``max(weight-streaming, compute)``; ``flops`` / ``flops_per_s`` at 0 (compute
     throughput uncalibrated) degrade to the weight floor alone. Pure decision logic —
     unit-testable without CUDA."""
-    if weight_bytes <= 0 or bw_bytes_per_s <= 0:
-        return None
-    floor_us = weight_bytes / bw_bytes_per_s * 1e6
-    if flops > 0 and flops_per_s > 0:
-        floor_us = max(floor_us, flops / flops_per_s * 1e6)
-    if floor_us < MIN_FLOOR_US:
+    floor_us = roofline_floor_us(weight_bytes, bw_bytes_per_s, flops, flops_per_s)
+    if floor_us is None:
         return None
     ratio = measured_us / floor_us
     if ratio <= WARN_RATIO:
@@ -148,7 +175,10 @@ def audit_boot_programs(named_programs, dtype_bytes: int = 2) -> None:
             flagged = []
             for label, prog, m_tokens in named_programs:
                 flops = 2.0 * (prog.weight_bytes / dtype_bytes) * m_tokens
-                verdict = flag_ratio(time_program_us(prog.program), prog.weight_bytes, bw, flops, flops_per_s)
+                floor_us = roofline_floor_us(prog.weight_bytes, bw, flops, flops_per_s)
+                budget_us = None if floor_us is None else WARN_RATIO * floor_us
+                measured_us = time_program_us(prog.program, budget_us=budget_us)
+                verdict = flag_ratio(measured_us, prog.weight_bytes, bw, flops, flops_per_s)
                 if verdict is not None:
                     floor_us, ratio = verdict
                     flagged.append((label, floor_us, ratio))

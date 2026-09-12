@@ -1,0 +1,113 @@
+{
+  "shape": {
+    "m": 16,
+    "k": 4096,
+    "n": 4096
+  },
+  "dtype": "bfloat16",
+  "gpu": "NVIDIA GeForce RTX 5090",
+  "torch": "2.13.0+cu130",
+  "cuda": "13.0",
+  "protocol": {
+    "warmup": 20,
+    "samples": 20,
+    "calls_per_sample": 200,
+    "dynamic_activation": true,
+    "timed_operation": "activation_quantize_and_matmul",
+    "weight_quantization_timed": false
+  },
+  "pytorch": {
+    "median_us": 22.048320770263672,
+    "min_us": 21.64896011352539,
+    "max_us": 22.92896032333374,
+    "samples_us": [
+      22.92896032333374,
+      21.989119052886963,
+      22.007839679718018,
+      21.94960117340088,
+      21.657121181488037,
+      22.367680072784424,
+      21.659040451049805,
+      22.05120086669922,
+      22.064640522003174,
+      22.045440673828125,
+      22.186880111694336,
+      21.679680347442627,
+      22.41919994354248,
+      21.71760082244873,
+      22.083520889282227,
+      22.090721130371094,
+      21.696960926055908,
+      22.424800395965576,
+      21.64896011352539,
+      22.134881019592285
+    ],
+    "cuda_kernels": [
+      "cutlass3x_sm120_bstensorop_s16864gemm_block_scaled_ue4m3xe2m1_ue4m3xe2m1_f32_bf16_bf16_128x128x256_1x1x1_0_tnn_align32_o_vs16_bias_bf16_relu",
+      "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)",
+      "void vllm::cvt_fp16_to_fp4<__nv_bfloat16, false>(int, int, int, int, __nv_bfloat16 const*, float const*, unsigned int*, unsigned int*)"
+    ]
+  },
+  "vllm": {
+    "median_us": 23.706079721450806,
+    "min_us": 23.464319705963135,
+    "max_us": 23.91455888748169,
+    "samples_us": [
+      23.889760971069336,
+      23.8702392578125,
+      23.51855993270874,
+      23.54464054107666,
+      23.91455888748169,
+      23.901920318603516,
+      23.52207899093628,
+      23.586719036102295,
+      23.88144016265869,
+      23.843679428100586,
+      23.488640785217285,
+      23.488318920135498,
+      23.845760822296143,
+      23.840959072113037,
+      23.48383903503418,
+      23.513760566711426,
+      23.867039680480957,
+      23.825440406799316,
+      23.464319705963135,
+      23.524320125579834
+    ],
+    "cuda_kernels": [
+      "_ZN7cutlass13device_kernelINS_4gemm6kernel13GemmUniversalIN4cute5tupleIJiiiiEEENS1_10collective13CollectiveMmaINS1_42MainloopSm120TmaWarpSpecializedBlockScaledILi4ELi3ENS5_IJNS4_1CILi1EEESB_SB_EEENS1_51KernelTmaWarpSpecializedCooperativeBlockScaledSm120ILi3EEEEENS5_IJNSA_ILi128EEESG_SG_EEENS5_IJNS_12float_e2m1_tENS_13float_ue4m3_tEEEENS5_IJNS5_IJlSB_lEEENS4_6LayoutINS5_IJNS5_IJNS5_IJNSA_ILi32EEENSA_ILi4EEEEEEiEEENS5_IJNS5_IJNSA_ILi16EEESO_EEEiEEENS5_IJSB_iEEEEEENS5_IJST_NS5_IJNS5_IJNSA_ILi0EEESB_EEENSA_ILi512EEEEEENS5_IJSW_iEEEEEEEEEEESK_S13_NS4_8TiledMMAINS4_8MMA_AtomIJNS4_5SM12011BLOCKSCALED19SM120_16x8x64_TN_VSISI_SI_fSJ_Li16EEEEEENSM_INS5_IJSO_NSA_ILi2EEESB_EEENS5_IJSB_SO_SW_EEEEENS5_IJSG_NSM_INS5_IJNSA_ILi8EEES1B_S1B_EEENS5_IJSB_SR_S1F_EEEEENSA_ILi64EEEEEEEENS5_IJNS4_13SM90_TMA_LOADES1M_EEENS5_IJNS4_14ComposedLayoutINS4_7SwizzleILi2ELi4ELi3EEENS4_18smem_ptr_flag_bitsILi4EEENSM_INS5_IJS1F_SG_EEENS5_IJSG_SB_EEEEEEENSM_INS5_IJNS5_IJSP_SB_EEENS5_IJSS_SB_S1B_EEEEEENS5_IJNS5_IJSS_SY_EEENS5_IJSX_SO_SY_EEEEEEEEEEENS5_IJNS4_9Copy_AtomIJNS4_17SM75_U32x4_LDSM_NENS_15integer_subbyteILi4ELb0EEEEEENS25_IJNS4_13UniversalCopyISJ_SJ_EESJ_EEEEEENS4_8identityES1N_S24_S2D_S2E_EENS_8epilogue10collective18CollectiveEpilogueINS2G_22Sm90TmaWarpSpecializedILi3ELi2ELi4ELb1ELb0EEEJSH_NS5_IJS1J_SN_EEENS_10bfloat16_tESL_S2M_SL_NS2G_6fusion15FusionCallbacksINS2G_23Sm120TmaWarpSpecializedILi3ELi2ELi4ELb1ELb0EEENS2N_17LinearCombinationIS2M_fS2M_fLNS_15FloatRoundStyleE2EEESH_S2L_JEEES1M_NS1O_IS1Q_NS1R_ILi16EEENSM_INS5_IJS1F_SN_EEENS5_IJSN_SB_EEEEEEENS4_17SM75_U32x2_LDSM_NENS4_14SM90_TMA_STOREES2Z_NS4_17SM90_U32x2_STSM_NENS25_IJS32_NS_6half_tEEEEvEEEvvEEEEvNT_6ParamsE",
+      "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1ul> >(int, at::native::FillFunctor<int>, std::array<char*, 1ul>)",
+      "void vllm::cvt_fp16_to_fp4<__nv_bfloat16, false>(int, int, int, int, __nv_bfloat16 const*, float const*, unsigned int*, unsigned int*)"
+    ]
+  },
+  "pytorch_vs_vllm": {
+    "max_abs": 0.0,
+    "mean_abs": 0.0,
+    "exact_fraction": 1.0
+  },
+  "emmy": {
+    "median_us": 10.293647020804782,
+    "min_us": 10.266891046732413,
+    "captured": true,
+    "num_launches": 3,
+    "per_launch": [
+      {
+        "kernel": "k_reshape_reduce_46015e",
+        "median_us": 1.3261114096451818
+      },
+      {
+        "kernel": "k_reshape_reduce_46015e__place_b87aae0fba",
+        "median_us": 1.1437620191879623
+      },
+      {
+        "kernel": "k_linear_334cf2",
+        "median_us": 5.940922971307879
+      }
+    ]
+  },
+  "emmy_vs_pytorch": {
+    "max_abs": 0.0,
+    "mean_abs": 0.0,
+    "exact_fraction": 1.0
+  }
+}

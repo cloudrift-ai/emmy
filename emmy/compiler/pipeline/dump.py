@@ -247,9 +247,10 @@ class CompilerDump:
         synthetic: set[str] = set()
         stack = [inp for oid in origins for inp in src.nodes[oid].inputs]
         while stack:
-            cur = stack.pop()
-            if cur in keep or cur not in src.nodes:
+            producer = src.producer(stack.pop())
+            if producer is None or producer.id in keep:
                 continue
+            cur = producer.id
             if isinstance(src.nodes[cur].op, (ConstantOp, InputOp)):
                 keep.add(cur)
                 stack.extend(src.nodes[cur].inputs)
@@ -261,18 +262,20 @@ class CompilerDump:
                 keep.add(cur)
                 synthetic.add(cur)  # frontend op feeding an origin → boundary
 
-        consumed = {inp for nid in keep for inp in src.nodes[nid].inputs if inp in keep}
+        consumed = {inp for nid in keep if nid not in synthetic for inp in src.nodes[nid].inputs}
         sub = _Graph()
         for kid in topo_order(src, keep):
             s = src.nodes[kid]
             if kid in synthetic:
-                sub.add_node(InputOp(), [], s.output, node_id=s.id)
-                sub.inputs.append(kid)
+                sub.add_node(InputOp(), [], outputs=s.outputs, node_id=s.id)
+                sub.inputs.extend(s.buffer_names())
             else:
-                sub.add_node(s.op, list(s.inputs), s.output, node_id=s.id)
+                sub.add_node(s.op, list(s.inputs), outputs=s.outputs, node_id=s.id)
                 if isinstance(s.op, InputOp):
-                    sub.inputs.append(kid)
-        sub.outputs = [oid for oid in origins if oid not in consumed]
+                    sub.inputs.extend(s.buffer_names())
+        sub.outputs = [
+            buf for oid in src.topological_order() if oid in origins for buf in src.nodes[oid].buffer_names() if buf not in consumed
+        ]
         return sub
 
     @staticmethod
@@ -294,7 +297,11 @@ class CompilerDump:
                 return None
             closure.add(cur)
             if not isinstance(node.op, ConstantOp):
-                stack.extend(node.inputs)
+                for buf in node.inputs:
+                    producer = src.producer(buf)
+                    if producer is None:
+                        return None
+                    stack.append(producer.id)
         return closure
 
     @staticmethod

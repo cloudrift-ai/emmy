@@ -544,9 +544,14 @@ def _root_results(body: Body) -> tuple[str, ...]:
     return ()
 
 
-def lift_loop_op(op: LoopOp, *, name: str = "") -> TileOp:
-    """Peel free axes and lift the complete remaining nest as one Fold tree."""
-    free, cell = _peel(op.body)
+def lift_loop_op(op: LoopOp, *, name: str = "", body: Body | None = None) -> TileOp:
+    """Peel free axes and lift the complete remaining nest as one Fold tree.
+
+    ``body`` lifts a rewritten spelling of ``op``'s program instead of the stored one. Constructing
+    a ``LoopOp`` around such a spelling would not preserve it — Loop-IR normalization is what drops
+    a size-one free axis, so the one caller that restores one (``_row``) hands its body here.
+    """
+    free, cell = _peel(op.body if body is None else Body.coerce(body))
     edges, stmts = lift_body(cell, tuple(free))
     split = extract_output_specs(stmts)
     if split is None:

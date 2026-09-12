@@ -1,0 +1,103 @@
+=== 0: k_reshape_reduce_cf039c ===
+    Tile[a0, a1_1] (N=5120)
+        in3 = load input_static_fp4_scale_2[0, 0, 0]
+        f32 v3 = multiply(6, in3)
+        f32 v4 = reciprocal(v3)
+        for a3 in 0..16
+            in7 = load input[a0, ((a1_1 * 16) + a3)]
+            f32 v28 = abs(in7)
+            f32 acc2 <- maximum(acc2, v28)
+        f32 v29 = multiply(acc2, v4)
+        f8e4m3 v30 = to_f8e4m3(v29)
+        input_static_fp4_scale_bits[a0, a1_1, 0] = v30
+
+=== 1: k_reshape_reduce_cf039c__place_19f4e2ccbe ===
+    Tile[a0, a1] (N=40960)
+        in3 = load input_static_fp4_scale_2[0, 0, 0]
+        f32 v0 = multiply(6, in3)
+        f32 v1 = reciprocal(v0)
+        f32 v2 = reciprocal(v0)
+        for a2 in 0..16
+            in4 = load input[a0, (((a1 / 8) * 16) + a2)]
+            f32 v5 = abs(in4)
+            f32 v6 = abs(in4)
+            f32 acc0 <- maximum(acc0, v5)
+            f32 acc1 <- maximum(acc1, v6)
+        f32 v7 = multiply(acc0, v1)
+        f32 v9 = multiply(acc1, v2)
+        f8e4m3 v8 = to_f8e4m3(v7)
+        f32 v10 = from_f8e4m3(v8)
+        f32 v12 = multiply(in3, v10)
+        f16 v14 = copy(v12)
+        f32 v16 = copy(v14)
+        f32 v18 = maximum(1e-12, v16)
+        f8e4m3 v11 = to_f8e4m3(v9)
+        f32 v13 = from_f8e4m3(v11)
+        f32 v15 = multiply(in3, v13)
+        f16 v17 = copy(v15)
+        f32 v19 = copy(v17)
+        f32 v21 = maximum(1e-12, v19)
+        in5 = load input[a0, ((a1 * 2) + 1)]
+        f32 v20 = divide(in5, v18)
+        i32 v22 = to_f4e2m1(v20)
+        i32 v24 = left_shift(v22, 4)
+        in6 = load input[a0, (a1 * 2)]
+        f32 v23 = divide(in6, v21)
+        i32 v25 = to_f4e2m1(v23)
+        i32 v26 = bitwise_or(v25, v24)
+        f4e2m1x2 v27 = copy(v26)
+        input_static_fp4_bits[a0, a1] = v27
+
+=== 2: k_linear_53c197 ===
+    Tile[a0_b, a1_b, a0_u, a1_u, _lane] (N=34816)
+        RegFragment a:f4e2m1x2 _a0[4] (16x8x64)
+        RegFragment b:f4e2m1x2 _b0[2] (16x8x64)
+        RegFragment b:f4e2m1x2 _b1[2] (16x8x64)
+        RegFragment a:f4e2m1x2 _sfa0 (16x8x64)
+        RegFragment a:f4e2m1x2 _sfb0 (16x8x64)
+        RegFragment a:f4e2m1x2 _sfb1 (16x8x64)
+        RegFragment c:f32 _c0_0[4] (16x8x64)
+        RegFragment c:f32 _c0_1[4] (16x8x64)
+        Smem unsigned char _a_smem[32, 272] align=16
+        Smem unsigned char _b_smem[128, 272] align=16
+        Smem __nv_fp8_e4m3 _as_smem[32, 32] align=16
+        Smem __nv_fp8_e4m3 _bs_smem[128, 32] align=16
+        for _fa in ((((a0_u * 4) + a1_u) * 32) + _lane)..256:128
+            cp.async[16B] _a_smem[((_fa * 16) / 256), ((_fa * 16) % 256)] <- input_static_fp4_bits[((a0_b * 16) + ((_fa * 16) / 256)), ((((0 + (((_fa * 16) % 256) * 2)) / 16) * 8) + (((0 + (((_fa * 16) % 256) * 2)) % 16) / 2))]
+        for _fb in ((((a0_u * 4) + a1_u) * 32) + _lane)..1024:128
+            cp.async[16B] _b_smem[((_fb * 16) / 256), ((_fb * 16) % 256)] <- p_weight_bits[((a1_b * 64) + ((_fb * 16) / 256)), ((((0 + (((_fb * 16) % 256) * 2)) / 16) * 8) + (((0 + (((_fb * 16) % 256) * 2)) % 16) / 2))]
+        for _fas in ((((a0_u * 4) + a1_u) * 32) + _lane)..32:128
+            cp.async[16B] _as_smem[((_fas * 16) / 32), ((_fas * 16) % 32)] <- input_static_fp4_scale_bits[((a0_b * 16) + ((_fas * 16) / 32)), ((0 + (((_fas * 16) % 32) * 16)) / 16), 0]
+        for _fbs in ((((a0_u * 4) + a1_u) * 32) + _lane)..128:128
+            cp.async[16B] _bs_smem[((_fbs * 16) / 32), ((_fbs * 16) % 32)] <- p_weight_scale_bits[((a1_b * 64) + ((_fbs * 16) / 32)), ((0 + (((_fbs * 16) % 32) * 16)) / 16)]
+        cp.async.commit_group
+        for _ks in 0..5120:512
+            for _fa in ((((a0_u * 4) + a1_u) * 32) + _lane)..256:128
+                cp.async[16B] _a_smem[(((((_ks / 512) + 1) % 2) * 16) + ((_fa * 16) / 256)), ((_fa * 16) % 256)] <- input_static_fp4_bits[((a0_b * 16) + ((_fa * 16) / 256)), (((((((_ks + 512) < 5120) ? (_ks + 512) : 4608) + (((_fa * 16) % 256) * 2)) / 16) * 8) + ((((((_ks + 512) < 5120) ? (_ks + 512) : 4608) + (((_fa * 16) % 256) * 2)) % 16) / 2))]
+            for _fb in ((((a0_u * 4) + a1_u) * 32) + _lane)..1024:128
+                cp.async[16B] _b_smem[(((((_ks / 512) + 1) % 2) * 64) + ((_fb * 16) / 256)), ((_fb * 16) % 256)] <- p_weight_bits[((a1_b * 64) + ((_fb * 16) / 256)), (((((((_ks + 512) < 5120) ? (_ks + 512) : 4608) + (((_fb * 16) % 256) * 2)) / 16) * 8) + ((((((_ks + 512) < 5120) ? (_ks + 512) : 4608) + (((_fb * 16) % 256) * 2)) % 16) / 2))]
+            for _fas in ((((a0_u * 4) + a1_u) * 32) + _lane)..32:128
+                cp.async[16B] _as_smem[(((((_ks / 512) + 1) % 2) * 16) + ((_fas * 16) / 32)), ((_fas * 16) % 32)] <- input_static_fp4_scale_bits[((a0_b * 16) + ((_fas * 16) / 32)), (((((_ks + 512) < 5120) ? (_ks + 512) : 4608) + (((_fas * 16) % 32) * 16)) / 16), 0]
+            for _fbs in ((((a0_u * 4) + a1_u) * 32) + _lane)..128:128
+                cp.async[16B] _bs_smem[(((((_ks / 512) + 1) % 2) * 64) + ((_fbs * 16) / 32)), ((_fbs * 16) % 32)] <- p_weight_scale_bits[((a1_b * 64) + ((_fbs * 16) / 32)), (((((_ks + 512) < 5120) ? (_ks + 512) : 4608) + (((_fbs * 16) % 32) * 16)) / 16)]
+            cp.async.commit_group
+            cp.async.wait_group(1)
+            Sync
+            for _ki in 0..512:64
+                BlockScaleLoad _sfa0 <- _as_smem[((((_ks / 512) % 2) * 16) + ((a0_u * 16) + 0)), (_ki / 16)] (sfa, ldm=32)
+                LdmatrixLoad _a0 <- _a_smem[((((_ks / 512) % 2) * 16) + ((a0_u * 16) + 0)), (_ki / 2)] (byte gather, ldm=272)
+                BlockScaleLoad _sfb0 <- _bs_smem[((((_ks / 512) % 2) * 64) + ((a1_u * 16) + 0)), (_ki / 16)] (sfb, ldm=32)
+                LdmatrixLoad _b0 <- _b_smem[((((_ks / 512) % 2) * 64) + ((a1_u * 16) + 0)), (_ki / 2)] (byte gather, ldm=272)
+                BlockScaleLoad _sfb1 <- _bs_smem[((((_ks / 512) % 2) * 64) + ((a1_u * 16) + 8)), (_ki / 16)] (sfb, ldm=32)
+                LdmatrixLoad _b1 <- _b_smem[((((_ks / 512) % 2) * 64) + ((a1_u * 16) + 8)), (_ki / 2)] (byte gather, ldm=272)
+                MmaSyncPtx _c0_0 += _a0 @ _b0 (m16n8k64 e2m1 scales:_sfa0,_sfb0)
+                MmaSyncPtx _c0_1 += _a0 @ _b1 (m16n8k64 e2m1 scales:_sfa0,_sfb1)
+            Sync
+        _bs_alpha_l0 = load input_static_fp4_scale_2[0, 0, 0]
+        f32 _bs_alpha0 = copy(_bs_alpha_l0)
+        _bs_alpha_l1 = load p_weight_scale_2[0, 0]
+        f32 _bs_alpha1 = multiply(_bs_alpha0, _bs_alpha_l1)
+        FragmentApply(_c0_0 *= multiply(_c0_0[], _bs_alpha1))
+        FragmentApply(_c0_1 *= multiply(_c0_1[], _bs_alpha1))
+        RegStore linear[(((a0_b * 16) + (a0_u * 16)) + 0), (((a1_b * 64) + (a1_u * 16)) + 0)] <- _c0_0 (ldm=auto)
+        RegStore linear[(((a0_b * 16) + (a0_u * 16)) + 0), (((a1_b * 64) + (a1_u * 16)) + 8)] <- _c0_1 (ldm=auto)

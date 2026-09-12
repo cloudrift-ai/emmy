@@ -84,7 +84,7 @@ def test_an_unknown_scheme_and_a_shapeless_graph_both_refuse(tmp_path):
     graph, bundle = _traced("nn.Linear(256, 64, bias=False)(torch.randn(32, 256))")
     with pytest.raises(ValueError, match="unknown quantization scheme"):
         write_quantized_checkpoint(graph, bundle, tmp_path / "a", scheme="int4")
-    assert SCHEMES == ("nvfp4", "nvfp4-w4a16")
+    assert SCHEMES == ("nvfp4", "nvfp4-w4a16", "fp8-block")
 
     bare, bundle2 = _traced("torch.exp(torch.randn(8, 8))")
     with pytest.raises(ValueError, match="no linear"):
@@ -98,7 +98,7 @@ def test_the_two_schemes_differ_only_in_the_activation_declaration(tmp_path):
     from safetensors import safe_open
 
     keys, configs = [], []
-    for i, scheme in enumerate(SCHEMES):
+    for i, scheme in enumerate(("nvfp4", "nvfp4-w4a16")):
         graph, bundle = _traced("nn.Linear(256, 64, bias=False)(torch.randn(32, 256))")
         ckpt = write_quantized_checkpoint(graph, bundle, tmp_path / f"c{i}", scheme=scheme)
         with safe_open(str(ckpt / "model.safetensors"), framework="pt") as f:
@@ -113,3 +113,34 @@ def test_the_two_schemes_differ_only_in_the_activation_declaration(tmp_path):
     assert w4a4["weights"] == w4a16["weights"]
     assert w4a4["input_activations"]["num_bits"] == 4
     assert "input_activations" not in w4a16
+
+
+def test_a_block_fp8_checkpoint_spells_the_weight_and_its_grouped_activation(tmp_path):
+    """``fp8-block`` writes the official FP8 form — e4m3 bits and one f32 scale per 128x128 block —
+    within one e4m3 step of the weight, and the ordinary spellers read it back as the weight's
+    decode cone plus the checkpoint's dynamic activation, one scale per row and 128-wide K group."""
+    import torch
+    from safetensors import safe_open
+
+    from emmy.compiler.dtype import decode_f8
+    from emmy.compiler.loader.quant import spell_dynamic_fp8_activations
+
+    torch.manual_seed(5)
+    graph, bundle = _traced("nn.Linear(256, 128, bias=False)(torch.randn(16, 256))")
+    original = bundle[0].state_dict()["weight"].detach().to(torch.float32).numpy()
+    ckpt = write_quantized_checkpoint(graph, bundle, tmp_path / "ckpt", scheme="fp8-block")
+
+    cfg = json.loads((ckpt / "config.json").read_text())["quantization_config"]
+    assert cfg["weight_block_size"] == [128, 128] and cfg["activation_scheme"] == "dynamic"
+    with safe_open(str(ckpt / "model.safetensors"), framework="pt") as f:
+        bits = f.get_tensor("l0.weight").view(torch.uint8).numpy()
+        scale = f.get_tensor("l0.weight_scale_inv").numpy()
+    assert scale.shape == (1, 2)
+    back = decode_f8(bits, "f8e4m3").reshape(1, 128, 2, 128) * scale[:, None, :, None]
+    # e4m3 carries 3 mantissa bits, so a round-to-nearest value is within 2^-4 of itself.
+    assert np.abs(back.reshape(128, 256) - original).max() <= np.abs(original).max() / 16
+
+    assert spell_quantized_constants(graph, str(ckpt)) == 1
+    assert spell_dynamic_fp8_activations(graph, str(ckpt)) == 1
+    amax = next(n for n in graph.nodes.values() if n.id.endswith("_dynamic_fp8_amax"))
+    assert tuple(d.as_static() for d in amax.output.shape) == (16, 2, 1), "one activation scale per row and 128-wide K group"

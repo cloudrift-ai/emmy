@@ -21,6 +21,8 @@ from emmy.compiler.ir.kernel.ir import (
     RegStore,
     Smem,
     TmaDescriptor,
+    WgmmaMma,
+    frag_dtype,
     pack_smem,
     swizzle_fn,
     swizzle_xor,
@@ -1086,6 +1088,37 @@ def _f4_lut_bits(dtype: str) -> list[int]:
     return [int(b) for b in np.array(F4_VALUES, dtype=np.float16).view(np.uint16)]
 
 
+# The staged BLOCK-SCALED fp8 B drain — the one-value-byte form of the packed drain above, appended
+# only for the fragment dtypes a kernel's fp8 scale-bearing byte-slab ``LdmatrixLoad``s use. A
+# lane's (k, k+1) byte pair converts to two exact 16-bit values with one hardware cvt, as the plain
+# W8A16 drain does, and both multiply the k block's f32 scale before ONE round to the fragment —
+# the fill's own ``bf16(scale * decode)``, so the staged form is bit-identical to it. The block
+# holds whole atom steps (the staged offer requires it), so a lane's K positions never leave the
+# block and every lane reads the scale at its row alone.
+_F8S_LOADER = """\
+template <typename T, typename T2>
+static __device__ __forceinline__ void emmy_mma_load_b_smem_trans_f8s_{sfx}(
+    unsigned* r, const T* g, int ldm, const float* s, int sldm) {{
+    int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
+    float sc = s[grp * sldm];
+    #pragma unroll
+    for (int i = 0; i < 2; ++i) {{
+        int k = (tig << 1) + (i ? 8 : 0);            // K: 2*threadID_in_group, +8 for the k16 half
+        float2 f = __half22float2(__half2(*reinterpret_cast<const T2*>(g + grp * ldm + k)));
+        {T2} v = {PACK}(f.x * sc, f.y * sc);
+        r[i] = *reinterpret_cast<unsigned*>(&v);
+    }}
+}}
+
+"""
+
+#: Per-fragment-dtype spellings of the fp8 scaled drain: the two-value vector and its rounding pack.
+_F8S_SPELLINGS: dict[str, dict[str, str]] = {
+    "f16": {"T2": "__half2", "PACK": "__floats2half2_rn"},
+    "bf16": {"T2": "__nv_bfloat162", "PACK": "__floats2bfloat162_rn"},
+}
+
+
 def _f4_staged_prelude(dtypes: tuple[str, ...]) -> str:
     """The packed drain(s) this kernel needs — one per fragment dtype, in the order given."""
     out = []
@@ -1120,6 +1153,74 @@ def _swizzle_prelude(kernel_op: KernelOp) -> str:
             f"}}\n\n"
         )
     return "".join(chunks)
+
+
+# Hopper warp-group MMA prelude (``WgmmaMma``): the shared-memory address helper, the matrix
+# descriptor builder, and one inline-PTX wrapper per (N, operand dtype, form) the kernel uses.
+# Joins only when a ``WgmmaMma`` is present (the kernel-source digest gate).
+_WGMMA_PRELUDE = """\
+static __device__ __forceinline__ unsigned emmy_smem_u32(const void* p) {
+    return (unsigned)__cvta_generic_to_shared(p);
+}
+
+// The wgmma shared-memory matrix descriptor (PTX ISA "Matrix Descriptor Format"): bits 0-13 the
+// start address >> 4, 16-29 the leading byte offset >> 4, 32-45 the stride byte offset >> 4,
+// 49-51 the base offset (0: every slab is aligned to its swizzle period), 62-63 the layout type
+// (0 none, 1 B128, 2 B64, 3 B32). ``wgmma_descriptor_bits`` (ir.py) is the Python twin of this
+// formula; keep the two identical.
+static __device__ __forceinline__ unsigned long long emmy_wgmma_desc(unsigned addr, unsigned lbo, unsigned sbo,
+                                                                     unsigned long long mode) {
+    return (unsigned long long)((addr >> 4) & 0x3FFF) | ((unsigned long long)((lbo >> 4) & 0x3FFF) << 16)
+         | ((unsigned long long)((sbo >> 4) & 0x3FFF) << 32) | (mode << 62);
+}
+
+"""
+
+
+def _wgmma_wrapper(n: int, ab_dtype: str, form: str) -> str:
+    """The ``emmy_wgmma_m64n{n}k16_{ab}_f32_{form}`` wrapper: the N/8 ``float[4]`` C fragments
+    (fragment-major, register-minor — the instruction's ``d0..d(N/2-1)`` order), then the A operand
+    (a descriptor for ``ss``, the four ``m16n8k16`` A registers for ``rs``), the B descriptor and
+    ``scale_d``. ``scale_d`` is a runtime predicate the way CUTLASS's ``SM90_64xNx16_F32F16F16_SS``
+    spells it; the transpose bits are PTX immediates, which nvcc accepts only as integral constant
+    expressions, so they are template arguments. The scale-A / scale-B immediates are 1."""
+    frags = n // 8
+    c_params = ", ".join(f"float* c{j}" for j in range(frags))
+    d_regs = ", ".join(f"%{i}" for i in range(n // 2))
+    c_operands = ", ".join(f'"+f"(c{j}[{k}])' for j in range(frags) for k in range(4))
+    base = n // 2  # the first input operand's number
+    if form == "ss":
+        template = "template <int TnspA, int TnspB>"
+        params = f"{c_params}, unsigned long long a_desc, unsigned long long b_desc, int scale_d"
+        operands = f"%{base}, %{base + 1}, p, 1, 1, %{base + 3}, %{base + 4}"
+        pred = f"%{base + 2}"
+        inputs = '"l"(a_desc), "l"(b_desc), "r"(scale_d), "n"(TnspA), "n"(TnspB)'
+    else:
+        template = "template <int TnspB>"
+        params = f"{c_params}, const unsigned* a, unsigned long long b_desc, int scale_d"
+        a_regs = ", ".join(f"%{base + i}" for i in range(4))
+        operands = f"{{{a_regs}}}, %{base + 4}, p, 1, 1, %{base + 6}"
+        pred = f"%{base + 5}"
+        inputs = '"r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(b_desc), "r"(scale_d), "n"(TnspB)'
+    instruction = f"wgmma.mma_async.sync.aligned.m64n{n}k16.f32.{ab_dtype}.{ab_dtype}"
+    return (
+        f"{template}\n"
+        f"static __device__ __forceinline__ void emmy_wgmma_m64n{n}k16_{ab_dtype}_f32_{form}({params}) {{\n"
+        f'    asm volatile("{{\\n.reg .pred p;\\nsetp.ne.b32 p, {pred}, 0;\\n"\n'
+        f'                 "{instruction} {{{d_regs}}}, {operands};\\n}}\\n"\n'
+        f"                 : {c_operands}\n"
+        f"                 : {inputs});\n"
+        f"}}\n\n"
+    )
+
+
+def _wgmma_prelude(kernel_op: KernelOp) -> str:
+    """The wgmma helpers plus one wrapper per ``(N, ab_dtype, form)`` the body's ``WgmmaMma`` cells
+    use; empty when none is present, so every other kernel's source stays byte-identical."""
+    forms = sorted({(s.shape[1], s.ab_dtype, s.form) for s in kernel_op.body.iter() if isinstance(s, WgmmaMma)})
+    if not forms:
+        return ""
+    return _WGMMA_PRELUDE + "".join(_wgmma_wrapper(n, ab_dtype, form) for n, ab_dtype, form in forms)
 
 
 _INTRINSIC_TO_CUDA: dict[str, str] = {
@@ -1317,14 +1418,22 @@ def render_kernelop(
         mma_sync_prelude += _F8_STAGED_PRELUDE
     # A packed drain's fragment dtype IS its scale slab's — the fill writes that slab at the atom's
     # own operand width — and the body render above already recorded every slab's dtype on ``ctx``.
-    packed = tuple(dict.fromkeys(ctx.buffer_dtypes.get(s.scale_buffer, "f16") for s in byte_drains if s.scale_buffer is not None))
+    # An fp8 bits slab's scale slab is f32 instead, so its drain names the fragment's own dtype.
+    scaled = [s for s in byte_drains if s.scale_buffer is not None]
+    f8 = [s for s in scaled if ctx.buffer_dtypes.get(s.src_buffer) in ("f8e4m3", "f8e5m2")]
+    packed = tuple(dict.fromkeys(ctx.buffer_dtypes.get(s.scale_buffer, "f16") for s in scaled if s not in f8))
     if packed:
         mma_sync_prelude += _f4_staged_prelude(packed)
+    for dt in dict.fromkeys(frag_dtype(ctx, s.frag) or "f16" for s in f8):
+        mma_sync_prelude += _F8S_LOADER.format(sfx=dt, **_F8S_SPELLINGS[dt])
     uses_cp_async = any(isinstance(s, (CpAsyncCopy, CpAsyncCommit, CpAsyncWait)) for s in kernel_op.body.iter())
     cp_async_prelude = _CP_ASYNC_PRELUDE if uses_cp_async else ""
     bitcast_prelude = _BITCAST_PRELUDE if any(isinstance(s, Assign) and s.op.name == "bitcast" for s in kernel_op.body.iter()) else ""
     f4_encode = _F4_ENCODE_PRELUDE if any(isinstance(s, Assign) and s.op.name == "to_f4e2m1" for s in kernel_op.body.iter()) else ""
-    preludes = f"{includes}{bitcast_prelude}{f4_encode}{mma_sync_prelude}{cp_async_prelude}{_swizzle_prelude(kernel_op)}{prelude}"
+    preludes = (
+        f"{includes}{bitcast_prelude}{f4_encode}{mma_sync_prelude}{_wgmma_prelude(kernel_op)}"
+        f"{cp_async_prelude}{_swizzle_prelude(kernel_op)}{prelude}"
+    )
     header = f'{preludes}extern "C" __global__{launch_bounds} void {kernel_op.name}({params_text})'
     return f"{header} {{\n{body_text}\n}}\n"
 

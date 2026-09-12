@@ -607,7 +607,7 @@ class Fold:
           ``(score, pivot, *extras)`` the chunk folds, which is what stands in for the stored base
           contribution the tier may not touch;
         - a state count the recipe covers, so no carried state is left without one;
-        - ``advance`` and ``rescale`` — the stable ⊕ at an open channel count, applied once per
+        - ``advance`` and ``scale`` — the stable ⊕ at an open channel count, applied once per
           chunk rather than once per element (a recipe spelling one fixed-arity ``combine`` merges
           whole carriers, which is not what a chunk hands back);
         - exactly ONE bilinear channel, since the tier holds one accumulator and every other state
@@ -617,7 +617,7 @@ class Fold:
         if twist is None or self.base is None or not twist.channels:
             return False
         recipe = twist.recipe
-        if recipe.advance is None or recipe.rescale is None:
+        if recipe.advance is None or recipe.scale is None:
             return False
         if len(twist.channels) != len(self.base.results) - 1:
             return False

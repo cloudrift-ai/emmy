@@ -59,7 +59,14 @@ class Search(ABC):
         :meth:`observe`."""
 
     def observe(  # noqa: B027
-        self, token: object | None, stats: PerfStats, status: str, candidate: object | None = None, kernels: list | None = None
+        self,
+        token: object | None,
+        stats: PerfStats,
+        status: str,
+        candidate: object | None = None,
+        kernels: list | None = None,
+        *,
+        measured: bool = True,
     ) -> None:
         """Hook for the policy to consume a terminal's measurement.
         ``token`` is the one the terminal was popped with; ``stats``
@@ -72,22 +79,16 @@ class Search(ABC):
         PER-KERNEL ``(knobs, median_us, status)`` rows: a terminal is a Σ over
         the kernels it lowered to, and one a structural fork made several of holds
         several rows, so the row that earned a latency is a kernel's and never the
-        terminal's. Default no-op; :class:`TuningSearch` overrides it."""
+        terminal's. ``measured`` distinguishes live backend work from cache or stub results;
+        only live work spends the measurement budget and patience. Default no-op; :class:`TuningSearch` overrides it."""
 
-    def note_bench(self, *, measured: bool) -> None:  # noqa: B027
-        """Tell the policy whether the terminal required a live benchmark.
-
-        Cache hits still produce observations, but they do not consume a hard
-        measured-candidate budget. Policies without such a budget ignore this
-        hook.
-        """
+    def reject(self, token: object | None) -> None:  # noqa: B027
+        """Account for a candidate whose expansion or lowering failed, without a measurement."""
 
     async def evaluate(self, token: object | None, cand, *, backend, db) -> None:
         """Value one terminal the engine's loop yielded — WHOLLY policy: what a terminal is
         worth (benching, caching, persistence, the training feed) is a search decision, and the
         engine only awaits it. The default benches the terminal's kernels (cache/stub-aware) and
-        feeds :meth:`observe`; :class:`~.mcts.TuningSearch` extends it with the deployable -O3
-        re-bench and the prior's row protocol."""
+        feeds :meth:`observe` with the measurement origin."""
         stats, status, measured, per_kernel = await bench_terminal_async(cand, backend=backend, db=db)
-        self.note_bench(measured=measured)
-        self.observe(token, stats, status, candidate=cand, kernels=per_kernel)
+        self.observe(token, stats, status, candidate=cand, kernels=per_kernel, measured=measured)

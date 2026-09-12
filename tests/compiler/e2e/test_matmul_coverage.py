@@ -1109,9 +1109,10 @@ def test_cp_staged_slab_is_swizzled(monkeypatch):
     src = op.kernel_source
     assert not op.tma_descriptors, "sm_89 has no TMA — the fills must be cp.async"
     assert "int emmy_swizzle_b64(int e)" in src, "the swizzle helper must be emitted in the preamble"
-    # Producer side: every cp.async fill writes through the XOR'd destination index...
-    assert "emmy_cp_async_cg(&_a_smem[emmy_swizzle_b64(" in src, "the A slab fill must XOR its smem destination"
-    assert "emmy_cp_async_cg(&_b_smem[emmy_swizzle_b64(" in src, "the B slab fill must XOR its smem destination"
+    # Producer side: every cp.async fill writes through the XOR'd destination index — the lane's
+    # part swizzled once and XORed with the stripe base (``swizzled_slab_index``)...
+    assert "emmy_cp_async_cg(&_a_smem[(emmy_swizzle_b64(" in src, "the A slab fill must XOR its smem destination"
+    assert "emmy_cp_async_cg(&_b_smem[(emmy_swizzle_b64(" in src, "the B slab fill must XOR its smem destination"
     # ...and the drain reads back through the identical XOR (fill/drain symmetry).
     assert "emmy_ldmatrix" in src and src.count("emmy_swizzle_b64(") >= 4, "the ldmatrix drains must apply the matching XOR"
 
