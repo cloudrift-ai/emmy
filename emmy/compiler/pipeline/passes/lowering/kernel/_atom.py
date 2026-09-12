@@ -1576,17 +1576,24 @@ def _contract_kloop(c, cells, *, read_row, read_col, contract, wrap):
     build the operand read (``LdmatrixLoad`` fragment vs scalar ``Load``), ``contract`` the ⊗+accumulate
     (``MmaSyncPtx`` vs ``Assign``+``Accum``), ``wrap`` the K-loop (``StridedLoop`` step ``atom_k`` vs a
     unit ``Loop``). Returns ``(pre_decls, kloop_stmts)`` — no pre-decls here (accumulators ride
-    ``state``)."""
+    ``state``).
+
+    An operand read answers as ``(hoisted, per-step)``: what a computed cone evaluates ONCE for the
+    row (its K seam's row-invariant prologue) rides ahead of the loop, the rest inside it. Only a
+    read is split this way — the fold ``step`` accumulates, so it belongs to the step whatever it
+    reads."""
     rows = sorted({i for i, _ in cells})
     cols = sorted({j for _, j in cells})
+    pre: list[Stmt] = []
     body: list[Stmt] = []
-    for i in rows:
-        body += read_row(i)
-    for j in cols:
-        body += read_col(j)
+    for read, cells_of in ((read_row, rows), (read_col, cols)):
+        for index in cells_of:
+            hoisted, per_step = read(index)
+            pre += hoisted
+            body += per_step
     for i, j in cells:
         body += contract(i, j)
-    return [], wrap(body)
+    return [], wrap(pre, body)
 
 
 # ---- scalar (register-tile) tier --------------------------------------------------------------- #
@@ -1803,6 +1810,19 @@ class _AtomOps:
         """The A cone's ``(row-invariant prologue, per-cell body, bridged stats, per-chunk statistic)`` — the node
         boundary, or the whole operand body when there is no cone to split."""
         return self.seam if self.seam is not None else ((), self.c.operands[0].lower(axes=self.axes), (), ())
+
+    @property
+    def cone_rows(self) -> tuple[tuple, tuple]:
+        """The same K seam read for a tile that evaluates the cone in REGISTERS — ``(hoisted, per-cell)``.
+
+        The row-invariant prologue is a value of the ROW, not of the contraction step, so it belongs
+        ahead of the K-loop: inside it, a fused norm→linear recomputes its whole statistic once per K
+        step (the register tile then once per register row on top), which squares the kernel. A
+        per-chunk statistic varies with K through its block guard, so it stays in the loop with the
+        cell. The staged fill bridges the same split through smem rows (:func:`_a_slab_operand`);
+        here the row IS the thread, so the prologue's results simply stay in registers."""
+        pro, cell, _stats, chunk = self.cone
+        return pro, ((*chunk[0], *cell) if chunk else cell)
 
     def reduce(self, cells, offset, mn):
         """The contraction K-loop — the ONE driver both atoms flow through, deciding nothing: a
@@ -2070,7 +2090,7 @@ class _MmaOps(_AtomOps):
                 # warp's own within-tile row and the K-loop's column.
                 slab, ldm, swz = self.slabs[0]
                 prim = BinaryExpr("+", BinaryExpr("*", Var(m.unit), Literal(m.reg * atom.atom_m, "int")), Literal(i * atom.atom_m, "int"))
-                return [
+                return [], [
                     LdmatrixLoad(
                         frag=self.frag(f"_a{i}"),
                         src_buffer=slab,
@@ -2088,7 +2108,9 @@ class _MmaOps(_AtomOps):
             # a split-K partition writes its ksplit coordinate into A's k index, and when the pair
             # places that ksplit on n the bare axis name no longer exists after the tile split.
             idx = tuple(Sigma({m.axis.name: cell, **_sibling_sigma(n)}).apply(e) for e in a_load.index)
-            return [
+            # A fragment read indexes the K-loop's own coordinate, so a gmem-direct mma leaf never
+            # hoists: the split the scalar tier takes is empty here.
+            return [], [
                 LdmatrixLoad(
                     frag=self.frag(f"_a{i}"),
                     src_buffer=a_load.input,
@@ -2106,7 +2128,7 @@ class _MmaOps(_AtomOps):
                 # Already staged: read the slab at the cell's LOCAL column (the slab covers exactly
                 # this tile's N span, so the absolute base drops out) and the K-loop's own row.
                 slab, ldm, swz = self.slabs[1]
-                return [
+                return [], [
                     LdmatrixLoad(
                         frag=self.frag(f"_b{j}"),
                         src_buffer=slab,
@@ -2121,7 +2143,7 @@ class _MmaOps(_AtomOps):
                 ]
             cell = offset[1].base(j)
             idx = tuple(Sigma({n.axis.name: cell, **_sibling_sigma(m)}).apply(e) for e in b_load.index)
-            return [
+            return [], [
                 LdmatrixLoad(
                     frag=self.frag(f"_b{j}"),
                     src_buffer=b_load.input,
@@ -2147,7 +2169,7 @@ class _MmaOps(_AtomOps):
                 )
             ]
 
-        def wrap(body):
+        def wrap(pre, body):
             step = Literal(atom.atom_k, "int")
             stmts, tail = list(body), []
             if _f16acc(atom):
@@ -2160,6 +2182,7 @@ class _MmaOps(_AtomOps):
                 stmts.append(Cond(cond=fire, body=tuple(promotes)))
                 tail = promotes
             return [
+                *pre,
                 StridedLoop(axis=k_axis, start=Literal(0, "int"), step=step, body=Body(tuple(stmts)), unroll=unroll_ok(k_axis.extent)),
                 *tail,
             ]
@@ -2279,20 +2302,24 @@ class _ScalarOps(_AtomOps):
         k_axis = self.k_axis
         m, n = mn
         step = tuple(c.step())
-        a_body, b_body = c.operands[0].lower(axes=self.axes), c.operands[1].lower(axes=self.axes)
+        # A's K seam: what the cone evaluates once for the ROW lifts out of the K-loop
+        # (:attr:`cone_rows`), the rest is the per-step read. A plain gmem-``Load`` A has no
+        # prologue and the split is empty.
+        a_pro, a_body = self.cone_rows
+        b_body = c.operands[1].lower(axes=self.axes)
         uniform = [stmt for edge in c.operands[2:] for stmt in edge.lower(axes=self.axes)]
         # The operand bodies contribute their OWN loop coordinates (a computed cone's internal
         # fold axes): a replicated read of such a coordinate must keep its name — the loop that
         # binds it is copied with the cell, so suffixing the reads (but never a Loop's binding)
         # emitted references no scope defines.
-        prot = _scalar_protected(c, self.tile, self.lead, body=(*a_body, *b_body, *step), k_axis=self.k_axis)
+        prot = _scalar_protected(c, self.tile, self.lead, body=(*a_pro, *a_body, *b_body, *step), k_axis=self.k_axis)
         b_name, a_name = c.operands[1].exposes[-1], c.operands[0].exposes[-1]
         # Whatever the step reads and does not define is bound OUTSIDE the cell — a uniform leaf
         # above the loop. Only the two operand results (rebound per row / column below) and the
         # carried states (one copy per cell) are the cell's own.
         outer = {name for stmt in step for name in free_names(stmt)} - {name for stmt in step for name in stmt.defines()}
         prot |= outer - {a_name, b_name} - set(c.exposes)
-        a_cell, b_cell = _cell_varying(a_body, n), _cell_varying(b_body, m)
+        a_cell, b_cell = _cell_varying((*a_pro, *a_body), n), _cell_varying(b_body, m)
 
         def at_m(i):  # register row ``i``'s m coordinate (a 1-D output has no m side)
             return {} if m is None else {m.name: _wrap(m, offset[0].base(i))}
@@ -2306,10 +2333,15 @@ class _ScalarOps(_AtomOps):
         # representative evaluates it unchanged, and the bare axis name no longer exists after
         # the tile split).
         def read_row(i):
-            return [] if a_cell else copy_cell(a_body, Sigma(at_m(i)), f"__ar{i}", prot)
+            # The prologue and the per-step read are copied under ONE (σ, suffix): the rename is by
+            # NAME, so the statistic the cell reads back keeps the row's spelling on both sides.
+            if a_cell:
+                return [], []
+            sigma, sfx = Sigma(at_m(i)), f"__ar{i}"
+            return copy_cell(a_pro, sigma, sfx, prot), copy_cell(a_body, sigma, sfx, prot)
 
         def read_col(j):
-            return [] if b_cell else copy_cell(b_body, Sigma(at_n(j)), f"__bc{j}", prot)
+            return [], ([] if b_cell else copy_cell(b_body, Sigma(at_n(j)), f"__bc{j}", prot))
 
         def contract(i, j):
             # A cell-varying operand's read lands here, σ-bound to BOTH coordinates and suffixed with
@@ -2318,15 +2350,15 @@ class _ScalarOps(_AtomOps):
             a_sfx = f"__ar{i}_{j}" if a_cell else f"__ar{i}"
             b_sfx = f"__bc{i}_{j}" if b_cell else f"__bc{j}"
             reads = [
-                *(copy_cell(a_body, cell, a_sfx, prot) if a_cell else ()),
+                *(copy_cell((*a_pro, *a_body), cell, a_sfx, prot) if a_cell else ()),
                 *(copy_cell(b_body, cell, b_sfx, prot) if b_cell else ()),
             ]
             bound = {a_name: f"{a_name}{a_sfx}", b_name: f"{b_name}{b_sfx}"}
             rebound = [stmt.rewrite(lambda name: bound.get(name, name)) for stmt in step]
             return [*reads, *copy_cell(rebound, cell, f"__c{i}_{j}", prot | set(bound.values()))]
 
-        def wrap(body):
-            return [*uniform, Loop(axis=k_axis, body=Body(tuple(body)), unroll=_unroll_inner(k_axis))]
+        def wrap(pre, body):
+            return [*uniform, *pre, Loop(axis=k_axis, body=Body(tuple(body)), unroll=_unroll_inner(k_axis))]
 
         return dict(read_row=read_row, read_col=read_col, contract=contract, wrap=wrap)
 
