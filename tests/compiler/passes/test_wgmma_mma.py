@@ -27,7 +27,7 @@ from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.ir.kernel.ir import Smem, TmaDescriptor, WgmmaDescriptor
 from emmy.compiler.ir.schedule import Stage, Tile, Work
-from emmy.compiler.ir.schedule.classic import ClassicProblem, ClassicScheduleContext, ReductionSchedule, project_classic
+from emmy.compiler.ir.schedule.classic import ClassicProblem, ClassicScheduleContext, ReductionSchedule
 from emmy.compiler.ir.schedule.classic import refusals as classic
 from emmy.compiler.ir.schedule.classic.refusals import _wgmma_refusal
 from emmy.compiler.ir.stmt import Load
@@ -108,14 +108,14 @@ def _matmul(b_trans: bool = False) -> TileOp:
     )
 
 
-def _domains(monkeypatch, b_trans: bool = False):
-    """The bf16 matmul's sm_90 domains over a catalog cut to three warp grids and one TMA stage."""
+def _problem(monkeypatch, b_trans: bool = False):
+    """The bf16 matmul's sm_90 problem over a catalog cut to three warp grids and one TMA stage."""
     moves = classic.warp_tile_moves
     monkeypatch.setattr(classic, "scalar_tile_moves", lambda: [Tile()])
     monkeypatch.setattr(classic, "warp_tile_moves", lambda atoms: [plan for plan in moves(atoms) if plan.units in ((2, 4), (4, 1), (8, 1))])
     monkeypatch.setattr(classic, "stage_moves", lambda *, warp, ctx=None: [Stage(depth=2, transport="smem-tma")])
     tile, target = _matmul(b_trans), Context.from_target((9, 0))
-    return tile, target, project_classic(tile, target)
+    return tile, target, ClassicProblem(tile, target)
 
 
 FULL_WGMMA_ROWS = {
@@ -134,10 +134,10 @@ def test_domain_offers_only_group_aligned_wgmma_rows_and_stages_them(monkeypatch
     whatever the B orientation (an N-contiguous B stages atom-major, so its tile is not bound to
     one swizzle atom), and the compatibility join lets none of them read a direct stage — while
     the mma.sync rows beside them still do, so the drop is the rule's, not the stage domain's."""
-    tile, target, domains = _domains(monkeypatch, b_trans=b_trans)
+    tile, target, offers = _problem(monkeypatch, b_trans=b_trans)
     site = tile.node_sites[0]
 
-    rows = tuple(choice.tile for choice in domains.nodes[site] if isinstance(choice, ReductionSchedule) and choice.tile.is_warp)
+    rows = tuple(choice.tile for choice in offers.node_site(site).nodes if isinstance(choice, ReductionSchedule) and choice.tile.is_warp)
     wgmma = tuple(plan for plan in rows if plan.atom.is_wgmma)
     assert {plan.units for plan in wgmma} == {(4, 1), (8, 1)}
     assert {(plan.atom.ptx_shape[1], plan.regs, plan.bk) for plan in wgmma} == FULL_WGMMA_ROWS
@@ -165,9 +165,9 @@ def test_domain_offers_only_group_aligned_wgmma_rows_and_stages_them(monkeypatch
 def test_pinned_wgmma_row_refuses_with_its_rule(monkeypatch, pins, message) -> None:
     """A pin the catalog never offered is refused with the rule's message, not as an unsupported
     pin; a wgmma TILE with no WORK pin still meets the rules that do not read the grid."""
-    tile, target, _ = _domains(monkeypatch)
+    tile, target, _offers = _problem(monkeypatch)
     with pytest.raises(ValueError, match=message):
-        _ = ClassicProblem(tile, target, row=pins).domains
+        _ = [site.nodes for site in ClassicProblem(tile, target, row=pins).node_sites]
 
 
 def _graph(m: int, n: int, k: int) -> Graph:

@@ -1,12 +1,10 @@
 """The classic assignment vocabulary: the kernel, node and edge choice types, the sites' wire spellings and
-keys, and ``ClassicDomains`` — the literal independent product a problem's sites span."""
+keys. The candidate values themselves belong to the sites (``classic.sites``), which are the one place
+that says what may be chosen."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass
-
-from frozendict import frozendict
 
 from emmy.compiler.ir.schedule.base import Schedule
 from emmy.compiler.ir.schedule.choices import Raster, Reduce, Stage, Tile, Work
@@ -124,41 +122,6 @@ def classic_stage_key(sites, edge: EdgeSite) -> str:
         raise ValueError(f"{edge_site_spelling(edge)} is not a STAGE edge")
     consumers = tuple(dict.fromkeys(candidate[0] for candidate in sites.stage_edges))
     return "STAGE" if len(consumers) == 1 else f"STAGE@{sites.sites[edge[0]].path}"
-
-
-@dataclass(frozen=True)
-class ClassicDomains:
-    """The literal independent kernel, node, and edge factors of Algorithm 1."""
-
-    kernel: tuple[KernelSchedule, ...]
-    nodes: Mapping[NodeId, tuple[NodeSchedule, ...]]
-    edges: Mapping[EdgeSite, tuple[EdgeSchedule, ...]]
-
-    def __post_init__(self) -> None:
-        if not self.kernel or any(not isinstance(choice, KernelSchedule) for choice in self.kernel):
-            raise TypeError("classic kernel domain must contain KernelSchedule choices")
-        for name, values, site_test, choice_type in (
-            ("node", self.nodes, _is_node_id, (ProjectionSchedule, ReductionSchedule)),
-            ("edge", self.edges, _is_edge_site, EdgeSchedule),
-        ):
-            if not isinstance(values, Mapping) or any(not site_test(site) for site in values):
-                raise TypeError(f"classic {name} domains have invalid site keys")
-            if any(not choices or any(not isinstance(choice, choice_type) for choice in choices) for choices in values.values()):
-                raise TypeError(f"classic {name} domains have invalid choices")
-        object.__setattr__(self, "nodes", frozendict({site: tuple(choices) for site, choices in self.nodes.items()}))
-        object.__setattr__(self, "edges", frozendict({edge: tuple(choices) for edge, choices in self.edges.items()}))
-
-    def __getstate__(self):
-        """Pickle declared domains, never derived membership indexes."""
-        return {name: self.__dict__[name] for name in self.__dataclass_fields__ if name in self.__dict__}
-
-    @property
-    def product_size(self) -> int:
-        """Number of assignments in the unfiltered Cartesian product."""
-        size = len(self.kernel)
-        for choices in (*self.nodes.values(), *self.edges.values()):
-            size *= len(choices)
-        return size
 
 
 def no_site_claims_inventory(tile_op) -> bool:

@@ -32,7 +32,6 @@ from emmy.compiler.ir.schedule import (
 )
 from emmy.compiler.ir.schedule.classic import (
     ClassicAssignment,
-    ClassicDomains,
     ClassicMaterialization,
     ClassicProblem,
     ClassicScheduleCodec,
@@ -50,7 +49,7 @@ from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, TileOp
 from emmy.compiler.pipeline.fork import DeferredFork, iter_leaves, schedule_forks
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
-from tests.compiler.helpers import classic_cartesian_assignments, enumerate_classic_reference
+from tests.compiler.helpers import classic_cartesian_assignments, enumerate_classic_reference, literal_classic_context
 from tests.compiler.terms import contraction, projection
 
 _K = Axis("k", 8)
@@ -81,10 +80,9 @@ def _leaf_nodes(tile: TileOp) -> dict:
     return {site: ProjectionSchedule(Tile()) for site, view in enumerate(tile.views) if view.axis is None}
 
 
-def _literal(problem: tuple[TileOp, object], domains: ClassicDomains, *, order=None, **problem_fields) -> ClassicScheduleContext:
-    """A context over hand-written factors: the literal oracle the tests compose against."""
-    tile, target = problem
-    return ClassicScheduleContext(tile, target, ClassicProblem(tile, target, domains_literal=domains, **problem_fields), order=order)
+def _literal(problem: tuple[TileOp, object], factors: dict, **kwargs) -> ClassicScheduleContext:
+    """A context over hand-written factors — see :func:`~tests.compiler.helpers.literal_classic_context`."""
+    return literal_classic_context(*problem, **factors, **kwargs)
 
 
 def _direct(context: ClassicScheduleContext) -> ClassicAssignment:
@@ -207,22 +205,21 @@ def test_independent_nodes_compose_only_at_matching_physical_axis_geometry() -> 
         context.extend(pick(context, second, ReductionSchedule(Tile(regs=(1, 2)), Reduce())))
 
 
-def _finite_domains(problem: tuple[TileOp, object]) -> ClassicDomains:
-    context = ClassicScheduleContext(*problem)
-    site = context.tile_op.node_sites[0]
+def _finite_factors(problem: tuple[TileOp, object]) -> dict:
+    """Three hand-written factors spanning 24 assignments — a space small enough to check by hand."""
+    tile = ClassicScheduleContext(*problem).tile_op
+    site = tile.node_sites[0]
     direct_node = ReductionSchedule(Tile(), Reduce())
     tiled_node = ReductionSchedule(Tile(units=(1, 2)), Reduce())
-    direct_edges = {edge: EdgeSchedule(Stage.direct()) for edge in context.tile_op.edge_sites}
-    staged_edges = {edge: EdgeSchedule(Stage()) for edge in context.tile_op.edge_sites}
-    return ClassicDomains(
-        kernel=(
+    return {
+        "kernel": (
             KernelSchedule(Work(), Raster()),
             KernelSchedule(Work.parse("t2"), Raster()),
             KernelSchedule(Work.parse("t2"), Raster("m", 8)),
         ),
-        nodes={site: (direct_node, tiled_node), **{leaf: (choice,) for leaf, choice in _leaf_nodes(context.tile_op).items()}},
-        edges={edge: (direct_edges[edge], staged_edges[edge]) for edge in context.tile_op.edge_sites},
-    )
+        "nodes": {site: (direct_node, tiled_node), **{leaf: (choice,) for leaf, choice in _leaf_nodes(tile).items()}},
+        "edges": {edge: (EdgeSchedule(Stage.direct()), EdgeSchedule(Stage())) for edge in tile.edge_sites},
+    }
 
 
 def _schedule_signature(schedule: ClassicAssignment) -> tuple:
@@ -237,28 +234,29 @@ def _enumerate_context(context: ScheduleContext):
             yield value
 
 
-def test_domains_are_independent_projections_of_static_support() -> None:
+def test_site_factors_do_not_depend_on_the_prefix() -> None:
+    """A site's options are a function of the problem and its row alone, never of what another site has been
+    given: that independence is what makes the enumeration the compatible subset of ONE product, rather than a
+    walk whose space depends on where it has been."""
     problem = _problem(_contraction())
-    context = ClassicScheduleContext(*problem)
-    domains = _finite_domains(problem)
-    site = context.tile_op.node_sites[0]
-    edge = context.tile_op.edge_sites[0]
+    offers = ClassicProblem(*problem)
+    context = ClassicScheduleContext(*problem, offers)
+    last = context.tile_op.node_sites[-1]
+    before = offers.node_site(last).nodes
 
-    projected = _literal(problem, domains).problem
-    assert projected.kernel_site.kernels == domains.kernel
-    assert projected.node_site(site).nodes == domains.nodes[site]
-    assert projected.node_site(edge[0]).edges == domains.edges[edge]
-    assert projected.domains == domains
+    advanced = context.extend(next(iter(context.extensions())))
+
+    assert advanced.problem is offers
+    assert advanced.problem.node_site(last).nodes == before
 
 
 def test_context_indexes_finite_domain_membership(monkeypatch) -> None:
     problem = _problem(_contraction())
-    domains = _finite_domains(problem)
+    factors = _finite_factors(problem)
     many_kernel_choices = tuple(KernelSchedule(Work(kind="thread", units=(width, 1)), Raster()) for width in range(1, 65)) + (
         KernelSchedule(Work(), Raster()),
     )
-    domains = ClassicDomains(many_kernel_choices, domains.nodes, domains.edges)
-    context = _literal(problem, domains)
+    context = _literal(problem, {**factors, "kernel": many_kernel_choices})
     equals = KernelSchedule.__eq__
     calls = 0
 
@@ -276,43 +274,43 @@ def test_context_indexes_finite_domain_membership(monkeypatch) -> None:
 
 def test_reference_is_the_compatible_cartesian_subset() -> None:
     problem = _problem(_contraction())
-    domains = _finite_domains(problem)
+    factors = _finite_factors(problem)
 
-    context = _literal(problem, domains)
+    context = _literal(problem, factors)
     assignments = list(classic_cartesian_assignments(context))
 
     assert {_schedule_signature(schedule) for schedule, verdict in assignments if verdict} == {
         _schedule_signature(schedule) for schedule in enumerate_classic_reference(context)
     }
-    assert len(assignments) == domains.product_size == 24
+    assert len(assignments) == context.problem.bounds[0] == 24
 
 
 def test_every_lazy_traversal_equals_the_cartesian_reference() -> None:
     problem = _problem(_contraction())
-    domains = _finite_domains(problem)
-    context = _literal(problem, domains)
+    factors = _finite_factors(problem)
+    context = _literal(problem, factors)
     reference = {_schedule_signature(schedule) for schedule in enumerate_classic_reference(context)}
 
     for traversal in permutations(context.tile_op.node_sites):
-        reordered = _literal(problem, domains, order=traversal)
+        reordered = _literal(problem, factors, order=traversal)
         assert {_schedule_signature(schedule) for schedule in _enumerate_context(reordered)} == reference
 
 
 def test_every_lazy_traversal_equals_algorithm_one_under_pinned_c() -> None:
     problem = _problem(_contraction())
-    domains = _finite_domains(problem)
-    context = _literal(problem, domains, row={"RASTER": ""})
+    factors = _finite_factors(problem)
+    context = _literal(problem, factors, row={"RASTER": ""})
     reference = {_schedule_signature(schedule) for schedule in enumerate_classic_reference(context)}
 
     for traversal in permutations(context.tile_op.node_sites):
-        actual = _enumerate_context(_literal(problem, domains, order=traversal, row={"RASTER": ""}))
+        actual = _enumerate_context(_literal(problem, factors, order=traversal, row={"RASTER": ""}))
         assert {_schedule_signature(schedule) for schedule in actual} == reference
 
 
 def test_extend_accepts_a_complete_schedule_at_the_root_or_matching_prefix() -> None:
     problem = _problem(_contraction())
-    domains = _finite_domains(problem)
-    context = _literal(problem, domains)
+    factors = _finite_factors(problem)
+    context = _literal(problem, factors)
     wanted = next(enumerate_classic_reference(context))
 
     assert context.extend(wanted).assignment == wanted
@@ -515,11 +513,11 @@ def test_generic_fork_adapter_drives_a_schedule_context_lazily() -> None:
     direct = _direct(inventory)
     context = _literal(
         problem,
-        ClassicDomains(
-            kernel=(direct.kernel,),
-            nodes={site: (choice,) for site, choice in direct.nodes.items()},
-            edges={edge: (choice,) for edge, choice in direct.edges.items()},
-        ),
+        {
+            "kernel": (direct.kernel,),
+            "nodes": {site: (choice,) for site, choice in direct.nodes.items()},
+            "edges": {edge: (choice,) for edge, choice in direct.edges.items()},
+        },
     )
     accepted = []
 

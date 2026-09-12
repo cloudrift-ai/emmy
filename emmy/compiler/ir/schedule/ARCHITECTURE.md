@@ -30,8 +30,10 @@ The pipeline's generic schedule-fork adapter preserves the same contexts as defe
 compatibility logic.
 
 Classic sites additionally expose their independent factors — a node site's `nodes` and `edges`, the kernel site's
-`kernels` — and `ClassicProblem.domains` is their literal product, `ClassicDomains`. Tests retain a literal
-Cartesian oracle over it:
+`kernels` — and `ClassicProblem.bounds` reports the size of their product without building it. There is no product
+OBJECT: the sites are the factors, so a type holding a copy of them would be a second answer to one question. Tests
+build the literal product themselves, and a bounded test hands the sites hand-written factors by subclassing them
+(`tests/compiler/helpers.literal_classic_context`), which is the only way to offer a site values it did not project:
 
     D(p, t, row) = K × ∏ N(node) × ∏ E(edge)      # what the sites offer, under the row
     Algorithm 1(p, t, row) = {a ∈ D(p, t, row) | extend(c + p + t, a) succeeds}
@@ -75,7 +77,7 @@ lowering, and a cache on the wrapper silently re-derives per wrapper. `schedule_
 ## Classic schedule
 
 The classic family is the `classic/` package, one role per module: `assignment` (the choice types, the sites' wire
-spellings and keys, `ClassicDomains`), `refusals` (every per-choice legality rule), `sites` (the source),
+spellings and keys), `refusals` (every per-choice legality rule), `sites` (the source),
 `context` (the join), `codec` (the wire boundary) and `materialize` (the lowering boundary). Imports flow in that
 order and nothing in the package imports the tile package at module level, which is what lets `ir/tile/ops` read
 the assignment names through the package.
