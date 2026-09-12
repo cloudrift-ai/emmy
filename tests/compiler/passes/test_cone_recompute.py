@@ -24,7 +24,7 @@ from emmy.compiler.ir.schedule.views import cone_seam
 from emmy.compiler.ir.stmt import Body, Load, Loop, Write
 from emmy.compiler.ir.stmt.body import dedup_recomputes
 from emmy.compiler.ir.stmt.leaves import Assign
-from emmy.compiler.pipeline.passes.lowering.kernel._atom import reduce_codegen, store_sink
+from emmy.compiler.pipeline.passes.lowering.kernel._atom import _hoist_k_invariant, reduce_codegen, store_sink
 from emmy.compiler.pipeline.passes.lowering.kernel._tiling import atomize, grid_tile, register_tile, unit_tile
 from tests.compiler.terms import contraction, projection, reduction, slab
 
@@ -125,3 +125,16 @@ def test_every_register_row_keeps_its_own_statistic() -> None:
     """The lift is per row: a taller tile hoists one statistic for each of its rows, since each reads a
     different row of the input."""
     assert _statistic_loops(_register_tiled("f2x4"), under=None) == 4
+
+
+def test_a_read_of_a_loop_bound_accumulator_stays_with_its_loop() -> None:
+    """A reduce over the CONTRACTION axis binds its accumulator inside its own body, so the projection
+    that reads the accumulator back is loop-varying too. Reading only the loop's head left that
+    accumulator invariant and hoisted the projection ahead of the loop that fills it."""
+    square = Assign(name="acc0__v", op=ElementwiseImpl("multiply"), args=("xj", "xj"))
+    inner = reduction(J, (slab("xj", "x", "k", "j"),), (square,), ("acc0",))
+    read = Assign(name="a", op=ElementwiseImpl("multiply"), args=("acc0", "acc0"))
+    body = (*inner.lower(axes=(M, N, K, J)), read)
+    hoisted, rest = _hoist_k_invariant(body, K.name)
+    assert hoisted == ()
+    assert rest == body

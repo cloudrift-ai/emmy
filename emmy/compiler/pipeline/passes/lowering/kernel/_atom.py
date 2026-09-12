@@ -193,13 +193,19 @@ def _hoist_k_invariant(body, k_name: str) -> tuple[tuple, tuple]:
     name a loop-varying statement defines, and loop-invariant otherwise. The coordinate counts as a
     read wherever it appears — as an index or as a value — which keeps a statement in the loop that
     only might vary with it.
+
+    What a loop-varying statement defines is read off its WHOLE tree, not its own head: a reduce
+    over some other axis is one statement whose accumulator its body binds, and reading only the
+    head left that accumulator invariant — so the projection above it hoisted ahead of the loop
+    that fills it, and the kernel read a name declared later (nvcc: *identifier "acc7__ar0" is
+    undefined*). A statement that reads the coordinate carries everything it binds with it.
     """
     varying = {k_name}
     hoisted: list[Stmt] = []
     rest: list[Stmt] = []
     for stmt in body:
         if free_names(stmt) & varying:
-            varying |= set(stmt.defines())
+            varying |= {name for inner in Body((stmt,)).iter() for name in inner.defines()}
             rest.append(stmt)
         else:
             hoisted.append(stmt)
