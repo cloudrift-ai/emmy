@@ -613,12 +613,15 @@ def chain_members(root: Fold) -> tuple[Fold, ...]:
     operand edges and the axis-invariant (hoisted) reduce operands of members, deepest first, so a
     member another member's cone reads comes ahead of it. This is the CHAIN the binder emits in
     body order around one shared lane axis. A reduce read per step of another (the score inside
-    the twist) lowers inside that reduce's loop and is no member, and a root a tile folds WHOLE has
-    no chain: its cone's statistic is the tiled fill's business, not a fold beside the root's. A
-    carrier the tiers cannot fold whole (:meth:`Fold.tiles_whole`) keeps its chain — no fill takes
-    its cone over, so the members are still folds beside it."""
+    the twist) lowers inside that reduce's loop and is no member.
+
+    Whether a FILL takes the cone over is the schedule's answer, not the term's: the binder asks
+    this only from its untiled arm, where no fill exists and the root's own statistic is a fold
+    beside it, so the chain is read off the term alone. The pairing a fill DOES take over — an
+    output-tiled root beside a partitioned member — is refused where the two choices meet
+    (``classic.context``), not pre-empted here by a term-level guess at the tier."""
     out: list[Fold] = []
-    if not isinstance(root, Fold) or root.axis is None or root.tiles_whole():
+    if not isinstance(root, Fold) or root.axis is None:
         return ()
 
     def visit(node: Fold, hoisted_from: str | None) -> None:

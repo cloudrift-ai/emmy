@@ -13,7 +13,7 @@ from frozendict import frozendict
 
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule.base import Schedule, ScheduleContext, ScheduleRefused
-from emmy.compiler.ir.schedule.choices import PlacedTile, Stage, Tile, Work, derive_inventory
+from emmy.compiler.ir.schedule.choices import PlacedTile, Reduce, Stage, Tile, Work, derive_inventory
 from emmy.compiler.ir.schedule.views import EdgeSite, NodeId
 from emmy.compiler.structural import instance_memo
 
@@ -487,6 +487,22 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
 
         return frozenset(self.tile_op.node_id(root) for root in refused_roots(self.tile_op.op, tuple(self.tile_op.output_specs)))
 
+    @cached_property
+    def _chain_pairs(self) -> tuple[tuple[NodeId, NodeId], ...]:
+        """The ``(root, member)`` pairs whose two partitions the binder cannot both realize.
+
+        A chain binds only in the binder's UNTILED arm: an output-tiled root reaches its cone
+        through the tiled fill, which evaluates the statistic per cell, so the member is no fold
+        beside the root and its partition is never read. The binder's own dispatch, applied at the
+        offer — the same service :attr:`_shared_roots` does for the second output-tiled root."""
+        from emmy.compiler.ir.tile.ops import chain_members, kernel_roots  # noqa: PLC0415 — tile.ops reads this package
+
+        return tuple(
+            (self.tile_op.node_id(root), self.tile_op.node_id(member))
+            for root in kernel_roots(self.tile_op.op)
+            for member in chain_members(root)
+        )
+
     def _support_refusal(self, site: NodeId, support: _LocalSupport) -> str | None:
         """Return why one locally supported pick cannot extend this prefix."""
         if (
@@ -495,6 +511,12 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             and any(self.schedule.nodes[other].tile.is_tiled for other in self._shared_roots if other in self.schedule.nodes)
         ):
             return "a second output-tiled root on a projection its outputs do not partition by root"
+        for root, member in self._chain_pairs:
+            if site not in (root, member):
+                continue
+            picks = {**self.schedule.nodes, site: support.node}
+            if root in picks and member in picks and picks[root].tile.is_tiled and picks[member].reduce != Reduce():
+                return "a partitioned chain member under an output-tiled root, whose fill owns its cone"
         return self._prefix_relation_refusal(
             support,
             work=self._work,
