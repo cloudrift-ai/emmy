@@ -179,6 +179,69 @@ def _axis_dim(index: tuple, axis_name: str) -> int | None:
     return dims[-1] if dims else None
 
 
+def _flat_strides(load, inputs, coords: tuple[str, ...]) -> dict[str, int] | None:
+    """Each coordinate's ELEMENT stride in a materialized operand's flat row-major address, or
+    ``None`` when a dim is not affine in them or a trailing extent is symbolic.
+
+    A gmem fragment loader addresses its operand through ONE leading dimension: one coordinate
+    steps by 1, the other by ``ldm``. Which DIM an index spells a coordinate in does not say that.
+    A frontend reshape can pack the reduction coordinate and the operand's own output coordinate
+    into one dim — ``hidden[stream * 4096 + channel]``, DeepSeek-V4's hyper-connection mixing —
+    and the dim-position reading then names the tensor's row stride as ``ldm`` and calls the
+    operand N-major because its last dim holds the reduction axis. Both are wrong, the fragment
+    reads the wrong elements, and nothing raises. Strides say it directly, and on an operand whose
+    dims separate the two coordinates they say exactly what the dim-position reading said.
+    """
+    tensor = inputs.get(load.input) if inputs else None
+    if tensor is None:
+        return None
+    shape = tensor.shape
+    if len(shape) != len(load.index):
+        return None
+    names = set(coords)
+    strides = dict.fromkeys(coords, 0)
+    unit = 1
+    for dim in reversed(range(len(load.index))):
+        form = affine_form(load.index[dim], names)
+        if form is None:
+            return None
+        for name, coeff in form[1].items():
+            strides[name] += coeff * unit
+        if dim == 0:
+            break  # nothing strides the leading dim, so its extent never enters a stride
+        extent = shape[dim]
+        if isinstance(extent, Dim):
+            if not extent.is_static:
+                return None  # a symbolic extent leaves the strides of every earlier dim unknown
+            extent = extent.as_static()
+        if not isinstance(extent, int):
+            return None
+        unit *= extent
+    return dict(strides)
+
+
+def _direct_operand(load, inputs, *, k_name: str, own: str | None, legacy_ldm) -> tuple[bool, object]:
+    """``(reduction-minor, ldm)`` for one gmem-direct fragment read.
+
+    ``reduction-minor`` means the reduction coordinate is the unit-stride one — the A loader's
+    only layout, and B's transposed one. Falls back to ``legacy_ldm`` (the dim-position reading)
+    where the strides do not resolve, which is every symbolic-extent operand the dim positions
+    already answered for."""
+    strides = _flat_strides(load, inputs, (k_name, *(() if own is None else (own,))))
+    if strides is None:
+        return legacy_ldm[0], legacy_ldm[1]
+    k_stride = strides[k_name]
+    own_stride = 1 if own is None else strides[own]
+    if k_stride == 1:
+        return True, own_stride
+    if own_stride == 1:
+        return False, k_stride
+    raise ValueError(
+        f"gmem-direct fragment read of {load.input!r}: neither the reduction coordinate (stride {k_stride}) "
+        f"nor {own!r} (stride {own_stride}) is unit-stride, so the operand has no leading dimension"
+    )
+
+
 def _cells(mn: tuple, offset, i: int, j: int):
     """Yield ``(side, cell-base coord)`` for each present output axis of register cell ``(i, j)`` —
     ``(m, offset[0].base(i))`` then ``(n, offset[1].base(j))`` (``m`` skipped for a 1-D output)."""
@@ -2076,7 +2139,12 @@ class _MmaOps(_AtomOps):
         a_edge, b_edge = c.operands[0], c.operands[1]
         a_load = a_edge.as_slab().load if a_edge.as_slab() is not None else a_edge
         b_load = b_edge.as_slab().load if b_edge.as_slab() is not None else b_edge
-        b_trans = c.as_contraction().b_trans
+        # The two operands' leading dimensions, read off their ADDRESSES (:func:`_direct_operand`).
+        # A has one layout — its reduction coordinate minor — so only its ``ldm`` is a question;
+        # B answers both, and its ``b_trans`` is the same fact ``ContractionView`` reads off dim
+        # positions wherever the strides do not resolve.
+        _, a_ldm = _direct_operand(a_load, self.inputs, k_name=k_axis.name, own=m.axis.name, legacy_ldm=(True, 0))
+        b_trans, b_ldm = _direct_operand(b_load, self.inputs, k_name=k_axis.name, own=n.axis.name, legacy_ldm=(c.as_contraction().b_trans, 0))
         # The loop's final step overhangs K whenever ``atom_k`` does not tile it — a SYMBOLIC K
         # (unknown at compile time) or a static K with a remainder. Both mask the same way: the
         # loaders zero-fill the fragment halves past ``k_zero``'s bound, so the summed reduction
@@ -2117,6 +2185,7 @@ class _MmaOps(_AtomOps):
                     src_index=idx,
                     role="a",
                     staged=False,
+                    ldm=a_ldm,
                     gmem_guard=_guard(m, cell),
                     k_zero=k_zero,
                     fragment_layout=atom.fragment_layout,
@@ -2151,6 +2220,7 @@ class _MmaOps(_AtomOps):
                     role="b",
                     staged=False,
                     b_trans=b_trans,
+                    ldm=b_ldm,
                     gmem_guard=_guard(n, cell),
                     k_zero=k_zero,
                     fragment_layout=atom.fragment_layout,

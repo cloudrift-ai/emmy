@@ -20,6 +20,8 @@ from __future__ import annotations
 import pytest
 
 from emmy.compiler.context import Context
+from emmy.compiler.dim import Dim
+from emmy.compiler.graph import Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Expr, Literal, Var
 from emmy.compiler.ir.kernel.ir import LdmatrixLoad
@@ -48,13 +50,14 @@ def _free(exprs) -> set[str]:
     return set().union(*(set(e.free_vars()) for e in exprs))
 
 
-def _fragment_loads(a: Load, b: Load, atom: str) -> dict[str, LdmatrixLoad]:
+def _fragment_loads(a: Load, b: Load, atom: str, inputs=None) -> dict[str, LdmatrixLoad]:
     """The gmem-direct operand fragment loads the mma atom emits for ``a ⊗ b`` on a 1×1 warp tile — sealed
-    through ``grid_tile`` the way ``_factor._bind``'s output-tiled arm seals it."""
+    through ``grid_tile`` the way ``_factor._bind``'s output-tiled arm seals it. ``inputs`` gives the
+    operand tensors their shapes, which is what lets the leaf read a stride rather than a dim position."""
     c = contraction(_K, a, (b, "acc"))
     plan = Tile.parse(f"{atom}/f1x1", Work.parse("w1x1")).at(_M, _N)
     axes = (_M, _N, _K)
-    state, region = reduce_codegen(c, plan, k_axis=_K, axes=axes)
+    state, region = reduce_codegen(c, plan, inputs=inputs, k_axis=_K, axes=axes)
     epilogue = Body((Write(output="out", index=(Var("m"), Var("n")), value=c.combine.results[0]),))
     tile = grid_tile(
         unit_tile(register_tile(atomize(plan.atom.shape[:2]), plan.mn), plan.mn),
@@ -99,3 +102,42 @@ def test_gmem_direct_a_fragment_binds_the_column_residue(atom) -> None:
     b = Load(name="b", input="B", index=(Var("k"), Var("n")))
     load = _fragment_loads(a, b, atom)["a"]
     assert "n" not in _free(load.src_index) and "n_b" in _free(load.src_index)
+
+
+def _packed(k_extent: int, n_extent: int) -> tuple[Load, Load, dict]:
+    """``out[m, n] = Σ_k a[m, k] · x[m, k * n_extent + n]`` — B's own coordinate and the reduction
+    coordinate packed into ONE tensor dim, the shape DeepSeek-V4's hyper-connection mixing reads
+    (``hidden[stream * 4096 + channel]``, 24 streams over one 16384-wide row)."""
+    a = Load(name="a", input="A", index=(Var("m"), Var("k")))
+    b = Load(name="b", input="X", index=(Var("m"), Var("k") * _lit(n_extent) + Var("n")))
+    inputs = {
+        "A": Tensor("A", (Dim(4), Dim(k_extent)), "f16"),
+        "X": Tensor("X", (Dim(4), Dim(k_extent * n_extent)), "f16"),
+    }
+    return a, b, inputs
+
+
+@pytest.mark.parametrize("atom", ["mma_m8n8k4_f16_f32", "mma_m16n8k16_f16_f32"])
+def test_a_packed_operand_dim_reads_its_stride_not_its_position(atom) -> None:
+    """One dim holding both coordinates is K-major at the reduction coordinate's own stride.
+
+    The dim-position reading calls it N-major (its LAST dim holds the reduction axis) at the
+    tensor's row stride, and the fragment then reads the wrong elements with nothing raised — the
+    DeepSeek-V4 V100 pre-attention kernel, wrong by up to 64x against eager on 3594 of 4096 outputs.
+    """
+    a, b, inputs = _packed(k_extent=4, n_extent=64)
+    load = _fragment_loads(a, b, atom, inputs)["b"]
+    assert not load.b_trans
+    assert load.ldm == 64
+
+
+@pytest.mark.parametrize("atom", ["mma_m8n8k4_f16_f32", "mma_m16n8k16_f16_f32"])
+def test_separate_dims_keep_the_answer_the_dim_positions_gave(atom) -> None:
+    """Where the dims separate the coordinates, the stride reading says what the positions said: a
+    ``b[n, k]`` operand is N-major with the row stride its trailing extent gives."""
+    a = Load(name="a", input="A", index=(Var("m"), Var("k")))
+    b = Load(name="b", input="B", index=(Var("n"), Var("k")))
+    inputs = {"A": Tensor("A", (Dim(4), Dim(64)), "f16"), "B": Tensor("B", (Dim(64), Dim(64)), "f16")}
+    load = _fragment_loads(a, b, atom, inputs)["b"]
+    assert load.b_trans
+    assert load.ldm == 64
