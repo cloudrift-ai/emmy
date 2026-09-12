@@ -2156,8 +2156,9 @@ class _MmaOps(_AtomOps):
         # A has one layout — its reduction coordinate minor — so only its ``ldm`` is a question;
         # B answers both, and its ``b_trans`` is the same fact ``ContractionView`` reads off dim
         # positions wherever the strides do not resolve.
-        _, a_ldm = _direct_operand(a_load, self.inputs, k_name=k_axis.name, own=m.axis.name, legacy_ldm=(True, 0))
-        b_trans, b_ldm = _direct_operand(b_load, self.inputs, k_name=k_axis.name, own=n.axis.name, legacy_ldm=(c.as_contraction().b_trans, 0))
+        direct = lambda load, own, legacy: _direct_operand(load, self.inputs, k_name=k_axis.name, own=own, legacy_ldm=legacy)  # noqa: E731
+        _, a_ldm = direct(a_load, m.axis.name, (True, 0))
+        b_trans, b_ldm = direct(b_load, n.axis.name, (c.as_contraction().b_trans, 0))
         # The loop's final step overhangs K whenever ``atom_k`` does not tile it — a SYMBOLIC K
         # (unknown at compile time) or a static K with a remainder. Both mask the same way: the
         # loaders zero-fill the fragment halves past ``k_zero``'s bound, so the summed reduction
