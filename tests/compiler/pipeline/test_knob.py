@@ -654,7 +654,7 @@ def test_complete_kernel_row_requires_the_emitted_exact_schedule():
         complete_kernel_row({"WORK": "", "RASTER": "", "REDUCE@row": ""})
     with pytest.raises(ValueError, match="must be bare"):
         complete_kernel_row({"WORK@map.1/inner": "", "WORK": "", "RASTER": "", "REDUCE": ""})
-    with pytest.raises(ValueError, match="no node assignment"):
+    with pytest.raises(ValueError, match="no node choice"):
         complete_kernel_row({"WORK": "", "RASTER": "", "STAGE": ""})
 
 
