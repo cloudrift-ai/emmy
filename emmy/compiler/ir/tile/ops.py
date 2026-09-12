@@ -640,14 +640,16 @@ def chain_members(root: Fold) -> tuple[Fold, ...]:
 
 
 def chain_form(root: Fold) -> bool:
-    """Whether a reduce root binds as a CHAIN — its members, or a computed provider cone hoisted
-    ahead of its loop (a workspace row and its rsqrt), sit beside its own fold. The transposed
-    band's σ-substitution and guarded close assume the fold stands alone at the kernel root, so a
-    chain root takes no transposed band."""
+    """Whether a computed provider cone — a workspace row and its rsqrt — is hoisted ahead of this
+    root's loop, beside its own fold. The transposed band's σ-substitution and guarded close assume
+    the fold stands alone at the kernel root, so such a root takes no band.
+
+    A MEMBER is not what decides that. The band absorbs one that folds serially, hoisted ahead of
+    its loop, which is what every recorded transposed row of a fused reduce does; only a member the
+    schedule PARTITIONS makes the root a chain, and that is a relation between two picks rather
+    than a fact about the term (``classic.context`` refuses the pair)."""
     if not isinstance(root, Fold) or root.axis is None:
         return False
-    if chain_members(root):
-        return True
     return any(
         edge.axis is None
         and root.axis not in edge.free_axes

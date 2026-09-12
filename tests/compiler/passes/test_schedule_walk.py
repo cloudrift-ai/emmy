@@ -434,11 +434,14 @@ def test_a_tilable_contraction_roots_own_statistic_is_still_a_chain_member(unpin
     assert _classic._reduction_domain(_tile_stub(root), statistic) == _member_catalog()
 
 
-def test_an_output_tiled_root_offers_its_chain_member_no_partition(unpinned) -> None:
-    """The complement, and the reason the member's own catalog may stay term-read: a chain binds
-    only in the binder's UNTILED arm, so a row that output-tiles the root and partitions its member
-    spells a kernel the binder never builds — it would realize without the partition and read as an
-    unreproducible pin. The context refuses the pairing; both halves stay reachable apart."""
+def test_a_root_that_leaves_the_chain_arm_offers_its_member_no_partition(unpinned) -> None:
+    """The complement, and the reason the member's own catalog may stay term-read: a chain binds in
+    ONE of the binder's arms. A root that output-tiles reaches its cone through the fill, and one
+    carrying a transposed band binds its fold alone — either way a row that also partitions the
+    member spells a kernel the binder never builds, realizing without the partition and reading as
+    an unreproducible pin. The context refuses those two pairs and nothing else: the band survives
+    a member that folds SERIALLY, which is what the recorded transposed rows of a fused reduce
+    are, and withdrawing it there turned ten of them undecodable."""
     tile = TileOp(
         op=_norm_linear_root(),
         place=Placement(free=(Axis("m", 64), Axis("n", 64))),
@@ -449,18 +452,33 @@ def test_an_output_tiled_root_offers_its_chain_member_no_partition(unpinned) -> 
     (root,) = ops.kernel_roots(tile.op)
     statistic = next(member for member in ops.chain_members(root) if member.axis == "k")
     sched = Sched(tile, place=tile.place.on_grid())
-    root_key, member_key = sched.key("TILE", root), sched.key("REDUCE", statistic)
+    tile_key, band_key = sched.key("TILE", root), sched.key("REDUCE", root)
+    member_key = sched.key("REDUCE", statistic)
 
     rows = [dict(leaf.knobs) for leaf in iter_leaves(_SCHEDULE_RULE.classic_forks(tile, tile.name, {}, Context.from_target(_CC)))]
     picks = []
     for row in rows:
         work = Work.parse(str(row["WORK"])) if str(row.get("WORK", "")) else None
-        picks.append((Tile.parse(str(row.get(root_key, "")), work), Reduce.parse(str(row.get(member_key, "")), work)))
-    assert not [1 for plan, partition in picks if plan.is_tiled and partition != Reduce()], (
+        picks.append(
+            (
+                Tile.parse(str(row.get(tile_key, "")), work),
+                Reduce.parse(str(row.get(band_key, "")), work),
+                Reduce.parse(str(row.get(member_key, "")), work),
+            )
+        )
+    assert not [1 for plan, _, partition in picks if plan.is_tiled and partition != Reduce()], (
         "the fill owns the cone; the pin would not realize"
     )
-    assert [1 for plan, partition in picks if not plan.is_tiled and partition != Reduce()], "an untiled root must still reach the partition"
-    assert [1 for plan, _ in picks if plan.is_tiled], "the root must still reach a tile"
+    assert not [1 for _, band, partition in picks if band.coop_transposed and partition != Reduce()], (
+        "the band binds its fold alone; the pin would not realize"
+    )
+    assert [1 for plan, _, partition in picks if not plan.is_tiled and partition != Reduce()], (
+        "an untiled root must still reach the partition"
+    )
+    assert [1 for plan, _, _ in picks if plan.is_tiled], "the root must still reach a tile"
+    assert [1 for _, band, _ in picks if band.coop_transposed], (
+        "a member that folds serially is hoisted ahead of the band's loop, and must not withdraw it"
+    )
 
 
 def test_a_transposed_band_is_not_in_a_direct_chain_members_domain(unpinned) -> None:
