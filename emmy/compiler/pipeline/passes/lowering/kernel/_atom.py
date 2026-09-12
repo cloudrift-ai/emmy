@@ -27,6 +27,7 @@ Leading ``_`` so the pass loader (globs ``*.py``, skips ``_``-prefixed) skips it
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from functools import partial
 
 from emmy.compiler.backend.cuda.dtype import cuda_name
 from emmy.compiler.dim import Dim
@@ -205,66 +206,48 @@ def _hoist_k_invariant(body, k_name: str) -> tuple[tuple, tuple]:
     return tuple(hoisted), tuple(rest)
 
 
-def _flat_strides(load, inputs, coords: tuple[str, ...]) -> dict[str, int] | None:
-    """Each coordinate's ELEMENT stride in a materialized operand's flat row-major address, or
-    ``None`` when a dim is not affine in them or a trailing extent is symbolic.
+def _direct_operand(load, inputs, *, k_name: str, own: str | None, legacy: tuple) -> tuple[bool, object]:
+    """``(reduction-minor, ldm)`` for one gmem-direct fragment read, off the operand's own ADDRESS.
 
-    A gmem fragment loader addresses its operand through ONE leading dimension: one coordinate
-    steps by 1, the other by ``ldm``. Which DIM an index spells a coordinate in does not say that.
-    A frontend reshape can pack the reduction coordinate and the operand's own output coordinate
-    into one dim — ``hidden[stream * 4096 + channel]``, DeepSeek-V4's hyper-connection mixing —
-    and the dim-position reading then names the tensor's row stride as ``ldm`` and calls the
-    operand N-major because its last dim holds the reduction axis. Both are wrong, the fragment
-    reads the wrong elements, and nothing raises. Strides say it directly, and on an operand whose
-    dims separate the two coordinates they say exactly what the dim-position reading said.
-    """
+    A loader reaches its operand through ONE leading dimension: one coordinate steps by 1, the other
+    by ``ldm``. Which DIM an index spells a coordinate in does not say that. A frontend reshape can
+    pack the reduction coordinate and the operand's own output coordinate into one dim —
+    ``hidden[stream * 4096 + channel]``, DeepSeek-V4's hyper-connection mixing over one 16384-wide
+    row — and the dim-position reading then names the tensor's trailing extent as ``ldm`` and calls
+    the operand N-major because its last dim holds the reduction axis. Both are wrong, the fragment
+    reads the wrong elements, and nothing raises. Element strides say it directly, and on an operand
+    whose dims separate the two coordinates they say exactly what the dim positions said.
+
+    Reduction-minor means the reduction coordinate is the unit-stride one — the A loader's only
+    layout, and B's transposed one. ``legacy`` is the dim-position answer, kept for an index that is
+    not affine in the coordinates and for a symbolic extent, which leaves the strides of every
+    earlier dim unknown. Neither coordinate unit-stride raises: the loader has no such address."""
+    coords = (k_name, *(() if own is None else (own,)))
     tensor = inputs.get(load.input) if inputs else None
-    if tensor is None:
-        return None
-    shape = tensor.shape
-    if len(shape) != len(load.index):
-        return None
-    names = set(coords)
     strides = dict.fromkeys(coords, 0)
     unit = 1
     for dim in reversed(range(len(load.index))):
-        form = affine_form(load.index[dim], names)
-        if form is None:
-            return None
+        form = affine_form(load.index[dim], set(coords))
+        if tensor is None or len(tensor.shape) != len(load.index) or form is None:
+            return legacy
         for name, coeff in form[1].items():
             strides[name] += coeff * unit
         if dim == 0:
             break  # nothing strides the leading dim, so its extent never enters a stride
-        extent = shape[dim]
-        if isinstance(extent, Dim):
-            if not extent.is_static:
-                return None  # a symbolic extent leaves the strides of every earlier dim unknown
-            extent = extent.as_static()
+        extent = tensor.shape[dim]
+        extent = extent.as_static() if isinstance(extent, Dim) and extent.is_static else extent
         if not isinstance(extent, int):
-            return None
+            return legacy
         unit *= extent
-    return dict(strides)
-
-
-def _direct_operand(load, inputs, *, k_name: str, own: str | None, legacy_ldm) -> tuple[bool, object]:
-    """``(reduction-minor, ldm)`` for one gmem-direct fragment read.
-
-    ``reduction-minor`` means the reduction coordinate is the unit-stride one — the A loader's
-    only layout, and B's transposed one. Falls back to ``legacy_ldm`` (the dim-position reading)
-    where the strides do not resolve, which is every symbolic-extent operand the dim positions
-    already answered for."""
-    strides = _flat_strides(load, inputs, (k_name, *(() if own is None else (own,))))
-    if strides is None:
-        return legacy_ldm[0], legacy_ldm[1]
-    k_stride = strides[k_name]
     own_stride = 1 if own is None else strides[own]
-    if k_stride == 1:
+    if strides[k_name] == 1:
         return True, own_stride
     if own_stride == 1:
-        return False, k_stride
+        return False, strides[k_name]
     raise ValueError(
-        f"gmem-direct fragment read of {load.input!r}: neither the reduction coordinate (stride {k_stride}) "
-        f"nor {own!r} (stride {own_stride}) is unit-stride, so the operand has no leading dimension"
+        f"gmem-direct fragment read of {load.input!r}: neither the reduction coordinate "
+        f"(stride {strides[k_name]}) nor {own!r} (stride {own_stride}) is unit-stride, "
+        f"so the operand has no leading dimension"
     )
 
 
@@ -2156,9 +2139,9 @@ class _MmaOps(_AtomOps):
         # A has one layout — its reduction coordinate minor — so only its ``ldm`` is a question;
         # B answers both, and its ``b_trans`` is the same fact ``ContractionView`` reads off dim
         # positions wherever the strides do not resolve.
-        direct = lambda load, own, legacy: _direct_operand(load, self.inputs, k_name=k_axis.name, own=own, legacy_ldm=legacy)  # noqa: E731
-        _, a_ldm = direct(a_load, m.axis.name, (True, 0))
-        b_trans, b_ldm = direct(b_load, n.axis.name, (c.as_contraction().b_trans, 0))
+        read = partial(_direct_operand, inputs=self.inputs, k_name=k_axis.name)
+        _, a_ldm = read(a_load, own=m.axis.name, legacy=(True, 0))
+        b_trans, b_ldm = read(b_load, own=n.axis.name, legacy=(c.as_contraction().b_trans, 0))
         # The loop's final step overhangs K whenever ``atom_k`` does not tile it — a SYMBOLIC K
         # (unknown at compile time) or a static K with a remainder. Both mask the same way: the
         # loaders zero-fill the fragment halves past ``k_zero``'s bound, so the summed reduction
