@@ -307,6 +307,7 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
     dtype_table: dict[int, tuple] = {}
     if isinstance(tile.op, Fold):
         dtype_table = _dtype_table(tile)
+    taken = _kept_components(tile)
     out: list[CutSite] = []
     seen: set[int] = set()
     for site in family_sites("PLACE", all_sites):
@@ -319,6 +320,10 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
         if node.observe is not None:
             # An observed fold's per-step results exist only inside its stream — a cut would
             # separate the scan from its streamed boundary store, which no piece can then spell.
+            continue
+        if not taken.get(id(node), node.exposes):
+            # No reader takes any component: lowering drops the edge outright, so a workspace
+            # here would be written and never read.
             continue
         if node.scalar():
             # One value for the whole kernel (an sdpa scale and its mask fills). The piece would be
@@ -500,12 +505,84 @@ def _replace_fold(node: Fold, targets: dict[int, tuple]) -> Fold:
     sequential replacement silently loses every decision after the first. IDENTITY-PRESERVING off
     the replacement spine: a subtree holding no target returns the SAME object, so untouched
     Lambdas are not reconstructed (construction normalization over a large fused body is where a
-    copying walk turns quadratic) and shared-node grouping keeps its identities."""
-    operands = tuple(piece for edge in node.operands for piece in _replace_member(edge, targets))
+    copying walk turns quadratic) and shared-node grouping keeps its identities.
+
+    An operand's replacement is POSITIONAL — one entry per component the edge exposed — and
+    ``None`` there means the reader takes that component no more (:func:`_kept_components`). The
+    param it bound goes with it: params past the iteration var bind the operands' components in
+    order, so a dropped entry that left its param behind would turn a value into a free coordinate
+    the kernel can hand no extent."""
+    operands: list = []
+    bound: list[bool] = []
+    for edge in node.operands:
+        pieces = _replace_member(edge, targets)
+        components = len(edge.exposes) if isinstance(edge, Fold) else 0
+        if any(piece is None for piece in pieces):
+            bound.extend(piece is not None for piece in pieces)
+            pieces = tuple(piece for piece in pieces if piece is not None)
+        else:
+            bound.extend([True] * components)
+        operands.extend(pieces)
+    operands = tuple(operands)
     body = tuple(piece for stmt in node.lift.body for piece in _replace_member(stmt, targets))
     if _unchanged(operands, node.operands) and _unchanged(body, node.lift.body):
         return node
-    return replace(node, operands=operands, lift=replace(node.lift, body=Body(body)))
+    lift = replace(node.lift, body=Body(body))
+    if not all(bound):
+        lead = 1 if node.base is not None else 0
+        params = node.lift.params
+        head, slots, tail = params[:lead], params[lead : lead + len(bound)], params[lead + len(bound) :]
+        lift = replace(lift, params=(*head, *(name for name, keep in zip(slots, bound, strict=True) if keep), *tail))
+    return replace(node, operands=operands, lift=lift)
+
+
+def _stores_under(term: Fold, stored: set[str]) -> bool:
+    """Whether the kernel's boundary stores read a value ``term``'s subtree exposes."""
+    pending, seen = [term], set()
+    while pending:
+        node = pending.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if set(node.exposes) & stored:
+            return True
+        pending.extend(node.operands)
+    return False
+
+
+def _kept_components(tile: TileOp) -> dict[int, tuple[str, ...]]:
+    """Per stored edge, the result components its READERS take — what :meth:`Fold.lower` places.
+
+    A term may carry more components than any one reader wants: six channels folded into one
+    reduce, each occurrence read for a single accumulator. A cut that materialized all six would
+    write five workspaces nothing loads back, and the backend's liveness plan refuses a scratch
+    buffer with no consuming launch. An edge a boundary store reaches keeps every component — the
+    store reads the term, not a reader's narrowing.
+    """
+    if not isinstance(tile.op, Fold):
+        return {}
+    # ``Fold.lower`` re-spells the stores into the root's applied vocabulary before it places
+    # anything, so a store naming a bound param names the operand result it binds. Compare in that
+    # same spelling or a store of an operand's own result reads as a name no edge exposes.
+    spelled = dict(zip(tile.op.lift.params, tile.op.applied.params, strict=True))
+    stored = {spelled.get(name, name) for store in tile.output_specs for name in store.write.values}
+    taken_by: dict[int, set[str]] = {}
+    edges: dict[int, Fold] = {}
+    pending, seen = [tile.op], set()
+    while pending:
+        term = pending.pop()
+        if id(term) in seen:
+            continue
+        seen.add(id(term))
+        taken = set(term.step().ssa_uses) | set(term.exposes)
+        for edge in term.operands:
+            edges[id(edge)] = edge
+            taken_by.setdefault(id(edge), set()).update(name for name in edge.exposes if name in taken)
+            pending.append(edge)
+    return {
+        key: edge.exposes if _stores_under(edge, stored) else tuple(name for name in edge.exposes if name in taken_by[key])
+        for key, edge in edges.items()
+    }
 
 
 def _workspace_axes(seam: CutSite, produced: Fold) -> tuple:
@@ -665,24 +742,42 @@ def realize(
     # a plain string, so a store of a cut cone's own result has to be re-spelled here or it names
     # a value the consumer no longer defines.
     read_names: dict[str, str] = {}
+    taken = _kept_components(tile)
     for seam in seams:
         child = seam.node
         front = seam.frontier
+        # A workspace holds the components the consumer READS. The piece still folds every
+        # channel — a reduce carries its accumulators together — but a component no reader takes
+        # is not stored, so no launch is left loading a buffer nothing wrote for it.
+        # One workspace serves the representative AND every clustered sibling, so a component any
+        # occurrence reads is kept for all of them.
+        shared = set().union(*(taken.get(id(node), set(node.exposes)) for node in (child, *(node for node, _ in seam.siblings))))
+        wanted = tuple(name for name in child.exposes if name in shared)
+        slots = tuple(name in set(wanted) for name in child.exposes)
         if front is not None:
             names = (front.name,)
             produced = Fold(operands=(), lift=Lambda.closing((), Body.coerce(Body(front.producer)), names))
+            dtypes = seam.dtypes
         else:
-            names = child.exposes
+            names = wanted
             produced = child
+            dtypes = tuple(dtype for dtype, keep in zip(seam.dtypes, slots, strict=True) if keep)
         axes = _workspace_axes(seam, produced)
         index = tuple(Var(axis.name) for axis in axes)
         token = digest(tile.identity_key(structural=False) or "", seam.spelling)[:10]
-        buffers = tuple(f"{root.id}__place_{token}_{i}" for i in range(len(names)))
+        # The ordinal names the component the workspace holds, so a narrowed seam keeps the
+        # spelling of the components it did keep.
+        ordinals = range(len(names)) if front is not None else (i for i, keep in enumerate(slots) if keep)
+        buffers = tuple(f"{root.id}__place_{token}_{i}" for i in ordinals)
 
         # SLABS, not bare Loads: these replace an operand edge, and an operand is a term. The
         # workspace read declares the seam axes it indexes, exactly as any other gmem read does.
-        loads = tuple(
-            Fold.slab(Load(name=_read_name(name, token), input=buffer, index=index)) for name, buffer in zip(names, buffers, strict=True)
+        # Positional over what the edge exposed, ``None`` where the reader took nothing. A
+        # frontier's workspace is the one raw waypoint, which the block below spells instead.
+        held = {} if front is not None else dict(zip((position for position, keep in enumerate(slots) if keep), buffers, strict=True))
+        loads: tuple = tuple(
+            Fold.slab(Load(name=_read_name(name, token), input=held[position], index=index)) if position in held else None
+            for position, name in enumerate(child.exposes)
         )
         if front is not None:
             # The raw storage read at the frontier's dtype stays INLINE under its decode residue —
@@ -705,14 +800,17 @@ def realize(
             mapping = dict(pairs)
             sibling_index = tuple(Var(mapping[axis.name]) for axis in axes)
             replacements[id(sibling)] = tuple(
-                Fold.slab(Load(name=_read_name(name, token, ordinal), input=buffer, index=sibling_index))
-                for name, buffer in zip(sibling.exposes, buffers, strict=True)
+                Fold.slab(Load(name=_read_name(own, token, ordinal), input=held[position], index=sibling_index))
+                if position in held
+                else None
+                for position, own in enumerate(sibling.exposes)
             )
             # The representative wins a shared name: a boundary store of a value both occurrences
             # expose reads the term's own, and only the representative sits on the term's path.
-            for name in sibling.exposes:
-                read_names.setdefault(name, _read_name(name, token, ordinal))
-        pieces.append((seam, produced, axes, index, token, names, buffers, replacements))
+            for position, name in enumerate(sibling.exposes):
+                if position in held:
+                    read_names.setdefault(name, _read_name(name, token, ordinal))
+        pieces.append((replace(seam, dtypes=dtypes), produced, axes, index, token, names, buffers, replacements))
 
     # Every replacement applies to the consumer AND to every OTHER seam's produced piece: a
     # composed decision may cut a cone nested inside another seam's value (attention's statistics
