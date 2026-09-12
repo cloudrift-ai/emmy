@@ -35,9 +35,17 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Programs whose floor is below this are skipped: launch overhead and timer noise dominate
-# µs-class programs, and a mispick there costs little in absolute terms.
+# Programs whose floor is below this get no ratio: launch overhead and timer noise dominate
+# µs-class programs. They are still judged on ABSOLUTE cost (:data:`MAX_ABS_US`) — a small floor
+# bounds what a healthy program costs, not what a mispicked one does.
 MIN_FLOOR_US = 20.0
+
+# A static twin costing more than this is reported even when no floor can be formed. No per-layer
+# serving program is healthy at 100 ms: at 44 layers that alone is 4.4 s per forward. This is the
+# 2026-09-12 DeepSeek-V4 V100 incident — an M=1 decode program elected at 29.7 s per forward sat
+# under MIN_FLOOR_US, so it was exempt from the audit, and every request died on the engine's RPC
+# deadline with a clean boot log. Well above any warmup-inflated µs-class measurement.
+MAX_ABS_US = 100_000.0
 # Warn threshold on measured/floor. Healthy tuned programs measure ~1-3x their floor (seam
 # copies, pointwise glue, sub-peak streaming); the incident class sits at >100x.
 WARN_RATIO = 10.0
@@ -122,7 +130,8 @@ def time_program_us(program, *, reps: int = 3, budget_us: float | None = None) -
 
 def roofline_floor_us(weight_bytes: int, bw_bytes_per_s: float, flops: float = 0.0, flops_per_s: float = 0.0) -> float | None:
     """The floor one program is judged against — ``max(weight-streaming, compute)`` in µs — or
-    ``None`` when it cannot be formed or sits under :data:`MIN_FLOOR_US`. Split out from
+    ``None`` when it cannot be formed or sits under :data:`MIN_FLOOR_US` — a ``None`` floor means
+    :func:`flag_ratio` judges the program on absolute cost instead, never that it is exempt. Split out from
     :func:`flag_ratio` because the audit needs the floor BEFORE it measures, to bound the
     measurement (:func:`time_program_us`)."""
     if weight_bytes <= 0 or bw_bytes_per_s <= 0:
@@ -142,30 +151,39 @@ def flag_ratio(
     unit-testable without CUDA."""
     floor_us = roofline_floor_us(weight_bytes, bw_bytes_per_s, flops, flops_per_s)
     if floor_us is None:
-        return None
+        # No usable floor — judge on absolute cost. The ratio is reported against the noise
+        # threshold, which UNDERSTATES it (the real floor is smaller), matching the rest of this
+        # audit's conservative direction.
+        if measured_us <= MAX_ABS_US:
+            return None
+        return MIN_FLOOR_US, measured_us / MIN_FLOOR_US
     ratio = measured_us / floor_us
     if ratio <= WARN_RATIO:
         return None
     return floor_us, ratio
 
 
-def audit_boot_programs(named_programs, dtype_bytes: int = 2) -> None:
+def audit_boot_programs(named_programs, dtype_bytes: int = 2) -> dict[str, float]:
     """Time each ``(label, _Program, m_tokens)`` against ``max(weight-streaming, compute)`` floor and
     warn on outliers. ``_Program`` here is the serving wrapper (``gen_runner._Program``): ``.program``
     is the ``CompiledProgram`` and ``.weight_bytes`` the per-forward weight footprint — bound constants
     plus the weight INPUTS an expert program takes per launch. ``m_tokens`` is the program's static
     token width, ``dtype_bytes`` the weight itemsize — together they turn ``weight_bytes`` into the
-    matmul FLOP estimate ``2 * weight_elems * m_tokens``. Never raises."""
+    matmul FLOP estimate ``2 * weight_elems * m_tokens``. Never raises.
+
+    Returns the measured µs per label — empty when the audit could not run. A caller that must
+    choose between two tiers of the same program reads it rather than timing them again."""
     from emmy import config
     from emmy.compiler.backend.gpu_lock import gpu_lock
 
+    measured: dict[str, float] = {}
     with contextlib.ExitStack() as stack:
         try:
             stack.enter_context(gpu_lock())
         except Exception:  # noqa: BLE001 — taking the lock is setup, not measurement: an unusable
             # lock path is an environment fault and must not read as a clean audit at debug level.
             logger.warning("[roofline] boot audit skipped: GPU lock %r unusable", config.gpu_lock_path(), exc_info=True)
-            return
+            return measured
         try:
             bw = measure_copy_bw()
             try:
@@ -176,25 +194,30 @@ def audit_boot_programs(named_programs, dtype_bytes: int = 2) -> None:
             for label, prog, m_tokens in named_programs:
                 flops = 2.0 * (prog.weight_bytes / dtype_bytes) * m_tokens
                 floor_us = roofline_floor_us(prog.weight_bytes, bw, flops, flops_per_s)
-                budget_us = None if floor_us is None else WARN_RATIO * floor_us
+                # A program with no usable floor still needs a measurement bound, or the audit
+                # pays 4x a mispick's full cost to learn what one run already showed.
+                budget_us = MAX_ABS_US if floor_us is None else WARN_RATIO * floor_us
                 measured_us = time_program_us(prog.program, budget_us=budget_us)
+                measured[label] = measured_us
                 verdict = flag_ratio(measured_us, prog.weight_bytes, bw, flops, flops_per_s)
                 if verdict is not None:
                     floor_us, ratio = verdict
-                    flagged.append((label, floor_us, ratio))
+                    flagged.append((label, floor_us, ratio, measured_us))
         except Exception:  # noqa: BLE001 — advisory only, never a boot blocker
             logger.debug("[roofline] boot audit skipped", exc_info=True)
-            return
-    for label, floor_us, ratio in flagged:
+            return measured
+    for label, floor_us, ratio, measured_us in flagged:
         logger.warning(
-            "[roofline] %s runs %.0fx over its roofline floor (~%.0f us) — a deployed kernel pick "
-            "is far off the weight-streaming/compute floor for this model/GPU. Capture and tune the "
-            "serving twins (`emmy tune`; see emmy/serving/ARCHITECTURE.md → 'Tuning what serving "
-            "actually runs').",
+            "[roofline] %s runs %.0fx over its roofline floor (~%.0f us), measured %.3f ms — a "
+            "deployed kernel pick is far off the weight-streaming/compute floor for this model/GPU. "
+            "Capture and tune the serving twins (`emmy tune`; see emmy/serving/ARCHITECTURE.md → "
+            "'Tuning what serving actually runs').",
             label,
             ratio,
             floor_us,
+            measured_us / 1e3,
         )
     if named_programs and not flagged:
         n = len(named_programs)
         logger.info("[roofline] boot audit clean: %d static program(s) within %sx of the roofline floor", n, int(WARN_RATIO))
+    return measured

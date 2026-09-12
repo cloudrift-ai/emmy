@@ -1749,7 +1749,27 @@ class EmmyGenRunner:
             for key, tag, m in (("bucket", f"bucket.m{decode_bucket}", decode_bucket), ("one", "one.m1", 1), ("m256", "m256", 256))
             if tiers[key] is not None
         ]
-        audit_boot_programs(named, dtype_bytes=np_dtype.itemsize)
+        measured = audit_boot_programs(named, dtype_bytes=np_dtype.itemsize)
+        # The M=1 tier is an OPTIMIZATION: the bucket twins already cover T=1 by padding up, and
+        # this tier exists only because the contractions demote to faster planar forms at one row.
+        # When its programs do not measure faster, keeping it is strictly worse. On 2026-09-12 it
+        # was 485x worse — a DeepSeek-V4 V100 boot elected an M=1 pre program at 29.7 s per forward
+        # and every request died on the engine's RPC deadline, with the roofline audit blind to it
+        # because that program's floor was too small to form a ratio. The audit already timed both
+        # tiers under the GPU lock, so this reads its numbers rather than measuring again.
+        if runner._pre_m1 is not None:
+            m1_us = sum(us for label, us in measured.items() if label.endswith(".decode.m1"))
+            bucket_us = sum(us for label, us in measured.items() if label.endswith(f".decode.m{decode_bucket}"))
+            if m1_us and bucket_us and m1_us >= bucket_us:
+                logger.warning(
+                    "[gen_runner] the static M=1 decode twins measure %.3f ms against %.3f ms for the bucket-%d "
+                    "twins they replace — dropping the M=1 tier; T=1 decode rides the bucket twins. Tune the M=1 "
+                    "twins (`emmy tune`; see emmy/serving/ARCHITECTURE.md → 'Tuning what serving actually runs').",
+                    m1_us / 1e3,
+                    bucket_us / 1e3,
+                    decode_bucket,
+                )
+                runner._pre_m1 = runner._post_m1 = None
         return runner
 
     def embed(self, input_ids):

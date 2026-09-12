@@ -2,17 +2,21 @@
 
 ## Conclusion
 
-This run characterizes the pinned 1Cat fork at the short serving envelope. It is **not** the Emmy-versus-fork A/B, and
-nothing here compares a compiler. Only the fork arm produced serving numbers.
+Both arms now serve this checkpoint and both produced serving numbers. The fork is **6.1× faster per output token**
+and **23× faster to first token**. The two arms were measured in separate invocations rather than one alternating run,
+so this is a directional comparison, not the balanced A/B described under "What this run does not establish".
 
-The Emmy arm now boots and serves — that changed on 2026-09-11 and is recorded under "The Emmy arm" below — but it
-cannot complete a request: the first generation exceeds vLLM's `sample_tokens` RPC deadline and kills the engine. Its
-numbers here are per-kernel and per-program compiler measurements, not serving measurements, and they do not belong in
-the same table as the fork's throughput.
+Getting there meant fixing one kernel. `pre1.k_linear_mean_reduce_7fce9f` at M=1 carried a single measured candidate
+in the golden, at 29.7 s, and under strict evidence the election had no alternative to elect. Single-token decode ran
+at a flat ~61 s per layer, so no generation request ever returned: each died on the engine's 300 s `sample_tokens`
+deadline, and raising that only moved the failure to the 600 s NCCL collective watchdog. Four placement cuts take that
+program to 473.6 µs whole-program, which took time per output token from **5.565 s to 0.899 s**.
 
-Three programs have since been fixed — `pre4096` by 594×, and the decode program's two hot kernels by 4.3× and
-5.6× — all confirmed by the deployed boot's own audit. The request still fails at the same 300 s deadline, and
-kernel latency no longer explains why: roughly a second of compute per decode step against a 300-second limit.
+Three programs were fixed earlier in this work — `pre4096` by 594×, and the decode program's two hot kernels by 4.3×
+and 5.6×. The M=1 kernel above is the same `k_linear_mean_reduce` as `pre4096`, recomputing the same loop-invariant
+dot products inside the same output-channel sweep, and it took the same four cuts; only the m4096 shape had been
+recorded. What now dominates is `post.decode.m16` at 1,149× its roofline floor and `post.decode.m1` at 293×, neither
+of which has been recorded.
 
 At a 4,096-token context the fork serves this checkpoint cleanly: 480 requests across fifteen rows, zero failures,
 and three workload shapes that differ far more in repeat stability than the shapes themselves suggest. Single-stream
@@ -48,19 +52,73 @@ be visible far below the noise floor of the other two shapes.
 
 ## The Emmy arm
 
-These are compiler measurements, not serving measurements. They come from a serving boot and a kernel tuning run on the
-same host, not from `emmy bench`, so they have no experiment records and no archive. They are recorded here because they
-are the first measured Emmy evidence for this model on this GPU, and because they say precisely why the serving column
-is still empty.
+The Emmy arm serves. The numbers below come from a serving boot on the same host driven by direct HTTP requests, not
+from `emmy bench`, so they carry no experiment records and no archive. The compiler measurements that follow them are
+kept because they explain where the time goes.
+
+### Serving measurements
+
+Boot on 2026-09-12, `--strict-evidence`, `gpu_memory_utilization` 0.90, prefix caching on, the M=1 decode tier
+enabled. Greedy decoding, single stream, streamed responses timestamped per chunk.
+
+| Shape | TTFT | TPOT mean | TPOT range | Output tok/s |
+| --- | ---: | ---: | ---: | ---: |
+| 5 in → 33 out | 7.05 s | 0.899 s | 0.894 – 0.906 | 1.11 |
+
+The first decode step of a request costs 1.85 s rather than 0.90 s: each layer's M=1 programs are CUDA-graph captured
+on first use, and a program is captured once per layer per worker. Thirty-one steady steps span 1.3%.
+
+Against the fork's single-stream row, which is the steadiest measurement on this stack:
+
+| | 1Cat fork | Emmy | Ratio |
+| --- | ---: | ---: | ---: |
+| TTFT | 3.77 s (2,048 in) | 88.22 s (2,405 in) | 23× |
+| Mean time per output token | 147.7 ms | 899 ms | 6.1× |
+| Output tok/s, decode only | 6.77 | 1.11 | 6.1× |
+
+The time-to-first-token row is from the pre-fix boot and is unchanged by this work: prefill runs the m16 and m4096
+twins, which the fix did not touch. `post.chunk.m4096` at 317× its ~1,955 µs floor is 619 ms per layer and is what
+dominates it.
+
+Correctness at the serving level: greedy completions are coherent English ("Red, blue, and green are three classic
+colors often used as primary colors in light-based systems (RGB)…"). There is no eager twin for a golden Loop IR
+target on this model, so no CLI-level numerical verdict was obtainable for the cut schedule alone. The cuts are code
+motion — hoisting a loop-invariant dot out of a sweep — which is why the equivalent `pre4096` cuts were bit-exact.
+
+### The M=1 decode tier: what broke and what now guards it
+
+The tier exists as an optimization. The bucket twins already cover `T=1` by padding up; the M=1 twins exist only
+because the contractions demote to faster planar forms at one row. Nothing checked that they were in fact faster.
+
+On this model they were not. `pre1.k_linear_mean_reduce_7fce9f` at M=1 had one measured candidate at 29.7 s against
+57.9 ms for the bucket twin it replaced, and both of its candidates bench-fail outright
+(`HungKernelError: kernel did not complete within 2000 ms`). Decode ran at a flat ~61 s per layer — flat from the
+first layer to the last, which is what ruled out first-use cost as the explanation.
+
+Its Loop IR shows the defect directly. A 16,384-long dot product that depends only on the stream index sits inside a
+4,096-wide output-channel sweep, so it is recomputed 4,096 times, and the structure appears twice in the program:
+
+```
+for a1 in 0..4096:              # output channel
+    for a2 in 0..4:             # stream
+        for a3 in 0..16384:     # depends on a2 only — recomputed for every a1
+            acc1 <- add(acc1, v8)
+```
+
+Two things were changed. Four placement cuts hoist those dots out of the sweeps, giving 473.6 µs whole-program, and
+that schedule is recorded into the golden so the election prices it at 410.9 µs against the old 29.7 s row. And the
+runner now drops the M=1 tier at boot when its twins do not measure faster than the bucket twins they replace, so a
+golden without a good M=1 schedule costs the optimization rather than the server.
+
+The boot audit let this run unseen for three rounds, and that is fixed too. It exempted any program whose roofline
+floor sat under 20 µs — as this program's did — on the reasoning that "a mispick there costs little in absolute
+terms". A small floor bounds what a healthy program costs, never what a broken one does. Programs with no usable
+floor are now judged on absolute cost instead, and every warning carries the measured time.
 
 ### The boot reaches a serving state
 
 On 2026-09-11 a boot with `--strict-evidence` came up: `/health` returned 200, `/v1/models` listed the checkpoint, and
 vLLM logged `Application startup complete`. Engine init — profile, KV-cache creation and model warm-up — took 949 s.
-
-The first chat completion then killed it. One 24-token greedy request returned HTTP 500 after 173.1 s with
-`TimeoutError: RPC call to sample_tokens timed out`, followed by `EngineDeadError`. The server is reachable and
-correctly configured; a forward pass simply does not fit inside the engine's RPC deadline.
 
 Strict evidence is what made the boot possible, and the mechanism is worth recording. An earlier boot without the flag
 logged 16 prior-clip warnings — one per worker — reporting a latency-proxy exponent of 996 against a shipped
@@ -158,20 +216,23 @@ recorded rows win the election on price.
 
 ## What this run does not establish
 
-- **It is not an A/B.** One arm ran. A comparison needs both arms in one invocation with their order alternated inside
-  each repeat, the way the RTX 5090 gemma-4 experiment balances time and thermal drift. Until then no claim about Emmy
-  against the fork is supported by this evidence.
-- **The Emmy arm serves but cannot answer.** It reaches a serving state and then loses every completion to the
-  `sample_tokens` RPC deadline, so it produces no throughput, TTFT or TPOT to compare. An earlier claim that a
-  whole-program compile "stalls in the schedule search" was wrong: that boot was not stuck but grinding, because a
-  degenerate prior had collapsed the ranking to enumeration order and each refused row re-resolved the entire program.
-  There is also no baked Emmy image for this model, so the single-image, two-entrypoint mechanism the gemma-4 A/B uses
-  does not exist here yet.
-- **The Emmy numbers above are not serving numbers.** They are per-kernel and per-program latencies from a boot audit,
-  a recorded golden and a tuning run. Nothing in them can be compared against the fork's tokens per second.
-- **One envelope parameter is unreconciled.** This recipe runs at `gpu_memory_utilization` 0.80; the Emmy arm's last
-  serving boot needed 0.90 to fit. Whichever value the joint recipe adopts, both arms must share it, and these numbers
-  do not transfer to a run at 0.90.
+- **It is not a balanced A/B.** The two arms were measured in separate invocations, not in one run with their order
+  alternated inside each repeat the way the RTX 5090 gemma-4 experiment balances time and thermal drift. The gap is
+  large enough that ordering cannot explain it, but the numbers are directional, not a controlled comparison. There is
+  also no baked Emmy image for this model, so the single-image, two-entrypoint mechanism that A/B uses does not exist
+  here yet.
+- **The two arms did not run the same envelope.** The fork rows are at `gpu_memory_utilization` 0.80 with prefix
+  caching disabled; the Emmy boot needed 0.90 and ran with prefix caching on. The Emmy shapes are 2,405 and 5 input
+  tokens against the fork's 2,048, and 9 and 33 output tokens against its 512. The two Emmy rows also come from
+  different boots: the time-to-first-token row predates the M=1 fix, which did not touch the prefill
+  twins. Whichever values a joint recipe adopts,
+  both arms must share them.
+- **The Emmy rows are one repeat each.** The fork rows are five repeats with a reported spread; the Emmy rows are
+  single runs, and their stability claim rests on the spread of decode steps within a run, not across runs.
+- **The Emmy row needs a golden carrying the recorded M=1 schedule.** Against the golden this experiment shipped
+  with, the M=1 decode tier is now dropped at boot and time per output token falls back to about 5.6 s.
+- **The Emmy rows came from direct HTTP requests**, not from `emmy bench`, so they have no experiment records and are
+  not in the archive.
 - **It is not a regression check against the August run.** That run used different prompt shapes, a different context
   length and four repeats, so the two are not comparable row for row.
 - **Correctness was checked only by the deployment smoke test**, which asks one arithmetic question and reads one
