@@ -179,6 +179,32 @@ def _axis_dim(index: tuple, axis_name: str) -> int | None:
     return dims[-1] if dims else None
 
 
+def _hoist_k_invariant(body, k_name: str) -> tuple[tuple, tuple]:
+    """Partition one operand read into ``(what does not vary with the contraction axis, the rest)``.
+
+    A computed cone's row-invariant prologue is a value of the ROW, so it belongs ahead of the
+    K-loop: inside it, a fused norm→linear re-derives the row's whole statistic once per contraction
+    step, and a register tile then once per register row on top. The seam
+    (:func:`~emmy.compiler.ir.schedule.views.cone_seam`) states the same split on the EDGES, but it
+    answers for the staged fill, which bridges the prologue's results through smem rows and so drops
+    a prologue nothing bridges; a register tile evaluates the cone whole and needs a partition. The
+    statements give one: a statement is loop-varying once it reads the contraction coordinate or a
+    name a loop-varying statement defines, and loop-invariant otherwise. The coordinate counts as a
+    read wherever it appears — as an index or as a value — which keeps a statement in the loop that
+    only might vary with it.
+    """
+    varying = {k_name}
+    hoisted: list[Stmt] = []
+    rest: list[Stmt] = []
+    for stmt in body:
+        if free_names(stmt) & varying:
+            varying |= set(stmt.defines())
+            rest.append(stmt)
+        else:
+            hoisted.append(stmt)
+    return tuple(hoisted), tuple(rest)
+
+
 def _flat_strides(load, inputs, coords: tuple[str, ...]) -> dict[str, int] | None:
     """Each coordinate's ELEMENT stride in a materialized operand's flat row-major address, or
     ``None`` when a dim is not affine in them or a trailing extent is symbolic.
@@ -1874,19 +1900,6 @@ class _AtomOps:
         boundary, or the whole operand body when there is no cone to split."""
         return self.seam if self.seam is not None else ((), self.c.operands[0].lower(axes=self.axes), (), ())
 
-    @property
-    def cone_rows(self) -> tuple[tuple, tuple]:
-        """The same K seam read for a tile that evaluates the cone in REGISTERS — ``(hoisted, per-cell)``.
-
-        The row-invariant prologue is a value of the ROW, not of the contraction step, so it belongs
-        ahead of the K-loop: inside it, a fused norm→linear recomputes its whole statistic once per K
-        step (the register tile then once per register row on top), which squares the kernel. A
-        per-chunk statistic varies with K through its block guard, so it stays in the loop with the
-        cell. The staged fill bridges the same split through smem rows (:func:`_a_slab_operand`);
-        here the row IS the thread, so the prologue's results simply stay in registers."""
-        pro, cell, _stats, chunk = self.cone
-        return pro, ((*chunk[0], *cell) if chunk else cell)
-
     def reduce(self, cells, offset, mn):
         """The contraction K-loop — the ONE driver both atoms flow through, deciding nothing: a
         resolved ``stage`` means staged (an smem operand slab over the one :func:`_staged`
@@ -2373,9 +2386,9 @@ class _ScalarOps(_AtomOps):
         m, n = mn
         step = tuple(c.step())
         # A's K seam: what the cone evaluates once for the ROW lifts out of the K-loop
-        # (:attr:`cone_rows`), the rest is the per-step read. A plain gmem-``Load`` A has no
-        # prologue and the split is empty.
-        a_pro, a_body = self.cone_rows
+        # (:func:`_hoist_k_invariant`), the rest is the per-step read. A plain gmem-``Load`` A has
+        # no prologue and the split is empty.
+        a_pro, a_body = _hoist_k_invariant(c.operands[0].lower(axes=self.axes), k_axis.name)
         b_body = c.operands[1].lower(axes=self.axes)
         uniform = [stmt for edge in c.operands[2:] for stmt in edge.lower(axes=self.axes)]
         # The operand bodies contribute their OWN loop coordinates (a computed cone's internal
