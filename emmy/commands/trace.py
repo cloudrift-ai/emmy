@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from emmy.compiler.pipeline.search.working_golden import (
+    append_trace_inventory,
     preflight_trace_inventory,
     write_trace_inventories,
     write_trace_inventory,
@@ -30,6 +31,15 @@ def register_trace_command(subparsers):
         help=(
             "Persist every target as exact post-fusion Loop IR. Use for compiler-sensitive storage formats "
             "whose fusion grouping is not a stable frontend-provenance selector."
+        ),
+    )
+    parser.add_argument(
+        "--append",
+        action="store_true",
+        help=(
+            "Add this trace's targets to an existing golden YAML instead of refusing to replace it. "
+            "Use to collect one model's separately traced paths -- each decoder-layer kind, the embedding, "
+            "final normalization and output seams -- into one inventory. A kernel already covered is kept once."
         ),
     )
     parser.add_argument(
@@ -143,11 +153,12 @@ def handle_trace(args):
 
         quantized_checkpoint = _quantize_traced(graph, bundle, args)
     destination = args.output or f"{basename}.golden.yaml"
-    try:
-        preflight_trace_inventory(destination)
-    except FileExistsError as e:
-        logger.error(str(e))
-        sys.exit(2)
+    if not args.append:
+        try:
+            preflight_trace_inventory(destination)
+        except FileExistsError as e:
+            logger.error(str(e))
+            sys.exit(2)
     _log_trace(graph)
     input_path = Path(args.input) if args.input else None
     model = args.model_provenance or (
@@ -165,14 +176,16 @@ def handle_trace(args):
         quant_dir = quantized_checkpoint_dir(args.input)
         if quant_dir is not None:
             model_quant_digest = checkpoint_quant_digest(quant_dir)
-    result = write_trace_inventory(
+    writer = append_trace_inventory if args.append and Path(destination).exists() else write_trace_inventory
+    result = writer(
         graph,
         destination,
         model=model,
         force_loop_targets=args.loop_targets,
         model_quant_digest=model_quant_digest,
     )
-    logger.info("Saved golden YAML: %s (%d distinct kernel(s))", result.path, result.target_count)
+    verb = "Appended to" if writer is append_trace_inventory else "Saved"
+    logger.info("%s golden YAML: %s (%d new distinct kernel(s))", verb, result.path, result.target_count)
 
 
 def graph_from_code(code: str, dynamic_shapes: dict | None = None):
