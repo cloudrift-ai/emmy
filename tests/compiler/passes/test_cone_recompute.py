@@ -100,6 +100,7 @@ def _register_tiled(spelling: str) -> Body:
 
 def _statistic_loops(body: Body, under: str | None = None) -> int:
     """How many ``j`` reduce loops sit under ``under`` (``None`` = at any depth outside the ``k`` loop)."""
+
     def walk(stmts, enclosing):
         found = 0
         for stmt in stmts:
@@ -109,6 +110,7 @@ def _statistic_loops(body: Body, under: str | None = None) -> int:
             for nested in stmt.nested():
                 found += walk(nested, name if name in (K.name, J.name) else enclosing)
         return found
+
     return walk(body, None)
 
 
