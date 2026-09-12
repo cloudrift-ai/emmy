@@ -28529,44 +28529,42 @@ configs:
       PLACE@map.1/inner.1/map.1/inner: cut
     identity: 7e22d4bab7d7527e70ecc772ef07c53e51aa99b237092ad317e8382a70af231e
     measurements:
-      emmy_us: 103973.88458251953
-      reference_us: 105809.92126464844
+      emmy_us: 11669.504165649414
+      reference_us: 12179.455757141113
       reference_backend: same-input-greedy
-    latency:
-      NVIDIA Tesla V100 SXM3 32GB:
-        emmy_us: 107784.19494628906
-        eager_us: 29198.335647583008
-  - name: expert-sym@mxfp4.k_linear_reduce_0de949.7d644f512b51.m4096.93f0a0e7072b
+    kernel_set:
+    - expert-sym@mxfp4.k_linear_reduce_0de949.7d644f512b51.m4096.7e22d4bab7d7
+  - name: expert-sym@mxfp4.k_linear_reduce_0de949.7d644f512b51.m4096.7e22d4bab7d7.93f0a0e7072b
     bindings:
       num_tokens: 4096
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w4x1
-      TILE: mma_m8n8k4_f16_f32/f1x2
+      WORK: w2x2
+      TILE: mma_m8n8k4_f16_f32/f4x2/k8
       REDUCE: ''
-      STAGE: d2/smem
+      STAGE: d1/smem
       RASTER: ''
     identity: 93f0a0e7072b8d06ec161a0d8aa6780bd68fad4248c016c539f9de9178bb2c28
     measurements:
-      emmy_us: 35240.95916748047
-      reference_us: 35056.640625
+      emmy_us: 6384.640216827393
+      reference_us: 6631.4239501953125
       reference_backend: same-input-greedy
-  - name: expert-sym@mxfp4.k_linear_reduce_0de949.7d644f512b51.m4096.6d6cc5eb4ffd
+  - name: expert-sym@mxfp4.k_linear_reduce_0de949.7d644f512b51.m4096.7e22d4bab7d7.6d6cc5eb4ffd
     bindings:
       num_tokens: 4096
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w4x8
-      TILE: mma_m8n8k4_f16_f32/f4x2
+      WORK: w2x2
+      TILE: mma_m8n8k4_f16_f32/f4x2/k8
       REDUCE: ''
       STAGE: d1/smem
       RASTER: ''
     identity: 6d6cc5eb4ffdab6ebd903718e4c57c057bdf5145d843e46fb6b44ec16d6aaaa9
     measurements:
-      emmy_us: 68732.92541503906
-      reference_us: 70753.28063964844
+      emmy_us: 5284.8639488220215
+      reference_us: 5548.031806945801
       reference_backend: same-input-greedy
   - name: expert-sym@mxfp4.k_linear_reduce_0de949.7d644f512b51.m1.7f821ab65404
     bindings:
@@ -28832,44 +28830,8 @@ configs:
       emmy_us: 206740.48519134521
       reference_us: 212396.03805541992
       reference_backend: same-input-greedy
-    latency:
-      NVIDIA Tesla V100 SXM3 32GB:
-        emmy_us: 200190.97900390625
-        eager_us: 29217.792510986328
     kernel_set:
     - expert4096@mxfp4.k_linear_reduce_a3f064.592880680b39.m4096.7e22d4bab7d7.7e22d4bab7d7
-  - name: expert4096@mxfp4.k_linear_reduce_a3f064.592880680b39.m4096.ea9536b34e57
-    bindings:
-      num_tokens: 4096
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w16x2
-      TILE: mma_m8n8k4_f16_f32/f1x16
-      REDUCE: ''
-      STAGE: d2/smem
-      RASTER: ''
-    identity: ea9536b34e571b3ede002c61751dab166925b5c2c5bc7ee67b3fefeb9d7b4581
-    measurements:
-      emmy_us: 195298.30932617188
-      reference_us: 200979.46166992188
-      reference_backend: same-input-greedy
-  - name: expert4096@mxfp4.k_linear_reduce_a3f064.592880680b39.m4096.d1316ef3a6b4
-    bindings:
-      num_tokens: 4096
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w4x1
-      TILE: mma_m8n8k4_f16_f32/f1x1/k2
-      REDUCE: ''
-      STAGE: d2/smem
-      RASTER: ''
-    identity: d1316ef3a6b4e69b7987b2333bcea957c8941ee188048329a6c7652e033e48ff
-    measurements:
-      emmy_us: 11442.17586517334
-      reference_us: 11416.576385498047
-      reference_backend: same-input-greedy
   - name: expert4096@mxfp4.k_linear_reduce_a3f064.592880680b39.m4096.7e22d4bab7d7.7e22d4bab7d7
     bindings:
       num_tokens: 4096
@@ -28879,8 +28841,8 @@ configs:
       PLACE@map.1/inner.1/map.1/inner: cut
     identity: 7e22d4bab7d7527e70ecc772ef07c53e51aa99b237092ad317e8382a70af231e
     measurements:
-      emmy_us: 38149.120807647705
-      reference_us: 38231.040477752686
+      emmy_us: 11674.623966217041
+      reference_us: 11680.768013000488
       reference_backend: same-input-greedy
   - name: expert4096@mxfp4.k_linear_reduce_a3f064.592880680b39.m4096.7e22d4bab7d7.93f0a0e7072b
     bindings:
@@ -28888,15 +28850,15 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w4x1
-      TILE: mma_m8n8k4_f16_f32/f1x2
+      WORK: w2x2
+      TILE: mma_m8n8k4_f16_f32/f4x2/k8
       REDUCE: ''
-      STAGE: d2/smem
+      STAGE: d1/smem
       RASTER: ''
     identity: 93f0a0e7072b8d06ec161a0d8aa6780bd68fad4248c016c539f9de9178bb2c28
     measurements:
-      emmy_us: 30797.82485961914
-      reference_us: 30780.41648864746
+      emmy_us: 6385.663986206055
+      reference_us: 6393.856048583984
       reference_backend: same-input-greedy
   - name: expert4096@mxfp4.k_linear_reduce_a3f064.592880680b39.m4096.7e22d4bab7d7.6d6cc5eb4ffd
     bindings:
@@ -28904,15 +28866,15 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w4x1
-      TILE: mma_m8n8k4_f16_f32/f1x4/k8
+      WORK: w2x2
+      TILE: mma_m8n8k4_f16_f32/f4x2/k8
       REDUCE: ''
       STAGE: d1/smem
       RASTER: ''
     identity: 6d6cc5eb4ffdab6ebd903718e4c57c057bdf5145d843e46fb6b44ec16d6aaaa9
     measurements:
-      emmy_us: 7351.295948028564
-      reference_us: 7450.623989105225
+      emmy_us: 5288.959980010986
+      reference_us: 5286.911964416504
       reference_backend: same-input-greedy
 - program: 4
   target:
