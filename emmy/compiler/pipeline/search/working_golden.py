@@ -95,6 +95,56 @@ def write_trace_inventory(
     return TraceInventoryResult(path=destination, target_count=len(entries))
 
 
+def append_trace_inventory(
+    graph,
+    path: str | Path,
+    *,
+    model: str | None = None,
+    ctx=None,
+    force_loop_targets: bool = False,
+    model_quant_digest: str | None = None,
+) -> TraceInventoryResult:
+    """Add one more traced program to an existing working inventory.
+
+    A model whose whole-graph export is not bounded is traced one distinct path at a
+    time -- each decoder-layer kind, then the embedding, final normalization and output
+    seams. Those are one model's inventory, so they belong in one file: a directory of
+    one-file-per-path is easy to promote only partially. Interning is shared with
+    :func:`write_trace_inventories`, so a kernel already covered is recorded once.
+    """
+    destination = Path(path)
+    from emmy.compiler.context import Context  # noqa: PLC0415
+
+    ctx = ctx or Context.probe()
+    document = load_golden_file(destination)
+    validate_working_gpu(document, ctx)
+    programs = document["programs"]
+    loops = document.setdefault("loops", [])
+    entries = document["configs"]
+    seen_loops = {entry["target"]["loop"] for entry in entries if "loop" in entry["target"]}
+    before = len(entries)
+    _append_trace_inventory(
+        graph,
+        ctx=ctx,
+        programs=programs,
+        loops=loops,
+        entries=entries,
+        force_loop_targets=force_loop_targets,
+        seen_loops=seen_loops,
+    )
+    _dump_trace_inventory(
+        destination,
+        ctx=ctx,
+        model=model or document.get("model"),
+        model_quant_digest=model_quant_digest or document.get("model_quant_digest"),
+        programs=programs,
+        loops=loops,
+        entries=entries,
+        overwrite=True,
+    )
+    return TraceInventoryResult(path=destination, target_count=len(entries) - before)
+
+
 def write_trace_inventories(
     graphs: dict[str, object],
     path: str | Path,
@@ -264,6 +314,7 @@ def _dump_trace_inventory(
     programs: list[dict],
     loops: list[dict],
     entries: list[dict],
+    overwrite: bool = False,
 ) -> None:
     """Write shared trace-inventory pools with their card and model provenance."""
     document: dict = {
@@ -280,7 +331,7 @@ def _dump_trace_inventory(
     if model:
         document["model"] = model
 
-    dump_golden_file(document, destination)
+    dump_golden_file(document, destination, overwrite=overwrite)
 
 
 def load_working_targets(path: str | Path, *, kernel: str | None = None) -> tuple[dict, list[WorkingGoldenTarget]]:

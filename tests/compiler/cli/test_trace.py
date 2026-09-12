@@ -15,7 +15,12 @@ from emmy.compiler.ir.frontend.ir import Conv1dOp, LinearOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tensor.ir import CastOp, ElementwiseOp, GatherOp
 from emmy.compiler.pipeline.search.golden import load_golden_file, load_golden_records
-from emmy.compiler.pipeline.search.working_golden import load_working_targets, write_trace_inventories, write_trace_inventory
+from emmy.compiler.pipeline.search.working_golden import (
+    append_trace_inventory,
+    load_working_targets,
+    write_trace_inventories,
+    write_trace_inventory,
+)
 
 # An inventory stamps the card its context is for, and reading a record back reconstructs that
 # card from the ``emmy.gpu`` registry — where an unregistered card is a hard error, not a
@@ -481,3 +486,41 @@ def test_trace_refuses_to_replace_existing_yaml(tmp_path) -> None:
     write_trace_inventory(graph, path, ctx=_TARGET_CTX)
     with pytest.raises(FileExistsError, match="refusing to replace"):
         write_trace_inventory(graph, path, ctx=_TARGET_CTX)
+
+
+def test_append_collects_separately_traced_paths_into_one_inventory(tmp_path) -> None:
+    relu = trace_inline_code("torch.relu(torch.randn(8))")["graph"]
+    sigmoid = trace_inline_code("torch.sigmoid(torch.randn(16))")["graph"]
+    path = tmp_path / "working.yaml"
+
+    write_trace_inventory(relu, path, model="org/model@revision", ctx=_TARGET_CTX)
+    result = append_trace_inventory(sigmoid, path, ctx=_TARGET_CTX)
+
+    document = load_golden_file(path)
+    records = load_golden_records(document)
+    assert result.target_count == 1
+    assert len(document["programs"]) == len(records) == 2
+    # A later path keeps the provenance the inventory was opened with.
+    assert document["model"] == "org/model@revision"
+    # Each target still resolves against the program it was traced in.
+    assert {entry["program"] for entry in document["configs"]} == {0, 1}
+
+
+def test_append_keeps_a_kernel_already_covered_once(tmp_path) -> None:
+    graph = trace_inline_code("torch.relu(torch.randn(8))")["graph"]
+    path = tmp_path / "working.yaml"
+
+    write_trace_inventory(graph.copy(), path, ctx=_TARGET_CTX, force_loop_targets=True)
+    result = append_trace_inventory(graph.copy(), path, ctx=_TARGET_CTX, force_loop_targets=True)
+
+    document = load_golden_file(path)
+    assert result.target_count == 0
+    assert len(document["loops"]) == len(load_golden_records(document)) == 1
+
+
+def test_append_rejects_an_inventory_traced_for_another_card(tmp_path) -> None:
+    graph = trace_inline_code("torch.relu(torch.randn(8))")["graph"]
+    path = tmp_path / "working.yaml"
+    write_trace_inventory(graph.copy(), path, ctx=_TARGET_CTX)
+    with pytest.raises(ValueError, match="compute capability"):
+        append_trace_inventory(graph.copy(), path, ctx=Context.from_target((7, 0)))
