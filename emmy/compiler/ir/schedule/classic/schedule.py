@@ -1,6 +1,8 @@
-"""The classic assignment vocabulary: the kernel, node and edge choice types, the sites' wire spellings and
-keys. The candidate values themselves belong to the sites (``classic.sites``), which are the one place
-that says what may be chosen."""
+"""What a classic schedule is written in: the kernel, node and edge choice types, the sites' wire spellings and
+keys, and ``ClassicSchedule`` — this family's filling of the generic :class:`~emmy.compiler.ir.schedule.base.Schedule`.
+
+Which of these values a site may actually take is the sites' business (``classic.sites``); this module only says
+what they are and how each one is spelled."""
 
 from __future__ import annotations
 
@@ -101,7 +103,7 @@ class EdgeSchedule:
             raise TypeError("classic edge STAGE must be a Stage choice")
 
 
-type ClassicAssignment = Schedule[KernelSchedule, NodeSchedule, EdgeSchedule]
+type ClassicSchedule = Schedule[KernelSchedule, NodeSchedule, EdgeSchedule]
 
 
 def classic_node_key(sites, family: str, site: NodeId) -> str:

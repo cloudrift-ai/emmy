@@ -9,8 +9,9 @@ from emmy.compiler.ir.schedule.base import Schedule
 from emmy.compiler.ir.schedule.choices import Raster, Reduce, Stage, Tile, Work, resolve_site_tile
 from emmy.compiler.ir.schedule.views import NodeId
 
-from .assignment import (
-    ClassicAssignment,
+from .context import ClassicScheduleContext
+from .schedule import (
+    ClassicSchedule,
     EdgeSchedule,
     KernelSchedule,
     NodeSchedule,
@@ -20,7 +21,6 @@ from .assignment import (
     classic_stage_key,
     node_id_spelling,
 )
-from .context import ClassicScheduleContext
 
 
 class ClassicScheduleCodec:
@@ -50,12 +50,12 @@ class ClassicScheduleCodec:
         )
         self._keys = frozenset(self._key_order)
 
-    def encode(self, schedule: ClassicAssignment) -> dict[str, str]:
+    def encode(self, schedule: ClassicSchedule) -> dict[str, str]:
         """Encode one accepted typed schedule in canonical scope order."""
         accepted = self.context.extend(schedule).assignment
         return self._encode(accepted)
 
-    def _encode(self, schedule: ClassicAssignment) -> dict[str, str]:
+    def _encode(self, schedule: ClassicSchedule) -> dict[str, str]:
         """Encode a schedule already accepted by this codec's context traversal."""
         row = {
             "WORK": schedule.kernel.work.spell(),
@@ -98,12 +98,12 @@ class ClassicScheduleCodec:
             row["WORK"] = after.work.spell()
         return row
 
-    def decode(self, row: Mapping[str, str]) -> ClassicAssignment:
+    def decode(self, row: Mapping[str, str]) -> ClassicSchedule:
         """Decode one complete canonical row and reject every other key set or assignment."""
         schedule = self._parse(row)
         return self._validate_row(schedule, row)
 
-    def _parse(self, row: Mapping[str, str]) -> ClassicAssignment:
+    def _parse(self, row: Mapping[str, str]) -> ClassicSchedule:
         """Parse typed values before a reconstructed TileOp supplies materialization for validation."""
         self._check_keys(row)
 
@@ -135,7 +135,7 @@ class ClassicScheduleCodec:
             },
         )
 
-    def _validate_row(self, schedule: ClassicAssignment, row: Mapping[str, str]) -> ClassicAssignment:
+    def _validate_row(self, schedule: ClassicSchedule, row: Mapping[str, str]) -> ClassicSchedule:
         """Validate a parsed assignment and its claimed canonical row exactly once."""
         accepted = self.context.extend(schedule).assignment
         canonical = self._encode(accepted)

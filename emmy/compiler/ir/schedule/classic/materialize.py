@@ -13,9 +13,9 @@ from emmy.compiler.ir.schedule.base import Schedule, ScheduleRefused
 from emmy.compiler.ir.schedule.choices import PlacedTile, ResolvedStage, WarpSpec
 from emmy.compiler.ir.schedule.views import EdgeSite, NodeId
 
-from .assignment import ClassicAssignment, ReductionSchedule, _is_edge_site, _is_node_id, edge_site_spelling, node_id_spelling
 from .context import ClassicScheduleContext
 from .refusals import _resolve_stage
+from .schedule import ClassicSchedule, ReductionSchedule, _is_edge_site, _is_node_id, edge_site_spelling, node_id_spelling
 
 if TYPE_CHECKING:
     from emmy.compiler.ir.tile import TileOp
@@ -38,7 +38,7 @@ class ClassicMaterialization:
         object.__setattr__(self, "tiles", frozendict(self.tiles))
         object.__setattr__(self, "stages", frozendict(self.stages))
 
-    def validate(self, schedule: ClassicAssignment, source: object, *, place: object, workers: object) -> None:
+    def validate(self, schedule: ClassicSchedule, source: object, *, place: object, workers: object) -> None:
         """Validate classic lowering facts against their semantic assignment."""
         if not isinstance(schedule, Schedule):
             raise TypeError("classic materialization requires a Schedule")
@@ -84,7 +84,7 @@ def materialize_classic(
     name: str,
     knobs: dict,
     target,
-    assignment: ClassicAssignment,
+    assignment: ClassicSchedule,
 ) -> TileOp:
     """Materialize one accepted classic assignment into a scheduled TileOp."""
     from emmy.compiler.ir.tile.ops import Sched, scheduled  # noqa: PLC0415 — tile.ops reads this package; module level would cycle

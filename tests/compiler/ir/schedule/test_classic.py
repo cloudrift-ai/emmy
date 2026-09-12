@@ -31,9 +31,9 @@ from emmy.compiler.ir.schedule import (
     schedule as advance_schedule,
 )
 from emmy.compiler.ir.schedule.classic import (
-    ClassicAssignment,
     ClassicMaterialization,
     ClassicProblem,
+    ClassicSchedule,
     ClassicScheduleCodec,
     ClassicScheduleContext,
     EdgeSchedule,
@@ -85,7 +85,7 @@ def _literal(problem: tuple[TileOp, object], factors: dict, **kwargs) -> Classic
     return literal_classic_context(*problem, **factors, **kwargs)
 
 
-def _direct(context: ClassicScheduleContext) -> ClassicAssignment:
+def _direct(context: ClassicScheduleContext) -> ClassicSchedule:
     nodes = {**_leaf_nodes(context.tile_op), **{site: ReductionSchedule(Tile(), Reduce()) for site in _reduce_sites(context.tile_op)}}
     return Schedule(
         kernel=KernelSchedule(work=Work(), raster=Raster()),
@@ -222,7 +222,7 @@ def _finite_factors(problem: tuple[TileOp, object]) -> dict:
     }
 
 
-def _schedule_signature(schedule: ClassicAssignment) -> tuple:
+def _schedule_signature(schedule: ClassicSchedule) -> tuple:
     return schedule.kernel, tuple(sorted(schedule.nodes.items())), tuple(sorted(schedule.edges.items()))
 
 

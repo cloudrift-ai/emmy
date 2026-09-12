@@ -26,7 +26,7 @@ from emmy.compiler.ir.schedule.views import ContractionFacts, NodeId
 from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Select, Write, mask_select_predicate
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
 
-from .assignment import NodeSchedule, node_id_spelling
+from .schedule import NodeSchedule, node_id_spelling
 
 if TYPE_CHECKING:
     from emmy.compiler.ir.tile import TileOp
