@@ -5,9 +5,9 @@ from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expr import CastExpr, Var
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
-from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
+from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop, scan_from_loop
 from tests.compiler.terms import contraction, projection, slab
 
 
@@ -44,3 +44,22 @@ def test_a_projection_exposes_its_last_definition_or_passes_its_operand_through(
     cell = projection((stat,), (Assign(name="r", op="rsqrt", args=("acc",)), Assign(name="o", op="multiply", args=("r", "r"))))
     assert cell.axis is None and cell.exposes == ("o",) and cell.free_axes == {"m", "n"}
     assert projection((stat,)).exposes == ("acc",)
+
+
+def test_a_load_indexed_by_a_loaded_value_is_a_gather_not_a_slab() -> None:
+    # The index reads ``i``, a value the step loads — not a coordinate. A slab would declare it as
+    # one, and the closed program would then ask the kernel for an extent no axis table can hold.
+    loop = Loop(
+        axis=Axis("k", 16),
+        body=Body(
+            (
+                Load(name="a", input="x", index=(Var("m"), Var("k"))),
+                Load(name="i", input="idx", index=(Var("k"),)),
+                Load(name="b", input="w", index=(CastExpr("int", Var("i")), Var("n"))),
+                Assign(name="acc__v", op=ElementwiseImpl("multiply"), args=("a", "b")),
+                Accum(name="acc", value="acc__v", op=ElementwiseImpl("add"), axes=("k",)),
+            )
+        ),
+    )
+    fold, _ = scan_from_loop(loop, axes=(Axis("m", 8), Axis("n", 32)))
+    assert fold.free_axes == {"m", "n"}

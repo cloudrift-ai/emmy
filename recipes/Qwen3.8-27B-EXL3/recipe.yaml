@@ -1,0 +1,22 @@
+# Qwen3.8-27B at EXL3 5.0 bpw on one V100 SXM3 32GB (sm_70 Volta).
+#
+# ONBOARDING SHELL — not runnable until qualification replaces it with a measured recipe.
+#
+# Fit: 18.53 GiB of EXL3 weights at revision a35e75a (5.0 bpw body, 6-bit head, 4-bit MTP), so a
+# min-to-serve near 24.1 GiB against 32,768 MiB on one card. Stock vLLM has no sm_70 support and no
+# EXL3 quantization method; the serving path under test is the Emmy plugin on the 1Cat-vLLM Volta
+# fork, where emmy owns every coded weight.
+tags:
+  - onboarding
+  - untested
+
+model:
+  huggingface: turboderp/Qwen3.8-27B-exl3
+  rationale: "Reference EXL3 trellis quantization of the dominant Qwen3.8 wave; 5.0 bpw is the largest rung that leaves KV headroom on one 32 GB Volta card."
+  heat: 0
+  revision: a35e75a73baee51da709329d19294245cbeeb5d8
+  task: generate
+
+matrices:
+  deploy.gpu: "NVIDIA Tesla V100 SXM3 32GB"
+  deploy.gpu_count: 1

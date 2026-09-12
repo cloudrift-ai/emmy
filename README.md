@@ -30,6 +30,17 @@ CUDA 12 NVRTC does:
 LD_PRELOAD=/usr/local/cuda-12.9/lib64/libnvrtc.so.12 emmy tune ...
 ```
 
+The torch wheel itself is a second, separate pre-Turing trap: the default `+cu130` build carries no `sm_70` kernels at
+all, so the reference side of every accuracy check and every `--bench-backends eager,tcompile` comparison dies with
+`no kernel image is available for execution on the device`. The newest build that still ships Volta is `2.9.1+cu126`:
+
+```bash
+pip install --force-reinstall "torch==2.9.1+cu126" --index-url https://download.pytorch.org/whl/cu126
+```
+
+Ask for the `+cu126` local version explicitly — a bare `torch==2.9.1` matches the already-installed `+cu130` wheel and
+pip reports the requirement satisfied without changing anything.
+
 Commands that compile or launch kernels locally check this at startup and abort with that remedy rather than letting
 it surface as a wall of failed benchmarks. Commands that only drive remote hardware (`deploy`, `bench`, `vm`,
 `teardown`, …) are unaffected and keep working on such a host. `make test` prints the same diagnosis in its session
