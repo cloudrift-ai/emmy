@@ -2,21 +2,21 @@
 
 ## Conclusion
 
-Both arms now serve this checkpoint and both produced serving numbers. The fork is roughly **38× faster per output
-token** and **23× faster to first token**. The two arms were measured in separate invocations rather than one
-alternating run, so this is a directional comparison, not the balanced A/B described under "What this run does not
-establish".
+Both arms now serve this checkpoint and both produced serving numbers. The fork is **6.1× faster per output token**
+and **23× faster to first token**. The two arms were measured in separate invocations rather than one alternating run,
+so this is a directional comparison, not the balanced A/B described under "What this run does not establish".
 
-The Emmy arm completes requests only with its static M=1 decode tier disabled (`EMMY_GEN_M1_TIER=0`). With that
-tier enabled — the default — no generation finished: a single-token decode forward advances at a flat ~61 s per
-layer and takes roughly 2,700 s, which overruns both vLLM's 300 s `sample_tokens` deadline and the 600 s NCCL collective
-watchdog. Routing single-token decode through the M=16 bucket twins instead costs 5.6 s per token, so the tier itself
-carries a factor of about 485×. That is an Emmy defect, recorded below and not yet fixed.
+Getting there meant fixing one kernel. `pre1.k_linear_mean_reduce_7fce9f` at M=1 carried a single measured candidate
+in the golden, at 29.7 s, and under strict evidence the election had no alternative to elect. Single-token decode ran
+at a flat ~61 s per layer, so no generation request ever returned: each died on the engine's 300 s `sample_tokens`
+deadline, and raising that only moved the failure to the 600 s NCCL collective watchdog. Four placement cuts take that
+program to 473.6 µs whole-program, which took time per output token from **5.565 s to 0.899 s**.
 
 Three programs were fixed earlier in this work — `pre4096` by 594×, and the decode program's two hot kernels by 4.3×
-and 5.6× — all confirmed by the deployed boot's own audit. Those fixes hold, and they are why the arm serves at all.
-The two programs that now dominate were never recorded: `post.decode.m16` at 1,149× its roofline floor is most of the
-per-token cost, and `post.chunk.m4096` at 317× is most of the time to first token.
+and 5.6×. The M=1 kernel above is the same `k_linear_mean_reduce` as `pre4096`, recomputing the same loop-invariant
+dot products inside the same output-channel sweep, and it took the same four cuts; only the m4096 shape had been
+recorded. What now dominates is `post.decode.m16` at 1,149× its roofline floor and `post.decode.m1` at 293×, neither
+of which has been recorded.
 
 At a 4,096-token context the fork serves this checkpoint cleanly: 480 requests across fifteen rows, zero failures,
 and three workload shapes that differ far more in repeat stability than the shapes themselves suggest. Single-stream
@@ -58,65 +58,62 @@ kept because they explain where the time goes.
 
 ### Serving measurements
 
-Boot on 2026-09-12, `--strict-evidence`, `EMMY_GEN_M1_TIER=0`, `gpu_memory_utilization` 0.90, prefix caching on.
-Greedy decoding, single stream, streamed responses timestamped per chunk.
+Boot on 2026-09-12, `--strict-evidence`, `gpu_memory_utilization` 0.90, prefix caching on, the M=1 decode tier
+enabled. Greedy decoding, single stream, streamed responses timestamped per chunk.
 
-| Shape | TTFT | TPOT mean | TPOT range | Output tok/s | Decode steps |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| 5 in → 33 out | 5.94 s | 5.565 s | 5.553 – 5.594 | 0.180 | 32 |
-| 2,405 in → 9 out | 88.22 s | 5.610 s | 5.598 – 5.665 | 0.178 | 8 |
+| Shape | TTFT | TPOT mean | TPOT range | Output tok/s |
+| --- | ---: | ---: | ---: | ---: |
+| 5 in → 33 out | 7.05 s | 0.899 s | 0.894 – 0.906 | 1.11 |
+
+The first decode step of a request costs 1.85 s rather than 0.90 s: each layer's M=1 programs are CUDA-graph captured
+on first use, and a program is captured once per layer per worker. Thirty-one steady steps span 1.3%.
 
 Against the fork's single-stream row, which is the steadiest measurement on this stack:
 
 | | 1Cat fork | Emmy | Ratio |
 | --- | ---: | ---: | ---: |
 | TTFT | 3.77 s (2,048 in) | 88.22 s (2,405 in) | 23× |
-| Mean time per output token | 147.7 ms | 5.610 s | 38× |
-| Output tok/s, decode only | 6.77 | 0.178 | 38× |
+| Mean time per output token | 147.7 ms | 899 ms | 6.1× |
+| Output tok/s, decode only | 6.77 | 1.11 | 6.1× |
 
-Emmy's inter-token latency is the more stable of the two in relative terms: 40 decode steps across the two shapes
-span 5.553 s to 5.665 s, a 2% spread, and the two shapes' means differ by 0.8% despite a 480× difference in context.
-A repeat of the 2,405-token request returned in 56.29 s against a warm prefix cache, which is nine decode steps and no
-prefill — an independent confirmation of the per-token figure.
+The time-to-first-token row is from the pre-fix boot and is unchanged by this work: prefill runs the m16 and m4096
+twins, which the fix did not touch. `post.chunk.m4096` at 317× its ~1,955 µs floor is 619 ms per layer and is what
+dominates it.
 
-The per-token cost is accounted for by one program. `post.decode.m16` runs at 1,149× its ~60 µs roofline floor, or
-about 68 ms per layer, which is roughly 3.0 s of the 5.6 s across 44 layers. `post.chunk.m4096` at 317× its ~1,955 µs
-floor is about 620 ms per layer and dominates the 88 s time to first token. Neither has ever been recorded — only the
-`m1` shapes were.
+Correctness at the serving level: greedy completions are coherent English ("Red, blue, and green are three classic
+colors often used as primary colors in light-based systems (RGB)…"). There is no eager twin for a golden Loop IR
+target on this model, so no CLI-level numerical verdict was obtainable for the cut schedule alone. The cuts are code
+motion — hoisting a loop-invariant dot out of a sweep — which is why the equivalent `pre4096` cuts were bit-exact.
 
-### The static M=1 decode tier is a defect
+### The M=1 decode tier: what broke and what now guards it
 
-With the M=1 tier enabled, which is the default, no generation request ever completed. The failure is not prefill: a
-one-token completion returns in 5.8 s, and a one-token completion runs zero decode forwards because prefill produces
-the first token's logits. vLLM's own scheduler dump at the failure names the step —
-`total_num_scheduled_tokens=1`, `num_computed_tokens=[5]`, `num_output_tokens=[1]` — the first true decode forward.
+The tier exists as an optimization. The bucket twins already cover `T=1` by padding up; the M=1 twins exist only
+because the contractions demote to faster planar forms at one row. Nothing checked that they were in fact faster.
 
-Sampling one worker's layer index through a complete 22-layer pipeline stage gives a flat rate with no decay:
+On this model they were not. `pre1.k_linear_mean_reduce_7fce9f` at M=1 had one measured candidate at 29.7 s against
+57.9 ms for the bucket twin it replaced, and both of its candidates bench-fail outright
+(`HungKernelError: kernel did not complete within 2000 ms`). Decode ran at a flat ~61 s per layer — flat from the
+first layer to the last, which is what ruled out first-use cost as the explanation.
 
-| Layer transition | 0→1 | 1→2 | 5→6 | 10→11 | 15→16 | 20→21 |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Seconds | 60 | 61 | 60 | 60 | 61 | 60 |
+Its Loop IR shows the defect directly. A 16,384-long dot product that depends only on the stream index sits inside a
+4,096-wide output-channel sweep, so it is recomputed 4,096 times, and the structure appears twice in the program:
 
-Twenty-two layers in 1,379 s, 62.7 s each, constant from the first layer to the last. That flatness is what rules out
-first-use cost: a cost paid once per process would fall away after the first layers. A whole forward at that rate is
-about 2,700 s, which is why it overruns the 300 s RPC deadline. Raising that deadline does not help, because the 600 s
-NCCL collective watchdog then tears the workers down, and under two-stage pipelining the second stage blocks on the
-first for the entire traversal. That watchdog timeout is a compiled-in constant with no environment override.
+```
+for a1 in 0..4096:              # output channel
+    for a2 in 0..4:             # stream
+        for a3 in 0..16384:     # depends on a2 only — recomputed for every a1
+            acc1 <- add(acc1, v8)
+```
 
-The same request through the M=16 bucket twins takes 5.6 s per token, so the tier carries a factor of about 485×.
+Two things were changed. Four placement cuts hoist those dots out of the sweeps, giving 473.6 µs whole-program, and
+that schedule is recorded into the golden so the election prices it at 410.9 µs against the old 29.7 s row. And the
+runner now drops the M=1 tier at boot when its twins do not measure faster than the bucket twins they replace, so a
+golden without a good M=1 schedule costs the optimization rather than the server.
 
-What makes this hard to see from the boot audit: the audit times `post.decode.m1` at 17 ms per layer, and it does so
-through raw launches, while serving drives the same program through whole-program CUDA graph capture and replay. The
-M=1 and M=16 post programs have identical 36-kernel launch lists, and the M=16 tier performs the same per-layer
-captures during prefill at about 0.16 s per layer. So the cost is in the M=1 tier's capture-and-replay path rather
-than in the program, and the audit cannot reach it.
-
-Seven other explanations were checked against the code and eliminated: the fixed-slot expert combine (DeepSeek's
-hyper-connection branch returns before that check, and tensor-parallel expert sharding excludes it independently), the
-refused expert `m256` twin (that tier applies only between the decode bucket and 256 routed rows; at one row the
-dispatch selects the `one` tier, which built on all sixteen workers), the Emmy programs themselves, graph-cache
-eviction, a launch-heavy M=1 program, ordinary first-use cost, and a straggler worker — all eight workers of a stage
-sit at the same layer with every GPU at 100%.
+The boot audit let this run unseen for three rounds, and that is fixed too. It exempted any program whose roofline
+floor sat under 20 µs — as this program's did — on the reasoning that "a mispick there costs little in absolute
+terms". A small floor bounds what a healthy program costs, never what a broken one does. Programs with no usable
+floor are now judged on absolute cost instead, and every warning carries the measured time.
 
 ### The boot reaches a serving state
 
@@ -226,12 +223,14 @@ recorded rows win the election on price.
   here yet.
 - **The two arms did not run the same envelope.** The fork rows are at `gpu_memory_utilization` 0.80 with prefix
   caching disabled; the Emmy boot needed 0.90 and ran with prefix caching on. The Emmy shapes are 2,405 and 5 input
-  tokens against the fork's 2,048, and 9 and 33 output tokens against its 512. Whichever values a joint recipe adopts,
+  tokens against the fork's 2,048, and 9 and 33 output tokens against its 512. The two Emmy rows also come from
+  different boots: the time-to-first-token row predates the M=1 fix, which did not touch the prefill
+  twins. Whichever values a joint recipe adopts,
   both arms must share them.
 - **The Emmy rows are one repeat each.** The fork rows are five repeats with a reported spread; the Emmy rows are
   single runs, and their stability claim rests on the spread of decode steps within a run, not across runs.
-- **The Emmy arm ran with a non-default configuration.** `EMMY_GEN_M1_TIER=0` is required for it to answer at all.
-  Any comparison including the default configuration would show no completions from the Emmy arm.
+- **The Emmy row needs a golden carrying the recorded M=1 schedule.** Against the golden this experiment shipped
+  with, the M=1 decode tier is now dropped at boot and time per output token falls back to about 5.6 s.
 - **The Emmy rows came from direct HTTP requests**, not from `emmy bench`, so they have no experiment records and are
   not in the archive.
 - **It is not a regression check against the August run.** That run used different prompt shapes, a different context
