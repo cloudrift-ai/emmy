@@ -93,6 +93,23 @@ def test_flag_ratio_compute_floor_negligible_at_m1():
     assert verdict[1] > 60.0
 
 
+def test_audit_returns_its_measurements_for_tier_choice(monkeypatch):
+    """The serving runner picks between the M=1 and bucket decode tiers from these numbers rather
+    than timing both again, so the audit has to hand them back keyed by label."""
+    monkeypatch.setattr(roofline, "measure_copy_bw", lambda: 1000 * GB)
+    monkeypatch.setattr(roofline, "measure_matmul_flops", lambda: 210e12)
+    monkeypatch.setattr(roofline, "time_program_us", lambda program, **kw: 123.0)
+    measured = audit_boot_programs([("L0.pre.decode.m1", _Prog(1_000_000), 1)])
+    assert measured == {"L0.pre.decode.m1": 123.0}
+
+
+def test_audit_returns_empty_when_it_cannot_run(monkeypatch):
+    """A caller must be able to tell "no data" from "measured fast" — an audit that bailed hands
+    back nothing, and the tier choice then leaves the default alone."""
+    monkeypatch.setattr(roofline, "measure_copy_bw", lambda: (_ for _ in ()).throw(RuntimeError("no cuda")))
+    assert audit_boot_programs([("L0.pre.decode.m1", _Prog(1_000_000), 1)]) == {}
+
+
 def test_audit_counts_weight_inputs(monkeypatch, caplog):
     """An expert program holds no constants — its weights arrive as per-launch INPUTS. Counting
     only the constant side would give it a zero floor and audit nothing."""
