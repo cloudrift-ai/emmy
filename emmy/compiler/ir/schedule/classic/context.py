@@ -43,6 +43,9 @@ from .schedule import (
 )
 
 if TYPE_CHECKING:
+    from emmy.compiler.context import Context
+    from emmy.compiler.ir.tile import TileOp
+
     from .sites import ClassicNodeSite, ClassicProblem
 
 
@@ -102,8 +105,8 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
     against the target ``t``. Derivations shared by every candidate ride memo tables on the tile.
     """
 
-    tile_op: object
-    target: object = None
+    tile_op: TileOp
+    target: Context | None = None
     problem: ClassicProblem | None = None
     order: tuple[NodeId, ...] | None = None
     position: int = 0
