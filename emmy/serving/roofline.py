@@ -163,23 +163,27 @@ def flag_ratio(
     return floor_us, ratio
 
 
-def audit_boot_programs(named_programs, dtype_bytes: int = 2) -> None:
+def audit_boot_programs(named_programs, dtype_bytes: int = 2) -> dict[str, float]:
     """Time each ``(label, _Program, m_tokens)`` against ``max(weight-streaming, compute)`` floor and
     warn on outliers. ``_Program`` here is the serving wrapper (``gen_runner._Program``): ``.program``
     is the ``CompiledProgram`` and ``.weight_bytes`` the per-forward weight footprint — bound constants
     plus the weight INPUTS an expert program takes per launch. ``m_tokens`` is the program's static
     token width, ``dtype_bytes`` the weight itemsize — together they turn ``weight_bytes`` into the
-    matmul FLOP estimate ``2 * weight_elems * m_tokens``. Never raises."""
+    matmul FLOP estimate ``2 * weight_elems * m_tokens``. Never raises.
+
+    Returns the measured µs per label — empty when the audit could not run. A caller that must
+    choose between two tiers of the same program reads it rather than timing them again."""
     from emmy import config
     from emmy.compiler.backend.gpu_lock import gpu_lock
 
+    measured: dict[str, float] = {}
     with contextlib.ExitStack() as stack:
         try:
             stack.enter_context(gpu_lock())
         except Exception:  # noqa: BLE001 — taking the lock is setup, not measurement: an unusable
             # lock path is an environment fault and must not read as a clean audit at debug level.
             logger.warning("[roofline] boot audit skipped: GPU lock %r unusable", config.gpu_lock_path(), exc_info=True)
-            return
+            return measured
         try:
             bw = measure_copy_bw()
             try:
@@ -194,13 +198,14 @@ def audit_boot_programs(named_programs, dtype_bytes: int = 2) -> None:
                 # pays 4x a mispick's full cost to learn what one run already showed.
                 budget_us = MAX_ABS_US if floor_us is None else WARN_RATIO * floor_us
                 measured_us = time_program_us(prog.program, budget_us=budget_us)
+                measured[label] = measured_us
                 verdict = flag_ratio(measured_us, prog.weight_bytes, bw, flops, flops_per_s)
                 if verdict is not None:
                     floor_us, ratio = verdict
                     flagged.append((label, floor_us, ratio, measured_us))
         except Exception:  # noqa: BLE001 — advisory only, never a boot blocker
             logger.debug("[roofline] boot audit skipped", exc_info=True)
-            return
+            return measured
     for label, floor_us, ratio, measured_us in flagged:
         logger.warning(
             "[roofline] %s runs %.0fx over its roofline floor (~%.0f us), measured %.3f ms — a "
@@ -215,3 +220,4 @@ def audit_boot_programs(named_programs, dtype_bytes: int = 2) -> None:
     if named_programs and not flagged:
         n = len(named_programs)
         logger.info("[roofline] boot audit clean: %d static program(s) within %sx of the roofline floor", n, int(WARN_RATIO))
+    return measured
