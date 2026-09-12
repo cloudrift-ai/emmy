@@ -513,11 +513,19 @@ class Fold:
         holds it, and a nested reduce that happens to bind the same name as the loop above still
         hoists. Their extents are the evaluator's, never the term's (:meth:`lower` takes them for
         the closed program).
+
+        Less, too, what the operands themselves PRODUCE. One operand can read a value a sibling
+        exposes — a mask fill's triple feeding both the score and the expectation — and the
+        reader's own ``free_axes`` then carries that name, having nothing below it that defines
+        one. It is not a coordinate: this term binds it and the sibling computes it, so no
+        evaluator can supply an extent. Leaving it in makes :meth:`lower` demand one and refuse a
+        cut that is perfectly well formed.
         """
         space = set(self.lift.params[(self.axis is not None) + len(self.bindings) :])
         for edge in self.operands:
             space |= edge.free_axes
-        return frozenset(space - ({self.axis} if self.axis is not None else set()))
+        produced = {name for edge in self.operands for name in edge.exposes}
+        return frozenset(space - produced - ({self.axis} if self.axis is not None else set()))
 
     @cached_method
     def as_contraction(self) -> ContractionView | None:

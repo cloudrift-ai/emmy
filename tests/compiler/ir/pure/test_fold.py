@@ -24,7 +24,7 @@ from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.pure.twist import SOFTMAX, Twist
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Const, Loop, OutputSpec, Write
-from tests.compiler.terms import contraction, reduction, slab
+from tests.compiler.terms import contraction, projection, reduction, slab
 
 M_AXIS, N_AXIS, K_AXIS = Axis("m", Dim(8)), Axis("n", Dim(4)), Axis("k", Dim(16))
 SCOPE = (M_AXIS, N_AXIS, K_AXIS)
@@ -97,6 +97,29 @@ def test_a_multi_channel_term_puts_the_shared_operand_first_at_formation() -> No
     fold = Fold(operands=(g, u, x), lift=lift, init=init, base=combine)
     assert fold.operands == (x, g, u) and fold.lift.params == ("k", "l", "g", "u")
     assert fold.as_contraction() is not None
+
+
+# --- what a term is evaluated over ---------------------------------------------------------------- #
+
+
+def test_a_value_a_sibling_operand_produces_is_not_a_free_coordinate() -> None:
+    """``free_axes`` rolls up its operands' free coordinates, and one operand can READ a value a
+    sibling exposes — a mask fill's triple feeding both the score and the expectation. The reader
+    has nothing below it defining that name, so it surfaces in the reader's own ``free_axes``; it
+    is still not a coordinate, because this term binds it and the sibling computes it.
+
+    Counting it as one made ``lower`` demand a loop extent for a value — ``no extent for
+    coordinates ['in5']`` — and refuse an otherwise well-formed cut. On Qwen3.8-27B's layer-3
+    attention that took every cheap cut set off the ballot and left only a 24-kernel over-cut."""
+    fills = projection(body=(Const(name="fill", value=-1e30), Const(name="zero", value=0.0)), results=("fill", "zero"))
+    reader = projection(
+        operands=(slab("s", "x", "m", "k"),),
+        body=(Assign(name="masked", op="add", args=("s", "fill")),),
+        results=("masked",),
+    )
+    whole = projection(operands=(fills, reader), body=(Assign(name="out", op="add", args=("fill", "masked")),))
+    assert "fill" in reader.free_axes, "the reader alone cannot see what defines the name"
+    assert whole.free_axes == frozenset({"m", "k"})
 
 
 # --- the binding contract ------------------------------------------------------------------------ #
