@@ -46,9 +46,27 @@ def test_flag_ratio_thresholds():
 
 
 def test_flag_ratio_skips_tiny_and_degenerate():
-    assert flag_ratio(1e6, 1_000, 1000 * GB) is None  # floor below MIN_FLOOR_US → skip
-    assert flag_ratio(1e6, 0, 1000 * GB) is None  # no weights at all
-    assert flag_ratio(1e6, 1_000_000, 0.0) is None  # broken bandwidth measurement
+    """A program with no usable floor is silent while it stays cheap. Each measured value here is
+    µs-class, which is what MIN_FLOOR_US exists to ignore — see the companion test for what happens
+    when such a program is not cheap."""
+    assert flag_ratio(150.0, 1_000, 1000 * GB) is None  # floor below MIN_FLOOR_US → no ratio
+    assert flag_ratio(150.0, 0, 1000 * GB) is None  # no weights at all
+    assert flag_ratio(150.0, 1_000_000, 0.0) is None  # broken bandwidth measurement
+
+
+def test_flag_ratio_reports_a_mispick_whose_floor_is_too_small_to_form():
+    """The 2026-09-12 DeepSeek-V4 V100 incident. A decode program elected at 29.7 s per forward had
+    a sub-MIN_FLOOR_US weight floor, so the audit exempted it entirely: sixteen workers booted clean
+    and every request died on the engine's RPC deadline. A small floor bounds what a HEALTHY program
+    costs, never what a mispicked one does, so absolute cost decides when no ratio can be formed."""
+    assert flag_ratio(roofline.MAX_ABS_US, 1_000, 1000 * GB) is None  # at the bar → still silent
+    verdict = flag_ratio(29_693_246.0, 1_000, 1000 * GB)
+    assert verdict is not None
+    floor_us, ratio = verdict
+    assert floor_us == roofline.MIN_FLOOR_US  # reported against the noise threshold
+    assert ratio > 1_000_000.0
+    # Degenerate inputs are judged the same way once the cost is real.
+    assert flag_ratio(29_693_246.0, 0, 1000 * GB) is not None
 
 
 def test_flag_ratio_compute_floor_bounds_compute_bound_shapes():
