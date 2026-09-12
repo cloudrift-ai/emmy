@@ -36430,6 +36430,8 @@ configs:
       NVIDIA Tesla V100 SXM3 32GB:
         emmy_us: 246934.5245361328
         eager_us: 17562.623457475143
+    kernel_set:
+    - pre-sym.k_linear_mean_reduce_3e0f82.1aaf9cf804d0.dynamic.cf2be9cc69f7.cf2be9cc69f7
   - name: pre-sym.k_linear_mean_reduce_3e0f82.1aaf9cf804d0.dynamic.0003b1bd6d4c
     bindings: {}
     pins:
@@ -36489,6 +36491,61 @@ configs:
       emmy_us: 19.114666514926487
       reference_us: 18.747076392173767
       reference_backend: same-input-greedy
+  - name: pre-sym.k_linear_mean_reduce_3e0f82.1aaf9cf804d0.dynamic.cf2be9cc69f7.cf2be9cc69f7
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      PLACE@map.1/map.1/reduce: cut
+      PLACE@map.1/map.1/reduce.1/inner.2/map: cut
+    identity: cf2be9cc69f74ab0f9ed957fc4611ef50c0ccc1f6d6e3a1af013c9535e1e2649
+    measurements:
+      emmy_us: 5549.009626561945
+      reference_us: 6157.311969569751
+      reference_backend: same-input-greedy
+  - name: pre-sym.k_linear_mean_reduce_3e0f82.1aaf9cf804d0.dynamic.cf2be9cc69f7.84bfbb8a3b22
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@map.1/inner: ''
+      REDUCE@map.1/inner.1/map.2/map.1/reduce: ''
+      WORK: t32x8
+      TILE: f2x8
+      STAGE: ''
+      RASTER: ''
+    identity: 84bfbb8a3b2226fc7fe5dfd1dd411bcfa05c4c87267a5b2c0c31ecb66a29984f
+    measurements:
+      emmy_us: 5158.912181854248
+      reference_us: 5758.975982666016
+      reference_backend: same-input-greedy
+  - name: pre-sym.k_linear_mean_reduce_3e0f82.1aaf9cf804d0.dynamic.cf2be9cc69f7.a69b5fd59f22
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@reduce: coop-t
+      REDUCE@reduce.1/inner: ''
+      WORK: t256
+      RASTER: ''
+    identity: a69b5fd59f2275012527a72bc3f3947dc03d1a7cddd9dd67371e9c5d0e903394
+    measurements:
+      emmy_us: 358.91199111938477
+      reference_us: 366.07998609542847
+      reference_backend: same-input-greedy
+  - name: pre-sym.k_linear_mean_reduce_3e0f82.1aaf9cf804d0.dynamic.cf2be9cc69f7.55128da09930
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop-t
+      RASTER: ''
+    identity: 55128da099302e588c41eb487ae216b46e9660bf7f3d299880ec5078e3c698b1
+    measurements:
+      emmy_us: 31.18545358831232
+      reference_us: 32.2560008083071
+      reference_backend: same-input-greedy
 - program: 9
   target:
     loop: 149
@@ -36524,6 +36581,84 @@ configs:
       NVIDIA Tesla V100 SXM3 32GB:
         emmy_us: 29690269.53125
         eager_us: 13863.936424255371
+    kernel_set:
+    - pre1.k_linear_mean_reduce_7fce9f.7c4629931db7.m1.0733f2fad083.0733f2fad083
+    - pre1.k_linear_mean_reduce_7fce9f.7c4629931db7.m1.0733f2fad083.fa047d8179f7
+  - name: pre1.k_linear_mean_reduce_7fce9f.7c4629931db7.m1.0733f2fad083.0733f2fad083
+    bindings:
+      num_tokens: 1
+    pins:
+      FAST_MATH: false
+    knobs:
+      PLACE@map.1/map.1/reduce: cut
+      PLACE@map.1/map.1/reduce.1/inner.2/map: cut
+    identity: 0733f2fad08324fa50809718f28ae9831a59985435ad27087eafd2b4681f48d2
+    measurements:
+      emmy_us: 211.65632226285024
+      reference_us: 275.6010747334041
+      reference_backend: same-input-greedy
+  - name: pre1.k_linear_mean_reduce_7fce9f.7c4629931db7.m1.0733f2fad083.fa047d8179f7
+    bindings:
+      num_tokens: 1
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@reduce: g64a
+    identity: fa047d8179f73c07aa9f3696509f712889c3b674ddf7be6bb9f796fc7ebb5438
+    measurements:
+      emmy_us: 1.6761904671078636
+      reference_us: 8.245894783421567
+      reference_backend: same-input-greedy
+  - name: pre1.k_linear_mean_reduce_7fce9f.7c4629931db7.m1.0733f2fad083.34dde4b5563f
+    bindings:
+      num_tokens: 1
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@map.1/inner: coop
+      REDUCE@map.1/inner.2/map.2/map.1/reduce: ''
+      WORK: t128
+      TILE: ''
+      STAGE: ''
+      RASTER: ''
+    identity: 34dde4b5563fc1d0645cc1cff15d962c1406719932a8a641f95fe988d2296414
+    measurements:
+      emmy_us: 207.10399746894836
+      reference_us: 258.5600018501282
+      reference_backend: same-input-greedy
+  - name: pre1.k_linear_mean_reduce_7fce9f.7c4629931db7.m1.0733f2fad083.9804cac4e117
+    bindings:
+      num_tokens: 1
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@reduce: coop
+      REDUCE@reduce.1/inner: ''
+      WORK: t128
+      TILE: ''
+      STAGE: ''
+      RASTER: ''
+    identity: 9804cac4e1171c33ffad77f52ca07b9a03c449c2ee1b886615799f571880533c
+    measurements:
+      emmy_us: 1.6761904671078636
+      reference_us: 8.245894783421567
+      reference_backend: same-input-greedy
+  - name: pre1.k_linear_mean_reduce_7fce9f.7c4629931db7.m1.0733f2fad083.19e6eb8309d3
+    bindings:
+      num_tokens: 1
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w8x2
+      TILE: mma_m8n8k4_f16_f32/f2x2/k2
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    identity: 19e6eb8309d3f798b820b24fb23bb959c9475c52cd285bb84786412a01e000cd
+    measurements:
+      emmy_us: 2.8761343267940034
+      reference_us: 8.79517809985435
+      reference_backend: same-input-greedy
 - program: 10
   target:
     loop: 150
@@ -36555,6 +36690,80 @@ configs:
       NVIDIA Tesla V100 SXM3 32GB:
         emmy_us: 17184826.171875
         eager_us: 14291.96834564209
+    kernel_set:
+    - pre16.k_linear_mean_reduce_03c479.8caa25e24052.m16.dc6db94ec8ea.dc6db94ec8ea
+    - pre16.k_linear_mean_reduce_03c479.8caa25e24052.m16.dc6db94ec8ea.dd70f818a372
+  - name: pre16.k_linear_mean_reduce_03c479.8caa25e24052.m16.dc6db94ec8ea.dc6db94ec8ea
+    bindings:
+      num_tokens: 16
+    pins:
+      FAST_MATH: false
+    knobs:
+      PLACE@map.1/map.1/reduce: cut
+      PLACE@map.1/map.1/reduce.1/inner.2/map: cut
+    identity: dc6db94ec8ea22ee0ec050481870872ea9a7f86217c7caf6c8e7759c0be4af3b
+    measurements:
+      emmy_us: 1887.8959461077775
+      reference_us: 2645.110697461211
+      reference_backend: same-input-greedy
+  - name: pre16.k_linear_mean_reduce_03c479.8caa25e24052.m16.dc6db94ec8ea.dd70f818a372
+    bindings:
+      num_tokens: 16
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@reduce: g4a
+    identity: dd70f818a372031459cd5b4a7bf086d5710a7929968339fa6b4643512d3dba30
+    measurements:
+      emmy_us: 2.633142861581984
+      reference_us: 9.557333588600159
+      reference_backend: same-input-greedy
+  - name: pre16.k_linear_mean_reduce_03c479.8caa25e24052.m16.dc6db94ec8ea.f3875e932840
+    bindings:
+      num_tokens: 16
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@map.1/inner: ''
+      REDUCE@map.1/inner.1/map.2/map.1/reduce: ''
+      WORK: ''
+      TILE: f3x4
+      STAGE: ''
+      RASTER: ''
+    identity: f3875e9328402acd9c861fd91d3878d9cc8e3544ba5e3eb346bae41b9345ff09
+    measurements:
+      emmy_us: 1883.1360340118408
+      reference_us: 2626.5599727630615
+      reference_backend: same-input-greedy
+  - name: pre16.k_linear_mean_reduce_03c479.8caa25e24052.m16.dc6db94ec8ea.c607711d8ef8
+    bindings:
+      num_tokens: 16
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@reduce: coop
+      REDUCE@reduce.1/inner: ''
+      WORK: t128
+      RASTER: ''
+    identity: c607711d8ef850ff9ef721ae3f889b0a59329edd6453e08493b14660d74d38e8
+    measurements:
+      emmy_us: 2.633142861581984
+      reference_us: 9.557333588600159
+      reference_backend: same-input-greedy
+  - name: pre16.k_linear_mean_reduce_03c479.8caa25e24052.m16.dc6db94ec8ea.5d9b14249e94
+    bindings:
+      num_tokens: 16
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      REDUCE: coop
+      RASTER: ''
+    identity: 5d9b14249e9492a2ad13af422ff83721d47bdbe8b4e28ea7e013e8f3e4e26735
+    measurements:
+      emmy_us: 2.1267692343546796
+      reference_us: 8.99339110954948
+      reference_backend: same-input-greedy
 - program: 11
   target:
     loop: 151
@@ -36571,6 +36780,8 @@ configs:
       emmy_us: 19646556.762695312
       reference_us: 19647283.447265625
       reference_backend: same-input-greedy
+    kernel_set:
+    - pre4096.k_linear_mean_reduce_00af35.ab5352f7b147.m4096.940dcfd32db9.940dcfd32db9
   - name: pre4096.k_linear_mean_reduce_00af35.ab5352f7b147.m4096.bcc778a0e272
     bindings:
       num_tokens: 4096
@@ -36664,6 +36875,65 @@ configs:
     measurements:
       emmy_us: 130.5599957704544
       reference_us: 131.27679824829102
+      reference_backend: same-input-greedy
+  - name: pre4096.k_linear_mean_reduce_00af35.ab5352f7b147.m4096.940dcfd32db9.940dcfd32db9
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      PLACE@map.1/map.1/reduce: cut
+      PLACE@map.1/map.1/reduce.1/inner.2/map: cut
+    identity: 940dcfd32db92fd11b823a6b1a616f0794644e09b8d9dbea0f005df3a4baae39
+    measurements:
+      emmy_us: 3237.1200025081635
+      reference_us: 15199.744015932083
+      reference_backend: same-input-greedy
+  - name: pre4096.k_linear_mean_reduce_00af35.ab5352f7b147.m4096.940dcfd32db9.7869b231f276
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@map.1/inner: ''
+      REDUCE@map.1/inner.1/map.2/map.1/reduce: ''
+      WORK: t16x16
+      TILE: f1x4
+      STAGE: ''
+      RASTER: ''
+    identity: 7869b231f2767ac63ee04c3e977f8851b3c206cd239d26b237691d73f72dfb20
+    measurements:
+      emmy_us: 2849.792003631592
+      reference_us: 14623.744010925293
+      reference_backend: same-input-greedy
+  - name: pre4096.k_linear_mean_reduce_00af35.ab5352f7b147.m4096.940dcfd32db9.44b39ce1aa01
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@reduce: coop
+      REDUCE@reduce.1/inner: ''
+      WORK: t128
+      RASTER: ''
+    identity: 44b39ce1aa0178feefefc77b43885f2a798d7b468d539484f3fed37a4781715b
+    measurements:
+      emmy_us: 159.9999964237213
+      reference_us: 272.8959918022156
+      reference_backend: same-input-greedy
+  - name: pre4096.k_linear_mean_reduce_00af35.ab5352f7b147.m4096.940dcfd32db9.83bc9ee5a4f3
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      REDUCE: coop
+      RASTER: ''
+    identity: 83bc9ee5a4f352fe099c258580a5075bc96e730334c39c4227fbcb07e485519f
+    measurements:
+      emmy_us: 227.32800245285034
+      reference_us: 303.1040132045746
       reference_backend: same-input-greedy
 loops:
 - inputs: [w_down, w_down_scale, w_gate_up, w_gate_up_scale, x]

@@ -390,8 +390,11 @@ symbolic extent leaves the strides of every earlier dim unknown and keeps the di
 the ROW, so it rides ahead of the loop, one evaluation per register row. Inside it, a fused norm→linear re-derived the
 row's whole statistic once per contraction step — a 26x4 tile over K = 16384 evaluating a 16384-wide reduce 26 * 16384
 times where 26 would do, 284 ms against 419 us on a V100 for the same schedule. Only a READ splits this way; the fold
-step accumulates, so it stays in the step whatever it reads. A per-chunk statistic varies with K through its block
-guard and stays with the cell, and an mma leaf always indexes the K coordinate, so its hoisted half is empty.
+step accumulates, so it stays in the step whatever it reads, and an mma leaf always indexes the K coordinate, so its
+hoisted half is empty. The split is taken on the read's STATEMENTS (`_hoist_k_invariant`), not on the seam's edges:
+the seam states the same thing but answers for the staged fill, which bridges the prologue's results through smem
+rows and so drops a prologue nothing bridges. A register tile evaluates the cone whole, so it needs a partition —
+under the edge split, symbolic-seq SDPA lowered a kernel reading twelve names it never bound.
 
 **A bridged seam value keeps its own dtype.** A computed operand's cone splits at its K seam into a row-invariant
 prologue and a per-cell body, and the prologue publishes its results through smem rows the cell reads back — so
