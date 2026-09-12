@@ -512,6 +512,8 @@ def test_unreproducible_pin_flag(monkeypatch):
     from emmy.compiler.pipeline.knob import Knob, KnobType
     from emmy.compiler.pipeline.search.pins import unreproducible_pin_flag
 
+    knob_mod.registry()  # declare space.py's Knobs into the REAL registry — one constructed under the swap is lost with it
+
     monkeypatch.setattr(
         knob_mod,
         "_REGISTRY",
@@ -1783,6 +1785,8 @@ def test_unreproducible_pin_flag_reads_a_cross_cta_split_structurally(monkeypatc
     from emmy.compiler.pipeline import knob as knob_mod
     from emmy.compiler.pipeline.knob import Knob, KnobType
     from emmy.compiler.pipeline.search.pins import unreproducible_pin_flag
+
+    knob_mod.registry()  # declare space.py's Knobs into the REAL registry — one constructed under the swap is lost with it
 
     monkeypatch.setattr(
         knob_mod,
