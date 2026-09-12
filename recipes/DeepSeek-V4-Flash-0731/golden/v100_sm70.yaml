@@ -28591,6 +28591,79 @@ configs:
       NVIDIA Tesla V100 SXM3 32GB:
         emmy_us: 1377833.984375
         eager_us: 25181.184768676758
+    kernel_set:
+    - expert-sym@mxfp4.k_linear_reduce_0de949.7d644f512b51.m1.7f821ab65404.7f821ab65404
+    - expert-sym@mxfp4.k_linear_reduce_0de949.7d644f512b51.m1.7f821ab65404.fec324df6e4b
+  - name: expert-sym@mxfp4.k_linear_reduce_0de949.7d644f512b51.m1.7f821ab65404.7f821ab65404
+    bindings:
+      num_tokens: 1
+    pins:
+      FAST_MATH: false
+    knobs:
+      PLACE@map.1/inner.2/map.1/inner: cut
+    identity: 7f821ab654040c58390b6ea58b413c9fe50caf225e3026bc78570940bfb1e3d1
+    measurements:
+      emmy_us: 409.5938510399094
+      reference_us: 436.20643793952235
+      reference_backend: same-input-greedy
+  - name: expert-sym@mxfp4.k_linear_reduce_0de949.7d644f512b51.m1.7f821ab65404.fec324df6e4b
+    bindings:
+      num_tokens: 1
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE: g64k
+    identity: fec324df6e4bf56ecc62a2a8603f590b8cf675dcdb33e04944cdd7e9e4654e77
+    measurements:
+      emmy_us: 282.87385470678714
+      reference_us: 306.2864321411825
+      reference_backend: same-input-greedy
+  - name: expert-sym@mxfp4.k_linear_reduce_0de949.7d644f512b51.m1.7f821ab65404.e42561678f7e
+    bindings:
+      num_tokens: 1
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      RASTER: ''
+    identity: e42561678f7e1123d2b58938665884fd35aa78e75a8254c6da2cfd49a55fd3b2
+    measurements:
+      emmy_us: 126.71999633312225
+      reference_us: 129.92000579833984
+      reference_backend: same-input-greedy
+  - name: expert-sym@mxfp4.k_linear_reduce_0de949.7d644f512b51.m1.7f821ab65404.8076a4cbff49
+    bindings:
+      num_tokens: 1
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x8
+      TILE: mma_m8n8k4_f16_f32/f1x1/k4
+      REDUCE: ''
+      STAGE: d1/smem
+      RASTER: ''
+    identity: 8076a4cbff490819ab9b3a94e96b2f04986db1c54493cef38d1dee4f3ae27ca8
+    measurements:
+      emmy_us: 279.55201268196106
+      reference_us: 302.7626673380534
+      reference_backend: same-input-greedy
+  - name: expert-sym@mxfp4.k_linear_reduce_0de949.7d644f512b51.m1.7f821ab65404.8c0373000cfc
+    bindings:
+      num_tokens: 1
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: 8c0373000cfcfd70bce8298140d9e4f99b3cdb63bb7d6f437906441c78a77e0d
+    measurements:
+      emmy_us: 3.3218420248261022
+      reference_us: 3.523764803129084
+      reference_backend: same-input-greedy
 - program: 1
   target:
     loop: 1
@@ -28670,6 +28743,79 @@ configs:
       NVIDIA Tesla V100 SXM3 32GB:
         emmy_us: 1293945.80078125
         eager_us: 25151.487350463867
+    kernel_set:
+    - expert1@mxfp4.k_linear_reduce_8da262.cf99757467d0.m1.7f821ab65404.7f821ab65404
+    - expert1@mxfp4.k_linear_reduce_8da262.cf99757467d0.m1.7f821ab65404.fec324df6e4b
+  - name: expert1@mxfp4.k_linear_reduce_8da262.cf99757467d0.m1.7f821ab65404.7f821ab65404
+    bindings:
+      num_tokens: 1
+    pins:
+      FAST_MATH: false
+    knobs:
+      PLACE@map.1/inner.2/map.1/inner: cut
+    identity: 7f821ab654040c58390b6ea58b413c9fe50caf225e3026bc78570940bfb1e3d1
+    measurements:
+      emmy_us: 408.6721099486656
+      reference_us: 435.3568626239019
+      reference_backend: same-input-greedy
+  - name: expert1@mxfp4.k_linear_reduce_8da262.cf99757467d0.m1.7f821ab65404.fec324df6e4b
+    bindings:
+      num_tokens: 1
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE: g64k
+    identity: fec324df6e4bf56ecc62a2a8603f590b8cf675dcdb33e04944cdd7e9e4654e77
+    measurements:
+      emmy_us: 282.3361165395088
+      reference_us: 305.9488607241827
+      reference_backend: same-input-greedy
+  - name: expert1@mxfp4.k_linear_reduce_8da262.cf99757467d0.m1.7f821ab65404.e42561678f7e
+    bindings:
+      num_tokens: 1
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      RASTER: ''
+    identity: e42561678f7e1123d2b58938665884fd35aa78e75a8254c6da2cfd49a55fd3b2
+    measurements:
+      emmy_us: 126.3359934091568
+      reference_us: 129.40800189971924
+      reference_backend: same-input-greedy
+  - name: expert1@mxfp4.k_linear_reduce_8da262.cf99757467d0.m1.7f821ab65404.8076a4cbff49
+    bindings:
+      num_tokens: 1
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x8
+      TILE: mma_m8n8k4_f16_f32/f1x1/k4
+      REDUCE: ''
+      STAGE: d1/smem
+      RASTER: ''
+    identity: 8076a4cbff490819ab9b3a94e96b2f04986db1c54493cef38d1dee4f3ae27ca8
+    measurements:
+      emmy_us: 279.04000878334045
+      reference_us: 302.42133140563965
+      reference_backend: same-input-greedy
+  - name: expert1@mxfp4.k_linear_reduce_8da262.cf99757467d0.m1.7f821ab65404.8c0373000cfc
+    bindings:
+      num_tokens: 1
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: 8c0373000cfcfd70bce8298140d9e4f99b3cdb63bb7d6f437906441c78a77e0d
+    measurements:
+      emmy_us: 3.2961077561683525
+      reference_us: 3.5275293185430416
+      reference_backend: same-input-greedy
 - program: 3
   target:
     loop: 3
@@ -28690,6 +28836,8 @@ configs:
       NVIDIA Tesla V100 SXM3 32GB:
         emmy_us: 200190.97900390625
         eager_us: 29217.792510986328
+    kernel_set:
+    - expert4096@mxfp4.k_linear_reduce_a3f064.592880680b39.m4096.7e22d4bab7d7.7e22d4bab7d7
   - name: expert4096@mxfp4.k_linear_reduce_a3f064.592880680b39.m4096.ea9536b34e57
     bindings:
       num_tokens: 4096
@@ -28721,6 +28869,50 @@ configs:
     measurements:
       emmy_us: 11442.17586517334
       reference_us: 11416.576385498047
+      reference_backend: same-input-greedy
+  - name: expert4096@mxfp4.k_linear_reduce_a3f064.592880680b39.m4096.7e22d4bab7d7.7e22d4bab7d7
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      PLACE@map.1/inner.1/map.1/inner: cut
+    identity: 7e22d4bab7d7527e70ecc772ef07c53e51aa99b237092ad317e8382a70af231e
+    measurements:
+      emmy_us: 38149.120807647705
+      reference_us: 38231.040477752686
+      reference_backend: same-input-greedy
+  - name: expert4096@mxfp4.k_linear_reduce_a3f064.592880680b39.m4096.7e22d4bab7d7.93f0a0e7072b
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x1
+      TILE: mma_m8n8k4_f16_f32/f1x2
+      REDUCE: ''
+      STAGE: d2/smem
+      RASTER: ''
+    identity: 93f0a0e7072b8d06ec161a0d8aa6780bd68fad4248c016c539f9de9178bb2c28
+    measurements:
+      emmy_us: 30797.82485961914
+      reference_us: 30780.41648864746
+      reference_backend: same-input-greedy
+  - name: expert4096@mxfp4.k_linear_reduce_a3f064.592880680b39.m4096.7e22d4bab7d7.6d6cc5eb4ffd
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x1
+      TILE: mma_m8n8k4_f16_f32/f1x4/k8
+      REDUCE: ''
+      STAGE: d1/smem
+      RASTER: ''
+    identity: 6d6cc5eb4ffdab6ebd903718e4c57c057bdf5145d843e46fb6b44ec16d6aaaa9
+    measurements:
+      emmy_us: 7351.295948028564
+      reference_us: 7450.623989105225
       reference_backend: same-input-greedy
 - program: 4
   target:
