@@ -197,13 +197,26 @@ class _ScheduleFork(Fork):
         anything), so the row's value must extend the branch's value at a segment boundary. A
         site the row names only by its bare family key reads as a bare pin does
         (``evidence_row_vouches``): the site may be OFF or carry the value, never another — pruned
-        here so a row that names no leaf costs O(path), not the pool."""
+        here so a row that names no leaf costs O(path), not the pool.
+
+        The prefix reading has one exception, and leaving it out cost the pool bound it advertises:
+        every string extends the empty one, so an OFF already in ``row`` admitted every request and
+        the descent only failed at leaf matching. One such site doubles the work and these kernels
+        carry dozens. The claim is only about the EMPTY spelling — a field in ``row`` is one the
+        codec emitted, not necessarily one whose spelling is complete (``WORK`` still grows its
+        producer band there) — and an emitted empty never fills in later: the classic codec writes a
+        site's node and edge values when that site advances, and an unclaimed inventory stays
+        ``None`` rather than spelling ``Work()``. An OFF merely INHERITED through ``branch_knobs``
+        is a pin, not a decision, and still admits, as does a bare family key — a bare pin permits
+        OFF."""
         for name, value in self.knobs.items():
             if name.startswith(("S_", "H_")):
                 continue
             family = name.split("@", 1)[0]
             if name in row:
                 want = str(row[name])
+                if name in self.row and not str(value) and want:
+                    return False
             elif name != family and family in row:
                 want = str(row[family])
             else:
