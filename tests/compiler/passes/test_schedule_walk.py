@@ -24,13 +24,13 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.frontend.ir import MatmulOp, SdpaOp
 from emmy.compiler.ir.pure import Fold, Lambda
-from emmy.compiler.ir.schedule import Placement
+from emmy.compiler.ir.schedule import Placement, Tile, Work
 from emmy.compiler.ir.schedule.catalog import coop_reduce_moves
 from emmy.compiler.ir.schedule.classic import refusals as _classic
 from emmy.compiler.ir.schedule.classic import sites as _sites
 from emmy.compiler.ir.schedule.views import ContractionFacts
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
-from emmy.compiler.ir.tile import OutputSpec, Reduce, TileOp
+from emmy.compiler.ir.tile import OutputSpec, Reduce, TileOp, ops
 from emmy.compiler.ir.tile.ops import Sched
 from emmy.compiler.pipeline.fork import iter_leaves
 from emmy.compiler.pipeline.knob import family_of
@@ -407,6 +407,60 @@ def test_a_direct_chain_member_offers_the_non_transposed_catalog(unpinned) -> No
     ILP catalog, priced at the offer rather than dropped at the binder."""
     red = _chain_member("acc", "k", "x", _provider())
     assert _classic._reduction_domain(_tile_stub(_chain_root(red)), red) == _member_catalog()
+
+
+def _norm_linear_root() -> Fold:
+    """A fused norm→linear: the contraction's A cone normalizes its row by a statistic the cone
+    folds itself. A tier COULD fold this root whole — its one carried state is the bilinear
+    channel — and the untiled tiers do not, which is the shape every pre-attention gate has."""
+    stat = reduction("k", (slab("x_e", "x", "m", "k"),), (Assign(name="acc_ms__v", op="multiply", args=("x_e", "x_e")),), ("acc_ms",))
+    cone = projection(
+        operands=(slab("x_k", "x", "m", "k"), stat),
+        body=(Assign(name="rs", op="rsqrt", args=("acc_ms",)), Assign(name="xn", op="multiply", args=("x_k", "rs"))),
+        results=("xn",),
+    )
+    return contraction("k", cone, (slab("w_e", "w", "n", "k"), "acc"))
+
+
+def test_a_tilable_contraction_roots_own_statistic_is_still_a_chain_member(unpinned) -> None:
+    """Whether a FILL takes the root's cone over is the schedule's answer, not the term's. A
+    contraction a tier could fold whole still binds through the untiled arm when nothing tiles it,
+    and there its statistic is a fold beside the root — so the member offers the catalog. Read off
+    the term, the statistic was serial-only, and the cooperative reduce over a 16384-wide gate
+    evaluated its whole row statistic once per thread."""
+    root = _norm_linear_root()
+    assert root.tiles_whole(), "the probe root is one a tier COULD fold whole"
+    statistic = next(member for member in ops.chain_members(root) if member.axis == "k")
+    assert _classic._reduction_domain(_tile_stub(root), statistic) == _member_catalog()
+
+
+def test_an_output_tiled_root_offers_its_chain_member_no_partition(unpinned) -> None:
+    """The complement, and the reason the member's own catalog may stay term-read: a chain binds
+    only in the binder's UNTILED arm, so a row that output-tiles the root and partitions its member
+    spells a kernel the binder never builds — it would realize without the partition and read as an
+    unreproducible pin. The context refuses the pairing; both halves stay reachable apart."""
+    tile = TileOp(
+        op=_norm_linear_root(),
+        place=Placement(free=(Axis("m", 64), Axis("n", 64))),
+        axes=(Axis("m", 64), Axis("n", 64), Axis("k", 256)),
+        name="k_norm_linear",
+        knobs={},
+    )
+    (root,) = ops.kernel_roots(tile.op)
+    statistic = next(member for member in ops.chain_members(root) if member.axis == "k")
+    sched = Sched(tile, place=tile.place.on_grid())
+    root_key, member_key = sched.key("TILE", root), sched.key("REDUCE", statistic)
+
+    rows = [dict(leaf.knobs) for leaf in iter_leaves(_SCHEDULE_RULE.classic_forks(tile, tile.name, {}, Context.from_target(_CC)))]
+    picks = []
+    for row in rows:
+        work = Work.parse(str(row["WORK"])) if str(row.get("WORK", "")) else None
+        picks.append((Tile.parse(str(row.get(root_key, "")), work), Reduce.parse(str(row.get(member_key, "")), work)))
+    assert not [1 for plan, partition in picks if plan.is_tiled and partition != Reduce()], (
+        "the fill owns the cone; the pin would not realize"
+    )
+    assert [1 for plan, partition in picks if not plan.is_tiled and partition != Reduce()], "an untiled root must still reach the partition"
+    assert [1 for plan, _ in picks if plan.is_tiled], "the root must still reach a tile"
 
 
 def test_a_transposed_band_is_not_in_a_direct_chain_members_domain(unpinned) -> None:
