@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -89,6 +89,12 @@ class Fork(ABC):
 
     @abstractmethod
     def expand(self) -> list[Op | Graph | Fork]: ...
+
+    def narrow(self, row: Mapping) -> Fork:
+        """This branch with its enumeration re-sourced to ``row`` where it can be: a schedule
+        root offers the row's values at the sites the row names. The default is the branch itself —
+        a tree with no enumeration behind it descends as it is."""
+        return self
 
     def leaves(self) -> Iterator[Op | Graph | Fork]:
         """Stream complete descendants without retaining the expanded tree."""
@@ -151,8 +157,6 @@ class _ScheduleTree:
     row_delta: Callable[[ScheduleContext, ScheduleContext], Mapping]
     leaf: Callable[[Schedule], Fork]
     pool_id: str
-    pool_bound: int
-    pool_descent_bound: int
 
     def step(self, context: ScheduleContext, row: Mapping) -> list[Fork]:
         forks = []
@@ -182,14 +186,22 @@ class _ScheduleFork(Fork):
 
     @property
     def pool_bound(self) -> int:
-        return self.tree.pool_bound
+        return self.context.problem.bounds[0]
 
     @property
     def pool_descent_bound(self) -> int:
-        return self.tree.pool_descent_bound
+        return self.context.problem.bounds[1]
 
     def expand(self) -> list[Fork]:
         return self.tree.step(self.context, self.row)
+
+    def narrow(self, row: Mapping) -> Fork:
+        """The root of a schedule tree re-sourced to ``row``: its problem offers the row's values at
+        the sites the row names, so the descent below it instantiates one path. A branch below the
+        root has decided sites already and descends as it is."""
+        if self.row or self.context.schedule.nodes or self.context.schedule.kernel is not None:
+            return self
+        return replace(self, context=self.context.narrowed(row))
 
     def admits(self, row: Mapping) -> bool:
         """A schedule branch spells each decided knob as the PREFIX of what its leaves will spell
@@ -221,12 +233,11 @@ def schedule_forks(
     row_delta: Callable[[ScheduleContext, ScheduleContext], Mapping],
     leaf: Callable[[Schedule], Fork],
     pool_id: str,
-    pool_bound: int,
-    pool_descent_bound: int,
 ) -> list[Fork]:
-    """Represent any schedule context as a lazy pipeline Fork tree."""
-    tree = _ScheduleTree(dict(branch_knobs), row_delta, leaf, pool_id, pool_bound, pool_descent_bound)
-    return tree.step(context, {})
+    """Represent any schedule context as a lazy pipeline Fork tree: one unexpanded root, so
+    nothing is enumerated until a consumer expands it — or narrows it to a row first."""
+    tree = _ScheduleTree(dict(branch_knobs), row_delta, leaf, pool_id)
+    return [_ScheduleFork(tree, context, {})]
 
 
 def iter_leaves(options: Iterable[Op | Graph | Fork]) -> Iterator[Op | Graph | Fork]:
@@ -272,13 +283,15 @@ def fork_signature(root_op: Op, options: Sequence[Op | Graph | Fork], ctx) -> fr
 
 def leaf_for(options: Sequence[Op | Graph | Fork], row: Mapping, *, skip: Callable[[dict], bool] | None = None):
     """The first leaf a (possibly partial) knob ``row`` vouches for, as ``(leaf, its knobs)``, or
-    ``None`` — descending only the branches that admit the row (:meth:`Fork.admits`), so the walk
-    instantiates O(path × siblings) Forks whatever the pool size. ``skip`` drops a leaf by its knobs
-    (a blocklisted tile). The one descent the evidence pick and the golden replay share."""
+    ``None``. A schedule root is first narrowed to the row (:meth:`Fork.narrow`), so its
+    enumeration offers the row's values at the sites the row names and the descent below it is
+    one path; every branch is descended only when it admits the row (:meth:`Fork.admits`).
+    ``skip`` drops a leaf by its knobs (a blocklisted tile). The one descent the evidence pick,
+    the decision memo's replay and the golden replay share."""
     for option in options:
         if isinstance(option, Fork) and not option.is_leaf:
             if option.admits(row):
-                found = leaf_for(option.expand(), row, skip=skip)
+                found = leaf_for(option.narrow(row).expand(), row, skip=skip)
                 if found is not None:
                     return found
             continue

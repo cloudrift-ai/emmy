@@ -35,6 +35,10 @@ _RECIPE_GOLDEN_DIR = "golden"
 _PROGRAM_GRAPH_CACHE: dict[int, tuple[dict, object]] = {}
 _LOOP_GRAPH_CACHE: dict[int, tuple[dict, object]] = {}
 _REFERENCE_CACHE: dict[int, tuple[dict, dict]] = {}
+#: Whole persisted programs lowered through the loop passes, memoized per (payload OBJECT, card)
+#: the same way as the sibling caches above. A frontend target resolves its provenance selector
+#: against this, so one traced layer lowers once however many kernels it contains.
+_LOWERED_PROGRAM_CACHE: dict[tuple, tuple[dict, object]] = {}
 _SAFE_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 
 
@@ -896,6 +900,36 @@ def _whole_op_origins(program, ctx) -> dict[str, tuple[tuple[str, ...], tuple[st
     return found
 
 
+def _lowered_program(record: GoldenRecord, ctx):
+    """The record's whole persisted program, lowered once per (program, card).
+
+    Every frontend target of one program selects out of the same lowering, so the pass runs once
+    for a traced layer instead of once per kernel it contains. Callers rebind ops on the nodes
+    they select, so each gets its own copy.
+    """
+    from emmy.compiler import provenance  # noqa: PLC0415
+    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline  # noqa: PLC0415
+
+    key = (id(record.program_wire), tuple(ctx.compute_capability), ctx.gpu_name)
+    cached = _LOWERED_PROGRAM_CACHE.get(key)
+    if cached is None or cached[0] is not record.program_wire:
+        graph = record.program.copy()
+        provenance.seed(graph)
+        cached = (record.program_wire, Pipeline.build(LOOP_PASSES).run(graph, ctx=ctx))
+        _LOWERED_PROGRAM_CACHE[key] = cached
+    return cached[1].copy()
+
+
+def _lowered_slice(record: GoldenRecord, ctx):
+    """The record's own frontend slice, lowered — the fallback context for its selector."""
+    from emmy.compiler import provenance  # noqa: PLC0415
+    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline  # noqa: PLC0415
+
+    graph = record.target_program.copy()
+    provenance.seed(graph)
+    return Pipeline.build(LOOP_PASSES).run(graph, ctx=ctx)
+
+
 def _target_kernel_nodes(record: GoldenRecord):
     """The record's target kernels in the CURRENT compiler: lower the persisted program through
     the loop passes and select the target's ``LoopOp`` node(s) — every output kernel for a Loop IR
@@ -907,18 +941,25 @@ def _target_kernel_nodes(record: GoldenRecord):
     from emmy.compiler.pipeline import LOOP_PASSES, Pipeline  # noqa: PLC0415
 
     ctx = Context.from_target(record.compute_cap, gpu_name=record.gpu_name or None)
-    graph = record.target_program.copy()
-    if record.loop_wire is None:
-        provenance.seed(graph)
-    lowered = Pipeline.build(LOOP_PASSES).run(graph, ctx=ctx)
     if record.loop_wire is not None:
+        lowered = Pipeline.build(LOOP_PASSES).run(record.target_program.copy(), ctx=ctx)
         # One kernel per PRODUCER, not per output: a multi-output kernel (an NVFP4 re-encode emits
         # packed codes beside their block scales) produces several of the graph's outputs, and
         # counting it once per output made a single-kernel target read as "lowers to N kernels".
         producers = (lowered.producer(output) for output in lowered.outputs)
         nodes = list({node.id: node for node in producers if node is not None and isinstance(node.op, LoopOp)}.values())
-    else:
-        wanted = frozenset(record.origins)
+        if not nodes:
+            raise ValueError(f"{record.name}: the persisted target selects no kernel after lowering")
+        return lowered, nodes
+
+    # A frontend target names its kernel by the trace's provenance, so the whole persisted program
+    # is the context the selector was recorded in and the one to resolve it in. The target's own
+    # frontend slice is the fallback, not the default: slicing re-fuses the cone in isolation, so a
+    # cone of sibling linears around one attention comes back as several kernels and none carries
+    # the recorded origin set. The slice still answers the opposite case -- a recorded cone that is
+    # a strict subset of what the current compiler fuses maximally, which the program never matches.
+    wanted = frozenset(record.origins)
+    for lowered in (_lowered_program(record, ctx), _lowered_slice(record, ctx)):
         nodes = []
         for node_id in lowered.topological_order():
             node = lowered.nodes[node_id]
@@ -927,9 +968,9 @@ def _target_kernel_nodes(record: GoldenRecord):
             origins = frozenset(origin for origin in provenance.get(node) if origin in record.program.nodes)
             if origins == wanted:
                 nodes.append(node)
-    if not nodes:
-        raise ValueError(f"{record.name}: the persisted target selects no kernel after lowering")
-    return lowered, nodes
+        if nodes:
+            return lowered, nodes
+    raise ValueError(f"{record.name}: the persisted target selects no kernel after lowering")
 
 
 def _lifted_target(record: GoldenRecord):

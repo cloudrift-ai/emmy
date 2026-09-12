@@ -238,13 +238,13 @@ class Sched:
         if self.schedule is None:
             return None
         site = self.tile.node_id(node)
-        assignment = self.schedule.nodes[site]
+        choice = self.schedule.nodes[site]
         if family == "TILE":
-            return assignment.tile if assignment.tile.is_tiled else None
+            return choice.tile if choice.tile.is_tiled else None
         if family == "REDUCE":
-            if not isinstance(assignment, ReductionSchedule) or not assignment.reduce.stages:
+            if not isinstance(choice, ReductionSchedule) or not choice.reduce.stages:
                 return None
-            return assignment.reduce
+            return choice.reduce
         if family == "STAGE":
             if self.materialization is None:
                 return None
@@ -369,10 +369,10 @@ def scheduled(
     workers=None,
     axes: tuple = (),
 ):
-    """Build a scheduled ``TileOp`` from one accepted semantic assignment.
+    """Build a scheduled ``TileOp`` from one accepted semantic schedule.
 
     The one constructor every row materializer shares (a split piece is not built here — it leaves
-    ``030_cut`` unscheduled and reaches this through its own row). The accepted assignment
+    ``030_cut`` unscheduled and reaches this through its own row). The accepted schedule
     is the sole worker-inventory source; the encoded row must agree with it."""
     if schedule is None:
         raise ValueError("cannot construct a scheduled TileOp without a Schedule")
@@ -381,7 +381,7 @@ def scheduled(
     if work.producer != producer:
         raise ValueError(f"WORK producer band {work.producer} disagrees with WarpSpec producer band {producer}")
     if knobs.get("WORK") != work.spell():
-        raise ValueError("encoded WORK does not agree with the accepted classic assignment")
+        raise ValueError("encoded WORK does not agree with the accepted classic schedule")
     return TileOp(
         op=op,
         name=name,
@@ -613,12 +613,15 @@ def chain_members(root: Fold) -> tuple[Fold, ...]:
     operand edges and the axis-invariant (hoisted) reduce operands of members, deepest first, so a
     member another member's cone reads comes ahead of it. This is the CHAIN the binder emits in
     body order around one shared lane axis. A reduce read per step of another (the score inside
-    the twist) lowers inside that reduce's loop and is no member, and a root a tile folds WHOLE has
-    no chain: its cone's statistic is the tiled fill's business, not a fold beside the root's. A
-    carrier the tiers cannot fold whole (:meth:`Fold.tiles_whole`) keeps its chain — no fill takes
-    its cone over, so the members are still folds beside it."""
+    the twist) lowers inside that reduce's loop and is no member.
+
+    Whether a FILL takes the cone over is the schedule's answer, not the term's: the binder asks
+    this only from its untiled arm, where no fill exists and the root's own statistic is a fold
+    beside it, so the chain is read off the term alone. The pairing a fill DOES take over — an
+    output-tiled root beside a partitioned member — is refused where the two choices meet
+    (``classic.context``), not pre-empted here by a term-level guess at the tier."""
     out: list[Fold] = []
-    if not isinstance(root, Fold) or root.axis is None or root.tiles_whole():
+    if not isinstance(root, Fold) or root.axis is None:
         return ()
 
     def visit(node: Fold, hoisted_from: str | None) -> None:
@@ -637,14 +640,16 @@ def chain_members(root: Fold) -> tuple[Fold, ...]:
 
 
 def chain_form(root: Fold) -> bool:
-    """Whether a reduce root binds as a CHAIN — its members, or a computed provider cone hoisted
-    ahead of its loop (a workspace row and its rsqrt), sit beside its own fold. The transposed
-    band's σ-substitution and guarded close assume the fold stands alone at the kernel root, so a
-    chain root takes no transposed band."""
+    """Whether a computed provider cone — a workspace row and its rsqrt — is hoisted ahead of this
+    root's loop, beside its own fold. The transposed band's σ-substitution and guarded close assume
+    the fold stands alone at the kernel root, so such a root takes no band.
+
+    A MEMBER is not what decides that. The band absorbs one that folds serially, hoisted ahead of
+    its loop, which is what every recorded transposed row of a fused reduce does; only a member the
+    schedule PARTITIONS makes the root a chain, and that is a relation between two picks rather
+    than a fact about the term (``classic.context`` refuses the pair)."""
     if not isinstance(root, Fold) or root.axis is None:
         return False
-    if chain_members(root):
-        return True
     return any(
         edge.axis is None
         and root.axis not in edge.free_axes
