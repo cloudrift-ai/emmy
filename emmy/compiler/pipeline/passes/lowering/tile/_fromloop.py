@@ -470,8 +470,10 @@ def scan_from_loop(loop: Loop, axes: tuple = (), levels: tuple = ()) -> tuple[Fo
     # reading is a reading of the stored term and no later pass rewrites the tree into that form.
     # A load over COORDINATES is a slab; a data-dependent GATHER — an index reading a value the step
     # computes (the packed-pair table read by a decoded code) — is a statement of its cone: the value
-    # it reads is not an axis, and a slab would declare it as one.
-    defined = {name for stmt in step if not isinstance(stmt, Load) for name in stmt.defines()}
+    # it reads is not an axis, and a slab would declare it as one. A LOAD defines such a value too:
+    # a trellis code read from gmem indexes the next table read, and reading only the arithmetic
+    # here left that index declared as a coordinate the kernel could hand no extent.
+    defined = {name for stmt in step for name in stmt.defines()}
     gathers = {id(stmt) for stmt in step if isinstance(stmt, Load) and any(expr.free_vars() & defined for expr in stmt.index)}
     slabs = tuple(Fold.slab(stmt) for stmt in step if isinstance(stmt, Load) and id(stmt) not in gathers)
     plain = Body(stmt for stmt in step if not isinstance(stmt, Load) or id(stmt) in gathers)
