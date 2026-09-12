@@ -709,7 +709,12 @@ def _record_rows(destination: Path, name: str, *, decisions, kernels, reference_
             entry["realizations"].append(row)
         else:
             recorded["measurements"] = row["measurements"]
-        written.append(row["name"])
+        # The name of the row that CARRIES the measurement — the existing row's wherever the write
+        # landed on one. A route whose seam the seed itself records matches the seed on every key,
+        # so the decision lands there, and naming the row that was not written leaves
+        # ``kernel_set`` pointing at nothing: the file is refused on the way out and the
+        # measurement just taken is lost.
+        written.append(row["name"] if recorded is None else recorded["name"])
     if decisions:
         seed["kernel_set"] = written[: len(decisions)]
     dump_golden_file(document, destination, overwrite=True, incremental=True)
