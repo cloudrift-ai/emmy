@@ -2125,6 +2125,10 @@ def spell_mxfp4_inputs(
             output=Tensor(f"{name}_blocks_view", (n, k // 32, 16, 1), "i32"),
         )
         blocks_bc = broadcast_to(graph, blocks_view, expanded)
+        # The nibble shift depends on the lane alone, so it is built at the lane extent and
+        # broadcast at the use site — the awq4 unpack's idiom. Multiplying the broadcast lanes
+        # instead makes the product a per-weight constant cone, which folds into a device table
+        # as wide as the weights themselves: one i32 load per decoded nibble, in the K-loop.
         lanes = graph.add_node(
             op=RangeOp(start=0, stop=2, step=1, dtype="i32"),
             inputs=[],
@@ -2135,16 +2139,15 @@ def spell_mxfp4_inputs(
             inputs=[lanes],
             output=Tensor(f"{name}_lanes_view", (1, 1, 1, 2), "i32"),
         )
-        lanes = broadcast_to(graph, lanes, expanded)
-        four = const_bc(graph, name=f"{name}_four", value=4, target_shape=expanded, dtype="i32")
+        four = const_bc(graph, name=f"{name}_four", value=4, target_shape=(1, 1, 1, 2), dtype="i32")
         shifts = graph.add_node(
             op=ElementwiseOp(op="multiply"),
             inputs=[lanes, four],
-            output=Tensor(f"{name}_shifts", expanded, "i32"),
+            output=Tensor(f"{name}_shifts", (1, 1, 1, 2), "i32"),
         )
         shifted = graph.add_node(
             op=ElementwiseOp(op="right_shift"),
-            inputs=[blocks_bc, shifts],
+            inputs=[blocks_bc, broadcast_to(graph, shifts, expanded)],
             output=Tensor(f"{name}_shifted", expanded, "i32"),
         )
         mask15 = const_bc(graph, name=f"{name}_mask15", value=15, target_shape=expanded, dtype="i32")

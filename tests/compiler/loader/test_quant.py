@@ -303,6 +303,17 @@ def test_spell_mxfp4_inputs_preserves_packed_feed_and_values():
     np.testing.assert_array_equal(fn(*inputs).numpy(), expected)
 
 
+def test_spell_mxfp4_inputs_keeps_the_nibble_shift_at_the_lane_extent():
+    """The shift that picks a byte's low or high nibble depends on the lane alone. Built at the
+    weight extent instead, it is a constant cone as wide as the weights, which folds into a device
+    table read once per decoded nibble inside the K-loop — four bytes of traffic per half-byte of
+    weight. The awq4 unpack builds it small and broadcasts at the use site; so does this one."""
+    graph = _input_graph((8, 64))
+    spell_mxfp4_inputs(graph, {"w": ((8, 2, 16), (8, 2))}, transposed=False)
+    graph.validate()
+    assert tuple(d.as_static() for d in graph.nodes["w_shifts"].output.shape) == (1, 1, 1, 2)
+
+
 def test_spell_mxfp4_inputs_decodes_in_place_for_the_f_linear_orientation():
     """Experts stored as ``(out, in)`` and applied through ``F.linear`` (DeepSeek, OLMoE) trace
     the STORED orientation, so the decode must land there — no transpose. The same blocks under
