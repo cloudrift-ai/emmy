@@ -17,7 +17,7 @@ everything the term deliberately does not carry:
   ``extract_output_specs`` pair that reconstitutes the effectful stmt stream from them.
 
 That split is the layer's invariant, not a convenience. The stored term is pure algebra, IMMUTABLE
-across the whole schedule search — a fork is a different assignment, never a rebuilt tree — which is
+across the whole schedule search — a fork is a different schedule, never a rebuilt tree — which is
 what keeps kernel identity (``Op.identity_key`` over the derived ``loop_body``) schedule-free, with
 the schedule, materialization, placement binding and workers excluded. Tile IR stores only
 pure terms; statements appear when the term is
@@ -356,7 +356,7 @@ class TileOp(Op):
 
     There is **no** let table: a computed operand is stored inline on its edge, and sharing is the
     product contraction's arity (see the module docstring), so stored trees are already
-    resolved and every walk is a plain tree walk. An accepted ``schedule`` assignment contains
+    resolved and every walk is a plain tree walk. An accepted ``schedule`` contains
     choices only; ``materialization`` separately contains placed geometry and resolved transport
     facts. There is no second schedule map or per-node schedule field. The ``op`` term is pure
     algebra, IMMUTABLE across the whole schedule search. Read through
@@ -371,7 +371,7 @@ class TileOp(Op):
     # names only; this is the domain it is evaluated on, and ``Fold.lower`` takes it whole.
     axes: tuple[Axis, ...] = ()
     workers: WarpSpec | None = None
-    # The accepted semantic assignment and its derived lowering facts. Unscheduled Tile IR carries
+    # The accepted semantic schedule and its derived lowering facts. Unscheduled Tile IR carries
     # neither; scheduling installs both together.
     schedule: Schedule | None = field(default=None, compare=False, repr=False)
     materialization: object | None = field(default=None, compare=False, repr=False)
@@ -642,7 +642,7 @@ class TileOp(Op):
         it reads) and places each store after the term defining its value — the extents, the store
         program (index spelling, ``atomicAdd``, width, output sweeps) and a cut child's typed seam
         ``Load`` are all in the body. Schedule-free by construction: ``lower`` never reads the
-        classic assignment, and ``place`` stays out entirely — which coordinates the grid binds,
+        classic schedule, and ``place`` stays out entirely — which coordinates the grid binds,
         and in what order the source nest spelled them, is execution choice, not identity. A bare
         reduction carries no ``Write`` — its grid-cell store is materializer glue derived from
         ``place.grid``, so the empty store stream is itself derivable. Cached: the term and the

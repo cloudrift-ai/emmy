@@ -169,7 +169,7 @@ def _kernel_nodes(graph: Graph) -> list[tuple[str, object]]:
     kernels are finalized ``LoopOp`` instances. A direct post-cut reproducer instead starts at an
     unscheduled ``TileOp``; it enters the same inner search so its rows keep the child identity
     ordinary parent-route replay already consumes. A Tile root carrying a classic ``Schedule`` is
-    already decided and stays lowering-only; the typed assignment is the exact scheduled marker."""
+    already decided and stays lowering-only; the typed schedult is the exact scheduled marker."""
     return [
         (nid, n.op) for nid, n in graph.nodes.items() if isinstance(n.op, LoopOp) or (isinstance(n.op, TileOp) and n.op.schedule is None)
     ]

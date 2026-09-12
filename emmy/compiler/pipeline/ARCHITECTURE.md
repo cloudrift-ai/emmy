@@ -1680,15 +1680,16 @@ Two equivalent forms:
 
 For structural and kernel-lowering knobs, pinning replaces tuner choice through `Knob.narrow`; a value outside the
 knob's hint tuple can therefore remain authoritative while downstream structural gates still apply. Classic schedule
-parameters are deliberately stricter: `WORK`, `TILE`, `REDUCE`, `STAGE`, and `RASTER` restrict Algorithm 1's fixed
-domains and never add a member. A value absent from the applicable factor yields no schedule row. The replay paths
+parameters are deliberately stricter: `WORK`, `TILE`, `REDUCE`, `STAGE`, and `RASTER` are the values the sites of
+Algorithm 1 offer, checked with the catalog's own rules, and never add a member. A value the applicable site cannot
+take yields no schedule row. The replay paths
 (`run --bench --golden` / `--ab`) verify realized-vs-pinned knobs on every pinned row right after the pinned compile
 and fail a mismatch (`unreproducible pin … NOT benched`) instead of benching a fallback (see Part 7).
 
 Classic schedule parameters use exact canonical spelling. Invalid widths, unavailable atoms or transports, K-step
 mismatches, and over-budget scalar tiles are absent from their static factors, so those values match no row. Persistent
 rows still pass through `ClassicScheduleCodec`, which rejects aliases, malformed values, and incompatible complete
-assignments. Outside the classic schedule families, each owning `Knob` retains its parser; for example, a `BOOL` knob
+schedules. Outside the classic schedule families, each owning `Knob` retains its parser; for example, a `BOOL` knob
 rejects an unrecognized value instead of coercing a typo (`ture`) to `False`.
 
 ### Registered knobs
@@ -1710,7 +1711,7 @@ cuts leave their pieces able to re-enter placement and expose smaller seams.
 `w<M>x<N>[+p<np>]` (warps — the mma tier; `+p<np>` the dedicated producer band the retired per-row `WSPEC` key
 spelled) / `t<N>x<M>` (the scalar thread tile, native n-then-m) / `t<N>` (the 1-D cooperative width). Empty = a
 1-thread register strip whose launch geometry stays derived. The tier discriminator IS the worker kind — never a
-per-`TILE` spelling. Option assembly derives the inventory from site choices, the complete typed assignment stores it
+per-`TILE` spelling. Option assembly derives the inventory from site choices, the complete typed schedule stores it
 once, and acceptance fails loudly on cross-site disagreement (one kernel, one inventory).
 
 **`TILE`** (STR codec, the tile schedule) — the **output-fragment** codec, site-local since step 7. A

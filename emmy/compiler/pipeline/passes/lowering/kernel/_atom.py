@@ -27,6 +27,7 @@ Leading ``_`` so the pass loader (globs ``*.py``, skips ``_``-prefixed) skips it
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from functools import partial
 
 from emmy.compiler.backend.cuda.dtype import cuda_name
 from emmy.compiler.dim import Dim
@@ -177,6 +178,77 @@ def _axis_dim(index: tuple, axis_name: str) -> int | None:
     """
     dims = [d for d, e in enumerate(index) if axis_name in e.free_vars()]
     return dims[-1] if dims else None
+
+
+def _hoist_k_invariant(body, k_name: str) -> tuple[tuple, tuple]:
+    """Partition one operand read into ``(what does not vary with the contraction axis, the rest)``.
+
+    A computed cone's row-invariant prologue is a value of the ROW, so it belongs ahead of the
+    K-loop: inside it, a fused norm→linear re-derives the row's whole statistic once per contraction
+    step, and a register tile then once per register row on top. The seam
+    (:func:`~emmy.compiler.ir.schedule.views.cone_seam`) states the same split on the EDGES, but it
+    answers for the staged fill, which bridges the prologue's results through smem rows and so drops
+    a prologue nothing bridges; a register tile evaluates the cone whole and needs a partition. The
+    statements give one: a statement is loop-varying once it reads the contraction coordinate or a
+    name a loop-varying statement defines, and loop-invariant otherwise. The coordinate counts as a
+    read wherever it appears — as an index or as a value — which keeps a statement in the loop that
+    only might vary with it.
+    """
+    varying = {k_name}
+    hoisted: list[Stmt] = []
+    rest: list[Stmt] = []
+    for stmt in body:
+        if free_names(stmt) & varying:
+            varying |= set(stmt.defines())
+            rest.append(stmt)
+        else:
+            hoisted.append(stmt)
+    return tuple(hoisted), tuple(rest)
+
+
+def _direct_operand(load, inputs, *, k_name: str, own: str | None, legacy: tuple) -> tuple[bool, object]:
+    """``(reduction-minor, ldm)`` for one gmem-direct fragment read, off the operand's own ADDRESS.
+
+    A loader reaches its operand through ONE leading dimension: one coordinate steps by 1, the other
+    by ``ldm``. Which DIM an index spells a coordinate in does not say that. A frontend reshape can
+    pack the reduction coordinate and the operand's own output coordinate into one dim —
+    ``hidden[stream * 4096 + channel]``, DeepSeek-V4's hyper-connection mixing over one 16384-wide
+    row — and the dim-position reading then names the tensor's trailing extent as ``ldm`` and calls
+    the operand N-major because its last dim holds the reduction axis. Both are wrong, the fragment
+    reads the wrong elements, and nothing raises. Element strides say it directly, and on an operand
+    whose dims separate the two coordinates they say exactly what the dim positions said.
+
+    Reduction-minor means the reduction coordinate is the unit-stride one — the A loader's only
+    layout, and B's transposed one. ``legacy`` is the dim-position answer, kept for an index that is
+    not affine in the coordinates and for a symbolic extent, which leaves the strides of every
+    earlier dim unknown. Neither coordinate unit-stride raises: the loader has no such address."""
+    coords = (k_name, *(() if own is None else (own,)))
+    tensor = inputs.get(load.input) if inputs else None
+    strides = dict.fromkeys(coords, 0)
+    unit = 1
+    for dim in reversed(range(len(load.index))):
+        form = affine_form(load.index[dim], set(coords))
+        if tensor is None or len(tensor.shape) != len(load.index) or form is None:
+            return legacy
+        for name, coeff in form[1].items():
+            strides[name] += coeff * unit
+        if dim == 0:
+            break  # nothing strides the leading dim, so its extent never enters a stride
+        extent = tensor.shape[dim]
+        extent = extent.as_static() if isinstance(extent, Dim) and extent.is_static else extent
+        if not isinstance(extent, int):
+            return legacy
+        unit *= extent
+    own_stride = 1 if own is None else strides[own]
+    if strides[k_name] == 1:
+        return True, own_stride
+    if own_stride == 1:
+        return False, strides[k_name]
+    raise ValueError(
+        f"gmem-direct fragment read of {load.input!r}: neither the reduction coordinate "
+        f"(stride {strides[k_name]}) nor {own!r} (stride {own_stride}) is unit-stride, "
+        f"so the operand has no leading dimension"
+    )
 
 
 def _cells(mn: tuple, offset, i: int, j: int):
@@ -1576,17 +1648,24 @@ def _contract_kloop(c, cells, *, read_row, read_col, contract, wrap):
     build the operand read (``LdmatrixLoad`` fragment vs scalar ``Load``), ``contract`` the ⊗+accumulate
     (``MmaSyncPtx`` vs ``Assign``+``Accum``), ``wrap`` the K-loop (``StridedLoop`` step ``atom_k`` vs a
     unit ``Loop``). Returns ``(pre_decls, kloop_stmts)`` — no pre-decls here (accumulators ride
-    ``state``)."""
+    ``state``).
+
+    An operand read answers as ``(hoisted, per-step)``: what a computed cone evaluates ONCE for the
+    row (its K seam's row-invariant prologue) rides ahead of the loop, the rest inside it. Only a
+    read is split this way — the fold ``step`` accumulates, so it belongs to the step whatever it
+    reads."""
     rows = sorted({i for i, _ in cells})
     cols = sorted({j for _, j in cells})
+    pre: list[Stmt] = []
     body: list[Stmt] = []
-    for i in rows:
-        body += read_row(i)
-    for j in cols:
-        body += read_col(j)
+    for read, cells_of in ((read_row, rows), (read_col, cols)):
+        for index in cells_of:
+            hoisted, per_step = read(index)
+            pre += hoisted
+            body += per_step
     for i, j in cells:
         body += contract(i, j)
-    return [], wrap(body)
+    return [], wrap(pre, body)
 
 
 # ---- scalar (register-tile) tier --------------------------------------------------------------- #
@@ -2056,7 +2135,13 @@ class _MmaOps(_AtomOps):
         a_edge, b_edge = c.operands[0], c.operands[1]
         a_load = a_edge.as_slab().load if a_edge.as_slab() is not None else a_edge
         b_load = b_edge.as_slab().load if b_edge.as_slab() is not None else b_edge
-        b_trans = c.as_contraction().b_trans
+        # The two operands' leading dimensions, read off their ADDRESSES (:func:`_direct_operand`).
+        # A has one layout — its reduction coordinate minor — so only its ``ldm`` is a question;
+        # B answers both, and its ``b_trans`` is the same fact ``ContractionView`` reads off dim
+        # positions wherever the strides do not resolve.
+        read = partial(_direct_operand, inputs=self.inputs, k_name=k_axis.name)
+        _, a_ldm = read(a_load, own=m.axis.name, legacy=(True, 0))
+        b_trans, b_ldm = read(b_load, own=n.axis.name, legacy=(c.as_contraction().b_trans, 0))
         # The loop's final step overhangs K whenever ``atom_k`` does not tile it — a SYMBOLIC K
         # (unknown at compile time) or a static K with a remainder. Both mask the same way: the
         # loaders zero-fill the fragment halves past ``k_zero``'s bound, so the summed reduction
@@ -2070,7 +2155,7 @@ class _MmaOps(_AtomOps):
                 # warp's own within-tile row and the K-loop's column.
                 slab, ldm, swz = self.slabs[0]
                 prim = BinaryExpr("+", BinaryExpr("*", Var(m.unit), Literal(m.reg * atom.atom_m, "int")), Literal(i * atom.atom_m, "int"))
-                return [
+                return [], [
                     LdmatrixLoad(
                         frag=self.frag(f"_a{i}"),
                         src_buffer=slab,
@@ -2088,13 +2173,16 @@ class _MmaOps(_AtomOps):
             # a split-K partition writes its ksplit coordinate into A's k index, and when the pair
             # places that ksplit on n the bare axis name no longer exists after the tile split.
             idx = tuple(Sigma({m.axis.name: cell, **_sibling_sigma(n)}).apply(e) for e in a_load.index)
-            return [
+            # A fragment read indexes the K-loop's own coordinate, so a gmem-direct mma leaf never
+            # hoists: the split the scalar tier takes is empty here.
+            return [], [
                 LdmatrixLoad(
                     frag=self.frag(f"_a{i}"),
                     src_buffer=a_load.input,
                     src_index=idx,
                     role="a",
                     staged=False,
+                    ldm=a_ldm,
                     gmem_guard=_guard(m, cell),
                     k_zero=k_zero,
                     fragment_layout=atom.fragment_layout,
@@ -2106,7 +2194,7 @@ class _MmaOps(_AtomOps):
                 # Already staged: read the slab at the cell's LOCAL column (the slab covers exactly
                 # this tile's N span, so the absolute base drops out) and the K-loop's own row.
                 slab, ldm, swz = self.slabs[1]
-                return [
+                return [], [
                     LdmatrixLoad(
                         frag=self.frag(f"_b{j}"),
                         src_buffer=slab,
@@ -2121,7 +2209,7 @@ class _MmaOps(_AtomOps):
                 ]
             cell = offset[1].base(j)
             idx = tuple(Sigma({n.axis.name: cell, **_sibling_sigma(m)}).apply(e) for e in b_load.index)
-            return [
+            return [], [
                 LdmatrixLoad(
                     frag=self.frag(f"_b{j}"),
                     src_buffer=b_load.input,
@@ -2129,6 +2217,7 @@ class _MmaOps(_AtomOps):
                     role="b",
                     staged=False,
                     b_trans=b_trans,
+                    ldm=b_ldm,
                     gmem_guard=_guard(n, cell),
                     k_zero=k_zero,
                     fragment_layout=atom.fragment_layout,
@@ -2147,7 +2236,7 @@ class _MmaOps(_AtomOps):
                 )
             ]
 
-        def wrap(body):
+        def wrap(pre, body):
             step = Literal(atom.atom_k, "int")
             stmts, tail = list(body), []
             if _f16acc(atom):
@@ -2160,6 +2249,7 @@ class _MmaOps(_AtomOps):
                 stmts.append(Cond(cond=fire, body=tuple(promotes)))
                 tail = promotes
             return [
+                *pre,
                 StridedLoop(axis=k_axis, start=Literal(0, "int"), step=step, body=Body(tuple(stmts)), unroll=unroll_ok(k_axis.extent)),
                 *tail,
             ]
@@ -2279,20 +2369,24 @@ class _ScalarOps(_AtomOps):
         k_axis = self.k_axis
         m, n = mn
         step = tuple(c.step())
-        a_body, b_body = c.operands[0].lower(axes=self.axes), c.operands[1].lower(axes=self.axes)
+        # A's K seam: what the cone evaluates once for the ROW lifts out of the K-loop
+        # (:func:`_hoist_k_invariant`), the rest is the per-step read. A plain gmem-``Load`` A has
+        # no prologue and the split is empty.
+        a_pro, a_body = _hoist_k_invariant(c.operands[0].lower(axes=self.axes), k_axis.name)
+        b_body = c.operands[1].lower(axes=self.axes)
         uniform = [stmt for edge in c.operands[2:] for stmt in edge.lower(axes=self.axes)]
         # The operand bodies contribute their OWN loop coordinates (a computed cone's internal
         # fold axes): a replicated read of such a coordinate must keep its name — the loop that
         # binds it is copied with the cell, so suffixing the reads (but never a Loop's binding)
         # emitted references no scope defines.
-        prot = _scalar_protected(c, self.tile, self.lead, body=(*a_body, *b_body, *step), k_axis=self.k_axis)
+        prot = _scalar_protected(c, self.tile, self.lead, body=(*a_pro, *a_body, *b_body, *step), k_axis=self.k_axis)
         b_name, a_name = c.operands[1].exposes[-1], c.operands[0].exposes[-1]
         # Whatever the step reads and does not define is bound OUTSIDE the cell — a uniform leaf
         # above the loop. Only the two operand results (rebound per row / column below) and the
         # carried states (one copy per cell) are the cell's own.
         outer = {name for stmt in step for name in free_names(stmt)} - {name for stmt in step for name in stmt.defines()}
         prot |= outer - {a_name, b_name} - set(c.exposes)
-        a_cell, b_cell = _cell_varying(a_body, n), _cell_varying(b_body, m)
+        a_cell, b_cell = _cell_varying((*a_pro, *a_body), n), _cell_varying(b_body, m)
 
         def at_m(i):  # register row ``i``'s m coordinate (a 1-D output has no m side)
             return {} if m is None else {m.name: _wrap(m, offset[0].base(i))}
@@ -2306,10 +2400,15 @@ class _ScalarOps(_AtomOps):
         # representative evaluates it unchanged, and the bare axis name no longer exists after
         # the tile split).
         def read_row(i):
-            return [] if a_cell else copy_cell(a_body, Sigma(at_m(i)), f"__ar{i}", prot)
+            # The prologue and the per-step read are copied under ONE (σ, suffix): the rename is by
+            # NAME, so the statistic the cell reads back keeps the row's spelling on both sides.
+            if a_cell:
+                return [], []
+            sigma, sfx = Sigma(at_m(i)), f"__ar{i}"
+            return copy_cell(a_pro, sigma, sfx, prot), copy_cell(a_body, sigma, sfx, prot)
 
         def read_col(j):
-            return [] if b_cell else copy_cell(b_body, Sigma(at_n(j)), f"__bc{j}", prot)
+            return [], ([] if b_cell else copy_cell(b_body, Sigma(at_n(j)), f"__bc{j}", prot))
 
         def contract(i, j):
             # A cell-varying operand's read lands here, σ-bound to BOTH coordinates and suffixed with
@@ -2318,15 +2417,15 @@ class _ScalarOps(_AtomOps):
             a_sfx = f"__ar{i}_{j}" if a_cell else f"__ar{i}"
             b_sfx = f"__bc{i}_{j}" if b_cell else f"__bc{j}"
             reads = [
-                *(copy_cell(a_body, cell, a_sfx, prot) if a_cell else ()),
+                *(copy_cell((*a_pro, *a_body), cell, a_sfx, prot) if a_cell else ()),
                 *(copy_cell(b_body, cell, b_sfx, prot) if b_cell else ()),
             ]
             bound = {a_name: f"{a_name}{a_sfx}", b_name: f"{b_name}{b_sfx}"}
             rebound = [stmt.rewrite(lambda name: bound.get(name, name)) for stmt in step]
             return [*reads, *copy_cell(rebound, cell, f"__c{i}_{j}", prot | set(bound.values()))]
 
-        def wrap(body):
-            return [*uniform, Loop(axis=k_axis, body=Body(tuple(body)), unroll=_unroll_inner(k_axis))]
+        def wrap(pre, body):
+            return [*uniform, *pre, Loop(axis=k_axis, body=Body(tuple(body)), unroll=_unroll_inner(k_axis))]
 
         return dict(read_row=read_row, read_col=read_col, contract=contract, wrap=wrap)
 
