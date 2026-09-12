@@ -65,16 +65,29 @@ kernel as `4e26cc` at another width: `20ed9d` @ m16 and `4682df` @ m4096 have st
 only in the outermost token loop, and the same cut family binds on them. Both are off the single-stream decode path
 but on any concurrent one, and on prefill.
 
-### The repo golden does not boot this model
+### The repo golden boots but cannot answer a request
 
 #799 records `4e26cc`, which makes the repo price that kernel the way host-local evidence already did. It buys
 reproducibility, not speed: the golden the 0.899 s per token was measured against already carried the cut.
 
-Booting the repo golden itself does not work. A boot on 2026-09-12 spent over 24 minutes inside a single fork
-decision for `post1.k_div_{11,25,50,64}_reduce` @ m1 — four rows sharing identity `07039feea7ff` — in the schedule
-search at a `fork.leaf_for` recursion depth near 124, and never reached its second layer. Those rows decode in
-seconds under `make test-goldens`, so the cost is in the boot's own resolve, not in the recording. Until that is
-understood, serving evidence for this model comes from a host-local golden and the repo cannot reproduce it.
+The repo golden now **boots** — health in 37 min 43 s over all 43 layers, on 2026-09-12, the first time it has
+served this model. An earlier boot the same day never reached its second layer, spending over 24 minutes inside one
+fork decision at a `fork.leaf_for` recursion depth near 124; #780 is the fix for that and the recursion is gone.
+
+It still cannot answer a request: the first forward exceeds the engine's RPC deadline, raised to 600 s, and the
+engine dies on `RPC call to sample_tokens timed out`. The boot audit names what the repo golden elects — the
+measured column is the audit's own, through raw launches rather than the capture-and-replay path serving uses.
+
+| program | measured | over floor |
+| --- | ---: | ---: |
+| `pre.decode.m16` | 17,208 ms | 860,394× |
+| `pre.chunk.m4096` | 1,937 ms | 64,740× |
+| `post.chunk.m4096` | 623 ms | 319× |
+| `post.decode.m16` | 68.8 ms | 1,156× |
+| `post.decode.m1` | 50.1 ms | 841× |
+
+`pre.decode.m1` is absent, which is #795 holding. Every row above is unrecorded, and each is a target of the same
+kind as `4e26cc`. That list, not a compiler gap, is what stands between the repo and reproducible serving.
 
 ### Stage 4 — image and release plumbing (not started)
 
