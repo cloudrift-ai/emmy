@@ -528,7 +528,7 @@ def test_unreproducible_pin_flag(monkeypatch):
     flag = unreproducible_pin_flag({"TILE": "mma_m16n8k16_f16_f32/f1x8"}, [{"TILE": "mma_m16n8k16_f16_f32/f2x4"}])
     assert "unreproducible pin" in flag and "TILE=mma_m16n8k16_f16_f32/f1x8" in flag and "mma_m16n8k16_f16_f32/f2x4" in flag
     # A classic schedule family with no site stamp is a miss. Typed schedule serialization may
-    # not silently discard an assignment.
+    # not silently discard a choice.
     assert "unreproducible pin" in unreproducible_pin_flag({"STAGE": "k8"}, [{"TILE": "w2x1"}])
     # An UNREGISTERED family with no stamp is a typo in the pin — flagged.
     assert "(unset)" in unreproducible_pin_flag({"TIEL": "w2x1"}, [{"TILE": "w2x1"}])
@@ -1563,12 +1563,12 @@ def test_write_ab_json_greedy_bench_fail_and_record_knobs(tmp_path):
 
 
 def test_write_ab_json_records_a_forkless_kernel_row(tmp_path):
-    """A forkless kernel's schedule space collapsed to its OFF anchors — no node assignment — and
+    """A forkless kernel's schedule space collapsed to its OFF anchors — no node choice — and
     its ``record_knobs`` is that row as-is: the one enumerated row a golden entry for it spells.
     The residual of a placement cut is one such kernel, and it must not sink the whole record.
 
     ``complete_kernel_row`` accepts the row rather than refusing it: ``TILE`` and ``REDUCE`` key off
-    the tile's contraction and reduction sites, so a kernel with neither has nothing to assign and
+    the tile's contraction and reduction sites, so a kernel with neither has nothing to choose and
     is complete without one. The policy stamp rides along exactly as it does on a kernel that DOES
     carry forks — ``schedule_row_key`` projects it out when the row is matched against a leaf, so it
     is recorded, not identity."""
