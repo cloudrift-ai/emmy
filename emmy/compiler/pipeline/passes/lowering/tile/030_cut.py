@@ -1,4 +1,4 @@
-"""Enumerate every kernel-set cut before schedule assignments.
+"""Enumerate every kernel-set cut before any schedule is composed.
 
 Stored-Fold-edge placement is the first domain and cross-CTA reduction splitting is the second.
 The rule runs to a fixpoint, so each successful choice and every fresh piece re-enters these ordered
@@ -29,21 +29,21 @@ class _CutContext(ScheduleContext[DeferredFork, object, object]):
     """One immutable frontier over the cut pass's already-restricted structural choices."""
 
     choices: tuple[DeferredFork, ...]
-    _assignment: Schedule = field(default_factory=lambda: Schedule(None, {}, {}), repr=False)
+    _schedule: Schedule = field(default_factory=lambda: Schedule(None, {}, {}), repr=False)
 
     @property
-    def assignment(self) -> Schedule:
-        return self._assignment
+    def schedule(self) -> Schedule:
+        return self._schedule
 
     def extensions(self):
-        if self.assignment.kernel is None:
+        if self.schedule.kernel is None:
             for choice in self.choices:
                 yield Schedule(choice, {}, {})
 
     def extend(self, pick: Schedule) -> _CutContext:
-        if self.assignment.kernel is not None or pick.nodes or pick.edges or pick.kernel not in self.choices:
+        if self.schedule.kernel is not None or pick.nodes or pick.edges or pick.kernel not in self.choices:
             raise ScheduleRefused("pick is outside the cut frontier")
-        return replace(self, _assignment=pick)
+        return replace(self, _schedule=pick)
 
 
 def _seam_index(seams) -> dict[int, object]:
@@ -205,5 +205,5 @@ def rewrite(match: Match, root: Node, ctx=None):
     if choices is None:
         raise RuleSkipped("no pending kernel-set cut")
     choices = choices if isinstance(choices, list) else [choices]
-    options = [assignment.kernel for assignment in schedule(_CutContext(tuple(choices)))]
+    options = [cut.kernel for cut in schedule(_CutContext(tuple(choices)))]
     return options if len(options) > 1 else options[0]

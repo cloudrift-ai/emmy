@@ -478,12 +478,12 @@ class ClassicProblem(ScheduleProblem[ClassicSchedule]):
             return None
         return value
 
-    def unrealized_bare_pin(self, assignment: ClassicSchedule) -> str | None:
+    def unrealized_bare_pin(self, schedule: ClassicSchedule) -> str | None:
         """Why a completed schedule leaves a bare pin unrealized — the half of the bare reading
         a site cannot decide alone. A pin no site can offer is ignored unless pins are validated,
         the reading a row published across the peer kernels of a multi-kernel target takes."""
         for family, value in self.bare_pins.items():
-            if not value or value in self._spelled(assignment, family).values():
+            if not value or value in self._spelled(schedule, family).values():
                 continue
             if self.validate_pins or any(self._site_offers(site, family, value) for site in self.node_sites):
                 return f"bare {family} pin {value} is realized by no site of this kernel"
@@ -497,17 +497,17 @@ class ClassicProblem(ScheduleProblem[ClassicSchedule]):
             return any(choice.tile.spell() == value for choice in site.nodes)
         return any(isinstance(choice, ReductionSchedule) and choice.reduce.spell() == value for choice in site.nodes)
 
-    def _spelled(self, assignment: ClassicSchedule, family: str) -> dict[str, str]:
+    def _spelled(self, schedule: ClassicSchedule, family: str) -> dict[str, str]:
         tile = self.tile
         if family == "TILE":
-            return {classic_node_key(tile, "TILE", site): assignment.nodes[site].tile.spell() for site in tile.family_sites["TILE"]}
+            return {classic_node_key(tile, "TILE", site): schedule.nodes[site].tile.spell() for site in tile.family_sites["TILE"]}
         if family == "REDUCE":
             return {
                 classic_node_key(tile, "REDUCE", site): node.reduce.spell()
                 for site in tile.family_sites["REDUCE"]
-                if isinstance(node := assignment.nodes[site], ReductionSchedule)
+                if isinstance(node := schedule.nodes[site], ReductionSchedule)
             }
-        return {classic_stage_key(tile, edge): assignment.edges[edge].stage.spell() for edge in tile.stage_edges}
+        return {classic_stage_key(tile, edge): schedule.edges[edge].stage.spell() for edge in tile.stage_edges}
 
     @cached_property
     def warp_eligible(self) -> bool:

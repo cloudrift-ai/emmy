@@ -336,7 +336,7 @@ while retaining exact values throughout the ordinary extent range.
 ## TileOp and scheduling
 
 `TileOp` owns facts deliberately excluded from the Fold tree: placement, an accepted `Schedule`, its separate
-classic materialization, knobs, and output specifications. The semantic assignment contains choices only;
+classic materialization, knobs, and output specifications. The semantic schedule contains choices only;
 site-indexed placed tile geometry and resolved transport sizes are lowering facts and cannot enter a row identity.
 `ops.Sched` is a read-only lowering view over those typed fields. There is no keyed slice map, per-node schedule
 field, compatibility adapter, alias codec, or dual reader.
@@ -377,11 +377,11 @@ choice. Construction rejects missing, extra, mismatched, or partly attached fact
   when it has one applicable site and carries the site's route (`TILE@map.1/twist.1/inner`, the same grammar as
   `PLACE`) only when ambiguous. `STAGE` is one value per consumer node and
   follows the same rule. Decode requires the full key set and rejects aliases, missing direct values, unknown keys,
-  and semantically refused assignments.
+  and semantically refused schedules.
 
 Structural choices are deliberately outside this algebra. A cut or split changes the kernel set first; every fresh
 kernel then constructs a fresh problem and fresh sites. Search ranks encoded accepted leaves and materialization
-consumes the typed assignment, so neither layer defines schedule membership.
+consumes the typed schedule, so neither layer defines schedule membership.
 
 The single `lowering/tile/030_cut` pass reaches a fixpoint over kernel-set alternatives before scheduling: placement
 first, then cross-CTA reduction splitting. `PLACE` uses the same tree-path codec to address a

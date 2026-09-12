@@ -675,7 +675,7 @@ def complete_kernel_row(knobs: dict) -> dict[str, str]:
     so a kernel with neither — the copy-shaped piece a placement cut splits off, or the leftover
     root that cut leaves behind — encodes canonically as ``WORK`` and ``RASTER`` alone. This
     recording boundary enforces the context-free half: kernel families are bare, node families may
-    be bare or carry their site's route, and a ``STAGE`` assignment comes with the node assignment
+    be bare or carry their site's route, and a ``STAGE`` choice comes with the node assignment
     it stages into (its consumer is a contraction, which always carries one).
     """
     out = dict(tuning_knob_items(knobs))
@@ -707,7 +707,7 @@ def complete_kernel_row(knobs: dict) -> dict[str, str]:
             else:
                 staged = True
         if staged and not assigned:
-            raise ValueError("complete classic schedule row stages a transport but has no node assignment")
+            raise ValueError("complete classic schedule row stages a transport but has no node choice")
         for key, value in out.items():
             if family_of(key) in SCHEDULE_FAMILIES:
                 validate_family_value(key, value)

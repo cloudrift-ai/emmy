@@ -199,7 +199,7 @@ class _ScheduleFork(Fork):
         """The root of a schedule tree re-sourced to ``row``: its problem offers the row's values at
         the sites the row names, so the descent below it instantiates one path. A branch below the
         root has decided sites already and descends as it is."""
-        if self.row or self.context.assignment.nodes or self.context.assignment.kernel is not None:
+        if self.row or self.context.schedule.nodes or self.context.schedule.kernel is not None:
             return self
         return replace(self, context=self.context.narrowed(row))
 

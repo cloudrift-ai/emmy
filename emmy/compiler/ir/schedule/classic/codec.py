@@ -1,5 +1,5 @@
-"""The strict wire boundary of a classic schedule: ``ClassicScheduleCodec`` encodes an accepted assignment as
-its canonical row and decodes one row into a typed assignment, validating through one context."""
+"""The strict wire boundary of a classic schedule: ``ClassicScheduleCodec`` encodes an accepted schedule as
+its canonical row and decodes one row into a typed schedule, validating through one context."""
 
 from __future__ import annotations
 
@@ -52,7 +52,7 @@ class ClassicScheduleCodec:
 
     def encode(self, schedule: ClassicSchedule) -> dict[str, str]:
         """Encode one accepted typed schedule in canonical scope order."""
-        accepted = self.context.extend(schedule).assignment
+        accepted = self.context.extend(schedule).schedule
         return self._encode(accepted)
 
     def _encode(self, schedule: ClassicSchedule) -> dict[str, str]:
@@ -64,9 +64,9 @@ class ClassicScheduleCodec:
         for site in self.tile_op.family_sites["TILE"]:
             row[classic_node_key(self.tile_op, "TILE", site)] = schedule.nodes[site].tile.spell()
         for site in self.tile_op.family_sites["REDUCE"]:
-            assignment = schedule.nodes[site]
-            assert isinstance(assignment, ReductionSchedule)
-            row[classic_node_key(self.tile_op, "REDUCE", site)] = assignment.reduce.spell()
+            choice = schedule.nodes[site]
+            assert isinstance(choice, ReductionSchedule)
+            row[classic_node_key(self.tile_op, "REDUCE", site)] = choice.reduce.spell()
         stage_consumers = tuple(dict.fromkeys(edge[0] for edge in self.tile_op.stage_edges))
         for site in stage_consumers:
             edges = tuple(edge for edge in self.tile_op.stage_edges if edge[0] == site)
@@ -83,7 +83,7 @@ class ClassicScheduleCodec:
         row = {}
         assert before.order is not None and after.order is not None
         for site in after.order[before.position : after.position]:
-            node = after.node_assignment(site)
+            node = after.node_choice(site)
             if site in after.tile_op.family_sites["TILE"]:
                 row[after.node_key("TILE", site)] = node.tile.spell()
             if site in after.tile_op.family_sites["REDUCE"]:
@@ -91,7 +91,7 @@ class ClassicScheduleCodec:
                 row[after.node_key("REDUCE", site)] = node.reduce.spell()
             staged = tuple(edge for edge in after.incident_edges(site) if edge in after.tile_op.stage_edges)
             if staged:
-                choices = {after.edge_assignment(edge) for edge in staged}
+                choices = {after.edge_choice(edge) for edge in staged}
                 if len(choices) == 1:
                     row[after.stage_key(staged[0])] = choices.pop().stage.spell()
         if after.work is not None:
@@ -99,7 +99,7 @@ class ClassicScheduleCodec:
         return row
 
     def decode(self, row: Mapping[str, str]) -> ClassicSchedule:
-        """Decode one complete canonical row and reject every other key set or assignment."""
+        """Decode one complete canonical row and reject every other key set or schedule."""
         schedule = self._parse(row)
         return self._validate_row(schedule, row)
 
@@ -136,8 +136,8 @@ class ClassicScheduleCodec:
         )
 
     def _validate_row(self, schedule: ClassicSchedule, row: Mapping[str, str]) -> ClassicSchedule:
-        """Validate a parsed assignment and its claimed canonical row exactly once."""
-        accepted = self.context.extend(schedule).assignment
+        """Validate a parsed schedule and its claimed canonical row exactly once."""
+        accepted = self.context.extend(schedule).schedule
         canonical = self._encode(accepted)
         if dict(row) != canonical:
             raise ValueError("classic schedule row is not its typed schedule's canonical encoding")

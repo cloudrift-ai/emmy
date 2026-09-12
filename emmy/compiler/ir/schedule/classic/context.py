@@ -107,7 +107,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
     problem: ClassicProblem | None = None
     order: tuple[NodeId, ...] | None = None
     position: int = 0
-    _assignment: ClassicSchedule = field(default_factory=lambda: Schedule(None, {}, {}), repr=False)
+    _schedule: ClassicSchedule = field(default_factory=lambda: Schedule(None, {}, {}), repr=False)
     _work: Work | None = field(default=None, repr=False)
     _axes: Mapping[str, tuple[int, int]] = field(default_factory=frozendict, repr=False)
     _fragments: Mapping[tuple[str, str], tuple] = field(default_factory=frozendict, repr=False)
@@ -125,8 +125,8 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         if not 0 <= self.position <= len(order):
             raise ValueError("classic composition position is outside its node order")
         object.__setattr__(self, "order", order)
-        if not isinstance(self._assignment, Schedule):
-            raise TypeError("classic context assignment must be a Schedule")
+        if not isinstance(self._schedule, Schedule):
+            raise TypeError("classic context prefix must be a Schedule")
         object.__setattr__(self, "_axes", frozendict(self._axes))
         object.__setattr__(self, "_fragments", frozendict(self._fragments))
 
@@ -187,13 +187,13 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         return None if self.nodes_complete else self.order[self.position]
 
     @property
-    def assignment(self) -> ClassicSchedule:
-        return self._assignment
+    def schedule(self) -> ClassicSchedule:
+        return self._schedule
 
     def extensions(self) -> Iterator[ClassicSchedule]:
         """Yield the next site's options that compose with this prefix: one node with its
         incident edges, or, past the last node, the kernel picks."""
-        if self.assignment.kernel is not None:
+        if self.schedule.kernel is not None:
             return
         if self.problem is None:
             raise ValueError("classic compatibility composition requires a projected problem")
@@ -239,8 +239,8 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         return tuple(support for support in frontier if self._support_refusal(site.id, support) is None)
 
     def extend(self, pick: ClassicSchedule) -> ClassicScheduleContext:
-        """Compose a frontier pick or validate and accept one complete assignment."""
-        if not isinstance(pick, Schedule) or self.assignment.kernel is not None:
+        """Compose a frontier pick or validate and accept one complete schedule."""
+        if not isinstance(pick, Schedule) or self.schedule.kernel is not None:
             self._refuse("classic extension requires an incomplete context and a Schedule pick")
         if pick.kernel is not None and (pick.nodes or pick.edges):
             return self._extend_complete(pick)
@@ -250,10 +250,10 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         return self._extend_local(pick)
 
     def _extend_complete(self, pick: ClassicSchedule) -> ClassicScheduleContext:
-        if any(pick.nodes.get(site) != choice for site, choice in self.assignment.nodes.items()) or any(
-            pick.edges.get(edge) != choice for edge, choice in self.assignment.edges.items()
+        if any(pick.nodes.get(site) != choice for site, choice in self.schedule.nodes.items()) or any(
+            pick.edges.get(edge) != choice for edge, choice in self.schedule.edges.items()
         ):
-            self._refuse("complete assignment disagrees with the existing classic prefix")
+            self._refuse("complete schedule disagrees with the existing classic prefix")
         self._require_complete_shape(pick)
         context = self._restart()
         assert context.order is not None and pick.kernel is not None
@@ -268,7 +268,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         return replace(
             self,
             position=0,
-            _assignment=Schedule(None, {}, {}),
+            _schedule=Schedule(None, {}, {}),
             _work=None,
             _axes=frozendict(),
             _fragments=frozendict(),
@@ -303,12 +303,12 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         if why := self._support_refusal(site, support):
             self._refuse(why, site)
         work = support.work or self._work
-        nodes = {**self.assignment.nodes, site: support.node}
+        nodes = {**self.schedule.nodes, site: support.node}
         axes = {**self._axes, **{claim.name: (claim.tile, claim.units) for claim in support.axes}}
         fragments = {**self._fragments, **{(claim.role, claim.edge): claim.value for claim in support.fragments}}
         return self._advance(
             position=self.position + 1,
-            _assignment=Schedule(None, nodes, {**self.assignment.edges, **support.edges}),
+            _schedule=Schedule(None, nodes, {**self.schedule.edges, **support.edges}),
             _work=work,
             _axes=frozendict(axes),
             _fragments=frozendict(fragments),
@@ -489,13 +489,13 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         if (
             site in self._shared_roots
             and support.node.tile.is_tiled
-            and any(self.assignment.nodes[other].tile.is_tiled for other in self._shared_roots if other in self.assignment.nodes)
+            and any(self.schedule.nodes[other].tile.is_tiled for other in self._shared_roots if other in self.schedule.nodes)
         ):
             return "a second output-tiled root on a projection its outputs do not partition by root"
         return self._prefix_relation_refusal(
             support,
             work=self._work,
-            previous_nodes=tuple(self.assignment.nodes.values()) if self._work is None else (),
+            previous_nodes=tuple(self.schedule.nodes.values()) if self._work is None else (),
             axes=tuple(self._axes.items()),
             fragments=tuple(self._fragments.items()),
             allowed_works=None if self.problem is None else self.problem.allowed_works,
@@ -564,7 +564,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
     def _finish(self, pick: ClassicSchedule) -> ClassicScheduleContext:
         if (
             not self.nodes_complete
-            or self.assignment.kernel is not None
+            or self.schedule.kernel is not None
             or not isinstance(pick.kernel, KernelSchedule)
             or pick.nodes
             or pick.edges
@@ -582,11 +582,11 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             self._refuse("RASTER requires a tiled contraction site")
         if pick.kernel.work.producer and not self._producer_eligible:
             self._refuse("producer band is incompatible with the selected transport")
-        assignment = Schedule(pick.kernel, self.assignment.nodes, self.assignment.edges)
-        self._require_kernel_prefix(assignment)
-        if self.problem is not None and (why := self.problem.unrealized_bare_pin(assignment)):
+        schedule = Schedule(pick.kernel, self.schedule.nodes, self.schedule.edges)
+        self._require_kernel_prefix(schedule)
+        if self.problem is not None and (why := self.problem.unrealized_bare_pin(schedule)):
             self._refuse(why)
-        return replace(self, _assignment=assignment)
+        return replace(self, _schedule=schedule)
 
     def _require_kernel_prefix(self, schedule: ClassicSchedule) -> None:
         """Validate the kernel facts not already proved by local prefix composition."""
@@ -600,10 +600,10 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             self._refuse("worker inventory exceeds the target thread limit")
         if not schedule.kernel.work.producer:
             return
-        for site, assignment in schedule.nodes.items():
-            if not assignment.tile.is_tiled:
+        for site, choice in schedule.nodes.items():
+            if not choice.tile.is_tiled:
                 continue
-            if isinstance(assignment, ReductionSchedule) and assignment.reduce.needs_split:
+            if isinstance(choice, ReductionSchedule) and choice.reduce.needs_split:
                 self._refuse("a producer band cannot accompany a cross-CTA reduction", site)
             edges = tuple(edge for edge in self.incident_edges(site) if edge in self.tile_op.stage_edges)
             if not edges or any(schedule.edges[edge].stage.transport != "smem-tma" for edge in edges):
@@ -616,32 +616,32 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         raise ScheduleRefused(f"{where}: {reason}")
 
     def _require_complete_shape(self, schedule: ClassicSchedule) -> None:
-        """Validate only complete-assignment structure before replaying normal transitions."""
+        """Validate only complete-schedule structure before replaying normal transitions."""
         if not isinstance(schedule, Schedule) or not isinstance(schedule.kernel, KernelSchedule):
-            self._refuse("assignment must contain a classic kernel schedule")
+            self._refuse("a schedule must contain a classic kernel choice")
         if any(not isinstance(value, (ProjectionSchedule, ReductionSchedule)) for value in schedule.nodes.values()):
-            self._refuse("classic node assignments must contain projection or reduction schedules")
+            self._refuse("classic node choices must be projection or reduction schedules")
         if any(not isinstance(value, EdgeSchedule) for value in schedule.edges.values()):
-            self._refuse("classic edge assignments must contain edge schedules")
+            self._refuse("classic edge choices must be edge schedules")
         expected_nodes = set(self.tile_op.node_sites)
         if missing := expected_nodes - schedule.nodes.keys():
-            self._refuse("missing node assignment", min(missing))
+            self._refuse("missing node choice", min(missing))
         if extra := schedule.nodes.keys() - expected_nodes:
-            self._refuse("node assignment is outside this problem", min(extra))
+            self._refuse("node choice is outside this problem", min(extra))
         expected_edges = set(self.tile_op.edge_sites)
         if missing := expected_edges - schedule.edges.keys():
-            self._refuse("missing edge assignment", min(missing))
+            self._refuse("missing edge choice", min(missing))
         if extra := schedule.edges.keys() - expected_edges:
-            self._refuse("edge assignment is outside this problem", min(extra))
+            self._refuse("edge choice is outside this problem", min(extra))
 
         for site in self.tile_op.node_sites:
             view = self.tile_op.views[site]
-            assignment = schedule.nodes[site]
-            if view.axis is None and not isinstance(assignment, ProjectionSchedule):
+            choice = schedule.nodes[site]
+            if view.axis is None and not isinstance(choice, ProjectionSchedule):
                 self._refuse("projection site requires a projection schedule", site)
-            if view.axis is not None and not isinstance(assignment, ReductionSchedule):
+            if view.axis is not None and not isinstance(choice, ReductionSchedule):
                 self._refuse("reduction site requires a reduction schedule", site)
-            if isinstance(assignment.tile, PlacedTile):
+            if isinstance(choice.tile, PlacedTile):
                 self._refuse("node choices cannot contain placed tile geometry", site)
 
     def _no_site_claims_inventory(self) -> bool:
@@ -657,11 +657,11 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         )
         return agrees and (not kernel.work.producer or self._producer_eligible) and (kernel.raster.is_direct or self._raster_eligible)
 
-    def node_assignment(self, site: NodeId) -> NodeSchedule:
-        return self.assignment.nodes[site]
+    def node_choice(self, site: NodeId) -> NodeSchedule:
+        return self.schedule.nodes[site]
 
-    def edge_assignment(self, edge: EdgeSite) -> EdgeSchedule:
-        return self.assignment.edges[edge]
+    def edge_choice(self, edge: EdgeSite) -> EdgeSchedule:
+        return self.schedule.edges[edge]
 
     @property
     def work(self) -> Work | None:

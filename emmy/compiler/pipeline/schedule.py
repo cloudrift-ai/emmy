@@ -50,9 +50,9 @@ def fork_schedule(
 ) -> list[Fork]:
     """Build and optionally sample a lazy fork tree from a semantic schedule context."""
 
-    def leaf(assignment: Schedule) -> ScheduleLeaf:
-        row = frozendict({**row_prefix, **codec._encode(assignment)})
-        return ScheduleLeaf(assignment, row, dict(inherited_knobs), materialize, pool_id)
+    def leaf(schedule: Schedule) -> ScheduleLeaf:
+        row = frozendict({**row_prefix, **codec._encode(schedule)})
+        return ScheduleLeaf(schedule, row, dict(inherited_knobs), materialize, pool_id)
 
     roots = schedule_forks(
         context,

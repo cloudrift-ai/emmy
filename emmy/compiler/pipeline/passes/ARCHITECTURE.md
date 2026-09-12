@@ -130,7 +130,7 @@ row that names several of a kernel's seams (the composed decision a pinned compi
 offers one composed arm per such route registered for the kernel's signature (`pins.composed_routes`, filled by the
 greedy strategy from the evidence index and by a golden record's replay from its own keys); its pieces are decided
 like a pinned cut's, since they are the kernels the row measured.
-`040_schedule` is the classic assignment boundary. The model under `ir/schedule` factors a kernel into sites — one
+`040_schedule` is the classic schedule boundary. The model under `ir/schedule` factors a kernel into sites — one
 per node, the kernel site last — and each site projects its own catalog: direct, plain-reduction, scalar-contraction,
 precision-gated tensor-core, materialized-operand copy, computed-operand and multi-channel smem compute-fill, and
 kernel-global raster choices. `ClassicScheduleContext` alone composes their compatibility. The pass folds the
@@ -150,7 +150,7 @@ beside a tiled contraction; symbolic grids expose only the direct choice. Static
 the transposed `gn4` and `gn8` are taken only where a row names them. The stage factor is projected once per
 consumer site from target-filtered transport choices. After `c` has selected one node and its incident edge values,
 the context derives their local support without putting slab sizes into either public factor; compatibility
-therefore rejects mixed transport assignments, and selected non-direct edges are resolved again only during
+therefore rejects mixed transport choices, and selected non-direct edges are resolved again only during
 materialization. The production traversal follows compatible prefixes. When `c + p + t` can prove that a prefix has
 no completion, the context may reject it without constructing later support. Bounded tests compare the complete set
 against the literal node × edge × kernel product.
@@ -164,7 +164,7 @@ cut piece.
 
 **The cross-CTA split is a kernel-set decision, not a schedule row.** A split kernel does not run — its cost is the
 Σ over the partial and finalize it produces — so the cross-CTA domain is the second slice of `030_cut`, BEFORE
-assignment composition. The
+any schedule is composed. The
 rewrite consumes only the stored Fold algebra (a contraction slices through σ-reindexed operand edges, its cone's
 row-invariant statistic staying full-row in every partition; any other fold slices through the generic
 `Fold.rewrite`), and each piece re-enters the scan as a fresh kernel that decides its own row. A piece is the region
@@ -193,7 +193,7 @@ There is no production-specific product and no second notion of membership. The 
 intact and never imports classic scheduling. The context may reject a prefix only when its combined state proves that
 no completion can satisfy the same relation; it must still enumerate exactly Algorithm 1, so traversal order can
 change only evaluation cost. Every leaf crosses the complete compatibility relation once at the strict codec boundary,
-then carries that accepted typed assignment and canonical row through search and materialization. Downstream reads
+then carries that accepted typed schedule and canonical row through search and materialization. Downstream reads
 never repeat the compatibility walk. Bounded spaces are exhaustively compared with the literal Cartesian reference.
 That compatibility pruning matters because on flash attention the unconstrained product is 8.9e6 against 13,280
 compatible rows, and on an EXL3 coded linear 5.3e12 against 19,407,312 — and a row that names every site makes D a
@@ -266,7 +266,7 @@ registry's target filter, which no pin overrides.
 
 The fill's `d1/smem` and `d2/smem` choices are projected independently onto every operand edge. Direct transport may
 still occur in those public edge factors because a scalar node choice supports it; compatibility alone rejects a
-direct or mixed edge assignment beside a warp node choice that needs the fill. Fill sizing uses the contraction's
+direct or mixed edge choice beside a warp node choice that needs the fill. Fill sizing uses the contraction's
 effective reduction axis. A derived unit-marker contraction therefore inherits its enclosing Fold's K axis and
 carried-state seam as immutable node facts; the synthetic unit axis never controls the K chunk or mask. An untiled
 choice claims neither physical-axis geometry nor a fill, so it composes with a tiled sibling without inventing an
@@ -301,7 +301,7 @@ untiled tile candidate composes with the same `coop_reduce_moves` catalog the pl
 bands, the ILP register chains, the transposed band — under a static K (the scalar contraction emitters carry no
 masked-K band), while a tiled output contracts K serially per register cell and takes only the serial fold. A
 cooperative band claims the kernel's inventory as the `t<coop>` thread inventory (`derive_inventory`), which is how
-the private partial assignment reconciles it with every other site. A cooperative / ILP `REDUCE` pin reaches only
+the private partial schedule reconciles it with every other site. A cooperative / ILP `REDUCE` pin reaches only
 the exact per-cell node site; a tiled plan offers nothing under it, while a serial choice remains valid for every tile.
 
 **The pointwise register strip is a `TILE` value materialized as a term variant.** The pure pointwise ROOT cell is the
@@ -313,7 +313,7 @@ writes at materialization — a different term, hence a different structural ide
 (`identity_key(with_io=True, with_knobs=True)`).
 
 **`RASTER` leads the walk as its own fork level.** The CTA launch-order codec is kernel-global with nothing for
-the partial assignment to reconcile, so it is decided once per kernel, ahead of the sites: each candidate value is one
+the partial schedule to reconcile, so it is decided once per kernel, ahead of the sites: each candidate value is one
 branch whose row prefix carries it and whose subtree is the whole site walk, and a kernel offering one value collapses
 the level
 exactly as any other one-option level does — the honest parallel to `WORK` *leading* the walk. Contraction-scoped
@@ -592,7 +592,7 @@ that canonical input:
   realizes another placement decision.
 
 - **The cross-CTA reduce split is structural.** Splitting the reduce axis across CTAs into a partial and finalize
-  changes which kernels exist, so `030_cut` offers it after stored-edge placement and before any assignment
+  changes which kernels exist, so `030_cut` offers it after stored-edge placement and before any schedule
   is enumerated.
   Each fresh piece then enters the ordinary schedule pass with the partition receipt described below.
 
@@ -664,9 +664,9 @@ stage at BOTH depths
 (`d1` + the asymmetric B-only prefetch ring `d2` as fork siblings — the M=512 occupancy loss inverts at decode M,
 so the depth is measured per shape), crossed with the shared `RASTER` launch-order candidates (its B stripes
 re-stream per M-tile row, exactly the grouped order's L2 reuse — `gn8` measured −8% on the gemma gate_up fused
-edge, 5090). The **redundant-statistic split-K** form is no longer an assignment row: the structural
+edge, 5090). The **redundant-statistic split-K** form is no longer a schedule row: the structural
 `030_cut` pass
-slices the contraction across CTAs BEFORE assignment composition, σ-reindexing the per-cell cone to
+slices the contraction across CTAs BEFORE any schedule is composed, σ-reindexing the per-cell cone to
 absolute k while the k-invariant stat prologue stays full-row in every partition (each recomputes it, which is
 cheap on the small-free decode shapes and is left to evidence to price), and the wrapping zero-axis fold's
 projection folds into the deferred finalize. Multi-channel (gate/up) nodes split too: the sliced contraction
@@ -677,7 +677,7 @@ Multi-channel products still have no scalar / gmem-direct / WSPEC rows; the comp
 is the anticipated
 `RoleKind` extension. `TILE` values reach each site through the exact codec spelling: an explicit `TILE@<route>`
 names one site when sites need different values, while the canonical bare spelling names one site among those that
-support its value. A value no applicable site can take leaves no assignment rather than changing a factor. Staging
+support its value. A value no applicable site can take leaves no schedule rather than changing a factor. Staging
 additionally
 requires the staged BUFFER dtypes to match the atom's operand dtypes — a slab fill byte-copies and cannot
 convert; gmem-direct fragment loads convert

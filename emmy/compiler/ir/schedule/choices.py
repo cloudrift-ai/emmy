@@ -7,7 +7,7 @@ one concrete schedule implementation.
 (:mod:`emmy.compiler.ir.pure.fold` + :mod:`~emmy.compiler.ir.tile.ir`). This module owns the
 leaf choice types (:class:`Reduce` / :class:`Tile` / :class:`Stage` / :class:`WarpSpec` plus
 :class:`Placement`); :mod:`emmy.compiler.ir.schedule.classic` composes them into the accepted
-kernel, node, and edge assignment stored on ``TileOp.schedule``. The Fold term itself carries no
+kernel, node, and edge schedule stored on ``TileOp.schedule``. The Fold term itself carries no
 schedule field.
 
 A reduction's only freedom is **how the reduce axis is partitioned across hardware levels**
@@ -653,7 +653,7 @@ def derive_inventory(tiles, *, coop: int = 1, producer: int = 0) -> Work | None:
     neither realizes.
 
     ONE home for the rule: ``ClassicScheduleContext.extend`` uses it while composing compatible
-    prefixes and ``require`` checks arbitrary complete assignments at the public boundary."""
+    prefixes and ``require`` checks arbitrary complete schedules at the public boundary."""
     work = derive_workers(tiles)
     if coop > 1:
         band = Work(kind="thread", units=(coop, 1))

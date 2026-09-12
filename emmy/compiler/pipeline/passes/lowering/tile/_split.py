@@ -205,7 +205,7 @@ def split_forks(match: Match, root: Node, *, unsplit_tile: TileOp | None = None)
     decide (no reduce fold, or the kernel is itself a piece of a realized split: the sliced axis's
     partition ``Window`` is the receipt, so the pieces re-entering the cut fixpoint and skip here;
     an ambient pin can never split twice). ``040_schedule`` then consumes the same receipt when it
-    strips the pin's ``g`` half before composing each piece's own assignment.
+    strips the pin's ``g`` half before composing each piece's own schedule.
 
     A ``REDUCE`` pin is authoritative over its cross-CTA ``g<n>[a|k]`` half and ONLY that half:
     the rest of the value (``coop`` / ``r<n>``) is the pieces' own schedule, which the walk reads

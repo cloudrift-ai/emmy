@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 
 
-def classic_cartesian_assignments(context):
+def classic_cartesian_schedules(context):
     """Enumerate a classic context's literal kernel × node × edge test oracle."""
     from emmy.compiler.ir.schedule import Schedule, ScheduleRefused
 
@@ -25,25 +25,25 @@ def classic_cartesian_assignments(context):
     nodes = tuple(problem.node_site(site).nodes for site in context.tile_op.node_sites)
     edges = tuple(problem.node_site(edge[0]).edges for edge in context.tile_op.edge_sites)
     for kernel, node_values, edge_values in product(problem.kernel_site.kernels, product(*nodes), product(*edges)):
-        assignment = Schedule(
+        schedule = Schedule(
             kernel,
             dict(zip(context.tile_op.node_sites, node_values, strict=True)),
             dict(zip(context.tile_op.edge_sites, edge_values, strict=True)),
         )
         try:
-            context.extend(assignment)
+            context.extend(schedule)
         except (ScheduleRefused, TypeError):
             accepted = False
         else:
             accepted = True
-        yield assignment, accepted
+        yield schedule, accepted
 
 
 def enumerate_classic_reference(context):
-    """Yield the accepted subset of the literal classic assignment product."""
-    for assignment, accepted in classic_cartesian_assignments(context):
+    """Yield the accepted subset of the literal classic schedule product."""
+    for schedule, accepted in classic_cartesian_schedules(context):
         if accepted:
-            yield assignment
+            yield schedule
 
 
 @functools.cache

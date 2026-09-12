@@ -1,7 +1,7 @@
 # Schedule model
 
-`Schedule` is the generic immutable kernel × node × edge assignment. Node sites are non-negative integers and edge
-sites are `(consumer node id, operand position)` tuples; the assignment contains no problem, target, path spelling, or
+`Schedule` is the generic immutable kernel × node × edge schedule. Node sites are non-negative integers and edge
+sites are `(consumer node id, operand position)` tuples; a schedule contains no problem, target, path spelling, or
 lowering facts. A concrete schedule family may carry derived lowering facts in a separate materialization type.
 
 A schedule enumeration has two terms, and the interface names both. A `ScheduleProblem` is the problem and the
@@ -17,12 +17,12 @@ between sites and nothing else. Its defining operations are a lazy frontier and 
     for pick in context.extensions():
         next = context.extend(pick)
 
-Every context assignment and extension is a `Schedule[KernelT, NodeT, EdgeT]`; a non-`None` kernel marks completion.
+Every context prefix and extension is a `Schedule[KernelT, NodeT, EdgeT]`; a non-`None` kernel marks completion.
 `extensions` yields the next site's options that compose with the prefix; `extend` composes one and returns a context
 containing the composed facts, leaving the original unchanged, or raises `ScheduleRefused`. `extend` is also the
-validation boundary for a complete classic assignment supplied directly by a pinned golden, even when that assignment
+validation boundary for a complete classic schedule supplied directly by a pinned golden, even when that assignment
 was not emitted by `extensions`. The generic `schedule(context)` recursively composes those lazy frontiers and yields
-only complete assignments. Recursion is the generic Algorithm 1 traversal; consumers do not write a family-specific
+only complete schedules. Recursion is the generic Algorithm 1 traversal; consumers do not write a family-specific
 visitor or feed contexts back themselves. The driver knows no concrete family, pipeline fork type, site order, or
 enumeration slice. `narrowed(row)` is the one way a row enters after construction: an EMPTY prefix over the same
 problem with the row installed, which is what a descent that already holds a row asks for before expanding anything.
@@ -80,7 +80,7 @@ The classic family is the `classic/` package, one role per module: `schedule` (t
 spellings and keys), `refusals` (every per-choice legality rule), `sites` (the source),
 `context` (the join), `codec` (the wire boundary) and `materialize` (the lowering boundary). Imports flow in that
 order and nothing in the package imports the tile package at module level, which is what lets `ir/tile/ops` read
-the assignment names through the package.
+the choice types and key spellings through the package.
 
 `ClassicProblem` (`classic/sites`) is `p + t` and the row: the unscheduled TileOp, its target, and the knob row
 whose values its sites offer where it names them. `ClassicScheduleContext` is the immutable `c + p + t` prefix over
@@ -182,7 +182,7 @@ before the `TileOp` constructor performs that same validation once. It owns cano
 encoding for `WORK`, `TILE`, `REDUCE`, `STAGE`, and `RASTER`. There is no codec base class: a second schedule family
 should demonstrate any shared codec contract before one is extracted.
 
-The structural cut phase runs before assignment composition. The single `030_cut` pass reaches a fixpoint over two
+The structural cut phase runs before any schedule is composed. The single `030_cut` pass reaches a fixpoint over two
 ordered domains: stored-Fold-edge placement first, then cross-CTA reduction splitting. Every successful choice and
 fresh piece re-enters the same rule. `030_cut` presents its restricted structural frontier through a schedule context;
 `040_schedule` supplies a `ClassicScheduleContext`. Both passes use the same generic `schedule` traversal.

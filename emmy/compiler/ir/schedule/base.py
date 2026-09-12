@@ -1,4 +1,4 @@
-"""Generic schedule assignments and compatible enumeration.
+"""Generic schedules and compatible enumeration.
 
 Two terms make a schedule enumeration, and the interface names both:
 
@@ -19,11 +19,11 @@ transport and fragment-seam combinations before they create subtrees.
 
 Three invariants make those different granularities one enumeration:
 
-* ``assignment`` is an immutable kernel × node × edge :class:`Schedule`; a non-``None`` kernel
+* ``schedule`` is an immutable kernel × node × edge :class:`Schedule`; a non-``None`` kernel
   marks a complete leaf.
 * ``extensions`` yields a lazy, context-aware frontier. It may omit picks already proved
-  incompatible, but must retain a route to every accepted complete assignment.
-* ``extend`` is the authority. It accepts a frontier pick or a complete assignment supplied by a
+  incompatible, but must retain a route to every accepted complete schedule.
+* ``extend`` is the authority. It accepts a frontier pick or a complete schedule supplied by a
   caller, returns a new context, and raises :class:`ScheduleRefused` without mutating the prefix.
 
 The generic driver knows only those operations. Repeatedly calling it on the returned contexts is
@@ -44,7 +44,7 @@ from .views import EdgeSite, NodeId
 
 @dataclass(frozen=True)
 class Schedule[KernelT, NodeT, EdgeT]:
-    """One immutable kernel × node × edge assignment, possibly still incomplete."""
+    """One immutable kernel × node × edge schedule, possibly still incomplete."""
 
     kernel: KernelT | None
     nodes: Mapping[NodeId, NodeT]
@@ -52,9 +52,9 @@ class Schedule[KernelT, NodeT, EdgeT]:
 
     def __post_init__(self) -> None:
         if not isinstance(self.nodes, Mapping) or not isinstance(self.edges, Mapping):
-            raise TypeError("schedule node and edge assignments must be mappings")
+            raise TypeError("schedule node and edge choices must be mappings")
         if any(type(site) is not int or site < 0 for site in self.nodes):
-            raise TypeError("schedule node assignments must use non-negative integer sites")
+            raise TypeError("schedule node choices must use non-negative integer sites")
         if any(
             not isinstance(edge, tuple)
             or len(edge) != 2
@@ -64,7 +64,7 @@ class Schedule[KernelT, NodeT, EdgeT]:
             or edge[1] < 0
             for edge in self.edges
         ):
-            raise TypeError("schedule edge assignments must use (consumer, operand) sites")
+            raise TypeError("schedule edge choices must use (consumer, operand) sites")
         object.__setattr__(self, "nodes", frozendict(self.nodes))
         object.__setattr__(self, "edges", frozendict(self.edges))
 
@@ -132,8 +132,8 @@ class ScheduleContext[KernelT, NodeT, EdgeT](ABC):
 
     @property
     @abstractmethod
-    def assignment(self) -> Schedule[KernelT, NodeT, EdgeT]:
-        """The immutable kernel × node × edge assignment prefix decided so far."""
+    def schedule(self) -> Schedule[KernelT, NodeT, EdgeT]:
+        """The immutable kernel × node × edge schedule decided so far — the prefix."""
 
     @abstractmethod
     def extensions(self) -> Iterator[Schedule[KernelT, NodeT, EdgeT]]:
@@ -146,7 +146,7 @@ class ScheduleContext[KernelT, NodeT, EdgeT](ABC):
     def narrowed(self, row: Mapping[str, str]) -> Self:
         """This prefix over the problem with ``row`` installed. Only an empty prefix can be
         narrowed: the sites change, and a decided site cannot be re-sourced under it."""
-        if self.problem is None or self.assignment.nodes or self.assignment.kernel is not None:
+        if self.problem is None or self.schedule.nodes or self.schedule.kernel is not None:
             raise ValueError("only an empty schedule prefix can be narrowed to a row")
         return self._with_problem(self.problem.with_row(row))
 
@@ -159,14 +159,14 @@ def schedule[KernelT, NodeT, EdgeT](
     *,
     recursive: bool = True,
 ) -> Iterator[ScheduleContext[KernelT, NodeT, EdgeT] | Schedule[KernelT, NodeT, EdgeT]]:
-    """Lazily enumerate complete assignments, or one frontier for a generic tree adapter."""
+    """Lazily enumerate complete schedules, or one frontier for a generic tree adapter."""
     for pick in context.extensions():
         try:
             child = context.extend(pick)
         except ScheduleRefused:
             continue
-        if child.assignment.kernel is not None:
-            yield child.assignment
+        if child.schedule.kernel is not None:
+            yield child.schedule
         elif recursive:
             yield from schedule(child)
         else:
