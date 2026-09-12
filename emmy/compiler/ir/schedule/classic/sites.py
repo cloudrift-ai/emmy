@@ -22,7 +22,6 @@ from emmy.utils import cached_method
 
 from .assignment import (
     ClassicAssignment,
-    ClassicDomains,
     EdgeSchedule,
     KernelSchedule,
     NodeSchedule,
@@ -31,7 +30,6 @@ from .assignment import (
     classic_node_key,
     classic_stage_key,
     no_site_claims_inventory,
-    node_id_spelling,
 )
 from .refusals import (
     _atom_policy_ok,
@@ -49,10 +47,6 @@ from .refusals import (
 
 if TYPE_CHECKING:
     from emmy.compiler.ir.tile import TileOp
-
-
-class ClassicProjectionError(RuntimeError):
-    """One projected site has no locally supported choice on this structural branch."""
 
 
 def _select[T](
@@ -157,27 +151,9 @@ class ClassicNodeSite(Site[ClassicAssignment]):
             validate_pins=self.problem.validate_pins,
         )
 
-    def _literal(self, family: str, choices: tuple, spell: Callable[[object], str]) -> tuple:
-        """A hand-written factor under the row: the same selection the catalog gets, by spelling."""
-        if family != "STAGE" and self.id not in self.problem.tile.family_sites[family]:
-            return choices
-        key = self.stage_key if family == "STAGE" else classic_node_key(self.problem.tile, family, self.id)
-        if key is None:
-            return choices
-        named = self.problem.row.get(key)
-        if named is not None:
-            kept = tuple(choice for choice in choices if spell(choice) == named)
-            choices = kept if kept or self.problem.strict(key) else choices
-        bare = self.problem.bare_value(family, self.keys)
-        return choices if bare is None else tuple(choice for choice in choices if spell(choice) in ("", bare))
-
     @cached_property
     def nodes(self) -> tuple[NodeSchedule, ...]:
         """The node choices: the row's value where it names this site, else the catalog."""
-        literal = self.problem.domains_literal
-        if literal is not None:
-            choices = self._literal("TILE", literal.nodes[self.id], lambda choice: choice.tile.spell())
-            return self._literal("REDUCE", choices, lambda choice: choice.reduce.spell() if isinstance(choice, ReductionSchedule) else "")
         tile, node = self.problem.tile, self.node
         view = tile.views[self.id]
         if view.axis is None:
@@ -250,7 +226,7 @@ class ClassicNodeSite(Site[ClassicAssignment]):
         read the same way whatever the row names, and found without walking the scalar tier."""
         tile, node = self.problem.tile, self.node
         facts = tile.contractions.get(self.id)
-        if facts is None or self.problem.domains_literal is not None:
+        if facts is None:
             return any(choice.tile.is_warp for choice in self.nodes)
         return any(self._placed_ok(ReductionSchedule(plan, Reduce())) for plan in _warp_plans(node, facts, self.problem.atoms_of(self.id)))
 
@@ -261,10 +237,7 @@ class ClassicNodeSite(Site[ClassicAssignment]):
     @cached_property
     def edges(self) -> tuple[EdgeSchedule, ...]:
         """The transport choices of every incident edge — one tuple, shared by all of them."""
-        literal = self.problem.domains_literal
         incident = self.problem.tile.incident_edges[self.id]
-        if literal is not None:
-            return self._literal("STAGE", literal.edges[incident[0]], lambda choice: choice.stage.spell()) if incident else ()
         if not incident:
             return ()
         tile, target, node = self.problem.tile, self.problem.target, self.node
@@ -319,15 +292,6 @@ class ClassicKernelSite(Site[ClassicAssignment]):
 
     @cached_property
     def kernels(self) -> tuple[KernelSchedule, ...]:
-        literal = self.problem.domains_literal
-        if literal is not None:
-            kernels = literal.kernel
-            for key, spell in (("WORK", lambda kernel: kernel.work.spell()), ("RASTER", lambda kernel: kernel.raster.spell())):
-                named = self.problem.row.get(key)
-                if named is not None:
-                    kept = tuple(kernel for kernel in kernels if spell(kernel) == named)
-                    kernels = kept if kept or self.problem.strict(key) else kernels
-            return kernels
         return tuple(KernelSchedule(work, raster) for work in self._works() for raster in self._rasters())
 
     def _inventories(self) -> Iterator[Work]:
@@ -411,8 +375,7 @@ class ClassicKernelSite(Site[ClassicAssignment]):
 @dataclass(frozen=True, eq=False)
 class ClassicProblem(ScheduleProblem[ClassicAssignment]):
     """``p + t`` and the row: one unscheduled ``TileOp``, its target, and the knob row whose
-    values the sites offer where it names them. ``domains_literal`` substitutes hand-written
-    factors for the projection — the tests' literal oracle. The precision policy and the pin
+    values the sites offer where it names them. The precision policy and the pin
     reading (``validate_pins``: a named value the site cannot take empties it, else the site keeps
     its catalog — the reading a row published across peer kernels takes) are the problem's
     parameters, because they change what a site offers."""
@@ -420,7 +383,6 @@ class ClassicProblem(ScheduleProblem[ClassicAssignment]):
     tile: TileOp
     target: object = None
     row: Mapping[str, str] = field(default_factory=frozendict)
-    domains_literal: ClassicDomains | None = None
     allow_f16_accumulate: bool = True
     allow_fp8: bool = True
     validate_pins: bool = True
@@ -553,22 +515,6 @@ class ClassicProblem(ScheduleProblem[ClassicAssignment]):
         return any(site.warp_eligible for site in self.node_sites)
 
     @cached_property
-    def domains(self) -> ClassicDomains:
-        """The literal independent factors — the product every enumeration is a subset of.
-        Raises :class:`ClassicProjectionError` when a site offers nothing."""
-        if self.domains_literal is not None:
-            return self.domains_literal
-        for site in self.node_sites:
-            if not site.nodes or (self.tile.incident_edges[site.id] and not site.edges):
-                raise ClassicProjectionError(f"classic site {node_id_spelling(site.id)} has no locally supported choice")
-        if not self.kernel_site.kernels:
-            raise ClassicProjectionError("classic kernel site has no locally supported choice")
-        edges = {}
-        for site in self.node_sites:
-            edges.update({edge: site.edges for edge in self.tile.incident_edges[site.id]})
-        return ClassicDomains(kernel=self.kernel_site.kernels, nodes={site.id: site.nodes for site in self.node_sites}, edges=edges)
-
-    @cached_property
     def bounds(self) -> tuple[int, int]:
         size = descent = len(self.kernel_site.kernels)
         for site in self.node_sites:
@@ -576,9 +522,3 @@ class ClassicProblem(ScheduleProblem[ClassicAssignment]):
             size *= len(site.nodes) * (len(site.edges) ** incident)
             descent += len(site.nodes) * max(len(site.edges), 1)
         return size, descent
-
-
-def project_classic(tile: TileOp, target, row: Mapping[str, str] | None = None) -> ClassicDomains:
-    """The independent kernel, node, and edge domains of one unscheduled tile: the catalog, or —
-    under ``row`` — the row's values at the sites it names."""
-    return ClassicProblem(tile, target, row=frozendict(row or {})).domains

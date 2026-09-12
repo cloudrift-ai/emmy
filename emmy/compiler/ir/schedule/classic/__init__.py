@@ -1,6 +1,6 @@
 """The classic grid/CTA/warp/thread/register schedule family, one role per module:
 
-* ``assignment`` — the choice types, the sites' wire spellings and keys, ``ClassicDomains``
+* ``assignment`` — the choice types, the sites' wire spellings and keys
 * ``refusals``   — every per-choice legality rule, asked of a catalog value and of a parsed row value alike
 * ``sites``      — the source: ``ClassicProblem`` factored into node sites and the kernel site
 * ``context``    — the join: ``ClassicScheduleContext``, the compatibility prefix
@@ -14,7 +14,6 @@ while a compile imports it, and nothing below ``assignment`` imports the tile pa
 from .assignment import (
     CLASSIC_FAMILIES,
     ClassicAssignment,
-    ClassicDomains,
     EdgeSchedule,
     KernelSchedule,
     NodeSchedule,
@@ -31,17 +30,15 @@ from .assignment import (
 from .codec import ClassicScheduleCodec
 from .context import ClassicScheduleContext
 from .materialize import ClassicMaterialization, materialize_classic
-from .sites import ClassicKernelSite, ClassicNodeSite, ClassicProblem, ClassicProjectionError, project_classic
+from .sites import ClassicKernelSite, ClassicNodeSite, ClassicProblem
 
 __all__ = [
     "CLASSIC_FAMILIES",
     "ClassicAssignment",
-    "ClassicDomains",
     "ClassicKernelSite",
     "ClassicMaterialization",
     "ClassicNodeSite",
     "ClassicProblem",
-    "ClassicProjectionError",
     "ClassicScheduleCodec",
     "ClassicScheduleContext",
     "EdgeSchedule",
@@ -57,5 +54,4 @@ __all__ = [
     "node_id_spelling",
     "parse_edge_site",
     "parse_node_id",
-    "project_classic",
 ]
