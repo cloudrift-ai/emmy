@@ -9,5 +9,5 @@ admits. A structural choice replaces the kernel with fresh unmapped pieces that 
 ``040_schedule`` schedules the stored tree only after the cut rule is quiescent.
 
 ``030_cut`` reads the structural tree through ``ir.tile.path.sites``. ``040_schedule`` adapts the classic
-schedule model's accepted assignments to lazy pipeline forks; schedule membership remains independent of traversal order.
+schedule model's accepted schedules to lazy pipeline forks; schedule membership remains independent of traversal order.
 """

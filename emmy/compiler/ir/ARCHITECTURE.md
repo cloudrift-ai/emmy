@@ -80,7 +80,7 @@ choice. It also derives each node site's projection or reduction view, and each 
 contraction-capable reduction, nor what its K axis, cone seam, producer, or fragment need are. `ClassicScheduleContext` composes compatibility
 over those sites and the separately projected node and edge domains.
 
-`Schedule` is the immutable, generic assignment of kernel, node, and edge choices. Direct work, flat raster, untiled
+`Schedule` is the immutable, generic binding of kernel, node, and edge choices. Direct work, flat raster, untiled
 nodes, serial reductions, and direct edges are explicit values rather than missing fields. Choice values never carry
 site identities, paths, target facts, encodings, or materialization results: `Tile` is axis-free and `Stage` contains
 no slab names or resolved K chunk. The wire codec is injective: empty `TILE` means only per-cell, while a parallel
@@ -89,9 +89,9 @@ unit-register thread tile spells `f1`; `WORK` never changes the meaning of an em
 geometry and `ResolvedStage` transport facts. Construction enforces the value types; completeness, site scope,
 node-sum agreement, worker inventory and thread limits, producer-band/TMA agreement, raster eligibility, target
 choice availability, and current per-contraction transport agreement need the problem and are enforced by
-`ClassicScheduleContext`. Every enumeration and decode leaf crosses that complete-assignment boundary exactly
+`ClassicScheduleContext`. Every enumeration and decode leaf crosses that complete-schedule boundary exactly
 once before search or lowering can observe it. A validated leaf retains its canonical codec row; inspection and
-materialization reuse that row and typed assignment instead of repeating the compatibility walk. Encoding an arbitrary
+materialization reuse that row and typed schedule instead of repeating the compatibility walk. Encoding an arbitrary
 schedule remains a validating public boundary.
 
 Graph reconstruction is the staged exception forced by the wire dependency: a private codec step parses typed schedule
@@ -166,7 +166,7 @@ kernel it produced went on to read.
   `REDUCE` codec knob (`g<n>` cta / `coop` (its width in `WORK`) / `r<n>` reg; the
   decision hierarchy = env pin > the deploy evidence hierarchy, and nothing
   else — there is no default partition). The knob is ephemeral — resolved here
-  into the typed assignment's `Reduce`; the combine stays the `Fold` node's stored program. Any static
+  into the typed schedule's `Reduce`; the combine stays the `Fold` node's stored program. Any static
   `PLANAR` / `TWISTED` reduce is cooperation-eligible (degenerate
   `sum`/`max`/`mean` AND twisted online-softmax, scalar AND
   full-row outputs), and the schedule enumerates the serial fold beside every
@@ -703,7 +703,7 @@ recipe recognizes — `(maximum, denominator, expectations…)` for the exp fami
 the axis (attention's `1/l`) out of the fold first; softmax and masked or unmasked SDPA are arity variants of one
 recipe, not separate matchers. Placement and cross-CTA split are structural phases before site construction. Classic scheduling
 classifies the resulting Fold tree, assigns each node once and every consumer operand edge independently, then stores
-one complete typed assignment on `TileOp.schedule`. Unsupported shapes remain unmapped; scheduling never annotates or
+one complete typed schedule on `TileOp.schedule`. Unsupported shapes remain unmapped; scheduling never annotates or
 rewrites the Fold tree.
 
 See [`tile/ARCHITECTURE.md`](tile/ARCHITECTURE.md) for the exact storage and boundary contract.

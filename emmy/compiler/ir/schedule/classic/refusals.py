@@ -52,8 +52,8 @@ def _reduction_domain(tile: TileOp, node) -> tuple[Reduce, ...]:
     """Project one plain reduction's legal choices from node and kernel facts only.
 
     The catalog is not capped by the axis extent: an over-wide band is legal and idles its extra
-    lanes. Keeping it in the independent node domain lets ``c`` restrict an existing assignment
-    instead of manufacturing a pin-only choice outside Algorithm 1.
+    lanes. Keeping it in the site's own factor lets a row select one instead of manufacturing a
+    pin-only choice outside Algorithm 1.
 
     Shared by the contraction per-cell tier through :func:`_contraction_reductions`, and
     deliberately so: a contraction is a monoid with a ⊗ lift, so it inherits the same swept /

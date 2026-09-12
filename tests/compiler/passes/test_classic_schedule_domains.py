@@ -7,7 +7,8 @@ from emmy.compiler.context import Context
 from emmy.compiler.graph import Tensor
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.schedule import Reduce, ScheduleContext, ScheduleRefused, Stage, Tile, Work, schedule
+from emmy.compiler.ir.schedule import Reduce, ScheduleContext, ScheduleRefused, Stage, Tile, Work
+from emmy.compiler.ir.schedule import schedule as advance_schedule
 from emmy.compiler.ir.schedule.catalog import coop_reduce_moves, scalar_tile_moves
 from emmy.compiler.ir.schedule.classic import (
     ClassicProblem,
@@ -27,12 +28,12 @@ from tests.compiler.terms import contraction, projection
 classic_forks = import_module("emmy.compiler.pipeline.passes.lowering.tile.040_schedule").classic_forks
 
 
-def _signature(codec, assignment) -> tuple[tuple[str, str], ...]:
-    return tuple(codec.encode(assignment).items())
+def _signature(codec, schedule) -> tuple[tuple[str, str], ...]:
+    return tuple(codec.encode(schedule).items())
 
 
 def _enumerate_context(context: ScheduleContext):
-    for value in schedule(context):
+    for value in advance_schedule(context):
         if isinstance(value, ScheduleContext):
             yield from _enumerate_context(value)
         else:
@@ -106,7 +107,7 @@ def test_production_enumeration_is_the_compatible_independent_product() -> None:
     offers = _offers(tile, target)
     codec = ClassicScheduleCodec(_context(tile, target))
 
-    reference = {_signature(codec, assignment) for assignment in _reference(tile, target)}
+    reference = {_signature(codec, schedule) for schedule in _reference(tile, target)}
     leaves = _schedule_leaves(tile, "pointwise", target)
 
     assert {_signature(codec, leaf.schedule) for leaf in leaves} == reference
@@ -149,7 +150,7 @@ def test_reduction_enumeration_filters_the_independent_product_by_compatibility(
     leaves = _schedule_leaves(tile, "reduce", target)
     codec = ClassicScheduleCodec(_context(tile, target))
 
-    assert {_signature(codec, leaf.schedule) for leaf in leaves} == {_signature(codec, assignment) for assignment in reference}
+    assert {_signature(codec, leaf.schedule) for leaf in leaves} == {_signature(codec, schedule) for schedule in reference}
     assert len(reference) == len(expected_reductions)
     assert offers.bounds[0] > len(reference)
 
@@ -174,10 +175,10 @@ def test_scalar_contraction_enumeration_is_the_compatible_independent_product(mo
     reference = tuple(_reference(tile, target))
     leaves = _schedule_leaves(tile, "matmul", target)
     codec = ClassicScheduleCodec(_context(tile, target))
-    assert {_signature(codec, leaf.schedule) for leaf in leaves} == {_signature(codec, assignment) for assignment in reference}
+    assert {_signature(codec, leaf.schedule) for leaf in leaves} == {_signature(codec, schedule) for schedule in reference}
     assert offers.bounds[0] > len(reference)
     assert {choice.raster.spell() for choice in offers.kernel_site.kernels} == {"", "gm8"}
-    assert all(assignment.kernel.raster.is_direct for assignment in reference if not assignment.nodes[site].tile.is_tiled)
+    assert all(schedule.kernel.raster.is_direct for schedule in reference if not schedule.nodes[site].tile.is_tiled)
 
     tiled = next(leaf for leaf in leaves if leaf.schedule.nodes[site].tile.is_tiled)
     materialized = tiled.expand()[0]
@@ -232,10 +233,10 @@ def test_multi_channel_contraction_domain_contains_per_cell_and_warp_compute_fil
 
     assert any(not choice.tile.is_tiled for choice in offers.node_site(0).nodes)
     assert any(choice.tile.is_warp for choice in offers.node_site(0).nodes)
-    per_cell = [child for child in compatible if not child.assignment.nodes[0].tile.is_tiled]
-    warp = [child for child in compatible if child.assignment.nodes[0].tile.is_warp]
-    assert per_cell and all(choice.stage.is_direct for child in per_cell for choice in child.assignment.edges.values())
-    assert warp and all(choice.stage.transport == "smem" for child in warp for choice in child.assignment.edges.values())
+    per_cell = [child for child in compatible if not child.schedule.nodes[0].tile.is_tiled]
+    warp = [child for child in compatible if child.schedule.nodes[0].tile.is_warp]
+    assert per_cell and all(choice.stage.is_direct for child in per_cell for choice in child.schedule.edges.values())
+    assert warp and all(choice.stage.transport == "smem" for child in warp for choice in child.schedule.edges.values())
 
 
 def test_tensor_core_enumeration_is_the_compatible_independent_product(monkeypatch) -> None:
@@ -263,10 +264,10 @@ def test_tensor_core_enumeration_is_the_compatible_independent_product(monkeypat
     reference = tuple(_reference(tile, target))
     leaves = _schedule_leaves(tile, "matmul", target)
     codec = ClassicScheduleCodec(_context(tile, target))
-    assert {_signature(codec, leaf.schedule) for leaf in leaves} == {_signature(codec, assignment) for assignment in reference}
+    assert {_signature(codec, leaf.schedule) for leaf in leaves} == {_signature(codec, schedule) for schedule in reference}
     assert offers.bounds[0] > len(reference)
     assert {choice.raster.spell() for choice in offers.kernel_site.kernels} == {"", "gm8"}
-    assert all(assignment.kernel.raster.is_direct for assignment in reference if not assignment.nodes[site].tile.is_tiled)
+    assert all(schedule.kernel.raster.is_direct for schedule in reference if not schedule.nodes[site].tile.is_tiled)
 
     warp = next(leaf for leaf in leaves if leaf.schedule.nodes[site].tile.is_warp)
     assert warp.expand()[0].materialization.tiles[site].choice == warp.schedule.nodes[site].tile
@@ -292,11 +293,11 @@ def test_producer_band_is_a_restricted_kernel_domain_choice(monkeypatch) -> None
     works = {choice.work.spell() for choice in offers.kernel_site.kernels}
     assert {"w2x2", "w2x2+p1", "w2x2+p2"} <= works
     reference = tuple(_reference(tile, target))
-    assert any(assignment.kernel.work.producer for assignment in reference)
+    assert any(schedule.kernel.work.producer for schedule in reference)
     assert all(
-        all(choice.stage.transport == "smem-tma" for choice in assignment.edges.values())
-        for assignment in reference
-        if assignment.kernel.work.producer
+        all(choice.stage.transport == "smem-tma" for choice in schedule.edges.values())
+        for schedule in reference
+        if schedule.kernel.work.producer
     )
 
     monkeypatch.setenv("EMMY_WORK", "w2x2+p1")
@@ -319,8 +320,8 @@ def test_producer_band_is_a_restricted_kernel_domain_choice(monkeypatch) -> None
     )
     codec = ClassicScheduleCodec(c)
     restricted = tuple(enumerate_classic_reference(c))
-    assert {_signature(codec, leaf.schedule) for leaf in leaves} == {_signature(codec, assignment) for assignment in restricted}
-    assert restricted and all(assignment.kernel.work.spell() == "w2x2+p1" for assignment in restricted)
+    assert {_signature(codec, leaf.schedule) for leaf in leaves} == {_signature(codec, schedule) for schedule in restricted}
+    assert restricted and all(schedule.kernel.work.spell() == "w2x2+p1" for schedule in restricted)
     assert leaves[0].expand()[0].workers.producer_warps == 1
 
 
@@ -363,10 +364,10 @@ def test_schedule_parameters_select_from_the_catalog_without_adding_a_member(mon
     assert set(c.problem.node_site(site).nodes) <= set(catalog.node_site(site).nodes)  # selects, never adds
     assert set(c.problem.kernel_site.kernels) <= set(catalog.kernel_site.kernels)
     assert {pick.nodes[0].tile.spell() for pick in c.extensions()} == {"mma_m16n8k16_f16_f32/f2x2/k2"}
-    assignments = tuple(_enumerate_context(c))
-    assert {assignment.nodes[0].tile.spell() for assignment in assignments} == {"mma_m16n8k16_f16_f32/f2x2/k2"}
-    assert {assignment.kernel.work.spell() for assignment in assignments} == {"w2x1"}
-    reference = {_signature(codec, assignment) for assignment in enumerate_classic_reference(c)}
+    schedules = tuple(_enumerate_context(c))
+    assert {schedule.nodes[0].tile.spell() for schedule in schedules} == {"mma_m16n8k16_f16_f32/f2x2/k2"}
+    assert {schedule.kernel.work.spell() for schedule in schedules} == {"w2x1"}
+    reference = {_signature(codec, schedule) for schedule in enumerate_classic_reference(c)}
     leaves = _schedule_leaves(tile, "matmul", target)
     assert {_signature(codec, leaf.schedule) for leaf in leaves} == reference
     assert reference
@@ -420,11 +421,11 @@ def test_schedule_restriction_drops_the_structural_split_stage_from_c() -> None:
     pins = {family: () for family in ("WORK", "TILE", "REDUCE", "STAGE", "RASTER")}
     pins["REDUCE"] = (("REDUCE", "g2k"),)
     c = _context(tile, target, pins=pins)
-    assignments = tuple(enumerate_classic_reference(c))
+    schedules = tuple(enumerate_classic_reference(c))
     site = tile.node_sites[0]
 
-    assert assignments
-    assert all(assignment.nodes[site].reduce == Reduce() for assignment in assignments)
+    assert schedules
+    assert all(schedule.nodes[site].reduce == Reduce() for schedule in schedules)
 
 
 def test_staged_edges_are_independent_product_factors(monkeypatch) -> None:
@@ -446,9 +447,9 @@ def test_staged_edges_are_independent_product_factors(monkeypatch) -> None:
     reference = tuple(_reference(tile, target))
     leaves = _schedule_leaves(tile, "matmul", target)
     codec = ClassicScheduleCodec(_context(tile, target))
-    assert {_signature(codec, leaf.schedule) for leaf in leaves} == {_signature(codec, assignment) for assignment in reference}
+    assert {_signature(codec, leaf.schedule) for leaf in leaves} == {_signature(codec, schedule) for schedule in reference}
     assert offers.bounds[0] > len(reference)
-    assert all(len({choice.stage for choice in assignment.edges.values()}) == 1 for assignment in reference)
+    assert all(len({choice.stage for choice in schedule.edges.values()}) == 1 for schedule in reference)
 
     staged = next(leaf for leaf in leaves if all(not choice.stage.is_direct for choice in leaf.schedule.edges.values()))
     materialized = staged.expand()[0]
@@ -481,11 +482,11 @@ def test_compute_fill_edges_remain_independent_product_factors(monkeypatch) -> N
     reference = tuple(_reference(tile, target))
     leaves = _schedule_leaves(tile, "computed_a", target)
     codec = ClassicScheduleCodec(_context(tile, target))
-    assert {_signature(codec, leaf.schedule) for leaf in leaves} == {_signature(codec, assignment) for assignment in reference}
+    assert {_signature(codec, leaf.schedule) for leaf in leaves} == {_signature(codec, schedule) for schedule in reference}
     assert offers.bounds[0] > len(reference)
-    warp_assignments = tuple(assignment for assignment in reference if assignment.nodes[site].tile.is_warp)
-    assert warp_assignments
-    assert all({edge.stage.transport for edge in assignment.edges.values()} == {"smem"} for assignment in warp_assignments)
+    warp_schedules = tuple(schedule for schedule in reference if schedule.nodes[site].tile.is_warp)
+    assert warp_schedules
+    assert all({edge.stage.transport for edge in schedule.edges.values()} == {"smem"} for schedule in warp_schedules)
 
 
 def _two_root_projection(m: Axis, n: Axis, body, results: tuple[str, ...], outputs: dict, specs: tuple) -> TileOp:

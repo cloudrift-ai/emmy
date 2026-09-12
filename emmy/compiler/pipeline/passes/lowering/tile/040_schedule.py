@@ -92,12 +92,12 @@ def classic_forks(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
         codec=codec,
         inherited_knobs=knobs,
         row_prefix=prefix,
-        materialize=lambda assignment, row: materialize_classic(
+        materialize=lambda schedule, row: materialize_classic(
             tile,
             name=name,
             knobs=row,
             target=ctx,
-            assignment=assignment,
+            schedule=schedule,
         ),
         pool_id=pool_id,
         sample=getattr(ctx, "pool_sample", None),

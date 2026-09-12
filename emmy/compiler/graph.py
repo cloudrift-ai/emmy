@@ -391,7 +391,7 @@ def _stmt_eval_scope() -> dict:
         "__builtins__": {},
     }
     # The stored Fold term and ordinary IR descriptors round-trip through repr-string fields. The
-    # classic assignment is deliberately excluded: ``_serialize_op_fields`` and
+    # classic schedule is deliberately excluded: ``_serialize_op_fields`` and
     # ``_deserialize_op`` route it through the strict site codec instead. Auto-populate every
     # public class from these modules (``setdefault`` so explicit stmt/expr entries win on a name
     # clash); a new ordinary IR field needs no edit here.

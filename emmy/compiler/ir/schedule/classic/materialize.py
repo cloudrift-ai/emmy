@@ -1,4 +1,4 @@
-"""The lowering boundary: ``materialize_classic`` turns one accepted assignment into a scheduled ``TileOp`` with
+"""The lowering boundary: ``materialize_classic`` turns one accepted schedule into a scheduled ``TileOp`` with
 placed geometry and resolved transports, and ``ClassicMaterialization`` is what it derives."""
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ class ClassicMaterialization:
         object.__setattr__(self, "stages", frozendict(self.stages))
 
     def validate(self, schedule: ClassicSchedule, source: object, *, place: object, workers: object) -> None:
-        """Validate classic lowering facts against their semantic assignment."""
+        """Validate classic lowering facts against their semantic schedule."""
         if not isinstance(schedule, Schedule):
             raise TypeError("classic materialization requires a Schedule")
         from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
@@ -55,13 +55,11 @@ class ClassicMaterialization:
             raise ValueError(f"TileOp carries a refused classic schedule: {error}") from error
         source_tile = context.tile_op
         expected_tiles = {
-            site
-            for site, assignment in schedule.nodes.items()
-            if assignment.tile.is_tiled and source_tile.views[site].as_contraction() is not None
+            site for site, choice in schedule.nodes.items() if choice.tile.is_tiled and source_tile.views[site].as_contraction() is not None
         }
         if set(self.tiles) != expected_tiles:
             raise ValueError("classic materialization must contain exactly the tiled node sites")
-        expected_stages = {edge for edge, assignment in schedule.edges.items() if not assignment.stage.is_direct}
+        expected_stages = {edge for edge, choice in schedule.edges.items() if not choice.stage.is_direct}
         if set(self.stages) != expected_stages:
             raise ValueError("classic materialization must contain exactly the staged edge sites")
         placement = Sched(source, place=place)
@@ -84,15 +82,15 @@ def materialize_classic(
     name: str,
     knobs: dict,
     target,
-    assignment: ClassicSchedule,
+    schedule: ClassicSchedule,
 ) -> TileOp:
-    """Materialize one accepted classic assignment into a scheduled TileOp."""
+    """Materialize one accepted classic schedule into a scheduled TileOp."""
     from emmy.compiler.ir.tile.ops import Sched, scheduled  # noqa: PLC0415 — tile.ops reads this package; module level would cycle
 
     sched = Sched(tile, place=tile.place.on_grid())
     placed = {}
     resolved = {}
-    for site, choice in assignment.nodes.items():
+    for site, choice in schedule.nodes.items():
         node = tile.sites[site].node
         geometry = None
         if choice.tile.is_tiled and isinstance(choice, ReductionSchedule):
@@ -100,7 +98,7 @@ def materialize_classic(
             if not isinstance(geometry, PlacedTile):
                 raise ValueError(f"accepted TILE at {node_id_spelling(site)} has no placed geometry")
             placed[site] = geometry
-        for edge, edge_choice in assignment.edges.items():
+        for edge, edge_choice in schedule.edges.items():
             if edge[0] != site or edge_choice.stage.is_direct:
                 continue
             if not isinstance(geometry, PlacedTile):
@@ -123,8 +121,8 @@ def materialize_classic(
         place=tile.place.on_grid(),
         knobs=knobs,
         output_specs=tile.output_specs,
-        schedule=assignment,
+        schedule=schedule,
         axes=tile.axes,
         materialization=ClassicMaterialization(placed, resolved),
-        workers=WarpSpec(assignment.kernel.work.producer) if assignment.kernel.work.producer else None,
+        workers=WarpSpec(schedule.kernel.work.producer) if schedule.kernel.work.producer else None,
     )

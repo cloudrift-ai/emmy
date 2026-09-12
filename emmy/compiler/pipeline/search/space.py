@@ -16,7 +16,7 @@ candidate schedules.
 Two groups:
 
 - **Schedule codec knobs** (``WORK`` / ``REDUCE`` / ``TILE`` / ``STAGE`` / ``RASTER``) — the tile-lowering schedule
-  fork points serialized by ``ClassicScheduleCodec``. The typed assignment is materialized in
+  fork points serialized by ``ClassicScheduleCodec``. The typed schedule is materialized in
   ``lowering/kernel/010_materialize``; its encoded row rides on ``TileOp.knobs`` so the online
   prior can featurize and tune the decision. ``off=""`` is the explicit direct leaf value.
 - **Kernel-lowering policy knobs** (``VECTORIZE_LOADS`` / ``INTERLEAVE_LOADS``) — boolean codegen

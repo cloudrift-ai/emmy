@@ -1,4 +1,4 @@
-"""The classic scheduling problem, sites, classification, and complete assignment contract."""
+"""The classic scheduling problem, sites, classification, and complete schedule contract."""
 
 import json
 import pickle
@@ -49,7 +49,7 @@ from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, TileOp
 from emmy.compiler.pipeline.fork import DeferredFork, iter_leaves, schedule_forks
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
-from tests.compiler.helpers import classic_cartesian_assignments, enumerate_classic_reference, literal_classic_context
+from tests.compiler.helpers import classic_cartesian_schedules, enumerate_classic_reference, literal_classic_context
 from tests.compiler.terms import contraction, projection
 
 _K = Axis("k", 8)
@@ -76,7 +76,7 @@ def _problem(root: Fold, target=None) -> tuple[TileOp, object]:
 
 def _leaf_nodes(tile: TileOp) -> dict:
     """The one schedule every zero-axis site takes — a slab is a site of its own, so a hand-built
-    assignment covers it beside the reduce site it feeds."""
+    schedule covers it beside the reduce site it feeds."""
     return {site: ProjectionSchedule(Tile()) for site, view in enumerate(tile.views) if view.axis is None}
 
 
@@ -132,14 +132,14 @@ def test_classification_does_not_read_the_target() -> None:
 def test_context_requires_complete_node_and_edge_coverage() -> None:
     context = ClassicScheduleContext(*_problem(_contraction()))
     complete = _direct(context)
-    assert context.extend(complete).assignment == complete
+    assert context.extend(complete).schedule == complete
 
     missing_node = Schedule(complete.kernel, {}, complete.edges)
-    with pytest.raises(ScheduleRefused, match="missing node assignment"):
+    with pytest.raises(ScheduleRefused, match="missing node choice"):
         context.extend(missing_node)
 
     missing_edge = Schedule(complete.kernel, complete.nodes, {})
-    with pytest.raises(ScheduleRefused, match="missing edge assignment"):
+    with pytest.raises(ScheduleRefused, match="missing edge choice"):
         context.extend(missing_edge)
 
 
@@ -206,7 +206,7 @@ def test_independent_nodes_compose_only_at_matching_physical_axis_geometry() -> 
 
 
 def _finite_factors(problem: tuple[TileOp, object]) -> dict:
-    """Three hand-written factors spanning 24 assignments — a space small enough to check by hand."""
+    """Three hand-written factors spanning 24 schedules — a space small enough to check by hand."""
     tile = ClassicScheduleContext(*problem).tile_op
     site = tile.node_sites[0]
     direct_node = ReductionSchedule(Tile(), Reduce())
@@ -268,7 +268,7 @@ def test_context_indexes_finite_domain_membership(monkeypatch) -> None:
     monkeypatch.setattr(KernelSchedule, "__eq__", counted)
 
     direct = _direct(context)
-    assert context.extend(direct).assignment == direct
+    assert context.extend(direct).schedule == direct
     assert calls <= 2
 
 
@@ -277,12 +277,12 @@ def test_reference_is_the_compatible_cartesian_subset() -> None:
     factors = _finite_factors(problem)
 
     context = _literal(problem, factors)
-    assignments = list(classic_cartesian_assignments(context))
+    schedules = list(classic_cartesian_schedules(context))
 
-    assert {_schedule_signature(schedule) for schedule, verdict in assignments if verdict} == {
+    assert {_schedule_signature(schedule) for schedule, verdict in schedules if verdict} == {
         _schedule_signature(schedule) for schedule in enumerate_classic_reference(context)
     }
-    assert len(assignments) == context.problem.bounds[0] == 24
+    assert len(schedules) == context.problem.bounds[0] == 24
 
 
 def test_every_lazy_traversal_equals_the_cartesian_reference() -> None:
@@ -313,12 +313,12 @@ def test_extend_accepts_a_complete_schedule_at_the_root_or_matching_prefix() -> 
     context = _literal(problem, factors)
     wanted = next(enumerate_classic_reference(context))
 
-    assert context.extend(wanted).assignment == wanted
+    assert context.extend(wanted).schedule == wanted
 
     prefix = context.extend(
         next(pick for pick in context.extensions() if pick.nodes == {0: wanted.nodes[0]} and pick.edges == wanted.edges)
     )
-    assert prefix.extend(wanted).assignment == wanted
+    assert prefix.extend(wanted).schedule == wanted
 
 
 def test_context_rejects_incomplete_or_duplicate_composition_orders() -> None:
@@ -485,7 +485,7 @@ def test_problem_context_schedule_and_materialization_are_pickle_safe() -> None:
     restored_context = pickle.loads(pickle.dumps(context))
     restored_node = restored_context.tile_op.sites[0].node
     assert restored_context.site(restored_node) == 0
-    assert restored_context.extend(_direct(restored_context)).assignment.kernel == KernelSchedule(Work(), Raster())
+    assert restored_context.extend(_direct(restored_context)).schedule.kernel == KernelSchedule(Work(), Raster())
 
     schedule = _direct(context)
     restored = pickle.loads(pickle.dumps(schedule))
@@ -521,8 +521,8 @@ def test_generic_fork_adapter_drives_a_schedule_context_lazily() -> None:
     )
     accepted = []
 
-    def leaf(assignment: Schedule) -> DeferredFork:
-        accepted.append(assignment)
+    def leaf(schedule: Schedule) -> DeferredFork:
+        accepted.append(schedule)
         return DeferredFork(lambda: context.tile_op)
 
     forks = schedule_forks(
@@ -546,14 +546,14 @@ def test_schedule_is_immutable_without_schedule_family_mutators() -> None:
     edge = context.tile_op.edge_sites[0]
     kernel = KernelSchedule(Work.parse("t2"), Raster())
     node = ReductionSchedule(Tile(units=(1, 2)), Reduce())
-    edge_assignment = EdgeSchedule(Stage())
+    edge_choice = EdgeSchedule(Stage())
 
     with pytest.raises(FrozenInstanceError):
         original.kernel = kernel  # type: ignore[misc]
     with pytest.raises(TypeError):
         original.nodes[site] = node  # type: ignore[index]
     with pytest.raises(TypeError):
-        original.edges[edge] = edge_assignment  # type: ignore[index]
+        original.edges[edge] = edge_choice  # type: ignore[index]
 
     assert original == _direct(context)
 
@@ -562,11 +562,11 @@ def test_schedule_and_materialization_reject_untyped_entries() -> None:
     context = ClassicScheduleContext(*_problem(_sum()))
     schedule = _direct(context)
 
-    with pytest.raises(ScheduleRefused, match="classic kernel schedule"):
+    with pytest.raises(ScheduleRefused, match="classic kernel choice"):
         context.extend(Schedule(object(), schedule.nodes, schedule.edges))  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="non-negative integer sites"):
         Schedule(schedule.kernel, {object(): next(iter(schedule.nodes.values()))}, schedule.edges)  # type: ignore[dict-item]
-    with pytest.raises(ScheduleRefused, match="node assignments must contain"):
+    with pytest.raises(ScheduleRefused, match="node choices must be"):
         context.extend(Schedule(schedule.kernel, {context.tile_op.node_sites[0]: object()}, schedule.edges))  # type: ignore[dict-item]
     with pytest.raises(TypeError, match="tiles must map node ids to PlacedTile"):
         ClassicMaterialization({context.tile_op.node_sites[0]: Tile()}, {})  # type: ignore[dict-item]
@@ -604,7 +604,7 @@ def test_one_grid_view_serves_every_candidate_and_every_target() -> None:
     assert tile.grid_sched is tile.grid_sched  # once per kernel, not once per candidate
     assert tile.grid_sched._all_sites() is tile.sites  # the kernel's one walk, not a second under a new owner
     assert tile.grid_sched.place == tile.place.on_grid()
-    assert tile.grid_sched.schedule is None and tile.grid_sched.materialization is None  # no assignment-specific state
+    assert tile.grid_sched.schedule is None and tile.grid_sched.materialization is None  # no schedule-specific state
 
 
 def test_tile_requires_complete_materialization() -> None:

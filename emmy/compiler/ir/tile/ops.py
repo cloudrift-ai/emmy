@@ -238,13 +238,13 @@ class Sched:
         if self.schedule is None:
             return None
         site = self.tile.node_id(node)
-        assignment = self.schedule.nodes[site]
+        choice = self.schedule.nodes[site]
         if family == "TILE":
-            return assignment.tile if assignment.tile.is_tiled else None
+            return choice.tile if choice.tile.is_tiled else None
         if family == "REDUCE":
-            if not isinstance(assignment, ReductionSchedule) or not assignment.reduce.stages:
+            if not isinstance(choice, ReductionSchedule) or not choice.reduce.stages:
                 return None
-            return assignment.reduce
+            return choice.reduce
         if family == "STAGE":
             if self.materialization is None:
                 return None
@@ -369,10 +369,10 @@ def scheduled(
     workers=None,
     axes: tuple = (),
 ):
-    """Build a scheduled ``TileOp`` from one accepted semantic assignment.
+    """Build a scheduled ``TileOp`` from one accepted semantic schedule.
 
     The one constructor every row materializer shares (a split piece is not built here — it leaves
-    ``030_cut`` unscheduled and reaches this through its own row). The accepted assignment
+    ``030_cut`` unscheduled and reaches this through its own row). The accepted schedule
     is the sole worker-inventory source; the encoded row must agree with it."""
     if schedule is None:
         raise ValueError("cannot construct a scheduled TileOp without a Schedule")
@@ -381,7 +381,7 @@ def scheduled(
     if work.producer != producer:
         raise ValueError(f"WORK producer band {work.producer} disagrees with WarpSpec producer band {producer}")
     if knobs.get("WORK") != work.spell():
-        raise ValueError("encoded WORK does not agree with the accepted classic assignment")
+        raise ValueError("encoded WORK does not agree with the accepted classic schedule")
     return TileOp(
         op=op,
         name=name,
