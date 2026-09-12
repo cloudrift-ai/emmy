@@ -28,7 +28,7 @@ from emmy.compiler.ir.schedule import Stage, Tile, Work
 from emmy.compiler.ir.schedule.packing import packed_readings
 from emmy.compiler.ir.schedule.staging import resolve_warp_stage
 from emmy.compiler.ir.stmt import Assign, Load
-from tests.compiler.helpers import requires_cuda
+from tests.compiler.helpers import literal_classic_context, requires_cuda
 from tests.compiler.terms import contraction, projection
 
 K16 = "mma_m16n8k16_f16_f32"
@@ -263,7 +263,6 @@ def test_packed_b_declines_a_byte_row_under_sixteen():
 def _rows(node, inputs, axes, ka, pins=None):
     """The ``STAGE`` rows the schedule offers this node at a warp tile, as resolved spellings."""
     from emmy.compiler.context import Context
-    from emmy.compiler.ir.schedule.classic import ClassicScheduleContext
     from emmy.compiler.ir.stmt import Write
     from emmy.compiler.ir.tile import Placement, TileOp
     from emmy.compiler.ir.tile.ir import OutputSpec
@@ -279,14 +278,18 @@ def _rows(node, inputs, axes, ka, pins=None):
     )
     ctx = Context.from_target((8, 9))
     tile = _tile(K16, "f2x2/k2", "w1x4", axes)
-    from emmy.compiler.ir.schedule.classic_projection import project_classic
+    from emmy.compiler.ir.schedule.classic import ClassicProblem
 
-    domains = project_classic(op, ctx)
-    context = ClassicScheduleContext(op, ctx, domains)
-    site = context.site(node)
-    choices = tuple(choice for choice in domains.nodes[site] if choice.tile == tile.choice)
-    edge_domains = tuple((edge, domains.edges[edge]) for edge in context.incident_edges(site))
-    rows = [next(iter(support.edges.values())).stage.spell() for support in context._local_frontier(site, choices, edge_domains)]
+    offers = ClassicProblem(op, ctx)
+    site = op.node_id(node)
+    context = literal_classic_context(
+        op,
+        ctx,
+        kernel=offers.kernel_site.kernels,
+        nodes={s.id: (tuple(c for c in s.nodes if c.tile == tile.choice) if s.id == site else s.nodes) for s in offers.node_sites},
+        edges={edge: offers.node_site(edge[0]).edges for edge in op.edge_sites},
+    )
+    rows = [next(iter(support.edges.values())).stage.spell() for support in context._local_frontier(context.problem.node_site(site))]
     pin = (pins or {}).get("STAGE")
     return [row for row in rows if pin is None or row == pin]
 
@@ -798,7 +801,6 @@ def test_the_block_scaled_stage_declines_tma_and_a_scale_row_under_the_chunk():
 
 def test_a_packed_byte_slab_refuses_a_producer_band_under_tma():
     from emmy.compiler.context import Context
-    from emmy.compiler.ir.schedule.classic import ClassicScheduleContext
     from emmy.compiler.ir.stmt import Write
     from emmy.compiler.ir.tile import Placement, TileOp
     from emmy.compiler.ir.tile.ir import OutputSpec
@@ -813,16 +815,24 @@ def test_a_packed_byte_slab_refuses_a_producer_band_under_tma():
         output_specs=(OutputSpec(write=Write(output="y", index=(Var("m"), Var("n")), value="acc")),),
     )
     target = Context.from_target((9, 0))
-    from emmy.compiler.ir.schedule.classic_projection import project_classic
+    from emmy.compiler.ir.schedule.classic import ClassicProblem
 
-    domains = project_classic(op, target)
-    context = ClassicScheduleContext(op, target, domains)
-    site = context.site(node)
+    offers = ClassicProblem(op, target)
+    site = op.node_id(node)
     tile = _tile(K16, "f2x2/k2", "w1x4", axes)
-    choices = tuple(choice for choice in domains.nodes[site] if choice.tile == tile.choice)
-    edge_domains = tuple(
-        (edge, tuple(choice for choice in domains.edges[edge] if choice.stage.spell() == "d1/smem-tma"))
-        for edge in context.incident_edges(site)
+    context = literal_classic_context(
+        op,
+        target,
+        kernel=offers.kernel_site.kernels,
+        nodes={s.id: (tuple(c for c in s.nodes if c.tile == tile.choice) if s.id == site else s.nodes) for s in offers.node_sites},
+        edges={
+            edge: (
+                tuple(c for c in offers.node_site(edge[0]).edges if c.stage.spell() == "d1/smem-tma")
+                if edge[0] == site
+                else offers.node_site(edge[0]).edges
+            )
+            for edge in op.edge_sites
+        },
     )
-    supports = context._local_frontier(site, choices, edge_domains)
+    supports = context._local_frontier(context.problem.node_site(site))
     assert supports and all(not support.producer_eligible for support in supports)

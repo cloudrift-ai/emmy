@@ -97,7 +97,7 @@ class Ctx:
     output: str = ""
     workers: object = None  # the resolved WarpSpec worker split (None = uniform SIMT)
     raster: object = None  # the parsed RASTER codec (ir.schedule.Raster; None = flat launch order)
-    # The accepted classic assignment bound to its Fold sites (read through ``ops.Sched``): all
+    # The accepted classic schedule bound to its Fold sites (read through ``ops.Sched``): all
     # per-node tile/reduce and per-edge stage reads go through here; the term stores no choices.
     sched: object = None
     # The placement's FREE axes — the un-shrunk originals. A split partial may prefix ``_ksplit``;

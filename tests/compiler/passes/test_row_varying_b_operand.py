@@ -24,7 +24,7 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Expr, Literal, Var
 from emmy.compiler.ir.kernel.ir import LdmatrixLoad
 from emmy.compiler.ir.schedule import Placement, Tile, Work
-from emmy.compiler.ir.schedule.classic_projection import project_classic
+from emmy.compiler.ir.schedule.classic import ClassicProblem
 from emmy.compiler.ir.stmt import Body, Load, Write
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import reduce_codegen, store_sink
@@ -77,9 +77,9 @@ def test_row_varying_b_slab_takes_the_reduction_domain(cc) -> None:
     tile = TileOp(op=contraction(_K, a, (b, "acc")), place=Placement(free=(_A0, _M, _N)), axes=(_A0, _M, _N, _K))
     site = tile.node_id(tile.op)
     assert not tile.contracts(site)
-    domains = project_classic(tile, Context.from_target(cc))
-    assert all(not choice.tile.is_tiled for choice in domains.nodes[site])
-    assert all(choice.stage.is_direct for edge in tile.incident_edges[site] for choice in domains.edges[edge])
+    offers = ClassicProblem(tile, Context.from_target(cc))
+    assert all(not choice.tile.is_tiled for choice in offers.node_site(site).nodes)
+    assert all(choice.stage.is_direct for choice in offers.node_site(site).edges)
 
 
 @pytest.mark.parametrize("atom", ["mma_m8n8k4_f16_f32", "mma_m16n8k16_f16_f32"])

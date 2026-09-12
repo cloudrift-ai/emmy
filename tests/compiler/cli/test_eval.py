@@ -289,7 +289,8 @@ def test_offer_audit_flags_unrealized_entries(monkeypatch, caplog):
     from emmy.compiler.context import Context
     from emmy.compiler.ir.base import InputOp
     from emmy.compiler.ir.schedule import Tile, Work
-    from emmy.compiler.ir.schedule import classic_projection as classic
+    from emmy.compiler.ir.schedule.classic import refusals as classic
+    from emmy.compiler.ir.schedule.classic import sites as classic_sites
     from emmy.compiler.pipeline.knob import complete_kernel_row
     from emmy.compiler.pipeline.search.golden import load_golden_records
     from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
@@ -306,7 +307,7 @@ def test_offer_audit_flags_unrealized_entries(monkeypatch, caplog):
     monkeypatch.setattr(classic, "warp_tile_moves", lambda atoms: [warp] if warp.atom.name in atoms else [])
     monkeypatch.setattr(classic, "coop_reduce_moves", lambda: [])
     monkeypatch.setattr(classic, "stage_moves", lambda *, warp, ctx=None: [])
-    monkeypatch.setattr(classic, "raster_moves", lambda: [""])
+    monkeypatch.setattr(classic_sites, "raster_moves", lambda: [""])
 
     def enumerated_row(graph):
         rows = enumerate_graph(graph.copy(), ctx).rows

@@ -2,7 +2,7 @@
 
 from emmy.compiler.ir.pure.fold import ContractionView
 
-from .base import Schedule, ScheduleContext, ScheduleRefused, schedule
+from .base import Schedule, ScheduleContext, ScheduleProblem, ScheduleRefused, Site, schedule
 from .choices import (
     AtomKind,
     FoldMove,
@@ -40,8 +40,10 @@ __all__ = [
     "ResolvedStage",
     "Schedule",
     "ScheduleContext",
+    "ScheduleProblem",
     "ScheduleRefused",
     "Side",
+    "Site",
     "Stage",
     "Tile",
     "WarpSpec",
