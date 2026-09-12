@@ -44,11 +44,11 @@ def parse_edge_site(value: str) -> EdgeSite:
     return parse_node_id(node), int(operand)
 
 
-def _is_node_id(node_id: object) -> bool:
+def _is_node_id(node_id: NodeId) -> bool:
     return type(node_id) is int and node_id >= 0
 
 
-def _is_edge_site(edge: object) -> bool:
+def _is_edge_site(edge: EdgeSite) -> bool:
     return isinstance(edge, tuple) and len(edge) == 2 and _is_node_id(edge[0]) and type(edge[1]) is int and edge[1] >= 0
 
 

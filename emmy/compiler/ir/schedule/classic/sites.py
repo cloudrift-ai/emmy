@@ -46,6 +46,7 @@ from .schedule import (
 )
 
 if TYPE_CHECKING:
+    from emmy.compiler.context import Context
     from emmy.compiler.ir.tile import TileOp
 
 
@@ -381,7 +382,7 @@ class ClassicProblem(ScheduleProblem[ClassicSchedule]):
     parameters, because they change what a site offers."""
 
     tile: TileOp
-    target: object = None
+    target: Context | None = None
     row: Mapping[str, str] = field(default_factory=frozendict)
     allow_f16_accumulate: bool = True
     allow_fp8: bool = True
