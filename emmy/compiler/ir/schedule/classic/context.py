@@ -17,8 +17,18 @@ from emmy.compiler.ir.schedule.choices import PlacedTile, Stage, Tile, Work, der
 from emmy.compiler.ir.schedule.views import EdgeSite, NodeId
 from emmy.compiler.structural import instance_memo
 
-from .assignment import (
-    ClassicAssignment,
+from .refusals import (
+    _AxisAgreement,
+    _fragment_agreements,
+    _FragmentAgreement,
+    _needs_fill,
+    _paired_budget_refusal,
+    _plan_node_refusal,
+    _resolve_stage,
+    _wgmma_refusal,
+)
+from .schedule import (
+    ClassicSchedule,
     EdgeSchedule,
     KernelSchedule,
     NodeSchedule,
@@ -30,16 +40,6 @@ from .assignment import (
     edge_site_spelling,
     no_site_claims_inventory,
     node_id_spelling,
-)
-from .refusals import (
-    _AxisAgreement,
-    _fragment_agreements,
-    _FragmentAgreement,
-    _needs_fill,
-    _paired_budget_refusal,
-    _plan_node_refusal,
-    _resolve_stage,
-    _wgmma_refusal,
 )
 
 if TYPE_CHECKING:
@@ -107,7 +107,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
     problem: ClassicProblem | None = None
     order: tuple[NodeId, ...] | None = None
     position: int = 0
-    _assignment: ClassicAssignment = field(default_factory=lambda: Schedule(None, {}, {}), repr=False)
+    _assignment: ClassicSchedule = field(default_factory=lambda: Schedule(None, {}, {}), repr=False)
     _work: Work | None = field(default=None, repr=False)
     _axes: Mapping[str, tuple[int, int]] = field(default_factory=frozendict, repr=False)
     _fragments: Mapping[tuple[str, str], tuple] = field(default_factory=frozendict, repr=False)
@@ -187,10 +187,10 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         return None if self.nodes_complete else self.order[self.position]
 
     @property
-    def assignment(self) -> ClassicAssignment:
+    def assignment(self) -> ClassicSchedule:
         return self._assignment
 
-    def extensions(self) -> Iterator[ClassicAssignment]:
+    def extensions(self) -> Iterator[ClassicSchedule]:
         """Yield the next site's options that compose with this prefix: one node with its
         incident edges, or, past the last node, the kernel picks."""
         if self.assignment.kernel is not None:
@@ -238,7 +238,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             frontier = (*indexes[key].get(None, ()), *indexes[key].get(self._work, ()))
         return tuple(support for support in frontier if self._support_refusal(site.id, support) is None)
 
-    def extend(self, pick: ClassicAssignment) -> ClassicScheduleContext:
+    def extend(self, pick: ClassicSchedule) -> ClassicScheduleContext:
         """Compose a frontier pick or validate and accept one complete assignment."""
         if not isinstance(pick, Schedule) or self.assignment.kernel is not None:
             self._refuse("classic extension requires an incomplete context and a Schedule pick")
@@ -249,7 +249,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
 
         return self._extend_local(pick)
 
-    def _extend_complete(self, pick: ClassicAssignment) -> ClassicScheduleContext:
+    def _extend_complete(self, pick: ClassicSchedule) -> ClassicScheduleContext:
         if any(pick.nodes.get(site) != choice for site, choice in self.assignment.nodes.items()) or any(
             pick.edges.get(edge) != choice for edge, choice in self.assignment.edges.items()
         ):
@@ -276,7 +276,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             _producer_eligible=True,
         )
 
-    def _extend_local(self, pick: ClassicAssignment) -> ClassicScheduleContext:
+    def _extend_local(self, pick: ClassicSchedule) -> ClassicScheduleContext:
         site = self.next_site
         incident = self.incident_edges(site)
         if site is None or pick.kernel is not None or set(pick.nodes) != {site} or set(pick.edges) != set(incident):
@@ -561,7 +561,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
                 return "pick is incompatible at a fragment seam"
         return None
 
-    def _finish(self, pick: ClassicAssignment) -> ClassicScheduleContext:
+    def _finish(self, pick: ClassicSchedule) -> ClassicScheduleContext:
         if (
             not self.nodes_complete
             or self.assignment.kernel is not None
@@ -588,7 +588,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             self._refuse(why)
         return replace(self, _assignment=assignment)
 
-    def _require_kernel_prefix(self, schedule: ClassicAssignment) -> None:
+    def _require_kernel_prefix(self, schedule: ClassicSchedule) -> None:
         """Validate the kernel facts not already proved by local prefix composition."""
         kernel_work = Work(schedule.kernel.work.kind, schedule.kernel.work.units)
         warp_size = getattr(self.target, "warp_size", 32)
@@ -615,7 +615,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         where = node_id_spelling(site) if type(site) is int else edge_site_spelling(site)
         raise ScheduleRefused(f"{where}: {reason}")
 
-    def _require_complete_shape(self, schedule: ClassicAssignment) -> None:
+    def _require_complete_shape(self, schedule: ClassicSchedule) -> None:
         """Validate only complete-assignment structure before replaying normal transitions."""
         if not isinstance(schedule, Schedule) or not isinstance(schedule.kernel, KernelSchedule):
             self._refuse("assignment must contain a classic kernel schedule")

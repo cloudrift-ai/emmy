@@ -20,17 +20,6 @@ from emmy.compiler.ir.schedule.staging import stage_target
 from emmy.compiler.ir.schedule.views import NodeId
 from emmy.utils import cached_method
 
-from .assignment import (
-    ClassicAssignment,
-    EdgeSchedule,
-    KernelSchedule,
-    NodeSchedule,
-    ProjectionSchedule,
-    ReductionSchedule,
-    classic_node_key,
-    classic_stage_key,
-    no_site_claims_inventory,
-)
 from .refusals import (
     _atom_policy_ok,
     _contraction_plan_allowed,
@@ -43,6 +32,17 @@ from .refusals import (
     _warp_atoms,
     _warp_plans,
     _wgmma_refusal,
+)
+from .schedule import (
+    ClassicSchedule,
+    EdgeSchedule,
+    KernelSchedule,
+    NodeSchedule,
+    ProjectionSchedule,
+    ReductionSchedule,
+    classic_node_key,
+    classic_stage_key,
+    no_site_claims_inventory,
 )
 
 if TYPE_CHECKING:
@@ -81,7 +81,7 @@ def _select[T](
 
 
 @dataclass(frozen=True, eq=False)
-class ClassicNodeSite(Site[ClassicAssignment]):
+class ClassicNodeSite(Site[ClassicSchedule]):
     """One node site's independent factor: its node choices, the transport catalog of its incident
     edges, and their product as picks. Every derived read is memoized on the site, so a site's
     tuples keep one identity for the context's caches."""
@@ -272,7 +272,7 @@ class ClassicNodeSite(Site[ClassicAssignment]):
         return frozenset(self.edges)
 
     @cached_property
-    def options(self) -> tuple[ClassicAssignment, ...]:
+    def options(self) -> tuple[ClassicSchedule, ...]:
         """The site's picks: each node choice with each transport on every incident edge."""
         incident = self.problem.tile.incident_edges[self.id]
         edge_picks = tuple(frozendict({edge: choice for edge in incident}) for choice in self.edges) if incident else (frozendict(),)
@@ -280,7 +280,7 @@ class ClassicNodeSite(Site[ClassicAssignment]):
 
 
 @dataclass(frozen=True, eq=False)
-class ClassicKernelSite(Site[ClassicAssignment]):
+class ClassicKernelSite(Site[ClassicSchedule]):
     """The kernel-level factor: the worker inventory and raster, spelled bare (``WORK``,
     ``RASTER``). Its catalog is what the node sites' choices imply, so it is the last site."""
 
@@ -368,12 +368,12 @@ class ClassicKernelSite(Site[ClassicAssignment]):
         return frozenset(self.kernels)
 
     @cached_property
-    def options(self) -> tuple[ClassicAssignment, ...]:
+    def options(self) -> tuple[ClassicSchedule, ...]:
         return tuple(Schedule(kernel, {}, {}) for kernel in self.kernels)
 
 
 @dataclass(frozen=True, eq=False)
-class ClassicProblem(ScheduleProblem[ClassicAssignment]):
+class ClassicProblem(ScheduleProblem[ClassicSchedule]):
     """``p + t`` and the row: one unscheduled ``TileOp``, its target, and the knob row whose
     values the sites offer where it names them. The precision policy and the pin
     reading (``validate_pins``: a named value the site cannot take empties it, else the site keeps
@@ -416,7 +416,7 @@ class ClassicProblem(ScheduleProblem[ClassicAssignment]):
         return ClassicKernelSite(self)
 
     @cached_property
-    def sites(self) -> tuple[Site[ClassicAssignment], ...]:
+    def sites(self) -> tuple[Site[ClassicSchedule], ...]:
         return (*self.node_sites, self.kernel_site)
 
     @cached_method
@@ -478,7 +478,7 @@ class ClassicProblem(ScheduleProblem[ClassicAssignment]):
             return None
         return value
 
-    def unrealized_bare_pin(self, assignment: ClassicAssignment) -> str | None:
+    def unrealized_bare_pin(self, assignment: ClassicSchedule) -> str | None:
         """Why a completed schedule leaves a bare pin unrealized — the half of the bare reading
         a site cannot decide alone. A pin no site can offer is ignored unless pins are validated,
         the reading a row published across the peer kernels of a multi-kernel target takes."""
@@ -497,7 +497,7 @@ class ClassicProblem(ScheduleProblem[ClassicAssignment]):
             return any(choice.tile.spell() == value for choice in site.nodes)
         return any(isinstance(choice, ReductionSchedule) and choice.reduce.spell() == value for choice in site.nodes)
 
-    def _spelled(self, assignment: ClassicAssignment, family: str) -> dict[str, str]:
+    def _spelled(self, assignment: ClassicSchedule, family: str) -> dict[str, str]:
         tile = self.tile
         if family == "TILE":
             return {classic_node_key(tile, "TILE", site): assignment.nodes[site].tile.spell() for site in tile.family_sites["TILE"]}

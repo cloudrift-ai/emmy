@@ -76,7 +76,7 @@ lowering, and a cache on the wrapper silently re-derives per wrapper. `schedule_
 
 ## Classic schedule
 
-The classic family is the `classic/` package, one role per module: `assignment` (the choice types, the sites' wire
+The classic family is the `classic/` package, one role per module: `schedule` (the choice types, the sites' wire
 spellings and keys), `refusals` (every per-choice legality rule), `sites` (the source),
 `context` (the join), `codec` (the wire boundary) and `materialize` (the lowering boundary). Imports flow in that
 order and nothing in the package imports the tile package at module level, which is what lets `ir/tile/ops` read
