@@ -18,10 +18,13 @@ FROM ${BASE_IMAGE}
 # deliberately absent — the CUDA serving path compiles via nvcc/NVRTC only.
 # The cupy wheel must match the image's CUDA major (vllm-openai:v0.23.0
 # ships CUDA 13.0 + nvcc; transformers 5.10.2 satisfies the compile pin).
+# frozendict is imported by the tensor IR itself, so every serving boot needs
+# it; only the stock image happened to carry it transitively, and a fork base
+# (1Cat-vLLM on Volta) fails at model construction without it.
 ARG CUPY_PACKAGE=cupy-cuda13x
 COPY dist/emmy_ml-*.whl /tmp/wheels/
 RUN pip install --no-cache-dir --no-deps /tmp/wheels/emmy_ml-*.whl \
-    && pip install --no-cache-dir "${CUPY_PACKAGE}" catboost pyyaml httpx "huggingface_hub[hf_transfer]" safetensors \
+    && pip install --no-cache-dir "${CUPY_PACKAGE}" catboost pyyaml httpx "huggingface_hub[hf_transfer]" safetensors frozendict \
     && rm -rf /tmp/wheels
 
 # Compiled-cubin cache under the HF cache mount (compose mounts the model dir
