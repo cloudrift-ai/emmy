@@ -92,36 +92,92 @@ not close it.
 Until strict correctness passes across the inventory and attention reaches parity, this recipe has no Emmy serving
 lane on the RTX 4090.
 
-## Tesla V100 (sm_70): a partial golden, and it does not measure the 4-bit path
+## Tesla V100 (sm_70): 4-bit pays in decode and costs in prefill
 
-**The recorded program runs dequantized weights.** This checkpoint stores its weights as
-compressed-tensors `pack-quantized` int4 over 128-element groups (`weight_packed`, `weight_scale`,
-`weight_zero_point`, `weight_shape`), and the compiler has no speller for that layout: the dispatch
-recognizes `quant_method: awq`, fp8, and compressed-tensors 4-bit over 16-element groups only. The
-packed weights therefore never reach a kernel -- the traced graph carries no `i32` tensor and no bitwise
-operation across its 2,735 nodes -- so `golden/v100_sm70.yaml` records a dense FP16 program at this
-model's shapes and fusion structure. It measures the right kernel set; it does **not** qualify W4A16, and
-no row in it is evidence that Emmy can serve this checkpoint at 4 bits.
+`golden/v100_sm70.yaml` holds 74 measured rows over 16 targets of decoder layer 0, recorded on one Tesla
+V100-SXM3-32GB. Every row carries a strict correctness proof against its reference; none is timed-only.
 
-With that caveat, `golden/v100_sm70.yaml` holds 117 measured rows over 17 targets of decoder layer 0,
-recorded on one Tesla V100-SXM3-32GB. It is a partial inventory: it covers two projections and the
-fifteen Gated DeltaNet chunk-recurrence targets, and nothing of decoder layer 3.
+This golden is over a program that **carries the coded weights**. Emmy reads this checkpoint's
+compressed-tensors `pack-quantized` int4 directly, so the traced graph holds the unpack and dequantize
+algebra — 26 `right_shift` and 26 `bitwise_and` operations over `i32` weight tensors — and the six
+quantized projections decode inside their own kernels rather than being handed dense FP16 weights.
 
-The rows exist because the greedy pick loses badly on this card without them. Each chunk target elects a
-single-CTA arm, grid 1 for the whole reduce, which leaves twelve of the fifteen unable to finish inside the
-launch watchdog at all. A placement cut (`PLACE@map.1/reduce`) restores a grid and takes the set from
-unrunnable to 61,109 us eager against 33,060 us, 1.85x in aggregate. The two projections reach 1.04x and
-0.99x eager on `WORK=w2x2, TILE=mma_m8n8k4_f16_f32/f4x4/k8, STAGE=d2/smem` once that schedule is measured
-rather than predicted.
+### The crossover
 
-Three chunk targets still sit at or below eager (1.00x, 0.85x, 0.55x). Their cost grows with chunk index
-where eager stays flat, because the delta-rule carried state is re-derived per chunk rather than carried.
-The cut removes the serialization, not that recompute.
+The same logical GEMM, the Gated DeltaNet input projection at N=10,240 and K=5,120, measured as a coded
+W4A16 program and as a dense FP16 one:
+
+| | M=64 | M=512 |
+| --- | ---: | ---: |
+| Emmy W4A16 (coded) | **155.8 us** | 1,546 us |
+| Emmy dense FP16 | 196.4 us | 520 us |
+| cuBLAS FP16 (eager) | 276.5 us | 536 us |
+| 4-bit against Emmy dense | **1.26x faster** | 2.97x slower |
+| 4-bit against cuBLAS | **1.77x faster** | 2.86x slower |
+
+At M=64 the dense kernel moves its 105 MiB of weights at 536 GB/s of the card's 900, so it is
+weight-bandwidth-bound and streaming a quarter of the bytes wins even though the decode is not free. At
+M=512 the same GEMM is compute-bound, the weight traffic is amortized over eight times the rows, and the
+decode is pure overhead. The crossover therefore lies between M=64 and M=512.
+
+Both coded rows are bit-exact: maximum absolute and maximum relative error 0.0 against eager.
+
+For a deployer the statement is: route decode through Emmy's 4-bit path and prefill elsewhere. That
+matches how this model is served, where per-token decode dominates the time.
+
+### Three bounds on that statement
+
+**The pair is best-available-Emmy at each shape, not a controlled tile sweep.** At M=512 the coded kernel
+is `WORK=w2x2, TILE=mma_m8n8k4_f16_f32/f4x4/k8, STAGE=d2/smem`; at M=64 the winner is the unscheduled
+per-cell tier. The comparison is what a deploy would actually pick at each shape, which is the useful
+question, but it is not one tile measured twice.
+
+**M=1 cannot be traced for this architecture at all.** `emmy trace --layer 0 --seq-len 1` fails with
+`aten.pad supports only explicit zero-width padding, got [0, 0, 0, 63]`: the Gated DeltaNet pads its
+sequence up to the chunk width of 64, and the tracer rejects non-zero-width padding. No shape below 64
+is reachable for 48 of this model's 64 layers — precisely the regime where 4-bit pays most. M=64 is the
+floor of the evidence here, and supporting that one `aten.pad` case would unlock M=1 for every Gated
+DeltaNet checkpoint.
+
+**A 17.0x figure appears in the raw records and must not be quoted.** Against the coded program eager
+measures 26,217 us, because torch executes the 26-operation unpack chain as separate tensor operations
+where Emmy fuses it into the GEMM. That is an upper bound on torch's eager cost and nothing more; no
+kernel anyone would deploy is that slow. The deployment-relevant baseline is cuBLAS FP16 at the same
+shape, which is what the table above uses.
+
+### The Gated DeltaNet chunk recurrence
+
+Fifteen `k_slice_unsqueeze_reduce_*` chunk targets carry the delta-rule recurrence. Each elects a
+single-CTA arm — grid 1 for the whole reduce — and twelve of the fifteen then cannot finish inside the
+launch watchdog at all. A placement cut at `PLACE@map.1/reduce` restores a grid and takes the set from
+unrunnable to 57,051 us eager against 31,373 us, **1.82x in aggregate**, every row strict-verified.
+
+| chunk | eager | with the cut | ratio |
+| --- | ---: | ---: | ---: |
+| first | 3,842 us | 186 us | 20.64x |
+| median | 4,034 us | 993 us | 4.06x |
+| last three | 4,557 / 4,629 / 3,265 us | 4,577 / 5,456 / 5,973 us | 1.00x / 0.85x / 0.55x |
+
+Per-chunk cost rises monotonically with chunk index where eager stays flat, because the carried state is
+re-derived per chunk rather than carried: `torch.export` unrolls the chunk loop and fusion pulls each
+chunk's history into its target. The cut removes the serialization, not that recompute, which is why the
+last three chunks still sit at or below eager. That residual is the traced program's volume and is
+upstream of scheduling.
+
+These targets are unaffected by the weight coding — 186 us coded against 188 us dense on the first chunk —
+because they contract activations rather than weights. That localizes the entire decode cost to the six
+quantized projections, which is what makes the 2.97x actionable rather than diffuse.
+
+### What still blocks a serving lane
 
 Neither full-attention target runs: both exceed a 60 s launch watchdog, so decoder layer 3 has no rows.
-Their cost is a nested reduce of 805,306,368 serial trips per cell in which the attention score cone, which
-reads only the head index, is re-derived once per each of the 256 head-dim components. The
-strict-correctness failure in the final normalization is unchanged.
+Their cost is a nested reduce of 805,306,368 serial trips per cell in which the attention score cone,
+which reads only the head index and never the head-dim component, is re-derived once per each of the 256
+components, twice over. Every free axis is distributed — grid equals free on both kernels — so this is a
+cone nothing hoists out of the loops enclosing it, not a grid that failed to spread.
+
+The final normalization's strict-correctness failure is unchanged: 14 of 2,621,440 BF16 outputs one ULP
+outside tolerance.
 
 ## Reproduce
 
