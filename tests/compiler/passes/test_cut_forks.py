@@ -413,27 +413,33 @@ def test_bare_and_scoped_place_cuts_compose_in_one_decision() -> None:
     assert len(pieces) == 3 and all(node.op.placement_decided for node in pieces)
 
 
-def test_a_composed_route_skips_a_bare_key_this_kernel_reads_as_ambiguous() -> None:
+def test_a_composed_route_skips_a_bare_key_and_still_fails_on_a_broken_one() -> None:
     """A composed route is registered for EVERY kernel of the compile, so most of its keys address
-    another one. A scoped key off this tree is skipped already; a BARE key must be too. A bare key
-    is what the codec spells for a kernel whose PLACE family has one site — a cut piece, typically —
-    so it never names a seam of a kernel that has several, and on one that does it is ambiguous.
-    Letting that ambiguity out ended the whole compile over stored evidence about another kernel:
-    every strict decode of a golden holding one bare and one scoped routing row for the same kernel
-    set died here, and so would the deploy compile that reads it."""
+    another one. A scoped key off this tree is skipped already; a BARE key must be too, because the
+    codec spells bare for a family with ONE site — so the kernel that spelled it has one seam and
+    composes with nothing, and asking this tree about it is asking about somebody else. On a tree
+    with several sites that question is ambiguous, and letting the ambiguity out ended the compile
+    over another kernel's evidence: every strict decode of a golden holding one bare and one scoped
+    routing row for the same kernel set died here, and so would the deploy compile reading it.
+
+    The skip stays that narrow. The codec still calls a bare key on a several-site tree ambiguous,
+    and a route key off the grammar is still a broken stored row that raises."""
     from emmy.compiler.pipeline.search.pins import composed_routes  # noqa: PLC0415
 
     match, graph = _case_match("attention/rmsnorm-qk-sdpa-composed-cut.yaml")
-    tile = graph.nodes[match.root_node_id].op
+    root = graph.nodes[match.root_node_id]
     with pytest.raises(ValueError, match="PLACE is ambiguous"):
-        resolve(tile.op, "PLACE")
+        resolve(root.op.op, "PLACE")
 
     with composed_routes([(None, ("PLACE", "PLACE@map.1/twist.1/inner.2/map"))]):
-        options = _CUT.rewrite(match, graph.nodes[match.root_node_id], _CTX)
+        options = _CUT.rewrite(match, root, _CTX)
 
     options = options if isinstance(options, list) else [options]
     assert options, "the ordinary fuse and single-seam arms still stand"
     assert all(option.knobs.get("PLACE") != "cut" for option in options), "no arm cuts under the unattributable bare key"
+
+    with composed_routes([(None, ("PLACE@map.1/twist.1/inner.2/map", "PLACE@map.1/not-a-kind"))]), pytest.raises(ValueError):
+        _CUT.rewrite(match, root, _CTX)
 
 
 def _receipt_fields() -> dict:
