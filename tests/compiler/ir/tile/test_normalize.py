@@ -847,3 +847,34 @@ def test_an_unfed_fold_is_an_operand_edge_too() -> None:
 
     assert out.axis is not None or any(edge.axis is not None for edge in out.operands)
     assert not any(isinstance(stmt, Fold) for stmt in out.lift.body)
+
+
+def test_root_collapses_onto_the_operand_the_stores_read() -> None:
+    """The Gated DeltaNet chunk shape: the boundary reads its value off an operand and the root's own
+    result is a statistic nothing keeps. Left standing, the root holds an invariant reduce alive, and
+    ``promoted_sweep`` will not promote a store sweep past a reduce that does not read it — so the
+    kernel keeps a one-axis placement and walks every cell of the sweep in one block."""
+    carried = reduction(
+        K32,
+        (slab("near", "x", "m", "n", "k"),),
+        (Assign(name="carried__v", op="multiply", args=("near", "near")),),
+        ("carried",),
+    )
+    invariant = reduction(
+        K32,
+        (slab("far", "y", Literal(0, "int"), Var("k")),),
+        (Assign(name="stat__v", op="multiply", args=("far", "far")),),
+        ("stat",),
+    )
+    root = projection((invariant, carried), (Assign(name="dead", op="multiply", args=("stat", "stat")),), ("dead",))
+    tile = _tile(
+        root,
+        N16,
+        K32,
+        free=(M8,),
+        output_specs=(OutputSpec(write=Write(output="out", index=(Var("m"), Var("n")), value="carried"), sweep=(N16,)),),
+    )
+
+    assert tile.op == carried  # the root and the operand only its dead lift bound are gone
+    assert all(_input(edge) != "y" for edge in tile.op.operands)
+    assert [axis.name for axis in tile.place.free] == ["m", "n"]  # the store sweep promotes

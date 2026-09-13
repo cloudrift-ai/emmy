@@ -139,7 +139,18 @@ def _prune_unread(root: Fold, stored: frozenset[str] = frozenset()) -> Fold:
         return rebuilt
 
     collect(root)
-    return visit(root)
+    pruned = visit(root)
+    # The ROOT answers to the stores the same way: they are its only readers. A zero-axis root none
+    # of whose own components a store writes computes nothing the kernel keeps -- the boundary reads
+    # the value off an operand -- so it collapses onto the operand carrying them, and the operands
+    # only its dead lift bound leave with it. An invariant reduce among those is what keeps
+    # ``promoted_sweep`` from promoting the stores' sweep, and the kernel then launches one block.
+    while pruned.axis is None and stored and not stored & set(pruned.exposes):
+        carriers = [edge for edge in pruned.operands if stored <= set(edge.exposes)]
+        if len(carriers) != 1:
+            break
+        pruned = carriers[0]
+    return pruned
 
 
 def _share_common_cones(root: Fold) -> Fold:
