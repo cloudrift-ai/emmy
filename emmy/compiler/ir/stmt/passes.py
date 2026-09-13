@@ -15,7 +15,7 @@ from dataclasses import fields, is_dataclass
 from functools import singledispatch
 
 from emmy.compiler.ir.axis import Axis, extend_simplify_ctx
-from emmy.compiler.ir.expr import Expr, SimplifyCtx, Var
+from emmy.compiler.ir.expr import Expr, Literal, SimplifyCtx, Var
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt.base import Stmt, _axis_identity
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
@@ -321,7 +321,24 @@ def _(s: Write, ctx: SimplifyCtx) -> Stmt:
 
 @simplify.register
 def _(s: Select, ctx: SimplifyCtx) -> Stmt:
-    return Select(name=s.name, branches=tuple(SelectBranch(b.value, b.select.simplify(ctx)) for b in s.branches))
+    """Predicates simplified, then every branch the constants DECIDE is dropped.
+
+    Branches are ordered and the last one is the else, so a predicate that folds to false is
+    unreachable and one that folds to true is the else from there on. Keeping such a branch costs
+    far more than its own arithmetic: ``Select.deps`` names its value, so the tree-wide prune holds
+    the whole producer cone alive, and a reduce inside a cone nothing can select does not read the
+    output sweep -- which is what makes ``promoted_sweep`` refuse the grid and leave the kernel
+    sweeping every cell in one block. Fusing a scatter at a literal coordinate decides a branch this
+    way at every read it reaches, so this is the ordinary case, not a corner one.
+    """
+    branches = [SelectBranch(b.value, b.select.simplify(ctx)) for b in s.branches]
+    kept: list[SelectBranch] = []
+    for branch in branches[:-1]:
+        if not isinstance(branch.select, Literal):
+            kept.append(branch)
+        elif branch.select.value:
+            return Select(name=s.name, branches=(*kept, branch))
+    return Select(name=s.name, branches=(*kept, branches[-1]))
 
 
 @simplify.register
