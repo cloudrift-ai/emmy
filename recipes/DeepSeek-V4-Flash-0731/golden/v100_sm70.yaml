@@ -31232,6 +31232,125 @@ configs:
     latency:
       NVIDIA Tesla V100 SXM3 32GB:
         emmy_us: 29957.120895385742
+    kernel_set:
+    - post1.k_linear_softmax_mean_matmul_reduce_4e26cc.482332b35fc3.m1.a85952540237.a85952540237
+  - name: post1.k_linear_softmax_mean_matmul_reduce_4e26cc.482332b35fc3.m1.a85952540237.a85952540237
+    bindings:
+      num_tokens: 1
+    pins:
+      FAST_MATH: false
+    knobs:
+      PLACE@map.2/map.1/map.1/twist.1/inner: cut
+      PLACE@map.2/map.1/map.1/twist.1/inner.1/map: cut
+      PLACE@map.2/map.2/reduce.1/inner: cut
+      PLACE@map.2/map.2/reduce.1/inner.1/map: cut
+      PLACE@map.2/map.2/reduce.2/twist.1/inner: cut
+      PLACE@map.2/map.2/reduce.2/twist.1/inner.1/map: cut
+    identity: a859525402376d22599f3e8b69de46ddfcaf56a646316d4295351d1a034ddebd
+    measurements:
+      emmy_us: 4628.804332816175
+      reference_us: 4869.580902780096
+      reference_backend: same-input-greedy
+  - name: post1.k_linear_softmax_mean_matmul_reduce_4e26cc.482332b35fc3.m1.a85952540237.59613335e3a6
+    bindings:
+      num_tokens: 1
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      RASTER: ''
+    identity: 59613335e3a6b154c78d1657248036b8b339db1bb0c21938461fa426a9c798a2
+    measurements:
+      emmy_us: 2.8159998889480318
+      reference_us: 3.106133391459783
+      reference_backend: same-input-greedy
+  - name: post1.k_linear_softmax_mean_matmul_reduce_4e26cc.482332b35fc3.m1.a85952540237.e54dff52980a
+    bindings:
+      num_tokens: 1
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      RASTER: ''
+    identity: e54dff52980a8b2cb4a9f7b26bd4cb2efef9e1529097f3e4fe3393d884649905
+    measurements:
+      emmy_us: 3.14026673634847
+      reference_us: 3.1573334708809853
+      reference_backend: same-input-greedy
+  - name: post1.k_linear_softmax_mean_matmul_reduce_4e26cc.482332b35fc3.m1.a85952540237.4a5314fd2278
+    bindings:
+      num_tokens: 1
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@inner: ''
+      REDUCE@inner.2/map.2/map.1/reduce: ''
+      WORK: ''
+      TILE: ''
+      STAGE: ''
+      RASTER: ''
+    identity: 4a5314fd227850e66797303b311e6d4728e8d0ad696d2983cd28f74cad6a6b08
+    measurements:
+      emmy_us: 711.679995059967
+      reference_us: 750.5919933319092
+      reference_backend: same-input-greedy
+  - name: post1.k_linear_softmax_mean_matmul_reduce_4e26cc.482332b35fc3.m1.a85952540237.e4ca400b7e59
+    bindings:
+      num_tokens: 1
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@inner: ''
+      REDUCE@inner.2/map.2/map.1/reduce: ''
+      WORK: ''
+      TILE: ''
+      STAGE: ''
+      RASTER: ''
+    identity: e4ca400b7e590bf474001cd061ac4fd7876ab7cd458ee3d4d2aa77e695d3fff8
+    measurements:
+      emmy_us: 711.679995059967
+      reference_us: 752.6400089263916
+      reference_backend: same-input-greedy
+  - name: post1.k_linear_softmax_mean_matmul_reduce_4e26cc.482332b35fc3.m1.a85952540237.bcaefc139cd1
+    bindings:
+      num_tokens: 1
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@inner: ''
+      REDUCE@inner.2/map.2/map.1/reduce: ''
+      WORK: ''
+      TILE: ''
+      STAGE: ''
+      RASTER: ''
+    identity: bcaefc139cd1eed7e0223c5fc654bc92f3d8b01eb3e1a9c32a460e39241c72ef
+    measurements:
+      emmy_us: 712.7040028572083
+      reference_us: 747.5200295448303
+      reference_backend: same-input-greedy
+  - name: post1.k_linear_softmax_mean_matmul_reduce_4e26cc.482332b35fc3.m1.a85952540237.7cddd76381e5
+    bindings:
+      num_tokens: 1
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE@map.1/map.1/map.1/inner: ''
+      TILE@map.2/map.4/inner: ''
+      REDUCE@map.1/map.1/map.1/inner: ''
+      REDUCE@map.1/map.1/map.1/inner.2/map.2/map.1/reduce: ''
+      REDUCE@map.2/map.1/map.1/twist: ''
+      REDUCE@map.2/map.2/reduce: ''
+      REDUCE@map.2/map.2/reduce.2/twist: ''
+      REDUCE@map.2/map.4/inner: ''
+      STAGE@map.1/map.1/map.1/inner: ''
+      STAGE@map.2/map.4/inner: ''
+      WORK: ''
+      RASTER: ''
+    identity: 7cddd76381e502916be3c93f6eb9e11c0e0661448be5801345e5e9c39cf4dadc
+    measurements:
+      emmy_us: 2483.2000732421875
+      reference_us: 2608.128070831299
+      reference_backend: same-input-greedy
 - program: 5
   target:
     loop: 41

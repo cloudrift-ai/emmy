@@ -33,7 +33,7 @@ programs was fixed by recording a placement cut, with no new compiler capability
 | --- | ---: | ---: | --- |
 | `pre` chunk m4096 | 1,923,598 µs | 3,238 µs | four `PLACE@…=cut` |
 | `post1` `9e578e` @ m1 | 42,278 µs | 9,866 µs | placement cuts |
-| `post1` `4e26cc` @ m1 | 30,016 µs | 5,347 µs | placement cuts (measured, **not recorded** — see below) |
+| `post1` `4e26cc` @ m1 | 29,988 µs | 4,839 µs | six `PLACE@…=cut` (#799) |
 | `pre1` `k_linear_mean_reduce_7fce9f` @ m1 | 29.7 s | 419 µs | the same four cuts as `pre` m4096 (#795) |
 
 The mechanism is the opposite of what was written here. These schedules were already expressible and already on the
@@ -53,16 +53,41 @@ does not depend on.
 
 ## What is left
 
-### Kernel quality — two targets, both the signature above
+### Kernel quality — one target left, the signature above
 
-- `post1.k_linear_softmax_mean_matmul_reduce_4e26cc` @ m1 — **one** measured row, 29.9 ms, and it dominates
-  `post.decode.m1` (293× its floor, 17 ms per layer, most of the 0.899 s per token). Its 5.6× cut was benched and
-  correctness-checked bit-exact in an earlier round and never reached the repo golden. Cheapest remaining win.
 - `post4096.k_matmul_reduce_06fabe` — 454.8 ms, the largest single cost anywhere in this model, inside
-  `post.chunk.m4096` (317×, 619 ms per layer). This is what puts time to first token 23× off the fork.
+  `post.chunk.m4096` (317×, 619 ms per layer). This is what puts time to first token 23× off the fork. Its nest is
+  the same defect in an extreme form: every load comes from one 4×4 matrix per index, and the program recomputes
+  that matrix's row sums at about eight nesting levels, so it runs `4096 × 4^k` iterations over sixteen values.
 
-`post.decode.m16` sits at 1,149× (68 ms per layer). It serves widths 2–16, so it is off the single-stream
-path but on any concurrent one.
+`post.decode.m16` (1,149×, 68 ms per layer) and the second kernel of `post.chunk.m4096` (106.3 ms) are the same
+kernel as `4e26cc` at another width: `20ed9d` @ m16 and `4682df` @ m4096 have structurally identical nests, differing
+only in the outermost token loop, and the same cut family binds on them. Both are off the single-stream decode path
+but on any concurrent one, and on prefill.
+
+### The repo golden boots but cannot answer a request
+
+#799 records `4e26cc`, which makes the repo price that kernel the way host-local evidence already did. It buys
+reproducibility, not speed: the golden the 0.899 s per token was measured against already carried the cut.
+
+The repo golden now **boots** — health in 37 min 43 s over all 43 layers, on 2026-09-12, the first time it has
+served this model. An earlier boot the same day never reached its second layer, spending over 24 minutes inside one
+fork decision at a `fork.leaf_for` recursion depth near 124; #780 is the fix for that and the recursion is gone.
+
+It still cannot answer a request: the first forward exceeds the engine's RPC deadline, raised to 600 s, and the
+engine dies on `RPC call to sample_tokens timed out`. The boot audit names what the repo golden elects — the
+measured column is the audit's own, through raw launches rather than the capture-and-replay path serving uses.
+
+| program | measured | over floor |
+| --- | ---: | ---: |
+| `pre.decode.m16` | 17,208 ms | 860,394× |
+| `pre.chunk.m4096` | 1,937 ms | 64,740× |
+| `post.chunk.m4096` | 623 ms | 319× |
+| `post.decode.m16` | 68.8 ms | 1,156× |
+| `post.decode.m1` | 50.1 ms | 841× |
+
+`pre.decode.m1` is absent, which is #795 holding. Every row above is unrecorded, and each is a target of the same
+kind as `4e26cc`. That list, not a compiler gap, is what stands between the repo and reproducible serving.
 
 ### Stage 4 — image and release plumbing (not started)
 
