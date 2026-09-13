@@ -1,14 +1,16 @@
 # Qwen3.8-27B at EXL3 5.0 bpw on one V100 SXM3 32GB (sm_70 Volta).
 #
-# ONBOARDING SHELL — not runnable until qualification replaces it with a measured recipe.
+# Compiler-qualified on one V100 SXM3; NOT serving-qualified. The golden under golden/ carries
+# measured Gated DeltaNet chunk kernels; no engine reads EXL3 on this card, so there is no serving
+# lane here. See RESULTS.md for what is and is not established.
 #
 # Fit: 18.53 GiB of EXL3 weights at revision a35e75a (5.0 bpw body, 6-bit head, 4-bit MTP), so a
 # min-to-serve near 24.1 GiB against 32,768 MiB on one card. Stock vLLM has no sm_70 support and no
 # EXL3 quantization method; the serving path under test is the Emmy plugin on the 1Cat-vLLM Volta
 # fork, where emmy owns every coded weight.
 tags:
-  - onboarding
-  - untested
+  - compiler-qualified
+  - serving-blocked
 
 model:
   huggingface: turboderp/Qwen3.8-27B-exl3
