@@ -256,6 +256,18 @@ def _handle_run_once(args):
     ir_path = args.ir
     if ir_path is None and args.input is not None and Path(args.input).suffix == ".json" and Path(args.input).exists():
         ir_path = args.input
+    # ONE target writes ONE file, and the write is the last thing this command does. A directory
+    # there used to reach ``Path(args.json).write_text`` and raise ``IsADirectoryError`` after the
+    # bench had run and the recording had been skipped — a whole 14-target ``--record-greedy`` batch
+    # reported success per target and recorded nothing. The multi-target walk keeps taking a
+    # directory; it hands each target a file inside it, so this never fires there.
+    if args.json and (args.json.endswith(("/", os.sep)) or Path(args.json).is_dir()):
+        logger.error(
+            "--json names ONE file for a single target, but %r is a directory. A directory is for a "
+            "multi-target --golden walk, which writes one file per realization inside it.",
+            args.json,
+        )
+        sys.exit(2)
     if args.ab:
         if not args.bench:
             logger.error("--ab requires --bench (the A/B rows render in the kernel table)")

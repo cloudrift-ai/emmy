@@ -250,6 +250,26 @@ def test_run_ab_requires_bench(run_cli):
     assert "--ab requires --bench" in (stdout + stderr)
 
 
+def test_run_json_rejects_a_directory_for_one_target(run_cli, tmp_path):
+    """One target writes one FILE, and it writes it last.
+
+    A directory used to reach ``Path(args.json).write_text`` and raise ``IsADirectoryError`` after
+    the bench had run and the recording had been skipped, so a ``--record-greedy`` batch reported
+    success per target and recorded nothing. The check has to fire before any work, which is what
+    ``rc == 2`` with no compile output shows."""
+    rc, stdout, stderr = run_cli("run", "--code", "torch.zeros(4)", "--bench", "--json", str(tmp_path))
+    assert rc == 2
+    assert "is a directory" in (stdout + stderr)
+
+
+def test_run_json_rejects_a_trailing_separator_for_one_target(run_cli, tmp_path):
+    """A path that NAMES a directory is refused even before it exists — otherwise a trailing slash
+    silently writes a file beside the intended directory."""
+    rc, stdout, stderr = run_cli("run", "--code", "torch.zeros(4)", "--bench", "--json", f"{tmp_path}/nope/")
+    assert rc == 2
+    assert "is a directory" in (stdout + stderr)
+
+
 def test_run_ab_requires_relowerable_input(run_cli):
     """``--ab`` on a model-ID positional has no code / IR to re-lower per config."""
     rc, stdout, stderr = run_cli("run", "some/model", "--ab", "BM=8", "--bench")
