@@ -1,4 +1,4 @@
-"""One broadcast constant feeding TWO sibling cones declares its load ONCE per scope.
+"""One value feeding TWO sibling cones is declared ONCE per scope.
 
 A ``Fold``'s operand edges splice independently (``Fold.spliced_step``), so two cones reading the
 same 1-element input each carry their own copy of its ``buf[0]`` ``Load`` — same SSA name, same
@@ -25,7 +25,7 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Literal
 from emmy.compiler.ir.frontend.ir import LinearOp, SliceOp
-from emmy.compiler.ir.stmt import Body, Load
+from emmy.compiler.ir.stmt import Assign, Body, Load
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 from emmy.compiler.target import set_target
@@ -104,3 +104,28 @@ def test_a_name_rebound_to_a_different_address_survives_as_the_fault_it_is() -> 
     body = Body((Load(name="in0", input="a", index=zero), Load(name="in0", input="b", index=zero)))
 
     assert [stmt.input for stmt in materialize._drop_repeated_declarations(body)] == ["a", "b"]
+
+
+def test_sibling_cones_share_one_declaration_of_a_derived_value() -> None:
+    """A cone DERIVES from what it reads, so the repeat is an ``Assign`` as readily as a ``Load``.
+
+    DeepSeek-V4's post block is a chain of normalizations; a placement cut lands two cones of one
+    ``1 / (sum + eps)`` at the kernel's own scope, and the second reciprocal redeclares the first's
+    name. nvcc rejects it exactly as it rejects the repeated load."""
+    zero = (Literal(0, "int"),)
+    body = Body(
+        (
+            Load(name="in0", input="s", index=zero),
+            Assign(name="v0", op="reciprocal", args=("in0",)),
+            Assign(name="v0", op="reciprocal", args=("in0",)),
+        )
+    )
+
+    assert [stmt.name for stmt in materialize._drop_repeated_declarations(body)] == ["in0", "v0"]
+
+
+def test_a_name_rebound_to_a_different_expression_survives_as_the_fault_it_is() -> None:
+    """The same rule from the other side: two VALUES under one name stay two statements."""
+    body = Body((Assign(name="v0", op="reciprocal", args=("a",)), Assign(name="v0", op="reciprocal", args=("b",))))
+
+    assert [stmt.args for stmt in materialize._drop_repeated_declarations(body)] == [("a",), ("b",)]
