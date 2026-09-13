@@ -202,3 +202,36 @@ def test_compiler_fingerprint_ignores_mtime_so_two_checkouts_share_one_memo(tmp_
     (second / "pkg" / "rule.py").write_text("VALUE = 2\n")
     os.utime(second / "pkg" / "rule.py", stamp)
     assert _tree_fingerprint(first) != _tree_fingerprint(second)
+
+
+def test_a_red_row_says_which_of_the_three_kinds_of_churn_moved_it() -> None:
+    """A compiler change moves recorded rows in bulk and only one reading of that is a loss, so the
+    decode has to say which. Before this the reason was a candidate COUNT, and telling a re-spelling
+    from a narrowing meant writing a probe: the Qwen family's 126 red rows across three goldens were
+    classified by hand before any of them could be re-recorded."""
+    from emmy.compiler.pipeline.search.golden import unmatched_reason
+
+    offered = frozenset({(("WORK", "t128"), ("TILE", "f4")), (("WORK", "t256"), ("TILE", "f2"))})
+
+    respelled = unmatched_reason(((("REDUCE@reduce"), "coop"), ("WORK", "t128")), offered)
+    assert "re-spelling or an identity change" in respelled and "REDUCE@reduce" in respelled
+
+    narrowed = unmatched_reason((("WORK", "t512"), ("TILE", "f4")), offered)
+    assert narrowed.startswith("NARROWING") and "WORK='t512'" in narrowed
+
+    regrouped = unmatched_reason((("WORK", "t128"), ("TILE", "f2")), offered)
+    assert "no one candidate carries them together" in regrouped
+
+    gained = unmatched_reason((), offered)
+    assert "takes a schedule where the recording spelled none" in gained
+
+
+def test_the_narrowing_reading_outranks_the_respelling_one() -> None:
+    """A row can lose a key AND a value at once. The re-spelling reading is reported first because
+    a key that is gone explains the value that went with it, and calling that a narrowing would
+    report a lost capability that was only renamed."""
+    from emmy.compiler.pipeline.search.golden import unmatched_reason
+
+    offered = frozenset({(("WORK", "t128"),)})
+    both = unmatched_reason(((("TILE"), "f4"), ("WORK", "t512")), offered)
+    assert "re-spelling" in both and "NARROWING" not in both

@@ -1003,6 +1003,29 @@ def _lifted_target(record: GoldenRecord):
     return tile.with_io(lowered, node)
 
 
+def unmatched_reason(row: Sequence[tuple[str, str]], candidates) -> str:
+    """Why a recorded row equals no enumerated leaf — the three readings golden churn has.
+
+    A compiler change moves recorded rows in bulk and only one of the readings is a loss, so a
+    re-record that does not tell them apart can enshrine one. A key the replay offers NOWHERE is a
+    re-spelling or an identity change: the site the row addressed is not on this kernel any more. A
+    value gone while its key survives is a NARROWING — the family is still offered and no longer
+    reaches that value, which is a capability the compiler used to have and is the one reading to
+    report rather than overwrite. Everything offered but never together is a kernel whose fork SET
+    moved, of which the row that spelled no decision at all against a kernel that now takes one is
+    the common case, and a gain."""
+    spellings = [dict(candidate) for candidate in candidates]
+    absent = sorted({key for key, _ in row if not any(key in spelling for spelling in spellings)})
+    if absent:
+        return f"the replay offers no {', '.join(absent)} — a re-spelling or an identity change"
+    narrowed = sorted(f"{key}={value!r}" for key, value in row if not any(spelling.get(key) == value for spelling in spellings))
+    if narrowed:
+        return f"NARROWING, the key is offered and the value is not: {', '.join(narrowed)}"
+    if not row:
+        return "the kernel takes a schedule where the recording spelled none"
+    return "every key and value is offered, no one candidate carries them together"
+
+
 def decode_record(record: GoldenRecord, siblings: Sequence[GoldenRecord] = ()) -> str | None:
     """STRICTLY decode one record against the current compiler — ``None`` on success, else the
     failure reason. This is the replayability contract the nightly onboarding job gates: the persisted
@@ -1044,10 +1067,17 @@ def decode_record(record: GoldenRecord, siblings: Sequence[GoldenRecord] = ()) -
         elif row in child_rows:
             reason = None
         else:
-            reason = f"no enumerated row of the identified kernel equals the recording ({len(child_rows)} candidate rows)"
+            reason = (
+                f"no enumerated row of the identified kernel equals the recording "
+                f"({len(child_rows)} candidate rows): {unmatched_reason(row, child_rows)}"
+            )
     else:
         pooled = frozenset().union(*candidates.values()) if candidates else frozenset()
-        reason = None if row in pooled else f"no enumerated row equals the recording ({len(pooled)} candidate rows)"
+        reason = (
+            None
+            if row in pooled
+            else f"no enumerated row equals the recording ({len(pooled)} candidate rows): {unmatched_reason(row, pooled)}"
+        )
     verdicts[verdict_key] = reason
     global _IDENTITY_STORE_DIRTY
     _IDENTITY_STORE_DIRTY = True
