@@ -7,9 +7,10 @@ re-exposes (a closing rewrite can leave one behind, and it is what makes two occ
 same computation compare unequal), a carrier the fusion left holding two independent contractions
 becomes one term per state, and same-value cones become ONE shared object.
 
-INVARIANT — normalization ends with no operand result component that no reader reads
-(:func:`_prune_unread`), and with same-value cones (alpha-equal, identical captures and
-interface names) as ONE shared object (:func:`_share_common_cones`). Object identity is how the
+INVARIANT — normalization ends with no result component that no reader reads, the ROOT's own
+included and the boundary stores counting as its readers (:func:`_prune_unread`), and with
+same-value cones (alpha-equal, identical captures and interface names) as ONE shared object
+(:func:`_share_common_cones`). Object identity is how the
 placement machinery recognizes that two consumption sites read one value, so a rewrite that
 copies a cone (the close rewrites do, by design) is only sound because this final pass restores
 the sharing. Recompute elimination is a
