@@ -627,7 +627,7 @@ def _prefer_mma_leaf(fp):
     return max(itertools.islice(iter_leaves(fp.options), 500_000), key=score, default=None)
 
 
-@pytest.mark.xfail(strict=True, reason="the EXL3 gather index still reads as a coordinate on the closed-term lift (PR #699)")
+@pytest.mark.xfail(strict=True, reason="no mma kernel for the computed-B cone; the pinned row is on the retired site codec (PR #699)")
 def test_input_spelling_streams_computed_b_through_tensor_cores():
     """A generic expanding B cone compute-fills a canonical slab and drains through mma.sync.
 
@@ -660,7 +660,7 @@ def test_input_spelling_streams_computed_b_through_tensor_cores():
         return _prefer_mma_leaf(fp)
 
     # Spelled on the retired ``n<id>`` site codec; re-derive as routes (``TILE@<route>``) once this
-    # program lowers again — its gather index still reads as a coordinate.
+    # program lowers again — it does now, and the cone still reaches no mma tier.
     row = {
         "WORK": "w1x1",
         "RASTER": "",
@@ -702,7 +702,7 @@ def test_input_spelling_streams_computed_b_through_tensor_cores():
 
 @requires_cuda
 @pytest.mark.parametrize(("K", "cb", "m", "lane"), [(2, 0, 16, "mma"), (5, 2, 1, "coop")])
-@pytest.mark.xfail(strict=True, reason="the EXL3 gather index still reads as a coordinate on the closed-term lift (PR #699)")
+@pytest.mark.xfail(strict=True, reason="no mma kernel for the computed-B cone; the pinned row is on the retired site codec (PR #699)")
 def test_input_spelling_computed_b_matches_decoded_linear(K, cb, m, lane):
     """The streamed generic B cone agrees with the decoded-weight linear on CUDA.
 
@@ -785,7 +785,6 @@ def test_input_spelling_computed_b_matches_decoded_linear(K, cb, m, lane):
 
 
 @requires_cuda
-@pytest.mark.xfail(strict=True, reason="the EXL3 gather index still reads as a coordinate on the closed-term lift (PR #699)")
 def test_factored_linear_runs_from_a_plan_on_checkpoint_leaves_alone():
     """The birth-time spelling runs off its PLAN, fed nothing but the checkpoint leaves.
 
@@ -914,7 +913,7 @@ def test_computed_b_lane_offers_the_cross_cta_split(monkeypatch):
     assert any(spelling.startswith("g") for spelling in offered), offered
 
 
-@pytest.mark.xfail(strict=True, reason="the EXL3 gather index still reads as a coordinate on the closed-term lift (PR #699)")
+@pytest.mark.xfail(strict=True, reason="no mma kernel for the computed-B cone; the pinned row is on the retired site codec (PR #699)")
 def test_computed_b_split_partial_reindexes_the_cone(monkeypatch):
     """The split partial reads the cone at ABSOLUTE k — no GPU, source only. Each CTA owns
     ``kslice`` = K/2 columns, so the computed B cone's reads must sit at their partition's own
@@ -971,7 +970,7 @@ def test_computed_b_split_partial_reindexes_the_cone(monkeypatch):
 
 
 @requires_cuda
-@pytest.mark.xfail(strict=True, reason="the EXL3 gather index still reads as a coordinate on the closed-term lift (PR #699)")
+@pytest.mark.xfail(strict=True, reason="no mma kernel for the computed-B cone; the pinned row is on the retired site codec (PR #699)")
 def test_computed_b_split_k_matches_decoded_linear(monkeypatch):
     """The split over the streamed computed-B cone agrees with the decoded linear on CUDA. The
     compute-filled warp lane is sm_80+, and the deferred-kernel finalize is the correct one for

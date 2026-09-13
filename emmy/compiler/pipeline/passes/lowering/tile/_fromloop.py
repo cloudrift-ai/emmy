@@ -471,7 +471,7 @@ def scan_from_loop(loop: Loop, axes: tuple = (), levels: tuple = ()) -> tuple[Fo
     # A load over COORDINATES is a slab; a data-dependent GATHER — an index reading a value the step
     # computes (the packed-pair table read by a decoded code) — is a statement of its cone: the value
     # it reads is not an axis, and a slab would declare it as one. A LOAD defines such a value too:
-    # a trellis code read from gmem indexes the next table read, and reading only the arithmetic
+    # a code read from gmem indexes the next table read, and reading only the arithmetic
     # here left that index declared as a coordinate the kernel could hand no extent.
     defined = {name for stmt in step for name in stmt.defines()}
     gathers = {id(stmt) for stmt in step if isinstance(stmt, Load) and any(expr.free_vars() & defined for expr in stmt.index)}
