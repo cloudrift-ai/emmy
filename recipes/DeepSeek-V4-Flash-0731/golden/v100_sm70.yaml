@@ -28566,32 +28566,6 @@ configs:
       emmy_us: 5284.8639488220215
       reference_us: 5548.031806945801
       reference_backend: same-input-greedy
-  - name: expert-sym@mxfp4.k_linear_reduce_0de949.7d644f512b51.m1.7f821ab65404
-    bindings:
-      num_tokens: 1
-    pins:
-      FAST_MATH: false
-    knobs:
-      TILE@map.1/inner: ''
-      TILE@map.1/inner.2/map.1/inner: ''
-      REDUCE@map.1/inner: coop/r2
-      REDUCE@map.1/inner.2/map.1/inner: ''
-      STAGE@map.1/inner: ''
-      STAGE@map.1/inner.2/map.1/inner: ''
-      WORK: t16
-      RASTER: ''
-    identity: 7f821ab654040c58390b6ea58b413c9fe50caf225e3026bc78570940bfb1e3d1
-    measurements:
-      emmy_us: 1381783.5693359375
-      reference_us: 1384111.083984375
-      reference_backend: same-input-greedy
-    latency:
-      NVIDIA Tesla V100 SXM3 32GB:
-        emmy_us: 1377833.984375
-        eager_us: 25181.184768676758
-    kernel_set:
-    - expert-sym@mxfp4.k_linear_reduce_0de949.7d644f512b51.m1.7f821ab65404.7f821ab65404
-    - expert-sym@mxfp4.k_linear_reduce_0de949.7d644f512b51.m1.7f821ab65404.fec324df6e4b
   - name: expert-sym@mxfp4.k_linear_reduce_0de949.7d644f512b51.m1.7f821ab65404.7f821ab65404
     bindings:
       num_tokens: 1
@@ -28718,32 +28692,6 @@ configs:
   target:
     loop: 2
   realizations:
-  - name: expert1@mxfp4.k_linear_reduce_8da262.cf99757467d0.m1.7f821ab65404
-    bindings:
-      num_tokens: 1
-    pins:
-      FAST_MATH: false
-    knobs:
-      TILE@map.1/inner: ''
-      TILE@map.1/inner.2/map.1/inner: ''
-      REDUCE@map.1/inner: coop/r2
-      REDUCE@map.1/inner.2/map.1/inner: ''
-      STAGE@map.1/inner: ''
-      STAGE@map.1/inner.2/map.1/inner: ''
-      WORK: t16
-      RASTER: ''
-    identity: 7f821ab654040c58390b6ea58b413c9fe50caf225e3026bc78570940bfb1e3d1
-    measurements:
-      emmy_us: 1326874.6337890625
-      reference_us: 1383727.05078125
-      reference_backend: same-input-greedy
-    latency:
-      NVIDIA Tesla V100 SXM3 32GB:
-        emmy_us: 1293945.80078125
-        eager_us: 25151.487350463867
-    kernel_set:
-    - expert1@mxfp4.k_linear_reduce_8da262.cf99757467d0.m1.7f821ab65404.7f821ab65404
-    - expert1@mxfp4.k_linear_reduce_8da262.cf99757467d0.m1.7f821ab65404.fec324df6e4b
   - name: expert1@mxfp4.k_linear_reduce_8da262.cf99757467d0.m1.7f821ab65404.7f821ab65404
     bindings:
       num_tokens: 1
@@ -36912,39 +36860,6 @@ configs:
   target:
     loop: 149
   realizations:
-  - name: pre1.k_linear_mean_reduce_7fce9f.7c4629931db7.m1.0733f2fad083
-    bindings:
-      num_tokens: 1
-    pins:
-      FAST_MATH: false
-    knobs:
-      TILE@map.1/map.1/reduce.1/inner: f1x10
-      TILE@map.1/map.1/reduce.1/inner.2/map.1/inner: ''
-      TILE@map.2/inner: f1
-      TILE@map.2/inner.2/map.1/inner: ''
-      REDUCE@map.1/map.1/reduce: ''
-      REDUCE@map.1/map.1/reduce.1/inner: ''
-      REDUCE@map.1/map.1/reduce.1/inner.2/map.1/inner: ''
-      REDUCE@map.1/map.1/reduce.1/inner.2/map.1/inner.2/map.2/map.1/reduce: ''
-      REDUCE@map.2/inner: ''
-      REDUCE@map.2/inner.2/map.1/inner: ''
-      STAGE@map.1/map.1/reduce.1/inner: ''
-      STAGE@map.1/map.1/reduce.1/inner.2/map.1/inner: ''
-      STAGE@map.2/inner: ''
-      STAGE@map.2/inner.2/map.1/inner: ''
-      WORK: t32x8
-      RASTER: ''
-    identity: 0733f2fad08324fa50809718f28ae9831a59985435ad27087eafd2b4681f48d2
-    measurements:
-      emmy_us: 29693246.09375
-      reference_us: 29698787.109375
-      reference_backend: same-input-greedy
-    latency:
-      NVIDIA Tesla V100 SXM3 32GB:
-        emmy_us: 29690269.53125
-        eager_us: 13863.936424255371
-    kernel_set:
-    - pre1.k_linear_mean_reduce_7fce9f.7c4629931db7.m1.0733f2fad083.0733f2fad083
   - name: pre1.k_linear_mean_reduce_7fce9f.7c4629931db7.m1.0733f2fad083.0733f2fad083
     bindings:
       num_tokens: 1
@@ -37030,36 +36945,6 @@ configs:
   target:
     loop: 150
   realizations:
-  - name: pre16.k_linear_mean_reduce_03c479.8caa25e24052.m16.dc6db94ec8ea
-    bindings:
-      num_tokens: 16
-    pins:
-      FAST_MATH: false
-    knobs:
-      TILE@map.1/map.1/reduce.1/inner.2/map.1/inner: f1x2
-      TILE@map.2/inner.2/map.1/inner: f4x2
-      REDUCE@map.1/map.1/reduce: ''
-      REDUCE@map.1/map.1/reduce.1/inner: ''
-      REDUCE@map.1/map.1/reduce.1/inner.2/map.1/inner: ''
-      REDUCE@map.1/map.1/reduce.1/inner.2/map.1/inner.1/map.2/map.1/reduce: ''
-      REDUCE@map.2/inner: ''
-      REDUCE@map.2/inner.2/map.1/inner: ''
-      STAGE@map.1/map.1/reduce.1/inner.2/map.1/inner: ''
-      STAGE@map.2/inner.2/map.1/inner: ''
-      WORK: t32x8
-      RASTER: ''
-    identity: dc6db94ec8ea22ee0ec050481870872ea9a7f86217c7caf6c8e7759c0be4af3b
-    measurements:
-      emmy_us: 17179498.046875
-      reference_us: 17178498.046875
-      reference_backend: same-input-greedy
-    latency:
-      NVIDIA Tesla V100 SXM3 32GB:
-        emmy_us: 17184826.171875
-        eager_us: 14291.96834564209
-    kernel_set:
-    - pre16.k_linear_mean_reduce_03c479.8caa25e24052.m16.dc6db94ec8ea.dc6db94ec8ea
-    - pre16.k_linear_mean_reduce_03c479.8caa25e24052.m16.dc6db94ec8ea.dd70f818a372
   - name: pre16.k_linear_mean_reduce_03c479.8caa25e24052.m16.dc6db94ec8ea.dc6db94ec8ea
     bindings:
       num_tokens: 16
