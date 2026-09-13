@@ -57,7 +57,14 @@ call, a floor rather than a total, because those ten never returned a number.
 
 The greedy elected a single fused kernel at **grid 1** — one CTA for the entire reduce. A `PLACE=cut` placement
 splits it into pieces that fill the grid. Nothing about the cut was missing: it was offered, it realized, and it
-was fast. It was simply never picked, because of a pricing defect diagnosed separately from this recipe.
+was fast. It was simply never picked, because of a pricing defect diagnosed separately from this recipe, and that
+defect is still open.
+
+**The golden is what closes it for a deploy.** A recorded row outranks the prior: the greedy's measured-evidence
+pick reads these rows before it consults the model, and a strict-evidence compile takes the kernel set the row
+names. So the fifteen rows below make a deploy take the cut whether or not the pricing defect is ever fixed — it
+costs an unrecorded kernel, not a recorded one. That is why this recipe carries a golden rather than waiting for a
+compiler change.
 
 ## Recording the route, and why the spelling is recorded per row
 
