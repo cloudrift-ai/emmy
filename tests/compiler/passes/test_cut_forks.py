@@ -21,6 +21,7 @@ from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.stmt import Assign, Load, Write
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
+from emmy.compiler.ir.tile.path import resolve
 from emmy.compiler.loop_wire import loop_graph_to_wire
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, TILE_PASSES, Match, Pipeline, Rule
 from emmy.compiler.pipeline.fork import Fork
@@ -410,6 +411,29 @@ def test_bare_and_scoped_place_cuts_compose_in_one_decision() -> None:
     (fragment,) = fork.expand()
     pieces = [node for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
     assert len(pieces) == 3 and all(node.op.placement_decided for node in pieces)
+
+
+def test_a_composed_route_skips_a_bare_key_this_kernel_reads_as_ambiguous() -> None:
+    """A composed route is registered for EVERY kernel of the compile, so most of its keys address
+    another one. A scoped key off this tree is skipped already; a BARE key must be too. A bare key
+    is what the codec spells for a kernel whose PLACE family has one site — a cut piece, typically —
+    so it never names a seam of a kernel that has several, and on one that does it is ambiguous.
+    Letting that ambiguity out ended the whole compile over stored evidence about another kernel:
+    every strict decode of a golden holding one bare and one scoped routing row for the same kernel
+    set died here, and so would the deploy compile that reads it."""
+    from emmy.compiler.pipeline.search.pins import composed_routes  # noqa: PLC0415
+
+    match, graph = _case_match("attention/rmsnorm-qk-sdpa-composed-cut.yaml")
+    tile = graph.nodes[match.root_node_id].op
+    with pytest.raises(ValueError, match="PLACE is ambiguous"):
+        resolve(tile.op, "PLACE")
+
+    with composed_routes([(None, ("PLACE", "PLACE@map.1/twist.1/inner.2/map"))]):
+        options = _CUT.rewrite(match, graph.nodes[match.root_node_id], _CTX)
+
+    options = options if isinstance(options, list) else [options]
+    assert options, "the ordinary fuse and single-seam arms still stand"
+    assert all(option.knobs.get("PLACE") != "cut" for option in options), "no arm cuts under the unattributable bare key"
 
 
 def _receipt_fields() -> dict:

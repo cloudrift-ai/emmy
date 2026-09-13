@@ -133,8 +133,13 @@ def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str] | None:
 def _composed_forks(match: Match, root: Node, tile: TileOp, seams, ctx) -> list[DeferredFork]:
     """One composed arm per measured route of this kernel that names several of its seams
     (:func:`composed_cuts_for`) — the decision a pinned compile consumed those seams as, offered
-    again so the row that measured it can spell it. A key naming no site here belongs to another
-    kernel; a route that resolves to fewer than two seams adds nothing the single arms lack."""
+    again so the row that measured it can spell it. A key that names no seam of THIS kernel is
+    skipped: a route is registered for every kernel of the compile, so most of its keys address
+    another one. That covers a scoped key whose path is not on this tree and a BARE key this tree
+    reads as ambiguous alike — a bare key was spelled by a kernel whose PLACE family had ONE site,
+    so it never names a seam of a kernel that has several, and letting its ambiguity out of here
+    would end the compile over stored evidence about another kernel. A route that resolves to fewer
+    than two seams adds nothing the single arms lack."""
     if ctx is None:
         return []
     signature = frozenset((key, value) for key, value in fork_signature(tile, (), ctx) if key not in SCHEDULE_FORK_STAMPS)
@@ -149,7 +154,7 @@ def _composed_forks(match: Match, root: Node, tile: TileOp, seams, ctx) -> list[
         for name in keys:
             try:
                 site = resolve(tile.op, name, all_sites=all_sites)
-            except MissingSiteError:
+            except ValueError:
                 continue
             seam = by_node.get(id(site.node)) if site is not None else None
             if seam is not None and not any(picked is seam for picked in chosen):
