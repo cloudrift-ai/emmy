@@ -97,9 +97,11 @@ class _NotSupported(Exception):
 
 
 class UnfusableStmt(_NotSupported):
-    """Construction hit the per-stmt binding cap: ``origin``'s statements multiply σ-bindings
-    instead of deduplicating (a recurrence-shaped chain). Surfaced — not folded into ``None`` —
-    when the caller asks, so fusion can drop ``origin`` from the region and retry the rest."""
+    """One named loop's statement cannot be spliced, and no other loop in the region is implicated.
+    Two reasons reach it: ``origin``'s statements multiply σ-bindings past the per-stmt cap instead
+    of deduplicating (a recurrence-shaped chain), and a Write of ``origin`` that observes a running
+    accumulator (a scan), whose order no merged body preserves. Surfaced — not folded into ``None``
+    — when the caller asks, so fusion can drop ``origin`` from the region and retry the rest."""
 
     def __init__(self, message: str, origin: str) -> None:
         super().__init__(message)
@@ -589,7 +591,10 @@ class _Splicer(LoopBuilder):
                 raise _NotSupported(f"root loop {root_tag!r} has no Write to {output!r}")
             w, scope = found
             if self._write_observes_running_accumulator(root, w, scope):
-                raise _NotSupported(f"root Write to {w.output!r} observes running accumulator {w.value!r}; ordered loop cannot be spliced")
+                raise UnfusableStmt(
+                    f"root Write to {w.output!r} observes running accumulator {w.value!r}; ordered loop cannot be spliced",
+                    origin=root_tag,
+                )
             v_bound = self._ensure_dep(w.value, root_tag, Sigma(), scope)
             self.insert(
                 Write(
@@ -708,8 +713,9 @@ class _Splicer(LoopBuilder):
             )
         target_write, target_scope = found
         if self._write_observes_running_accumulator(target, target_write, target_scope):
-            raise _NotSupported(
-                f"splice edge into {target_tag!r} observes running accumulator {target_write.value!r}; ordered loop cannot be spliced"
+            raise UnfusableStmt(
+                f"splice edge into {target_tag!r} observes running accumulator {target_write.value!r}; ordered loop cannot be spliced",
+                origin=target_tag,
             )
         source_meta = self.loops[d.origin]
         index_rename = {
