@@ -3,8 +3,9 @@
 This module is the ONE place quantization-as-a-concept exists (together with the
 safetensors loader that reads the checkpoint and ``trace/huggingface.py``'s
 architecture-twin construction). Four checkpoint families share the design — FP8
-(scale-paired bits, ``quant_method: "fp8"`` / compressed-tensors), AWQ GEMM
-(packed int4 ``qweight`` / ``qzeros`` plus group scales), and EXL3 (trellis-coded
+(scale-paired bits, ``quant_method: "fp8"`` / compressed-tensors), packed int4 (AWQ
+GEMM and GPTQ: ``qweight`` / ``qzeros`` plus group scales, differing only in nibble
+order, pack axis and zero convention — see :class:`_PackedInt4`), and EXL3 (trellis-coded
 sibling tensors, ``quant_method: "exl3"``; decode math in ``loader/exl3.py``), plus
 MXFP4 (two nibbles per byte with one E8M0 scale per 32 values). Per family:
 
@@ -50,6 +51,7 @@ import logging
 import re
 from contextlib import ExitStack
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 
@@ -78,10 +80,34 @@ F8_SAFETENSORS_DTYPES: dict[str, str] = {"F8_E4M3": "f8e4m3", "F8_E5M2": "f8e5m2
 # is NOT here — it is a plain tensor the twin/loader reads by its own key.
 _EXL3_SIBLING_LEAVES = ("suh", "svh", "mcg", "mul1", "su", "sv")
 
-# AutoAWQ GEMM stores eight output-channel nibbles in one i32 word using
-# ``[0, 2, 4, 6, 1, 3, 5, 7]`` as the pack order. Reading the shifts in this
-# inverse order emits logical output channels directly, without a gather.
-_AWQ4_LOGICAL_SHIFTS = (0, 16, 4, 20, 8, 24, 12, 28)
+
+class _PackedInt4(NamedTuple):
+    """How one packed-int4 family lays eight nibbles out in an i32 word, and what its zeros mean.
+
+    ``lanes`` is how many interleaved runs the word holds, so logical slot ``i`` sits at bit
+    ``(i % lanes) * (32 // lanes) + (i // lanes) * 4``: AutoAWQ GEMM's ``[0, 2, 4, 6, 1, 3, 5, 7]``
+    pack order is two lanes of four, GPTQ's sequential order one lane of eight. Reading the shifts
+    in that order emits logical channels directly, without a gather. ``rows`` says the packed
+    weight runs along the INPUT dim (GPTQ's ``(k // 8, n)``) rather than the output dim (AWQ's
+    ``(k, n // 8)``); both families pack ``qzeros`` along the output dim. ``zero_bias`` is added to
+    the stored zero point before it is subtracted — GPTQ's v1 format stores ``zero - 1`` so its
+    unsigned kernels add it back, while AWQ stores the zero point itself. ``name`` is the storage
+    token a serving store records for the family.
+    """
+
+    name: str
+    lanes: int
+    rows: bool
+    zero_bias: int
+
+    @property
+    def shifts(self) -> tuple[int, ...]:
+        """The eight word bit offsets, in logical slot order."""
+        return tuple((i % self.lanes) * (32 // self.lanes) + (i // self.lanes) * 4 for i in range(8))
+
+
+_AWQ4 = _PackedInt4(name="awq4", lanes=2, rows=False, zero_bias=0)
+_GPTQ4 = _PackedInt4(name="gptq4", lanes=1, rows=True, zero_bias=1)
 
 
 def scale_is_reciprocal(scale_key: str) -> bool:  # noqa: ARG001 — the key is the one fact a caller has
@@ -317,11 +343,8 @@ def _awq_quant_config(model_dir: Path) -> dict | None:
     eight output-channel nibbles per i32 word, per-input-channel groups, and
     explicit zero points. Other AWQ layouts must not be mistaken for it.
     """
-    cfg_path = model_dir / "config.json"
-    if not cfg_path.exists():
-        return None
-    qc = json.loads(cfg_path.read_text()).get("quantization_config")
-    if not isinstance(qc, dict) or qc.get("quant_method") != "awq":
+    qc = _quantization_config(model_dir)
+    if qc is None or qc.get("quant_method") != "awq":
         return None
     bits = int(qc.get("bits", qc.get("w_bit", 0)) or 0)
     version = str(qc.get("version", "gemm")).lower()
@@ -331,6 +354,45 @@ def _awq_quant_config(model_dir: Path) -> dict | None:
             f"(bits={bits}, version={version!r}, zero_point={qc.get('zero_point')!r})"
         )
     return qc
+
+
+def _gptq_quant_config(model_dir: Path) -> dict | None:
+    """The checkpoint's GPTQ declaration, when it is the layout Emmy decodes.
+
+    Emmy's spelling below implements the v1 checkpoint format: four-bit nibbles packed
+    sequentially along the INPUT dim, per-input-channel groups, and zero points stored one below
+    their true value (a v1 packer writes ``zero - 1`` so its unsigned kernels add it back).
+    ``desc_act`` must be false, which makes the checkpoint's ``g_idx`` the identity permutation and
+    the group index plain ``row // group_size``; an activation-ordered checkpoint needs a gather
+    this decode does not spell. ``sym`` must be true — that is the zero convention measured here,
+    and an asymmetric checkpoint would be decoded on an unverified assumption. Any other GPTQ
+    variant raises rather than being mistaken for this one: every one of them would still load,
+    silently, with every weight off by a whole scale unit.
+    """
+    qc = _quantization_config(model_dir)
+    if qc is None or qc.get("quant_method") != "gptq":
+        return None
+    bits = int(qc.get("bits", 0) or 0)
+    fmt = str(qc.get("checkpoint_format", qc.get("format", "gptq"))).lower()
+    if bits != 4 or fmt != "gptq" or qc.get("desc_act", False) or qc.get("sym", False) is not True:
+        raise ValueError(
+            "unsupported GPTQ checkpoint: Emmy requires the symmetric 4-bit v1 layout without "
+            f"activation ordering (bits={bits}, format={fmt!r}, desc_act={qc.get('desc_act')!r}, sym={qc.get('sym')!r})"
+        )
+    return qc
+
+
+def _packed_int4_config(model_dir: Path) -> tuple[dict, _PackedInt4] | None:
+    """The checkpoint's packed-int4 declaration and the nibble layout it selects, or ``None``.
+
+    The two families share every step of the decode — unpack, centre on the zero point, scale by
+    the input-channel group — and differ only in the three fields of :class:`_PackedInt4`.
+    """
+    for recognizer, layout in ((_awq_quant_config, _AWQ4), (_gptq_quant_config, _GPTQ4)):
+        qc = recognizer(model_dir)
+        if qc is not None:
+            return qc, layout
+    return None
 
 
 def is_awq_checkpoint(model_dir) -> bool:
@@ -360,38 +422,48 @@ def decode_mxfp4(blocks: np.ndarray, scales: np.ndarray) -> np.ndarray:
     return np.swapaxes(dense, -2, -1).astype(np.float32)
 
 
-def unpack_awq4(packed: np.ndarray) -> np.ndarray:
-    """Unpack AutoAWQ GEMM i32 words to logical int4 output channels.
+def _packed_int4_logical(stored_shape: tuple[int, int], rows: bool) -> tuple[int, int]:
+    """The logical extents a stored packed shape describes, eight nibbles per word along one axis."""
+    stored_rows, cols = stored_shape
+    return (stored_rows * 8, cols) if rows else (stored_rows, cols * 8)
 
-    The returned shape is ``(*packed.shape[:-1], packed.shape[-1] * 8)``.
-    Unsigned views avoid implementation-defined signed shifts; masking then
-    returns values in ``[0, 15]`` exactly.
+
+def unpack_int4(packed: np.ndarray, layout: _PackedInt4, *, rows: bool = False) -> np.ndarray:
+    """Unpack i32 words to logical int4 values, eight per word.
+
+    ``rows`` spreads each word down the ROW axis (GPTQ's ``qweight``); otherwise the eight
+    nibbles run along the column axis (both families' ``qzeros``, and AWQ's ``qweight``).
+    Unsigned views avoid implementation-defined signed shifts; masking then returns values in
+    ``[0, 15]`` exactly.
     """
     words = np.asarray(packed)
     if words.ndim != 2 or words.dtype not in (np.dtype(np.int32), np.dtype(np.uint32)):
-        raise ValueError(f"AWQ packed tensor must be rank-2 i32/u32, got shape={words.shape}, dtype={words.dtype}")
-    shifts = np.asarray(_AWQ4_LOGICAL_SHIFTS, dtype=np.uint32)
+        raise ValueError(f"packed int4 tensor must be rank-2 i32/u32, got shape={words.shape}, dtype={words.dtype}")
+    shifts = np.asarray(layout.shifts, dtype=np.uint32)
     unpacked = (words.astype(np.uint32, copy=False)[..., None] >> shifts) & np.uint32(0xF)
-    return unpacked.reshape(words.shape[0], words.shape[1] * 8).astype(np.int8)
+    if rows:
+        unpacked = unpacked.swapaxes(-1, -2)
+    return unpacked.reshape(*_packed_int4_logical(words.shape, rows)).astype(np.int8)
 
 
-def dequantize_awq4(qweight: np.ndarray, qzeros: np.ndarray, scales: np.ndarray, group_size: int) -> np.ndarray:
-    """Decode one AutoAWQ GEMM weight to its ``(in, out)`` value matrix."""
+def dequantize_packed_int4(
+    qweight: np.ndarray, qzeros: np.ndarray, scales: np.ndarray, group_size: int, *, layout: _PackedInt4
+) -> np.ndarray:
+    """Decode one packed-int4 weight (AutoAWQ GEMM or GPTQ) to its ``(in, out)`` value matrix."""
     qweight = np.asarray(qweight)
     qzeros = np.asarray(qzeros)
     scales = np.asarray(scales)
     if qweight.ndim != 2 or qzeros.ndim != 2 or scales.ndim != 2:
-        raise ValueError(f"AWQ qweight/qzeros/scales must be rank-2, got {qweight.shape}, {qzeros.shape}, {scales.shape}")
-    k, packed_n = qweight.shape
+        raise ValueError(f"packed int4 qweight/qzeros/scales must be rank-2, got {qweight.shape}, {qzeros.shape}, {scales.shape}")
+    k, n = _packed_int4_logical(qweight.shape, layout.rows)
     groups, zero_packed_n = qzeros.shape
-    n = packed_n * 8
     effective_group = k if int(group_size) == -1 else int(group_size)
     if effective_group <= 0 or groups * effective_group != k:
-        raise ValueError(f"AWQ group geometry {groups} x {effective_group} does not cover input size {k}")
-    if zero_packed_n != packed_n or scales.shape != (groups, n):
-        raise ValueError(f"AWQ sibling geometry mismatch: qweight={qweight.shape}, qzeros={qzeros.shape}, scales={scales.shape}")
-    integers = unpack_awq4(qweight).astype(np.float32)
-    zeros = np.repeat(unpack_awq4(qzeros), effective_group, axis=0).astype(np.float32)
+        raise ValueError(f"packed int4 group geometry {groups} x {effective_group} does not cover input size {k}")
+    if zero_packed_n * 8 != n or scales.shape != (groups, n):
+        raise ValueError(f"packed int4 sibling geometry mismatch: qweight={qweight.shape}, qzeros={qzeros.shape}, scales={scales.shape}")
+    integers = unpack_int4(qweight, layout, rows=layout.rows).astype(np.float32)
+    zeros = np.repeat(unpack_int4(qzeros, layout).astype(np.float32) + layout.zero_bias, effective_group, axis=0)
     scale_values = np.repeat(scales.astype(np.float32), effective_group, axis=0)
     return (integers - zeros) * scale_values
 
@@ -493,6 +565,8 @@ def checkpoint_quant_summary(model_dir) -> str:
         return f"fp8 {fp8.get('fmt') or fp8.get('quant_method')}"
     if (qc := _awq_quant_config(model_dir)) is not None:
         return f"awq int{qc.get('bits')} g{qc.get('group_size', qc.get('q_group_size'))} {qc.get('version', 'gemm')}"
+    if (qc := _gptq_quant_config(model_dir)) is not None:
+        return f"gptq int{qc.get('bits')} g{qc.get('group_size')} sym"
     if _mxfp4_quant_config(model_dir) is not None:
         return "mxfp4"
     return "unquantized"
@@ -503,7 +577,7 @@ def engine_config_overrides(hf_config) -> dict:
     loader already owns. ``{}`` for an ordinary checkpoint (and for ``None``, the caller's
     "config unreadable").
 
-    EXL3, AWQ, MXFP4 and NVFP4 are owned by Emmy's loader and compiler. Presenting their
+    EXL3, AWQ, GPTQ, MXFP4 and NVFP4 are owned by Emmy's loader and compiler. Presenting their
     shape-only architecture twin as unquantized prevents the engine from rejecting an otherwise
     supported device, standing up a second quantizer over weights the loader already reads, or
     trying to allocate a second decoded expert table. NVFP4 is recognized by the declaration
@@ -512,7 +586,7 @@ def engine_config_overrides(hf_config) -> dict:
     band because naming a checkpoint scheme is frontend-band knowledge."""
     scheme = getattr(hf_config, "quantization_config", None)
     method = scheme.get("quant_method") if isinstance(scheme, dict) else getattr(scheme, "quant_method", None)
-    owned = method in {"exl3", "awq", "mxfp4"} or (isinstance(scheme, dict) and _declares_nvfp4_weights(scheme))
+    owned = method in {"exl3", "awq", "gptq", "mxfp4"} or (isinstance(scheme, dict) and _declares_nvfp4_weights(scheme))
     return {"quantization_config": None} if owned else {}
 
 
@@ -637,8 +711,10 @@ def load_dequantized_state_dict(model_dir: str | Path) -> dict[str, np.ndarray]:
     decoded footprint materializes in host memory, so this is for models (or
     config-truncated checkpoints) whose expanded weights fit in RAM.
 
-    AWQ GEMM checkpoints: each ``<module>.qweight`` / ``qzeros`` / ``scales``
-    triplet decodes to ``<module>.weight`` in HF ``(out, in)`` orientation.
+    Packed-int4 checkpoints (AWQ GEMM and GPTQ): each ``<module>.qweight`` / ``qzeros`` /
+    ``scales`` triplet decodes to ``<module>.weight`` in HF ``(out, in)`` orientation. GPTQ's
+    ``g_idx`` is dropped unread — the recognizer admits only ``desc_act: false``, where it is the
+    identity permutation.
     """
     from emmy.compiler.loader.safetensors import _build_index, _read_shard  # noqa: PLC0415
 
@@ -648,7 +724,7 @@ def load_dequantized_state_dict(model_dir: str | Path) -> dict[str, np.ndarray]:
     qc4 = _fp4_quant_config(model_dir)
     mxfp4 = _mxfp4_quant_config(model_dir) is not None
     exl3 = _exl3_quant_config(model_dir) is not None
-    awq = _awq_quant_config(model_dir)
+    packed4 = _packed_int4_config(model_dir)
     patterns = _skip_patterns(qc) if qc else []
     patterns4 = list(qc4.get("ignore") or []) if qc4 else []
     # NVFP4 trio signature: packed <key> + <key>_scale (e4m3) + <key>_scale_2 (f32).
@@ -681,13 +757,18 @@ def load_dequantized_state_dict(model_dir: str | Path) -> dict[str, np.ndarray]:
         if mxfp4 and key.endswith("_scales") and key[: -len("_scales")] + "_blocks" in index:
             consumed.add(key)
             continue
-        if awq is not None and key.endswith(".qweight"):
+        if packed4 is not None and key.endswith(".qweight"):
+            qc4, layout = packed4
             base = key[: -len(".qweight")]
             qzeros_key, scales_key = base + ".qzeros", base + ".scales"
             if qzeros_key not in index or scales_key not in index:
-                raise ValueError(f"AWQ linear {base!r} is missing qzeros or scales")
-            out[base + ".weight"] = dequantize_awq4(
-                sources[key], sources[qzeros_key], sources[scales_key], int(awq.get("group_size", awq.get("q_group_size", -1)))
+                raise ValueError(f"packed int4 linear {base!r} is missing qzeros or scales")
+            out[base + ".weight"] = dequantize_packed_int4(
+                sources[key],
+                sources[qzeros_key],
+                sources[scales_key],
+                int(qc4.get("group_size", qc4.get("q_group_size", -1))),
+                layout=layout,
             ).T
             consumed |= {key, qzeros_key, scales_key}
             continue
@@ -708,7 +789,7 @@ def load_dequantized_state_dict(model_dir: str | Path) -> dict[str, np.ndarray]:
                 out[key] = dequantize_nvfp4(sources[key], sources[key + "_scale"], sources[key + "_scale_2"])
                 consumed |= {key + "_scale", key + "_scale_2"}
                 continue
-        if awq is not None and key.endswith((".qzeros", ".scales")):
+        if packed4 is not None and key.endswith((".qzeros", ".scales", ".g_idx")):
             base = key.rsplit(".", 1)[0]
             if base + ".qweight" in index:
                 consumed.add(key)
@@ -1012,18 +1093,19 @@ def _spell_fp4_one(
     return True
 
 
-def _spell_awq4_weight(
+def _spell_packed_int4_weight(
     graph: Graph,
     nid: str,
     *,
     base: str,
+    layout: _PackedInt4,
     qweight_shape: tuple[int, int],
     qzeros_shape: tuple[int, int],
     scales_shape: tuple[int, int],
     scale_dtype: str,
     group_size: int,
 ) -> None:
-    """Replace one logical weight constant with packed AWQ decode algebra."""
+    """Replace one logical weight constant with its packed int4 decode algebra."""
     from emmy.compiler.ir.frontend.ir import ReshapeOp, TransposeOp  # noqa: PLC0415
     from emmy.compiler.ir.tensor.ir import ElementwiseOp, RangeOp  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to  # noqa: PLC0415
@@ -1033,24 +1115,22 @@ def _spell_awq4_weight(
     node = graph.nodes[nid]
     op, out = node.op, node.output
     if op.load_ops or op.source_parts or op.value is not None or any(not d.is_static for d in out.shape):
-        raise ValueError(f"AWQ weight {nid!r} is not a pristine static checkpoint constant")
+        raise ValueError(f"packed int4 weight {nid!r} is not a pristine static checkpoint constant")
     if len(out.shape) != 2:
-        raise ValueError(f"AWQ weight {nid!r} must be rank-2, got {tuple(out.shape)}")
+        raise ValueError(f"packed int4 weight {nid!r} must be rank-2, got {tuple(out.shape)}")
 
     n, k = (d.as_static() for d in out.shape)
-    qk, packed_n = qweight_shape
     groups, zero_packed_n = qzeros_shape
     effective_group = k if group_size == -1 else group_size
     if (
-        qk != k
-        or packed_n * 8 != n
-        or zero_packed_n != packed_n
+        _packed_int4_logical(qweight_shape, layout.rows) != (k, n)
+        or zero_packed_n * 8 != n
         or scales_shape != (groups, n)
         or effective_group <= 0
         or groups * effective_group != k
     ):
         raise ValueError(
-            f"AWQ weight {nid!r} storage geometry qweight={qweight_shape}, qzeros={qzeros_shape}, "
+            f"packed int4 weight {nid!r} storage geometry qweight={qweight_shape}, qzeros={qzeros_shape}, "
             f"scales={scales_shape}, group={effective_group} does not reproduce logical {(n, k)}"
         )
 
@@ -1071,55 +1151,59 @@ def _spell_awq4_weight(
         inputs=[],
         output=Tensor(f"{out.name}_scales", scales_shape, graph_scale_dtype),
     )
+    # One word's eight nibble bit offsets: slot i sits at (i % lanes) * (32 // lanes) + (i // lanes) * 4.
+    # One lane spells GPTQ's sequential order, two spell AutoAWQ GEMM's interleave.
     slots = frag.add_node(
         op=RangeOp(start=0, stop=8, step=1, dtype="i32"),
         inputs=[],
-        output=Tensor(f"{out.name}_awq4_slots", (8,), "i32"),
+        output=Tensor(f"{out.name}_int4_slots", (8,), "i32"),
     )
-    slots = frag.add_node(
-        op=ReshapeOp(shape=(1, 1, 8)),
-        inputs=[slots],
-        output=Tensor(f"{out.name}_awq4_slots_view", (1, 1, 8), "i32"),
-    )
-    two = const_bc(frag, name=f"{out.name}_awq4_two", value=2, target_shape=(1, 1, 8), dtype="i32")
-    low_lane = frag.add_node(
+    lanes = const_bc(frag, name=f"{out.name}_int4_lanes", value=layout.lanes, target_shape=(8,), dtype="i32")
+    lane_stride = const_bc(frag, name=f"{out.name}_int4_lane_stride", value=32 // layout.lanes, target_shape=(8,), dtype="i32")
+    nibble_bits = const_bc(frag, name=f"{out.name}_int4_bits", value=4, target_shape=(8,), dtype="i32")
+    lane = frag.add_node(
         op=ElementwiseOp(op="remainder"),
-        inputs=[slots, two],
-        output=Tensor(f"{out.name}_awq4_low_lane", (1, 1, 8), "i32"),
+        inputs=[slots, lanes],
+        output=Tensor(f"{out.name}_int4_lane", (8,), "i32"),
     )
-    high_lane = frag.add_node(
+    run = frag.add_node(
         op=ElementwiseOp(op="floor_divide"),
-        inputs=[slots, two],
-        output=Tensor(f"{out.name}_awq4_high_lane", (1, 1, 8), "i32"),
+        inputs=[slots, lanes],
+        output=Tensor(f"{out.name}_int4_run", (8,), "i32"),
     )
-    sixteen = const_bc(frag, name=f"{out.name}_awq4_sixteen", value=16, target_shape=(1, 1, 8), dtype="i32")
-    four = const_bc(frag, name=f"{out.name}_awq4_four", value=4, target_shape=(1, 1, 8), dtype="i32")
-    low_shift = frag.add_node(
+    lane_shift = frag.add_node(
         op=ElementwiseOp(op="multiply"),
-        inputs=[low_lane, sixteen],
-        output=Tensor(f"{out.name}_awq4_low_shift", (1, 1, 8), "i32"),
+        inputs=[lane, lane_stride],
+        output=Tensor(f"{out.name}_int4_lane_shift", (8,), "i32"),
     )
-    high_shift = frag.add_node(
+    run_shift = frag.add_node(
         op=ElementwiseOp(op="multiply"),
-        inputs=[high_lane, four],
-        output=Tensor(f"{out.name}_awq4_high_shift", (1, 1, 8), "i32"),
+        inputs=[run, nibble_bits],
+        output=Tensor(f"{out.name}_int4_run_shift", (8,), "i32"),
     )
     shifts = frag.add_node(
         op=ElementwiseOp(op="add"),
-        inputs=[low_shift, high_shift],
-        output=Tensor(f"{out.name}_awq4_shifts", (1, 1, 8), "i32"),
+        inputs=[lane_shift, run_shift],
+        output=Tensor(f"{out.name}_int4_shifts", (8,), "i32"),
     )
 
-    def unpack(packed: str, shape: tuple[int, int], name: str) -> str:
-        rows, words = shape
-        expanded_shape = (rows, words, 8)
+    def unpack(packed: str, stored: tuple[int, int], logical: tuple[int, int], name: str, *, slot_axis: int) -> str:
+        """Spread each word's eight nibbles along ``slot_axis``, then flatten to ``logical``."""
+        view_shape = stored[:slot_axis] + (1,) + stored[slot_axis:]
+        expanded_shape = stored[:slot_axis] + (8,) + stored[slot_axis:]
         view = frag.add_node(
-            op=ReshapeOp(shape=(rows, words, 1)),
+            op=ReshapeOp(shape=view_shape),
             inputs=[packed],
-            output=Tensor(f"{name}_view", (rows, words, 1), "i32"),
+            output=Tensor(f"{name}_view", view_shape, "i32"),
         )
         words_bc = broadcast_to(frag, view, expanded_shape)
-        shifts_bc = broadcast_to(frag, shifts, expanded_shape)
+        shift_shape = (1,) * slot_axis + (8,) + (1,) * (2 - slot_axis)
+        shift_view = frag.add_node(
+            op=ReshapeOp(shape=shift_shape),
+            inputs=[shifts],
+            output=Tensor(f"{name}_shift_view", shift_shape, "i32"),
+        )
+        shifts_bc = broadcast_to(frag, shift_view, expanded_shape)
         shifted = frag.add_node(
             op=ElementwiseOp(op="right_shift"),
             inputs=[words_bc, shifts_bc],
@@ -1132,13 +1216,21 @@ def _spell_awq4_weight(
             output=Tensor(f"{name}_nibble", expanded_shape, "i32"),
         )
         return frag.add_node(
-            op=ReshapeOp(shape=(rows, words * 8)),
+            op=ReshapeOp(shape=logical),
             inputs=[nibble],
-            output=Tensor(name, (rows, words * 8), "i32"),
+            output=Tensor(name, logical, "i32"),
         )
 
-    integers = unpack(qweight, qweight_shape, f"{out.name}_integers")
-    zeros_grouped = unpack(qzeros, qzeros_shape, f"{out.name}_zeros_grouped")
+    integers = unpack(qweight, qweight_shape, (k, n), f"{out.name}_integers", slot_axis=1 if layout.rows else 2)
+    zeros_grouped = unpack(qzeros, qzeros_shape, (groups, n), f"{out.name}_zeros_grouped", slot_axis=2)
+    if layout.zero_bias:
+        # GPTQ v1 stores zero - 1; adding it back here keeps the group broadcast below unchanged.
+        bias = const_bc(frag, name=f"{out.name}_zero_bias", value=layout.zero_bias, target_shape=(groups, n), dtype="i32")
+        zeros_grouped = frag.add_node(
+            op=ElementwiseOp(op="add"),
+            inputs=[zeros_grouped, bias],
+            output=Tensor(f"{out.name}_zeros_unbiased", (groups, n), "i32"),
+        )
 
     zeros_view = frag.add_node(
         op=ReshapeOp(shape=(groups, 1, n)),
@@ -1192,8 +1284,8 @@ def _spell_awq4_weight(
     graph.splice(frag, consumed=[nid], output=nid)
 
 
-def _spell_awq4_constants(graph: Graph, model_dir: Path, qc: dict) -> int:
-    """Spell supported AWQ GEMM checkpoint constants as packed decode algebra."""
+def _spell_packed_int4_constants(graph: Graph, model_dir: Path, qc: dict, layout: _PackedInt4) -> int:
+    """Spell supported packed-int4 checkpoint constants (AWQ GEMM / GPTQ) as decode algebra."""
     from safetensors import safe_open  # noqa: PLC0415
 
     from emmy.compiler.loader.safetensors import _build_index, _candidate_keys  # noqa: PLC0415
@@ -1228,13 +1320,14 @@ def _spell_awq4_constants(graph: Graph, model_dir: Path, qc: dict) -> int:
             siblings = {leaf: base + "." + leaf for leaf in ("qweight", "qzeros", "scales")}
             missing = [key for key in siblings.values() if key not in index]
             if missing:
-                raise ValueError(f"AWQ weight {nid!r} is missing checkpoint siblings {missing}")
+                raise ValueError(f"packed int4 weight {nid!r} is missing checkpoint siblings {missing}")
             slices = {leaf: _slice(key) for leaf, key in siblings.items()}
             shapes = {leaf: tuple(int(d) for d in sl.get_shape()) for leaf, sl in slices.items()}
-            _spell_awq4_weight(
+            _spell_packed_int4_weight(
                 graph,
                 nid,
                 base=base,
+                layout=layout,
                 qweight_shape=shapes["qweight"],
                 qzeros_shape=shapes["qzeros"],
                 scales_shape=shapes["scales"],
@@ -1243,7 +1336,7 @@ def _spell_awq4_constants(graph: Graph, model_dir: Path, qc: dict) -> int:
             )
             spelled += 1
     if spelled:
-        logger.info("spelled %d packed AWQ int4 weight constant(s) from %s", spelled, model_dir)
+        logger.info("spelled %d packed int4 weight constant(s) from %s", spelled, model_dir)
     return spelled
 
 
@@ -1272,8 +1365,8 @@ def spell_quantized_constants(graph: Graph, model_id_or_path: str) -> int:
 
     model_dir = _resolve_model_dir(model_id_or_path)
     qc = _fp8_quant_config(model_dir)
-    if (awq := _awq_quant_config(model_dir)) is not None:
-        return _spell_awq4_constants(graph, model_dir, awq)
+    if (packed4 := _packed_int4_config(model_dir)) is not None:
+        return _spell_packed_int4_constants(graph, model_dir, *packed4)
     qc4 = _fp4_quant_config(model_dir)
     if qc is None and qc4 is None:
         return 0

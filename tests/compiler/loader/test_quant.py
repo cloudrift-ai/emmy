@@ -13,14 +13,16 @@ from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.frontend.ir import LinearOp, ReshapeOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
 from emmy.compiler.loader.quant import (
+    _AWQ4,
+    _GPTQ4,
     _fp4_quant_config,
     _fp8_quant_config,
     _static_fp4_activation_declared,
     decode_f8,
     decode_mxfp4,
     dequantize,
-    dequantize_awq4,
     dequantize_nvfp4,
+    dequantize_packed_int4,
     encode_f4x2,
     encode_f8,
     fuse_nvfp4_scales,
@@ -30,7 +32,7 @@ from emmy.compiler.loader.quant import (
     spell_quantized_constants,
     spell_quantized_inputs,
     spell_static_fp4_activations,
-    unpack_awq4,
+    unpack_int4,
 )
 from emmy.compiler.loader.safetensors import load_constants_from_safetensors
 from tests.compiler.helpers import requires_cuda
@@ -179,6 +181,7 @@ def test_dequantize_rejects_rank_mismatch():
 
 _FP8_QC = {"quant_method": "fp8", "fmt": "e4m3", "activation_scheme": "dynamic", "modules_to_not_convert": []}
 _AWQ_QC = {"quant_method": "awq", "bits": 4, "group_size": 4, "zero_point": True, "version": "gemm"}
+_GPTQ_QC = {"quant_method": "gptq", "bits": 4, "group_size": 4, "desc_act": False, "sym": True, "checkpoint_format": "gptq"}
 _MXFP4_QC = {"quant_method": "mxfp4", "modules_to_not_convert": ["lm_head"]}
 
 # The two NVFP4 dialects, pruned to the fields the recognizer reads plus ``ignore``
@@ -759,12 +762,12 @@ def _awq_fixture(tmp_path, *, k=8, n=16, group_size=4):
 
 def test_unpack_awq4_reverses_gemm_pack_order():
     values = np.arange(32, dtype=np.int32).reshape(2, 16) % 16
-    np.testing.assert_array_equal(unpack_awq4(_pack_awq4(values)), values)
+    np.testing.assert_array_equal(unpack_int4(_pack_awq4(values), _AWQ4), values)
 
 
 def test_dequantize_awq4_matches_group_formula(tmp_path):
     integers, zeros, scales, ref = _awq_fixture(tmp_path)
-    got = dequantize_awq4(_pack_awq4(integers), _pack_awq4(zeros), scales.astype(np.float16), 4)
+    got = dequantize_packed_int4(_pack_awq4(integers), _pack_awq4(zeros), scales.astype(np.float16), 4, layout=_AWQ4)
     np.testing.assert_array_equal(got, ref)
 
 
@@ -800,6 +803,104 @@ def test_quantized_checkpoint_dir_detects_awq(tmp_path):
 
     _awq_fixture(tmp_path)
     assert quantized_checkpoint_dir(str(tmp_path)) == tmp_path
+
+
+# ===================================================================
+# GPTQ int4: the other packed-int4 family — sequential nibbles down the
+# INPUT dim, and v1 zero points stored one below their true value
+# ===================================================================
+
+
+def _pack_gptq4(values, *, rows):
+    """GPTQ sequential packing, down the input dim (``qweight``) or along the output dim (``qzeros``)."""
+    values = np.asarray(values, dtype=np.uint32)
+    shifts = np.arange(0, 32, 4, dtype=np.uint32)
+    if rows:
+        assert values.shape[0] % 8 == 0
+        words = values.reshape(values.shape[0] // 8, 8, values.shape[1]) << shifts[None, :, None]
+    else:
+        assert values.shape[1] % 8 == 0
+        words = values.reshape(values.shape[0], values.shape[1] // 8, 8) << shifts[None, None, :]
+    return np.bitwise_or.reduce(words, axis=1 if rows else 2).astype(np.uint32).view(np.int32)
+
+
+def _gptq_fixture(tmp_path, *, k=8, n=16, group_size=4):
+    """A synthetic GPTQ v1 checkpoint. Stored zeros stay under 15 so ``zero + 1`` is a real code."""
+    integers = (np.arange(k * n, dtype=np.int32).reshape(k, n) * 7 + 3) % 16
+    zeros = (np.arange((k // group_size) * n, dtype=np.int32).reshape(k // group_size, n) * 5 + 1) % 15
+    scales = (np.arange((k // group_size) * n, dtype=np.float32).reshape(k // group_size, n) + 1) / 128
+    _write_checkpoint(
+        tmp_path,
+        {
+            "layer.qweight": torch.from_numpy(_pack_gptq4(integers, rows=True)),
+            "layer.qzeros": torch.from_numpy(_pack_gptq4(zeros, rows=False)),
+            "layer.scales": torch.from_numpy(scales).half(),
+            "layer.g_idx": torch.from_numpy(np.arange(k, dtype=np.int32) // group_size),
+        },
+        dict(_GPTQ_QC, group_size=group_size),
+    )
+    stored_scales = scales.astype(np.float16).astype(np.float32)
+    ref = (integers - np.repeat(zeros + 1, group_size, axis=0)) * np.repeat(stored_scales, group_size, axis=0)
+    return integers, zeros, stored_scales, ref
+
+
+def test_unpack_int4_reverses_gptq_sequential_pack_order():
+    """The same words unpack down the rows for a ``qweight`` and along the columns for ``qzeros``."""
+    values = np.arange(32, dtype=np.int32).reshape(16, 2) % 16
+    np.testing.assert_array_equal(unpack_int4(_pack_gptq4(values, rows=True), _GPTQ4, rows=True), values)
+    np.testing.assert_array_equal(unpack_int4(_pack_gptq4(values.T.copy(), rows=False), _GPTQ4), values.T)
+
+
+def test_dequantize_packed_int4_gptq_adds_the_v1_zero_bias(tmp_path):
+    """GPTQ v1 stores ``zero - 1``. Those same bytes read on AWQ's convention still decode, with every
+    weight off by exactly one scale unit, so the bias is pinned here against that silent neighbour."""
+    integers, zeros, stored_scales, ref = _gptq_fixture(tmp_path)
+    packed = (_pack_gptq4(integers, rows=True), _pack_gptq4(zeros, rows=False), stored_scales.astype(np.float16), 4)
+    np.testing.assert_array_equal(dequantize_packed_int4(*packed, layout=_GPTQ4), ref)
+    unbiased = dequantize_packed_int4(*packed, layout=_GPTQ4._replace(zero_bias=0))
+    np.testing.assert_allclose(unbiased - ref, np.repeat(stored_scales, 4, axis=0), rtol=1e-6)
+
+
+def test_load_dequantized_state_dict_gptq_emits_hf_weight_and_drops_g_idx(tmp_path):
+    from emmy.compiler.loader.quant import load_dequantized_state_dict
+
+    _integers, _zeros, _scales, ref = _gptq_fixture(tmp_path)
+    state = load_dequantized_state_dict(tmp_path)
+    assert set(state) == {"layer.weight"}
+    np.testing.assert_array_equal(state["layer.weight"], ref.T)
+
+
+def test_spell_gptq4_constants_preserves_packed_sources_and_values(tmp_path):
+    _integers, _zeros, _scales, ref = _gptq_fixture(tmp_path)
+    graph = _weight_graph(shape=(16, 8), dtype="f32")
+    assert spell_quantized_constants(graph, str(tmp_path)) == 1
+    graph.validate()
+    sources = {op.source_path for op in _constants(graph).values() if op.source_path is not None}
+    assert sources == {"layer.qweight", "layer.qzeros", "layer.scales"}
+
+    from emmy.compiler.backend.numpy.backend import NumpyBackend
+
+    backend = NumpyBackend()
+    compiled = backend.compile(graph)
+    result, _ = backend.run(compiled, input_data=load_constants_from_safetensors(compiled, str(tmp_path)))
+    np.testing.assert_array_equal(result.outputs[compiled.outputs[0]], ref.T)
+
+
+def test_quantized_checkpoint_dir_detects_gptq(tmp_path):
+    from emmy.compiler.trace.huggingface import quantized_checkpoint_dir
+
+    _gptq_fixture(tmp_path)
+    assert quantized_checkpoint_dir(str(tmp_path)) == tmp_path
+
+
+@pytest.mark.parametrize("field, value", [("desc_act", True), ("sym", False), ("bits", 8), ("checkpoint_format", "gptq_v2")])
+def test_gptq_config_rejects_unverified_variants(tmp_path, field, value):
+    """Each of these would decode without complaint and produce wrong weights, so each must raise."""
+    from emmy.compiler.loader.quant import _gptq_quant_config
+
+    _write_checkpoint(tmp_path, {"layer.weight": torch.zeros(2, 2)}, dict(_GPTQ_QC, **{field: value}))
+    with pytest.raises(ValueError, match="unsupported GPTQ checkpoint"):
+        _gptq_quant_config(tmp_path)
 
 
 # ===================================================================
