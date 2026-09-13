@@ -1120,6 +1120,7 @@ async def _bench_golden_variants(
     strict_correctness=False,
     strict_reference="eager",
     quantize=None,
+    unverified=None,
 ):
     """Compile + bench each recorded golden config with its knobs pinned — one
     ``_GoldenBench`` per config so :func:`_print_kernel_stats` can show each as a measured
@@ -1170,7 +1171,9 @@ async def _bench_golden_variants(
         # String sources must be retraced at the recorded symbolic shape. An
         # embedded stable program already carries its symbolic dimensions.
         dyn = getattr(sample, "dynamic", None) if isinstance(source, str) else None
-        flags = []
+        # ``unverified`` rides every row of a session with no reference outputs, so a measurement
+        # taken without an output check is never mistaken for a checked one.
+        flags = [unverified] if unverified else []
         try:
             dynamic_shapes = build_torch_dynamic_shapes(parse_position_specs(list(dyn))) if dyn else None
             with pinned_knobs(replay_knobs):
@@ -2271,6 +2274,27 @@ async def bench_full_model_real(module, args_t, kwargs, lowered, backend, *, war
     return await _bench_interleaved_captured(cuda_module, cuda_args, cuda_kwargs, backend, lowered, warmup, iters, torch_fns=torch_fns)
 
 
+_NO_GREEDY_REF = "pinned embedded-Loop verification requires same-input greedy outputs, but none were returned"
+
+
+def pinned_reference_refusal(*, ab_ref, same_input_greedy: bool, greedy_fail: str | None) -> str | None:
+    """Why pinned rows cannot be benched AT ALL, or ``None`` to bench them without an output check.
+
+    A greedy that never returned run outputs leaves nothing for a pinned row's outputs to be
+    compared against. That is only fatal when the same-input proof is the ONLY reference obtainable
+    — a strict embedded-Loop replay, which has no torch frontend to fall back on. Otherwise the
+    rows still bench, flagged as unverified: a greedy that cannot be timed is exactly the case a
+    pinned alternative exists to escape, so refusing to measure the alternative leaves the target
+    with no measurement at all and no way to find one. Measuring it and saying so on the row is
+    strictly more useful than refusing.
+    """
+    if ab_ref is not None:
+        return None
+    if same_input_greedy:
+        return f"{_NO_GREEDY_REF}: {greedy_fail or 'the greedy worker returned no run outputs'}"
+    return None
+
+
 def _pinned_samples_for_ir(args, embedded):
     """Automatic verified pins plus explicit ``--ab`` pins for an embedded golden target."""
     pinned = list(getattr(args, "golden_configs", None) or [])
@@ -2495,11 +2519,11 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
                     greedy_fail = f"greedy timing failed after reference execution: {resp['greedy_error']}"
                     _record_greedy_failure(args, backend, graph, resp["greedy_error"])
             if pinned and tail:
-                if ab_ref is None:
-                    reason = greedy_fail or "the greedy worker returned no run outputs"
-                    missing = "pinned embedded-Loop verification requires same-input greedy outputs, but none were returned"
-                    reference_error = f"{missing}: {reason}"
-                elif same_input_greedy or not strict_correctness or accuracy_error is None:
+                reference_error = pinned_reference_refusal(ab_ref=ab_ref, same_input_greedy=same_input_greedy, greedy_fail=greedy_fail)
+                unverified = None
+                if reference_error is None and ab_ref is None:
+                    unverified = f"benched with no reference outputs: {greedy_fail or 'the greedy worker returned no run outputs'}"
+                if reference_error is None and (same_input_greedy or not strict_correctness or accuracy_error is None):
                     to_bench = pinned
                     if greedy_fail:
                         # An automatic golden-config row with no knobs pins nothing beyond the input
@@ -2526,8 +2550,9 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
                         warmup=args.warmup,
                         iters=args.iters,
                         ref=ab_ref,
-                        strict_correctness=strict_correctness,
+                        strict_correctness=strict_correctness and ab_ref is not None,
                         strict_reference="same-input-greedy" if same_input_greedy else "eager",
+                        unverified=unverified,
                     )
             elif not pinned and args.ab and tail:
                 if greedy_fail:
