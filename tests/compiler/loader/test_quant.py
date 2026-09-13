@@ -893,6 +893,127 @@ def test_quantized_checkpoint_dir_detects_gptq(tmp_path):
     assert quantized_checkpoint_dir(str(tmp_path)) == tmp_path
 
 
+# ===================================================================
+# compressed-tensors pack-quantized int4: GPTQ's nibble order and pack
+# axis, stored in torch's (out, in) orientation under its own key names
+# ===================================================================
+
+
+_CT_INT4_QC = {
+    "quant_method": "compressed-tensors",
+    "format": "pack-quantized",
+    "config_groups": {"group_0": {"weights": {"type": "int", "num_bits": 4, "group_size": 4, "symmetric": False}, "targets": ["Linear"]}},
+}
+
+
+def _ct_int4_fixture(tmp_path, *, k=8, n=16, group_size=4):
+    """A synthetic compressed-tensors checkpoint: every stored matrix is GPTQ's, transposed.
+
+    The zero point is stored as it stands, so a reader applying GPTQ's ``zero - 1`` convention would
+    decode every weight one scale unit off instead of failing.
+    """
+    integers = (np.arange(k * n, dtype=np.int32).reshape(k, n) * 7 + 3) % 16
+    zeros = (np.arange((k // group_size) * n, dtype=np.int32).reshape(k // group_size, n) * 5 + 1) % 16
+    scales = (np.arange((k // group_size) * n, dtype=np.float32).reshape(k // group_size, n) + 1) / 128
+    _write_checkpoint(
+        tmp_path,
+        {
+            # (k // 8, n) packed down the input dim, stored transposed as (n, k // 8).
+            "layer.weight_packed": torch.from_numpy(_pack_gptq4(integers, rows=True).T.copy()),
+            # (groups, n // 8) packed along the output dim, stored transposed as (n // 8, groups).
+            "layer.weight_zero_point": torch.from_numpy(_pack_gptq4(zeros, rows=False).T.copy()),
+            "layer.weight_scale": torch.from_numpy(scales.T.copy()).half(),
+            "layer.weight_shape": torch.tensor([n, k], dtype=torch.int64),
+        },
+        dict(_CT_INT4_QC),
+    )
+    stored_scales = scales.astype(np.float16).astype(np.float32)
+    ref = (integers - np.repeat(zeros, group_size, axis=0)) * np.repeat(stored_scales, group_size, axis=0)
+    return integers, zeros, stored_scales, ref
+
+
+def test_ct_int4_config_selects_the_transposed_sequential_layout(tmp_path):
+    """The NVFP4 recognizer reads the same ``quant_method``, so the two must not collide."""
+    from emmy.compiler.loader.quant import _CT_INT4, _packed_int4_config
+
+    _ct_int4_fixture(tmp_path)
+    qc, layout = _packed_int4_config(tmp_path)
+    assert layout is _CT_INT4
+    assert qc["group_size"] == 4
+    # Sequential nibbles, like GPTQ and unlike AWQ GEMM's two interleaved runs of four.
+    assert layout.shifts == _GPTQ4.shifts == tuple(range(0, 32, 4))
+    assert layout.shifts != _AWQ4.shifts
+
+
+def test_ct_int4_config_rejects_a_symmetric_or_unpacked_declaration(tmp_path):
+    from emmy.compiler.loader.quant import _ct_int4_quant_config
+
+    for field, value in (("symmetric", True), ("group_size", 0)):
+        groups = {"group_0": {"weights": {**_CT_INT4_QC["config_groups"]["group_0"]["weights"], field: value}}}
+        _write_checkpoint(tmp_path, {"layer.weight": torch.zeros(2, 2)}, dict(_CT_INT4_QC, config_groups=groups))
+        with pytest.raises(ValueError, match="unsupported compressed-tensors int4 checkpoint"):
+            _ct_int4_quant_config(tmp_path)
+
+
+def test_ct_int4_config_ignores_a_float_group(tmp_path):
+    """An NVFP4 checkpoint declares 4-bit weights too, as ``type: float``; it is not this family."""
+    from emmy.compiler.loader.quant import _ct_int4_quant_config
+
+    _write_checkpoint(tmp_path, {"layer.weight": torch.zeros(2, 2)}, dict(_FP4_CT_QC))
+    assert _ct_int4_quant_config(tmp_path) is None
+
+
+def test_dequantize_packed_int4_ct_reads_the_transposed_storage(tmp_path):
+    """Transposing all three stored matrices IS GPTQ's layout, and the zero point stands as stored."""
+    from emmy.compiler.loader.quant import _CT_INT4
+
+    integers, zeros, stored_scales, ref = _ct_int4_fixture(tmp_path)
+    packed = (
+        _pack_gptq4(integers, rows=True).T.copy(),
+        _pack_gptq4(zeros, rows=False).T.copy(),
+        stored_scales.T.copy().astype(np.float16),
+        4,
+    )
+    np.testing.assert_array_equal(dequantize_packed_int4(*packed, layout=_CT_INT4), ref)
+    # GPTQ's v1 bias on these bytes decodes silently, every weight one scale unit low.
+    biased = dequantize_packed_int4(*packed, layout=_CT_INT4._replace(zero_bias=1))
+    np.testing.assert_allclose(ref - biased, np.repeat(stored_scales, 4, axis=0), rtol=1e-6)
+
+
+def test_load_dequantized_state_dict_ct_int4_emits_hf_weight(tmp_path):
+    from emmy.compiler.loader.quant import load_dequantized_state_dict
+
+    _integers, _zeros, _scales, ref = _ct_int4_fixture(tmp_path)
+    state = load_dequantized_state_dict(tmp_path)
+    assert set(state) == {"layer.weight"}
+    np.testing.assert_array_equal(state["layer.weight"], ref.T)
+
+
+def test_spell_ct_int4_constants_preserves_packed_sources_and_values(tmp_path):
+    """The spelled graph must read the stored siblings under their own names and compute the same
+    weight the numpy decode does, transpose included."""
+    _integers, _zeros, _scales, ref = _ct_int4_fixture(tmp_path)
+    graph = _weight_graph(shape=(16, 8), dtype="f32")
+    assert spell_quantized_constants(graph, str(tmp_path)) == 1
+    graph.validate()
+    sources = {op.source_path for op in _constants(graph).values() if op.source_path is not None}
+    assert sources == {"layer.weight_packed", "layer.weight_zero_point", "layer.weight_scale"}
+
+    from emmy.compiler.backend.numpy.backend import NumpyBackend
+
+    backend = NumpyBackend()
+    compiled = backend.compile(graph)
+    result, _ = backend.run(compiled, input_data=load_constants_from_safetensors(compiled, str(tmp_path)))
+    np.testing.assert_array_equal(result.outputs[compiled.outputs[0]], ref.T)
+
+
+def test_quantized_checkpoint_dir_detects_ct_int4(tmp_path):
+    from emmy.compiler.trace.huggingface import quantized_checkpoint_dir
+
+    _ct_int4_fixture(tmp_path)
+    assert quantized_checkpoint_dir(str(tmp_path)) == tmp_path
+
+
 @pytest.mark.parametrize("field, value", [("desc_act", True), ("sym", False), ("bits", 8), ("checkpoint_format", "gptq_v2")])
 def test_gptq_config_rejects_unverified_variants(tmp_path, field, value):
     """Each of these would decode without complaint and produce wrong weights, so each must raise."""

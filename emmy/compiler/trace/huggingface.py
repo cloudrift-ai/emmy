@@ -1365,11 +1365,12 @@ class _PassThroughMask:
 
 def _is_quantized_dir(p) -> bool:
     """Whether the checkpoint at ``p`` declares a quantization scheme the loaders ingest
-    (FP8 scale-paired bits, NVFP4 packed trios, MXFP4 blocks, packed int4 — AWQ GEMM or GPTQ — or
-    EXL3 siblings)."""
+    (FP8 scale-paired bits, NVFP4 packed trios, MXFP4 blocks, packed int4 — AWQ GEMM, GPTQ or
+    compressed-tensors — or EXL3 siblings)."""
     from emmy.compiler.loader.quant import (
         # noqa: PLC0415,
         _awq_quant_config,
+        _ct_int4_quant_config,
         _exl3_quant_config,
         _fp4_quant_config,
         _fp8_quant_config,
@@ -1385,6 +1386,7 @@ def _is_quantized_dir(p) -> bool:
             _mxfp4_quant_config,
             _awq_quant_config,
             _gptq_quant_config,
+            _ct_int4_quant_config,
             _exl3_quant_config,
         )
     )

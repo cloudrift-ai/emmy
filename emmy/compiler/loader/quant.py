@@ -93,12 +93,22 @@ class _PackedInt4(NamedTuple):
     the stored zero point before it is subtracted — GPTQ's v1 format stores ``zero - 1`` so its
     unsigned kernels add it back, while AWQ stores the zero point itself. ``name`` is the storage
     token a serving store records for the family.
+
+    ``leaves`` names the three stored siblings, because compressed-tensors spells them
+    ``weight_packed`` / ``weight_zero_point`` / ``weight_scale`` where both GEMM families spell them
+    ``qweight`` / ``qzeros`` / ``scales``. ``transposed`` says the stored matrices are the transpose
+    of what the other two families store: compressed-tensors keeps torch's own ``(out, in)``
+    orientation, so its weight is ``(n, k // 8)`` and its zeros ``(n // 8, groups)`` where GPTQ
+    stores ``(k // 8, n)`` and ``(groups, n // 8)``. Transposing all three reduces it exactly to
+    GPTQ, which is why the pack axis stays one bit and the orientation is the second.
     """
 
     name: str
     lanes: int
     rows: bool
     zero_bias: int
+    leaves: tuple[str, str, str] = ("qweight", "qzeros", "scales")
+    transposed: bool = False
 
     @property
     def shifts(self) -> tuple[int, ...]:
@@ -108,6 +118,16 @@ class _PackedInt4(NamedTuple):
 
 _AWQ4 = _PackedInt4(name="awq4", lanes=2, rows=False, zero_bias=0)
 _GPTQ4 = _PackedInt4(name="gptq4", lanes=1, rows=True, zero_bias=1)
+# compressed-tensors shares GPTQ's sequential nibble order and input-dim pack axis, and differs only
+# in its sibling names, its storage orientation, and storing the zero point itself rather than minus one.
+_CT_INT4 = _PackedInt4(
+    name="ct-int4",
+    lanes=1,
+    rows=True,
+    zero_bias=0,
+    leaves=("weight_packed", "weight_zero_point", "weight_scale"),
+    transposed=True,
+)
 
 
 def scale_is_reciprocal(scale_key: str) -> bool:  # noqa: ARG001 — the key is the one fact a caller has
@@ -382,13 +402,52 @@ def _gptq_quant_config(model_dir: Path) -> dict | None:
     return qc
 
 
+def _ct_int4_quant_config(model_dir: Path) -> dict | None:
+    """The checkpoint's compressed-tensors declaration, when it is the packed int4 weight layout.
+
+    llm-compressor writes ``quant_method: "compressed-tensors"`` with ``format: "pack-quantized"``
+    and a ``config_groups`` entry quantizing weights as ``type: "int"`` at 4 bits over an
+    input-channel group. The NVFP4 recognizer reads the same ``quant_method`` but only matches
+    ``type: "float"``, so the two never collide.
+
+    ``group_size`` is republished under the key the shared decode reads. ``symmetric`` must be false,
+    which is the zero convention measured here: the stored zero point is subtracted as it stands, and
+    a symmetric checkpoint carries no zero tensor for this decode to read.
+    """
+    qc = _quantization_config(model_dir)
+    if qc is None or qc.get("quant_method") != "compressed-tensors":
+        return None
+    group = next(
+        (
+            weights
+            for entry in (qc.get("config_groups") or {}).values()
+            if isinstance(entry, dict)
+            and isinstance(weights := entry.get("weights"), dict)
+            and weights.get("type") == "int"
+            and int(weights.get("num_bits") or 0) == 4
+        ),
+        None,
+    )
+    if group is None:
+        return None
+    fmt = str(qc.get("format", "")).lower()
+    group_size = int(group.get("group_size") or 0)
+    if fmt != "pack-quantized" or group_size <= 0 or group.get("symmetric", True) is not False:
+        raise ValueError(
+            "unsupported compressed-tensors int4 checkpoint: Emmy requires the asymmetric "
+            f"pack-quantized layout over a positive input-channel group (format={fmt!r}, "
+            f"group_size={group_size}, symmetric={group.get('symmetric')!r})"
+        )
+    return {**qc, "group_size": group_size}
+
+
 def _packed_int4_config(model_dir: Path) -> tuple[dict, _PackedInt4] | None:
     """The checkpoint's packed-int4 declaration and the nibble layout it selects, or ``None``.
 
     The two families share every step of the decode — unpack, centre on the zero point, scale by
     the input-channel group — and differ only in the three fields of :class:`_PackedInt4`.
     """
-    for recognizer, layout in ((_awq_quant_config, _AWQ4), (_gptq_quant_config, _GPTQ4)):
+    for recognizer, layout in ((_awq_quant_config, _AWQ4), (_gptq_quant_config, _GPTQ4), (_ct_int4_quant_config, _CT_INT4)):
         qc = recognizer(model_dir)
         if qc is not None:
             return qc, layout
@@ -422,6 +481,16 @@ def decode_mxfp4(blocks: np.ndarray, scales: np.ndarray) -> np.ndarray:
     return np.swapaxes(dense, -2, -1).astype(np.float32)
 
 
+def _packed_int4_spent(layout: _PackedInt4) -> tuple[str, ...]:
+    """The siblings a decoded packed-int4 weight leaves with nothing left to say.
+
+    Its zeros and scales, plus the one bookkeeping tensor each family carries: GPTQ's ``g_idx``,
+    which the recognizer admits only where it is the identity, and compressed-tensors'
+    ``weight_shape``, which restates the logical extents the traced weight already declares.
+    """
+    return ("." + layout.leaves[1], "." + layout.leaves[2], ".g_idx", ".weight_shape")
+
+
 def _packed_int4_logical(stored_shape: tuple[int, int], rows: bool) -> tuple[int, int]:
     """The logical extents a stored packed shape describes, eight nibbles per word along one axis."""
     stored_rows, cols = stored_shape
@@ -450,6 +519,9 @@ def dequantize_packed_int4(
     qweight: np.ndarray, qzeros: np.ndarray, scales: np.ndarray, group_size: int, *, layout: _PackedInt4
 ) -> np.ndarray:
     """Decode one packed-int4 weight (AutoAWQ GEMM or GPTQ) to its ``(in, out)`` value matrix."""
+    if layout.transposed:
+        # Stored in torch's (out, in) orientation; transposing all three IS the other families' layout.
+        qweight, qzeros, scales = np.asarray(qweight).T, np.asarray(qzeros).T, np.asarray(scales).T
     qweight = np.asarray(qweight)
     qzeros = np.asarray(qzeros)
     scales = np.asarray(scales)
@@ -757,10 +829,10 @@ def load_dequantized_state_dict(model_dir: str | Path) -> dict[str, np.ndarray]:
         if mxfp4 and key.endswith("_scales") and key[: -len("_scales")] + "_blocks" in index:
             consumed.add(key)
             continue
-        if packed4 is not None and key.endswith(".qweight"):
+        if packed4 is not None and key.endswith("." + packed4[1].leaves[0]):
             qc4, layout = packed4
-            base = key[: -len(".qweight")]
-            qzeros_key, scales_key = base + ".qzeros", base + ".scales"
+            base = key[: -len("." + layout.leaves[0])]
+            qzeros_key, scales_key = base + "." + layout.leaves[1], base + "." + layout.leaves[2]
             if qzeros_key not in index or scales_key not in index:
                 raise ValueError(f"packed int4 linear {base!r} is missing qzeros or scales")
             out[base + ".weight"] = dequantize_packed_int4(
@@ -789,9 +861,9 @@ def load_dequantized_state_dict(model_dir: str | Path) -> dict[str, np.ndarray]:
                 out[key] = dequantize_nvfp4(sources[key], sources[key + "_scale"], sources[key + "_scale_2"])
                 consumed |= {key + "_scale", key + "_scale_2"}
                 continue
-        if packed4 is not None and key.endswith((".qzeros", ".scales", ".g_idx")):
+        if packed4 is not None and key.endswith(_packed_int4_spent(packed4[1])):
             base = key.rsplit(".", 1)[0]
-            if base + ".qweight" in index:
+            if base + "." + packed4[1].leaves[0] in index:
                 consumed.add(key)
                 continue
         if qc is not None and key in fp8_keys and not _is_skipped(key, patterns):
@@ -1120,6 +1192,9 @@ def _spell_packed_int4_weight(
         raise ValueError(f"packed int4 weight {nid!r} must be rank-2, got {tuple(out.shape)}")
 
     n, k = (d.as_static() for d in out.shape)
+    stored = {"qweight": qweight_shape, "qzeros": qzeros_shape, "scales": scales_shape}
+    if layout.transposed:
+        qweight_shape, qzeros_shape, scales_shape = (shape[::-1] for shape in (qweight_shape, qzeros_shape, scales_shape))
     groups, zero_packed_n = qzeros_shape
     effective_group = k if group_size == -1 else group_size
     if (
@@ -1130,27 +1205,36 @@ def _spell_packed_int4_weight(
         or groups * effective_group != k
     ):
         raise ValueError(
-            f"packed int4 weight {nid!r} storage geometry qweight={qweight_shape}, qzeros={qzeros_shape}, "
-            f"scales={scales_shape}, group={effective_group} does not reproduce logical {(n, k)}"
+            f"packed int4 weight {nid!r} storage geometry qweight={stored['qweight']}, qzeros={stored['qzeros']}, "
+            f"scales={stored['scales']}, group={effective_group} does not reproduce logical {(n, k)}"
         )
 
     frag = Graph()
-    qweight = frag.add_node(
-        op=ConstantOp(name=f"{op.name}_qweight", source_path=base + ".qweight", source_shape=qweight_shape, source_dtype="i32"),
-        inputs=[],
-        output=Tensor(f"{out.name}_qweight", qweight_shape, "i32"),
-    )
-    qzeros = frag.add_node(
-        op=ConstantOp(name=f"{op.name}_qzeros", source_path=base + ".qzeros", source_shape=qzeros_shape, source_dtype="i32"),
-        inputs=[],
-        output=Tensor(f"{out.name}_qzeros", qzeros_shape, "i32"),
-    )
     graph_scale_dtype = "f32" if scale_dtype == "bf16" else scale_dtype
-    scales = frag.add_node(
-        op=ConstantOp(name=f"{op.name}_scales", source_path=base + ".scales", source_shape=scales_shape, source_dtype=scale_dtype),
-        inputs=[],
-        output=Tensor(f"{out.name}_scales", scales_shape, graph_scale_dtype),
-    )
+
+    def sibling(leaf: str, slot: int, logical: tuple[int, int], dtype: str, graph_dtype: str) -> str:
+        """The stored sibling, turned the way the decode below indexes it."""
+        node = frag.add_node(
+            op=ConstantOp(
+                name=f"{op.name}_{leaf}",
+                source_path=base + "." + layout.leaves[slot],
+                source_shape=stored[leaf],
+                source_dtype=dtype,
+            ),
+            inputs=[],
+            output=Tensor(f"{out.name}_{leaf}", stored[leaf], graph_dtype),
+        )
+        if not layout.transposed:
+            return node
+        return frag.add_node(
+            op=TransposeOp(axes=(1, 0)),
+            inputs=[node],
+            output=Tensor(f"{out.name}_{leaf}_t", logical, graph_dtype),
+        )
+
+    qweight = sibling("qweight", 0, qweight_shape, "i32", "i32")
+    qzeros = sibling("qzeros", 1, qzeros_shape, "i32", "i32")
+    scales = sibling("scales", 2, scales_shape, scale_dtype, graph_scale_dtype)
     # One word's eight nibble bit offsets: slot i sits at (i % lanes) * (32 // lanes) + (i // lanes) * 4.
     # One lane spells GPTQ's sequential order, two spell AutoAWQ GEMM's interleave.
     slots = frag.add_node(
@@ -1311,13 +1395,13 @@ def _spell_packed_int4_constants(graph: Graph, model_dir: Path, qc: dict, layout
                 (
                     candidate[:-suffix]
                     for candidate in _candidate_keys(op.source_path)
-                    if candidate.endswith(".weight") and candidate[:-suffix] + ".qweight" in index
+                    if candidate.endswith(".weight") and candidate[:-suffix] + "." + layout.leaves[0] in index
                 ),
                 None,
             )
             if base is None:
                 continue
-            siblings = {leaf: base + "." + leaf for leaf in ("qweight", "qzeros", "scales")}
+            siblings = dict(zip(("qweight", "qzeros", "scales"), (base + "." + leaf for leaf in layout.leaves), strict=True))
             missing = [key for key in siblings.values() if key not in index]
             if missing:
                 raise ValueError(f"packed int4 weight {nid!r} is missing checkpoint siblings {missing}")
