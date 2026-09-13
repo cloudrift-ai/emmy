@@ -433,7 +433,14 @@ def _handle_run_once(args):
                     logger.error("%s — greedy row marked bench_fail; pinned rows still bench in the worker", greedy_fail)
                 greedy_iso = await _bench_greedy_isolated(backend, compiled, warmup=args.warmup, iters=args.iters)
                 golden_benches = await _bench_golden_variants(
-                    backend, args.code, pinned, warmup=args.warmup, iters=args.iters, ref=ab_ref, quantize=args.quantize
+                    backend,
+                    args.code,
+                    pinned,
+                    warmup=args.warmup,
+                    iters=args.iters,
+                    ref=ab_ref,
+                    quantize=args.quantize,
+                    ref_knobs=_cuda_knob_dicts(compiled),
                 )
         finally:
             await backend.aclose_async_worker()
@@ -952,6 +959,38 @@ def _wrong_answer_flag(outputs: dict, ref_outputs: dict) -> str | None:
     return None
 
 
+REFERENCE_SELF_DISAGREES = (
+    "wrong-answer reference unusable: a row realizing the greedy's own config disagrees with the "
+    "greedy output, so no row's comparison against it carries information"
+)
+
+
+def resolve_reference_disagreement(verdicts, ref_knobs) -> list[str | None]:
+    """The wrong-answer flags a session can actually justify, one per benched row.
+
+    ``verdicts`` is one ``(realized_knob_dicts, wrong_answer_flag_or_None)`` per row and
+    ``ref_knobs`` is the greedy's own realized knobs — the configuration whose outputs every row is
+    compared against by :func:`_wrong_answer_flag`.
+
+    A row that realized the reference configuration computes the reference. If such a row is flagged
+    as disagreeing with it, the reference is not reproducible, and then NO row's comparison against
+    it means anything: a genuinely wrong row and a correct one are indistinguishable. Emitting a
+    wrong-answer flag per row there is worse than emitting none, because a flag that fires on
+    everything is one people learn to skip past — which is how a real deviation gets waved through.
+
+    So in that case every wrong-answer verdict is dropped and the session says once, on the row that
+    demonstrates it, that the reference itself is unusable. Every other kind of flag is untouched,
+    and where the reference does reproduce the per-row verdicts stand exactly as before.
+    """
+    verdicts = list(verdicts)
+    if not ref_knobs:
+        return [flag for _, flag in verdicts]
+    witness = next((i for i, (knobs, flag) in enumerate(verdicts) if flag and knobs == ref_knobs), None)
+    if witness is None:
+        return [flag for _, flag in verdicts]
+    return [REFERENCE_SELF_DISAGREES if i == witness else None for i in range(len(verdicts))]
+
+
 def _comparison_outputs(outputs: dict, graph) -> dict:
     """Decode physical carriers before command-layer correctness checks."""
     import numpy as np  # noqa: PLC0415
@@ -1127,6 +1166,7 @@ async def _bench_golden_variants(
     strict_reference="eager",
     quantize=None,
     unverified=None,
+    ref_knobs=None,
 ):
     """Compile + bench each recorded golden config with its knobs pinned — one
     ``_GoldenBench`` per config so :func:`_print_kernel_stats` can show each as a measured
@@ -1172,6 +1212,9 @@ async def _bench_golden_variants(
     # Session-unique cache key: the (potentially hundreds-of-MB) reference inputs cross
     # the worker pipe once per child, not once per row (see benchmark_pinned_isolated_async).
     ref_key = uuid.uuid4().hex if ref_inputs is not None else None
+    # Row index -> its deferred wrong-answer verdict and the knobs it actually realized.
+    wrong_answer: dict[int, str | None] = {}
+    realized: dict[int, list] = {}
     for sample in golden_configs or []:
         replay_knobs = _sample_replay_knobs(sample)
         # String sources must be retraced at the recorded symbolic shape. An
@@ -1231,17 +1274,26 @@ async def _bench_golden_variants(
                 correctness = _strict_correctness_proof(run_outputs, ref_outputs, reference=strict_reference)
                 if correctness["status"] != "pass":
                     flags.append(f"strict {strict_reference} correctness failed: {correctness.get('error', 'tolerance exceeded')}")
-            else:
-                flag = _wrong_answer_flag(run_outputs, ref_outputs)
-                if flag:
-                    flags.append(flag)
+            elif not strict_correctness:
+                # Held back until every row is in: whether this verdict means anything depends on
+                # whether the reference reproduces, which only the whole set can answer.
+                wrong_answer[len(out)] = _wrong_answer_flag(run_outputs, ref_outputs)
+                realized[len(out)] = _cuda_knob_dicts(g_compiled)
         total_us = (g_bench.min_ms if g_bench.min_ms is not None else g_bench.time_ms) * 1000
         flag = _intensity_floor_flag(sample, total_us)
         if flag:
             flags.append(flag)
-        for f in flags:
-            logger.warning("[golden] %s: %s — row flagged (marked ! in the table, flagged in --json)", sample.name, f)
         out.append(_GoldenBench(sample, g_compiled, g_bench, flags, "ok", correctness))
+
+    resolved = resolve_reference_disagreement(((realized.get(i, []), wrong_answer.get(i)) for i in range(len(out))), ref_knobs)
+    for i, flag in enumerate(resolved):
+        if flag:
+            out[i].flags.append(flag)
+    if REFERENCE_SELF_DISAGREES in resolved:
+        logger.error("[golden] %s — every per-row wrong-answer verdict dropped as uninformative", REFERENCE_SELF_DISAGREES)
+    for row in out:
+        for f in row.flags:
+            logger.warning("[golden] %s: %s — row flagged (marked ! in the table, flagged in --json)", row.sample.name, f)
     return out
 
 
@@ -2571,6 +2623,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
                         strict_correctness=strict_correctness and ab_ref is not None,
                         strict_reference="same-input-greedy" if same_input_greedy else "eager",
                         unverified=unverified,
+                        ref_knobs=_cuda_knob_dicts(graph),
                     )
             elif not pinned and args.ab and tail:
                 if greedy_fail:

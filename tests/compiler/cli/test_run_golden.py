@@ -343,3 +343,46 @@ def test_record_refuses_a_row_benched_without_a_reference(tmp_path):
     with pytest.raises(SystemExit) as exc:
         run_mod._record_golden_latency(args, {"Emmy": 1000.0}, [gb])
     assert exc.value.code == 2
+
+
+def test_a_reference_that_disagrees_with_itself_is_reported_unusable_not_per_row():
+    """A pinned row is checked against the greedy output. A row that realized the greedy's OWN config
+    computes that output, so if it is flagged as disagreeing the reference does not reproduce -- and
+    then no row's comparison against it distinguishes a wrong answer from a right one.
+
+    Measured on Qwen3.8-27B-W4A16 layer 0: every row of one target was flagged, including the --ab row
+    realizing the greedy's own w2x2 f4x4/k8 d2/smem at 1722.4 us against the greedy's 1723.4 us, at
+    rel err 15.859. A flag that fires on the reference itself is not evidence about any row, and a
+    flag that fires on everything is one readers learn to skip -- which is how a real deviation
+    (a sibling slot measured rel err 2.177 on a genuinely miscompiling tile) gets waved through.
+    """
+    ref = [{"WORK": "w2x2", "TILE": "mma_m8n8k4_f16_f32/f4x4/k8", "STAGE": "d2/smem"}]
+    other = [{"WORK": "w4x8", "TILE": "mma_m8n8k4_f16_f32/f4x4", "STAGE": "d2/smem"}]
+
+    # The reference reproduces: a row that differs from it is genuinely suspect, and says so.
+    verdict = "wrong-answer: rel err 2.177 vs greedy output"
+    assert run_mod.resolve_reference_disagreement([(other, verdict), (ref, None)], ref) == [verdict, None]
+
+    # The reference disagrees with a row that IS the reference: one statement, and nothing per row.
+    resolved = run_mod.resolve_reference_disagreement(
+        [(ref, "wrong-answer: rel err 15.992 vs greedy output"), (other, "wrong-answer: rel err 15.859 vs greedy output")],
+        ref,
+    )
+    assert resolved == [run_mod.REFERENCE_SELF_DISAGREES, None]
+    assert "unusable" in run_mod.REFERENCE_SELF_DISAGREES
+    # It is stated once, not once per row.
+    assert resolved.count(run_mod.REFERENCE_SELF_DISAGREES) == 1
+
+    # Order does not matter: the witness may be any row, and the others still lose their verdicts.
+    resolved = run_mod.resolve_reference_disagreement(
+        [(other, "wrong-answer: rel err 15.859 vs greedy output"), (ref, "wrong-answer: rel err 15.992 vs greedy output")],
+        ref,
+    )
+    assert resolved == [None, run_mod.REFERENCE_SELF_DISAGREES]
+
+    # A reference row that AGREES is no witness -- the others keep their verdicts.
+    assert run_mod.resolve_reference_disagreement([(ref, None), (other, verdict)], ref) == [None, verdict]
+
+    # Without the greedy's realized knobs there is nothing to compare, so verdicts pass through.
+    assert run_mod.resolve_reference_disagreement([(other, verdict)], None) == [verdict]
+    assert run_mod.resolve_reference_disagreement([(other, verdict)], []) == [verdict]
