@@ -92,11 +92,20 @@ not close it.
 Until strict correctness passes across the inventory and attention reaches parity, this recipe has no Emmy serving
 lane on the RTX 4090.
 
-## Tesla V100 (sm_70): a partial golden
+## Tesla V100 (sm_70): a partial golden, and it does not measure the 4-bit path
 
-`golden/v100_sm70.yaml` holds 117 measured rows over 17 targets of decoder layer 0, recorded on one Tesla
-V100-SXM3-32GB. It is a partial inventory, not a qualification: it covers two projections and the fifteen
-Gated DeltaNet chunk-recurrence targets, and nothing of decoder layer 3.
+**The recorded program runs dequantized weights.** This checkpoint stores its weights as
+compressed-tensors `pack-quantized` int4 over 128-element groups (`weight_packed`, `weight_scale`,
+`weight_zero_point`, `weight_shape`), and the compiler has no speller for that layout: the dispatch
+recognizes `quant_method: awq`, fp8, and compressed-tensors 4-bit over 16-element groups only. The
+packed weights therefore never reach a kernel -- the traced graph carries no `i32` tensor and no bitwise
+operation across its 2,735 nodes -- so `golden/v100_sm70.yaml` records a dense FP16 program at this
+model's shapes and fusion structure. It measures the right kernel set; it does **not** qualify W4A16, and
+no row in it is evidence that Emmy can serve this checkpoint at 4 bits.
+
+With that caveat, `golden/v100_sm70.yaml` holds 117 measured rows over 17 targets of decoder layer 0,
+recorded on one Tesla V100-SXM3-32GB. It is a partial inventory: it covers two projections and the
+fifteen Gated DeltaNet chunk-recurrence targets, and nothing of decoder layer 3.
 
 The rows exist because the greedy pick loses badly on this card without them. Each chunk target elects a
 single-CTA arm, grid 1 for the whole reduce, which leaves twelve of the fifteen unable to finish inside the
@@ -109,11 +118,10 @@ Three chunk targets still sit at or below eager (1.00x, 0.85x, 0.55x). Their cos
 where eager stays flat, because the delta-rule carried state is re-derived per chunk rather than carried.
 The cut removes the serialization, not that recompute.
 
-Neither full-attention target runs: both exceed a 60 s launch watchdog, so decoder layer 3 has no rows. The
-strict-correctness failure in the final normalization is unchanged. The 4-bit weights are not exercised at
-all, because this checkpoint is compressed-tensors `pack-quantized` int4 at group 128 and the compiler has
-no speller for that format, so the traced program carries dense fp16 weights and no packed weight reaches a
-kernel.
+Neither full-attention target runs: both exceed a 60 s launch watchdog, so decoder layer 3 has no rows.
+Their cost is a nested reduce of 805,306,368 serial trips per cell in which the attention score cone, which
+reads only the head index, is re-derived once per each of the 256 head-dim components. The
+strict-correctness failure in the final normalization is unchanged.
 
 ## Reproduce
 
