@@ -301,24 +301,45 @@ def test_record_greedy_is_a_golden_bench_flag(run_cli):
 def test_pinned_rows_bench_when_the_greedy_returned_no_outputs():
     """A greedy that cannot be timed must not also block the pinned alternative that escapes it.
 
-    The reference outputs a pinned row is checked against come from the greedy. When the greedy
-    bench_fails there are none, and refusing the whole session leaves the target with no
-    measurement AND no way to find one -- the targets whose greedy hangs are exactly the ones a
-    pinned row exists for. So the refusal is limited to the strict embedded-Loop replay, which has
-    no eager frontend to fall back on; every other session benches the rows unverified.
+    The reference a pinned row is checked against comes from the greedy. When the greedy
+    bench_fails there is none, and the question is whether any OTHER reference exists. An exact
+    Loop target has no Torch twin, so the greedy is the only reference obtainable and the row would
+    be unfalsifiable -- refuse. Where a twin exists the rows bench, flagged unverified, because the
+    targets whose greedy hangs are exactly the ones a pinned row exists for.
+
+    The predicate is the twin's existence, not ``same_input_greedy``: those differ by a
+    ``strict_correctness`` conjunct, and keying on it would let a non-strict twinless target bench
+    with no reference at all.
     """
     fail = "greedy run/bench failed: HungKernelError"
 
     # A reference is present: nothing to refuse, whatever else is true.
-    assert run_mod.pinned_reference_refusal(ab_ref=("in", "out"), same_input_greedy=True, greedy_fail=None) is None
-    assert run_mod.pinned_reference_refusal(ab_ref=("in", "out"), same_input_greedy=False, greedy_fail=fail) is None
+    assert run_mod.pinned_reference_refusal(ab_ref=("in", "out"), torch_twin=False, greedy_fail=None) is None
+    assert run_mod.pinned_reference_refusal(ab_ref=("in", "out"), torch_twin=True, greedy_fail=fail) is None
 
-    # No reference and no fallback: still refused, and the reason still names the greedy failure.
-    refusal = run_mod.pinned_reference_refusal(ab_ref=None, same_input_greedy=True, greedy_fail=fail)
+    # No reference and no twin to fall back on: refused, and the reason still names the failure.
+    refusal = run_mod.pinned_reference_refusal(ab_ref=None, torch_twin=False, greedy_fail=fail)
     assert refusal is not None
     assert run_mod._NO_GREEDY_REF in refusal
     assert fail in refusal
+    assert run_mod.pinned_reference_refusal(ab_ref=None, torch_twin=False, greedy_fail=None) is not None
 
-    # No reference but a fallback exists: bench anyway. This is the case the gate used to refuse.
-    assert run_mod.pinned_reference_refusal(ab_ref=None, same_input_greedy=False, greedy_fail=fail) is None
-    assert run_mod.pinned_reference_refusal(ab_ref=None, same_input_greedy=False, greedy_fail=None) is None
+    # No reference but a twin exists: bench anyway. This is the case the gate used to refuse.
+    assert run_mod.pinned_reference_refusal(ab_ref=None, torch_twin=True, greedy_fail=fail) is None
+    assert run_mod.pinned_reference_refusal(ab_ref=None, torch_twin=True, greedy_fail=None) is None
+
+
+def test_record_refuses_a_row_benched_without_a_reference(tmp_path):
+    """An unverified row must never become golden evidence -- a miscompiling tile runs at a
+    perfectly plausible latency, so a recorded number for an unchecked kernel is worse than none."""
+    sample = SimpleNamespace(name="pinned.row", knobs={"WORK": "w2x2"}, pins={}, dynamic=None, shape=None)
+    gb = SimpleNamespace(
+        status="ok",
+        bench=SimpleNamespace(min_ms=1.0, time_ms=1.0, per_launch=[]),
+        sample=sample,
+        flags=[f"{run_mod.UNVERIFIED_ROW}: greedy run/bench failed"],
+    )
+    args = SimpleNamespace(golden=str(tmp_path / "g.yaml"), realization="pinned.row")
+    with pytest.raises(SystemExit) as exc:
+        run_mod._record_golden_latency(args, {"Emmy": 1000.0}, [gb])
+    assert exc.value.code == 2

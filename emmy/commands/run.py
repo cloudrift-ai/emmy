@@ -536,6 +536,12 @@ def _record_golden_latency(args, results: dict, golden_benches) -> None:
     # timing nor its schedule knobs describe the row this writes — narrowing by them selects
     # nothing and the write is refused.
     measured = [gb for gb in golden_benches or [] if gb.status == "ok" and gb.bench is not None and gb.sample.name == args.realization]
+    # An unverified row never becomes golden evidence. Its outputs were never compared against
+    # anything, so recording its latency would publish a number for a kernel nobody checked --
+    # and a miscompiling tile runs at a perfectly plausible latency.
+    if any(flag.startswith(UNVERIFIED_ROW) for gb in measured for flag in gb.flags or []):
+        logger.error("--record refuses %s: the row was benched with no reference outputs", args.realization)
+        sys.exit(2)
     if len(measured) > 1:
         logger.error("--record needs exactly one pinned row to attribute the timing to, measured %d", len(measured))
         sys.exit(2)
@@ -2275,22 +2281,34 @@ async def bench_full_model_real(module, args_t, kwargs, lowered, backend, *, war
 
 
 _NO_GREEDY_REF = "pinned embedded-Loop verification requires same-input greedy outputs, but none were returned"
+UNVERIFIED_ROW = "benched with no reference outputs"
 
 
-def pinned_reference_refusal(*, ab_ref, same_input_greedy: bool, greedy_fail: str | None) -> str | None:
+def pinned_reference_refusal(*, ab_ref, torch_twin: bool, greedy_fail: str | None) -> str | None:
     """Why pinned rows cannot be benched AT ALL, or ``None`` to bench them without an output check.
 
     A greedy that never returned run outputs leaves nothing for a pinned row's outputs to be
-    compared against. That is only fatal when the same-input proof is the ONLY reference obtainable
-    — a strict embedded-Loop replay, which has no torch frontend to fall back on. Otherwise the
-    rows still bench, flagged as unverified: a greedy that cannot be timed is exactly the case a
-    pinned alternative exists to escape, so refusing to measure the alternative leaves the target
-    with no measurement at all and no way to find one. Measuring it and saying so on the row is
-    strictly more useful than refusing.
+    compared against. Whether that is fatal turns on ONE question: does any other reference exist?
+    An exact Loop target has no Torch twin, so the greedy Loop execution is the only reference
+    obtainable and a row measured without it is unfalsifiable — refuse. Where a Torch twin does
+    exist, refusing costs more than it protects: a greedy too slow to time is exactly the case a
+    pinned alternative exists to escape, so refusing the alternative leaves the target with no
+    measurement and no way to find one.
+
+    The predicate is the twin's existence, NOT ``same_input_greedy``. The two differ by a
+    ``strict_correctness`` conjunct, and keying on the latter would relax the case this is meant to
+    keep: a non-strict embedded-Loop target with no twin would bench unverified when in fact no
+    reference exists for it at all.
+
+    A row benched this way carries the :data:`UNVERIFIED_ROW` flag, and that flag is a hard barrier
+    downstream, not a note. It keeps the row out of the golden (``--record`` refuses it), out of the
+    tune DB's ``perf`` rows and out of the node store, because unverified data must never become
+    deployable evidence — the whole value of the reference comparison is that it is the only thing
+    standing between a tile that miscompiles silently and a recorded row that deploys it.
     """
     if ab_ref is not None:
         return None
-    if same_input_greedy:
+    if not torch_twin:
         return f"{_NO_GREEDY_REF}: {greedy_fail or 'the greedy worker returned no run outputs'}"
     return None
 
@@ -2519,10 +2537,10 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
                     greedy_fail = f"greedy timing failed after reference execution: {resp['greedy_error']}"
                     _record_greedy_failure(args, backend, graph, resp["greedy_error"])
             if pinned and tail:
-                reference_error = pinned_reference_refusal(ab_ref=ab_ref, same_input_greedy=same_input_greedy, greedy_fail=greedy_fail)
+                reference_error = pinned_reference_refusal(ab_ref=ab_ref, torch_twin=frontend is not None, greedy_fail=greedy_fail)
                 unverified = None
                 if reference_error is None and ab_ref is None:
-                    unverified = f"benched with no reference outputs: {greedy_fail or 'the greedy worker returned no run outputs'}"
+                    unverified = f"{UNVERIFIED_ROW}: {greedy_fail or 'the greedy worker returned no run outputs'}"
                 if reference_error is None and (same_input_greedy or not strict_correctness or accuracy_error is None):
                     to_bench = pinned
                     if greedy_fail:
