@@ -345,6 +345,40 @@ def test_record_refuses_a_row_benched_without_a_reference(tmp_path):
     assert exc.value.code == 2
 
 
+def test_an_env_pin_that_did_not_realize_is_flagged_like_an_ab_pin(monkeypatch):
+    """A pin published through EMMY_KNOBS gates the greedy compile, and nothing used to check it.
+
+    An --ab row has always been gated: benching a row whose pin did not take would measure the planner's
+    own pick under the pin's name. The same pin set in the environment was unchecked, so a hand-run sweep
+    whose pins did nothing reported the planner's pick under the experiment's name -- not a wrong number
+    but an unfalsifiable one, indistinguishable from a flat result.
+
+    The last case is the one measured in practice: a scheduled TILE pinned against a kernel that reached
+    the unscheduled per-cell tier, where the pin is simply absent from the realized knobs.
+    """
+    realized = [{"WORK": "w2x2", "TILE": "mma_m8n8k4_f16_f32/f4x4/k8", "STAGE": "d2/smem"}]
+
+    # Nothing pinned: nothing to refuse.
+    assert run_mod.env_pin_refusal(realized) is None
+
+    # A pin the graph realized is silent, exactly as the --ab gate is.
+    monkeypatch.setenv("EMMY_WORK", "w2x2")
+    assert run_mod.env_pin_refusal(realized) is None
+
+    # A pin the graph contradicts names both sides, in the --ab gate's own wording.
+    monkeypatch.setenv("EMMY_WORK", "w4x8")
+    flag = run_mod.env_pin_refusal(realized)
+    assert flag is not None
+    assert "w4x8" in flag and "w2x2" in flag
+    monkeypatch.delenv("EMMY_WORK")
+
+    # A scheduled pin against the unscheduled per-cell tier: absent, not contradicted.
+    monkeypatch.setenv("EMMY_TILE", "mma_m8n8k4_f16_f32/f4x4/k8")
+    flag = run_mod.env_pin_refusal([{"LOOPIFY": "0"}])
+    assert flag is not None
+    assert "TILE" in flag
+
+
 def test_a_reference_that_disagrees_with_itself_is_reported_unusable_not_per_row():
     """A pinned row is checked against the greedy output. A row that realized the greedy's OWN config
     computes that output, so if it is flagged as disagreeing the reference does not reproduce -- and

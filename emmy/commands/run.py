@@ -959,6 +959,28 @@ def _wrong_answer_flag(outputs: dict, ref_outputs: dict) -> str | None:
     return None
 
 
+def env_pin_refusal(kernel_knobs: list[dict]) -> str | None:
+    """The live ``EMMY_<KNOB>`` pins a compiled graph did not realize, or ``None``.
+
+    An ``--ab`` row has always been gated this way (:func:`unreproducible_pin_flag`), because benching a
+    row whose pin did not take would measure the planner's own pick under the pin's name. A pin published
+    through ``EMMY_KNOBS`` / ``EMMY_<KNOB>`` gates the GREEDY compile instead, and nothing checked it --
+    so the same mistake was invisible exactly where a hand-run sweep puts its pins.
+
+    That does not produce a wrong number, it produces an unfalsifiable one: the sweep reports the
+    planner's pick under the experiment's name, and a pin that did nothing reads as a flat result rather
+    than a broken experiment. Measured while comparing Emmy's int4 decode against its dense kernel, a
+    ``WORK``/``TILE``/``STAGE`` pin silently failed to realize at one shape and the run reported the
+    greedy's own unscheduled tier with no indication the pin had been ignored.
+
+    Same comparison and same message as the ``--ab`` gate; only the source of the pins differs.
+    """
+    from emmy.compiler.pipeline.knob import KERNEL_DECISION_FAMILIES, family_pins  # noqa: PLC0415
+
+    pins = {name: value for family in KERNEL_DECISION_FAMILIES for name, value in family_pins(family)}
+    return unreproducible_pin_flag(pins, kernel_knobs) if pins else None
+
+
 REFERENCE_SELF_DISAGREES = (
     "wrong-answer reference unusable: a row realizing the greedy's own config disagrees with the "
     "greedy output, so no row's comparison against it carries information"
@@ -1645,6 +1667,14 @@ def _write_ab_json(
         **_timing(bench),
         "kernels": _kernel_rows(graph, bench),
     }
+    # An env pin gates THIS graph, so an unrealized one misrepresents the greedy row itself.
+    env_miss = env_pin_refusal(_cuda_knob_dicts(graph))
+    if env_miss:
+        greedy["flags"] = [f"{env_miss} — the env pin did not realize, so this row is the planner's own pick"]
+        logger.error(
+            "%s — EMMY_KNOBS / EMMY_<KNOB> pin did not realize; the greedy row below is the planner's own pick, not the pinned config",
+            env_miss,
+        )
     if greedy_fail is not None:
         greedy["error"] = greedy_fail
     if greedy_reference_us is not None:
