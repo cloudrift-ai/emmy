@@ -36742,40 +36742,6 @@ configs:
         eager_us: 17562.623457475143
     kernel_set:
     - pre-sym.k_linear_mean_reduce_3e0f82.1aaf9cf804d0.dynamic.cf2be9cc69f7.cf2be9cc69f7
-  - name: pre-sym.k_linear_mean_reduce_3e0f82.1aaf9cf804d0.dynamic.0003b1bd6d4c
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      REDUCE@inner: r2
-      REDUCE@inner.2/map.1/inner: ''
-      REDUCE@inner.2/map.1/inner.1/map.2/map.1/reduce: ''
-      WORK: t16x8
-      TILE: f2x8
-      STAGE: ''
-      RASTER: ''
-    identity: 0003b1bd6d4cf4957a66e8571a0f4e72d791727b015af9cbccb7aecfd88f0158
-    measurements:
-      emmy_us: 123431.93817138672
-      reference_us: 123420.66955566406
-      reference_backend: same-input-greedy
-  - name: pre-sym.k_linear_mean_reduce_3e0f82.1aaf9cf804d0.dynamic.a1e07ba2c8a0
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      REDUCE@inner: coop-t
-      REDUCE@inner.2/map.1/inner: ''
-      REDUCE@inner.2/map.1/inner.1/map.2/map.1/reduce: ''
-      WORK: t64
-      TILE: f1
-      STAGE: ''
-      RASTER: ''
-    identity: a1e07ba2c8a0e68af5d78bada6dd466cd32cb47e851035ec12a5e58feb6307ff
-    measurements:
-      emmy_us: 134187.01171875
-      reference_us: 134190.07873535156
-      reference_backend: same-input-greedy
   - name: pre-sym.k_linear_mean_reduce_3e0f82.1aaf9cf804d0.dynamic.8f06e7d9d7b0
     bindings: {}
     pins:
@@ -37066,24 +37032,6 @@ configs:
       reference_us: 1932547.7475643158
       reference_backend: same-input-greedy
     kernel_set: *id001
-  - name: pre4096.k_linear_mean_reduce_00af35.ab5352f7b147.m4096.212c5c11dec9
-    bindings:
-      num_tokens: 4096
-    pins:
-      FAST_MATH: false
-    knobs:
-      REDUCE@inner: r4
-      REDUCE@inner.2/map.1/inner: ''
-      REDUCE@inner.2/map.1/inner.1/map.2/map.1/reduce: ''
-      WORK: t32x8
-      TILE: f1x12
-      STAGE: ''
-      RASTER: ''
-    identity: 212c5c11dec9e5e911a743e76e41be4527882e52d35d456b2f6cbd0053d4760e
-    measurements:
-      emmy_us: 965917.724609375
-      reference_us: 966423.5229492188
-      reference_backend: same-input-greedy
   - name: pre4096.k_linear_mean_reduce_00af35.ab5352f7b147.m4096.92e740dfe6bf
     bindings:
       num_tokens: 4096
