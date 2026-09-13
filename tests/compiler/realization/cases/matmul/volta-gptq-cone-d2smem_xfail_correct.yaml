@@ -1,0 +1,3481 @@
+# evidence: the two schedules one knob away from this one both realize, build and run CORRECTLY on
+# the same kernel, the same program and the same card. `WORK=w2x2 TILE=mma_m8n8k4_f16_f32/f4x4/k8
+# STAGE=d2/smem` is clean at 849 us, and `WORK=w2x2 TILE=mma_m8n8k4_f16_f32/f2x2/k8 STAGE=d1/smem`
+# is clean at 1277 us. So the Volta atom, the w2x2 warp grid, the f2x2/k8 fragment and depth-2 smem
+# staging are each individually fine here; only their conjunction is wrong. A schedule whose every
+# one-knob neighbour is correct should itself be correct.
+#
+# The gap: this row compiles, launches, completes, and returns garbage. Measured against eager at
+# rtol=atol=1e-3, 2,145,034 of 2,621,440 output elements are outside tolerance -- 82% of the result
+# -- while both neighbours above pass strictly. It is not a tolerance question: a `--strict` run
+# reports the two neighbours clean and only this row failing.
+#
+# Why it is a `correct` xfail and not `built`: nvcc accepts the kernel and it runs at a perfectly
+# plausible 1,153 us, faster than the correct d1/smem neighbour. Nothing about the launch or the
+# timing distinguishes it. That is what makes it dangerous -- a recorded row carrying this schedule
+# would deploy and silently produce wrong numbers, and only an output comparison catches it.
+#
+# Where it came from: found while tuning Qwen3.8-27B-GPTQ-Int4 on a Tesla V100 (sm_70), on the real
+# `in_proj_qkv` linear with its packed-int4 decode cone fused in, where it measured rel err 2.177
+# and 2.193 against the greedy output on two runs and 88% of elements outside 1e-3 against eager.
+# The AWQ slot reproduced the same fragment independently on a different kernel in a different
+# quantization (rel err 1.614) where `f4x4/k8` agreed, so it is neither model- nor
+# coding-specific. This case is the minimized form: a one-layer synthetic GPTQ checkpoint driven
+# through the real `spell_quantized_constants`, which is what builds the cone.
+#
+# The cone is load-bearing and that is the sharpest clue about the mechanism. `STAGE=d2/smem` is not
+# offered at all on a plain f16 contraction of the same shape, nor on a decode cone written as a
+# traced expression -- only on one built from checkpoint-backed constants, whose buffers carry
+# `source_path` / `load_ops`. Depth-2 staging appears to require a loaded operand it has something
+# to prefetch from. The failing configuration is also the only one landing on a 12 KB
+# double-buffered allocation (its correct neighbours are 8 KB single-buffered at the same warp grid
+# and fragment, and 24 KB at the same depth), which points at a second-buffer offset or a barrier in
+# the staging drain rather than at the mma lowering. Not proven: no SASS or ncu inspection was done,
+# and it should not be upgraded from a hypothesis without that.
+compute_cap:
+- 7
+- 0
+programs:
+- inputs: [hidden_states, position_embeddings_0, position_embeddings_1]
+  outputs: [add_5]
+  nodes:
+  - id: add_4_c1
+    op: constant
+    attrs:
+      name: add_4_c1
+      value: 1.0e-05
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[add_4_c1, f32, [1]]]
+  - id: add_4_c1_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 512}, {__dim__: 1}]}
+      sources: {__tuple__: [{__index_source__: {input_idx: 0, coord_map: [{var: out_coord_2}], select: null}}]}
+    inputs: [add_4_c1]
+    outputs: [[add_4_c1_bc, f32, [1, 512, 1]]]
+  - id: add_c1
+    op: constant
+    attrs:
+      name: add_c1
+      value: 1.0e-05
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[add_c1, f32, [1]]]
+  - id: add_c1_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 512}, {__dim__: 1}]}
+      sources: {__tuple__: [{__index_source__: {input_idx: 0, coord_map: [{var: out_coord_2}], select: null}}]}
+    inputs: [add_c1]
+    outputs: [[add_c1_bc, f32, [1, 512, 1]]]
+  - id: cat_1_c2
+    op: constant
+    attrs:
+      name: cat_1_c2
+      value: -1.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[cat_1_c2, f16, [1]]]
+  - id: cat_c2
+    op: constant
+    attrs:
+      name: cat_c2
+      value: -1.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[cat_c2, f16, [1]]]
+  - id: hidden_states
+    op: input
+    outputs: [[hidden_states, f16, [1, 512, 5120]]]
+  - id: p_attn_k_proj_weight_int4_bits
+    op: constant
+    attrs:
+      name: p_attn_k_proj_weight_int4_bits
+      value: 4
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_attn_k_proj_weight_int4_bits, i32, [1]]]
+  - id: p_attn_k_proj_weight_int4_bits_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 8}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_attn_k_proj_weight_int4_bits]
+    outputs: [[p_attn_k_proj_weight_int4_bits_bc, i32, [8]]]
+  - id: p_attn_k_proj_weight_int4_lane_stride
+    op: constant
+    attrs:
+      name: p_attn_k_proj_weight_int4_lane_stride
+      value: 32
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_attn_k_proj_weight_int4_lane_stride, i32, [1]]]
+  - id: p_attn_k_proj_weight_int4_lane_stride_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 8}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_attn_k_proj_weight_int4_lane_stride]
+    outputs: [[p_attn_k_proj_weight_int4_lane_stride_bc, i32, [8]]]
+  - id: p_attn_k_proj_weight_int4_lanes
+    op: constant
+    attrs:
+      name: p_attn_k_proj_weight_int4_lanes
+      value: 1
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_attn_k_proj_weight_int4_lanes, i32, [1]]]
+  - id: p_attn_k_proj_weight_int4_lanes_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 8}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_attn_k_proj_weight_int4_lanes]
+    outputs: [[p_attn_k_proj_weight_int4_lanes_bc, i32, [8]]]
+  - id: p_attn_k_proj_weight_int4_slots
+    op: tensor.range
+    attrs: {start: 0, stop: 8, step: 1, dtype: i32}
+    outputs: [[p_attn_k_proj_weight_int4_slots, i32, [8]]]
+  - id: p_attn_k_proj_weight_int4_lane
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: remainder}}
+    inputs: [p_attn_k_proj_weight_int4_slots, p_attn_k_proj_weight_int4_lanes_bc]
+    outputs: [[p_attn_k_proj_weight_int4_lane, i32, [8]]]
+  - id: p_attn_k_proj_weight_int4_lane_shift
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [p_attn_k_proj_weight_int4_lane, p_attn_k_proj_weight_int4_lane_stride_bc]
+    outputs: [[p_attn_k_proj_weight_int4_lane_shift, i32, [8]]]
+  - id: p_attn_k_proj_weight_int4_run
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: floor_divide}}
+    inputs: [p_attn_k_proj_weight_int4_slots, p_attn_k_proj_weight_int4_lanes_bc]
+    outputs: [[p_attn_k_proj_weight_int4_run, i32, [8]]]
+  - id: p_attn_k_proj_weight_int4_run_shift
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [p_attn_k_proj_weight_int4_run, p_attn_k_proj_weight_int4_bits_bc]
+    outputs: [[p_attn_k_proj_weight_int4_run_shift, i32, [8]]]
+  - id: p_attn_k_proj_weight_int4_shifts
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [p_attn_k_proj_weight_int4_lane_shift, p_attn_k_proj_weight_int4_run_shift]
+    outputs: [[p_attn_k_proj_weight_int4_shifts, i32, [8]]]
+  - id: p_attn_k_proj_weight_integers_mask
+    op: constant
+    attrs:
+      name: p_attn_k_proj_weight_integers_mask
+      value: 15
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_attn_k_proj_weight_integers_mask, i32, [1]]]
+  - id: p_attn_k_proj_weight_integers_mask_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 640}, {__dim__: 8}, {__dim__: 640}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_attn_k_proj_weight_integers_mask]
+    outputs: [[p_attn_k_proj_weight_integers_mask_bc, i32, [640, 8, 640]]]
+  - id: p_attn_k_proj_weight_integers_shift_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [1, 8, 1]}}
+    inputs: [p_attn_k_proj_weight_int4_shifts]
+    outputs: [[p_attn_k_proj_weight_integers_shift_view, i32, [1, 8, 1]]]
+  - id: p_attn_k_proj_weight_integers_shift_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 640}, {__dim__: 8}, {__dim__: 640}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_1}
+            - {literal: {value: 0, dtype: int}}
+            select: null
+    inputs: [p_attn_k_proj_weight_integers_shift_view]
+    outputs: [[p_attn_k_proj_weight_integers_shift_view_bc, i32, [640, 8, 640]]]
+  - id: p_attn_k_proj_weight_qweight
+    op: constant
+    attrs:
+      name: p_attn_k_proj_weight_qweight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: model.layers.0.self_attn.k_proj.qweight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [640, 640]}
+      source_dtype: i32
+      source_graph: null
+    outputs: [[p_attn_k_proj_weight_qweight, i32, [640, 640]]]
+  - id: p_attn_k_proj_weight_integers_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [640, 1, 640]}}
+    inputs: [p_attn_k_proj_weight_qweight]
+    outputs: [[p_attn_k_proj_weight_integers_view, i32, [640, 1, 640]]]
+  - id: p_attn_k_proj_weight_integers_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 640}, {__dim__: 8}, {__dim__: 640}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_2}
+            select: null
+    inputs: [p_attn_k_proj_weight_integers_view]
+    outputs: [[p_attn_k_proj_weight_integers_view_bc, i32, [640, 8, 640]]]
+  - id: p_attn_k_proj_weight_integers_shifted
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: right_shift}}
+    inputs: [p_attn_k_proj_weight_integers_view_bc, p_attn_k_proj_weight_integers_shift_view_bc]
+    outputs: [[p_attn_k_proj_weight_integers_shifted, i32, [640, 8, 640]]]
+  - id: p_attn_k_proj_weight_integers_nibble
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: bitwise_and}}
+    inputs: [p_attn_k_proj_weight_integers_shifted, p_attn_k_proj_weight_integers_mask_bc]
+    outputs: [[p_attn_k_proj_weight_integers_nibble, i32, [640, 8, 640]]]
+  - id: p_attn_k_proj_weight_integers
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [5120, 640]}}
+    inputs: [p_attn_k_proj_weight_integers_nibble]
+    outputs: [[p_attn_k_proj_weight_integers, i32, [5120, 640]]]
+  - id: p_attn_k_proj_weight_qzeros
+    op: constant
+    attrs:
+      name: p_attn_k_proj_weight_qzeros
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: model.layers.0.self_attn.k_proj.qzeros
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [40, 80]}
+      source_dtype: i32
+      source_graph: null
+    outputs: [[p_attn_k_proj_weight_qzeros, i32, [40, 80]]]
+  - id: p_attn_k_proj_weight_scales
+    op: constant
+    attrs:
+      name: p_attn_k_proj_weight_scales
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: model.layers.0.self_attn.k_proj.scales
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [40, 640]}
+      source_dtype: f16
+      source_graph: null
+    outputs: [[p_attn_k_proj_weight_scales, f16, [40, 640]]]
+  - id: p_attn_k_proj_weight_scales_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [40, 1, 640]}}
+    inputs: [p_attn_k_proj_weight_scales]
+    outputs: [[p_attn_k_proj_weight_scales_view, f16, [40, 1, 640]]]
+  - id: p_attn_k_proj_weight_scales_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 128}, {__dim__: 640}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_2}
+            select: null
+    inputs: [p_attn_k_proj_weight_scales_view]
+    outputs: [[p_attn_k_proj_weight_scales_view_bc, f16, [40, 128, 640]]]
+  - id: p_attn_k_proj_weight_scale_values
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [5120, 640]}}
+    inputs: [p_attn_k_proj_weight_scales_view_bc]
+    outputs: [[p_attn_k_proj_weight_scale_values, f16, [5120, 640]]]
+  - id: p_attn_k_proj_weight_zero_bias
+    op: constant
+    attrs:
+      name: p_attn_k_proj_weight_zero_bias
+      value: 1
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_attn_k_proj_weight_zero_bias, i32, [1]]]
+  - id: p_attn_k_proj_weight_zero_bias_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 640}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_attn_k_proj_weight_zero_bias]
+    outputs: [[p_attn_k_proj_weight_zero_bias_bc, i32, [40, 640]]]
+  - id: p_attn_k_proj_weight_zeros_grouped_mask
+    op: constant
+    attrs:
+      name: p_attn_k_proj_weight_zeros_grouped_mask
+      value: 15
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_attn_k_proj_weight_zeros_grouped_mask, i32, [1]]]
+  - id: p_attn_k_proj_weight_zeros_grouped_mask_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 80}, {__dim__: 8}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_attn_k_proj_weight_zeros_grouped_mask]
+    outputs: [[p_attn_k_proj_weight_zeros_grouped_mask_bc, i32, [40, 80, 8]]]
+  - id: p_attn_k_proj_weight_zeros_grouped_shift_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [1, 1, 8]}}
+    inputs: [p_attn_k_proj_weight_int4_shifts]
+    outputs: [[p_attn_k_proj_weight_zeros_grouped_shift_view, i32, [1, 1, 8]]]
+  - id: p_attn_k_proj_weight_zeros_grouped_shift_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 80}, {__dim__: 8}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {literal: {value: 0, dtype: int}}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_2}
+            select: null
+    inputs: [p_attn_k_proj_weight_zeros_grouped_shift_view]
+    outputs: [[p_attn_k_proj_weight_zeros_grouped_shift_view_bc, i32, [40, 80, 8]]]
+  - id: p_attn_k_proj_weight_zeros_grouped_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [40, 80, 1]}}
+    inputs: [p_attn_k_proj_weight_qzeros]
+    outputs: [[p_attn_k_proj_weight_zeros_grouped_view, i32, [40, 80, 1]]]
+  - id: p_attn_k_proj_weight_zeros_grouped_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 80}, {__dim__: 8}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {var: out_coord_1}
+            - {literal: {value: 0, dtype: int}}
+            select: null
+    inputs: [p_attn_k_proj_weight_zeros_grouped_view]
+    outputs: [[p_attn_k_proj_weight_zeros_grouped_view_bc, i32, [40, 80, 8]]]
+  - id: p_attn_k_proj_weight_zeros_grouped_shifted
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: right_shift}}
+    inputs: [p_attn_k_proj_weight_zeros_grouped_view_bc, p_attn_k_proj_weight_zeros_grouped_shift_view_bc]
+    outputs: [[p_attn_k_proj_weight_zeros_grouped_shifted, i32, [40, 80, 8]]]
+  - id: p_attn_k_proj_weight_zeros_grouped_nibble
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: bitwise_and}}
+    inputs: [p_attn_k_proj_weight_zeros_grouped_shifted, p_attn_k_proj_weight_zeros_grouped_mask_bc]
+    outputs: [[p_attn_k_proj_weight_zeros_grouped_nibble, i32, [40, 80, 8]]]
+  - id: p_attn_k_proj_weight_zeros_grouped
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [40, 640]}}
+    inputs: [p_attn_k_proj_weight_zeros_grouped_nibble]
+    outputs: [[p_attn_k_proj_weight_zeros_grouped, i32, [40, 640]]]
+  - id: p_attn_k_proj_weight_zeros_unbiased
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [p_attn_k_proj_weight_zeros_grouped, p_attn_k_proj_weight_zero_bias_bc]
+    outputs: [[p_attn_k_proj_weight_zeros_unbiased, i32, [40, 640]]]
+  - id: p_attn_k_proj_weight_zeros_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [40, 1, 640]}}
+    inputs: [p_attn_k_proj_weight_zeros_unbiased]
+    outputs: [[p_attn_k_proj_weight_zeros_view, i32, [40, 1, 640]]]
+  - id: p_attn_k_proj_weight_zeros_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 128}, {__dim__: 640}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_2}
+            select: null
+    inputs: [p_attn_k_proj_weight_zeros_view]
+    outputs: [[p_attn_k_proj_weight_zeros_view_bc, i32, [40, 128, 640]]]
+  - id: p_attn_k_proj_weight_zeros
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [5120, 640]}}
+    inputs: [p_attn_k_proj_weight_zeros_view_bc]
+    outputs: [[p_attn_k_proj_weight_zeros, i32, [5120, 640]]]
+  - id: p_attn_k_proj_weight_centered
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: subtract}}
+    inputs: [p_attn_k_proj_weight_integers, p_attn_k_proj_weight_zeros]
+    outputs: [[p_attn_k_proj_weight_centered, i32, [5120, 640]]]
+  - id: p_attn_k_proj_weight_values
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: copy}}
+    inputs: [p_attn_k_proj_weight_centered]
+    outputs: [[p_attn_k_proj_weight_values, f16, [5120, 640]]]
+  - id: p_attn_k_proj_weight_scaled
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [p_attn_k_proj_weight_values, p_attn_k_proj_weight_scale_values]
+    outputs: [[p_attn_k_proj_weight_scaled, f16, [5120, 640]]]
+  - id: p_attn_k_proj_weight
+    op: torch.transpose
+    attrs: {axes: {__tuple__: [1, 0]}}
+    inputs: [p_attn_k_proj_weight_scaled]
+    outputs: [[p_attn_k_proj_weight, f16, [640, 5120]]]
+  - id: p_attn_o_proj_weight_int4_bits
+    op: constant
+    attrs:
+      name: p_attn_o_proj_weight_int4_bits
+      value: 4
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_attn_o_proj_weight_int4_bits, i32, [1]]]
+  - id: p_attn_o_proj_weight_int4_bits_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 8}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_attn_o_proj_weight_int4_bits]
+    outputs: [[p_attn_o_proj_weight_int4_bits_bc, i32, [8]]]
+  - id: p_attn_o_proj_weight_int4_lane_stride
+    op: constant
+    attrs:
+      name: p_attn_o_proj_weight_int4_lane_stride
+      value: 32
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_attn_o_proj_weight_int4_lane_stride, i32, [1]]]
+  - id: p_attn_o_proj_weight_int4_lane_stride_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 8}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_attn_o_proj_weight_int4_lane_stride]
+    outputs: [[p_attn_o_proj_weight_int4_lane_stride_bc, i32, [8]]]
+  - id: p_attn_o_proj_weight_int4_lanes
+    op: constant
+    attrs:
+      name: p_attn_o_proj_weight_int4_lanes
+      value: 1
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_attn_o_proj_weight_int4_lanes, i32, [1]]]
+  - id: p_attn_o_proj_weight_int4_lanes_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 8}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_attn_o_proj_weight_int4_lanes]
+    outputs: [[p_attn_o_proj_weight_int4_lanes_bc, i32, [8]]]
+  - id: p_attn_o_proj_weight_int4_slots
+    op: tensor.range
+    attrs: {start: 0, stop: 8, step: 1, dtype: i32}
+    outputs: [[p_attn_o_proj_weight_int4_slots, i32, [8]]]
+  - id: p_attn_o_proj_weight_int4_lane
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: remainder}}
+    inputs: [p_attn_o_proj_weight_int4_slots, p_attn_o_proj_weight_int4_lanes_bc]
+    outputs: [[p_attn_o_proj_weight_int4_lane, i32, [8]]]
+  - id: p_attn_o_proj_weight_int4_lane_shift
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [p_attn_o_proj_weight_int4_lane, p_attn_o_proj_weight_int4_lane_stride_bc]
+    outputs: [[p_attn_o_proj_weight_int4_lane_shift, i32, [8]]]
+  - id: p_attn_o_proj_weight_int4_run
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: floor_divide}}
+    inputs: [p_attn_o_proj_weight_int4_slots, p_attn_o_proj_weight_int4_lanes_bc]
+    outputs: [[p_attn_o_proj_weight_int4_run, i32, [8]]]
+  - id: p_attn_o_proj_weight_int4_run_shift
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [p_attn_o_proj_weight_int4_run, p_attn_o_proj_weight_int4_bits_bc]
+    outputs: [[p_attn_o_proj_weight_int4_run_shift, i32, [8]]]
+  - id: p_attn_o_proj_weight_int4_shifts
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [p_attn_o_proj_weight_int4_lane_shift, p_attn_o_proj_weight_int4_run_shift]
+    outputs: [[p_attn_o_proj_weight_int4_shifts, i32, [8]]]
+  - id: p_attn_o_proj_weight_integers_mask
+    op: constant
+    attrs:
+      name: p_attn_o_proj_weight_integers_mask
+      value: 15
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_attn_o_proj_weight_integers_mask, i32, [1]]]
+  - id: p_attn_o_proj_weight_integers_mask_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 640}, {__dim__: 8}, {__dim__: 5120}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_attn_o_proj_weight_integers_mask]
+    outputs: [[p_attn_o_proj_weight_integers_mask_bc, i32, [640, 8, 5120]]]
+  - id: p_attn_o_proj_weight_integers_shift_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [1, 8, 1]}}
+    inputs: [p_attn_o_proj_weight_int4_shifts]
+    outputs: [[p_attn_o_proj_weight_integers_shift_view, i32, [1, 8, 1]]]
+  - id: p_attn_o_proj_weight_integers_shift_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 640}, {__dim__: 8}, {__dim__: 5120}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_1}
+            - {literal: {value: 0, dtype: int}}
+            select: null
+    inputs: [p_attn_o_proj_weight_integers_shift_view]
+    outputs: [[p_attn_o_proj_weight_integers_shift_view_bc, i32, [640, 8, 5120]]]
+  - id: p_attn_o_proj_weight_qweight
+    op: constant
+    attrs:
+      name: p_attn_o_proj_weight_qweight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: model.layers.0.self_attn.o_proj.qweight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [640, 5120]}
+      source_dtype: i32
+      source_graph: null
+    outputs: [[p_attn_o_proj_weight_qweight, i32, [640, 5120]]]
+  - id: p_attn_o_proj_weight_integers_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [640, 1, 5120]}}
+    inputs: [p_attn_o_proj_weight_qweight]
+    outputs: [[p_attn_o_proj_weight_integers_view, i32, [640, 1, 5120]]]
+  - id: p_attn_o_proj_weight_integers_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 640}, {__dim__: 8}, {__dim__: 5120}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_2}
+            select: null
+    inputs: [p_attn_o_proj_weight_integers_view]
+    outputs: [[p_attn_o_proj_weight_integers_view_bc, i32, [640, 8, 5120]]]
+  - id: p_attn_o_proj_weight_integers_shifted
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: right_shift}}
+    inputs: [p_attn_o_proj_weight_integers_view_bc, p_attn_o_proj_weight_integers_shift_view_bc]
+    outputs: [[p_attn_o_proj_weight_integers_shifted, i32, [640, 8, 5120]]]
+  - id: p_attn_o_proj_weight_integers_nibble
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: bitwise_and}}
+    inputs: [p_attn_o_proj_weight_integers_shifted, p_attn_o_proj_weight_integers_mask_bc]
+    outputs: [[p_attn_o_proj_weight_integers_nibble, i32, [640, 8, 5120]]]
+  - id: p_attn_o_proj_weight_integers
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [5120, 5120]}}
+    inputs: [p_attn_o_proj_weight_integers_nibble]
+    outputs: [[p_attn_o_proj_weight_integers, i32, [5120, 5120]]]
+  - id: p_attn_o_proj_weight_qzeros
+    op: constant
+    attrs:
+      name: p_attn_o_proj_weight_qzeros
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: model.layers.0.self_attn.o_proj.qzeros
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [40, 640]}
+      source_dtype: i32
+      source_graph: null
+    outputs: [[p_attn_o_proj_weight_qzeros, i32, [40, 640]]]
+  - id: p_attn_o_proj_weight_scales
+    op: constant
+    attrs:
+      name: p_attn_o_proj_weight_scales
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: model.layers.0.self_attn.o_proj.scales
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [40, 5120]}
+      source_dtype: f16
+      source_graph: null
+    outputs: [[p_attn_o_proj_weight_scales, f16, [40, 5120]]]
+  - id: p_attn_o_proj_weight_scales_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [40, 1, 5120]}}
+    inputs: [p_attn_o_proj_weight_scales]
+    outputs: [[p_attn_o_proj_weight_scales_view, f16, [40, 1, 5120]]]
+  - id: p_attn_o_proj_weight_scales_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 128}, {__dim__: 5120}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_2}
+            select: null
+    inputs: [p_attn_o_proj_weight_scales_view]
+    outputs: [[p_attn_o_proj_weight_scales_view_bc, f16, [40, 128, 5120]]]
+  - id: p_attn_o_proj_weight_scale_values
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [5120, 5120]}}
+    inputs: [p_attn_o_proj_weight_scales_view_bc]
+    outputs: [[p_attn_o_proj_weight_scale_values, f16, [5120, 5120]]]
+  - id: p_attn_o_proj_weight_zero_bias
+    op: constant
+    attrs:
+      name: p_attn_o_proj_weight_zero_bias
+      value: 1
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_attn_o_proj_weight_zero_bias, i32, [1]]]
+  - id: p_attn_o_proj_weight_zero_bias_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 5120}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_attn_o_proj_weight_zero_bias]
+    outputs: [[p_attn_o_proj_weight_zero_bias_bc, i32, [40, 5120]]]
+  - id: p_attn_o_proj_weight_zeros_grouped_mask
+    op: constant
+    attrs:
+      name: p_attn_o_proj_weight_zeros_grouped_mask
+      value: 15
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_attn_o_proj_weight_zeros_grouped_mask, i32, [1]]]
+  - id: p_attn_o_proj_weight_zeros_grouped_mask_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 640}, {__dim__: 8}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_attn_o_proj_weight_zeros_grouped_mask]
+    outputs: [[p_attn_o_proj_weight_zeros_grouped_mask_bc, i32, [40, 640, 8]]]
+  - id: p_attn_o_proj_weight_zeros_grouped_shift_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [1, 1, 8]}}
+    inputs: [p_attn_o_proj_weight_int4_shifts]
+    outputs: [[p_attn_o_proj_weight_zeros_grouped_shift_view, i32, [1, 1, 8]]]
+  - id: p_attn_o_proj_weight_zeros_grouped_shift_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 640}, {__dim__: 8}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {literal: {value: 0, dtype: int}}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_2}
+            select: null
+    inputs: [p_attn_o_proj_weight_zeros_grouped_shift_view]
+    outputs: [[p_attn_o_proj_weight_zeros_grouped_shift_view_bc, i32, [40, 640, 8]]]
+  - id: p_attn_o_proj_weight_zeros_grouped_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [40, 640, 1]}}
+    inputs: [p_attn_o_proj_weight_qzeros]
+    outputs: [[p_attn_o_proj_weight_zeros_grouped_view, i32, [40, 640, 1]]]
+  - id: p_attn_o_proj_weight_zeros_grouped_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 640}, {__dim__: 8}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {var: out_coord_1}
+            - {literal: {value: 0, dtype: int}}
+            select: null
+    inputs: [p_attn_o_proj_weight_zeros_grouped_view]
+    outputs: [[p_attn_o_proj_weight_zeros_grouped_view_bc, i32, [40, 640, 8]]]
+  - id: p_attn_o_proj_weight_zeros_grouped_shifted
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: right_shift}}
+    inputs: [p_attn_o_proj_weight_zeros_grouped_view_bc, p_attn_o_proj_weight_zeros_grouped_shift_view_bc]
+    outputs: [[p_attn_o_proj_weight_zeros_grouped_shifted, i32, [40, 640, 8]]]
+  - id: p_attn_o_proj_weight_zeros_grouped_nibble
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: bitwise_and}}
+    inputs: [p_attn_o_proj_weight_zeros_grouped_shifted, p_attn_o_proj_weight_zeros_grouped_mask_bc]
+    outputs: [[p_attn_o_proj_weight_zeros_grouped_nibble, i32, [40, 640, 8]]]
+  - id: p_attn_o_proj_weight_zeros_grouped
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [40, 5120]}}
+    inputs: [p_attn_o_proj_weight_zeros_grouped_nibble]
+    outputs: [[p_attn_o_proj_weight_zeros_grouped, i32, [40, 5120]]]
+  - id: p_attn_o_proj_weight_zeros_unbiased
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [p_attn_o_proj_weight_zeros_grouped, p_attn_o_proj_weight_zero_bias_bc]
+    outputs: [[p_attn_o_proj_weight_zeros_unbiased, i32, [40, 5120]]]
+  - id: p_attn_o_proj_weight_zeros_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [40, 1, 5120]}}
+    inputs: [p_attn_o_proj_weight_zeros_unbiased]
+    outputs: [[p_attn_o_proj_weight_zeros_view, i32, [40, 1, 5120]]]
+  - id: p_attn_o_proj_weight_zeros_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 128}, {__dim__: 5120}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_2}
+            select: null
+    inputs: [p_attn_o_proj_weight_zeros_view]
+    outputs: [[p_attn_o_proj_weight_zeros_view_bc, i32, [40, 128, 5120]]]
+  - id: p_attn_o_proj_weight_zeros
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [5120, 5120]}}
+    inputs: [p_attn_o_proj_weight_zeros_view_bc]
+    outputs: [[p_attn_o_proj_weight_zeros, i32, [5120, 5120]]]
+  - id: p_attn_o_proj_weight_centered
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: subtract}}
+    inputs: [p_attn_o_proj_weight_integers, p_attn_o_proj_weight_zeros]
+    outputs: [[p_attn_o_proj_weight_centered, i32, [5120, 5120]]]
+  - id: p_attn_o_proj_weight_values
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: copy}}
+    inputs: [p_attn_o_proj_weight_centered]
+    outputs: [[p_attn_o_proj_weight_values, f16, [5120, 5120]]]
+  - id: p_attn_o_proj_weight_scaled
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [p_attn_o_proj_weight_values, p_attn_o_proj_weight_scale_values]
+    outputs: [[p_attn_o_proj_weight_scaled, f16, [5120, 5120]]]
+  - id: p_attn_o_proj_weight
+    op: torch.transpose
+    attrs: {axes: {__tuple__: [1, 0]}}
+    inputs: [p_attn_o_proj_weight_scaled]
+    outputs: [[p_attn_o_proj_weight, f16, [5120, 5120]]]
+  - id: p_attn_q_proj_weight_int4_bits
+    op: constant
+    attrs:
+      name: p_attn_q_proj_weight_int4_bits
+      value: 4
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_attn_q_proj_weight_int4_bits, i32, [1]]]
+  - id: p_attn_q_proj_weight_int4_bits_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 8}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_attn_q_proj_weight_int4_bits]
+    outputs: [[p_attn_q_proj_weight_int4_bits_bc, i32, [8]]]
+  - id: p_attn_q_proj_weight_int4_lane_stride
+    op: constant
+    attrs:
+      name: p_attn_q_proj_weight_int4_lane_stride
+      value: 32
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_attn_q_proj_weight_int4_lane_stride, i32, [1]]]
+  - id: p_attn_q_proj_weight_int4_lane_stride_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 8}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_attn_q_proj_weight_int4_lane_stride]
+    outputs: [[p_attn_q_proj_weight_int4_lane_stride_bc, i32, [8]]]
+  - id: p_attn_q_proj_weight_int4_lanes
+    op: constant
+    attrs:
+      name: p_attn_q_proj_weight_int4_lanes
+      value: 1
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_attn_q_proj_weight_int4_lanes, i32, [1]]]
+  - id: p_attn_q_proj_weight_int4_lanes_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 8}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_attn_q_proj_weight_int4_lanes]
+    outputs: [[p_attn_q_proj_weight_int4_lanes_bc, i32, [8]]]
+  - id: p_attn_q_proj_weight_int4_slots
+    op: tensor.range
+    attrs: {start: 0, stop: 8, step: 1, dtype: i32}
+    outputs: [[p_attn_q_proj_weight_int4_slots, i32, [8]]]
+  - id: p_attn_q_proj_weight_int4_lane
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: remainder}}
+    inputs: [p_attn_q_proj_weight_int4_slots, p_attn_q_proj_weight_int4_lanes_bc]
+    outputs: [[p_attn_q_proj_weight_int4_lane, i32, [8]]]
+  - id: p_attn_q_proj_weight_int4_lane_shift
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [p_attn_q_proj_weight_int4_lane, p_attn_q_proj_weight_int4_lane_stride_bc]
+    outputs: [[p_attn_q_proj_weight_int4_lane_shift, i32, [8]]]
+  - id: p_attn_q_proj_weight_int4_run
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: floor_divide}}
+    inputs: [p_attn_q_proj_weight_int4_slots, p_attn_q_proj_weight_int4_lanes_bc]
+    outputs: [[p_attn_q_proj_weight_int4_run, i32, [8]]]
+  - id: p_attn_q_proj_weight_int4_run_shift
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [p_attn_q_proj_weight_int4_run, p_attn_q_proj_weight_int4_bits_bc]
+    outputs: [[p_attn_q_proj_weight_int4_run_shift, i32, [8]]]
+  - id: p_attn_q_proj_weight_int4_shifts
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [p_attn_q_proj_weight_int4_lane_shift, p_attn_q_proj_weight_int4_run_shift]
+    outputs: [[p_attn_q_proj_weight_int4_shifts, i32, [8]]]
+  - id: p_attn_q_proj_weight_integers_mask
+    op: constant
+    attrs:
+      name: p_attn_q_proj_weight_integers_mask
+      value: 15
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_attn_q_proj_weight_integers_mask, i32, [1]]]
+  - id: p_attn_q_proj_weight_integers_mask_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 640}, {__dim__: 8}, {__dim__: 5120}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_attn_q_proj_weight_integers_mask]
+    outputs: [[p_attn_q_proj_weight_integers_mask_bc, i32, [640, 8, 5120]]]
+  - id: p_attn_q_proj_weight_integers_shift_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [1, 8, 1]}}
+    inputs: [p_attn_q_proj_weight_int4_shifts]
+    outputs: [[p_attn_q_proj_weight_integers_shift_view, i32, [1, 8, 1]]]
+  - id: p_attn_q_proj_weight_integers_shift_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 640}, {__dim__: 8}, {__dim__: 5120}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_1}
+            - {literal: {value: 0, dtype: int}}
+            select: null
+    inputs: [p_attn_q_proj_weight_integers_shift_view]
+    outputs: [[p_attn_q_proj_weight_integers_shift_view_bc, i32, [640, 8, 5120]]]
+  - id: p_attn_q_proj_weight_qweight
+    op: constant
+    attrs:
+      name: p_attn_q_proj_weight_qweight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: model.layers.0.self_attn.q_proj.qweight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [640, 5120]}
+      source_dtype: i32
+      source_graph: null
+    outputs: [[p_attn_q_proj_weight_qweight, i32, [640, 5120]]]
+  - id: p_attn_q_proj_weight_integers_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [640, 1, 5120]}}
+    inputs: [p_attn_q_proj_weight_qweight]
+    outputs: [[p_attn_q_proj_weight_integers_view, i32, [640, 1, 5120]]]
+  - id: p_attn_q_proj_weight_integers_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 640}, {__dim__: 8}, {__dim__: 5120}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_2}
+            select: null
+    inputs: [p_attn_q_proj_weight_integers_view]
+    outputs: [[p_attn_q_proj_weight_integers_view_bc, i32, [640, 8, 5120]]]
+  - id: p_attn_q_proj_weight_integers_shifted
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: right_shift}}
+    inputs: [p_attn_q_proj_weight_integers_view_bc, p_attn_q_proj_weight_integers_shift_view_bc]
+    outputs: [[p_attn_q_proj_weight_integers_shifted, i32, [640, 8, 5120]]]
+  - id: p_attn_q_proj_weight_integers_nibble
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: bitwise_and}}
+    inputs: [p_attn_q_proj_weight_integers_shifted, p_attn_q_proj_weight_integers_mask_bc]
+    outputs: [[p_attn_q_proj_weight_integers_nibble, i32, [640, 8, 5120]]]
+  - id: p_attn_q_proj_weight_integers
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [5120, 5120]}}
+    inputs: [p_attn_q_proj_weight_integers_nibble]
+    outputs: [[p_attn_q_proj_weight_integers, i32, [5120, 5120]]]
+  - id: p_attn_q_proj_weight_qzeros
+    op: constant
+    attrs:
+      name: p_attn_q_proj_weight_qzeros
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: model.layers.0.self_attn.q_proj.qzeros
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [40, 640]}
+      source_dtype: i32
+      source_graph: null
+    outputs: [[p_attn_q_proj_weight_qzeros, i32, [40, 640]]]
+  - id: p_attn_q_proj_weight_scales
+    op: constant
+    attrs:
+      name: p_attn_q_proj_weight_scales
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: model.layers.0.self_attn.q_proj.scales
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [40, 5120]}
+      source_dtype: f16
+      source_graph: null
+    outputs: [[p_attn_q_proj_weight_scales, f16, [40, 5120]]]
+  - id: p_attn_q_proj_weight_scales_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [40, 1, 5120]}}
+    inputs: [p_attn_q_proj_weight_scales]
+    outputs: [[p_attn_q_proj_weight_scales_view, f16, [40, 1, 5120]]]
+  - id: p_attn_q_proj_weight_scales_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 128}, {__dim__: 5120}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_2}
+            select: null
+    inputs: [p_attn_q_proj_weight_scales_view]
+    outputs: [[p_attn_q_proj_weight_scales_view_bc, f16, [40, 128, 5120]]]
+  - id: p_attn_q_proj_weight_scale_values
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [5120, 5120]}}
+    inputs: [p_attn_q_proj_weight_scales_view_bc]
+    outputs: [[p_attn_q_proj_weight_scale_values, f16, [5120, 5120]]]
+  - id: p_attn_q_proj_weight_zero_bias
+    op: constant
+    attrs:
+      name: p_attn_q_proj_weight_zero_bias
+      value: 1
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_attn_q_proj_weight_zero_bias, i32, [1]]]
+  - id: p_attn_q_proj_weight_zero_bias_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 5120}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_attn_q_proj_weight_zero_bias]
+    outputs: [[p_attn_q_proj_weight_zero_bias_bc, i32, [40, 5120]]]
+  - id: p_attn_q_proj_weight_zeros_grouped_mask
+    op: constant
+    attrs:
+      name: p_attn_q_proj_weight_zeros_grouped_mask
+      value: 15
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_attn_q_proj_weight_zeros_grouped_mask, i32, [1]]]
+  - id: p_attn_q_proj_weight_zeros_grouped_mask_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 640}, {__dim__: 8}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_attn_q_proj_weight_zeros_grouped_mask]
+    outputs: [[p_attn_q_proj_weight_zeros_grouped_mask_bc, i32, [40, 640, 8]]]
+  - id: p_attn_q_proj_weight_zeros_grouped_shift_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [1, 1, 8]}}
+    inputs: [p_attn_q_proj_weight_int4_shifts]
+    outputs: [[p_attn_q_proj_weight_zeros_grouped_shift_view, i32, [1, 1, 8]]]
+  - id: p_attn_q_proj_weight_zeros_grouped_shift_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 640}, {__dim__: 8}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {literal: {value: 0, dtype: int}}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_2}
+            select: null
+    inputs: [p_attn_q_proj_weight_zeros_grouped_shift_view]
+    outputs: [[p_attn_q_proj_weight_zeros_grouped_shift_view_bc, i32, [40, 640, 8]]]
+  - id: p_attn_q_proj_weight_zeros_grouped_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [40, 640, 1]}}
+    inputs: [p_attn_q_proj_weight_qzeros]
+    outputs: [[p_attn_q_proj_weight_zeros_grouped_view, i32, [40, 640, 1]]]
+  - id: p_attn_q_proj_weight_zeros_grouped_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 640}, {__dim__: 8}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {var: out_coord_1}
+            - {literal: {value: 0, dtype: int}}
+            select: null
+    inputs: [p_attn_q_proj_weight_zeros_grouped_view]
+    outputs: [[p_attn_q_proj_weight_zeros_grouped_view_bc, i32, [40, 640, 8]]]
+  - id: p_attn_q_proj_weight_zeros_grouped_shifted
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: right_shift}}
+    inputs: [p_attn_q_proj_weight_zeros_grouped_view_bc, p_attn_q_proj_weight_zeros_grouped_shift_view_bc]
+    outputs: [[p_attn_q_proj_weight_zeros_grouped_shifted, i32, [40, 640, 8]]]
+  - id: p_attn_q_proj_weight_zeros_grouped_nibble
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: bitwise_and}}
+    inputs: [p_attn_q_proj_weight_zeros_grouped_shifted, p_attn_q_proj_weight_zeros_grouped_mask_bc]
+    outputs: [[p_attn_q_proj_weight_zeros_grouped_nibble, i32, [40, 640, 8]]]
+  - id: p_attn_q_proj_weight_zeros_grouped
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [40, 5120]}}
+    inputs: [p_attn_q_proj_weight_zeros_grouped_nibble]
+    outputs: [[p_attn_q_proj_weight_zeros_grouped, i32, [40, 5120]]]
+  - id: p_attn_q_proj_weight_zeros_unbiased
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [p_attn_q_proj_weight_zeros_grouped, p_attn_q_proj_weight_zero_bias_bc]
+    outputs: [[p_attn_q_proj_weight_zeros_unbiased, i32, [40, 5120]]]
+  - id: p_attn_q_proj_weight_zeros_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [40, 1, 5120]}}
+    inputs: [p_attn_q_proj_weight_zeros_unbiased]
+    outputs: [[p_attn_q_proj_weight_zeros_view, i32, [40, 1, 5120]]]
+  - id: p_attn_q_proj_weight_zeros_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 128}, {__dim__: 5120}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_2}
+            select: null
+    inputs: [p_attn_q_proj_weight_zeros_view]
+    outputs: [[p_attn_q_proj_weight_zeros_view_bc, i32, [40, 128, 5120]]]
+  - id: p_attn_q_proj_weight_zeros
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [5120, 5120]}}
+    inputs: [p_attn_q_proj_weight_zeros_view_bc]
+    outputs: [[p_attn_q_proj_weight_zeros, i32, [5120, 5120]]]
+  - id: p_attn_q_proj_weight_centered
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: subtract}}
+    inputs: [p_attn_q_proj_weight_integers, p_attn_q_proj_weight_zeros]
+    outputs: [[p_attn_q_proj_weight_centered, i32, [5120, 5120]]]
+  - id: p_attn_q_proj_weight_values
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: copy}}
+    inputs: [p_attn_q_proj_weight_centered]
+    outputs: [[p_attn_q_proj_weight_values, f16, [5120, 5120]]]
+  - id: p_attn_q_proj_weight_scaled
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [p_attn_q_proj_weight_values, p_attn_q_proj_weight_scale_values]
+    outputs: [[p_attn_q_proj_weight_scaled, f16, [5120, 5120]]]
+  - id: p_attn_q_proj_weight
+    op: torch.transpose
+    attrs: {axes: {__tuple__: [1, 0]}}
+    inputs: [p_attn_q_proj_weight_scaled]
+    outputs: [[p_attn_q_proj_weight, f16, [5120, 5120]]]
+  - id: p_attn_v_proj_weight_int4_bits
+    op: constant
+    attrs:
+      name: p_attn_v_proj_weight_int4_bits
+      value: 4
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_attn_v_proj_weight_int4_bits, i32, [1]]]
+  - id: p_attn_v_proj_weight_int4_bits_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 8}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_attn_v_proj_weight_int4_bits]
+    outputs: [[p_attn_v_proj_weight_int4_bits_bc, i32, [8]]]
+  - id: p_attn_v_proj_weight_int4_lane_stride
+    op: constant
+    attrs:
+      name: p_attn_v_proj_weight_int4_lane_stride
+      value: 32
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_attn_v_proj_weight_int4_lane_stride, i32, [1]]]
+  - id: p_attn_v_proj_weight_int4_lane_stride_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 8}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_attn_v_proj_weight_int4_lane_stride]
+    outputs: [[p_attn_v_proj_weight_int4_lane_stride_bc, i32, [8]]]
+  - id: p_attn_v_proj_weight_int4_lanes
+    op: constant
+    attrs:
+      name: p_attn_v_proj_weight_int4_lanes
+      value: 1
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_attn_v_proj_weight_int4_lanes, i32, [1]]]
+  - id: p_attn_v_proj_weight_int4_lanes_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 8}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_attn_v_proj_weight_int4_lanes]
+    outputs: [[p_attn_v_proj_weight_int4_lanes_bc, i32, [8]]]
+  - id: p_attn_v_proj_weight_int4_slots
+    op: tensor.range
+    attrs: {start: 0, stop: 8, step: 1, dtype: i32}
+    outputs: [[p_attn_v_proj_weight_int4_slots, i32, [8]]]
+  - id: p_attn_v_proj_weight_int4_lane
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: remainder}}
+    inputs: [p_attn_v_proj_weight_int4_slots, p_attn_v_proj_weight_int4_lanes_bc]
+    outputs: [[p_attn_v_proj_weight_int4_lane, i32, [8]]]
+  - id: p_attn_v_proj_weight_int4_lane_shift
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [p_attn_v_proj_weight_int4_lane, p_attn_v_proj_weight_int4_lane_stride_bc]
+    outputs: [[p_attn_v_proj_weight_int4_lane_shift, i32, [8]]]
+  - id: p_attn_v_proj_weight_int4_run
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: floor_divide}}
+    inputs: [p_attn_v_proj_weight_int4_slots, p_attn_v_proj_weight_int4_lanes_bc]
+    outputs: [[p_attn_v_proj_weight_int4_run, i32, [8]]]
+  - id: p_attn_v_proj_weight_int4_run_shift
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [p_attn_v_proj_weight_int4_run, p_attn_v_proj_weight_int4_bits_bc]
+    outputs: [[p_attn_v_proj_weight_int4_run_shift, i32, [8]]]
+  - id: p_attn_v_proj_weight_int4_shifts
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [p_attn_v_proj_weight_int4_lane_shift, p_attn_v_proj_weight_int4_run_shift]
+    outputs: [[p_attn_v_proj_weight_int4_shifts, i32, [8]]]
+  - id: p_attn_v_proj_weight_integers_mask
+    op: constant
+    attrs:
+      name: p_attn_v_proj_weight_integers_mask
+      value: 15
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_attn_v_proj_weight_integers_mask, i32, [1]]]
+  - id: p_attn_v_proj_weight_integers_mask_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 640}, {__dim__: 8}, {__dim__: 640}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_attn_v_proj_weight_integers_mask]
+    outputs: [[p_attn_v_proj_weight_integers_mask_bc, i32, [640, 8, 640]]]
+  - id: p_attn_v_proj_weight_integers_shift_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [1, 8, 1]}}
+    inputs: [p_attn_v_proj_weight_int4_shifts]
+    outputs: [[p_attn_v_proj_weight_integers_shift_view, i32, [1, 8, 1]]]
+  - id: p_attn_v_proj_weight_integers_shift_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 640}, {__dim__: 8}, {__dim__: 640}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_1}
+            - {literal: {value: 0, dtype: int}}
+            select: null
+    inputs: [p_attn_v_proj_weight_integers_shift_view]
+    outputs: [[p_attn_v_proj_weight_integers_shift_view_bc, i32, [640, 8, 640]]]
+  - id: p_attn_v_proj_weight_qweight
+    op: constant
+    attrs:
+      name: p_attn_v_proj_weight_qweight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: model.layers.0.self_attn.v_proj.qweight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [640, 640]}
+      source_dtype: i32
+      source_graph: null
+    outputs: [[p_attn_v_proj_weight_qweight, i32, [640, 640]]]
+  - id: p_attn_v_proj_weight_integers_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [640, 1, 640]}}
+    inputs: [p_attn_v_proj_weight_qweight]
+    outputs: [[p_attn_v_proj_weight_integers_view, i32, [640, 1, 640]]]
+  - id: p_attn_v_proj_weight_integers_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 640}, {__dim__: 8}, {__dim__: 640}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_2}
+            select: null
+    inputs: [p_attn_v_proj_weight_integers_view]
+    outputs: [[p_attn_v_proj_weight_integers_view_bc, i32, [640, 8, 640]]]
+  - id: p_attn_v_proj_weight_integers_shifted
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: right_shift}}
+    inputs: [p_attn_v_proj_weight_integers_view_bc, p_attn_v_proj_weight_integers_shift_view_bc]
+    outputs: [[p_attn_v_proj_weight_integers_shifted, i32, [640, 8, 640]]]
+  - id: p_attn_v_proj_weight_integers_nibble
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: bitwise_and}}
+    inputs: [p_attn_v_proj_weight_integers_shifted, p_attn_v_proj_weight_integers_mask_bc]
+    outputs: [[p_attn_v_proj_weight_integers_nibble, i32, [640, 8, 640]]]
+  - id: p_attn_v_proj_weight_integers
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [5120, 640]}}
+    inputs: [p_attn_v_proj_weight_integers_nibble]
+    outputs: [[p_attn_v_proj_weight_integers, i32, [5120, 640]]]
+  - id: p_attn_v_proj_weight_qzeros
+    op: constant
+    attrs:
+      name: p_attn_v_proj_weight_qzeros
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: model.layers.0.self_attn.v_proj.qzeros
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [40, 80]}
+      source_dtype: i32
+      source_graph: null
+    outputs: [[p_attn_v_proj_weight_qzeros, i32, [40, 80]]]
+  - id: p_attn_v_proj_weight_scales
+    op: constant
+    attrs:
+      name: p_attn_v_proj_weight_scales
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: model.layers.0.self_attn.v_proj.scales
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [40, 640]}
+      source_dtype: f16
+      source_graph: null
+    outputs: [[p_attn_v_proj_weight_scales, f16, [40, 640]]]
+  - id: p_attn_v_proj_weight_scales_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [40, 1, 640]}}
+    inputs: [p_attn_v_proj_weight_scales]
+    outputs: [[p_attn_v_proj_weight_scales_view, f16, [40, 1, 640]]]
+  - id: p_attn_v_proj_weight_scales_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 128}, {__dim__: 640}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_2}
+            select: null
+    inputs: [p_attn_v_proj_weight_scales_view]
+    outputs: [[p_attn_v_proj_weight_scales_view_bc, f16, [40, 128, 640]]]
+  - id: p_attn_v_proj_weight_scale_values
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [5120, 640]}}
+    inputs: [p_attn_v_proj_weight_scales_view_bc]
+    outputs: [[p_attn_v_proj_weight_scale_values, f16, [5120, 640]]]
+  - id: p_attn_v_proj_weight_zero_bias
+    op: constant
+    attrs:
+      name: p_attn_v_proj_weight_zero_bias
+      value: 1
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_attn_v_proj_weight_zero_bias, i32, [1]]]
+  - id: p_attn_v_proj_weight_zero_bias_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 640}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_attn_v_proj_weight_zero_bias]
+    outputs: [[p_attn_v_proj_weight_zero_bias_bc, i32, [40, 640]]]
+  - id: p_attn_v_proj_weight_zeros_grouped_mask
+    op: constant
+    attrs:
+      name: p_attn_v_proj_weight_zeros_grouped_mask
+      value: 15
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_attn_v_proj_weight_zeros_grouped_mask, i32, [1]]]
+  - id: p_attn_v_proj_weight_zeros_grouped_mask_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 80}, {__dim__: 8}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_attn_v_proj_weight_zeros_grouped_mask]
+    outputs: [[p_attn_v_proj_weight_zeros_grouped_mask_bc, i32, [40, 80, 8]]]
+  - id: p_attn_v_proj_weight_zeros_grouped_shift_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [1, 1, 8]}}
+    inputs: [p_attn_v_proj_weight_int4_shifts]
+    outputs: [[p_attn_v_proj_weight_zeros_grouped_shift_view, i32, [1, 1, 8]]]
+  - id: p_attn_v_proj_weight_zeros_grouped_shift_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 80}, {__dim__: 8}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {literal: {value: 0, dtype: int}}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_2}
+            select: null
+    inputs: [p_attn_v_proj_weight_zeros_grouped_shift_view]
+    outputs: [[p_attn_v_proj_weight_zeros_grouped_shift_view_bc, i32, [40, 80, 8]]]
+  - id: p_attn_v_proj_weight_zeros_grouped_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [40, 80, 1]}}
+    inputs: [p_attn_v_proj_weight_qzeros]
+    outputs: [[p_attn_v_proj_weight_zeros_grouped_view, i32, [40, 80, 1]]]
+  - id: p_attn_v_proj_weight_zeros_grouped_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 80}, {__dim__: 8}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {var: out_coord_1}
+            - {literal: {value: 0, dtype: int}}
+            select: null
+    inputs: [p_attn_v_proj_weight_zeros_grouped_view]
+    outputs: [[p_attn_v_proj_weight_zeros_grouped_view_bc, i32, [40, 80, 8]]]
+  - id: p_attn_v_proj_weight_zeros_grouped_shifted
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: right_shift}}
+    inputs: [p_attn_v_proj_weight_zeros_grouped_view_bc, p_attn_v_proj_weight_zeros_grouped_shift_view_bc]
+    outputs: [[p_attn_v_proj_weight_zeros_grouped_shifted, i32, [40, 80, 8]]]
+  - id: p_attn_v_proj_weight_zeros_grouped_nibble
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: bitwise_and}}
+    inputs: [p_attn_v_proj_weight_zeros_grouped_shifted, p_attn_v_proj_weight_zeros_grouped_mask_bc]
+    outputs: [[p_attn_v_proj_weight_zeros_grouped_nibble, i32, [40, 80, 8]]]
+  - id: p_attn_v_proj_weight_zeros_grouped
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [40, 640]}}
+    inputs: [p_attn_v_proj_weight_zeros_grouped_nibble]
+    outputs: [[p_attn_v_proj_weight_zeros_grouped, i32, [40, 640]]]
+  - id: p_attn_v_proj_weight_zeros_unbiased
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [p_attn_v_proj_weight_zeros_grouped, p_attn_v_proj_weight_zero_bias_bc]
+    outputs: [[p_attn_v_proj_weight_zeros_unbiased, i32, [40, 640]]]
+  - id: p_attn_v_proj_weight_zeros_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [40, 1, 640]}}
+    inputs: [p_attn_v_proj_weight_zeros_unbiased]
+    outputs: [[p_attn_v_proj_weight_zeros_view, i32, [40, 1, 640]]]
+  - id: p_attn_v_proj_weight_zeros_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 128}, {__dim__: 640}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_2}
+            select: null
+    inputs: [p_attn_v_proj_weight_zeros_view]
+    outputs: [[p_attn_v_proj_weight_zeros_view_bc, i32, [40, 128, 640]]]
+  - id: p_attn_v_proj_weight_zeros
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [5120, 640]}}
+    inputs: [p_attn_v_proj_weight_zeros_view_bc]
+    outputs: [[p_attn_v_proj_weight_zeros, i32, [5120, 640]]]
+  - id: p_attn_v_proj_weight_centered
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: subtract}}
+    inputs: [p_attn_v_proj_weight_integers, p_attn_v_proj_weight_zeros]
+    outputs: [[p_attn_v_proj_weight_centered, i32, [5120, 640]]]
+  - id: p_attn_v_proj_weight_values
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: copy}}
+    inputs: [p_attn_v_proj_weight_centered]
+    outputs: [[p_attn_v_proj_weight_values, f16, [5120, 640]]]
+  - id: p_attn_v_proj_weight_scaled
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [p_attn_v_proj_weight_values, p_attn_v_proj_weight_scale_values]
+    outputs: [[p_attn_v_proj_weight_scaled, f16, [5120, 640]]]
+  - id: p_attn_v_proj_weight
+    op: torch.transpose
+    attrs: {axes: {__tuple__: [1, 0]}}
+    inputs: [p_attn_v_proj_weight_scaled]
+    outputs: [[p_attn_v_proj_weight, f16, [640, 5120]]]
+  - id: p_input_layernorm_weight
+    op: constant
+    attrs:
+      name: p_input_layernorm_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: model.layers.0.input_layernorm.weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [5120]}
+      source_dtype: float16
+      source_graph: null
+    outputs: [[p_input_layernorm_weight, f16, [5120]]]
+  - id: p_input_layernorm_weight_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 512}, {__dim__: 5120}]}
+      sources: {__tuple__: [{__index_source__: {input_idx: 0, coord_map: [{var: out_coord_2}], select: null}}]}
+    inputs: [p_input_layernorm_weight]
+    outputs: [[p_input_layernorm_weight_bc, f16, [1, 512, 5120]]]
+  - id: p_mlp_down_proj_weight_int4_bits
+    op: constant
+    attrs:
+      name: p_mlp_down_proj_weight_int4_bits
+      value: 4
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_mlp_down_proj_weight_int4_bits, i32, [1]]]
+  - id: p_mlp_down_proj_weight_int4_bits_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 8}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_mlp_down_proj_weight_int4_bits]
+    outputs: [[p_mlp_down_proj_weight_int4_bits_bc, i32, [8]]]
+  - id: p_mlp_down_proj_weight_int4_lane_stride
+    op: constant
+    attrs:
+      name: p_mlp_down_proj_weight_int4_lane_stride
+      value: 32
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_mlp_down_proj_weight_int4_lane_stride, i32, [1]]]
+  - id: p_mlp_down_proj_weight_int4_lane_stride_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 8}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_mlp_down_proj_weight_int4_lane_stride]
+    outputs: [[p_mlp_down_proj_weight_int4_lane_stride_bc, i32, [8]]]
+  - id: p_mlp_down_proj_weight_int4_lanes
+    op: constant
+    attrs:
+      name: p_mlp_down_proj_weight_int4_lanes
+      value: 1
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_mlp_down_proj_weight_int4_lanes, i32, [1]]]
+  - id: p_mlp_down_proj_weight_int4_lanes_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 8}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_mlp_down_proj_weight_int4_lanes]
+    outputs: [[p_mlp_down_proj_weight_int4_lanes_bc, i32, [8]]]
+  - id: p_mlp_down_proj_weight_int4_slots
+    op: tensor.range
+    attrs: {start: 0, stop: 8, step: 1, dtype: i32}
+    outputs: [[p_mlp_down_proj_weight_int4_slots, i32, [8]]]
+  - id: p_mlp_down_proj_weight_int4_lane
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: remainder}}
+    inputs: [p_mlp_down_proj_weight_int4_slots, p_mlp_down_proj_weight_int4_lanes_bc]
+    outputs: [[p_mlp_down_proj_weight_int4_lane, i32, [8]]]
+  - id: p_mlp_down_proj_weight_int4_lane_shift
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [p_mlp_down_proj_weight_int4_lane, p_mlp_down_proj_weight_int4_lane_stride_bc]
+    outputs: [[p_mlp_down_proj_weight_int4_lane_shift, i32, [8]]]
+  - id: p_mlp_down_proj_weight_int4_run
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: floor_divide}}
+    inputs: [p_mlp_down_proj_weight_int4_slots, p_mlp_down_proj_weight_int4_lanes_bc]
+    outputs: [[p_mlp_down_proj_weight_int4_run, i32, [8]]]
+  - id: p_mlp_down_proj_weight_int4_run_shift
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [p_mlp_down_proj_weight_int4_run, p_mlp_down_proj_weight_int4_bits_bc]
+    outputs: [[p_mlp_down_proj_weight_int4_run_shift, i32, [8]]]
+  - id: p_mlp_down_proj_weight_int4_shifts
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [p_mlp_down_proj_weight_int4_lane_shift, p_mlp_down_proj_weight_int4_run_shift]
+    outputs: [[p_mlp_down_proj_weight_int4_shifts, i32, [8]]]
+  - id: p_mlp_down_proj_weight_integers_mask
+    op: constant
+    attrs:
+      name: p_mlp_down_proj_weight_integers_mask
+      value: 15
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_mlp_down_proj_weight_integers_mask, i32, [1]]]
+  - id: p_mlp_down_proj_weight_integers_mask_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1280}, {__dim__: 8}, {__dim__: 5120}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_mlp_down_proj_weight_integers_mask]
+    outputs: [[p_mlp_down_proj_weight_integers_mask_bc, i32, [1280, 8, 5120]]]
+  - id: p_mlp_down_proj_weight_integers_shift_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [1, 8, 1]}}
+    inputs: [p_mlp_down_proj_weight_int4_shifts]
+    outputs: [[p_mlp_down_proj_weight_integers_shift_view, i32, [1, 8, 1]]]
+  - id: p_mlp_down_proj_weight_integers_shift_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1280}, {__dim__: 8}, {__dim__: 5120}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_1}
+            - {literal: {value: 0, dtype: int}}
+            select: null
+    inputs: [p_mlp_down_proj_weight_integers_shift_view]
+    outputs: [[p_mlp_down_proj_weight_integers_shift_view_bc, i32, [1280, 8, 5120]]]
+  - id: p_mlp_down_proj_weight_qweight
+    op: constant
+    attrs:
+      name: p_mlp_down_proj_weight_qweight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: model.layers.0.mlp.down_proj.qweight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [1280, 5120]}
+      source_dtype: i32
+      source_graph: null
+    outputs: [[p_mlp_down_proj_weight_qweight, i32, [1280, 5120]]]
+  - id: p_mlp_down_proj_weight_integers_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [1280, 1, 5120]}}
+    inputs: [p_mlp_down_proj_weight_qweight]
+    outputs: [[p_mlp_down_proj_weight_integers_view, i32, [1280, 1, 5120]]]
+  - id: p_mlp_down_proj_weight_integers_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1280}, {__dim__: 8}, {__dim__: 5120}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_2}
+            select: null
+    inputs: [p_mlp_down_proj_weight_integers_view]
+    outputs: [[p_mlp_down_proj_weight_integers_view_bc, i32, [1280, 8, 5120]]]
+  - id: p_mlp_down_proj_weight_integers_shifted
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: right_shift}}
+    inputs: [p_mlp_down_proj_weight_integers_view_bc, p_mlp_down_proj_weight_integers_shift_view_bc]
+    outputs: [[p_mlp_down_proj_weight_integers_shifted, i32, [1280, 8, 5120]]]
+  - id: p_mlp_down_proj_weight_integers_nibble
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: bitwise_and}}
+    inputs: [p_mlp_down_proj_weight_integers_shifted, p_mlp_down_proj_weight_integers_mask_bc]
+    outputs: [[p_mlp_down_proj_weight_integers_nibble, i32, [1280, 8, 5120]]]
+  - id: p_mlp_down_proj_weight_integers
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [10240, 5120]}}
+    inputs: [p_mlp_down_proj_weight_integers_nibble]
+    outputs: [[p_mlp_down_proj_weight_integers, i32, [10240, 5120]]]
+  - id: p_mlp_down_proj_weight_qzeros
+    op: constant
+    attrs:
+      name: p_mlp_down_proj_weight_qzeros
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: model.layers.0.mlp.down_proj.qzeros
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [80, 640]}
+      source_dtype: i32
+      source_graph: null
+    outputs: [[p_mlp_down_proj_weight_qzeros, i32, [80, 640]]]
+  - id: p_mlp_down_proj_weight_scales
+    op: constant
+    attrs:
+      name: p_mlp_down_proj_weight_scales
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: model.layers.0.mlp.down_proj.scales
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [80, 5120]}
+      source_dtype: f16
+      source_graph: null
+    outputs: [[p_mlp_down_proj_weight_scales, f16, [80, 5120]]]
+  - id: p_mlp_down_proj_weight_scales_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [80, 1, 5120]}}
+    inputs: [p_mlp_down_proj_weight_scales]
+    outputs: [[p_mlp_down_proj_weight_scales_view, f16, [80, 1, 5120]]]
+  - id: p_mlp_down_proj_weight_scales_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 80}, {__dim__: 128}, {__dim__: 5120}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_2}
+            select: null
+    inputs: [p_mlp_down_proj_weight_scales_view]
+    outputs: [[p_mlp_down_proj_weight_scales_view_bc, f16, [80, 128, 5120]]]
+  - id: p_mlp_down_proj_weight_scale_values
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [10240, 5120]}}
+    inputs: [p_mlp_down_proj_weight_scales_view_bc]
+    outputs: [[p_mlp_down_proj_weight_scale_values, f16, [10240, 5120]]]
+  - id: p_mlp_down_proj_weight_zero_bias
+    op: constant
+    attrs:
+      name: p_mlp_down_proj_weight_zero_bias
+      value: 1
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_mlp_down_proj_weight_zero_bias, i32, [1]]]
+  - id: p_mlp_down_proj_weight_zero_bias_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 80}, {__dim__: 5120}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_mlp_down_proj_weight_zero_bias]
+    outputs: [[p_mlp_down_proj_weight_zero_bias_bc, i32, [80, 5120]]]
+  - id: p_mlp_down_proj_weight_zeros_grouped_mask
+    op: constant
+    attrs:
+      name: p_mlp_down_proj_weight_zeros_grouped_mask
+      value: 15
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_mlp_down_proj_weight_zeros_grouped_mask, i32, [1]]]
+  - id: p_mlp_down_proj_weight_zeros_grouped_mask_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 80}, {__dim__: 640}, {__dim__: 8}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_mlp_down_proj_weight_zeros_grouped_mask]
+    outputs: [[p_mlp_down_proj_weight_zeros_grouped_mask_bc, i32, [80, 640, 8]]]
+  - id: p_mlp_down_proj_weight_zeros_grouped_shift_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [1, 1, 8]}}
+    inputs: [p_mlp_down_proj_weight_int4_shifts]
+    outputs: [[p_mlp_down_proj_weight_zeros_grouped_shift_view, i32, [1, 1, 8]]]
+  - id: p_mlp_down_proj_weight_zeros_grouped_shift_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 80}, {__dim__: 640}, {__dim__: 8}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {literal: {value: 0, dtype: int}}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_2}
+            select: null
+    inputs: [p_mlp_down_proj_weight_zeros_grouped_shift_view]
+    outputs: [[p_mlp_down_proj_weight_zeros_grouped_shift_view_bc, i32, [80, 640, 8]]]
+  - id: p_mlp_down_proj_weight_zeros_grouped_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [80, 640, 1]}}
+    inputs: [p_mlp_down_proj_weight_qzeros]
+    outputs: [[p_mlp_down_proj_weight_zeros_grouped_view, i32, [80, 640, 1]]]
+  - id: p_mlp_down_proj_weight_zeros_grouped_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 80}, {__dim__: 640}, {__dim__: 8}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {var: out_coord_1}
+            - {literal: {value: 0, dtype: int}}
+            select: null
+    inputs: [p_mlp_down_proj_weight_zeros_grouped_view]
+    outputs: [[p_mlp_down_proj_weight_zeros_grouped_view_bc, i32, [80, 640, 8]]]
+  - id: p_mlp_down_proj_weight_zeros_grouped_shifted
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: right_shift}}
+    inputs: [p_mlp_down_proj_weight_zeros_grouped_view_bc, p_mlp_down_proj_weight_zeros_grouped_shift_view_bc]
+    outputs: [[p_mlp_down_proj_weight_zeros_grouped_shifted, i32, [80, 640, 8]]]
+  - id: p_mlp_down_proj_weight_zeros_grouped_nibble
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: bitwise_and}}
+    inputs: [p_mlp_down_proj_weight_zeros_grouped_shifted, p_mlp_down_proj_weight_zeros_grouped_mask_bc]
+    outputs: [[p_mlp_down_proj_weight_zeros_grouped_nibble, i32, [80, 640, 8]]]
+  - id: p_mlp_down_proj_weight_zeros_grouped
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [80, 5120]}}
+    inputs: [p_mlp_down_proj_weight_zeros_grouped_nibble]
+    outputs: [[p_mlp_down_proj_weight_zeros_grouped, i32, [80, 5120]]]
+  - id: p_mlp_down_proj_weight_zeros_unbiased
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [p_mlp_down_proj_weight_zeros_grouped, p_mlp_down_proj_weight_zero_bias_bc]
+    outputs: [[p_mlp_down_proj_weight_zeros_unbiased, i32, [80, 5120]]]
+  - id: p_mlp_down_proj_weight_zeros_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [80, 1, 5120]}}
+    inputs: [p_mlp_down_proj_weight_zeros_unbiased]
+    outputs: [[p_mlp_down_proj_weight_zeros_view, i32, [80, 1, 5120]]]
+  - id: p_mlp_down_proj_weight_zeros_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 80}, {__dim__: 128}, {__dim__: 5120}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_2}
+            select: null
+    inputs: [p_mlp_down_proj_weight_zeros_view]
+    outputs: [[p_mlp_down_proj_weight_zeros_view_bc, i32, [80, 128, 5120]]]
+  - id: p_mlp_down_proj_weight_zeros
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [10240, 5120]}}
+    inputs: [p_mlp_down_proj_weight_zeros_view_bc]
+    outputs: [[p_mlp_down_proj_weight_zeros, i32, [10240, 5120]]]
+  - id: p_mlp_down_proj_weight_centered
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: subtract}}
+    inputs: [p_mlp_down_proj_weight_integers, p_mlp_down_proj_weight_zeros]
+    outputs: [[p_mlp_down_proj_weight_centered, i32, [10240, 5120]]]
+  - id: p_mlp_down_proj_weight_values
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: copy}}
+    inputs: [p_mlp_down_proj_weight_centered]
+    outputs: [[p_mlp_down_proj_weight_values, f16, [10240, 5120]]]
+  - id: p_mlp_down_proj_weight_scaled
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [p_mlp_down_proj_weight_values, p_mlp_down_proj_weight_scale_values]
+    outputs: [[p_mlp_down_proj_weight_scaled, f16, [10240, 5120]]]
+  - id: p_mlp_down_proj_weight
+    op: torch.transpose
+    attrs: {axes: {__tuple__: [1, 0]}}
+    inputs: [p_mlp_down_proj_weight_scaled]
+    outputs: [[p_mlp_down_proj_weight, f16, [5120, 10240]]]
+  - id: p_mlp_gate_proj_weight_int4_bits
+    op: constant
+    attrs:
+      name: p_mlp_gate_proj_weight_int4_bits
+      value: 4
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_mlp_gate_proj_weight_int4_bits, i32, [1]]]
+  - id: p_mlp_gate_proj_weight_int4_bits_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 8}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_mlp_gate_proj_weight_int4_bits]
+    outputs: [[p_mlp_gate_proj_weight_int4_bits_bc, i32, [8]]]
+  - id: p_mlp_gate_proj_weight_int4_lane_stride
+    op: constant
+    attrs:
+      name: p_mlp_gate_proj_weight_int4_lane_stride
+      value: 32
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_mlp_gate_proj_weight_int4_lane_stride, i32, [1]]]
+  - id: p_mlp_gate_proj_weight_int4_lane_stride_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 8}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_mlp_gate_proj_weight_int4_lane_stride]
+    outputs: [[p_mlp_gate_proj_weight_int4_lane_stride_bc, i32, [8]]]
+  - id: p_mlp_gate_proj_weight_int4_lanes
+    op: constant
+    attrs:
+      name: p_mlp_gate_proj_weight_int4_lanes
+      value: 1
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_mlp_gate_proj_weight_int4_lanes, i32, [1]]]
+  - id: p_mlp_gate_proj_weight_int4_lanes_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 8}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_mlp_gate_proj_weight_int4_lanes]
+    outputs: [[p_mlp_gate_proj_weight_int4_lanes_bc, i32, [8]]]
+  - id: p_mlp_gate_proj_weight_int4_slots
+    op: tensor.range
+    attrs: {start: 0, stop: 8, step: 1, dtype: i32}
+    outputs: [[p_mlp_gate_proj_weight_int4_slots, i32, [8]]]
+  - id: p_mlp_gate_proj_weight_int4_lane
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: remainder}}
+    inputs: [p_mlp_gate_proj_weight_int4_slots, p_mlp_gate_proj_weight_int4_lanes_bc]
+    outputs: [[p_mlp_gate_proj_weight_int4_lane, i32, [8]]]
+  - id: p_mlp_gate_proj_weight_int4_lane_shift
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [p_mlp_gate_proj_weight_int4_lane, p_mlp_gate_proj_weight_int4_lane_stride_bc]
+    outputs: [[p_mlp_gate_proj_weight_int4_lane_shift, i32, [8]]]
+  - id: p_mlp_gate_proj_weight_int4_run
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: floor_divide}}
+    inputs: [p_mlp_gate_proj_weight_int4_slots, p_mlp_gate_proj_weight_int4_lanes_bc]
+    outputs: [[p_mlp_gate_proj_weight_int4_run, i32, [8]]]
+  - id: p_mlp_gate_proj_weight_int4_run_shift
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [p_mlp_gate_proj_weight_int4_run, p_mlp_gate_proj_weight_int4_bits_bc]
+    outputs: [[p_mlp_gate_proj_weight_int4_run_shift, i32, [8]]]
+  - id: p_mlp_gate_proj_weight_int4_shifts
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [p_mlp_gate_proj_weight_int4_lane_shift, p_mlp_gate_proj_weight_int4_run_shift]
+    outputs: [[p_mlp_gate_proj_weight_int4_shifts, i32, [8]]]
+  - id: p_mlp_gate_proj_weight_integers_mask
+    op: constant
+    attrs:
+      name: p_mlp_gate_proj_weight_integers_mask
+      value: 15
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_mlp_gate_proj_weight_integers_mask, i32, [1]]]
+  - id: p_mlp_gate_proj_weight_integers_mask_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 640}, {__dim__: 8}, {__dim__: 10240}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_mlp_gate_proj_weight_integers_mask]
+    outputs: [[p_mlp_gate_proj_weight_integers_mask_bc, i32, [640, 8, 10240]]]
+  - id: p_mlp_gate_proj_weight_integers_shift_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [1, 8, 1]}}
+    inputs: [p_mlp_gate_proj_weight_int4_shifts]
+    outputs: [[p_mlp_gate_proj_weight_integers_shift_view, i32, [1, 8, 1]]]
+  - id: p_mlp_gate_proj_weight_integers_shift_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 640}, {__dim__: 8}, {__dim__: 10240}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_1}
+            - {literal: {value: 0, dtype: int}}
+            select: null
+    inputs: [p_mlp_gate_proj_weight_integers_shift_view]
+    outputs: [[p_mlp_gate_proj_weight_integers_shift_view_bc, i32, [640, 8, 10240]]]
+  - id: p_mlp_gate_proj_weight_qweight
+    op: constant
+    attrs:
+      name: p_mlp_gate_proj_weight_qweight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: model.layers.0.mlp.gate_proj.qweight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [640, 10240]}
+      source_dtype: i32
+      source_graph: null
+    outputs: [[p_mlp_gate_proj_weight_qweight, i32, [640, 10240]]]
+  - id: p_mlp_gate_proj_weight_integers_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [640, 1, 10240]}}
+    inputs: [p_mlp_gate_proj_weight_qweight]
+    outputs: [[p_mlp_gate_proj_weight_integers_view, i32, [640, 1, 10240]]]
+  - id: p_mlp_gate_proj_weight_integers_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 640}, {__dim__: 8}, {__dim__: 10240}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_2}
+            select: null
+    inputs: [p_mlp_gate_proj_weight_integers_view]
+    outputs: [[p_mlp_gate_proj_weight_integers_view_bc, i32, [640, 8, 10240]]]
+  - id: p_mlp_gate_proj_weight_integers_shifted
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: right_shift}}
+    inputs: [p_mlp_gate_proj_weight_integers_view_bc, p_mlp_gate_proj_weight_integers_shift_view_bc]
+    outputs: [[p_mlp_gate_proj_weight_integers_shifted, i32, [640, 8, 10240]]]
+  - id: p_mlp_gate_proj_weight_integers_nibble
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: bitwise_and}}
+    inputs: [p_mlp_gate_proj_weight_integers_shifted, p_mlp_gate_proj_weight_integers_mask_bc]
+    outputs: [[p_mlp_gate_proj_weight_integers_nibble, i32, [640, 8, 10240]]]
+  - id: p_mlp_gate_proj_weight_integers
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [5120, 10240]}}
+    inputs: [p_mlp_gate_proj_weight_integers_nibble]
+    outputs: [[p_mlp_gate_proj_weight_integers, i32, [5120, 10240]]]
+  - id: p_mlp_gate_proj_weight_qzeros
+    op: constant
+    attrs:
+      name: p_mlp_gate_proj_weight_qzeros
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: model.layers.0.mlp.gate_proj.qzeros
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [40, 1280]}
+      source_dtype: i32
+      source_graph: null
+    outputs: [[p_mlp_gate_proj_weight_qzeros, i32, [40, 1280]]]
+  - id: p_mlp_gate_proj_weight_scales
+    op: constant
+    attrs:
+      name: p_mlp_gate_proj_weight_scales
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: model.layers.0.mlp.gate_proj.scales
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [40, 10240]}
+      source_dtype: f16
+      source_graph: null
+    outputs: [[p_mlp_gate_proj_weight_scales, f16, [40, 10240]]]
+  - id: p_mlp_gate_proj_weight_scales_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [40, 1, 10240]}}
+    inputs: [p_mlp_gate_proj_weight_scales]
+    outputs: [[p_mlp_gate_proj_weight_scales_view, f16, [40, 1, 10240]]]
+  - id: p_mlp_gate_proj_weight_scales_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 128}, {__dim__: 10240}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_2}
+            select: null
+    inputs: [p_mlp_gate_proj_weight_scales_view]
+    outputs: [[p_mlp_gate_proj_weight_scales_view_bc, f16, [40, 128, 10240]]]
+  - id: p_mlp_gate_proj_weight_scale_values
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [5120, 10240]}}
+    inputs: [p_mlp_gate_proj_weight_scales_view_bc]
+    outputs: [[p_mlp_gate_proj_weight_scale_values, f16, [5120, 10240]]]
+  - id: p_mlp_gate_proj_weight_zero_bias
+    op: constant
+    attrs:
+      name: p_mlp_gate_proj_weight_zero_bias
+      value: 1
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_mlp_gate_proj_weight_zero_bias, i32, [1]]]
+  - id: p_mlp_gate_proj_weight_zero_bias_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 10240}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_mlp_gate_proj_weight_zero_bias]
+    outputs: [[p_mlp_gate_proj_weight_zero_bias_bc, i32, [40, 10240]]]
+  - id: p_mlp_gate_proj_weight_zeros_grouped_mask
+    op: constant
+    attrs:
+      name: p_mlp_gate_proj_weight_zeros_grouped_mask
+      value: 15
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_mlp_gate_proj_weight_zeros_grouped_mask, i32, [1]]]
+  - id: p_mlp_gate_proj_weight_zeros_grouped_mask_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 1280}, {__dim__: 8}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_mlp_gate_proj_weight_zeros_grouped_mask]
+    outputs: [[p_mlp_gate_proj_weight_zeros_grouped_mask_bc, i32, [40, 1280, 8]]]
+  - id: p_mlp_gate_proj_weight_zeros_grouped_shift_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [1, 1, 8]}}
+    inputs: [p_mlp_gate_proj_weight_int4_shifts]
+    outputs: [[p_mlp_gate_proj_weight_zeros_grouped_shift_view, i32, [1, 1, 8]]]
+  - id: p_mlp_gate_proj_weight_zeros_grouped_shift_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 1280}, {__dim__: 8}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {literal: {value: 0, dtype: int}}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_2}
+            select: null
+    inputs: [p_mlp_gate_proj_weight_zeros_grouped_shift_view]
+    outputs: [[p_mlp_gate_proj_weight_zeros_grouped_shift_view_bc, i32, [40, 1280, 8]]]
+  - id: p_mlp_gate_proj_weight_zeros_grouped_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [40, 1280, 1]}}
+    inputs: [p_mlp_gate_proj_weight_qzeros]
+    outputs: [[p_mlp_gate_proj_weight_zeros_grouped_view, i32, [40, 1280, 1]]]
+  - id: p_mlp_gate_proj_weight_zeros_grouped_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 1280}, {__dim__: 8}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {var: out_coord_1}
+            - {literal: {value: 0, dtype: int}}
+            select: null
+    inputs: [p_mlp_gate_proj_weight_zeros_grouped_view]
+    outputs: [[p_mlp_gate_proj_weight_zeros_grouped_view_bc, i32, [40, 1280, 8]]]
+  - id: p_mlp_gate_proj_weight_zeros_grouped_shifted
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: right_shift}}
+    inputs: [p_mlp_gate_proj_weight_zeros_grouped_view_bc, p_mlp_gate_proj_weight_zeros_grouped_shift_view_bc]
+    outputs: [[p_mlp_gate_proj_weight_zeros_grouped_shifted, i32, [40, 1280, 8]]]
+  - id: p_mlp_gate_proj_weight_zeros_grouped_nibble
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: bitwise_and}}
+    inputs: [p_mlp_gate_proj_weight_zeros_grouped_shifted, p_mlp_gate_proj_weight_zeros_grouped_mask_bc]
+    outputs: [[p_mlp_gate_proj_weight_zeros_grouped_nibble, i32, [40, 1280, 8]]]
+  - id: p_mlp_gate_proj_weight_zeros_grouped
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [40, 10240]}}
+    inputs: [p_mlp_gate_proj_weight_zeros_grouped_nibble]
+    outputs: [[p_mlp_gate_proj_weight_zeros_grouped, i32, [40, 10240]]]
+  - id: p_mlp_gate_proj_weight_zeros_unbiased
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [p_mlp_gate_proj_weight_zeros_grouped, p_mlp_gate_proj_weight_zero_bias_bc]
+    outputs: [[p_mlp_gate_proj_weight_zeros_unbiased, i32, [40, 10240]]]
+  - id: p_mlp_gate_proj_weight_zeros_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [40, 1, 10240]}}
+    inputs: [p_mlp_gate_proj_weight_zeros_unbiased]
+    outputs: [[p_mlp_gate_proj_weight_zeros_view, i32, [40, 1, 10240]]]
+  - id: p_mlp_gate_proj_weight_zeros_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 128}, {__dim__: 10240}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_2}
+            select: null
+    inputs: [p_mlp_gate_proj_weight_zeros_view]
+    outputs: [[p_mlp_gate_proj_weight_zeros_view_bc, i32, [40, 128, 10240]]]
+  - id: p_mlp_gate_proj_weight_zeros
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [5120, 10240]}}
+    inputs: [p_mlp_gate_proj_weight_zeros_view_bc]
+    outputs: [[p_mlp_gate_proj_weight_zeros, i32, [5120, 10240]]]
+  - id: p_mlp_gate_proj_weight_centered
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: subtract}}
+    inputs: [p_mlp_gate_proj_weight_integers, p_mlp_gate_proj_weight_zeros]
+    outputs: [[p_mlp_gate_proj_weight_centered, i32, [5120, 10240]]]
+  - id: p_mlp_gate_proj_weight_values
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: copy}}
+    inputs: [p_mlp_gate_proj_weight_centered]
+    outputs: [[p_mlp_gate_proj_weight_values, f16, [5120, 10240]]]
+  - id: p_mlp_gate_proj_weight_scaled
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [p_mlp_gate_proj_weight_values, p_mlp_gate_proj_weight_scale_values]
+    outputs: [[p_mlp_gate_proj_weight_scaled, f16, [5120, 10240]]]
+  - id: p_mlp_gate_proj_weight
+    op: torch.transpose
+    attrs: {axes: {__tuple__: [1, 0]}}
+    inputs: [p_mlp_gate_proj_weight_scaled]
+    outputs: [[p_mlp_gate_proj_weight, f16, [10240, 5120]]]
+  - id: p_mlp_up_proj_weight_int4_bits
+    op: constant
+    attrs:
+      name: p_mlp_up_proj_weight_int4_bits
+      value: 4
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_mlp_up_proj_weight_int4_bits, i32, [1]]]
+  - id: p_mlp_up_proj_weight_int4_bits_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 8}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_mlp_up_proj_weight_int4_bits]
+    outputs: [[p_mlp_up_proj_weight_int4_bits_bc, i32, [8]]]
+  - id: p_mlp_up_proj_weight_int4_lane_stride
+    op: constant
+    attrs:
+      name: p_mlp_up_proj_weight_int4_lane_stride
+      value: 32
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_mlp_up_proj_weight_int4_lane_stride, i32, [1]]]
+  - id: p_mlp_up_proj_weight_int4_lane_stride_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 8}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_mlp_up_proj_weight_int4_lane_stride]
+    outputs: [[p_mlp_up_proj_weight_int4_lane_stride_bc, i32, [8]]]
+  - id: p_mlp_up_proj_weight_int4_lanes
+    op: constant
+    attrs:
+      name: p_mlp_up_proj_weight_int4_lanes
+      value: 1
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_mlp_up_proj_weight_int4_lanes, i32, [1]]]
+  - id: p_mlp_up_proj_weight_int4_lanes_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 8}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_mlp_up_proj_weight_int4_lanes]
+    outputs: [[p_mlp_up_proj_weight_int4_lanes_bc, i32, [8]]]
+  - id: p_mlp_up_proj_weight_int4_slots
+    op: tensor.range
+    attrs: {start: 0, stop: 8, step: 1, dtype: i32}
+    outputs: [[p_mlp_up_proj_weight_int4_slots, i32, [8]]]
+  - id: p_mlp_up_proj_weight_int4_lane
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: remainder}}
+    inputs: [p_mlp_up_proj_weight_int4_slots, p_mlp_up_proj_weight_int4_lanes_bc]
+    outputs: [[p_mlp_up_proj_weight_int4_lane, i32, [8]]]
+  - id: p_mlp_up_proj_weight_int4_lane_shift
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [p_mlp_up_proj_weight_int4_lane, p_mlp_up_proj_weight_int4_lane_stride_bc]
+    outputs: [[p_mlp_up_proj_weight_int4_lane_shift, i32, [8]]]
+  - id: p_mlp_up_proj_weight_int4_run
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: floor_divide}}
+    inputs: [p_mlp_up_proj_weight_int4_slots, p_mlp_up_proj_weight_int4_lanes_bc]
+    outputs: [[p_mlp_up_proj_weight_int4_run, i32, [8]]]
+  - id: p_mlp_up_proj_weight_int4_run_shift
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [p_mlp_up_proj_weight_int4_run, p_mlp_up_proj_weight_int4_bits_bc]
+    outputs: [[p_mlp_up_proj_weight_int4_run_shift, i32, [8]]]
+  - id: p_mlp_up_proj_weight_int4_shifts
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [p_mlp_up_proj_weight_int4_lane_shift, p_mlp_up_proj_weight_int4_run_shift]
+    outputs: [[p_mlp_up_proj_weight_int4_shifts, i32, [8]]]
+  - id: p_mlp_up_proj_weight_integers_mask
+    op: constant
+    attrs:
+      name: p_mlp_up_proj_weight_integers_mask
+      value: 15
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_mlp_up_proj_weight_integers_mask, i32, [1]]]
+  - id: p_mlp_up_proj_weight_integers_mask_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 640}, {__dim__: 8}, {__dim__: 10240}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_mlp_up_proj_weight_integers_mask]
+    outputs: [[p_mlp_up_proj_weight_integers_mask_bc, i32, [640, 8, 10240]]]
+  - id: p_mlp_up_proj_weight_integers_shift_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [1, 8, 1]}}
+    inputs: [p_mlp_up_proj_weight_int4_shifts]
+    outputs: [[p_mlp_up_proj_weight_integers_shift_view, i32, [1, 8, 1]]]
+  - id: p_mlp_up_proj_weight_integers_shift_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 640}, {__dim__: 8}, {__dim__: 10240}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_1}
+            - {literal: {value: 0, dtype: int}}
+            select: null
+    inputs: [p_mlp_up_proj_weight_integers_shift_view]
+    outputs: [[p_mlp_up_proj_weight_integers_shift_view_bc, i32, [640, 8, 10240]]]
+  - id: p_mlp_up_proj_weight_qweight
+    op: constant
+    attrs:
+      name: p_mlp_up_proj_weight_qweight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: model.layers.0.mlp.up_proj.qweight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [640, 10240]}
+      source_dtype: i32
+      source_graph: null
+    outputs: [[p_mlp_up_proj_weight_qweight, i32, [640, 10240]]]
+  - id: p_mlp_up_proj_weight_integers_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [640, 1, 10240]}}
+    inputs: [p_mlp_up_proj_weight_qweight]
+    outputs: [[p_mlp_up_proj_weight_integers_view, i32, [640, 1, 10240]]]
+  - id: p_mlp_up_proj_weight_integers_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 640}, {__dim__: 8}, {__dim__: 10240}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_2}
+            select: null
+    inputs: [p_mlp_up_proj_weight_integers_view]
+    outputs: [[p_mlp_up_proj_weight_integers_view_bc, i32, [640, 8, 10240]]]
+  - id: p_mlp_up_proj_weight_integers_shifted
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: right_shift}}
+    inputs: [p_mlp_up_proj_weight_integers_view_bc, p_mlp_up_proj_weight_integers_shift_view_bc]
+    outputs: [[p_mlp_up_proj_weight_integers_shifted, i32, [640, 8, 10240]]]
+  - id: p_mlp_up_proj_weight_integers_nibble
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: bitwise_and}}
+    inputs: [p_mlp_up_proj_weight_integers_shifted, p_mlp_up_proj_weight_integers_mask_bc]
+    outputs: [[p_mlp_up_proj_weight_integers_nibble, i32, [640, 8, 10240]]]
+  - id: p_mlp_up_proj_weight_integers
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [5120, 10240]}}
+    inputs: [p_mlp_up_proj_weight_integers_nibble]
+    outputs: [[p_mlp_up_proj_weight_integers, i32, [5120, 10240]]]
+  - id: p_mlp_up_proj_weight_qzeros
+    op: constant
+    attrs:
+      name: p_mlp_up_proj_weight_qzeros
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: model.layers.0.mlp.up_proj.qzeros
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [40, 1280]}
+      source_dtype: i32
+      source_graph: null
+    outputs: [[p_mlp_up_proj_weight_qzeros, i32, [40, 1280]]]
+  - id: p_mlp_up_proj_weight_scales
+    op: constant
+    attrs:
+      name: p_mlp_up_proj_weight_scales
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: model.layers.0.mlp.up_proj.scales
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [40, 10240]}
+      source_dtype: f16
+      source_graph: null
+    outputs: [[p_mlp_up_proj_weight_scales, f16, [40, 10240]]]
+  - id: p_mlp_up_proj_weight_scales_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [40, 1, 10240]}}
+    inputs: [p_mlp_up_proj_weight_scales]
+    outputs: [[p_mlp_up_proj_weight_scales_view, f16, [40, 1, 10240]]]
+  - id: p_mlp_up_proj_weight_scales_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 128}, {__dim__: 10240}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_2}
+            select: null
+    inputs: [p_mlp_up_proj_weight_scales_view]
+    outputs: [[p_mlp_up_proj_weight_scales_view_bc, f16, [40, 128, 10240]]]
+  - id: p_mlp_up_proj_weight_scale_values
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [5120, 10240]}}
+    inputs: [p_mlp_up_proj_weight_scales_view_bc]
+    outputs: [[p_mlp_up_proj_weight_scale_values, f16, [5120, 10240]]]
+  - id: p_mlp_up_proj_weight_zero_bias
+    op: constant
+    attrs:
+      name: p_mlp_up_proj_weight_zero_bias
+      value: 1
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_mlp_up_proj_weight_zero_bias, i32, [1]]]
+  - id: p_mlp_up_proj_weight_zero_bias_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 10240}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_mlp_up_proj_weight_zero_bias]
+    outputs: [[p_mlp_up_proj_weight_zero_bias_bc, i32, [40, 10240]]]
+  - id: p_mlp_up_proj_weight_zeros_grouped_mask
+    op: constant
+    attrs:
+      name: p_mlp_up_proj_weight_zeros_grouped_mask
+      value: 15
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[p_mlp_up_proj_weight_zeros_grouped_mask, i32, [1]]]
+  - id: p_mlp_up_proj_weight_zeros_grouped_mask_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 1280}, {__dim__: 8}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [p_mlp_up_proj_weight_zeros_grouped_mask]
+    outputs: [[p_mlp_up_proj_weight_zeros_grouped_mask_bc, i32, [40, 1280, 8]]]
+  - id: p_mlp_up_proj_weight_zeros_grouped_shift_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [1, 1, 8]}}
+    inputs: [p_mlp_up_proj_weight_int4_shifts]
+    outputs: [[p_mlp_up_proj_weight_zeros_grouped_shift_view, i32, [1, 1, 8]]]
+  - id: p_mlp_up_proj_weight_zeros_grouped_shift_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 1280}, {__dim__: 8}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {literal: {value: 0, dtype: int}}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_2}
+            select: null
+    inputs: [p_mlp_up_proj_weight_zeros_grouped_shift_view]
+    outputs: [[p_mlp_up_proj_weight_zeros_grouped_shift_view_bc, i32, [40, 1280, 8]]]
+  - id: p_mlp_up_proj_weight_zeros_grouped_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [40, 1280, 1]}}
+    inputs: [p_mlp_up_proj_weight_qzeros]
+    outputs: [[p_mlp_up_proj_weight_zeros_grouped_view, i32, [40, 1280, 1]]]
+  - id: p_mlp_up_proj_weight_zeros_grouped_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 1280}, {__dim__: 8}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {var: out_coord_1}
+            - {literal: {value: 0, dtype: int}}
+            select: null
+    inputs: [p_mlp_up_proj_weight_zeros_grouped_view]
+    outputs: [[p_mlp_up_proj_weight_zeros_grouped_view_bc, i32, [40, 1280, 8]]]
+  - id: p_mlp_up_proj_weight_zeros_grouped_shifted
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: right_shift}}
+    inputs: [p_mlp_up_proj_weight_zeros_grouped_view_bc, p_mlp_up_proj_weight_zeros_grouped_shift_view_bc]
+    outputs: [[p_mlp_up_proj_weight_zeros_grouped_shifted, i32, [40, 1280, 8]]]
+  - id: p_mlp_up_proj_weight_zeros_grouped_nibble
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: bitwise_and}}
+    inputs: [p_mlp_up_proj_weight_zeros_grouped_shifted, p_mlp_up_proj_weight_zeros_grouped_mask_bc]
+    outputs: [[p_mlp_up_proj_weight_zeros_grouped_nibble, i32, [40, 1280, 8]]]
+  - id: p_mlp_up_proj_weight_zeros_grouped
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [40, 10240]}}
+    inputs: [p_mlp_up_proj_weight_zeros_grouped_nibble]
+    outputs: [[p_mlp_up_proj_weight_zeros_grouped, i32, [40, 10240]]]
+  - id: p_mlp_up_proj_weight_zeros_unbiased
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [p_mlp_up_proj_weight_zeros_grouped, p_mlp_up_proj_weight_zero_bias_bc]
+    outputs: [[p_mlp_up_proj_weight_zeros_unbiased, i32, [40, 10240]]]
+  - id: p_mlp_up_proj_weight_zeros_view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [40, 1, 10240]}}
+    inputs: [p_mlp_up_proj_weight_zeros_unbiased]
+    outputs: [[p_mlp_up_proj_weight_zeros_view, i32, [40, 1, 10240]]]
+  - id: p_mlp_up_proj_weight_zeros_view_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 128}, {__dim__: 10240}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_2}
+            select: null
+    inputs: [p_mlp_up_proj_weight_zeros_view]
+    outputs: [[p_mlp_up_proj_weight_zeros_view_bc, i32, [40, 128, 10240]]]
+  - id: p_mlp_up_proj_weight_zeros
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [5120, 10240]}}
+    inputs: [p_mlp_up_proj_weight_zeros_view_bc]
+    outputs: [[p_mlp_up_proj_weight_zeros, i32, [5120, 10240]]]
+  - id: p_mlp_up_proj_weight_centered
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: subtract}}
+    inputs: [p_mlp_up_proj_weight_integers, p_mlp_up_proj_weight_zeros]
+    outputs: [[p_mlp_up_proj_weight_centered, i32, [5120, 10240]]]
+  - id: p_mlp_up_proj_weight_values
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: copy}}
+    inputs: [p_mlp_up_proj_weight_centered]
+    outputs: [[p_mlp_up_proj_weight_values, f16, [5120, 10240]]]
+  - id: p_mlp_up_proj_weight_scaled
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [p_mlp_up_proj_weight_values, p_mlp_up_proj_weight_scale_values]
+    outputs: [[p_mlp_up_proj_weight_scaled, f16, [5120, 10240]]]
+  - id: p_mlp_up_proj_weight
+    op: torch.transpose
+    attrs: {axes: {__tuple__: [1, 0]}}
+    inputs: [p_mlp_up_proj_weight_scaled]
+    outputs: [[p_mlp_up_proj_weight, f16, [10240, 5120]]]
+  - id: p_post_attention_layernorm_weight
+    op: constant
+    attrs:
+      name: p_post_attention_layernorm_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: model.layers.0.post_attention_layernorm.weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [5120]}
+      source_dtype: float16
+      source_graph: null
+    outputs: [[p_post_attention_layernorm_weight, f16, [5120]]]
+  - id: p_post_attention_layernorm_weight_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 512}, {__dim__: 5120}]}
+      sources: {__tuple__: [{__index_source__: {input_idx: 0, coord_map: [{var: out_coord_2}], select: null}}]}
+    inputs: [p_post_attention_layernorm_weight]
+    outputs: [[p_post_attention_layernorm_weight_bc, f16, [1, 512, 5120]]]
+  - id: position_embeddings_0
+    op: input
+    outputs: [[position_embeddings_0, f16, [1, 512, 640]]]
+  - id: position_embeddings_1
+    op: input
+    outputs: [[position_embeddings_1, f16, [1, 512, 640]]]
+  - id: pow_1_c1
+    op: constant
+    attrs:
+      name: pow_1_c1
+      value: 2.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[pow_1_c1, f32, [1]]]
+  - id: pow_1_c1_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 512}, {__dim__: 5120}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [pow_1_c1]
+    outputs: [[pow_1_c1_bc, f32, [1, 512, 5120]]]
+  - id: pow_2_c1
+    op: constant
+    attrs:
+      name: pow_2_c1
+      value: 2.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[pow_2_c1, f32, [1]]]
+  - id: pow_2_c1_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 512}, {__dim__: 5120}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [pow_2_c1]
+    outputs: [[pow_2_c1_bc, f32, [1, 512, 5120]]]
+  - id: slice_1_c1
+    op: constant
+    attrs:
+      name: slice_1_c1
+      value: 3.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_1_c1, f16, [1]]]
+  - id: slice_1_c2
+    op: constant
+    attrs:
+      name: slice_1_c2
+      value: 0.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_1_c2, f16, [1]]]
+  - id: slice_1_c3
+    op: constant
+    attrs:
+      name: slice_1_c3
+      value: 320.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_1_c3, f16, [1]]]
+  - id: slice_2_c1
+    op: constant
+    attrs:
+      name: slice_2_c1
+      value: 3.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_2_c1, f16, [1]]]
+  - id: slice_2_c2
+    op: constant
+    attrs:
+      name: slice_2_c2
+      value: 320.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_2_c2, f16, [1]]]
+  - id: slice_2_c3
+    op: constant
+    attrs:
+      name: slice_2_c3
+      value: 9.223372036854776e+18
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_2_c3, f16, [1]]]
+  - id: slice_3_c1
+    op: constant
+    attrs:
+      name: slice_3_c1
+      value: 3.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_3_c1, f16, [1]]]
+  - id: slice_3_c2
+    op: constant
+    attrs:
+      name: slice_3_c2
+      value: 0.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_3_c2, f16, [1]]]
+  - id: slice_3_c3
+    op: constant
+    attrs:
+      name: slice_3_c3
+      value: 320.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_3_c3, f16, [1]]]
+  - id: slice_4_c1
+    op: constant
+    attrs:
+      name: slice_4_c1
+      value: 3.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_4_c1, f16, [1]]]
+  - id: slice_4_c2
+    op: constant
+    attrs:
+      name: slice_4_c2
+      value: 320.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_4_c2, f16, [1]]]
+  - id: slice_4_c3
+    op: constant
+    attrs:
+      name: slice_4_c3
+      value: 9.223372036854776e+18
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_4_c3, f16, [1]]]
+  - id: to
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 512}, {__dim__: 5120}]}
+      sources:
+        __tuple__:
+        - __index_source__: {input_idx: 0, coord_map: [{var: out_coord_0}, {var: out_coord_1}, {var: out_coord_2}], select: null}
+    inputs: [hidden_states]
+    outputs: [[to, f32, [1, 512, 5120]]]
+  - id: pow_1
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: pow}}
+    inputs: [to, pow_1_c1_bc]
+    outputs: [[pow_1, f32, [1, 512, 5120]]]
+  - id: mean
+    op: torch.mean
+    attrs: {axis: -1}
+    inputs: [pow_1]
+    outputs: [[mean, f32, [1, 512, 1]]]
+  - id: add
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [mean, add_c1_bc]
+    outputs: [[add, f32, [1, 512, 1]]]
+  - id: rsqrt
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: rsqrt}}
+    inputs: [add]
+    outputs: [[rsqrt, f32, [1, 512, 1]]]
+  - id: rsqrt_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 512}, {__dim__: 5120}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {var: out_coord_1}
+            - {literal: {value: 0, dtype: int}}
+            select: null
+    inputs: [rsqrt]
+    outputs: [[rsqrt_bc, f32, [1, 512, 5120]]]
+  - id: mul
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [to, rsqrt_bc]
+    outputs: [[mul, f32, [1, 512, 5120]]]
+  - id: to_1
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 512}, {__dim__: 5120}]}
+      sources:
+        __tuple__:
+        - __index_source__: {input_idx: 0, coord_map: [{var: out_coord_0}, {var: out_coord_1}, {var: out_coord_2}], select: null}
+    inputs: [mul]
+    outputs: [[to_1, f16, [1, 512, 5120]]]
+  - id: mul_1
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [p_input_layernorm_weight_bc, to_1]
+    outputs: [[mul_1, f16, [1, 512, 5120]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [mul_1, p_attn_q_proj_weight]
+    outputs: [[linear, f16, [1, 512, 5120]]]
+  - id: linear_1
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [mul_1, p_attn_k_proj_weight]
+    outputs: [[linear_1, f16, [1, 512, 640]]]
+  - id: linear_2
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [mul_1, p_attn_v_proj_weight]
+    outputs: [[linear_2, f16, [1, 512, 640]]]
+  - id: unsqueeze
+    op: torch.unsqueeze
+    attrs: {dim: 1}
+    inputs: [position_embeddings_0]
+    outputs: [[unsqueeze, f16, [1, 1, 512, 640]]]
+  - id: unsqueeze_1
+    op: torch.unsqueeze
+    attrs: {dim: 1}
+    inputs: [position_embeddings_1]
+    outputs: [[unsqueeze_1, f16, [1, 1, 512, 640]]]
+  - id: unsqueeze_1_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 8}, {__dim__: 512}, {__dim__: 640}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_2}
+            - {var: out_coord_3}
+            select: null
+    inputs: [unsqueeze_1]
+    outputs: [[unsqueeze_1_bc, f16, [1, 8, 512, 640]]]
+  - id: unsqueeze_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 8}, {__dim__: 512}, {__dim__: 640}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_2}
+            - {var: out_coord_3}
+            select: null
+    inputs: [unsqueeze]
+    outputs: [[unsqueeze_bc, f16, [1, 8, 512, 640]]]
+  - id: view
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [1, 512, -1, 640]}}
+    inputs: [linear]
+    outputs: [[view, f16, [1, 512, 8, 640]]]
+  - id: transpose
+    op: torch.transpose
+    attrs: {axes: {__tuple__: [1, 2]}}
+    inputs: [view]
+    outputs: [[transpose, f16, [1, 8, 512, 640]]]
+  - id: mul_2
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [transpose, unsqueeze_bc]
+    outputs: [[mul_2, f16, [1, 8, 512, 640]]]
+  - id: slice_1
+    op: torch.slice
+    attrs: {shape: {__tuple__: [1, 8, 512, 320]}, dim: 3, start: 0}
+    inputs: [transpose, slice_1_c1, slice_1_c2, slice_1_c3]
+    outputs: [[slice_1, f16, [1, 8, 512, 320]]]
+  - id: slice_2
+    op: torch.slice
+    attrs: {shape: {__tuple__: [1, 8, 512, 320]}, dim: 3, start: 320}
+    inputs: [transpose, slice_2_c1, slice_2_c2, slice_2_c3]
+    outputs: [[slice_2, f16, [1, 8, 512, 320]]]
+  - id: neg
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: negative}}
+    inputs: [slice_2]
+    outputs: [[neg, f16, [1, 8, 512, 320]]]
+  - id: cat
+    op: torch.cat
+    inputs: [neg, slice_1, cat_c2]
+    outputs: [[cat, f16, [1, 8, 512, 640]]]
+  - id: mul_3
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [cat, unsqueeze_1_bc]
+    outputs: [[mul_3, f16, [1, 8, 512, 640]]]
+  - id: add_1
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [mul_2, mul_3]
+    outputs: [[add_1, f16, [1, 8, 512, 640]]]
+  - id: view_1
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [1, 512, -1, 640]}}
+    inputs: [linear_1]
+    outputs: [[view_1, f16, [1, 512, 1, 640]]]
+  - id: transpose_1
+    op: torch.transpose
+    attrs: {axes: {__tuple__: [1, 2]}}
+    inputs: [view_1]
+    outputs: [[transpose_1, f16, [1, 1, 512, 640]]]
+  - id: mul_4
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [transpose_1, unsqueeze]
+    outputs: [[mul_4, f16, [1, 1, 512, 640]]]
+  - id: slice_3
+    op: torch.slice
+    attrs: {shape: {__tuple__: [1, 1, 512, 320]}, dim: 3, start: 0}
+    inputs: [transpose_1, slice_3_c1, slice_3_c2, slice_3_c3]
+    outputs: [[slice_3, f16, [1, 1, 512, 320]]]
+  - id: slice_4
+    op: torch.slice
+    attrs: {shape: {__tuple__: [1, 1, 512, 320]}, dim: 3, start: 320}
+    inputs: [transpose_1, slice_4_c1, slice_4_c2, slice_4_c3]
+    outputs: [[slice_4, f16, [1, 1, 512, 320]]]
+  - id: neg_1
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: negative}}
+    inputs: [slice_4]
+    outputs: [[neg_1, f16, [1, 1, 512, 320]]]
+  - id: cat_1
+    op: torch.cat
+    inputs: [neg_1, slice_3, cat_1_c2]
+    outputs: [[cat_1, f16, [1, 1, 512, 640]]]
+  - id: mul_5
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [cat_1, unsqueeze_1]
+    outputs: [[mul_5, f16, [1, 1, 512, 640]]]
+  - id: add_2
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [mul_4, mul_5]
+    outputs: [[add_2, f16, [1, 1, 512, 640]]]
+  - id: unsqueeze_2
+    op: torch.unsqueeze
+    attrs: {dim: 2}
+    inputs: [add_2]
+    outputs: [[unsqueeze_2, f16, [1, 1, 1, 512, 640]]]
+  - id: unsqueeze_2_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 1}, {__dim__: 8}, {__dim__: 512}, {__dim__: 640}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {var: out_coord_1}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_3}
+            - {var: out_coord_4}
+            select: null
+    inputs: [unsqueeze_2]
+    outputs: [[unsqueeze_2_bc, f16, [1, 1, 8, 512, 640]]]
+  - id: reshape
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [1, 8, 512, 640]}}
+    inputs: [unsqueeze_2_bc]
+    outputs: [[reshape, f16, [1, 8, 512, 640]]]
+  - id: view_2
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [1, 512, -1, 640]}}
+    inputs: [linear_2]
+    outputs: [[view_2, f16, [1, 512, 1, 640]]]
+  - id: transpose_2
+    op: torch.transpose
+    attrs: {axes: {__tuple__: [1, 2]}}
+    inputs: [view_2]
+    outputs: [[transpose_2, f16, [1, 1, 512, 640]]]
+  - id: unsqueeze_3
+    op: torch.unsqueeze
+    attrs: {dim: 2}
+    inputs: [transpose_2]
+    outputs: [[unsqueeze_3, f16, [1, 1, 1, 512, 640]]]
+  - id: unsqueeze_3_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 1}, {__dim__: 8}, {__dim__: 512}, {__dim__: 640}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {var: out_coord_1}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_3}
+            - {var: out_coord_4}
+            select: null
+    inputs: [unsqueeze_3]
+    outputs: [[unsqueeze_3_bc, f16, [1, 1, 8, 512, 640]]]
+  - id: reshape_1
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [1, 8, 512, 640]}}
+    inputs: [unsqueeze_3_bc]
+    outputs: [[reshape_1, f16, [1, 8, 512, 640]]]
+  - id: scaled_dot_product_attention
+    op: torch.sdpa
+    attrs: {is_causal: true, sliding_window: null, scale: 0.03952847075210474}
+    inputs: [add_1, reshape, reshape_1]
+    outputs: [[scaled_dot_product_attention, f16, [1, 8, 512, 640]]]
+  - id: transpose_3
+    op: torch.transpose
+    attrs: {axes: {__tuple__: [1, 2]}}
+    inputs: [scaled_dot_product_attention]
+    outputs: [[transpose_3, f16, [1, 512, 8, 640]]]
+  - id: reshape_2
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [1, 512, -1]}}
+    inputs: [transpose_3]
+    outputs: [[reshape_2, f16, [1, 512, 5120]]]
+  - id: linear_3
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [reshape_2, p_attn_o_proj_weight]
+    outputs: [[linear_3, f16, [1, 512, 5120]]]
+  - id: add_3
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [hidden_states, linear_3]
+    outputs: [[add_3, f16, [1, 512, 5120]]]
+  - id: to_2
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 512}, {__dim__: 5120}]}
+      sources:
+        __tuple__:
+        - __index_source__: {input_idx: 0, coord_map: [{var: out_coord_0}, {var: out_coord_1}, {var: out_coord_2}], select: null}
+    inputs: [add_3]
+    outputs: [[to_2, f32, [1, 512, 5120]]]
+  - id: pow_2
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: pow}}
+    inputs: [to_2, pow_2_c1_bc]
+    outputs: [[pow_2, f32, [1, 512, 5120]]]
+  - id: mean_1
+    op: torch.mean
+    attrs: {axis: -1}
+    inputs: [pow_2]
+    outputs: [[mean_1, f32, [1, 512, 1]]]
+  - id: add_4
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [mean_1, add_4_c1_bc]
+    outputs: [[add_4, f32, [1, 512, 1]]]
+  - id: rsqrt_1
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: rsqrt}}
+    inputs: [add_4]
+    outputs: [[rsqrt_1, f32, [1, 512, 1]]]
+  - id: rsqrt_1_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 512}, {__dim__: 5120}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {var: out_coord_1}
+            - {literal: {value: 0, dtype: int}}
+            select: null
+    inputs: [rsqrt_1]
+    outputs: [[rsqrt_1_bc, f32, [1, 512, 5120]]]
+  - id: mul_6
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [to_2, rsqrt_1_bc]
+    outputs: [[mul_6, f32, [1, 512, 5120]]]
+  - id: to_3
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 512}, {__dim__: 5120}]}
+      sources:
+        __tuple__:
+        - __index_source__: {input_idx: 0, coord_map: [{var: out_coord_0}, {var: out_coord_1}, {var: out_coord_2}], select: null}
+    inputs: [mul_6]
+    outputs: [[to_3, f16, [1, 512, 5120]]]
+  - id: mul_7
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [p_post_attention_layernorm_weight_bc, to_3]
+    outputs: [[mul_7, f16, [1, 512, 5120]]]
+  - id: linear_4
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [mul_7, p_mlp_gate_proj_weight]
+    outputs: [[linear_4, f16, [1, 512, 10240]]]
+  - id: linear_5
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [mul_7, p_mlp_up_proj_weight]
+    outputs: [[linear_5, f16, [1, 512, 10240]]]
+  - id: silu
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: silu}}
+    inputs: [linear_4]
+    outputs: [[silu, f16, [1, 512, 10240]]]
+  - id: mul_8
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [silu, linear_5]
+    outputs: [[mul_8, f16, [1, 512, 10240]]]
+  - id: linear_6
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [mul_8, p_mlp_down_proj_weight]
+    outputs: [[linear_6, f16, [1, 512, 5120]]]
+  - id: add_5
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [add_3, linear_6]
+    outputs: [[add_5, f16, [1, 512, 5120]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - linear
+    - p_attn_q_proj_weight
+    - p_attn_q_proj_weight_centered
+    - p_attn_q_proj_weight_integers
+    - p_attn_q_proj_weight_integers_mask_bc
+    - p_attn_q_proj_weight_integers_nibble
+    - p_attn_q_proj_weight_integers_shift_view_bc
+    - p_attn_q_proj_weight_integers_shifted
+    - p_attn_q_proj_weight_integers_view_bc
+    - p_attn_q_proj_weight_scale_values
+    - p_attn_q_proj_weight_scaled
+    - p_attn_q_proj_weight_scales_view_bc
+    - p_attn_q_proj_weight_values
+    - p_attn_q_proj_weight_zero_bias_bc
+    - p_attn_q_proj_weight_zeros
+    - p_attn_q_proj_weight_zeros_grouped
+    - p_attn_q_proj_weight_zeros_grouped_mask_bc
+    - p_attn_q_proj_weight_zeros_grouped_nibble
+    - p_attn_q_proj_weight_zeros_grouped_shift_view_bc
+    - p_attn_q_proj_weight_zeros_grouped_shifted
+    - p_attn_q_proj_weight_zeros_grouped_view_bc
+    - p_attn_q_proj_weight_zeros_unbiased
+    - p_attn_q_proj_weight_zeros_view
+    - p_attn_q_proj_weight_zeros_view_bc
+  realizations:
+  - name: k_linear_reduce_4b3528.3d12414e2774
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m8n8k4_f16_f32/f2x2/k8
+      REDUCE: ''
+      STAGE: d2/smem
+      RASTER: ''
+    identity: 863d0fa4263734f4e2218247fd5e6e5058c108088fef298c8d62ebbbb95d8be2
