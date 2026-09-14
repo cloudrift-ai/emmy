@@ -849,6 +849,24 @@ def test_an_unfed_fold_is_an_operand_edge_too() -> None:
     assert not any(isinstance(stmt, Fold) for stmt in out.lift.body)
 
 
+def test_a_name_two_stores_ride_at_different_extents_is_not_one_axis() -> None:
+    """Loop IR scopes its axes lexically, so two sibling nests may spell one name at two extents,
+    and ``LoopOp.axes`` deduplicates them on the name. Promoting such a name sizes the grid for
+    whichever extent the dedup kept, and every store riding the other is written over the wrong
+    cells: a Gated DeltaNet chunk kernel this compiler minted returned half of one output as zeros
+    that way, faster than eager and with nothing to say it was wrong. Declining leaves the kernel
+    sweeping in one block — slow, and correct, which is what this refusal is for."""
+    from emmy.compiler.ir.tile.ir import promoted_sweep
+
+    op = projection((_matmul(),))
+    wide = OutputSpec(write=Write(output="wide", index=(Var("m"), Var("n")), value="acc"), sweep=(N16,))
+    narrow = OutputSpec(write=Write(output="narrow", index=(Var("m"), Var("n")), value="acc"), sweep=(Axis("n", 8),))
+
+    assert promoted_sweep(op, (wide, wide)) == {"n"}, "one axis two stores ride at one extent still promotes"
+    assert promoted_sweep(op, (wide, narrow)) == set()
+    assert promoted_sweep(op, (narrow, wide)) == set(), "and the refusal does not depend on which store is first"
+
+
 def test_root_collapses_onto_the_operand_the_stores_read() -> None:
     """The Gated DeltaNet chunk shape: the boundary reads its value off an operand and the root's own
     result is a statistic nothing keeps. Left standing, the root holds an invariant reduce alive, and

@@ -310,15 +310,21 @@ def _refuse_partitioned_sweep(root, ctx: Ctx, axis: str) -> None:
 
 
 def _merge_root_tiles(tiles: tuple[Tile, ...]) -> Tile:
-    """Merge independently bound regions that use one physical grid and worker inventory."""
+    """Merge independently bound regions that use one physical grid and worker inventory.
+
+    Roots that do not agree are a legality fact about the OFFERED row, not a malformed tree, so the
+    refusal is typed for the materializer to decline and the greedy to try the next row. Raised
+    plain it killed the compile outright — which is how a Gated DeltaNet chunk kernel came to have
+    no compilable row at all once its grid stopped being promoted out from under one of its stores.
+    """
     first = tiles[0]
     axes = {axis.name: axis for axis in first.axes}
     for tile in tiles[1:]:
         current = {axis.name: axis for axis in tile.axes}
         if current != axes:
-            raise ValueError("output-tiled roots disagree on their physical grid")
+            raise UnbindableProjection("output-tiled roots disagree on their physical grid")
         if (tile.block_threads, tile.aux_threads) != (first.block_threads, first.aux_threads):
-            raise ValueError("output-tiled roots disagree on their worker inventory")
+            raise UnbindableProjection("output-tiled roots disagree on their worker inventory")
 
     local = {}
     body = []
@@ -330,14 +336,14 @@ def _merge_root_tiles(tiles: tuple[Tile, ...]) -> Tile:
                 prior = tuple(local.get(name) for name in declarations)
                 if any(previous is not None and previous != stmt for previous in prior):
                     conflict = next(name for name, previous in zip(declarations, prior, strict=True) if previous not in (None, stmt))
-                    raise ValueError(f"output-tiled roots require incompatible local buffer {conflict!r}")
+                    raise UnbindableProjection(f"output-tiled roots require incompatible local buffer {conflict!r}")
                 if all(previous is not None for previous in prior):
                     continue
                 for name in declarations:
                     local[name] = stmt
             overlap = top_defs & set(stmt.defines())
             if overlap:
-                raise ValueError(f"output-tiled roots reuse top-level SSA names: {sorted(overlap)}")
+                raise UnbindableProjection(f"output-tiled roots reuse top-level SSA names: {sorted(overlap)}")
             top_defs.update(stmt.defines())
             body.append(stmt)
     return replace(first, body=Body(body))

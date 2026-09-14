@@ -220,7 +220,16 @@ def promoted_sweep(op, output_specs: tuple[OutputSpec, ...], *, free: tuple[Axis
     """
     if not output_specs:
         return set()
-    shared = set.intersection(*({axis.name for axis in store.sweep} for store in output_specs))
+    rides = [{axis.name: axis.extent for axis in store.sweep} for store in output_specs]
+    shared = set.intersection(*(set(ride) for ride in rides))
+    # An axis every store rides at a DIFFERENT extent is not one axis. Loop IR scopes its axes
+    # lexically, so two sibling nests may spell one name at two extents, and ``LoopOp.axes``
+    # deduplicates them on the name — rightly, for softmax's two equal K-sweeps. Promoting such a
+    # name sizes the grid for whichever extent the dedup kept, and every store riding another is
+    # written over the wrong cells. A Gated DeltaNet chunk kernel returned half of one output as
+    # zeros this way, at a plausible latency and with nothing to say it was wrong. Declining leaves
+    # the kernel sweeping in one block: slow, and correct, which is what this refusal is for.
+    shared = {name for name in shared if len({ride[name] for ride in rides}) == 1}
     if not shared:
         return set()
     nodes = tuple(site.node for site in sites(op))
