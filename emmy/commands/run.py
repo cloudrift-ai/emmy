@@ -2609,6 +2609,11 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
         stats_sym_env = _collect_sym_env(([frontend] if frontend is not None else []) + [graph])
         torch_available = captured = False
         pinned = _pinned_samples_for_ir(args, embedded)
+        # ``--record-greedy`` writes the greedy pick from its per-kernel ISOLATED re-bench, and
+        # proves it against the greedy's own outputs where no Torch twin exists. Both used to ride
+        # on the pinned-row path below, so a walk over a fresh trace inventory — which holds no
+        # verified row to pin — benched every target and recorded none of them.
+        record_greedy = bool(getattr(args, "record_greedy", False))
         try:
             try:
                 resp = await backend.benchmark_compare_async(
@@ -2619,7 +2624,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
                     warmup=args.warmup,
                     iters=args.iters,
                     seed=args.seed,
-                    want_ref=bool(pinned and tail),
+                    want_ref=bool(tail and (pinned or record_greedy)),
                     strict_accuracy=strict_correctness and not same_input_greedy,
                 )
             except RuntimeError as exc:
@@ -2642,6 +2647,8 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
                 if resp.get("greedy_error"):
                     greedy_fail = f"greedy timing failed after reference execution: {resp['greedy_error']}"
                     _record_greedy_failure(args, backend, graph, resp["greedy_error"])
+            if record_greedy and not pinned and tail and greedy_fail is None:
+                greedy_iso = await _bench_greedy_isolated(backend, graph, warmup=args.warmup, iters=args.iters)
             if pinned and tail:
                 reference_error = pinned_reference_refusal(ab_ref=ab_ref, torch_twin=frontend is not None, greedy_fail=greedy_fail)
                 unverified = None
