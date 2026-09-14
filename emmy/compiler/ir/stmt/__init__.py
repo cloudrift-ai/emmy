@@ -72,7 +72,6 @@ from emmy.compiler.ir.stmt.leaves import (
     mask_select_predicate,
 )
 from emmy.compiler.ir.stmt.normalize import (
-    canonicalize_buffer_names,
     canonicalize_free_axis_order,
     dedup_loads,
     drop_size_one_free_axes,
@@ -110,7 +109,6 @@ __all__ = [
     "Unpack",
     "Write",
     "OutputSpec",
-    "canonicalize_buffer_names",
     "canonicalize_free_axis_order",
     "dedup_loads",
     "drop_size_one_free_axes",

@@ -208,9 +208,9 @@ along different lowering paths still dedup in the tuning cache.
 **Stmt subclasses are `@dataclass(frozen=True)`** — every concrete Loop-IR
 / Tile-IR / Kernel-IR statement (`Loop`, `Cond`, leaves, `Tile`, `Smem`, `Sync`,
 `CpAsyncCopy`, `TmaDescriptor`, …) is immutable + hashable. `Body` is a `tuple[Stmt, ...]`
-subclass, so a full body tree hashes structurally end-to-end. This makes
-`Body.structural_key()` and any other bodies-as-cache-keys path work
-without a try/except fallback for unhashable stmts. To "edit" a frozen
+subclass, so ordinary body equality and hashing work end-to-end. `Body.structural_key()` uses the complete
+`structural.form` as its shared-cache key rather than ordinary dataclass equality: an identity-relevant field such as
+`Axis.window` may deliberately be excluded from general equality. To "edit" a frozen
 Stmt, return a fresh instance via `dataclasses.replace(stmt, field=value)`;
 `__post_init__` coercions use `object.__setattr__`. Ops, by contrast,
 are frozen and unhashable — rewrites replace the op and rebind its graph node. Op fields stored inside Stmts (e.g.
@@ -558,32 +558,44 @@ canonicalized before validation:
   Loops. Effect summaries are cached on immutable statements, and `Body.axis_dependencies` retains only the axes
   reachable from each definition. Long SSA chains therefore remain linear in definitions × loop depth instead of
   materializing the quadratic full SSA dependency closure.
-- `dedup_loads` — after expression simplification, keep one `Load` for
-  each identical `(input, index)` read in a scope and rewire its users.
-  This is canonicalization for every Loop / Tile body, not a fusion
-  profitability decision.
-- `rename_ssa_sequential` — cosmetic: `Load` names become `in0, in1,
-  …`, Assign/Select `v0, v1, …`, Accum `acc0, …`, in definition order.
-  Records renames only in the SSA channel (`rename`), never the axis
-  channel (`sigma`) — see the `rewrite` two-channel rule above; an SSA
-  name leaking into `sigma` double-renames indirect (gather) indices.
-- `canonicalize_buffer_names` — rename `Load.input` / `Write.output` to
-  `b0, b1, …` in encounter order. Off by default (buffer names bind to
-  graph nodes) — opt in via `normalize_body(..., canonical_buffers=True)`.
-  Used by `Body.structural_key()` for dedup queries where buffer identity
-  doesn't matter.
+- `dedup_loads` — after expression simplification, keep one `Load` for each identical
+  `(input, index, width, dtype)` read in a scope and rewire every scalar or vector lane. This is canonicalization for
+  every Loop / Tile body, not a fusion profitability decision.
+- `rename_ssa_sequential` — cosmetic: `Load` names become `in0, in1, …`, accumulator state becomes `acc0, …`, and
+  every other definition becomes `v0, v1, …`, in lexical definition order. Names stay globally unique while each
+  nested body tracks its own binders, so sibling scopes may reuse the same source spelling without collapsing. Axis
+  renames reach conditions, reduction metadata, and `Window` parent/base/bound metadata as well as indices; a
+  reduction's axis tuple is canonicalized as a set. SSA values travel only through the rename channel, never `sigma`,
+  so indirect indices cannot be renamed twice.
 - `sort_commutative_args` — sort `Assign.args` for commutative ops
   (`add` / `multiply` / `maximum` / `minimum`) so two bodies that
   differ only by argument order land in the same canonical form.
   Runs last so the sort key is the post-rename canonical SSA / buffer
   names.
 
-`Body.structural_key()` re-runs `normalize_body(self, hoist=False,
-canonical_buffers=True)` and joins `pretty_body`'s line list — a
-`cached_property` returning the canonical text rendering. Two bodies
-that differ only by SSA / axis names, commutative-arg order, or
-external-buffer names produce the same key. Use it as a dict key /
-set member when deduping candidate bodies in a search.
+`Body.structural_key()` re-runs `normalize_body(self, hoist=False)` and then applies identity-only canonicalization.
+Executable normalization keeps external buffer names and the authored order of independent statements because graph
+wiring and effect order are live there. The identity-only step removes only choices that do not change the kernel:
+
+- Each external buffer is assigned a role from its access and downstream-use contexts. Distinct roles fix buffer order;
+  tied roles are permuted and the least complete structural form wins. Encounter order and argument spelling therefore
+  cannot select the identity, while using one buffer twice remains distinct from using two buffers.
+- Every sibling statement is ordered by SSA dependencies and actual resource conflicts. Independent pure work, writes
+  to distinct buffers, and updates to distinct accumulators may move; reads and writes of the same buffer and updates to
+  the same accumulator retain their order. Repeated computation is not removed because it changes kernel work.
+- Name-free forward/use roles usually make the next dependency-valid statement or buffer unique. Remaining ties are
+  searched exactly. Proven transposition symmetries are searched once, which keeps large sets of interchangeable
+  arguments, producers, or axes from causing factorial work without assuming that an unresolved tie is a symmetry.
+- Identity-only expressions sort commutative operands, use one direction for dual comparisons, and rebuild affine
+  address expressions from their coefficient form. Executable expression order stays untouched.
+- The final canonical body applies the scope-aware SSA/axis rename and sorts commutative statement arguments.
+
+The key is `digest(form(canonical_body))`, not the human `pretty()` rendering. Both exact and compute-unit-clustered
+forms are cached on the immutable `Body`; complete pre-normalization forms share the module-level cache, so fields
+excluded from ordinary dataclass equality cannot collide there. Two bodies
+that differ only by SSA or axis names, argument spelling and discovery order, dependency-valid statement order, or
+equivalent commutative and affine expression spelling therefore share a structural key. Use it when deduplicating
+candidate bodies in search.
 
 ### `ir/expr.py` — Expr simplification
 

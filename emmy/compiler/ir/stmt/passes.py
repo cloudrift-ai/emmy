@@ -135,7 +135,7 @@ def _(s: Assign, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
 
 @_rewrite_kind.register
 def _(s: Accum, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
-    new_axes = tuple(n for old in s.axes for n in _rewrite_axis_name(old, sigma))
+    new_axes = tuple(sorted({rename(n) for old in s.axes for n in _rewrite_axis_name(old, sigma)}))
     return Accum(
         name=rename(s.name),
         value=rename(s.value),
@@ -148,10 +148,14 @@ def _(s: Accum, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
 
 @_rewrite_kind.register
 def _(s: Mma, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
-    new_axes = tuple(n for old in s.axes for n in _rewrite_axis_name(old, sigma))
+    new_axes = tuple(sorted({rename(n) for old in s.axes for n in _rewrite_axis_name(old, sigma)}))
 
     def _g(guard):  # σ-substitute a (base, bound) guard's exprs so axis vars canonicalize
-        return None if guard is None else (sigma.apply(guard[0]), sigma.apply(guard[1]))
+        return (
+            None
+            if guard is None
+            else tuple(_rename_ssa_vars_in_expr(sigma.apply(expr), rename) for expr in guard)
+        )
 
     return Mma(
         c=rename(s.c),
@@ -237,19 +241,23 @@ def _(s: Loop, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
         axis=axis_fn(s.axis),
         body=tuple(rewrite(c, rename, sigma, axis_fn) for c in s.body),
         unroll=s.unroll,
+        seed=s.seed,
     )
 
 
 @_rewrite_kind.register
 def _(s: StridedLoop, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
-    step = sigma.apply(s.step) if isinstance(s.step, Expr) else s.step
+    def _expr(expr: Expr) -> Expr:
+        return _rename_ssa_vars_in_expr(sigma.apply(expr), rename)
+
+    step = _expr(s.step) if isinstance(s.step, Expr) else s.step
     return StridedLoop(
         axis=axis_fn(s.axis),
-        start=sigma.apply(s.start),
+        start=_expr(s.start),
         step=step,
         body=tuple(rewrite(c, rename, sigma, axis_fn) for c in s.body),
         unroll=s.unroll,
-        end=sigma.apply(s.end) if s.end is not None else None,
+        end=_expr(s.end) if s.end is not None else None,
         seed=s.seed,
     )
 
@@ -257,7 +265,7 @@ def _(s: StridedLoop, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
 @_rewrite_kind.register
 def _(s: Cond, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
     return Cond(
-        cond=sigma.apply(s.cond),
+        cond=_rename_ssa_vars_in_expr(sigma.apply(s.cond), rename),
         body=tuple(rewrite(c, rename, sigma, axis_fn) for c in s.body),
         else_body=tuple(rewrite(c, rename, sigma, axis_fn) for c in s.else_body),
     )
@@ -344,7 +352,12 @@ def _(s: Select, ctx: SimplifyCtx) -> Stmt:
 @simplify.register
 def _(s: Loop, ctx: SimplifyCtx) -> Stmt:
     inner = extend_simplify_ctx(ctx, s.axis)
-    return Loop(axis=s.axis, body=tuple(simplify(c, inner) for c in s.body), unroll=s.unroll)
+    return Loop(
+        axis=s.axis,
+        body=tuple(simplify(c, inner) for c in s.body),
+        unroll=s.unroll,
+        seed=s.seed,
+    )
 
 
 @simplify.register

@@ -19,34 +19,20 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from dataclasses import replace
-from itertools import count, permutations, product
+from itertools import count, product
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Expr, Literal, SimplifyCtx, Var, affine_form
+from emmy.compiler.ir.expr import BinaryExpr, CastExpr, Expr, FuncCallExpr, Literal, SimplifyCtx, TernaryExpr, Var, affine_form
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
 from emmy.compiler.ir.stmt.body import Body, _exposed_defines, free_names
-from emmy.compiler.ir.stmt.leaves import Accum, Assign, Init, Load, Mma, Pack, Select, Unpack, Write
-
-# ---------------------------------------------------------------------------
-# Visitor helpers shared by every pass below
-# ---------------------------------------------------------------------------
-
-
-def _identity_rename(n: str) -> str:
-    return n
-
-
-def _make_axis_renamer(old: str, new: Axis) -> Callable[[Axis], Axis]:
-    return lambda a: new if a.name == old else a
-
+from emmy.compiler.ir.stmt.leaves import Accum, Assign, Const, Init, Load, Mma, Pack, Select, SelectBranch, Unpack, Write
 
 def normalize_body(
     stmts: Body,
     *,
     hoist: bool = True,
-    canonical_buffers: bool = False,
     cluster_ops: bool = False,
 ) -> Body:
     """Apply the structural and cosmetic normalization passes in order.
@@ -60,14 +46,8 @@ def normalize_body(
     declared — hoisting Loads that read from a staged buffer above the
     Stage decl would leave the read referencing an undeclared name.
 
-    ``canonical_buffers=True`` runs :func:`canonicalize_buffer_names` after
-    SSA renaming. Off by default — buffer names bind to graph inputs /
-    outputs and are meaningful at the Op boundary. Turned on by
-    :attr:`Body.structural_key()` so two bodies that read identical patterns
-    from differently-named buffers hash and compare equal.
-
     ``cluster_ops=True`` runs :func:`canonicalize_op_clusters` after
-    buffer renaming. Off by default — collapsing ``sub`` to ``add`` (or
+    SSA renaming. Off by default — collapsing ``sub`` to ``add`` (or
     ``mod`` to ``divide``) destroys semantics, so this is only safe
     when the output is a hash key, never a runnable body. Turned on by
     :attr:`Body.structural_key()` so two bodies that differ only in the
@@ -87,13 +67,9 @@ def normalize_body(
     stmts = simplify_body(stmts)
     stmts = dedup_loads(stmts)
     stmts = Body.coerce(rename_ssa_sequential(stmts))
-    if canonical_buffers:
-        stmts = canonicalize_buffer_names(stmts)
     if cluster_ops:
         stmts = canonicalize_op_clusters(stmts)
-    # Sort runs last so the keys it sorts by are the post-rename canonical
-    # SSA / buffer names — that way two bodies that differ only in original
-    # argument order produce identical post-normalization arg tuples.
+    # Sort runs last so its keys are the post-rename canonical SSA names.
     stmts = sort_commutative_args(stmts)
     return stmts
 
@@ -211,7 +187,7 @@ def canonicalize_free_axis_order(stmts: Body) -> Body:
 
     Boundary writes provide the canonical geometry: larger coordinate depth is outer, so the
     innermost loop follows the output's contiguous dimension. If the writes do not totally order
-    the chain, axis names provide the deterministic fallback. Recursion continues into terminal
+    the chain, choose the least alpha-renamed structural form. Recursion continues into terminal
     block bodies (Loop / StridedLoop / Tile / Cond).
     """
     stmts = Body.coerce(stmts)
@@ -230,10 +206,74 @@ def canonicalize_free_axis_order(stmts: Body) -> Body:
     if all(depth is not None for depth in depths) and len(set(depths)) == len(depths):
         chain_sorted = [loop for _, loop in sorted(zip(depths, chain, strict=True), key=lambda item: -item[0])]
     else:
-        chain_sorted = sorted(chain, key=lambda lp: lp.axis.name)
+        from emmy.compiler.structural import form  # noqa: PLC0415
+
+        def rename_axes(body: Body, mapping: dict[str, str]) -> Body:
+            sigma = Sigma({name: Var(replacement) for name, replacement in mapping.items()})
+            return Body(stmt.substitute(sigma) for stmt in body)
+
+        def axis_metadata(loop: Loop) -> str:
+            mapping = {loop.axis.name: "__axis__"}
+            parent = loop.axis.source_axis
+            depth = 0
+            seen: set[int] = set()
+            while parent is not None and id(parent) not in seen:
+                seen.add(id(parent))
+                mapping.setdefault(parent.name, f"__parent{depth}__")
+                depth += 1
+                parent = parent.source_axis
+            renamed = loop.rename(mapping)
+            assert isinstance(renamed, Loop)
+            return repr(form((renamed.axis, renamed.unroll, renamed.seed)))
+
+        source_counts: dict[str, int] = {}
+        for loop in chain:
+            if loop.axis.source_axis is not None:
+                name = loop.axis.source_axis.name
+                source_counts[name] = source_counts.get(name, 0) + 1
+
+        roles: dict[str, str] = {}
+        for focus in chain:
+            mapping = {loop.axis.name: "__self__" if loop is focus else "__other__" for loop in chain}
+            focused = rename_axes(Body(terminal), mapping)
+            source = focus.axis.source_axis
+            source_arity = 1 if source is None else source_counts[source.name]
+            roles[focus.axis.name] = repr((axis_metadata(focus), source_arity, form(focused)))
+
+        groups: dict[str, list[Loop]] = {}
+        for loop in chain:
+            groups.setdefault(roles[loop.axis.name], []).append(loop)
+
+        def axis_orders(group: list[Loop]) -> Iterator[tuple[Loop, ...]]:
+            def interchangeable(left: Loop, right: Loop) -> bool:
+                if axis_metadata(left) != axis_metadata(right):
+                    return False
+                left_source, right_source = left.axis.source_axis, right.axis.source_axis
+                if (
+                    left_source is not None
+                    and right_source is not None
+                    and left_source.name != right_source.name
+                    and (source_counts[left_source.name] != 1 or source_counts[right_source.name] != 1)
+                ):
+                    return False
+                swapped = rename_axes(Body(terminal), {left.axis.name: right.axis.name, right.axis.name: left.axis.name})
+                return form(swapped) == form(terminal)
+
+            yield from _orders_modulo_transpositions(group, interchangeable)
+
+        def candidate(order: tuple[Loop, ...]) -> tuple[str, tuple[Loop, ...]]:
+            result: Body = Body(terminal)
+            for loop in reversed(order):
+                result = Body((Loop(axis=loop.axis, body=result, unroll=loop.unroll, seed=loop.seed),))
+            return repr(form(rename_ssa_sequential(result))), order
+
+        ordered_groups = [groups[role] for role in sorted(groups)]
+        chain_sorted = list(min(candidate(tuple(loop for choice in choices for loop in choice)) for choices in product(
+            *(axis_orders(group) for group in ordered_groups)
+        ))[1])
     result: Body = terminal
     for loop in reversed(chain_sorted):
-        result = (Loop(axis=loop.axis, body=result, unroll=loop.unroll),)
+        result = Body((Loop(axis=loop.axis, body=result, unroll=loop.unroll, seed=loop.seed),))
     return result
 
 
@@ -772,7 +812,7 @@ def dedup_loads(stmts: Body) -> Body:
 
     def walk(
         body: Body,
-        env: dict[tuple[str, tuple[str, ...]], str],
+        env: dict[tuple[str, tuple[str, ...], int, object], tuple[str, ...]],
         parent_alias: dict[str, str],
     ) -> Body:
         local = dict(env)
@@ -802,11 +842,11 @@ def dedup_loads(stmts: Body) -> Body:
                 # kept name, or the index dangles after the duplicate is
                 # dropped. (No-op for plain axis indices: axes aren't aliased.)
                 s = s.rewrite(rename)
-                key = (s.input, tuple(e.pretty() for e in s.index))
+                key = (s.input, tuple(e.pretty() for e in s.index), s.width, s.dtype)
                 if key in local:
-                    alias[s.name] = local[key]
+                    alias.update(dict(zip(s.names, local[key], strict=True)))
                     continue
-                local[key] = s.name
+                local[key] = s.names
                 out.append(s)
             elif isinstance(s, Loop | StridedLoop):
                 out.append(replace(s, body=descend(s.body)))
@@ -925,8 +965,34 @@ def _sibling_defs_uses(stmt: Stmt) -> tuple[frozenset[str], frozenset[str]]:
     return frozenset(defs), frozenset(all_uses - all_inner_defs)
 
 
+def _ordered_sibling_defs(stmt: Stmt) -> tuple[str, ...]:
+    """Names visible to siblings in structural body order."""
+    children = stmt.nested()
+    if not children:
+        return stmt.defines()
+    return tuple(dict.fromkeys(name for child in children for name in _ordered_exported_accs(child)))
+
+
+def _ordered_exported_accs(body: Body) -> tuple[str, ...]:
+    """Accumulator names exported by ``body``, deduplicated in structural order."""
+    exported: list[str] = []
+    seen: set[str] = set()
+    for stmt in Body.coerce(body):
+        if isinstance(stmt, (Accum, Mma)):
+            for name in stmt.carried_names():
+                if name not in seen:
+                    seen.add(name)
+                    exported.append(name)
+        for child in stmt.nested():
+            for name in _ordered_exported_accs(child):
+                if name not in seen:
+                    seen.add(name)
+                    exported.append(name)
+    return tuple(exported)
+
+
 def _exported_accs(body: Body) -> frozenset[str]:
-    return Body.coerce(body)._exported_accums
+    return frozenset(_ordered_exported_accs(body))
 
 
 # ---------------------------------------------------------------------------
@@ -938,83 +1004,90 @@ def rename_ssa_sequential(stmts: Body) -> Body:
     """Canonicalize names in a fused body:
 
     - Axes from every axis-bearing scope (``Loop`` / ``StridedLoop`` /
-      ``Tile.axes`` / new tile flavors' axes) renamed to ``a0, a1, ...``
-      in pre-order of first declaration. All scopes share one numbering
-      namespace so Tile.axes ``a0_o`` and a Loop axis ``a2_o`` don't
-      collide on rename.
+      ``Tile.axes`` / new tile flavors' axes) renamed to ``a0, a1, ...``.
+      Window parent provenance is renamed to ``p0, p1, ...`` with its base and bound expressions.
     - Load SSA names renamed to ``in0, in1, ...`` in definition order.
     - Accum names renamed to ``acc0, acc1, ...`` in definition order.
-    - Assign / Select SSA names renamed to ``v0, v1, ...`` in definition
-      order.
+    - Every other SSA definition renamed to ``v0, v1, ...`` in definition order.
+
+    Each nested body is a lexical scope, while its assigned names remain globally unique. Reusing
+    ``x`` or ``i`` in two sibling loops therefore cannot collapse two distinct binders into one
+    canonical name. Loop-carried accumulators are allocated in the enclosing scope and deliberately
+    keep that name through the reduce body.
 
     Idempotent: bodies already in canonical form round-trip unchanged."""
-    stmts = Body.coerce(stmts)
-    ssa_rename: dict[str, str] = {}
-    axis_rename: dict[str, str] = {}
-    expr_sub: dict[str, Expr] = {}
-    counters = {"v": 0, "in": 0, "acc": 0}
 
-    def _rename(name: str, prefix: str) -> str:
-        new = f"{prefix}{counters[prefix]}"
-        ssa_rename[name] = new
-        counters[prefix] += 1
-        return new
-
-    def _record_axis(name: str) -> None:
-        if name in axis_rename:
-            return
-        new = f"a{len(axis_rename)}"
-        axis_rename[name] = new
-        if name != new:
-            expr_sub[name] = Var(new)
-
-    for stmt in stmts.iter():
+    def prefix(stmt: Stmt) -> str:
         if isinstance(stmt, Load):
-            for old in stmt.names:
-                if old in ssa_rename:
-                    continue
-                # Only record the SSA rename in ``ssa_rename`` — NOT in
-                # ``expr_sub`` (sigma). The Load/Write rewriters apply
-                # ``_rename_ssa_vars_in_expr(sigma.apply(e), rename)`` to index
-                # exprs: ``sigma`` is the axis-substitution channel, ``rename``
-                # the SSA channel. Putting an SSA rename in *both* renames an
-                # indirect (gather) index Var twice. Sequential renumbering can
-                # form a chain — e.g. cell-3's index ``in2_3 → in5`` while a
-                # pre-existing ``in5`` (a layernorm-weight Load) → ``in26`` —
-                # and the double application collapses it (``in2_3 → in5 →
-                # in26``), wiring the gather to the wrong row. ``acc`` / ``v``
-                # names are likewise kept out of ``expr_sub`` (they reach exprs
-                # only via ``rename``), so this keeps Load names consistent.
-                _rename(old, "in")
-        elif isinstance(stmt, Accum) and stmt.name not in ssa_rename:
-            _rename(stmt.name, "acc")
-        elif isinstance(stmt, (Assign, Select)) and stmt.name not in ssa_rename:
-            _rename(stmt.name, "v")
-        elif isinstance(stmt, Unpack):
-            # ``low_name`` and ``high_name`` are fresh SSA scalars
-            # defined by Unpack — must get rename slots in the ``v`` pool.
-            # Without this, they collided with their input's renamed name
-            # (e.g. paired Accum ``acc0_acc1_p`` → ``acc0`` makes
-            # ``Unpack(low_name="acc0", value="acc0_acc1_p")`` rewrite to
-            # ``Unpack(low_name="acc0", value="acc0")`` — self-referential).
-            for old in (stmt.low_name, stmt.high_name):
-                if old not in ssa_rename:
-                    _rename(old, "v")
-        elif isinstance(stmt, Pack) and stmt.name not in ssa_rename:
-            # ``Pack.name`` defines a fresh f16x2 SSA value consumed by the
-            # next Accum. Same reasoning as Assign — give it a ``v`` slot.
-            _rename(stmt.name, "v")
-        elif isinstance(stmt, (Loop, StridedLoop)):
-            _record_axis(stmt.axis.name)
+            return "in"
+        if isinstance(stmt, (Accum, Mma, Init)):
+            return "acc"
+        return "v"
 
-    if all(o == n for o, n in ssa_rename.items()) and all(o == n for o, n in axis_rename.items()):
-        return stmts
+    counters = {kind: 0 for kind in ("v", "in", "acc", "a", "p")}
 
-    # ONE map: renaming an SSA value and renaming an axis are the same operation, and a rename
-    # travels through the very binders it renames. Spelled as a σ over axis names it read as a
-    # substitution — which must stop at a re-binding scope, and these loops ARE those scopes.
-    names = {**ssa_rename, **axis_rename}
-    return tuple(s.rename(names) for s in stmts)
+    def bound_axes(stmt: Stmt) -> tuple[Axis, ...]:
+        axis = getattr(stmt, "axis", None)
+        if isinstance(axis, Axis):
+            return (axis,)
+        axes = getattr(stmt, "axes", ())
+        return tuple(axis for axis in axes if isinstance(axis, Axis))
+
+    def walk(
+        body: Body,
+        inherited_ssa: dict[str, str],
+        inherited_axes: dict[str, str],
+        inherited_sources: dict[str, str],
+        fixed: frozenset[str] = frozenset(),
+    ) -> Body:
+        body = Body.coerce(body)
+        ssa = dict(inherited_ssa)
+        sources = dict(inherited_sources)
+        owned: set[str] = set()
+
+        def allocate(old: str, kind: str) -> None:
+            if old in owned or old in fixed:
+                return
+            new = f"{kind}{counters[kind]}"
+            counters[kind] += 1
+            ssa[old] = new
+            owned.add(old)
+
+        out: list[Stmt] = []
+        for stmt in body:
+            children = stmt.nested()
+            if children:
+                for child in children:
+                    for name in _ordered_exported_accs(child):
+                        allocate(name, "acc")
+            else:
+                for name in stmt.defines():
+                    allocate(name, prefix(stmt))
+
+            axes = dict(inherited_axes)
+            for old in stmt.binds_axes():
+                axes[old] = f"a{counters['a']}"
+                counters["a"] += 1
+            for axis in bound_axes(stmt):
+                parent = axis.source_axis
+                seen: set[int] = set()
+                while parent is not None and id(parent) not in seen:
+                    seen.add(id(parent))
+                    if parent.name not in sources:
+                        sources[parent.name] = f"p{counters['p']}"
+                        counters["p"] += 1
+                    parent = parent.source_axis
+
+            names = {**ssa, **sources, **axes}
+            renamed = stmt.rename(names)
+            if children:
+                exported = frozenset(name for child in children for name in _exported_accs(child))
+                renamed_children = tuple(walk(child, ssa, axes, sources, exported) for child in children)
+                renamed = renamed.with_bodies(renamed_children)
+            out.append(renamed)
+        return Body(out)
+
+    return walk(Body.coerce(stmts), {}, {}, {})
 
 
 # ---------------------------------------------------------------------------
@@ -1026,9 +1099,8 @@ def sort_commutative_args(stmts: Body) -> Body:
     """Sort ``Assign.args`` for commutative ``op``s so two bodies that
     differ only by argument order land in the same canonical form.
 
-    Acts on ``Assign`` only — Expr-level commutativity (e.g. ``a + b``
-    inside a ``Load`` index or ``Cond.cond``) is handled by
-    :func:`simplify_body` via the per-Expr ``simplify`` rules. Recurses
+    Acts on ``Assign`` only. Identity-only Expr normalization handles equivalent index and
+    condition spellings without changing the executable body. Recurses
     through every block-structured Stmt (``Loop`` / ``StridedLoop`` /
     ``Tile`` / ``Cond``)."""
     stmts = Body.coerce(stmts)
@@ -1044,21 +1116,21 @@ def sort_commutative_args(stmts: Body) -> Body:
 
 
 # ---------------------------------------------------------------------------
-# Identity-only canonicalization: external arguments + independent pure stmts.
+# Identity-only canonicalization: external arguments + dependency-valid statement order.
 # ---------------------------------------------------------------------------
 
 
 def canonicalize_identity(stmts: Body) -> Body:
     """Canonicalize the name-free choices used only by structural identity.
 
-    The ordinary normalization above preserves independent statement order and assigns buffer
-    slots on first encounter. Both are right for an executable body, but together they let two
-    traces of one kernel key apart: changing which argument is loaded first changes both its
-    ``bN`` slot and the sequential SSA names.
+    The ordinary normalization above preserves independent statement order and external buffer
+    names. Both are right for an executable body, but together they let two traces of one kernel
+    key apart: changing which argument is loaded first changes both its source spelling and the
+    sequential SSA names.
 
-    Give each external buffer a structural role by focusing it in the whole body, order buffers by
-    that role, then dependency-sort consecutive pure statements. Effectful statement order remains
-    untouched. A final SSA rename removes the construction order exposed by those two changes.
+    Give each external buffer a structural role from its access and downstream-use contexts, order
+    buffers by that role, then dependency-sort siblings while retaining true memory and accumulator
+    conflicts. A final SSA rename removes the construction order exposed by those two changes.
     The result is identity material only; callers must never execute it."""
     stmts = Body.coerce(stmts)
     buffers: dict[str, None] = {}
@@ -1071,24 +1143,62 @@ def canonicalize_identity(stmts: Body) -> Body:
 
     from emmy.compiler.structural import form  # noqa: PLC0415
 
-    # Individualizing one buffer gives an isomorphism-invariant role. Most kernel arguments become
-    # unique here (different access coordinates or downstream uses); only genuine symmetries remain
-    # tied in ordinary bodies.
+    # A buffer's occurrence contexts give it an isomorphism-invariant initial role without merging
+    # the other buffers. Merging them to one placeholder would invent memory dependencies while the
+    # sibling-order pass runs (an input and an unrelated output would suddenly alias).
+    names = {
+        name
+        for stmt in stmts.iter()
+        for name in (*stmt.defines(), *stmt.deps(), *stmt.binds_axes())
+    }
+    abstract_names = {name: "__name__" for name in names}
     roles: dict[str, str] = {}
     for focus in buffers:
-        renamed = stmts.rename_buffers({name: "__self__" if name == focus else "__other__" for name in buffers})
-        roles[focus] = repr(form(_canonicalize_fixed_buffers(renamed)))
+        focused = stmts.rename_buffers(
+            {name: "__self__" if name == focus else "__other__" for name in buffers}
+        )
+        pure_tokens = _pure_identity_tokens(focused)
+        definitions = {
+            name: stmt
+            for stmt in focused.iter()
+            if stmt.pure
+            for name in stmt.defines()
+        }
+        contexts = []
+        for stmt in focused.iter():
+            if "__self__" not in (*stmt.external_reads(), *stmt.external_writes()):
+                continue
+            if stmt.pure:
+                contexts.append(pure_tokens[id(stmt)])
+                continue
+            dependency_roles = {
+                name: f"__dep_{pure_tokens[id(owner)]}"
+                for name in stmt.deps()
+                if (owner := definitions.get(name)) is not None
+            }
+            renamed = stmt.rename({**abstract_names, **dependency_roles})
+            contexts.append(repr(form(sort_commutative_args(Body((renamed,)))[0])))
+        roles[focus] = repr(tuple(sorted(contexts)))
 
     groups: dict[str, list[str]] = {}
     for name, role in roles.items():
         groups.setdefault(role, []).append(name)
 
     # A role tie is not assumed to be a symmetry. Try every ordering inside each tied partition and
-    # choose the least complete form. This is the small individualize/refine search that makes the
-    # result a canonical label rather than a heuristic color refinement.
+    # choose the least complete form. Proven transposition symmetries are quotiented first: assigning
+    # labels to interchangeable buffers cannot change the result and must not cause factorial work.
     ordered_groups = [groups[role] for role in sorted(groups)]
+    base = repr(form(_canonicalize_fixed_buffers(stmts)))
+
+    def buffer_orders(group: list[str]) -> Iterator[tuple[str, ...]]:
+        def interchangeable(left: str, right: str) -> bool:
+            swapped = stmts.rename_buffers({left: right, right: left})
+            return repr(form(_canonicalize_fixed_buffers(swapped))) == base
+
+        yield from _orders_modulo_transpositions(group, interchangeable)
+
     best: tuple[str, Body] | None = None
-    for choices in product(*(permutations(group) for group in ordered_groups)):
+    for choices in product(*(buffer_orders(group) for group in ordered_groups)):
         names = tuple(name for group in choices for name in group)
         renamed = stmts.rename_buffers({name: f"b{index}" for index, name in enumerate(names)})
         candidate = _canonicalize_fixed_buffers(renamed)
@@ -1103,15 +1213,84 @@ def _canonicalize_fixed_buffers(stmts: Body) -> Body:
     """Canonicalize pure dataflow after external buffers have fixed labels."""
     from emmy.compiler.structural import form  # noqa: PLC0415
 
-    tokens = _pure_identity_tokens(stmts)
+    stmts = _canonicalize_identity_exprs(stmts)
     best: tuple[str, Body] | None = None
-    for ordered in _canonicalize_pure_order_variants(stmts, tokens):
+    for ordered in _canonicalize_order_variants(stmts):
         candidate = Body.coerce(sort_commutative_args(rename_ssa_sequential(ordered)))
         rendered = repr(form(candidate))
         if best is None or rendered < best[0]:
             best = (rendered, candidate)
     assert best is not None
     return best[1]
+
+
+def _canonicalize_identity_exprs(stmts: Body) -> Body:
+    """Canonicalize equivalent expression spellings without changing an executable body."""
+    from dataclasses import fields  # noqa: PLC0415
+
+    from emmy.compiler.structural import form  # noqa: PLC0415
+
+    commutative = frozenset({"+", "*", "==", "!=", "&&", "||", "&", "|", "^"})
+    dual = {">": "<", ">=": "<="}
+    axis_names = stmts.axis_names
+
+    def affine(expr: Expr) -> Expr:
+        variables = expr.free_vars()
+        # Reassociation and coefficient folding are exact for integer coordinates. An SSA value
+        # may be floating point, where changing the operation tree changes rounding and kernel work.
+        if not variables or not variables <= axis_names or (decomposed := affine_form(expr, variables)) is None:
+            return expr
+        anchor, coefficients = decomposed
+        anchor = anchor.simplify(SimplifyCtx.empty())
+        terms: list[Expr] = []
+        for name, coefficient in sorted(coefficients.items()):
+            variable = Var(name)
+            terms.append(
+                variable
+                if coefficient == 1
+                else BinaryExpr("*", Literal(coefficient, "int"), variable)
+            )
+        if not (isinstance(anchor, Literal) and anchor.value == 0):
+            terms.append(anchor)
+        if not terms:
+            return Literal(0, "int")
+        result = terms[0]
+        for term in terms[1:]:
+            result = BinaryExpr("+", result, term)
+        return result
+
+    def expression(expr: Expr) -> Expr:
+        if isinstance(expr, BinaryExpr):
+            left, right = expression(expr.left), expression(expr.right)
+            op = expr.op
+            if op in dual:
+                op, left, right = dual[op], right, left
+            if op in commutative and repr(form(right)) < repr(form(left)):
+                left, right = right, left
+            result = BinaryExpr(op, left, right)
+            return affine(result) if op in {"+", "-", "*"} else result
+        if isinstance(expr, FuncCallExpr):
+            return FuncCallExpr(expr.name, tuple(expression(arg) for arg in expr.args))
+        if isinstance(expr, TernaryExpr):
+            return TernaryExpr(expression(expr.cond), expression(expr.if_true), expression(expr.if_false))
+        if isinstance(expr, CastExpr):
+            return CastExpr(expr.dtype, expression(expr.expr))
+        return expr
+
+    def value(item):
+        if isinstance(item, Expr):
+            return expression(item)
+        if isinstance(item, tuple):
+            return tuple(value(member) for member in item)
+        if isinstance(item, SelectBranch):
+            return SelectBranch(value=item.value, select=expression(item.select))
+        return item
+
+    def statement(stmt: Stmt) -> Stmt:
+        changes = {field.name: value(getattr(stmt, field.name)) for field in fields(stmt)}
+        return replace(stmt, **changes)
+
+    return Body.coerce(stmts).map(statement)
 
 
 def _pure_identity_tokens(stmts: Body) -> dict[int, str]:
@@ -1123,7 +1302,6 @@ def _pure_identity_tokens(stmts: Body) -> dict[int, str]:
     """
     from emmy.compiler.structural import digest, form  # noqa: PLC0415
 
-    axes = {stmt.axis.name for stmt in stmts.iter() if isinstance(stmt, (Loop, StridedLoop))}
     definitions: dict[str, tuple[Stmt, int]] = {}
     for stmt in stmts.iter():
         if stmt.pure:
@@ -1146,8 +1324,8 @@ def _pure_identity_tokens(stmts: Body) -> dict[int, str]:
             if owner is not None:
                 producer, slot = owner
                 mapping[name] = f"__dep_{digest(forward_token(producer))}_{slot}"
-            elif name not in axes:
-                mapping[name] = f"__free_{name}"
+            else:
+                mapping[name] = "__free__"
         renamed = stmt.rename(mapping)
         renamed = sort_commutative_args(Body((renamed,)))[0]
         result = repr(form(renamed))
@@ -1183,8 +1361,8 @@ def _pure_identity_tokens(stmts: Body) -> dict[int, str]:
                 if owner is not None:
                     producer, slot = owner
                     mapping[dependency] = f"__other_{digest(forward_token(producer))}_{slot}"
-                elif dependency not in axes:
-                    mapping[dependency] = f"__free_{dependency}"
+                else:
+                    mapping[dependency] = "__free__"
             renamed = consumer.rename(mapping)
             renamed = sort_commutative_args(Body((renamed,)))[0]
             downstream = tuple(reverse_token(defined) for defined in consumer.defines() if defined in definitions)
@@ -1203,13 +1381,8 @@ def _pure_identity_tokens(stmts: Body) -> dict[int, str]:
     return tokens
 
 
-def _canonicalize_pure_order_variants(stmts: Body, tokens: dict[int, str]) -> Iterator[Body]:
-    """Yield canonical candidates for dependency-valid orderings of pure statements.
-
-    A unique structural token fixes the next ready statement. Equal tokens remain ambiguous: later
-    uses can distinguish two otherwise identical definitions, so every tied ordering is retained
-    until the complete body's canonical form chooses between them. Effectful order never changes.
-    """
+def _canonicalize_order_variants(stmts: Body) -> Iterator[Body]:
+    """Yield canonical candidates for dependency- and effect-valid sibling orderings."""
     stmts = Body.coerce(stmts)
     statement_choices = []
     for stmt in stmts:
@@ -1217,39 +1390,105 @@ def _canonicalize_pure_order_variants(stmts: Body, tokens: dict[int, str]) -> It
         if not children:
             statement_choices.append((stmt,))
             continue
-        child_choices = [tuple(_canonicalize_pure_order_variants(child, tokens)) for child in children]
+        child_choices = [tuple(_canonicalize_order_variants(child)) for child in children]
         statement_choices.append(tuple(stmt.with_bodies(choice) for choice in product(*child_choices)))
 
     for statements in product(*statement_choices):
-        segment_choices: list[tuple[tuple[Stmt, ...], ...]] = []
-        run: list[Stmt] = []
-        for stmt in (*statements, None):
-            if stmt is not None and stmt.pure:
-                run.append(stmt)
-                continue
-            if run:
-                segment_choices.append(tuple(_canonicalize_pure_run_variants(run, tokens)))
-                run = []
-            if stmt is not None:
-                segment_choices.append(((stmt,),))
-        for segments in product(*segment_choices):
-            yield Body(member for segment in segments for member in segment)
+        yield from (Body(choice) for choice in _canonicalize_sibling_order_variants(list(statements)))
 
 
-def _canonicalize_pure_run_variants(stmts: list[Stmt], tokens: dict[int, str]) -> Iterator[tuple[Stmt, ...]]:
-    """Yield every unresolved canonical Kahn order for one pure sibling run."""
+def _canonicalize_sibling_order_variants(stmts: list[Stmt]) -> Iterator[tuple[Stmt, ...]]:
+    """Yield every unresolved canonical Kahn order for one sibling scope."""
     if len(stmts) <= 1:
         yield tuple(stmts)
         return
 
-    definitions: dict[str, int] = {}
+    from emmy.compiler.structural import form  # noqa: PLC0415
+
+    pure_tokens = _pure_identity_tokens(Body(stmts))
+    members = tuple(
+        (stmt, *(member for child in stmt.nested() for member in child.iter()))
+        for stmt in stmts
+    )
+    all_names = {
+        name
+        for subtree in members
+        for member in subtree
+        for name in (*member.defines(), *member.deps(), *member.binds_axes())
+    }
+    abstract = {name: "__name__" for name in all_names}
+    tokens = {
+        id(stmt): pure_tokens.get(
+            id(stmt),
+            repr(form(sort_commutative_args(Body((stmt.rename(abstract),)))[0])),
+        )
+        for stmt in stmts
+    }
+
+    definitions: dict[str, list[int]] = {}
     for index, stmt in enumerate(stmts):
-        for name in stmt.defines():
-            definitions.setdefault(name, index)
-    incoming = [
-        {definitions[name] for name in stmt.deps() if name in definitions and definitions[name] != index}
-        for index, stmt in enumerate(stmts)
-    ]
+        for name in _sibling_defs_uses(stmt)[0]:
+            definitions.setdefault(name, []).append(index)
+
+    def defining_stmt(name: str, consumer: int) -> int | None:
+        sites = definitions.get(name, ())
+        preceding = [site for site in sites if site < consumer]
+        if preceding:
+            return preceding[-1]
+        return next((site for site in sites if site != consumer), None)
+
+    incoming = []
+    for index, stmt in enumerate(stmts):
+        sources = {
+            source
+            for name in _sibling_defs_uses(stmt)[1]
+            if (source := defining_stmt(name, index)) is not None
+        }
+        incoming.append(sources)
+    for reader, stmt in enumerate(stmts):
+        for name in _sibling_defs_uses(stmt)[1]:
+            for later_definition in definitions.get(name, ()):
+                if later_definition > reader:
+                    incoming[later_definition].add(reader)
+
+    def resources(stmt: Stmt) -> tuple[set[str], set[str], set[str]]:
+        members = tuple(stmt for child in stmt.nested() for stmt in child.iter()) or (stmt,)
+        reads = {name for member in members for name in member.external_reads()}
+        writes = {name for member in members for name in member.external_writes()}
+        state = {
+            name
+            for member in members
+            for name in getattr(member, "carried_names", lambda: ())()
+        }
+        if isinstance(stmt, Init):
+            state.update(stmt.defines())
+        return reads, writes, state
+
+    effects = [resources(stmt) for stmt in stmts]
+    for later in range(len(stmts)):
+        later_reads, later_writes, later_state = effects[later]
+        for earlier in range(later):
+            reads, writes, state = effects[earlier]
+            if writes & (later_reads | later_writes) or reads & later_writes or state & later_state:
+                incoming[later].add(earlier)
+
+    edges = {(source, target) for target, sources in enumerate(incoming) for source in sources}
+
+    def interchangeable(left: int, right: int) -> bool:
+        left_defs = _ordered_sibling_defs(stmts[left])
+        right_defs = _ordered_sibling_defs(stmts[right])
+        if len(left_defs) != len(right_defs):
+            return False
+        rename = {**dict(zip(left_defs, right_defs, strict=True)), **dict(zip(right_defs, left_defs, strict=True))}
+        swap = {left: right, right: left}
+        if {(swap.get(a, a), swap.get(b, b)) for a, b in edges} != edges:
+            return False
+        for index, stmt in enumerate(stmts):
+            rewritten = sort_commutative_args(Body((stmt.rename(rename),)))[0]
+            if form(rewritten) != form(stmts[swap.get(index, index)]):
+                return False
+        return True
+
     def walk(remaining: frozenset[int], ordered: tuple[int, ...]) -> Iterator[tuple[Stmt, ...]]:
         if not remaining:
             yield tuple(stmts[index] for index in ordered)
@@ -1259,41 +1498,45 @@ def _canonicalize_pure_run_variants(stmts: list[Stmt], tokens: dict[int, str]) -
             yield tuple(stmts)
             return
         least = min(tokens[id(stmts[index])] for index in ready)
-        for selected in ready:
-            if tokens[id(stmts[selected])] == least:
-                yield from walk(remaining - {selected}, (*ordered, selected))
+        tied = [index for index in ready if tokens[id(stmts[index])] == least]
+        representatives: list[int] = []
+        for selected in tied:
+            if not any(interchangeable(selected, earlier) for earlier in representatives):
+                representatives.append(selected)
+        for selected in representatives:
+            yield from walk(remaining - {selected}, (*ordered, selected))
 
     yield from walk(frozenset(range(len(stmts))), ())
 
 
-# ---------------------------------------------------------------------------
-# Pass: canonicalize external-buffer names (opt-in via normalize_body flag).
-# ---------------------------------------------------------------------------
+def _orders_modulo_transpositions(items: list, interchangeable: Callable[[object, object], bool]) -> Iterator[tuple]:
+    """Permute distinct items once modulo transpositions proven to preserve the whole form."""
+    classes: list[list] = []
+    for item in items:
+        for group in classes:
+            if interchangeable(item, group[0]):
+                group.append(item)
+                break
+        else:
+            classes.append([item])
 
+    def walk(remaining: tuple[int, ...], positions: tuple[int, ...]) -> Iterator[tuple]:
+        if not any(remaining):
+            offsets = [0] * len(classes)
+            out = []
+            for class_index in positions:
+                out.append(classes[class_index][offsets[class_index]])
+                offsets[class_index] += 1
+            yield tuple(out)
+            return
+        for class_index, count_left in enumerate(remaining):
+            if not count_left:
+                continue
+            next_remaining = list(remaining)
+            next_remaining[class_index] -= 1
+            yield from walk(tuple(next_remaining), (*positions, class_index))
 
-def canonicalize_buffer_names(stmts: Body) -> Body:
-    """Rename ``Load.input`` and ``Write.output`` buffer references to
-    ``b0, b1, ...`` in encounter order via :meth:`Body.iter`.
-
-    Off by default — buffer names bind to graph nodes (each ``Load.input``
-    matches the producing op's id), so renaming them in a body that's
-    still attached to an Op would break that wiring. Used by
-    :attr:`Body.structural_key()` for dedup queries where buffer identity
-    doesn't matter (two bodies with identical access patterns over
-    differently-named inputs are structurally equal)."""
-    stmts = Body.coerce(stmts)
-
-    rename: dict[str, str] = {}
-    for s in stmts.iter():
-        for name in (*s.external_reads(), *s.external_writes()):
-            if name not in rename:
-                rename[name] = f"b{len(rename)}"
-
-    if all(o == n for o, n in rename.items()):
-        return stmts
-
-    return stmts.rename_buffers(rename)
-
+    yield from walk(tuple(len(group) for group in classes), ())
 
 # ---------------------------------------------------------------------------
 # Pass: collapse ops to their compute-unit cluster representative

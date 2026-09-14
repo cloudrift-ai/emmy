@@ -75,3 +75,23 @@ def test_dedup_loads_still_rewires_an_inner_use_of_the_dropped_name() -> None:
 
     assert [s.name for s in out if isinstance(s, Load)] == ["in0"]
     assert out[-1].body == Body((Assign(name="v", op="add", args=("in0", "in0")),))
+
+
+def test_dedup_loads_rewires_every_vector_lane() -> None:
+    """A duplicate vector load aliases each lane to the corresponding kept lane."""
+    body = Body(
+        (
+            Load(names=("x0", "x1"), input="X", index=ZERO),
+            Load(names=("y0", "y1"), input="X", index=ZERO),
+            Assign(name="sum", op="add", args=("y0", "y1")),
+        )
+    )
+
+    out = dedup_loads(body)
+
+    assert out == Body(
+        (
+            Load(names=("x0", "x1"), input="X", index=ZERO),
+            Assign(name="sum", op="add", args=("x0", "x1")),
+        )
+    )

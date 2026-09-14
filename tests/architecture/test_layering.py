@@ -335,8 +335,8 @@ def test_nothing_reaches_into_the_scheduler_for_identity() -> None:
 def test_every_buffer_bearing_stmt_can_rename_its_buffers() -> None:
     """``Stmt.rename_buffers`` is the setter counterpart of ``external_reads`` /
     ``external_writes``: a stmt kind that DECLARES external buffers without knowing how to
-    rename them silently breaks every buffer rebind (``canonicalize_buffer_names``, the session
-    kernel cache) the day it first appears inside a body those walk. Wrapper stmts whose
+    rename them silently breaks every buffer rebind (structural identity, the session kernel
+    cache) the day it first appears inside a body those walk. Wrapper stmts whose
     declarations aggregate a nested body are exempt — ``Body.rename_buffers`` reaches their
     leaves through the recursive map."""
     import importlib
