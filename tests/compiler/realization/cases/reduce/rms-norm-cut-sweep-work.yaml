@@ -19,7 +19,9 @@
 # Measured after the change: 4.2 us for this half, and the cut arm 6.3 us against 5.4 us fused --
 # a 211x kernel speedup that turns the placement fork from a foregone conclusion into a real
 # comparison. Correctness checked against eager (max abs error 3e-08).
-compute_cap: [12, 0]
+compute_cap:
+- 12
+- 0
 programs:
 - inputs: [x]
   outputs: [rms_norm]
@@ -30,45 +32,42 @@ programs:
       name: p_weight
       value: null
       context_value: null
-      load_ops:
-        __tuple__: []
+      load_ops: {__tuple__: []}
       source_path: weight
-      source_parts:
-        __tuple__: []
-      source_shape:
-        __tuple__: [4096]
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [4096]}
       source_dtype: float32
       source_graph: null
-    outputs:
-    - - p_weight
-      - f32
-      - [4096]
+    outputs: [[p_weight, f32, [4096]]]
   - id: x
     op: input
-    outputs:
-    - - x
-      - f32
-      - [512, 4096]
+    outputs: [[x, f32, [512, 4096]]]
   - id: rms_norm
     op: torch.rms_norm
     attrs: {eps: 1.0e-06}
     inputs: [x, p_weight]
-    outputs:
-    - - rms_norm
-      - f32
-      - [512, 4096]
+    outputs: [[rms_norm, f32, [512, 4096]]]
 configs:
 - program: 0
   target:
-    origins: [rms_norm]
+    origins:
+    - rms_norm
   realizations:
-  - name: k_rms_norm_86ddb3.c342c72939b8
+  - name: k_rms_norm_cbb3be.7f1412a7858d
     bindings: {}
-    pins: {FAST_MATH: false, PLACE@map.1/map: cut}
-    knobs: {WORK: t128, REDUCE: coop, RASTER: ''}
-    identity: 97b9a41c07253c3dfa09c8f01e5f949c07f7ee4e37f1f67ea036239c0069cdf9
+    pins:
+      FAST_MATH: false
+      PLACE@map.1/map: cut
+    knobs:
+      WORK: t128
+      REDUCE: coop
+      RASTER: ''
+    identity: 7969ca9a200b65f0a1275ebf6532a5ca2502cd96582ef7cd7ef0ff2163619538
   - name: k_rms_norm_86ddb3.c342c72939b8.cac64900859e
     bindings: {}
-    pins: {FAST_MATH: false}
-    knobs: {WORK: t512, RASTER: ''}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t512
+      RASTER: ''
     identity: cac64900859e5707820fc1f6b73473c8696a161414cc219fdff81472315525e2

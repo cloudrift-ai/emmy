@@ -19,14 +19,14 @@ configs:
     origins:
     - sum_1
   realizations:
-  - name: k_sum_1_reduce.28b5cb4fdd47
+  - name: k_sum_1_reduce.22d8e3e1f80c
     bindings: {}
     pins:
       FAST_MATH: false
       PLACE: fuse
     knobs:
       REDUCE: g2k
-    identity: 7ddbf749e187579cc4d97761dd198062e516f5cd20b297e5647bd32303c163c9
+    identity: 79f16d74a1fcde9a3b66268d40a5cdfc44c81bbc32886b0d2ed06ddca39d4b00
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 8.184000140144713

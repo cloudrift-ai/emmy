@@ -32,13 +32,13 @@ configs:
     - add_7
     - linear_6
   realizations:
-  - name: k_linear_6e0a29.80e94867d2bb
+  - name: k_linear_7f1d4b.137766ea21e0
     bindings: {}
     pins:
       FAST_MATH: false
       PLACE: cut
     knobs: {}
-    identity: ac7f15e1da83fc888de282bb2876faccaadf7775b19d27c3530eeeef1ffbb898
+    identity: 76ea2407c248a23368c3385de4280b3b6f2e7e391bba958d3602f97a57ed6362
   - name: k_linear_0ac86e.4b5154dda667.2353a673153f
     bindings: {}
     pins:

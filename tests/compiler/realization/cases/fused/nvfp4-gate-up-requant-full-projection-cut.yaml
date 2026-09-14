@@ -1685,7 +1685,7 @@ configs:
   target:
     loop: 1
   realizations:
-  - name: k_linear_reduce_d0a3a9.ee41d0acb382
+  - name: k_linear_reduce_e19466.02d8496e42de
     bindings: {}
     pins:
       FAST_MATH: false
@@ -1700,7 +1700,7 @@ configs:
       PLACE@map.2/map: cut
       PLACE@map.2/map.2/reduce.1/inner: cut
       PLACE@map.2/map.2/reduce.2/inner: cut
-    identity: fc7cd092faad82175f6f259fa67c2b084fe6960bb87807e145e7d0b93d7519ef
+    identity: b564ce7ae7575f93ff01e988c4d21a721de5bdf6980dd3a58a145478df748817
   - name: k_linear_reduce_d0a3a9.ee41d0acb382.10803bc913cd
     bindings: {}
     pins:
@@ -1949,7 +1949,7 @@ loops:
                               value: v5
                               op: {elementwise: maximum}
                               dtype: null
-                              axes: {tuple: [a2_s2]}
+                              axes: {tuple: [a2]}
                               base: null
                           - class: Assign
                             fields: {name: v6, op: {elementwise: abs}, args: {tuple: [in4]}, dtype: {dtype: f32}}
@@ -1959,7 +1959,7 @@ loops:
                               value: v6
                               op: {elementwise: maximum}
                               dtype: null
-                              axes: {tuple: [a2_s1]}
+                              axes: {tuple: [a2]}
                               base: null
                         unroll: false
                         seed: true
@@ -2039,12 +2039,12 @@ loops:
                   seed: true
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 32}, window: null}}
+                  axis: {class: Axis, fields: {name: a3, extent: {dim: 32}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a3, extent: {dim: 16}, window: null}}
+                        axis: {class: Axis, fields: {name: a4, extent: {dim: 16}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -2057,8 +2057,8 @@ loops:
                                 - expr:
                                     binary:
                                       op: +
-                                      left: {binary: {op: '*', left: {var: a1}, right: {literal: {value: 16, dtype: int}}}}
-                                      right: {var: a3}
+                                      left: {binary: {op: '*', left: {var: a3}, right: {literal: {value: 16, dtype: int}}}}
+                                      right: {var: a4}
                               dtype: null
                           - class: Assign
                             fields: {name: v28, op: {elementwise: abs}, args: {tuple: [in7]}, dtype: {dtype: f32}}
@@ -2068,7 +2068,7 @@ loops:
                               value: v28
                               op: {elementwise: maximum}
                               dtype: null
-                              axes: {tuple: [a3_s1]}
+                              axes: {tuple: [a4]}
                               base: null
                         unroll: false
                         seed: true
@@ -2079,7 +2079,7 @@ loops:
                     - class: Write
                       fields:
                         output: x_static_fp4_scale_bits
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}, {expr: {literal: {value: 0, dtype: int}}}]}
+                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a3}}, {expr: {literal: {value: 0, dtype: int}}}]}
                         values: {tuple: [v30]}
                         value_dtype: null
                         atomic: false
@@ -2088,7 +2088,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_reshape_reduce_a2ebc9
+      name: k_reshape_reduce_91dd8c
     inputs: [x_static_fp4_floor, x_static_fp4_shift, x_static_fp4_f4_max, x_static_fp4_scale_2, x]
     outputs: [[x_static_fp4_scale_bits, f8e4m3, [128, 32, 1]], [x_static_fp4_bits, f4e2m1x2, [128, 256]]]
 - inputs: [x_static_fp4_scale_bits, x_static_fp4_bits]
@@ -2888,13 +2888,7 @@ loops:
                                 - class: Assign
                                   fields: {name: v16, op: {elementwise: multiply}, args: {tuple: [v14, v15]}, dtype: null}
                                 - class: Accum
-                                  fields:
-                                    name: acc0
-                                    value: v16
-                                    op: {elementwise: add}
-                                    dtype: null
-                                    axes: {tuple: [a3_s1]}
-                                    base: null
+                                  fields: {name: acc0, value: v16, op: {elementwise: add}, dtype: null, axes: {tuple: [a3]}, base: null}
                               unroll: false
                               seed: true
                           - class: Assign
@@ -3039,13 +3033,7 @@ loops:
                                 - class: Assign
                                   fields: {name: v33, op: {elementwise: multiply}, args: {tuple: [v31, v32]}, dtype: null}
                                 - class: Accum
-                                  fields:
-                                    name: acc1
-                                    value: v33
-                                    op: {elementwise: add}
-                                    dtype: null
-                                    axes: {tuple: [a4_s1]}
-                                    base: null
+                                  fields: {name: acc1, value: v33, op: {elementwise: add}, dtype: null, axes: {tuple: [a4]}, base: null}
                               unroll: false
                               seed: true
                           - class: Assign
@@ -3062,7 +3050,7 @@ loops:
                               value: v37
                               op: {elementwise: maximum}
                               dtype: null
-                              axes: {tuple: [a2_s1]}
+                              axes: {tuple: [a2]}
                               base: null
                         unroll: false
                         seed: true
@@ -3197,13 +3185,7 @@ loops:
                           - class: Assign
                             fields: {name: v52, op: {elementwise: multiply}, args: {tuple: [v50, v51]}, dtype: null}
                           - class: Accum
-                            fields:
-                              name: acc3
-                              value: v52
-                              op: {elementwise: add}
-                              dtype: null
-                              axes: {tuple: [a5_s1]}
-                              base: null
+                            fields: {name: acc3, value: v52, op: {elementwise: add}, dtype: null, axes: {tuple: [a5]}, base: null}
                         unroll: false
                         seed: true
                     - class: Assign
@@ -3329,13 +3311,7 @@ loops:
                           - class: Assign
                             fields: {name: v67, op: {elementwise: multiply}, args: {tuple: [v65, v66]}, dtype: null}
                           - class: Accum
-                            fields:
-                              name: acc4
-                              value: v67
-                              op: {elementwise: add}
-                              dtype: null
-                              axes: {tuple: [a6_s1]}
-                              base: null
+                            fields: {name: acc4, value: v67, op: {elementwise: add}, dtype: null, axes: {tuple: [a6]}, base: null}
                         unroll: false
                         seed: true
                     - class: Assign
@@ -3472,13 +3448,7 @@ loops:
                           - class: Assign
                             fields: {name: v84, op: {elementwise: multiply}, args: {tuple: [v82, v83]}, dtype: null}
                           - class: Accum
-                            fields:
-                              name: acc5
-                              value: v84
-                              op: {elementwise: add}
-                              dtype: null
-                              axes: {tuple: [a7_s1]}
-                              base: null
+                            fields: {name: acc5, value: v84, op: {elementwise: add}, dtype: null, axes: {tuple: [a7]}, base: null}
                         unroll: false
                         seed: true
                     - class: Assign
@@ -3617,13 +3587,7 @@ loops:
                           - class: Assign
                             fields: {name: v106, op: {elementwise: multiply}, args: {tuple: [v104, v105]}, dtype: null}
                           - class: Accum
-                            fields:
-                              name: acc6
-                              value: v106
-                              op: {elementwise: add}
-                              dtype: null
-                              axes: {tuple: [a8_s1]}
-                              base: null
+                            fields: {name: acc6, value: v106, op: {elementwise: add}, dtype: null, axes: {tuple: [a8]}, base: null}
                         unroll: false
                         seed: true
                     - class: Assign
@@ -3666,17 +3630,17 @@ loops:
                   seed: true
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 32}, window: null}}
+                  axis: {class: Axis, fields: {name: a9, extent: {dim: 32}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a9, extent: {dim: 16}, window: null}}
+                        axis: {class: Axis, fields: {name: a10, extent: {dim: 16}, window: null}}
                         body:
                           body:
                           - class: Loop
                             fields:
-                              axis: {class: Axis, fields: {name: a10, extent: {dim: 512}, window: null}}
+                              axis: {class: Axis, fields: {name: a11, extent: {dim: 512}, window: null}}
                               body:
                                 body:
                                 - class: Load
@@ -3688,9 +3652,9 @@ loops:
                                       - expr:
                                           binary:
                                             op: +
-                                            left: {binary: {op: '*', left: {var: a1}, right: {literal: {value: 16, dtype: int}}}}
-                                            right: {var: a9}
-                                      - {expr: {binary: {op: /, left: {var: a10}, right: {literal: {value: 16, dtype: int}}}}}
+                                            left: {binary: {op: '*', left: {var: a9}, right: {literal: {value: 16, dtype: int}}}}
+                                            right: {var: a10}
+                                      - {expr: {binary: {op: /, left: {var: a11}, right: {literal: {value: 16, dtype: int}}}}}
                                     dtype: null
                                 - class: Load
                                   fields:
@@ -3699,7 +3663,7 @@ loops:
                                     index:
                                       tuple:
                                       - {expr: {var: a0}}
-                                      - {expr: {binary: {op: /, left: {var: a10}, right: {literal: {value: 16, dtype: int}}}}}
+                                      - {expr: {binary: {op: /, left: {var: a11}, right: {literal: {value: 16, dtype: int}}}}}
                                       - {expr: {literal: {value: 0, dtype: int}}}
                                     dtype: null
                                 - class: Assign
@@ -3713,20 +3677,20 @@ loops:
                                       - expr:
                                           binary:
                                             op: +
-                                            left: {binary: {op: '*', left: {var: a1}, right: {literal: {value: 16, dtype: int}}}}
-                                            right: {var: a9}
+                                            left: {binary: {op: '*', left: {var: a9}, right: {literal: {value: 16, dtype: int}}}}
+                                            right: {var: a10}
                                       - expr:
                                           binary:
                                             op: +
                                             left:
                                               binary:
                                                 op: '*'
-                                                left: {binary: {op: /, left: {var: a10}, right: {literal: {value: 16, dtype: int}}}}
+                                                left: {binary: {op: /, left: {var: a11}, right: {literal: {value: 16, dtype: int}}}}
                                                 right: {literal: {value: 8, dtype: int}}
                                             right:
                                               binary:
                                                 op: /
-                                                left: {binary: {op: '%', left: {var: a10}, right: {literal: {value: 16, dtype: int}}}}
+                                                left: {binary: {op: '%', left: {var: a11}, right: {literal: {value: 16, dtype: int}}}}
                                                 right: {literal: {value: 2, dtype: int}}
                                     dtype: null
                                 - class: Assign
@@ -3744,12 +3708,12 @@ loops:
                                             left:
                                               binary:
                                                 op: '*'
-                                                left: {binary: {op: /, left: {var: a10}, right: {literal: {value: 16, dtype: int}}}}
+                                                left: {binary: {op: /, left: {var: a11}, right: {literal: {value: 16, dtype: int}}}}
                                                 right: {literal: {value: 8, dtype: int}}
                                             right:
                                               binary:
                                                 op: /
-                                                left: {binary: {op: '%', left: {var: a10}, right: {literal: {value: 16, dtype: int}}}}
+                                                left: {binary: {op: '%', left: {var: a11}, right: {literal: {value: 16, dtype: int}}}}
                                                 right: {literal: {value: 2, dtype: int}}
                                     dtype: null
                                 - class: Assign
@@ -3772,7 +3736,7 @@ loops:
                                       - expr:
                                           binary:
                                             op: '%'
-                                            left: {binary: {op: '%', left: {var: a10}, right: {literal: {value: 16, dtype: int}}}}
+                                            left: {binary: {op: '%', left: {var: a11}, right: {literal: {value: 16, dtype: int}}}}
                                             right: {literal: {value: 2, dtype: int}}
                                     dtype: null
                                 - class: Assign
@@ -3787,7 +3751,7 @@ loops:
                                       - expr:
                                           binary:
                                             op: '%'
-                                            left: {binary: {op: '%', left: {var: a10}, right: {literal: {value: 16, dtype: int}}}}
+                                            left: {binary: {op: '%', left: {var: a11}, right: {literal: {value: 16, dtype: int}}}}
                                             right: {literal: {value: 2, dtype: int}}
                                     dtype: null
                                 - class: Assign
@@ -3797,13 +3761,7 @@ loops:
                                 - class: Assign
                                   fields: {name: v131, op: {elementwise: multiply}, args: {tuple: [v129, v130]}, dtype: null}
                                 - class: Accum
-                                  fields:
-                                    name: acc7
-                                    value: v131
-                                    op: {elementwise: add}
-                                    dtype: null
-                                    axes: {tuple: [a10_s1]}
-                                    base: null
+                                  fields: {name: acc7, value: v131, op: {elementwise: add}, dtype: null, axes: {tuple: [a11]}, base: null}
                               unroll: false
                               seed: true
                           - class: Assign
@@ -3820,7 +3778,7 @@ loops:
                             fields: {name: v137, op: {elementwise: reciprocal}, args: {tuple: [v136]}, dtype: null}
                           - class: Loop
                             fields:
-                              axis: {class: Axis, fields: {name: a11, extent: {dim: 512}, window: null}}
+                              axis: {class: Axis, fields: {name: a12, extent: {dim: 512}, window: null}}
                               body:
                                 body:
                                 - class: Load
@@ -3836,12 +3794,12 @@ loops:
                                             left:
                                               binary:
                                                 op: '*'
-                                                left: {binary: {op: /, left: {var: a11}, right: {literal: {value: 16, dtype: int}}}}
+                                                left: {binary: {op: /, left: {var: a12}, right: {literal: {value: 16, dtype: int}}}}
                                                 right: {literal: {value: 8, dtype: int}}
                                             right:
                                               binary:
                                                 op: /
-                                                left: {binary: {op: '%', left: {var: a11}, right: {literal: {value: 16, dtype: int}}}}
+                                                left: {binary: {op: '%', left: {var: a12}, right: {literal: {value: 16, dtype: int}}}}
                                                 right: {literal: {value: 2, dtype: int}}
                                     dtype: null
                                 - class: Assign
@@ -3853,7 +3811,7 @@ loops:
                                     index:
                                       tuple:
                                       - {expr: {var: a0}}
-                                      - {expr: {binary: {op: /, left: {var: a11}, right: {literal: {value: 16, dtype: int}}}}}
+                                      - {expr: {binary: {op: /, left: {var: a12}, right: {literal: {value: 16, dtype: int}}}}}
                                       - {expr: {literal: {value: 0, dtype: int}}}
                                     dtype: null
                                 - class: Load
@@ -3865,9 +3823,9 @@ loops:
                                       - expr:
                                           binary:
                                             op: +
-                                            left: {binary: {op: '*', left: {var: a1}, right: {literal: {value: 16, dtype: int}}}}
-                                            right: {var: a9}
-                                      - {expr: {binary: {op: /, left: {var: a11}, right: {literal: {value: 16, dtype: int}}}}}
+                                            left: {binary: {op: '*', left: {var: a9}, right: {literal: {value: 16, dtype: int}}}}
+                                            right: {var: a10}
+                                      - {expr: {binary: {op: /, left: {var: a12}, right: {literal: {value: 16, dtype: int}}}}}
                                     dtype: null
                                 - class: Assign
                                   fields: {name: v139, op: {elementwise: from_f8e4m3}, args: {tuple: [in51]}, dtype: null}
@@ -3881,7 +3839,7 @@ loops:
                                       - expr:
                                           binary:
                                             op: '%'
-                                            left: {binary: {op: '%', left: {var: a11}, right: {literal: {value: 16, dtype: int}}}}
+                                            left: {binary: {op: '%', left: {var: a12}, right: {literal: {value: 16, dtype: int}}}}
                                             right: {literal: {value: 2, dtype: int}}
                                     dtype: null
                                 - class: Assign
@@ -3895,20 +3853,20 @@ loops:
                                       - expr:
                                           binary:
                                             op: +
-                                            left: {binary: {op: '*', left: {var: a1}, right: {literal: {value: 16, dtype: int}}}}
-                                            right: {var: a9}
+                                            left: {binary: {op: '*', left: {var: a9}, right: {literal: {value: 16, dtype: int}}}}
+                                            right: {var: a10}
                                       - expr:
                                           binary:
                                             op: +
                                             left:
                                               binary:
                                                 op: '*'
-                                                left: {binary: {op: /, left: {var: a11}, right: {literal: {value: 16, dtype: int}}}}
+                                                left: {binary: {op: /, left: {var: a12}, right: {literal: {value: 16, dtype: int}}}}
                                                 right: {literal: {value: 8, dtype: int}}
                                             right:
                                               binary:
                                                 op: /
-                                                left: {binary: {op: '%', left: {var: a11}, right: {literal: {value: 16, dtype: int}}}}
+                                                left: {binary: {op: '%', left: {var: a12}, right: {literal: {value: 16, dtype: int}}}}
                                                 right: {literal: {value: 2, dtype: int}}
                                     dtype: null
                                 - class: Assign
@@ -3931,7 +3889,7 @@ loops:
                                       - expr:
                                           binary:
                                             op: '%'
-                                            left: {binary: {op: '%', left: {var: a11}, right: {literal: {value: 16, dtype: int}}}}
+                                            left: {binary: {op: '%', left: {var: a12}, right: {literal: {value: 16, dtype: int}}}}
                                             right: {literal: {value: 2, dtype: int}}
                                     dtype: null
                                 - class: Assign
@@ -3941,13 +3899,7 @@ loops:
                                 - class: Assign
                                   fields: {name: v148, op: {elementwise: multiply}, args: {tuple: [v146, v147]}, dtype: null}
                                 - class: Accum
-                                  fields:
-                                    name: acc8
-                                    value: v148
-                                    op: {elementwise: add}
-                                    dtype: null
-                                    axes: {tuple: [a11_s1]}
-                                    base: null
+                                  fields: {name: acc8, value: v148, op: {elementwise: add}, dtype: null, axes: {tuple: [a12]}, base: null}
                               unroll: false
                               seed: true
                           - class: Assign
@@ -3964,7 +3916,7 @@ loops:
                               value: v152
                               op: {elementwise: maximum}
                               dtype: null
-                              axes: {tuple: [a9_s1]}
+                              axes: {tuple: [a10]}
                               base: null
                         unroll: false
                         seed: true
@@ -3975,7 +3927,7 @@ loops:
                     - class: Write
                       fields:
                         output: mul_static_fp4_scale_bits
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}, {expr: {literal: {value: 0, dtype: int}}}]}
+                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a9}}, {expr: {literal: {value: 0, dtype: int}}}]}
                         values: {tuple: [v154]}
                         value_dtype: null
                         atomic: false
@@ -3984,7 +3936,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_reduce_d0a3a9
+      name: k_linear_reduce_e19466
     inputs: [p_gate_weight_scale_2, x_static_fp4_scale_2, p_up_weight_scale_2, silu_one, mul_static_fp4_floor, mul_static_fp4_scale_2, mul_static_fp4_f4_max,
       mul_static_fp4_shift, p_gate_weight_scale_bits, x_static_fp4_scale_bits, p_gate_weight_bits, x_static_fp4_bits, p_gate_weight_f4_pairs,
       x_static_fp4_r1_f4_pairs, p_up_weight_scale_bits, x_static_fp4_r2_f4_pairs, p_up_weight_bits, p_up_weight_f4_pairs]
@@ -4401,13 +4353,7 @@ loops:
                           - class: Assign
                             fields: {name: v10, op: {elementwise: multiply}, args: {tuple: [v8, v9]}, dtype: null}
                           - class: Accum
-                            fields:
-                              name: acc0
-                              value: v10
-                              op: {elementwise: add}
-                              dtype: null
-                              axes: {tuple: [a2_s1]}
-                              base: null
+                            fields: {name: acc0, value: v10, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
                         unroll: false
                         seed: true
                     - class: Write
@@ -4422,7 +4368,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_e7c35a
+      name: k_linear_7db7e3
     inputs: [p_down_weight_scale_2, mul_static_fp4_scale_2, mul_static_fp4_bits, p_down_weight_scale_bits, mul_static_fp4_scale_bits, p_down_weight_bits,
       mul_static_fp4_r1_f4_pairs, p_down_weight_f4_pairs]
     outputs: [[linear_2, f16, [128, 512]]]
