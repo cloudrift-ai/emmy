@@ -9,6 +9,11 @@ on:
     types: [published]
   workflow_dispatch:
 
+permissions:
+  actions: read
+  contents: read
+  pull-requests: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -19,13 +24,28 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Verify the release commit is on main
+      - name: Verify the release source
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           git fetch origin main
           if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
             echo "::error::Releases must publish a commit already merged into main"
             exit 1
           fi
+          PR_HEAD=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" \
+            --jq "map(select(.merged_at != null and .base.ref == \"main\" and .merge_commit_sha == \"$GITHUB_SHA\")) | first | .head.sha // empty")
+          if [ -z "$PR_HEAD" ]; then
+            echo "::error::The release commit is not associated with a merged pull request"
+            exit 1
+          fi
+          TEST_RUN=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/tests.yml/runs?head_sha=$PR_HEAD&event=pull_request" \
+            --jq '[.workflow_runs[] | select(.status == "completed" and .conclusion == "success")] | first | .html_url // empty')
+          if [ -z "$TEST_RUN" ]; then
+            echo "::error::The merged pull request has no successful Tests workflow"
+            exit 1
+          fi
+          echo "Using pull-request checks from $TEST_RUN"
 
       - uses: actions/setup-python@v5
         with:
