@@ -703,10 +703,9 @@ class Body(tuple[Stmt, ...]):
 
         Built by re-running :func:`normalize_body` with ``hoist=False``
         (safe for both Loop-IR and Tile-IR bodies — hoisting can move
-        Loads above Stage decls in Tile bodies) and
-        ``canonical_buffers=True`` (renames ``Load.input`` /
-        ``Write.output`` to ``b0, b1, ...``). Cached on the
-        instance — Body is immutable."""
+        Loads above Stage decls in Tile bodies), then canonicalizing
+        external-buffer roles and dependency-valid pure-statement order.
+        Cached on the instance — Body is immutable."""
         return self._structural_key_clustered if structural else self._structural_key_exact
 
     @cached_property
@@ -732,7 +731,7 @@ def _shared_structural_key(body: Body, cluster: bool) -> str:
     """Module-level memoization for :meth:`Body.structural_key`.
 
     The formula is fixed per flavor: ``normalize_body(body, hoist=False,
-    canonical_buffers=True, cluster_ops=cluster)`` rendered through
+    cluster_ops=cluster)`` followed by identity-only canonicalization and rendered through
     :func:`~emmy.compiler.structural.form`. Structural, not the
     pretty text it used to join: ``pretty()`` is the human rendering, and
     a cosmetic change to how a statement prints must not re-key every
@@ -750,10 +749,11 @@ def _shared_structural_key(body: Body, cluster: bool) -> str:
     queries but would be a *correctness bug* for any callsite running
     the normalized body.
     """
-    from emmy.compiler.ir.stmt.normalize import normalize_body  # noqa: PLC0415
+    from emmy.compiler.ir.stmt.normalize import canonicalize_identity, normalize_body  # noqa: PLC0415
     from emmy.compiler.structural import digest, form  # noqa: PLC0415
 
-    normalized = normalize_body(body, hoist=False, canonical_buffers=True, cluster_ops=cluster)
+    normalized = normalize_body(body, hoist=False, cluster_ops=cluster)
+    normalized = canonicalize_identity(normalized)
     return digest(form(normalized))
 
 
