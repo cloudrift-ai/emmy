@@ -583,6 +583,103 @@ def test_embedded_loop_pins_receive_greedy_output_reference(monkeypatch, tmp_pat
     assert "requires same-input greedy outputs" in caplog.text
 
 
+def test_a_walk_recording_the_greedy_pick_still_times_it_isolated(monkeypatch, tmp_path):
+    """``--record-greedy`` records the greedy pick from its per-kernel ISOLATED re-bench, and asks
+    the worker for the greedy's own outputs — the only reference a target with no Torch twin has.
+    Both used to ride on the pinned-row path, which a whole-file walk over a fresh trace inventory
+    never enters: the file holds no verified row to pin. Every target then benched and recorded
+    nothing, one ``--record-greedy needs the greedy row ... timed per kernel`` at a time."""
+    from emmy.commands import run as run_module
+    from emmy.commands.compile import resolve_golden_arg
+    from emmy.compiler.pipeline import Pipeline
+
+    path = tmp_path / "working.yaml"
+    _working_loop(path)
+    args = _args(
+        path,
+        ir=None,
+        bench=True,
+        ab=None,
+        debug=False,
+        dump_dir=None,
+        bench_backends="emmy",
+        warmup=5,
+        iters=20,
+        seed=0,
+        json=None,
+        profile=False,
+        record_greedy=True,
+    )
+    resolve_golden_arg(args)
+    args._explicit_realization = False
+    args.golden_configs = []  # a walk pins a target's VERIFIED rows; a trace inventory has none
+    seen = {}
+    returned = {"accuracy_error": None}
+
+    class FakePipeline:
+        def with_strategies(self, _taken):
+            return self
+
+        def run(self, graph, **_kwargs):
+            return graph
+
+    class FakeBackend:
+        name = "cuda"
+        tune_db = None
+        bench_compile_timeout_s = 1.0
+        bench_run_timeout_s = 1.0
+
+        def __init__(self, **_kwargs):
+            pass
+
+        async def benchmark_compare_async(self, _graph, **kwargs):
+            seen["want_ref"] = kwargs["want_ref"]
+            return {
+                "results": {},
+                "result": None,
+                "captured": False,
+                "torch_available": False,
+                "accuracy_error": returned["accuracy_error"],
+                "run_io": ({"x": [1.0]}, {"y": [1.0]}),
+                "greedy_error": None,
+                "reference_run_us": None,
+            }
+
+        async def aclose_async_worker(self):
+            pass
+
+    class FakeDump:
+        @staticmethod
+        def resolve(_path):
+            return None
+
+    async def fake_isolated(*_args, **_kwargs):
+        seen["isolated"] = True
+        return None
+
+    monkeypatch.setattr(Pipeline, "build", lambda _passes: FakePipeline())
+    monkeypatch.setattr(run_module, "_bench_greedy_isolated", fake_isolated)
+    monkeypatch.setattr(run_module, "_print_kernel_stats", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(run_module, "_record_greedy_pick", lambda *_args, **_kwargs: seen.__setitem__("recorded", True))
+    monkeypatch.setattr(run_module, "_record_bench_evidence", lambda *_args, **_kwargs: None)
+
+    run_module._handle_run_ir(args, FakeBackend, FakeDump)
+
+    assert seen["want_ref"] is True, "the greedy outputs are the only reference a twinless target has"
+    assert seen.get("isolated") is True, "the recorded row's per-kernel timings come from the isolated re-bench"
+    assert seen.get("recorded") is True
+
+    # And a row whose ANSWER --strict rejected is not recorded: on sm_70 a wrong answer can run
+    # faster than the right neighbour, and a recorded row outranks every later compile.
+    seen.pop("recorded")
+    args.strict_correctness = True
+    returned["accuracy_error"] = "strict eager correctness failed: output 'y' exceeds rtol=0.001"
+    with pytest.raises(SystemExit) as exit_code:
+        run_module._handle_run_ir(args, FakeBackend, FakeDump)
+    assert exit_code.value.code == 1
+    assert "recorded" not in seen
+
+
 def test_replay_keys_its_cache_by_the_entry_identity(tmp_path):
     """Two entries of one set can spell the same row and pins on different kernels — a seam
     spelling recurs on a residual as earlier cuts renumber its tree — and each replays its own

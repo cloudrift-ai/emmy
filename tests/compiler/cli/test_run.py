@@ -250,6 +250,26 @@ def test_run_ab_requires_bench(run_cli):
     assert "--ab requires --bench" in (stdout + stderr)
 
 
+def test_run_json_rejects_a_directory_for_one_target(run_cli, tmp_path):
+    """One target writes one FILE, and it writes it last.
+
+    A directory used to reach ``Path(args.json).write_text`` and raise ``IsADirectoryError`` after
+    the bench had run and the recording had been skipped, so a ``--record-greedy`` batch reported
+    success per target and recorded nothing. The check has to fire before any work, which is what
+    ``rc == 2`` with no compile output shows."""
+    rc, stdout, stderr = run_cli("run", "--code", "torch.zeros(4)", "--bench", "--json", str(tmp_path))
+    assert rc == 2
+    assert "is a directory" in (stdout + stderr)
+
+
+def test_run_json_rejects_a_trailing_separator_for_one_target(run_cli, tmp_path):
+    """A path that NAMES a directory is refused even before it exists — otherwise a trailing slash
+    silently writes a file beside the intended directory."""
+    rc, stdout, stderr = run_cli("run", "--code", "torch.zeros(4)", "--bench", "--json", f"{tmp_path}/nope/")
+    assert rc == 2
+    assert "is a directory" in (stdout + stderr)
+
+
 def test_run_ab_requires_relowerable_input(run_cli):
     """``--ab`` on a model-ID positional has no code / IR to re-lower per config."""
     rc, stdout, stderr = run_cli("run", "some/model", "--ab", "BM=8", "--bench")
@@ -1562,6 +1582,45 @@ def test_write_ab_json_greedy_bench_fail_and_record_knobs(tmp_path):
     row = rec["pinned"][0]
     assert row["status"] == "pin_unmatched" and row["total_us"] is None
     assert any("NOT benched" in f for f in row["flags"])
+
+
+def test_the_bench_record_always_says_whether_the_emmy_row_was_checked(tmp_path):
+    """A latency is not evidence until something says the output was right, so the record carries
+    that verdict in every state — including the two that used to be an absence.
+
+    Without ``--strict`` the bench still compares against eager, on dtype-scaled tolerances wide
+    enough to pass fp16 accumulation drift, and that verdict reached the log and nothing else. So
+    a failed check and a target with no eager reference at all both landed in the file as a
+    latency with no ``correctness`` key, indistinguishable from a row that passed. A survey pass
+    ranks on this file: one kernel here passed the scaled check, failed the strict one on 198 of
+    3.1M elements, and was ranked on a number nothing had verified."""
+    import json
+    from types import SimpleNamespace
+
+    from emmy.commands.run import _write_ab_json
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.cuda.ir import CudaOp
+
+    graph = Graph()
+    graph.add_node(op=CudaOp(kernel_name="k", knobs=_classic_row()), inputs=[], output=Tensor("o", (4,)), node_id="n0")
+
+    def record(results, **kwargs):
+        args = SimpleNamespace(
+            json=str(tmp_path / "ab.json"), code="torch.matmul(a, b)", input=None, ir=None, golden=None, dynamic=None, warmup=1, iters=1
+        )
+        _write_ab_json(args, results, graph, None, [], **kwargs)
+        return json.loads((tmp_path / "ab.json").read_text())["backends"]["Emmy"]["correctness"]
+
+    both = {"Emmy": 10.0, "Eager PyTorch": 20.0}
+    assert record(both) == {"status": "pass", "reference": "eager", "tolerance": "scaled"}
+
+    failed = record(both, accuracy_error="CORRECTNESS FAIL: output o contains NaN")
+    assert failed["status"] == "fail" and "NaN" in failed["error"]
+
+    proof = {"status": "pass", "reference": "eager", "rtol": 1e-3, "atol": 1e-3}
+    assert record(both, correctness=proof, accuracy_error=None) == proof, "a strict proof stands as written"
+
+    assert record({"Emmy": 10.0}) == {"status": "unchecked"}, "no eager reference is its own state, not a pass"
 
 
 def test_write_ab_json_records_a_forkless_kernel_row(tmp_path):

@@ -12,7 +12,7 @@ from dataclasses import dataclass, field, replace
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.schedule import Schedule, ScheduleContext, ScheduleRefused, schedule
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.ir.tile.path import MissingSiteError, resolve, sites
+from emmy.compiler.ir.tile.path import MissingSiteError, parse_key, resolve, sites
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.fork import SCHEDULE_FORK_STAMPS, DeferredFork, fork_signature
 from emmy.compiler.pipeline.knob import family_of, family_pins
@@ -133,8 +133,13 @@ def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str] | None:
 def _composed_forks(match: Match, root: Node, tile: TileOp, seams, ctx) -> list[DeferredFork]:
     """One composed arm per measured route of this kernel that names several of its seams
     (:func:`composed_cuts_for`) — the decision a pinned compile consumed those seams as, offered
-    again so the row that measured it can spell it. A key naming no site here belongs to another
-    kernel; a route that resolves to fewer than two seams adds nothing the single arms lack."""
+    again so the row that measured it can spell it. A route is registered for every kernel of the
+    compile, so most of its keys address another one: a scoped key whose path is not on this tree is
+    skipped, and a BARE key is skipped whatever tree it meets. The codec spells bare for a family
+    with ONE site, so the kernel that spelled it has one seam and composes with nothing — the key is
+    always another kernel's, and resolving it here only asks this tree a question about somebody
+    else, which on a tree with several sites is ambiguous and ended the compile. A route that
+    resolves to fewer than two seams adds nothing the single arms lack."""
     if ctx is None:
         return []
     signature = frozenset((key, value) for key, value in fork_signature(tile, (), ctx) if key not in SCHEDULE_FORK_STAMPS)
@@ -147,6 +152,8 @@ def _composed_forks(match: Match, root: Node, tile: TileOp, seams, ctx) -> list[
     for keys in routes:
         chosen: list = []
         for name in keys:
+            if parse_key(name).bare:
+                continue
             try:
                 site = resolve(tile.op, name, all_sites=all_sites)
             except MissingSiteError:

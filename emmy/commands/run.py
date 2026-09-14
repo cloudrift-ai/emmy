@@ -256,6 +256,18 @@ def _handle_run_once(args):
     ir_path = args.ir
     if ir_path is None and args.input is not None and Path(args.input).suffix == ".json" and Path(args.input).exists():
         ir_path = args.input
+    # ONE target writes ONE file, and the write is the last thing this command does. A directory
+    # there used to reach ``Path(args.json).write_text`` and raise ``IsADirectoryError`` after the
+    # bench had run and the recording had been skipped — a whole 14-target ``--record-greedy`` batch
+    # reported success per target and recorded nothing. The multi-target walk keeps taking a
+    # directory; it hands each target a file inside it, so this never fires there.
+    if args.json and (args.json.endswith(("/", os.sep)) or Path(args.json).is_dir()):
+        logger.error(
+            "--json names ONE file for a single target, but %r is a directory. A directory is for a "
+            "multi-target --golden walk, which writes one file per realization inside it.",
+            args.json,
+        )
+        sys.exit(2)
     if args.ab:
         if not args.bench:
             logger.error("--ab requires --bench (the A/B rows render in the kernel table)")
@@ -421,7 +433,14 @@ def _handle_run_once(args):
                     logger.error("%s — greedy row marked bench_fail; pinned rows still bench in the worker", greedy_fail)
                 greedy_iso = await _bench_greedy_isolated(backend, compiled, warmup=args.warmup, iters=args.iters)
                 golden_benches = await _bench_golden_variants(
-                    backend, args.code, pinned, warmup=args.warmup, iters=args.iters, ref=ab_ref, quantize=args.quantize
+                    backend,
+                    args.code,
+                    pinned,
+                    warmup=args.warmup,
+                    iters=args.iters,
+                    ref=ab_ref,
+                    quantize=args.quantize,
+                    ref_knobs=_cuda_knob_dicts(compiled),
                 )
         finally:
             await backend.aclose_async_worker()
@@ -477,6 +496,7 @@ def _handle_run_once(args):
             greedy_reference_us=greedy_reference_us,
             correctness=correctness,
             strict_errors=strict_errors,
+            accuracy_error=accuracy_error,
         )
     for error in strict_errors or []:
         logger.error("strict: %s", error)
@@ -524,6 +544,12 @@ def _record_golden_latency(args, results: dict, golden_benches) -> None:
     # timing nor its schedule knobs describe the row this writes — narrowing by them selects
     # nothing and the write is refused.
     measured = [gb for gb in golden_benches or [] if gb.status == "ok" and gb.bench is not None and gb.sample.name == args.realization]
+    # An unverified row never becomes golden evidence. Its outputs were never compared against
+    # anything, so recording its latency would publish a number for a kernel nobody checked --
+    # and a miscompiling tile runs at a perfectly plausible latency.
+    if any(flag.startswith(UNVERIFIED_ROW) for gb in measured for flag in gb.flags or []):
+        logger.error("--record refuses %s: the row was benched with no reference outputs", args.realization)
+        sys.exit(2)
     if len(measured) > 1:
         logger.error("--record needs exactly one pinned row to attribute the timing to, measured %d", len(measured))
         sys.exit(2)
@@ -934,6 +960,60 @@ def _wrong_answer_flag(outputs: dict, ref_outputs: dict) -> str | None:
     return None
 
 
+def env_pin_refusal(kernel_knobs: list[dict]) -> str | None:
+    """The live ``EMMY_<KNOB>`` pins a compiled graph did not realize, or ``None``.
+
+    An ``--ab`` row has always been gated this way (:func:`unreproducible_pin_flag`), because benching a
+    row whose pin did not take would measure the planner's own pick under the pin's name. A pin published
+    through ``EMMY_KNOBS`` / ``EMMY_<KNOB>`` gates the GREEDY compile instead, and nothing checked it --
+    so the same mistake was invisible exactly where a hand-run sweep puts its pins.
+
+    That does not produce a wrong number, it produces an unfalsifiable one: the sweep reports the
+    planner's pick under the experiment's name, and a pin that did nothing reads as a flat result rather
+    than a broken experiment. Measured while comparing Emmy's int4 decode against its dense kernel, a
+    ``WORK``/``TILE``/``STAGE`` pin silently failed to realize at one shape and the run reported the
+    greedy's own unscheduled tier with no indication the pin had been ignored.
+
+    Same comparison and same message as the ``--ab`` gate; only the source of the pins differs.
+    """
+    from emmy.compiler.pipeline.knob import KERNEL_DECISION_FAMILIES, family_pins  # noqa: PLC0415
+
+    pins = {name: value for family in KERNEL_DECISION_FAMILIES for name, value in family_pins(family)}
+    return unreproducible_pin_flag(pins, kernel_knobs) if pins else None
+
+
+REFERENCE_SELF_DISAGREES = (
+    "wrong-answer reference unusable: a row realizing the greedy's own config disagrees with the "
+    "greedy output, so no row's comparison against it carries information"
+)
+
+
+def resolve_reference_disagreement(verdicts, ref_knobs) -> list[str | None]:
+    """The wrong-answer flags a session can actually justify, one per benched row.
+
+    ``verdicts`` is one ``(realized_knob_dicts, wrong_answer_flag_or_None)`` per row and
+    ``ref_knobs`` is the greedy's own realized knobs — the configuration whose outputs every row is
+    compared against by :func:`_wrong_answer_flag`.
+
+    A row that realized the reference configuration computes the reference. If such a row is flagged
+    as disagreeing with it, the reference is not reproducible, and then NO row's comparison against
+    it means anything: a genuinely wrong row and a correct one are indistinguishable. Emitting a
+    wrong-answer flag per row there is worse than emitting none, because a flag that fires on
+    everything is one people learn to skip past — which is how a real deviation gets waved through.
+
+    So in that case every wrong-answer verdict is dropped and the session says once, on the row that
+    demonstrates it, that the reference itself is unusable. Every other kind of flag is untouched,
+    and where the reference does reproduce the per-row verdicts stand exactly as before.
+    """
+    verdicts = list(verdicts)
+    if not ref_knobs:
+        return [flag for _, flag in verdicts]
+    witness = next((i for i, (knobs, flag) in enumerate(verdicts) if flag and knobs == ref_knobs), None)
+    if witness is None:
+        return [flag for _, flag in verdicts]
+    return [REFERENCE_SELF_DISAGREES if i == witness else None for i in range(len(verdicts))]
+
+
 def _comparison_outputs(outputs: dict, graph) -> dict:
     """Decode physical carriers before command-layer correctness checks."""
     import numpy as np  # noqa: PLC0415
@@ -1108,6 +1188,8 @@ async def _bench_golden_variants(
     strict_correctness=False,
     strict_reference="eager",
     quantize=None,
+    unverified=None,
+    ref_knobs=None,
 ):
     """Compile + bench each recorded golden config with its knobs pinned — one
     ``_GoldenBench`` per config so :func:`_print_kernel_stats` can show each as a measured
@@ -1153,12 +1235,17 @@ async def _bench_golden_variants(
     # Session-unique cache key: the (potentially hundreds-of-MB) reference inputs cross
     # the worker pipe once per child, not once per row (see benchmark_pinned_isolated_async).
     ref_key = uuid.uuid4().hex if ref_inputs is not None else None
+    # Row index -> its deferred wrong-answer verdict and the knobs it actually realized.
+    wrong_answer: dict[int, str | None] = {}
+    realized: dict[int, list] = {}
     for sample in golden_configs or []:
         replay_knobs = _sample_replay_knobs(sample)
         # String sources must be retraced at the recorded symbolic shape. An
         # embedded stable program already carries its symbolic dimensions.
         dyn = getattr(sample, "dynamic", None) if isinstance(source, str) else None
-        flags = []
+        # ``unverified`` rides every row of a session with no reference outputs, so a measurement
+        # taken without an output check is never mistaken for a checked one.
+        flags = [unverified] if unverified else []
         try:
             dynamic_shapes = build_torch_dynamic_shapes(parse_position_specs(list(dyn))) if dyn else None
             with pinned_knobs(replay_knobs):
@@ -1210,17 +1297,26 @@ async def _bench_golden_variants(
                 correctness = _strict_correctness_proof(run_outputs, ref_outputs, reference=strict_reference)
                 if correctness["status"] != "pass":
                     flags.append(f"strict {strict_reference} correctness failed: {correctness.get('error', 'tolerance exceeded')}")
-            else:
-                flag = _wrong_answer_flag(run_outputs, ref_outputs)
-                if flag:
-                    flags.append(flag)
+            elif not strict_correctness:
+                # Held back until every row is in: whether this verdict means anything depends on
+                # whether the reference reproduces, which only the whole set can answer.
+                wrong_answer[len(out)] = _wrong_answer_flag(run_outputs, ref_outputs)
+                realized[len(out)] = _cuda_knob_dicts(g_compiled)
         total_us = (g_bench.min_ms if g_bench.min_ms is not None else g_bench.time_ms) * 1000
         flag = _intensity_floor_flag(sample, total_us)
         if flag:
             flags.append(flag)
-        for f in flags:
-            logger.warning("[golden] %s: %s — row flagged (marked ! in the table, flagged in --json)", sample.name, f)
         out.append(_GoldenBench(sample, g_compiled, g_bench, flags, "ok", correctness))
+
+    resolved = resolve_reference_disagreement(((realized.get(i, []), wrong_answer.get(i)) for i in range(len(out))), ref_knobs)
+    for i, flag in enumerate(resolved):
+        if flag:
+            out[i].flags.append(flag)
+    if REFERENCE_SELF_DISAGREES in resolved:
+        logger.error("[golden] %s — every per-row wrong-answer verdict dropped as uninformative", REFERENCE_SELF_DISAGREES)
+    for row in out:
+        for f in row.flags:
+            logger.warning("[golden] %s: %s — row flagged (marked ! in the table, flagged in --json)", row.sample.name, f)
     return out
 
 
@@ -1455,6 +1551,25 @@ def _print_kernel_stats(graph, bench, golden_benches=None, greedy_fail=None, gre
             print(f"! {gb.sample.name}: {flag}")
 
 
+def _emmy_correctness(correctness: dict | None, accuracy_error: str | None, *, reference: bool) -> dict:
+    """The Emmy row's correctness verdict — a proof, a failure, a loose pass, or nobody checked.
+
+    ``--strict`` builds a proof and it stands as written. Without it the bench still compares
+    against eager, on dtype-scaled tolerances wide enough to pass fp16 accumulation drift, and
+    that verdict used to reach the log and nothing else. So the record carried a latency and no
+    way to tell a number backed by a passing reference from one backed by a failing reference or
+    by none at all — and a survey pass ranks on this file. The absence read as a pass.
+
+    ``tolerance`` is what separates the two passing states: ``scaled`` is the wide check, and a
+    row that has only that has not been asked the strict question. One kernel here passed the
+    scaled check and failed the strict one on 198 of 3.1M elements."""
+    if correctness is not None:
+        return correctness
+    if accuracy_error is not None:
+        return {"status": "fail", "reference": "eager", "error": accuracy_error}
+    return {"status": "pass", "reference": "eager", "tolerance": "scaled"} if reference else {"status": "unchecked"}
+
+
 def _write_ab_json(
     args,
     results: dict,
@@ -1466,6 +1581,7 @@ def _write_ab_json(
     greedy_reference_us=None,
     correctness=None,
     strict_errors=None,
+    accuracy_error=None,
 ) -> None:
     """``--json PATH``: the whole ``--bench`` comparison as one machine-readable record —
     the backend table (eager / torch.compile / emmy), the per-kernel greedy rows, and every
@@ -1473,7 +1589,10 @@ def _write_ab_json(
     flags. ``pinned_knobs`` is the exact input-regime-plus-winner map used for replay. This is
     the golden-sweep workflow's parse target (it retires the ad-hoc stdout
     table parsers) and where the intensity-floor / wrong-answer verdicts become fields —
-    the confirm-twice rule diffs two of these files instead of two terminal scrollbacks.
+    the confirm-twice rule diffs two of these files instead of two terminal scrollbacks. The
+    Emmy row always carries a ``correctness`` verdict, including the two that used to be an
+    absence: a non-strict check that FAILED, and a target with no eager reference to check
+    against (:func:`_emmy_correctness`).
 
     Each kernel row carries ``record_knobs`` — the realized tuning knobs with the exact complete
     classic row validated by :func:`~emmy.compiler.pipeline.knob.complete_kernel_row` — the map
@@ -1572,6 +1691,14 @@ def _write_ab_json(
         **_timing(bench),
         "kernels": _kernel_rows(graph, bench),
     }
+    # An env pin gates THIS graph, so an unrealized one misrepresents the greedy row itself.
+    env_miss = env_pin_refusal(_cuda_knob_dicts(graph))
+    if env_miss:
+        greedy["flags"] = [f"{env_miss} — the env pin did not realize, so this row is the planner's own pick"]
+        logger.error(
+            "%s — EMMY_KNOBS / EMMY_<KNOB> pin did not realize; the greedy row below is the planner's own pick, not the pinned config",
+            env_miss,
+        )
     if greedy_fail is not None:
         greedy["error"] = greedy_fail
     if greedy_reference_us is not None:
@@ -1595,8 +1722,8 @@ def _write_ab_json(
         }
         for name, us in (results or {}).items()
     }
-    if correctness is not None and "Emmy" in backend_rows:
-        backend_rows["Emmy"]["correctness"] = correctness
+    if "Emmy" in backend_rows:
+        backend_rows["Emmy"]["correctness"] = _emmy_correctness(correctness, accuracy_error, reference="Eager PyTorch" in backend_rows)
     eager_us = (results or {}).get("Eager PyTorch")
     if eager_us:
         for name, us in (results or {}).items():
@@ -2259,6 +2386,39 @@ async def bench_full_model_real(module, args_t, kwargs, lowered, backend, *, war
     return await _bench_interleaved_captured(cuda_module, cuda_args, cuda_kwargs, backend, lowered, warmup, iters, torch_fns=torch_fns)
 
 
+_NO_GREEDY_REF = "pinned embedded-Loop verification requires same-input greedy outputs, but none were returned"
+UNVERIFIED_ROW = "benched with no reference outputs"
+
+
+def pinned_reference_refusal(*, ab_ref, torch_twin: bool, greedy_fail: str | None) -> str | None:
+    """Why pinned rows cannot be benched AT ALL, or ``None`` to bench them without an output check.
+
+    A greedy that never returned run outputs leaves nothing for a pinned row's outputs to be
+    compared against. Whether that is fatal turns on ONE question: does any other reference exist?
+    An exact Loop target has no Torch twin, so the greedy Loop execution is the only reference
+    obtainable and a row measured without it is unfalsifiable — refuse. Where a Torch twin does
+    exist, refusing costs more than it protects: a greedy too slow to time is exactly the case a
+    pinned alternative exists to escape, so refusing the alternative leaves the target with no
+    measurement and no way to find one.
+
+    The predicate is the twin's existence, NOT ``same_input_greedy``. The two differ by a
+    ``strict_correctness`` conjunct, and keying on the latter would relax the case this is meant to
+    keep: a non-strict embedded-Loop target with no twin would bench unverified when in fact no
+    reference exists for it at all.
+
+    A row benched this way carries the :data:`UNVERIFIED_ROW` flag, and that flag is a hard barrier
+    downstream, not a note. It keeps the row out of the golden (``--record`` refuses it), out of the
+    tune DB's ``perf`` rows and out of the node store, because unverified data must never become
+    deployable evidence — the whole value of the reference comparison is that it is the only thing
+    standing between a tile that miscompiles silently and a recorded row that deploys it.
+    """
+    if ab_ref is not None:
+        return None
+    if not torch_twin:
+        return f"{_NO_GREEDY_REF}: {greedy_fail or 'the greedy worker returned no run outputs'}"
+    return None
+
+
 def _pinned_samples_for_ir(args, embedded):
     """Automatic verified pins plus explicit ``--ab`` pins for an embedded golden target."""
     pinned = list(getattr(args, "golden_configs", None) or [])
@@ -2449,6 +2609,11 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
         stats_sym_env = _collect_sym_env(([frontend] if frontend is not None else []) + [graph])
         torch_available = captured = False
         pinned = _pinned_samples_for_ir(args, embedded)
+        # ``--record-greedy`` writes the greedy pick from its per-kernel ISOLATED re-bench, and
+        # proves it against the greedy's own outputs where no Torch twin exists. Both used to ride
+        # on the pinned-row path below, so a walk over a fresh trace inventory — which holds no
+        # verified row to pin — benched every target and recorded none of them.
+        record_greedy = bool(getattr(args, "record_greedy", False))
         try:
             try:
                 resp = await backend.benchmark_compare_async(
@@ -2459,7 +2624,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
                     warmup=args.warmup,
                     iters=args.iters,
                     seed=args.seed,
-                    want_ref=bool(pinned and tail),
+                    want_ref=bool(tail and (pinned or record_greedy)),
                     strict_accuracy=strict_correctness and not same_input_greedy,
                 )
             except RuntimeError as exc:
@@ -2482,12 +2647,14 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
                 if resp.get("greedy_error"):
                     greedy_fail = f"greedy timing failed after reference execution: {resp['greedy_error']}"
                     _record_greedy_failure(args, backend, graph, resp["greedy_error"])
+            if record_greedy and not pinned and tail and greedy_fail is None:
+                greedy_iso = await _bench_greedy_isolated(backend, graph, warmup=args.warmup, iters=args.iters)
             if pinned and tail:
-                if ab_ref is None:
-                    reason = greedy_fail or "the greedy worker returned no run outputs"
-                    missing = "pinned embedded-Loop verification requires same-input greedy outputs, but none were returned"
-                    reference_error = f"{missing}: {reason}"
-                elif same_input_greedy or not strict_correctness or accuracy_error is None:
+                reference_error = pinned_reference_refusal(ab_ref=ab_ref, torch_twin=frontend is not None, greedy_fail=greedy_fail)
+                unverified = None
+                if reference_error is None and ab_ref is None:
+                    unverified = f"{UNVERIFIED_ROW}: {greedy_fail or 'the greedy worker returned no run outputs'}"
+                if reference_error is None and (same_input_greedy or not strict_correctness or accuracy_error is None):
                     to_bench = pinned
                     if greedy_fail:
                         # An automatic golden-config row with no knobs pins nothing beyond the input
@@ -2514,8 +2681,10 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
                         warmup=args.warmup,
                         iters=args.iters,
                         ref=ab_ref,
-                        strict_correctness=strict_correctness,
+                        strict_correctness=strict_correctness and ab_ref is not None,
                         strict_reference="same-input-greedy" if same_input_greedy else "eager",
+                        unverified=unverified,
+                        ref_knobs=_cuda_knob_dicts(graph),
                     )
             elif not pinned and args.ab and tail:
                 if greedy_fail:
@@ -2619,11 +2788,20 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
             greedy_reference_us=greedy_reference_us,
             correctness=correctness,
             strict_errors=strict_errors,
+            accuracy_error=accuracy_error,
         )
     if getattr(args, "record", False):
         _record_golden_latency(args, results or {}, ab_benches)
     if getattr(args, "record_greedy", False):
-        _record_greedy_pick(args, graph, bench, greedy_iso, taken)
+        # A recorded row outranks every later compile, so a row whose answer --strict rejected must
+        # never become one: on sm_70 a wrong answer can run FASTER than the right neighbour, and the
+        # recording ran before the exit that reports it. Only the ANSWER is grounds to refuse — the
+        # other strict errors are about the FILE (a working inventory holds no pinned row yet), and
+        # refusing on those would leave a recording walk recording nothing at all.
+        if strict_correctness and accuracy_error is not None:
+            logger.error("not recording the greedy pick of %s — it failed the strict accuracy check: %s", args.realization, accuracy_error)
+        else:
+            _record_greedy_pick(args, graph, bench, greedy_iso, taken)
     for error in strict_errors or []:
         logger.error("strict: %s", error)
     if embedded is not None:

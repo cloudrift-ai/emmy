@@ -7,9 +7,10 @@ re-exposes (a closing rewrite can leave one behind, and it is what makes two occ
 same computation compare unequal), a carrier the fusion left holding two independent contractions
 becomes one term per state, and same-value cones become ONE shared object.
 
-INVARIANT — normalization ends with no operand result component that no reader reads
-(:func:`_prune_unread`), and with same-value cones (alpha-equal, identical captures and
-interface names) as ONE shared object (:func:`_share_common_cones`). Object identity is how the
+INVARIANT — normalization ends with no result component that no reader reads, the ROOT's own
+included and the boundary stores counting as its readers (:func:`_prune_unread`), and with
+same-value cones (alpha-equal, identical captures and interface names) as ONE shared object
+(:func:`_share_common_cones`). Object identity is how the
 placement machinery recognizes that two consumption sites read one value, so a rewrite that
 copies a cone (the close rewrites do, by design) is only sound because this final pass restores
 the sharing. Recompute elimination is a
@@ -139,7 +140,18 @@ def _prune_unread(root: Fold, stored: frozenset[str] = frozenset()) -> Fold:
         return rebuilt
 
     collect(root)
-    return visit(root)
+    pruned = visit(root)
+    # The ROOT answers to the stores the same way: they are its only readers. A zero-axis root none
+    # of whose own components a store writes computes nothing the kernel keeps -- the boundary reads
+    # the value off an operand -- so it collapses onto the operand carrying them, and the operands
+    # only its dead lift bound leave with it. An invariant reduce among those is what keeps
+    # ``promoted_sweep`` from promoting the stores' sweep, and the kernel then launches one block.
+    while pruned.axis is None and stored and not stored & set(pruned.exposes):
+        carriers = [edge for edge in pruned.operands if stored <= set(edge.exposes)]
+        if len(carriers) != 1:
+            break
+        pruned = carriers[0]
+    return pruned
 
 
 def _share_common_cones(root: Fold) -> Fold:

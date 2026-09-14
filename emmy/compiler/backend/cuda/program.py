@@ -133,10 +133,24 @@ def _load_kernel(name: str, spec: KernelSpec):
     return nvcc.load_function(spec.source, name, _nvrtc_options(arch_specific=spec.arch_specific), arch_specific=spec.arch_specific)
 
 
-def _load_plan(plan: ExecutionPlan) -> _Compiled:
+def _load_plan(plan: ExecutionPlan, *, deadline: float | None = None) -> _Compiled:
     """Materialize the runtime object from a plan: load every kernel (cubin-by-key or
-    source-via-cache), and adopt the plan's pure-data fields as-is."""
-    kernels: dict[str, object] = {name: _load_kernel(name, spec) for name, spec in plan.kernels.items()}
+    source-via-cache), and adopt the plan's pure-data fields as-is.
+
+    ``deadline`` is the compile budget's monotonic expiry, checked BETWEEN kernels — the only
+    boundary a Python-level check has, since one ``_load_kernel`` is a single C call into nvcc.
+    Checking here rather than after the whole load is what keeps a cold multi-kernel compile from
+    outliving the wall cap that SIGKILLs the bench worker: past the cap the operator is told a
+    worker died, which reads as a slow kernel, and the fact that nothing about the kernel was
+    measured is lost."""
+    kernels: dict[str, object] = {}
+    for index, (name, spec) in enumerate(plan.kernels.items(), start=1):
+        kernels[name] = _load_kernel(name, spec)
+        if deadline is not None and _time_module.monotonic() > deadline:
+            raise CompileBudgetExceeded(
+                f"compile stage exceeded its budget after {index} of {len(plan.kernels)} kernel(s) "
+                f"({name}) — nothing measured; raise {config.BENCH_COMPILE_TIMEOUT_S} to compile it"
+            )
     return _Compiled(
         bufs=list(plan.buffers),
         buf_by_name={b.name: b for b in plan.buffers},
@@ -631,8 +645,11 @@ class CompileBudgetExceeded(RuntimeError):
     about the kernel. Callers must record no latency for it — inventing one mislabels the config,
     and a persisted row is worse than mislabelled, because it is then served as a cache hit and
     the config is never re-benched. Subclasses ``RuntimeError`` so existing handlers still catch
-    it. The budget is checked when the compile RETURNS, so it can only fire for a compile that
-    finished: any wall cap over it must exceed it, or the SIGKILL pre-empts this distinction."""
+    it. The budget is enforced BETWEEN kernels (:func:`_load_plan`) and once more when the whole
+    setup returns, so it fires on a compile that is still running rather than only on one that
+    finished. That ordering is what the distinction rests on: a bench worker's wall cap SIGKILLs
+    the child, and a killed child reports a dead worker — which reads as a slow kernel and is the
+    opposite of what a compile overrun means."""
 
 
 def compile_budget_overrun(exc: BaseException) -> bool:
@@ -822,16 +839,17 @@ class CompiledProgram:
         """Load every kernel (cubin-by-key or source-via-cache), allocate every
         buffer (the plan's generated constants fill themselves — see
         :func:`_with_generated_constants`), pre-build TMA descriptors. ``compile_timeout_s`` bounds the
-        setup phase at a C-call boundary: if compile + alloc + descriptor work
-        overruns, raise ``RuntimeError`` before the caller proceeds to launches
-        so no in-flight kernels are left queued. ``arena`` pools the
+        setup phase at a C-call boundary: the kernel load checks it between kernels and the
+        alloc + descriptor work is checked when it returns, so an overrun raises
+        :class:`CompileBudgetExceeded` before the caller proceeds to launches, leaving no
+        in-flight kernels queued. ``arena`` pools the
         activation buffers + scratch slab across sequentially-run
         programs (see :class:`BufferArena`).
 
         Caller is expected to hold ``gpu_lock()`` around this call and
         every subsequent method on the returned program."""
         t0 = _time_module.monotonic()
-        compiled = _load_plan(plan)
+        compiled = _load_plan(plan, deadline=None if compile_timeout_s is None else t0 + compile_timeout_s)
         input_data = _with_generated_constants(plan, input_data or {})
         sym_values = _resolve_symbolic(compiled, input_data)
         arrays, slab_plan = _allocate(compiled, input_data, arena)

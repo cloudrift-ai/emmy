@@ -92,6 +92,23 @@ _NAME_TO_FN: dict[str, object] = {
     "to_f4e2m1": encode_f4,
 }
 
+# Spellings that mean an op the renderers already know under another name. Normalized at
+# construction, so the op carries the canonical name and every downstream table -- the CUDA and
+# loop render targets, the torch reference, the statement renderer -- keeps working unchanged.
+#
+# ``right_shift`` is the canonical name the whole stack uses and the name the quantized-weight
+# spellers emit directly. Two other spellings reach the tracer for the same operation and neither
+# resolved: ``a >> b`` traces to ``__rshift__``, which is in neither numpy nor ``_NAME_TO_FN`` and
+# failed at construction, and ``torch.bitwise_right_shift`` traces under its own name, which numpy
+# happens to alias so it constructed and then died in the renderer. Until this existed, no packed
+# int4 or trellis decode cone could be written as a traced expression at all -- which meant a
+# miscompilation reachable only through such a cone could not be minimized outside a real
+# checkpoint.
+_ALIASES: dict[str, str] = {
+    "__rshift__": "right_shift",
+    "bitwise_right_shift": "right_shift",
+}
+
 _ARITY: dict[str, int] = {
     # ``np.where`` is a regular function rather than a ufunc, so it has no ``nin`` metadata.
     "where": 3,
@@ -148,6 +165,7 @@ class ElementwiseImpl:
     _DECODES: dict[str, str] = {"from_f8e4m3": "f8e4m3", "from_f8e5m2": "f8e5m2"}
 
     def __init__(self, name: str) -> None:
+        name = _ALIASES.get(name, name)
         fn = _NAME_TO_FN.get(name)
         if fn is None:
             fn = getattr(np, name, None)

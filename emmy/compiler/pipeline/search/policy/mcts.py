@@ -80,6 +80,14 @@ class SearchNode:
     # reject a parent row whose ordinary schedule pins describe a different
     # independently tuned child than the terminal actually measured.
     realized_cuda_knobs: list[dict] | None = field(default=None, repr=False)
+    # This node's children's PUCT ``P``, with the sibling set it was computed for. The prior is a
+    # fixed model for the life of one search (it refits between ops, never within a descent) and a
+    # child's knobs never change, so ``P`` is a function of the sibling set alone — but ``_select``
+    # asked for it again on every descent through this node, and a descent walks the whole depth.
+    # On Qwen3.8-27B's projection GEMM that featurization was 85% of the tuner's wall time, with the
+    # bench worker sitting idle. The key is the exact set, because the live filter drops a child
+    # once its subtree is exhausted and ``Prior.policy`` normalizes within whatever set it is given.
+    policy_memo: tuple[tuple[int, ...], list[float]] | None = field(default=None, repr=False)
 
 
 class SearchTree:
@@ -436,7 +444,12 @@ class TuningSearch(Search):
             return self._rng.choice(children)
         global_best = self.tree.best_reward or 1.0
         sqrt_parent = math.sqrt(parent.visits + 1)
-        policy = self._prior_policy(children)
+        key = tuple(id(c) for c in children)
+        if parent.policy_memo is not None and parent.policy_memo[0] == key:
+            policy = parent.policy_memo[1]
+        else:
+            policy = self._prior_policy(children)
+            parent.policy_memo = (key, policy)
         best, best_v = children[0], float("-inf")
         for c, p in zip(children, policy, strict=True):
             q = (c.best_reward / global_best) if c.visits > 0 else 0.0

@@ -15,7 +15,7 @@ from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.expr import Literal, placeholder
 from emmy.compiler.ir.frontend.ir import LinearOp, RmsNormOp
 from emmy.compiler.ir.loop import Accum, Assign, Load, LoopOp, Select, Write
-from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, IndexMapOp, IndexSource, ReduceOp
+from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, IndexMapOp, IndexSource, ReduceOp, ScanOp
 from emmy.compiler.pipeline import Pipeline
 
 rng = np.random.default_rng(0)
@@ -468,6 +468,41 @@ def test_contraction_epilogue_body_has_add():
     result = _fuse(_make_contraction_with_epilogue())
     kernel = _kernel_nodes(result)[0]
     assert "add" in _assign_fns(kernel.op.body)
+
+
+# ===================================================================
+# A scan downstream: the ordered loop leaves, the region keeps fusing
+# ===================================================================
+
+
+def _make_contraction_then_scan():
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("a", (4, 8)), node_id="a")
+    g.add_node(InputOp(), [], Tensor("b", (4, 8)), node_id="b")
+    g.add_node(ElementwiseOp("multiply"), ["a", "b"], Tensor("m", (4, 8)), node_id="m")
+    g.add_node(ReduceOp("sum", -1), ["m"], Tensor("s", (4, 1)), node_id="s")
+    g.add_node(ElementwiseOp("exp"), ["s"], Tensor("e", (4, 1)), node_id="e")
+    g.add_node(ScanOp("sum", 0), ["e"], Tensor("y", (4, 1)), node_id="y")
+    g.inputs, g.outputs = ["a", "b"], ["y"]
+    return g
+
+
+def test_scan_leaves_the_region_it_cannot_join():
+    """A scan writes its running accumulator, so no merged body preserves its order and the
+    splicer refuses it. The refusal names that one loop: everything upstream still fuses, and
+    only the scan stands alone. Abandoning the whole region instead shatters every op before it
+    into its own kernel — a contraction then materializes its broadcast operands to memory."""
+    kernels = _kernel_nodes(_fuse(_make_contraction_then_scan()))
+    assert len(kernels) == 2, [n.id for n in kernels]
+    contraction = next(k for k in kernels if _has_update(k.op.body) and "multiply" in _assign_fns(k.op.body))
+    assert "exp" in _assign_fns(contraction.op.body)
+
+
+def test_contraction_then_scan_correctness():
+    _assert_correctness(
+        _make_contraction_then_scan,
+        {"a": rng.standard_normal((4, 8)).astype(np.float32), "b": rng.standard_normal((4, 8)).astype(np.float32)},
+    )
 
 
 # ===================================================================

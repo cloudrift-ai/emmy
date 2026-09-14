@@ -1365,19 +1365,30 @@ class _PassThroughMask:
 
 def _is_quantized_dir(p) -> bool:
     """Whether the checkpoint at ``p`` declares a quantization scheme the loaders ingest
-    (FP8 scale-paired bits, NVFP4 packed trios, MXFP4 blocks, AWQ GEMM int4, or EXL3 siblings)."""
+    (FP8 scale-paired bits, NVFP4 packed trios, MXFP4 blocks, packed int4 — AWQ GEMM, GPTQ or
+    compressed-tensors — or EXL3 siblings)."""
     from emmy.compiler.loader.quant import (
         # noqa: PLC0415,
         _awq_quant_config,
+        _ct_int4_quant_config,
         _exl3_quant_config,
         _fp4_quant_config,
         _fp8_quant_config,
+        _gptq_quant_config,
         _mxfp4_quant_config,
     )
 
     return any(
         config(p) is not None
-        for config in (_fp8_quant_config, _fp4_quant_config, _mxfp4_quant_config, _awq_quant_config, _exl3_quant_config)
+        for config in (
+            _fp8_quant_config,
+            _fp4_quant_config,
+            _mxfp4_quant_config,
+            _awq_quant_config,
+            _gptq_quant_config,
+            _ct_int4_quant_config,
+            _exl3_quant_config,
+        )
     )
 
 
@@ -1834,17 +1845,17 @@ def load_quantized_split(
     from emmy.compiler.loader.quant import (
         # noqa: PLC0415,
         _EXL3_SIBLING_LEAVES,
-        _awq_quant_config,
         _exl3_codebook,
         _exl3_quant_config,
         _fp4_quant_config,
         _fp8_quant_config,
         _is_skipped,
         _mxfp4_quant_config,
+        _packed_int4_config,
         _skip_patterns,
         dequantize,
-        dequantize_awq4,
         dequantize_nvfp4,
+        dequantize_packed_int4,
         native_mxfp4_experts,
         scale_is_reciprocal,
     )
@@ -1862,7 +1873,7 @@ def load_quantized_split(
     # predicate, so the golden records the expert program this load produces.
     native_experts = native_mxfp4_experts(config)
     qc = _fp8_quant_config(model_dir) or mxfp4_qc or {}
-    awq = _awq_quant_config(model_dir)
+    packed4 = _packed_int4_config(model_dir)
     patterns = _skip_patterns(qc)
     qc4 = _fp4_quant_config(model_dir)
     patterns4 = list(qc4.get("ignore") or []) if qc4 else []
@@ -1925,25 +1936,27 @@ def load_quantized_split(
                 continue
             f = _open(shard_path)
             for k in owned_keys:
-                if awq is not None and k.endswith(".qweight"):
+                if packed4 is not None and k.endswith(".qweight"):
+                    qc4, layout = packed4
                     base = k[: -len(".qweight")]
                     qzeros_key, scales_key = base + ".qzeros", base + ".scales"
                     if qzeros_key not in index or scales_key not in index:
-                        raise ValueError(f"AWQ linear {base!r} is missing qzeros or scales")
+                        raise ValueError(f"packed int4 linear {base!r} is missing qzeros or scales")
                     model_key = _checkpoint_to_model_key(rename(base + ".weight"))
                     if compress_trunk:
                         coded_trunk.add(model_key)
                     else:
-                        values = dequantize_awq4(
+                        values = dequantize_packed_int4(
                             f.get_tensor(k).numpy(),
                             _sibling(qzeros_key).numpy(),
                             _sibling(scales_key).numpy(),
-                            int(awq.get("group_size", awq.get("q_group_size", -1))),
+                            int(qc4.get("group_size", qc4.get("q_group_size", -1))),
+                            layout=layout,
                         ).T
                         state[model_key] = torch.from_numpy(values).to(dtype)
-                    fmt = "awq4"
+                    fmt = layout.name
                     continue
-                if awq is not None and k.endswith((".qzeros", ".scales")):
+                if packed4 is not None and k.endswith((".qzeros", ".scales", ".g_idx")):
                     base = k.rsplit(".", 1)[0]
                     if base + ".qweight" in index:
                         continue

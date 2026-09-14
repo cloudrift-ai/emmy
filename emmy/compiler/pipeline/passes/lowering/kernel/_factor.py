@@ -250,7 +250,7 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
         if plain:
             proj = apply_output_specs(proj, plain)
         # Two peel levels may each carry a sibling's copy of one shared cone; a statement is one value.
-        joined = tuple(dict.fromkeys((*proj, *tail))) if aside_copies else (*proj, *tail)
+        joined = tuple(_one_value_per_name(dict.fromkeys((*proj, *tail)))) if aside_copies else (*proj, *tail)
         return _factorize(root, ctx, tail=joined, out_val=out_val, store=store, output_specs=streamed)
     if output_specs and isinstance(op, Fold) and op.axis is None:
         # A zero-axis root with no operand edge still owns a real projection body. Reconstitute
@@ -310,15 +310,21 @@ def _refuse_partitioned_sweep(root, ctx: Ctx, axis: str) -> None:
 
 
 def _merge_root_tiles(tiles: tuple[Tile, ...]) -> Tile:
-    """Merge independently bound regions that use one physical grid and worker inventory."""
+    """Merge independently bound regions that use one physical grid and worker inventory.
+
+    Roots that do not agree are a legality fact about the OFFERED row, not a malformed tree, so the
+    refusal is typed for the materializer to decline and the greedy to try the next row. Raised
+    plain it killed the compile outright — which is how a Gated DeltaNet chunk kernel came to have
+    no compilable row at all once its grid stopped being promoted out from under one of its stores.
+    """
     first = tiles[0]
     axes = {axis.name: axis for axis in first.axes}
     for tile in tiles[1:]:
         current = {axis.name: axis for axis in tile.axes}
         if current != axes:
-            raise ValueError("output-tiled roots disagree on their physical grid")
+            raise UnbindableProjection("output-tiled roots disagree on their physical grid")
         if (tile.block_threads, tile.aux_threads) != (first.block_threads, first.aux_threads):
-            raise ValueError("output-tiled roots disagree on their worker inventory")
+            raise UnbindableProjection("output-tiled roots disagree on their worker inventory")
 
     local = {}
     body = []
@@ -330,17 +336,48 @@ def _merge_root_tiles(tiles: tuple[Tile, ...]) -> Tile:
                 prior = tuple(local.get(name) for name in declarations)
                 if any(previous is not None and previous != stmt for previous in prior):
                     conflict = next(name for name, previous in zip(declarations, prior, strict=True) if previous not in (None, stmt))
-                    raise ValueError(f"output-tiled roots require incompatible local buffer {conflict!r}")
+                    raise UnbindableProjection(f"output-tiled roots require incompatible local buffer {conflict!r}")
                 if all(previous is not None for previous in prior):
                     continue
                 for name in declarations:
                     local[name] = stmt
             overlap = top_defs & set(stmt.defines())
             if overlap:
-                raise ValueError(f"output-tiled roots reuse top-level SSA names: {sorted(overlap)}")
+                raise UnbindableProjection(f"output-tiled roots reuse top-level SSA names: {sorted(overlap)}")
             top_defs.update(stmt.defines())
             body.append(stmt)
     return replace(first, body=Body(body))
+
+
+def _one_value_per_name(stmts) -> list:
+    """Re-spell a name a later statement binds to a DIFFERENT value than the one already in scope.
+
+    Sibling cones lower under ONE ``__aside`` tag: it keeps them off the root's names, not off each
+    other's. Two peel levels that carry the same cone bind the same names to the same statements and
+    the dedup above collapses them, which is what the tag is for. A placement cut breaks the tie — it
+    replaces one level's cone with a workspace read and leaves the other computing in place — so the
+    two bind one name to two values, and nvcc rejects the second declaration (DeepSeek-V4's
+    ``post1.k_div_64_reduce`` under a cut, where one ``in0`` is a broadcast constant and the other is
+    the workspace the cut materialized, and both derive ``v73`` from it).
+
+    The sweep is positional, which is what makes it right in one C scope: a use before the second
+    binding means the first value and a use after it means the second, exactly as the redeclaration
+    nvcc refuses would have read. Nothing moves while the two agree.
+    """
+    bound: dict[str, object] = {}
+    rename: dict[str, str] = {}
+    out: list = []
+    for stmt in stmts:
+        spelled = stmt.rename(lambda name: rename.get(name, name)) if rename else stmt
+        for original in stmt.defines():
+            name = rename.get(original, original)
+            if bound.get(name, spelled) != spelled:
+                rename[original] = f"{original}__s{len(rename)}"
+                spelled = stmt.rename(lambda name: rename.get(name, name))
+        for name in spelled.defines():
+            bound[name] = spelled
+        out.append(spelled)
+    return out
 
 
 def _bind_roots(op: Fold, ctx: Ctx, output_specs: tuple) -> Tile:

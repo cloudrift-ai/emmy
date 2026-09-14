@@ -128,3 +128,52 @@ def test_packed_block_scale_fill_binds_the_sibling_axis():
     free = _free(reads[0].index)
     assert "_um" not in free, "the block-scale fill leaks the unsplit sibling var '_um'"
     assert "_um_b" in free, "the block-scale fill does not bind the sibling block var '_um_b'"
+
+
+def test_a_ringed_group_still_publishes_the_slab_it_fills_this_iteration() -> None:
+    """A ``depth >= 2`` ring splits the PEER copies into register staging, and the deposit's barrier
+    past the drain is that group's whole handshake — the deposit lands in the PREFETCH slot no lane
+    is reading. The compute fill is the opposite and does not ring: ``fill`` writes it at the top of
+    the body into the CURRENT chunk's single-buffer slab and the drain reads it in the SAME body, so
+    the deposit's barrier sits behind both and publishes nothing.
+
+    ``wait`` keyed that skip on ``register_staged``, which is a property of the GROUP, so a group
+    holding a ringed peer AND a compute fill lost the compute fill's barrier by association. The
+    fill strides across every thread of the CTA while the drain reads per-warp slices of what it
+    wrote, so warps read a slab other warps had not written yet: on a V100, nine of sixteen
+    warp-grid and fragment combinations of one Qwen3.8 GPTQ projection returned wrong answers at
+    ``STAGE=d2/smem``, non-deterministically — the same pin gave rel err 0.996 and 0.081 on two
+    runs — while every ``d1/smem`` control, where nothing splits and the barrier was always
+    emitted, was correct."""
+    from types import SimpleNamespace
+
+    from emmy.compiler.ir.kernel.ir import Sync
+    from emmy.compiler.pipeline.passes.lowering.kernel._stage import Operand, SyncTransport
+
+    peer = Operand(tag="a", buf="w", shape=(64, 32), index=lambda k0: None, coords=lambda k0: ())
+
+    def transport(operands):
+        return SyncTransport(
+            operands=operands,
+            slab_dtype="f16",
+            cta=CtaTile(linear_tid=Var("_t"), n_threads=128),
+            copy_operands=(peer,),
+            copy_sync=True,
+            staged=True,
+        )
+
+    def barriers(group):
+        return [type(stmt) for stmt in group.wait(in_flight=0, slot=_lit(0), phase=_lit(0))]
+
+    peers_only = transport(())
+    assert peers_only.register_staged, "the ring split is what suppresses the group's own barrier"
+    assert not peers_only.fills_current_slot
+    assert barriers(peers_only) == [], "the deposit's barrier past the drain publishes the peers"
+
+    with_compute_fill = transport((SimpleNamespace(producer=None),))
+    assert with_compute_fill.register_staged and with_compute_fill.fills_current_slot
+    assert barriers(with_compute_fill) == [Sync], "the compute fill is read this iteration and needs its own"
+
+    scheduled = transport((SimpleNamespace(producer="its own segment"),))
+    assert not scheduled.fills_current_slot, "an op with a scheduled producer fills in its own segment"
+    assert barriers(scheduled) == []

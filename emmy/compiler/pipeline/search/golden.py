@@ -35,6 +35,10 @@ _RECIPE_GOLDEN_DIR = "golden"
 _PROGRAM_GRAPH_CACHE: dict[int, tuple[dict, object]] = {}
 _LOOP_GRAPH_CACHE: dict[int, tuple[dict, object]] = {}
 _REFERENCE_CACHE: dict[int, tuple[dict, dict]] = {}
+#: Whole persisted programs lowered through the loop passes, memoized per (payload OBJECT, card)
+#: the same way as the sibling caches above. A frontend target resolves its provenance selector
+#: against this, so one traced layer lowers once however many kernels it contains.
+_LOWERED_PROGRAM_CACHE: dict[tuple, tuple[dict, object]] = {}
 _SAFE_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 
 
@@ -902,6 +906,36 @@ def _whole_op_origins(program, ctx) -> dict[str, tuple[tuple[str, ...], tuple[st
     return found
 
 
+def _lowered_program(record: GoldenRecord, ctx):
+    """The record's whole persisted program, lowered once per (program, card).
+
+    Every frontend target of one program selects out of the same lowering, so the pass runs once
+    for a traced layer instead of once per kernel it contains. Callers rebind ops on the nodes
+    they select, so each gets its own copy.
+    """
+    from emmy.compiler import provenance  # noqa: PLC0415
+    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline  # noqa: PLC0415
+
+    key = (id(record.program_wire), tuple(ctx.compute_capability), ctx.gpu_name)
+    cached = _LOWERED_PROGRAM_CACHE.get(key)
+    if cached is None or cached[0] is not record.program_wire:
+        graph = record.program.copy()
+        provenance.seed(graph)
+        cached = (record.program_wire, Pipeline.build(LOOP_PASSES).run(graph, ctx=ctx))
+        _LOWERED_PROGRAM_CACHE[key] = cached
+    return cached[1].copy()
+
+
+def _lowered_slice(record: GoldenRecord, ctx):
+    """The record's own frontend slice, lowered — the fallback context for its selector."""
+    from emmy.compiler import provenance  # noqa: PLC0415
+    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline  # noqa: PLC0415
+
+    graph = record.target_program.copy()
+    provenance.seed(graph)
+    return Pipeline.build(LOOP_PASSES).run(graph, ctx=ctx)
+
+
 def _target_kernel_nodes(record: GoldenRecord):
     """The record's target kernels in the CURRENT compiler: lower the persisted program through
     the loop passes and select the target's ``LoopOp`` node(s) — every output kernel for a Loop IR
@@ -913,18 +947,25 @@ def _target_kernel_nodes(record: GoldenRecord):
     from emmy.compiler.pipeline import LOOP_PASSES, Pipeline  # noqa: PLC0415
 
     ctx = Context.from_target(record.compute_cap, gpu_name=record.gpu_name or None)
-    graph = record.target_program.copy()
-    if record.loop_wire is None:
-        provenance.seed(graph)
-    lowered = Pipeline.build(LOOP_PASSES).run(graph, ctx=ctx)
     if record.loop_wire is not None:
+        lowered = Pipeline.build(LOOP_PASSES).run(record.target_program.copy(), ctx=ctx)
         # One kernel per PRODUCER, not per output: a multi-output kernel (an NVFP4 re-encode emits
         # packed codes beside their block scales) produces several of the graph's outputs, and
         # counting it once per output made a single-kernel target read as "lowers to N kernels".
         producers = (lowered.producer(output) for output in lowered.outputs)
         nodes = list({node.id: node for node in producers if node is not None and isinstance(node.op, LoopOp)}.values())
-    else:
-        wanted = frozenset(record.origins)
+        if not nodes:
+            raise ValueError(f"{record.name}: the persisted target selects no kernel after lowering")
+        return lowered, nodes
+
+    # A frontend target names its kernel by the trace's provenance, so the whole persisted program
+    # is the context the selector was recorded in and the one to resolve it in. The target's own
+    # frontend slice is the fallback, not the default: slicing re-fuses the cone in isolation, so a
+    # cone of sibling linears around one attention comes back as several kernels and none carries
+    # the recorded origin set. The slice still answers the opposite case -- a recorded cone that is
+    # a strict subset of what the current compiler fuses maximally, which the program never matches.
+    wanted = frozenset(record.origins)
+    for lowered in (_lowered_program(record, ctx), _lowered_slice(record, ctx)):
         nodes = []
         for node_id in lowered.topological_order():
             node = lowered.nodes[node_id]
@@ -933,9 +974,9 @@ def _target_kernel_nodes(record: GoldenRecord):
             origins = frozenset(origin for origin in provenance.get(node) if origin in record.program.nodes)
             if origins == wanted:
                 nodes.append(node)
-    if not nodes:
-        raise ValueError(f"{record.name}: the persisted target selects no kernel after lowering")
-    return lowered, nodes
+        if nodes:
+            return lowered, nodes
+    raise ValueError(f"{record.name}: the persisted target selects no kernel after lowering")
 
 
 def _lifted_target(record: GoldenRecord):
@@ -960,6 +1001,29 @@ def _lifted_target(record: GoldenRecord):
     # and the dtype half of the deploy identity (``identity_key(with_io=True)``) reads the same
     # output fingerprint on both sides.
     return tile.with_io(lowered, node)
+
+
+def unmatched_reason(row: Sequence[tuple[str, str]], candidates) -> str:
+    """Why a recorded row equals no enumerated leaf — the three readings golden churn has.
+
+    A compiler change moves recorded rows in bulk and only one of the readings is a loss, so a
+    re-record that does not tell them apart can enshrine one. A key the replay offers NOWHERE is a
+    re-spelling or an identity change: the site the row addressed is not on this kernel any more. A
+    value gone while its key survives is a NARROWING — the family is still offered and no longer
+    reaches that value, which is a capability the compiler used to have and is the one reading to
+    report rather than overwrite. Everything offered but never together is a kernel whose fork SET
+    moved, of which the row that spelled no decision at all against a kernel that now takes one is
+    the common case, and a gain."""
+    spellings = [dict(candidate) for candidate in candidates]
+    absent = sorted({key for key, _ in row if not any(key in spelling for spelling in spellings)})
+    if absent:
+        return f"the replay offers no {', '.join(absent)} — a re-spelling or an identity change"
+    narrowed = sorted(f"{key}={value!r}" for key, value in row if not any(spelling.get(key) == value for spelling in spellings))
+    if narrowed:
+        return f"NARROWING, the key is offered and the value is not: {', '.join(narrowed)}"
+    if not row:
+        return "the kernel takes a schedule where the recording spelled none"
+    return "every key and value is offered, no one candidate carries them together"
 
 
 def decode_record(record: GoldenRecord, siblings: Sequence[GoldenRecord] = ()) -> str | None:
@@ -1003,10 +1067,17 @@ def decode_record(record: GoldenRecord, siblings: Sequence[GoldenRecord] = ()) -
         elif row in child_rows:
             reason = None
         else:
-            reason = f"no enumerated row of the identified kernel equals the recording ({len(child_rows)} candidate rows)"
+            reason = (
+                f"no enumerated row of the identified kernel equals the recording "
+                f"({len(child_rows)} candidate rows): {unmatched_reason(row, child_rows)}"
+            )
     else:
         pooled = frozenset().union(*candidates.values()) if candidates else frozenset()
-        reason = None if row in pooled else f"no enumerated row equals the recording ({len(pooled)} candidate rows)"
+        reason = (
+            None
+            if row in pooled
+            else f"no enumerated row equals the recording ({len(pooled)} candidate rows): {unmatched_reason(row, pooled)}"
+        )
     verdicts[verdict_key] = reason
     global _IDENTITY_STORE_DIRTY
     _IDENTITY_STORE_DIRTY = True

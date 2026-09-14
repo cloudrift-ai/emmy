@@ -296,3 +296,127 @@ def test_record_greedy_is_a_golden_bench_flag(run_cli):
 
     assert rc == 2
     assert "--record-greedy requires --golden PATH and --bench" in stdout + stderr
+
+
+def test_pinned_rows_bench_when_the_greedy_returned_no_outputs():
+    """A greedy that cannot be timed must not also block the pinned alternative that escapes it.
+
+    The reference a pinned row is checked against comes from the greedy. When the greedy
+    bench_fails there is none, and the question is whether any OTHER reference exists. An exact
+    Loop target has no Torch twin, so the greedy is the only reference obtainable and the row would
+    be unfalsifiable -- refuse. Where a twin exists the rows bench, flagged unverified, because the
+    targets whose greedy hangs are exactly the ones a pinned row exists for.
+
+    The predicate is the twin's existence, not ``same_input_greedy``: those differ by a
+    ``strict_correctness`` conjunct, and keying on it would let a non-strict twinless target bench
+    with no reference at all.
+    """
+    fail = "greedy run/bench failed: HungKernelError"
+
+    # A reference is present: nothing to refuse, whatever else is true.
+    assert run_mod.pinned_reference_refusal(ab_ref=("in", "out"), torch_twin=False, greedy_fail=None) is None
+    assert run_mod.pinned_reference_refusal(ab_ref=("in", "out"), torch_twin=True, greedy_fail=fail) is None
+
+    # No reference and no twin to fall back on: refused, and the reason still names the failure.
+    refusal = run_mod.pinned_reference_refusal(ab_ref=None, torch_twin=False, greedy_fail=fail)
+    assert refusal is not None
+    assert run_mod._NO_GREEDY_REF in refusal
+    assert fail in refusal
+    assert run_mod.pinned_reference_refusal(ab_ref=None, torch_twin=False, greedy_fail=None) is not None
+
+    # No reference but a twin exists: bench anyway. This is the case the gate used to refuse.
+    assert run_mod.pinned_reference_refusal(ab_ref=None, torch_twin=True, greedy_fail=fail) is None
+    assert run_mod.pinned_reference_refusal(ab_ref=None, torch_twin=True, greedy_fail=None) is None
+
+
+def test_record_refuses_a_row_benched_without_a_reference(tmp_path):
+    """An unverified row must never become golden evidence -- a miscompiling tile runs at a
+    perfectly plausible latency, so a recorded number for an unchecked kernel is worse than none."""
+    sample = SimpleNamespace(name="pinned.row", knobs={"WORK": "w2x2"}, pins={}, dynamic=None, shape=None)
+    gb = SimpleNamespace(
+        status="ok",
+        bench=SimpleNamespace(min_ms=1.0, time_ms=1.0, per_launch=[]),
+        sample=sample,
+        flags=[f"{run_mod.UNVERIFIED_ROW}: greedy run/bench failed"],
+    )
+    args = SimpleNamespace(golden=str(tmp_path / "g.yaml"), realization="pinned.row")
+    with pytest.raises(SystemExit) as exc:
+        run_mod._record_golden_latency(args, {"Emmy": 1000.0}, [gb])
+    assert exc.value.code == 2
+
+
+def test_an_env_pin_that_did_not_realize_is_flagged_like_an_ab_pin(monkeypatch):
+    """A pin published through EMMY_KNOBS gates the greedy compile, and nothing used to check it.
+
+    An --ab row has always been gated: benching a row whose pin did not take would measure the planner's
+    own pick under the pin's name. The same pin set in the environment was unchecked, so a hand-run sweep
+    whose pins did nothing reported the planner's pick under the experiment's name -- not a wrong number
+    but an unfalsifiable one, indistinguishable from a flat result.
+
+    The last case is the one measured in practice: a scheduled TILE pinned against a kernel that reached
+    the unscheduled per-cell tier, where the pin is simply absent from the realized knobs.
+    """
+    realized = [{"WORK": "w2x2", "TILE": "mma_m8n8k4_f16_f32/f4x4/k8", "STAGE": "d2/smem"}]
+
+    # Nothing pinned: nothing to refuse.
+    assert run_mod.env_pin_refusal(realized) is None
+
+    # A pin the graph realized is silent, exactly as the --ab gate is.
+    monkeypatch.setenv("EMMY_WORK", "w2x2")
+    assert run_mod.env_pin_refusal(realized) is None
+
+    # A pin the graph contradicts names both sides, in the --ab gate's own wording.
+    monkeypatch.setenv("EMMY_WORK", "w4x8")
+    flag = run_mod.env_pin_refusal(realized)
+    assert flag is not None
+    assert "w4x8" in flag and "w2x2" in flag
+    monkeypatch.delenv("EMMY_WORK")
+
+    # A scheduled pin against the unscheduled per-cell tier: absent, not contradicted.
+    monkeypatch.setenv("EMMY_TILE", "mma_m8n8k4_f16_f32/f4x4/k8")
+    flag = run_mod.env_pin_refusal([{"LOOPIFY": "0"}])
+    assert flag is not None
+    assert "TILE" in flag
+
+
+def test_a_reference_that_disagrees_with_itself_is_reported_unusable_not_per_row():
+    """A pinned row is checked against the greedy output. A row that realized the greedy's OWN config
+    computes that output, so if it is flagged as disagreeing the reference does not reproduce -- and
+    then no row's comparison against it distinguishes a wrong answer from a right one.
+
+    Measured on Qwen3.8-27B-W4A16 layer 0: every row of one target was flagged, including the --ab row
+    realizing the greedy's own w2x2 f4x4/k8 d2/smem at 1722.4 us against the greedy's 1723.4 us, at
+    rel err 15.859. A flag that fires on the reference itself is not evidence about any row, and a
+    flag that fires on everything is one readers learn to skip -- which is how a real deviation
+    (a sibling slot measured rel err 2.177 on a genuinely miscompiling tile) gets waved through.
+    """
+    ref = [{"WORK": "w2x2", "TILE": "mma_m8n8k4_f16_f32/f4x4/k8", "STAGE": "d2/smem"}]
+    other = [{"WORK": "w4x8", "TILE": "mma_m8n8k4_f16_f32/f4x4", "STAGE": "d2/smem"}]
+
+    # The reference reproduces: a row that differs from it is genuinely suspect, and says so.
+    verdict = "wrong-answer: rel err 2.177 vs greedy output"
+    assert run_mod.resolve_reference_disagreement([(other, verdict), (ref, None)], ref) == [verdict, None]
+
+    # The reference disagrees with a row that IS the reference: one statement, and nothing per row.
+    resolved = run_mod.resolve_reference_disagreement(
+        [(ref, "wrong-answer: rel err 15.992 vs greedy output"), (other, "wrong-answer: rel err 15.859 vs greedy output")],
+        ref,
+    )
+    assert resolved == [run_mod.REFERENCE_SELF_DISAGREES, None]
+    assert "unusable" in run_mod.REFERENCE_SELF_DISAGREES
+    # It is stated once, not once per row.
+    assert resolved.count(run_mod.REFERENCE_SELF_DISAGREES) == 1
+
+    # Order does not matter: the witness may be any row, and the others still lose their verdicts.
+    resolved = run_mod.resolve_reference_disagreement(
+        [(other, "wrong-answer: rel err 15.859 vs greedy output"), (ref, "wrong-answer: rel err 15.992 vs greedy output")],
+        ref,
+    )
+    assert resolved == [None, run_mod.REFERENCE_SELF_DISAGREES]
+
+    # A reference row that AGREES is no witness -- the others keep their verdicts.
+    assert run_mod.resolve_reference_disagreement([(ref, None), (other, verdict)], ref) == [None, verdict]
+
+    # Without the greedy's realized knobs there is nothing to compare, so verdicts pass through.
+    assert run_mod.resolve_reference_disagreement([(other, verdict)], None) == [verdict]
+    assert run_mod.resolve_reference_disagreement([(other, verdict)], []) == [verdict]

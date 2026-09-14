@@ -1,4 +1,4 @@
-"""One broadcast constant feeding TWO sibling cones declares its load ONCE per scope.
+"""One value feeding TWO sibling cones is declared ONCE per scope.
 
 A ``Fold``'s operand edges splice independently (``Fold.spliced_step``), so two cones reading the
 same 1-element input each carry their own copy of its ``buf[0]`` ``Load`` — same SSA name, same
@@ -25,12 +25,13 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Literal
 from emmy.compiler.ir.frontend.ir import LinearOp, SliceOp
-from emmy.compiler.ir.stmt import Body, Load
+from emmy.compiler.ir.stmt import Assign, Body, Load
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 from emmy.compiler.target import set_target
 
 materialize = import_module("emmy.compiler.pipeline.passes.lowering.kernel.010_materialize")
+factor = import_module("emmy.compiler.pipeline.passes.lowering.kernel._factor")
 
 _CAP = (8, 0)
 _M, _K, _N = 1, 32, 16  # M=1 — the decode row, whose contraction folds serially per channel
@@ -104,3 +105,59 @@ def test_a_name_rebound_to_a_different_address_survives_as_the_fault_it_is() -> 
     body = Body((Load(name="in0", input="a", index=zero), Load(name="in0", input="b", index=zero)))
 
     assert [stmt.input for stmt in materialize._drop_repeated_declarations(body)] == ["a", "b"]
+
+
+def test_sibling_cones_share_one_declaration_of_a_derived_value() -> None:
+    """A cone DERIVES from what it reads, so the repeat is an ``Assign`` as readily as a ``Load``.
+
+    DeepSeek-V4's post block is a chain of normalizations; a placement cut lands two cones of one
+    ``1 / (sum + eps)`` at the kernel's own scope, and the second reciprocal redeclares the first's
+    name. nvcc rejects it exactly as it rejects the repeated load."""
+    zero = (Literal(0, "int"),)
+    body = Body(
+        (
+            Load(name="in0", input="s", index=zero),
+            Assign(name="v0", op="reciprocal", args=("in0",)),
+            Assign(name="v0", op="reciprocal", args=("in0",)),
+        )
+    )
+
+    assert [stmt.name for stmt in materialize._drop_repeated_declarations(body)] == ["in0", "v0"]
+
+
+def test_a_name_rebound_to_a_different_expression_survives_as_the_fault_it_is() -> None:
+    """The same rule from the other side: two VALUES under one name stay two statements."""
+    body = Body((Assign(name="v0", op="reciprocal", args=("a",)), Assign(name="v0", op="reciprocal", args=("b",))))
+
+    assert [stmt.args for stmt in materialize._drop_repeated_declarations(body)] == [("a",), ("b",)]
+
+
+def test_two_cones_that_bind_one_name_to_two_values_are_re_spelled() -> None:
+    """The other half of the same rule: two VALUES cannot share one declaration either.
+
+    Sibling cones lower under one ``__aside`` tag, which keeps them off the root's names but not off
+    each other's. That is invisible while the cones agree — they are one statement and the dedup
+    collapses them. A placement cut breaks the tie: it leaves one cone reading the workspace it
+    materialized and its structural twin computing in place, so the two derive one name from
+    different operands and nvcc rejects the second declaration.
+    """
+    body = [
+        Assign(name="v0", op="add", args=("a", "b")),
+        Assign(name="out0", op="reciprocal", args=("v0",)),
+        Assign(name="v0", op="add", args=("ws", "b")),
+        Assign(name="out1", op="reciprocal", args=("v0",)),
+    ]
+
+    spelled = factor._one_value_per_name(body)
+    names = [stmt.name for stmt in spelled]
+
+    assert names[0] == "v0" and names[2] != "v0", names
+    assert spelled[1].args == ("v0",)  # a use BEFORE the rebinding still means the first value
+    assert spelled[3].args == (names[2],)  # one after it means the second
+
+
+def test_two_cones_that_agree_keep_one_spelling() -> None:
+    """Nothing moves while the cones agree, or the dedup above would stop collapsing them."""
+    body = [Assign(name="v0", op="add", args=("a", "b"))] * 2
+
+    assert [stmt.name for stmt in factor._one_value_per_name(body)] == ["v0", "v0"]
