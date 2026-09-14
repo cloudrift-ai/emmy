@@ -754,9 +754,15 @@ class SyncTransport:
     lane loads chunk ``i+ring-1`` into registers, the resident chunk's drain runs, and only then do
     the registers land in the slab. The in-flight bytes sit in registers instead of the copy engine
     — the same ``depth`` knob, one level further down the hierarchy — and the deposit's own CTA
-    barrier is the whole handshake, so the pipelined loop carries ONE barrier per chunk rather than
-    the two an unsplit fill needs. Requested by a ``depth >= 2`` schedule and confirmed per slab:
-    see :attr:`register_staged`.
+    barrier is the whole handshake FOR THE PEERS, so the pipelined loop carries ONE barrier per
+    chunk rather than the two an unsplit fill needs. Requested by a ``depth >= 2`` schedule and
+    confirmed per slab: see :attr:`register_staged`.
+
+    That saving is the peers' alone, and reading it as the group's was a silent wrong answer. The
+    compute fill below does NOT ring: it writes the current chunk into a single-buffer slab at the
+    top of the body and the drain reads it in the same body, so the deposit's end-of-body barrier
+    is behind both. :attr:`fills_current_slot` is what keeps :meth:`wait` emitting that group's
+    own barrier anyway.
 
     ``depth >= 2`` is the **asymmetric (peer-only) prefetch ring**: only the ``copy_operands``
     slabs ring (the copies for chunk ``i+ring-1`` fly under the compute fill AND the drain of chunk
@@ -1051,8 +1057,20 @@ class SyncTransport:
     def commit(self) -> list[Stmt]:
         return cp_async_commit() if self.copy_operands and not self.copy_sync else []
 
+    @property
+    def fills_current_slot(self) -> bool:
+        """Whether this group writes a slab THIS iteration that the SAME iteration's drain reads.
+
+        The register-staged deposit publishes itself: it targets the PREFETCH slot no lane is
+        reading, and the barrier the skeleton places past the drain covers it. A compute fill is the
+        opposite — :meth:`fill` writes it at the top of the body into the CURRENT chunk's
+        single-buffer slab (the peer-only ring leaves those unringed by design), and the drain reads
+        it in the same body, so the deposit's barrier sits behind both and publishes nothing. An op
+        with a scheduled ``producer`` fills in its own segment and is not one of these."""
+        return any(op.producer is None for op in self.operands)
+
     def wait(self, *, in_flight: int, slot: Expr, phase: Expr) -> list[Stmt]:  # noqa: ARG002
-        if self.register_staged:
+        if self.register_staged and not self.fills_current_slot:
             return []  # the deposit's own barrier past the drain is this group's whole handshake
         return cp_async_wait(in_flight) if self.copy_operands and not self.copy_sync else [Sync()]
 
