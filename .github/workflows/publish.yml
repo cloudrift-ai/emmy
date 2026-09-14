@@ -10,53 +10,22 @@ on:
   workflow_dispatch:
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    # Same bound as the pull-request suite: a hung run must fail rather than hold a runner.
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-
-      # The suite reads the LFS-backed measurement freeze. Pull only that path;
-      # fetching every LFS object also downloads the much larger experiment archives.
-      - name: Fetch the measurement freeze from LFS
-        run: git lfs pull --include="emmy/compiler/pipeline/search/freezes/*"
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-
-      - name: Install dependencies
-        run: make setup-ci
-
-      - name: Ruff check
-        run: ./venv/bin/ruff check
-
-      - name: Ruff format check
-        run: ./venv/bin/ruff format --check
-
-      # Cache the HuggingFace hub downloads (TinyLlama-1.1B-Chat-v1.0 +
-      # Qwen/Qwen3-Embedding-0.6B). The anonymous HF CDN rate-limits the
-      # shared runner egress IPs — 429s on config.json have killed multiple
-      # runs — and with a populated cache ``from_pretrained`` falls back to
-      # the cached files when the hub is unreachable. Bump the key suffix
-      # when tests start needing new models.
-      - name: Cache HuggingFace models
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/huggingface
-          key: hf-models-v1
-
-      - name: Run tests
-        run: make test
-
   build:
-    needs: test
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify the release commit is on main
+        run: |
+          git fetch origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::Releases must publish a commit already merged into main"
+            exit 1
+          fi
 
       - uses: actions/setup-python@v5
         with:
@@ -87,6 +56,23 @@ jobs:
       # dry-runs this exact target so the publishing path cannot drift untested.
       - name: Build the PyPI distribution
         run: make pypi-dist
+
+      - name: Smoke-test the PyPI distribution
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          test "$(find dist -maxdepth 1 -name '*.whl' | wc -l)" -eq 1
+          test "$(find dist -maxdepth 1 -name '*.tar.gz' | wc -l)" -eq 1
+          WHEEL=$(find dist -maxdepth 1 -name '*.whl' -print -quit)
+          SMOKE_ENV="$RUNNER_TEMP/emmy-release-smoke"
+          CATALOG="$RUNNER_TEMP/emmy-recipes.json"
+          python -m venv "$SMOKE_ENV"
+          "$SMOKE_ENV/bin/pip" install --disable-pip-version-check "$WHEEL"
+          test "$("$SMOKE_ENV/bin/emmy" --version)" = "emmy $VERSION"
+          "$SMOKE_ENV/bin/emmy" recipe list --json > "$CATALOG"
+          "$SMOKE_ENV/bin/python" -c \
+            'import json, sys; assert json.load(open(sys.argv[1]))["recipes"], "wheel contains no recipes"' \
+            "$CATALOG"
 
       - uses: actions/upload-artifact@v4
         with:
