@@ -1,37 +1,46 @@
-# evidence: the two schedules one knob away from this one both realize, build and run CORRECTLY on
-# the same kernel, the same program and the same card. `WORK=w2x2 TILE=mma_m8n8k4_f16_f32/f4x4/k8
-# STAGE=d2/smem` is clean at 849 us, and `WORK=w2x2 TILE=mma_m8n8k4_f16_f32/f2x2/k8 STAGE=d1/smem`
-# is clean at 1277 us. So the Volta atom, the w2x2 warp grid, the f2x2/k8 fragment and depth-2 smem
-# staging are each individually fine here; only their conjunction is wrong. A schedule whose every
-# one-knob neighbour is correct should itself be correct.
+# evidence: `STAGE=d2/smem` on `mma_m8n8k4_f16_f32` returns WRONG ANSWERS on sm_70 across a wide and
+# irregular set of warp grids and fragments. This case pins one member of that set. It compiles,
+# launches, completes, and runs at 1,153 us -- FASTER than its correct `d1/smem` neighbour at
+# 1,277 us -- so nothing about the launch or the timing distinguishes it, and only an output
+# comparison catches it. A recorded row carrying such a schedule would deploy and silently produce
+# wrong numbers.
 #
-# The gap: this row compiles, launches, completes, and returns garbage. Measured against eager at
-# rtol=atol=1e-3, 2,145,034 of 2,621,440 output elements are outside tolerance -- 82% of the result
-# -- while both neighbours above pass strictly. It is not a tolerance question: a `--strict` run
-# reports the two neighbours clean and only this row failing.
+# The envelope, measured on a Tesla V100 on the Qwen3.8-27B-GPTQ-Int4 `in_proj_qkv` linear (16
+# combinations, every verdict against a greedy first confirmed eager-correct under `--strict`):
+# nine of sixteen are wrong, at rel err 0.081 to 2.507. Wrong: w4x1/f4x4/k8, w8x1/f4x4/k8,
+# w4x1/f1x8/k8, w4x1/f1x4/k8, w4x1/f4x4/k2, w4x1/f2x4/k8, w2x1/f2x2/k8, w2x2/f2x2/k8,
+# w4x1/f2x2/k8. Correct: w1x1/f4x4/k8, w2x1/f4x4/k8, w1x2/f4x4/k8, w2x2/f4x4/k8, w1x4/f4x4/k8,
+# w4x1/f1x16/k2, w8x1/f1x16/k2. Every one of those pairs is correct at `d1/smem`, including the
+# ones that are wrong at `d2/smem`, so the STAGING DEPTH is the term that flips it.
 #
-# Why it is a `correct` xfail and not `built`: nvcc accepts the kernel and it runs at a perfectly
-# plausible 1,153 us, faster than the correct d1/smem neighbour. Nothing about the launch or the
-# timing distinguishes it. That is what makes it dangerous -- a recorded row carrying this schedule
-# would deploy and silently produce wrong numbers, and only an output comparison catches it.
+# Four readings of WHICH nine have been tested and refuted, and they are recorded here so nobody
+# re-derives them. It is not tile-shape-specific: nine combinations over five fragments fail. It is
+# not a K-depth-8 fragment: `w4x1 f4x4/k2` fails. It is not the double-buffered ALLOCATION SIZE --
+# the earlier second-buffer-offset hypothesis, now withdrawn -- because 12.0K is correct at
+# w1x1/f4x4/k8 and wrong at w2x2/f2x2/k8, 20.0K is correct at w2x1/f4x4/k8 and wrong at
+# w4x1/f2x4/k8, and the failing set spans 9K to 68K against a correct set spanning 6K to 24K. And it
+# is not the warp count: w2x2/f4x4/k8 is correct at four warps and w2x1/f2x2/k8 is wrong at two.
+# Nothing in WORK, either fragment extent, the K depth, the smem size, the grid, the block or the
+# occupancy separates the two sets; total m-tile in elements does not either, since w2x1/f4x4 and
+# w4x1/f2x4 are both 64 and land on opposite sides.
+#
+# So the risk is worse than a rule would be: a family where nine of sixteen members silently return
+# wrong answers and membership cannot be predicted from the knobs.
+#
+# Root cause NOT established: no SASS or ncu inspection has been done, and nothing here should be
+# upgraded past measurement without it.
+#
+# The cone is load-bearing, and that is the sharpest clue left. `STAGE=d2/smem` is not offered at
+# all on a plain f16 contraction of the same shape, nor on a decode cone written as a traced
+# expression -- only on one built from checkpoint-backed constants, whose buffers carry
+# `source_path` / `load_ops`. Depth-2 staging appears to require a loaded operand it has something
+# to prefetch from, which means the dangerous family and the offered family may be the same one.
 #
 # Where it came from: found while tuning Qwen3.8-27B-GPTQ-Int4 on a Tesla V100 (sm_70), on the real
-# `in_proj_qkv` linear with its packed-int4 decode cone fused in, where it measured rel err 2.177
-# and 2.193 against the greedy output on two runs and 88% of elements outside 1e-3 against eager.
-# The AWQ slot reproduced the same fragment independently on a different kernel in a different
-# quantization (rel err 1.614) where `f4x4/k8` agreed, so it is neither model- nor
-# coding-specific. This case is the minimized form: a one-layer synthetic GPTQ checkpoint driven
-# through the real `spell_quantized_constants`, which is what builds the cone.
-#
-# The cone is load-bearing and that is the sharpest clue about the mechanism. `STAGE=d2/smem` is not
-# offered at all on a plain f16 contraction of the same shape, nor on a decode cone written as a
-# traced expression -- only on one built from checkpoint-backed constants, whose buffers carry
-# `source_path` / `load_ops`. Depth-2 staging appears to require a loaded operand it has something
-# to prefetch from. The failing configuration is also the only one landing on a 12 KB
-# double-buffered allocation (its correct neighbours are 8 KB single-buffered at the same warp grid
-# and fragment, and 24 KB at the same depth), which points at a second-buffer offset or a barrier in
-# the staging drain rather than at the mma lowering. Not proven: no SASS or ncu inspection was done,
-# and it should not be upgraded from a hypothesis without that.
+# `in_proj_qkv` linear with its packed-int4 decode cone fused in. The AWQ slot reproduced a failing
+# fragment independently on a different kernel in a different quantization (rel err 1.614), so it is
+# neither model- nor coding-specific. This case is the minimized form: a one-layer synthetic GPTQ
+# checkpoint driven through the real `spell_quantized_constants`, which is what builds the cone.
 compute_cap:
 - 7
 - 0
