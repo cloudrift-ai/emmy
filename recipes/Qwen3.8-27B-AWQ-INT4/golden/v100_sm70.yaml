@@ -97994,38 +97994,33 @@ programs:
 loops:
 - inputs: []
   outputs:
-  - linear_3_b_unsq_bc
+  - conv1d_w0
   nodes:
-  - id: linear_3_wt
+  - id: p_linear_attn_conv1d_weight
     op: constant
     attrs:
-      name: p_linear_attn_in_proj_a_weight
+      name: p_linear_attn_conv1d_weight
       value: null
       context_value: null
       load_ops:
-        __tuple__:
-        - __op__:
-            op: torch.transpose
-            attrs:
-              axes:
-                __tuple__:
-                - -2
-                - -1
-      source_path: model.language_model.layers.0.linear_attn.in_proj_a.weight
+        __tuple__: []
+      source_path: model.language_model.layers.0.linear_attn.conv1d.weight
       source_parts:
         __tuple__: []
       source_shape:
         __tuple__:
-        - 48
-        - 5120
+        - 10240
+        - 1
+        - 4
       source_dtype: float16
       source_graph: null
     outputs:
-    - - linear_3_wt
+    - - p_linear_attn_conv1d_weight
       - f16
-      - - 5120
-        - 48
-  - id: linear_3_b_unsq_bc
+      - - 10240
+        - 1
+        - 4
+  - id: conv1d_w0
     op: loop
     attrs:
       body:
@@ -98037,10 +98032,29 @@ loops:
               fields:
                 name: a0
                 extent:
-                  dim: 512
+                  dim: 10240
                 window: null
             body:
               body:
+              - class: Load
+                fields:
+                  names:
+                    tuple:
+                    - in0
+                  input: p_linear_attn_conv1d_weight
+                  index:
+                    tuple:
+                    - expr:
+                        var: a0
+                    - expr:
+                        literal:
+                          value: 0
+                          dtype: int
+                    - expr:
+                        literal:
+                          value: 0
+                          dtype: int
+                  dtype: null
               - class: Loop
                 fields:
                   axis:
@@ -98048,40 +98062,13 @@ loops:
                     fields:
                       name: a1
                       extent:
-                        dim: 245760
+                        dim: 515
                       window: null
                   body:
                     body:
-                    - class: Load
-                      fields:
-                        names:
-                          tuple:
-                          - in0
-                        input: linear_3_wt
-                        index:
-                          tuple:
-                          - expr:
-                              binary:
-                                op: //
-                                left:
-                                  var: a1
-                                right:
-                                  literal:
-                                    value: 48
-                                    dtype: int
-                          - expr:
-                              binary:
-                                op: '%'
-                                left:
-                                  var: a1
-                                right:
-                                  literal:
-                                    value: 48
-                                    dtype: int
-                        dtype: null
                     - class: Write
                       fields:
-                        output: linear_3_b_unsq_bc
+                        output: conv1d_w0
                         index:
                           tuple:
                           - expr:
@@ -98091,23 +98078,7 @@ loops:
                           - expr:
                               var: a0
                           - expr:
-                              binary:
-                                op: //
-                                left:
-                                  var: a1
-                                right:
-                                  literal:
-                                    value: 48
-                                    dtype: int
-                          - expr:
-                              binary:
-                                op: '%'
-                                left:
-                                  var: a1
-                                right:
-                                  literal:
-                                    value: 48
-                                    dtype: int
+                              var: a1
                         values:
                           tuple:
                           - in0
@@ -98118,56 +98089,48 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_pointwise_796083
+      name: k_conv1d_pointwise_b2c4db
     inputs:
-    - linear_3_wt
+    - p_linear_attn_conv1d_weight
     outputs:
-    - - linear_3_b_unsq_bc
+    - - conv1d_w0
       - f16
       - - 1
-        - 512
-        - 5120
-        - 48
+        - 10240
+        - 515
 - inputs: []
   outputs:
-  - mean_count_bc
+  - conv1d_w1
   nodes:
-  - id: mean_count
+  - id: p_linear_attn_conv1d_weight
     op: constant
     attrs:
-      name: mean_count
-      value: 5120.0
+      name: p_linear_attn_conv1d_weight
+      value: null
       context_value: null
       load_ops:
         __tuple__: []
-      source_path: null
+      source_path: model.language_model.layers.0.linear_attn.conv1d.weight
       source_parts:
         __tuple__: []
-      source_shape: null
-      source_dtype: null
+      source_shape:
+        __tuple__:
+        - 10240
+        - 1
+        - 4
+      source_dtype: float16
       source_graph: null
     outputs:
-    - - mean_count
-      - f32
-      - - 1
-  - id: mean_count_bc
+    - - p_linear_attn_conv1d_weight
+      - f16
+      - - 10240
+        - 1
+        - 4
+  - id: conv1d_w1
     op: loop
     attrs:
       body:
         body:
-        - class: Load
-          fields:
-            names:
-              tuple:
-              - in0
-            input: mean_count
-            index:
-              tuple:
-              - expr:
-                  literal:
-                    value: 0
-                    dtype: int
-            dtype: null
         - class: Loop
           fields:
             axis:
@@ -98175,42 +98138,284 @@ loops:
               fields:
                 name: a0
                 extent:
-                  dim: 512
+                  dim: 10240
                 window: null
             body:
               body:
-              - class: Write
+              - class: Load
                 fields:
-                  output: mean_count_bc
+                  names:
+                    tuple:
+                    - in0
+                  input: p_linear_attn_conv1d_weight
                   index:
                     tuple:
-                    - expr:
-                        literal:
-                          value: 0
-                          dtype: int
                     - expr:
                         var: a0
                     - expr:
                         literal:
                           value: 0
                           dtype: int
-                  values:
-                    tuple:
-                    - in0
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
+                    - expr:
+                        literal:
+                          value: 1
+                          dtype: int
+                  dtype: null
+              - class: Loop
+                fields:
+                  axis:
+                    class: Axis
+                    fields:
+                      name: a1
+                      extent:
+                        dim: 515
+                      window: null
+                  body:
+                    body:
+                    - class: Write
+                      fields:
+                        output: conv1d_w1
+                        index:
+                          tuple:
+                          - expr:
+                              literal:
+                                value: 0
+                                dtype: int
+                          - expr:
+                              var: a0
+                          - expr:
+                              var: a1
+                        values:
+                          tuple:
+                          - in0
+                        value_dtype: null
+                        atomic: false
+                        swizzle: NONE
+                  unroll: false
+                  seed: true
             unroll: false
             seed: true
-      name: k_mean_pointwise_993b3d
+      name: k_conv1d_pointwise_cf20e4
     inputs:
-    - mean_count
+    - p_linear_attn_conv1d_weight
     outputs:
-    - - mean_count_bc
-      - f32
+    - - conv1d_w1
+      - f16
       - - 1
-        - 512
+        - 10240
+        - 515
+- inputs: []
+  outputs:
+  - conv1d_w2
+  nodes:
+  - id: p_linear_attn_conv1d_weight
+    op: constant
+    attrs:
+      name: p_linear_attn_conv1d_weight
+      value: null
+      context_value: null
+      load_ops:
+        __tuple__: []
+      source_path: model.language_model.layers.0.linear_attn.conv1d.weight
+      source_parts:
+        __tuple__: []
+      source_shape:
+        __tuple__:
+        - 10240
         - 1
+        - 4
+      source_dtype: float16
+      source_graph: null
+    outputs:
+    - - p_linear_attn_conv1d_weight
+      - f16
+      - - 10240
+        - 1
+        - 4
+  - id: conv1d_w2
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis:
+              class: Axis
+              fields:
+                name: a0
+                extent:
+                  dim: 10240
+                window: null
+            body:
+              body:
+              - class: Load
+                fields:
+                  names:
+                    tuple:
+                    - in0
+                  input: p_linear_attn_conv1d_weight
+                  index:
+                    tuple:
+                    - expr:
+                        var: a0
+                    - expr:
+                        literal:
+                          value: 0
+                          dtype: int
+                    - expr:
+                        literal:
+                          value: 2
+                          dtype: int
+                  dtype: null
+              - class: Loop
+                fields:
+                  axis:
+                    class: Axis
+                    fields:
+                      name: a1
+                      extent:
+                        dim: 515
+                      window: null
+                  body:
+                    body:
+                    - class: Write
+                      fields:
+                        output: conv1d_w2
+                        index:
+                          tuple:
+                          - expr:
+                              literal:
+                                value: 0
+                                dtype: int
+                          - expr:
+                              var: a0
+                          - expr:
+                              var: a1
+                        values:
+                          tuple:
+                          - in0
+                        value_dtype: null
+                        atomic: false
+                        swizzle: NONE
+                  unroll: false
+                  seed: true
+            unroll: false
+            seed: true
+      name: k_conv1d_pointwise_0589ec
+    inputs:
+    - p_linear_attn_conv1d_weight
+    outputs:
+    - - conv1d_w2
+      - f16
+      - - 1
+        - 10240
+        - 515
+- inputs: []
+  outputs:
+  - conv1d_w3
+  nodes:
+  - id: p_linear_attn_conv1d_weight
+    op: constant
+    attrs:
+      name: p_linear_attn_conv1d_weight
+      value: null
+      context_value: null
+      load_ops:
+        __tuple__: []
+      source_path: model.language_model.layers.0.linear_attn.conv1d.weight
+      source_parts:
+        __tuple__: []
+      source_shape:
+        __tuple__:
+        - 10240
+        - 1
+        - 4
+      source_dtype: float16
+      source_graph: null
+    outputs:
+    - - p_linear_attn_conv1d_weight
+      - f16
+      - - 10240
+        - 1
+        - 4
+  - id: conv1d_w3
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis:
+              class: Axis
+              fields:
+                name: a0
+                extent:
+                  dim: 10240
+                window: null
+            body:
+              body:
+              - class: Load
+                fields:
+                  names:
+                    tuple:
+                    - in0
+                  input: p_linear_attn_conv1d_weight
+                  index:
+                    tuple:
+                    - expr:
+                        var: a0
+                    - expr:
+                        literal:
+                          value: 0
+                          dtype: int
+                    - expr:
+                        literal:
+                          value: 3
+                          dtype: int
+                  dtype: null
+              - class: Loop
+                fields:
+                  axis:
+                    class: Axis
+                    fields:
+                      name: a1
+                      extent:
+                        dim: 515
+                      window: null
+                  body:
+                    body:
+                    - class: Write
+                      fields:
+                        output: conv1d_w3
+                        index:
+                          tuple:
+                          - expr:
+                              literal:
+                                value: 0
+                                dtype: int
+                          - expr:
+                              var: a0
+                          - expr:
+                              var: a1
+                        values:
+                          tuple:
+                          - in0
+                        value_dtype: null
+                        atomic: false
+                        swizzle: NONE
+                  unroll: false
+                  seed: true
+            unroll: false
+            seed: true
+      name: k_conv1d_pointwise_d27d07
+    inputs:
+    - p_linear_attn_conv1d_weight
+    outputs:
+    - - conv1d_w3
+      - f16
+      - - 1
+        - 10240
+        - 515
 - inputs: []
   outputs:
   - softplus_one_bc
@@ -98401,2239 +98606,6 @@ loops:
       - - 1
         - 512
         - 48
-- inputs: []
-  outputs:
-  - to_1_cast
-  nodes:
-  - id: p_input_layernorm_weight
-    op: constant
-    attrs:
-      name: p_input_layernorm_weight
-      value: null
-      context_value: null
-      load_ops:
-        __tuple__: []
-      source_path: model.language_model.layers.0.input_layernorm.weight
-      source_parts:
-        __tuple__: []
-      source_shape:
-        __tuple__:
-        - 5120
-      source_dtype: float16
-      source_graph: null
-    outputs:
-    - - p_input_layernorm_weight
-      - f16
-      - - 5120
-  - id: to_1_cast
-    op: loop
-    attrs:
-      body:
-        body:
-        - class: Loop
-          fields:
-            axis:
-              class: Axis
-              fields:
-                name: a0
-                extent:
-                  dim: 5120
-                window: null
-            body:
-              body:
-              - class: Load
-                fields:
-                  names:
-                    tuple:
-                    - in0
-                  input: p_input_layernorm_weight
-                  index:
-                    tuple:
-                    - expr:
-                        var: a0
-                  dtype: null
-              - class: Assign
-                fields:
-                  name: v0
-                  op:
-                    elementwise: copy
-                  args:
-                    tuple:
-                    - in0
-                  dtype:
-                    dtype: f32
-              - class: Write
-                fields:
-                  output: to_1_cast
-                  index:
-                    tuple:
-                    - expr:
-                        var: a0
-                  values:
-                    tuple:
-                    - v0
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
-            unroll: false
-            seed: true
-      name: k_to_1_cast_pointwise
-    inputs:
-    - p_input_layernorm_weight
-    outputs:
-    - - to_1_cast
-      - f32
-      - - 5120
-- inputs: []
-  outputs:
-  - to_2_cast
-  nodes:
-  - id: p_linear_attn_a_log
-    op: constant
-    attrs:
-      name: p_linear_attn_a_log
-      value: null
-      context_value: null
-      load_ops:
-        __tuple__: []
-      source_path: model.language_model.layers.0.linear_attn.A_log
-      source_parts:
-        __tuple__: []
-      source_shape:
-        __tuple__:
-        - 48
-      source_dtype: float16
-      source_graph: null
-    outputs:
-    - - p_linear_attn_a_log
-      - f16
-      - - 48
-  - id: to_2_cast
-    op: loop
-    attrs:
-      body:
-        body:
-        - class: Loop
-          fields:
-            axis:
-              class: Axis
-              fields:
-                name: a0
-                extent:
-                  dim: 48
-                window: null
-            body:
-              body:
-              - class: Load
-                fields:
-                  names:
-                    tuple:
-                    - in0
-                  input: p_linear_attn_a_log
-                  index:
-                    tuple:
-                    - expr:
-                        var: a0
-                  dtype: null
-              - class: Assign
-                fields:
-                  name: v0
-                  op:
-                    elementwise: copy
-                  args:
-                    tuple:
-                    - in0
-                  dtype:
-                    dtype: f32
-              - class: Write
-                fields:
-                  output: to_2_cast
-                  index:
-                    tuple:
-                    - expr:
-                        var: a0
-                  values:
-                    tuple:
-                    - v0
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
-            unroll: false
-            seed: true
-      name: k_to_2_cast_pointwise
-    inputs:
-    - p_linear_attn_a_log
-    outputs:
-    - - to_2_cast
-      - f32
-      - - 48
-- inputs:
-  - hidden_states
-  outputs:
-  - to_cast
-  nodes:
-  - id: hidden_states
-    op: input
-    outputs:
-    - - hidden_states
-      - f16
-      - - 1
-        - 512
-        - 5120
-  - id: to_cast
-    op: loop
-    attrs:
-      body:
-        body:
-        - class: Loop
-          fields:
-            axis:
-              class: Axis
-              fields:
-                name: a0
-                extent:
-                  dim: 2621440
-                window: null
-            body:
-              body:
-              - class: Load
-                fields:
-                  names:
-                    tuple:
-                    - in0
-                  input: hidden_states
-                  index:
-                    tuple:
-                    - expr:
-                        literal:
-                          value: 0
-                          dtype: int
-                    - expr:
-                        binary:
-                          op: //
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 5120
-                              dtype: int
-                    - expr:
-                        binary:
-                          op: '%'
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 5120
-                              dtype: int
-                  dtype: null
-              - class: Assign
-                fields:
-                  name: v0
-                  op:
-                    elementwise: copy
-                  args:
-                    tuple:
-                    - in0
-                  dtype:
-                    dtype: f32
-              - class: Write
-                fields:
-                  output: to_cast
-                  index:
-                    tuple:
-                    - expr:
-                        literal:
-                          value: 0
-                          dtype: int
-                    - expr:
-                        binary:
-                          op: //
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 5120
-                              dtype: int
-                    - expr:
-                        binary:
-                          op: '%'
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 5120
-                              dtype: int
-                  values:
-                    tuple:
-                    - v0
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
-            unroll: false
-            seed: true
-      name: k_to_cast_pointwise
-    inputs:
-    - hidden_states
-    outputs:
-    - - to_cast
-      - f32
-      - - 1
-        - 512
-        - 5120
-- inputs:
-  - pow_1
-  outputs:
-  - mean_sum
-  nodes:
-  - id: pow_1
-    op: input
-    outputs:
-    - - pow_1
-      - f32
-      - - 1
-        - 512
-        - 5120
-  - id: mean_sum
-    op: loop
-    attrs:
-      body:
-        body:
-        - class: Loop
-          fields:
-            axis:
-              class: Axis
-              fields:
-                name: a0
-                extent:
-                  dim: 512
-                window: null
-            body:
-              body:
-              - class: Loop
-                fields:
-                  axis:
-                    class: Axis
-                    fields:
-                      name: a1
-                      extent:
-                        dim: 5120
-                      window: null
-                  body:
-                    body:
-                    - class: Load
-                      fields:
-                        names:
-                          tuple:
-                          - in0
-                        input: pow_1
-                        index:
-                          tuple:
-                          - expr:
-                              literal:
-                                value: 0
-                                dtype: int
-                          - expr:
-                              var: a0
-                          - expr:
-                              var: a1
-                        dtype: null
-                    - class: Accum
-                      fields:
-                        name: acc0
-                        value: in0
-                        op:
-                          elementwise: add
-                        dtype: null
-                        axes:
-                          tuple:
-                          - a2
-                        base: null
-                  unroll: false
-                  seed: true
-              - class: Write
-                fields:
-                  output: mean_sum
-                  index:
-                    tuple:
-                    - expr:
-                        literal:
-                          value: 0
-                          dtype: int
-                    - expr:
-                        var: a0
-                    - expr:
-                        literal:
-                          value: 0
-                          dtype: int
-                  values:
-                    tuple:
-                    - acc0
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
-            unroll: false
-            seed: true
-      name: k_mean_reduce_d9863b
-    inputs:
-    - pow_1
-    outputs:
-    - - mean_sum
-      - f32
-      - - 1
-        - 512
-        - 1
-- inputs:
-  - mean_count_bc
-  - mean_sum
-  outputs:
-  - mean
-  nodes:
-  - id: mean_count_bc
-    op: input
-    outputs:
-    - - mean_count_bc
-      - f32
-      - - 1
-        - 512
-        - 1
-  - id: mean_sum
-    op: input
-    outputs:
-    - - mean_sum
-      - f32
-      - - 1
-        - 512
-        - 1
-  - id: mean
-    op: loop
-    attrs:
-      body:
-        body:
-        - class: Loop
-          fields:
-            axis:
-              class: Axis
-              fields:
-                name: a0
-                extent:
-                  dim: 512
-                window: null
-            body:
-              body:
-              - class: Load
-                fields:
-                  names:
-                    tuple:
-                    - in0
-                  input: mean_sum
-                  index:
-                    tuple:
-                    - expr:
-                        literal:
-                          value: 0
-                          dtype: int
-                    - expr:
-                        var: a0
-                    - expr:
-                        literal:
-                          value: 0
-                          dtype: int
-                  dtype: null
-              - class: Load
-                fields:
-                  names:
-                    tuple:
-                    - in1
-                  input: mean_count_bc
-                  index:
-                    tuple:
-                    - expr:
-                        literal:
-                          value: 0
-                          dtype: int
-                    - expr:
-                        var: a0
-                    - expr:
-                        literal:
-                          value: 0
-                          dtype: int
-                  dtype: null
-              - class: Assign
-                fields:
-                  name: v0
-                  op:
-                    elementwise: divide
-                  args:
-                    tuple:
-                    - in0
-                    - in1
-                  dtype: null
-              - class: Write
-                fields:
-                  output: mean
-                  index:
-                    tuple:
-                    - expr:
-                        literal:
-                          value: 0
-                          dtype: int
-                    - expr:
-                        var: a0
-                    - expr:
-                        literal:
-                          value: 0
-                          dtype: int
-                  values:
-                    tuple:
-                    - v0
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
-            unroll: false
-            seed: true
-      name: k_mean_pointwise_8d9845
-    inputs:
-    - mean_sum
-    - mean_count_bc
-    outputs:
-    - - mean
-      - f32
-      - - 1
-        - 512
-        - 1
-- inputs:
-  - mul_1
-  outputs:
-  - type_as_cast
-  nodes:
-  - id: mul_1
-    op: input
-    outputs:
-    - - mul_1
-      - f32
-      - - 1
-        - 512
-        - 5120
-  - id: type_as_cast
-    op: loop
-    attrs:
-      body:
-        body:
-        - class: Loop
-          fields:
-            axis:
-              class: Axis
-              fields:
-                name: a0
-                extent:
-                  dim: 2621440
-                window: null
-            body:
-              body:
-              - class: Load
-                fields:
-                  names:
-                    tuple:
-                    - in0
-                  input: mul_1
-                  index:
-                    tuple:
-                    - expr:
-                        literal:
-                          value: 0
-                          dtype: int
-                    - expr:
-                        binary:
-                          op: //
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 5120
-                              dtype: int
-                    - expr:
-                        binary:
-                          op: '%'
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 5120
-                              dtype: int
-                  dtype: null
-              - class: Assign
-                fields:
-                  name: v0
-                  op:
-                    elementwise: copy
-                  args:
-                    tuple:
-                    - in0
-                  dtype:
-                    dtype: f16
-              - class: Write
-                fields:
-                  output: type_as_cast
-                  index:
-                    tuple:
-                    - expr:
-                        literal:
-                          value: 0
-                          dtype: int
-                    - expr:
-                        binary:
-                          op: //
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 5120
-                              dtype: int
-                    - expr:
-                        binary:
-                          op: '%'
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 5120
-                              dtype: int
-                  values:
-                    tuple:
-                    - v0
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
-            unroll: false
-            seed: true
-      name: k_type_as_cast_pointwise
-    inputs:
-    - mul_1
-    outputs:
-    - - type_as_cast
-      - f16
-      - - 1
-        - 512
-        - 5120
-- inputs:
-  - type_as
-  outputs:
-  - linear_3_a_unsq_bc
-  nodes:
-  - id: type_as
-    op: input
-    outputs:
-    - - type_as
-      - f16
-      - - 1
-        - 512
-        - 5120
-  - id: linear_3_a_unsq_bc
-    op: loop
-    attrs:
-      body:
-        body:
-        - class: Loop
-          fields:
-            axis:
-              class: Axis
-              fields:
-                name: a0
-                extent:
-                  dim: 2621440
-                window: null
-            body:
-              body:
-              - class: Load
-                fields:
-                  names:
-                    tuple:
-                    - in0
-                  input: type_as
-                  index:
-                    tuple:
-                    - expr:
-                        literal:
-                          value: 0
-                          dtype: int
-                    - expr:
-                        binary:
-                          op: //
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 5120
-                              dtype: int
-                    - expr:
-                        binary:
-                          op: '%'
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 5120
-                              dtype: int
-                  dtype: null
-              - class: Loop
-                fields:
-                  axis:
-                    class: Axis
-                    fields:
-                      name: a1
-                      extent:
-                        dim: 48
-                      window: null
-                  body:
-                    body:
-                    - class: Write
-                      fields:
-                        output: linear_3_a_unsq_bc
-                        index:
-                          tuple:
-                          - expr:
-                              literal:
-                                value: 0
-                                dtype: int
-                          - expr:
-                              binary:
-                                op: //
-                                left:
-                                  var: a0
-                                right:
-                                  literal:
-                                    value: 5120
-                                    dtype: int
-                          - expr:
-                              binary:
-                                op: '%'
-                                left:
-                                  var: a0
-                                right:
-                                  literal:
-                                    value: 5120
-                                    dtype: int
-                          - expr:
-                              var: a1
-                        values:
-                          tuple:
-                          - in0
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
-      name: k_linear_pointwise_fcfda6
-    inputs:
-    - type_as
-    outputs:
-    - - linear_3_a_unsq_bc
-      - f16
-      - - 1
-        - 512
-        - 5120
-        - 48
-- inputs:
-  - linear_3_b_unsq_bc
-  - linear_3_a_unsq_bc
-  outputs:
-  - linear_3_ew
-  nodes:
-  - id: linear_3_a_unsq_bc
-    op: input
-    outputs:
-    - - linear_3_a_unsq_bc
-      - f16
-      - - 1
-        - 512
-        - 5120
-        - 48
-  - id: linear_3_b_unsq_bc
-    op: input
-    outputs:
-    - - linear_3_b_unsq_bc
-      - f16
-      - - 1
-        - 512
-        - 5120
-        - 48
-  - id: linear_3_ew
-    op: loop
-    attrs:
-      body:
-        body:
-        - class: Loop
-          fields:
-            axis:
-              class: Axis
-              fields:
-                name: a0
-                extent:
-                  dim: 125829120
-                window: null
-            body:
-              body:
-              - class: Load
-                fields:
-                  names:
-                    tuple:
-                    - in0
-                  input: linear_3_a_unsq_bc
-                  index:
-                    tuple:
-                    - expr:
-                        literal:
-                          value: 0
-                          dtype: int
-                    - expr:
-                        binary:
-                          op: //
-                          left:
-                            binary:
-                              op: //
-                              left:
-                                var: a0
-                              right:
-                                literal:
-                                  value: 48
-                                  dtype: int
-                          right:
-                            literal:
-                              value: 5120
-                              dtype: int
-                    - expr:
-                        binary:
-                          op: '%'
-                          left:
-                            binary:
-                              op: //
-                              left:
-                                var: a0
-                              right:
-                                literal:
-                                  value: 48
-                                  dtype: int
-                          right:
-                            literal:
-                              value: 5120
-                              dtype: int
-                    - expr:
-                        binary:
-                          op: '%'
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                  dtype: null
-              - class: Load
-                fields:
-                  names:
-                    tuple:
-                    - in1
-                  input: linear_3_b_unsq_bc
-                  index:
-                    tuple:
-                    - expr:
-                        literal:
-                          value: 0
-                          dtype: int
-                    - expr:
-                        binary:
-                          op: //
-                          left:
-                            binary:
-                              op: //
-                              left:
-                                var: a0
-                              right:
-                                literal:
-                                  value: 48
-                                  dtype: int
-                          right:
-                            literal:
-                              value: 5120
-                              dtype: int
-                    - expr:
-                        binary:
-                          op: '%'
-                          left:
-                            binary:
-                              op: //
-                              left:
-                                var: a0
-                              right:
-                                literal:
-                                  value: 48
-                                  dtype: int
-                          right:
-                            literal:
-                              value: 5120
-                              dtype: int
-                    - expr:
-                        binary:
-                          op: '%'
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                  dtype: null
-              - class: Assign
-                fields:
-                  name: v0
-                  op:
-                    elementwise: multiply
-                  args:
-                    tuple:
-                    - in0
-                    - in1
-                  dtype: null
-              - class: Write
-                fields:
-                  output: linear_3_ew
-                  index:
-                    tuple:
-                    - expr:
-                        literal:
-                          value: 0
-                          dtype: int
-                    - expr:
-                        binary:
-                          op: //
-                          left:
-                            binary:
-                              op: //
-                              left:
-                                var: a0
-                              right:
-                                literal:
-                                  value: 48
-                                  dtype: int
-                          right:
-                            literal:
-                              value: 5120
-                              dtype: int
-                    - expr:
-                        binary:
-                          op: '%'
-                          left:
-                            binary:
-                              op: //
-                              left:
-                                var: a0
-                              right:
-                                literal:
-                                  value: 48
-                                  dtype: int
-                          right:
-                            literal:
-                              value: 5120
-                              dtype: int
-                    - expr:
-                        binary:
-                          op: '%'
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                  values:
-                    tuple:
-                    - v0
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
-            unroll: false
-            seed: true
-      name: k_linear_pointwise_00ae82
-    inputs:
-    - linear_3_a_unsq_bc
-    - linear_3_b_unsq_bc
-    outputs:
-    - - linear_3_ew
-      - f16
-      - - 1
-        - 512
-        - 5120
-        - 48
-- inputs:
-  - linear_3_ew
-  outputs:
-  - linear_3_reduce
-  nodes:
-  - id: linear_3_ew
-    op: input
-    outputs:
-    - - linear_3_ew
-      - f16
-      - - 1
-        - 512
-        - 5120
-        - 48
-  - id: linear_3_reduce
-    op: loop
-    attrs:
-      body:
-        body:
-        - class: Loop
-          fields:
-            axis:
-              class: Axis
-              fields:
-                name: a0
-                extent:
-                  dim: 512
-                window: null
-            body:
-              body:
-              - class: Loop
-                fields:
-                  axis:
-                    class: Axis
-                    fields:
-                      name: a1
-                      extent:
-                        dim: 48
-                      window: null
-                  body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis:
-                          class: Axis
-                          fields:
-                            name: a2
-                            extent:
-                              dim: 5120
-                            window: null
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names:
-                                tuple:
-                                - in0
-                              input: linear_3_ew
-                              index:
-                                tuple:
-                                - expr:
-                                    literal:
-                                      value: 0
-                                      dtype: int
-                                - expr:
-                                    var: a0
-                                - expr:
-                                    var: a2
-                                - expr:
-                                    var: a1
-                              dtype: null
-                          - class: Accum
-                            fields:
-                              name: acc0
-                              value: in0
-                              op:
-                                elementwise: add
-                              dtype: null
-                              axes:
-                                tuple:
-                                - a2
-                              base: null
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear_3_reduce
-                        index:
-                          tuple:
-                          - expr:
-                              literal:
-                                value: 0
-                                dtype: int
-                          - expr:
-                              var: a0
-                          - expr:
-                              literal:
-                                value: 0
-                                dtype: int
-                          - expr:
-                              var: a1
-                        values:
-                          tuple:
-                          - acc0
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
-      name: k_linear_reduce_ebd24f
-    inputs:
-    - linear_3_ew
-    outputs:
-    - - linear_3_reduce
-      - f16
-      - - 1
-        - 512
-        - 1
-        - 48
-- inputs:
-  - linear_3_reduce
-  outputs:
-  - linear_3
-  nodes:
-  - id: linear_3_reduce
-    op: input
-    outputs:
-    - - linear_3_reduce
-      - f16
-      - - 1
-        - 512
-        - 1
-        - 48
-  - id: linear_3
-    op: loop
-    attrs:
-      body:
-        body:
-        - class: Loop
-          fields:
-            axis:
-              class: Axis
-              fields:
-                name: a0
-                extent:
-                  dim: 24576
-                window: null
-            body:
-              body:
-              - class: Load
-                fields:
-                  names:
-                    tuple:
-                    - in0
-                  input: linear_3_reduce
-                  index:
-                    tuple:
-                    - expr:
-                        literal:
-                          value: 0
-                          dtype: int
-                    - expr:
-                        binary:
-                          op: //
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                    - expr:
-                        literal:
-                          value: 0
-                          dtype: int
-                    - expr:
-                        binary:
-                          op: '%'
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                  dtype: null
-              - class: Assign
-                fields:
-                  name: v0
-                  op:
-                    elementwise: copy
-                  args:
-                    tuple:
-                    - in0
-                  dtype:
-                    dtype: f16
-              - class: Write
-                fields:
-                  output: linear_3
-                  index:
-                    tuple:
-                    - expr:
-                        literal:
-                          value: 0
-                          dtype: int
-                    - expr:
-                        binary:
-                          op: //
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                    - expr:
-                        binary:
-                          op: '%'
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                  values:
-                    tuple:
-                    - v0
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
-            unroll: false
-            seed: true
-      name: k_linear_pointwise_419e6b
-    inputs:
-    - linear_3_reduce
-    outputs:
-    - - linear_3
-      - f16
-      - - 1
-        - 512
-        - 48
-- inputs:
-  - linear_3
-  outputs:
-  - to_3_cast
-  nodes:
-  - id: linear_3
-    op: input
-    outputs:
-    - - linear_3
-      - f16
-      - - 1
-        - 512
-        - 48
-  - id: to_3_cast
-    op: loop
-    attrs:
-      body:
-        body:
-        - class: Loop
-          fields:
-            axis:
-              class: Axis
-              fields:
-                name: a0
-                extent:
-                  dim: 24576
-                window: null
-            body:
-              body:
-              - class: Load
-                fields:
-                  names:
-                    tuple:
-                    - in0
-                  input: linear_3
-                  index:
-                    tuple:
-                    - expr:
-                        literal:
-                          value: 0
-                          dtype: int
-                    - expr:
-                        binary:
-                          op: //
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                    - expr:
-                        binary:
-                          op: '%'
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                  dtype: null
-              - class: Assign
-                fields:
-                  name: v0
-                  op:
-                    elementwise: copy
-                  args:
-                    tuple:
-                    - in0
-                  dtype:
-                    dtype: f32
-              - class: Write
-                fields:
-                  output: to_3_cast
-                  index:
-                    tuple:
-                    - expr:
-                        literal:
-                          value: 0
-                          dtype: int
-                    - expr:
-                        binary:
-                          op: //
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                    - expr:
-                        binary:
-                          op: '%'
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                  values:
-                    tuple:
-                    - v0
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
-            unroll: false
-            seed: true
-      name: k_to_3_cast_pointwise
-    inputs:
-    - linear_3
-    outputs:
-    - - to_3_cast
-      - f32
-      - - 1
-        - 512
-        - 48
-- inputs:
-  - add_2
-  outputs:
-  - softplus_abs
-  nodes:
-  - id: add_2
-    op: input
-    outputs:
-    - - add_2
-      - f32
-      - - 1
-        - 512
-        - 48
-  - id: softplus_abs
-    op: loop
-    attrs:
-      body:
-        body:
-        - class: Loop
-          fields:
-            axis:
-              class: Axis
-              fields:
-                name: a0
-                extent:
-                  dim: 24576
-                window: null
-            body:
-              body:
-              - class: Load
-                fields:
-                  names:
-                    tuple:
-                    - in0
-                  input: add_2
-                  index:
-                    tuple:
-                    - expr:
-                        literal:
-                          value: 0
-                          dtype: int
-                    - expr:
-                        binary:
-                          op: //
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                    - expr:
-                        binary:
-                          op: '%'
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                  dtype: null
-              - class: Assign
-                fields:
-                  name: v0
-                  op:
-                    elementwise: abs
-                  args:
-                    tuple:
-                    - in0
-                  dtype: null
-              - class: Write
-                fields:
-                  output: softplus_abs
-                  index:
-                    tuple:
-                    - expr:
-                        literal:
-                          value: 0
-                          dtype: int
-                    - expr:
-                        binary:
-                          op: //
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                    - expr:
-                        binary:
-                          op: '%'
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                  values:
-                    tuple:
-                    - v0
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
-            unroll: false
-            seed: true
-      name: k_softplus_abs_pointwise
-    inputs:
-    - add_2
-    outputs:
-    - - softplus_abs
-      - f32
-      - - 1
-        - 512
-        - 48
-- inputs:
-  - softplus_abs
-  outputs:
-  - softplus_neg_abs
-  nodes:
-  - id: softplus_abs
-    op: input
-    outputs:
-    - - softplus_abs
-      - f32
-      - - 1
-        - 512
-        - 48
-  - id: softplus_neg_abs
-    op: loop
-    attrs:
-      body:
-        body:
-        - class: Loop
-          fields:
-            axis:
-              class: Axis
-              fields:
-                name: a0
-                extent:
-                  dim: 24576
-                window: null
-            body:
-              body:
-              - class: Load
-                fields:
-                  names:
-                    tuple:
-                    - in0
-                  input: softplus_abs
-                  index:
-                    tuple:
-                    - expr:
-                        literal:
-                          value: 0
-                          dtype: int
-                    - expr:
-                        binary:
-                          op: //
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                    - expr:
-                        binary:
-                          op: '%'
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                  dtype: null
-              - class: Assign
-                fields:
-                  name: v0
-                  op:
-                    elementwise: negative
-                  args:
-                    tuple:
-                    - in0
-                  dtype: null
-              - class: Write
-                fields:
-                  output: softplus_neg_abs
-                  index:
-                    tuple:
-                    - expr:
-                        literal:
-                          value: 0
-                          dtype: int
-                    - expr:
-                        binary:
-                          op: //
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                    - expr:
-                        binary:
-                          op: '%'
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                  values:
-                    tuple:
-                    - v0
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
-            unroll: false
-            seed: true
-      name: k_softplus_neg_abs_pointwise
-    inputs:
-    - softplus_abs
-    outputs:
-    - - softplus_neg_abs
-      - f32
-      - - 1
-        - 512
-        - 48
-- inputs:
-  - softplus_neg_abs
-  outputs:
-  - softplus_exp
-  nodes:
-  - id: softplus_neg_abs
-    op: input
-    outputs:
-    - - softplus_neg_abs
-      - f32
-      - - 1
-        - 512
-        - 48
-  - id: softplus_exp
-    op: loop
-    attrs:
-      body:
-        body:
-        - class: Loop
-          fields:
-            axis:
-              class: Axis
-              fields:
-                name: a0
-                extent:
-                  dim: 24576
-                window: null
-            body:
-              body:
-              - class: Load
-                fields:
-                  names:
-                    tuple:
-                    - in0
-                  input: softplus_neg_abs
-                  index:
-                    tuple:
-                    - expr:
-                        literal:
-                          value: 0
-                          dtype: int
-                    - expr:
-                        binary:
-                          op: //
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                    - expr:
-                        binary:
-                          op: '%'
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                  dtype: null
-              - class: Assign
-                fields:
-                  name: v0
-                  op:
-                    elementwise: exp
-                  args:
-                    tuple:
-                    - in0
-                  dtype: null
-              - class: Write
-                fields:
-                  output: softplus_exp
-                  index:
-                    tuple:
-                    - expr:
-                        literal:
-                          value: 0
-                          dtype: int
-                    - expr:
-                        binary:
-                          op: //
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                    - expr:
-                        binary:
-                          op: '%'
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                  values:
-                    tuple:
-                    - v0
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
-            unroll: false
-            seed: true
-      name: k_softplus_exp_pointwise
-    inputs:
-    - softplus_neg_abs
-    outputs:
-    - - softplus_exp
-      - f32
-      - - 1
-        - 512
-        - 48
-- inputs:
-  - softplus_one_bc
-  - softplus_exp
-  outputs:
-  - softplus_one_plus_exp
-  nodes:
-  - id: softplus_exp
-    op: input
-    outputs:
-    - - softplus_exp
-      - f32
-      - - 1
-        - 512
-        - 48
-  - id: softplus_one_bc
-    op: input
-    outputs:
-    - - softplus_one_bc
-      - f32
-      - - 1
-        - 512
-        - 48
-  - id: softplus_one_plus_exp
-    op: loop
-    attrs:
-      body:
-        body:
-        - class: Loop
-          fields:
-            axis:
-              class: Axis
-              fields:
-                name: a0
-                extent:
-                  dim: 24576
-                window: null
-            body:
-              body:
-              - class: Load
-                fields:
-                  names:
-                    tuple:
-                    - in0
-                  input: softplus_one_bc
-                  index:
-                    tuple:
-                    - expr:
-                        literal:
-                          value: 0
-                          dtype: int
-                    - expr:
-                        binary:
-                          op: //
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                    - expr:
-                        binary:
-                          op: '%'
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                  dtype: null
-              - class: Load
-                fields:
-                  names:
-                    tuple:
-                    - in1
-                  input: softplus_exp
-                  index:
-                    tuple:
-                    - expr:
-                        literal:
-                          value: 0
-                          dtype: int
-                    - expr:
-                        binary:
-                          op: //
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                    - expr:
-                        binary:
-                          op: '%'
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                  dtype: null
-              - class: Assign
-                fields:
-                  name: v0
-                  op:
-                    elementwise: add
-                  args:
-                    tuple:
-                    - in0
-                    - in1
-                  dtype: null
-              - class: Write
-                fields:
-                  output: softplus_one_plus_exp
-                  index:
-                    tuple:
-                    - expr:
-                        literal:
-                          value: 0
-                          dtype: int
-                    - expr:
-                        binary:
-                          op: //
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                    - expr:
-                        binary:
-                          op: '%'
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                  values:
-                    tuple:
-                    - v0
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
-            unroll: false
-            seed: true
-      name: k_softplus_one_plus_exp_pointwise
-    inputs:
-    - softplus_one_bc
-    - softplus_exp
-    outputs:
-    - - softplus_one_plus_exp
-      - f32
-      - - 1
-        - 512
-        - 48
-- inputs:
-  - softplus_one_plus_exp
-  outputs:
-  - softplus_log
-  nodes:
-  - id: softplus_one_plus_exp
-    op: input
-    outputs:
-    - - softplus_one_plus_exp
-      - f32
-      - - 1
-        - 512
-        - 48
-  - id: softplus_log
-    op: loop
-    attrs:
-      body:
-        body:
-        - class: Loop
-          fields:
-            axis:
-              class: Axis
-              fields:
-                name: a0
-                extent:
-                  dim: 24576
-                window: null
-            body:
-              body:
-              - class: Load
-                fields:
-                  names:
-                    tuple:
-                    - in0
-                  input: softplus_one_plus_exp
-                  index:
-                    tuple:
-                    - expr:
-                        literal:
-                          value: 0
-                          dtype: int
-                    - expr:
-                        binary:
-                          op: //
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                    - expr:
-                        binary:
-                          op: '%'
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                  dtype: null
-              - class: Assign
-                fields:
-                  name: v0
-                  op:
-                    elementwise: log
-                  args:
-                    tuple:
-                    - in0
-                  dtype: null
-              - class: Write
-                fields:
-                  output: softplus_log
-                  index:
-                    tuple:
-                    - expr:
-                        literal:
-                          value: 0
-                          dtype: int
-                    - expr:
-                        binary:
-                          op: //
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                    - expr:
-                        binary:
-                          op: '%'
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                  values:
-                    tuple:
-                    - v0
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
-            unroll: false
-            seed: true
-      name: k_softplus_log_pointwise
-    inputs:
-    - softplus_one_plus_exp
-    outputs:
-    - - softplus_log
-      - f32
-      - - 1
-        - 512
-        - 48
-- inputs:
-  - softplus_zero_bc
-  - add_2
-  outputs:
-  - softplus_positive
-  nodes:
-  - id: add_2
-    op: input
-    outputs:
-    - - add_2
-      - f32
-      - - 1
-        - 512
-        - 48
-  - id: softplus_zero_bc
-    op: input
-    outputs:
-    - - softplus_zero_bc
-      - f32
-      - - 1
-        - 512
-        - 48
-  - id: softplus_positive
-    op: loop
-    attrs:
-      body:
-        body:
-        - class: Loop
-          fields:
-            axis:
-              class: Axis
-              fields:
-                name: a0
-                extent:
-                  dim: 24576
-                window: null
-            body:
-              body:
-              - class: Load
-                fields:
-                  names:
-                    tuple:
-                    - in0
-                  input: add_2
-                  index:
-                    tuple:
-                    - expr:
-                        literal:
-                          value: 0
-                          dtype: int
-                    - expr:
-                        binary:
-                          op: //
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                    - expr:
-                        binary:
-                          op: '%'
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                  dtype: null
-              - class: Load
-                fields:
-                  names:
-                    tuple:
-                    - in1
-                  input: softplus_zero_bc
-                  index:
-                    tuple:
-                    - expr:
-                        literal:
-                          value: 0
-                          dtype: int
-                    - expr:
-                        binary:
-                          op: //
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                    - expr:
-                        binary:
-                          op: '%'
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                  dtype: null
-              - class: Assign
-                fields:
-                  name: v0
-                  op:
-                    elementwise: maximum
-                  args:
-                    tuple:
-                    - in0
-                    - in1
-                  dtype: null
-              - class: Write
-                fields:
-                  output: softplus_positive
-                  index:
-                    tuple:
-                    - expr:
-                        literal:
-                          value: 0
-                          dtype: int
-                    - expr:
-                        binary:
-                          op: //
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                    - expr:
-                        binary:
-                          op: '%'
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                  values:
-                    tuple:
-                    - v0
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
-            unroll: false
-            seed: true
-      name: k_softplus_positive_pointwise
-    inputs:
-    - add_2
-    - softplus_zero_bc
-    outputs:
-    - - softplus_positive
-      - f32
-      - - 1
-        - 512
-        - 48
-- inputs:
-  - softplus_log
-  - softplus_positive
-  outputs:
-  - softplus
-  nodes:
-  - id: softplus_log
-    op: input
-    outputs:
-    - - softplus_log
-      - f32
-      - - 1
-        - 512
-        - 48
-  - id: softplus_positive
-    op: input
-    outputs:
-    - - softplus_positive
-      - f32
-      - - 1
-        - 512
-        - 48
-  - id: softplus
-    op: loop
-    attrs:
-      body:
-        body:
-        - class: Loop
-          fields:
-            axis:
-              class: Axis
-              fields:
-                name: a0
-                extent:
-                  dim: 24576
-                window: null
-            body:
-              body:
-              - class: Load
-                fields:
-                  names:
-                    tuple:
-                    - in0
-                  input: softplus_positive
-                  index:
-                    tuple:
-                    - expr:
-                        literal:
-                          value: 0
-                          dtype: int
-                    - expr:
-                        binary:
-                          op: //
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                    - expr:
-                        binary:
-                          op: '%'
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                  dtype: null
-              - class: Load
-                fields:
-                  names:
-                    tuple:
-                    - in1
-                  input: softplus_log
-                  index:
-                    tuple:
-                    - expr:
-                        literal:
-                          value: 0
-                          dtype: int
-                    - expr:
-                        binary:
-                          op: //
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                    - expr:
-                        binary:
-                          op: '%'
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                  dtype: null
-              - class: Assign
-                fields:
-                  name: v0
-                  op:
-                    elementwise: add
-                  args:
-                    tuple:
-                    - in0
-                    - in1
-                  dtype: null
-              - class: Write
-                fields:
-                  output: softplus
-                  index:
-                    tuple:
-                    - expr:
-                        literal:
-                          value: 0
-                          dtype: int
-                    - expr:
-                        binary:
-                          op: //
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                    - expr:
-                        binary:
-                          op: '%'
-                          left:
-                            var: a0
-                          right:
-                            literal:
-                              value: 48
-                              dtype: int
-                  values:
-                    tuple:
-                    - v0
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
-            unroll: false
-            seed: true
-      name: k_softplus_pointwise
-    inputs:
-    - softplus_positive
-    - softplus_log
-    outputs:
-    - - softplus
-      - f32
-      - - 1
-        - 512
-        - 48
 gpu_name: NVIDIA Tesla V100 SXM3 32GB
 model_quant_digest: c3eb3c6efcb8119e
 model: philbert440/Qwen3.8-27B-W4A16-AWQ@7908d42a71077a5e4dc458f273682b12dfe384a0
@@ -100641,8 +98613,155 @@ configs:
 - program: 0
   target:
     origins:
-    - linear
-    - p_linear_attn_in_proj_qkv_weight
+    - linear_2
+  realizations:
+  - name: k_linear_pointwise_796083.02975d9f92f5.b65b5970a866
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x2
+      TILE: mma_m8n8k4_f16_f32/f4x1
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    identity: b65b5970a86699bdd99addc32c774577c698e2f1daabdccf7598359174b0598d
+    measurements:
+      emmy_us: 540.6720042228699
+      reference_us: 782.3359966278076
+      reference_backend: same-input-greedy
+  - &id001
+    name: k_linear_pointwise_796083.02975d9f92f5.linear_3_b_unsq_bc.b65b5970a866
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x2
+      TILE: mma_m8n8k4_f16_f32/f4x1
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    identity: b65b5970a86699bdd99addc32c774577c698e2f1daabdccf7598359174b0598d
+    measurements:
+      emmy_us: 588.2880091667175
+      reference_us: 786.4320278167725
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    origins:
+    - linear_3
+  realizations:
+  - *id001
+- program: 0
+  target:
+    origins:
+    - exp
+    - neg
+    - neg_bc
+    - to_2
+  realizations:
+  - name: k_neg_bc_pointwise.dc4e732026de.c8412519fecd
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      RASTER: ''
+    identity: c8412519fecdce1f7c574bcd23c04eac96ef68b8867cf5b98960423ef360c6a5
+    measurements:
+      emmy_us: 1.3743532881119984
+      reference_us: 1.3677819045407529
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    loop: 0
+  realizations:
+  - name: k_conv1d_pointwise_b2c4db.44ceee05eb56.ea69a28388ab
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: ''
+      RASTER: ''
+    identity: ea69a28388ab3e5d19d7aa1b05077469e8c8104557c908a2df5e87ce7115cd33
+    measurements:
+      emmy_us: 34.35696610089006
+      reference_us: 34.35696610089006
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    loop: 1
+  realizations:
+  - name: k_conv1d_pointwise_cf20e4.5640c3a17fe0.e50670ad1f4e
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: ''
+      RASTER: ''
+    identity: e50670ad1f4ec0012296944cde00a249ea55019f28584aa568bb01fcd2dd857d
+    measurements:
+      emmy_us: 34.35696610089006
+      reference_us: 34.21572364609817
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    loop: 2
+  realizations:
+  - name: k_conv1d_pointwise_0589ec.c22b006d282b.a93ba91a31b1
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: ''
+      RASTER: ''
+    identity: a93ba91a31b1e5b9dba428bfd16fdd9394d4a31a7b1597850801af907c86b753
+    measurements:
+      emmy_us: 34.42758527295343
+      reference_us: 34.392276714588036
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    loop: 3
+  realizations:
+  - name: k_conv1d_pointwise_d27d07.ef25136c97a7.b010217bee7f
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: ''
+      RASTER: ''
+    identity: b010217bee7fb3dde0122d22f44108c1233e6dd7214e9d881c3d168155dda9a8
+    measurements:
+      emmy_us: 31.390897158918712
+      reference_us: 34.32165548719208
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    origins:
+    - p_linear_attn_dt_bias_bc
+  realizations:
+  - name: k_p_linear_attn_dt_bias_bc_pointwise.6b5e495c3aba.7e851768a7de
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      RASTER: ''
+    identity: 7e851768a7de5da42fd38155170b304079e019b63f2c21328f455eab469a4ad0
+    measurements:
+      emmy_us: 1.2953733495259099
+      reference_us: 1.286382242583172
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    origins:
     - p_linear_attn_in_proj_qkv_weight_centered
     - p_linear_attn_in_proj_qkv_weight_integers
     - p_linear_attn_in_proj_qkv_weight_integers_mask_bc
@@ -100665,7 +98784,26 @@ configs:
     - p_linear_attn_in_proj_qkv_weight_zeros_view
     - p_linear_attn_in_proj_qkv_weight_zeros_view_bc
   realizations:
-  - name: k_linear_reduce_d289c9.b47f67eb802c.6cdf7b9c1602
+  - name: k_reshape_pointwise_dbca42.38f97b949f00.36061cfcd29c
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      RASTER: ''
+    identity: 36061cfcd29c3a5985794b5cba6adcf537f5146a807b43e133e8fa1498c6e5a9
+    measurements:
+      emmy_us: 200.2943992614746
+      reference_us: 199.4752049446106
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    origins:
+    - linear
+    - p_linear_attn_in_proj_qkv_weight
+  realizations:
+  - name: k_linear_pointwise_fa224d.30b2c1ae8e46.6cdf7b9c1602
     bindings: {}
     pins:
       FAST_MATH: false
@@ -100674,32 +98812,476 @@ configs:
       TILE: mma_m8n8k4_f16_f32/f4x4/k8
       REDUCE: ''
       STAGE: d2/smem
-      RASTER: ''
+      RASTER: gm8
     identity: 6cdf7b9c1602a529e0e59291c35ffd73c4dd942913e473fe5ab2e630abff0bc9
     measurements:
-      emmy_us: 1546.239972114563
-      reference_us: 1546.239972114563
+      emmy_us: 1553.4080266952515
+      reference_us: 1544.1919565200806
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    origins:
+    - silu_1
+  realizations:
+  - name: k_silu_1_one_bc_pointwise.1cb20a65ad32.800a188964ba
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      RASTER: ''
+    identity: 800a188964bad55d8548e165f4454879ce73d4769b78da25cd41c046dc341a3f
+    measurements:
+      emmy_us: 30.161454822077896
+      reference_us: 30.037332664836537
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    origins:
+    - silu
+  realizations:
+  - name: k_silu_one_bc_pointwise.3df855530b84.426c46da16a4
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      RASTER: ''
+    identity: 426c46da16a4e8902f5c502bc6479d0deb6ba56787e5edac080cde0d82aec252
+    measurements:
+      emmy_us: 26.35452621861508
+      reference_us: 26.111999624653865
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    loop: 4
+  realizations:
+  - name: k_softplus_one_bc_pointwise.09267ab9b9be.df7a1c2f242e
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      RASTER: ''
+    identity: df7a1c2f242ec6db575be63c23d1f2d920d336e0e724650d9d6bc30efba2e22f
+    measurements:
+      emmy_us: 1.373583096391845
+      reference_us: 1.4912771532334477
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    loop: 5
+  realizations:
+  - name: k_softplus_zero_bc_pointwise.09267ab9b9be.df7a1c2f242e
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      RASTER: ''
+    identity: df7a1c2f242ec6db575be63c23d1f2d920d336e0e724650d9d6bc30efba2e22f
+    measurements:
+      emmy_us: 1.4915449355176822
+      reference_us: 1.4895951639849614
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    origins:
+    - add
+    - add_c1_bc
+    - mean
+    - pow_1
+    - rsqrt
+    - rsqrt_bc
+    - to
+  realizations:
+  - name: k_mean_759f6d.12e8734f96fe.984d7c7d8c0b
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      REDUCE: coop
+      RASTER: ''
+    identity: 984d7c7d8c0b7f4ccc8af7725063cd07177ff3e41707d37de2fda0ea10e17e31
+    measurements:
+      emmy_us: 19.886080026626587
+      reference_us: 20.062040309516753
+      reference_backend: same-input-greedy
+  - &id002
+    name: k_mean_759f6d.12e8734f96fe.to.984d7c7d8c0b
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      REDUCE: coop
+      RASTER: ''
+    identity: 984d7c7d8c0b7f4ccc8af7725063cd07177ff3e41707d37de2fda0ea10e17e31
+    measurements:
+      emmy_us: 19.824639558792114
+      reference_us: 20.062040309516753
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    origins:
+    - mul
+  realizations:
+  - name: k_mul_pointwise.18cc55947770.bc09d6a8a14a
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      RASTER: ''
+    identity: bc09d6a8a14a8ea59d4977e686865b4c66d82663ccb2fce28321c3ad9c61dbd4
+    measurements:
+      emmy_us: 38.1636917591095
+      reference_us: 37.24326027764214
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    origins:
+    - to_1
+  realizations:
+  - name: k_to_1_pointwise.f3c2d87fb215.ae1ece0863f3
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      RASTER: ''
+    identity: ae1ece0863f3e47b192ecd730c9d04b4f1e8ea48d5ecdd865648fed8181dc67d
+    measurements:
+      emmy_us: 1.3218167451906648
+      reference_us: 1.3145521923076888
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    origins:
+    - cumsum
+  realizations:
+  - name: k_cumsum_reduce.0d565c5819a0.96280da4077d
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: 96280da4077ddce17fe107f2a51be68a6e6cd8f6cbd8755bee77e0680cc194b3
+    measurements:
+      emmy_us: 25.655351780556344
+      reference_us: 27.075764010934268
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    origins:
+    - exp_10
+    - exp_10_bc
+    - select_157
+    - select_158
+    - unsqueeze_79
+    - unsqueeze_80
+  realizations:
+  - name: k_unsqueeze_pointwise_9d7e7f.a67c907b11d3.62a7b28443a3
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      RASTER: ''
+    identity: 62a7b28443a3d369474568e9702fd2fa7a3db9af1632826bd7bdad26f5f7682f
+    measurements:
+      emmy_us: 3.091140142482389
+      reference_us: 3.4502021942404504
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    origins:
+    - transpose_1
+  realizations:
+  - name: k_transpose_272034.97fa7ca9bcb7.43d6c76ebd75
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      RASTER: ''
+    identity: 43d6c76ebd75432569cfefed4a3a573e062a1adaf3b74dc037503cef3574547f
+    measurements:
+      emmy_us: 92.5323638049039
+      reference_us: 101.17119550704956
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    origins:
+    - add_3
+    - add_3_c1_bc
+    - mul_3
+    - mul_4
+    - mul_7
+    - mul_7_c1_bc
+    - pad
+    - repeat_interleave
+    - reshape_1
+    - rsqrt_1
+    - rsqrt_1_bc
+    - split_with_sizes_0
+    - sum_1
+    - to_4
+    - transpose_2
+  realizations:
+  - name: k_reshape_slice_transpose_reduce_8032e7.4792f95dc620.e5f80cf51c87
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      REDUCE: coop
+      RASTER: ''
+    identity: e5f80cf51c870ba0864490bd08741065e9249d87aeebd9525f6e1cffda13929a
+    measurements:
+      emmy_us: 35.76685701097761
+      reference_us: 35.80061518228971
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    origins:
+    - repeat_interleave_1
+    - reshape_2
+    - split_with_sizes_1
+  realizations:
+  - name: k_reshape_slice_pointwise_b75dea.90131d33c5f9.1c0e4821e661
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      RASTER: ''
+    identity: 1c0e4821e66108b9e77cd657c49a9cf348f0f7b6c557e53ccab441be1f83db64
+    measurements:
+      emmy_us: 11.561674434085225
+      reference_us: 11.466418587884236
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    origins:
+    - reshape_4
+  realizations:
+  - name: k_reshape_3457df.04f315152655.60a458a200e7
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      RASTER: ''
+    identity: 60a458a200e705ea038eec4e718d8b3481eebffcb35cc5601902089c241741e0
+    measurements:
+      emmy_us: 30.192485361388236
+      reference_us: 30.347636251738578
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    origins:
+    - add_4
+    - add_4_c1_bc
+    - add_5
+    - add_6
+    - copy_
+    - copy__base
+    - exp_1
+    - masked_fill
+    - masked_fill_c2_bc
+    - matmul
+    - mul_10
+    - mul_11
+    - mul_12
+    - mul_5
+    - mul_6
+    - mul_9
+    - neg_1
+    - ones_scalar_bc
+    - pad_1
+    - reshape_5
+    - reshape_7
+    - rsqrt_2
+    - rsqrt_2_bc
+    - select
+    - select_129
+    - select_141
+    - select_151
+    - select_153
+    - select_163
+    - select_165
+    - select_177
+    - select_189
+    - select_199
+    - select_2
+    - select_201
+    - select_213
+    - slice_2
+    - slice_3
+    - slice_4
+    - slice_6
+    - slice_7
+    - slice_8
+    - sub
+    - sum_2
+    - sum_3
+    - sum_3_keepdim
+    - sum_4
+    - sum_4_keepdim
+    - to_5
+    - to_9
+    - transpose_3
+    - transpose_7
+    - tril
+    - tril_1
+    - triu
+    - triu_bc
+    - unsqueeze_2
+    - unsqueeze_2_bc
+    - unsqueeze_3
+    - unsqueeze_3_bc
+    - unsqueeze_4
+    - unsqueeze_5
+    - unsqueeze_5_bc
+  realizations:
+  - name: k_matmul_264a4c.de0a22d3afdb.76c19ef1d937
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      PLACE@map.1/map: cut
+    identity: 76c19ef1d937a8fa4c72b89084bd9dc6c6c839decebe8a6b945b80b5922c3a5f
+    measurements:
+      emmy_us: 720.7253376642864
+      reference_us: 722.2613294919331
+      reference_backend: same-input-greedy
+  - name: k_matmul_264a4c.de0a22d3afdb.1cb0e3ed5627
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: 1cb0e3ed5627733c82255aec1e438eb7606fd90823cde5a93f11402c23645a40
+    measurements:
+      emmy_us: 423.42400550842285
+      reference_us: 421.88799381256104
+      reference_backend: same-input-greedy
+  - name: k_matmul_264a4c.de0a22d3afdb.dcd68f31e05f
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@map.2/reduce: ''
+      REDUCE@map.2/reduce.1/map.1/reduce: ''
+      REDUCE@map.2/reduce.1/map.1/reduce.1/map.3/map.1/reduce: ''
+      REDUCE@map.2/reduce.1/map.1/reduce.4/map.3/map.1/reduce: ''
+      REDUCE@map.2/reduce.1/map.1/reduce.7/map.2/map.1/reduce: ''
+      REDUCE@map.3/inner: ''
+      WORK: ''
+      RASTER: ''
+    identity: dcd68f31e05fb6e4ae309b57bd7263c82e133354e61d435f975d6b7100c22627
+    measurements:
+      emmy_us: 297.30133215586346
+      reference_us: 300.37333567937213
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    origins:
+    - copy__1
+    - copy__1_base
+  realizations:
+  - name: k_copy_1_base_pointwise.8f659603ccdb.c07995059fa1
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      RASTER: ''
+    identity: c07995059fa1ffc5f63eba9c2bb63be7e7def36b917e6dc6741dc61575f0638d
+    measurements:
+      emmy_us: 15.90503223480717
+      reference_us: 16.36721267074835
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    origins:
+    - add_7
+    - mul_13
+    - select_4
+    - slice_10
+    - slice_11
+    - slice_12
+    - sum_5
+    - sum_5_keepdim
+    - unsqueeze_6
+    - unsqueeze_6_bc
+  realizations:
+  - name: k_slice_unsqueeze_reduce_c30d5f.e7740a0d1930.f7169637baab
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      REDUCE: coop
+      RASTER: ''
+    identity: f7169637baab955b4f10871620d0036b68ab8dd86a6d45ca86576e7706c875f1
+    measurements:
+      emmy_us: 3.1581617481885993
+      reference_us: 3.1872410866225263
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    origins:
+    - copy__2
+    - copy__2_base
+  realizations:
+  - name: k_copy_2_base_pointwise.0e903d8655d3.92ce968f27c3
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      RASTER: ''
+    identity: 92ce968f27c3ce87868742ca053b6c5872c0b36eb2971123ce50b3d18f831858
+    measurements:
+      emmy_us: 15.880126801748125
+      reference_us: 16.417573709956933
       reference_backend: same-input-greedy
 - program: 0
   target:
     origins:
     - add_10
-    - add_11
     - add_8
     - add_9
     - copy__3
     - copy__3_base
     - copy__4
     - copy__4_base
-    - copy__5
-    - copy__5_base
     - mul_14
     - mul_15
     - mul_16
-    - mul_17
     - select_10
-    - select_12
+    - select_6
     - select_8
+    - slice_14
     - slice_15
     - slice_16
     - slice_18
@@ -100708,19 +99290,12 @@ configs:
     - slice_22
     - slice_23
     - slice_24
-    - slice_26
-    - slice_27
-    - slice_28
     - sum_6
     - sum_6_keepdim
     - sum_7
     - sum_7_keepdim
     - sum_8
     - sum_8_keepdim
-    - sum_9
-    - sum_9_keepdim
-    - unsqueeze_10
-    - unsqueeze_10_bc
     - unsqueeze_7
     - unsqueeze_7_bc
     - unsqueeze_8
@@ -100728,33 +99303,29 @@ configs:
     - unsqueeze_9
     - unsqueeze_9_bc
   realizations:
-  - name: k_slice_unsqueeze_reduce_4b94bb.ffb496ccd959.f7627a81d2dc
+  - name: k_slice_unsqueeze_reduce_6bb9a7.ca2329090bb8.efa217693965
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      PLACE@map.1/reduce: cut
-    identity: f7627a81d2dcc6e03660442ca08234a4ab2fde81c0451dc6a5743b7f86bad798
-    measurements:
-      emmy_us: 166.85144042456022
-      reference_us: 168.09014639546794
-      reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_4b94bb.ffb496ccd959.240c458b2fa1
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      TILE: f4x4
-      REDUCE: ''
-      STAGE: ''
+      REDUCE@map.1/inner: coop
+      REDUCE@map.1/inner.2/map.1/reduce: ''
+      REDUCE@map.1/inner.2/map.2/reduce: ''
+      REDUCE@map.1/inner.2/map.2/reduce.2/map.1/reduce: ''
+      WORK: t128
       RASTER: ''
-    identity: 240c458b2fa18f10369e8464f61a85607576b28c412d38cc2134179d0ee7fd53
+    identity: efa2176939650ab69f7b4e500aa70e48673f1bc5996b3ace913bd0e7946951c1
     measurements:
-      emmy_us: 2.713043404662091
-      reference_us: 2.6966253059572285
+      emmy_us: 5.001648287078244
+      reference_us: 5.552355448404948
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_4b94bb.ffb496ccd959.935dbb87e3c7
+- program: 0
+  target:
+    origins:
+    - copy__5
+    - copy__5_base
+  realizations:
+  - name: k_copy_5_base_pointwise.b90a77376609.bd27359be4df
     bindings: {}
     pins:
       FAST_MATH: false
@@ -100762,41 +99333,56 @@ configs:
       WORK: ''
       TILE: f4
       RASTER: ''
-    identity: 935dbb87e3c76a28011a0f87d7420f58ebef2ef25b1dd453ea0fbb307ed88603
+    identity: bd27359be4df65f8f34725cb7646a807a383299caef7f87d894494b086eb7f7a
     measurements:
-      emmy_us: 15.950101917072876
-      reference_us: 16.896000196193825
+      emmy_us: 15.880126801748125
+      reference_us: 16.38399968381788
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_4b94bb.ffb496ccd959.bd23f0f78165
+- program: 0
+  target:
+    origins:
+    - add_11
+    - mul_17
+    - select_12
+    - slice_26
+    - slice_27
+    - slice_28
+    - sum_9
+    - sum_9_keepdim
+    - unsqueeze_10
+    - unsqueeze_10_bc
+  realizations:
+  - name: k_slice_unsqueeze_reduce_f2042a.f458261ac492.4331ef55215e
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@reduce: coop
-      REDUCE@reduce.1/map.1/reduce: ''
-      REDUCE@reduce.1/map.2/reduce: ''
-      REDUCE@reduce.1/map.2/reduce.1/map.2/map.1/reduce: ''
-      REDUCE@reduce.1/map.2/reduce.3/map.1/reduce: ''
       WORK: t128
+      REDUCE: coop
       RASTER: ''
-    identity: bd23f0f7816506aebadc1eadecb9aec3c986d36cacbf5274fec3dfde9cb19575
+    identity: 4331ef55215e1ebbbddbd4e601318b65b9e42cd9f7e62c015d3af1f2347e864f
     measurements:
-      emmy_us: 10.350107505757322
-      reference_us: 10.735483579738165
+      emmy_us: 5.119999861105894
+      reference_us: 5.291620113330181
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_4b94bb.ffb496ccd959.1e04ac006eaf
+- program: 0
+  target:
+    origins:
+    - copy__6
+    - copy__6_base
+  realizations:
+  - name: k_copy_6_base_pointwise.0fd6a8fc5a0c.c8e42ccff0eb
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@map.2/map.1/reduce: ''
-      REDUCE@map.2/map.2/reduce: ''
       WORK: ''
+      TILE: f4
       RASTER: ''
-    identity: 1e04ac006eaf082441128d57a7d65f800dbce9c88b147de492483ffae25a407d
+    identity: c8e42ccff0eb12fa548fb6069adad86f88017228ef1d9a8719c296252a958633
     measurements:
-      emmy_us: 156.5013329188029
-      reference_us: 157.35466281572977
+      emmy_us: 15.880126801748125
+      reference_us: 16.400786696887405
       reference_backend: same-input-greedy
 - program: 0
   target:
@@ -100804,20 +99390,17 @@ configs:
     - add_12
     - add_13
     - add_14
-    - add_15
     - copy__7
     - copy__7_base
     - copy__8
     - copy__8_base
-    - copy__9
-    - copy__9_base
     - mul_18
     - mul_19
     - mul_20
-    - mul_21
+    - select_14
     - select_16
     - select_18
-    - select_20
+    - slice_30
     - slice_31
     - slice_32
     - slice_34
@@ -100826,53 +99409,42 @@ configs:
     - slice_38
     - slice_39
     - slice_40
-    - slice_42
-    - slice_43
-    - slice_44
     - sum_10
     - sum_10_keepdim
     - sum_11
     - sum_11_keepdim
     - sum_12
     - sum_12_keepdim
-    - sum_13
-    - sum_13_keepdim
     - unsqueeze_11
     - unsqueeze_11_bc
     - unsqueeze_12
     - unsqueeze_12_bc
     - unsqueeze_13
     - unsqueeze_13_bc
-    - unsqueeze_14
-    - unsqueeze_14_bc
   realizations:
-  - name: k_slice_unsqueeze_reduce_d90fea.e9279d00bfdd.001fc6d49c85
+  - name: k_slice_unsqueeze_reduce_55cc08.bc4ad7c541cf.13b3d09fa34a
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      PLACE@map.1/reduce: cut
-    identity: 001fc6d49c851bc3b21f32251875f8efcc73b8f78236dcc8b1ce771fa82e0ce2
-    measurements:
-      emmy_us: 290.801374401365
-      reference_us: 291.32069093840465
-      reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_d90fea.e9279d00bfdd.9de2aaf7863c
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      TILE: f3x4
-      REDUCE: ''
-      STAGE: ''
+      REDUCE@map.1/inner: coop
+      REDUCE@map.1/inner.2/map.1/reduce: ''
+      REDUCE@map.1/inner.2/map.2/reduce: ''
+      REDUCE@map.1/inner.2/map.2/reduce.2/map.1/reduce: ''
+      WORK: t128
       RASTER: ''
-    identity: 9de2aaf7863c715103e39c60326ba41a331eaed382508cf8f465051884b48f0d
+    identity: 13b3d09fa34afcb3b2ef838b5ccf829a1a67de8f8554f41368a5f3ebdfede2fb
     measurements:
-      emmy_us: 3.4851929597687303
-      reference_us: 3.463111196955045
+      emmy_us: 13.923555612564087
+      reference_us: 14.365680839704432
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_d90fea.e9279d00bfdd.63ab5a203aa3
+- program: 0
+  target:
+    origins:
+    - copy__9
+    - copy__9_base
+  realizations:
+  - name: k_copy_9_base_pointwise.bf5270952c30.87fb2510abb5
     bindings: {}
     pins:
       FAST_MATH: false
@@ -100880,41 +99452,56 @@ configs:
       WORK: ''
       TILE: f4
       RASTER: ''
-    identity: 63ab5a203aa37aac20cf3f7522d1f54c716720778d51a625c599f7abb214c6f0
+    identity: 87fb2510abb574fb4d64254b4ccfd23dd0f4ae6733f758b25e0720d1452c142c
     measurements:
-      emmy_us: 16.332800189654034
-      reference_us: 16.904678385136492
+      emmy_us: 15.938064744395595
+      reference_us: 16.434360723026465
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_d90fea.e9279d00bfdd.17c8da70e7e7
+- program: 0
+  target:
+    origins:
+    - add_15
+    - mul_21
+    - select_20
+    - slice_42
+    - slice_43
+    - slice_44
+    - sum_13
+    - sum_13_keepdim
+    - unsqueeze_14
+    - unsqueeze_14_bc
+  realizations:
+  - name: k_slice_unsqueeze_reduce_6b3080.3992463a32e6.f1bc8513e8da
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@reduce: coop
-      REDUCE@reduce.1/map.1/reduce: ''
-      REDUCE@reduce.1/map.2/reduce: ''
-      REDUCE@reduce.1/map.2/reduce.1/map.2/map.1/reduce: ''
-      REDUCE@reduce.1/map.2/reduce.3/map.1/reduce: ''
       WORK: t128
+      REDUCE: coop
       RASTER: ''
-    identity: 17c8da70e7e7fcbd037aa3dc2c609a924e18d6798431b6970fec033cf7959de0
+    identity: f1bc8513e8da1b7c6e436c1a9da71a82e558d64e18aab076d4550f15b30b192b
     measurements:
-      emmy_us: 28.14537116459438
-      reference_us: 28.408685752323695
+      emmy_us: 7.212521805279497
+      reference_us: 7.310883943424668
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_d90fea.e9279d00bfdd.eaaa5937e50a
+- program: 0
+  target:
+    origins:
+    - copy__10
+    - copy__10_base
+  realizations:
+  - name: k_copy_10_base_pointwise.f5a09b71c5e1.7e4147240ba7
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@map.2/map.1/reduce: ''
-      REDUCE@map.2/map.2/reduce: ''
       WORK: ''
+      TILE: f4
       RASTER: ''
-    identity: eaaa5937e50a769dac4cce5b68c4561e6e3b0a510622ad9ee74f6c15759324a3
+    identity: 7e4147240ba70246b6f81b508ae8bdfaf74f58bb8ab495f2cfa74774f090d9ea
     measurements:
-      emmy_us: 262.65600323677063
-      reference_us: 262.91200518608093
+      emmy_us: 15.880126801748125
+      reference_us: 16.486400365829468
       reference_backend: same-input-greedy
 - program: 0
   target:
@@ -100922,20 +99509,17 @@ configs:
     - add_16
     - add_17
     - add_18
-    - add_19
     - copy__11
     - copy__11_base
     - copy__12
     - copy__12_base
-    - copy__13
-    - copy__13_base
     - mul_22
     - mul_23
     - mul_24
-    - mul_25
+    - select_22
     - select_24
     - select_26
-    - select_28
+    - slice_46
     - slice_47
     - slice_48
     - slice_50
@@ -100944,53 +99528,42 @@ configs:
     - slice_54
     - slice_55
     - slice_56
-    - slice_58
-    - slice_59
-    - slice_60
     - sum_14
     - sum_14_keepdim
     - sum_15
     - sum_15_keepdim
     - sum_16
     - sum_16_keepdim
-    - sum_17
-    - sum_17_keepdim
     - unsqueeze_15
     - unsqueeze_15_bc
     - unsqueeze_16
     - unsqueeze_16_bc
     - unsqueeze_17
     - unsqueeze_17_bc
-    - unsqueeze_18
-    - unsqueeze_18_bc
   realizations:
-  - name: k_slice_unsqueeze_reduce_ac7e88.4775ad7e2b61.28b13b7357e3
+  - name: k_slice_unsqueeze_reduce_cd0f4d.8da19667506e.6d81644e73d0
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      PLACE@map.1/reduce: cut
-    identity: 28b13b7357e3090a68f9c6a8a31204d9dbf6c091adf31924d9815bb60e297ef7
-    measurements:
-      emmy_us: 365.349547068278
-      reference_us: 366.98795477549237
-      reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_ac7e88.4775ad7e2b61.a440611e8114
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
+      REDUCE@map.1/inner: coop
+      REDUCE@map.1/inner.2/map.1/reduce: ''
+      REDUCE@map.1/inner.2/map.2/reduce: ''
+      REDUCE@map.1/inner.2/map.2/reduce.2/map.1/reduce: ''
       WORK: t128
-      TILE: ''
-      REDUCE: coop
-      STAGE: ''
       RASTER: ''
-    identity: a440611e81145b64a8cf9f8bf2919bd683b364a6068bd4895125b3c5f8080f10
+    identity: 6d81644e73d050c3db164e3181392e145f94182b362bec73248ffcdb4bbca3e8
     measurements:
-      emmy_us: 7.787563219791701
-      reference_us: 8.268799881140392
+      emmy_us: 33.68606855129373
+      reference_us: 33.968551405544936
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_ac7e88.4775ad7e2b61.9b39c2870f1a
+- program: 0
+  target:
+    origins:
+    - copy__13
+    - copy__13_base
+  realizations:
+  - name: k_copy_13_base_pointwise.de3a76397f9a.17d9a6dd4c18
     bindings: {}
     pins:
       FAST_MATH: false
@@ -100998,41 +99571,56 @@ configs:
       WORK: ''
       TILE: f4
       RASTER: ''
-    identity: 9b39c2870f1a86fe2beb1a21a56934c522d30ce87450c3c6a484b0563e01bbd8
+    identity: 17d9a6dd4c18049af836ea74642ae37c4aaabbb938c08fd9f328acf5f5d76b3d
     measurements:
-      emmy_us: 15.915389788352837
-      reference_us: 16.88732232077647
+      emmy_us: 15.945143169826933
+      reference_us: 16.46793474916552
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_ac7e88.4775ad7e2b61.4da114f8fb76
+- program: 0
+  target:
+    origins:
+    - add_19
+    - mul_25
+    - select_28
+    - slice_58
+    - slice_59
+    - slice_60
+    - sum_17
+    - sum_17_keepdim
+    - unsqueeze_18
+    - unsqueeze_18_bc
+  realizations:
+  - name: k_slice_unsqueeze_reduce_25f842.bf07a4d50c22.5f562e90cc31
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@reduce: coop
-      REDUCE@reduce.1/map.1/reduce: ''
-      REDUCE@reduce.1/map.2/reduce: ''
-      REDUCE@reduce.1/map.2/reduce.1/map.2/map.1/reduce: ''
-      REDUCE@reduce.1/map.2/reduce.3/map.1/reduce: ''
       WORK: t128
+      REDUCE: coop
       RASTER: ''
-    identity: 4da114f8fb763d83d761d7192b56c4ff00d1232a3f61ef0b0e6e38037646b100
+    identity: 5f562e90cc317be0f4741df1beb073979d470564c96e2eb01cde88ffddd559df
     measurements:
-      emmy_us: 39.034879207611084
-      reference_us: 39.64927911758423
+      emmy_us: 9.302130926435238
+      reference_us: 9.5232003264957
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_ac7e88.4775ad7e2b61.c86552389e0f
+- program: 0
+  target:
+    origins:
+    - copy__14
+    - copy__14_base
+  realizations:
+  - name: k_copy_14_base_pointwise.47432624739f.6aa3759afbc0
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@map.2/map.1/reduce: ''
-      REDUCE@map.2/map.2/reduce: ''
       WORK: ''
+      TILE: f4
       RASTER: ''
-    identity: c86552389e0fd5bbc2683554db62d1447e40bd9ae1148b956632852957d76d8c
+    identity: 6aa3759afbc0cb62c57049eff787549daebc2b7ca621ab43827f1647e4d526ab
     measurements:
-      emmy_us: 326.31466786066693
-      reference_us: 327.33867565790814
+      emmy_us: 15.896380893767825
+      reference_us: 16.501508775304575
       reference_backend: same-input-greedy
 - program: 0
   target:
@@ -101040,20 +99628,17 @@ configs:
     - add_20
     - add_21
     - add_22
-    - add_23
     - copy__15
     - copy__15_base
     - copy__16
     - copy__16_base
-    - copy__17
-    - copy__17_base
     - mul_26
     - mul_27
     - mul_28
-    - mul_29
+    - select_30
     - select_32
     - select_34
-    - select_36
+    - slice_62
     - slice_63
     - slice_64
     - slice_66
@@ -101062,53 +99647,42 @@ configs:
     - slice_70
     - slice_71
     - slice_72
-    - slice_74
-    - slice_75
-    - slice_76
     - sum_18
     - sum_18_keepdim
     - sum_19
     - sum_19_keepdim
     - sum_20
     - sum_20_keepdim
-    - sum_21
-    - sum_21_keepdim
     - unsqueeze_19
     - unsqueeze_19_bc
     - unsqueeze_20
     - unsqueeze_20_bc
     - unsqueeze_21
     - unsqueeze_21_bc
-    - unsqueeze_22
-    - unsqueeze_22_bc
   realizations:
-  - name: k_slice_unsqueeze_reduce_006570.323153093846.92e809c55225
+  - name: k_slice_unsqueeze_reduce_c1c725.7fd47a7d20d3.d9c6efe99960
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      PLACE@map.1/reduce: cut
-    identity: 92e809c55225bf155ebe4af840481633eae0dd67c1ea5fa4fc5efbd1d18903e3
-    measurements:
-      emmy_us: 505.38339523168713
-      reference_us: 506.6830630485828
-      reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_006570.323153093846.f0420451db5e
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: t32
-      TILE: ''
-      REDUCE: coop
-      STAGE: ''
+      REDUCE@map.1/inner: coop
+      REDUCE@map.1/inner.2/map.1/reduce: ''
+      REDUCE@map.1/inner.2/map.2/reduce: ''
+      REDUCE@map.1/inner.2/map.2/reduce.2/map.1/reduce: ''
+      WORK: t128
       RASTER: ''
-    identity: f0420451db5e7c1e454d073385a8b854dca836ccd2700395b54fd18596a42fd7
+    identity: d9c6efe99960414409cc6f36c302f0c0ddef82e5321d207d0a04d72da4f57eb0
     measurements:
-      emmy_us: 9.877333417534828
-      reference_us: 10.208652943980937
+      emmy_us: 63.80800157785416
+      reference_us: 64.06400352716446
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_006570.323153093846.f2749cd87a88
+- program: 0
+  target:
+    origins:
+    - copy__17
+    - copy__17_base
+  realizations:
+  - name: k_copy_17_base_pointwise.a647d5f4092e.f6c4e3585a1d
     bindings: {}
     pins:
       FAST_MATH: false
@@ -101116,41 +99690,56 @@ configs:
       WORK: ''
       TILE: f4
       RASTER: ''
-    identity: f2749cd87a88ec450f7b09ced3bb51e6f98b05bf14f788f9ba9053b9fe3d8ba8
+    identity: f6c4e3585a1d2892bcc91637d5adb783b11d6f0cad2e08f24e98d53191bd6456
     measurements:
-      emmy_us: 15.923200050989788
-      reference_us: 16.904678385136492
+      emmy_us: 15.90503223480717
+      reference_us: 16.46933356920878
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_006570.323153093846.6dbbeb372d4e
+- program: 0
+  target:
+    origins:
+    - add_23
+    - mul_29
+    - select_36
+    - slice_74
+    - slice_75
+    - slice_76
+    - sum_21
+    - sum_21_keepdim
+    - unsqueeze_22
+    - unsqueeze_22_bc
+  realizations:
+  - name: k_slice_unsqueeze_reduce_26ce64.e2950a95390f.f501a759f4e0
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@reduce: coop
-      REDUCE@reduce.1/map.1/reduce: ''
-      REDUCE@reduce.1/map.2/reduce: ''
-      REDUCE@reduce.1/map.2/reduce.1/map.2/map.1/reduce: ''
-      REDUCE@reduce.1/map.2/reduce.3/map.1/reduce: ''
       WORK: t128
+      REDUCE: coop
       RASTER: ''
-    identity: 6dbbeb372d4e5811a626b5e4eccb663b079d9c64f91640713212098c2f5e8d5f
+    identity: f501a759f4e0a030e6c2ef561865e155417c4837471e019e7d7496b5b7a619d3
     measurements:
-      emmy_us: 73.25538305135873
-      reference_us: 74.04307677195622
+      emmy_us: 11.403636498884723
+      reference_us: 11.580049255747854
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_006570.323153093846.143dc4c03c26
+- program: 0
+  target:
+    origins:
+    - copy__18
+    - copy__18_base
+  realizations:
+  - name: k_copy_18_base_pointwise.af2c20618445.32f753257e13
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@map.2/map.1/reduce: ''
-      REDUCE@map.2/map.2/reduce: ''
       WORK: ''
+      TILE: f4
       RASTER: ''
-    identity: 143dc4c03c2635747745baaccc88056676710b66957707f3148d45c39eaf8366
+    identity: 32f753257e13f2316ba53289de6f31edca962e2b4a8200c43661b20208082f8d
     measurements:
-      emmy_us: 432.12801218032837
-      reference_us: 432.6399862766266
+      emmy_us: 15.87199972521874
+      reference_us: 16.46933356920878
       reference_backend: same-input-greedy
 - program: 0
   target:
@@ -101158,20 +99747,17 @@ configs:
     - add_24
     - add_25
     - add_26
-    - add_27
     - copy__19
     - copy__19_base
     - copy__20
     - copy__20_base
-    - copy__21
-    - copy__21_base
     - mul_30
     - mul_31
     - mul_32
-    - mul_33
+    - select_38
     - select_40
     - select_42
-    - select_44
+    - slice_78
     - slice_79
     - slice_80
     - slice_82
@@ -101180,53 +99766,42 @@ configs:
     - slice_86
     - slice_87
     - slice_88
-    - slice_90
-    - slice_91
-    - slice_92
     - sum_22
     - sum_22_keepdim
     - sum_23
     - sum_23_keepdim
     - sum_24
     - sum_24_keepdim
-    - sum_25
-    - sum_25_keepdim
     - unsqueeze_23
     - unsqueeze_23_bc
     - unsqueeze_24
     - unsqueeze_24_bc
     - unsqueeze_25
     - unsqueeze_25_bc
-    - unsqueeze_26
-    - unsqueeze_26_bc
   realizations:
-  - name: k_slice_unsqueeze_reduce_cc2c8e.f3c7ba32585d.4c1e9a905c02
+  - name: k_slice_unsqueeze_reduce_6fefd0.fc791c95dd65.ff9e674e0e5e
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      PLACE@map.1/reduce: cut
-    identity: 4c1e9a905c02ff4a6ece5b2019709608bc99f07c9ee4ac1373a6a072d471b83d
-    measurements:
-      emmy_us: 624.1279989480972
-      reference_us: 625.5360096693039
-      reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_cc2c8e.f3c7ba32585d.cac12095d04a
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
+      REDUCE@map.1/inner: coop
+      REDUCE@map.1/inner.2/map.1/reduce: ''
+      REDUCE@map.1/inner.2/map.2/reduce: ''
+      REDUCE@map.1/inner.2/map.2/reduce.2/map.1/reduce: ''
       WORK: t128
-      TILE: f1
-      REDUCE: ''
-      STAGE: ''
       RASTER: ''
-    identity: cac12095d04a3b3b94c9d594d9591df84cf346916738e5ef58a1f43bdeb97a89
+    identity: ff9e674e0e5e9dbe8870ccd76822696001d033be1e8b8c17a88ea15c7ab1a186
     measurements:
-      emmy_us: 2.6475214041196384
-      reference_us: 2.788519791964084
+      emmy_us: 110.59200101428563
+      reference_us: 110.59200101428563
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_cc2c8e.f3c7ba32585d.72a68c6de648
+- program: 0
+  target:
+    origins:
+    - copy__21
+    - copy__21_base
+  realizations:
+  - name: k_copy_21_base_pointwise.ac99b2873a27.137aea1bf90d
     bindings: {}
     pins:
       FAST_MATH: false
@@ -101234,41 +99809,56 @@ configs:
       WORK: ''
       TILE: f4
       RASTER: ''
-    identity: 72a68c6de648b7147e32d97d83b8810a8a70e3bc4a9a8231eeb8be7ade48f30b
+    identity: 137aea1bf90d93be185366c07ed199b343ed064ae88e6d2b6fab5698469d7bee
     measurements:
-      emmy_us: 16.772414075917208
-      reference_us: 17.08799973130226
+      emmy_us: 15.938064744395595
+      reference_us: 16.46933356920878
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_cc2c8e.f3c7ba32585d.b3d6fbb42c29
+- program: 0
+  target:
+    origins:
+    - add_27
+    - mul_33
+    - select_44
+    - slice_90
+    - slice_91
+    - slice_92
+    - sum_25
+    - sum_25_keepdim
+    - unsqueeze_26
+    - unsqueeze_26_bc
+  realizations:
+  - name: k_slice_unsqueeze_reduce_7a01f8.b2baee5bc6d2.59f8ef1685e2
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@reduce: coop
-      REDUCE@reduce.1/map.1/reduce: ''
-      REDUCE@reduce.1/map.2/reduce: ''
-      REDUCE@reduce.1/map.2/reduce.1/map.2/map.1/reduce: ''
-      REDUCE@reduce.1/map.2/reduce.3/map.1/reduce: ''
       WORK: t128
+      REDUCE: coop
       RASTER: ''
-    identity: b3d6fbb42c2938083cdb35a8b479224ff985b97b669d3926daf52d5e5c103a6a
+    identity: 59f8ef1685e2e7c60b8a61af60b54d10c4c96a3bd6f0927f4d0b9afb0b9c8269
     measurements:
-      emmy_us: 126.46399438381195
-      reference_us: 126.8479973077774
+      emmy_us: 13.505729469093117
+      reference_us: 13.643718101608922
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_cc2c8e.f3c7ba32585d.e9e1134e5e7d
+- program: 0
+  target:
+    origins:
+    - copy__22
+    - copy__22_base
+  realizations:
+  - name: k_copy_22_base_pointwise.b0ab59542602.58b7e7fb8904
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@map.2/map.1/reduce: ''
-      REDUCE@map.2/map.2/reduce: ''
       WORK: ''
+      TILE: f4
       RASTER: ''
-    identity: e9e1134e5e7d6dd83cdb0d5e61961644cd09ad66695a108f333f08e1d9a3563e
+    identity: 58b7e7fb89041b9a78220031e1f23aa8a4903980488021e9702bd39a641338be
     measurements:
-      emmy_us: 497.6640045642853
-      reference_us: 498.6880123615265
+      emmy_us: 15.896380893767825
+      reference_us: 16.503467162450153
       reference_backend: same-input-greedy
 - program: 0
   target:
@@ -101276,27 +99866,21 @@ configs:
     - add_28
     - add_29
     - add_30
-    - add_31
     - copy__23
     - copy__23_base
     - copy__24
     - copy__24_base
-    - copy__25
-    - copy__25_base
     - mul_34
     - mul_35
     - mul_36
-    - mul_37
+    - select_46
     - select_48
     - select_50
-    - select_52
     - slice_100
     - slice_102
     - slice_103
     - slice_104
-    - slice_106
-    - slice_107
-    - slice_108
+    - slice_94
     - slice_95
     - slice_96
     - slice_98
@@ -101307,44 +99891,36 @@ configs:
     - sum_27_keepdim
     - sum_28
     - sum_28_keepdim
-    - sum_29
-    - sum_29_keepdim
     - unsqueeze_27
     - unsqueeze_27_bc
     - unsqueeze_28
     - unsqueeze_28_bc
     - unsqueeze_29
     - unsqueeze_29_bc
-    - unsqueeze_30
-    - unsqueeze_30_bc
   realizations:
-  - name: k_slice_unsqueeze_reduce_d4b52b.fef79bf87765.1aaa34904577
+  - name: k_slice_unsqueeze_reduce_385df7.f59e5d07854e.cd02bdddaabf
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      PLACE@map.1/reduce: cut
-    identity: 1aaa34904577e97db2aeabb2694630da2a5cb1e59d645690c7e36d0bbe18e70a
-    measurements:
-      emmy_us: 800.5631804466248
-      reference_us: 806.9120198488235
-      reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_d4b52b.fef79bf87765.cf0c1fe652b9
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: t16x8
-      TILE: f2
-      REDUCE: ''
-      STAGE: ''
+      REDUCE@map.1/inner: coop
+      REDUCE@map.1/inner.2/map.1/reduce: ''
+      REDUCE@map.1/inner.2/map.2/reduce: ''
+      REDUCE@map.1/inner.2/map.2/reduce.2/map.1/reduce: ''
+      WORK: t128
       RASTER: ''
-    identity: cf0c1fe652b9d1680753ec425a72a4e9ccbcb76de2257855a950112acb72efe4
+    identity: cd02bdddaabf61f6d139dc12e8f2023adb7816410862dca4ac6ec4123a55db1d
     measurements:
-      emmy_us: 3.3346782559933867
-      reference_us: 3.489959300780783
+      emmy_us: 177.6640017827352
+      reference_us: 177.97119617462158
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_d4b52b.fef79bf87765.7d8f76702f35
+- program: 0
+  target:
+    origins:
+    - copy__25
+    - copy__25_base
+  realizations:
+  - name: k_copy_25_base_pointwise.3d810b9e3fea.1089db1269b3
     bindings: {}
     pins:
       FAST_MATH: false
@@ -101352,41 +99928,56 @@ configs:
       WORK: ''
       TILE: f4
       RASTER: ''
-    identity: 7d8f76702f357d3071d08a0438f11b34761c71e0161f03612c59b122a31af929
+    identity: 1089db1269b342c36a66ae7c76ba3555f8391c00793bb131f3c32d4a04531286
     measurements:
-      emmy_us: 16.52524183536398
-      reference_us: 17.885865767796833
+      emmy_us: 15.921548489601381
+      reference_us: 16.486400365829468
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_d4b52b.fef79bf87765.61511eb5d50a
+- program: 0
+  target:
+    origins:
+    - add_31
+    - mul_37
+    - select_52
+    - slice_106
+    - slice_107
+    - slice_108
+    - sum_29
+    - sum_29_keepdim
+    - unsqueeze_30
+    - unsqueeze_30_bc
+  realizations:
+  - name: k_slice_unsqueeze_reduce_1fa614.98e46e59541b.3f673e9704ff
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@reduce: coop
-      REDUCE@reduce.1/map.1/reduce: ''
-      REDUCE@reduce.1/map.2/reduce: ''
-      REDUCE@reduce.1/map.2/reduce.1/map.1/reduce: ''
-      REDUCE@reduce.1/map.2/reduce.3/map.2/map.1/reduce: ''
       WORK: t128
+      REDUCE: coop
       RASTER: ''
-    identity: 61511eb5d50a76595106394618efc475f511b2f93cfce4d230618a3f3872c01d
+    identity: 3f673e9704ff1e5c78d9ba6929f52658cc4222774dc239f0c1ee723a4ea03aa0
     measurements:
-      emmy_us: 200.49920082092285
-      reference_us: 201.7280012369156
+      emmy_us: 15.584000386297703
+      reference_us: 15.701333681742351
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_d4b52b.fef79bf87765.3f0188e61b0b
+- program: 0
+  target:
+    origins:
+    - copy__26
+    - copy__26_base
+  realizations:
+  - name: k_copy_26_base_pointwise.784dbdbe472b.0f5e574e75de
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@map.2/map.1/reduce: ''
-      REDUCE@map.2/map.2/reduce: ''
       WORK: ''
+      TILE: f4
       RASTER: ''
-    identity: 3f0188e61b0bcea95a576807343d50e009b603f7bf6b6fceb0836b7027a03be8
+    identity: 0f5e574e75de446da5f777cc5e2b71fc5d4d0237115ad54ede9ba77f73f77b1b
     measurements:
-      emmy_us: 600.0639796257019
-      reference_us: 605.184018611908
+      emmy_us: 15.961397261846633
+      reference_us: 16.520532965660095
       reference_backend: same-input-greedy
 - program: 0
   target:
@@ -101394,20 +99985,17 @@ configs:
     - add_32
     - add_33
     - add_34
-    - add_35
     - copy__27
     - copy__27_base
     - copy__28
     - copy__28_base
-    - copy__29
-    - copy__29_base
     - mul_38
     - mul_39
     - mul_40
-    - mul_41
+    - select_54
     - select_56
     - select_58
-    - select_60
+    - slice_110
     - slice_111
     - slice_112
     - slice_114
@@ -101416,53 +100004,42 @@ configs:
     - slice_118
     - slice_119
     - slice_120
-    - slice_122
-    - slice_123
-    - slice_124
     - sum_30
     - sum_30_keepdim
     - sum_31
     - sum_31_keepdim
     - sum_32
     - sum_32_keepdim
-    - sum_33
-    - sum_33_keepdim
     - unsqueeze_31
     - unsqueeze_31_bc
     - unsqueeze_32
     - unsqueeze_32_bc
     - unsqueeze_33
     - unsqueeze_33_bc
-    - unsqueeze_34
-    - unsqueeze_34_bc
   realizations:
-  - name: k_slice_unsqueeze_reduce_287e6f.2a8bccd8e584.252e3b030599
+  - name: k_slice_unsqueeze_reduce_8fe466.eb305b26f7ab.b9c3afe33b12
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      PLACE@map.1/reduce: cut
-    identity: 252e3b030599d9539d8c4b23d010341702c42c7d8db866a03b206f83b2690dbf
-    measurements:
-      emmy_us: 969.7279731432598
-      reference_us: 973.4826485315959
-      reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_287e6f.2a8bccd8e584.8c0fffa68142
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: t16x8
-      TILE: f2
-      REDUCE: ''
-      STAGE: ''
+      REDUCE@map.1/inner: coop
+      REDUCE@map.1/inner.2/map.1/reduce: ''
+      REDUCE@map.1/inner.2/map.2/reduce: ''
+      REDUCE@map.1/inner.2/map.2/reduce.2/map.1/reduce: ''
+      WORK: t128
       RASTER: ''
-    identity: 8c0fffa68142fd3b88464ec48e0afb6b4343e58070eb0a5ef5b1637fcaed0f0b
+    identity: b9c3afe33b128f31424602b1000711b7889965f6162c4b7e56301d58dd0cf8eb
     measurements:
-      emmy_us: 4.561454396356235
-      reference_us: 3.762336929192704
+      emmy_us: 269.0559923648834
+      reference_us: 268.2879865169525
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_287e6f.2a8bccd8e584.7124232744e4
+- program: 0
+  target:
+    origins:
+    - copy__29
+    - copy__29_base
+  realizations:
+  - name: k_copy_29_base_pointwise.83b0383ac310.bea68e7a9f84
     bindings: {}
     pins:
       FAST_MATH: false
@@ -101470,41 +100047,56 @@ configs:
       WORK: ''
       TILE: f4
       RASTER: ''
-    identity: 7124232744e446ef78fcc554c17d3d3cc18ddb7b7e19d6007e15703dabaa78aa
+    identity: bea68e7a9f840ab153ba3ee8f24342ad40f99da32cb3cf4fdea2c1babc2d237c
     measurements:
-      emmy_us: 16.554666062196095
-      reference_us: 18.02240014076233
+      emmy_us: 15.961397261846633
+      reference_us: 16.503467162450153
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_287e6f.2a8bccd8e584.266db4f0e23e
+- program: 0
+  target:
+    origins:
+    - add_35
+    - mul_41
+    - select_60
+    - slice_122
+    - slice_123
+    - slice_124
+    - sum_33
+    - sum_33_keepdim
+    - unsqueeze_34
+    - unsqueeze_34_bc
+  realizations:
+  - name: k_slice_unsqueeze_reduce_0a6f53.9f8b0928de3e.94e4b46bb8ad
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@reduce: coop
-      REDUCE@reduce.1/map.1/reduce: ''
-      REDUCE@reduce.1/map.2/reduce: ''
-      REDUCE@reduce.1/map.2/reduce.1/map.2/map.1/reduce: ''
-      REDUCE@reduce.1/map.2/reduce.3/map.1/reduce: ''
       WORK: t128
+      REDUCE: coop
       RASTER: ''
-    identity: 266db4f0e23e6aaa6c5dbdf5ed8798c03be3ccdccf69f1b48ca746af413076a6
+    identity: 94e4b46bb8ad393164757dd3d165d2128d8c0d9befac3012057f930071350909
     measurements:
-      emmy_us: 300.03199974695843
-      reference_us: 301.7386595408122
+      emmy_us: 17.69543948926424
+      reference_us: 17.749333133300144
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_287e6f.2a8bccd8e584.b6513ee78e3f
+- program: 0
+  target:
+    origins:
+    - copy__30
+    - copy__30_base
+  realizations:
+  - name: k_copy_30_base_pointwise.87f4b96b2c97.f2be95c92a81
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@map.2/map.1/reduce: ''
-      REDUCE@map.2/map.2/reduce: ''
       WORK: ''
+      TILE: f4
       RASTER: ''
-    identity: b6513ee78e3fbe32ea9660d1c000ed5e743ce5aaa650bb61a02fce2dc3ae594e
+    identity: f2be95c92a81bc2860f53a6cae48547a622bf77841ffd1541eeb0ca2d310baa5
     measurements:
-      emmy_us: 669.6959733963013
-      reference_us: 671.7439889907837
+      emmy_us: 15.912634985787527
+      reference_us: 16.537599762280784
       reference_backend: same-input-greedy
 - program: 0
   target:
@@ -101512,20 +100104,17 @@ configs:
     - add_36
     - add_37
     - add_38
-    - add_39
     - copy__31
     - copy__31_base
     - copy__32
     - copy__32_base
-    - copy__33
-    - copy__33_base
     - mul_42
     - mul_43
     - mul_44
-    - mul_45
+    - select_62
     - select_64
     - select_66
-    - select_68
+    - slice_126
     - slice_127
     - slice_128
     - slice_130
@@ -101534,53 +100123,42 @@ configs:
     - slice_134
     - slice_135
     - slice_136
-    - slice_138
-    - slice_139
-    - slice_140
     - sum_34
     - sum_34_keepdim
     - sum_35
     - sum_35_keepdim
     - sum_36
     - sum_36_keepdim
-    - sum_37
-    - sum_37_keepdim
     - unsqueeze_35
     - unsqueeze_35_bc
     - unsqueeze_36
     - unsqueeze_36_bc
     - unsqueeze_37
     - unsqueeze_37_bc
-    - unsqueeze_38
-    - unsqueeze_38_bc
   realizations:
-  - name: k_slice_unsqueeze_reduce_d126a6.306bdd659844.eb7b0476d737
+  - name: k_slice_unsqueeze_reduce_988cc6.f23651b4cd16.0c52637da6e1
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      PLACE@map.1/reduce: cut
-    identity: eb7b0476d73751e8637077c6c0da0fc440b4ccbaf67ac89510e7d75d72dc1934
-    measurements:
-      emmy_us: 1620.9920048713684
-      reference_us: 1620.9920048713684
-      reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_d126a6.306bdd659844.1a1b70255116
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: t32x8
-      TILE: f1
-      REDUCE: ''
-      STAGE: ''
+      REDUCE@map.1/inner: coop
+      REDUCE@map.1/inner.2/map.1/reduce: ''
+      REDUCE@map.1/inner.2/map.2/reduce: ''
+      REDUCE@map.1/inner.2/map.2/reduce.2/map.1/reduce: ''
+      WORK: t128
       RASTER: ''
-    identity: 1a1b70255116efd775a526225d3fabf60041febe60135abcf084aaf351959555
+    identity: 0c52637da6e1f3bb37c90f4bed65f4b85ef60aa917781c24a6f575cc0850e441
     measurements:
-      emmy_us: 4.43733345579218
-      reference_us: 4.567730292845308
+      emmy_us: 769.0240144729614
+      reference_us: 771.0719704627991
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_d126a6.306bdd659844.c063f66d6d53
+- program: 0
+  target:
+    origins:
+    - copy__33
+    - copy__33_base
+  realizations:
+  - name: k_copy_33_base_pointwise.1ff3736efc33.26a5a0317469
     bindings: {}
     pins:
       FAST_MATH: false
@@ -101588,41 +100166,56 @@ configs:
       WORK: ''
       TILE: f4
       RASTER: ''
-    identity: c063f66d6d53e4898da88cb31882129d3b0cb48b37d83f84acaae50efbccc253
+    identity: 26a5a03174695002ae1e74ea98547bc23cdf7e81ffaf72811d5dc62576d9369b
     measurements:
-      emmy_us: 16.04266630278693
-      reference_us: 17.885865767796833
+      emmy_us: 15.938064744395595
+      reference_us: 16.503467162450153
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_d126a6.306bdd659844.cad344bf6635
+- program: 0
+  target:
+    origins:
+    - add_39
+    - mul_45
+    - select_68
+    - slice_138
+    - slice_139
+    - slice_140
+    - sum_37
+    - sum_37_keepdim
+    - unsqueeze_38
+    - unsqueeze_38_bc
+  realizations:
+  - name: k_slice_unsqueeze_reduce_29b2e2.d523def963b0.916001044696
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@reduce: coop
-      REDUCE@reduce.1/map.1/reduce: ''
-      REDUCE@reduce.1/map.2/reduce: ''
-      REDUCE@reduce.1/map.2/reduce.1/map.2/map.1/reduce: ''
-      REDUCE@reduce.1/map.2/reduce.3/map.1/reduce: ''
       WORK: t128
+      REDUCE: coop
       RASTER: ''
-    identity: cad344bf6635bbfd2e34588235a3f76c37905f7cd4fa377a358467719e3542fe
+    identity: 916001044696009aec0077b7b12de1da65b5885ab4f36de03b37f3ecc0fce694
     measurements:
-      emmy_us: 843.7759876251221
-      reference_us: 842.7519798278809
+      emmy_us: 19.824639558792114
+      reference_us: 19.90656018257141
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_d126a6.306bdd659844.73bfe316da06
+- program: 0
+  target:
+    origins:
+    - copy__34
+    - copy__34_base
+  realizations:
+  - name: k_copy_34_base_pointwise.8643597f39c4.4243303c1179
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@map.2/map.1/reduce: ''
-      REDUCE@map.2/map.2/reduce: ''
       WORK: ''
+      TILE: f4
       RASTER: ''
-    identity: 73bfe316da063480354d21b739924ae0f135acc9da9ecae97b394e8a481ebf13
+    identity: 4243303c1179e4f5f7b6c33e153ccd4a3f05c92def76c193f3d87eba9bf7fdb4
     measurements:
-      emmy_us: 777.2160172462463
-      reference_us: 778.2400250434875
+      emmy_us: 15.863872709728422
+      reference_us: 16.520532965660095
       reference_backend: same-input-greedy
 - program: 0
   target:
@@ -101630,20 +100223,17 @@ configs:
     - add_40
     - add_41
     - add_42
-    - add_43
     - copy__35
     - copy__35_base
     - copy__36
     - copy__36_base
-    - copy__37
-    - copy__37_base
     - mul_46
     - mul_47
     - mul_48
-    - mul_49
+    - select_70
     - select_72
     - select_74
-    - select_76
+    - slice_142
     - slice_143
     - slice_144
     - slice_146
@@ -101652,53 +100242,42 @@ configs:
     - slice_150
     - slice_151
     - slice_152
-    - slice_154
-    - slice_155
-    - slice_156
     - sum_38
     - sum_38_keepdim
     - sum_39
     - sum_39_keepdim
     - sum_40
     - sum_40_keepdim
-    - sum_41
-    - sum_41_keepdim
     - unsqueeze_39
     - unsqueeze_39_bc
     - unsqueeze_40
     - unsqueeze_40_bc
     - unsqueeze_41
     - unsqueeze_41_bc
-    - unsqueeze_42
-    - unsqueeze_42_bc
   realizations:
-  - name: k_slice_unsqueeze_reduce_99707e.b6c85cf15dc4.34cd4c1c4455
+  - name: k_slice_unsqueeze_reduce_37da99.4c404451ea57.f5547c0dde8e
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      PLACE@map.1/reduce: cut
-    identity: 34cd4c1c4455a665a99a7d91eaad3fa7cc579a496586d065a737c396ff0b006c
-    measurements:
-      emmy_us: 2026.4959335327148
-      reference_us: 2030.5919647216797
-      reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_99707e.b6c85cf15dc4.9d8fb170e9a7
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: t32x8
-      TILE: f1
-      REDUCE: ''
-      STAGE: ''
+      REDUCE@map.1/inner: coop
+      REDUCE@map.1/inner.2/map.1/reduce: ''
+      REDUCE@map.1/inner.2/map.2/reduce: ''
+      REDUCE@map.1/inner.2/map.2/reduce.2/map.1/reduce: ''
+      WORK: t128
       RASTER: ''
-    identity: 9d8fb170e9a793defa7d5aab0f9be4fe26c2fc74bdb205f129266d7a51087792
+    identity: f5547c0dde8e4a70807d104ffdce25495bfc69a78b0a43cfc4d70ebcab87e828
     measurements:
-      emmy_us: 8.669867118199667
-      reference_us: 8.444061646094688
+      emmy_us: 1073.15194606781
+      reference_us: 1073.15194606781
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_99707e.b6c85cf15dc4.f6bceec9359f
+- program: 0
+  target:
+    origins:
+    - copy__37
+    - copy__37_base
+  realizations:
+  - name: k_copy_37_base_pointwise.b5bd07c8ab8b.7421273a0fbd
     bindings: {}
     pins:
       FAST_MATH: false
@@ -101706,41 +100285,56 @@ configs:
       WORK: ''
       TILE: f4
       RASTER: ''
-    identity: f6bceec9359f93a22c7ea782144b49c924472c232d53470986bbf61fd754dd12
+    identity: 7421273a0fbd9156c914297b4c4454f44c537058d3222a40574e93c3dcd96379
     measurements:
-      emmy_us: 16.042667130629223
-      reference_us: 17.773714448724473
+      emmy_us: 15.954580999189806
+      reference_us: 16.486400365829468
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_99707e.b6c85cf15dc4.07305bede38a
+- program: 0
+  target:
+    origins:
+    - add_43
+    - mul_49
+    - select_76
+    - slice_154
+    - slice_155
+    - slice_156
+    - sum_41
+    - sum_41_keepdim
+    - unsqueeze_42
+    - unsqueeze_42_bc
+  realizations:
+  - name: k_slice_unsqueeze_reduce_b3411f.5544f59f9875.5a1aef7d2364
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@reduce: coop
-      REDUCE@reduce.1/map.1/reduce: ''
-      REDUCE@reduce.1/map.2/reduce: ''
-      REDUCE@reduce.1/map.2/reduce.1/map.2/map.1/reduce: ''
-      REDUCE@reduce.1/map.2/reduce.3/map.1/reduce: ''
       WORK: t128
+      REDUCE: coop
       RASTER: ''
-    identity: 07305bede38a5ce5679d2b3d7f75540003fe2b6227c9321706c342077d178adb
+    identity: 5a1aef7d23647d6d9b50bbafea228980b613cceaae9c176a889f4752a7d389d4
     measurements:
-      emmy_us: 1184.7679615020752
-      reference_us: 1187.8399848937988
+      emmy_us: 21.90469658893088
+      reference_us: 22.05538444029979
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_99707e.b6c85cf15dc4.846183105117
+- program: 0
+  target:
+    origins:
+    - copy__38
+    - copy__38_base
+  realizations:
+  - name: k_copy_38_base_pointwise.5ce6953be5c2.dcd83661c1ce
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@map.2/map.1/reduce: ''
-      REDUCE@map.2/map.2/reduce: ''
       WORK: ''
+      TILE: f4
       RASTER: ''
-    identity: 8461831051173af7675899f43cd76b9e1ea93f82c30e1cda417ee5d467519067
+    identity: dcd83661c1cec38c80d11c2e4520631940577f0ed8762d0042da431c24e521e9
     measurements:
-      emmy_us: 841.7279720306396
-      reference_us: 842.7519798278809
+      emmy_us: 15.912634985787527
+      reference_us: 16.537599762280784
       reference_backend: same-input-greedy
 - program: 0
   target:
@@ -101748,20 +100342,17 @@ configs:
     - add_44
     - add_45
     - add_46
-    - add_47
     - copy__39
     - copy__39_base
     - copy__40
     - copy__40_base
-    - copy__41
-    - copy__41_base
     - mul_50
     - mul_51
     - mul_52
-    - mul_53
+    - select_78
     - select_80
     - select_82
-    - select_84
+    - slice_158
     - slice_159
     - slice_160
     - slice_162
@@ -101770,53 +100361,42 @@ configs:
     - slice_166
     - slice_167
     - slice_168
-    - slice_170
-    - slice_171
-    - slice_172
     - sum_42
     - sum_42_keepdim
     - sum_43
     - sum_43_keepdim
     - sum_44
     - sum_44_keepdim
-    - sum_45
-    - sum_45_keepdim
     - unsqueeze_43
     - unsqueeze_43_bc
     - unsqueeze_44
     - unsqueeze_44_bc
     - unsqueeze_45
     - unsqueeze_45_bc
-    - unsqueeze_46
-    - unsqueeze_46_bc
   realizations:
-  - name: k_slice_unsqueeze_reduce_7e169c.bb7c2cd91d41.b6f30bbc2f7c
+  - name: k_slice_unsqueeze_reduce_7caa57.58664d227c3a.f96e065ad32d
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      PLACE@map.1/reduce: cut
-    identity: b6f30bbc2f7c78cd72f6f21d44def7f38f6c69d605ea120a480ed890ac27c06e
-    measurements:
-      emmy_us: 2536.4479422569275
-      reference_us: 2540.5439734458923
-      reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_7e169c.bb7c2cd91d41.7067c9f8ccc8
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      TILE: f4x4
-      REDUCE: ''
-      STAGE: ''
+      REDUCE@map.1/inner: coop
+      REDUCE@map.1/inner.2/map.1/reduce: ''
+      REDUCE@map.1/inner.2/map.2/reduce: ''
+      REDUCE@map.1/inner.2/map.2/reduce.2/map.1/reduce: ''
+      WORK: t128
       RASTER: ''
-    identity: 7067c9f8ccc80279b8920f9196e5344694e46862eb97ae6bb0f6b05387396a13
+    identity: f96e065ad32dd7c4d12398d755f5056c397f683c54fc9e1bea80ba372aadcbb4
     measurements:
-      emmy_us: 5.725091153925115
-      reference_us: 5.539672296555316
+      emmy_us: 1449.9839544296265
+      reference_us: 1446.9120502471924
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_7e169c.bb7c2cd91d41.505a0a187152
+- program: 0
+  target:
+    origins:
+    - copy__41
+    - copy__41_base
+  realizations:
+  - name: k_copy_41_base_pointwise.87d1b0b3a0b6.46832f69cdd9
     bindings: {}
     pins:
       FAST_MATH: false
@@ -101824,41 +100404,56 @@ configs:
       WORK: ''
       TILE: f4
       RASTER: ''
-    identity: 505a0a187152552788b82b018be3321b062a6ce59f60bb494eaf6f883955909e
+    identity: 46832f69cdd96f1633c5b5f03b60e6a6455f4461abc43fa3e49e2e18e7008812
     measurements:
-      emmy_us: 16.015360355377197
-      reference_us: 17.648940577226526
+      emmy_us: 15.954580999189806
+      reference_us: 16.520532965660095
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_7e169c.bb7c2cd91d41.b9ec2fce46ed
+- program: 0
+  target:
+    origins:
+    - add_47
+    - mul_53
+    - select_84
+    - slice_170
+    - slice_171
+    - slice_172
+    - sum_45
+    - sum_45_keepdim
+    - unsqueeze_46
+    - unsqueeze_46_bc
+  realizations:
+  - name: k_slice_unsqueeze_reduce_4425a1.80c15d236a5e.cce6bd9e714c
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@reduce: coop
-      REDUCE@reduce.1/map.1/reduce: ''
-      REDUCE@reduce.1/map.2/reduce: ''
-      REDUCE@reduce.1/map.2/reduce.1/map.2/map.1/reduce: ''
-      REDUCE@reduce.1/map.2/reduce.3/map.1/reduce: ''
       WORK: t128
+      REDUCE: coop
       RASTER: ''
-    identity: b9ec2fce46edfd4b722f9400326d87a291501cea430ddef3775046ad721a9387
+    identity: cce6bd9e714ce2a9c1ee89a046a2e554ad6038e68935b30232244bb4c0d70c6e
     measurements:
-      emmy_us: 1589.2479419708252
-      reference_us: 1591.2959575653076
+      emmy_us: 24.039620444888158
+      reference_us: 24.19565745762416
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_7e169c.bb7c2cd91d41.457eabc35e51
+- program: 0
+  target:
+    origins:
+    - copy__42
+    - copy__42_base
+  realizations:
+  - name: k_copy_42_base_pointwise.458a7b0ed328.ec2d2ce4700c
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@map.2/map.1/reduce: ''
-      REDUCE@map.2/map.2/reduce: ''
       WORK: ''
+      TILE: f4
       RASTER: ''
-    identity: 457eabc35e51da0178d13c96ad0085b50bb08c64afc02a26bfc4ea94bf3d5400
+    identity: ec2d2ce4700cbf12be9e22213b1b506e891b6d6df0268709d11227ab0e4d494d
     measurements:
-      emmy_us: 947.2000002861023
-      reference_us: 949.2480158805847
+      emmy_us: 15.912634985787527
+      reference_us: 16.537599762280784
       reference_backend: same-input-greedy
 - program: 0
   target:
@@ -101866,20 +100461,17 @@ configs:
     - add_48
     - add_49
     - add_50
-    - add_51
     - copy__43
     - copy__43_base
     - copy__44
     - copy__44_base
-    - copy__45
-    - copy__45_base
     - mul_54
     - mul_55
     - mul_56
-    - mul_57
+    - select_86
     - select_88
     - select_90
-    - select_92
+    - slice_174
     - slice_175
     - slice_176
     - slice_178
@@ -101888,53 +100480,42 @@ configs:
     - slice_182
     - slice_183
     - slice_184
-    - slice_186
-    - slice_187
-    - slice_188
     - sum_46
     - sum_46_keepdim
     - sum_47
     - sum_47_keepdim
     - sum_48
     - sum_48_keepdim
-    - sum_49
-    - sum_49_keepdim
     - unsqueeze_47
     - unsqueeze_47_bc
     - unsqueeze_48
     - unsqueeze_48_bc
     - unsqueeze_49
     - unsqueeze_49_bc
-    - unsqueeze_50
-    - unsqueeze_50_bc
   realizations:
-  - name: k_slice_unsqueeze_reduce_124b26.c4b1f7fba454.d38bd7529cf8
+  - name: k_slice_unsqueeze_reduce_09b2ec.79f76a61d40f.fe51209b3e73
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      PLACE@map.1/reduce: cut
-    identity: d38bd7529cf88bc92e06df3bc676e85fae5263ae8c4e2556a36f2080d76f203d
-    measurements:
-      emmy_us: 3084.288001060486
-      reference_us: 3084.2881202697754
-      reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_124b26.c4b1f7fba454.3c5cd88362a5
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: t32x8
-      TILE: f1x4
-      REDUCE: ''
-      STAGE: ''
+      REDUCE@map.1/inner: coop
+      REDUCE@map.1/inner.2/map.1/reduce: ''
+      REDUCE@map.1/inner.2/map.2/reduce: ''
+      REDUCE@map.1/inner.2/map.2/reduce.2/map.1/reduce: ''
+      WORK: t128
       RASTER: ''
-    identity: 3c5cd88362a577a835521c9b8154198136c516678e71f02f11e4edfe04097d9f
+    identity: fe51209b3e739df52b353ac6bdfbeee82f5fe8dd6b53b17393a7b1710a93dcf0
     measurements:
-      emmy_us: 9.774545376951044
-      reference_us: 9.728000119880395
+      emmy_us: 1945.6000328063965
+      reference_us: 1942.5280094146729
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_124b26.c4b1f7fba454.2a14bd5be67d
+- program: 0
+  target:
+    origins:
+    - copy__45
+    - copy__45_base
+  realizations:
+  - name: k_copy_45_base_pointwise.a546049fe7a6.a10b9bea7d42
     bindings: {}
     pins:
       FAST_MATH: false
@@ -101942,41 +100523,56 @@ configs:
       WORK: ''
       TILE: f4
       RASTER: ''
-    identity: 2a14bd5be67d2697c259bc6b8fee1b440af666dc6814af543c2ce4f359663a79
+    identity: a10b9bea7d42867360f2703e1b468f9a3048c01dcb8d25f09cd58e6a4bfed3e8
     measurements:
-      emmy_us: 16.015360355377197
-      reference_us: 17.96654544093392
+      emmy_us: 15.954580999189806
+      reference_us: 16.520532965660095
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_124b26.c4b1f7fba454.71378aad0f79
+- program: 0
+  target:
+    origins:
+    - add_51
+    - mul_57
+    - select_92
+    - slice_186
+    - slice_187
+    - slice_188
+    - sum_49
+    - sum_49_keepdim
+    - unsqueeze_50
+    - unsqueeze_50_bc
+  realizations:
+  - name: k_slice_unsqueeze_reduce_139309.b2fec2236f71.09f427b1e1f5
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@reduce: coop
-      REDUCE@reduce.1/map.1/reduce: ''
-      REDUCE@reduce.1/map.2/reduce: ''
-      REDUCE@reduce.1/map.2/reduce.1/map.2/map.1/reduce: ''
-      REDUCE@reduce.1/map.2/reduce.3/map.1/reduce: ''
       WORK: t128
+      REDUCE: coop
       RASTER: ''
-    identity: 71378aad0f79d1be7594ff3920e07d0ef3beb80e4434b8d75ac87748fdfac73c
+    identity: 09f427b1e1f5b8332077f963cce1b5f22f27f272d4551bcbb9cde10f73ccea9b
     measurements:
-      emmy_us: 2073.6000537872314
-      reference_us: 2074.6240615844727
+      emmy_us: 26.181188789573877
+      reference_us: 26.27291509083339
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_124b26.c4b1f7fba454.d0db3cd792fb
+- program: 0
+  target:
+    origins:
+    - copy__46
+    - copy__46_base
+  realizations:
+  - name: k_copy_46_base_pointwise.ef6d2d13fbdb.a484403fe300
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@map.2/map.1/reduce: ''
-      REDUCE@map.2/map.2/reduce: ''
       WORK: ''
+      TILE: f4
       RASTER: ''
-    identity: d0db3cd792fb36d66f421c92de591a795187d653cdd9d0e469a5148d69081c40
+    identity: a484403fe30035f0f8f6a1b79e49bb56d282ff1fb3211602ba8da4618dc34f4b
     measurements:
-      emmy_us: 1010.6879472732544
-      reference_us: 1009.6640586853027
+      emmy_us: 15.92888907780723
+      reference_us: 16.537599762280784
       reference_backend: same-input-greedy
 - program: 0
   target:
@@ -101984,20 +100580,17 @@ configs:
     - add_52
     - add_53
     - add_54
-    - add_55
     - copy__47
     - copy__47_base
     - copy__48
     - copy__48_base
-    - copy__49
-    - copy__49_base
     - mul_58
     - mul_59
     - mul_60
-    - mul_61
-    - select_100
+    - select_94
     - select_96
     - select_98
+    - slice_190
     - slice_191
     - slice_192
     - slice_194
@@ -102006,53 +100599,42 @@ configs:
     - slice_198
     - slice_199
     - slice_200
-    - slice_202
-    - slice_203
-    - slice_204
     - sum_50
     - sum_50_keepdim
     - sum_51
     - sum_51_keepdim
     - sum_52
     - sum_52_keepdim
-    - sum_53
-    - sum_53_keepdim
     - unsqueeze_51
     - unsqueeze_51_bc
     - unsqueeze_52
     - unsqueeze_52_bc
     - unsqueeze_53
     - unsqueeze_53_bc
-    - unsqueeze_54
-    - unsqueeze_54_bc
   realizations:
-  - name: k_slice_unsqueeze_reduce_0d1c72.89e817d8c249.eab62a49e700
+  - name: k_slice_unsqueeze_reduce_90cd88.56f1398afd1b.a3cf9876c217
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      PLACE@map.1/reduce: cut
-    identity: eab62a49e70079487388cfe58d494482478df2ac8262b83ae85c7a35004441f8
-    measurements:
-      emmy_us: 3744.7680234909058
-      reference_us: 3748.8640546798706
-      reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_0d1c72.89e817d8c249.4148126c07c0
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: t32x8
-      TILE: f1x6
-      REDUCE: ''
-      STAGE: ''
+      REDUCE@map.1/inner: coop
+      REDUCE@map.1/inner.2/map.1/reduce: ''
+      REDUCE@map.1/inner.2/map.2/reduce: ''
+      REDUCE@map.1/inner.2/map.2/reduce.2/map.1/reduce: ''
+      WORK: t128
       RASTER: ''
-    identity: 4148126c07c0dabab80394f44601431f06f10b7b3c6dac4defd4112fb3013711
+    identity: a3cf9876c217318879f1ff76e0bec85a1a5f5cc04155389c42e0eead056cf6b1
     measurements:
-      emmy_us: 10.727619131406149
-      reference_us: 10.621490431766883
+      emmy_us: 2438.1439685821533
+      reference_us: 2434.0479373931885
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_0d1c72.89e817d8c249.4408e4d7e54b
+- program: 0
+  target:
+    origins:
+    - copy__49
+    - copy__49_base
+  realizations:
+  - name: k_copy_49_base_pointwise.2bba6a9e5c87.cd025b740029
     bindings: {}
     pins:
       FAST_MATH: false
@@ -102060,41 +100642,56 @@ configs:
       WORK: ''
       TILE: f4
       RASTER: ''
-    identity: 4408e4d7e54b1077be6cc296bc6984edf9ad5c1459e1657e1861d2baad233efc
+    identity: cd025b740029dfa740a8075861d045411264e893dc81d0b4fb1a6b068099c82a
     measurements:
-      emmy_us: 16.029539016576912
-      reference_us: 17.64430793432089
+      emmy_us: 15.971097253984022
+      reference_us: 16.537599762280784
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_0d1c72.89e817d8c249.daf80bca0142
+- program: 0
+  target:
+    origins:
+    - add_55
+    - mul_61
+    - select_100
+    - slice_202
+    - slice_203
+    - slice_204
+    - sum_53
+    - sum_53_keepdim
+    - unsqueeze_54
+    - unsqueeze_54_bc
+  realizations:
+  - name: k_slice_unsqueeze_reduce_a27124.9ec0265757c3.11c31371f5fd
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@reduce: coop
-      REDUCE@reduce.1/map.1/reduce: ''
-      REDUCE@reduce.1/map.2/reduce: ''
-      REDUCE@reduce.1/map.2/reduce.1/map.2/map.1/reduce: ''
-      REDUCE@reduce.1/map.2/reduce.3/map.1/reduce: ''
       WORK: t128
+      REDUCE: coop
       RASTER: ''
-    identity: daf80bca014223266bfec8fe4bf0c10acf4eeeed36aa85801debe6fba8f43c81
+    identity: 11c31371f5fd12cc5759f21c135f05a81b78d3b9ff06d2c30af88d6abaad0c65
     measurements:
-      emmy_us: 2629.631996154785
-      reference_us: 2632.704019546509
+      emmy_us: 28.672000340053014
+      reference_us: 28.603732585906982
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_0d1c72.89e817d8c249.b9312d96df75
+- program: 0
+  target:
+    origins:
+    - copy__50
+    - copy__50_base
+  realizations:
+  - name: k_copy_50_base_pointwise.1f55d8339641.d43cb0d8d88f
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@map.2/map.1/reduce: ''
-      REDUCE@map.2/map.2/reduce: ''
       WORK: ''
+      TILE: f4
       RASTER: ''
-    identity: b9312d96df75d5bf4f1f43692d321e42cb156f5e9aa1d21dd66d93d7a38df075
+    identity: d43cb0d8d88f6a7e0a3d8aceec6cf0b2ef9766a1f9ee0b1dc30aad5701b2d50d
     measurements:
-      emmy_us: 1115.1360273361206
-      reference_us: 1116.1600351333618
+      emmy_us: 15.954580999189806
+      reference_us: 16.55466655890147
       reference_backend: same-input-greedy
 - program: 0
   target:
@@ -102102,20 +100699,17 @@ configs:
     - add_56
     - add_57
     - add_58
-    - add_59
     - copy__51
     - copy__51_base
     - copy__52
     - copy__52_base
-    - copy__53
-    - copy__53_base
     - mul_62
     - mul_63
     - mul_64
-    - mul_65
+    - select_102
     - select_104
     - select_106
-    - select_108
+    - slice_206
     - slice_207
     - slice_208
     - slice_210
@@ -102124,53 +100718,42 @@ configs:
     - slice_214
     - slice_215
     - slice_216
-    - slice_218
-    - slice_219
-    - slice_220
     - sum_54
     - sum_54_keepdim
     - sum_55
     - sum_55_keepdim
     - sum_56
     - sum_56_keepdim
-    - sum_57
-    - sum_57_keepdim
     - unsqueeze_55
     - unsqueeze_55_bc
     - unsqueeze_56
     - unsqueeze_56_bc
     - unsqueeze_57
     - unsqueeze_57_bc
-    - unsqueeze_58
-    - unsqueeze_58_bc
   realizations:
-  - name: k_slice_unsqueeze_reduce_6169c0.b2236c6f6930.3953105f2190
+  - name: k_slice_unsqueeze_reduce_492362.acba0900d3cc.a624da993733
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      PLACE@map.1/reduce: cut
-    identity: 3953105f219088dd963edff7556a0dcbb604b6165467ec2504752af271c2257c
-    measurements:
-      emmy_us: 4541.44012928009
-      reference_us: 4548.608064651489
-      reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_6169c0.b2236c6f6930.b2ce047c0845
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: t32x16
-      TILE: f1x2
-      REDUCE: ''
-      STAGE: ''
+      REDUCE@map.1/inner: coop
+      REDUCE@map.1/inner.2/map.1/reduce: ''
+      REDUCE@map.1/inner.2/map.2/reduce: ''
+      REDUCE@map.1/inner.2/map.2/reduce.2/map.1/reduce: ''
+      WORK: t128
       RASTER: ''
-    identity: b2ce047c08452e912fff2c57242bd0980917936b24af1bb28140486c889188c6
+    identity: a624da993733ed1300bb0fa156c56a40314c08a1be574b18ff3e773090dcda80
     measurements:
-      emmy_us: 20.961882436976712
-      reference_us: 20.67199908196926
+      emmy_us: 3137.53604888916
+      reference_us: 3134.4640254974365
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_6169c0.b2236c6f6930.94a4a092db81
+- program: 0
+  target:
+    origins:
+    - copy__53
+    - copy__53_base
+  realizations:
+  - name: k_copy_53_base_pointwise.63562e300b3d.1ba19b763729
     bindings: {}
     pins:
       FAST_MATH: false
@@ -102178,41 +100761,56 @@ configs:
       WORK: ''
       TILE: f4
       RASTER: ''
-    identity: 94a4a092db81034c49614bb50ef98a8af273c6124f10ba8460d813403b9d8a71
+    identity: 1ba19b763729fd8ff2f4d63dab157eaed6d3f32b1854494fc803cb220a0c0f83
     measurements:
-      emmy_us: 16.128000617027283
-      reference_us: 17.749333133300144
+      emmy_us: 15.987612547412995
+      reference_us: 16.571733355522156
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_6169c0.b2236c6f6930.a594ea83b585
+- program: 0
+  target:
+    origins:
+    - add_59
+    - mul_65
+    - select_108
+    - slice_218
+    - slice_219
+    - slice_220
+    - sum_57
+    - sum_57_keepdim
+    - unsqueeze_58
+    - unsqueeze_58_bc
+  realizations:
+  - name: k_slice_unsqueeze_reduce_662d50.d7eb10084dd6.aab8d3a8799d
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@reduce: coop
-      REDUCE@reduce.1/map.1/reduce: ''
-      REDUCE@reduce.1/map.2/reduce: ''
-      REDUCE@reduce.1/map.2/reduce.1/map.2/map.1/reduce: ''
-      REDUCE@reduce.1/map.2/reduce.3/map.1/reduce: ''
       WORK: t128
+      REDUCE: coop
       RASTER: ''
-    identity: a594ea83b5854ad433a1692ab9262dec1d8387ab6219a60c2dd50eaa5ea0328d
+    identity: aab8d3a8799df7e42c4d8d43a126d45796acd2e7cacbb5663434318ede973530
     measurements:
-      emmy_us: 3361.7920875549316
-      reference_us: 3363.840103149414
+      emmy_us: 30.7839997112751
+      reference_us: 30.79314317022051
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_6169c0.b2236c6f6930.d76cfb7afae8
+- program: 0
+  target:
+    origins:
+    - copy__54
+    - copy__54_base
+  realizations:
+  - name: k_copy_54_base_pointwise.fcd4a2e2ec0e.90b4fb711697
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@map.2/map.1/reduce: ''
-      REDUCE@map.2/map.2/reduce: ''
       WORK: ''
+      TILE: f4
       RASTER: ''
-    identity: d76cfb7afae81906052f558c3780b8151c26f9d77910b11c2037b1adafefc2b1
+    identity: 90b4fb711697e093f4482262f5ec7e7f21d59626969288ad42c03f40883c9d3b
     measurements:
-      emmy_us: 1179.6480417251587
-      reference_us: 1184.7679615020752
+      emmy_us: 15.954580999189806
+      reference_us: 16.588800152142845
       reference_backend: same-input-greedy
 - program: 0
   target:
@@ -102220,20 +100818,17 @@ configs:
     - add_60
     - add_61
     - add_62
-    - add_63
     - copy__55
     - copy__55_base
     - copy__56
     - copy__56_base
-    - copy__57
-    - copy__57_base
     - mul_66
     - mul_67
     - mul_68
-    - mul_69
+    - select_110
     - select_112
     - select_114
-    - select_116
+    - slice_222
     - slice_223
     - slice_224
     - slice_226
@@ -102242,53 +100837,42 @@ configs:
     - slice_230
     - slice_231
     - slice_232
-    - slice_234
-    - slice_235
-    - slice_236
     - sum_58
     - sum_58_keepdim
     - sum_59
     - sum_59_keepdim
     - sum_60
     - sum_60_keepdim
-    - sum_61
-    - sum_61_keepdim
     - unsqueeze_59
     - unsqueeze_59_bc
     - unsqueeze_60
     - unsqueeze_60_bc
     - unsqueeze_61
     - unsqueeze_61_bc
-    - unsqueeze_62
-    - unsqueeze_62_bc
   realizations:
-  - name: k_slice_unsqueeze_reduce_955202.06f9e78a7403.66c566d49958
+  - name: k_slice_unsqueeze_reduce_c47f85.ed81caa66dac.0d39743b7eed
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      PLACE@map.1/reduce: cut
-    identity: 66c566d499582020f9fce84f4639529bdcf97393d4766cbb541541f65983b264
-    measurements:
-      emmy_us: 5422.079801559448
-      reference_us: 5427.199840545654
-      reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_955202.06f9e78a7403.ca269098e282
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: t32x16
-      TILE: f1x2
-      REDUCE: ''
-      STAGE: ''
+      REDUCE@map.1/inner: coop
+      REDUCE@map.1/inner.2/map.1/reduce: ''
+      REDUCE@map.1/inner.2/map.2/reduce: ''
+      REDUCE@map.1/inner.2/map.2/reduce.2/map.1/reduce: ''
+      WORK: t128
       RASTER: ''
-    identity: ca269098e282223a468d182dc8a2e3c4a9becf1f886df1ecfbdeebc2c2a09708
+    identity: 0d39743b7eed3f9b804f07fbc861bf091e048ddfc9e7dedc7882ba769495c059
     measurements:
-      emmy_us: 22.732800245285034
-      reference_us: 22.592000663280487
+      emmy_us: 3874.8159408569336
+      reference_us: 3870.7199096679688
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_955202.06f9e78a7403.826afbe34211
+- program: 0
+  target:
+    origins:
+    - copy__57
+    - copy__57_base
+  realizations:
+  - name: k_copy_57_base_pointwise.ec822b7d5a1a.d5d10dbd2942
     bindings: {}
     pins:
       FAST_MATH: false
@@ -102296,41 +100880,56 @@ configs:
       WORK: ''
       TILE: f4
       RASTER: ''
-    identity: 826afbe342118162bea864432d76a2c92ce0c6187b5b8daa3210cd78f3267ef9
+    identity: d5d10dbd29420d36e360b0cd4609f692be253c4ca44d2b3257a1aae330ba50ef
     measurements:
-      emmy_us: 16.128000617027283
-      reference_us: 17.544533809026085
+      emmy_us: 15.987612547412995
+      reference_us: 16.537599762280784
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_955202.06f9e78a7403.b7410c05f437
+- program: 0
+  target:
+    origins:
+    - add_63
+    - mul_69
+    - select_116
+    - slice_234
+    - slice_235
+    - slice_236
+    - sum_61
+    - sum_61_keepdim
+    - unsqueeze_62
+    - unsqueeze_62_bc
+  realizations:
+  - name: k_slice_unsqueeze_reduce_58adc2.da56101bba28.660b64c13b06
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@reduce: coop
-      REDUCE@reduce.1/map.1/reduce: ''
-      REDUCE@reduce.1/map.2/reduce: ''
-      REDUCE@reduce.1/map.2/reduce.1/map.2/map.1/reduce: ''
-      REDUCE@reduce.1/map.2/reduce.3/map.1/reduce: ''
       WORK: t128
+      REDUCE: coop
       RASTER: ''
-    identity: b7410c05f437c1edfa36181de38e120d458447c8d5335b643ccad76c2ed31ec6
+    identity: 660b64c13b06b55c8d03e53876bcb04402ccebd4b5f8227bc48570631640d3ce
     measurements:
-      emmy_us: 4135.9357833862305
-      reference_us: 4137.983798980713
+      emmy_us: 33.21173389752706
+      reference_us: 33.20123140628521
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_955202.06f9e78a7403.10b065b9b713
+- program: 0
+  target:
+    origins:
+    - copy__58
+    - copy__58_base
+  realizations:
+  - name: k_copy_58_base_pointwise.eebe5b85a6f9.47d2731e298f
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@map.2/map.1/reduce: ''
-      REDUCE@map.2/map.2/reduce: ''
       WORK: ''
+      TILE: f4
       RASTER: ''
-    identity: 10b065b9b71348e75fa5ff05255c513ddf6c741a25591f53ec5757837a7bb7f1
+    identity: 47d2731e298fbe0f380490695a364d824037006921d05fe6608e6dadf031103f
     measurements:
-      emmy_us: 1286.1440181732178
-      reference_us: 1289.2160415649414
+      emmy_us: 16.00412880220721
+      reference_us: 16.571733355522156
       reference_backend: same-input-greedy
 - program: 0
   target:
@@ -102345,8 +100944,10 @@ configs:
     - mul_70
     - mul_71
     - mul_72
+    - select_118
     - select_120
     - select_122
+    - slice_238
     - slice_239
     - slice_240
     - slice_242
@@ -102368,45 +100969,254 @@ configs:
     - unsqueeze_65
     - unsqueeze_65_bc
   realizations:
-  - name: k_slice_unsqueeze_reduce_1faf06.e6a9e0541527.62e5f9fbc429
+  - name: k_slice_unsqueeze_reduce_334002.f111812e19fe.01d8ce355ec5
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      PLACE@map.1/reduce: cut
-    identity: 62e5f9fbc429ddd9b010579867e0b1ac127860b6960cb2f8cd16d026e0bed233
-    measurements:
-      emmy_us: 5988.352179527283
-      reference_us: 5978.112101554871
-      reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_1faf06.e6a9e0541527.a4be8ccaab52
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      REDUCE@reduce: coop
-      REDUCE@reduce.1/map.1/reduce: ''
-      REDUCE@reduce.1/map.2/reduce: ''
-      REDUCE@reduce.1/map.2/reduce.1/map.1/reduce: ''
-      REDUCE@reduce.1/map.2/reduce.3/map.2/map.1/reduce: ''
+      REDUCE@map.1/inner: coop
+      REDUCE@map.1/inner.2/map.1/reduce: ''
+      REDUCE@map.1/inner.2/map.2/reduce: ''
+      REDUCE@map.1/inner.2/map.2/reduce.2/map.1/reduce: ''
       WORK: t128
       RASTER: ''
-    identity: a4be8ccaab52b92e80f88a6d0620d02f7af68aefff0ee3918d7eddb2e006b3d4
+    identity: 01d8ce355ec5c5cf427809b228fea40201b92a1f683cefe27e0703d9ae4d8e18
     measurements:
-      emmy_us: 4692.992210388184
-      reference_us: 4680.704116821289
+      emmy_us: 4759.552001953125
+      reference_us: 4754.432201385498
       reference_backend: same-input-greedy
-  - name: k_slice_unsqueeze_reduce_1faf06.e6a9e0541527.0f075be44703
+- program: 0
+  target:
+    origins:
+    - copy__61
+    - copy__61_base
+  realizations:
+  - name: k_copy_61_base_pointwise.20d452800247.c9b215ff1725
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@map.2/map.1/reduce: ''
-      REDUCE@map.2/map.2/reduce: ''
       WORK: ''
+      TILE: f4
       RASTER: ''
-    identity: 0f075be447033a60981e0f77b276ba6f5288a50977e2b875772680b1b8e26086
+    identity: c9b215ff1725a77a0ac5661ec2aa05e5c4021e00c95a97ff34296cc770603f86
     measurements:
-      emmy_us: 1295.3599691390991
-      reference_us: 1297.4079847335815
+      emmy_us: 16.232918520442773
+      reference_us: 16.72533353169759
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    origins:
+    - select_124
+    - slice_250
+  realizations:
+  - name: k_slice_99d686.9e42962abaa8.eb4c73a57e2a
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f3
+      RASTER: ''
+    identity: eb4c73a57e2a61206178f73dbd9c45d4fa94d7f5a5d1fe5d3955fbad891e6f36
+    measurements:
+      emmy_us: 1.5027933890283736
+      reference_us: 1.4962408508627236
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    origins:
+    - matmul_1
+  realizations:
+  - name: k_matmul_pointwise_227f1b.3bb6a48e8983.93ac2a821aff
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t32x16
+      TILE: f4x10
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    identity: 93ac2a821aff7fb0ddd6fe59f91060588a07ca880003db9daca5cec63ea12b95
+    measurements:
+      emmy_us: 185.95839738845825
+      reference_us: 185.13920307159424
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    origins:
+    - mul_85
+  realizations:
+  - name: k_mul_85_pointwise.734b8efa4d61.810e4d901a66
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      RASTER: ''
+    identity: 810e4d901a66320e2adb4a52366a4fe12fdcd09b3599c9c2f7cb7473a3ae4c42
+    measurements:
+      emmy_us: 12.599088723146462
+      reference_us: 12.547240227083616
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    origins:
+    - select_164
+  realizations:
+  - name: k_select_164_pointwise.387c3b0e82ef.4a75c8c4149d
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      RASTER: ''
+    identity: 4a75c8c4149db8e2abf47380c563fea4ef12df830a8d94166d083b9bfd5dbe28
+    measurements:
+      emmy_us: 2.3836172653727554
+      reference_us: 2.7434913753774124
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    origins:
+    - add_80
+  realizations:
+  - name: k_add_80_pointwise.7468ca8074ff.810e4d901a66
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      RASTER: ''
+    identity: 810e4d901a66320e2adb4a52366a4fe12fdcd09b3599c9c2f7cb7473a3ae4c42
+    measurements:
+      emmy_us: 12.599088723146462
+      reference_us: 12.492799758911133
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    origins:
+    - matmul_34
+  realizations:
+  - name: k_matmul_reduce_b686cf.0494b86b1876.03715c9bcaa5
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t32x8
+      TILE: f2x6
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    identity: 03715c9bcaa5e92d85c27b37d3da1d83c95e7514de15fe55a2721673c8d581a7
+    measurements:
+      emmy_us: 30.347636251738578
+      reference_us: 31.049142990793502
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    origins:
+    - select_200
+  realizations:
+  - name: k_select_200_pointwise.c086b5d35c76.5e90b982cd72
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      RASTER: ''
+    identity: 5e90b982cd728fbfc274c959d880845f400cc4a61c5cbf04b5a5932dfb82e27f
+    measurements:
+      emmy_us: 2.3893333739228098
+      reference_us: 2.7316446632232227
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    origins:
+    - sub_13
+  realizations:
+  - name: k_sub_13_pointwise.dfb951b6c0c3.f86cefc95ab0
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      RASTER: ''
+    identity: f86cefc95ab0e1242f4aeea8a82f172fc43d8b3533e185b3dde5c47e858ef612
+    measurements:
+      emmy_us: 3.0156330231132857
+      reference_us: 2.9629808868292167
+      reference_backend: same-input-greedy
+- program: 1
+  target:
+    origins:
+    - add
+    - add_c1_bc
+    - mean
+    - pow_1
+    - rsqrt
+    - rsqrt_bc
+    - to
+  realizations:
+  - *id002
+- program: 1
+  target:
+    origins:
+    - mul
+  realizations:
+  - name: k_mul_pointwise.18cc55947770.mul.bc09d6a8a14a
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      RASTER: ''
+    identity: bc09d6a8a14a8ea59d4977e686865b4c66d82663ccb2fce28321c3ad9c61dbd4
+    measurements:
+      emmy_us: 37.88799964464628
+      reference_us: 37.17907804709215
+      reference_backend: same-input-greedy
+- program: 1
+  target:
+    origins:
+    - transpose
+    - type_as_1
+  realizations:
+  - name: k_transpose_5b9623.ea4da2ed6c73.0c368673c643
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      RASTER: ''
+    identity: 0c368673c643de5d428581d7eddf59ff9265900239d5bd4d2e4fe6519e21f3d1
+    measurements:
+      emmy_us: 27.875555886162655
+      reference_us: 27.706514086042134
+      reference_backend: same-input-greedy
+- program: 1
+  target:
+    origins:
+    - slice_1
+  realizations:
+  - name: k_slice_02eaca.02dd25baa366.21251768d9aa
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      RASTER: ''
+    identity: 21251768d9aa160716dafe40b89442c319f5598fb2dc3c018547ea3bc39c527a
+    measurements:
+      emmy_us: 2.8529942380210565
+      reference_us: 2.8517209859781487
       reference_backend: same-input-greedy
