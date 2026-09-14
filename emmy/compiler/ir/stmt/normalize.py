@@ -17,9 +17,9 @@ is reachable from Loop IR and from the digest, not from a materialized
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import replace
-from itertools import count
+from itertools import count, permutations, product
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Expr, Literal, SimplifyCtx, Var, affine_form
@@ -86,7 +86,7 @@ def normalize_body(
         stmts = hoist_loop_invariants(stmts)
     stmts = simplify_body(stmts)
     stmts = dedup_loads(stmts)
-    stmts = rename_ssa_sequential(stmts)
+    stmts = Body.coerce(rename_ssa_sequential(stmts))
     if canonical_buffers:
         stmts = canonicalize_buffer_names(stmts)
     if cluster_ops:
@@ -1041,6 +1041,229 @@ def sort_commutative_args(stmts: Body) -> Body:
         return s
 
     return stmts.map(fn)
+
+
+# ---------------------------------------------------------------------------
+# Identity-only canonicalization: external arguments + independent pure stmts.
+# ---------------------------------------------------------------------------
+
+
+def canonicalize_identity(stmts: Body) -> Body:
+    """Canonicalize the name-free choices used only by structural identity.
+
+    The ordinary normalization above preserves independent statement order and assigns buffer
+    slots on first encounter. Both are right for an executable body, but together they let two
+    traces of one kernel key apart: changing which argument is loaded first changes both its
+    ``bN`` slot and the sequential SSA names.
+
+    Give each external buffer a structural role by focusing it in the whole body, order buffers by
+    that role, then dependency-sort consecutive pure statements. Effectful statement order remains
+    untouched. A final SSA rename removes the construction order exposed by those two changes.
+    The result is identity material only; callers must never execute it."""
+    stmts = Body.coerce(stmts)
+    buffers: dict[str, None] = {}
+    for stmt in stmts.iter():
+        for name in (*stmt.external_reads(), *stmt.external_writes()):
+            buffers.setdefault(name, None)
+
+    if not buffers:
+        return _canonicalize_fixed_buffers(stmts)
+
+    from emmy.compiler.structural import form  # noqa: PLC0415
+
+    # Individualizing one buffer gives an isomorphism-invariant role. Most kernel arguments become
+    # unique here (different access coordinates or downstream uses); only genuine symmetries remain
+    # tied in ordinary bodies.
+    roles: dict[str, str] = {}
+    for focus in buffers:
+        renamed = stmts.rename_buffers({name: "__self__" if name == focus else "__other__" for name in buffers})
+        roles[focus] = repr(form(_canonicalize_fixed_buffers(renamed)))
+
+    groups: dict[str, list[str]] = {}
+    for name, role in roles.items():
+        groups.setdefault(role, []).append(name)
+
+    # A role tie is not assumed to be a symmetry. Try every ordering inside each tied partition and
+    # choose the least complete form. This is the small individualize/refine search that makes the
+    # result a canonical label rather than a heuristic color refinement.
+    ordered_groups = [groups[role] for role in sorted(groups)]
+    best: tuple[str, Body] | None = None
+    for choices in product(*(permutations(group) for group in ordered_groups)):
+        names = tuple(name for group in choices for name in group)
+        renamed = stmts.rename_buffers({name: f"b{index}" for index, name in enumerate(names)})
+        candidate = _canonicalize_fixed_buffers(renamed)
+        rendered = repr(form(candidate))
+        if best is None or rendered < best[0]:
+            best = (rendered, candidate)
+    assert best is not None
+    return best[1]
+
+
+def _canonicalize_fixed_buffers(stmts: Body) -> Body:
+    """Canonicalize pure dataflow after external buffers have fixed labels."""
+    from emmy.compiler.structural import form  # noqa: PLC0415
+
+    tokens = _pure_identity_tokens(stmts)
+    best: tuple[str, Body] | None = None
+    for ordered in _canonicalize_pure_order_variants(stmts, tokens):
+        candidate = Body.coerce(sort_commutative_args(rename_ssa_sequential(ordered)))
+        rendered = repr(form(candidate))
+        if best is None or rendered < best[0]:
+            best = (rendered, candidate)
+    assert best is not None
+    return best[1]
+
+
+def _pure_identity_tokens(stmts: Body) -> dict[int, str]:
+    """Name- and order-free structural token for every pure definition.
+
+    The forward half describes what a statement computes. The reverse half describes every use of
+    its results. Equal producers that feed different operations or operand positions therefore get
+    different tokens before the exact ordering search has to branch.
+    """
+    from emmy.compiler.structural import digest, form  # noqa: PLC0415
+
+    axes = {stmt.axis.name for stmt in stmts.iter() if isinstance(stmt, (Loop, StridedLoop))}
+    definitions: dict[str, tuple[Stmt, int]] = {}
+    for stmt in stmts.iter():
+        if stmt.pure:
+            for slot, name in enumerate(stmt.defines()):
+                definitions.setdefault(name, (stmt, slot))
+
+    forward_tokens: dict[int, str] = {}
+    visiting_forward: set[int] = set()
+
+    def forward_token(stmt: Stmt) -> str:
+        identity = id(stmt)
+        if identity in forward_tokens:
+            return forward_tokens[identity]
+        if identity in visiting_forward:
+            return "__cycle__"
+        visiting_forward.add(identity)
+        mapping = {name: f"__own{slot}" for slot, name in enumerate(stmt.defines())}
+        for name in stmt.deps():
+            owner = definitions.get(name)
+            if owner is not None:
+                producer, slot = owner
+                mapping[name] = f"__dep_{digest(forward_token(producer))}_{slot}"
+            elif name not in axes:
+                mapping[name] = f"__free_{name}"
+        renamed = stmt.rename(mapping)
+        renamed = sort_commutative_args(Body((renamed,)))[0]
+        result = repr(form(renamed))
+        visiting_forward.remove(identity)
+        forward_tokens[identity] = result
+        return result
+
+    consumers: dict[str, list[Stmt]] = {name: [] for name in definitions}
+    for stmt in stmts.iter():
+        if stmt.pure:
+            forward_token(stmt)
+        for name in dict.fromkeys(stmt.deps()):
+            if name in consumers:
+                consumers[name].append(stmt)
+
+    reverse_tokens: dict[str, str] = {}
+    visiting_reverse: set[str] = set()
+
+    def reverse_token(name: str) -> str:
+        if name in reverse_tokens:
+            return reverse_tokens[name]
+        if name in visiting_reverse:
+            return "__cycle__"
+        visiting_reverse.add(name)
+        contexts = []
+        for consumer in consumers[name]:
+            mapping = {defined: f"__own{slot}" for slot, defined in enumerate(consumer.defines())}
+            for dependency in consumer.deps():
+                if dependency == name:
+                    mapping[dependency] = "__self__"
+                    continue
+                owner = definitions.get(dependency)
+                if owner is not None:
+                    producer, slot = owner
+                    mapping[dependency] = f"__other_{digest(forward_token(producer))}_{slot}"
+                elif dependency not in axes:
+                    mapping[dependency] = f"__free_{dependency}"
+            renamed = consumer.rename(mapping)
+            renamed = sort_commutative_args(Body((renamed,)))[0]
+            downstream = tuple(reverse_token(defined) for defined in consumer.defines() if defined in definitions)
+            contexts.append((repr(form(renamed)), downstream))
+        result = repr(tuple(sorted(contexts)))
+        visiting_reverse.remove(name)
+        reverse_tokens[name] = result
+        return result
+
+    tokens: dict[int, str] = {}
+    for stmt in stmts.iter():
+        if stmt.pure:
+            tokens[id(stmt)] = repr(
+                (forward_token(stmt), tuple(reverse_token(name) for name in stmt.defines()))
+            )
+    return tokens
+
+
+def _canonicalize_pure_order_variants(stmts: Body, tokens: dict[int, str]) -> Iterator[Body]:
+    """Yield canonical candidates for dependency-valid orderings of pure statements.
+
+    A unique structural token fixes the next ready statement. Equal tokens remain ambiguous: later
+    uses can distinguish two otherwise identical definitions, so every tied ordering is retained
+    until the complete body's canonical form chooses between them. Effectful order never changes.
+    """
+    stmts = Body.coerce(stmts)
+    statement_choices = []
+    for stmt in stmts:
+        children = stmt.nested()
+        if not children:
+            statement_choices.append((stmt,))
+            continue
+        child_choices = [tuple(_canonicalize_pure_order_variants(child, tokens)) for child in children]
+        statement_choices.append(tuple(stmt.with_bodies(choice) for choice in product(*child_choices)))
+
+    for statements in product(*statement_choices):
+        segment_choices: list[tuple[tuple[Stmt, ...], ...]] = []
+        run: list[Stmt] = []
+        for stmt in (*statements, None):
+            if stmt is not None and stmt.pure:
+                run.append(stmt)
+                continue
+            if run:
+                segment_choices.append(tuple(_canonicalize_pure_run_variants(run, tokens)))
+                run = []
+            if stmt is not None:
+                segment_choices.append(((stmt,),))
+        for segments in product(*segment_choices):
+            yield Body(member for segment in segments for member in segment)
+
+
+def _canonicalize_pure_run_variants(stmts: list[Stmt], tokens: dict[int, str]) -> Iterator[tuple[Stmt, ...]]:
+    """Yield every unresolved canonical Kahn order for one pure sibling run."""
+    if len(stmts) <= 1:
+        yield tuple(stmts)
+        return
+
+    definitions: dict[str, int] = {}
+    for index, stmt in enumerate(stmts):
+        for name in stmt.defines():
+            definitions.setdefault(name, index)
+    incoming = [
+        {definitions[name] for name in stmt.deps() if name in definitions and definitions[name] != index}
+        for index, stmt in enumerate(stmts)
+    ]
+    def walk(remaining: frozenset[int], ordered: tuple[int, ...]) -> Iterator[tuple[Stmt, ...]]:
+        if not remaining:
+            yield tuple(stmts[index] for index in ordered)
+            return
+        ready = [index for index in remaining if not incoming[index] & remaining]
+        if not ready:
+            yield tuple(stmts)
+            return
+        least = min(tokens[id(stmts[index])] for index in ready)
+        for selected in ready:
+            if tokens[id(stmts[selected])] == least:
+                yield from walk(remaining - {selected}, (*ordered, selected))
+
+    yield from walk(frozenset(range(len(stmts))), ())
 
 
 # ---------------------------------------------------------------------------

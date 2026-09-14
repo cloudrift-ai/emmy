@@ -8,6 +8,8 @@ arg order, or external-buffer names must produce the same key.
 
 from __future__ import annotations
 
+from itertools import permutations
+
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.stmt.blocks import Loop
@@ -154,6 +156,156 @@ def test_structural_key_equal_for_swapped_commutative_args() -> None:
         )
     )
     assert body_xy.structural_key() == body_yx.structural_key()
+
+
+def _pointwise_body(*, inputs: tuple[tuple[str, str, str], ...], op: str, args: tuple[str, ...]) -> Body:
+    """One pointwise kernel with an authored load order over row/column arguments."""
+    row, column = Axis("row", 4), Axis("column", 4)
+    loads = tuple(Load(name=value, input=buffer, index=(Var(index),)) for value, buffer, index in inputs)
+    return Body(
+        (
+            Loop(
+                axis=row,
+                body=(
+                    Loop(
+                        axis=column,
+                        body=(
+                            *loads,
+                            Assign(name="result", op=op, args=args),
+                            Write(output="output", index=(Var("row"), Var("column")), value="result"),
+                        ),
+                    ),
+                ),
+            ),
+        )
+    )
+
+
+def test_structural_key_equal_when_arguments_and_their_loads_are_reordered() -> None:
+    """A Q·K-style product has one identity whether the trace encounters Q or K first."""
+    query_first = _pointwise_body(
+        inputs=(("query", "query_buffer", "row"), ("key", "key_buffer", "column")),
+        op="multiply",
+        args=("query", "key"),
+    )
+    key_first = _pointwise_body(
+        inputs=(("renamed_key", "renamed_key_buffer", "column"), ("renamed_query", "renamed_query_buffer", "row")),
+        op="multiply",
+        args=("renamed_key", "renamed_query"),
+    )
+    assert query_first.structural_key(structural=False) == key_first.structural_key(structural=False)
+
+
+def test_structural_key_equal_for_reordered_independent_operations() -> None:
+    """Every valid topological order of pure definitions has one identity."""
+    load = Load(name="input", input="input_buffer", index=(Var("element"),))
+    absolute = Assign(name="absolute", op="abs", args=("input",))
+    negated = Assign(name="negated", op="negative", args=("input",))
+    combine = Assign(name="result", op="add", args=("absolute", "negated"))
+    write = Write(output="output", index=(Var("element"),), value="result")
+    axis = Axis("element", 4)
+    valid_orders = (
+        order
+        for order in permutations((load, absolute, negated, combine))
+        if order.index(load) < order.index(absolute) < order.index(combine)
+        and order.index(load) < order.index(negated) < order.index(combine)
+    )
+    keys = {Body((Loop(axis=axis, body=(*order, write)),)).structural_key(structural=False) for order in valid_orders}
+    assert len(keys) == 1
+
+
+def test_structural_key_equal_for_permuted_same_shape_arguments() -> None:
+    """Argument roles, not same-shaped Loads or their names, fix the canonical buffer order."""
+    entries = (("x", "X", "row"), ("y", "Y", "row"), ("z", "Z", "row"))
+    keys = {
+        _pointwise_body(inputs=order, op="where", args=("x", "y", "z")).structural_key(structural=False)
+        for order in permutations(entries)
+    }
+    assert len(keys) == 1
+
+
+def test_structural_key_equal_when_duplicate_producers_are_reordered() -> None:
+    """Use roles disambiguate equal producers without relying on which duplicate came first."""
+    load = Load(name="input", input="input_buffer", index=(Var("element"),))
+    first = Assign(name="first", op="abs", args=("input",))
+    second = Assign(name="second", op="abs", args=("input",))
+    exponential = Assign(name="exponential", op="exp", args=("first",))
+    logarithm = Assign(name="logarithm", op="log", args=("second",))
+    result = Assign(name="result", op="subtract", args=("exponential", "logarithm"))
+    write = Write(output="output", index=(Var("element"),), value="result")
+    axis = Axis("element", 4)
+    one = Body((Loop(axis=axis, body=(load, first, second, exponential, logarithm, result, write)),))
+    two = Body((Loop(axis=axis, body=(load, second, first, exponential, logarithm, result, write)),))
+    assert one.structural_key(structural=False) == two.structural_key(structural=False)
+
+
+def test_structural_key_distinguishes_reordered_noncommutative_arguments() -> None:
+    """Statement order is free; the operand order of an exact subtract remains identity."""
+    inputs = (("left", "left_buffer", "row"), ("right", "right_buffer", "column"))
+    left_minus_right = _pointwise_body(inputs=inputs, op="subtract", args=("left", "right"))
+    right_minus_left = _pointwise_body(inputs=inputs, op="subtract", args=("right", "left"))
+    assert left_minus_right.structural_key(structural=False) != right_minus_left.structural_key(structural=False)
+
+
+def test_structural_key_distinguishes_repeated_computation() -> None:
+    """Canonical ordering retains duplicate instructions because they change kernel work."""
+    axis = Axis("element", 4)
+    load = Load(name="input", input="input_buffer", index=(Var("element"),))
+    first = Assign(name="first", op="abs", args=("input",))
+    second = Assign(name="second", op="abs", args=("input",))
+    repeated = Body(
+        (
+            Loop(
+                axis=axis,
+                body=(
+                    load,
+                    first,
+                    second,
+                    Assign(name="result", op="add", args=("first", "second")),
+                    Write(output="output", index=(Var("element"),), value="result"),
+                ),
+            ),
+        )
+    )
+    shared = Body(
+        (
+            Loop(
+                axis=axis,
+                body=(
+                    load,
+                    first,
+                    Assign(name="result", op="add", args=("first", "first")),
+                    Write(output="output", index=(Var("element"),), value="result"),
+                ),
+            ),
+        )
+    )
+    assert repeated.structural_key(structural=False) != shared.structural_key(structural=False)
+
+
+def test_structural_key_preserves_effect_order() -> None:
+    """Writes are ordering barriers even when their operands are independent."""
+    axis = Axis("element", 4)
+    load_x = Load(name="x", input="X", index=(Var("element"),))
+    load_y = Load(name="y", input="Y", index=(Var("element"),))
+    absolute = Assign(name="absolute", op="abs", args=("x",))
+    exponential = Assign(name="exponential", op="exp", args=("y",))
+    write_x = Write(output="output", index=(Var("element"),), value="absolute")
+    write_y = Write(output="output", index=(Var("element"),), value="exponential")
+    xy = Body((Loop(axis=axis, body=(load_x, load_y, absolute, exponential, write_x, write_y)),))
+    yx = Body((Loop(axis=axis, body=(load_x, load_y, absolute, exponential, write_y, write_x)),))
+    assert xy.structural_key(structural=False) != yx.structural_key(structural=False)
+
+
+def test_structural_key_distinguishes_buffer_aliasing() -> None:
+    """Two argument names and one argument used twice are different signatures."""
+    separate = _pointwise_body(
+        inputs=(("left", "X", "row"), ("right", "Y", "column")), op="multiply", args=("left", "right")
+    )
+    aliased = _pointwise_body(
+        inputs=(("left", "X", "row"), ("right", "X", "column")), op="multiply", args=("left", "right")
+    )
+    assert separate.structural_key(structural=False) != aliased.structural_key(structural=False)
 
 
 def _binary_body(op: str, args: tuple[str, str] = ("x", "y")) -> Body:
