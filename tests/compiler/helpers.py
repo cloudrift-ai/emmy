@@ -7,7 +7,9 @@ are explicit at each call site and test modules never import implementation from
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import functools
+from collections.abc import Mapping
 from itertools import product
 from pathlib import Path
 
@@ -15,32 +17,103 @@ import numpy as np
 import pytest
 
 
-def classic_cartesian_assignments(context):
+def classic_cartesian_schedules(context):
     """Enumerate a classic context's literal kernel × node × edge test oracle."""
     from emmy.compiler.ir.schedule import Schedule, ScheduleRefused
 
-    nodes = tuple(context.node_choices(site) for site in context.tile_op.node_sites)
-    edges = tuple(context.edge_choices(site) for site in context.tile_op.edge_sites)
-    for kernel, node_values, edge_values in product(context.kernels, product(*nodes), product(*edges)):
-        assignment = Schedule(
+    problem = context.problem
+    nodes = tuple(problem.node_site(site).nodes for site in context.tile_op.node_sites)
+    edges = tuple(problem.node_site(edge[0]).edges for edge in context.tile_op.edge_sites)
+    for kernel, node_values, edge_values in product(problem.kernel_site.kernels, product(*nodes), product(*edges)):
+        schedule = Schedule(
             kernel,
             dict(zip(context.tile_op.node_sites, node_values, strict=True)),
             dict(zip(context.tile_op.edge_sites, edge_values, strict=True)),
         )
         try:
-            context.extend(assignment)
+            context.extend(schedule)
         except (ScheduleRefused, TypeError):
             accepted = False
         else:
             accepted = True
-        yield assignment, accepted
+        yield schedule, accepted
 
 
 def enumerate_classic_reference(context):
-    """Yield the accepted subset of the literal classic assignment product."""
-    for assignment, accepted in classic_cartesian_assignments(context):
+    """Yield the accepted subset of the literal classic schedule product."""
+    for schedule, accepted in classic_cartesian_schedules(context):
         if accepted:
-            yield assignment
+            yield schedule
+
+
+@functools.cache
+def _literal_classic_problem_type():
+    """The classic site classes with their catalogs replaced by hand-written factors.
+
+    The compiler knows nothing of this: a site is the source of its own candidates, and the only way to hand it
+    others is to be a different site. Built once, since each class definition binds its own descriptors.
+    """
+    from emmy.compiler.ir.schedule.classic.sites import ClassicKernelSite, ClassicNodeSite, ClassicProblem
+
+    class _LiteralNodeSite(ClassicNodeSite):
+        @functools.cached_property
+        def nodes(self):
+            return self.problem.literal_nodes[self.id]
+
+        @functools.cached_property
+        def edges(self):
+            incident = self.problem.tile.incident_edges[self.id]
+            return self.problem.literal_edges[incident[0]] if incident else ()
+
+        @functools.cached_property
+        def warp_eligible(self) -> bool:
+            return any(choice.tile.is_warp for choice in self.nodes)
+
+    class _LiteralKernelSite(ClassicKernelSite):
+        @functools.cached_property
+        def kernels(self):
+            return self.problem.literal_kernels
+
+    @dataclasses.dataclass(frozen=True, eq=False)
+    class _LiteralProblem(ClassicProblem):
+        literal_kernels: tuple = ()
+        literal_nodes: Mapping = dataclasses.field(default_factory=dict)
+        literal_edges: Mapping = dataclasses.field(default_factory=dict)
+
+        @functools.cached_property
+        def node_sites(self):
+            return tuple(_LiteralNodeSite(self, site) for site in self.tile.node_sites)
+
+        @functools.cached_property
+        def kernel_site(self):
+            return _LiteralKernelSite(self)
+
+    return _LiteralProblem
+
+
+def literal_classic_context(tile, target, *, kernel, nodes, edges, row=None, order=None):
+    """A classic context whose sites offer exactly the factors named here — the bounded space a test can answer
+    by hand, against which the lazy traversal is checked.
+
+    ``kernel`` is the kernel factor, ``nodes`` maps a node site to its choices and ``edges`` an edge site to its
+    transports. ``row`` narrows the kernel factor by its bare ``WORK`` / ``RASTER`` spellings, which is all a
+    bounded test asks of a row; the sites of a real problem narrow their own catalogs.
+    """
+    from emmy.compiler.ir.schedule.classic import ClassicScheduleContext
+
+    row = dict(row or {})
+    for key, spell in (("WORK", lambda choice: choice.work.spell()), ("RASTER", lambda choice: choice.raster.spell())):
+        if key in row:
+            kernel = tuple(choice for choice in kernel if spell(choice) == row[key])
+    problem = _literal_classic_problem_type()(
+        tile,
+        target,
+        row=row,
+        literal_kernels=tuple(kernel),
+        literal_nodes={site: tuple(choices) for site, choices in nodes.items()},
+        literal_edges={edge: tuple(choices) for edge, choices in edges.items()},
+    )
+    return ClassicScheduleContext(tile, target, problem, order=order)
 
 
 def case_target_tile(case: str):

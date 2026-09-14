@@ -491,13 +491,18 @@ def seeded_inputs(program) -> dict[str, np.ndarray]:
     from emmy.compiler.ir.base import ConstantOp  # noqa: PLC0415
 
     rng = np.random.default_rng(0)
-    feed: dict[str, np.ndarray] = {}
-    for name in program.inputs:
-        shape = tuple(dim.as_static() if dim.is_static else (dim.hint or DEFAULT_SEQ_HINT) for dim in program.buffer(name).shape)
-        feed[name] = (rng.standard_normal(shape) * 0.05).astype(np.float32)
+
+    def seeded(dims) -> np.ndarray:  # noqa: ANN001
+        shape = tuple(dim.as_static() if dim.is_static else (dim.hint or DEFAULT_SEQ_HINT) for dim in dims)
+        return (rng.standard_normal(shape) * 0.05).astype(np.float32)
+
+    feed: dict[str, np.ndarray] = {name: seeded(program.buffer(name).shape) for name in program.inputs}
     for node_id, node in program.nodes.items():
-        if isinstance(node.op, ConstantOp) and node_id not in feed and node.op.value is not None:
-            feed[node_id] = np.array([node.op.value], dtype=np.float32)
+        if not isinstance(node.op, ConstantOp) or node_id in feed:
+            continue
+        # A checkpoint-backed weight reaches a case with its shape but no value — the corpus has no
+        # checkpoint to bind it from — so it is seeded exactly like an input.
+        feed[node_id] = np.array([node.op.value], dtype=np.float32) if node.op.value is not None else seeded(node.output.shape)
     return feed
 
 

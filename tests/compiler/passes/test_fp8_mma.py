@@ -31,7 +31,7 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.frontend.ir import LinearOp
 from emmy.compiler.ir.schedule import Placement, Tile, Work
-from emmy.compiler.ir.schedule import classic_projection as sched
+from emmy.compiler.ir.schedule.classic import refusals as sched
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.ir.tile.ir import TileOp

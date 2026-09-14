@@ -32,8 +32,8 @@ _PLACE = Placement(free=(_M,))
 
 def _stamped(root: Fold, plans: dict, axes: tuple = (_K,)) -> TileOp:
     """A scheduled ``TileOp`` carrying ``plans`` (member node → :class:`Reduce`) as its accepted
-    classic assignment. The kernel ``WORK`` derives from the widest cooperative plan, because the
-    assignment's own validation requires the inventory to realize the node choices."""
+    classic schedule. The kernel ``WORK`` derives from the widest cooperative plan, because the
+    schedule's own validation requires the inventory to realize the node choices."""
     tile = TileOp(op=root, place=_PLACE, axes=(_M, *axes))
     by_site = {tile.node_id(node): plan for node, plan in plans.items()}
     nodes = {

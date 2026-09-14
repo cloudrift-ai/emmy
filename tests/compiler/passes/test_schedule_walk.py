@@ -9,6 +9,7 @@ split choices remain separate from classic schedule choices.
 
 from __future__ import annotations
 
+import functools
 import importlib
 from dataclasses import replace as dc_replace
 from types import SimpleNamespace
@@ -24,8 +25,9 @@ from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.frontend.ir import MatmulOp, SdpaOp
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.schedule import Placement
-from emmy.compiler.ir.schedule import classic_projection as _classic
 from emmy.compiler.ir.schedule.catalog import coop_reduce_moves
+from emmy.compiler.ir.schedule.classic import refusals as _classic
+from emmy.compiler.ir.schedule.classic import sites as _sites
 from emmy.compiler.ir.schedule.views import ContractionFacts
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, Reduce, TileOp
@@ -135,18 +137,20 @@ def test_the_prescan_asks_each_catalog_question_once(case, unpinned, monkeypatch
     leaf, so a reintroduced per-branch re-ask shows up here as a repeated question, not as a slow
     test somebody eventually notices."""
     asked: list[tuple] = []
-    original = _classic._options
+    original = _sites.ClassicNodeSite.nodes.func
 
-    def spy(state, node):
-        asked.append((state.tile, node))  # strong refs, so ids below cannot alias freed objects
-        return original(state, node)
+    def spy(site):
+        asked.append((site.problem.tile, site.node))  # strong refs, so ids below cannot alias freed objects
+        return original(site)
 
-    monkeypatch.setattr(_classic, "_options", spy)
+    spied = functools.cached_property(spy)
+    spied.__set_name__(_sites.ClassicNodeSite, "nodes")
+    monkeypatch.setattr(_sites.ClassicNodeSite, "nodes", spied)
     assert _rows(FIXTURES[case]())
     assert asked, "the fixture built no catalog at all"
     keys = [(id(tile), id(node)) for tile, node in asked]
     repeats = len(keys) - len(set(keys))
-    assert not repeats, f"_options was asked the same question {repeats} time(s) over ({len(keys)} calls)"
+    assert not repeats, f"a site was asked its options {repeats} time(s) over ({len(keys)} calls)"
 
 
 def test_the_prescan_reads_each_computed_a_seam_once(unpinned, monkeypatch) -> None:
@@ -465,14 +469,9 @@ def test_a_streamed_store_keeps_chain_members_serial(unpinned) -> None:
 
 
 def _per_cell_reductions(root, output_specs=()) -> set:
-    """The reduce values ``_contraction_domain`` offers on the PER-CELL tier of ``root``'s
-    contraction — asked through the contraction projection itself, not through
-    ``_reduction_domain``, so that deleting the delegation between them fails this.
-
-    The stub carries no typed inputs, so ``_warp_atoms`` refuses every tensor-core atom and the
-    catalog is the scalar tiles alone; a tiled plan contracts K serially per register cell and is
-    excluded here by ``is_tiled``.
-    """
+    """The reduce values the PER-CELL tier of ``root``'s contraction offers — asked through the
+    contraction's own reduction factor (``_contraction_reductions``), not through
+    ``_reduction_domain``, so that deleting the delegation between them fails this."""
     con = next(edge for edge in root.operands if edge.as_contraction() is not None)
     tile = SimpleNamespace(
         output_specs=output_specs,
@@ -482,8 +481,7 @@ def _per_cell_reductions(root, output_specs=()) -> set:
         packed_reading=lambda _node: (None, None),
         axis_of=lambda name: Axis(name=name, extent=Dim(1)),
     )
-    domain = _classic._contraction_domain(tile, None, con, ContractionFacts(k_axis=_K))
-    return {choice.reduce for choice in domain if not choice.tile.is_tiled}
+    return set(_classic._contraction_reductions(tile, con, ContractionFacts(k_axis=_K)))
 
 
 def test_a_contraction_chain_member_inherits_the_member_domain(unpinned) -> None:
@@ -492,8 +490,8 @@ def test_a_contraction_chain_member_inherits_the_member_domain(unpinned) -> None
     serial-only gates with no carve-out of its own. A contraction is a monoid with a ⊗ lift;
     nothing about the chain arm reads its algebra.
 
-    Asked through ``_contraction_domain``, which is the only thing that makes this a test OF the
-    delegation: routed through ``_reduction_domain`` directly it would stay green with the
+    Asked through ``_contraction_reductions``, which is the only thing that makes this a test OF
+    the delegation: routed through ``_reduction_domain`` directly it would stay green with the
     delegation deleted."""
     cone = projection(
         (_provider(),),

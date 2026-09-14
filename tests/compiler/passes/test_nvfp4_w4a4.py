@@ -256,8 +256,13 @@ def test_the_marked_matmul_binds_its_activation_edge_as_a_packed_decode_chain(tm
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
 def test_the_block_scaled_cell_runs_and_holds_its_declared_tolerance(tmp_path):
-    """The native fp4 path end to end: both operands packed, the block-scaled cell selected, and
+    """The native fp4 path end to end: both operands packed, the block-scaled cell spelled, and
     the result within the gap PR decision 18 accepts.
+
+    The cell is PINNED rather than elected. This lane gives every test an empty online prior, so an
+    unpinned compile decides the cell's fork by the prior's cold-start order — which arm that names
+    is not this test's subject, and it moved with the catalog. The pin makes the subject the cell
+    itself: that it reaches the kernel with its own scale operands and holds its declared tolerance.
 
     That gap is not rounding noise, so this is a tolerance and not the exact oracle every other
     lowering answers to. The declared program applies ``f16(block_scale x tensor_scale)`` per
@@ -272,6 +277,7 @@ def test_the_block_scaled_cell_runs_and_holds_its_declared_tolerance(tmp_path):
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.backend.numpy import NumpyBackend
     from emmy.compiler.loader.safetensors import load_constants_from_safetensors
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     m, n, k = 16, 128, 512
     g = _w4a4_shared_linears(tmp_path, ("q", "kp", "v"), m=m, n=n, k=k, norm=False)
@@ -279,9 +285,10 @@ def test_the_block_scaled_cell_runs_and_holds_its_declared_tolerance(tmp_path):
     data = load_constants_from_safetensors(g, str(tmp_path))
     ref, _ = NumpyBackend().run(g, input_data={**data, **feed})
     backend = CudaBackend()
-    compiled = backend.compile(g)
+    with pinned_knobs({"TILE": "mma_m16n8k64_e2m1_f32/f1x2/k4"}):
+        compiled = backend.compile(g)
     sources = [s for node in compiled.nodes.values() if (s := getattr(node.op, "kernel_source", None))]
-    assert any("emmy_mma_m16n8k64_e2m1_f32(" in s for s in sources), "the block-scaled cell was never selected"
+    assert any("emmy_mma_m16n8k64_e2m1_f32(" in s for s in sources), "the pinned block-scaled cell never reached a kernel"
     native = next(s for s in sources if "emmy_mma_m16n8k64_e2m1_f32(" in s)
     assert "emmy_mma_load_sfa_f4" in native and "emmy_mma_load_sfb_f4" in native, "the cell ran without its scale operands"
     assert "EMMY_F4_LUT" not in native, "a native cell must not decode either operand through the value table"
@@ -443,7 +450,7 @@ def _pair_terms(tmp_path):
 
 def _pair_refusal(tile, ctx, con, pair):
     """Why static node facts rule out every tensor-core atom, asked with ``pair`` as the reading."""
-    from emmy.compiler.ir.schedule import classic_projection as sched
+    from emmy.compiler.ir.schedule.classic import refusals as sched
     from emmy.compiler.ir.tile.ops import projection_tail
 
     tail = projection_tail(tile)

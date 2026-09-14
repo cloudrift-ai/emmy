@@ -6,10 +6,10 @@ scheduling fork — the second half of the Loop-IR → Tile-IR boundary.
 THIS rule picks that up and decides the schedule — the free-axis → grid mapping plus the per-node
 ``TILE`` / ``REDUCE`` / ``STAGE`` / ``WORK`` / ``RASTER`` families through the classic model.
 
-The fixed candidate-space contract is Algorithm 1(c, p, t): the schedule restriction, problem, and target form one
-immutable context over independently projected kernel, node, and edge domains. The generic traversal never unpacks
-that context. Its composition may reject a prefix only when the combined state proves there is no completion, and
-traversal order cannot change membership.
+The fixed candidate-space contract is Algorithm 1(p, t, row): the problem and target, factored into sites, offer the
+candidates — the row's value where the row names a site, the site's catalog where it does not — and one immutable
+context composes them. The generic traversal never unpacks that context. Its composition may reject a prefix only
+when the combined state proves there is no completion, and traversal order cannot change membership.
 
 Splitting the two halves is what makes the fork ONE thing: a kernel reaches scheduling by
 several routes — the ordinary lift and a cross-CTA split's partial and finalize — and all converge here. The engine restarts its
@@ -18,18 +18,14 @@ matched here on the next sweep, and so is every unmapped ``TileOp`` a structural
 That is exactly why none of them needs a special case: each arrives as a kernel with no schedule,
 like any other, and this rule cannot tell them apart.
 
-Empty enumeration remains a skip rather than a guessed schedule.
+An unpinned enumeration is one lazy root; only a pool SAMPLE can come back empty, and an empty enumeration
+remains a skip rather than a guessed schedule.
 """
 
 from __future__ import annotations
 
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.schedule.classic import ClassicScheduleCodec, ClassicScheduleContext
-from emmy.compiler.ir.schedule.classic_projection import (
-    ClassicProjectionError,
-    materialize_classic,
-    project_classic,
-)
+from emmy.compiler.ir.schedule.classic import ClassicProblem, ClassicScheduleCodec, ClassicScheduleContext, materialize_classic
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.ops import carries_partition, merges_partition
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
@@ -46,28 +42,41 @@ from emmy.compiler.structural import digest
 PATTERN = [Pattern("root", TileOp)]
 
 
+def pin_row(*, split_consumed: bool) -> dict[str, str]:
+    """The environment's schedule pins as one knob row — the source every site reads, the same
+    way it reads a golden row. A kernel that consumed a split (``split_consumed``) reads a
+    ``REDUCE`` pin without the ``g<n>`` half the split already took."""
+    row: dict[str, str] = {}
+    for family in ("WORK", "TILE", "REDUCE", "STAGE", "RASTER"):
+        for key, value in family_pins(family):
+            if split_consumed and family == "REDUCE":
+                value = "/".join(part for part in value.split("/") if not part.startswith("g"))
+            row[key] = value
+    return row
+
+
 def classic_forks(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
-    """Adapt the classic semantic enumeration to the pipeline's lazy search tree."""
+    """Adapt the classic semantic enumeration to the pipeline's lazy search tree: one unexpanded
+    root over the problem (a one-element list, the shape every fork builder returns), its sites
+    sourced from the environment's pins where they name them."""
     from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, FP8_MMA, precision_pin  # noqa: PLC0415
 
-    try:
-        domains = project_classic(tile, ctx)
-    except ClassicProjectionError:
-        return []
     # A bare WORK / RASTER / REDUCE pin is published across the kernels a split minted and names the
     # partial (a warp ``WORK``, a ``coop`` band), not its finalize, which folds one partial per split
     # per cell serially: the finalize keeps its own domain instead of refusing every row and falling
     # unmapped. The partial, like every other kernel, keeps every verdict, and the post-compile pin
     # check still asks that SOME kernel realized the pin.
     peer = merges_partition(tile)
-    context = ClassicScheduleContext(tile, ctx, domains).restrict(
-        {family: family_pins(family) for family in ("WORK", "TILE", "REDUCE", "STAGE", "RASTER")},
-        split_consumed=tile.split_consumed or carries_partition(tile),
+    problem = ClassicProblem(
+        tile,
+        ctx,
+        row=pin_row(split_consumed=tile.split_consumed or carries_partition(tile)),
         allow_f16_accumulate=precision_pin(F16_MMA_F32_ACC) is True,
         allow_fp8=precision_pin(FP8_MMA) is True,
         validate_pins=ctx.validate_pins,
         tolerate_kernel_pins=peer,
     )
+    context = ClassicScheduleContext(tile, ctx, problem)
     codec = ClassicScheduleCodec(context)
     pool_id = digest(
         tile.identity_key(with_io=True) or "",
@@ -77,32 +86,25 @@ def classic_forks(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
         schedule_pin_fingerprint(),
         tile.split_consumed,
     )
-    warp = any(choice.tile.is_warp for choices in domains.nodes.values() for choice in choices)
-    prefix = dict.fromkeys(SCHEDULE_FORK_STAMPS, 1.0) if warp else {}
-    descent_bound = len(domains.kernel) + sum(
-        len(choices) * max((len(domains.edges[edge]) for edge in domains.edges if edge[0] == site), default=1)
-        for site, choices in domains.nodes.items()
-    )
+    prefix = dict.fromkeys(SCHEDULE_FORK_STAMPS, 1.0) if problem.warp_eligible else {}
     return fork_schedule(
         context,
         codec=codec,
         inherited_knobs=knobs,
         row_prefix=prefix,
-        materialize=lambda assignment, row: materialize_classic(
+        materialize=lambda schedule, row: materialize_classic(
             tile,
             name=name,
             knobs=row,
             target=ctx,
-            assignment=assignment,
+            schedule=schedule,
         ),
         pool_id=pool_id,
-        pool_bound=domains.product_size,
-        pool_descent_bound=descent_bound,
         sample=getattr(ctx, "pool_sample", None),
     )
 
 
-def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[TileOp] | TileOp:
+def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[Fork]:
     del match  # the scheduled op replaces the matched node in place — no graph surgery here
     tile: TileOp = root.op
     if tile.op is None or tile.place.is_mapped:
