@@ -597,6 +597,35 @@ def test_structural_key_equal_when_sibling_scopes_reuse_local_names() -> None:
     )
 
 
+def test_structural_key_equal_when_a_copy_alias_precedes_a_sibling_scope() -> None:
+    def make(reuse_names: bool) -> Body:
+        right_axis = "i" if reuse_names else "j"
+        right_input = "x" if reuse_names else "right_input"
+        right_result = "y" if reuse_names else "right_result"
+        return Body(
+            (
+                Loop(
+                    axis=Axis("i", 4),
+                    body=(
+                        Load(name="x", input="A", index=(Var("i"),)),
+                        Assign(name="y", op="copy", args=("x",)),
+                        Write(output="OA", index=(Var("i"),), value="y"),
+                    ),
+                ),
+                Loop(
+                    axis=Axis(right_axis, 4),
+                    body=(
+                        Load(name=right_input, input="B", index=(Var(right_axis),)),
+                        Assign(name=right_result, op="exp", args=(right_input,)),
+                        Write(output="OB", index=(Var(right_axis),), value=right_result),
+                    ),
+                ),
+            )
+        )
+
+    assert make(True).structural_key(structural=False) == make(False).structural_key(structural=False)
+
+
 def test_structural_key_handles_large_symmetric_partitions() -> None:
     """Exact symmetry does not trigger factorial buffer, producer, or axis searches."""
     axis = Axis("element", 4)
@@ -700,6 +729,21 @@ def test_structural_key_preserves_effect_order() -> None:
     xy = Body((Loop(axis=axis, body=(load_x, load_y, absolute, exponential, write_x, write_y)),))
     yx = Body((Loop(axis=axis, body=(load_x, load_y, absolute, exponential, write_y, write_x)),))
     assert xy.structural_key(structural=False) != yx.structural_key(structural=False)
+
+
+def test_structural_key_preserves_a_read_across_a_write_to_its_buffer() -> None:
+    prefix = (
+        Load(name="old", input="B", index=()),
+        Const(name="replacement", value=7),
+        Write(output="P", index=(), value="old"),
+    )
+    write = Write(output="B", index=(), value="replacement")
+    read = Load(name="new", input="B", index=())
+    observe = Write(output="O", index=(), value="new")
+    after_write = Body((*prefix, write, read, observe))
+    before_write = Body((*prefix, read, write, observe))
+
+    assert after_write.structural_key(structural=False) != before_write.structural_key(structural=False)
 
 
 def test_structural_key_preserves_shared_accumulator_order() -> None:

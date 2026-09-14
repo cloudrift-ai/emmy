@@ -95,3 +95,38 @@ def test_dedup_loads_rewires_every_vector_lane() -> None:
             Assign(name="sum", op="add", args=("x0", "x1")),
         )
     )
+
+
+def test_dedup_loads_invalidates_a_read_after_writing_its_buffer() -> None:
+    body = Body(
+        (
+            Load(name="old", input="B", index=ZERO),
+            Load(name="replacement", input="R", index=ZERO),
+            Write(output="B", index=ZERO, value="replacement"),
+            Load(name="new", input="B", index=ZERO),
+            Write(output="O", index=ZERO, value="new"),
+        )
+    )
+
+    out = dedup_loads(body)
+
+    assert [stmt.name for stmt in out if isinstance(stmt, Load) and stmt.input == "B"] == ["old", "new"]
+
+
+def test_dedup_loads_does_not_reuse_a_read_across_a_loop_that_writes_its_buffer() -> None:
+    body = Body(
+        (
+            Load(name="before", input="B", index=ZERO),
+            Loop(
+                axis=Axis("a", 4),
+                body=(
+                    Load(name="current", input="B", index=ZERO),
+                    Write(output="B", index=ZERO, value="current"),
+                ),
+            ),
+        )
+    )
+
+    out = dedup_loads(body)
+
+    assert out[1].body[0] == Load(name="current", input="B", index=ZERO)
