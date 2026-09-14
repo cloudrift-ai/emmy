@@ -25,7 +25,7 @@ that slice computed-operand cones. Region transforms (``replace_at``,
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property, lru_cache
 
 from emmy.compiler.ir.stmt.base import Stmt
@@ -320,19 +320,6 @@ class Body(tuple[Stmt, ...]):
         (``Loop`` / ``StridedLoop`` / ``Tile.axes``). Axes from
         enclosing scopes above this body are not included."""
         return frozenset(ax for s in self.iter() for ax in s.binds_axes())
-
-    @cached_property
-    def _exported_accums(self) -> frozenset[str]:
-        """Accumulator names exposed by this immutable subtree."""
-        from emmy.compiler.ir.stmt.leaves import Accum  # noqa: PLC0415
-
-        out: set[str] = set()
-        for stmt in self:
-            if isinstance(stmt, Accum):
-                out.add(stmt.name)
-            for child in stmt.nested():
-                out.update(child._exported_accums)
-        return frozenset(out)
 
     @cached_property
     def ssa_defs(self) -> frozenset[str]:
@@ -704,17 +691,16 @@ class Body(tuple[Stmt, ...]):
         Built by re-running :func:`normalize_body` with ``hoist=False``
         (safe for both Loop-IR and Tile-IR bodies — hoisting can move
         Loads above Stage decls in Tile bodies), then canonicalizing
-        external-buffer roles and dependency-valid pure-statement order.
+        external-buffer roles and dependency- and effect-valid statement order.
         Cached on the instance — Body is immutable."""
         return self._structural_key_clustered if structural else self._structural_key_exact
 
     @cached_property
     def _structural_key_clustered(self) -> str:
-        # Both flavors delegate to a module-level lru_cache keyed by Body
-        # content (Body is ``tuple[Stmt, ...]`` and every Stmt subclass is
-        # a frozen dataclass, so the cache key is structural). Two
-        # different Body instances with identical stmts share the one
-        # ``normalize_body`` call — matters in tune mode where
+        # Both flavors delegate to a module-level lru_cache keyed by the complete structural form.
+        # Dataclass equality is insufficient because a few codegen-relevant fields deliberately do
+        # not participate in ordinary equality. Different Body instances with identical forms share
+        # one ``normalize_body`` call — matters in tune mode where
         # ``_record_op_inventory`` walks the source chain of every
         # CudaOp in every terminal and hammers ``identity_key(with_io=True, with_knobs=True)`` ->
         # ``Body.structural_key()`` on bodies that frequently recur
@@ -726,19 +712,30 @@ class Body(tuple[Stmt, ...]):
         return _shared_structural_key(self, False)
 
 
-@lru_cache(maxsize=4096)
+@dataclass(frozen=True)
+class _BodyCacheKey:
+    digest: str
+    body: Body = field(compare=False, hash=False, repr=False)
+
+
 def _shared_structural_key(body: Body, cluster: bool) -> str:
+    from emmy.compiler.structural import digest, form  # noqa: PLC0415
+
+    return _cached_structural_key(_BodyCacheKey(digest(form(body)), body), cluster)
+
+
+@lru_cache(maxsize=4096)
+def _cached_structural_key(key: _BodyCacheKey, cluster: bool) -> str:
     """Module-level memoization for :meth:`Body.structural_key`.
 
     The formula is fixed per flavor: ``normalize_body(body, hoist=False,
-    cluster_ops=cluster)`` followed by identity-only canonicalization and rendered through
+    cluster_ops=cluster)`` followed by identity-only canonicalization and rendering through
     :func:`~emmy.compiler.structural.form`. Structural, not the
     pretty text it used to join: ``pretty()`` is the human rendering, and
     a cosmetic change to how a statement prints must not re-key every
-    kernel that contains it. With every concrete ``Stmt`` subclass a frozen
-    dataclass and ``Body`` a ``tuple[Stmt, ...]`` subclass, equal-content
-    bodies hash equal — so two structurally identical Body instances
-    share one normalize+pretty walk through this cache. Tune mode hits
+    kernel that contains it. The cache key digests that complete form instead of relying on
+    dataclass equality: fields excluded from ordinary equality may still affect generated code.
+    Structurally identical Body instances share one normalize-and-render walk. Tune mode hits
     this hard from ``_record_op_inventory`` (one ``identity_key(with_io=True, with_knobs=True)`` call
     per ancestor in every CudaOp's source chain, per terminal candidate).
 
@@ -752,6 +749,7 @@ def _shared_structural_key(body: Body, cluster: bool) -> str:
     from emmy.compiler.ir.stmt.normalize import canonicalize_identity, normalize_body  # noqa: PLC0415
     from emmy.compiler.structural import digest, form  # noqa: PLC0415
 
+    body = key.body
     normalized = normalize_body(body, hoist=False, cluster_ops=cluster)
     normalized = canonicalize_identity(normalized)
     return digest(form(normalized))
