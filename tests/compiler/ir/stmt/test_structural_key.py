@@ -75,6 +75,7 @@ def _matmul_body(input_x: str, input_y: str, output: str) -> Body:
 def test_structural_key_equal_for_renamed_buffers() -> None:
     a = _matmul_body("X", "Y", "O")
     b = _matmul_body("foo", "bar", "baz")
+    assert normalize_body(a) != normalize_body(b)
     assert a.structural_key() == b.structural_key()
 
 
@@ -106,6 +107,7 @@ def test_structural_key_equal_for_swapped_commutative_args() -> None:
             ),
         )
     )
+    assert normalize_body(body_xy) == normalize_body(body_yx)
     assert body_xy.structural_key() == body_yx.structural_key()
 
 
@@ -155,13 +157,15 @@ def test_structural_key_equal_for_reordered_independent_operations() -> None:
     combine = Assign(name="result", op="add", args=("absolute", "negated"))
     write = Write(output="output", index=(Var("element"),), value="result")
     axis = Axis("element", 4)
-    valid_orders = (
+    valid_orders = tuple(
         order
         for order in permutations((load, absolute, negated, combine))
         if order.index(load) < order.index(absolute) < order.index(combine)
         and order.index(load) < order.index(negated) < order.index(combine)
     )
+    normalized = {normalize_body(Body((Loop(axis=axis, body=(*order, write)),))) for order in valid_orders}
     keys = {Body((Loop(axis=axis, body=(*order, write)),)).structural_key(structural=False) for order in valid_orders}
+    assert len(normalized) == 1
     assert len(keys) == 1
 
 
@@ -277,6 +281,7 @@ def test_structural_key_equal_for_ambiguous_free_axis_renaming() -> None:
         )
         return Body((Loop(axis=Axis(outer, 2), body=(Loop(axis=Axis(inner, 3), body=terminal),)),))
 
+    assert normalize_body(make("z", "a")) == normalize_body(make("a", "z"))
     assert make("z", "a").structural_key(structural=False) == make("a", "z").structural_key(structural=False)
 
 
@@ -316,7 +321,7 @@ def test_structural_key_equal_for_renamed_and_reordered_axis_windows() -> None:
 
 
 def test_structural_key_distinguishes_axis_windows_even_when_bodies_compare_equal() -> None:
-    """The shared cache includes codegen-relevant fields excluded from dataclass equality."""
+    """The key includes codegen-relevant fields excluded from dataclass equality."""
 
     def make(window: Window) -> Body:
         axis = Axis("element", 4, window=window)
@@ -442,6 +447,7 @@ def test_structural_key_equal_for_equivalent_index_and_comparison_expressions() 
     element, one, four = Var("element"), Literal(1, "int"), Literal(4, "int")
     left = make(BinaryExpr("+", element, one), BinaryExpr("<", element, four))
     right = make(BinaryExpr("+", one, element), BinaryExpr(">", four, element))
+    assert normalize_body(left) == normalize_body(right)
     assert left.structural_key(structural=False) == right.structural_key(structural=False)
 
 
@@ -826,6 +832,14 @@ def test_structural_key_clusters_sfu_div_ops() -> None:
     """divide / mod / reciprocal share the SFU-div cluster."""
     keys = {_binary_body(op).structural_key() for op in ("divide", "true_divide", "floor_divide", "remainder", "mod")}
     assert len(keys) == 1
+
+
+def test_normalize_body_does_not_cluster_operations() -> None:
+    add = _binary_body("add")
+    subtract = _binary_body("subtract")
+
+    assert normalize_body(add) != normalize_body(subtract)
+    assert add.structural_key() == subtract.structural_key()
 
 
 def test_structural_key_distinguishes_across_clusters() -> None:
