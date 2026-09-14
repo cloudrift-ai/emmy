@@ -25,8 +25,8 @@ that slice computed-operand cones. Region transforms (``replace_at``,
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator
-from dataclasses import dataclass, field
-from functools import cached_property, lru_cache
+from dataclasses import dataclass
+from functools import cached_property
 
 from emmy.compiler.ir.stmt.base import Stmt
 
@@ -697,59 +697,27 @@ class Body(tuple[Stmt, ...]):
 
     @cached_property
     def _structural_key_clustered(self) -> str:
-        # Both flavors delegate to a module-level lru_cache keyed by the complete structural form.
-        # Dataclass equality is insufficient because a few codegen-relevant fields deliberately do
-        # not participate in ordinary equality. Different Body instances with identical forms share
-        # one ``normalize_body`` call — matters in tune mode where
-        # ``_record_op_inventory`` walks the source chain of every
-        # CudaOp in every terminal and hammers ``identity_key(with_io=True, with_knobs=True)`` ->
-        # ``Body.structural_key()`` on bodies that frequently recur
-        # structurally across variants.
-        return _shared_structural_key(self, True)
+        return _compute_structural_key(self, True)
 
     @cached_property
     def _structural_key_exact(self) -> str:
-        return _shared_structural_key(self, False)
+        return _compute_structural_key(self, False)
 
 
-@dataclass(frozen=True)
-class _BodyCacheKey:
-    digest: str
-    body: Body = field(compare=False, hash=False, repr=False)
-
-
-def _shared_structural_key(body: Body, cluster: bool) -> str:
-    from emmy.compiler.structural import digest, form  # noqa: PLC0415
-
-    return _cached_structural_key(_BodyCacheKey(digest(form(body)), body), cluster)
-
-
-@lru_cache(maxsize=4096)
-def _cached_structural_key(key: _BodyCacheKey, cluster: bool) -> str:
-    """Module-level memoization for :meth:`Body.structural_key`.
+def _compute_structural_key(body: Body, cluster: bool) -> str:
+    """Compute one flavor of :meth:`Body.structural_key`.
 
     The formula is fixed per flavor: ``normalize_body(body, hoist=False,
     cluster_ops=cluster)`` followed by identity-only canonicalization and rendering through
     :func:`~emmy.compiler.structural.form`. Structural, not the
     pretty text it used to join: ``pretty()`` is the human rendering, and
     a cosmetic change to how a statement prints must not re-key every
-    kernel that contains it. The cache key digests that complete form instead of relying on
-    dataclass equality: fields excluded from ordinary equality may still affect generated code.
-    Structurally identical Body instances share one normalize-and-render walk. Tune mode hits
-    this hard from ``_record_op_inventory`` (one ``identity_key(with_io=True, with_knobs=True)`` call
-    per ancestor in every CudaOp's source chain, per terminal candidate).
-
-    Generic :func:`normalize_body` callers with other flags don't share
-    this cache — ``cluster_ops=True`` collapses semantically distinct ops
-    to a single cluster representative (``add``↔``sub``, ``div``↔``mod``,
-    …), which is the right canonicalization for structural-equivalence
-    queries but would be a *correctness bug* for any callsite running
-    the normalized body.
+    kernel that contains it. ``cluster_ops=True`` collapses semantically distinct ops to one
+    cluster representative, so this path is only for structural identity, never executable IR.
     """
     from emmy.compiler.ir.stmt.normalize import canonicalize_identity, normalize_body  # noqa: PLC0415
     from emmy.compiler.structural import digest, form  # noqa: PLC0415
 
-    body = key.body
     normalized = normalize_body(body, hoist=False, cluster_ops=cluster)
     normalized = canonicalize_identity(normalized)
     return digest(form(normalized))

@@ -291,26 +291,34 @@ def eliminate_copy_aliases(stmts: Body) -> Body:
     copies as bridges between producer writes and consumer reads; a long
     chain stacks them. Every such Assign is dropped and downstream
     references to ``y`` are rewired to the alias root. Pure IR hygiene."""
-    stmts = Body.coerce(stmts)
-    alias: dict[str, str] = {}
+    from emmy.compiler.ir.stmt.passes import rename_free  # noqa: PLC0415
 
-    def resolve(name: str) -> str:
-        seen: set[str] = set()
-        while name in alias and name not in seen:
-            seen.add(name)
-            name = alias[name]
-        return name
+    def walk(body: Body) -> Body:
+        alias: dict[str, str] = {}
 
-    def fn(s: Stmt) -> Stmt | None:
-        # Body.map post-order: block bodies already recursed; only handle leaves.
-        if isinstance(s, (Loop, StridedLoop, Cond)):
-            return s
-        if isinstance(s, Assign) and s.op.name == "copy" and len(s.args) == 1 and s.dtype is None:
-            alias[s.name] = s.args[0]
-            return None
-        return s.rewrite(resolve)
+        def resolve(name: str) -> str:
+            seen: set[str] = set()
+            while name in alias and name not in seen:
+                seen.add(name)
+                name = alias[name]
+            return name
 
-    return stmts.map(fn)
+        out: list[Stmt] = []
+        for stmt in body:
+            if isinstance(stmt, Assign) and stmt.op.name == "copy" and len(stmt.args) == 1 and stmt.dtype is None:
+                alias[stmt.name] = resolve(stmt.args[0])
+                continue
+            if stmt.nested():
+                # Apply aliases from the enclosing scope hygienically, then give each child its
+                # own alias table. A spelling reused by sibling bodies denotes separate binders.
+                stmt = rename_free(stmt, alias)
+                stmt = stmt.with_bodies(tuple(walk(child) for child in stmt.nested()))
+                out.append(stmt)
+            else:
+                out.append(stmt.rewrite(resolve))
+        return Body(out)
+
+    return walk(Body.coerce(stmts))
 
 
 # ---------------------------------------------------------------------------
@@ -814,28 +822,30 @@ def dedup_loads(stmts: Body) -> Body:
 
     stmts = Body.coerce(stmts)
 
-    def walk(
-        body: Body,
-        env: dict[tuple[str, tuple[str, ...], int, object], tuple[str, ...]],
-        parent_alias: dict[str, str],
-    ) -> Body:
+    def written_buffers(stmt: Stmt) -> frozenset[str]:
+        return frozenset(
+            (*stmt.external_writes(), *(name for child in stmt.nested() for member in child.iter() for name in member.external_writes()))
+        )
+
+    def walk(body: Body, env: dict[tuple[str, tuple[str, ...], int, object], tuple[str, ...]]) -> Body:
         local = dict(env)
-        alias = dict(parent_alias)
+        alias: dict[str, str] = {}
 
         def rename(n: str) -> str:
             return alias.get(n, n)
 
-        def descend(inner: Body) -> Body:
+        def descend(inner: Body, clobbered: frozenset[str]) -> Body:
             """Enter ``inner``'s scope, dropping every alias / kept name whose spelling ``inner``
             re-binds. SSA names bound inside a Loop / Cond body are scoped to it, so such a name is
             a DIFFERENT variable — following it out would rewire the inner arithmetic to the outer
             value and redeclare the survivor."""
             shadowed = Body.coerce(inner).ssa_defs
-            return walk(
-                inner,
-                {k: v for k, v in local.items() if v not in shadowed},
-                {k: v for k, v in alias.items() if k not in shadowed},
-            )
+            return walk(inner, {k: v for k, v in local.items() if k[0] not in clobbered and not shadowed.intersection(v)})
+
+        def invalidate(buffers: frozenset[str]) -> None:
+            for key in tuple(local):
+                if key[0] in buffers:
+                    del local[key]
 
         out: list[Stmt] = []
         for s in body:
@@ -852,17 +862,17 @@ def dedup_loads(stmts: Body) -> Body:
                     continue
                 local[key] = s.names
                 out.append(s)
-            elif isinstance(s, Loop | StridedLoop):
-                out.append(replace(s, body=descend(s.body)))
-            elif isinstance(s, Cond):
-                out.append(Cond(cond=s.cond, body=descend(s.body), else_body=descend(s.else_body)))
+            elif s.nested():
+                clobbered = written_buffers(s)
+                renamed = rename_free(s, alias)
+                out.append(renamed.with_bodies(tuple(descend(child, clobbered) for child in renamed.nested())))
+                invalidate(clobbered)
             else:
-                # ``rename_free``, not ``rewrite``: identical for a leaf, but a block stmt the
-                # ladder above doesn't name (``Tile``) carries scopes the alias must stop at.
                 out.append(rename_free(s, alias))
-        return tuple(out)
+                invalidate(frozenset(s.external_writes()))
+        return Body(out)
 
-    return walk(stmts, {}, {})
+    return walk(stmts, {})
 
 
 # ---------------------------------------------------------------------------
