@@ -172,8 +172,7 @@ def test_structural_key_equal_for_permuted_same_shape_arguments() -> None:
     """Argument roles, not same-shaped Loads or their names, fix the canonical buffer order."""
     entries = (("x", "X", "row"), ("y", "Y", "row"), ("z", "Z", "row"))
     keys = {
-        _pointwise_body(inputs=order, op="where", args=("x", "y", "z")).structural_key(structural=False)
-        for order in permutations(entries)
+        _pointwise_body(inputs=order, op="where", args=("x", "y", "z")).structural_key(structural=False) for order in permutations(entries)
     }
     assert len(keys) == 1
 
@@ -265,9 +264,7 @@ def test_structural_key_equal_for_reordered_reduction_axis_metadata() -> None:
             )
         )
 
-    assert make(("row", "column")).structural_key(structural=False) == make(
-        ("column", "row")
-    ).structural_key(structural=False)
+    assert make(("row", "column")).structural_key(structural=False) == make(("column", "row")).structural_key(structural=False)
     assert make(("row",)).structural_key(structural=False) != make(("column",)).structural_key(structural=False)
 
 
@@ -316,11 +313,9 @@ def test_structural_key_equal_for_renamed_and_reordered_axis_windows() -> None:
             terminal = Body((Loop(axis=axis, body=terminal),))
         return terminal
 
-    assert make(("outer", "inner"), ("source_a", "source_b"), False).structural_key(
-        structural=False
-    ) == make(("renamed_outer", "renamed_inner"), ("renamed_a", "renamed_b"), True).structural_key(
-        structural=False
-    )
+    assert make(("outer", "inner"), ("source_a", "source_b"), False).structural_key(structural=False) == make(
+        ("renamed_outer", "renamed_inner"), ("renamed_a", "renamed_b"), True
+    ).structural_key(structural=False)
 
 
 def test_structural_key_distinguishes_axis_windows_even_when_bodies_compare_equal() -> None:
@@ -428,9 +423,7 @@ def test_structural_key_equal_for_renamed_exported_accumulators() -> None:
             )
         )
 
-    assert make("total", "maximum").structural_key(structural=False) == make(
-        "alpha_ssa_0", "alpha_ssa_1"
-    ).structural_key(structural=False)
+    assert make("total", "maximum").structural_key(structural=False) == make("alpha_ssa_0", "alpha_ssa_1").structural_key(structural=False)
 
 
 def test_structural_key_equal_for_equivalent_index_and_comparison_expressions() -> None:
@@ -528,9 +521,9 @@ def test_structural_key_equal_for_renamed_const_and_init() -> None:
             )
         )
 
-    assert make("constant", "initial").structural_key(structural=False) == make(
-        "renamed_constant", "renamed_initial"
-    ).structural_key(structural=False)
+    assert make("constant", "initial").structural_key(structural=False) == make("renamed_constant", "renamed_initial").structural_key(
+        structural=False
+    )
 
 
 def test_structural_key_equal_for_renamed_vector_load_lanes() -> None:
@@ -545,9 +538,7 @@ def test_structural_key_equal_for_renamed_vector_load_lanes() -> None:
             )
         )
 
-    assert make(("x0", "x1")).structural_key(structural=False) == make(
-        ("renamed0", "renamed1")
-    ).structural_key(structural=False)
+    assert make(("x0", "x1")).structural_key(structural=False) == make(("renamed0", "renamed1")).structural_key(structural=False)
 
 
 def test_structural_key_equal_when_sibling_scopes_reuse_local_names() -> None:
@@ -573,9 +564,7 @@ def test_structural_key_equal_when_sibling_scopes_reuse_local_names() -> None:
                         Write(output=output, index=(Var(axis),), value=f"{value}_result"),
                     ),
                 )
-                for axis, value, input_buffer, output, operation in zip(
-                    axes, values, buffers, outputs, ("abs", "exp"), strict=True
-                )
+                for axis, value, input_buffer, output, operation in zip(axes, values, buffers, outputs, ("abs", "exp"), strict=True)
             )
         )
 
@@ -596,13 +585,16 @@ def test_structural_key_equal_when_sibling_scopes_reuse_local_names() -> None:
             )
         )
     )
-    assert len(
-        {
-            reused.structural_key(structural=False),
-            distinct.structural_key(structural=False),
-            renamed_and_reordered.structural_key(structural=False),
-        }
-    ) == 1
+    assert (
+        len(
+            {
+                reused.structural_key(structural=False),
+                distinct.structural_key(structural=False),
+                renamed_and_reordered.structural_key(structural=False),
+            }
+        )
+        == 1
+    )
 
 
 def test_structural_key_handles_large_symmetric_partitions() -> None:
@@ -613,7 +605,11 @@ def test_structural_key_handles_large_symmetric_partitions() -> None:
         (
             Loop(
                 axis=axis,
-                body=(*loads, Assign(name="result", op="add", args=tuple(f"x{i}" for i in range(9))), Write(output="O", index=(Var("element"),), value="result")),
+                body=(
+                    *loads,
+                    Assign(name="result", op="add", args=tuple(f"x{i}" for i in range(9))),
+                    Write(output="O", index=(Var("element"),), value="result"),
+                ),
             ),
         )
     )
@@ -623,7 +619,12 @@ def test_structural_key_handles_large_symmetric_partitions() -> None:
         (
             Loop(
                 axis=axis,
-                body=(load, *producers, Assign(name="result", op="add", args=tuple(f"p{i}" for i in range(9))), Write(output="O", index=(Var("element"),), value="result")),
+                body=(
+                    load,
+                    *producers,
+                    Assign(name="result", op="add", args=tuple(f"p{i}" for i in range(9))),
+                    Write(output="O", index=(Var("element"),), value="result"),
+                ),
             ),
         )
     )
@@ -631,7 +632,16 @@ def test_structural_key_handles_large_symmetric_partitions() -> None:
     for i in reversed(range(9)):
         nested = Body((Loop(axis=Axis(f"axis{i}", 2), body=nested),))
 
-    assert len({buffers.structural_key(structural=False), duplicate_producers.structural_key(structural=False), nested.structural_key(structural=False)}) == 3
+    assert (
+        len(
+            {
+                buffers.structural_key(structural=False),
+                duplicate_producers.structural_key(structural=False),
+                nested.structural_key(structural=False),
+            }
+        )
+        == 3
+    )
 
 
 def test_structural_key_distinguishes_reordered_noncommutative_arguments() -> None:
@@ -738,12 +748,8 @@ def test_structural_key_distinguishes_reduction_seed_policy() -> None:
 
 def test_structural_key_distinguishes_buffer_aliasing() -> None:
     """Two argument names and one argument used twice are different signatures."""
-    separate = _pointwise_body(
-        inputs=(("left", "X", "row"), ("right", "Y", "column")), op="multiply", args=("left", "right")
-    )
-    aliased = _pointwise_body(
-        inputs=(("left", "X", "row"), ("right", "X", "column")), op="multiply", args=("left", "right")
-    )
+    separate = _pointwise_body(inputs=(("left", "X", "row"), ("right", "Y", "column")), op="multiply", args=("left", "right"))
+    aliased = _pointwise_body(inputs=(("left", "X", "row"), ("right", "X", "column")), op="multiply", args=("left", "right"))
     assert separate.structural_key(structural=False) != aliased.structural_key(structural=False)
 
 
