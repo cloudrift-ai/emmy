@@ -496,6 +496,7 @@ def _handle_run_once(args):
             greedy_reference_us=greedy_reference_us,
             correctness=correctness,
             strict_errors=strict_errors,
+            accuracy_error=accuracy_error,
         )
     for error in strict_errors or []:
         logger.error("strict: %s", error)
@@ -1550,6 +1551,25 @@ def _print_kernel_stats(graph, bench, golden_benches=None, greedy_fail=None, gre
             print(f"! {gb.sample.name}: {flag}")
 
 
+def _emmy_correctness(correctness: dict | None, accuracy_error: str | None, *, reference: bool) -> dict:
+    """The Emmy row's correctness verdict — a proof, a failure, a loose pass, or nobody checked.
+
+    ``--strict`` builds a proof and it stands as written. Without it the bench still compares
+    against eager, on dtype-scaled tolerances wide enough to pass fp16 accumulation drift, and
+    that verdict used to reach the log and nothing else. So the record carried a latency and no
+    way to tell a number backed by a passing reference from one backed by a failing reference or
+    by none at all — and a survey pass ranks on this file. The absence read as a pass.
+
+    ``tolerance`` is what separates the two passing states: ``scaled`` is the wide check, and a
+    row that has only that has not been asked the strict question. One kernel here passed the
+    scaled check and failed the strict one on 198 of 3.1M elements."""
+    if correctness is not None:
+        return correctness
+    if accuracy_error is not None:
+        return {"status": "fail", "reference": "eager", "error": accuracy_error}
+    return {"status": "pass", "reference": "eager", "tolerance": "scaled"} if reference else {"status": "unchecked"}
+
+
 def _write_ab_json(
     args,
     results: dict,
@@ -1561,6 +1581,7 @@ def _write_ab_json(
     greedy_reference_us=None,
     correctness=None,
     strict_errors=None,
+    accuracy_error=None,
 ) -> None:
     """``--json PATH``: the whole ``--bench`` comparison as one machine-readable record —
     the backend table (eager / torch.compile / emmy), the per-kernel greedy rows, and every
@@ -1568,7 +1589,10 @@ def _write_ab_json(
     flags. ``pinned_knobs`` is the exact input-regime-plus-winner map used for replay. This is
     the golden-sweep workflow's parse target (it retires the ad-hoc stdout
     table parsers) and where the intensity-floor / wrong-answer verdicts become fields —
-    the confirm-twice rule diffs two of these files instead of two terminal scrollbacks.
+    the confirm-twice rule diffs two of these files instead of two terminal scrollbacks. The
+    Emmy row always carries a ``correctness`` verdict, including the two that used to be an
+    absence: a non-strict check that FAILED, and a target with no eager reference to check
+    against (:func:`_emmy_correctness`).
 
     Each kernel row carries ``record_knobs`` — the realized tuning knobs with the exact complete
     classic row validated by :func:`~emmy.compiler.pipeline.knob.complete_kernel_row` — the map
@@ -1698,8 +1722,8 @@ def _write_ab_json(
         }
         for name, us in (results or {}).items()
     }
-    if correctness is not None and "Emmy" in backend_rows:
-        backend_rows["Emmy"]["correctness"] = correctness
+    if "Emmy" in backend_rows:
+        backend_rows["Emmy"]["correctness"] = _emmy_correctness(correctness, accuracy_error, reference="Eager PyTorch" in backend_rows)
     eager_us = (results or {}).get("Eager PyTorch")
     if eager_us:
         for name, us in (results or {}).items():
@@ -2757,6 +2781,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
             greedy_reference_us=greedy_reference_us,
             correctness=correctness,
             strict_errors=strict_errors,
+            accuracy_error=accuracy_error,
         )
     if getattr(args, "record", False):
         _record_golden_latency(args, results or {}, ab_benches)
