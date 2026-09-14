@@ -79,51 +79,68 @@ throughput choice. TP2 divides cleanly: 24 attention heads / 2 = 12, 4 key/value
 
 ## Emmy
 
-`golden/v100_sm70.yaml` carries **114 recorded rows over 15 targets** of decoder layer 0 — the Gated DeltaNet
-archetype, 48 of the model's 64 layers. 101 of those rows are measured; the other 13 are the routing seeds that name
-a kernel set and take their price from the rows they list. They were recorded on **one V100 SXM3 32GB**, not on the
-SXM2 16GB pair the serving lane above ran on. Both are sm_70 and the kernels are the same, but the card is a
-different SKU, so read the golden as compiler evidence for Volta rather than as a measurement of that deploy.
+`golden/v100_sm70.yaml` carries **48 recorded rows over 46 targets** of decoder layer 0 — the Gated DeltaNet
+archetype, 48 of the model's 64 layers. **36 beat eager PyTorch, 2 are at parity, 8 lose.** Recorded on **one V100
+SXM3 32GB**, not on the SXM2 16GB pair the serving lane above ran on: both are sm_70 and the kernels are the same,
+but the card is a different SKU, so read the golden as compiler evidence for Volta rather than as a measurement of
+that deploy. **The golden does not qualify serving** — every serving figure above is the stock 1Cat-vLLM fork, which
+reads none of these kernels.
 
-**The golden does not qualify serving.** Every serving figure above is the stock 1Cat-vLLM fork, which reads none of
-these kernels. What the golden establishes is that this checkpoint's dominant decoder path compiles, runs correctly
-and is mostly faster than eager PyTorch on Volta.
+Layer 0 traces to 99 distinct kernels. The 46 recorded are what one GPU-pair session could measure and verify; the
+coverage is a subset by time, not by selection, and it deliberately spans both ends of the ranking so the file
+records what loses as well as what wins.
 
-Fourteen targets are the export-unrolled delta rule and one is the `in_proj_qkv` GPTQ linear with its whole int4
-decode cone fused in. Against eager, at the shapes recorded:
+**The largest wins.** The export-unrolled delta rule dominates, and the two GPTQ projections carry the most absolute
+time:
 
 | target | eager us | emmy us | vs eager |
 | --- | ---: | ---: | ---: |
-| `k_slice_unsqueeze_reduce_d90fea` | 3,842 | 316 | 12.14x |
-| `k_linear_reduce_5542a0` (`in_proj_qkv`) | 25,014 | 2,306 | 10.84x |
-| `k_slice_unsqueeze_reduce_006570` | 3,876 | 536 | 7.23x |
-| `k_slice_unsqueeze_reduce_cc2c8e` | 3,924 | 647 | 6.07x |
-| `k_slice_unsqueeze_reduce_d4b52b` | 3,973 | 834 | 4.77x |
-| `k_slice_unsqueeze_reduce_287e6f` | 4,032 | 997 | 4.04x |
-| `k_slice_unsqueeze_reduce_d126a6` | 4,084 | 1,652 | 2.47x |
-| `k_slice_unsqueeze_reduce_99707e` | 4,205 | 2,052 | 2.05x |
-| `k_slice_unsqueeze_reduce_7e169c` | 4,265 | 2,560 | 1.67x |
-| `k_slice_unsqueeze_reduce_124b26` | 4,338 | 3,113 | 1.39x |
-| `k_slice_unsqueeze_reduce_0d1c72` | 4,421 | 3,780 | 1.17x |
-| `k_slice_unsqueeze_reduce_6169c0` | 4,554 | 4,570 | 1.00x |
-| `k_slice_unsqueeze_reduce_955202` | 4,627 | 5,454 | 0.85x |
-| `k_slice_unsqueeze_reduce_1faf06` | 3,260 | 5,977 | 0.55x |
-| `k_matmul_reduce_b686cf` | 18 | 35 | 0.51x |
+| `k_slice_unsqueeze_reduce_6bb9a7` | 2,630 | 5 | 525.25x |
+| `k_slice_unsqueeze_reduce_55cc08` | 2,641 | 14 | 189.85x |
+| `k_reshape_pointwise_a69add` | 24,469 | 193 | 126.84x |
+| `k_slice_unsqueeze_reduce_cd0f4d` | 2,648 | 34 | 78.51x |
+| 14 x `k_copy_*_base_pointwise` | ~1,085 | ~16 | ~68x |
+| `k_linear_pointwise_fa224d` (`in_proj_qkv`) | 25,020 | 1,392 | **17.98x** |
+| `k_linear_pointwise_944f3d` | 15,229 | 1,011 | **15.07x** |
 
-**The three chunks that lose are upstream of scheduling.** Eager sits flat between 3,260 and 4,627 us across the
-whole family while Emmy climbs monotonically with chunk index, because the Gated DeltaNet reference loops over chunks
-in Python: `torch.export` unrolls it, so unrolled chunk *k* carries O(*k*) work where eager's batched form amortizes
-every chunk into one flat cost. The cut is already the best partition available of the wrong amount of work, and no
-pin, tile, fold or placement removes work the traced program contains.
+Both projections carry **two rows**: the schedule above and the greedy the compiler picks unaided, which is 66x and
+47x slower. The greedy takes `WORK=w16x2` with 1024-thread blocks — one wave of very fat blocks on an 80-SM card —
+where `w8x1` at 12-25% occupancy wins. Occupancy is not the signal; the single wave is. Both rows are measured, and
+a strict-evidence compile ranks them fastest-first.
 
-**Every row is recorded behind a `PLACE` cut**, because the greedy elects one fused kernel at grid 1 — a single CTA
-for the whole reduce, 648,716 us on `006570` against the cut's 536. The cut was always offered and always cheaper; it
-was never picked, for a pricing reason diagnosed and fixed separately. A recorded row outranks the prior, which is
-what makes this file the thing that keeps a deploy off the grid-1 pick.
+**What still loses, and why each one does.** These are four different kinds of fact, not one:
 
-**What the golden does not cover.** Layer 3's full attention (16 of 64 layers) is traced but carries no row: its
-fused nest opens a serial cone that does not finish compiling. `embed_tokens`, the final norm, `lm_head` and the two
-MTP programs are not traced. Of layer 0's 118 kernels, 15 are here — the ones that dominated the layer.
+| target | eager us | emmy us | vs eager | why |
+| --- | ---: | ---: | ---: | --- |
+| `k_slice_unsqueeze_reduce_c47f85` | 3,230 | 4,068 | 0.79x | the O(*k*) tail — upstream of scheduling |
+| `k_slice_unsqueeze_reduce_334002` | 3,314 | 4,767 | 0.70x | the O(*k*) tail — upstream of scheduling |
+| `k_matmul_reduce_b686cf` | 18 | 35 | 0.53x | unprobed; 17 us |
+| `k_matmul_pointwise_227f1b` | 54 | 197 | 0.27x | 0.30x in all three Qwen slots — a shared pricing item |
+| `k_cumsum_reduce` | 4 | 29 | 0.14x | no parallel scan tier exists in the tree |
+| `k_reshape_3457df` | 2 | 30 | 0.06x | eager's reshape is a VIEW; Emmy materializes |
+| `k_linear_pointwise_796083` | 33 | 591 | 0.06x | `in_proj_z`'s decode cone does not fuse into its linear |
+| `k_transpose_272034` | 3 | 101 | 0.03x | eager's transpose is a VIEW; Emmy materializes |
+
+`k_mul_85_pointwise` (1.01x) and `k_slice_unsqueeze_reduce_492362` (0.96x) are recorded as parity.
+
+The two **view** rows are not tuning gaps: torch gets a transpose or a reshape by re-striding, at no cost, and Emmy
+writes the tensor out. The question there is why the graph materializes them at all, and no pin addresses it. The
+**scan** is a missing schedule family: `ScanOp` lifts to a serial-prefix loop, `_reduction_domain` returns one plan
+and `split_pending` refuses, so no cross-CTA fork is even offered — only a new family would move it. The
+**unfused decode cone** is a fusion asymmetry: `in_proj_qkv` fuses its whole int4 cone into its linear and
+`in_proj_z` does not, so the second materializes the dequantized weight into global memory as its own kernel. And
+the **O(*k*) tail** is the trace shape: `torch.export` unrolls the Gated DeltaNet chunk loop, so unrolled chunk *k*
+carries O(*k*) work where eager's batched form amortizes flat. Across the 30 recorded chunks Emmy climbs from 5 us
+to 4,767 us while eager moves only 2,630 to 3,314 — the curve is the evidence, and no pin removes work the traced
+program contains.
+
+**Five targets carry no row at all**, for three different reasons. `k_matmul_264a4c`, `k_matmul_reduce_08ec89` and
+`k_matmul_reduce_00fcbf` hang: 60 s per launch on iteration 0, nothing measured.
+`k_linear_matmul_mean_reduce_f10138` never reaches the GPU — over forty minutes in the compiler's kernel-set
+pricing, which resolves every cut arm by nested resolution before any launch. And `k_matmul_reduce_c9784e` is a
+defect rather than a gap: measured with the watchdog raised it runs **5,182,147 us against 3,717 us eager** at grid
+12 on an 80-SM card, returns half its output as zeros, and disagrees with itself between runs. It is filed for its
+own fix.
 
 ## Reproduce
 
