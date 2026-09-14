@@ -17,6 +17,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The suite reads the LFS-backed measurement freeze. Pull only that path;
+      # fetching every LFS object also downloads the much larger experiment archives.
+      - name: Fetch the measurement freeze from LFS
+        run: git lfs pull --include="emmy/compiler/pipeline/search/freezes/*"
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
