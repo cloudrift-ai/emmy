@@ -2793,7 +2793,15 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
     if getattr(args, "record", False):
         _record_golden_latency(args, results or {}, ab_benches)
     if getattr(args, "record_greedy", False):
-        _record_greedy_pick(args, graph, bench, greedy_iso, taken)
+        # A recorded row outranks every later compile, so a row whose answer --strict rejected must
+        # never become one: on sm_70 a wrong answer can run FASTER than the right neighbour, and the
+        # recording ran before the exit that reports it. Only the ANSWER is grounds to refuse — the
+        # other strict errors are about the FILE (a working inventory holds no pinned row yet), and
+        # refusing on those would leave a recording walk recording nothing at all.
+        if strict_correctness and accuracy_error is not None:
+            logger.error("not recording the greedy pick of %s — it failed the strict accuracy check: %s", args.realization, accuracy_error)
+        else:
+            _record_greedy_pick(args, graph, bench, greedy_iso, taken)
     for error in strict_errors or []:
         logger.error("strict: %s", error)
     if embedded is not None:

@@ -614,6 +614,7 @@ def test_a_walk_recording_the_greedy_pick_still_times_it_isolated(monkeypatch, t
     args._explicit_realization = False
     args.golden_configs = []  # a walk pins a target's VERIFIED rows; a trace inventory has none
     seen = {}
+    returned = {"accuracy_error": None}
 
     class FakePipeline:
         def with_strategies(self, _taken):
@@ -638,8 +639,8 @@ def test_a_walk_recording_the_greedy_pick_still_times_it_isolated(monkeypatch, t
                 "result": None,
                 "captured": False,
                 "torch_available": False,
-                "accuracy_error": None,
-                "run_io": ({"x": object()}, {"y": object()}),
+                "accuracy_error": returned["accuracy_error"],
+                "run_io": ({"x": [1.0]}, {"y": [1.0]}),
                 "greedy_error": None,
                 "reference_run_us": None,
             }
@@ -667,6 +668,16 @@ def test_a_walk_recording_the_greedy_pick_still_times_it_isolated(monkeypatch, t
     assert seen["want_ref"] is True, "the greedy outputs are the only reference a twinless target has"
     assert seen.get("isolated") is True, "the recorded row's per-kernel timings come from the isolated re-bench"
     assert seen.get("recorded") is True
+
+    # And a row whose ANSWER --strict rejected is not recorded: on sm_70 a wrong answer can run
+    # faster than the right neighbour, and a recorded row outranks every later compile.
+    seen.pop("recorded")
+    args.strict_correctness = True
+    returned["accuracy_error"] = "strict eager correctness failed: output 'y' exceeds rtol=0.001"
+    with pytest.raises(SystemExit) as exit_code:
+        run_module._handle_run_ir(args, FakeBackend, FakeDump)
+    assert exit_code.value.code == 1
+    assert "recorded" not in seen
 
 
 def test_replay_keys_its_cache_by_the_entry_identity(tmp_path):
