@@ -151,11 +151,7 @@ def _(s: Mma, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
     new_axes = tuple(sorted({rename(n) for old in s.axes for n in _rewrite_axis_name(old, sigma)}))
 
     def _g(guard):  # σ-substitute a (base, bound) guard's exprs so axis vars canonicalize
-        return (
-            None
-            if guard is None
-            else tuple(_rename_ssa_vars_in_expr(sigma.apply(expr), rename) for expr in guard)
-        )
+        return None if guard is None else tuple(_rename_ssa_vars_in_expr(sigma.apply(expr), rename) for expr in guard)
 
     return Mma(
         c=rename(s.c),

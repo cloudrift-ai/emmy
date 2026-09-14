@@ -27,7 +27,8 @@ from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
 from emmy.compiler.ir.stmt.body import Body, _exposed_defines, free_names
-from emmy.compiler.ir.stmt.leaves import Accum, Assign, Const, Init, Load, Mma, Pack, Select, SelectBranch, Unpack, Write
+from emmy.compiler.ir.stmt.leaves import Accum, Assign, Init, Load, Mma, SelectBranch, Write
+
 
 def normalize_body(
     stmts: Body,
@@ -268,9 +269,12 @@ def canonicalize_free_axis_order(stmts: Body) -> Body:
             return repr(form(rename_ssa_sequential(result))), order
 
         ordered_groups = [groups[role] for role in sorted(groups)]
-        chain_sorted = list(min(candidate(tuple(loop for choice in choices for loop in choice)) for choices in product(
-            *(axis_orders(group) for group in ordered_groups)
-        ))[1])
+        chain_sorted = list(
+            min(
+                candidate(tuple(loop for choice in choices for loop in choice))
+                for choices in product(*(axis_orders(group) for group in ordered_groups))
+            )[1]
+        )
     result: Body = terminal
     for loop in reversed(chain_sorted):
         result = Body((Loop(axis=loop.axis, body=result, unroll=loop.unroll, seed=loop.seed),))
@@ -1146,24 +1150,13 @@ def canonicalize_identity(stmts: Body) -> Body:
     # A buffer's occurrence contexts give it an isomorphism-invariant initial role without merging
     # the other buffers. Merging them to one placeholder would invent memory dependencies while the
     # sibling-order pass runs (an input and an unrelated output would suddenly alias).
-    names = {
-        name
-        for stmt in stmts.iter()
-        for name in (*stmt.defines(), *stmt.deps(), *stmt.binds_axes())
-    }
+    names = {name for stmt in stmts.iter() for name in (*stmt.defines(), *stmt.deps(), *stmt.binds_axes())}
     abstract_names = {name: "__name__" for name in names}
     roles: dict[str, str] = {}
     for focus in buffers:
-        focused = stmts.rename_buffers(
-            {name: "__self__" if name == focus else "__other__" for name in buffers}
-        )
+        focused = stmts.rename_buffers({name: "__self__" if name == focus else "__other__" for name in buffers})
         pure_tokens = _pure_identity_tokens(focused)
-        definitions = {
-            name: stmt
-            for stmt in focused.iter()
-            if stmt.pure
-            for name in stmt.defines()
-        }
+        definitions = {name: stmt for stmt in focused.iter() if stmt.pure for name in stmt.defines()}
         contexts = []
         for stmt in focused.iter():
             if "__self__" not in (*stmt.external_reads(), *stmt.external_writes()):
@@ -1172,9 +1165,7 @@ def canonicalize_identity(stmts: Body) -> Body:
                 contexts.append(pure_tokens[id(stmt)])
                 continue
             dependency_roles = {
-                name: f"__dep_{pure_tokens[id(owner)]}"
-                for name in stmt.deps()
-                if (owner := definitions.get(name)) is not None
+                name: f"__dep_{pure_tokens[id(owner)]}" for name in stmt.deps() if (owner := definitions.get(name)) is not None
             }
             renamed = stmt.rename({**abstract_names, **dependency_roles})
             contexts.append(repr(form(sort_commutative_args(Body((renamed,)))[0])))
@@ -1245,11 +1236,7 @@ def _canonicalize_identity_exprs(stmts: Body) -> Body:
         terms: list[Expr] = []
         for name, coefficient in sorted(coefficients.items()):
             variable = Var(name)
-            terms.append(
-                variable
-                if coefficient == 1
-                else BinaryExpr("*", Literal(coefficient, "int"), variable)
-            )
+            terms.append(variable if coefficient == 1 else BinaryExpr("*", Literal(coefficient, "int"), variable))
         if not (isinstance(anchor, Literal) and anchor.value == 0):
             terms.append(anchor)
         if not terms:
@@ -1375,9 +1362,7 @@ def _pure_identity_tokens(stmts: Body) -> dict[int, str]:
     tokens: dict[int, str] = {}
     for stmt in stmts.iter():
         if stmt.pure:
-            tokens[id(stmt)] = repr(
-                (forward_token(stmt), tuple(reverse_token(name) for name in stmt.defines()))
-            )
+            tokens[id(stmt)] = repr((forward_token(stmt), tuple(reverse_token(name) for name in stmt.defines())))
     return tokens
 
 
@@ -1406,16 +1391,8 @@ def _canonicalize_sibling_order_variants(stmts: list[Stmt]) -> Iterator[tuple[St
     from emmy.compiler.structural import form  # noqa: PLC0415
 
     pure_tokens = _pure_identity_tokens(Body(stmts))
-    members = tuple(
-        (stmt, *(member for child in stmt.nested() for member in child.iter()))
-        for stmt in stmts
-    )
-    all_names = {
-        name
-        for subtree in members
-        for member in subtree
-        for name in (*member.defines(), *member.deps(), *member.binds_axes())
-    }
+    members = tuple((stmt, *(member for child in stmt.nested() for member in child.iter())) for stmt in stmts)
+    all_names = {name for subtree in members for member in subtree for name in (*member.defines(), *member.deps(), *member.binds_axes())}
     abstract = {name: "__name__" for name in all_names}
     tokens = {
         id(stmt): pure_tokens.get(
@@ -1439,11 +1416,7 @@ def _canonicalize_sibling_order_variants(stmts: list[Stmt]) -> Iterator[tuple[St
 
     incoming = []
     for index, stmt in enumerate(stmts):
-        sources = {
-            source
-            for name in _sibling_defs_uses(stmt)[1]
-            if (source := defining_stmt(name, index)) is not None
-        }
+        sources = {source for name in _sibling_defs_uses(stmt)[1] if (source := defining_stmt(name, index)) is not None}
         incoming.append(sources)
     for reader, stmt in enumerate(stmts):
         for name in _sibling_defs_uses(stmt)[1]:
@@ -1455,11 +1428,7 @@ def _canonicalize_sibling_order_variants(stmts: list[Stmt]) -> Iterator[tuple[St
         members = tuple(stmt for child in stmt.nested() for stmt in child.iter()) or (stmt,)
         reads = {name for member in members for name in member.external_reads()}
         writes = {name for member in members for name in member.external_writes()}
-        state = {
-            name
-            for member in members
-            for name in getattr(member, "carried_names", lambda: ())()
-        }
+        state = {name for member in members for name in getattr(member, "carried_names", lambda: ())()}
         if isinstance(stmt, Init):
             state.update(stmt.defines())
         return reads, writes, state
@@ -1537,6 +1506,7 @@ def _orders_modulo_transpositions(items: list, interchangeable: Callable[[object
             yield from walk(tuple(next_remaining), (*positions, class_index))
 
     yield from walk(tuple(len(group) for group in classes), ())
+
 
 # ---------------------------------------------------------------------------
 # Pass: collapse ops to their compute-unit cluster representative
