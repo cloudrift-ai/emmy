@@ -516,7 +516,7 @@ may spell the same as the enclosing contraction's): `fold.subst_free(stmt, sigma
 a `Loop` / reducing `Fold` binder that re-binds a substituted name, and is what the smem compute fill substitutes
 cell coordinates through.
 
-### `ir/stmt/normalize.py` — structural canonicalization
+### `ir/stmt/normalize.py` — executable body normalization
 
 Pure `body → body` passes run from `LoopOp.__post_init__` so every
 constructed `LoopOp` (including intermediate fusion results) is
@@ -530,10 +530,11 @@ canonicalized before validation:
   update before total reduction lifting.
 - `canonicalize_free_axis_order` — sort outer free Loops by their row-major position in boundary writes, so output
   storage geometry rather than axis spelling decides the nest. When the writes cannot totally order the chain, axis
-  names provide a deterministic fallback. A cross-CTA partition coordinate occupies the workspace's leading index,
-  so the same rule keeps it outside the axes it partitions without a naming convention.
+  roles and the least complete alpha-renamed form decide the order. A cross-CTA partition coordinate occupies the
+  workspace's leading index, so the same rule keeps it outside the axes it partitions without a naming convention.
 
-- `eliminate_copy_aliases` — drop `y = copy(x)` Assigns.
+- `eliminate_copy_aliases` — drop `y = copy(x)` Assigns. Each nested body owns its alias map, so source spellings
+  reused by sibling scopes remain separate binders.
 - `unify_sibling_reduce_axes` — rename sibling reduce Loops whose reduce-axis Load positions overlap so they share one
   canonical axis name (softmax's max + sum sweeps; the two matmul reductions in `silu(x@Wg) * (x@Wu)` that both index
   `x` at the same K slot). A position is `(source, dim, anchor, coefficient)`, read through `affine_form`: a blocked
@@ -559,8 +560,9 @@ canonicalized before validation:
   reachable from each definition. Long SSA chains therefore remain linear in definitions × loop depth instead of
   materializing the quadratic full SSA dependency closure.
 - `dedup_loads` — after expression simplification, keep one `Load` for each identical
-  `(input, index, width, dtype)` read in a scope and rewire every scalar or vector lane. This is canonicalization for
-  every Loop / Tile body, not a fusion profitability decision.
+  `(input, index, width, dtype)` read in a scope and rewire every scalar or vector lane. A write invalidates retained
+  reads of that buffer, including around a nested scope with a write. This is canonicalization for every Loop / Tile
+  body, not a fusion profitability decision.
 - `rename_ssa_sequential` — cosmetic: `Load` names become `in0, in1, …`, accumulator state becomes `acc0, …`, and
   every other definition becomes `v0, v1, …`, in lexical definition order. Names stay globally unique while each
   nested body tracks its own binders, so sibling scopes may reuse the same source spelling without collapsing. Axis
@@ -572,6 +574,8 @@ canonicalized before validation:
   differ only by argument order land in the same canonical form.
   Runs last so the sort key is the post-rename canonical SSA / buffer
   names.
+
+### `ir/stmt/identity.py` — structural identity
 
 `Body.structural_key()` re-runs `normalize_body(self, hoist=False)` and then applies identity-only canonicalization.
 Executable normalization keeps external buffer names and the authored order of independent statements because graph
@@ -590,12 +594,10 @@ wiring and effect order are live there. The identity-only step removes only choi
   address expressions from their coefficient form. Executable expression order stays untouched.
 - The final canonical body applies the scope-aware SSA/axis rename and sorts commutative statement arguments.
 
-The key is `digest(form(canonical_body))`, not the human `pretty()` rendering. Both exact and compute-unit-clustered
-forms are cached on the immutable `Body`; complete pre-normalization forms share the module-level cache, so fields
-excluded from ordinary dataclass equality cannot collide there. Two bodies
-that differ only by SSA or axis names, argument spelling and discovery order, dependency-valid statement order, or
-equivalent commutative and affine expression spelling therefore share a structural key. Use it when deduplicating
-candidate bodies in search.
+The key is `digest(form(canonical_body))`, not the human `pretty()` rendering. The exact and compute-unit-clustered
+forms are cached on each immutable `Body`. Two bodies that differ only by SSA or axis names, argument spelling and
+discovery order, dependency-valid statement order, or equivalent commutative and affine expression spelling
+therefore share a structural key. Use it when deduplicating candidate bodies in search.
 
 ### `ir/expr.py` — Expr simplification
 
