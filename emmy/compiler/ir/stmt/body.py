@@ -715,7 +715,8 @@ def _compute_structural_key(body: Body, cluster: bool) -> str:
     kernel that contains it. ``cluster_ops=True`` collapses semantically distinct ops to one
     cluster representative, so this path is only for structural identity, never executable IR.
     """
-    from emmy.compiler.ir.stmt.normalize import canonicalize_identity, normalize_body  # noqa: PLC0415
+    from emmy.compiler.ir.stmt.identity import canonicalize_identity  # noqa: PLC0415
+    from emmy.compiler.ir.stmt.normalize import normalize_body  # noqa: PLC0415
     from emmy.compiler.structural import digest, form  # noqa: PLC0415
 
     normalized = normalize_body(body, hoist=False, cluster_ops=cluster)

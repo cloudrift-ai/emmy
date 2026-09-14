@@ -14,12 +14,9 @@ from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.stmt.blocks import Cond, Loop
 from emmy.compiler.ir.stmt.body import Body
+from emmy.compiler.ir.stmt.identity import canonicalize_identity
 from emmy.compiler.ir.stmt.leaves import Accum, Assign, Const, Init, Load, Write
-from emmy.compiler.ir.stmt.normalize import (
-    canonicalize_identity,
-    normalize_body,
-    sort_commutative_args,
-)
+from emmy.compiler.ir.stmt.normalize import normalize_body, sort_commutative_args
 
 # ---------------------------------------------------------------------------
 # sort_commutative_args

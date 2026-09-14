@@ -16,7 +16,7 @@ Defined here rather than under any one IR package because all three IRs
 - Tree walks: :meth:`Body.iter` (pre-order recursive) and
   :meth:`Body.map` (flat 1:N transformer) — methods on
   :class:`Body` (in :mod:`.body`).
-- Body normalization: ``normalize_body`` driver and its ordered passes
+- Body normalization: the public ``normalize_body`` driver and its internal ordered passes
   (drop-size-one, canonicalize-axis-order, copy-alias-elim,
   reduce-axis-unify, hoist, simplify, dedup-loads, rename-ssa) in
   :mod:`.normalize`.
@@ -71,19 +71,7 @@ from emmy.compiler.ir.stmt.leaves import (
     ZeroPrologue,
     mask_select_predicate,
 )
-from emmy.compiler.ir.stmt.normalize import (
-    canonicalize_free_axis_order,
-    dedup_loads,
-    drop_size_one_free_axes,
-    drop_size_one_reduce_axes,
-    eliminate_copy_aliases,
-    hoist_loop_invariants,
-    normalize_body,
-    rename_ssa_sequential,
-    simplify_body,
-    sort_commutative_args,
-    unify_sibling_reduce_axes,
-)
+from emmy.compiler.ir.stmt.normalize import normalize_body
 
 __all__ = [
     "refs_axis",
@@ -109,20 +97,10 @@ __all__ = [
     "Unpack",
     "Write",
     "OutputSpec",
-    "canonicalize_free_axis_order",
-    "dedup_loads",
-    "drop_size_one_free_axes",
-    "drop_size_one_reduce_axes",
-    "eliminate_copy_aliases",
-    "hoist_loop_invariants",
     "normalize_body",
     "op_to_expr",
     "pretty_body",
-    "rename_ssa_sequential",
     "render_body",
     "render_index",
     "select_to_ternary",
-    "simplify_body",
-    "sort_commutative_args",
-    "unify_sibling_reduce_axes",
 ]
