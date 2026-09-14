@@ -11,7 +11,7 @@ skills and CloudRift inference endpoint.
 | Workflow | Trigger | Runner | Result |
 | --- | --- | --- | --- |
 | **Tests** | Pull request to `main` | GitHub-hosted + `ubuntu-runners` | Runs Ruff, the complete test suite, and a PyPI package dry run. |
-| **Publish to PyPI** | Manual dispatch or published GitHub release | GitHub-hosted | Tests, builds, publishes to PyPI, and optionally creates the release. |
+| **Publish to PyPI** | Manual dispatch or published GitHub release | GitHub-hosted | Verifies the source and distribution, publishes to PyPI, and optionally creates the release. |
 | **Verify or onboard model** | Nightly schedule or manual dispatch | `agent-runners` / `agents` | Qualifies one available exact model/GPU deployment and updates the rolling lifecycle PR. |
 | **Discover model** | Nightly schedule or manual dispatch | `agent-runners` / `agents` | Refreshes recipe lifecycle tags and onboarding shells in one rolling PR without renting a VM. |
 
@@ -39,9 +39,9 @@ compiler-heavy job uses `ubuntu-runners` for `make test`, including `tests/githu
 `.github/scripts/` and `.github/workflows/scripts/`. Hugging Face downloads used by tests are cached because anonymous
 shared-runner traffic is rate-limited. A separate GitHub-hosted bare-Python job runs `make pypi-dist`, the exact
 non-publishing build path used by the release workflow, and requires one wheel and one source distribution. This
-workflow has no write permission and does not use deployment credentials. The test step has a twelve-minute execution
-cap and reuses the environment installed before that step; the outer twenty-minute job allowance also covers
-dependency installation and cache setup.
+workflow has no write permission and does not use deployment credentials. The test step has a 38-minute execution cap
+and reuses the environment installed before that step; the outer 45-minute job allowance also covers dependency
+installation and cache setup.
 
 ## Package publication
 
@@ -52,12 +52,15 @@ dependency installation and cache setup.
 - A manually published GitHub release must already have a tag matching `pyproject.toml`; the workflow validates and
   publishes that version without creating another release.
 
-Both paths run lint and tests before building. `make pypi-dist` first installs its minimal build dependencies, then
-uses `scripts/prepare_dist.py` to stage bundled recipes and rewrite repository-relative README links for PyPI before
-building the wheel and source distribution. The build artifact moves between jobs through GitHub artifacts. PyPI
-uses trusted publishing through the `pypi` environment and an OIDC token, so the repository stores no PyPI password.
-The manual path creates its GitHub release only after a successful upload, preventing a failed publication from
-leaving a release behind.
+Both paths accept only a commit already merged into `main` through a pull request with a successful **Tests** workflow.
+Those pull-request checks own lint, the complete suite, and the release-path package dry run; publication verifies the
+result through GitHub's read-only API rather than repeating it. `make pypi-dist` installs its minimal build
+dependencies, then uses `scripts/prepare_dist.py` to stage bundled recipes and rewrite repository-relative README
+links for PyPI before building the wheel and source distribution. The release gate requires exactly one of each,
+installs the wheel into a clean environment, checks its version, and reads its bundled recipe catalog. The build
+artifact moves between jobs through GitHub artifacts. PyPI uses trusted publishing through the `pypi` environment and
+an OIDC token, so the repository stores no PyPI password. The manual path creates its GitHub release only after a
+successful upload, preventing a failed publication from leaving a release behind.
 
 ## Model discovery and onboarding
 
