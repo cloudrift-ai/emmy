@@ -1273,7 +1273,9 @@ def _pure_tokens(stmts: Body) -> dict[int, str]:
                     mapping[dependency] = "__free__"
             renamed = consumer.rename(mapping)
             renamed = sort_commutative_args(Body((renamed,)))[0]
-            downstream = tuple(reverse_token(defined) for defined in consumer.defines() if defined in definitions)
+            # Hash the recursive suffix before embedding it. Repr-nesting raw token strings doubles
+            # their escaping at each producer in a long chain and grows exponentially in memory.
+            downstream = tuple(digest(reverse_token(defined)) for defined in consumer.defines() if defined in definitions)
             contexts.append((repr(form(renamed)), downstream))
         result = repr(tuple(sorted(contexts)))
         visiting_reverse.remove(name)
