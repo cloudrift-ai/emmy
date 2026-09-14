@@ -47,7 +47,7 @@ configs:
     origins:
     - scaled_dot_product_attention
   realizations:
-  - name: k_sdpa_deb5ea.d6f7283119fe
+  - name: k_sdpa_9dd3a9.48688c6b8591
     bindings: {}
     pins:
       FAST_MATH: false
@@ -61,4 +61,4 @@ configs:
       STAGE@map.1/twist.1/inner: ''
       LOOPIFY: '0'
       RASTER: ''
-    identity: 909a3ae21b91fd2b1ff79aa2d864126659f6825bbd9fd675ce4dd9a6b8210a9d
+    identity: 4398b203c4a5f752db601b3b16f01a5ef68cc24e87bc8986c4110d33636f85eb

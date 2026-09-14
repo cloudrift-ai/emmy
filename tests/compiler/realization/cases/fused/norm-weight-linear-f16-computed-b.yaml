@@ -36,11 +36,11 @@ configs:
     - linear
     - rms_norm
   realizations:
-  - name: k_rms_norm_linear_reduce_6c8853.b46fc43f3da0
+  - name: k_rms_norm_linear_reduce_6e8160.cf57e9637359
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
       WORK: w1x1
       TILE: mma_m16n8k16_f16_f32/f1x4/k8
-    identity: cdd74d6f90a0cbb44532b9bb7ba9aca10e82311ed059d57c47a769cb6bb2b9ca
+    identity: d39c0327f699ac5d9c41cef80f73cbce6bd2a98133126a153dd4c8c548f48d05

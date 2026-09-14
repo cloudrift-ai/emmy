@@ -650,7 +650,7 @@ configs:
   target:
     loop: 1
   realizations:
-  - name: k_linear_936f0e.0cbc6cafc0d2
+  - name: k_linear_dc1640.f8df3e3a47bc
     bindings: {}
     pins:
       FAST_MATH: false
@@ -661,7 +661,7 @@ configs:
       REDUCE: ''
       STAGE: d3/smem-async
       RASTER: ''
-    identity: dfcc60fecad4b273e1b0b15e5147aa64ce1af118cfa6b0de787059ff751627ae
+    identity: 66a8f63b171073d9d3c6b525a1964c0f4760b15126fe6a48cf998d9b2891c784
 loops:
 - inputs: [input]
   outputs: [input_static_fp4_scale_bits, input_static_fp4_bits]
@@ -803,7 +803,7 @@ loops:
                               value: v5
                               op: {elementwise: maximum}
                               dtype: null
-                              axes: {tuple: [a2_s2]}
+                              axes: {tuple: [a2]}
                               base: null
                           - {class: Assign, fields: {name: v6, op: {elementwise: abs}, args: {tuple: [in4]}, dtype: null}}
                           - class: Accum
@@ -812,7 +812,7 @@ loops:
                               value: v6
                               op: {elementwise: maximum}
                               dtype: null
-                              axes: {tuple: [a2_s1]}
+                              axes: {tuple: [a2]}
                               base: null
                         unroll: false
                         seed: true
@@ -892,12 +892,12 @@ loops:
                   seed: true
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 32}, window: null}}
+                  axis: {class: Axis, fields: {name: a3, extent: {dim: 32}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a3, extent: {dim: 16}, window: null}}
+                        axis: {class: Axis, fields: {name: a4, extent: {dim: 16}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -910,8 +910,8 @@ loops:
                                 - expr:
                                     binary:
                                       op: +
-                                      left: {binary: {op: '*', left: {var: a1}, right: {literal: {value: 16, dtype: int}}}}
-                                      right: {var: a3}
+                                      left: {binary: {op: '*', left: {var: a3}, right: {literal: {value: 16, dtype: int}}}}
+                                      right: {var: a4}
                               dtype: null
                           - {class: Assign, fields: {name: v28, op: {elementwise: abs}, args: {tuple: [in7]}, dtype: null}}
                           - class: Accum
@@ -920,7 +920,7 @@ loops:
                               value: v28
                               op: {elementwise: maximum}
                               dtype: null
-                              axes: {tuple: [a3_s1]}
+                              axes: {tuple: [a4]}
                               base: null
                         unroll: false
                         seed: true
@@ -931,7 +931,7 @@ loops:
                     - class: Write
                       fields:
                         output: input_static_fp4_scale_bits
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}, {expr: {literal: {value: 0, dtype: int}}}]}
+                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a3}}, {expr: {literal: {value: 0, dtype: int}}}]}
                         values: {tuple: [v30]}
                         value_dtype: null
                         atomic: false
@@ -940,7 +940,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_reshape_reduce_db0b72
+      name: k_reshape_reduce_bc108a
     inputs: [input_static_fp4_floor, input_static_fp4_shift, input_static_fp4_f4_max, input_static_fp4_scale_2, input]
     outputs: [[input_static_fp4_scale_bits, f8e4m3, [128, 32, 1]], [input_static_fp4_bits, f4e2m1x2, [128, 256]]]
 - inputs: [input_static_fp4_scale_bits, input_static_fp4_bits]
@@ -1349,13 +1349,7 @@ loops:
                           - class: Assign
                             fields: {name: v12, op: {elementwise: multiply}, args: {tuple: [v10, v11]}, dtype: null}
                           - class: Accum
-                            fields:
-                              name: acc0
-                              value: v12
-                              op: {elementwise: add}
-                              dtype: null
-                              axes: {tuple: [a2_s1]}
-                              base: null
+                            fields: {name: acc0, value: v12, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
                         unroll: false
                         seed: true
                     - class: Write
@@ -1370,7 +1364,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_936f0e
+      name: k_linear_dc1640
     inputs: [input_static_fp4_scale_2, p_weight_scale_2, p_weight_scale_bits, input_static_fp4_scale_bits, input_static_fp4_bits, p_weight_bits,
       input_static_fp4_r1_f4_pairs, p_weight_f4_pairs]
     outputs: [[linear, f32, [128, 256]]]
