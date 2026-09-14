@@ -100,12 +100,13 @@ and seals through the one `grid_tile` finalizer. A tiled contraction tiles its O
 cells; the reduce K serial per cell); a cooperating `Fold` tiles its REDUCE axis instead (`_tile_reduce_axis` —
 BLOCK `coop` lanes at the unit level, REG `reg` ILP chains at the register level, the algebra merge — the fold's
 own `merge` — closing the fold),
-its per-cell reduce loop taken from the node's own lowering; a planar root whose cones close over other reduces
+its per-cell reduce loop taken from the node's own lowering; an UNTILED root whose cones close over other reduces
 (its CHAIN MEMBERS, `ops.chain_members`: reached through zero-axis operand edges and the axis-invariant reduce
 operands members hoist ahead of their loops) binds through the chain arm (`_tile_chain_members`) when a member
-carries a partition — every partitioned member's hoisted loop and the root's own stride around ONE lane axis in
-body order, the segments between them per cell on every lane, and a stamped transposed band on such a root falls
-to the serial fold; each ILP copy suffixes only its per-copy SSA temps
+carries a partition — a contraction reaches this arm too whenever nothing tiles its output, which is where a fused
+norm-linear's own row statistic stops being evaluated once per thread — every partitioned member's hoisted loop and
+the root's own stride around ONE lane axis in body order, the segments between them per cell on every lane, and a
+stamped transposed band on such a root falls to the serial fold; each ILP copy suffixes only its per-copy SSA temps
 (`__r{r}`)
 — the shared iteration coordinates, **including any nested contraction's own reduce-axis var** (whose `for`
 declaration `copy_cell` does not rename), stay shared, so each copy re-declares its own nested
@@ -374,6 +375,27 @@ per-channel C fragments (`_fold_frag`), and the projection (SwiGLU) combines the
 forms use the synchronous compute fill because the gmem-direct and single-sided byte-copy MMA paths remain
 single-channel. The block-scaled fp4 cell is the exception: it carries N channels on cp.async, staging `2 + 2N` slabs
 over the one shared A pair, and names each channel's block-scale fragment per channel just as its data fragment is.
+
+**A gmem fragment's leading dimension is read off the operand's ADDRESS.** A loader reaches its operand through one
+leading dimension: one coordinate steps by 1, the other by `ldm`. Which DIM an index spells a coordinate in does not
+say that. A frontend reshape can pack the reduction coordinate and the operand's own output coordinate into ONE dim —
+`hidden[stream * 4096 + channel]`, DeepSeek-V4's hyper-connection mixing over one 16384-wide row — and the dim-position
+reading then names the tensor's trailing extent as `ldm` and calls the operand N-major because its last dim holds the
+reduction axis. Both are wrong, the fragment reads the wrong elements, and nothing raises. `_direct_operand` takes both
+from the operand's own element strides, which say exactly what the dim positions said wherever the dims separate the
+two coordinates. Neither coordinate unit-stride raises rather than emitting an address the loader cannot express; a
+symbolic extent leaves the strides of every earlier dim unknown and keeps the dim-position reading.
+
+**The register tile lifts a computed cone's prologue out of the K-loop.** The gmem-direct spine
+(`_contract_kloop`) takes each operand read as `(hoisted, per-step)`: the cone's row-invariant prologue is a value of
+the ROW, so it rides ahead of the loop, one evaluation per register row. Inside it, a fused norm→linear re-derived the
+row's whole statistic once per contraction step — a 26x4 tile over K = 16384 evaluating a 16384-wide reduce 26 * 16384
+times where 26 would do, 284 ms against 419 us on a V100 for the same schedule. Only a READ splits this way; the fold
+step accumulates, so it stays in the step whatever it reads, and an mma leaf always indexes the K coordinate, so its
+hoisted half is empty. The split is taken on the read's STATEMENTS (`_hoist_k_invariant`), not on the seam's edges:
+the seam states the same thing but answers for the staged fill, which bridges the prologue's results through smem
+rows and so drops a prologue nothing bridges. A register tile evaluates the cone whole, so it needs a partition —
+under the edge split, symbolic-seq SDPA lowered a kernel reading twelve names it never bound.
 
 **A bridged seam value keeps its own dtype.** A computed operand's cone splits at its K seam into a row-invariant
 prologue and a per-cell body, and the prologue publishes its results through smem rows the cell reads back — so

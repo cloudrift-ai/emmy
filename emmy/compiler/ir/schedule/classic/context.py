@@ -13,7 +13,7 @@ from frozendict import frozendict
 
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule.base import Schedule, ScheduleContext, ScheduleRefused
-from emmy.compiler.ir.schedule.choices import PlacedTile, Stage, Tile, Work, derive_inventory
+from emmy.compiler.ir.schedule.choices import PlacedTile, Reduce, Stage, Tile, Work, derive_inventory
 from emmy.compiler.ir.schedule.views import EdgeSite, NodeId
 from emmy.compiler.structural import instance_memo
 
@@ -487,6 +487,34 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
 
         return frozenset(self.tile_op.node_id(root) for root in refused_roots(self.tile_op.op, tuple(self.tile_op.output_specs)))
 
+    @cached_property
+    def _chain_pairs(self) -> tuple[tuple[NodeId, NodeId], ...]:
+        """The ``(root, member)`` pairs whose two partitions the binder cannot both realize.
+
+        A chain binds in ONE of the binder's arms, and a root that leaves it cannot carry a
+        partitioned member. An output-tiled root reaches its cone through the tiled fill, which
+        evaluates the statistic per cell; a transposed band σ-substitutes its output var assuming
+        its fold stands alone. Either way the member is no fold beside the root and its partition
+        is never read. The binder's own dispatch, applied at the offer — the same service
+        :attr:`_shared_roots` does for the second output-tiled root.
+
+        A member the peel reaches that is itself a kernel ROOT is no pair: the binder binds it
+        through its own :func:`_bind`, where its partition is realized whatever its neighbour
+        took. A multi-root kernel whose roots reach each other records exactly that."""
+        from emmy.compiler.ir.tile.ops import chain_members, kernel_roots  # noqa: PLC0415 — tile.ops reads this package
+
+        # Identity against the site table, never ``node_id``: the peel and the cone walk both reach
+        # Folds the site walk does not carry, and one of those has no REDUCE key to pair anyway.
+        sites = {id(self.tile_op.sites[site].node): site for site in self.tile_op.node_sites}
+        roots = {sites[id(root)] for root in kernel_roots(self.tile_op.op) if id(root) in sites}
+        return tuple(
+            (sites[id(root)], sites[id(member)])
+            for root in kernel_roots(self.tile_op.op)
+            if id(root) in sites
+            for member in chain_members(root)
+            if id(member) in sites and sites[id(member)] not in roots
+        )
+
     def _support_refusal(self, site: NodeId, support: _LocalSupport) -> str | None:
         """Return why one locally supported pick cannot extend this prefix."""
         if (
@@ -495,6 +523,16 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             and any(self.schedule.nodes[other].tile.is_tiled for other in self._shared_roots if other in self.schedule.nodes)
         ):
             return "a second output-tiled root on a projection its outputs do not partition by root"
+        for root, member in self._chain_pairs:
+            if site not in (root, member):
+                continue
+            picks = {**self.schedule.nodes, site: support.node}
+            if root not in picks or member not in picks or picks[member].reduce == Reduce():
+                continue
+            if picks[root].tile.is_tiled:
+                return "a partitioned chain member under an output-tiled root, whose fill owns its cone"
+            if picks[root].reduce.coop_transposed:
+                return "a partitioned chain member under a transposed band, which binds its fold alone"
         return self._prefix_relation_refusal(
             support,
             work=self._work,

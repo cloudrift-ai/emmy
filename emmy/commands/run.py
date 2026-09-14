@@ -519,7 +519,11 @@ def _record_golden_latency(args, results: dict, golden_benches) -> None:
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.pipeline.search.working_golden import record_latency  # noqa: PLC0415
 
-    measured = [gb for gb in golden_benches or [] if gb.status == "ok" and gb.bench is not None]
+    # Only a row of the NAMED realization can carry that realization's latency. A child receipt
+    # of the same target is benched beside it and holds ONE kernel of the program, so neither its
+    # timing nor its schedule knobs describe the row this writes — narrowing by them selects
+    # nothing and the write is refused.
+    measured = [gb for gb in golden_benches or [] if gb.status == "ok" and gb.bench is not None and gb.sample.name == args.realization]
     if len(measured) > 1:
         logger.error("--record needs exactly one pinned row to attribute the timing to, measured %d", len(measured))
         sys.exit(2)

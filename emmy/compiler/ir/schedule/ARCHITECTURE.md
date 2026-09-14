@@ -102,19 +102,26 @@ nor filters them. `ir/schedule` may import other IR modules but never the pipeli
 knob/pin reads (folded into the row), pool identity, sampling, and the generic lazy-Fork adapter.
 
 A reduction domain is projected from node and kernel facts alone, so the shapes the kernel factorizer cannot bind are
-decided once, at the offer, and never dropped from a priced row later. The partition catalog is offered only on the
-reduce nodes the binder builds the kernel around — the roots it peels from the root projection (`ops.kernel_roots`: a
-tiled contraction's root, every one of them for a multi-output kernel, else the first operand); a reduce nested under
-a root or beside it lowers serially inside its reader, so it carries the serial fold only, as does an observed node
-and one whose reduce reads a boundary store's output sweep. The contraction per-cell tier reads that same
+decided once, at the offer, and never dropped from a priced row later. The partition catalog is offered on the reduce
+nodes the binder builds the kernel around — the roots it peels from the root projection (`ops.kernel_roots`: a tiled
+contraction's root, every one of them for a multi-output kernel, else the first operand) and the folds those roots'
+cones close over (`ops.chain_members`, which the binder's chain arm strides around one shared lane axis). A reduce
+NESTED under one of those lowers serially inside its reader, so it carries the serial fold only, as does an observed
+node and one whose reduce reads a boundary store's output sweep. Whether a fill takes a root's cone over is the
+SCHEDULE's answer and not the term's, so a contraction a tier could fold whole still offers its own row statistic the
+member catalog: the untiled tiers bind it as a fold beside the root, and reading the tier off the term left a
+cooperative reduce evaluating a 16384-wide statistic once per thread. The contraction per-cell tier reads that same
 projection, so a contraction inherits those readings rather than restating them.
 
-One binder fact is a relation between root sites rather than a node domain, so it composes in `extend` beside the
-worker and physical-axis agreements: the binder builds a kernel around several output-tiled roots only where the
-projection partitions its outputs by root (`ops.projection_regions` — each store reads exactly one root's region);
-where it does not, one tiled root is the kernel's root and every other reduce lowers serially, so the context refuses
-a second output-tiled root among those roots. The row that tiled both — a gate/up projection whose one output reads
-both channels — used to be offered, ranked first, and refused at materialize.
+Two binder facts are relations between sites rather than node domains, so they compose in `extend` beside the worker
+and physical-axis agreements. The binder builds a kernel around several output-tiled roots only where the projection
+partitions its outputs by root (`ops.projection_regions` — each store reads exactly one root's region); where it does
+not, one tiled root is the kernel's root and every other reduce lowers serially, so the context refuses a second
+output-tiled root among those roots. The row that tiled both — a gate/up projection whose one output reads both
+channels — used to be offered, ranked first, and refused at materialize. And a chain binds only in the binder's
+untiled arm, so the context refuses a partitioned chain member beside an output-tiled root: there the fill evaluates
+the cone per cell, statistic included, and the member's partition would realize as nothing — an unreproducible pin
+rather than a refusal.
 
 A CHUNKED carrier's seam is stricter than an ordinary consumer's. The ordinary need tolerates an untiled producer;
 this one is built on the fragment, since the chunk's score IS the producer's tile — so the producer must be

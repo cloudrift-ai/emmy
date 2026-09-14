@@ -3,6 +3,7 @@
 import argparse
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 import pytest
 
@@ -262,6 +263,27 @@ def test_resolve_golden_arg_prefers_the_document_the_caller_loaded(monkeypatch, 
     with pytest.raises(SystemExit) as excinfo:
         compile_mod.resolve_golden_arg(args)
     assert excinfo.value.code == 2
+
+
+def test_record_latency_ignores_a_child_receipt_of_the_same_target():
+    """A recorded route's child receipts are rows of the same target, so ``--record`` benches them
+    beside the realization it was asked for. Their timing is one kernel of the program and their
+    knobs are that kernel's schedule, so attributing the realization's latency to them stores the
+    wrong number under knobs that select no row — the write is then refused and the measurement
+    lost. Only a row named for the realization itself can carry it."""
+    seen = {}
+    receipt = SimpleNamespace(
+        status="ok",
+        bench=object(),
+        sample=SimpleNamespace(name="linear.layer0.abcdef123456", knobs={"WORK": "w1x1"}, pins={"FAST_MATH": True}),
+    )
+    args = SimpleNamespace(golden="working.yaml", realization="linear.layer0")
+    with mock.patch.object(run_mod, "_bench_total_us", side_effect=AssertionError("a receipt's timing is not the program's")):
+        with mock.patch("emmy.compiler.pipeline.search.working_golden.record_latency", lambda *a, **kw: seen.update(kw)):
+            run_mod._record_golden_latency(args, {"Emmy": 12.5, "Eager PyTorch": 30.0}, [receipt])
+
+    assert seen["emmy_us"] == 12.5
+    assert seen["knobs"] is None and seen["pins"] is None
 
 
 def test_record_greedy_is_a_golden_bench_flag(run_cli):
