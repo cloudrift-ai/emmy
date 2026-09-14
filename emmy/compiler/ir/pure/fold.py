@@ -144,6 +144,37 @@ class ReductionView:
         return self.ops is None
 
 
+#: The name a matcher spells both sides' bound axis as, so an operand that CAPTURES it compares
+#: alpha-invariantly. Reserved: no kernel axis is spelled this way.
+_MATCH_AXIS = "_match_axis"
+
+
+def _rebind(term: Fold, name: str) -> Fold:
+    """``term`` with the axis it BINDS spelled ``name`` — in its lift and in every operand that
+    captures it.
+
+    Not :func:`_rewrite_kind` on the term: that applies σ hygienically, and a term's own axis is
+    precisely the binder it drops σ for. Here the binder is what we are renaming, so the rename is
+    applied at this node and σ handed to the subtree unmodified; an operand that rebinds the same
+    spelling drops it for its own subtree, which is the hygiene that still applies.
+    """
+    old = term.axis
+    sigma = Sigma({old: Var(name)})
+
+    def axis_fn(axis, old=old, name=name):
+        return replace(axis, name=name) if axis.name == old else axis
+
+    return replace(
+        term,
+        operands=tuple(_rewrite_kind(edge, lambda n: n, sigma, axis_fn) for edge in term.operands),
+        lift=Lambda(
+            params=(name, *term.lift.params[1:]),
+            body=Body(tuple(_rewrite(stmt, lambda n: n, sigma, axis_fn) for stmt in term.lift.body)),
+            results=term.lift.results,
+        ),
+    )
+
+
 @dataclass(frozen=True)
 class Fold:
     """The ONE reduce term — ``reduce(⊕) ∘ map(f)``, the typed successor of the annotated reduce
@@ -900,13 +931,29 @@ class Fold:
             )
             return fn, values
 
+        def alike(x: Fold, y: Fold) -> bool:
+            """Whether two operand terms are the same value, up to the axis each of them BINDS.
+
+            :meth:`canonical` abstracts a term's bound axis in its own lift and leaves it FREE
+            wherever an operand captures it — a lift that reads a coordinate without declaring it as
+            a param, which a ``cat``'s coord-predicated ``Select`` does. Two alpha-equal score cones
+            whose contractions were numbered ``a2`` and ``a3`` at lift time then compare unequal,
+            and the online-softmax recipe declines on every rotary attention, whose ``rotate_half``
+            is exactly that ``cat``. Spelling both axes as one reserved name before comparing is
+            what the matcher can do that :meth:`canonical` cannot: the correspondence between these
+            two terms is the question being asked, and a term alone does not know it.
+            """
+            if x.axis is None or y.axis is None or x.axis == y.axis:
+                return x.canonical() == y.canonical()
+            return _rebind(x, _MATCH_AXIS).canonical() == _rebind(y, _MATCH_AXIS).canonical()
+
         def same(a: tuple, b: tuple) -> bool:
             if a[0].canonical() != b[0].canonical() or len(a[1]) != len(b[1]):
                 return False
             for x, y in zip(a[1], b[1], strict=True):
                 if (x is None) != (y is None) or isinstance(x, tuple) != isinstance(y, tuple):
                     return False
-                if x is not None and (not same(x, y) if isinstance(x, tuple) else x.canonical() != y.canonical()):
+                if x is not None and (not same(x, y) if isinstance(x, tuple) else not alike(x, y)):
                     return False
             return True
 

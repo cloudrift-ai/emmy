@@ -146,17 +146,17 @@ def test_causal_sdpa_uses_the_same_twisted_rewrite() -> None:
     assert len(fold.init) == 3
 
 
-@pytest.mark.xfail(strict=True, reason="a Select in the score cone stops the recipe clicking; every rotary attention has one")
 def test_a_cat_in_the_query_cone_still_twists() -> None:
     """``rotate_half`` is a ``torch.cat``, so every rotary attention hands the score a query whose
-    cone carries a coord-predicated ``Select`` (a multi-source ``IndexMapOp`` lowers to one). The
-    recipe then declines and the two-pass form stands: three score contractions and two nested
-    reduces where one twisted fold carried all of it.
+    cone carries a coord-predicated ``Select`` — a multi-source ``IndexMapOp`` lowers to one, and
+    its predicate reads the enclosing contraction's axis without declaring it a lift param.
 
-    A computed query is otherwise fine — negation and a broadcast scale both twist — so the cat is
-    the whole trigger. It costs most where the chunk (flash) tier is unavailable, which is every
-    pre-Ampere card: there the twist is the only thing that makes a fused attention tractable, and
-    without it Qwen3.8-27B's full-attention layer does not finish inside the launch watchdog.
+    That capture is what the match has to see past: ``canonical`` abstracts a term's bound axis in
+    its own lift and leaves it FREE where an operand captures it, so two alpha-equal score cones
+    numbered ``a2`` and ``a3`` at lift time used to compare unequal and the recipe declined. The
+    two-pass form it left standing is three score contractions and two nested reduces where one
+    twisted fold carries all of it, which is what put a V100's full-attention layer past the launch
+    watchdog.
     """
     fold = _twisted(
         "F.scaled_dot_product_attention("
