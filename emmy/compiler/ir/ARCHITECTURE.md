@@ -574,25 +574,24 @@ canonicalized before validation:
   differ only by argument order land in the same canonical form.
   Runs last so the sort key is the post-rename canonical SSA / buffer
   names.
+- The final ordering pass canonicalizes integer coordinate expressions and chooses the least dependency- and
+  effect-valid statement order. This includes independent pure work, writes to distinct buffers, and updates to
+  distinct accumulators. Reads and writes of the same buffer and updates to the same accumulator retain their order.
 
 ### `ir/stmt/identity.py` — structural identity
 
-`Body.structural_key()` re-runs `normalize_body(self, hoist=False)` and then applies identity-only canonicalization.
-Executable normalization keeps external buffer names and the authored order of independent statements because graph
-wiring and effect order are live there. The identity-only step removes only choices that do not change the kernel:
+`Body.structural_key()` re-runs `normalize_body(self, hoist=False)`, assigns external arguments canonical names, and
+optionally collapses operations to their compute-unit cluster. Clear external argument names remain on executable
+bodies; these two transformations produce identity material only and must never be executed.
 
 - Each external buffer is assigned a role from its access and downstream-use contexts. Distinct roles fix buffer order;
   tied roles are permuted and the least complete structural form wins. Encounter order and argument spelling therefore
   cannot select the identity, while using one buffer twice remains distinct from using two buffers.
-- Every sibling statement is ordered by SSA dependencies and actual resource conflicts. Independent pure work, writes
-  to distinct buffers, and updates to distinct accumulators may move; reads and writes of the same buffer and updates to
-  the same accumulator retain their order. Repeated computation is not removed because it changes kernel work.
 - Name-free forward/use roles usually make the next dependency-valid statement or buffer unique. Remaining ties are
   searched exactly. Proven transposition symmetries are searched once, which keeps large sets of interchangeable
   arguments, producers, or axes from causing factorial work without assuming that an unresolved tie is a symmetry.
-- Identity-only expressions sort commutative operands, use one direction for dual comparisons, and rebuild affine
-  address expressions from their coefficient form. Executable expression order stays untouched.
-- The final canonical body applies the scope-aware SSA/axis rename and sorts commutative statement arguments.
+- Normalization reruns after assigning argument names, so any operation or axis order that depends on argument roles
+  reaches the same executable canonical form before rendering.
 
 The key is `digest(form(canonical_body))`, not the human `pretty()` rendering. The exact and compute-unit-clustered
 forms are cached on each immutable `Body`. Two bodies that differ only by SSA or axis names, argument spelling and

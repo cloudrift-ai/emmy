@@ -707,20 +707,20 @@ class Body(tuple[Stmt, ...]):
 def _compute_structural_key(body: Body, cluster: bool) -> str:
     """Compute one flavor of :meth:`Body.structural_key`.
 
-    The formula is fixed per flavor: ``normalize_body(body, hoist=False,
-    cluster_ops=cluster)`` followed by identity-only canonicalization and rendering through
+    The formula is fixed per flavor: ``normalize_body(body, hoist=False)`` followed by
+    identity-only canonicalization and rendering through
     :func:`~emmy.compiler.structural.form`. Structural, not the
     pretty text it used to join: ``pretty()`` is the human rendering, and
     a cosmetic change to how a statement prints must not re-key every
-    kernel that contains it. ``cluster_ops=True`` collapses semantically distinct ops to one
+    kernel that contains it. Clustered identity collapses semantically distinct ops to one
     cluster representative, so this path is only for structural identity, never executable IR.
     """
     from emmy.compiler.ir.stmt.identity import canonicalize_identity  # noqa: PLC0415
     from emmy.compiler.ir.stmt.normalize import normalize_body  # noqa: PLC0415
     from emmy.compiler.structural import digest, form  # noqa: PLC0415
 
-    normalized = normalize_body(body, hoist=False, cluster_ops=cluster)
-    normalized = canonicalize_identity(normalized)
+    normalized = normalize_body(body, hoist=False)
+    normalized = canonicalize_identity(normalized, cluster=cluster)
     return digest(form(normalized))
 
 
