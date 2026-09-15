@@ -85,6 +85,59 @@ changes. Evaluate independent attention libraries such as FlashInfer through nat
 A faster HTTP implementation alone is not an inference speedup. Measure CPU dispatch, transfer, and GPU execution
 costs separately before attributing a performance change to Rust.
 
+## Repository structure
+
+Keep the server in this repository as one Rust crate under `server/`. Do not introduce a separate repository
+or a multi-crate workspace initially. The intended layout is:
+
+```text
+server/
+├── Cargo.toml
+├── Cargo.lock
+├── ARCHITECTURE.md
+├── src/
+│   ├── main.rs              # Startup, configuration, shutdown
+│   ├── api.rs               # HTTP endpoints and streaming
+│   ├── protocol.rs          # Messages exchanged with Python worker
+│   ├── worker.rs            # Worker process, admission, cancellation
+│   └── runtime/             # Added in milestone 2
+│       ├── mod.rs
+│       ├── artifact.rs      # Load Emmy's exported execution plan
+│       ├── executor.rs      # Generation loop and GPU dispatch
+│       ├── cuda.rs          # CUDA bindings, streams, events, transfers
+│       ├── cache.rs         # KV-cache allocation and lifecycle
+│       └── text.rs          # Tokenization and incremental decoding
+└── tests/                   # Rust integration tests
+
+emmy/
+├── commands/
+│   └── serve.py             # Existing command; selects native or vLLM
+├── serving/
+│   ├── native/              # First-milestone Python integration
+│   │   ├── __init__.py
+│   │   ├── launch.py        # Locate and launch Rust executable
+│   │   ├── worker.py        # Socket handling and execution thread
+│   │   └── generation.py    # Cached generation using existing runner
+│   └── ...                  # Existing runners and vLLM integration
+└── compiler/
+    └── backend/
+        ├── plan.py          # Existing execution-plan definition
+        └── pack.py          # Extend existing artifact export
+
+tests/
+└── serving/
+    └── native/              # Python tests and cross-language tests
+```
+
+`server/` owns the API and eventually runtime dispatch. Python serving code temporarily owns model execution.
+The existing compiler owns execution plans and artifact export; extend those mechanisms instead of duplicating
+them in the server. Contain unsafe CUDA calls and GPU memory/synchronization ownership in the CUDA module.
+
+Create the runtime modules only when milestone 2 starts. Once Rust replaces Python execution, delete the Python
+worker and generation adapter, the Rust worker-process/socket implementation, and their obsolete protocol tests.
+Move admission and cancellation to the in-process runtime at that point. Keep the Python launcher and existing
+shared runners used by vLLM. Rust unit tests live beside their modules; integration tests live under `server/tests/`.
+
 ## CPU/GPU transfers and synchronization
 
 Use explicit device allocations and copies. Do not introduce unified-memory migration, CPU weight offload, or
