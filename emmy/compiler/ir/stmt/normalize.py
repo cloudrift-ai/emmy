@@ -69,7 +69,11 @@ def _normalize_body(stmts: Body, *, hoist: bool) -> Body:
         stmts = hoist_loop_invariants(stmts)
     stmts = simplify_body(stmts)
     stmts = dedup_loads(stmts)
-    return _canonicalize_order(stmts)
+    # Scope-aware renaming distinguishes unrelated binders that happen to share a spelling. Restore
+    # the deliberate relation between sibling reductions only after that rename: two loops that
+    # walk the same source dimension are one schedulable reduction axis even when they cannot merge
+    # because the later loop reads the earlier loop's completed accumulator.
+    return unify_sibling_reduce_axes(_canonicalize_order(stmts))
 
 
 # ---------------------------------------------------------------------------
@@ -230,15 +234,19 @@ def canonicalize_free_axis_order(stmts: Body) -> Body:
                 name = loop.axis.source_axis.name
                 source_counts[name] = source_counts.get(name, 0) + 1
 
-        roles: dict[str, str] = {}
-        for focus in chain:
+        roles: dict[str, tuple[tuple[int, int], str]] = {}
+        for focus, depth in zip(chain, depths, strict=True):
             mapping = {loop.axis.name: "__self__" if loop is focus else "__other__" for loop in chain}
             focused = rename_axes(Body(terminal), mapping)
             source = focus.axis.source_axis
             source_arity = 1 if source is None else source_counts[source.name]
-            roles[focus.axis.name] = repr((axis_metadata(focus), source_arity, form(focused)))
+            # A coordinate used once by an output has a fixed row-major position. An unresolved
+            # coordinate is shared, broadcast, or represented by several output dimensions; keep
+            # it outside the known output suffix, then use its structural role to break ties.
+            storage_order = (0, 0) if depth is None else (1, -depth)
+            roles[focus.axis.name] = storage_order, repr((axis_metadata(focus), source_arity, form(focused)))
 
-        groups: dict[str, list[Loop]] = {}
+        groups: dict[tuple[tuple[int, int], str], list[Loop]] = {}
         for loop in chain:
             groups.setdefault(roles[loop.axis.name], []).append(loop)
 
@@ -1504,7 +1512,13 @@ def _canonicalize_sibling_order_variants(stmts: list[Stmt]) -> Iterator[tuple[St
         token_stmt = stmt.with_bodies(tuple(Body() for _ in children)) if shallow and children else stmt
         renamed = sort_commutative_args(Body((token_stmt.rename(abstract),)))[0]
         rendered = form(renamed)
-        return repr((not children, rendered)) if shallow else digest(rendered)
+        if shallow:
+            # Keep pure/reduction blocks together before leaf epilogues, but leave output blocks
+            # in the trailing effect run Tile IR extracts. This avoids widening scheduling while
+            # still giving every valid output body a representable canonical order.
+            category = 2 if children and stmt.has_side_effects else int(not children)
+            return repr((category, rendered))
+        return digest(rendered)
 
     # Most ready statements already differ by their own operation, buffer, index, or wrapper.
     # Compare that cheap local shape first; build the downstream-sensitive pure graph only for a
