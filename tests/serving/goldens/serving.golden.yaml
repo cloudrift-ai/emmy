@@ -8779,27 +8779,39 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: g028.k_linear_mean_reduce_d0b149.ef80b201a4f7.2fe99612f72e
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs: {}
-    identity: 2fe99612f72ec3481e4297670ee82ce202c6fd52ddb4502b3b724ea255667795
-  - name: g028.k_linear_mean_reduce_d0b149.ef80b201a4f7.55dc8c800ab8
+    kernel_set:
+    - g028.k_linear_mean_reduce_d0b149.ef80b201a4f7.c2f492780e7d
+  - name: g028.k_linear_mean_reduce_d0b149.ef80b201a4f7.c2f492780e7d
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      TILE@map.1/inner: ''
-      TILE@map.2/inner: ''
-      REDUCE@map.1/inner: ''
-      REDUCE@map.1/inner.1/map.3/map.1/reduce: ''
-      REDUCE@map.2/inner: ''
-      STAGE@map.1/inner: ''
-      STAGE@map.2/inner: ''
-      WORK: ''
+      PLACE@map.1/inner: cut
+    identity: c2f492780e7d85ab0f1be809cbb306d039bb945a38aa99ef8a2bd270c2fe3e9a
+  - name: g028.k_linear_mean_reduce_d0b149.ef80b201a4f7.629ccdcd7238
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@inner: coop-t
+      REDUCE@inner.1/map.3/map.1/reduce: ''
+      WORK: t32
+      TILE: ''
+      STAGE: ''
       RASTER: ''
-    identity: 55dc8c800ab8dc5a96a3e89b279d3724a122d72aa9c02d57b1fe597c7fd3515b
+    identity: 629ccdcd72383d334bcb64b6d52a43563fb8b7223d1ba3a6333861aee2af11f8
+  - name: g028.k_linear_mean_reduce_d0b149.ef80b201a4f7.dbdee4663a7c
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@map.1/inner: ''
+      REDUCE@map.1/inner.1/map.3/map.1/reduce: coop
+      WORK: t64
+      TILE: ''
+      STAGE: ''
+      RASTER: ''
+    identity: dbdee4663a7c6aeefc741bc286491c18d3330da334e61d75cfb03d50316105bf
 - program: 27
   target:
     loop: 27
@@ -8808,27 +8820,39 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: g029.k_linear_mean_reduce_b4de4b.716c52c3a73f.44899ed2f906
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs: {}
-    identity: 44899ed2f90690f3315f885cfea9c3a4b60bf0d2e3f3d0623b0402251371b1b6
-  - name: g029.k_linear_mean_reduce_b4de4b.716c52c3a73f.dae9e517169d
+    kernel_set:
+    - g029.k_linear_mean_reduce_b4de4b.716c52c3a73f.0c573420a46b
+  - name: g029.k_linear_mean_reduce_b4de4b.716c52c3a73f.0c573420a46b
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      TILE@map.1/inner: ''
-      TILE@map.2/inner: ''
-      REDUCE@map.1/inner: ''
-      REDUCE@map.1/inner.1/map.3/map.1/reduce: ''
-      REDUCE@map.2/inner: ''
-      STAGE@map.1/inner: ''
-      STAGE@map.2/inner: ''
-      WORK: ''
+      PLACE@map.1/inner: cut
+    identity: 0c573420a46b2579cda183836f87e83681b0fcf56e411010979371d310747203
+  - name: g029.k_linear_mean_reduce_b4de4b.716c52c3a73f.6dcbc3e8f953
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@inner: ''
+      REDUCE@inner.1/map.3/map.1/reduce: ''
+      WORK: t32x8
+      TILE: f4x14
+      STAGE: ''
       RASTER: ''
-    identity: dae9e517169d29722571b509d51184736b4519f9fdaa4e71a5d569ea09882827
+    identity: 6dcbc3e8f95327263386ed84928277a560272b877ae2915bff8ecfbdfcdd0f32
+  - name: g029.k_linear_mean_reduce_b4de4b.716c52c3a73f.94f41583db82
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@map.1/inner: ''
+      REDUCE@map.1/inner.1/map.3/map.1/reduce: coop
+      WORK: t32
+      TILE: ''
+      STAGE: ''
+      RASTER: ''
+    identity: 94f41583db82b999200dbfbb8a6ebff3282b075c70c4b8f4cac7b7233fa61760
 - program: 28
   target:
     loop: 28
@@ -8837,27 +8861,47 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: g030.k_linear_mean_reduce_0de810.8ac56ba96a0a.5f9a2cd2b27e
+    kernel_set:
+    - g030.k_linear_mean_reduce_0de810.8ac56ba96a0a.dcd432da57b9
+    - g030.k_linear_mean_reduce_0de810.8ac56ba96a0a.58b0e2b587c4
+  - name: g030.k_linear_mean_reduce_0de810.8ac56ba96a0a.dcd432da57b9
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      TILE@map.1/inner: ''
-      TILE@map.2/inner: ''
-      REDUCE@map.1/inner: ''
-      REDUCE@map.1/inner.1/map.3/map.1/reduce: ''
-      REDUCE@map.2/inner: ''
-      STAGE@map.1/inner: ''
-      STAGE@map.2/inner: ''
-      WORK: ''
-      RASTER: ''
-    identity: 5f9a2cd2b27e856467926493f86ef29c319f11c1f2014364398a12624eafd963
-  - name: g030.k_linear_mean_reduce_0de810.8ac56ba96a0a.726fc8ee07b4
+      PLACE@map.1/inner: cut
+    identity: dcd432da57b94ed0a8ba3ebdb0737348da1d5bf77b3de3d12e0d838a13ce8be1
+  - name: g030.k_linear_mean_reduce_0de810.8ac56ba96a0a.58b0e2b587c4
     bindings: {}
     pins:
       FAST_MATH: false
-    knobs: {}
-    identity: 726fc8ee07b49b13adfc1a3c73a4d1e1690a993f7f0606fae360c50933eabaf3
+    knobs:
+      REDUCE@inner: g8a
+    identity: 58b0e2b587c49a90f2dcafaa2143a21e523a572ec7228cd0ff2d6e2b15d1f067
+  - name: g030.k_linear_mean_reduce_0de810.8ac56ba96a0a.a0b55b9c3ffe
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@inner: ''
+      REDUCE@inner.1/map.3/map.1/reduce: ''
+      WORK: t16x16
+      TILE: f26x26
+      STAGE: ''
+      RASTER: ''
+    identity: a0b55b9c3ffe6dbd0e203ce58e7ba7fd660f17f12ffe92ac72c6655535b61c36
+  - name: g030.k_linear_mean_reduce_0de810.8ac56ba96a0a.630a2cd2927b
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@map.1/inner: ''
+      REDUCE@map.1/inner.1/map.3/map.1/reduce: coop
+      WORK: t64
+      TILE: ''
+      STAGE: ''
+      RASTER: ''
+    identity: 630a2cd2927b00bf7d02d507dd0f1032c14308639f6250d2db5286210f99bcba
 - program: 29
   target:
     loop: 29
@@ -8866,27 +8910,39 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: g031.k_linear_mean_reduce_43d97c.e3741277d870.d623d406ed32
+    kernel_set:
+    - g031.k_linear_mean_reduce_43d97c.e3741277d870.00cd1b61e38b
+  - name: g031.k_linear_mean_reduce_43d97c.e3741277d870.00cd1b61e38b
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      TILE@map.1/inner: ''
-      TILE@map.2/inner: ''
-      REDUCE@map.1/inner: ''
-      REDUCE@map.1/inner.1/map.3/map.1/reduce: ''
-      REDUCE@map.2/inner: ''
-      STAGE@map.1/inner: ''
-      STAGE@map.2/inner: ''
-      WORK: ''
-      RASTER: ''
-    identity: d623d406ed32702c1de66828e4ce8327d1b8ff889c32d5ea4e169821da37ba8e
-  - name: g031.k_linear_mean_reduce_43d97c.e3741277d870.e5cf5672a21e
+      PLACE@map.1/inner: cut
+    identity: 00cd1b61e38b6a058fb95cba1b0db91b509b6aa9939336845d54d52fedf46f4a
+  - name: g031.k_linear_mean_reduce_43d97c.e3741277d870.4f3fc6dcda64
     bindings: {}
     pins:
       FAST_MATH: false
-    knobs: {}
-    identity: e5cf5672a21e8e92499c5526f170ac939d2c8a2a1dc265c1e62bb148f0f2cd2c
+    knobs:
+      REDUCE@inner: ''
+      REDUCE@inner.1/map.3/map.1/reduce: ''
+      WORK: t32x16
+      TILE: f4x10
+      STAGE: ''
+      RASTER: ''
+    identity: 4f3fc6dcda646a7029ee6e02ec20acf49a5e09b61428f4957958b20ddc9fc82e
+  - name: g031.k_linear_mean_reduce_43d97c.e3741277d870.b826b03dd6aa
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@map.1/inner: ''
+      REDUCE@map.1/inner.1/map.3/map.1/reduce: coop
+      WORK: t64
+      TILE: ''
+      STAGE: ''
+      RASTER: ''
+    identity: b826b03dd6aa1accd25c302b92a0dde495a8fd7f87ea88618a72f68d59538cb1
 - program: 30
   target:
     loop: 30

@@ -537,6 +537,21 @@ def test_evidence_rows_key_each_row_by_the_kernel_it_decides() -> None:
     ]
 
 
+def test_evidence_rows_replay_an_identityless_kernel_set_lead() -> None:
+    """A seed with no row of its own still contributes the routes listed by ``kernel_set``."""
+    from emmy.compiler.pipeline.search.golden import evidence_rows, records_override
+
+    fields = {**_receipt_fields(), "measurements": {"emmy_us": 1.0, "reference_us": 2.0, "reference_backend": "torch"}}
+    route = {"PLACE@map.1/twist.1/inner": "cut"}
+    routing = GoldenRecord(name="sdpa.route", knobs=route, identity="0" * 64, **{k: v for k, v in fields.items() if k != "name"})
+    lead = GoldenRecord(name="sdpa.lead", knobs={}, kernel_set=(routing.name,), **{k: v for k, v in fields.items() if k != "name"})
+    parent_signature = frozenset((key, str(value)) for key, value in lead.structural_features.items())
+
+    with records_override([lead, routing]):
+        got = evidence_rows("", (12, 0))
+    assert (parent_signature, route, 1.0, lead.name) in got
+
+
 def test_multi_output_kernel_record_derives_the_identity_its_live_fork_carries() -> None:
     """A record whose one target kernel writes SEVERAL output buffers must derive the identity its
     live fork carries. Every evidence row a golden contributes is keyed by that identity, so a

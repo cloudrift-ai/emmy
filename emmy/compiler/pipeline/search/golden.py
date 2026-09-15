@@ -1763,7 +1763,7 @@ def evidence_rows(gpu_name: str, compute_cap: tuple[int, int]) -> list[tuple[fro
             continue
         row = record.schedule_row
         split = any(family_of(k) == "REDUCE" and (plan := parse_reduce(v)) is not None and plan.needs_split for k, v in row.items())
-        if record.identity is None and not record.route and not split:
+        if record.identity is None and not record.route and not split and not record.kernel_set:
             try:
                 signature = frozenset((key, str(value)) for key, value in record.structural_features.items())
             except Exception:  # noqa: BLE001 — a stale record is no evidence, not an error
