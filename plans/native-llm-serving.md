@@ -146,6 +146,59 @@ changes. Evaluate independent attention libraries such as FlashInfer through nat
 A faster HTTP implementation alone is not an inference speedup. Measure CPU dispatch, transfer, and GPU execution
 costs separately before attributing a performance change to Rust.
 
+## Dependencies and frameworks
+
+### Milestone 1: Rust API and Python execution
+
+| Dependency | Purpose |
+| --- | --- |
+| Axum | HTTP routes and server-sent events for streaming responses. |
+| Tokio | Async networking, worker supervision, channels, and shutdown. |
+| Serde / serde_json | API serialization and JSON worker messages. |
+| tracing / tracing-subscriber | Structured logs and timing. |
+| Clap | Command-line arguments for the Rust executable. |
+| Existing Emmy Python/GPU dependencies | PyTorch, Transformers, CuPy, NumPy, Safetensors, and compiler tooling. |
+
+Use Unix-domain sockets for the local worker connection; no gRPC framework is needed. FastAPI and Uvicorn are
+not part of this design. vLLM remains optional for comparisons and the existing benchmark client.
+
+### Milestone 2: Rust GPU runtime
+
+The following are proposed dependencies, to be qualified against the complete exported model step before adoption.
+Pin compatible versions in Cargo's lockfile when implementation begins; do not assume the newest releases form a
+tested CUDA/toolchain combination.
+
+| Dependency | Purpose |
+| --- | --- |
+| cudarc | CUDA allocation, transfers, streams, events, and kernel launches from Rust. |
+| tokenizers | Load tokenizer files and encode/decode text in Rust. |
+| MiniJinja | Render model chat templates, with parity tests against Transformers. |
+| Safetensors Rust crate | Read weights if the exported artifact retains Safetensors storage. |
+| Selected CUDA libraries | Operations not yet provided by Emmy kernels, such as matrix multiplication or attention. |
+
+Prefer cudarc's existing CUDA Driver and cuBLAS bindings; use narrow native bindings for functionality it does not
+cover. Validate buffer lifetimes and graph support against the selected version. Choose additional CUDA libraries
+only for operations the qualified model actually needs. FlashInfer is deferred until its attention/cache support
+is needed. Do not introduce Candle or Burn as a second model framework: the runtime executes Emmy's plans.
+
+The tokenizer and template engine reuse existing implementations, but neither alone guarantees parity with
+Transformers' complete chat preprocessing. Test the qualified Qwen3 template, special tokens, thinking setting,
+and incremental decoding before removing the Python text path.
+
+### Build, deployment, and development
+
+- Use Rust/Cargo to build the server. End users receive the platform-specific executable; server startup does
+  not require Cargo or a Rust compiler.
+- Require a compatible NVIDIA driver on the serving machine. Require the CUDA toolkit/NVCC where Emmy compiles
+  kernels; a fully precompiled deployment should not need NVCC. Include any runtime CUDA libraries actually used.
+- Retain Python/GPU execution dependencies in milestone 1. In milestone 2, Python remains necessary for Emmy's
+  compiler and launcher, but the Rust server must execute a prepared artifact without a Python worker.
+- Use Rustfmt, Clippy, and Cargo unit/integration tests alongside the existing Python development checks.
+
+Reference documentation: [Axum streaming](https://docs.rs/axum/latest/axum/response/sse/),
+[cudarc](https://docs.rs/cudarc/latest/cudarc/), [Tokenizers](https://docs.rs/tokenizers/latest/tokenizers/),
+and [MiniJinja](https://docs.rs/crate/minijinja/latest).
+
 ## Repository structure
 
 Keep the server in this repository as one Rust crate under `server/`. Do not introduce a separate repository
