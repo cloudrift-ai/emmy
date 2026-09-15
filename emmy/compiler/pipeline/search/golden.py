@@ -1329,8 +1329,26 @@ def _replay(
         if identity is not None:
             kernels.add(identity)
         if not exhaustive:
+            # A receipt can name the TileOp produced by its schedule row rather than the op that
+            # owns the schedule fork. Decode that one row without enumerating the pool, but select
+            # it only after materializing the leaf and refreshing its graph I/O proves that it
+            # produces the receipt's deploy identity; another unowned kernel that accepts the
+            # same keys must retain the lead's decision.
             asked = piece if decider is record else piece_row(decider.schedule_row)
-            hit = leaf_for(fp.options, asked) if asked else None
+            exact = exact_schedule_leaf(fp.options, piece, frozenset(piece)) if owner is None and piece else None
+            if exact is not None:
+                _declared, option = exact
+                materialized = option.expand() if option is not None else ()
+                candidate = materialized[0].with_io(fp.match.graph, fp.match.root) if len(materialized) == 1 else None
+                hit = (
+                    (option, leaf_knobs(option))
+                    if candidate is not None and _identity_of(candidate) == record.identity
+                    else None
+                )
+            else:
+                hit = None
+            if hit is None:
+                hit = leaf_for(fp.options, asked) if asked else None
             if hit is not None and identity is not None and decider is record:
                 holders.add(identity)
             return hit[0] if hit is not None else next(iter_leaves(fp.options))

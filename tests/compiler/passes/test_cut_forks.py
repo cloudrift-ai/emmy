@@ -486,6 +486,49 @@ def test_child_identity_receipts_decode_per_child_and_join_by_stored_identity() 
     assert reason is not None and "equals none" in reason
 
 
+def test_post_schedule_receipt_does_not_steer_an_unowned_peer(monkeypatch) -> None:
+    """A receipt identity that appears after scheduling selects only that materialized kernel.
+
+    Another cut child accepts the same schedule row, but must retain the lead's distinct row and
+    must not become a holder of the receipt's evidence.
+    """
+    from emmy.compiler.pipeline.knob import evidence_row_vouches
+
+    fields = _receipt_fields()
+    parent = GoldenRecord(knobs={}, **fields)
+    children = {identity: rows for identity, rows in _replay(parent, exhaustive=True).rows.items() if identity is not None}
+    (target_identity, target_rows), (peer_identity, peer_rows) = sorted(children.items(), key=lambda item: len(item[1]), reverse=True)
+    target_row = next(iter(target_rows & peer_rows), None)
+    peer_row = next(iter(peer_rows - {target_row}), None)
+    assert target_row is not None and peer_row is not None, "the two children need one shared and one distinct schedule row"
+
+    post_identity = "f" * 64
+    original_identity_key = TileOp.identity_key
+
+    def identity_after_schedule(self, *, structural=True, with_io=False, with_knobs=False):
+        identity = original_identity_key(self, structural=structural, with_io=with_io, with_knobs=with_knobs)
+        if self.schedule is not None and with_io and not with_knobs and identity == target_identity:
+            return post_identity
+        return identity
+
+    monkeypatch.setattr(TileOp, "identity_key", identity_after_schedule)
+    lead = GoldenRecord(name="sdpa.lead", knobs=dict(peer_row), **{key: value for key, value in fields.items() if key != "name"})
+    receipt = GoldenRecord(
+        name="sdpa.receipt",
+        knobs=dict(target_row),
+        identity=post_identity,
+        **{key: value for key, value in fields.items() if key != "name"},
+    )
+
+    replay = _replay(receipt, siblings=(lead,), lead=lead)
+
+    assert replay.holders == {post_identity}
+    assert evidence_row_vouches(replay.realized[post_identity], dict(target_row))
+    assert peer_identity not in replay.holders
+    assert evidence_row_vouches(replay.realized[peer_identity], dict(peer_row))
+    assert not evidence_row_vouches(replay.realized[peer_identity], dict(target_row))
+
+
 def test_child_identity_receipt_selects_one_kernel_from_multi_kernel_loop_target() -> None:
     """A stored child identity is the selector when a regenerated target now lowers to several
     kernels; strict decoding must consult that identity's rows before requiring a one-kernel lift."""
