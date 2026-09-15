@@ -69,11 +69,16 @@ def _normalize_body(stmts: Body, *, hoist: bool) -> Body:
         stmts = hoist_loop_invariants(stmts)
     stmts = simplify_body(stmts)
     stmts = dedup_loads(stmts)
-    # Scope-aware renaming distinguishes unrelated binders that happen to share a spelling. Restore
-    # the deliberate relation between sibling reductions only after that rename: two loops that
-    # walk the same source dimension are one schedulable reduction axis even when they cannot merge
-    # because the later loop reads the earlier loop's completed accumulator.
-    return unify_sibling_reduce_axes(_canonicalize_order(stmts))
+    # Hoisting, simplification, and a parent merge can expose sibling reductions after the first
+    # merge. Close that dependency here: unifying their axes may enable a merge, which may then
+    # expose duplicate loads and require one new canonical order. Every changed round removes a
+    # loop or a load, so this reaches a fixed point without a fixed iteration bound.
+    stmts = unify_sibling_reduce_axes(_canonicalize_order(stmts))
+    while True:
+        reduced = dedup_loads(merge_sibling_reduce_loops(stmts))
+        if reduced == stmts:
+            return stmts
+        stmts = unify_sibling_reduce_axes(_canonicalize_order(reduced))
 
 
 # ---------------------------------------------------------------------------
@@ -164,23 +169,19 @@ def _recurse_canonicalize(s: Stmt) -> Stmt:
 
 
 def _output_storage_depth(stmts: Body, axis: str) -> int | None:
-    """The row-major output-coordinate depth of one unit-affine free axis."""
+    """The innermost row-major output-coordinate depth carrying one free axis."""
     depths = []
     for write in stmts.iter_of_type(Write):
         positions = []
         for position, expr in enumerate(write.index):
+            if axis not in expr.free_vars():
+                continue
             form = affine_form(expr, {axis})
-            if form is None:
+            if form is not None and form[1].get(axis, 0) != 1:
                 return None
-            coefficient = form[1].get(axis, 0)
-            if coefficient:
-                if coefficient != 1:
-                    return None
-                positions.append(position)
-        if len(positions) > 1:
-            return None
+            positions.append(position)
         if positions:
-            depths.append(len(write.index) - positions[0] - 1)
+            depths.append(len(write.index) - positions[-1] - 1)
     return depths[0] if depths and len(set(depths)) == 1 else None
 
 
@@ -240,9 +241,9 @@ def canonicalize_free_axis_order(stmts: Body) -> Body:
             focused = rename_axes(Body(terminal), mapping)
             source = focus.axis.source_axis
             source_arity = 1 if source is None else source_counts[source.name]
-            # A coordinate used once by an output has a fixed row-major position. An unresolved
-            # coordinate is shared, broadcast, or represented by several output dimensions; keep
-            # it outside the known output suffix, then use its structural role to break ties.
+            # A coordinate carried by a consistent output position has a fixed row-major role. An
+            # unresolved coordinate is absent, inconsistently placed, or scaled; keep it outside
+            # the known output suffix, then use its structural role to break ties.
             storage_order = (0, 0) if depth is None else (1, -depth)
             roles[focus.axis.name] = storage_order, repr((axis_metadata(focus), source_arity, form(focused)))
 

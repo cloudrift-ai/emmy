@@ -81,12 +81,11 @@ def test_split_dim_store_does_not_share_an_identity() -> None:
     """A buffer's SHAPE and the store's index are enumeration inputs, so both identities carry them.
 
     The same iteration space can reach its output flat (``128x128``) or through a re-fused split
-    axis spelled as a dim pair (``4x32x128``, index ``a0/32, a0%32, a1``). The fragment store can
-    address the pair only under a divisibility rule, so the split form loses the warp tier — 50538
-    candidates against 10284. The term carries neither fact: ``TileOp.structural_key`` excludes the
-    stores by design and the algebra digest canonicalizes sizes away. The complete Loop-body
-    identity and the schedule-space stamp must both carry the store boundary so a golden measured
-    on the flat kernel is never handed to a kernel that cannot realize its row.
+    axis spelled as a dim pair (``4x32x128``, index ``a0/32, a0%32, a1``). Free-axis normalization
+    now re-fuses that pair, so both forms can reach the warp tier. The term carries neither output
+    fact: ``TileOp.structural_key`` excludes the stores by design and the algebra digest canonicalizes
+    sizes away. The complete Loop-body identity and the schedule-space stamp must still carry the
+    store boundary so a golden measured on one output layout is never handed to the other.
     """
     from emmy.commands.trace import graph_from_code
     from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op
@@ -109,7 +108,7 @@ def test_split_dim_store_does_not_share_an_identity() -> None:
     def total(tile) -> int:
         return sum(1 for _ in iter_leaves(classic_forks(tile, "t", tile.knobs, ctx)))
 
-    assert total(flat) != total(split), "a split-pair store must not offer the same tiers"
+    assert total(flat) == total(split), "re-fusing the split pair must recover the contraction schedule space"
     assert flat.identity_key(with_io=True) != split.identity_key(with_io=True), "so a golden must not join across them"
     assert classic_forks(flat, "t", flat.knobs, ctx)[0].pool_id != classic_forks(split, "t", split.knobs, ctx)[0].pool_id, (
         "and they must not share a schedule-space stamp"
