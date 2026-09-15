@@ -1366,18 +1366,16 @@ def _canonicalize_sibling_order_variants(stmts: list[Stmt]) -> Iterator[tuple[St
         if tokens is not None:
             return tokens
         pure_tokens = _pure_tokens(stmts)
-        members = tuple((stmt, *(member for child in stmt.nested() for member in child.iter())) for stmt in stmts)
-        all_names = {
-            name for subtree in members for member in subtree for name in (*member.defines(), *member.deps(), *member.binds_axes())
-        }
-        abstract = {name: "__name__" for name in all_names}
-        tokens = {
-            id(stmt): pure_tokens.get(
-                id(stmt),
-                repr(form(sort_commutative_args(Body((stmt.rename(abstract),)))[0])),
-            )
-            for stmt in stmts
-        }
+        body = Body(stmts)
+        abstract = {name: "__name__" for name in body.ssa_defs | body.ssa_uses | body.axis_names}
+
+        def token(stmt: Stmt) -> str:
+            if id(stmt) in pure_tokens:
+                return pure_tokens[id(stmt)]
+            renamed = sort_commutative_args(Body((stmt.rename(abstract),)))[0]
+            return repr(form(renamed))
+
+        tokens = {id(stmt): token(stmt) for stmt in stmts}
         return tokens
 
     def interchangeable(left: int, right: int) -> bool:

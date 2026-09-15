@@ -45,7 +45,7 @@ def canonicalize_identity(stmts: Body, *, cluster: bool = False) -> Body:
     # A buffer's occurrence contexts give it an isomorphism-invariant initial role without merging
     # the other buffers. Merging them to one placeholder would invent memory dependencies while the
     # sibling-order pass runs (an input and an unrelated output would suddenly alias).
-    names = {name for stmt in stmts.iter() for name in (*stmt.defines(), *stmt.deps(), *stmt.binds_axes())}
+    names = stmts.ssa_defs | stmts.ssa_uses | stmts.axis_names
     abstract_names = {name: "__name__" for name in names}
     roles: dict[str, str] = {}
     for focus in buffers:
@@ -98,19 +98,10 @@ def canonicalize_identity(stmts: Body, *, cluster: bool = False) -> Body:
 
 
 def _canonicalize_op_clusters(stmts: Body) -> Body:
-    """Replace every ``ElementwiseImpl`` field on every stmt with its
-    cluster representative from :func:`cluster_representative`.
+    """Replace operation fields with their compute-unit cluster representative.
 
-    The pass walks ``stmts`` with :meth:`Body.map` and uses
-    ``dataclasses.fields`` to locate any field currently holding an
-    ``ElementwiseImpl`` (covers ``Init.op`` / ``Assign.op`` /
-    ``Accum.op`` without coupling this module to those IR dialects). A
-    fold algebra and the kernel-IR cross-thread combine
-    stmts (``WarpShuffle`` / ``TreeHalve``) carry their op inside an
-    ``Assign`` program (``merge`` / ``combine_states``), already
-    canonicalized at the carrier before lowering. The replacement is
-    destructive — the resulting body is only safe to consume from
-    :attr:`Body.structural_key()`.
+    Generic dataclass field inspection covers every operation-bearing statement without coupling
+    identity to individual IR dialects. The result is digest material and must not be executed.
     """
     from dataclasses import fields, is_dataclass  # noqa: PLC0415
 

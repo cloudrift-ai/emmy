@@ -6,7 +6,7 @@ SSA / axis names, dependency-valid order, equivalent expressions, or external-bu
 
 from __future__ import annotations
 
-from itertools import permutations
+from itertools import permutations, product
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F32
@@ -598,6 +598,51 @@ def test_structural_key_equal_when_sibling_scopes_reuse_local_names() -> None:
         )
         == 1
     )
+
+
+def test_normalize_body_canonicalizes_nested_scope_orders_independently() -> None:
+    """Two ambiguous child scopes do not multiply their order choices or leak alpha names."""
+
+    def make(axis: str, *, reverse_scopes: bool, reverse_left: bool, reverse_right: bool) -> Body:
+        def child(
+            stem: str,
+            source: str,
+            outputs: tuple[str, str],
+            operations: tuple[str, str],
+            reverse: bool,
+        ) -> Cond:
+            value = f"{stem}_input"
+            chains = tuple(
+                (
+                    Assign(name=f"{stem}_value_{index}", op=operation, args=(value,)),
+                    Write(output=output, index=(Var(axis),), value=f"{stem}_value_{index}"),
+                )
+                for index, (operation, output) in enumerate(zip(operations, outputs, strict=True))
+            )
+            ordered = reversed(chains) if reverse else chains
+            return Cond(
+                cond=BinaryExpr("<", Var(axis), Literal(4, "int")),
+                body=(Load(name=value, input=source, index=(Var(axis),)), *(stmt for chain in ordered for stmt in chain)),
+            )
+
+        scopes = (
+            child("left", "X", ("A0", "A1"), ("abs", "negative"), reverse_left),
+            child("right", "Y", ("B0", "B1"), ("exp", "reciprocal"), reverse_right),
+        )
+        return Body((Loop(axis=Axis(axis, 4), body=tuple(reversed(scopes)) if reverse_scopes else scopes),))
+
+    normalized = {
+        normalize_body(
+            make(
+                "renamed_axis" if renamed else "element",
+                reverse_scopes=reverse_scopes,
+                reverse_left=reverse_left,
+                reverse_right=reverse_right,
+            )
+        )
+        for renamed, reverse_scopes, reverse_left, reverse_right in product((False, True), repeat=4)
+    }
+    assert len(normalized) == 1
 
 
 def test_structural_key_equal_when_a_copy_alias_precedes_a_sibling_scope() -> None:
