@@ -73,13 +73,9 @@ def canonicalize_identity(stmts: Body, *, cluster: bool = False) -> Body:
     if cluster:
         stmts = _canonicalize_op_clusters(stmts)
     stmts = normalize_body(stmts, hoist=False)
-    buffers: dict[str, None] = {}
-    for stmt in stmts.iter():
-        for name in (*stmt.external_reads(), *stmt.external_writes()):
-            buffers.setdefault(name, None)
-
-    if not buffers:
-        return normalize_body(stmts, hoist=False)
+    roles = _buffer_roles(stmts)
+    if not roles:
+        return stmts
 
     from emmy.compiler.structural import form  # noqa: PLC0415
 
@@ -87,7 +83,7 @@ def canonicalize_identity(stmts: Body, *, cluster: bool = False) -> Body:
     # the other buffers. Merging them to one placeholder would invent memory dependencies while the
     # sibling-order pass runs (an input and an unrelated output would suddenly alias).
     groups: dict[str, list[str]] = {}
-    for name, role in _buffer_roles(stmts).items():
+    for name, role in roles.items():
         groups.setdefault(role, []).append(name)
 
     # A role tie is not assumed to be a symmetry. Try every ordering inside each tied partition and

@@ -110,8 +110,9 @@ Every `Op` dataclass is `frozen=True` as well (an architecture test ratchets it)
 `inputs`, `outputs`, a `TileOp`'s `schedule`) land as `frozendict` via `Op.__post_init__` — a rewrite is always a
 `dataclasses.replace` + graph-node rebind, never an edit. The one sanctioned bypass is the spelling-preserving
 clone in `LoopOp.rename_buffers` (field-level `object.__setattr__`, no `__init__`): a buffer rename must not
-renormalize, since commutative-arg order sorts by buffer name. Ops stay UNHASHABLE (`__hash__ = None`) — semantic
-comparison is `identity_key`, never `hash`. Also make sure no Op ends up as a *field value* of a Stmt —
+renormalize, since canonical sibling order can depend on external-buffer spelling. Ops stay UNHASHABLE
+(`__hash__ = None`) — semantic comparison is `identity_key`, never `hash`. Also make sure no Op ends up as a *field
+value* of a Stmt —
 `Assign.op` / `Accum.op` / `Select.op` take an `ElementwiseImpl` (the lightweight value object, already hashable),
 never an `ElementwiseOp` wrapper.
 

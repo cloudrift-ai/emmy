@@ -131,9 +131,9 @@ class LoopOp(BodyOp):
             )
 
         # A SPELLING-preserving clone — field-level, no ``__init__``: renaming must not
-        # renormalize (``sort_commutative_args`` orders by buffer name, so renormalizing a
-        # renamed body could reorder it mid-pipeline; a graph-level rename is a spelling edit,
-        # never a rebuild). Fresh ``__dict__``: no cached digest rides along.
+        # renormalize (canonical sibling order can depend on external-buffer spelling, so a
+        # graph-level rename is a spelling edit, never a rebuild). Fresh ``__dict__``: no cached
+        # digest rides along.
         clone = object.__new__(type(self))
         for f in fields(self):
             object.__setattr__(clone, f.name, getattr(self, f.name))
