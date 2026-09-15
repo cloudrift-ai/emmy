@@ -11,8 +11,7 @@
 # remain UNQUALIFIED here, which means unmeasured, not unsuitable. Either card has native FP8
 # hardware that this one lacks, so their numbers would not resemble these.
 #
-# There is no Emmy lane here: this run qualified serving only, so Emmy eligibility is unevaluated
-# rather than established. See RESULTS.md.
+# There is no Emmy lane: this recipe serves the stock 1Cat-vLLM fork. See RESULTS.md.
 tags:
   - best-effort
 
@@ -31,9 +30,8 @@ engine:
     tensor_parallel_size: 4
     pipeline_parallel_size: 1
     gpu_memory_utilization: 0.88
-    # The full native window fits: the measured KV pool holds 292,125 tokens, giving 1.11x
-    # concurrency at full context. Note the caveat in RESULTS.md — that is allocated capacity,
-    # and end-to-end retrieval was validated at 60,295 tokens, not at the full window.
+    # The full native window fits: the measured KV pool holds 288,281 tokens, 1.10x concurrency at
+    # full context, and a planted marker was retrieved from a 249,581-token prompt in 206 s.
     context_length: 262144
     max_concurrent_requests: 4
     vllm:
@@ -45,6 +43,9 @@ engine:
       image: "cloudriftai/1cat-vllm-deepseek-v4-flash-0731:1.2.3-d76126608"
       # --dtype half sets the compute dtype; Volta has no bfloat16. --language-model-only drops
       # the vision tower; the text path is what is qualified here.
+      # --exclude-tools-when-tool-choice-none: with tool_choice "none" the tool list otherwise
+      # stays in the prompt, the model still writes its <tool_call> markup, and nothing parses
+      # it, so the markup comes back as the answer text (3/3 before this flag).
       extra_args: >-
         --dtype half
         --language-model-only
@@ -52,6 +53,7 @@ engine:
         --max-num-batched-tokens 4096
         --enable-auto-tool-choice
         --tool-call-parser qwen3_coder
+        --exclude-tools-when-tool-choice-none
         --reasoning-parser qwen3
       extra_env:
         # Volta has no FP8 arithmetic. The fork serves FP8 checkpoints on sm_70 through its
@@ -66,6 +68,11 @@ engine:
         # flash_qla independently; this knob is what keeps the JIT out of the run.
         VLLM_SM70_GDN_DECODE_FLASHQLA: "0"
 
+# The host must have NVLink up. On CloudRift that means a VM image newer than the catalog default
+# (ubuntu-noble-server-gpup-580-129-20260430-084759 sets NvLinkDisable=1); this lane was measured on
+# ubuntu-noble-server-gpup-580-129-20260810-232733. Without NVLink, time to first token is 2.5-3.5x
+# longer and prompts past about 190K exceed a 300 s client timeout. Check with `nvidia-smi topo -m`:
+# linked pairs show NV1/NV2, not PHB.
 matrices:
   deploy.gpu: "NVIDIA Tesla V100 SXM2 16GB"
   deploy.gpu_count: 4

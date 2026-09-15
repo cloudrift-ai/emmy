@@ -1,8 +1,8 @@
 # Volta qualification lane for Qwen3.8-27B-FP8.
 #
-# Target is four V100 SXM2 16 GB (sm_70). Weights are 30.9 GB, so min-to-serve is about 40.2 GB
-# and four cards (4 x 16,384 MiB = 68.7 GB) are the smallest admissible platform; two cards hold
-# 34.4 GB and cannot take the weights.
+# Targets are four V100 SXM2 16 GB and two V100 SXM3 32 GB (both sm_70). Weights are 30.9 GB, so
+# min-to-serve is about 40.2 GB: four 16 GB cards (4 x 16,384 MiB = 68.7 GB) or two 32 GB cards
+# (2 x 32,768 MiB = 64.0 GB) are the smallest admissible platforms.
 #
 # Volta has no native FP8 arithmetic. The 1Cat fork serves FP8 checkpoints on sm_70 through its
 # TurboMind dequantization path, which the DeepSeek-V4-Flash lane on this same engine selects
@@ -32,6 +32,7 @@ engine:
         --max-num-batched-tokens 4096
         --enable-auto-tool-choice
         --tool-call-parser qwen3_coder
+        --exclude-tools-when-tool-choice-none
         --reasoning-parser qwen3
       extra_env:
         VLLM_SM70_FP8_TURBOMIND: "1"
@@ -54,5 +55,13 @@ benchmark:
   ignore_eos: true
 
 matrices:
-  deploy.gpu: "NVIDIA Tesla V100 SXM2 16GB"
-  deploy.gpu_count: 4
+  - deploy.gpu: "NVIDIA Tesla V100 SXM2 16GB"
+    deploy.gpu_count: 4
+    benchmark.repeats: 3
+  # Two V100 SXM3 32 GB (2 x 32,768 MiB = 64.0 GB) hold the ~40.2 GB min-to-serve that two 16 GB
+  # cards cannot. TP2 divides cleanly: 24 attention heads / 2 = 12, 4 key/value heads / 2 = 2.
+  - deploy.gpu: "NVIDIA Tesla V100 SXM3 32GB"
+    deploy.gpu_count: 2
+    engine.llm.tensor_parallel_size: 2
+    # Three repeats of the identical workload on one server, so the report can show run-to-run spread.
+    benchmark.repeats: 3

@@ -240,11 +240,12 @@ default sampling, not greedy. `temperature` / `ignore_eos` are generation-only a
 Use it when the serving engine performs request-time initialization after the deployment health check. The warmup
 requests use the same controlled workload configuration and run before every measured repeat.
 
-`benchmark.repeats` (default 1) reruns the identical bench-client workload N times against the one deployed server —
-the model is deployed once, only the client run repeats. Every client stanza remains in the raw benchmark artifact;
-the experiment record does not parse or aggregate those measurements. Because the seed and prompts are identical
-across repeats, a separate intelligent review may use their spread to assess run-to-run noise rather than workload
-variation.
+`benchmark.repeats` (default 1) reruns the bench-client workload N times against the one deployed server — the model
+is deployed once, only the client run repeats. Repeat `i` draws its prompts from `seed + i` (an unset seed counts as
+the client's default, 0): the engine keeps a prefix cache across requests, so replaying one prompt set would let every
+repeat after the first skip most of its prefill. Lengths, concurrency and request count stay identical, so a separate
+intelligent review may use the spread across repeats to assess run-to-run noise. Every client stanza remains in the
+raw benchmark artifact; the experiment record does not parse or aggregate those measurements.
 
 The `benchmark` block describes workload generation only. Unknown fields are rejected rather than becoming implicit
 result validators. `emmy bench`, the experiment record, and the `run-experiment` skill preserve raw observations but

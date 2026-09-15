@@ -49,6 +49,25 @@ def test_run_benchmark_workload_repeats_client_runs():
     assert output.count("client noise") == 3
 
 
+def test_each_repeat_draws_fresh_prompts():
+    # A replayed prompt set would hit the server's prefix cache from the second repeat on.
+    def seeds(recipe):
+        calls: list[str] = []
+
+        async def fake_run_cmd(command, stream=True, timeout=600):
+            calls.append(command)
+            return 0, _stanza(100.0, 50.0), ""
+
+        asyncio.run(run_benchmark_workload(fake_run_cmd, recipe))
+        return [next((part.split()[1] for part in call.split("--")[1:] if part.startswith("seed ")), None) for call in calls]
+
+    seeded = _recipe(3)
+    seeded.benchmark.seed = 7
+    assert seeds(seeded) == ["7", "8", "9"]
+    assert seeds(_recipe(3)) == [None, "1", "2"]
+    assert seeds(_recipe(1)) == [None]
+
+
 def test_run_benchmark_workload_fails_on_failed_repeat():
     async def fake_run_cmd(command, stream=True, timeout=600):
         return 1, "boom", "err"
