@@ -596,8 +596,9 @@ bodies; these two transformations produce identity material only and must never 
 - Name-free forward/use roles usually make the next dependency-valid statement or buffer unique. Remaining ties are
   searched exactly. Proven transposition symmetries are searched once, which keeps large sets of interchangeable
   arguments, producers, or axes from causing factorial work without assuming that an unresolved tie is a symmetry.
-- Normalization reruns after assigning argument names, so any operation or axis order that depends on argument roles
-  reaches the same executable canonical form before rendering.
+- After argument names are assigned, the existing ordering pass revisits only scopes that use those arguments and
+  their ancestors. Argument roles therefore reach the same canonical form without repeatedly normalizing unaffected
+  parts of a large body.
 
 The key is `digest(form(canonical_body))`, not the human `pretty()` rendering. The exact and compute-unit-clustered
 forms are cached on each immutable `Body`. Two bodies that differ only by SSA or axis names, argument spelling and
