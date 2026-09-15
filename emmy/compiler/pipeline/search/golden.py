@@ -1200,21 +1200,21 @@ def _replay(
     kernel it never described. So a set of per-kernel entries — the parent's cut, each piece's
     row — walks one path together, and the record's own rows are what this replay reports.
     ``exhaustive`` streams every schedule pool for ``rows``; the evidence import asks only
-    ``holders`` and descends. ``wanted`` names the ONE match key the caller will ask ``rows`` about,
-    which the descent answers without flattening — a pool that holds it files just it. A miss keeps
-    only the wanted keys and values needed to classify it, never the candidate rows. How much the
-    descent saves is the pool's to decide: it skips a branch that has already decided against the
-    row, so a pool whose branches leave the row open is still walked widely."""
+    ``holders`` and descends. ``wanted`` names the ONE match key the caller will ask ``rows`` about.
+    An unsampled schedule answers by decoding that complete row through its codec and compatibility
+    context, without enumerating candidates. Other forks use lazy descent and keep only the wanted
+    keys and values needed to classify a miss, never the candidate rows."""
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
     from emmy.compiler.pipeline import TILE_PASSES, Pipeline  # noqa: PLC0415
-    from emmy.compiler.pipeline.fork import fork_signature, iter_leaves, leaf_for, leaf_knobs, schedule_key_set  # noqa: PLC0415
+    from emmy.compiler.pipeline.fork import exact_schedule_leaf, fork_signature, iter_leaves, leaf_for, leaf_knobs  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import (  # noqa: PLC0415
         canonical_row_key,
         evidence_row_vouches,
         family_of,
         schedule_match_key,
         schedule_row_key,
+        validate_family_value,
     )
     from emmy.compiler.pipeline.pipeline import Run, _is_structural_option  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import composed_routes, pinned_knobs, spelled_arm, unpinned_decisions  # noqa: PLC0415
@@ -1334,18 +1334,26 @@ def _replay(
             if hit is not None and identity is not None and decider is record:
                 holders.add(identity)
             return hit[0] if hit is not None else next(iter_leaves(fp.options))
-        # The strict decode asks this pool ONE question — does ``wanted`` equal an enumerated leaf.
-        # The keyed descent answers it by refusing the branches that cannot carry the record's row
-        # (``Fork.admits``), and ``skip`` keeps the answer exact where the descent alone would take
-        # a leaf the partial row merely vouches for. The hit has to be one the walk below would have
-        # filed: a leaf with no row of its own keys as the empty match, which a wholly OFF record
-        # equals, and a structural option never enters ``buckets`` at all. Pruning can only lose a
-        # leaf, never invent one, so a miss streams only until its explanation is known.
+        # An unsampled semantic schedule decodes the complete wanted row through the same codec and
+        # compatibility context that validates a direct schedule. Other forks retain the generic
+        # lazy descent; ``skip`` keeps that answer exact where a partial row vouches for more than
+        # one leaf. Structural options never enter ``buckets``.
         proved_miss = False
         if wanted is not None:
-            declared = schedule_key_set(fp.options)
-            if declared is not None and not wanted_keys <= declared:
+            exact = exact_schedule_leaf(fp.options, piece, wanted_keys)
+            if exact is not None:
+                declared, hit = exact
                 offered_keys.setdefault(identity, set()).update(wanted_keys & declared)
+                for key, value in wanted_pairs:
+                    try:
+                        if key in declared and validate_family_value(key, value) == value:
+                            offered_pairs.setdefault(identity, set()).add((key, value))
+                    except ValueError:
+                        pass
+                if hit is not None and schedule_match_key(leaf_knobs(hit)) == wanted:
+                    buckets.setdefault(identity, set()).add(wanted)
+                    _offer(identity, wanted)
+                    return hit
                 return next(iter_leaves(fp.options))
             hit = leaf_for(fp.options, piece, skip=lambda knobs: schedule_match_key(knobs) != wanted)
             if hit is not None and not _is_structural_option(hit[0]):

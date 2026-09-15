@@ -59,6 +59,7 @@ def _select[T](
     spell: Callable[[T], str],
     bare: str | None,
     validate_pins: bool,
+    exact: bool = False,
 ) -> tuple[T, ...]:
     """One factor's values under the row.
 
@@ -68,11 +69,15 @@ def _select[T](
     cannot take empties the factor, or, when pins are not validated (a row published across the
     peer kernels of a multi-kernel target), leaves the catalog whole. A BARE pin of an ambiguous
     family names one site among several: this factor keeps the pin's value and OFF, and the
-    completed schedule is asked which site carried it."""
+    completed schedule is asked which site carried it. An ``exact`` replay supplies the complete
+    row, so a value that does not parse and pass its intrinsic checks can return empty without the
+    catalog-spelling fallback needed by partial hand pins."""
     if named is not None:
         value = parse(named)
         if value is not None and allowed(value):
             return (value,)
+        if exact:
+            return ()
     values = tuple(catalog)  # the catalog is walked only past the named fast path
     if named is not None:
         matched = tuple(choice for choice in values if spell(choice) == named)
@@ -142,6 +147,7 @@ class ClassicNodeSite(Site[ClassicSchedule]):
             except ValueError:
                 return None
 
+        key = classic_node_key(self.problem.tile, "TILE", self.id)
         return _select(
             named,
             catalog,
@@ -149,7 +155,8 @@ class ClassicNodeSite(Site[ClassicSchedule]):
             allowed=allowed,
             spell=Tile.spell,
             bare=self.problem.bare_value("TILE", self.keys),
-            validate_pins=self.problem.validate_pins,
+            validate_pins=self.problem.strict(key),
+            exact=self.problem._exact(key),
         )
 
     @cached_property
@@ -199,6 +206,7 @@ class ClassicNodeSite(Site[ClassicSchedule]):
             except ValueError:
                 return None
 
+        key = classic_node_key(tile, "REDUCE", self.id)
         return _select(
             self._named("REDUCE"),
             catalog,
@@ -206,7 +214,8 @@ class ClassicNodeSite(Site[ClassicSchedule]):
             allowed=lambda reduction: reduction in catalog,
             spell=Reduce.spell,
             bare=self.problem.bare_value("REDUCE", self.keys),
-            validate_pins=self.problem.strict(classic_node_key(tile, "REDUCE", self.id)),
+            validate_pins=self.problem.strict(key),
+            exact=self.problem._exact(key),
         )
 
     def _placed_ok(self, choice: NodeSchedule) -> bool:
@@ -265,7 +274,8 @@ class ClassicNodeSite(Site[ClassicSchedule]):
             allowed=lambda choice: any(choice.stage in stages for stages in candidates.values()),
             spell=lambda choice: choice.stage.spell(),
             bare=self.problem.bare_value("STAGE", self.keys),
-            validate_pins=self.problem.validate_pins,
+            validate_pins=False if self.stage_key is None else self.problem.strict(self.stage_key),
+            exact=self.stage_key is not None and self.problem._exact(self.stage_key),
         )
 
     @cached_property
@@ -391,6 +401,9 @@ class ClassicProblem(ScheduleProblem[ClassicSchedule]):
     #: reduce serially only and its work at the thread level, so a warp WORK or a band names its
     #: sibling, and the finalize keeps its own catalog instead of offering nothing.
     tolerate_kernel_pins: bool = False
+    #: Row keys whose values must be accepted exactly. Strict replay adds only the keys it supplies,
+    #: leaving unrelated inherited pins under their original published-row reading.
+    _strict_row_keys: frozenset[str] = frozenset()
     #: Whether a named value the rules refuse outright — a warp-group tile its grid cannot feed, a
     #: transport the card cannot run, a stage no support resolves — is an error naming the rule.
     #: True for a hand pin, which is wrong wherever it is published; ``with_row`` turns it off, since
@@ -403,10 +416,18 @@ class ClassicProblem(ScheduleProblem[ClassicSchedule]):
     def strict(self, key: str) -> bool:
         """Whether a named value at ``key`` the site cannot take empties the site (else the site
         keeps its catalog): pins are validated, and a bare kernel-family pin is not tolerated."""
-        return self.validate_pins and not (self.tolerate_kernel_pins and key in ("WORK", "RASTER", "REDUCE"))
+        return key in self._strict_row_keys or (
+            self.validate_pins and not (self.tolerate_kernel_pins and key in ("WORK", "RASTER", "REDUCE"))
+        )
 
-    def with_row(self, row: Mapping[str, str]) -> ClassicProblem:
-        return replace(self, row=frozendict({**self.row, **{str(key): str(value) for key, value in row.items()}}), loud_pins=False)
+    def _exact(self, key: str) -> bool:
+        """Whether strict replay supplied this exact row key."""
+        return key in self._strict_row_keys
+
+    def with_row(self, row: Mapping[str, str], *, strict: bool = False) -> ClassicProblem:
+        supplied = {str(key): str(value) for key, value in row.items()}
+        strict_row_keys = self._strict_row_keys | supplied.keys() if strict else self._strict_row_keys
+        return replace(self, row=frozendict({**self.row, **supplied}), _strict_row_keys=frozenset(strict_row_keys), loud_pins=False)
 
     @cached_property
     def node_sites(self) -> tuple[ClassicNodeSite, ...]:
@@ -486,7 +507,7 @@ class ClassicProblem(ScheduleProblem[ClassicSchedule]):
         for family, value in self.bare_pins.items():
             if not value or value in self._spelled(schedule, family).values():
                 continue
-            if self.validate_pins or any(self._site_offers(site, family, value) for site in self.node_sites):
+            if self.validate_pins or self._exact(family) or any(self._site_offers(site, family, value) for site in self.node_sites):
                 return f"bare {family} pin {value} is realized by no site of this kernel"
         return None
 
