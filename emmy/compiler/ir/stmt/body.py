@@ -242,6 +242,25 @@ class Body(tuple[Stmt, ...]):
                 out.extend(r)
         return Body(out)
 
+    @cached_property
+    def _normalized(self) -> Body:
+        """Executable normal form, cached on this immutable body and its fixed point."""
+        from emmy.compiler.ir.stmt.normalize import _normalize_body  # noqa: PLC0415
+
+        result = _normalize_body(self, hoist=True)
+        result.__dict__["_normalized"] = result
+        result.__dict__["_normalized_without_hoist"] = result
+        return result
+
+    @cached_property
+    def _normalized_without_hoist(self) -> Body:
+        """Identity-safe normal form, cached on this immutable body and its fixed point."""
+        from emmy.compiler.ir.stmt.normalize import _normalize_body  # noqa: PLC0415
+
+        result = _normalize_body(self, hoist=False)
+        result.__dict__["_normalized_without_hoist"] = result
+        return result
+
     # -- generic backward dataflow --------------------------------------
 
     def fold[T](
