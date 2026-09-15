@@ -557,12 +557,13 @@ readings the tier would otherwise refuse. Its LEAVES are read once ahead of the 
 one needs no gmem address at all: a causal mask's fill / zero constants are a computed pair, and only the pivot source
 and the streamed value are ever asked for a slab. And a `Select` on the score fragment's OWN coordinates — the row the
 carrier folds and the chunk it folds over — is per ELEMENT, not cell-uniform, so `_residence` lands it as a
-a `FragmentMask` under the same coordinate substitution the boundary mask performs. The same `Select`s are also read
-ONCE, ahead of the loop, for what they say about whole chunks (`_mask_key_bounds`): a mask whose masked branch reads
-`key > row + c` (or `>=`) with `c ≥ 0` masks every key from the CTA's block end onward for every row the CTA holds,
-so the chunk loop stops there; one whose masked branch reads `key < row − c` (or `<=`) masks every key before the
-CTA's block base for every row, so the loop starts on the chunk that key falls in. Both are the skeleton's
-`k_first` / `k_end`, CTA-uniform in the grid var alone, bit-identical because a masked chunk folds the carrier
+`FragmentMask` under the same coordinate substitution the boundary mask performs. The same `Select`s are also read
+ONCE, ahead of the loop, for what they say about whole chunks (`_mask_key_bounds`). Expression normalization may
+reverse either comparison's operands, so the bound reader first restores the `key − row` orientation. A mask whose
+masked branch reads `key > row + c` (or `>=`) with `c ≥ 0` masks every key from the CTA's block end onward for every
+row the CTA holds, so the chunk loop stops there; one whose masked branch reads `key < row − c` (or `<=`) masks every
+key before the CTA's block base for every row, so the loop starts on the chunk that key falls in. They become the
+skeleton's `k_first` / `k_end`, CTA-uniform in the grid var alone, bit-identical because a masked chunk folds the carrier
 identity exactly — and derived here, stored nowhere. The mask `Select` in the body is the bound's one source: an
 axis's domain is its extent in the kernel's axis table, and a row-dependent bound is a relation between two axes
 that only becomes a range once widened to the CTA's rows, so neither the term, the loop IR nor the axis carries it.
