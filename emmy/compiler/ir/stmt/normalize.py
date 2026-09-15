@@ -1020,6 +1020,120 @@ def _exported_accs(body: Body) -> frozenset[str]:
 # ---------------------------------------------------------------------------
 
 
+def _ssa_prefix(stmt: Stmt) -> str:
+    if isinstance(stmt, Load):
+        return "in"
+    if isinstance(stmt, (Accum, Mma, Init)):
+        return "acc"
+    return "v"
+
+
+def _bound_axes(stmt: Stmt) -> tuple[Axis, ...]:
+    axis = getattr(stmt, "axis", None)
+    if isinstance(axis, Axis):
+        return (axis,)
+    axes = getattr(stmt, "axes", ())
+    return tuple(axis for axis in axes if isinstance(axis, Axis))
+
+
+class _SequentialScope:
+    """Mutable state for one lexical scope of sequential renaming."""
+
+    def __init__(
+        self,
+        *,
+        counters: dict[str, int] | None = None,
+        ssa: dict[str, str] | None = None,
+        sources: dict[str, str] | None = None,
+        inherited_axes: dict[str, str] | None = None,
+        owned: set[str] | None = None,
+        fixed: frozenset[str] = frozenset(),
+    ) -> None:
+        self.counters = {kind: 0 for kind in ("v", "in", "acc", "a", "p")} if counters is None else counters
+        self.ssa = {} if ssa is None else ssa
+        self.sources = {} if sources is None else sources
+        self.inherited_axes = {} if inherited_axes is None else inherited_axes
+        self.owned = set() if owned is None else owned
+        self.fixed = fixed
+
+    def copy(self) -> _SequentialScope:
+        return _SequentialScope(
+            counters=dict(self.counters),
+            ssa=dict(self.ssa),
+            sources=dict(self.sources),
+            inherited_axes=dict(self.inherited_axes),
+            owned=set(self.owned),
+            fixed=self.fixed,
+        )
+
+    def _allocate(self, old: str, kind: str) -> None:
+        if old in self.owned or old in self.fixed:
+            return
+        self.ssa[old] = f"{kind}{self.counters[kind]}"
+        self.counters[kind] += 1
+        self.owned.add(old)
+
+    def step(self, stmt: Stmt) -> Stmt:
+        """Rename one next statement and advance this scope's allocation state."""
+        renamed = self._step(stmt, emit=True)
+        assert renamed is not None
+        return renamed
+
+    def advance(self, stmt: Stmt) -> None:
+        """Advance past one statement without constructing its renamed copy."""
+        self._step(stmt, emit=False)
+
+    def _step(self, stmt: Stmt, *, emit: bool) -> Stmt | None:
+        children = stmt.nested()
+        if children:
+            for child in children:
+                for name in _ordered_exported_accs(child):
+                    self._allocate(name, "acc")
+        else:
+            for name in stmt.defines():
+                self._allocate(name, _ssa_prefix(stmt))
+
+        axes = dict(self.inherited_axes)
+        for old in stmt.binds_axes():
+            axes[old] = f"a{self.counters['a']}"
+            self.counters["a"] += 1
+        for axis in _bound_axes(stmt):
+            parent = axis.source_axis
+            seen: set[int] = set()
+            while parent is not None and id(parent) not in seen:
+                seen.add(id(parent))
+                if parent.name not in self.sources:
+                    self.sources[parent.name] = f"p{self.counters['p']}"
+                    self.counters["p"] += 1
+                parent = parent.source_axis
+
+        names = {**self.ssa, **self.sources, **axes} if emit else None
+        renamed = None
+        if emit:
+            shell = stmt.with_bodies(tuple(Body() for _ in children)) if children else stmt
+            renamed = shell.rename(names)
+        if children:
+            exported = frozenset(name for child in children for name in _exported_accs(child))
+            renamed_children: list[Body] = []
+            for child in children:
+                scope = _SequentialScope(
+                    counters=self.counters,
+                    ssa=dict(self.ssa),
+                    sources=dict(self.sources),
+                    inherited_axes=dict(axes),
+                    fixed=exported,
+                )
+                if emit:
+                    renamed_children.append(Body(tuple(scope.step(member) for member in child)))
+                else:
+                    for member in child:
+                        scope.advance(member)
+            if emit:
+                assert renamed is not None
+                renamed = renamed.with_bodies(tuple(renamed_children))
+        return renamed
+
+
 def rename_ssa_sequential(stmts: Body) -> Body:
     """Canonicalize names in a fused body:
 
@@ -1037,78 +1151,8 @@ def rename_ssa_sequential(stmts: Body) -> Body:
 
     Idempotent: bodies already in canonical form round-trip unchanged."""
 
-    def prefix(stmt: Stmt) -> str:
-        if isinstance(stmt, Load):
-            return "in"
-        if isinstance(stmt, (Accum, Mma, Init)):
-            return "acc"
-        return "v"
-
-    counters = {kind: 0 for kind in ("v", "in", "acc", "a", "p")}
-
-    def bound_axes(stmt: Stmt) -> tuple[Axis, ...]:
-        axis = getattr(stmt, "axis", None)
-        if isinstance(axis, Axis):
-            return (axis,)
-        axes = getattr(stmt, "axes", ())
-        return tuple(axis for axis in axes if isinstance(axis, Axis))
-
-    def walk(
-        body: Body,
-        inherited_ssa: dict[str, str],
-        inherited_axes: dict[str, str],
-        inherited_sources: dict[str, str],
-        fixed: frozenset[str] = frozenset(),
-    ) -> Body:
-        body = Body.coerce(body)
-        ssa = dict(inherited_ssa)
-        sources = dict(inherited_sources)
-        owned: set[str] = set()
-
-        def allocate(old: str, kind: str) -> None:
-            if old in owned or old in fixed:
-                return
-            new = f"{kind}{counters[kind]}"
-            counters[kind] += 1
-            ssa[old] = new
-            owned.add(old)
-
-        out: list[Stmt] = []
-        for stmt in body:
-            children = stmt.nested()
-            if children:
-                for child in children:
-                    for name in _ordered_exported_accs(child):
-                        allocate(name, "acc")
-            else:
-                for name in stmt.defines():
-                    allocate(name, prefix(stmt))
-
-            axes = dict(inherited_axes)
-            for old in stmt.binds_axes():
-                axes[old] = f"a{counters['a']}"
-                counters["a"] += 1
-            for axis in bound_axes(stmt):
-                parent = axis.source_axis
-                seen: set[int] = set()
-                while parent is not None and id(parent) not in seen:
-                    seen.add(id(parent))
-                    if parent.name not in sources:
-                        sources[parent.name] = f"p{counters['p']}"
-                        counters["p"] += 1
-                    parent = parent.source_axis
-
-            names = {**ssa, **sources, **axes}
-            shell = stmt.with_bodies(tuple(Body() for _ in children)) if children else stmt
-            renamed = shell.rename(names)
-            if children:
-                exported = frozenset(name for child in children for name in _exported_accs(child))
-                renamed_children = tuple(walk(child, ssa, axes, sources, exported) for child in children)
-                renamed = renamed.with_bodies(renamed_children)
-            out.append(renamed)
-        return Body(out)
-
-    return walk(Body.coerce(stmts), {}, {}, {})
+    scope = _SequentialScope()
+    return Body(tuple(scope.step(stmt) for stmt in Body.coerce(stmts)))
 
 
 # ---------------------------------------------------------------------------
@@ -1151,7 +1195,7 @@ def _refine_contextual_scope_order(candidate: Body, revisit: frozenset[_ScopePat
     choose the original order again. Treat that finite orbit like external-buffer canonicalization:
     a fixed point returns directly, while a longer cycle resolves to its least complete form.
     """
-    from emmy.compiler.structural import form  # noqa: PLC0415
+    from emmy.compiler.structural import digest, form  # noqa: PLC0415
 
     if not revisit:
         return candidate
@@ -1447,6 +1491,67 @@ def _pure_tokens(stmts: Iterable[Stmt]) -> dict[int, str]:
     return tokens
 
 
+def _renamed_name_roles(stmt: Stmt, names: Iterable[str]) -> Callable[[dict[str, str]], tuple]:
+    """Describe renamed occurrences without rebuilding one structural form per producer edge."""
+    from dataclasses import fields  # noqa: PLC0415
+
+    from emmy.compiler.structural import form  # noqa: PLC0415
+
+    class NameSlot(str):
+        pass
+
+    slots = {name: NameSlot(f"\0{index}") for index, name in enumerate(sorted(names))}
+    slot_names = {slot: name for name, slot in slots.items()}
+    templated = stmt.rename(slots)
+    rendered = form(templated)
+    sorted_paths: set[tuple[int, ...]] = set()
+    set_paths: set[tuple[int, ...]] = set()
+
+    def mark(value: object, structural: object, path: tuple[int, ...]) -> None:
+        if isinstance(value, Stmt):
+            shown = fields(value)[: len(structural) - 1]  # type: ignore[arg-type]
+            for position, field in enumerate(shown, start=1):
+                child_path = (*path, position)
+                if isinstance(value, Assign) and field.name == "args" and value.op.commutative:
+                    sorted_paths.add(child_path)
+                elif isinstance(value, (Accum, Mma)) and field.name == "axes":
+                    set_paths.add(child_path)
+                mark(getattr(value, field.name), structural[position], child_path)  # type: ignore[index]
+        elif isinstance(value, (tuple, list)):
+            for position, (child, child_form) in enumerate(zip(value, structural, strict=True)):  # type: ignore[arg-type]
+                mark(child, child_form, (*path, position))
+
+    mark(templated, rendered, ())
+
+    ordered: list[tuple[tuple[int, ...], str]] = []
+    unordered: list[tuple[tuple[int, ...], tuple[tuple[bool, str], ...], bool]] = []
+
+    def inventory(value: object, path: tuple[int, ...]) -> None:
+        if path in sorted_paths or path in set_paths:
+            assert isinstance(value, tuple)
+            values = tuple((True, slot_names[item]) if isinstance(item, NameSlot) else (False, item) for item in value)
+            unordered.append((path, values, path in set_paths))
+            return
+        if isinstance(value, NameSlot):
+            ordered.append((path, slot_names[value]))
+        elif isinstance(value, tuple):
+            for position, child in enumerate(value):
+                inventory(child, (*path, position))
+
+    inventory(rendered, ())
+
+    def roles(mapping: dict[str, str]) -> tuple:
+        changed = tuple((path, value) for path, name in ordered if (value := mapping.get(name, name)) != "__name__")
+        fields = []
+        for path, values, is_set in unordered:
+            mapped = tuple(mapping.get(value, value) if renamed else value for renamed, value in values)
+            if any(renamed and mapping.get(value, value) != "__name__" for renamed, value in values):
+                fields.append((path, tuple(sorted(set(mapped))) if is_set else tuple(sorted(mapped))))
+        return changed, tuple(fields)
+
+    return roles
+
+
 def _canonicalize_sibling_order_variants(stmts: list[Stmt], *, pruned_choice: list[bool] | None = None) -> Iterator[tuple[Stmt, ...]]:
     """Yield every unresolved canonical Kahn order for one sibling scope."""
     if len(stmts) <= 1:
@@ -1510,7 +1615,6 @@ def _canonicalize_sibling_order_variants(stmts: list[Stmt], *, pruned_choice: li
                 names.add(parent.name)
                 parent = parent.source_axis
     abstract = {name: "__name__" for name in names}
-
     def direct_token(stmt: Stmt, *, shallow: bool) -> str:
         children = stmt.nested()
         token_stmt = stmt.with_bodies(tuple(Body() for _ in children)) if shallow and children else stmt
@@ -1559,6 +1663,7 @@ def _canonicalize_sibling_order_variants(stmts: list[Stmt], *, pruned_choice: li
             return graph_tokens
 
         base_tokens = canonical_tokens()
+        name_roles: dict[int, Callable[[dict[str, str]], tuple]] = {}
 
         def ranks(values: list[object]) -> list[int]:
             ordered = {value: rank for rank, value in enumerate(sorted(set(values), key=repr))}
@@ -1568,11 +1673,14 @@ def _canonicalize_sibling_order_variants(stmts: list[Stmt], *, pruned_choice: li
         for source, target in edges:
             mapping = dict(abstract)
             mapping.update({name: f"__source{slot}" for slot, name in enumerate(_ordered_sibling_defs(stmts[source]))})
-            consumer = sort_commutative_args(Body((stmts[target].rename(mapping),)))[0]
+            roles = name_roles.get(target)
+            if roles is None:
+                roles = _renamed_name_roles(stmts[target], abstract)
+                name_roles[target] = roles
             reads, writes, state = effects[source]
             target_reads, target_writes, target_state = effects[target]
             labels[source, target] = (
-                digest(form(consumer)),
+                roles(mapping),
                 tuple(sorted(writes & target_reads)),
                 tuple(sorted(writes & target_writes)),
                 tuple(sorted(reads & target_writes)),
@@ -1613,7 +1721,9 @@ def _canonicalize_sibling_order_variants(stmts: list[Stmt], *, pruned_choice: li
                 return False
         return True
 
-    def walk(remaining: frozenset[int], ordered: tuple[int, ...]) -> Iterator[tuple[Stmt, ...]]:
+    def walk(
+        remaining: frozenset[int], ordered: tuple[int, ...], scope: _SequentialScope
+    ) -> Iterator[tuple[Stmt, ...]]:
         if not remaining:
             yield tuple(stmts[index] for index in ordered)
             return
@@ -1623,8 +1733,11 @@ def _canonicalize_sibling_order_variants(stmts: list[Stmt], *, pruned_choice: li
             return
         if len(ready) == 1:
             selected = ready[0]
-            yield from walk(remaining - {selected}, (*ordered, selected))
+            branch = scope.copy()
+            branch.advance(stmts[selected])
+            yield from walk(remaining - {selected}, (*ordered, selected), branch)
             return
+        branch_scopes: dict[int, _SequentialScope] = {}
         least_coarse = min(coarse_tokens[id(stmts[index])] for index in ready)
         tied = [index for index in ready if coarse_tokens[id(stmts[index])] == least_coarse]
         if len(tied) > 1:
@@ -1637,9 +1750,11 @@ def _canonicalize_sibling_order_variants(stmts: list[Stmt], *, pruned_choice: li
             # is prefix-stable, so compare the tied next statements here instead of enumerating all
             # interleavings and rendering each complete body afterward.
             def prefix_form(index: int) -> str:
-                prefix = Body(stmts[position] for position in (*ordered, index))
-                canonical = sort_commutative_args(rename_ssa_sequential(prefix))
-                return repr(form(canonical[-1]))
+                branch = scope.copy()
+                renamed = branch.step(stmts[index])
+                branch_scopes[index] = branch
+                canonical = sort_commutative_args(Body((renamed,)))
+                return repr(form(canonical[0]))
 
             prefix_tokens = {index: prefix_form(index) for index in tied}
             least = min(prefix_tokens.values())
@@ -1655,9 +1770,13 @@ def _canonicalize_sibling_order_variants(stmts: list[Stmt], *, pruned_choice: li
             if not any(interchangeable(selected, earlier) for earlier in representatives):
                 representatives.append(selected)
         for selected in representatives:
-            yield from walk(remaining - {selected}, (*ordered, selected))
+            branch = branch_scopes.get(selected)
+            if branch is None:
+                branch = scope.copy()
+                branch.advance(stmts[selected])
+            yield from walk(remaining - {selected}, (*ordered, selected), branch)
 
-    yield from walk(frozenset(range(len(stmts))), ())
+    yield from walk(frozenset(range(len(stmts))), (), _SequentialScope())
 
 
 def _orders_modulo_transpositions(items: list, interchangeable: Callable[[object, object], bool]) -> Iterator[tuple]:
