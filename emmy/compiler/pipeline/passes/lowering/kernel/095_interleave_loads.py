@@ -77,9 +77,10 @@ def _walk(body: Body) -> tuple[Body, bool]:
         new_stmts.append(s)
     rebuilt = Body(tuple(new_stmts))
     if not _has_load_and_assign(rebuilt):
-        return rebuilt, nested_changed
+        return (rebuilt if nested_changed else body), nested_changed
     sunk = _sink_loads(rebuilt)
-    return sunk, nested_changed or tuple(sunk) != tuple(rebuilt)
+    changed = nested_changed or sunk != rebuilt
+    return (sunk if changed else body), changed
 
 
 def _has_load_and_assign(body: Body) -> bool:

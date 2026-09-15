@@ -707,10 +707,9 @@ class Body(tuple[Stmt, ...]):
         for consumers to whom ``relu`` and ``gelu`` are different
         kernels (their latency differs even under one schedule).
 
-        Built by re-running :func:`normalize_body` with ``hoist=False``
-        (safe for both Loop-IR and Tile-IR bodies — hoisting can move
-        Loads above Stage decls in Tile bodies), then canonicalizing
-        external-buffer roles and dependency- and effect-valid statement order.
+        Built by canonicalizing the body with identity-safe normalization
+        (hoisting stays off because it can move Loads above Stage declarations
+        in Tile bodies), external-buffer roles, and optional operation clusters.
         Cached on the instance — Body is immutable."""
         return self._structural_key_clustered if structural else self._structural_key_exact
 
@@ -726,8 +725,8 @@ class Body(tuple[Stmt, ...]):
 def _compute_structural_key(body: Body, cluster: bool) -> str:
     """Compute one flavor of :meth:`Body.structural_key`.
 
-    The formula is fixed per flavor: ``normalize_body(body, hoist=False)`` followed by
-    identity-only canonicalization and rendering through
+    The formula is fixed per flavor: identity canonicalization (which applies the
+    identity-safe normal form) followed by rendering through
     :func:`~emmy.compiler.structural.form`. Structural, not the
     pretty text it used to join: ``pretty()`` is the human rendering, and
     a cosmetic change to how a statement prints must not re-key every
@@ -735,12 +734,9 @@ def _compute_structural_key(body: Body, cluster: bool) -> str:
     cluster representative, so this path is only for structural identity, never executable IR.
     """
     from emmy.compiler.ir.stmt.identity import canonicalize_identity  # noqa: PLC0415
-    from emmy.compiler.ir.stmt.normalize import normalize_body  # noqa: PLC0415
     from emmy.compiler.structural import digest, form  # noqa: PLC0415
 
-    normalized = normalize_body(body, hoist=False)
-    normalized = canonicalize_identity(normalized, cluster=cluster)
-    return digest(form(normalized))
+    return digest(form(canonicalize_identity(body, cluster=cluster)))
 
 
 def refs_axis(s: Stmt, name: str) -> bool:

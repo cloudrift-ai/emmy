@@ -1128,24 +1128,40 @@ def sort_commutative_args(stmts: Body) -> Body:
 
 def _canonicalize_order(stmts: Body) -> Body:
     """Canonicalize expressions and dependency-valid statement order."""
-    from emmy.compiler.structural import form  # noqa: PLC0415
-
     stmts = _canonicalize_exprs(stmts)
     ordered, revisit = _canonicalize_scope_order(stmts)
     candidate = Body.coerce(sort_commutative_args(rename_ssa_sequential(ordered)))
+    return _refine_contextual_scope_order(candidate, revisit)
+
+
+def _refine_contextual_scope_order(candidate: Body, revisit: frozenset[_ScopePath]) -> Body:
+    """Refine context-sensitive sibling order to its least repeating form.
+
+    Renaming can make a nested scope choose a different sibling order, then make the next rename
+    choose the original order again. Treat that finite orbit like external-buffer canonicalization:
+    a fixed point returns directly, while a longer cycle resolves to its least complete form.
+    """
+    from emmy.compiler.structural import form  # noqa: PLC0415
+
+    rendered = repr(form(candidate))
+    seen: dict[str, int] = {}
+    orbit: list[tuple[str, Body]] = []
     while revisit:
-        refined, revisit = _revisit_scope_order(candidate, revisit)
-        refined = Body.coerce(sort_commutative_args(rename_ssa_sequential(refined)))
-        if form(refined) == form(candidate):
-            return refined
-        candidate = refined
+        if rendered in seen:
+            return min(orbit[seen[rendered] :], key=lambda item: item[0])[1]
+        seen[rendered] = len(orbit)
+        orbit.append((rendered, candidate))
+        candidate, revisit = _revisit_scope_order(candidate, revisit)
+        candidate = Body.coerce(sort_commutative_args(rename_ssa_sequential(candidate)))
+        refined = repr(form(candidate))
+        if refined == rendered:
+            return candidate
+        rendered = refined
     return candidate
 
 
 def _renormalize_external_order(stmts: Body, buffers: frozenset[str]) -> Body:
     """Revisit only scopes whose order can change after an external-buffer rename."""
-    from emmy.compiler.structural import form  # noqa: PLC0415
-
     def paths(body: Body) -> frozenset[_ScopePath]:
         found: set[_ScopePath] = set()
         touched = False
@@ -1161,19 +1177,7 @@ def _renormalize_external_order(stmts: Body, buffers: frozenset[str]) -> Body:
             found.add(())
         return frozenset(found)
 
-    revisit = paths(stmts)
-    candidate = Body.coerce(stmts)
-    seen: dict[str, int] = {}
-    orbit: list[tuple[str, Body]] = []
-    while revisit:
-        rendered = repr(form(candidate))
-        if rendered in seen:
-            return min(orbit[seen[rendered] :])[1]
-        seen[rendered] = len(orbit)
-        orbit.append((rendered, candidate))
-        candidate, revisit = _revisit_scope_order(candidate, revisit)
-        candidate = Body.coerce(sort_commutative_args(rename_ssa_sequential(candidate)))
-    return candidate
+    return _refine_contextual_scope_order(Body.coerce(stmts), paths(stmts))
 
 
 def _least_sibling_order(statements: list[Stmt]) -> tuple[Body, bool]:

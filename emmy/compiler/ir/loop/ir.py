@@ -137,7 +137,15 @@ class LoopOp(BodyOp):
         clone = object.__new__(type(self))
         for f in fields(self):
             object.__setattr__(clone, f.name, getattr(self, f.name))
-        object.__setattr__(clone, "body", self.body.rename_buffers(rename))
+        renamed_body = self.body.rename_buffers(rename)
+        external = tuple(dict.fromkeys((*self.inputs, *self.outputs)))
+        if len({rename.get(name, name) for name in external}) == len(external):
+            # A fresh, injective graph rebind changes spelling only. Preserve the two normal-form
+            # fixed points, but none of the body's name-dependent analysis or identity caches.
+            for attr in ("_normalized", "_normalized_without_hoist"):
+                if self.body.__dict__.get(attr) is self.body:
+                    renamed_body.__dict__[attr] = renamed_body
+        object.__setattr__(clone, "body", renamed_body)
         object.__setattr__(clone, "inputs", rename_io(self.inputs))
         object.__setattr__(clone, "outputs", rename_io(self.outputs))
         return clone
