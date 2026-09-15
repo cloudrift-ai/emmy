@@ -26,7 +26,7 @@ configs:
     knobs:
       REDUCE: coop
       WORK: t32
-    identity: c4c37a6c290b7d92f1e317ade87a04d0c88707ff59210e401973fb485f5ed6e8
+    identity: 41c32ea72cd00d0d7e3bf5aa633c19f73c98e13d3b5b6c7c80f40c218d85091f
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 1.1365642862243999

@@ -30,7 +30,7 @@ configs:
   target:
     loop: 0
   realizations:
-  - name: k_sdpa_760ef7.d86525a87821
+  - name: k_sdpa_29babd.6f277b6ac586
     bindings: {}
     pins:
       FAST_MATH: true
@@ -236,6 +236,8 @@ loops:
                                 - class: Assign
                                   fields: {name: v9, op: {elementwise: subtract}, args: {tuple: [v8, acc1]}, dtype: null}
                                 - {class: Assign, fields: {name: v10, op: {elementwise: exp}, args: {tuple: [v9]}, dtype: null}}
+                                - class: Assign
+                                  fields: {name: v11, op: {elementwise: multiply}, args: {tuple: [v10, v6]}, dtype: null}
                                 - class: Load
                                   fields:
                                     names: {tuple: [in7]}
@@ -247,8 +249,6 @@ loops:
                                       - {expr: {var: a7}}
                                       - {expr: {var: a6}}
                                     dtype: null
-                                - class: Assign
-                                  fields: {name: v11, op: {elementwise: multiply}, args: {tuple: [v10, v6]}, dtype: null}
                                 - class: Assign
                                   fields: {name: v12, op: {elementwise: multiply}, args: {tuple: [in7, v11]}, dtype: null}
                                 - class: Accum
@@ -274,6 +274,6 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_sdpa_760ef7
-    inputs: [scaled_dot_product_attention_scale, x0, x1, x2]
+      name: k_sdpa_29babd
+    inputs: [scaled_dot_product_attention_scale, x1, x0, x2]
     outputs: [[scaled_dot_product_attention, f16, [1, 8, 512, 128]]]

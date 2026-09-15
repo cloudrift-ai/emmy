@@ -62,7 +62,7 @@ configs:
     - sg
     - up
   realizations:
-  - name: k_linear_reduce_e173a4.5d4a64045a38
+  - name: k_linear_reduce_27f98c.50abe5ab7ff5
     bindings: {}
     pins:
       FAST_MATH: false
@@ -71,4 +71,4 @@ configs:
       WORK: w2x2
       TILE@map.1/inner: mma_m16n8k16_f16_f32/f2x2/k2
       TILE@map.2/inner: mma_m16n8k16_f16_f32/f2x2/k2
-    identity: 68c919a6ef710d9ce74d7a6fedb00e402db8d31f63efaf1bb8ac6a6c0d565ae5
+    identity: 006cabcd08027558b4ccdb517888879061b40e7808323dbcea319c1278683f1e

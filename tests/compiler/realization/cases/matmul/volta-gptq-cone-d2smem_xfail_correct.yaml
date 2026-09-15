@@ -3477,7 +3477,7 @@ configs:
     - p_attn_q_proj_weight_zeros_view
     - p_attn_q_proj_weight_zeros_view_bc
   realizations:
-  - name: k_linear_reduce_009441.5149dd8075ef
+  - name: k_linear_reduce_0a31ad.5149dd8075ef
     bindings: {}
     pins:
       FAST_MATH: false

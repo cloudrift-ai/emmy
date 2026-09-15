@@ -61,7 +61,7 @@ configs:
     - rms_norm_1
     - scaled_dot_product_attention
   realizations:
-  - name: k_sdpa_rms_norm_reduce_c93542.9f3382275390
+  - name: k_sdpa_rms_norm_reduce_be3cd1.613a22e87858
     bindings: {}
     pins:
       FAST_MATH: true
@@ -74,7 +74,7 @@ configs:
       REDUCE@map.1/twist.1/inner.1/map.3/map.1/reduce: ''
       STAGE: ''
       RASTER: ''
-    identity: 4ee37160f706e3045b0fbc36c8cd2e9a057c9caea555b547ecc348b016906936
+    identity: d20aa84ab3293fef0daac774ac715166d7953d7b8623f33917480024043856fa
   - name: k_sdpa_rms_norm_reduce_deba55.f77edf4b7e93.9a8d71ef07fd
     bindings: {}
     pins:
