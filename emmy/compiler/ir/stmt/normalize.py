@@ -1471,6 +1471,7 @@ def _canonicalize_sibling_order_variants(stmts: list[Stmt]) -> Iterator[tuple[St
     # the common case of distinct loads and operations.
     coarse_tokens = {id(stmt): direct_token(stmt, shallow=True) for stmt in stmts}
     tokens: dict[int, str] | None = None
+    graph_tokens: dict[int, int] | None = None
 
     def canonical_tokens() -> dict[int, str]:
         nonlocal tokens
@@ -1485,6 +1486,58 @@ def _canonicalize_sibling_order_variants(stmts: list[Stmt]) -> Iterator[tuple[St
 
         tokens = {id(stmt): token(stmt) for stmt in stmts}
         return tokens
+
+    def refined_tokens() -> dict[int, int]:
+        """Refine tied local forms by their position in the sibling dependency graph.
+
+        A statement's own form and immediate producer/use roles leave regular, non-symmetric
+        graphs tied. Exhaustively ordering such a partition is factorial even though neighboring
+        statements usually distinguish every member. Stable color refinement carries those
+        distinctions through the graph before the exact transposition and ordering fallback.
+        """
+        nonlocal graph_tokens
+        if graph_tokens is not None:
+            return graph_tokens
+
+        base_tokens = canonical_tokens()
+
+        def ranks(values: list[object]) -> list[int]:
+            ordered = {value: rank for rank, value in enumerate(sorted(set(values), key=repr))}
+            return [ordered[value] for value in values]
+
+        labels: dict[tuple[int, int], object] = {}
+        for source, target in edges:
+            mapping = dict(abstract)
+            mapping.update({name: f"__source{slot}" for slot, name in enumerate(_ordered_sibling_defs(stmts[source]))})
+            consumer = sort_commutative_args(Body((stmts[target].rename(mapping),)))[0]
+            reads, writes, state = effects[source]
+            target_reads, target_writes, target_state = effects[target]
+            labels[source, target] = (
+                digest(form(consumer)),
+                tuple(sorted(writes & target_reads)),
+                tuple(sorted(writes & target_writes)),
+                tuple(sorted(reads & target_writes)),
+                len(state & target_state),
+            )
+
+        base = [base_tokens[id(stmt)] for stmt in stmts]
+        colors = ranks(base)
+        for _ in stmts:
+            descriptors = [
+                (
+                    base[index],
+                    colors[index],
+                    tuple(sorted((labels[source, index], colors[source]) for source in incoming[index])),
+                    tuple(sorted((labels[index, target], colors[target]) for source, target in edges if source == index)),
+                )
+                for index in range(len(stmts))
+            ]
+            refined = ranks(descriptors)
+            if refined == colors:
+                break
+            colors = refined
+        graph_tokens = {id(stmt): colors[index] for index, stmt in enumerate(stmts)}
+        return graph_tokens
 
     def interchangeable(left: int, right: int) -> bool:
         left_defs = _ordered_sibling_defs(stmts[left])
@@ -1517,6 +1570,10 @@ def _canonicalize_sibling_order_variants(stmts: list[Stmt]) -> Iterator[tuple[St
         tied = [index for index in ready if coarse_tokens[id(stmts[index])] == least_coarse]
         if len(tied) > 1:
             tokens = canonical_tokens()
+            least = min(tokens[id(stmts[index])] for index in tied)
+            tied = [index for index in tied if tokens[id(stmts[index])] == least]
+        if len(tied) > 1:
+            tokens = refined_tokens()
             least = min(tokens[id(stmts[index])] for index in tied)
             tied = [index for index in tied if tokens[id(stmts[index])] == least]
         representatives: list[int] = []

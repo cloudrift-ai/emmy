@@ -773,6 +773,23 @@ def test_structural_key_handles_large_symmetric_partitions() -> None:
     )
 
 
+def test_normalize_body_refines_large_asymmetric_sibling_partition() -> None:
+    """Graph context splits a local-form tie before the exact ordering fallback."""
+
+    def make(prefix: str, *, reverse: bool) -> Body:
+        constants = tuple(Const(name=f"{prefix}_source_{index}", value=index) for index in range(9))
+        consumers = tuple(
+            Cond(
+                cond=Literal(1, "int"),
+                body=(Assign(name=f"{prefix}_value_{index}", op="abs", args=(f"{prefix}_source_{index}",)),),
+            )
+            for index in range(9)
+        )
+        return Body((*constants, *(reversed(consumers) if reverse else consumers)))
+
+    assert normalize_body(make("first", reverse=False)) == normalize_body(make("renamed", reverse=True))
+
+
 def test_structural_key_distinguishes_reordered_noncommutative_arguments() -> None:
     """Statement order is free; the operand order of an exact subtract remains identity."""
     inputs = (("left", "left_buffer", "row"), ("right", "right_buffer", "column"))
