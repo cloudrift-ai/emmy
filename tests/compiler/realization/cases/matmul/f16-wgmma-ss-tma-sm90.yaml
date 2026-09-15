@@ -27,7 +27,7 @@ configs:
     origins:
     - matmul
   realizations:
-  - name: k_matmul_0d04ce.956acc1c6b18
+  - name: k_matmul_13e5d8.8e771a33beea
     bindings: {}
     pins:
       FAST_MATH: false
@@ -37,4 +37,4 @@ configs:
       REDUCE: ''
       STAGE: d2/smem-tma
       RASTER: ''
-    identity: 29799689304c3c7a29cff4634a96852520efd5731cc9ff453b5456ee7f7a3ab8
+    identity: 48db2669f72889324a0c0cda237d7222ebaf85252d45c5fcc9a188a58e26cefb

@@ -32,7 +32,7 @@ configs:
     - add
     - linear
   realizations:
-  - name: k_linear_e81aec.c5577731362a
+  - name: k_linear_c95fe9.c5577731362a
     bindings: {}
     pins:
       FAST_MATH: false
@@ -67,3 +67,20 @@ configs:
       WORK: ''
       RASTER: ''
     identity: 331467e5c94b5cbd3a85013462cce199ce7047203d3bb11e8640c547df011cc3
+  - name: k_linear_c95fe9.c5577731362a.88845588278c
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: 88845588278c83b6e353490fa4f075007df8df792687a45400b0762a8d8f35d6
+  - name: k_linear_c95fe9.c5577731362a.c60f4b9a714e
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      RASTER: ''
+    identity: c60f4b9a714e26dd6e265eff3b496a212a7555a9b85be238d2e34e88d36a9fcc

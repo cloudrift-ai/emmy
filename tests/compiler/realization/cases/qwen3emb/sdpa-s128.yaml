@@ -32,7 +32,7 @@ configs:
     origins:
     - o
   realizations:
-  - name: k_sdpa_105894.c8fdb96b70d5
+  - name: k_sdpa_3c68e3.87af83e1d83c
     bindings: {}
     pins:
       FAST_MATH: false
@@ -43,4 +43,4 @@ configs:
       STAGE: ''
       RASTER: ''
       WORK: t32x16
-    identity: 89e2f8900233d27023757d30c7b62881b2dc82dbd7a303b914e307c8a0ebe4a0
+    identity: dc54ab34cd69e698a37558f2b96d1827891237bbf2bffd49dc892614b5113595
