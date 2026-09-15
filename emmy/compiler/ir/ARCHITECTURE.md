@@ -575,14 +575,16 @@ canonicalized before validation:
   differ only by argument order land in the same canonical form.
   Runs last so the sort key is the post-rename canonical SSA / buffer
   names.
-- The final ordering pass canonicalizes integer coordinate expressions and chooses the least dependency- and
-  effect-valid statement order. This includes independent pure work, writes to distinct buffers, and updates to
-  distinct accumulators. Reads and writes of the same buffer and updates to the same accumulator retain their order.
-  Each nested scope chooses its order before its parent while keeping its original binders until the final whole-body
-  rename. This avoids multiplying every child's valid orders. Name/use roles are built only when a scope has more
-  than one dependency-valid next statement, then refined through the sibling dependency graph before an exact tie
-  search. Ready nested scopes stay together ahead of leaf epilogues so canonical order does not widen the schedule
-  search or obscure contraction structure.
+- The final ordering pass canonicalizes integer coordinate expressions, builds one colored relation graph for the
+  complete body tree, and chooses one dependency- and effect-valid statement order. Vertices represent scopes,
+  statements, lexical definitions, axes, source axes, and external buffers; colored relations retain operand
+  positions, captures, aliases, nesting, resource hazards, and ordered execution protocols. The graph is independent
+  of source order and spelling.
+- A standard smaller-half worklist computes the equitable partition in
+  `O((vertices + relations) log vertices)` relation visits. Exact individualization is isolated to partitions that
+  refinement cannot distinguish; no exact near-linear worst-case graph-canonization algorithm is known. Canonical
+  vertex ranks then serve as the optional tie-break for `Body.topological_order`, a heap-based Kahn sort. Ready nested
+  scopes stay ahead of leaf epilogues so normalization does not widen schedule search or obscure contractions.
 
 ### `ir/stmt/identity.py` — structural identity
 
@@ -590,15 +592,12 @@ canonicalized before validation:
 optionally collapses operations to their compute-unit cluster. Clear external argument names remain on executable
 bodies; these two transformations produce identity material only and must never be executed.
 
-- Each external buffer is assigned a role from its access and downstream-use contexts. Distinct roles fix buffer order;
-  tied roles are permuted and the least complete structural form wins. Encounter order and argument spelling therefore
-  cannot select the identity, while using one buffer twice remains distinct from using two buffers.
-- Name-free forward/use roles usually make the next dependency-valid statement or buffer unique. Remaining ties are
-  searched exactly. Proven transposition symmetries are searched once, which keeps large sets of interchangeable
-  arguments, producers, or axes from causing factorial work without assuming that an unresolved tie is a symmetry.
-- After argument names are assigned, the existing ordering pass revisits only scopes that use those arguments and
-  their ancestors. Argument roles therefore reach the same canonical form without repeatedly normalizing unaffected
-  parts of a large body.
+- The same relation graph that orders statements ranks external buffers without using their spelling. Identity assigns
+  `b0`, `b1`, … by those ranks, preserving aliasing while making discovery order irrelevant, then runs the final
+  expression, statement-order, SSA, and operand cleanup once with those names.
+- Optional operation clustering replaces each elementwise operation with its compute-unit representative before
+  normalization. It is the only operation rewrite owned by identity; all executable canonicalization stays in
+  `normalize_body`.
 
 The key is `digest(form(canonical_body))`, not the human `pretty()` rendering. The exact and compute-unit-clustered
 forms are cached on each immutable `Body`. Two bodies that differ only by SSA or axis names, argument spelling and

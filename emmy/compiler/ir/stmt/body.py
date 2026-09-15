@@ -14,7 +14,8 @@ Phase 1 surface (this file): the protocol that lets every
 as method-shaped wrappers around the existing free functions.
 
 Phase 2 surface: def-use queries (``definitions``, ``axis_dependencies``,
-``deps_closure``, ``depends_on`` / ``independent``, ``deps_of``), type-filtered lookups
+``deps_closure``, ``depends_on`` / ``independent``, ``deps_of``), Kahn
+``topological_order``, type-filtered lookups
 (``loads``, ``writes``, ``accums``, …), and dependence cones
 (:class:`Cone`, :meth:`Body.backward_cone`
 / :meth:`Body.defs_die_at`) — the shared substrate behind the rules
@@ -24,9 +25,10 @@ that slice computed-operand cones. Region transforms (``replace_at``,
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from functools import cached_property
+from heapq import heappop, heappush
 
 from emmy.compiler.ir.stmt.base import Stmt
 
@@ -251,6 +253,38 @@ class Body(tuple[Stmt, ...]):
             else:
                 out.extend(r)
         return Body(out)
+
+    def topological_order(
+        self,
+        incoming: Sequence[set[int] | frozenset[int]],
+        tie_break: Callable[[int, Stmt], object] | None = None,
+    ) -> Body:
+        """Kahn topological order over indexed predecessor sets.
+
+        Source order breaks ties by default. ``tie_break`` may supply a canonical priority while
+        the source index remains the final deterministic tie-break. A cycle leaves the body
+        unchanged so callers can preserve the validator's error path.
+        """
+        successors: list[list[int]] = [[] for _ in self]
+        degree = [len(sources) for sources in incoming]
+        for target, sources in enumerate(incoming):
+            for source in sources:
+                successors[source].append(target)
+
+        def priority(index: int) -> tuple[object, int]:
+            return (index if tie_break is None else tie_break(index, self[index])), index
+
+        ready = [priority(index) for index, count in enumerate(degree) if not count]
+        ready.sort()
+        ordered: list[Stmt] = []
+        while ready:
+            _, selected = heappop(ready)
+            ordered.append(self[selected])
+            for target in successors[selected]:
+                degree[target] -= 1
+                if not degree[target]:
+                    heappush(ready, priority(target))
+        return Body(ordered) if len(ordered) == len(self) else self
 
     @cached_property
     def _normalized(self) -> Body:

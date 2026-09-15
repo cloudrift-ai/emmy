@@ -18,7 +18,7 @@ Defined here rather than under any one IR package because all three IRs
   :class:`Body` (in :mod:`.body`).
 - Body normalization: the public ``normalize_body`` driver and its internal ordered passes
   (drop-size-one, canonicalize-axis-order, copy-alias-elim,
-  reduce-axis-unify, hoist, simplify, dedup-loads, rename-ssa) in
+  reduce-axis-unify, hoist, simplify, dedup-loads, canonical-statement-order, rename-ssa) in
   :mod:`.normalize`.
 - Pretty printing + render context: ``RenderCtx``, ``op_to_expr``,
   ``select_to_ternary``, ``render_index`` (in :mod:`.base`).

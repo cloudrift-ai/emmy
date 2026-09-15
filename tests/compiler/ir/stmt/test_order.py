@@ -12,7 +12,7 @@ from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.identity import canonicalize_identity
 from emmy.compiler.ir.stmt.leaves import Assign, Const, Load, Write
 from emmy.compiler.ir.stmt.normalize import normalize_body
-from emmy.compiler.ir.stmt.order import _canonical_ranks, _equitable_partition, _kahn, _ordering_constraints
+from emmy.compiler.ir.stmt.order import _canonical_ranks, _equitable_partition, _ordering_constraints
 
 
 def _certificate(colors, edges, ranks: tuple[int, ...]) -> tuple:
@@ -120,8 +120,8 @@ def test_canonical_label_splits_regular_asymmetric_graph() -> None:
 def test_kahn_tie_break_is_optional() -> None:
     body = Body((Assign(name="right", op="exp", args=("x",)), Assign(name="left", op="abs", args=("x",))))
     incoming = (frozenset(), frozenset())
-    assert _kahn(body, incoming) == body
-    assert _kahn(body, incoming, lambda _index, stmt: stmt.op.name) == Body(reversed(body))
+    assert body.topological_order(incoming) == body
+    assert body.topological_order(incoming, lambda _index, stmt: stmt.op.name) == Body(reversed(body))
 
 
 def test_effect_constraints_keep_only_intervening_resource_hazards() -> None:
