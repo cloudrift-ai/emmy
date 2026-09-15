@@ -100,7 +100,7 @@ configs:
     - scaled_dot_product_attention
     - transpose
   realizations:
-  - name: k_sdpa_linear_reduce_2f1e89.51be0fbb7614
+  - name: k_sdpa_linear_reduce_eb8000.b473a4d467bd
     bindings: {}
     pins:
       FAST_MATH: false
@@ -110,4 +110,4 @@ configs:
       STAGE@map.1/inner: d2/smem
       TILE@map.1/inner.1/map.1/twist.1/inner: mma_m16n8k16_f16_f32/f8x2/k4
       RASTER: ''
-    identity: 7bb9cf058b39b9d098594b26b0a5e5d2f2ce57da02f0918a375197055f78ee66
+    identity: 861d8e107bf3d48369812774d728399fd8ab164a1265ba16d0faebc7bac4efdd

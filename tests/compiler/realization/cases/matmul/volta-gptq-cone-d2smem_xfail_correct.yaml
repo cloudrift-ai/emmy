@@ -3477,7 +3477,7 @@ configs:
     - p_attn_q_proj_weight_zeros_view
     - p_attn_q_proj_weight_zeros_view_bc
   realizations:
-  - name: k_linear_reduce_0a31ad.5149dd8075ef
+  - name: k_linear_reduce_1c738d.3007f7db9d37
     bindings: {}
     pins:
       FAST_MATH: false
@@ -3487,4 +3487,4 @@ configs:
       REDUCE: ''
       STAGE: d2/smem
       RASTER: ''
-    identity: 6c6940f863910d030bb23eca0caeef913b83b786cd400334aa974a2f506cbd51
+    identity: 27bf3c44e92c2ca0af556724d7c3d125e69bc3e69c84451c57274fe834f75221
