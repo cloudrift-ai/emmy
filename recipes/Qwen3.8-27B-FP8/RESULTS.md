@@ -109,11 +109,27 @@ reasons inline in `content`.
 `<tool_call><function=get_weather>…` markup, and the `none` path returns that markup as the answer text — 3/3 before
 the change. The recipe now sets `--exclude-tools-when-tool-choice-none`, which this image supports.
 
-**`tool_choice: "required"` can run to the output limit when thinking is on and no tool fits.** `required` forces a
-JSON array of calls, but only after the reasoning block ends. Asked for a haiku with thinking on, the model decided no
-tool applied, then wrote the haiku inside its reasoning and never closed the block: `finish_reason: length` at both
-256 and 1,024 tokens, with empty `content` and no call. Clients forcing a tool call should keep thinking off for that
-request, or cap `max_tokens`. (Reproduced on the SXM3 lane with the same image and flags.)
+A combination matrix over thinking on/off x `auto`/`required`/`none`/named x streamed/plain x five prompt kinds (one
+tool fits, two parallel calls, typed arguments, no tool fits, a tool result fed back) passed all 80 cases on this lane:
+the expected call or no call, a known tool with parseable arguments carrying every required field, no markup in
+`content`, reasoning present only with thinking on, and nothing stopped at the token limit. Streamed and plain replies
+agreed case by case.
+
+Two behaviours follow from the API rather than from this deployment, and a client has to plan for them:
+
+- **`required` and a named tool invent a call when no tool fits.** Asked for a haiku under `required`, the model
+  returned `get_weather{"city": "Tokyo"}`; with thinking on it wrote the haiku inside its reasoning first, where it is
+  then discarded. Use `auto` unless a call is genuinely mandatory.
+- **`required` after a tool result calls again instead of answering.** Fed `{"temperature_c": 18}` for Paris, it
+  re-issued `get_weather{"city": "Paris"}`. A client that keeps `required` on every turn loops; switch to `auto` once a
+  tool result is in the conversation.
+
+**`tool_choice: "required"` can also run to the output limit when thinking is on and no tool fits.** `required` forces
+a JSON array of calls, but only after the reasoning block ends. On the SXM3 lane with two tools offered, a haiku
+request with thinking on reasoned past `finish_reason: length` at both 256 and 1,024 tokens, with empty `content` and
+no call. The same request with three tools offered closed its reasoning after ~320 tokens and produced a call, so the
+failure depends on the prompt rather than on the platform, and it is not fixed. Clients forcing a call should keep
+thinking off for that request, or cap `max_tokens`.
 
 ### Fit
 
