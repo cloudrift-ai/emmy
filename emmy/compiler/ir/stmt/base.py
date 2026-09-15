@@ -666,11 +666,11 @@ class Stmt(Structural):
         stmt run N times instead of M is observable, so it pins the
         enclosing iteration to its current scope.
 
-        Note: ``Accum`` / ``Init`` are *not* side-effecting in this
+        Note: ``Accum`` / ``Mma`` / ``Init`` are *not* side-effecting in this
         sense — they're scope-bound (their semantics depend on which
         Loop encloses them) but moving the *whole enclosing block* is
         safe. Hoisting passes that want to move a Loop containing an
-        Accum need a separate scope-bound check on the leaf, not
+        carried state need a separate scope-bound check on the leaf, not
         ``has_side_effects`` on the wrapper."""
         return any(c.has_side_effects for sub in self.nested() for c in sub)
 

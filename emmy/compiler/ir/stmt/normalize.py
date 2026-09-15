@@ -698,7 +698,7 @@ def hoist_loop_invariants(stmts: Body) -> Body:
     move together: hoisting just the consumer would leave it referencing
     an Accum still defined inside the outer Loop body.
 
-    ``Accum`` / ``Init`` / ``Write`` always stay (iteration-tied
+    ``Accum`` / ``Mma`` / ``Init`` / ``Write`` always stay (iteration-tied
     semantics). Loop-invariance is queried via :meth:`Body.depends_on`
     against the body's transitive read closure, so the hoisted set is
     automatically closed under SSA dependencies — no separate ordering
@@ -732,7 +732,7 @@ def hoist_loop_invariants(stmts: Body) -> Body:
         # Accum or a Carrier's state per output cell) — they can't move alone, but the
         # whole enclosing block can. Side-effecting stmts (Write, or any block containing a
         # Write) pin their iteration count and stay put.
-        if isinstance(s, (Accum, Init)) or s.has_side_effects:
+        if isinstance(s, (Accum, Mma, Init)) or s.has_side_effects:
             return False
         return axis not in _axis_deps(s)
 
@@ -1105,8 +1105,8 @@ def sort_commutative_args(stmts: Body) -> Body:
     """Sort ``Assign.args`` for commutative ``op``s so two bodies that
     differ only by argument order land in the same canonical form.
 
-    Acts on ``Assign`` only. Identity-only Expr normalization handles equivalent index and
-    condition spellings without changing the executable body. Recurses
+    Acts on ``Assign`` only. Expression normalization handles equivalent index and condition
+    spellings. Recurses
     through every block-structured Stmt (``Loop`` / ``StridedLoop`` /
     ``Tile`` / ``Cond``)."""
     stmts = Body.coerce(stmts)
@@ -1123,36 +1123,116 @@ def sort_commutative_args(stmts: Body) -> Body:
 
 def _canonicalize_order(stmts: Body) -> Body:
     """Canonicalize expressions and dependency-valid statement order."""
+    from emmy.compiler.structural import form  # noqa: PLC0415
+
     stmts = _canonicalize_exprs(stmts)
-    stmts = _canonicalize_scope_order(stmts)
-    return Body.coerce(sort_commutative_args(rename_ssa_sequential(stmts)))
+    ordered, revisit = _canonicalize_scope_order(stmts)
+    candidate = Body.coerce(sort_commutative_args(rename_ssa_sequential(ordered)))
+    while revisit:
+        refined, revisit = _revisit_scope_order(candidate, revisit)
+        refined = Body.coerce(sort_commutative_args(rename_ssa_sequential(refined)))
+        if form(refined) == form(candidate):
+            return refined
+        candidate = refined
+    return candidate
 
 
-def _canonicalize_scope_order(stmts: Body) -> Body:
+def _least_sibling_order(statements: list[Stmt]) -> tuple[Body, bool]:
+    """Least dependency-valid order for one scope and whether a choice existed."""
+    from emmy.compiler.structural import form  # noqa: PLC0415
+
+    choices = iter(_canonicalize_sibling_order_variants(statements))
+    first = next(choices)
+    second = next(choices, None)
+    if second is None:
+        return Body(first), False
+
+    def key(ordered: tuple[Stmt, ...]) -> str:
+        candidate = Body.coerce(sort_commutative_args(rename_ssa_sequential(Body(ordered))))
+        return repr(form(candidate))
+
+    return Body(min(chain((first, second), choices), key=key)), True
+
+
+type _ScopePath = tuple[tuple[int, int], ...]
+
+
+def _scope_needs_context(body: Body) -> bool:
+    """Whether a scope reads enclosing names or exports carried state."""
+    visible_defs = frozenset(name for stmt in body for name in _sibling_defs_uses(stmt)[0])
+    captures = frozenset(name for stmt in body for name in free_names(stmt)) - visible_defs
+    return bool(captures or _exported_accs(body))
+
+
+def _scope_paths(
+    ordered: Body,
+    child_paths: dict[int, tuple[frozenset[_ScopePath], ...]],
+    *,
+    current: bool,
+) -> frozenset[_ScopePath]:
+    """Rebase child scope paths under one chosen sibling order."""
+    paths: set[_ScopePath] = {()} if current else set()
+    for statement_index, stmt in enumerate(ordered):
+        for child_index, nested in enumerate(child_paths.get(id(stmt), ())):
+            paths.update(((statement_index, child_index), *path) for path in nested)
+    return frozenset(paths)
+
+
+def _canonicalize_scope_order(stmts: Body, *, nested: bool = False) -> tuple[Body, frozenset[_ScopePath]]:
     """Choose one canonical sibling order per scope without renaming its binders.
 
     Nested scopes are independent ordering problems. Keeping their original names until the final
     whole-body rename preserves outer captures and exported accumulator references without taking
     the Cartesian product of every child's valid orders.
     """
-    from emmy.compiler.structural import form  # noqa: PLC0415
-
-    statements = []
+    statements: list[Stmt] = []
+    child_paths: dict[int, tuple[frozenset[_ScopePath], ...]] = {}
     for stmt in Body.coerce(stmts):
         children = stmt.nested()
-        statements.append(stmt.with_bodies(tuple(_canonicalize_scope_order(child) for child in children)) if children else stmt)
+        if children:
+            nested_results = tuple(_canonicalize_scope_order(child, nested=True) for child in children)
+            stmt = stmt.with_bodies(tuple(body for body, _ in nested_results))
+            child_paths[id(stmt)] = tuple(paths for _, paths in nested_results)
+        statements.append(stmt)
 
-    choices = iter(_canonicalize_sibling_order_variants(statements))
-    first = next(choices)
-    second = next(choices, None)
-    if second is None:
-        return Body(first)
+    ordered, ambiguous = _least_sibling_order(statements)
+    has_marked_child = any(paths for children_paths in child_paths.values() for paths in children_paths)
+    current = has_marked_child or (nested and ambiguous and _scope_needs_context(Body(statements)))
+    return ordered, _scope_paths(ordered, child_paths, current=current)
 
-    def key(ordered: tuple[Stmt, ...]) -> str:
-        candidate = Body.coerce(sort_commutative_args(rename_ssa_sequential(Body(ordered))))
-        return repr(form(candidate))
 
-    return Body(min(chain((first, second), choices), key=key))
+def _revisit_scope_order(stmts: Body, revisit: frozenset[_ScopePath]) -> tuple[Body, frozenset[_ScopePath]]:
+    """Reorder marked scopes after their enclosing names become canonical.
+
+    The bottom-up pass deliberately preserves names until the whole body is renamed. An ambiguous
+    nested scope can therefore choose an order from the source spelling of a captured value or an
+    exported accumulator. Revisit those scopes after the enclosing names are canonical, and revisit
+    their ancestors because a changed child can change a block's sibling role. Unrelated scopes do
+    not repeat their ordering search.
+    """
+    statements: list[Stmt] = []
+    child_paths: dict[int, tuple[frozenset[_ScopePath], ...]] = {}
+    for statement_index, stmt in enumerate(Body.coerce(stmts)):
+        children = stmt.nested()
+        if children:
+            refined_children = []
+            refined_paths = []
+            for child_index, child in enumerate(children):
+                prefix = (statement_index, child_index)
+                nested_paths = frozenset(path[1:] for path in revisit if path and path[0] == prefix)
+                if nested_paths:
+                    refined, paths = _revisit_scope_order(child, nested_paths)
+                else:
+                    refined, paths = child, frozenset()
+                refined_children.append(refined)
+                refined_paths.append(paths)
+            stmt = stmt.with_bodies(tuple(refined_children))
+            child_paths[id(stmt)] = tuple(refined_paths)
+        statements.append(stmt)
+
+    current = () in revisit
+    ordered = _least_sibling_order(statements)[0] if current else Body(statements)
+    return ordered, _scope_paths(ordered, child_paths, current=current)
 
 
 def _canonicalize_exprs(stmts: Body) -> Body:
@@ -1316,7 +1396,7 @@ def _canonicalize_sibling_order_variants(stmts: list[Stmt]) -> Iterator[tuple[St
         yield tuple(stmts)
         return
 
-    from emmy.compiler.structural import form  # noqa: PLC0415
+    from emmy.compiler.structural import digest, form  # noqa: PLC0415
 
     defs_uses = [_sibling_defs_uses(stmt) for stmt in stmts]
     definitions: dict[str, list[int]] = {}
@@ -1359,6 +1439,32 @@ def _canonicalize_sibling_order_variants(stmts: list[Stmt]) -> Iterator[tuple[St
                 incoming[later].add(earlier)
 
     edges = {(source, target) for target, sources in enumerate(incoming) for source in sources}
+    body = Body(stmts)
+    names = set(body.ssa_defs | body.ssa_uses | body.axis_names)
+    names.update(name for stmt in body for name in free_names(stmt))
+    for stmt in body.iter():
+        axis = getattr(stmt, "axis", None)
+        axes = (*((axis,) if isinstance(axis, Axis) else ()), *getattr(stmt, "axes", ()))
+        for axis in (axis for axis in axes if isinstance(axis, Axis)):
+            parent = axis.source_axis
+            seen: set[int] = set()
+            while parent is not None and id(parent) not in seen:
+                seen.add(id(parent))
+                names.add(parent.name)
+                parent = parent.source_axis
+    abstract = {name: "__name__" for name in names}
+
+    def direct_token(stmt: Stmt, *, shallow: bool) -> str:
+        children = stmt.nested()
+        token_stmt = stmt.with_bodies(tuple(Body() for _ in children)) if shallow and children else stmt
+        renamed = sort_commutative_args(Body((token_stmt.rename(abstract),)))[0]
+        return digest(form(renamed))
+
+    # Most ready statements already differ by their own operation, buffer, index, or wrapper.
+    # Compare that cheap local shape first; build the downstream-sensitive pure graph only for a
+    # remaining tie. This keeps exact canonical labeling while avoiding whole-scope graph work for
+    # the common case of distinct loads and operations.
+    coarse_tokens = {id(stmt): direct_token(stmt, shallow=True) for stmt in stmts}
     tokens: dict[int, str] | None = None
 
     def canonical_tokens() -> dict[int, str]:
@@ -1366,14 +1472,11 @@ def _canonicalize_sibling_order_variants(stmts: list[Stmt]) -> Iterator[tuple[St
         if tokens is not None:
             return tokens
         pure_tokens = _pure_tokens(stmts)
-        body = Body(stmts)
-        abstract = {name: "__name__" for name in body.ssa_defs | body.ssa_uses | body.axis_names}
 
         def token(stmt: Stmt) -> str:
             if id(stmt) in pure_tokens:
                 return pure_tokens[id(stmt)]
-            renamed = sort_commutative_args(Body((stmt.rename(abstract),)))[0]
-            return repr(form(renamed))
+            return direct_token(stmt, shallow=False)
 
         tokens = {id(stmt): token(stmt) for stmt in stmts}
         return tokens
@@ -1405,9 +1508,12 @@ def _canonicalize_sibling_order_variants(stmts: list[Stmt]) -> Iterator[tuple[St
             selected = ready[0]
             yield from walk(remaining - {selected}, (*ordered, selected))
             return
-        tokens = canonical_tokens()
-        least = min(tokens[id(stmts[index])] for index in ready)
-        tied = [index for index in ready if tokens[id(stmts[index])] == least]
+        least_coarse = min(coarse_tokens[id(stmts[index])] for index in ready)
+        tied = [index for index in ready if coarse_tokens[id(stmts[index])] == least_coarse]
+        if len(tied) > 1:
+            tokens = canonical_tokens()
+            least = min(tokens[id(stmts[index])] for index in tied)
+            tied = [index for index in tied if tokens[id(stmts[index])] == least]
         representatives: list[int] = []
         for selected in tied:
             if not any(interchangeable(selected, earlier) for earlier in representatives):

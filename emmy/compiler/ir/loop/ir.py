@@ -103,19 +103,17 @@ class LoopOp(BodyOp):
     """
 
     def __post_init__(self) -> None:
-        Op.__post_init__(self)  # BodyOp's coerce+seed is REPLACED below (normalize-then-seed), not chained
+        Op.__post_init__(self)  # BodyOp's coerce+seed is replaced below, not chained
         from emmy.compiler.ir.stmt import normalize_body
 
-        # Body is a tuple subclass; coerce so ``Op(body=tuple_value)``
-        # construction shape keeps working without forcing wrapping at
-        # every rule's rewrite site.
+        # Body is a tuple subclass; coerce so ``Op(body=tuple_value)`` construction keeps working.
+        # Seed the positional ABI before normalization reorders independent reads and writes; the
+        # matcher later refreshes these placeholders in graph order.
         coerced = Body.coerce(self.body)
+        object.__setattr__(self, "body", coerced)
+        self._seed_io_placeholders()
         normalized = normalize_body(coerced)
         object.__setattr__(self, "body", normalized if isinstance(normalized, Body) else Body(normalized))
-        # Seed before validating so ``_validate`` can read
-        # ``loop.outputs`` (populated from body-derived names) rather
-        # than the now-gone ``body_outputs`` property.
-        self._seed_io_placeholders()
         _validate(self)
 
     def rename_buffers(self, rename: dict[str, str]) -> LoopOp:
