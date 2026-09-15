@@ -102,3 +102,14 @@ def test_bench_fixed_host_dry_run_cli(run_cli, make_bench_config, recipes_dir, t
     # provision_remote runs even for pre-allocated hosts (idempotent)
     assert "would install docker" in stdout
     assert "would install nvidia-container-toolkit" in stdout
+    # The host outlives the run; its serving workload does not.
+    assert "Leaving pre-allocated host in place" in stdout
+    assert "docker compose down" in stdout
+
+
+def test_bench_fixed_host_no_teardown_keeps_workload(run_cli, make_bench_config, recipes_dir, tmp_path):
+    config_path = make_bench_config(tmp_path)
+    recipe = os.path.join(recipes_dir, "Qwen3-Coder-30B-A3B-Instruct-AWQ")
+    rc, stdout, stderr = run_cli("bench", recipe, "--config", config_path, "--dry-run", "--no-teardown", "--ssh", "fakeuser@fake.host")
+    assert rc == 0, f"stderr: {stderr}\nstdout: {stdout}"
+    assert "Tearing down" not in stdout

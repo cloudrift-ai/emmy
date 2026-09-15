@@ -343,7 +343,7 @@ For each task in group:
     +-- deploy(DeployParams) -> compose up
     +-- run_benchmark_workload()
     +-- capture raw client/server logs and update the experiment record
-    +-- teardown() (skipped with --no-teardown)
+    +-- teardown() (also after a failed deploy; skipped with --no-teardown)
     |
     v
 delete_cloud_vm(conn.delete_info) (skipped with --no-teardown; the active handle stays in each affected record)
@@ -357,7 +357,8 @@ mutation through the async deploy/bench chain (so `run_deploy()` keeps its `bool
 and a `[timing] <name>: 12.3s` line is logged. Phase-name constants live in `timing.py`.
 
 **Measured phases:** provisioning `vm_provision`, `remote_provision`; deploy `image_pull`, `model_download`,
-`model_load_and_warmup` (the `compose up --wait` window — covers weight load into GPU + CUDA graph capture + warmup),
+`model_load_and_warmup` (detached `compose up -d` until `/health` answers — weight load into GPU + CUDA graph capture +
+warmup; polled with short SSH calls, so a reset connection costs one probe, and a service that exits fails at once),
 `smoke_test`; plus `benchmark`, `teardown`, and `command` (command recipes). After `model_load_and_warmup`,
 `orchestrate.py` scrapes `docker compose logs` and runs `log_phases.parse_engine_load_phases()` +
 `log_phases.decompose_model_load()` to break that window into a **non-overlapping** set of sub-phases that sums to the
@@ -389,7 +390,8 @@ planned `ExecutionGroup` can run on at least one supplied host. The dispatcher
 `_run_groups_on_hosts()` routes each group to a compatible idle host (locking per-host so
 each runs at most one group at a time) and calls `run_execution_group(...,
 preallocated_conn=host.conn)` — which skips both `provision_cloud_vm()` and
-`delete_cloud_vm()`. `provision_remote()` (Docker, NVIDIA Container Toolkit, optional
+`delete_cloud_vm()`. The host outlives the run, but its serving workload does not: each task tears it down exactly as
+a provisioned VM's would, unless `--no-teardown` keeps it. `provision_remote()` (Docker, NVIDIA Container Toolkit, optional
 driver/CUDA pinning) still runs and is idempotent, so already-provisioned hosts are a
 fast no-op while bare VMs (e.g. straight from `vm create`) get set up on first use.
 
@@ -562,7 +564,7 @@ emmy bench recipes/* --filter "deploy.gpu=*5090*"       # Subset (fnmatch glob, 
 emmy bench recipes/* --gpu-concurrency 4                # Split each (model, GPU) group across up to N VMs
 emmy bench recipes/* --no-teardown                      # Retain the VM handle in experiment records for later cleanup
 emmy bench recipes/* --local                            # Run on this machine via ssh to 127.0.0.1
-emmy bench recipes/* --ssh user@host1 --ssh user@host2  # Pre-allocated host pool (no provisioning, no teardown)
+emmy bench recipes/* --ssh user@host1 --ssh user@host2  # Pre-allocated host pool (no provisioning; hosts are kept, workloads torn down)
 ```
 
 Each actual run creates `{recipe_dir}/<YYYY-MM-DD_HH-MM-SS>/`. Every expanded row writes one `*.experiment.yaml` plus

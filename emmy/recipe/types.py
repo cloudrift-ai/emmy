@@ -127,9 +127,10 @@ class BenchmarkConfig:
     (note: an unset temperature is the server's default sampling, not greedy).
 
     ``num_warmups`` runs requests before measurement so request-time initialization does not
-    contaminate the first repeat. ``repeats`` reruns the identical measured workload N times
-    against the one deployed server; the JSON result then reports per-field mean and stddev
-    across the runs, so the spread is run-to-run noise, not workload variation."""
+    contaminate the first repeat. ``repeats`` reruns the measured workload N times against the
+    one deployed server, repeat ``i`` drawing its prompts from ``seed + i`` so the server's
+    prefix cache cannot carry one repeat's prompts into the next; lengths and concurrency are
+    unchanged, so the spread is run-to-run noise."""
 
     max_concurrency: int = 128
     num_prompts: int = 256
