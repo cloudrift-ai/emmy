@@ -1463,7 +1463,8 @@ def _canonicalize_sibling_order_variants(stmts: list[Stmt]) -> Iterator[tuple[St
         children = stmt.nested()
         token_stmt = stmt.with_bodies(tuple(Body() for _ in children)) if shallow and children else stmt
         renamed = sort_commutative_args(Body((token_stmt.rename(abstract),)))[0]
-        return digest(form(renamed))
+        rendered = form(renamed)
+        return repr((not children, rendered)) if shallow else digest(rendered)
 
     # Most ready statements already differ by their own operation, buffer, index, or wrapper.
     # Compare that cheap local shape first; build the downstream-sensitive pure graph only for a

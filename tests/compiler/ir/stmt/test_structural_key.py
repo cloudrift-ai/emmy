@@ -790,6 +790,39 @@ def test_normalize_body_refines_large_asymmetric_sibling_partition() -> None:
     assert normalize_body(make("first", reverse=False)) == normalize_body(make("renamed", reverse=True))
 
 
+def test_normalize_body_keeps_independent_sibling_scopes_together() -> None:
+    """Ready blocks stay ahead of leaf epilogues so normalization does not widen scheduling."""
+    first = Loop(
+        axis=Axis("first_axis", 4),
+        body=(
+            Load(name="first_input", input="X", index=(Var("first_axis"),)),
+            Accum(name="first_sum", value="first_input", axes=("first_axis",)),
+        ),
+    )
+    second = Loop(
+        axis=Axis("second_axis", 4),
+        body=(
+            Load(name="second_input", input="Y", index=(Var("second_axis"),)),
+            Accum(name="second_sum", value="second_input", axes=("second_axis",)),
+        ),
+    )
+    normalized = normalize_body(
+        Body(
+            (
+                first,
+                Assign(name="first_result", op="abs", args=("first_sum",)),
+                second,
+                Assign(name="second_result", op="exp", args=("second_sum",)),
+                Write(output="O0", index=(), value="first_result"),
+                Write(output="O1", index=(), value="second_result"),
+            )
+        )
+    )
+
+    assert isinstance(normalized[0], Loop)
+    assert isinstance(normalized[1], Loop)
+
+
 def test_structural_key_distinguishes_reordered_noncommutative_arguments() -> None:
     """Statement order is free; the operand order of an exact subtract remains identity."""
     inputs = (("left", "left_buffer", "row"), ("right", "right_buffer", "column"))
