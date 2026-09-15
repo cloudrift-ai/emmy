@@ -268,6 +268,7 @@
  "tests/compiler/passes/test_cut_forks.py::test_output_owning_cut_leaves_single_output_pieces_that_promote": 0.26,
  "tests/compiler/passes/test_cut_forks.py::test_pinned_fusion_lowers_one_computed_operand_kernel": 0.3,
  "tests/compiler/passes/test_cut_forks.py::test_pool_group_fuses_node_id_respellings_and_keys_on_pins": 0.19,
+ "tests/compiler/passes/test_cut_forks.py::test_post_schedule_receipt_does_not_steer_an_unowned_peer": 1.89,
  "tests/compiler/passes/test_cut_forks.py::test_recorded_sdpa_cut_decodes_exactly_and_stale_path_fails_loudly": 5.8,
  "tests/compiler/passes/test_cut_forks.py::test_scoped_place_cut_is_consumed_once_by_both_pieces": 0.38,
  "tests/compiler/passes/test_cut_forks.py::test_sdpa_score_cut_is_offered_and_pinned_cut_lowers[False]": 2.57,
