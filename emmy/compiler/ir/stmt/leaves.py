@@ -1021,9 +1021,15 @@ def mask_select_predicate(select: Select) -> Expr | None:
     keep, mask = select.branches
     if not isinstance(keep.select, BinaryExpr) or not isinstance(mask.select, BinaryExpr):
         return None
-    if (keep.select.op, mask.select.op) not in (("<", ">="), ("<=", ">"), (">", "<="), (">=", "<")):
+    comparison = mask.select
+    if keep.select.left == comparison.right and keep.select.right == comparison.left:
+        swapped = {"<": ">", "<=": ">=", ">": "<", ">=": "<="}
+        if comparison.op not in swapped:
+            return None
+        comparison = BinaryExpr(swapped[comparison.op], comparison.right, comparison.left)
+    if keep.select.left != comparison.left or keep.select.right != comparison.right:
         return None
-    if keep.select.left != mask.select.left or keep.select.right != mask.select.right:
+    if (keep.select.op, comparison.op) not in (("<", ">="), ("<=", ">"), (">", "<="), (">=", "<")):
         return None
     return mask.select
 
