@@ -2,350 +2,307 @@
 
 ## Summary
 
-Add `--native` to the existing serving command. Emmy launches our Rust server instead of vLLM. Keep vLLM as
-the default. Python remains the compiler and launcher; Rust becomes the API server and, in a second milestone,
-the inference runtime.
+Build a reusable Rust execution runtime before adding an HTTP server. Python Emmy remains the compiler, tuner,
+and launcher. The runtime executes Emmy's exported programs independently for benchmarking and, later, serving.
 
-The first milestone serves dense Qwen3 models in FP16 on one GPU, with cached generation and a streaming API.
-It runs without vLLM installed. Success means correct behavior and ownership of execution; outperforming vLLM
-comes later.
+Once complete cached generation works, add `--native` to the existing serving command to launch `emmy-server`
+instead of vLLM. Keep vLLM as the default. Qualify dense Qwen3-0.6B in FP16 on one GPU first.
 
-## Approach
+This is a plan-only PR. The performance opportunities below are hypotheses, not measured Rust gains. No new GPU
+experiments have been run for this plan. Evidence gathering precedes performance claims and runtime expansion.
 
-- Reuse Emmy's compiled model runner and device execution paths.
-- Use Rust with Axum for HTTP/SSE, Tokio for asynchronous I/O, and Serde for request and response serialization.
-  Do not add FastAPI or Uvicorn. Rust is the default for both server concurrency and runtime memory ownership;
-  use narrow C/CUDA bindings where existing GPU libraries require them.
-- Own the generation loop, KV cache, request lifecycle, and HTTP API. Move ownership in the stages below.
-- Start with PyTorch attention and a preallocated contiguous KV cache. Prefill computes the prompt once;
-  subsequent steps process one new token.
-- Defer FlashInfer until paged cache or batching makes it useful. Its independent attention kernels fit that
-  later stage. See the [FlashInfer KV-cache documentation](https://docs.flashinfer.ai/tutorials/kv_layout.html).
-- Keep the current vLLM integration as the production path and comparison baseline.
+## Evidence before implementation
 
-## Potential gains
+### Compare with the current path
 
-The strongest opportunity is designing compilation and serving together. Rust can lower CPU overhead, but changing
-the server language alone does not establish an inference speedup. These are hypotheses to measure:
+The current generative integration already supports whole-step CUDA graphs. Do not count removal of per-kernel
+Python submission as a benefit for steps already captured. Investigate work between replays: metadata preparation,
+request scheduling, graph selection, sampling/output processing, transfers, and synchronization. Measure which
+costs lie on the critical path; CPU work overlapping GPU computation is not automatically removable latency.
 
-- **Unified GPU memory planning:** budget weights, activation/scratch buffers, and KV cache together. Reuse storage
-  and size buffers to scheduled work so more memory remains for concurrent requests. Existing serving evidence
-  identifies non-KV footprint as a concurrency limit; replacing an allocator alone does not shrink that footprint.
-- **Scheduling matched to compiled kernels:** choose efficient batch sizes and prefill chunks, reducing padding,
-  unnecessary shape changes, and gaps between useful GPU work.
-- **Lower CPU dispatch overhead:** remove Python from step preparation and submission. This matters most for short
-  GPU steps; long prefills and bandwidth-bound decode may see little improvement from faster CPU code.
-- **Fewer copies and synchronization points:** keep intermediate results and sampling on GPU, and avoid CPU waits
-  except where text processing or request decisions actually require results.
-- **Simpler runtime deployment:** load complete compiled artifacts without the Python execution stack or vLLM
-  compatibility patches. We still own the native binary and CUDA-library compatibility requirements.
+A concrete current inefficiency is fixed-width decode. When the single-token tier is disabled and the decode bucket
+is 16, one real token goes through a 16-row compiled pre/post program. Graph replay does not remove padded work.
+This does not imply 16x latency. The decision belongs to Emmy's runner, so first compare a smaller compiled width
+inside the existing vLLM integration. Do not present this as proof that vLLM must be replaced.
 
-The current integration already uses CUDA graphs, so their existing savings cannot be counted again as a Rust gain.
-As an illustration, eliminating overhead that contributes 10% of total latency yields at most 1.11x speedup if all
-other costs stay fixed. Measure the actual removable fraction rather than assuming CPU dispatch is the bottleneck.
+Also measure activation/scratch allocation against the widths actually scheduled. Existing serving documentation
+records non-KV footprint limiting concurrency, but that historical evidence is not a current native-runtime result.
+Reproduce the relevant workload before claiming recoverable KV capacity or throughput.
 
-Milestone 1 establishes ownership and may be slower than vLLM. Milestone 2 creates an opportunity to improve
-low-concurrency token latency and CPU use. Integrated memory planning, scheduling, and batching in milestone 3 offer
-the stronger throughput opportunity. Compare token latency, throughput at the same latency target, and GPU memory
-usage under equivalent model, precision, context, and workload settings; a single-request result is not evidence
-of production throughput or fairness.
+The current benchmark implementation already has persistent workers for autotuning and some benchmark sessions;
+some comparison paths still use one-shot workers. Inventory the actual path in each experiment. Persistence is not
+a new Rust capability. Compare equivalent worker lifetimes before attributing a startup saving to Rust.
 
-## Risks and continuation criteria
+### Required experimental reports
 
-- **Rebuilding without a performance gain:** months of infrastructure work may leave GPU costs unchanged. Compare
-  with the existing vLLM path after each milestone on fixed workloads, and identify which measured cost changed.
-- **Performance regression:** CPU sampling, weaker attention, or missing batching can dominate any CPU savings.
-  Keep those limitations explicit and retain vLLM as the production path during the experiment.
-- **Silent correctness errors:** cache positions, masks, rotary embeddings, stream ordering, or stale buffers can
-  produce plausible but incorrect text. Compare logits over prefill and repeated decode steps, and test consecutive
-  requests, cancellation, and boundary lengths.
-- **Scope growth:** model variants, quantization, tool calling, speculative decoding, and multi-GPU execution can
-  turn this into rebuilding a general serving engine. Keep the initial model family and API subset narrow.
-- **Incomplete artifacts:** existing plans may leave model operations dependent on Python. Prove complete execution
-  of one qualified model from an exported artifact before expanding model coverage.
-- **Memory and concurrency bugs:** asynchronous copies or cancellation may reuse memory still in flight. Rust's
-  safety guarantees do not automatically cover CUDA lifetimes; one execution thread owns GPU resources and waits
-  for completion before reuse.
-- **Maintenance burden:** Python, Rust, CUDA, native libraries, and platform-specific binaries complicate builds
-  and debugging. Qualify one GPU platform first, keep one Rust crate, and minimize native interfaces.
-- **Permanent transition machinery:** the Rust server plus Python worker could become another architecture to
-  maintain indefinitely. Keep the protocol small and remove it when milestone 2 replaces the worker.
-- **Scheduler complexity:** good throughput, fairness, cancellation, and overload behavior require more than a fast
-  single-request loop. Validate mixed request lengths and contention when batching is introduced.
+Use existing experiment recipes and the benchmark CLI, with profiler collection added through supported mechanisms.
+Do not write a separate benchmark script. Add missing reusable measurement controls to the existing harness when
+needed. Each experiment retains raw results and a separate Markdown report under the normal experiment structure:
 
-Treat milestones 1 and 2 as a bounded architectural experiment, each with its stated deliverables and validation.
-The first milestone remains a correctness/ownership gate, not a requirement to beat vLLM. Before expanding toward
-production, review evidence for all three continuation criteria:
+- **Serving dispatch report:** CPU/GPU timelines for current Emmy-vLLM and stock vLLM, with graph coverage verified.
+  Separate GPU execution, exposed CPU gaps, scheduling/metadata, transfers, synchronization, sampling, and output.
+- **Shape and memory report:** fixed-width versus smaller/exact-width decode, partial/full prefill chunks, and
+  mixed request lengths. Record useful/padded rows, activation/scratch/KV bytes, admission, latency, and throughput.
+  Try improvements within the current integration first and state which require a different runtime.
+- **Runtime benchmark report:** after the minimal executor exists, compare Python and Rust on identical exported
+  programs, binaries, inputs, and timing rules. Separate cold startup, warm module loading, allocation, serialization,
+  submission, and GPU time. Compare persistent and one-shot execution separately, including timeout recovery.
 
-1. Correct cached generation from a compiled artifact without Python model execution.
-2. A measured advantage in latency, memory use, or CPU efficiency on the qualified workload.
-3. A demonstrated useful optimization that is difficult in the current vLLM integration.
+Before collecting data, pin GPU, driver/toolkit, model revision, code revisions, precision, golden evidence,
+context lengths, concurrency, graph settings, and warmup. For serving, include concurrency 1 plus contention,
+short and long prompts, and fixed output lengths. Record repeated measurements and their spread; record the exact
+matrix in the recipe so comparisons can be rerun. GPU provisioning and long experiment budgets need separate scope.
 
-If the evidence does not support continuing, stop or revise the experiment instead of expanding feature scope.
-Make that decision with the user; do not silently drop features or switch the production default.
+Reports distinguish existing observations, new measurements, estimates, and unresolved questions. Link every
+numeric claim to its raw result and configuration. Estimate the upper bound from exposed overhead, not total CPU
+activity: removing a non-overlapped fraction f yields at most 1/(1-f) speedup if other costs stay fixed.
+Do not invent report results to complete this planning PR. If no meaningful opportunity appears, revise or stop
+with the user before expanding implementation.
 
-## Migration and dispatch ownership
+## Potential gains and risks
 
-### Milestone 1: Rust API server, Python execution worker
+### Potential gains
 
-Emmy starts the Rust executable; the server starts and supervises one local Python execution worker for the GPU.
-The worker reuses Emmy's device runner and PyTorch attention. It loads the checkpoint once, tokenizes and applies
-chat templates, allocates the cache, runs the complete generation loop, samples, and decodes output text.
+- **Unified memory planning:** coordinate weights, scratch, activations, and KV cache to reduce actual footprint.
+  Replacing an allocator alone saves no memory.
+- **Scheduling matched to compiled shapes:** reduce padding and expensive shape changes. Separate benefits available
+  inside the current integration from benefits that require owning scheduling.
+- **Lower exposed CPU overhead:** reduce step preparation and submission costs that timelines show blocking GPU work.
+  Large compute- or bandwidth-bound steps may gain little.
+- **Fewer copies and waits:** retain intermediates and sampling on GPU. Existing device-resident paths and graph
+  replay are the baseline, not savings to claim again.
+- **Reusable deployment artifacts:** run the same compiled program in benchmarks and serving without Python model
+  execution, while retaining responsibility for native binary and CUDA compatibility.
 
-Rust owns HTTP validation, admission, request IDs, streaming, cancellation, and worker health. Send each complete
-generation request over a Unix-domain socket using length-prefixed JSON messages. The worker returns ready,
-incremental output, completion, or failure messages. Cancellation is a separate message keyed by request ID.
-This connection carries text and control data only: no weights, activations, GPU pointers, or per-layer RPCs.
+### Risks and controls
 
-The worker's I/O loop remains responsive while a dedicated execution thread owns all GPU operations. It checks
-cancellation between generation steps. Bounded output queues prevent slow clients from causing unlimited buffering;
-an output consumer that disconnects cancels its request. Rust retains the active-request slot until the worker
-acknowledges completion or cancellation, so it cannot admit work while shared GPU buffers are still in use.
-Worker failure fails the active request and makes the server unready; it must not silently replay the request.
-Server shutdown terminates and reaps its worker.
+- **No net performance gain:** benchmark identical work throughout; a faster HTTP layer is not faster inference.
+- **Regressions from weaker attention or missing batching:** keep vLLM available and state unsupported workloads.
+- **Silent incorrect output:** test logits across prefill, repeated decode, boundary lengths, and consecutive requests.
+- **Incomplete artifacts:** prove an executable program first, then a complete model step; no hidden Python callbacks.
+- **Unsafe CUDA lifetimes:** one execution thread owns each GPU context and waits for completion before buffer reuse.
+- **Fault isolation:** a hung kernel or poisoned context needs process retirement; a persistent thread is not enough.
+- **Scope growth:** restrict model family, precision, GPU platform, and API subset; defer multi-GPU and model variants.
+- **Maintenance burden:** keep the native interface small and remove superseded dispatch only after parity is proven.
+- **Scheduler complexity:** measure fairness, overload, cancellation, and mixed lengths before production batching.
 
-| Responsibility | Milestone 1 | Milestone 2 |
-| --- | --- | --- |
-| Compilation, tuning, launch | Python Emmy | Python Emmy |
-| HTTP, streaming, admission | Rust server | Rust server |
-| Tokenization and text decoding | Python worker | Rust CPU worker |
-| Generation steps and cache ownership | Python execution thread | Rust GPU execution thread |
-| Enqueue GPU kernels and transfers | Emmy/CuPy and PyTorch | Rust through the CUDA Driver API |
-| Execute kernels and copies | CUDA driver and GPU | CUDA driver and GPU |
+The standalone runtime is a correctness and reuse milestone. Before expanding toward production serving, review
+evidence for correct Python-independent cached generation, a measured latency/memory/CPU-efficiency advantage,
+and a useful optimization difficult in the current vLLM integration. A single-request test establishes neither
+production throughput nor fairness. Continuing, changing scope, or stopping is a decision to make with the user.
 
-The compiler determines the ordered operations and buffer requirements. The runtime selects the next request/step,
-binds pointers and current shapes, and submits that work. CUDA enforces stream dependencies; GPU hardware schedules
-thread blocks. Tokio schedules CPU I/O tasks, not GPU kernels. There is no automatic CPU/GPU placement policy:
-text/control work is CPU work, and model computation is GPU work.
+## Milestones
 
-### Milestone 2: Rust inference runtime
+### 0. Baseline and API reuse investigation
 
-Replace the Python worker with a dedicated Rust execution thread in the server process. Keep blocking GPU waits
-and tokenization off Tokio's I/O threads. Use bounded channels between HTTP tasks, CPU text processing, and GPU
-execution. One execution thread owns the CUDA context, allocations, streams, and request cache state for the GPU.
+Produce the serving dispatch and shape/memory reports above. Inventory the existing execution-plan format and
+benchmark worker behavior. Evaluate API reuse before committing to a hand-written OpenAI-compatible server:
 
-Extend Emmy's existing execution-plan and compiled-binary export into a versioned, self-contained serving artifact.
-It must include weights, buffer layouts and lifetimes, kernel symbols and arguments, launch order, dynamic-shape
-bindings, supported GPU target, and the complete model step. Existing packs are a starting point, not a complete
-Python-independent serving artifact: rotary embedding, attention, final normalization, the output head, and
-sampling must also have executable implementations and explicit bindings. Reject unsupported artifacts at startup.
+- NVIDIA Dynamo provides a Rust OpenAI-compatible frontend. Check whether it can call our local runtime without
+  adopting its distributed infrastructure. Verify dependency/build cost, license, API coverage, and cancellation.
+- `async-openai` is a client library with potentially reusable protocol types, not a server implementation.
+  Check type compatibility and feature/dependency cost rather than assuming it provides serving behavior.
+- Compare reuse against a thin Axum adapter. Reuse a separable frontend if it meets the narrow contract without
+  imposing an unrelated execution stack; otherwise retain Axum and document why. Record the decision before API work.
 
-Rust loads CUDA binaries and weights, binds the plan, and submits kernels through the CUDA Driver API. Reuse the
-compiler's plan instead of creating a second optimizer in Rust. CUDA-library operations use narrow native bindings;
-no Python callbacks remain in the model step. Use Rust tokenizers with the same tokenizer files and implement the
-qualified Qwen3 chat-template behavior with parity tests before removing the Python text path.
+Without a reusable frontend, we own routes, request/model validation, parameter translation, error/status mapping,
+stream chunks and termination, usage/finish reasons, cancellation, and rejection of unsupported fields. Axum handles
+HTTP/SSE transport; it does not implement those semantics. Test compatible clients against the selected subset.
 
-Add GPU sampling and retain the selected token on-device for the next decode step. Whole-step CUDA graph replay
-follows once the uncaptured runtime is correct and buffer addresses are stable. Resolve changing context lengths,
-launch dimensions, and kernel arguments explicitly; never replay a graph with stale shape metadata.
+Sources: [Dynamo HTTP service](https://docs.dynamo.nvidia.com/dynamo/dev/reference/api/python/llm),
+[async-openai](https://docs.rs/async-openai/latest/async_openai/),
+and [Axum streaming](https://docs.rs/axum/latest/axum/response/sse/).
 
-### Milestone 3: optimize measured costs
+### 1. Standalone executable format and Rust runtime
 
-Add continuous batching, paged KV cache, and scheduling coordinated with compiled shapes as separate measured
-changes. Evaluate independent attention libraries such as FlashInfer through native bindings when needed.
-A faster HTTP implementation alone is not an inference speedup. Measure CPU dispatch, transfer, and GPU execution
-costs separately before attributing a performance change to Rust.
+Make this an independently reviewable contribution. Extend the existing execution-plan/pack export, not a second
+compiler or optimizer. The current JSON plan already defines buffers, launch order, symbols, and expressions;
+document its portable execution contract and only version it when runtime interpretation changes.
 
-## Dependencies and frameworks
+The artifact must resolve binaries and constants without a compiler checkout or machine-local cache assumption.
+Specify dtypes/layouts, buffer lifetimes and aliasing, zeroing, ordered kernel arguments, launch dimensions, dynamic
+shape expressions, target compatibility, and required CUDA features. Start with ordinary static kernels and explicit
+I/O; reject unsupported plan features before execution. Expand to dynamic shapes, indirect operands, descriptors,
+and graph replay as qualification requires. Rejection is a visible limitation, not silent fallback inside Rust.
 
-### Milestone 1: Rust API and Python execution
+Expose load, bind/update inputs and shapes, execute, read outputs, event-time, and release operations through a Rust
+library with no HTTP dependency. Test it on small exported programs before integrating a complete model.
 
-| Dependency | Purpose |
+Provide a persistent benchmark worker binary using that library. Drive it through Emmy's existing run/tune benchmark
+entrypoints using the shared process supervision machinery. Transport control metadata in a versioned framed
+protocol; carry tensor payloads as binary data or file references, not JSON numeric arrays. Keep IPC out of the
+timed kernel region and account for it separately in end-to-end measurements.
+
+Retain context and loaded CUDA modules across valid jobs; reuse buffers and prepared graphs only where bindings,
+capacity, and artifact identity agree. Bound cached resources and support explicit release. Preserve hard deadlines,
+process kill/reap, and clean respawn after a hung kernel or poisoned context. Failed jobs must remain visible.
+
+Produce the runtime benchmark report before claiming a pipeline speedup. The persistent Rust worker must be compared
+with the existing persistent Python path, not only with a Python process restarted for each job.
+
+### 2. Complete cached generation and dispatch qualification
+
+Extend the artifact/runtime to execute a full dense Qwen3 model without Python callbacks: embedding, pre/post
+programs, rotary embedding, attention, final normalization, output head, and sampling. Python may prepare/export
+the artifact, but must not run model operations during inference.
+
+Use a preallocated contiguous KV cache and independent CUDA implementations for operations Emmy does not yet emit.
+PyTorch remains a reference for parity; it is not the Rust serving attention implementation. Qualify required
+attention bindings before claiming a complete Python-independent step. Defer paged cache and FlashInfer unless
+the chosen qualified operation requires them.
+
+Prefill computes the prompt once. Decode processes one token at its absolute position and attends to populated KV.
+Sample on GPU and retain the next token on-device. CPU observation remains necessary for text decoding and stop
+strings; do not claim a fully GPU-driven generation loop. Test uncaptured execution first, then graph replay with
+stable addresses and explicit dynamic argument/shape updates.
+
+Keep Python CUDA dispatch during parity qualification. Inventory its callers, diagnostic outputs, per-kernel timing,
+dynamic shapes, transfer behavior, and fault recovery. Replace it in run/tune/benchmark paths only after those
+required contracts pass and end-to-end benchmark impact is measured. A serving-only subset cannot replace the
+general dispatcher. Preserve compiler, tracing, eager references, and vLLM integration until their uses migrate;
+the destination is one shared dispatcher, not two permanent implementations.
+
+### 3. Native API serving
+
+Add `emmy-server` as a thin consumer of `emmy-runtime`. Do not build the previously proposed temporary Rust HTTP
+server plus Python generation worker. Reuse the API frontend selected in milestone 0 or implement the agreed
+Axum subset. Benchmarks call the runtime directly, never through HTTP unless measuring serving.
+
+- Add `emmy serve MODEL --generate --native`; reject `--native --stock` and unsupported native arguments.
+  Preserve existing vLLM forwarding and defaults.
+- Support host, port, revision, context limit, golden/strict evidence for artifact preparation, dry-run, and the
+  existing optional serving benchmark client. Package matching Rust binaries; do not build them on server startup.
+- Qualify dense Qwen3-0.6B in FP16 on one GPU. Reject MoE, quantization, sliding attention, and unsupported rotary
+  configurations. Default total context to 4,096 tokens within model/compiler limits.
+- Provide health, model listing, completions, and chat completions. Support text, streaming/non-streaming output,
+  output limits, temperature, top-p, seed, stop strings, token usage, and finish reasons.
+- Apply the checkpoint chat template with Qwen3 thinking off by default. Test template/tokenizer parity.
+- Admit one active request and return a clear busy response for additional requests. Use bounded output channels,
+  cancel on disconnect, and retain admission until submitted GPU work completes and state is released.
+- Do not silently retry a request after runtime failure. A poisoned context makes the server unready and requires
+  process restart. Keep blocking GPU waits and tokenization off the HTTP I/O threads.
+
+### 4. Optimize measured serving costs
+
+Add continuous batching, paged KV cache, and scheduling coordinated with compiled shapes as separately measured
+changes. Qualify mixed request lengths, fairness, overload, and cancellation. Defer deployment images, additional
+model families, multi-GPU serving, and production feature parity.
+
+## Dispatch and CPU/GPU transfers
+
+| Responsibility | Owner |
 | --- | --- |
-| Axum | HTTP routes and server-sent events for streaming responses. |
-| Tokio | Async networking, worker supervision, channels, and shutdown. |
-| Serde / serde_json | API serialization and JSON worker messages. |
-| tracing / tracing-subscriber | Structured logs and timing. |
-| Clap | Command-line arguments for the Rust executable. |
-| Existing Emmy Python/GPU dependencies | PyTorch, Transformers, CuPy, NumPy, Safetensors, and compiler tooling. |
+| Compilation, tuning policy, artifact preparation | Python Emmy |
+| HTTP, streaming, admission | Rust server or selected reusable frontend |
+| Tokenization, templates, text decoding | CPU text processing outside GPU execution |
+| Program order and buffer requirements | Exported compiler execution plan |
+| Generation steps, cache state, CUDA submission | Dedicated Rust execution thread per GPU |
+| Enforce stream dependencies and execute work | CUDA driver and GPU hardware |
 
-Use Unix-domain sockets for the local worker connection; no gRPC framework is needed. FastAPI and Uvicorn are
-not part of this design. vLLM remains optional for comparisons and the existing benchmark client.
+The runtime binds pointers and current shapes and submits the plan. CUDA orders streams; GPU hardware schedules
+thread blocks. Tokio handles CPU I/O tasks, not GPU kernels. There is no automatic CPU/GPU placement policy.
 
-### Milestone 2: Rust GPU runtime
+Use explicit allocations and copies. Weights upload once per loaded model; prompt IDs upload once per request.
+Activations, intermediate results, and KV cache stay on GPU. Update only small shape/position metadata as needed.
+Normal serving decode downloads selected tokens/status, not complete logits. Correctness tests may download full
+outputs, and benchmarks must identify those transfers separately.
 
-The following are proposed dependencies, to be qualified against the complete exported model step before adoption.
-Pin compatible versions in Cargo's lockfile when implementation begins; do not assume the newest releases form a
-tested CUDA/toolchain combination.
+Use reusable pinned host staging buffers for asynchronous copies. Retain buffers until their completion event fires.
+Start with one explicit stream for ordered copies and kernels. Synchronize only at actual CPU-consumption boundaries;
+do not synchronize after every layer. Sampling keeps the next token on-device, but autoregressive dependencies
+and CPU stop/cancellation decisions still constrain submission.
 
-| Dependency | Purpose |
-| --- | --- |
-| cudarc | CUDA allocation, transfers, streams, events, and kernel launches from Rust. |
-| tokenizers | Load tokenizer files and encode/decode text in Rust. |
-| MiniJinja | Render model chat templates, with parity tests against Transformers. |
-| Safetensors Rust crate | Read weights if the exported artifact retains Safetensors storage. |
-| Selected CUDA libraries | Operations not yet provided by Emmy kernels, such as matrix multiplication or attention. |
+Add a transfer stream only when profiling shows independent work worth overlapping; connect streams with events.
+Cancellation stops future submissions, not an in-flight kernel. Wait before reusing buffers; use process retirement
+for irrecoverable GPU faults. No unified-memory migration, CPU weight offload, or cross-process GPU sharing initially.
+Python reference paths retain their existing PyTorch/CuPy stream and DLPack rules during comparison.
 
-Prefer cudarc's existing CUDA Driver and cuBLAS bindings; use narrow native bindings for functionality it does not
-cover. Validate buffer lifetimes and graph support against the selected version. Choose additional CUDA libraries
-only for operations the qualified model actually needs. FlashInfer is deferred until its attention/cache support
-is needed. Do not introduce Candle or Burn as a second model framework: the runtime executes Emmy's plans.
+See [CUDA asynchronous execution](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/asynchronous-execution.html).
 
-The tokenizer and template engine reuse existing implementations, but neither alone guarantees parity with
-Transformers' complete chat preprocessing. Test the qualified Qwen3 template, special tokens, thinking setting,
-and incremental decoding before removing the Python text path.
+## Dependencies and repository structure
 
-### Build, deployment, and development
-
-- Use Rust/Cargo to build the server. End users receive the platform-specific executable; server startup does
-  not require Cargo or a Rust compiler.
-- Require a compatible NVIDIA driver on the serving machine. Require the CUDA toolkit/NVCC where Emmy compiles
-  kernels; a fully precompiled deployment should not need NVCC. Include any runtime CUDA libraries actually used.
-- Retain Python/GPU execution dependencies in milestone 1. In milestone 2, Python remains necessary for Emmy's
-  compiler and launcher, but the Rust server must execute a prepared artifact without a Python worker.
-- Use Rustfmt, Clippy, and Cargo unit/integration tests alongside the existing Python development checks.
-
-Reference documentation: [Axum streaming](https://docs.rs/axum/latest/axum/response/sse/),
-[cudarc](https://docs.rs/cudarc/latest/cudarc/), [Tokenizers](https://docs.rs/tokenizers/latest/tokenizers/),
-and [MiniJinja](https://docs.rs/crate/minijinja/latest).
-
-## Repository structure
-
-Keep the server in this repository as one Rust crate under `server/`. Do not introduce a separate repository
-or a multi-crate workspace initially. The intended layout is:
+Use a small Cargo workspace in this repository. Create the runtime crate first and the server crate only when
+API work starts. The runtime has no dependency on the server or Axum.
 
 ```text
-server/
-├── Cargo.toml
-├── Cargo.lock
-├── ARCHITECTURE.md
-├── src/
-│   ├── main.rs              # Startup, configuration, shutdown
-│   ├── api.rs               # HTTP endpoints and streaming
-│   ├── protocol.rs          # Messages exchanged with Python worker
-│   ├── worker.rs            # Worker process, admission, cancellation
-│   └── runtime/             # Added in milestone 2
-│       ├── mod.rs
-│       ├── artifact.rs      # Load Emmy's exported execution plan
-│       ├── executor.rs      # Generation loop and GPU dispatch
-│       ├── cuda.rs          # CUDA bindings, streams, events, transfers
-│       ├── cache.rs         # KV-cache allocation and lifecycle
-│       └── text.rs          # Tokenization and incremental decoding
-└── tests/                   # Rust integration tests
+Cargo.toml                          # Workspace
+Cargo.lock
+crates/
+├── emmy-runtime/
+│   ├── Cargo.toml
+│   ├── ARCHITECTURE.md
+│   ├── src/
+│   │   ├── lib.rs                  # HTTP-independent runtime API
+│   │   ├── artifact.rs             # Existing plan format reader and validation
+│   │   ├── executor.rs             # Program binding and execution
+│   │   ├── cuda.rs                 # CUDA resources, streams, copies, events
+│   │   ├── generation.rs           # Full model loop, added in milestone 2
+│   │   ├── cache.rs                # KV lifecycle, added in milestone 2
+│   │   └── bin/emmy-runtime-worker.rs # Persistent isolated benchmark worker
+│   └── tests/
+└── emmy-server/                     # Added in milestone 3
+    ├── Cargo.toml
+    ├── ARCHITECTURE.md
+    ├── src/
+    │   ├── main.rs                 # Startup and shutdown
+    │   ├── api.rs                  # Selected frontend adapter
+    │   └── text.rs                 # Tokenization, templates, incremental decoding
+    └── tests/
 
 emmy/
-├── commands/
-│   └── serve.py             # Existing command; selects native or vLLM
-├── serving/
-│   ├── native/              # First-milestone Python integration
-│   │   ├── __init__.py
-│   │   ├── launch.py        # Locate and launch Rust executable
-│   │   ├── worker.py        # Socket handling and execution thread
-│   │   └── generation.py    # Cached generation using existing runner
-│   └── ...                  # Existing runners and vLLM integration
-└── compiler/
-    └── backend/
-        ├── plan.py          # Existing execution-plan definition
-        └── pack.py          # Extend existing artifact export
+├── commands/serve.py               # Native/vLLM selection
+├── serving/native/launch.py        # Locate and launch server
+└── compiler/backend/
+    ├── plan.py                     # Existing portable execution contract
+    ├── pack.py                     # Existing artifact export
+    └── ...                         # Shared benchmark supervision/integration
 
 tests/
-└── serving/
-    └── native/              # Python tests and cross-language tests
+├── compiler/backend/               # Export and Python/Rust parity tests
+└── serving/native/                 # Launcher and API interoperability tests
 ```
 
-`server/` owns the API and eventually runtime dispatch. Python serving code temporarily owns model execution.
-The existing compiler owns execution plans and artifact export; extend those mechanisms instead of duplicating
-them in the server. Contain unsafe CUDA calls and GPU memory/synchronization ownership in the CUDA module.
+Do not introduce an HTTP dependency for runtime benchmarking or a separate benchmark script. Keep unsafe CUDA calls
+inside the CUDA module. Rust unit tests live beside modules; integration tests live in each crate's tests directory.
+Python package directories include their normal initializer. The layout does not require placeholder modules before
+their milestone. Extend existing CLI/library mechanisms rather than cloning the benchmark pipeline.
 
-Create the runtime modules only when milestone 2 starts. Once Rust replaces Python execution, delete the Python
-worker and generation adapter, the Rust worker-process/socket implementation, and their obsolete protocol tests.
-Move admission and cancellation to the in-process runtime at that point. Keep the Python launcher and existing
-shared runners used by vLLM. Rust unit tests live beside their modules; integration tests live under `server/tests/`.
-
-## CPU/GPU transfers and synchronization
-
-Use explicit device allocations and copies. Do not introduce unified-memory migration, CPU weight offload, or
-GPU memory sharing between processes for the first milestones.
-
-| Data | Transfer policy |
+| Stage | Dependencies/frameworks |
 | --- | --- |
-| Weights | Read on CPU, upload once at startup, retain on GPU; reuse tied storage. |
-| Prompt token IDs | Tokenize on CPU, upload once per request. |
-| Positions, lengths, sampling parameters | Small metadata updates; derive positions on GPU where practical. |
-| Activations, attention intermediates, KV cache | Remain on GPU throughout generation. |
-| Milestone 1 sampling | Copy final logits to CPU for the existing sampler; upload the selected token. |
-| Milestone 2 sampling | Sample on GPU; copy only selected token IDs and required status to CPU for streaming. |
+| Runtime | Serde/serde_json, cudarc, tracing, and the existing exported kernel binaries. |
+| Benchmark worker | Clap and framed transport compatible with Emmy's shared supervision. |
+| Complete generation | Required CUDA attention/math bindings; Safetensors if retained as weight storage. |
+| API/text | Selected frontend; Axum/Tokio if the thin adapter wins, tokenizers, MiniJinja, tracing-subscriber. |
+| Python preparation/reference | Existing Emmy compiler, PyTorch, Transformers, CuPy, NumPy, Safetensors tooling. |
 
-The full-logit copy and CPU sampling in milestone 1 are a documented temporary cost. They impose one CPU-dependent
-round trip per token. GPU sampling in milestone 2 removes that dependency from choosing the next token, although
-the CPU still observes tokens for text decoding, stop strings, and scheduling. Do not claim fully GPU-driven decode.
+cudarc and individual CUDA-library bindings remain qualification choices; verify the required driver APIs,
+descriptors, graph behavior, and CUDA versions before adopting them. Do not add Candle or Burn as a second model
+framework. No FastAPI/Uvicorn is planned. vLLM remains the production baseline and optional serving benchmark client.
 
-Use reusable pinned host staging buffers for asynchronous transfers and retain each buffer until its completion
-event fires. Stream dependencies ensure an upload completes before a kernel reads it, and a download completes
-before the CPU reads its result. Start with one explicit execution stream: copies and kernels run in order.
-In milestone 1, bind CuPy to the same CUDA stream as PyTorch and use DLPack for device tensor views; DLPack does
-not copy through CPU memory, and shared buffers must remain alive until all consumers finish.
+Use Cargo to build binaries, Rustfmt/Clippy/Cargo tests for development, and pinned compatible versions in the lockfile.
+Require a compatible NVIDIA driver at runtime and only the native CUDA libraries actually used. NVCC/toolkit belongs
+where compilation occurs; a fully precompiled deployment should not need NVCC. Python still drives Emmy's compiler
+and launcher, while the prepared Rust runtime can execute independently.
 
-Synchronize at actual CPU-consumption boundaries, not after every kernel or layer. Use event/stream completion
-rather than device-wide synchronization. Cancellation stops future submissions; it does not preempt an in-flight
-kernel. Wait for submitted work before reusing request buffers or releasing cache state.
-
-Add a separate transfer stream only when profiling shows useful independent work to overlap. Connect streams with
-CUDA events. Autoregressive dependencies still hold: a decode step needs the previously selected token, and
-asynchronous copies alone do not eliminate that dependency. Pinned buffers permit asynchronous host transfers;
-overlap depends on hardware and available independent work. See
-[CUDA asynchronous execution](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/asynchronous-execution.html).
-
-## First-milestone implementation
-
-### Command and dependencies
-
-- Make `--native` require `--generate`; reject its combination with `--stock`.
-- Support host, port, model revision, context limit, golden evidence, strict evidence, dry-run, and benchmark options.
-- Reject unsupported native arguments explicitly. Preserve existing vLLM argument forwarding.
-- Package a platform-specific Rust server executable, resolved alongside the Emmy installation. During development,
-  build it with Cargo; at distribution time, bundle the matching binary rather than building it at server startup.
-  Milestone 1 also uses the existing Python compiler/GPU dependencies. Native startup must not import or invoke vLLM.
-- Keep the existing benchmark client optional: native serving needs no vLLM, but the existing benchmark command
-  may use it.
-
-### Model execution
-
-- Load the model once. Reuse its tokenizer, rotary embedding implementation, output head, and generation
-  configuration alongside Emmy's compiled transformer computation.
-- Keep intermediate tensors and KV cache on the GPU. Initially reuse existing sampling behavior; copying the
-  final logits for sampling is acceptable for this correctness milestone.
-- Use causal attention during prefill. During single-token decode, attend to the entire populated cache,
-  with absolute token positions.
-- Support dense Qwen3 with standard full attention. Reject MoE, quantized checkpoints, sliding attention,
-  and unsupported rotary configurations before compilation.
-- Default to a 4,096-token total context, bounded by model and compiler capacity. Reset cache state between requests.
-
-### API and lifecycle
-
-- Provide health, model listing, completions, and chat completions endpoints with an explicitly documented
-  OpenAI-compatible subset.
-- Support text prompts/messages, streaming and non-streaming responses, output limits, temperature, top-p,
-  seed, and stop strings. Return token usage and finish reasons.
-- Apply the checkpoint's chat template; default Qwen3 thinking off for this experimental endpoint.
-- Run one active generation request. Return a clear busy response for additional requests rather than
-  adding a scheduler.
-- Keep HTTP handling responsive through the execution ownership described above. Cancel generation on disconnect
-  and release request state after submitted GPU work has completed.
-- Reject unsupported request features instead of silently ignoring them.
+References: [cudarc](https://docs.rs/cudarc/latest/cudarc/),
+[Tokenizers](https://docs.rs/tokenizers/latest/tokenizers/),
+[MiniJinja](https://docs.rs/crate/minijinja/latest).
 
 ## Validation and rollout
 
-- Test argument routing and startup without vLLM.
-- Test API responses, streaming boundaries, Unicode, stop strings, context limits, busy responses,
-  cancellation, and cache reset.
-- Test socket framing, bounded output, worker death, shutdown, and cancellation acknowledgment before readmission.
-- Test stream ordering, pinned-buffer lifetime, and repeated requests for stale cache or reused-buffer reads.
-  Verify that weights upload once and intermediate model tensors do not pass through host memory.
-- Compare tiny Qwen3 prefill and cached-decode logits against eager execution across several decode steps.
-  Verify decode receives only one token.
-- Qualify Qwen3-0.6B on an available CUDA GPU. Compare deterministic outputs and record first-token latency,
-  token latency, and memory against the existing vLLM path.
-- Use the existing benchmark machinery; add no benchmark script. GPU provisioning is outside this plan.
-- For milestone 2, compare exported-plan execution with the Python runner, test artifact/GPU incompatibility,
-  and verify startup and generation without a Python worker. Test GPU sampling and tokenization/template parity.
-- Profile transfer bytes, synchronization, CPU dispatch time, and GPU time. Keep milestone 1's full-logit transfers
-  visible; require milestone 2 to return only tokens/status in normal decode. No speedup is an acceptance assumption.
-- Follow repository development and finalization gates, including the full suite, lint, documentation review,
-  and model-golden decoding if compiler code changes.
-- Add Rust unit/integration tests and Cargo formatting/lint gates when Rust implementation lands.
-- Keep native serving opt-in. Defer deployment images, additional model families, and production feature parity.
-  Continuous batching and paged cache belong to milestone 3; whole-step CUDA graphs belong to milestone 2.
+- Runtime: Python/Rust parity for exported programs, argument ordering, dtypes, dynamic shapes, aliasing/zeroing,
+  graph replay, unsupported features/versions, and GPU compatibility. Validate buffers and cached-module lifetimes.
+- Benchmarking: equivalent warm/cold lifetimes, CUDA-event timing, end-to-end latency, binary/input reuse,
+  bounded caches, worker death, deadlines, and process recovery after invalid or hung kernels.
+- Generation: tiny Qwen3 eager logit parity across prefill and many decode steps, one-token decode input,
+  context boundaries, reset between requests, GPU sampling, and tokenizer/template parity.
+- Serving: streaming boundaries, Unicode/stop strings, usage/finish reasons, busy responses, backpressure,
+  cancellation, readiness, shutdown, and no vLLM/Python model execution on the native path.
+- Performance: preserve raw evidence for the three reports; record regressions and limitations as well as gains.
+  Do not infer a Rust benefit from different kernels, graph modes, worker lifetimes, or feature subsets.
+- Follow repository development and finalization gates: scoped development tests, final full suite, duration records,
+  lint, documentation review, and model-golden decoding when compiler code changes. Add the Rust gates when code lands.
 
-This PR records the plan only. Implementation and GPU validation belong to a subsequent PR. Delete this plan
-once its implementation has landed and its durable conclusions are recorded in the serving documentation.
+Keep vLLM as default throughout qualification. Migrate Python dispatch consumers only after the parity inventory
+passes; remove their obsolete machinery in the same scoped migration. This plan is deleted after implementation
+lands and durable conclusions are recorded. Experimental reports remain with their reproducible evidence.
