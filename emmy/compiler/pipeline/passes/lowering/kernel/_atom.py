@@ -987,9 +987,7 @@ def _a_slab_operand(
             # INSTRUCTION from the first thread).
             box=(1,) * (len(load.index) - 2) + shape if len(load.index) > 2 else None,
             coords=_box_origin(load.index, tile=mn[0], tile_base=row_base, k_axis=k_axis, sibling=mn[1]),
-            index=_slab_index(
-                load.index, tile=mn[0], tile_base=row_base, k_axis=k_axis, tile_is_row=True, sibling=mn[1]
-            ),
+            index=_slab_index(load.index, tile=mn[0], tile_base=row_base, k_axis=k_axis, tile_is_row=True, sibling=mn[1]),
             swizzle=swizzle,
         )
         return op, True, []

@@ -1340,11 +1340,7 @@ def _replay(
                 _declared, option = exact
                 materialized = option.expand() if option is not None else ()
                 candidate = materialized[0].with_io(fp.match.graph, fp.match.root) if len(materialized) == 1 else None
-                hit = (
-                    (option, leaf_knobs(option))
-                    if candidate is not None and _identity_of(candidate) == record.identity
-                    else None
-                )
+                hit = (option, leaf_knobs(option)) if candidate is not None and _identity_of(candidate) == record.identity else None
             else:
                 hit = None
             if hit is None:
