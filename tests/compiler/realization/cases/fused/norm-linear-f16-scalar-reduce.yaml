@@ -39,7 +39,7 @@ configs:
     knobs:
       TILE: ''
       WORK: t128
-    identity: 99519edba569c6ca958a2e404063a820bd5c2e38a39a4c1d799c98fecd7d48d2
+    identity: bcf1bf210707574d9df8a34a8c7888106a428eaf95a878ca32425fcd9340da5b
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 80.04266520341237
