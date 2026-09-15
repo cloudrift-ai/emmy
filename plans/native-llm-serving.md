@@ -23,6 +23,67 @@ comes later.
   later stage. See the [FlashInfer KV-cache documentation](https://docs.flashinfer.ai/tutorials/kv_layout.html).
 - Keep the current vLLM integration as the production path and comparison baseline.
 
+## Potential gains
+
+The strongest opportunity is designing compilation and serving together. Rust can lower CPU overhead, but changing
+the server language alone does not establish an inference speedup. These are hypotheses to measure:
+
+- **Unified GPU memory planning:** budget weights, activation/scratch buffers, and KV cache together. Reuse storage
+  and size buffers to scheduled work so more memory remains for concurrent requests. Existing serving evidence
+  identifies non-KV footprint as a concurrency limit; replacing an allocator alone does not shrink that footprint.
+- **Scheduling matched to compiled kernels:** choose efficient batch sizes and prefill chunks, reducing padding,
+  unnecessary shape changes, and gaps between useful GPU work.
+- **Lower CPU dispatch overhead:** remove Python from step preparation and submission. This matters most for short
+  GPU steps; long prefills and bandwidth-bound decode may see little improvement from faster CPU code.
+- **Fewer copies and synchronization points:** keep intermediate results and sampling on GPU, and avoid CPU waits
+  except where text processing or request decisions actually require results.
+- **Simpler runtime deployment:** load complete compiled artifacts without the Python execution stack or vLLM
+  compatibility patches. We still own the native binary and CUDA-library compatibility requirements.
+
+The current integration already uses CUDA graphs, so their existing savings cannot be counted again as a Rust gain.
+As an illustration, eliminating overhead that contributes 10% of total latency yields at most 1.11x speedup if all
+other costs stay fixed. Measure the actual removable fraction rather than assuming CPU dispatch is the bottleneck.
+
+Milestone 1 establishes ownership and may be slower than vLLM. Milestone 2 creates an opportunity to improve
+low-concurrency token latency and CPU use. Integrated memory planning, scheduling, and batching in milestone 3 offer
+the stronger throughput opportunity. Compare token latency, throughput at the same latency target, and GPU memory
+usage under equivalent model, precision, context, and workload settings; a single-request result is not evidence
+of production throughput or fairness.
+
+## Risks and continuation criteria
+
+- **Rebuilding without a performance gain:** months of infrastructure work may leave GPU costs unchanged. Compare
+  with the existing vLLM path after each milestone on fixed workloads, and identify which measured cost changed.
+- **Performance regression:** CPU sampling, weaker attention, or missing batching can dominate any CPU savings.
+  Keep those limitations explicit and retain vLLM as the production path during the experiment.
+- **Silent correctness errors:** cache positions, masks, rotary embeddings, stream ordering, or stale buffers can
+  produce plausible but incorrect text. Compare logits over prefill and repeated decode steps, and test consecutive
+  requests, cancellation, and boundary lengths.
+- **Scope growth:** model variants, quantization, tool calling, speculative decoding, and multi-GPU execution can
+  turn this into rebuilding a general serving engine. Keep the initial model family and API subset narrow.
+- **Incomplete artifacts:** existing plans may leave model operations dependent on Python. Prove complete execution
+  of one qualified model from an exported artifact before expanding model coverage.
+- **Memory and concurrency bugs:** asynchronous copies or cancellation may reuse memory still in flight. Rust's
+  safety guarantees do not automatically cover CUDA lifetimes; one execution thread owns GPU resources and waits
+  for completion before reuse.
+- **Maintenance burden:** Python, Rust, CUDA, native libraries, and platform-specific binaries complicate builds
+  and debugging. Qualify one GPU platform first, keep one Rust crate, and minimize native interfaces.
+- **Permanent transition machinery:** the Rust server plus Python worker could become another architecture to
+  maintain indefinitely. Keep the protocol small and remove it when milestone 2 replaces the worker.
+- **Scheduler complexity:** good throughput, fairness, cancellation, and overload behavior require more than a fast
+  single-request loop. Validate mixed request lengths and contention when batching is introduced.
+
+Treat milestones 1 and 2 as a bounded architectural experiment, each with its stated deliverables and validation.
+The first milestone remains a correctness/ownership gate, not a requirement to beat vLLM. Before expanding toward
+production, review evidence for all three continuation criteria:
+
+1. Correct cached generation from a compiled artifact without Python model execution.
+2. A measured advantage in latency, memory use, or CPU efficiency on the qualified workload.
+3. A demonstrated useful optimization that is difficult in the current vLLM integration.
+
+If the evidence does not support continuing, stop or revise the experiment instead of expanding feature scope.
+Make that decision with the user; do not silently drop features or switch the production default.
+
 ## Migration and dispatch ownership
 
 ### Milestone 1: Rust API server, Python execution worker
