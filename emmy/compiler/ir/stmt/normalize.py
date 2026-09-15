@@ -1143,6 +1143,8 @@ def _refine_contextual_scope_order(candidate: Body, revisit: frozenset[_ScopePat
     """
     from emmy.compiler.structural import form  # noqa: PLC0415
 
+    if not revisit:
+        return candidate
     rendered = repr(form(candidate))
     seen: dict[str, int] = {}
     orbit: list[tuple[str, Body]] = []
