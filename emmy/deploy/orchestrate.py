@@ -43,6 +43,14 @@ async def _baked_hf_cache(run_cmd, image):
     return env.get("HF_HOME") if env.get("HF_HUB_OFFLINE") == "1" else None
 
 
+async def _fail_with_logs(run_cmd, message: str) -> bool:
+    """Log a failed deploy step with the containers' last log lines; always False."""
+    logger.error(message)
+    logger.error("Container logs:")
+    await run_cmd("docker compose logs --tail=100", timeout=60, log_output=True)
+    return False
+
+
 async def run_deploy(
     run_cmd,
     write_file,
@@ -155,16 +163,32 @@ async def run_deploy(
     logger.info("Cleaning up old containers...")
     await run_cmd("docker compose down", timeout=300, log_output=True)
 
-    # Step 4: Start services (blocks until /health passes, so this window covers
-    # container start + weight load into GPU + CUDA graph capture + warmup)
-    logger.info("Starting services...")
+    # Steps 4-5: start detached, then poll /health. The window covers container start +
+    # weight load into GPU + CUDA graph capture + warmup. Waiting inside one long SSH call
+    # (`compose up --wait`) loses the whole deploy when that connection is reset mid-load; short
+    # polls lose one probe. A service that exits before it is healthy still fails at once.
     async with timer.ameasure(PHASE_MODEL_LOAD_AND_WARMUP):
-        rc, _, _ = await run_cmd("docker compose up -d --wait --wait-timeout 3600", timeout=3600, log_output=True)
-    if rc != 0:
-        logger.error("Failed to start services")
-        logger.error("Container logs:")
-        await run_cmd("docker compose logs --tail=100", timeout=60, log_output=True)
-        return False
+        logger.info("Starting services...")
+        rc, _, _ = await run_cmd("docker compose up -d", timeout=600, log_output=True)
+        if rc != 0:
+            return await _fail_with_logs(run_cmd, "Failed to start services")
+        logger.info("Waiting for health check...")
+        health_url = f"http://localhost:{internal_port}/health"
+        timeout = 3600  # 60 minutes
+        interval = 10
+        elapsed = 0
+        while elapsed < timeout:
+            rc, _, _ = await run_cmd(f"curl -sf {health_url}", stream=False, timeout=30, log_output=True)
+            if rc == 0 or dry_run:
+                break
+            rc_ps, exited, _ = await run_cmd("docker compose ps -q --status exited --status dead", stream=False, timeout=30)
+            if rc_ps == 0 and exited.strip():
+                return await _fail_with_logs(run_cmd, "A service exited before becoming healthy")
+            await asyncio.sleep(interval)
+            elapsed += interval
+        else:
+            logger.error(f"Health check timed out after {timeout}s")
+            return False
 
     # Best-effort: break the warmup window into startup / weights_load / torch_compile /
     # engine_warmup / cuda_graph_capture by scraping the container logs. The leaves sum to
@@ -176,24 +200,6 @@ async def run_deploy(
             mlw = timer.phases.get(PHASE_MODEL_LOAD_AND_WARMUP, 0.0)
             for name, seconds in decompose_model_load(raw, mlw).items():
                 timer.record(name, seconds)
-
-    # Step 5: Poll health
-    logger.info("Waiting for health check...")
-    health_url = f"http://localhost:{internal_port}/health"
-    timeout = 3600  # 60 minutes
-    interval = 10
-    elapsed = 0
-    while elapsed < timeout:
-        rc, _, _ = await run_cmd(f"curl -sf {health_url}", stream=False, timeout=30, log_output=True)
-        if rc == 0:
-            break
-        if dry_run:
-            break
-        await asyncio.sleep(interval)
-        elapsed += interval
-    else:
-        logger.error(f"Health check timed out after {timeout}s")
-        return False
 
     # Step 6: Print endpoint info
     status = "dry-run (not deployed)" if dry_run else "deployed"
@@ -249,15 +255,9 @@ async def run_deploy(
                     logger.info("Smoke test passed.")
                     break
                 # Valid response, wrong content — broken model
-                logger.error(f"Smoke test failed: {detail}")
-                logger.error("Container logs:")
-                await run_cmd("docker compose logs --tail=100", timeout=60, log_output=True)
-                return False
+                return await _fail_with_logs(run_cmd, f"Smoke test failed: {detail}")
             else:
-                logger.error(f"Smoke test timed out after {smoke_timeout}s. The endpoint is not ready.")
-                logger.error("Container logs:")
-                await run_cmd("docker compose logs --tail=100", timeout=60, log_output=True)
-                return False
+                return await _fail_with_logs(run_cmd, f"Smoke test timed out after {smoke_timeout}s. The endpoint is not ready.")
 
     # Print curl example
     logger.info("\nExample curl:")

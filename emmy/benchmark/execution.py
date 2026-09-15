@@ -249,8 +249,12 @@ async def run_execution_group(
             task_logger.info("Deploying model...")
             deployed = await deploy_entry(params, timer=task_timer, check_smoke_output=False)
             if not deployed:
-                timing = task_timer.as_dict()
                 task_logger.error("Deploy failed, skipping benchmark")
+                if not no_teardown:
+                    # A failed deploy can still leave a container running and holding the GPUs.
+                    async with task_timer.ameasure(PHASE_TEARDOWN):
+                        await teardown_entry(params)
+                timing = task_timer.as_dict()
                 _finalize_failure(
                     task,
                     stage="deploy",
@@ -357,8 +361,9 @@ async def run_execution_group(
     return task_results
 
 
-async def _run_groups_on_hosts(groups, hosts: list, config, ssh_key, dry_run, provider: str | None = None):
-    """Dispatch groups across a fixed pool of compatible hosts."""
+async def _run_groups_on_hosts(groups, hosts: list, config, ssh_key, dry_run, no_teardown=False, provider: str | None = None):
+    """Dispatch groups across a fixed pool of compatible hosts. The hosts always outlive the run;
+    their workloads are torn down like any other unless ``no_teardown`` keeps them."""
     locks: dict[int, asyncio.Lock] = {id(host): asyncio.Lock() for host in hosts}
     select_lock = asyncio.Lock()
     in_use: set[int] = set()
@@ -383,7 +388,7 @@ async def _run_groups_on_hosts(groups, hosts: list, config, ssh_key, dry_run, pr
                     config,
                     ssh_key,
                     dry_run,
-                    no_teardown=True,
+                    no_teardown=no_teardown,
                     preallocated_conn=host.conn,
                     provider=provider,
                 )

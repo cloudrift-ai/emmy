@@ -4,6 +4,7 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 from emmy.benchmark.execution import run_execution_group
@@ -330,3 +331,33 @@ async def test_execution_failure_leaves_terminal_yaml_record(tmp_path, monkeypat
     assert record.status == "failed"
     assert record.execution.stage == "provisioning"
     assert record.execution.error.message == "VM provisioning failed"
+
+
+@pytest.mark.parametrize("no_teardown", [False, True])
+async def test_a_failed_deploy_on_a_supplied_host_is_torn_down(tmp_path, monkeypatch, no_teardown):
+    # A deploy can fail with its container still running and holding the host's GPUs.
+    task = _task(tmp_path)
+    group = ExecutionGroup(gpu_name=task.gpu_name, gpu_count=task.gpu_count, tasks=[task])
+    torn_down = []
+
+    async def failed_deploy(*_args, **_kwargs):
+        return False
+
+    async def teardown(params):
+        torn_down.append(params.server)
+        return True
+
+    monkeypatch.setattr("emmy.benchmark.execution.deploy_entry", failed_deploy)
+    monkeypatch.setattr("emmy.benchmark.execution.teardown_entry", teardown)
+
+    results = await run_execution_group(
+        group,
+        {"benchmark": {}},
+        "/missing/ssh-key",
+        dry_run=True,
+        no_teardown=no_teardown,
+        preallocated_conn=VMConnectionInfo(host="example.test", username="riftuser"),
+    )
+
+    assert [ok for _task, ok, _timing in results] == [False]
+    assert len(torn_down) == (0 if no_teardown else 1)
