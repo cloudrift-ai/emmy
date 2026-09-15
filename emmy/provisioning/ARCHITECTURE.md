@@ -159,9 +159,10 @@ publish different revision suffixes (`-1`, `-1ubuntu1`, `-0ubuntu0.24.04.1`) for
 Every CloudRift request carries an envelope `{"version": API_VERSION, "data": {...}}`. The server versions its public
 types by calendar date and decodes each request against the newest declared schema whose date is `<= API_VERSION` (an
 unknown in-between date silently resolves *down* to the nearest older schema). `API_VERSION` (`cloudrift.py`) is pinned
-to `2026-08-05`, the current public generation for the instance endpoints used here. Pin to a date rather than
-`~upcoming` (CloudRift's own client default) so a future server
-release can't change request/response shapes under us.
+to `2026-09-08`: `instances/rent` rejects any older date with `unsupported version`, while `instances/list` and
+`instances/terminate` still resolve it down to `2026-08-05`. Pin to a date rather than `~upcoming` (CloudRift's own
+client default) so a future server release can't change request/response shapes under us. When the server stops
+accepting the pinned date, move the pin to the oldest date every endpoint used here accepts.
 
 CloudRift API behaviours the client relies on:
 
