@@ -198,8 +198,20 @@ class Body(tuple[Stmt, ...]):
     def rename_buffers(self, rename) -> Body:  # noqa: ANN001 — any str->str mapping
         """This body with every external-buffer reference renamed through ``rename`` — the
         body-level face of :meth:`Stmt.rename_buffers` (the recursive :meth:`map` reaches every
-        nested leaf, so wrapper stmts need no handling)."""
-        return self.map(lambda s: s.rename_buffers(rename))
+        nested leaf, so wrapper stmts need no handling). An injective spelling-only rename retains
+        this body's declared normal-form fixed points, while an aliasing rename must recompute
+        ordering because it changes memory dependencies."""
+        result = self.map(lambda s: s.rename_buffers(rename))
+        if result == self:
+            return self
+        resources = tuple(
+            dict.fromkeys(name for stmt in self.iter() for name in (*stmt.external_reads(), *stmt.external_writes()))
+        )
+        if len({rename.get(name, name) for name in resources}) == len(resources):
+            for attr in ("_normalized", "_normalized_without_hoist"):
+                if self.__dict__.get(attr) is self:
+                    result.__dict__[attr] = result
+        return result
 
     def map(self, fn: Callable[[Stmt], Stmt | None | Iterable[Stmt]]) -> Body:
         """Recursive 1:N body transformer. Post-order: each block stmt's
