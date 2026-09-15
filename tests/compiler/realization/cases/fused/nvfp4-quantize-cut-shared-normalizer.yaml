@@ -733,17 +733,6 @@ configs:
     knobs:
       PLACE@map.1/map.2/reduce.2/map: cut
     identity: a0e139756fc77916c526e5938068123183ec3c5238819a453a65ce163e27cede
-  - name: k_mean_5e4be9.775f7724680f.184c5d350482
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      REDUCE@map.1/map.2/reduce: ''
-      REDUCE@map.2/map.1/map.1/reduce: ''
-      REDUCE@map.2/map.2/reduce: ''
-      WORK: ''
-      RASTER: ''
-    identity: 184c5d3504820594972d1b7d84f865878750da9dc46c43b3cb509830c24819d2
   - name: k_mean_5e4be9.775f7724680f.af51605583f5
     bindings: {}
     pins:
@@ -753,6 +742,17 @@ configs:
       REDUCE: ''
       RASTER: ''
     identity: af51605583f50785693569256c86cbcce1b4f82589f2154affe0e1d2975dac26
+  - name: k_mean_5e4be9.775f7724680f.1e9d8c141b73
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@map.1/map.2/reduce: ''
+      REDUCE@map.2/map.1/map.1/reduce: ''
+      REDUCE@map.2/map.2/reduce: ''
+      WORK: ''
+      RASTER: ''
+    identity: 1e9d8c141b7348b5c45b21df97901fe992f63ff6cbe1b8980c53c5b4ed367d48
 loops:
 - inputs: [x]
   outputs: [mul_static_fp4_scale_bits, mul_static_fp4_bits]
