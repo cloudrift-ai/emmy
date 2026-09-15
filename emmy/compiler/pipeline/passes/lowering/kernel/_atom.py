@@ -924,12 +924,28 @@ _INVARIANT_TAG, _STREAM_TAG = "s_a", "s_b"
 
 
 def _a_slab_operand(
-    c: Fold, *, mn, bk_elems, cta, swizzle, seam, row_base, m_coord, k_coord, k_ext, inputs=None, k_axis: Axis, axes: tuple = ()
+    c: Fold,
+    *,
+    mn,
+    bk_elems,
+    cta,
+    swizzle,
+    seam,
+    row_base,
+    m_coord,
+    k_coord,
+    k_ext,
+    inputs=None,
+    slab_dtype=None,
+    k_axis: Axis,
+    axes: tuple = (),
 ):
     """The A slab's operand, plus any statistic prologue it needs.
 
-    A is COPIED when it is a materialized ``Load`` and COMPUTE-FILLED when it is a producer cone —
-    a fused RMSNorm ahead of the projection, which is what a serving program's linears look like.
+    A is COPIED when it is a materialized ``Load`` already at the slab dtype and COMPUTE-FILLED
+    when it is a producer cone or a materialized load that needs conversion — a fused RMSNorm ahead
+    of the projection and an erased f32-to-f16 cast are the serving forms. Copy transports move raw
+    bytes, so only the typed compute-fill store can perform the latter conversion.
 
     Shared by the ``smem`` compute fill and the packed byte-slab stage. Those two differ in how B
     moves, never in how A does, and keeping one A side is what lets a packed weight sit behind a
@@ -943,11 +959,25 @@ def _a_slab_operand(
     pro, cell, stats, chunk = seam
     chunk_pro, chunk_stats, _block = chunk or ((), (), 0)
     m_name, k_name = mn[0].axis.name, k_axis.name
-    if c.operands[0].as_slab() is not None:
+    a_slab = c.operands[0].as_slab()
+    if a_slab is not None:
+        load = a_slab.load
         shape = (mn[0].tile, bk_elems)
+        source = inputs.get(load.input) if inputs else None
+        converting = source is not None and slab_dtype is not None and source.dtype != slab_dtype
+        if converting:
+
+            def a_value(k0, row, col):
+                k = BinaryExpr("+", k0, col)
+                sigma = Sigma({m_name: m_coord(row), k_name: k_coord(k)})
+                name = f"{load.name}__af"
+                stmts = [Load(name=name, input=load.input, index=tuple(sigma.apply(e) for e in load.index), dtype=load.dtype)]
+                return _k_masked(stmts, name, k, k_ext)
+
+            return SyncOperand(tag="a", shape=shape, value=a_value, swizzle=swizzle), False, []
         op = Operand(
             tag="a",
-            buf=c.operands[0].as_slab().load.input,
+            buf=load.input,
             shape=shape,
             # A >2-D operand boxes as rank-N with leading extent-1 dims — the convention
             # ``_slab_operands`` applies. ``_box_origin`` already yields the FULL-RANK origin, so
@@ -955,10 +985,10 @@ def _a_slab_operand(
             # descriptor's encoded rank, and TMA treats that as an invalid tensor map (measured
             # on a leading unit batch axis: UTMALDG.4D over a rank-3 map raises ILLEGAL
             # INSTRUCTION from the first thread).
-            box=(1,) * (len(c.operands[0].as_slab().load.index) - 2) + shape if len(c.operands[0].as_slab().load.index) > 2 else None,
-            coords=_box_origin(c.operands[0].as_slab().load.index, tile=mn[0], tile_base=row_base, k_axis=k_axis, sibling=mn[1]),
+            box=(1,) * (len(load.index) - 2) + shape if len(load.index) > 2 else None,
+            coords=_box_origin(load.index, tile=mn[0], tile_base=row_base, k_axis=k_axis, sibling=mn[1]),
             index=_slab_index(
-                c.operands[0].as_slab().load.index, tile=mn[0], tile_base=row_base, k_axis=k_axis, tile_is_row=True, sibling=mn[1]
+                load.index, tile=mn[0], tile_base=row_base, k_axis=k_axis, tile_is_row=True, sibling=mn[1]
             ),
             swizzle=swizzle,
         )
@@ -1021,6 +1051,7 @@ def _sync_operands(
     channels=(),
     seam: tuple = ((), (), (), ()),
     inputs=None,
+    slab_dtype=None,
     *,
     k_axis: Axis,
     axes: tuple = (),
@@ -1074,6 +1105,7 @@ def _sync_operands(
         k_coord=k_coord,
         k_ext=k_ext,
         inputs=inputs,
+        slab_dtype=slab_dtype,
         k_axis=k_axis,
         axes=axes,
     )
@@ -1586,6 +1618,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             ops.channels,
             ops.cone,
             ops.inputs,
+            slab_dtype=elem,
             k_axis=k_axis,
             axes=ops.axes,
             b_atoms=ops.b_atoms(mn),
