@@ -19,7 +19,7 @@ configs:
     origins:
     - softmax
   realizations:
-  - name: k_softmax_3e303d.af2bb2f9b904
+  - name: k_softmax_6fe798.b591597bc1ee
     bindings: {}
     pins:
       FAST_MATH: false
@@ -27,4 +27,4 @@ configs:
       WORK: t256
       REDUCE: coop
       RASTER: ''
-    identity: 5d3e2c1c0cd8a071c0a76ec5c2fadbdfdc504b0b0bbc8c91f25b0650325d4021
+    identity: 1d42ce4bbd6168acced652994dbc0ff8879985707fa3c49a093dc3a33cb78915
