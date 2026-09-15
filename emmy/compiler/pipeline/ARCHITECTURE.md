@@ -1453,6 +1453,12 @@ identical deterministic inputs, their outputs pass the normal accuracy policy, a
 this checks compiler-configuration parity rather than independent framework correctness. The original frontend
 program remains embedded for provenance, while the selected standalone target is what both configurations execute.
 
+Strict decode sends one complete recorded row through an unsampled schedule's existing codec and compatibility
+context. Missing current fields are OFF, a non-OFF key outside the codec is rejected, and supplied keys are exact:
+legal authored choices still bypass enumeration policy, while an invalid value cannot fall back to a catalog. Sampled
+and non-schedule forks retain lazy row descent and a bounded miss summary. Full row enumeration remains available only
+to explicit diagnostics that request the whole pool.
+
 The three historical RTX 4080 rows without measurements were dropped during migration; repository validation has no
 provisional exception.
 

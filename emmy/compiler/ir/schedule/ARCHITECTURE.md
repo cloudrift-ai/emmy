@@ -26,6 +26,8 @@ only complete schedules. Recursion is the generic Algorithm 1 traversal; consume
 visitor or feed contexts back themselves. The driver knows no concrete family, pipeline fork type, site order, or
 enumeration slice. `narrowed(row)` is the one way a row enters after construction: an EMPTY prefix over the same
 problem with the row installed, which is what a descent that already holds a row asks for before expanding anything.
+Strict narrowing marks only the supplied codec keys as exact; inherited peer-kernel pins keep their ordinary tolerant
+reading.
 The pipeline's generic schedule-fork adapter preserves the same contexts as deferred search branches without adding
 compatibility logic.
 
@@ -168,7 +170,8 @@ row — the loud direction; under `validate_pins=False`, the reading a row publi
 multi-kernel target takes, the site keeps its catalog instead. A warp-group tile its grid cannot feed, a transport
 the card cannot run, and a hand-pinned transport no support resolves raise with the rule's own message
 (`loud_pins`), which the descent's `with_row` turns off: a stale row is answered by an empty site and the caller
-re-decides.
+re-decides. Strict complete-row decode does not take that tolerant catalog fallback: once parsing or an intrinsic
+check fails, the empty site is returned without walking the catalog.
 
 A bare pin on a kernel that spells its family per site is a DISJUNCTION over those sites: one carries the value and
 every other is OFF. That is the reading `unreproducible_pin_flag` and `evidence_row_vouches` already give a bare key,

@@ -1099,7 +1099,8 @@ def rename_ssa_sequential(stmts: Body) -> Body:
                     parent = parent.source_axis
 
             names = {**ssa, **sources, **axes}
-            renamed = stmt.rename(names)
+            shell = stmt.with_bodies(tuple(Body() for _ in children)) if children else stmt
+            renamed = shell.rename(names)
             if children:
                 exported = frozenset(name for child in children for name in _exported_accs(child))
                 renamed_children = tuple(walk(child, ssa, axes, sources, exported) for child in children)
@@ -1196,11 +1197,12 @@ def _least_sibling_order(statements: list[Stmt]) -> tuple[Body, bool]:
     """Least dependency-valid order for one scope and whether a choice existed."""
     from emmy.compiler.structural import form  # noqa: PLC0415
 
-    choices = iter(_canonicalize_sibling_order_variants(statements))
+    pruned_choice = [False]
+    choices = iter(_canonicalize_sibling_order_variants(statements, pruned_choice=pruned_choice))
     first = next(choices)
     second = next(choices, None)
     if second is None:
-        return Body(first), False
+        return Body(first), pruned_choice[0]
 
     def key(ordered: tuple[Stmt, ...]) -> str:
         candidate = Body.coerce(sort_commutative_args(rename_ssa_sequential(Body(ordered))))
@@ -1445,7 +1447,7 @@ def _pure_tokens(stmts: Iterable[Stmt]) -> dict[int, str]:
     return tokens
 
 
-def _canonicalize_sibling_order_variants(stmts: list[Stmt]) -> Iterator[tuple[Stmt, ...]]:
+def _canonicalize_sibling_order_variants(stmts: list[Stmt], *, pruned_choice: list[bool] | None = None) -> Iterator[tuple[Stmt, ...]]:
     """Yield every unresolved canonical Kahn order for one sibling scope."""
     if len(stmts) <= 1:
         yield tuple(stmts)
@@ -1629,6 +1631,21 @@ def _canonicalize_sibling_order_variants(stmts: list[Stmt]) -> Iterator[tuple[St
             tokens = canonical_tokens()
             least = min(tokens[id(stmts[index])] for index in tied)
             tied = [index for index in tied if tokens[id(stmts[index])] == least]
+        if len(tied) > 1:
+            # The final key is the tuple of canonical statement forms. Every completion of this
+            # prefix therefore loses as soon as its next form is larger. Canonical name allocation
+            # is prefix-stable, so compare the tied next statements here instead of enumerating all
+            # interleavings and rendering each complete body afterward.
+            def prefix_form(index: int) -> str:
+                prefix = Body(stmts[position] for position in (*ordered, index))
+                canonical = sort_commutative_args(rename_ssa_sequential(prefix))
+                return repr(form(canonical[-1]))
+
+            prefix_tokens = {index: prefix_form(index) for index in tied}
+            least = min(prefix_tokens.values())
+            if pruned_choice is not None and any(token != least for token in prefix_tokens.values()):
+                pruned_choice[0] = True
+            tied = [index for index in tied if prefix_tokens[index] == least]
         if len(tied) > 1:
             tokens = refined_tokens()
             least = min(tokens[id(stmts[index])] for index in tied)

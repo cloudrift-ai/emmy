@@ -129,11 +129,10 @@ def test_decode_ignores_off_anchors_but_not_a_decided_value() -> None:
 def test_a_pool_that_holds_the_recorded_row_is_not_walked_whole(monkeypatch) -> None:
     """The strict decode asks one question of a schedule pool, and pays for one answer.
 
-    A recorded row decodes when it equals an enumerated leaf, which is a membership test — so the
-    replay descends only the branches that can carry the row and stops at the leaf whose match key
-    equals it, instead of keying every leaf of a pool that runs to millions on a fused attention
-    target. Pruning can only lose a leaf, never invent one, so the answer stays exact: a row that
-    equals nothing misses everywhere and is still counted against the whole pool.
+    A recorded row decodes through the schedule's codec and compatibility context, instead of
+    keying every leaf of a pool that runs to millions on a fused attention target. A row that names
+    a site outside the codec is rejected before decode; another miss keeps only the requested keys
+    and values needed to explain it.
     """
     from dataclasses import replace
 
@@ -154,6 +153,14 @@ def test_a_pool_that_holds_the_recorded_row_is_not_walked_whole(monkeypatch) -> 
 
     wanted = schedule_match_key(piece_row(record.knobs))
     assert wanted in rows(record), "the whole pool holds the recorded row"
+
+    old_leaf_for = fork.leaf_for
+
+    def reject_schedule_descent(options, row, *, skip=None):
+        assert not any(option.pool_id is not None for option in options), "an exact schedule row must use the codec"
+        return old_leaf_for(options, row, skip=skip)
+
+    monkeypatch.setattr(fork, "leaf_for", reject_schedule_descent)
     assert wanted in rows(record, wanted), "and asking for that one row still finds it"
     assert len(rows(record, wanted)) < len(rows(record)), "having filed it without keying the pool's every leaf"
 
@@ -172,13 +179,6 @@ def test_a_pool_that_holds_the_recorded_row_is_not_walked_whole(monkeypatch) -> 
     assert _unmatched_reason(absent, keys, pairs) == unmatched_reason(absent, full)
     assert not golden._REPLAY_CACHE, "requested-row results cannot serve a different recording and must not accumulate"
 
-    old_leaf_for = fork.leaf_for
-
-    def reject_schedule_descent(options, row, *, skip=None):
-        assert not any(option.pool_id is not None for option in options), "an unknown schedule key must reject the pool"
-        return old_leaf_for(options, row, skip=skip)
-
-    monkeypatch.setattr(fork, "leaf_for", reject_schedule_descent)
     respelled = replace(record, knobs={**record.knobs, "WORK@missing": record.knobs["WORK"]})
     reason = _decode(respelled, records)
     assert reason is not None and "WORK@missing" in reason and "re-spelling" in reason

@@ -821,6 +821,37 @@ def test_normalize_body_refines_large_asymmetric_sibling_partition() -> None:
     assert normalize_body(make("first", reverse=False)) == normalize_body(make("renamed", reverse=True))
 
 
+def test_sibling_order_prunes_larger_dependency_prefixes() -> None:
+    """Two independent chains do not enumerate every valid interleaving."""
+    statements = [
+        Assign(name="a0", op="abs", args=("left",)),
+        Assign(name="a1", op="exp", args=("a0",)),
+        Assign(name="b0", op="abs", args=("right",)),
+        Assign(name="b1", op="exp", args=("b0",)),
+    ]
+    pruned = [False]
+
+    variants = list(_normalize._canonicalize_sibling_order_variants(statements, pruned_choice=pruned))
+    definitions = {name: index for index, statement in enumerate(statements) for name in statement.defines()}
+    valid = [
+        order
+        for order in permutations(statements)
+        if all(
+            next(i for i, candidate in enumerate(order) if candidate is statements[source]) < order.index(statement)
+            for statement in order
+            for name in statement.deps()
+            if (source := definitions.get(name)) is not None
+        )
+    ]
+
+    def key(order) -> str:
+        return repr(form(sort_commutative_args(_normalize.rename_ssa_sequential(Body(order)))))
+
+    assert pruned == [True]
+    assert len(variants) == 1
+    assert key(variants[0]) == min(map(key, valid))
+
+
 def test_normalize_body_keeps_independent_sibling_scopes_together() -> None:
     """Ready blocks stay ahead of leaf epilogues so normalization does not widen scheduling."""
     first = Loop(
