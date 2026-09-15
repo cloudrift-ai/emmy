@@ -6,7 +6,6 @@ SSA / axis names, dependency-valid order, equivalent expressions, or external-bu
 
 from __future__ import annotations
 
-from importlib import import_module
 from itertools import permutations, product
 
 from emmy.compiler.dim import Dim
@@ -14,7 +13,7 @@ from emmy.compiler.dtype import F32
 from emmy.compiler.ir.atom import SCALAR_ATOM
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
-from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
+from emmy.compiler.ir.stmt.blocks import Cond, Loop
 from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.identity import canonicalize_identity
 from emmy.compiler.ir.stmt.leaves import (
@@ -24,17 +23,9 @@ from emmy.compiler.ir.stmt.leaves import (
     Init,
     Load,
     Mma,
-    Pack,
-    Select,
-    SelectBranch,
-    Unpack,
     Write,
-    ZeroPrologue,
 )
 from emmy.compiler.ir.stmt.normalize import normalize_body, sort_commutative_args
-from emmy.compiler.structural import form
-
-_normalize = import_module("emmy.compiler.ir.stmt.normalize")
 
 # ---------------------------------------------------------------------------
 # sort_commutative_args
@@ -834,179 +825,6 @@ def test_normalize_body_refines_large_asymmetric_sibling_partition() -> None:
     assert normalize_body(make("first", reverse=False)) == normalize_body(make("renamed", reverse=True))
 
 
-def test_sibling_order_prunes_larger_dependency_prefixes() -> None:
-    """Two independent chains do not enumerate every valid interleaving."""
-    statements = [
-        Assign(name="a0", op="abs", args=("left",)),
-        Assign(name="a1", op="exp", args=("a0",)),
-        Assign(name="b0", op="abs", args=("right",)),
-        Assign(name="b1", op="exp", args=("b0",)),
-    ]
-    pruned = [False]
-
-    variants = list(_normalize._canonicalize_sibling_order_variants(statements, pruned_choice=pruned))
-    definitions = {name: index for index, statement in enumerate(statements) for name in statement.defines()}
-    valid = [
-        order
-        for order in permutations(statements)
-        if all(
-            next(i for i, candidate in enumerate(order) if candidate is statements[source]) < order.index(statement)
-            for statement in order
-            for name in statement.deps()
-            if (source := definitions.get(name)) is not None
-        )
-    ]
-
-    def key(order) -> str:
-        return repr(form(sort_commutative_args(_normalize.rename_ssa_sequential(Body(order)))))
-
-    assert pruned == [True]
-    assert len(variants) == 1
-    assert key(variants[0]) == min(map(key, valid))
-
-
-def test_incremental_sequential_rename_matches_every_complete_prefix() -> None:
-    """Kahn prefix comparison advances the same lexical state as the whole-body renamer."""
-    parent = Axis("source", 16)
-    reduce_loop = Loop(
-        axis=Axis(
-            "i",
-            4,
-            window=Window(
-                parent=parent,
-                base=Var("source"),
-                bound=BinaryExpr("+", Var("source"), Literal(4, "int")),
-            ),
-        ),
-        body=(
-            Load(name="local", input="X", index=(Var("i"),)),
-            Cond(
-                cond=BinaryExpr("<", Var("i"), Literal(4, "int")),
-                body=(Assign(name="value", op="abs", args=("local",)), Accum(name="total", value="value", axes=("i",))),
-            ),
-        ),
-    )
-    mma_loop = Loop(
-        axis=Axis("i", 4),
-        body=(
-            Load(name="local", input="A", index=(Var("i"),)),
-            Load(name="other", input="B", index=(Var("i"),)),
-            Mma(
-                c="fragment",
-                a="local",
-                b="other",
-                atom=SCALAR_ATOM,
-                axes=("i",),
-                m_guard=(Var("i"), Literal(4, "int")),
-            ),
-        ),
-    )
-
-    for order in ((reduce_loop, mma_loop), (mma_loop, reduce_loop)):
-        scope = _normalize._SequentialScope()
-        advance_only = _normalize._SequentialScope()
-        prefix = []
-        for statement in order:
-            prefix.append(statement)
-            assert scope.step(statement) == _normalize.rename_ssa_sequential(Body(prefix))[-1]
-            advance_only.advance(statement)
-            assert advance_only.__dict__ == scope.__dict__
-
-
-def test_compact_name_roles_match_full_consumer_form_equivalence() -> None:
-    """Compact refinement roles preserve the old full-consumer equivalence partition."""
-    parent = Axis("source", 16)
-    axis = Axis(
-        "i",
-        4,
-        window=Window(parent=parent, base=Var("source"), bound=BinaryExpr("+", Var("source"), Literal(4, "int"))),
-    )
-    statements = (
-        Load(names=("x", "y"), input="\0" + "0", index=(Var("i"), Var("source"))),
-        Pack(name="packed", low="x", high="y"),
-        Unpack(low_name="low", high_name="high", value="packed"),
-        Assign(name="z", op="add", args=("y", "x")),
-        Assign(name="ordered", op="subtract", args=("x", "y")),
-        Assign(name="repeated", op="add", args=("x", "x")),
-        Accum(name="acc", value="z", axes=("j", "i", "i"), base="seed"),
-        Mma(
-            c="fragment",
-            a="x",
-            b="y",
-            atom=SCALAR_ATOM,
-            axes=("j", "i"),
-            m_guard=(Var("i"), Var("source")),
-        ),
-        Init(name="seed", identity=0.0, dtype=F32),
-        Const(name="constant", value=1.0),
-        Select(
-            name="selected",
-            branches=(
-                SelectBranch(value="x", select=BinaryExpr("<", Var("i"), Var("source"))),
-                SelectBranch(value="y", select=Literal(True)),
-            ),
-        ),
-        Write(output="O", index=(Var("i"),), values=("x", "y")),
-        ZeroPrologue(dst="O", words=16),
-        Loop(axis=axis, body=(Assign(name="inside", op="multiply", args=("y", "x")),)),
-        StridedLoop(
-            axis=axis,
-            start=Var("source"),
-            step=Var("i"),
-            end=BinaryExpr("+", Var("source"), Literal(4, "int")),
-            body=(Assign(name="inside", op="multiply", args=("y", "x")),),
-        ),
-        Cond(
-            cond=BinaryExpr("<", Var("i"), Var("source")),
-            body=(Assign(name="inside", op="subtract", args=("x", "y")),),
-            else_body=(Assign(name="inside", op="subtract", args=("y", "x")),),
-        ),
-    )
-    names = {
-        "acc",
-        "constant",
-        "fragment",
-        "high",
-        "i",
-        "inside",
-        "j",
-        "low",
-        "ordered",
-        "packed",
-        "repeated",
-        "seed",
-        "selected",
-        "source",
-        "x",
-        "y",
-        "z",
-    }
-    abstract = {name: "__name__" for name in names}
-    mappings = (
-        abstract,
-        abstract | {"x": "__source0"},
-        abstract | {"y": "__source0"},
-        abstract | {"x": "__source0", "y": "__source1"},
-        abstract | {"x": "__source1", "y": "__source0"},
-        abstract | {"i": "__source0", "j": "__source0"},
-        abstract | {"i": "__source0", "j": "__source1"},
-        abstract | {"packed": "__source0", "low": "__source1"},
-        abstract | {"low": "__source0", "high": "__source1"},
-        abstract | {"source": "__source0"},
-    )
-    samples = []
-    for statement in statements:
-        roles = _normalize._renamed_name_roles(statement, names)
-        base = form(sort_commutative_args(Body((statement.rename(abstract),)))[0])
-        for mapping in mappings:
-            expected = form(sort_commutative_args(Body((statement.rename(mapping),)))[0])
-            samples.append(((base, roles(mapping)), expected))
-
-    for left_roles, left_form in samples:
-        for right_roles, right_form in samples:
-            assert (left_roles == right_roles) == (left_form == right_form)
-
-
 def test_normalize_body_keeps_independent_sibling_scopes_together() -> None:
     """Ready blocks stay ahead of leaf epilogues so normalization does not widen scheduling."""
     first = Loop(
@@ -1229,19 +1047,6 @@ def test_structural_key_idempotent() -> None:
     body = _matmul_body("X", "Y", "O")
     canonical = canonicalize_identity(normalize_body(body, hoist=False))
     assert canonicalize_identity(canonical) == canonical
-
-
-def test_contextual_order_cycle_chooses_least_form(monkeypatch) -> None:
-    """Binder renaming can alternate two valid orders; normalization still terminates canonically."""
-    first = Body((Assign(name="v0", op="abs", args=("x",)),))
-    second = Body((Assign(name="v0", op="exp", args=("x",)),))
-
-    def alternate(body: Body, revisit):
-        return (second if body == first else first), revisit
-
-    monkeypatch.setattr(_normalize, "_revisit_scope_order", alternate)
-    expected = min((first, second), key=lambda body: repr(form(body)))
-    assert _normalize._refine_contextual_scope_order(first, frozenset({()})) == expected
 
 
 def test_structural_key_is_string_and_hashable() -> None:
