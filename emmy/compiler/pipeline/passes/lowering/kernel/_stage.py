@@ -691,8 +691,8 @@ class SyncOperand:
     async copy. ``value(k0, row, col)`` returns the stmts producing the cell's value at slab
     coords ``(row, col)`` of the K-chunk at ``k0`` + the SSA name holding it: the fused producer
     CONE (the fused-edge A operand — the computed tile materializes straight into the slab the
-    ``ldmatrix`` drain reads). A MATERIALIZED edge never rides this: every such fill — canonical or
-    transposed — is a vectorized copy :class:`Operand` on ``copy_operands``."""
+    ``ldmatrix`` drain reads), or a materialized A whose dtype is converted by the typed slab
+    store. Materialized edges already at the slab dtype use vectorized :class:`Operand` copies."""
 
     tag: str  # "a" / "b" — the smem-slab suffix
     shape: tuple[int, int]  # (rows, cols) of one ring slot

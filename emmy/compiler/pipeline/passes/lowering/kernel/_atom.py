@@ -89,7 +89,7 @@ from emmy.compiler.ir.stmt import (
 )
 from emmy.compiler.ir.stmt.body import _exposed_defines, dedup_recomputes, free_names
 from emmy.compiler.ir.stmt.passes import rename_free
-from emmy.compiler.ir.tile.ops import cone_stat, cone_stat_dtypes, make_cone
+from emmy.compiler.ir.tile.ops import cone_stat, cone_stat_dtypes
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     CpAsyncTransport,
     CtaTile,
@@ -3404,28 +3404,9 @@ def _atom_ops(
     one_wave: bool = False,
 ) -> _AtomOps:
     """The **one** atom dispatch — select the codegen strategy off the atom kind. ``c`` is the
-    stored algebra, ``tile`` the PLACED schedule slice (``Tile.at``) the geometry derives from.
-
-    A CONVERTING materialized ``a`` — an ``smem`` stage on a load whose dtype differs from the
-    atom's — is normalized to its one-``Load`` cone HERE, at the decode boundary: the synchronous
-    fill then evaluates the load per slab cell and the typed slab store performs the conversion
-    (the scheduler resolved the fill for exactly this edge; the tree itself is never rewritten)."""
+    stored algebra, ``tile`` the PLACED schedule slice (``Tile.at``) the geometry derives from."""
     k_axis = k_axis if k_axis is not None else c.axis  # a scheduled wrapper already carries the resolved axis
     assert isinstance(k_axis, Axis), "the atom needs the contraction's K with its extent — the kernel's axis table names it"
-    a_edge = c.operands[0] if c.operands else None
-    a_load = a_edge.lift.body[0] if a_edge is not None and a_edge.as_slab() is not None else None
-    if (
-        stage is not None
-        and stage.transport == "smem"
-        and isinstance(tile.atom, AtomKind)
-        and a_load is not None
-        and inputs is not None
-        and (t := inputs.get(a_load.input)) is not None
-        and t.dtype != tile.atom.operand_dtype("a")
-    ):
-        # Only the A edge is replaced; the term keeps its own lift, monoid and seeds, so there is
-        # no semiring to re-thread and no former to go through.
-        c = replace(c, operands=(make_cone([a_load], k_axis.name), *c.operands[1:]))
     if not isinstance(tile.atom, AtomKind):
         cls = _ScalarOps
     else:
