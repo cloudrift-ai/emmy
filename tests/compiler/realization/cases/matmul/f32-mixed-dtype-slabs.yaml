@@ -26,7 +26,7 @@ configs:
     origins:
     - c
   realizations:
-  - name: k_matmul_639f84.ce9c5269a875
+  - name: k_matmul_407d95.c6f4c7dd53a0
     bindings: {}
     pins:
       FAST_MATH: false
@@ -34,4 +34,4 @@ configs:
       TILE: f2x4
       WORK: t16x8
       STAGE: d1/smem-async
-    identity: 6939ba358190c58ee5f24782bc31d7a5e61ea1b36f038ae4001d9be0409d7e54
+    identity: 212061d7dec7aa8a6f568c88ae4f90885d22e85d30987a9abe95fbb1a0f94357
