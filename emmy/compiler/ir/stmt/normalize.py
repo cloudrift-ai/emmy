@@ -52,6 +52,11 @@ def normalize_body(
     it would change executable semantics.
     """
     stmts = Body.coerce(stmts)
+    return stmts._normalized if hoist else stmts._normalized_without_hoist
+
+
+def _normalize_body(stmts: Body, *, hoist: bool) -> Body:
+    """Uncached implementation owned by :class:`Body`'s normalization properties."""
     stmts = topo_sort_siblings(stmts)
     stmts = drop_size_one_free_axes(stmts)
     stmts = drop_size_one_reduce_axes(stmts)

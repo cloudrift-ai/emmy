@@ -669,6 +669,7 @@ def test_normalize_body_canonicalizes_outer_captures_before_nested_order() -> No
     canonical = normalize_body(make("x"))
     assert normalize_body(make("renamed_x")) == canonical
     assert normalize_body(canonical) == canonical
+    assert normalize_body(canonical) is canonical
 
 
 def test_normalize_body_keeps_mma_in_its_reduction_loop() -> None:
