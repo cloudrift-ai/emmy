@@ -33,7 +33,7 @@ configs:
       RASTER: ''
       STAGE: d2/smem-async
     identity: bf19c1046d408a671cc1209fe151eb745c0544ee6378cdc7df19d54c5f0b971f
-  - name: k_matmul_befb76.313488d19410.ac3e12d7a7c1
+  - name: k_matmul_2d0881.dfbda24a224b.94597cea094f
     bindings: {}
     pins:
       FAST_MATH: false
@@ -41,4 +41,4 @@ configs:
       WORK: ''
       REDUCE: ''
       RASTER: ''
-    identity: ac3e12d7a7c1f6080afc4b83555dc5c2545256d43821ee715b265df7362382a8
+    identity: 94597cea094f8c4111b71f0218dd87d27154fb515198adc09e70a4ac848ebe0e

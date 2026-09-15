@@ -18,6 +18,7 @@ from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.leaves import Accum, Assign, Load, Write
 from emmy.compiler.ir.stmt.normalize import (
     merge_sibling_reduce_loops,
+    normalize_body,
     unify_sibling_reduce_axes,
 )
 
@@ -391,6 +392,56 @@ def test_unify_then_merge_collapses_gated_mlp_pattern() -> None:
     assert accs_inside == ["acc0", "acc1"]
     x_loads = [s for s in loops[0].body if isinstance(s, Load) and s.input == "x"]
     assert len(x_loads) == 2, "dedup happens in a later pass — merge alone leaves both x loads"
+
+
+def test_normalize_closes_reductions_exposed_by_hoisting() -> None:
+    """A reduction hoisted beside an existing sibling merges in the same normalization."""
+    body = Body(
+        (
+            Loop(
+                Axis("i", 2),
+                (
+                    Loop(Axis("k0", 4), (Load("x0", "X", (Var("k0"),)), Accum("a", "x0"))),
+                    Write("A", (Var("i"),), "a"),
+                ),
+            ),
+            Loop(Axis("k1", 4), (Load("x1", "X", (Var("k1"),)), Accum("b", "x1"))),
+            Write("B", (), "b"),
+        )
+    )
+
+    normalized = normalize_body(body)
+    reduce_loops = [stmt for stmt in normalized if isinstance(stmt, Loop) and stmt.is_reduce]
+
+    assert len(reduce_loops) == 1
+    assert len([stmt for stmt in reduce_loops[0].body if isinstance(stmt, Load)]) == 1
+    assert normalize_body(Body(tuple(normalized))) == normalized
+
+
+def test_normalize_closes_children_exposed_by_parent_merge() -> None:
+    """Merging parent reductions exposes and merges their matching child reductions too."""
+
+    def cone(outer: str, inner: str, tag: str) -> Loop:
+        return Loop(
+            Axis(outer, 4),
+            (
+                Loop(
+                    Axis(inner, 8),
+                    (
+                        Load(f"load_{tag}", "X", (Var(outer), Var(inner))),
+                        Accum(f"inner_{tag}", f"load_{tag}"),
+                    ),
+                ),
+                Accum(f"outer_{tag}", f"inner_{tag}"),
+            ),
+        )
+
+    body = Body((cone("k0", "j0", "a"), cone("k1", "j1", "b"), Write("Y", (), "outer_b")))
+    normalized = normalize_body(body)
+
+    assert len(tuple(normalized.iter_of_type(Loop))) == 2
+    assert len(tuple(normalized.iter_of_type(Load))) == 1
+    assert normalize_body(Body(tuple(normalized))) == normalized
 
 
 def test_merge_collapses_three_alpha_equal_siblings() -> None:
