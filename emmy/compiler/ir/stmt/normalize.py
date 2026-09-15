@@ -1142,6 +1142,40 @@ def _canonicalize_order(stmts: Body) -> Body:
     return candidate
 
 
+def _renormalize_external_order(stmts: Body, buffers: frozenset[str]) -> Body:
+    """Revisit only scopes whose order can change after an external-buffer rename."""
+    from emmy.compiler.structural import form  # noqa: PLC0415
+
+    def paths(body: Body) -> frozenset[_ScopePath]:
+        found: set[_ScopePath] = set()
+        touched = False
+        for statement_index, stmt in enumerate(Body.coerce(body)):
+            if buffers & {*stmt.external_reads(), *stmt.external_writes()}:
+                touched = True
+            for child_index, child in enumerate(stmt.nested()):
+                child_paths = paths(child)
+                if child_paths:
+                    touched = True
+                    found.update(((statement_index, child_index), *path) for path in child_paths)
+        if touched:
+            found.add(())
+        return frozenset(found)
+
+    revisit = paths(stmts)
+    candidate = Body.coerce(stmts)
+    seen: dict[str, int] = {}
+    orbit: list[tuple[str, Body]] = []
+    while revisit:
+        rendered = repr(form(candidate))
+        if rendered in seen:
+            return min(orbit[seen[rendered] :])[1]
+        seen[rendered] = len(orbit)
+        orbit.append((rendered, candidate))
+        candidate, revisit = _revisit_scope_order(candidate, revisit)
+        candidate = Body.coerce(sort_commutative_args(rename_ssa_sequential(candidate)))
+    return candidate
+
+
 def _least_sibling_order(statements: list[Stmt]) -> tuple[Body, bool]:
     """Least dependency-valid order for one scope and whether a choice existed."""
     from emmy.compiler.structural import form  # noqa: PLC0415
