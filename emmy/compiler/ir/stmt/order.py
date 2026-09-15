@@ -656,13 +656,19 @@ def _materialize(scope: _Scope, ranks: Sequence[int], orbit_ranks: Sequence[int]
         rebuilt.append(stmt.with_bodies(tuple(_materialize(child, ranks, orbit_ranks) for child in children)) if children else stmt)
 
     body = Body(rebuilt)
-    resource_forms = {id(stmt): repr(form(stmt.rename(_AbstractNames()))) for stmt in body}
+    structural_forms = {
+        id(stmt): (
+            _statement_shape(stmt)[0],
+            repr(form(stmt.rename(_AbstractNames()))),
+        )
+        for stmt in body
+    }
     return body.topological_order(
         scope.incoming,
         lambda index, stmt: (
             scope.categories[index],
+            structural_forms[id(stmt)],
             orbit_ranks[scope.statements[index]],
-            resource_forms[id(stmt)],
             ranks[scope.statements[index]],
         ),
     )
