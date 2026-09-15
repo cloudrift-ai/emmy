@@ -50,7 +50,7 @@ def canonicalize_identity(stmts: Body, *, cluster: bool = False) -> Body:
     roles: dict[str, str] = {}
     for focus in buffers:
         focused = stmts.rename_buffers({name: "__self__" if name == focus else "__other__" for name in buffers})
-        pure_tokens = _pure_tokens(focused)
+        pure_tokens = _pure_tokens(focused.iter())
         definitions = {name: stmt for stmt in focused.iter() if stmt.pure for name in stmt.defines()}
         contexts = []
         for stmt in focused.iter():
@@ -83,16 +83,13 @@ def canonicalize_identity(stmts: Body, *, cluster: bool = False) -> Body:
 
         yield from _orders_modulo_transpositions(group, interchangeable)
 
-    best: tuple[str, Body] | None = None
-    for choices in product(*(buffer_orders(group) for group in ordered_groups)):
+    def candidate(choices: tuple[tuple[str, ...], ...]) -> tuple[str, Body]:
         names = tuple(name for group in choices for name in group)
         renamed = stmts.rename_buffers({name: f"b{index}" for index, name in enumerate(names)})
-        candidate = normalize_body(renamed, hoist=False)
-        rendered = repr(form(candidate))
-        if best is None or rendered < best[0]:
-            best = (rendered, candidate)
-    assert best is not None
-    return best[1]
+        normalized = normalize_body(renamed, hoist=False)
+        return repr(form(normalized)), normalized
+
+    return min(candidate(choices) for choices in product(*(buffer_orders(group) for group in ordered_groups)))[1]
 
 
 # ---------------------------------------------------------------------------

@@ -577,6 +577,9 @@ canonicalized before validation:
 - The final ordering pass canonicalizes integer coordinate expressions and chooses the least dependency- and
   effect-valid statement order. This includes independent pure work, writes to distinct buffers, and updates to
   distinct accumulators. Reads and writes of the same buffer and updates to the same accumulator retain their order.
+  Each nested scope chooses its order before its parent while keeping its original binders until the final whole-body
+  rename. This avoids multiplying every child's valid orders, and name/use tokens are built only when a scope has
+  more than one dependency-valid next statement.
 
 ### `ir/stmt/identity.py` — structural identity
 

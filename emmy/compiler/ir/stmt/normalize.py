@@ -17,9 +17,9 @@ is reachable from Loop IR and from the digest, not from a materialized
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import replace
-from itertools import count, product
+from itertools import chain, count, product
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, CastExpr, Expr, FuncCallExpr, Literal, SimplifyCtx, TernaryExpr, Var, affine_form
@@ -1123,17 +1123,36 @@ def sort_commutative_args(stmts: Body) -> Body:
 
 def _canonicalize_order(stmts: Body) -> Body:
     """Canonicalize expressions and dependency-valid statement order."""
+    stmts = _canonicalize_exprs(stmts)
+    stmts = _canonicalize_scope_order(stmts)
+    return Body.coerce(sort_commutative_args(rename_ssa_sequential(stmts)))
+
+
+def _canonicalize_scope_order(stmts: Body) -> Body:
+    """Choose one canonical sibling order per scope without renaming its binders.
+
+    Nested scopes are independent ordering problems. Keeping their original names until the final
+    whole-body rename preserves outer captures and exported accumulator references without taking
+    the Cartesian product of every child's valid orders.
+    """
     from emmy.compiler.structural import form  # noqa: PLC0415
 
-    stmts = _canonicalize_exprs(stmts)
-    best: tuple[str, Body] | None = None
-    for ordered in _canonicalize_order_variants(stmts):
-        candidate = Body.coerce(sort_commutative_args(rename_ssa_sequential(ordered)))
-        rendered = repr(form(candidate))
-        if best is None or rendered < best[0]:
-            best = (rendered, candidate)
-    assert best is not None
-    return best[1]
+    statements = []
+    for stmt in Body.coerce(stmts):
+        children = stmt.nested()
+        statements.append(stmt.with_bodies(tuple(_canonicalize_scope_order(child) for child in children)) if children else stmt)
+
+    choices = iter(_canonicalize_sibling_order_variants(statements))
+    first = next(choices)
+    second = next(choices, None)
+    if second is None:
+        return Body(first)
+
+    def key(ordered: tuple[Stmt, ...]) -> str:
+        candidate = Body.coerce(sort_commutative_args(rename_ssa_sequential(Body(ordered))))
+        return repr(form(candidate))
+
+    return Body(min(chain((first, second), choices), key=key))
 
 
 def _canonicalize_exprs(stmts: Body) -> Body:
@@ -1201,17 +1220,19 @@ def _canonicalize_exprs(stmts: Body) -> Body:
     return Body.coerce(stmts).map(statement)
 
 
-def _pure_tokens(stmts: Body) -> dict[int, str]:
+def _pure_tokens(stmts: Iterable[Stmt]) -> dict[int, str]:
     """Name- and order-free structural token for every pure definition.
 
     The forward half describes what a statement computes. The reverse half describes every use of
     its results. Equal producers that feed different operations or operand positions therefore get
-    different tokens before the exact ordering search has to branch.
+    different tokens before the exact ordering search has to branch. Callers choose the scope:
+    definitions from a nested lexical scope cannot participate in its parent's pure-value graph.
     """
     from emmy.compiler.structural import digest, form  # noqa: PLC0415
 
+    members = tuple(stmts)
     definitions: dict[str, tuple[Stmt, int]] = {}
-    for stmt in stmts.iter():
+    for stmt in members:
         if stmt.pure:
             for slot, name in enumerate(stmt.defines()):
                 definitions.setdefault(name, (stmt, slot))
@@ -1242,7 +1263,7 @@ def _pure_tokens(stmts: Body) -> dict[int, str]:
         return result
 
     consumers: dict[str, list[Stmt]] = {name: [] for name in definitions}
-    for stmt in stmts.iter():
+    for stmt in members:
         if stmt.pure:
             forward_token(stmt)
         for name in dict.fromkeys(stmt.deps()):
@@ -1283,26 +1304,10 @@ def _pure_tokens(stmts: Body) -> dict[int, str]:
         return result
 
     tokens: dict[int, str] = {}
-    for stmt in stmts.iter():
+    for stmt in members:
         if stmt.pure:
             tokens[id(stmt)] = repr((forward_token(stmt), tuple(reverse_token(name) for name in stmt.defines())))
     return tokens
-
-
-def _canonicalize_order_variants(stmts: Body) -> Iterator[Body]:
-    """Yield canonical candidates for dependency- and effect-valid sibling orderings."""
-    stmts = Body.coerce(stmts)
-    statement_choices = []
-    for stmt in stmts:
-        children = stmt.nested()
-        if not children:
-            statement_choices.append((stmt,))
-            continue
-        child_choices = [tuple(_canonicalize_order_variants(child)) for child in children]
-        statement_choices.append(tuple(stmt.with_bodies(choice) for choice in product(*child_choices)))
-
-    for statements in product(*statement_choices):
-        yield from (Body(choice) for choice in _canonicalize_sibling_order_variants(list(statements)))
 
 
 def _canonicalize_sibling_order_variants(stmts: list[Stmt]) -> Iterator[tuple[Stmt, ...]]:
@@ -1313,21 +1318,10 @@ def _canonicalize_sibling_order_variants(stmts: list[Stmt]) -> Iterator[tuple[St
 
     from emmy.compiler.structural import form  # noqa: PLC0415
 
-    pure_tokens = _pure_tokens(Body(stmts))
-    members = tuple((stmt, *(member for child in stmt.nested() for member in child.iter())) for stmt in stmts)
-    all_names = {name for subtree in members for member in subtree for name in (*member.defines(), *member.deps(), *member.binds_axes())}
-    abstract = {name: "__name__" for name in all_names}
-    tokens = {
-        id(stmt): pure_tokens.get(
-            id(stmt),
-            repr(form(sort_commutative_args(Body((stmt.rename(abstract),)))[0])),
-        )
-        for stmt in stmts
-    }
-
+    defs_uses = [_sibling_defs_uses(stmt) for stmt in stmts]
     definitions: dict[str, list[int]] = {}
-    for index, stmt in enumerate(stmts):
-        for name in _sibling_defs_uses(stmt)[0]:
+    for index, (defines, _) in enumerate(defs_uses):
+        for name in defines:
             definitions.setdefault(name, []).append(index)
 
     def defining_stmt(name: str, consumer: int) -> int | None:
@@ -1338,11 +1332,11 @@ def _canonicalize_sibling_order_variants(stmts: list[Stmt]) -> Iterator[tuple[St
         return next((site for site in sites if site != consumer), None)
 
     incoming = []
-    for index, stmt in enumerate(stmts):
-        sources = {source for name in _sibling_defs_uses(stmt)[1] if (source := defining_stmt(name, index)) is not None}
+    for index, (_, uses) in enumerate(defs_uses):
+        sources = {source for name in uses if (source := defining_stmt(name, index)) is not None}
         incoming.append(sources)
-    for reader, stmt in enumerate(stmts):
-        for name in _sibling_defs_uses(stmt)[1]:
+    for reader, (_, uses) in enumerate(defs_uses):
+        for name in uses:
             for later_definition in definitions.get(name, ()):
                 if later_definition > reader:
                     incoming[later_definition].add(reader)
@@ -1365,6 +1359,26 @@ def _canonicalize_sibling_order_variants(stmts: list[Stmt]) -> Iterator[tuple[St
                 incoming[later].add(earlier)
 
     edges = {(source, target) for target, sources in enumerate(incoming) for source in sources}
+    tokens: dict[int, str] | None = None
+
+    def canonical_tokens() -> dict[int, str]:
+        nonlocal tokens
+        if tokens is not None:
+            return tokens
+        pure_tokens = _pure_tokens(stmts)
+        members = tuple((stmt, *(member for child in stmt.nested() for member in child.iter())) for stmt in stmts)
+        all_names = {
+            name for subtree in members for member in subtree for name in (*member.defines(), *member.deps(), *member.binds_axes())
+        }
+        abstract = {name: "__name__" for name in all_names}
+        tokens = {
+            id(stmt): pure_tokens.get(
+                id(stmt),
+                repr(form(sort_commutative_args(Body((stmt.rename(abstract),)))[0])),
+            )
+            for stmt in stmts
+        }
+        return tokens
 
     def interchangeable(left: int, right: int) -> bool:
         left_defs = _ordered_sibling_defs(stmts[left])
@@ -1389,6 +1403,11 @@ def _canonicalize_sibling_order_variants(stmts: list[Stmt]) -> Iterator[tuple[St
         if not ready:
             yield tuple(stmts)
             return
+        if len(ready) == 1:
+            selected = ready[0]
+            yield from walk(remaining - {selected}, (*ordered, selected))
+            return
+        tokens = canonical_tokens()
         least = min(tokens[id(stmts[index])] for index in ready)
         tied = [index for index in ready if tokens[id(stmts[index])] == least]
         representatives: list[int] = []
