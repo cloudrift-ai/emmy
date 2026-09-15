@@ -1063,9 +1063,8 @@ def _canonicalize_order(stmts: Body) -> Body:
     return Body.coerce(sort_commutative_args(rename_ssa_sequential(ordered)))
 
 
-def _renormalize_external_order(stmts: Body, buffers: frozenset[str]) -> Body:
+def _renormalize_external_order(stmts: Body) -> Body:
     """Recompute ordering after an identity-only external-buffer rename."""
-    del buffers
     return _canonicalize_order(Body.coerce(stmts))
 
 

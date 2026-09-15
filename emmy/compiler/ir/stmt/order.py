@@ -12,9 +12,8 @@ This module is private implementation for :mod:`emmy.compiler.ir.stmt.normalize`
 from __future__ import annotations
 
 from collections import Counter, deque
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, fields
-from heapq import heappop, heappush
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.stmt.base import Stmt
@@ -269,41 +268,13 @@ def _ordering_constraints(body: Body, *, effects: bool, redefinitions: bool = Tr
     return incoming
 
 
-def _kahn(
-    body: Body,
-    incoming: Sequence[set[int] | frozenset[int]],
-    tie_break: Callable[[int, Stmt], object] | None = None,
-) -> Body:
-    """Topologically order one Body; the default tie-break preserves source order."""
-    successors: list[list[int]] = [[] for _ in body]
-    degree = [len(sources) for sources in incoming]
-    for target, sources in enumerate(incoming):
-        for source in sources:
-            successors[source].append(target)
-
-    def priority(index: int) -> tuple[object, int]:
-        return (index if tie_break is None else tie_break(index, body[index])), index
-
-    ready = [priority(index) for index, count in enumerate(degree) if not count]
-    ready.sort()
-    ordered: list[Stmt] = []
-    while ready:
-        _, selected = heappop(ready)
-        ordered.append(body[selected])
-        for target in successors[selected]:
-            degree[target] -= 1
-            if not degree[target]:
-                heappush(ready, priority(target))
-    return Body(ordered) if len(ordered) == len(body) else body
-
-
 def _topological_sort(stmts: Body) -> Body:
     """Stable recursive dependency sort used before structural normalization."""
     body = Body(
         stmt.with_bodies(tuple(_topological_sort(child) for child in stmt.nested())) if stmt.nested() else stmt
         for stmt in Body.coerce(stmts)
     )
-    return _kahn(body, _ordering_constraints(body, effects=False, redefinitions=False))
+    return body.topological_order(_ordering_constraints(body, effects=False, redefinitions=False))
 
 
 class _Builder:
@@ -686,8 +657,7 @@ def _materialize(scope: _Scope, ranks: Sequence[int], orbit_ranks: Sequence[int]
 
     body = Body(rebuilt)
     resource_forms = {id(stmt): repr(form(stmt.rename(_AbstractNames()))) for stmt in body}
-    return _kahn(
-        body,
+    return body.topological_order(
         scope.incoming,
         lambda index, stmt: (
             scope.categories[index],

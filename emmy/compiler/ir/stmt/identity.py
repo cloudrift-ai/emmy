@@ -31,7 +31,7 @@ def canonicalize_identity(stmts: Body, *, cluster: bool = False) -> Body:
     if not resources:
         return stmts
     rename = {name: f"b{index}" for index, name in enumerate(resources)}
-    return _renormalize_external_order(stmts.rename_buffers(rename), frozenset(rename.values()))
+    return _renormalize_external_order(stmts.rename_buffers(rename))
 
 
 # ---------------------------------------------------------------------------
