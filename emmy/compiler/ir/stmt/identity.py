@@ -28,9 +28,7 @@ def _buffer_roles(stmts: Body) -> dict[str, str]:
     from emmy.compiler.structural import form  # noqa: PLC0415
 
     members = tuple(stmts.iter())
-    buffers = tuple(
-        dict.fromkeys(name for stmt in members for name in (*stmt.external_reads(), *stmt.external_writes()))
-    )
+    buffers = tuple(dict.fromkeys(name for stmt in members for name in (*stmt.external_reads(), *stmt.external_writes())))
     if not buffers:
         return {}
 
@@ -49,9 +47,7 @@ def _buffer_roles(stmts: Body) -> dict[str, str]:
             token = pure_tokens[id(statement)]
         else:
             dependency_roles = {
-                name: f"__dep_{pure_tokens[id(owner)]}"
-                for name in statement.deps()
-                if (owner := definitions.get(name)) is not None
+                name: f"__dep_{pure_tokens[id(owner)]}" for name in statement.deps() if (owner := definitions.get(name)) is not None
             }
             renamed = statement.rename({**abstract_names, **dependency_roles})
             token = repr(form(sort_commutative_args(Body((renamed,)))[0]))

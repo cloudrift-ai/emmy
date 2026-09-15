@@ -6,6 +6,7 @@ SSA / axis names, dependency-valid order, equivalent expressions, or external-bu
 
 from __future__ import annotations
 
+from importlib import import_module
 from itertools import permutations, product
 
 from emmy.compiler.dim import Dim
@@ -18,6 +19,9 @@ from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.identity import canonicalize_identity
 from emmy.compiler.ir.stmt.leaves import Accum, Assign, Const, Init, Load, Mma, Write
 from emmy.compiler.ir.stmt.normalize import normalize_body, sort_commutative_args
+from emmy.compiler.structural import form
+
+_normalize = import_module("emmy.compiler.ir.stmt.normalize")
 
 # ---------------------------------------------------------------------------
 # sort_commutative_args
@@ -1012,6 +1016,19 @@ def test_structural_key_idempotent() -> None:
     body = _matmul_body("X", "Y", "O")
     canonical = canonicalize_identity(normalize_body(body, hoist=False))
     assert canonicalize_identity(canonical) == canonical
+
+
+def test_contextual_order_cycle_chooses_least_form(monkeypatch) -> None:
+    """Binder renaming can alternate two valid orders; normalization still terminates canonically."""
+    first = Body((Assign(name="v0", op="abs", args=("x",)),))
+    second = Body((Assign(name="v0", op="exp", args=("x",)),))
+
+    def alternate(body: Body, revisit):
+        return (second if body == first else first), revisit
+
+    monkeypatch.setattr(_normalize, "_revisit_scope_order", alternate)
+    expected = min((first, second), key=lambda body: repr(form(body)))
+    assert _normalize._refine_contextual_scope_order(first, frozenset({()})) == expected
 
 
 def test_structural_key_is_string_and_hashable() -> None:

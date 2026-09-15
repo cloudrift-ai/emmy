@@ -268,11 +268,8 @@ def stats_from_launch(lt) -> PerfStats:
     return point_stats(lt.time_ms * 1000.0)
 
 
-def record_op_inventory(db, op) -> None:
+def record_op_inventory(db, op, key: str) -> None:
     """Upsert one op's inventory row (``cuda_op`` / ``kernel_op`` / ``loop_op``) by its variant key."""
-    key = op.identity_key(with_io=True, with_knobs=True)
-    if key is None:
-        return
     if isinstance(op, CudaOp):
         db.record_cuda_op(
             key,
@@ -313,9 +310,11 @@ def persist_kernel_perf(
     if cuda_key is None:
         return False
     chain = [op for op in cuda_op.source_chain() if op.dialect is not None]
-    for op in chain:
-        record_op_inventory(db, op)
-    for parent_op, child_op in zip(chain[1:], chain[:-1], strict=False):
+    keyed_chain = [(op, cuda_key if op is cuda_op else op.identity_key(with_io=True, with_knobs=True)) for op in chain]
+    for op, key in keyed_chain:
+        if key is not None:
+            record_op_inventory(db, op, key)
+    for (parent_op, p_key), (child_op, c_key) in zip(keyed_chain[1:], keyed_chain[:-1], strict=False):
         p_dialect = parent_op.dialect
         c_dialect = child_op.dialect
         if p_dialect is None or c_dialect is None:
@@ -332,8 +331,6 @@ def persist_kernel_perf(
             # masquerading as the whole op. The decomposition's cost
             # is a Σ, owned by the two-level tuner, never this table.
             continue
-        p_key = parent_op.identity_key(with_io=True, with_knobs=True)
-        c_key = child_op.identity_key(with_io=True, with_knobs=True)
         if p_key is None or c_key is None:
             continue
         p_knobs = getattr(parent_op, "knobs", None) or {}
