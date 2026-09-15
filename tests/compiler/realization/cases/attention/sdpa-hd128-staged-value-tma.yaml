@@ -145,7 +145,7 @@ loops:
                         seed: true
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a4, extent: {dim: 512}, window: null}}
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 512}, window: null}}
                         body:
                           body:
                           - class: Loop
@@ -172,7 +172,7 @@ loops:
                                       tuple:
                                       - {expr: {literal: {value: 0, dtype: int}}}
                                       - {expr: {var: a0}}
-                                      - {expr: {var: a4}}
+                                      - {expr: {var: a2}}
                                       - {expr: {var: a5}}
                                     dtype: null
                                 - class: Assign
@@ -187,7 +187,7 @@ loops:
                             fields: {name: v4, op: {elementwise: subtract}, args: {tuple: [v3, acc1]}, dtype: null}
                           - {class: Assign, fields: {name: v5, op: {elementwise: exp}, args: {tuple: [v4]}, dtype: null}}
                           - class: Accum
-                            fields: {name: acc3, value: v5, op: {elementwise: add}, dtype: null, axes: {tuple: [a4]}, base: null}
+                            fields: {name: acc3, value: v5, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
                         unroll: false
                         seed: true
                     - class: Assign

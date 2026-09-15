@@ -290,6 +290,33 @@ def test_structural_key_equal_for_ambiguous_free_axis_renaming() -> None:
     assert make("z", "a").structural_key(structural=False) == make("a", "z").structural_key(structural=False)
 
 
+def test_normalize_body_keeps_shared_axes_outside_known_output_geometry() -> None:
+    """A composed batch coordinate stays outside matrix rows and columns after alpha-renaming."""
+
+    def make(names: tuple[str, str, str], order: tuple[int, int, int]) -> Body:
+        batch, row, column = names
+        divisor = Literal(3, "int")
+        index = (BinaryExpr("//", Var(batch), divisor), BinaryExpr("%", Var(batch), divisor), Var(row), Var(column))
+        result = Body((Load(name="x", input="X", index=index), Write(output="O", index=index, value="x")))
+        axes = (Axis(batch, 6), Axis(row, 128), Axis(column, 128))
+        for position in reversed(order):
+            result = Body((Loop(axis=axes[position], body=result),))
+        return result
+
+    first = normalize_body(make(("batch", "row", "column"), (0, 1, 2)))
+    second = normalize_body(make(("b", "m", "n"), (2, 0, 1)))
+
+    def extents(body: Body) -> tuple[Dim, ...]:
+        result = []
+        while len(body) == 1 and isinstance(body[0], Loop):
+            result.append(body[0].axis.extent)
+            body = body[0].body
+        return tuple(result)
+
+    assert first == second
+    assert extents(first) == (Dim(6), Dim(128), Dim(128))
+
+
 def test_structural_key_equal_for_renamed_and_reordered_axis_windows() -> None:
     """Axis and parent provenance names cannot choose the order of otherwise ambiguous loops."""
 

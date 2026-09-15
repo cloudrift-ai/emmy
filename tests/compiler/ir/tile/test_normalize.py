@@ -296,7 +296,7 @@ def test_promoted_attention_output_sweep_closes_the_a100_b_seam_idempotently() -
     tile = case_target_tile("attention/rmsnorm-gqa-b-cut.yaml")
     reconstructed = TileOp(op=tile.op, name=tile.name, place=tile.place, axes=tile.axes, output_specs=tile.output_specs)
 
-    assert tuple(axis.name for axis in tile.place.free) == ("a0", "a1", "a6")
+    assert tuple(axis.extent for axis in tile.place.free) == (Dim(4), Dim(4), Dim(16))
     assert all(spec.sweep == () for spec in tile.output_specs)
     assert reconstructed.op is tile.op
     # The authored seam — the score's K cone — is offered on the promoted tree.

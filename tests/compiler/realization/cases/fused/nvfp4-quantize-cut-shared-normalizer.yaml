@@ -732,7 +732,7 @@ configs:
       FAST_MATH: false
     knobs:
       PLACE@map.1/map.2/reduce.2/map: cut
-    identity: 4193741a90d0310f1adba22412f9c6cf083491f88e5e1bcc6f5eddd17fb9beb8
+    identity: bd587e7d4a67fe5220cf712a7a5e52de540931e0b3de2021564717553e4ba34f
   - name: k_mean_219c01.2beb12d3c4f8.a13d24531f3b
     bindings: {}
     pins:
@@ -747,7 +747,7 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@map.1/map.1/map.1/reduce: ''
+      REDUCE@map.2/map.1/map.1/reduce: ''
       REDUCE@map.1/map.2/reduce: ''
       REDUCE@map.2/map.2/reduce: ''
       WORK: ''
