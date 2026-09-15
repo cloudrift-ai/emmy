@@ -1,17 +1,8 @@
-"""Stmt rewrite + simplify, dispatched by type.
-
-Replaces the per-class ``Stmt.rewrite`` overrides on body-carrying and
-leaf stmts, and the ``_simplify_stmt`` if-ladder in ``normalize``.
-The Stage hierarchy uses ``dataclasses.fields()`` introspection inside
-the registered handler — adding a new ``Expr`` / ``Axis`` field on a
-Stage subclass is picked up automatically (no override needed, no
-silent-drop bug).
-"""
+"""Stmt rewrite + simplify, dispatched by type."""
 
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import fields, is_dataclass
 from functools import singledispatch
 
 from emmy.compiler.ir.axis import Axis, extend_simplify_ctx
@@ -57,25 +48,6 @@ def _rename_ssa_vars_in_expr(e: Expr, rename: Rename) -> Expr:
     """
     mapping = {n: Var(rename(n)) for n in e.free_vars() if rename(n) != n}
     return e.substitute(mapping) if mapping else e
-
-
-# ---------------------------------------------------------------------------
-# Generic walker — recurses tuples + plain dataclasses (Addressing, BoundAxis,
-# SelectBranch); applies ``on_expr`` to Expr leaves and ``on_axis`` to Axis.
-# Stmt is excluded — Stmt traversal goes through the singledispatch handlers.
-# ---------------------------------------------------------------------------
-
-
-def _walk(value, *, on_expr, on_axis):
-    if isinstance(value, Expr):
-        return on_expr(value)
-    if isinstance(value, Axis):
-        return on_axis(value)
-    if isinstance(value, tuple):
-        return tuple(_walk(v, on_expr=on_expr, on_axis=on_axis) for v in value)
-    if is_dataclass(value) and not isinstance(value, Stmt):
-        return type(value)(**{f.name: _walk(getattr(value, f.name), on_expr=on_expr, on_axis=on_axis) for f in fields(value)})
-    return value
 
 
 # ---------------------------------------------------------------------------
