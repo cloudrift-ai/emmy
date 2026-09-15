@@ -54,12 +54,25 @@ def fork_schedule(
         row = frozendict({**row_prefix, **codec._encode(schedule)})
         return ScheduleLeaf(schedule, row, dict(inherited_knobs), materialize, pool_id)
 
+    keys = frozenset(codec.keys())
+
+    def exact(row: Mapping[str, str]) -> ScheduleLeaf | None:
+        complete = {key: row.get(key, "") for key in keys}
+        try:
+            narrowed = context.narrowed(complete, strict=True)
+            schedule = type(codec)(narrowed).decode(complete)
+        except ValueError:
+            return None
+        return leaf(schedule)
+
     roots = schedule_forks(
         context,
         branch_knobs={**inherited_knobs, **row_prefix},
         row_delta=codec.delta,
         leaf=leaf,
         pool_id=pool_id,
+        exact=exact,
+        exact_keys=keys,
     )
     if sample is None:
         return roots

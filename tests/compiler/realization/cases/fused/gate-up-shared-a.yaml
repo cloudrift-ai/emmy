@@ -43,7 +43,7 @@ configs:
     - sg
     - up
   realizations:
-  - name: k_linear_reduce_efee7d.1227efc81e06
+  - name: k_linear_reduce_e44076.d1b562843dda
     bindings: {}
     pins:
       FAST_MATH: false
@@ -51,7 +51,7 @@ configs:
     knobs:
       WORK: w2x2
       TILE: mma_m16n8k16_f16_f32/f2x2/k2
-    identity: 6218cef2f71be19d0edc87efd242216fdf3d359796a0a4e5ceac646ece490858
+    identity: f2389b773ed31269b48d4513bcb0acf6d0c44683d6b6e3cc360abf986d85059a
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 9.945600032806396

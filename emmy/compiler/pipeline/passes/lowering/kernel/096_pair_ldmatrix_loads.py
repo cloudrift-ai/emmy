@@ -89,7 +89,7 @@ def _walk(body: Body) -> tuple[Body, bool]:
         stmts.append(s)
     paired = _pair(stmts)
     if paired is None:
-        return Body(tuple(stmts)), changed
+        return (Body(tuple(stmts)) if changed else body), changed
     return Body(tuple(paired)), True
 
 

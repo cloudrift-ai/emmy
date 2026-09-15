@@ -4,12 +4,8 @@ compute_cap:
 - 7
 - 0
 programs:
-- inputs:
-  - x0
-  - x1
-  - x2
-  outputs:
-  - scaled_dot_product_attention
+- inputs: [x0, x1, x2]
+  outputs: [scaled_dot_product_attention]
   nodes:
   - id: scaled_dot_product_attention_c3
     op: constant
@@ -17,73 +13,34 @@ programs:
       name: scaled_dot_product_attention_c3
       value: 0.0
       context_value: null
-      load_ops:
-        __tuple__: []
+      load_ops: {__tuple__: []}
       source_path: null
-      source_parts:
-        __tuple__: []
+      source_parts: {__tuple__: []}
       source_shape: null
       source_dtype: null
       source_graph: null
-    outputs:
-    - - scaled_dot_product_attention_c3
-      - f16
-      - - 1
+    outputs: [[scaled_dot_product_attention_c3, f16, [1]]]
   - id: x0
     op: input
-    outputs:
-    - - x0
-      - f16
-      - - 1
-        - 16
-        - sym: seq_len
-          hint: 512
-        - 256
+    outputs: [[x0, f16, [1, 16, {sym: seq_len, hint: 512}, 256]]]
   - id: x1
     op: input
-    outputs:
-    - - x1
-      - f16
-      - - 1
-        - 16
-        - sym: seq_len
-          hint: 512
-        - 256
+    outputs: [[x1, f16, [1, 16, {sym: seq_len, hint: 512}, 256]]]
   - id: x2
     op: input
-    outputs:
-    - - x2
-      - f16
-      - - 1
-        - 16
-        - sym: seq_len
-          hint: 512
-        - 256
+    outputs: [[x2, f16, [1, 16, {sym: seq_len, hint: 512}, 256]]]
   - id: scaled_dot_product_attention
     op: torch.sdpa
-    attrs:
-      is_causal: true
-      sliding_window: null
-      scale: null
-    inputs:
-    - x0
-    - x1
-    - x2
-    outputs:
-    - - scaled_dot_product_attention
-      - f16
-      - - 1
-        - 16
-        - sym: seq_len
-          hint: 512
-        - 256
+    attrs: {is_causal: true, sliding_window: null, scale: null}
+    inputs: [x0, x1, x2]
+    outputs: [[scaled_dot_product_attention, f16, [1, 16, {sym: seq_len, hint: 512}, 256]]]
 configs:
 - program: 0
   target:
     origins:
     - scaled_dot_product_attention
   realizations:
-  - name: k_sdpa_d4ff16.4f5da7db2111
+  - name: k_sdpa_7f6466.2eefaaadc97a
     bindings: {}
     pins:
       FAST_MATH: false
@@ -96,4 +53,4 @@ configs:
       STAGE: ''
       LOOPIFY: '0'
       RASTER: ''
-    identity: 622e92f2068a8109844f054aadeae6d6ad520c44b39a47f56037ae3126b4862a
+    identity: 33a2cc9b5e9304c52c5b3600d0d74153d8235f318fc273834fc14db3ea524166

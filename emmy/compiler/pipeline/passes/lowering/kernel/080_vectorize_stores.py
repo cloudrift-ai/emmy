@@ -97,7 +97,8 @@ def _vectorize_body(top: KernelOp, body: Body) -> Body:
         if not replaced:
             out.append(descended[i])
             i += 1
-    return Body(tuple(out))
+    vectorized = Body(tuple(out))
+    return body if vectorized == body else vectorized
 
 
 def _per_dim_inners(writes: list[Write]) -> list | None:

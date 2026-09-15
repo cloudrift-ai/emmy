@@ -1416,6 +1416,10 @@ def _mask_key_bounds(stmts, held: str, key: Axis, row: str, offset, bk: int) -> 
         masked = _mask_add(stmt, selects, fragments)
         predicate = mask_select_predicate(masked[0]) if masked is not None else None
         affine = _mask_affine(predicate, frozenset({key.name, row})) if predicate is not None else None
+        if affine is not None and affine[0] == {key.name: -1, row: 1}:
+            swapped = {"<": ">", "<=": ">=", ">": "<", ">=": "<="}
+            predicate = BinaryExpr(swapped[predicate.op], predicate.right, predicate.left)
+            affine = _mask_affine(predicate, frozenset({key.name, row}))
         if affine is None or affine[0] != {key.name: 1, row: -1} or affine[1].free_vars():
             continue
         shift = -int(affine[1].eval({}))  # the masked branch reads ``key OP row + shift``

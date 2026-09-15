@@ -75,3 +75,58 @@ def test_dedup_loads_still_rewires_an_inner_use_of_the_dropped_name() -> None:
 
     assert [s.name for s in out if isinstance(s, Load)] == ["in0"]
     assert out[-1].body == Body((Assign(name="v", op="add", args=("in0", "in0")),))
+
+
+def test_dedup_loads_rewires_every_vector_lane() -> None:
+    """A duplicate vector load aliases each lane to the corresponding kept lane."""
+    body = Body(
+        (
+            Load(names=("x0", "x1"), input="X", index=ZERO),
+            Load(names=("y0", "y1"), input="X", index=ZERO),
+            Assign(name="sum", op="add", args=("y0", "y1")),
+        )
+    )
+
+    out = dedup_loads(body)
+
+    assert out == Body(
+        (
+            Load(names=("x0", "x1"), input="X", index=ZERO),
+            Assign(name="sum", op="add", args=("x0", "x1")),
+        )
+    )
+
+
+def test_dedup_loads_invalidates_a_read_after_writing_its_buffer() -> None:
+    body = Body(
+        (
+            Load(name="old", input="B", index=ZERO),
+            Load(name="replacement", input="R", index=ZERO),
+            Write(output="B", index=ZERO, value="replacement"),
+            Load(name="new", input="B", index=ZERO),
+            Write(output="O", index=ZERO, value="new"),
+        )
+    )
+
+    out = dedup_loads(body)
+
+    assert [stmt.name for stmt in out if isinstance(stmt, Load) and stmt.input == "B"] == ["old", "new"]
+
+
+def test_dedup_loads_does_not_reuse_a_read_across_a_loop_that_writes_its_buffer() -> None:
+    body = Body(
+        (
+            Load(name="before", input="B", index=ZERO),
+            Loop(
+                axis=Axis("a", 4),
+                body=(
+                    Load(name="current", input="B", index=ZERO),
+                    Write(output="B", index=ZERO, value="current"),
+                ),
+            ),
+        )
+    )
+
+    out = dedup_loads(body)
+
+    assert out[1].body[0] == Load(name="current", input="B", index=ZERO)

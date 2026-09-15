@@ -4,64 +4,30 @@ compute_cap:
 - 7
 - 0
 programs:
-- inputs:
-  - x0
-  - x1
-  - x2
-  outputs:
-  - scaled_dot_product_attention
+- inputs: [x0, x1, x2]
+  outputs: [scaled_dot_product_attention]
   nodes:
   - id: x0
     op: input
-    outputs:
-    - - x0
-      - f16
-      - - 1
-        - 8
-        - 512
-        - 128
+    outputs: [[x0, f16, [1, 8, 512, 128]]]
   - id: x1
     op: input
-    outputs:
-    - - x1
-      - f16
-      - - 1
-        - 8
-        - 512
-        - 128
+    outputs: [[x1, f16, [1, 8, 512, 128]]]
   - id: x2
     op: input
-    outputs:
-    - - x2
-      - f16
-      - - 1
-        - 8
-        - 512
-        - 128
+    outputs: [[x2, f16, [1, 8, 512, 128]]]
   - id: scaled_dot_product_attention
     op: torch.sdpa
-    attrs:
-      is_causal: false
-      sliding_window: null
-      scale: null
-    inputs:
-    - x0
-    - x1
-    - x2
-    outputs:
-    - - scaled_dot_product_attention
-      - f16
-      - - 1
-        - 8
-        - 512
-        - 128
+    attrs: {is_causal: false, sliding_window: null, scale: null}
+    inputs: [x0, x1, x2]
+    outputs: [[scaled_dot_product_attention, f16, [1, 8, 512, 128]]]
 configs:
 - program: 0
   target:
     origins:
     - scaled_dot_product_attention
   realizations:
-  - name: k_sdpa_6a2bfa.0015e9065043
+  - name: k_sdpa_3ffbb0.74a81f7d77ff
     bindings: {}
     pins:
       FAST_MATH: false
@@ -74,4 +40,4 @@ configs:
       STAGE: ''
       LOOPIFY: '0'
       RASTER: ''
-    identity: 3ec795cedf21b59dce873ccc52ebbacf6519878078959430f44405a131ffc106
+    identity: e081176dc6f83816fd903ebe493a9b6414972f8cde6ed483f1ff91211136a4f5

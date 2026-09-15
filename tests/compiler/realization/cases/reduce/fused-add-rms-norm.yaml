@@ -31,14 +31,14 @@ configs:
     - h
     - n
   realizations:
-  - name: k_rms_norm_4172e4.78636d0087dd
+  - name: k_rms_norm_5af0a0.b72a3019dfbd
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
       REDUCE: coop
       WORK: t128
-    identity: 86f4ff80a21fb346ba63231f81f87bee345e19bd7918e44fe6686f9f8eb4a67a
+    identity: dd4dde7f5a68969e68661dc9152738ff685f21f3afc8c2aa3143853220c69db7
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 1.6021538430299513

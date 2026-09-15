@@ -31,7 +31,7 @@ configs:
     origins:
     - c
   realizations:
-  - name: k_matmul_619b7e.dfdfde01fe27
+  - name: k_matmul_cc4369.2363c49c7793
     bindings: {}
     pins:
       FAST_MATH: false
@@ -39,8 +39,8 @@ configs:
       TILE: f2x2
       WORK: t16x8
       STAGE: d1/smem-async
-    identity: 5261b9605efcd7b0cfa112612897657756863ad8721181bdd7dbf8fb6424446e
-  - name: k_matmul_89caea.61fe394718cd.9086f238eb74
+    identity: 90e99394cdbd58465315cff6638151add48952e30dc9d83ee697d6e7cf5c845c
+  - name: k_matmul_b424f6.3a1a11696e80.dc1f1224801d
     bindings: {}
     pins:
       FAST_MATH: false
@@ -50,26 +50,4 @@ configs:
       REDUCE: ''
       STAGE: ''
       RASTER: ''
-    identity: 9086f238eb74d88d2b3ef9b3cae3bfb464121047e22b6ab97567c5d88d83688d
-  - name: k_matmul_bd3a21.c07fbc53427d.8e61168eae46
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      TILE: ''
-      REDUCE: ''
-      STAGE: ''
-      RASTER: ''
-    identity: 8e61168eae46d5213d2365090e41ba59940a298dc29923b3c234f8f5ca57ee8b
-  - name: k_matmul_619b7e.dfdfde01fe27.fbadcc22f49c
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      TILE: ''
-      REDUCE: ''
-      STAGE: ''
-      RASTER: ''
-    identity: fbadcc22f49cfafbc9f3e30595289cd9c982be3153018900c882ed3ce3f27cc6
+    identity: dc1f1224801d2d05f24e394e2ad08e1eb86d98f3d3d544477c55785350218166
