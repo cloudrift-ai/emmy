@@ -19,14 +19,14 @@ configs:
     origins:
     - amax
   realizations:
-  - name: k_amax_reduce.2468e86b2d9d
+  - name: k_amax_reduce.63d852991fe7
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
       REDUCE: coop
       WORK: t128
-    identity: 1cb989f350d9c0a43358109447116cd405d7a742655208efba60b6064a45a82e
+    identity: ba106221b80268fa652b33bd913ae9289d1daf5fecb6c90041c65731ca7cf733
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 1.0680341695108984

@@ -32,7 +32,7 @@ configs:
     - add
     - linear
   realizations:
-  - name: k_linear_a9e05e.de9e97e49f33
+  - name: k_linear_e81aec.c5577731362a
     bindings: {}
     pins:
       FAST_MATH: false
@@ -49,7 +49,7 @@ configs:
       INTERLEAVE_LOADS: 'True'
       PAIR_LDMATRIX: 'True'
       LOOPIFY: '0'
-    identity: 39754dc0d73162a330698a814b082761ff75523aa2b74f64ace3f019e3778d30
+    identity: d0792a692556250e7e86361fa3e1a0177f7ddd3fdba8b7091bc34f8e73f8272b
   - name: k_linear_a9e05e.de9e97e49f33.2f6de0d7fe59
     bindings: {}
     pins:

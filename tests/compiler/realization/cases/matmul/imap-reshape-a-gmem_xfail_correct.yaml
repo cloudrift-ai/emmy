@@ -46,7 +46,7 @@ configs:
     - o
     - xr
   realizations:
-  - name: k_matmul_de8d89.e2c64fdeff61
+  - name: k_matmul_a84ad1.539008f0b65d
     bindings: {}
     pins:
       FAST_MATH: false
@@ -56,4 +56,4 @@ configs:
       REDUCE: ''
       STAGE: ''
       RASTER: ''
-    identity: 3130ec980a9fc40cffd96d82be60de920d2f88fdfba8c1208c1c89144910d6db
+    identity: c53b29abb0af49d4972b8dc2e6d556c92a80bf63685f9e4c30664b49b340a237

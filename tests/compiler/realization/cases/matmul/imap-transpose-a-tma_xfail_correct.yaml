@@ -43,10 +43,10 @@ configs:
     - o
     - xr
   realizations:
-  - name: k_matmul_114568.506d36db79a2
+  - name: k_matmul_e95e7f.06158b3c2eca
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
       STAGE: d2/smem-tma
-    identity: 72aced8400b9c8f08148598e4302e6fc7e737e7cc7e8638f9a3f03845b8c3758
+    identity: 71c63fd30cfdffae685cbf4e56870fd84c42c8f0b2845e19b3efa613584078ea
