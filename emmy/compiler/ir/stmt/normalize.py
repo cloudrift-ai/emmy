@@ -1173,6 +1173,7 @@ def _refine_contextual_scope_order(candidate: Body, revisit: frozenset[_ScopePat
 
 def _renormalize_external_order(stmts: Body, buffers: frozenset[str]) -> Body:
     """Revisit only scopes whose order can change after an external-buffer rename."""
+
     def paths(body: Body) -> frozenset[_ScopePath]:
         found: set[_ScopePath] = set()
         touched = False

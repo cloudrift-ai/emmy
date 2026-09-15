@@ -253,6 +253,26 @@ def schedule_forks(
     return [_ScheduleFork(tree, context, {})]
 
 
+def schedule_key_set(options: Sequence[Op | Graph | Fork]) -> frozenset[str] | None:
+    """The complete-row key vocabulary of schedule roots, without expanding them.
+
+    ``None`` means the options are not an unsampled semantic schedule. A strict replay can reject
+    a row carrying another key before descending a schedule space; partial-row consumers cannot,
+    because their extra keys may belong to later pipeline forks.
+    """
+    roots = [option for option in options if isinstance(option, _ScheduleFork)]
+    if len(roots) != len(options) or any(root.context.problem is None for root in roots):
+        return None
+    return frozenset(
+        key
+        for root in roots
+        for key in (
+            *root.tree.branch_knobs,
+            *(key for site in root.context.problem.sites for key in site.keys),
+        )
+    )
+
+
 def iter_leaves(options: Iterable[Op | Graph | Fork]) -> Iterator[Op | Graph | Fork]:
     """Yield complete leaves depth-first without retaining the expanded tree."""
     for option in options:

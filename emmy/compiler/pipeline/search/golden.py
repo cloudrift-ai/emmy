@@ -860,10 +860,10 @@ def _record_fingerprint(record: GoldenRecord) -> str:
     return digest(cached[1], str(record.target_key), str(record.bindings), str(record.compute_cap), record.gpu_name or "")
 
 
-#: One :class:`_Replay` per exact target, pins and spelled knobs — the tripwire and the evidence
-#: import walk whole files, and sibling realizations that spell the same kernel-set decisions share
-#: one replay. Context construction is also shared per card; neither cache changes schedule-space
-#: membership.
+#: One evidence :class:`_Replay` per exact target, pins and spelled knobs — imports walk whole
+#: files, and sibling realizations that spell the same kernel-set decisions share one replay.
+#: Exhaustive strict-decode results are not retained: a miss can contain millions of candidate
+#: rows, and its requested-row cache key means no different recording can reuse it.
 _REPLAY_CACHE: dict[tuple, _Replay] = {}
 _DECODE_CTX_CACHE: dict[tuple, object] = {}
 
@@ -1014,11 +1014,22 @@ def unmatched_reason(row: Sequence[tuple[str, str]], candidates) -> str:
     report rather than overwrite. Everything offered but never together is a kernel whose fork SET
     moved, of which the row that spelled no decision at all against a kernel that now takes one is
     the common case, and a gain."""
-    spellings = [dict(candidate) for candidate in candidates]
-    absent = sorted({key for key, _ in row if not any(key in spelling for spelling in spellings)})
+    seen_keys: set[str] = set()
+    seen_pairs: set[tuple[str, str]] = set()
+    for candidate in candidates:
+        seen_keys.update(key for key, _ in candidate)
+        seen_pairs.update(candidate)
+    return _unmatched_reason(row, seen_keys, seen_pairs)
+
+
+def _unmatched_reason(
+    row: Sequence[tuple[str, str]], seen_keys: set[str] | frozenset[str], seen_pairs: set[tuple[str, str]] | frozenset[tuple[str, str]]
+) -> str:
+    """Classify a miss from the bounded facts the candidates offered."""
+    absent = sorted({key for key, _ in row if key not in seen_keys})
     if absent:
         return f"the replay offers no {', '.join(absent)} — a re-spelling or an identity change"
-    narrowed = sorted(f"{key}={value!r}" for key, value in row if not any(spelling.get(key) == value for spelling in spellings))
+    narrowed = sorted(f"{key}={value!r}" for key, value in row if (key, value) not in seen_pairs)
     if narrowed:
         return f"NARROWING, the key is offered and the value is not: {', '.join(narrowed)}"
     if not row:
@@ -1062,22 +1073,18 @@ def decode_record(record: GoldenRecord, siblings: Sequence[GoldenRecord] = ()) -
     candidates = replay.rows
     if record.is_receipt and (tile is None or record.identity != tile.identity_key(with_io=True)):
         child_rows = candidates.get(record.identity)
-        if child_rows is None:
-            reason = f"stored identity equals none of the {len(candidates)} kernel identities resolved under the record's pins"
-        elif row in child_rows:
+        offered = replay.offered.get(record.identity, (frozenset(), frozenset()))
+        if record.identity not in replay.kernels:
+            reason = "stored identity equals none of the kernel identities resolved under the record's pins"
+        elif child_rows is not None and row in child_rows:
             reason = None
         else:
-            reason = (
-                f"no enumerated row of the identified kernel equals the recording "
-                f"({len(child_rows)} candidate rows): {unmatched_reason(row, child_rows)}"
-            )
+            reason = f"no enumerated row of the identified kernel equals the recording: {_unmatched_reason(row, *offered)}"
     else:
         pooled = frozenset().union(*candidates.values()) if candidates else frozenset()
-        reason = (
-            None
-            if row in pooled
-            else f"no enumerated row equals the recording ({len(pooled)} candidate rows): {unmatched_reason(row, pooled)}"
-        )
+        offered_keys = set().union(*(summary[0] for summary in replay.offered.values())) if replay.offered else set()
+        offered_pairs = set().union(*(summary[1] for summary in replay.offered.values())) if replay.offered else set()
+        reason = None if row in pooled else f"no enumerated row equals the recording: {_unmatched_reason(row, offered_keys, offered_pairs)}"
     verdicts[verdict_key] = reason
     global _IDENTITY_STORE_DIRTY
     _IDENTITY_STORE_DIRTY = True
@@ -1095,22 +1102,25 @@ class _Replay(NamedTuple):
     """One replay of a record's target through the tile passes under the record's pins, following
     the record's knobs at every kernel-set fork (:func:`~emmy.compiler.pipeline.search.pins.spelled_arm`).
 
-    ``rows`` — the EXHAUSTIVE replay's answer: every schedule-row identity each kernel can realize
+    ``rows`` — the EXHAUSTIVE replay's answer when no row is requested: every schedule-row identity each kernel can realize
     as a :func:`~emmy.compiler.pipeline.knob.schedule_match_key`, bucketed by the kernel's deploy
     identity (``identity_key(with_io=True)``; ``None`` for forks
     whose root is not a recognized ``TileOp``): the fork leaves' rows, PLUS each resolved kernel's
     own realized row — a forkless kernel (the schedule space collapsed to one row, often the all-OFF
     anchor) never opens a fork, so its one row is read off the resolved op instead. Behind a cut the
     buckets are exactly the pieces, which is what lets a child-identity receipt decode against its
-    own kernel only. ``holders`` — the evidence replay's answer to the one question the index
-    needs of the same enumeration: the kernels whose enumeration admits the record's piece row
+    own kernel only. A requested-row replay keeps only an exact match here. ``holders`` — the
+    evidence replay's answer to the one question the index needs of the same enumeration: the
+    kernels whose enumeration admits the record's piece row
     (:func:`piece_row`), found by the deploy's own descent (``fork.leaf_for``) instead of by
     flattening every pool. ``signatures`` — each resolved kernel's ``S_*`` signature by identity:
     how a row is keyed as evidence for the kernel it decorates. ``arms`` — the arm the record's
     route and knobs spelled at each kernel-set fork it decided (a cut seam, a cross-CTA plan),
     keyed by the signature of the kernel that fork was offered on: the record's route rows.
     ``unresolved`` — the record's scoped cut keys no offered seam carried, the strict decode's
-    routing failure."""
+    routing failure. ``offered`` — for a requested-row replay, the bounded set of keys and
+    key/value pairs offered per kernel identity; a miss uses it to explain re-spelling, narrowing
+    or regrouping without retaining every candidate row."""
 
     rows: dict[str | None, frozenset]
     holders: frozenset[str]
@@ -1123,6 +1133,7 @@ class _Replay(NamedTuple):
     #: Each scheduled kernel's realized schedule row (``schedule_row_key`` families), by identity —
     #: what a per-kernel entry for a kernel the set leaves undescribed would record.
     realized: dict[str, dict[str, str]]
+    offered: dict[str | None, tuple[frozenset[str], frozenset[tuple[str, str]]]]
 
 
 def piece_row(row: Mapping[str, str]) -> dict[str, str]:
@@ -1188,16 +1199,16 @@ def _replay(
     lead's — never by an entry that does not own it, whose row would say "fused" or "unsplit" of a
     kernel it never described. So a set of per-kernel entries — the parent's cut, each piece's
     row — walks one path together, and the record's own rows are what this replay reports.
-    ``exhaustive`` flattens every schedule pool for ``rows`` (the strict decode's question); the
-    evidence import asks only ``holders`` and descends. ``wanted`` names the ONE match key the
-    caller will ask ``rows`` about, which the descent answers without flattening — a pool that
-    holds it files just it, and only a pool that does not is walked whole. How much the descent
-    saves is the pool's to decide: it skips a branch that has already decided against the row, so a
-    pool whose branches leave the row open is still walked widely."""
+    ``exhaustive`` streams every schedule pool for ``rows``; the evidence import asks only
+    ``holders`` and descends. ``wanted`` names the ONE match key the caller will ask ``rows`` about,
+    which the descent answers without flattening — a pool that holds it files just it. A miss keeps
+    only the wanted keys and values needed to classify it, never the candidate rows. How much the
+    descent saves is the pool's to decide: it skips a branch that has already decided against the
+    row, so a pool whose branches leave the row open is still walked widely."""
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
     from emmy.compiler.pipeline import TILE_PASSES, Pipeline  # noqa: PLC0415
-    from emmy.compiler.pipeline.fork import flatten_leaves, fork_signature, iter_leaves, leaf_for, leaf_knobs  # noqa: PLC0415
+    from emmy.compiler.pipeline.fork import fork_signature, iter_leaves, leaf_for, leaf_knobs, schedule_key_set  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import (  # noqa: PLC0415
         canonical_row_key,
         evidence_row_vouches,
@@ -1237,7 +1248,7 @@ def _replay(
         exhaustive,
         wanted,
     )
-    cached = _REPLAY_CACHE.get(cache_key)
+    cached = None if exhaustive else _REPLAY_CACHE.get(cache_key)
     if cached is not None:
         return cached
     # The evidence replay is a pure function of the record, its set and the compiler — it runs
@@ -1260,6 +1271,7 @@ def _replay(
             tuple((frozenset(tuple(pair) for pair in signature), dict(arm)) for signature, arm in kept["arms"]),
             tuple(kept["unresolved"]),
             {identity: dict(row) for identity, row in kept["realized"].items()},
+            {},
         )
         _REPLAY_CACHE[cache_key] = result
         return result
@@ -1272,6 +1284,10 @@ def _replay(
     pending = {key for key, value in spelled.items() if family_of(key) == "PLACE" and value == "cut"}
     piece = piece_row(record.schedule_row)
     buckets: dict[str | None, set] = {}
+    offered_keys: dict[str | None, set[str]] = {}
+    offered_pairs: dict[str | None, set[tuple[str, str]]] = {}
+    wanted_keys = frozenset(key for key, _ in wanted or ())
+    wanted_pairs = frozenset(wanted or ())
     holders: set[str] = set()
     kernels: set[str] = set()
     signatures: dict[str, frozenset] = {}
@@ -1285,6 +1301,10 @@ def _replay(
         identity = _identity_of(op)
         if identity is not None:
             signatures.setdefault(identity, signature)
+
+    def _offer(identity: str | None, row: tuple[tuple[str, str], ...]) -> None:
+        offered_keys.setdefault(identity, set()).update(key for key, _ in row if key in wanted_keys)
+        offered_pairs.setdefault(identity, set()).update(pair for pair in row if pair in wanted_pairs)
 
     def decide(fp):
         # The kernel's signature as the deploy reads it at this fork — an op resolved without a
@@ -1320,21 +1340,42 @@ def _replay(
         # a leaf the partial row merely vouches for. The hit has to be one the walk below would have
         # filed: a leaf with no row of its own keys as the empty match, which a wholly OFF record
         # equals, and a structural option never enters ``buckets`` at all. Pruning can only lose a
-        # leaf, never invent one, so a miss falls through to the whole walk — and a row that equals
-        # nothing still counts every candidate it did not equal.
-        if wanted is not None and piece:
-            hit = leaf_for(fp.options, piece, skip=lambda knobs: not knobs or schedule_match_key(knobs) != wanted)
+        # leaf, never invent one, so a miss streams only until its explanation is known.
+        proved_miss = False
+        if wanted is not None:
+            declared = schedule_key_set(fp.options)
+            if declared is not None and not wanted_keys <= declared:
+                offered_keys.setdefault(identity, set()).update(wanted_keys & declared)
+                return next(iter_leaves(fp.options))
+            hit = leaf_for(fp.options, piece, skip=lambda knobs: schedule_match_key(knobs) != wanted)
             if hit is not None and not _is_structural_option(hit[0]):
                 buckets.setdefault(identity, set()).add(wanted)
+                _offer(identity, wanted)
                 chosen = next((leaf for leaf in iter_leaves(fp.options) if not _is_structural_option(leaf)), None)
                 return chosen if chosen is not None else next(iter_leaves(fp.options))
-        leaves = flatten_leaves(fp.options)
-        ops = [o for o in leaves if not _is_structural_option(o)]
-        for leaf in ops:
+            proved_miss = hit is None
+        first_leaf = None
+        first_op = None
+        for leaf in iter_leaves(fp.options):
+            if first_leaf is None:
+                first_leaf = leaf
+            if _is_structural_option(leaf):
+                continue
+            if first_op is None:
+                first_op = leaf
             row = leaf_knobs(leaf)
-            if row:
-                buckets.setdefault(identity, set()).add(schedule_match_key(row))
-        return ops[0] if ops else leaves[0]
+            key = schedule_match_key(row)
+            if wanted is None:
+                if row:
+                    buckets.setdefault(identity, set()).add(key)
+            else:
+                if key == wanted:
+                    buckets.setdefault(identity, set()).add(wanted)
+                _offer(identity, key)
+                if proved_miss and wanted_pairs and wanted_pairs <= offered_pairs[identity]:
+                    break
+        assert first_leaf is not None
+        return first_op if first_op is not None else first_leaf
 
     # The seams an entry marks cut together are one composed decision where they resolve on one
     # kernel (a pinned compile consumed them so, and ``run --record-greedy`` wrote them so); the cut
@@ -1353,7 +1394,11 @@ def _replay(
             knobs = dict(node.op.knobs or {})
             row = schedule_row_key(knobs)
             if exhaustive:
-                buckets.setdefault(identity, set()).add(schedule_match_key(knobs))
+                row_key = schedule_match_key(knobs)
+                if wanted is None or row_key == wanted:
+                    buckets.setdefault(identity, set()).add(row_key)
+                if wanted is not None:
+                    _offer(identity, row_key)
             if identity is not None:
                 kernels.add(identity)
                 realized[identity] = dict(row)
@@ -1368,9 +1413,10 @@ def _replay(
         tuple(arms),
         tuple(sorted(pending)),
         realized,
+        {identity: (frozenset(keys), frozenset(offered_pairs[identity])) for identity, keys in offered_keys.items()},
     )
-    _REPLAY_CACHE[cache_key] = result
     if not exhaustive:
+        _REPLAY_CACHE[cache_key] = result
         global _IDENTITY_STORE_DIRTY
         store[store_key] = {
             "holders": sorted(holders),

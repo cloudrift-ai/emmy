@@ -204,9 +204,7 @@ class Body(tuple[Stmt, ...]):
         result = self.map(lambda s: s.rename_buffers(rename))
         if result == self:
             return self
-        resources = tuple(
-            dict.fromkeys(name for stmt in self.iter() for name in (*stmt.external_reads(), *stmt.external_writes()))
-        )
+        resources = tuple(dict.fromkeys(name for stmt in self.iter() for name in (*stmt.external_reads(), *stmt.external_writes())))
         if len({rename.get(name, name) for name in resources}) == len(resources):
             for attr in ("_normalized", "_normalized_without_hoist"):
                 if self.__dict__.get(attr) is self:
