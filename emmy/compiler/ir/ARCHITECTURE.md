@@ -209,8 +209,9 @@ along different lowering paths still dedup in the tuning cache.
 / Tile-IR / Kernel-IR statement (`Loop`, `Cond`, leaves, `Tile`, `Smem`, `Sync`,
 `CpAsyncCopy`, `TmaDescriptor`, …) is immutable + hashable. `Body` is a `tuple[Stmt, ...]`
 subclass, so ordinary body equality and hashing work end-to-end. `Body.structural_key()` uses the complete
-`structural.form` as its shared-cache key rather than ordinary dataclass equality: an identity-relevant field such as
-`Axis.window` may deliberately be excluded from general equality. To "edit" a frozen
+`structural.form`, including identity-relevant fields such as `Axis.window` that may deliberately be excluded from
+general equality. Its exact and clustered keys, and its executable normal forms, are cached properties on that Body;
+there is no equality-keyed shared cache that could alias distinct metadata. To "edit" a frozen
 Stmt, return a fresh instance via `dataclasses.replace(stmt, field=value)`;
 `__post_init__` coercions use `object.__setattr__`. Ops, by contrast,
 are frozen and unhashable — rewrites replace the op and rebind its graph node. Op fields stored inside Stmts (e.g.
@@ -578,8 +579,10 @@ canonicalized before validation:
   effect-valid statement order. This includes independent pure work, writes to distinct buffers, and updates to
   distinct accumulators. Reads and writes of the same buffer and updates to the same accumulator retain their order.
   Each nested scope chooses its order before its parent while keeping its original binders until the final whole-body
-  rename. This avoids multiplying every child's valid orders, and name/use tokens are built only when a scope has
-  more than one dependency-valid next statement.
+  rename. This avoids multiplying every child's valid orders. Name/use roles are built only when a scope has more
+  than one dependency-valid next statement, then refined through the sibling dependency graph before an exact tie
+  search. Ready nested scopes stay together ahead of leaf epilogues so canonical order does not widen the schedule
+  search or obscure contraction structure.
 
 ### `ir/stmt/identity.py` — structural identity
 
