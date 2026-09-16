@@ -78,7 +78,7 @@ def test_multi_kernel_origin_poisons_the_key() -> None:
 
     cache = KernelCache()
     a, b = KernelOp(), KernelOp()
-    origin = types.SimpleNamespace(inputs={}, outputs={})
+    origin = types.SimpleNamespace(inputs={}, outputs={}, canonical_buffers=lambda: ())
     cache.harvest("k", a, origin)
     assert cache._store["k"] is not POISON
     cache.harvest("k", b, origin)

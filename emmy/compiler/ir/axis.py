@@ -17,6 +17,7 @@ carry bare ``Axis`` tuples and encode the binding in the flavor's type.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 
 from emmy.compiler.dim import DEFAULT_SEQ_HINT, Dim, to_dim
@@ -90,6 +91,15 @@ class Axis:
     def source_axis(self) -> Axis | None:
         """The pre-split axis this one was carved out of — the window's ``parent``."""
         return self.window.parent if self.window is not None else None
+
+    def sources(self) -> Iterator[Axis]:
+        """The source-axis chain, nearest first; a cycle in the window metadata ends it."""
+        seen: set[int] = set()
+        parent = self.source_axis
+        while parent is not None and id(parent) not in seen:
+            seen.add(id(parent))
+            yield parent
+            parent = parent.source_axis
 
     @property
     def hint_extent(self) -> int:

@@ -25,7 +25,7 @@ that slice computed-operand cones. Region transforms (``replace_at``,
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from functools import cached_property
 from heapq import heappop, heappush
@@ -207,10 +207,8 @@ class Body(tuple[Stmt, ...]):
         if result == self:
             return self
         resources = tuple(dict.fromkeys(name for stmt in self.iter() for name in (*stmt.external_reads(), *stmt.external_writes())))
-        if len({rename.get(name, name) for name in resources}) == len(resources):
-            for attr in ("_normalized", "_normalized_without_hoist"):
-                if self.__dict__.get(attr) is self:
-                    result.__dict__[attr] = result
+        if len({rename.get(name, name) for name in resources}) == len(resources) and self.__dict__.get("_normalized") is self:
+            result.__dict__["_normalized"] = result
         return result
 
     def map(self, fn: Callable[[Stmt], Stmt | None | Iterable[Stmt]]) -> Body:
@@ -259,10 +257,18 @@ class Body(tuple[Stmt, ...]):
         incoming: Sequence[set[int] | frozenset[int]],
         tie_break: Callable[[int, Stmt], object] | None = None,
     ) -> Body:
-        """Kahn topological order over indexed predecessor sets.
+        """This body in :meth:`topological_permutation` order."""
+        return Body(self[index] for index in self.topological_permutation(incoming, tie_break))
+
+    def topological_permutation(
+        self,
+        incoming: Sequence[set[int] | frozenset[int]],
+        tie_break: Callable[[int, Stmt], object] | None = None,
+    ) -> tuple[int, ...]:
+        """Kahn topological order over indexed predecessor sets, as source indices.
 
         Source order breaks ties by default. ``tie_break`` may supply a canonical priority while
-        the source index remains the final deterministic tie-break. A cycle leaves the body
+        the source index remains the final deterministic tie-break. A cycle leaves the order
         unchanged so callers can preserve the validator's error path.
         """
         successors: list[list[int]] = [[] for _ in self]
@@ -276,34 +282,32 @@ class Body(tuple[Stmt, ...]):
 
         ready = [priority(index) for index, count in enumerate(degree) if not count]
         ready.sort()
-        ordered: list[Stmt] = []
+        ordered: list[int] = []
         while ready:
             _, selected = heappop(ready)
-            ordered.append(self[selected])
+            ordered.append(selected)
             for target in successors[selected]:
                 degree[target] -= 1
                 if not degree[target]:
                     heappush(ready, priority(target))
-        return Body(ordered) if len(ordered) == len(self) else self
+        return tuple(ordered) if len(ordered) == len(self) else tuple(range(len(self)))
 
     @cached_property
     def _normalized(self) -> Body:
         """Executable normal form, cached on this immutable body and its fixed point."""
         from emmy.compiler.ir.stmt.normalize import _normalize_body  # noqa: PLC0415
 
-        result = _normalize_body(self, hoist=True)
+        result = _normalize_body(self)
         result.__dict__["_normalized"] = result
-        result.__dict__["_normalized_without_hoist"] = result
         return result
 
     @cached_property
-    def _normalized_without_hoist(self) -> Body:
-        """Identity-safe normal form, cached on this immutable body and its fixed point."""
-        from emmy.compiler.ir.stmt.normalize import _normalize_body  # noqa: PLC0415
+    def _ordering(self):  # noqa: ANN202 — ``order.Ordering``; the module imports this one
+        """This body's colored relation graph, built once. Normalization stamps the graph it
+        ordered by onto its result, so identity labels that graph again instead of rebuilding it."""
+        from emmy.compiler.ir.stmt.order import relation_graph  # noqa: PLC0415
 
-        result = _normalize_body(self, hoist=False)
-        result.__dict__["_normalized_without_hoist"] = result
-        return result
+        return relation_graph(self)
 
     # -- generic backward dataflow --------------------------------------
 
@@ -737,7 +741,17 @@ class Body(tuple[Stmt, ...]):
 
     # -- structural identity --------------------------------------------
 
-    def structural_key(self, *, structural: bool = True) -> str:
+    def identity(self, *, structural: bool = True, types: Mapping[str, object] | None = None):  # noqa: ANN201 — ``identity.Identity``
+        """This body's identity material (:func:`~emmy.compiler.ir.stmt.identity.canonicalize_identity`):
+        the canonical body over ``b0, b1, …``, which external buffer fills each role, and the
+        role's type. The untyped flavors are cached on the instance — Body is immutable."""
+        from emmy.compiler.ir.stmt.identity import canonicalize_identity  # noqa: PLC0415
+
+        if types is not None:
+            return canonicalize_identity(self, cluster=structural, types=types)
+        return self._identity_clustered if structural else self._identity_exact
+
+    def structural_key(self, *, structural: bool = True, types: Mapping[str, object] | None = None) -> str:
         """Implements :class:`emmy.compiler.structural.Structural`.
 
         Canonical digest used for structural-equivalence queries. Two
@@ -751,36 +765,26 @@ class Body(tuple[Stmt, ...]):
         for consumers to whom ``relu`` and ``gelu`` are different
         kernels (their latency differs even under one schedule).
 
-        Built by canonicalizing the body with identity-safe normalization
-        (hoisting stays off because it can move Loads above Stage declarations
-        in Tile bodies), external-buffer roles, and optional operation clusters.
-        Cached on the instance — Body is immutable."""
-        return self._structural_key_clustered if structural else self._structural_key_exact
+        ``types`` maps external buffer names to what a deployed kernel is bound to (dtype and
+        shape); they color the buffers in the identity graph, so two bodies that read the same
+        structure through differently typed roles key apart, whatever order the buffers were
+        declared in. Structural, not the pretty text it used to join: ``pretty()`` is the human
+        rendering, and a cosmetic change to how a statement prints must not re-key every kernel
+        that contains it. Clustered identity collapses semantically distinct ops to one cluster
+        representative, so this path is only for structural identity, never executable IR."""
+        return self.identity(structural=structural, types=types).key
 
     @cached_property
-    def _structural_key_clustered(self) -> str:
-        return _compute_structural_key(self, True)
+    def _identity_clustered(self):  # noqa: ANN202
+        from emmy.compiler.ir.stmt.identity import canonicalize_identity  # noqa: PLC0415
+
+        return canonicalize_identity(self, cluster=True)
 
     @cached_property
-    def _structural_key_exact(self) -> str:
-        return _compute_structural_key(self, False)
+    def _identity_exact(self):  # noqa: ANN202
+        from emmy.compiler.ir.stmt.identity import canonicalize_identity  # noqa: PLC0415
 
-
-def _compute_structural_key(body: Body, cluster: bool) -> str:
-    """Compute one flavor of :meth:`Body.structural_key`.
-
-    The formula is fixed per flavor: identity canonicalization (which applies the
-    identity-safe normal form) followed by rendering through
-    :func:`~emmy.compiler.structural.form`. Structural, not the
-    pretty text it used to join: ``pretty()`` is the human rendering, and
-    a cosmetic change to how a statement prints must not re-key every
-    kernel that contains it. Clustered identity collapses semantically distinct ops to one
-    cluster representative, so this path is only for structural identity, never executable IR.
-    """
-    from emmy.compiler.ir.stmt.identity import canonicalize_identity  # noqa: PLC0415
-    from emmy.compiler.structural import digest, form  # noqa: PLC0415
-
-    return digest(form(canonicalize_identity(body, cluster=cluster)))
+        return canonicalize_identity(self, cluster=False)
 
 
 def refs_axis(s: Stmt, name: str) -> bool:

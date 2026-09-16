@@ -1045,8 +1045,8 @@ def test_structural_key_clusters_collapse_noncommutative_to_commutative() -> Non
 def test_structural_key_idempotent() -> None:
     """Identity normalization reaches a fixed canonical body."""
     body = _matmul_body("X", "Y", "O")
-    canonical = canonicalize_identity(normalize_body(body, hoist=False))
-    assert canonicalize_identity(canonical) == canonical
+    canonical = canonicalize_identity(normalize_body(body))
+    assert canonicalize_identity(canonical.body).key == canonical.key
 
 
 def test_structural_key_is_string_and_hashable() -> None:

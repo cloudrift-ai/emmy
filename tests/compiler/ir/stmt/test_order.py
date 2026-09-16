@@ -12,7 +12,7 @@ from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.identity import canonicalize_identity
 from emmy.compiler.ir.stmt.leaves import Assign, Const, Load, Write
 from emmy.compiler.ir.stmt.normalize import normalize_body
-from emmy.compiler.ir.stmt.order import _canonical_ranks, _equitable_partition, _ordering_constraints
+from emmy.compiler.ir.stmt.order import _canonical_ranks, _equitable_partition, ordering_constraints
 
 
 def _certificate(colors, edges, ranks: tuple[int, ...]) -> tuple:
@@ -126,7 +126,7 @@ def test_kahn_tie_break_is_optional() -> None:
 
 def test_effect_constraints_keep_only_intervening_resource_hazards() -> None:
     writes = Body(Write(output="X", index=(), value=f"value_{index}") for index in range(100))
-    incoming = _ordering_constraints(writes, effects=True)
+    incoming = ordering_constraints(writes, effects=True)
     assert incoming[0] == set()
     assert incoming[1:] == [{index - 1} for index in range(1, len(writes))]
 
@@ -139,7 +139,7 @@ def test_effect_constraints_keep_only_intervening_resource_hazards() -> None:
             Load(name="tail", input="X", index=()),
         )
     )
-    incoming = _ordering_constraints(body, effects=True)
+    incoming = ordering_constraints(body, effects=True)
     assert incoming == [set(), {0}, {0}, {0, 1, 2}, {3}]
 
 
@@ -184,7 +184,7 @@ def test_identity_combines_buffer_rename_with_nested_reordering() -> None:
         return Body((Loop(axis=Axis(axis, 4), body=tuple(reversed(chains)) if reverse else chains),))
 
     keys = {
-        canonicalize_identity(normalize_body(make(reverse=reverse, renamed=renamed)))
+        canonicalize_identity(normalize_body(make(reverse=reverse, renamed=renamed))).key
         for reverse, renamed in product((False, True), repeat=2)
     }
     assert len(keys) == 1
@@ -204,3 +204,112 @@ def test_repeated_definition_capture_uses_nearest_predecessor() -> None:
     after = normalize_body(make("value", "inside", "result", late_before_capture=True))
     assert before == renamed
     assert before != after
+
+
+def test_topological_sort_refuses_a_captured_rebind() -> None:
+    """A scope that reads an enclosing binding and later rebinds the same spelling is refused:
+    sorting the rebind above the read would silently retarget it."""
+    import pytest
+
+    body = Body(
+        (
+            Const(name="x", value=1.0),
+            Cond(
+                cond=Literal(True),
+                body=(
+                    Assign(name="y", op="abs", args=("x",)),
+                    Const(name="x", value=2.0),
+                    Assign(name="z", op="exp", args=("x",)),
+                    Write(output="O", index=(), value="y"),
+                    Write(output="P", index=(), value="z"),
+                ),
+            ),
+        )
+    )
+    with pytest.raises(ValueError, match="rebinds"):
+        normalize_body(body)
+
+
+def test_shadowing_after_the_read_keeps_the_outer_dependency() -> None:
+    """A deeper scope's rebind of a name binds nothing read above it: the block still depends on
+    the enclosing definition, so it cannot sort above it."""
+    body = Body(
+        (
+            Cond(
+                cond=Literal(True),
+                body=(
+                    Assign(name="y", op="abs", args=("x",)),
+                    Cond(cond=Literal(True), body=(Const(name="x", value=2.0), Write(output="P", index=(), value="x"))),
+                    Write(output="O", index=(), value="y"),
+                ),
+            ),
+            Const(name="x", value=1.0),
+        )
+    )
+    normalized = normalize_body(body)
+    assert isinstance(normalized[0], Const)
+    assert isinstance(normalized[1], Cond)
+
+
+def test_relation_graph_binds_every_name_of_a_closed_body() -> None:
+    """Every name a closed body spells is a binder the graph owns. A name it could not bind
+    keeps its spelling as a vertex color, which would make identity spelling-dependent."""
+    from emmy.compiler.ir.stmt.leaves import Accum
+    from emmy.compiler.ir.stmt.order import relation_graph
+
+    body = Body(
+        (
+            Loop(
+                axis=Axis("i", 4),
+                body=(
+                    Load(name="x", input="X", index=(Var("i"),)),
+                    Loop(
+                        axis=Axis("k", 8),
+                        body=(
+                            Load(name="w", input="W", index=(Var("i"), Var("k"))),
+                            Assign(name="p", op="multiply", args=("x", "w")),
+                            Accum(name="acc", op="add", value="p", axes=("k",)),
+                        ),
+                    ),
+                    Cond(cond=BinaryExpr("<", Var("i"), Literal(2, "int")), body=(Write(output="O", index=(Var("i"),), value="acc"),)),
+                ),
+            ),
+        )
+    )
+    assert relation_graph(normalize_body(body)).fixed_names == ()
+
+
+def test_identity_shares_normalizations_graph() -> None:
+    body = Body((Load(name="x", input="X", index=()), Assign(name="y", op="abs", args=("x",)), Write(output="O", index=(), value="y")))
+    normalized = normalize_body(body)
+    assert "_ordering" in normalized.__dict__
+    assert canonicalize_identity(normalized).body == canonicalize_identity(body).body
+
+
+def test_structural_key_is_invariant_under_random_renaming_and_reordering() -> None:
+    """Seeded property check: independent load/compute/write chains keyed under every
+    interleaving and spelling. The relation graph never reads a spelling or a source position."""
+    import random
+
+    def chains(seed: int, *, shuffle: bool) -> Body:
+        rng = random.Random(seed)
+        stmts: list = []
+        for chain in range(4):
+            prefix = f"c{chain}_" if shuffle else f"r{rng.randrange(1000)}_"
+            axis = f"{prefix}i"
+            stmts.append(
+                Loop(
+                    axis=Axis(axis, 4),
+                    body=(
+                        Load(name=f"{prefix}x", input=f"{prefix}X", index=(Var(axis),)),
+                        Assign(name=f"{prefix}y", op=("abs", "exp", "negative")[chain % 3], args=(f"{prefix}x",)),
+                        Write(output=f"{prefix}O", index=(Var(axis),), value=f"{prefix}y"),
+                    ),
+                )
+            )
+        if shuffle:
+            rng.shuffle(stmts)
+        return Body(stmts)
+
+    keys = {chains(seed, shuffle=shuffle).structural_key() for seed in range(12) for shuffle in (False, True)}
+    assert len(keys) == 1

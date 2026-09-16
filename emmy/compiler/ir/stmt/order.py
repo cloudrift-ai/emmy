@@ -6,13 +6,15 @@ name occurrences and ordering constraints are directed, colored relations.  Exac
 labeling therefore chooses every sibling order together, without rendering renamed bodies for
 each topological prefix or revisiting nested scopes after an enclosing rename.
 
-This module is private implementation for :mod:`emmy.compiler.ir.stmt.normalize`.
+A body's graph is built once (:func:`relation_graph`) and labeled under any resource coloring
+(:meth:`Ordering.label`): the executable normal form labels resources bare and breaks the remaining
+ties by spelling, structural identity colors them by type and never reads a spelling.
 """
 
 from __future__ import annotations
 
 from collections import Counter, deque
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, fields
 
 from emmy.compiler.ir.axis import Axis
@@ -21,7 +23,7 @@ from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.leaves import Accum, Assign, Init, Mma
 from emmy.compiler.structural import form
 
-__all__: list[str] = []
+__all__ = ["Labeling", "Ordering", "bound_axes", "ordering_constraints", "relation_graph", "topological_sort"]
 
 
 def _ordered_exported_accs(body: Body) -> tuple[str, ...]:
@@ -39,22 +41,28 @@ def _ordered_sibling_defs(stmt: Stmt) -> tuple[str, ...]:
     return tuple(dict.fromkeys(name for child in children for name in _ordered_exported_accs(child)))
 
 
-def _sibling_defs_uses(stmt: Stmt) -> tuple[frozenset[str], frozenset[str]]:
-    """Names one sibling exposes and names it reads from sibling definitions."""
+def _free_ssa(stmt: Stmt) -> frozenset[str]:
+    """SSA names ``stmt`` reads from the scope around it.
+
+    A nested scope binds only what it defines at its own level; a deeper scope's definition of the
+    same spelling is a different binder and hides nothing read above it.
+    """
     children = stmt.nested()
-    if not children:
-        return frozenset(stmt.defines()), frozenset(stmt.deps())
-    definitions: set[str] = set()
-    uses: set[str] = set(stmt.deps())
-    inner_definitions: set[str] = set()
+    if not children or stmt.deps_deep:
+        return frozenset(stmt.deps())
+    reads = set(stmt.deps())
     for child in children:
-        definitions.update(_ordered_exported_accs(child))
-        uses.update(child.ssa_uses)
-        inner_definitions.update(child.ssa_defs)
-    return frozenset(definitions), frozenset(uses - inner_definitions)
+        reads.update(_scope_free_ssa(child))
+    return frozenset(reads)
 
 
-def _bound_axes(stmt: Stmt) -> tuple[Axis, ...]:
+def _scope_free_ssa(body: Body) -> frozenset[str]:
+    defined = {name for stmt in body for name in _ordered_sibling_defs(stmt)}
+    return frozenset().union(*(_free_ssa(stmt) for stmt in body)) - defined
+
+
+def bound_axes(stmt: Stmt) -> tuple[Axis, ...]:
+    """The axes a statement binds, as :class:`Axis` values."""
     axis = getattr(stmt, "axis", None)
     if isinstance(axis, Axis):
         return (axis,)
@@ -144,28 +152,38 @@ def _statement_shape(stmt: Stmt) -> tuple[str, tuple[_Occurrence, ...]]:
     return repr(strip(rendered, ())), tuple(occurrences)
 
 
-@dataclass
-class _RelationGraph:
-    colors: list[str]
-    edges: list[tuple[int, int, str]]
-
-    def vertex(self, color: object) -> int:
-        index = len(self.colors)
-        self.colors.append(repr(color))
-        return index
-
-    def relation(self, source: int, target: int, color: object) -> None:
-        self.edges.append((source, target, repr(color)))
-
-
-@dataclass
+@dataclass(frozen=True)
 class _Scope:
+    """One lexical scope of the relation graph: its statements' vertices, constraints and shapes,
+    in the order of ``body``."""
+
     body: Body
     vertex: int
     statements: tuple[int, ...]
     incoming: tuple[frozenset[int], ...]
     children: tuple[tuple[_Scope, ...], ...]
     categories: tuple[int, ...]
+    shapes: tuple[str, ...]
+
+    def permuted(self, order: Sequence[int], body: Body, children: tuple[tuple[_Scope, ...], ...]) -> _Scope:
+        position = {old: new for new, old in enumerate(order)}
+        return _Scope(
+            body=body,
+            vertex=self.vertex,
+            statements=tuple(self.statements[index] for index in order),
+            incoming=tuple(frozenset(position[source] for source in self.incoming[index]) for index in order),
+            children=children,
+            categories=tuple(self.categories[index] for index in order),
+            shapes=tuple(self.shapes[index] for index in order),
+        )
+
+    def rebound(self, body: Body) -> _Scope:
+        """This scope over ``body``, an order-preserving rename of its own."""
+        children = tuple(
+            tuple(child.rebound(nested) for child, nested in zip(scopes, stmt.nested(), strict=True))
+            for stmt, scopes in zip(body, self.children, strict=True)
+        )
+        return _Scope(body, self.vertex, self.statements, self.incoming, children, self.categories, self.shapes)
 
 
 @dataclass(frozen=True)
@@ -186,20 +204,12 @@ def _resources(stmt: Stmt) -> tuple[set[str], set[str], set[str]]:
 
 
 def _source_names(stmt: Stmt) -> tuple[str, ...]:
-    names: list[str] = []
-    for axis in _bound_axes(stmt):
-        parent = axis.source_axis
-        seen: set[int] = set()
-        while parent is not None and id(parent) not in seen:
-            seen.add(id(parent))
-            names.append(parent.name)
-            parent = parent.source_axis
-    return tuple(dict.fromkeys(names))
+    return tuple(dict.fromkeys(source.name for axis in bound_axes(stmt) for source in axis.sources()))
 
 
-def _ordering_constraints(body: Body, *, effects: bool, redefinitions: bool = True) -> list[set[int]]:
+def ordering_constraints(body: Body, *, effects: bool, redefinitions: bool = True) -> list[set[int]]:
     """Dependency and, when requested, effect predecessors for one lexical scope."""
-    defs_uses = [_sibling_defs_uses(stmt) for stmt in body]
+    defs_uses = [(frozenset(_ordered_sibling_defs(stmt)), _free_ssa(stmt)) for stmt in body]
     definitions: dict[str, list[int]] = {}
     for index, (defines, _) in enumerate(defs_uses):
         for name in defines:
@@ -268,38 +278,60 @@ def _ordering_constraints(body: Body, *, effects: bool, redefinitions: bool = Tr
     return incoming
 
 
-def _topological_sort(stmts: Body) -> Body:
-    """Stable recursive dependency sort used before structural normalization."""
+def topological_sort(stmts: Body, enclosing: frozenset[str] = frozenset()) -> Body:
+    """Stable recursive dependency sort used before structural normalization.
+
+    A scope that reads a name before it rebinds the same spelling, while an enclosing scope binds
+    that name too, is refused: sorting would move the rebinding above the read and silently
+    capture it. A nested scope's own carried accumulators are its binders, not an enclosing one's.
+    """
+    body = Body.coerce(stmts)
+    visible = enclosing | {name for stmt in body for name in _ordered_sibling_defs(stmt)}
+    for name in visible & enclosing & {name for stmt in body for name in _ordered_sibling_defs(stmt)}:
+        first = next(index for index, stmt in enumerate(body) if name in _ordered_sibling_defs(stmt))
+        if any(name in _free_ssa(stmt) for stmt in body[:first]):
+            raise ValueError(f"{name!r} is read before this scope rebinds it while an enclosing scope binds it too")
     body = Body(
-        stmt.with_bodies(tuple(_topological_sort(child) for child in stmt.nested())) if stmt.nested() else stmt
-        for stmt in Body.coerce(stmts)
+        stmt.with_bodies(tuple(topological_sort(child, visible - frozenset(_ordered_exported_accs(child))) for child in stmt.nested()))
+        if stmt.nested()
+        else stmt
+        for stmt in body
     )
-    return body.topological_order(_ordering_constraints(body, effects=False, redefinitions=False))
+    return body.topological_order(ordering_constraints(body, effects=False, redefinitions=False))
 
 
 class _Builder:
     def __init__(self) -> None:
-        self.graph = _RelationGraph([], [])
+        self.colors: list[str] = []
+        self.edges: list[tuple[int, int, str]] = []
         self.resources: dict[str, int] = {}
         self.fixed_names: dict[str, int] = {}
+
+    def vertex(self, color: object) -> int:
+        index = len(self.colors)
+        self.colors.append(repr(color))
+        return index
+
+    def relation(self, source: int, target: int, color: object) -> None:
+        self.edges.append((source, target, repr(color)))
 
     def _resource(self, name: str) -> int:
         vertex = self.resources.get(name)
         if vertex is None:
-            vertex = self.graph.vertex(("resource",))
+            vertex = self.vertex(("resource", None))
             self.resources[name] = vertex
         return vertex
 
     def _fixed_name(self, name: str) -> int:
         vertex = self.fixed_names.get(name)
         if vertex is None:
-            vertex = self.graph.vertex(("fixed-name", name))
+            vertex = self.vertex(("fixed-name", name))
             self.fixed_names[name] = vertex
         return vertex
 
     def scope(self, body: Body, env: _Environment, fixed: dict[str, int], *, root: bool = False) -> _Scope:
         body = Body.coerce(body)
-        scope_vertex = self.graph.vertex(("scope", "root" if root else "child"))
+        scope_vertex = self.vertex(("scope", "root" if root else "child"))
         sibling_defs = tuple(_ordered_sibling_defs(stmt) for stmt in body)
         definition_sites: dict[str, list[tuple[int, int, int]]] = {}
         definitions_by_stmt: list[dict[str, int]] = []
@@ -307,16 +339,16 @@ class _Builder:
         for statement_index, names in enumerate(sibling_defs):
             own: dict[str, int] = {}
             for slot, name in enumerate(names):
-                vertex = self.graph.vertex(("binder", "ssa"))
+                vertex = self.vertex(("binder", "ssa"))
                 alias = aliases.get(name)
                 if alias is None:
-                    alias = self.graph.vertex(("binder", "same-name"))
+                    alias = self.vertex(("binder", "same-name"))
                     aliases[name] = alias
-                    self.graph.relation(scope_vertex, alias, ("owns", "same-name"))
-                self.graph.relation(scope_vertex, vertex, ("owns", "ssa"))
-                self.graph.relation(vertex, alias, ("same-name",))
+                    self.relation(scope_vertex, alias, ("owns", "same-name"))
+                self.relation(scope_vertex, vertex, ("owns", "ssa"))
+                self.relation(vertex, alias, ("same-name",))
                 if name in fixed:
-                    self.graph.relation(vertex, fixed[name], ("exports",))
+                    self.relation(vertex, fixed[name], ("exports",))
                 definition_sites.setdefault(name, []).append((statement_index, slot, vertex))
                 own.setdefault(name, vertex)
             definitions_by_stmt.append(own)
@@ -333,34 +365,36 @@ class _Builder:
         for stmt in body:
             for name in _source_names(stmt):
                 if name not in local_sources:
-                    vertex = self.graph.vertex(("binder", "source"))
+                    vertex = self.vertex(("binder", "source"))
                     local_sources[name] = vertex
-                    self.graph.relation(scope_vertex, vertex, ("owns", "source"))
+                    self.relation(scope_vertex, vertex, ("owns", "source"))
 
         statement_vertices: list[int] = []
         categories: list[int] = []
-        bound_axes: list[dict[str, int]] = []
+        shapes: list[str] = []
+        bound: list[dict[str, int]] = []
         for statement_index, (stmt, definitions) in enumerate(zip(body, sibling_defs, strict=True)):
             shape, occurrences = _statement_shape(stmt)
             children = stmt.nested()
             category = 2 if children and stmt.has_side_effects else int(not children)
-            stmt_vertex = self.graph.vertex(("statement", category, shape))
+            stmt_vertex = self.vertex(("statement", category, shape))
             statement_vertices.append(stmt_vertex)
             categories.append(category)
-            self.graph.relation(scope_vertex, stmt_vertex, ("member",))
+            shapes.append(shape)
+            self.relation(scope_vertex, stmt_vertex, ("member",))
 
             axes = dict(env.axes)
             for name in stmt.binds_axes():
-                axis_vertex = self.graph.vertex(("binder", "axis"))
+                axis_vertex = self.vertex(("binder", "axis"))
                 axes[name] = axis_vertex
-                self.graph.relation(stmt_vertex, axis_vertex, ("binds", "axis"))
-            bound_axes.append(axes)
+                self.relation(stmt_vertex, axis_vertex, ("binds", "axis"))
+            bound.append(axes)
 
             own_definitions = definitions_by_stmt[statement_index]
             for slot, name in enumerate(definitions):
                 definition = definition_sites[name]
                 vertex = next(vertex for index, own_slot, vertex in definition if index == statement_index and own_slot == slot)
-                self.graph.relation(stmt_vertex, vertex, ("defines", "export" if children else slot))
+                self.relation(stmt_vertex, vertex, ("defines", "export" if children else slot))
             for occurrence in occurrences:
                 if occurrence.kind == "resource":
                     target = self._resource(occurrence.name)
@@ -374,7 +408,7 @@ class _Builder:
                         target = defining_vertex(occurrence.name, statement_index)
                     if target is None:
                         target = self._fixed_name(occurrence.name)
-                self.graph.relation(stmt_vertex, target, (occurrence.kind, occurrence.role))
+                self.relation(stmt_vertex, target, (occurrence.kind, occurrence.role))
 
             reads, writes, state = _resources(stmt)
             for mode, names in (("read", reads), ("write", writes), ("state", state)):
@@ -387,14 +421,14 @@ class _Builder:
                             target = env.ssa.get(name)
                         if target is None:
                             target = self._fixed_name(name)
-                    self.graph.relation(stmt_vertex, target, ("access", mode))
+                    self.relation(stmt_vertex, target, ("access", mode))
 
-        incoming = _ordering_constraints(body, effects=True)
+        incoming = ordering_constraints(body, effects=True)
         for target, sources in enumerate(incoming):
             for source in sources:
-                self.graph.relation(statement_vertices[source], statement_vertices[target], ("before",))
+                self.relation(statement_vertices[source], statement_vertices[target], ("before",))
         nested_scopes: list[tuple[_Scope, ...]] = []
-        for index, (stmt, stmt_vertex, axes) in enumerate(zip(body, statement_vertices, bound_axes, strict=True)):
+        for index, (stmt, stmt_vertex, axes) in enumerate(zip(body, statement_vertices, bound, strict=True)):
             children = stmt.nested()
             exported = {
                 name: definitions_by_stmt[index][name]
@@ -417,7 +451,7 @@ class _Builder:
                     exported,
                 )
                 built_children.append(child_scope)
-                self.graph.relation(stmt_vertex, child_scope.vertex, ("body", child_index))
+                self.relation(stmt_vertex, child_scope.vertex, ("body", child_index))
             nested_scopes.append(tuple(built_children))
 
         return _Scope(
@@ -427,6 +461,7 @@ class _Builder:
             incoming=tuple(frozenset(sources) for sources in incoming),
             children=tuple(nested_scopes),
             categories=tuple(categories),
+            shapes=tuple(shapes),
         )
 
 
@@ -492,15 +527,9 @@ def _equitable_partition(
                     continue
 
                 parts = dict(nonzero_parts)
-                zero_size = len(cell.vertices) - covered
-                if zero_size:
-                    touched_vertices = set().union(*nonzero_parts.values())
-                    parts[0] = cell.vertices - touched_vertices
+                if covered < len(cell.vertices):
+                    parts[0] = cell.vertices - set().union(*nonzero_parts.values())
                 retained = max(parts, key=lambda value: (len(parts[value]), value))
-                if retained == 0:
-                    retained_vertices = cell.vertices
-                    retained_vertices.difference_update(set().union(*nonzero_parts.values()))
-                    parts[0] = retained_vertices
 
                 was_queued = cell.queued
                 children: list[_PartitionCell] = []
@@ -566,6 +595,12 @@ def _canonical_labeling(
         mapped = Counter((candidate[source], candidate[target], color) for source, target, color in relations)
         return candidate if mapped == edge_counter else None
 
+    def inverse(permutation: tuple[int, ...]) -> tuple[int, ...]:
+        out = [0] * count
+        for index, mapped in enumerate(permutation):
+            out[mapped] = index
+        return tuple(out)
+
     def certificate(order: tuple[int, ...]) -> tuple:
         ranks = {vertex: rank for rank, vertex in enumerate(order)}
         ordered_relations = tuple(sorted((ranks[source], ranks[target], color) for source, target, color in relations))
@@ -608,7 +643,7 @@ def _canonical_labeling(
                 best = result
             elif result[0] == best[0]:
                 if (generator := automorphism(best[1], result[1])) is not None and generator not in generators:
-                    generators.extend((generator, tuple(generator.index(index) for index in range(count))))
+                    generators.extend((generator, inverse(generator)))
         assert best is not None
         return best
 
@@ -650,41 +685,84 @@ def _canonical_ranks(colors: Sequence[object], edges: Iterable[tuple[int, int, o
     return _canonical_labeling(colors, edges, _prune=_prune)[0]
 
 
-def _materialize(scope: _Scope, ranks: Sequence[int], orbit_ranks: Sequence[int]) -> Body:
-    rebuilt: list[Stmt] = []
-    for stmt, children in zip(scope.body, scope.children, strict=True):
-        rebuilt.append(stmt.with_bodies(tuple(_materialize(child, ranks, orbit_ranks) for child in children)) if children else stmt)
+@dataclass(frozen=True)
+class Ordering:
+    """One body's relation graph, built once and labeled under any resource coloring."""
 
-    body = Body(rebuilt)
-    structural_forms = {
-        id(stmt): (
-            _statement_shape(stmt)[0],
-            repr(form(stmt.rename(_AbstractNames()))),
-        )
-        for stmt in body
-    }
-    return body.topological_order(
-        scope.incoming,
-        lambda index, stmt: (
-            scope.categories[index],
-            structural_forms[id(stmt)],
-            orbit_ranks[scope.statements[index]],
-            ranks[scope.statements[index]],
-        ),
-    )
+    colors: tuple[str, ...]
+    edges: tuple[tuple[int, int, str], ...]
+    root: _Scope
+    resources: tuple[tuple[str, int], ...]
+    #: The spellings the graph could not bind: every free name of the body.
+    fixed_names: tuple[str, ...]
+
+    def label(self, resource_color: Callable[[str], object] | None = None) -> Labeling:
+        """Canonical ranks with every external resource colored by ``resource_color`` (bare when
+        ``None``): the body's structure decides the labeling, never a resource's spelling."""
+        colors = list(self.colors)
+        if resource_color is not None:
+            for name, vertex in self.resources:
+                colors[vertex] = repr(("resource", resource_color(name)))
+        ranks, orbit_ranks = _canonical_labeling(colors, self.edges)
+        return Labeling(self, ranks, orbit_ranks)
+
+    def rebound(self, body: Body) -> Ordering:
+        """This graph over ``body``, an order-preserving rename of the body it was built from."""
+        return Ordering(self.colors, self.edges, self.root.rebound(body), self.resources, self.fixed_names)
 
 
-def _canonicalize_statement_order(stmts: Body) -> Body:
-    """Choose a canonical dependency-valid sibling order throughout one body tree."""
+@dataclass(frozen=True)
+class Labeling:
+    """Canonical vertex ranks of one :class:`Ordering`."""
+
+    ordering: Ordering
+    ranks: tuple[int, ...]
+    orbit_ranks: tuple[int, ...]
+
+    def resources(self) -> tuple[str, ...]:
+        """External resource names in canonical rank order."""
+        return tuple(name for name, _ in sorted(self.ordering.resources, key=lambda item: self.ranks[item[1]]))
+
+    def materialize(self, *, spelled: bool) -> tuple[Body, Ordering]:
+        """The body in canonical dependency-valid order, with the graph re-indexed to it.
+
+        Ready nested scopes stay ahead of leaf epilogues. ``spelled`` breaks the remaining ties by
+        each statement's name-free shape and its spelled form before the ranks, which keeps the
+        executable order stable under a spelling-only buffer rename; identity never spells.
+        """
+        body, root = self._materialize(self.ordering.root, spelled)
+        return body, Ordering(self.ordering.colors, self.ordering.edges, root, self.ordering.resources, self.ordering.fixed_names)
+
+    def _materialize(self, scope: _Scope, spelled: bool) -> tuple[Body, _Scope]:
+        rebuilt: list[Stmt] = []
+        children: list[tuple[_Scope, ...]] = []
+        for stmt, scopes in zip(scope.body, scope.children, strict=True):
+            if scopes:
+                built = [self._materialize(child, spelled) for child in scopes]
+                stmt = stmt.with_bodies(tuple(body for body, _ in built))
+                children.append(tuple(child for _, child in built))
+            else:
+                children.append(())
+            rebuilt.append(stmt)
+        body = Body(rebuilt)
+        if spelled:
+            spellings = tuple(repr(form(stmt.rename(_AbstractNames()))) for stmt in body)
+
+            def priority(index: int, _stmt: Stmt) -> tuple:
+                vertex = scope.statements[index]
+                return scope.categories[index], (scope.shapes[index], spellings[index]), self.orbit_ranks[vertex], self.ranks[vertex]
+
+        else:
+
+            def priority(index: int, _stmt: Stmt) -> tuple:
+                return scope.categories[index], self.ranks[scope.statements[index]]
+
+        order = body.topological_permutation(scope.incoming, priority)
+        return Body(body[index] for index in order), scope.permuted(order, body, tuple(children[index] for index in order))
+
+
+def relation_graph(stmts: Body) -> Ordering:
+    """Build the complete body tree's colored relation graph."""
     builder = _Builder()
     root = builder.scope(Body.coerce(stmts), _Environment({}, {}, {}), {}, root=True)
-    ranks, orbit_ranks = _canonical_labeling(builder.graph.colors, builder.graph.edges)
-    return _materialize(root, ranks, orbit_ranks)
-
-
-def _canonical_resource_order(stmts: Body) -> tuple[str, ...]:
-    """External resources in the canonical order of the same relation graph."""
-    builder = _Builder()
-    builder.scope(Body.coerce(stmts), _Environment({}, {}, {}), {}, root=True)
-    ranks = _canonical_ranks(builder.graph.colors, builder.graph.edges)
-    return tuple(sorted(builder.resources, key=lambda name: ranks[builder.resources[name]]))
+    return Ordering(tuple(builder.colors), tuple(builder.edges), root, tuple(builder.resources.items()), tuple(builder.fixed_names))

@@ -3,9 +3,11 @@
 from dataclasses import replace
 
 import pytest
+from frozendict import frozendict
 
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.loop import (
     Accum,
     Assign,
@@ -223,7 +225,6 @@ def test_injective_buffer_rename_preserves_normal_form_cache() -> None:
     rename = {"X": "z_input", "Y": "a_input", "O": "renamed_output"}
     renamed = op.rename_buffers(rename)
     assert renamed.body._normalized is renamed.body
-    assert renamed.body._normalized_without_hoist is renamed.body
     assert replace(renamed, outputs=renamed.outputs).body is renamed.body
     assert tuple(load.input for load in renamed.loads) == tuple(rename[load.input] for load in op.loads)
     assert renamed.identity_key() == op.identity_key()
@@ -241,7 +242,6 @@ def test_aliasing_buffer_rename_does_not_preserve_normal_form_cache() -> None:
 
     renamed = op.rename_buffers({"X": "input", "Y": "input"})
     assert "_normalized" not in renamed.body.__dict__
-    assert "_normalized_without_hoist" not in renamed.body.__dict__
 
 
 def test_update_synthesizes_accum_decl():
@@ -640,3 +640,63 @@ def test_execute_loop_op_handles_nested_body():
     out_flat = flat.forward(x)
     out_nested = nested.forward(x)
     np.testing.assert_allclose(out_flat, out_nested, rtol=1e-5)
+
+
+def test_structural_key_is_the_same_bare_and_through_a_loop_op() -> None:
+    """Identity keys the executable normal form: hoisting a loop-invariant read at Loop op
+    construction must not key the op apart from the bare body it was built from."""
+    i = Var("i")
+    raw = Body(
+        (
+            Loop(
+                axis=Axis("i", 8),
+                body=(
+                    Load(name="s", input="S", index=()),
+                    Load(name="x", input="X", index=(i,)),
+                    Assign(name="y", op="multiply", args=("x", "s")),
+                    Write(output="O", index=(i,), value="y"),
+                ),
+            ),
+        )
+    )
+    op = LoopOp(body=raw)
+    assert op.body != raw, "the invariant read hoists"
+    assert op.body.structural_key() == raw.structural_key()
+
+
+def test_identity_binds_buffer_types_to_roles() -> None:
+    """``identity_key(with_io=True)`` types the ROLE a buffer plays. Two kernels whose typed
+    argument lists read the same in declaration order but assign the types to different roles
+    key apart; declaring the same typed roles in another order keys the same."""
+    from emmy.compiler.dtype import F16, F32  # noqa: PLC0415
+    from emmy.compiler.tensor import Tensor  # noqa: PLC0415
+
+    i = Var("i")
+
+    def body(product_left: str, product_right: str, subtrahend: str) -> Body:
+        return Body(
+            (
+                Loop(
+                    axis=Axis("i", 8),
+                    body=(
+                        Load(name="p", input=product_left, index=(i,)),
+                        Load(name="q", input=product_right, index=(i,)),
+                        Load(name="r", input=subtrahend, index=(i,)),
+                        Assign(name="m", op="multiply", args=("p", "q")),
+                        Assign(name="o", op="subtract", args=("m", "r")),
+                        Write(output="O", index=(i,), value="o"),
+                    ),
+                ),
+            )
+        )
+
+    def op(stmts: Body, *declared: tuple[str, object]) -> LoopOp:
+        inputs = frozendict({name: Tensor(name, (8,), dtype) for name, dtype in declared})
+        return LoopOp(body=stmts, inputs=inputs, outputs=frozendict({"O": Tensor("O", (8,), F32)}))
+
+    halves_f16 = op(body("A", "B", "C"), ("A", F16), ("B", F16), ("C", F32))
+    mixed_product = op(body("A", "C", "B"), ("A", F16), ("B", F16), ("C", F32))
+    redeclared = op(body("A", "B", "C"), ("C", F32), ("B", F16), ("A", F16))
+    assert halves_f16.identity_key() == mixed_product.identity_key(), "untyped, the bodies are one structure"
+    assert halves_f16.identity_key(with_io=True) != mixed_product.identity_key(with_io=True)
+    assert halves_f16.identity_key(with_io=True) == redeclared.identity_key(with_io=True)

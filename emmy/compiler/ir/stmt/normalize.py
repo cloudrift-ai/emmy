@@ -2,7 +2,7 @@
 
 Pure ``body → body`` transforms applied via :func:`normalize_body` from
 ``LoopOp.__post_init__`` and from :meth:`Body.structural_key`, so a
-constructed Loop-IR Op and every identity digest land in canonical form. The
+constructed Loop-IR Op and every identity digest land in one canonical form. The
 passes operate on the shared Stmt vocabulary (``Loop``, ``Load``, ``Assign``,
 ``Accum``, ``Select``, ``Write``) and recurse through every block-structured
 Stmt (``Loop`` / ``StridedLoop`` / ``Tile`` / ``Cond``).
@@ -21,47 +21,33 @@ from collections.abc import Callable, Iterator
 from dataclasses import replace
 from itertools import count, product
 
-from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, CastExpr, Expr, FuncCallExpr, Literal, SimplifyCtx, TernaryExpr, Var, affine_form
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
-from emmy.compiler.ir.stmt.body import Body, _exposed_defines, free_names
+from emmy.compiler.ir.stmt.body import Body, free_names
 from emmy.compiler.ir.stmt.leaves import Accum, Assign, Init, Load, Mma, SelectBranch, Write
-from emmy.compiler.ir.stmt.order import (
-    _canonicalize_statement_order,
-    _ordered_exported_accs,
-    _topological_sort,
-)
+from emmy.compiler.ir.stmt.order import _ordered_exported_accs, bound_axes, ordering_constraints, relation_graph, topological_sort
 
 __all__ = ["normalize_body"]
 
 
-def normalize_body(
-    stmts: Body,
-    *,
-    hoist: bool = True,
-) -> Body:
+def normalize_body(stmts: Body) -> Body:
     """Apply the structural and cosmetic normalization passes in order.
 
-    Used by ``LoopOp.__post_init__`` so Loop-IR bodies land in a canonical shape before validation.
-    Structural identity also runs it over the shared statement vocabulary before its identity-only
-    transforms.
+    Used by ``LoopOp.__post_init__`` so Loop-IR bodies land in a canonical shape before validation,
+    and by structural identity, which labels the result's relation graph again with the external
+    arguments colored by type. One executable normal form serves both: a body keys the same
+    whether it was held bare or constructed as a Loop op.
 
-    ``hoist=False`` skips :func:`hoist_loop_invariants`. Structural identity turns it off because a
-    Stage binding is scoped to the Loop where it is declared; hoisting a Load from a staged buffer
-    above that declaration would leave the read referencing an undeclared name.
-
-    External argument names remain readable. Identity assigns those arguments canonical names
-    after this pass and may run normalization again; operation clustering never runs here because
-    it would change executable semantics.
+    External argument names remain readable; operation clustering never runs here because it
+    would change executable semantics.
     """
-    stmts = Body.coerce(stmts)
-    return stmts._normalized if hoist else stmts._normalized_without_hoist
+    return Body.coerce(stmts)._normalized
 
 
-def _normalize_body(stmts: Body, *, hoist: bool) -> Body:
-    """Uncached implementation owned by :class:`Body`'s normalization properties."""
+def _normalize_body(stmts: Body) -> Body:
+    """Uncached implementation owned by :class:`Body`'s normalization property."""
     stmts = topo_sort_siblings(stmts)
     stmts = drop_size_one_free_axes(stmts)
     stmts = drop_size_one_reduce_axes(stmts)
@@ -69,21 +55,27 @@ def _normalize_body(stmts: Body, *, hoist: bool) -> Body:
     stmts = eliminate_copy_aliases(stmts)
     stmts = unify_sibling_reduce_axes(stmts)
     stmts = merge_sibling_reduce_loops(stmts)
-    if hoist:
-        stmts = split_invariant_divides(stmts)
-        stmts = hoist_loop_invariants(stmts)
+    stmts = split_invariant_divides(stmts)
+    stmts = hoist_loop_invariants(stmts)
     stmts = simplify_body(stmts)
     stmts = dedup_loads(stmts)
     # Hoisting, simplification, and a parent merge can expose sibling reductions after the first
     # merge. Close that dependency here: unifying their axes may enable a merge, which may then
     # expose duplicate loads and require one new canonical order. Every changed round removes a
     # loop or a load, so this reaches a fixed point without a fixed iteration bound.
-    stmts = unify_sibling_reduce_axes(_canonicalize_order(stmts))
+    stmts = _canonical_order(stmts)
     while True:
-        reduced = dedup_loads(merge_sibling_reduce_loops(stmts))
-        if reduced == stmts:
-            return stmts
-        stmts = unify_sibling_reduce_axes(_canonicalize_order(reduced))
+        # Unification renames sibling reduce axes in place: an order-preserving alpha-rename the
+        # relation graph never spelled, so the graph the order came from still describes it.
+        unified = unify_sibling_reduce_axes(stmts)
+        if unified == stmts:
+            unified = stmts
+        else:
+            unified.__dict__["_ordering"] = stmts._ordering.rebound(unified)
+        reduced = dedup_loads(merge_sibling_reduce_loops(unified))
+        if reduced == unified:
+            return unified
+        stmts = _canonical_order(reduced)
 
 
 # ---------------------------------------------------------------------------
@@ -222,14 +214,8 @@ def canonicalize_free_axis_order(stmts: Body) -> Body:
 
         def axis_metadata(loop: Loop) -> str:
             mapping = {loop.axis.name: "__axis__"}
-            parent = loop.axis.source_axis
-            depth = 0
-            seen: set[int] = set()
-            while parent is not None and id(parent) not in seen:
-                seen.add(id(parent))
-                mapping.setdefault(parent.name, f"__parent{depth}__")
-                depth += 1
-                parent = parent.source_axis
+            for depth, source in enumerate(loop.axis.sources()):
+                mapping.setdefault(source.name, f"__parent{depth}__")
             renamed = loop.rename(mapping)
             assert isinstance(renamed, Loop)
             return repr(form((renamed.axis, renamed.unroll, renamed.seed)))
@@ -718,10 +704,11 @@ def hoist_loop_invariants(stmts: Body) -> Body:
     an Accum still defined inside the outer Loop body.
 
     ``Accum`` / ``Mma`` / ``Init`` / ``Write`` always stay (iteration-tied
-    semantics). Loop-invariance is queried via :meth:`Body.depends_on`
-    against the body's transitive read closure, so the hoisted set is
-    automatically closed under SSA dependencies — no separate ordering
-    check is needed.
+    semantics). Axis-invariance alone does not earn a hoist: the hoisted set is closed under the
+    scope's ordering constraints (:func:`~emmy.compiler.ir.stmt.order.ordering_constraints`), so
+    a statement that must follow one that stays — the consumer of an accumulator a pinned
+    reduction exports, a read of a buffer the loop writes, anything behind an ordered execution
+    protocol such as a barrier or a declaration — stays with it.
     """
     stmts = Body.coerce(stmts)
     name_axes = stmts.axis_dependencies
@@ -755,22 +742,20 @@ def hoist_loop_invariants(stmts: Body) -> Body:
             return False
         return axis not in _axis_deps(s)
 
-    def _crossing_a_definition(inner: list[Stmt], hoisted: list[Stmt]) -> list[Stmt]:
-        """``hoisted`` less every stmt reading a name the loop body still BINDS.
+    def _closed_under_constraints(inner: list[Stmt], candidates: set[int]) -> set[int]:
+        """``candidates`` less every statement that must follow one that stays.
 
-        Axis-invariance alone does not earn a hoist. A nested reduction can export an
-        accumulator that varies with none of the outer axes while its own loop stays pinned
-        (attention's denominator is produced inside the value sweep, which is pinned by the
-        head-dim axis the value slab reads). Its consumer then reads as invariant and moves
-        above the definition. Iterated: un-hoisting one candidate can pin the next."""
-        while hoisted:
-            ids = {id(c) for c in hoisted}
-            bound = {name for c in inner if id(c) not in ids for name in _exposed_defines(c)}
-            keep = [c for c in hoisted if not (free_names(c) & bound)]
-            if len(keep) == len(hoisted):
-                break
-            hoisted = keep
-        return hoisted
+        A nested reduction can export an accumulator that varies with none of the outer axes
+        while its own loop stays pinned (attention's denominator is produced inside the value
+        sweep, which is pinned by the head-dim axis the value slab reads); its consumer then
+        reads as invariant and would move above the definition. Iterated: un-hoisting one
+        candidate can pin the next."""
+        if not candidates:
+            return candidates
+        incoming = ordering_constraints(Body(inner), effects=True)
+        while pinned := {index for index in candidates if incoming[index] - candidates}:
+            candidates -= pinned
+        return candidates
 
     def walk(body: Body) -> list[Stmt]:
         new_body: list[Stmt] = []
@@ -778,11 +763,9 @@ def hoist_loop_invariants(stmts: Body) -> Body:
             if isinstance(s, (Loop, StridedLoop)):
                 inner = walk(s.body)
                 axis = s.axis.name
-                hoisted = _crossing_a_definition(inner, [c for c in inner if _hoistable(c, axis)])
-                hoisted_ids = {id(c) for c in hoisted}
-                stay = [c for c in inner if id(c) not in hoisted_ids]
-                new_body.extend(hoisted)
-                new_body.append(replace(s, body=tuple(stay)))
+                hoisted = _closed_under_constraints(inner, {index for index, c in enumerate(inner) if _hoistable(c, axis)})
+                new_body.extend(c for index, c in enumerate(inner) if index in hoisted)
+                new_body.append(replace(s, body=tuple(c for index, c in enumerate(inner) if index not in hoisted)))
             elif isinstance(s, Cond):
                 new_body.append(Cond(cond=s.cond, body=tuple(walk(s.body)), else_body=tuple(walk(s.else_body))))
             else:
@@ -915,7 +898,7 @@ def topo_sort_siblings(stmts: Body) -> Body:
     order is preserved (heap-based Kahn with index tiebreak). Idempotent:
     bodies already in topo order round-trip unchanged.
     """
-    return _topological_sort(Body.coerce(stmts))
+    return topological_sort(Body.coerce(stmts))
 
 
 # ---------------------------------------------------------------------------
@@ -929,14 +912,6 @@ def _ssa_prefix(stmt: Stmt) -> str:
     if isinstance(stmt, (Accum, Mma, Init)):
         return "acc"
     return "v"
-
-
-def _bound_axes(stmt: Stmt) -> tuple[Axis, ...]:
-    axis = getattr(stmt, "axis", None)
-    if isinstance(axis, Axis):
-        return (axis,)
-    axes = getattr(stmt, "axes", ())
-    return tuple(axis for axis in axes if isinstance(axis, Axis))
 
 
 class _SequentialScope:
@@ -981,15 +956,11 @@ class _SequentialScope:
         for old in stmt.binds_axes():
             axes[old] = f"a{self.counters['a']}"
             self.counters["a"] += 1
-        for axis in _bound_axes(stmt):
-            parent = axis.source_axis
-            seen: set[int] = set()
-            while parent is not None and id(parent) not in seen:
-                seen.add(id(parent))
-                if parent.name not in self.sources:
-                    self.sources[parent.name] = f"p{self.counters['p']}"
+        for axis in bound_axes(stmt):
+            for source in axis.sources():
+                if source.name not in self.sources:
+                    self.sources[source.name] = f"p{self.counters['p']}"
                     self.counters["p"] += 1
-                parent = parent.source_axis
 
         names = {**self.ssa, **self.sources, **axes}
         shell = stmt.with_bodies(tuple(Body() for _ in children)) if children else stmt
@@ -1056,16 +1027,18 @@ def sort_commutative_args(stmts: Body) -> Body:
     return stmts.map(fn)
 
 
-def _canonicalize_order(stmts: Body) -> Body:
-    """Canonicalize expressions and dependency-valid statement order."""
+def _canonical_order(stmts: Body) -> Body:
+    """Canonicalize expressions and dependency-valid statement order.
+
+    The relation graph this labels rides the result: the sequential rename and the operand sort
+    are order-preserving alpha-renames the graph never spelled, so identity labels the same graph
+    with its own resource coloring instead of building it again.
+    """
     stmts = _canonicalize_exprs(stmts)
-    ordered = _canonicalize_statement_order(stmts)
-    return Body.coerce(sort_commutative_args(rename_ssa_sequential(ordered)))
-
-
-def _renormalize_external_order(stmts: Body) -> Body:
-    """Recompute ordering after an identity-only external-buffer rename."""
-    return _canonicalize_order(Body.coerce(stmts))
+    ordered, ordering = relation_graph(stmts).label().materialize(spelled=True)
+    result = Body.coerce(sort_commutative_args(rename_ssa_sequential(ordered)))
+    result.__dict__["_ordering"] = ordering.rebound(result)
+    return result
 
 
 def _canonicalize_exprs(stmts: Body) -> Body:
