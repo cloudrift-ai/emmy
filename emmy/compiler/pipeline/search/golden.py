@@ -964,18 +964,33 @@ def _target_kernel_nodes(record: GoldenRecord):
     # cone of sibling linears around one attention comes back as several kernels and none carries
     # the recorded origin set. The slice still answers the opposite case -- a recorded cone that is
     # a strict subset of what the current compiler fuses maximally, which the program never matches.
+    #
+    # Exact equality is the rule in the PROGRAM, where a node carrying more than the recorded
+    # origins is a genuinely larger fused kernel and selecting it would measure the wrong thing.
+    # In the SLICE it is too strict: the slice IS the recorded cone, so every origin a node there
+    # carries came from inside it, and the surplus is what lowering now materializes for the cone
+    # rather than work fused in from outside -- a weight broadcast the recording predates, say.
+    # The triple-fused attention target of the Qwen3-0.6B layer-0 trace fails on exactly one such
+    # origin, on every card, which is what held strict verification to a quarter of the corpus. So
+    # the slice also accepts the one smallest node that COVERS the recording, and stays silent when
+    # two cover it equally -- an ambiguous target is still a target that no longer resolves.
     wanted = frozenset(record.origins)
-    for lowered in (_lowered_program(record, ctx), _lowered_slice(record, ctx)):
-        nodes = []
+    for lowered, covers_ok in ((_lowered_program(record, ctx), False), (_lowered_slice(record, ctx), True)):
+        exact, covering = [], []
         for node_id in lowered.topological_order():
             node = lowered.nodes[node_id]
             if not isinstance(node.op, LoopOp):
                 continue
             origins = frozenset(origin for origin in provenance.get(node) if origin in record.program.nodes)
             if origins == wanted:
-                nodes.append(node)
-        if nodes:
-            return lowered, nodes
+                exact.append(node)
+            elif covers_ok and origins > wanted:
+                covering.append((len(origins), node))
+        if exact:
+            return lowered, exact
+        smallest = [node for size, node in covering if size == min(s for s, _ in covering)] if covering else []
+        if len(smallest) == 1:
+            return lowered, smallest
     raise ValueError(f"{record.name}: the persisted target selects no kernel after lowering")
 
 

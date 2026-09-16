@@ -321,3 +321,60 @@ def test_the_narrowing_reading_outranks_the_respelling_one() -> None:
     offered = frozenset({(("WORK", "t128"),)})
     both = unmatched_reason(((("TILE"), "f4"), ("WORK", "t512")), offered)
     assert "re-spelling" in both and "NARROWING" not in both
+
+
+def test_the_slice_accepts_the_kernel_that_covers_a_recording_the_program_must_match_exactly(monkeypatch) -> None:
+    """A frontend target names its kernel by the origins the trace gave it, and lowering may later
+    attach one more to the same kernel — a weight broadcast the recording predates. Exact equality
+    is right in the PROGRAM, where a node carrying more origins is a genuinely larger fused kernel.
+    In the SLICE it is not: the slice IS the recorded cone, so a surplus origin came from inside it.
+    The triple-fused attention target of the Qwen3-0.6B layer-0 trace misses by exactly one such
+    origin on every card, which is what held strict verification to a quarter of the corpus.
+
+    No checked-in program reproduces that surplus, so the slice is stubbed with a REAL lowered graph
+    whose one kernel fuses two frontend nodes; only which graph the slice hands back is faked.
+    """
+    from emmy.compiler import provenance
+    from emmy.compiler.context import Context
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp
+    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
+    from emmy.compiler.pipeline.search import golden as golden_module
+    from emmy.compiler.pipeline.search.golden import GoldenRecord, _lowered_program, _target_kernel_nodes
+    from emmy.compiler.torch_wire import graph_to_wire
+
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (8,), "f16"), node_id="x")
+    graph.add_node(ElementwiseOp("relu"), ["x"], Tensor("hot", (8,), "f16"), node_id="hot")
+    graph.add_node(ElementwiseOp("negative"), ["hot"], Tensor("cold", (8,), "f16"), node_id="cold")
+    graph.inputs, graph.outputs = ["x"], ["cold"]
+    record = GoldenRecord(
+        knobs={},
+        name="chain.frontend",
+        gpu_name="",
+        compute_cap=(12, 0),
+        model=None,
+        program_index=0,
+        program_wire=graph_to_wire(graph),
+        origins=("cold",),
+        bindings=(),
+        pins=(),
+        measurements=None,
+        ranking=None,
+    )
+    ctx = Context.from_target(record.compute_cap)
+    fused = _lowered_program(record, ctx)
+    covering = [nid for nid in fused.nodes if "hot" in provenance.get(fused.nodes[nid]) and "cold" in provenance.get(fused.nodes[nid])]
+    assert covering == ["cold"], "the fixture must lower to ONE kernel carrying both frontend origins"
+
+    # The program context sees that same covering kernel and must still refuse it: over there a
+    # surplus origin is work fused in from outside the recording.
+    monkeypatch.setattr(golden_module, "_lowered_slice", lambda _record, _ctx: Pipeline.build(LOOP_PASSES).run(Graph(), ctx=ctx))
+    with pytest.raises(ValueError, match="selects no kernel after lowering"):
+        _target_kernel_nodes(record)
+
+    # Hand the same graph back as the slice and the covering kernel is the target.
+    monkeypatch.setattr(golden_module, "_lowered_slice", lambda _record, _ctx: fused)
+    _lowered, nodes = _target_kernel_nodes(record)
+    assert [node.id for node in nodes] == ["cold"]
