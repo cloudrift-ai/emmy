@@ -3351,8 +3351,8 @@ class _FlashOps(_MmaOps):
 
     def store(self, i, j, offset, mn):
         """Write cell ``(i, j)``'s expectation, the projection applied at each value's residence —
-        a carried state the tier keeps as a per-row register is not something a :class:`RegEpilogue`
-        chain can bind, so the projection evaluates ahead of the store and the store writes the
+        a carried state the tier keeps as a per-row register is not something the store's epilogue
+        ``Lambda`` can bind, so the projection evaluates ahead of the store and the store writes the
         fragment. A projection that reads no such state is the ordinary sink's (a placement cut
         materializes the denominator, and the tail is then a per-cell chain like any other)."""
         from emmy.compiler.pipeline import RuleSkipped  # noqa: PLC0415 — avoid an import cycle

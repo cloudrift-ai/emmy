@@ -1243,7 +1243,7 @@ ELEM_COL = "__N__"
 # referenced positionally inside inline PTX (``RegFragment`` / ``LdmatrixLoad``
 # / ``MmaSyncPtx`` / ``RegStore``), rendered via the ``_MMA_SYNC_PRELUDE``
 # helper wrappers (pure PTX — NVRTC-clean, no ``<mma.h>``). Emitted by
-# ``kernel/005_lower_atom_tile`` from the ``Mma`` op's ``Atom`` spec.
+# the kernel atom lowering (``lowering/kernel/_atom.py``) from the tile's ``Atom`` spec.
 # (The opaque ``nvcuda::wmma`` node family was removed — the swizzled mma.sync
 # slab beat it.)
 # ---------------------------------------------------------------------------
@@ -1558,7 +1558,7 @@ class LdmatrixLoad(Stmt):
     (``staged=False``, ``src_buffer`` is the gmem operand) the render emits the
     ``emmy_mma_load_{a,b}_gmem`` helper instead — a gmem-direct fragment load that
     replicates the same lane→element map without ldmatrix. Slower (no smem reuse)
-    but correct; ``005_lower_atom_tile`` picks per operand based on whether an
+    but correct; the atom lowering picks per operand based on whether an
     enclosing ``StageBundle`` staged it.
 
     ``gmem_guard`` (gmem-direct only) carries a masked-tile boundary as
