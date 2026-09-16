@@ -2,19 +2,21 @@
 
 Kernel IR sits between Tile IR (schedule decisions as structural Stmts)
 and CUDA source (text). Its body contains the explicit hardware
-machinery: ``Tile`` (thread/block coord bindings), ``Smem``
-(``__shared__`` arrays), ``Sync`` (``__syncthreads`` barriers),
-``TreeHalve`` (cross-thread reduction over smem), ``StridedLoop``
-(strided per-thread loop).
+machinery: ``Tile`` (thread/block coord bindings), ``Smem`` (``__shared__``
+arrays), ``Sync`` (barriers), the transports into shared memory
+(``CpAsync*``, ``Tma*`` + ``Mbarrier*``), the cross-thread combines
+(``WarpShuffle``, ``TreeHalve``) and the tensor-core register fragments
+(``RegFragment`` … ``RegStore``, ``Wgmma*``). ``OPERATIONS.md`` next to this
+module is the complete index.
 
 Pipeline shape::
 
     Tile IR ──materialize_tile──▶ Kernel IR
                     ──render_kernelop──▶ CUDA source
 
-**Leaf compute reuses Loop IR directly**. ``Load`` / ``Assign`` /
-``Select`` / ``Write`` / ``Accum`` / ``Cond`` / ``Loop`` come straight
-from ``ir.loop`` — buf names are strings so they're directly renderable.
+**Leaf compute reuses the shared statements directly**. ``Load`` / ``Assign`` /
+``Let`` / ``Select`` / ``Write`` / ``Accum`` / ``Cond`` / ``Loop`` come straight
+from ``ir.stmt`` — buffer names are strings, so they render as they are.
 
 Kernel IR deliberately contains no scheduling decisions — those live in
 Tile IR and are materialized away before reaching this layer. A
