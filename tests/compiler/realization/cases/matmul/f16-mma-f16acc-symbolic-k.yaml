@@ -22,14 +22,14 @@ configs:
     origins:
     - o
   realizations:
-  - name: k_matmul_a76a9d.82bb98d6bad8
+  - name: k_matmul_e06cc1.049efebb91dd
     bindings: {}
     pins:
       FAST_MATH: true
     knobs:
       TILE: mma_m16n8k16_f16_f16/f1x1
       WORK: w1x1
-    identity: a08b46bc222c3d8b7884db4133a7c5b16e001fbe1b50cc047bdcc951376774bf
+    identity: e2d357c7b058d418ec79a51e5b892e30c78823671f43f2be97f7bae42899eb9d
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 8.047741747671557

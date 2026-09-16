@@ -333,10 +333,7 @@ def test_fused_gate_up_swiglu_symbolic_m(runtime_s, monkeypatch):
 
 
 @requires_cuda
-@pytest.mark.parametrize(
-    "tier",
-    ["scalar", pytest.param("warp", marks=pytest.mark.xfail(strict=True, reason="pre-existing on the fold-value-closure tree (PR #699)"))],
-)
+@pytest.mark.parametrize("tier", ["scalar", "warp"])
 def test_mixed_dtype_matmul_demotes_a_to_mma(tier, monkeypatch):
     """An **f32-A × f16-B** matmul — the erased-downcast signature (torch cannot execute a mixed
     matmul, so the model itself rounded A; the tracer maps ``to``/``type_as`` to pass-throughs,

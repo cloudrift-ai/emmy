@@ -113,7 +113,7 @@ class ScheduleProblem[Pick](ABC):
     def bounds(self) -> tuple[int, int]: ...
 
     @abstractmethod
-    def with_row(self, row: Mapping[str, str]) -> Self: ...
+    def with_row(self, row: Mapping[str, str], *, strict: bool = False) -> Self: ...
 
 
 class ScheduleContext[KernelT, NodeT, EdgeT](ABC):
@@ -143,12 +143,12 @@ class ScheduleContext[KernelT, NodeT, EdgeT](ABC):
     def extend(self, pick: Schedule[KernelT, NodeT, EdgeT]) -> Self:
         """Compose a partial or complete pick, or raise when it is incompatible."""
 
-    def narrowed(self, row: Mapping[str, str]) -> Self:
+    def narrowed(self, row: Mapping[str, str], *, strict: bool = False) -> Self:
         """This prefix over the problem with ``row`` installed. Only an empty prefix can be
         narrowed: the sites change, and a decided site cannot be re-sourced under it."""
         if self.problem is None or self.schedule.nodes or self.schedule.kernel is not None:
             raise ValueError("only an empty schedule prefix can be narrowed to a row")
-        return self._with_problem(self.problem.with_row(row))
+        return self._with_problem(self.problem.with_row(row, strict=strict))
 
     def _with_problem(self, problem: ScheduleProblem) -> Self:
         raise NotImplementedError

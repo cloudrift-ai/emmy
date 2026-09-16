@@ -1,5 +1,7 @@
 """Tests for the structural LoopOp IR with SSA body (Assign/Accum/Write/Select)."""
 
+from dataclasses import replace
+
 import pytest
 
 from emmy.compiler.ir.elementwise import ElementwiseImpl
@@ -206,6 +208,40 @@ def test_load_stmt_multiple_sources():
     )
     # Two distinct source buf names → two inputs.
     assert tuple(k.inputs) == ("src_0", "src_2")
+
+
+def test_injective_buffer_rename_preserves_normal_form_cache() -> None:
+    op = LoopOp(
+        body=(
+            Load("x", input="X", index=()),
+            Load("y", input="Y", index=()),
+            Assign("z", ElementwiseImpl("add"), ("x", "y")),
+            Write("O", index=(), value="z"),
+        )
+    )
+
+    rename = {"X": "z_input", "Y": "a_input", "O": "renamed_output"}
+    renamed = op.rename_buffers(rename)
+    assert renamed.body._normalized is renamed.body
+    assert renamed.body._normalized_without_hoist is renamed.body
+    assert replace(renamed, outputs=renamed.outputs).body is renamed.body
+    assert tuple(load.input for load in renamed.loads) == tuple(rename[load.input] for load in op.loads)
+    assert renamed.identity_key() == op.identity_key()
+
+
+def test_aliasing_buffer_rename_does_not_preserve_normal_form_cache() -> None:
+    op = LoopOp(
+        body=(
+            Load("x", input="X", index=()),
+            Load("y", input="Y", index=()),
+            Assign("z", ElementwiseImpl("add"), ("x", "y")),
+            Write("O", index=(), value="z"),
+        )
+    )
+
+    renamed = op.rename_buffers({"X": "input", "Y": "input"})
+    assert "_normalized" not in renamed.body.__dict__
+    assert "_normalized_without_hoist" not in renamed.body.__dict__
 
 
 def test_update_synthesizes_accum_decl():

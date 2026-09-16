@@ -245,9 +245,9 @@ def test_sibling_q_and_kv_regions_total_lift_with_separate_outputs() -> None:
     # store does not ride kv, nor the k/v stores q — so post-init leaves both as sweeps: promoting
     # one would evaluate the other region once per cell of it. The row alone is on the grid.
     assert tile.op.axis is None and not tile.op.lift.body
-    assert [(edge.as_contraction() is not None, len(edge.exposes)) for edge in tile.op.operands] == [(True, 1), (True, 2)]
+    assert sorted((edge.as_contraction() is not None, len(edge.exposes)) for edge in tile.op.operands) == [(True, 1), (True, 2)]
     assert [axis.extent for axis in tile.place.free] == [Dim(3)]
-    assert [tuple(axis.extent for axis in spec.sweep) for spec in tile.output_specs] == [(Dim(4),), (Dim(2),), (Dim(2),)]
+    assert [tuple(axis.extent for axis in spec.sweep) for spec in tile.output_specs] == [(Dim(2),), (Dim(2),), (Dim(4),)]
     # The closed program opens the two sweeps as SIBLING loops under the row: no term is evaluated
     # over both, so neither nests in the other.
     (m_loop,) = tile.loop_body

@@ -650,7 +650,7 @@ configs:
   target:
     loop: 1
   realizations:
-  - name: k_linear_936f0e.0cbc6cafc0d2
+  - name: k_linear_db872e.774a5015ab9c
     bindings: {}
     pins:
       FAST_MATH: false
@@ -661,7 +661,7 @@ configs:
       REDUCE: ''
       STAGE: d3/smem-async
       RASTER: ''
-    identity: dfcc60fecad4b273e1b0b15e5147aa64ce1af118cfa6b0de787059ff751627ae
+    identity: 663ccf6870478cbee2a0abd6fcf8b28a0cd9a5a79552b7c42a70c94892b82db0
 loops:
 - inputs: [input]
   outputs: [input_static_fp4_scale_bits, input_static_fp4_bits]
@@ -729,24 +729,6 @@ loops:
         - class: Load
           fields:
             names: {tuple: [in0]}
-            input: input_static_fp4_floor
-            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
-            dtype: null
-        - class: Load
-          fields:
-            names: {tuple: [in1]}
-            input: input_static_fp4_shift
-            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
-            dtype: null
-        - class: Load
-          fields:
-            names: {tuple: [in2]}
-            input: input_static_fp4_f4_max
-            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
-            dtype: null
-        - class: Load
-          fields:
-            names: {tuple: [in3]}
             input: input_static_fp4_scale_2
             index:
               tuple:
@@ -754,16 +736,34 @@ loops:
               - {expr: {literal: {value: 0, dtype: int}}}
               - {expr: {literal: {value: 0, dtype: int}}}
             dtype: null
+        - class: Load
+          fields:
+            names: {tuple: [in1]}
+            input: input_static_fp4_f4_max
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
         - class: Assign
-          fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in2, in3]}, dtype: null}
+          fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: null}
         - class: Assign
-          fields: {name: v1, op: {elementwise: reciprocal}, args: {tuple: [v0]}, dtype: null}
+          fields: {name: v1, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: null}
         - class: Assign
           fields: {name: v2, op: {elementwise: reciprocal}, args: {tuple: [v0]}, dtype: null}
         - class: Assign
-          fields: {name: v3, op: {elementwise: multiply}, args: {tuple: [in2, in3]}, dtype: null}
+          fields: {name: v3, op: {elementwise: reciprocal}, args: {tuple: [v1]}, dtype: null}
         - class: Assign
-          fields: {name: v4, op: {elementwise: reciprocal}, args: {tuple: [v3]}, dtype: null}
+          fields: {name: v4, op: {elementwise: reciprocal}, args: {tuple: [v0]}, dtype: null}
+        - class: Load
+          fields:
+            names: {tuple: [in2]}
+            input: input_static_fp4_floor
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Load
+          fields:
+            names: {tuple: [in3]}
+            input: input_static_fp4_shift
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
         - class: Loop
           fields:
             axis: {class: Axis, fields: {name: a0, extent: {dim: 128}, window: null}}
@@ -803,7 +803,7 @@ loops:
                               value: v5
                               op: {elementwise: maximum}
                               dtype: null
-                              axes: {tuple: [a2_s2]}
+                              axes: {tuple: [a2]}
                               base: null
                           - {class: Assign, fields: {name: v6, op: {elementwise: abs}, args: {tuple: [in4]}, dtype: null}}
                           - class: Accum
@@ -812,34 +812,38 @@ loops:
                               value: v6
                               op: {elementwise: maximum}
                               dtype: null
-                              axes: {tuple: [a2_s1]}
+                              axes: {tuple: [a2]}
                               base: null
                         unroll: false
                         seed: true
                     - class: Assign
-                      fields: {name: v7, op: {elementwise: multiply}, args: {tuple: [acc0, v1]}, dtype: null}
+                      fields: {name: v7, op: {elementwise: multiply}, args: {tuple: [acc0, v2]}, dtype: null}
                     - class: Assign
-                      fields: {name: v8, op: {elementwise: to_f8e4m3}, args: {tuple: [v7]}, dtype: {dtype: f8e4m3}}
+                      fields: {name: v8, op: {elementwise: multiply}, args: {tuple: [acc1, v4]}, dtype: null}
                     - class: Assign
-                      fields: {name: v9, op: {elementwise: multiply}, args: {tuple: [acc1, v2]}, dtype: null}
+                      fields: {name: v9, op: {elementwise: to_f8e4m3}, args: {tuple: [v8]}, dtype: {dtype: f8e4m3}}
                     - class: Assign
-                      fields: {name: v10, op: {elementwise: from_f8e4m3}, args: {tuple: [v8]}, dtype: null}
+                      fields: {name: v10, op: {elementwise: from_f8e4m3}, args: {tuple: [v9]}, dtype: null}
                     - class: Assign
-                      fields: {name: v11, op: {elementwise: to_f8e4m3}, args: {tuple: [v9]}, dtype: {dtype: f8e4m3}}
+                      fields: {name: v11, op: {elementwise: multiply}, args: {tuple: [in0, v10]}, dtype: null}
                     - class: Assign
-                      fields: {name: v12, op: {elementwise: multiply}, args: {tuple: [in3, v10]}, dtype: null}
+                      fields: {name: v12, op: {elementwise: copy}, args: {tuple: [v11]}, dtype: {dtype: f16}}
                     - class: Assign
-                      fields: {name: v13, op: {elementwise: from_f8e4m3}, args: {tuple: [v11]}, dtype: null}
+                      fields: {name: v13, op: {elementwise: copy}, args: {tuple: [v12]}, dtype: {dtype: f32}}
                     - class: Assign
-                      fields: {name: v14, op: {elementwise: copy}, args: {tuple: [v12]}, dtype: {dtype: f16}}
+                      fields: {name: v14, op: {elementwise: maximum}, args: {tuple: [in2, v13]}, dtype: null}
                     - class: Assign
-                      fields: {name: v15, op: {elementwise: multiply}, args: {tuple: [in3, v13]}, dtype: null}
+                      fields: {name: v15, op: {elementwise: to_f8e4m3}, args: {tuple: [v7]}, dtype: {dtype: f8e4m3}}
                     - class: Assign
-                      fields: {name: v16, op: {elementwise: copy}, args: {tuple: [v14]}, dtype: {dtype: f32}}
+                      fields: {name: v16, op: {elementwise: from_f8e4m3}, args: {tuple: [v15]}, dtype: null}
                     - class: Assign
-                      fields: {name: v17, op: {elementwise: copy}, args: {tuple: [v15]}, dtype: {dtype: f16}}
+                      fields: {name: v17, op: {elementwise: multiply}, args: {tuple: [in0, v16]}, dtype: null}
                     - class: Assign
-                      fields: {name: v18, op: {elementwise: maximum}, args: {tuple: [in0, v16]}, dtype: null}
+                      fields: {name: v18, op: {elementwise: copy}, args: {tuple: [v17]}, dtype: {dtype: f16}}
+                    - class: Assign
+                      fields: {name: v19, op: {elementwise: copy}, args: {tuple: [v18]}, dtype: {dtype: f32}}
+                    - class: Assign
+                      fields: {name: v20, op: {elementwise: maximum}, args: {tuple: [in2, v19]}, dtype: null}
                     - class: Load
                       fields:
                         names: {tuple: [in5]}
@@ -847,18 +851,12 @@ loops:
                         index:
                           tuple:
                           - {expr: {var: a0}}
-                          - expr:
-                              binary:
-                                op: +
-                                left: {binary: {op: '*', left: {var: a1}, right: {literal: {value: 2, dtype: int}}}}
-                                right: {literal: {value: 1, dtype: int}}
+                          - {expr: {binary: {op: '*', left: {literal: {value: 2, dtype: int}}, right: {var: a1}}}}
                         dtype: null
                     - class: Assign
-                      fields: {name: v19, op: {elementwise: copy}, args: {tuple: [v17]}, dtype: {dtype: f32}}
+                      fields: {name: v21, op: {elementwise: divide}, args: {tuple: [in5, v14]}, dtype: null}
                     - class: Assign
-                      fields: {name: v20, op: {elementwise: divide}, args: {tuple: [in5, v18]}, dtype: null}
-                    - class: Assign
-                      fields: {name: v21, op: {elementwise: maximum}, args: {tuple: [in0, v19]}, dtype: null}
+                      fields: {name: v22, op: {elementwise: to_f4e2m1}, args: {tuple: [v21]}, dtype: {dtype: i32}}
                     - class: Load
                       fields:
                         names: {tuple: [in6]}
@@ -866,18 +864,20 @@ loops:
                         index:
                           tuple:
                           - {expr: {var: a0}}
-                          - {expr: {binary: {op: '*', left: {var: a1}, right: {literal: {value: 2, dtype: int}}}}}
+                          - expr:
+                              binary:
+                                op: +
+                                left: {binary: {op: '*', left: {literal: {value: 2, dtype: int}}, right: {var: a1}}}
+                                right: {literal: {value: 1, dtype: int}}
                         dtype: null
                     - class: Assign
-                      fields: {name: v22, op: {elementwise: to_f4e2m1}, args: {tuple: [v20]}, dtype: {dtype: i32}}
+                      fields: {name: v23, op: {elementwise: divide}, args: {tuple: [in6, v20]}, dtype: null}
                     - class: Assign
-                      fields: {name: v23, op: {elementwise: divide}, args: {tuple: [in6, v21]}, dtype: null}
+                      fields: {name: v24, op: {elementwise: to_f4e2m1}, args: {tuple: [v23]}, dtype: {dtype: i32}}
                     - class: Assign
-                      fields: {name: v24, op: {elementwise: left_shift}, args: {tuple: [v22, in1]}, dtype: null}
+                      fields: {name: v25, op: {elementwise: left_shift}, args: {tuple: [v24, in3]}, dtype: null}
                     - class: Assign
-                      fields: {name: v25, op: {elementwise: to_f4e2m1}, args: {tuple: [v23]}, dtype: {dtype: i32}}
-                    - class: Assign
-                      fields: {name: v26, op: {elementwise: bitwise_or}, args: {tuple: [v25, v24]}, dtype: null}
+                      fields: {name: v26, op: {elementwise: bitwise_or}, args: {tuple: [v22, v25]}, dtype: null}
                     - class: Assign
                       fields: {name: v27, op: {elementwise: copy}, args: {tuple: [v26]}, dtype: {dtype: f4e2m1x2}}
                     - class: Write
@@ -892,12 +892,12 @@ loops:
                   seed: true
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 32}, window: null}}
+                  axis: {class: Axis, fields: {name: a3, extent: {dim: 32}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a3, extent: {dim: 16}, window: null}}
+                        axis: {class: Axis, fields: {name: a4, extent: {dim: 16}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -910,8 +910,8 @@ loops:
                                 - expr:
                                     binary:
                                       op: +
-                                      left: {binary: {op: '*', left: {var: a1}, right: {literal: {value: 16, dtype: int}}}}
-                                      right: {var: a3}
+                                      left: {binary: {op: '*', left: {literal: {value: 16, dtype: int}}, right: {var: a3}}}
+                                      right: {var: a4}
                               dtype: null
                           - {class: Assign, fields: {name: v28, op: {elementwise: abs}, args: {tuple: [in7]}, dtype: null}}
                           - class: Accum
@@ -920,18 +920,18 @@ loops:
                               value: v28
                               op: {elementwise: maximum}
                               dtype: null
-                              axes: {tuple: [a3_s1]}
+                              axes: {tuple: [a4]}
                               base: null
                         unroll: false
                         seed: true
                     - class: Assign
-                      fields: {name: v29, op: {elementwise: multiply}, args: {tuple: [acc2, v4]}, dtype: null}
+                      fields: {name: v29, op: {elementwise: multiply}, args: {tuple: [acc2, v3]}, dtype: null}
                     - class: Assign
                       fields: {name: v30, op: {elementwise: to_f8e4m3}, args: {tuple: [v29]}, dtype: {dtype: f8e4m3}}
                     - class: Write
                       fields:
                         output: input_static_fp4_scale_bits
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}, {expr: {literal: {value: 0, dtype: int}}}]}
+                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a3}}, {expr: {literal: {value: 0, dtype: int}}}]}
                         values: {tuple: [v30]}
                         value_dtype: null
                         atomic: false
@@ -940,7 +940,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_reshape_reduce_db0b72
+      name: k_reshape_reduce_5fc21e
     inputs: [input_static_fp4_floor, input_static_fp4_shift, input_static_fp4_f4_max, input_static_fp4_scale_2, input]
     outputs: [[input_static_fp4_scale_bits, f8e4m3, [128, 32, 1]], [input_static_fp4_bits, f4e2m1x2, [128, 256]]]
 - inputs: [input_static_fp4_scale_bits, input_static_fp4_bits]
@@ -1207,18 +1207,18 @@ loops:
         - class: Load
           fields:
             names: {tuple: [in0]}
+            input: p_weight_scale_2
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Load
+          fields:
+            names: {tuple: [in1]}
             input: input_static_fp4_scale_2
             index:
               tuple:
               - {expr: {literal: {value: 0, dtype: int}}}
               - {expr: {literal: {value: 0, dtype: int}}}
               - {expr: {literal: {value: 0, dtype: int}}}
-            dtype: null
-        - class: Load
-          fields:
-            names: {tuple: [in1]}
-            input: p_weight_scale_2
-            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {literal: {value: 0, dtype: int}}}]}
             dtype: null
         - class: Loop
           fields:
@@ -1238,31 +1238,6 @@ loops:
                           - class: Load
                             fields:
                               names: {tuple: [in2]}
-                              input: p_weight_scale_bits
-                              index:
-                                tuple:
-                                - {expr: {var: a1}}
-                                - {expr: {binary: {op: /, left: {var: a2}, right: {literal: {value: 16, dtype: int}}}}}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in3]}
-                              input: input_static_fp4_scale_bits
-                              index:
-                                tuple:
-                                - {expr: {var: a0}}
-                                - {expr: {binary: {op: /, left: {var: a2}, right: {literal: {value: 16, dtype: int}}}}}
-                                - {expr: {literal: {value: 0, dtype: int}}}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: from_f8e4m3}, args: {tuple: [in2]}, dtype: null}
-                          - class: Assign
-                            fields: {name: v1, op: {elementwise: from_f8e4m3}, args: {tuple: [in3]}, dtype: null}
-                          - class: Assign
-                            fields: {name: v2, op: {elementwise: multiply}, args: {tuple: [in0, v1]}, dtype: null}
-                          - class: Load
-                            fields:
-                              names: {tuple: [in4]}
                               input: input_static_fp4_bits
                               index:
                                 tuple:
@@ -1282,10 +1257,23 @@ loops:
                                           right: {literal: {value: 2, dtype: int}}
                               dtype: null
                           - class: Assign
-                            fields: {name: v3, op: {elementwise: multiply}, args: {tuple: [in1, v0]}, dtype: null}
+                            fields: {name: v0, op: {elementwise: copy}, args: {tuple: [in2]}, dtype: {dtype: i32}}
                           - class: Load
                             fields:
-                              names: {tuple: [in5]}
+                              names: {tuple: [in3]}
+                              input: input_static_fp4_r1_f4_pairs
+                              index:
+                                tuple:
+                                - {expr: {cast: {dtype: int, expr: {var: v0}}}}
+                                - expr:
+                                    binary:
+                                      op: '%'
+                                      left: {binary: {op: '%', left: {var: a2}, right: {literal: {value: 16, dtype: int}}}}
+                                      right: {literal: {value: 2, dtype: int}}
+                              dtype: null
+                          - class: Load
+                            fields:
+                              names: {tuple: [in4]}
                               input: p_weight_bits
                               index:
                                 tuple:
@@ -1305,57 +1293,63 @@ loops:
                                           right: {literal: {value: 2, dtype: int}}
                               dtype: null
                           - class: Assign
-                            fields: {name: v4, op: {elementwise: copy}, args: {tuple: [v2]}, dtype: {dtype: f16}}
-                          - class: Assign
-                            fields: {name: v5, op: {elementwise: copy}, args: {tuple: [in4]}, dtype: {dtype: i32}}
-                          - class: Assign
-                            fields: {name: v6, op: {elementwise: copy}, args: {tuple: [v3]}, dtype: {dtype: f16}}
-                          - class: Assign
-                            fields: {name: v7, op: {elementwise: copy}, args: {tuple: [in5]}, dtype: {dtype: i32}}
-                          - class: Assign
-                            fields: {name: v8, op: {elementwise: copy}, args: {tuple: [v4]}, dtype: {dtype: f32}}
+                            fields: {name: v1, op: {elementwise: copy}, args: {tuple: [in4]}, dtype: {dtype: i32}}
                           - class: Load
                             fields:
-                              names: {tuple: [in6]}
-                              input: input_static_fp4_r1_f4_pairs
-                              index:
-                                tuple:
-                                - {expr: {cast: {dtype: int, expr: {var: v5}}}}
-                                - expr:
-                                    binary:
-                                      op: '%'
-                                      left: {binary: {op: '%', left: {var: a2}, right: {literal: {value: 16, dtype: int}}}}
-                                      right: {literal: {value: 2, dtype: int}}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v9, op: {elementwise: copy}, args: {tuple: [v6]}, dtype: {dtype: f32}}
-                          - class: Load
-                            fields:
-                              names: {tuple: [in7]}
+                              names: {tuple: [in5]}
                               input: p_weight_f4_pairs
                               index:
                                 tuple:
-                                - {expr: {cast: {dtype: int, expr: {var: v7}}}}
+                                - {expr: {cast: {dtype: int, expr: {var: v1}}}}
                                 - expr:
                                     binary:
                                       op: '%'
                                       left: {binary: {op: '%', left: {var: a2}, right: {literal: {value: 16, dtype: int}}}}
                                       right: {literal: {value: 2, dtype: int}}
                               dtype: null
-                          - class: Assign
-                            fields: {name: v10, op: {elementwise: multiply}, args: {tuple: [in6, v8]}, dtype: null}
-                          - class: Assign
-                            fields: {name: v11, op: {elementwise: multiply}, args: {tuple: [in7, v9]}, dtype: null}
-                          - class: Assign
-                            fields: {name: v12, op: {elementwise: multiply}, args: {tuple: [v10, v11]}, dtype: null}
-                          - class: Accum
+                          - class: Load
                             fields:
-                              name: acc0
-                              value: v12
-                              op: {elementwise: add}
+                              names: {tuple: [in6]}
+                              input: p_weight_scale_bits
+                              index:
+                                tuple:
+                                - {expr: {var: a1}}
+                                - {expr: {binary: {op: /, left: {var: a2}, right: {literal: {value: 16, dtype: int}}}}}
                               dtype: null
-                              axes: {tuple: [a2_s1]}
-                              base: null
+                          - class: Assign
+                            fields: {name: v2, op: {elementwise: from_f8e4m3}, args: {tuple: [in6]}, dtype: null}
+                          - class: Assign
+                            fields: {name: v3, op: {elementwise: multiply}, args: {tuple: [in0, v2]}, dtype: null}
+                          - class: Assign
+                            fields: {name: v4, op: {elementwise: copy}, args: {tuple: [v3]}, dtype: {dtype: f16}}
+                          - class: Assign
+                            fields: {name: v5, op: {elementwise: copy}, args: {tuple: [v4]}, dtype: {dtype: f32}}
+                          - class: Assign
+                            fields: {name: v6, op: {elementwise: multiply}, args: {tuple: [in5, v5]}, dtype: null}
+                          - class: Load
+                            fields:
+                              names: {tuple: [in7]}
+                              input: input_static_fp4_scale_bits
+                              index:
+                                tuple:
+                                - {expr: {var: a0}}
+                                - {expr: {binary: {op: /, left: {var: a2}, right: {literal: {value: 16, dtype: int}}}}}
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v7, op: {elementwise: from_f8e4m3}, args: {tuple: [in7]}, dtype: null}
+                          - class: Assign
+                            fields: {name: v8, op: {elementwise: multiply}, args: {tuple: [in1, v7]}, dtype: null}
+                          - class: Assign
+                            fields: {name: v9, op: {elementwise: copy}, args: {tuple: [v8]}, dtype: {dtype: f16}}
+                          - class: Assign
+                            fields: {name: v10, op: {elementwise: copy}, args: {tuple: [v9]}, dtype: {dtype: f32}}
+                          - class: Assign
+                            fields: {name: v11, op: {elementwise: multiply}, args: {tuple: [in3, v10]}, dtype: null}
+                          - class: Assign
+                            fields: {name: v12, op: {elementwise: multiply}, args: {tuple: [v11, v6]}, dtype: null}
+                          - class: Accum
+                            fields: {name: acc0, value: v12, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
                         unroll: false
                         seed: true
                     - class: Write
@@ -1370,7 +1364,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_936f0e
-    inputs: [input_static_fp4_scale_2, p_weight_scale_2, p_weight_scale_bits, input_static_fp4_scale_bits, input_static_fp4_bits, p_weight_bits,
-      input_static_fp4_r1_f4_pairs, p_weight_f4_pairs]
+      name: k_linear_db872e
+    inputs: [p_weight_scale_2, input_static_fp4_scale_2, p_weight_scale_bits, input_static_fp4_scale_bits, p_weight_bits, input_static_fp4_bits,
+      p_weight_f4_pairs, input_static_fp4_r1_f4_pairs]
     outputs: [[linear, f32, [128, 256]]]

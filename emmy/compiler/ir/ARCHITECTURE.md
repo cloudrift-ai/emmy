@@ -208,9 +208,10 @@ along different lowering paths still dedup in the tuning cache.
 **Stmt subclasses are `@dataclass(frozen=True)`** — every concrete Loop-IR
 / Tile-IR / Kernel-IR statement (`Loop`, `Cond`, leaves, `Tile`, `Smem`, `Sync`,
 `CpAsyncCopy`, `TmaDescriptor`, …) is immutable + hashable. `Body` is a `tuple[Stmt, ...]`
-subclass, so a full body tree hashes structurally end-to-end. This makes
-`Body.structural_key()` and any other bodies-as-cache-keys path work
-without a try/except fallback for unhashable stmts. To "edit" a frozen
+subclass, so ordinary body equality and hashing work end-to-end. `Body.structural_key()` uses the complete
+`structural.form`, including identity-relevant fields such as `Axis.window` that may deliberately be excluded from
+general equality. Its exact and clustered keys, and its executable normal forms, are cached properties on that Body;
+there is no equality-keyed shared cache that could alias distinct metadata. To "edit" a frozen
 Stmt, return a fresh instance via `dataclasses.replace(stmt, field=value)`;
 `__post_init__` coercions use `object.__setattr__`. Ops, by contrast,
 are frozen and unhashable — rewrites replace the op and rebind its graph node. Op fields stored inside Stmts (e.g.
@@ -516,7 +517,7 @@ may spell the same as the enclosing contraction's): `fold.subst_free(stmt, sigma
 a `Loop` / reducing `Fold` binder that re-binds a substituted name, and is what the smem compute fill substitutes
 cell coordinates through.
 
-### `ir/stmt/normalize.py` — structural canonicalization
+### `ir/stmt/normalize.py` — executable body normalization
 
 Pure `body → body` passes run from `LoopOp.__post_init__` so every
 constructed `LoopOp` (including intermediate fusion results) is
@@ -530,10 +531,11 @@ canonicalized before validation:
   update before total reduction lifting.
 - `canonicalize_free_axis_order` — sort outer free Loops by their row-major position in boundary writes, so output
   storage geometry rather than axis spelling decides the nest. When the writes cannot totally order the chain, axis
-  names provide a deterministic fallback. A cross-CTA partition coordinate occupies the workspace's leading index,
-  so the same rule keeps it outside the axes it partitions without a naming convention.
+  roles and the least complete alpha-renamed form decide the order. A cross-CTA partition coordinate occupies the
+  workspace's leading index, so the same rule keeps it outside the axes it partitions without a naming convention.
 
-- `eliminate_copy_aliases` — drop `y = copy(x)` Assigns.
+- `eliminate_copy_aliases` — drop `y = copy(x)` Assigns. Each nested body owns its alias map, so source spellings
+  reused by sibling scopes remain separate binders.
 - `unify_sibling_reduce_axes` — rename sibling reduce Loops whose reduce-axis Load positions overlap so they share one
   canonical axis name (softmax's max + sum sweeps; the two matmul reductions in `silu(x@Wg) * (x@Wu)` that both index
   `x` at the same K slot). A position is `(source, dim, anchor, coefficient)`, read through `affine_form`: a blocked
@@ -558,32 +560,49 @@ canonicalized before validation:
   Loops. Effect summaries are cached on immutable statements, and `Body.axis_dependencies` retains only the axes
   reachable from each definition. Long SSA chains therefore remain linear in definitions × loop depth instead of
   materializing the quadratic full SSA dependency closure.
-- `dedup_loads` — after expression simplification, keep one `Load` for
-  each identical `(input, index)` read in a scope and rewire its users.
-  This is canonicalization for every Loop / Tile body, not a fusion
-  profitability decision.
-- `rename_ssa_sequential` — cosmetic: `Load` names become `in0, in1,
-  …`, Assign/Select `v0, v1, …`, Accum `acc0, …`, in definition order.
-  Records renames only in the SSA channel (`rename`), never the axis
-  channel (`sigma`) — see the `rewrite` two-channel rule above; an SSA
-  name leaking into `sigma` double-renames indirect (gather) indices.
-- `canonicalize_buffer_names` — rename `Load.input` / `Write.output` to
-  `b0, b1, …` in encounter order. Off by default (buffer names bind to
-  graph nodes) — opt in via `normalize_body(..., canonical_buffers=True)`.
-  Used by `Body.structural_key()` for dedup queries where buffer identity
-  doesn't matter.
+- `dedup_loads` — after expression simplification, keep one `Load` for each identical
+  `(input, index, width, dtype)` read in a scope and rewire every scalar or vector lane. A write invalidates retained
+  reads of that buffer, including around a nested scope with a write. This is canonicalization for every Loop / Tile
+  body, not a fusion profitability decision.
+- `rename_ssa_sequential` — cosmetic: `Load` names become `in0, in1, …`, accumulator state becomes `acc0, …`, and
+  every other definition becomes `v0, v1, …`, in lexical definition order. Names stay globally unique while each
+  nested body tracks its own binders, so sibling scopes may reuse the same source spelling without collapsing. Axis
+  renames reach conditions, reduction metadata, and `Window` parent/base/bound metadata as well as indices; a
+  reduction's axis tuple is canonicalized as a set. SSA values travel only through the rename channel, never `sigma`,
+  so indirect indices cannot be renamed twice.
 - `sort_commutative_args` — sort `Assign.args` for commutative ops
   (`add` / `multiply` / `maximum` / `minimum`) so two bodies that
   differ only by argument order land in the same canonical form.
   Runs last so the sort key is the post-rename canonical SSA / buffer
   names.
+- The final ordering pass canonicalizes integer coordinate expressions, builds one colored relation graph for the
+  complete body tree, and chooses one dependency- and effect-valid statement order. Vertices represent scopes,
+  statements, lexical definitions, axes, source axes, and external buffers; colored relations retain operand
+  positions, captures, aliases, nesting, resource hazards, and ordered execution protocols. The graph is independent
+  of source order and spelling.
+- A standard smaller-half worklist computes the equitable partition in
+  `O((vertices + relations) log vertices)` relation visits. Exact individualization is isolated to partitions that
+  refinement cannot distinguish; no exact near-linear worst-case graph-canonization algorithm is known. Canonical
+  vertex ranks then serve as the optional tie-break for `Body.topological_order`, a heap-based Kahn sort. Ready nested
+  scopes stay ahead of leaf epilogues so normalization does not widen schedule search or obscure contractions.
 
-`Body.structural_key()` re-runs `normalize_body(self, hoist=False,
-canonical_buffers=True)` and joins `pretty_body`'s line list — a
-`cached_property` returning the canonical text rendering. Two bodies
-that differ only by SSA / axis names, commutative-arg order, or
-external-buffer names produce the same key. Use it as a dict key /
-set member when deduping candidate bodies in a search.
+### `ir/stmt/identity.py` — structural identity
+
+`Body.structural_key()` re-runs `normalize_body(self, hoist=False)`, assigns external arguments canonical names, and
+optionally collapses operations to their compute-unit cluster. Clear external argument names remain on executable
+bodies; these two transformations produce identity material only and must never be executed.
+
+- The same relation graph that orders statements ranks external buffers without using their spelling. Identity assigns
+  `b0`, `b1`, … by those ranks, preserving aliasing while making discovery order irrelevant, then runs the final
+  expression, statement-order, SSA, and operand cleanup once with those names.
+- Optional operation clustering replaces each elementwise operation with its compute-unit representative before
+  normalization. It is the only operation rewrite owned by identity; all executable canonicalization stays in
+  `normalize_body`.
+
+The key is `digest(form(canonical_body))`, not the human `pretty()` rendering. The exact and compute-unit-clustered
+forms are cached on each immutable `Body`. Two bodies that differ only by SSA or axis names, argument spelling and
+discovery order, dependency-valid statement order, or equivalent commutative and affine expression spelling
+therefore share a structural key. Use it when deduplicating candidate bodies in search.
 
 ### `ir/expr.py` — Expr simplification
 

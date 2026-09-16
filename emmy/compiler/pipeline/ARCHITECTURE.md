@@ -1410,7 +1410,10 @@ stored identity must equal one kernel resolved under the record's pins, and the 
 kernel's enumerated rows, so a sibling child's row never vouches. Ordinary records must still select exactly one
 pre-cut kernel, but a receipt may outlive target-boundary drift that makes its regenerated target lower to several:
 the stored identity selects one bucket from the kernels resolved under its pins, without first requiring the legacy
-one-kernel lift. As evidence a receipt is two rows: its route under the signature of the kernel the cut was offered
+one-kernel lift. When the deploy identity appears only after scheduling, replay decodes the receipt's exact row,
+refreshes its graph I/O, and accepts it only when the resulting deploy identity matches; another child that accepts
+the same schedule spelling cannot acquire that receipt. As evidence a receipt is two rows: its route under the
+signature of the kernel the cut was offered
 on and its schedule row under the child's (both read off the record's replay, `golden._replay`, whose evidence half
 persists in the derived golden store beside identities and verdicts). The regime check
 (`golden.regime_live`) skips PLACE pins — the route is the record's kernel-set decision, not an input regime — and
@@ -1452,6 +1455,12 @@ compiled, repeated O3 `same-input-greedy` row as its positive reference only whe
 identical deterministic inputs, their outputs pass the normal accuracy policy, and the model report discloses that
 this checks compiler-configuration parity rather than independent framework correctness. The original frontend
 program remains embedded for provenance, while the selected standalone target is what both configurations execute.
+
+Strict decode sends one complete recorded row through an unsampled schedule's existing codec and compatibility
+context. Missing current fields are OFF, a non-OFF key outside the codec is rejected, and supplied keys are exact:
+legal authored choices still bypass enumeration policy, while an invalid value cannot fall back to a catalog. Sampled
+and non-schedule forks retain lazy row descent and a bounded miss summary. Full row enumeration remains available only
+to explicit diagnostics that request the whole pool.
 
 The three historical RTX 4080 rows without measurements were dropped during migration; repository validation has no
 provisional exception.
