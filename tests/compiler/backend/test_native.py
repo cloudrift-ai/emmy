@@ -91,5 +91,6 @@ async def test_pack_comparison_matches_lifetimes_and_closes_workers(tmp_path, mo
     result = await native.benchmark_pack(tmp_path, warmup=2, iterations=7)
     assert len(result["rows"]) == 24
     assert len(workers) == 8
-    assert [w.loads for w in workers] == [1, 3] * 4
+    assert [w.loads for w in workers] == [2, 3] * 4
+    assert len(result["reloads"]) == 4
     assert all(w.runs == 3 and w.closes >= 1 for w in workers)

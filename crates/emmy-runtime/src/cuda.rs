@@ -6,6 +6,17 @@ use cudarc::driver::{CudaContext, CudaFunction, CudaGraph, CudaSlice, CudaStream
 use cudarc::nvrtc::Ptx;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::time::Instant;
+use serde::Serialize;
+
+#[derive(Serialize)]
+pub struct RunMetrics {
+    pub time_ms: f32,
+    pub preparation_ms: f64,
+    pub warmup_ms: f64,
+    pub submission_ms: f64,
+    pub completion_wait_ms: f64,
+}
 
 pub struct Device(Arc<CudaContext>);
 
@@ -20,6 +31,7 @@ impl Device {
 }
 
 pub struct Executor {
+    pub load_times_ms: BTreeMap<&'static str, f64>,
     plan: Plan,
     graph: Option<CudaGraph>,
     stream: Arc<CudaStream>,
@@ -44,6 +56,7 @@ impl Executor {
             ensure!(grid.0 <= i32::MAX as u32 && grid.1 <= 65535 && grid.2 <= 65535, "invalid CUDA grid");
         }
         let stream = context.new_stream()?;
+        let started = Instant::now();
         let mut functions = BTreeMap::new();
         for (name, path) in artifact.binaries {
             let module = context.load_module(Ptx::from_file(path))?;
@@ -54,15 +67,24 @@ impl Executor {
             }
             functions.insert(name, function);
         }
+        let module_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let started = Instant::now();
         let mut arrays = BTreeMap::new();
         for buffer in &artifact.plan.buffers {
             arrays.insert(buffer.name.clone(), stream.alloc_zeros::<u8>(buffer.byte_len()?.max(1))?);
         }
-        let mut executor = Self { plan: artifact.plan, graph: None, stream, arrays, functions, bound: BTreeSet::new(), completed: false };
+        stream.synchronize()?;
+        let allocation_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let mut executor = Self { load_times_ms: BTreeMap::new(), plan: artifact.plan, graph: None, stream, arrays, functions, bound: BTreeSet::new(), completed: false };
+        let started = Instant::now();
         for (name, data) in artifact.bindings {
             executor.upload(&name, &data)?;
         }
         executor.stream.synchronize()?;
+        executor.load_times_ms = BTreeMap::from([
+            ("module_ms", module_ms), ("allocation_zero_ms", allocation_ms),
+            ("upload_ms", started.elapsed().as_secs_f64() * 1000.0),
+        ]);
         Ok(executor)
     }
 
@@ -108,9 +130,10 @@ impl Executor {
 
     /// Time ordered program submissions with CUDA events; excludes I/O and control transport.
     /// Uncaptured execution includes exposed host submission gaps.
-    pub fn execute(&mut self, warmup: u32, iterations: u32, capture: bool) -> Result<f32> {
+    pub fn execute(&mut self, warmup: u32, iterations: u32, capture: bool) -> Result<RunMetrics> {
         ensure!(iterations > 0 && iterations <= 1_000_000 && warmup <= 1_000_000, "invalid iteration count");
         self.completed = false;
+        let started = Instant::now();
         if capture && self.graph.is_none() {
             self.submit()?;
             self.stream.synchronize()?;
@@ -120,16 +143,23 @@ impl Executor {
             submitted?;
             self.graph = Some(captured?.context("empty CUDA graph")?);
         }
+        let preparation_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let started = Instant::now();
         for _ in 0..warmup { self.step(capture)?; }
         self.stream.synchronize()?;
+        let warmup_ms = started.elapsed().as_secs_f64() * 1000.0;
         let start = self.stream.context().new_event(Some(sys::CUevent_flags::CU_EVENT_DEFAULT))?;
         let end = self.stream.context().new_event(Some(sys::CUevent_flags::CU_EVENT_DEFAULT))?;
         start.record(&self.stream)?;
+        let started = Instant::now();
         for _ in 0..iterations { self.step(capture)?; }
         end.record(&self.stream)?;
+        let submission_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let started = Instant::now();
         let time = start.elapsed_ms(&end)? / iterations as f32;
+        let completion_wait_ms = started.elapsed().as_secs_f64() * 1000.0;
         self.completed = true;
-        Ok(time)
+        Ok(RunMetrics {time_ms: time, preparation_ms, warmup_ms, submission_ms, completion_wait_ms})
     }
 
     fn step(&mut self, capture: bool) -> Result<()> {

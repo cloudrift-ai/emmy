@@ -758,6 +758,7 @@ class CompiledProgram:
     compiled: _Compiled
     arrays: dict[str, cp.ndarray]
     descs: dict[int, dict[str, cp.ndarray]]
+    load_times_ms: dict[str, float] = field(default_factory=dict)
     # Per-symbolic-axis runtime ``int`` resolved at ``build`` time from the
     # supplied input shapes — fed straight to ``_launch`` for grid /
     # block resolution and the runtime-arg tail. Empty for fully-static
@@ -852,9 +853,11 @@ class CompiledProgram:
         every subsequent method on the returned program."""
         t0 = _time_module.monotonic()
         compiled = _load_plan(plan, deadline=None if compile_timeout_s is None else t0 + compile_timeout_s, cubin_dir=cubin_dir)
+        loaded = _time_module.monotonic()
         input_data = _with_generated_constants(plan, input_data or {})
         sym_values = _resolve_symbolic(compiled, input_data)
         arrays, slab_plan = _allocate(compiled, input_data, arena)
+        allocated = _time_module.monotonic()
         descs = _prebuild_descriptors(compiled, arrays)
         elapsed = _time_module.monotonic() - t0
         if compile_timeout_s is not None and elapsed > compile_timeout_s:
@@ -873,7 +876,10 @@ class CompiledProgram:
                 slab_plan.naive_bytes / max(1, slab_plan.total_bytes),
                 len(slab_plan.offsets),
             )
-        return cls(compiled=compiled, arrays=arrays, descs=descs, sym_values=sym_values, slab_plan=slab_plan, arena=arena)
+        return cls(
+            compiled=compiled, arrays=arrays, descs=descs, sym_values=sym_values, slab_plan=slab_plan, arena=arena,
+            load_times_ms={"module_ms": (loaded - t0) * 1000, "allocation_upload_submit_ms": (allocated - loaded) * 1000},
+        )
 
     def rebind(self, input_data: dict[str, np.ndarray]) -> None:
         """Re-bind ``input_data`` on an already-built program, re-sizing

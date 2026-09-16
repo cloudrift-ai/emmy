@@ -104,7 +104,7 @@ class PackReference:
             with self.stream:
                 self.program = CompiledProgram.build_from_plan(self.plan, data, cubin_dir=root / "cubin")
             self.stream.synchronize()
-            return {"loaded": True, "load_ms": (perf_counter() - started) * 1000}
+            return {"loaded": True, "load_ms": (perf_counter() - started) * 1000, "load_times_ms": self.program.load_times_ms}
         if self.program is None:
             raise ValueError("no loaded program")
         if op != "run":
@@ -113,26 +113,40 @@ class PackReference:
         if not 0 <= warmup <= 1_000_000 or not 1 <= iterations <= 1_000_000:
             raise ValueError("invalid iteration count")
         with self.stream:
+            phase = perf_counter()
             if capture:
                 self.program.run_once()
                 self.stream.synchronize()
                 self.program.capture_program_graph()
+            preparation_ms = (perf_counter() - phase) * 1000
             execute = self.program.replay_program_graph if capture else self.program.run_once
+            phase = perf_counter()
             for _ in range(warmup):
                 execute()
             self.stream.synchronize()
+            warmup_ms = (perf_counter() - phase) * 1000
             start, end = cp.cuda.Event(), cp.cuda.Event()
             start.record()
+            phase = perf_counter()
             for _ in range(iterations):
                 execute()
             end.record()
+            submission_ms = (perf_counter() - phase) * 1000
+            phase = perf_counter()
             end.synchronize()
             time_ms = cp.cuda.get_elapsed_time(start, end) / iterations
+            completion_wait_ms = (perf_counter() - phase) * 1000
+            phase = perf_counter()
             for name, path in request["outputs"].items():
                 if name not in self.plan.outputs:
                     raise ValueError(f"unknown output {name}")
                 Path(path).write_bytes(cp.asnumpy(self.program.arrays[name]).tobytes())
-        return {"time_ms": time_ms, "captured": capture, "run_ms": (perf_counter() - started) * 1000}
+            output_ms = (perf_counter() - phase) * 1000
+        return {
+            "time_ms": time_ms, "captured": capture, "run_ms": (perf_counter() - started) * 1000, "output_ms": output_ms,
+            "metrics": {"preparation_ms": preparation_ms, "warmup_ms": warmup_ms,
+                        "submission_ms": submission_ms, "completion_wait_ms": completion_wait_ms},
+        }
 
 
 async def benchmark_pack(root, *, warmup: int, iterations: int, repeats: int = 3, executable: str | None = None) -> dict:
@@ -155,6 +169,7 @@ async def benchmark_pack(root, *, warmup: int, iterations: int, repeats: int = 3
     root = Path(root).resolve()
     manifest = json.loads((root / "manifest.json").read_text())
     rows = []
+    reloads = []
     with tempfile.TemporaryDirectory(prefix="emmy-runtime-") as temporary:
         for program, relative in manifest["programs"].items():
             plan = plan_from_dict(json.loads((root / relative).read_text()))
@@ -167,9 +182,10 @@ async def benchmark_pack(root, *, warmup: int, iterations: int, repeats: int = 3
                         try:
                             for repeat in range(repeats):
                                 load_ms = None
+                                load_result = None
                                 if lifetime == "one-shot" or repeat == 0:
                                     before = perf_counter()
-                                    await worker.run_job({"op": "load", "root": str(root), "program": program}, wall_timeout_s=60)
+                                    load_result = await worker.run_job({"op": "load", "root": str(root), "program": program}, wall_timeout_s=60)
                                     load_ms = (perf_counter() - before) * 1000
                                 outputs = {name: str(Path(temporary) / f"output-{i}.bin") for i, name in enumerate(plan.outputs)}
                                 before = perf_counter()
@@ -187,9 +203,16 @@ async def benchmark_pack(root, *, warmup: int, iterations: int, repeats: int = 3
                                     "program": program, "runtime": runtime, "capture": capture, "lifetime": lifetime, "repeat": repeat,
                                     "load_roundtrip_ms": load_ms, "run_roundtrip_ms": roundtrip_ms, "time_ms": result["time_ms"],
                                     "outputs_equal": True,
+                                    "load": load_result, "run": result,
                                 })
                                 if lifetime == "one-shot":
                                     await worker.aclose()
+                            if lifetime == "persistent":
+                                before = perf_counter()
+                                result = await worker.run_job({"op": "load", "root": str(root), "program": program}, wall_timeout_s=60)
+                                reloads.append({"program": program, "runtime": runtime, "capture": capture,
+                                                "roundtrip_ms": (perf_counter() - before) * 1000, "load": result})
                         finally:
                             await worker.aclose()
-    return {"format": 1, "artifact": str(root), "warmup": warmup, "iterations": iterations, "repeats": repeats, "rows": rows}
+    return {"format": 1, "artifact": str(root), "warmup": warmup, "iterations": iterations, "repeats": repeats,
+            "rows": rows, "reloads": reloads}

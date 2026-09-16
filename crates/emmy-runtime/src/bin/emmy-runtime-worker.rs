@@ -7,6 +7,7 @@ use serde_json::json;
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::time::Instant;
 
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
@@ -47,11 +48,16 @@ fn main() -> Result<()> {
             ensure!(request.version == 1, "unsupported control protocol version");
             match request.command {
                 Command::Load { root, program } => {
+                    let started = Instant::now();
                     let artifact = Artifact::load(&root, &program)?;
+                    let artifact_ms = started.elapsed().as_secs_f64() * 1000.0;
                     executor = None;
+                    let started = Instant::now();
                     if context.is_none() { context = Some(Device::new(0)?); }
+                    let context_ms = started.elapsed().as_secs_f64() * 1000.0;
                     executor = Some(Executor::load(context.as_ref().unwrap(), artifact)?);
-                    Ok(json!({"loaded": true}))
+                    Ok(json!({"loaded": true, "artifact_ms": artifact_ms, "context_ms": context_ms,
+                        "load_times_ms": executor.as_ref().unwrap().load_times_ms}))
                 }
                 Command::Bind { inputs } => {
                     let executor = executor.as_mut().context("no loaded program")?;
@@ -60,9 +66,11 @@ fn main() -> Result<()> {
                 }
                 Command::Run { warmup, iterations, capture, outputs } => {
                     let executor = executor.as_mut().context("no loaded program")?;
-                    let time_ms = executor.execute(warmup, iterations, capture)?;
+                    let metrics = executor.execute(warmup, iterations, capture)?;
+                    let started = Instant::now();
                     for (name, path) in outputs { std::fs::write(path, executor.output(&name)?)?; }
-                    Ok(json!({"time_ms": time_ms, "captured": capture}))
+                    Ok(json!({"time_ms": metrics.time_ms, "captured": capture, "metrics": metrics,
+                        "output_ms": started.elapsed().as_secs_f64() * 1000.0}))
                 }
                 Command::Release => { executor = None; Ok(json!({"released": true})) }
             }
