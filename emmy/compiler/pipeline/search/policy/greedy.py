@@ -175,25 +175,21 @@ def _leaf_op(leaf: object):
     return option if isinstance(option, Op) else None
 
 
-def _leaf_graph(leaf: object) -> Graph:
-    """The ``Graph`` behind a raw, concrete, or deferred structural leaf."""
-    if isinstance(leaf, Graph):
-        return leaf
-    option = getattr(leaf, "option", None)
-    return option if option is not None else leaf.expand()[0]
-
-
 def _materialized_graph(leaf: object) -> Graph | None:
-    """The ``Graph`` behind a structural leaf, or ``None`` when the option cannot be minted.
+    """The ``Graph`` behind a raw, concrete, or deferred structural leaf — or ``None`` when the
+    option cannot be minted.
 
-    A deferred structural leaf is a thunk: expanding it RUNS the rewrite that builds its
-    fragment, and a rewrite may refuse there (``_split``'s closure gate: a sliced piece whose
-    term does not close). That refusal means "this is not an option", not "this compile is
-    broken" — the fused side and every sibling splice are still live, and pricing must drop the
-    refused leaf rather than let the raise escape a fork that had a healthy alternative in hand.
+    A deferred leaf is a thunk: expanding it RUNS the rewrite that builds its fragment, and a
+    rewrite may refuse there (``_split``'s closure gate: a sliced piece whose term does not close).
+    That refusal means "this is not an option", not "this compile is broken" — the fused side and
+    every sibling splice are still live, and pricing must drop the refused leaf rather than let the
+    raise escape a fork that had a healthy alternative in hand.
     """
     try:
-        return _leaf_graph(leaf)
+        if isinstance(leaf, Graph):
+            return leaf
+        option = getattr(leaf, "option", None)
+        return option if option is not None else leaf.expand()[0]
     except (ValueError, KeyError) as exc:  # noqa: BLE001 — a refusal is data here, not an error
         logger.debug("structural option refused at mint (%s) — dropping it from the fork", exc)
         return None
