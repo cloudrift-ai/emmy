@@ -1610,7 +1610,7 @@ def staged_kloop(
         assert isinstance(transport, TmaTransport), "warp specialization drives the TMA transport only (scheduler legality)"
         assert block_threads is not None, "warp specialization needs the compute-band thread count"
         # A banded stream start is not built for the producer/compute band split — stream the full
-        # extent (the band FragmentMask keeps every skipped-candidate step at the fold identity, so
+        # extent (the band mask keeps every skipped-candidate step at the fold identity, so
         # dropping the OPTIMIZATION is exact; only the tile-skip is lost under the band).
         return _producer_band_kloop(
             transport=transport,

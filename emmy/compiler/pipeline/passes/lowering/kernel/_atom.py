@@ -38,6 +38,8 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, TernaryExpr, Var, affine_form
 from emmy.compiler.ir.kernel.ir import (
+    COORD,
+    GMEM,
     FRAG,
     FRAG_COL,
     FRAG_ROW,
@@ -50,8 +52,6 @@ from emmy.compiler.ir.kernel.ir import (
     EpilogueLoad,
     FragLayout,
     FragmentApply,
-    FragmentBiasAdd,
-    FragmentMask,
     FragmentPromote,
     FragmentRepack,
     FragmentRowReduce,
@@ -1419,7 +1419,7 @@ def _block_scaled_operands(
 
 def _mask_add(stmt, selects: dict, frags) -> tuple[Select, str] | None:
     """The coordinate mask ``stmt`` adds to a fragment value, with the value's name — the statement
-    pair the chunk tier lands as a ``FragmentMask`` and reads for its stream bounds — or ``None``
+    pair the chunk tier lands as a coordinate-masking ``FragmentApply`` and reads for its stream bounds — or ``None``
     for any other statement."""
     if not isinstance(stmt, Assign) or stmt.op.name != "add":
         return None
@@ -1440,7 +1440,7 @@ def _mask_key_bounds(stmts, held: str, key: Axis, row: str, offset, bk: int) -> 
     ``(k_first, k_end)``, each ``None`` when no mask bounds the keys on that side.
 
     The masks are the coordinate ``Select`` statements the prefix adds to the score (the pairs
-    :func:`_residence` turns into a ``FragmentMask``), each read ONCE, ahead of the loop, for what
+    :func:`_residence` turns into a coordinate mask), each read ONCE, ahead of the loop, for what
     its masked branch says about whole chunks. ``key + ck > row + cr`` (or ``>=``) masks every key
     from ``block_end + cr − ck`` on for the block's last row, and so for every row before it: the
     stream stops there. ``key + ck < row + cr`` (or ``<=``) masks every key before
@@ -2584,17 +2584,19 @@ def _residence(
             if predicate is None:
                 raise RuleSkipped("the chunk tier needs complementary branches for a coordinate mask")
             name = f"{frag_tag}{stmt.name}"
-            out.append(FragmentApply(out=name, op=ElementwiseImpl("copy"), args=(frags[source],), kinds=(FRAG,), layout=layout))
+            # The keep branch applies the authored scalar to every element; the masked elements then
+            # take the carrier's finite identity, so an all-masked chunk never sees ``-inf - -inf``.
+            out.append(FragmentApply(out=name, op=stmt.op, args=(frags[source], mask.branches[0].value), kinds=(FRAG, UNIFORM), layout=layout))
             out.append(
-                FragmentMask(
-                    frag=name,
-                    mask_when=select_sigma.apply(predicate),
+                FragmentApply(
+                    out=name,
+                    op=ElementwiseImpl("where"),
+                    args=(select_sigma.apply(predicate), Literal(float(mask_fill)), name),
+                    kinds=(COORD, UNIFORM, FRAG),
+                    in_place=True,
+                    layout=layout,
                     row_base=row_base,
                     col_base=col_base,
-                    fill=mask_fill,
-                    keep=mask.branches[0].value,
-                    keep_op=stmt.op,
-                    layout=layout,
                 )
             )
             frags[stmt.name] = name
@@ -2865,12 +2867,14 @@ class _FlashOps(_MmaOps):
                     scored[i, j] = frags[self.c.roles[0]]
                     if bound is not None:
                         body.append(
-                            FragmentMask(
-                                frag=scored[i, j],
-                                mask_when=BinaryExpr(">=", Var(FRAG_COL), bound),
-                                col_base=BinaryExpr("+", base, Literal(j * atom.atom_n, "int")),
-                                fill=self.c.base.components()[0].identity,
+                            FragmentApply(
+                                out=scored[i, j],
+                                op=ElementwiseImpl("where"),
+                                args=(BinaryExpr(">=", Var(FRAG_COL), bound), Literal(float(self.c.base.components()[0].identity)), scored[i, j]),
+                                kinds=(COORD, UNIFORM, FRAG),
+                                in_place=True,
                                 layout=layout,
+                                col_base=BinaryExpr("+", base, Literal(j * atom.atom_n, "int")),
                             )
                         )
                 pivots[i] = _row_pair(self.frag("_g"), i)
@@ -2945,7 +2949,7 @@ class _FlashOps(_MmaOps):
         # softmax, and a single slot refills each at its kill point — the key under the softmax
         # and expectation, the value under the next score.
         # A RAGGED key extent stages too (``_chunk_warp_stage`` states when): the last chunk
-        # overhangs, its value rows read the last valid key, and the boundary ``FragmentMask``
+        # overhangs, its value rows read the last valid key, and the boundary mask
         # above has already put those keys at the pivot identity — so they weigh exactly zero and
         # the duplicates fold to nothing, the same discipline the gmem-direct arm carries.
         k_extent, n_chunks = _chunk_stream(key, bk)
@@ -3050,10 +3054,10 @@ class _FlashOps(_MmaOps):
         whose probabilities arrive as an input), so there is nothing to contract.
 
         Each ``(row, chunk)`` C fragment is gathered from that tile at the fragment's own lane map:
-        a role-``c`` :class:`RegFragment` declares zero, so one :class:`FragmentBiasAdd` per
+        a role-``c`` :class:`RegFragment` declares zero, so one GMEM-adding :class:`FragmentApply` per
         fragment IS the fragment. Both coordinates are read wrapped in-bounds — an overhanging row
         is discarded by the store guard and an overhanging column is refilled with the pivot ⊕'s
-        identity by the boundary :class:`FragmentMask` the caller emits, exactly as the contracted
+        identity by the boundary mask the caller emits, exactly as the contracted
         form's clamped reads are."""
         m, _ = mn
         atom, load = self._score_atom, self.c.operands[0].as_slab().load
@@ -3065,13 +3069,15 @@ class _FlashOps(_MmaOps):
             for j in range(cols):
                 out.append(self._frag(f"_s{i}_{j}", "c", atom))
                 out.append(
-                    FragmentBiasAdd(
-                        frag=self.frag(f"_s{i}_{j}"),
-                        buf=load.input,
-                        index=index,
+                    FragmentApply(
+                        out=self.frag(f"_s{i}_{j}"),
+                        op=ElementwiseImpl("add"),
+                        args=(self.frag(f"_s{i}_{j}"), (load.input, index)),
+                        kinds=(FRAG, GMEM),
+                        in_place=True,
+                        layout=frag_layout(atom.fragment_layout),
                         row_base=offset[0].base(i),
                         col_base=BinaryExpr("+", base, Literal(j * atom.atom_n, "int")),
-                        layout=frag_layout(atom.fragment_layout),
                     )
                 )
         return out
