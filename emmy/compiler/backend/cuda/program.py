@@ -22,6 +22,7 @@ import pickle
 import sys as _sys
 import time as _time_module
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -111,14 +112,14 @@ class _Compiled:
     runtime_constants: dict = field(default_factory=dict)
 
 
-def _load_kernel(name: str, spec: KernelSpec):
+def _load_kernel(name: str, spec: KernelSpec, *, cubin_dir: Path | None = None):
     """Obtain one launchable kernel from its :class:`KernelSpec`. A ``binary_key`` (the pack
     path) loads the content-addressed cubin straight from the cache; otherwise the ``source``
     compiles through the same cache (``nvcc.load_function``). A key whose cubin has been
     evicted falls back to the source when present, and errors otherwise — the pack loader
     pre-checks cubin existence, so hitting this means the cache was cleared mid-boot."""
     if spec.binary_key is not None:
-        path = nvcc.cubin_cache_dir() / f"{spec.binary_key}.cubin"
+        path = (cubin_dir or nvcc.cubin_cache_dir()) / f"{spec.binary_key}.cubin"
         if path.exists():
             return nvcc.load_cubin_function(path, name)
         if spec.source is None:
@@ -133,7 +134,7 @@ def _load_kernel(name: str, spec: KernelSpec):
     return nvcc.load_function(spec.source, name, _nvrtc_options(arch_specific=spec.arch_specific), arch_specific=spec.arch_specific)
 
 
-def _load_plan(plan: ExecutionPlan, *, deadline: float | None = None) -> _Compiled:
+def _load_plan(plan: ExecutionPlan, *, deadline: float | None = None, cubin_dir: Path | None = None) -> _Compiled:
     """Materialize the runtime object from a plan: load every kernel (cubin-by-key or
     source-via-cache), and adopt the plan's pure-data fields as-is.
 
@@ -145,7 +146,7 @@ def _load_plan(plan: ExecutionPlan, *, deadline: float | None = None) -> _Compil
     measured is lost."""
     kernels: dict[str, object] = {}
     for index, (name, spec) in enumerate(plan.kernels.items(), start=1):
-        kernels[name] = _load_kernel(name, spec)
+        kernels[name] = _load_kernel(name, spec, **({"cubin_dir": cubin_dir} if cubin_dir is not None else {}))
         if deadline is not None and _time_module.monotonic() > deadline:
             raise CompileBudgetExceeded(
                 f"compile stage exceeded its budget after {index} of {len(plan.kernels)} kernel(s) "
@@ -835,6 +836,7 @@ class CompiledProgram:
         *,
         compile_timeout_s: float | None = None,
         arena: BufferArena | None = None,
+        cubin_dir: Path | None = None,
     ) -> CompiledProgram:
         """Load every kernel (cubin-by-key or source-via-cache), allocate every
         buffer (the plan's generated constants fill themselves — see
@@ -849,7 +851,7 @@ class CompiledProgram:
         Caller is expected to hold ``gpu_lock()`` around this call and
         every subsequent method on the returned program."""
         t0 = _time_module.monotonic()
-        compiled = _load_plan(plan, deadline=None if compile_timeout_s is None else t0 + compile_timeout_s)
+        compiled = _load_plan(plan, deadline=None if compile_timeout_s is None else t0 + compile_timeout_s, cubin_dir=cubin_dir)
         input_data = _with_generated_constants(plan, input_data or {})
         sym_values = _resolve_symbolic(compiled, input_data)
         arrays, slab_plan = _allocate(compiled, input_data, arena)

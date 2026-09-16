@@ -56,3 +56,40 @@ def test_native_wire_version_and_error_translation():
     assert NativeWorker._decode(b'{"version":1,"error":"bad"}')["_retire_worker"]
     with pytest.raises(ValueError, match="version"):
         NativeWorker._decode(b'{"version":2}')
+
+
+async def test_pack_comparison_matches_lifetimes_and_closes_workers(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from emmy.compiler.backend import native
+    from emmy.compiler.backend.plan import ExecutionPlan, plan_to_dict
+
+    plan = ExecutionPlan("cuda", [], [], [], {}, {}, [], {})
+    (tmp_path / "plan.json").write_text(json.dumps(plan_to_dict(plan)))
+    (tmp_path / "manifest.json").write_text(json.dumps({"programs": {"test": "plan.json"}}))
+    workers = []
+
+    class Worker:
+        def __init__(self, **kwargs):
+            self.loads = self.runs = self.closes = 0
+            workers.append(self)
+
+        async def run_job(self, request, **kwargs):
+            if request["op"] == "load":
+                self.loads += 1
+                assert Path(request["root"]) == tmp_path
+                return {"loaded": True}
+            self.runs += 1
+            assert request["iterations"] == 7 and request["warmup"] == 2
+            return {"time_ms": 0.1}
+
+        async def aclose(self):
+            self.closes += 1
+
+    monkeypatch.setattr(native, "NativeWorker", Worker)
+    monkeypatch.setattr(native, "PythonPackWorker", Worker)
+    result = await native.benchmark_pack(tmp_path, warmup=2, iterations=7)
+    assert len(result["rows"]) == 24
+    assert len(workers) == 8
+    assert [w.loads for w in workers] == [1, 3] * 4
+    assert all(w.runs == 3 and w.closes >= 1 for w in workers)

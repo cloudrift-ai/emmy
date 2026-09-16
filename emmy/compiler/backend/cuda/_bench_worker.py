@@ -58,6 +58,8 @@ import pickle
 import sys
 import traceback
 
+_PACK_REFERENCE = None
+
 
 def _read_n(fd: int, n: int) -> bytes:
     out = bytearray()
@@ -107,6 +109,13 @@ async def _run_job(req: dict) -> dict:
     Rebuilding the torch side **here** (not pickling a live module) means a hung emmy kernel
     hangs *this* child, which the parent SIGKILLs — recovering the device. ``nvcc_flags`` re-points
     the compile at a given opt level (the cubin cache key folds it in)."""
+    if "pack_command" in req:
+        from emmy.compiler.backend.native import PackReference
+
+        global _PACK_REFERENCE
+        if _PACK_REFERENCE is None:
+            _PACK_REFERENCE = PackReference()
+        return _PACK_REFERENCE.command(req["pack_command"])
     if req.get("worker_warmup"):
         import cupy as cp
 
