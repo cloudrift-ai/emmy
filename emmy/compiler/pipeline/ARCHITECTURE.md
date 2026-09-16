@@ -1435,7 +1435,9 @@ the compile's own, not the seed's (`pins.measured_precision_pins`): a row measur
 native-fp8 cell offered has to say so, or the replay republishes a regime that no longer enumerates it — measured
 evidence for a pick nothing can take again. A nested cut is a routing row of the
 piece it was offered on, so a cascade of cuts is as many routing rows, and the replay walks the set together: the entry
-whose identity a fork's kernel carries decides that fork, and the set's lead decides the rest. Receipts written this way
+whose identity a fork's kernel carries decides that fork — where several carry it, as a routing row and a plain row of
+one target do under the canonical identity, the one spelling a route — and the set's lead decides the rest. Receipts
+written this way
 carry NO route in `pins`, unlike the corpus convention above: seam spellings are kernel-local, and a cut key copied
 onto every receipt re-cuts any piece that happens to offer a same-spelled seam (a 4096-token DeepSeek V4 serving twin
 cuts its residual at `PLACE@map.3/map` twice, at two cascade steps, and a piece of it offers a third). For the same
