@@ -19,8 +19,12 @@ DEFAULT_API_URL = os.environ.get("CLOUDRIFT_API_URL", "https://api.cloudrift.ai"
 DEFAULT_IMAGE_URL_NVIDIA = (
     "https://storage.googleapis.com/cloudrift-vm-disks/disks/github/ubuntu-noble-server-gpu-580-129-20251015-183936.img"
 )
+# The 2026-04-30 build of this image disabled NVLink in the driver
+# (`NVreg_RegistryDwords=…NvLinkDisable=1`), so a four-card V100 rental staged every
+# tensor-parallel all-reduce through host memory: measured 138 prefill tok/s against 2,506 on
+# this build, which boots with the links up (driver 580.173.02, three 25.8 GB/s links per GPU).
 DEFAULT_IMAGE_URL_NVIDIA_PROPRIETARY = (
-    "https://storage.googleapis.com/cloudrift-vm-disks/disks/github/ubuntu-noble-server-gpup-580-129-20260430-084759.img"
+    "https://storage.googleapis.com/cloudrift-vm-disks/disks/github/ubuntu-noble-server-gpup-580-129-20260810-232733.img"
 )
 DEFAULT_IMAGE_URL_AMD = "https://storage.googleapis.com/cloudrift-vm-disks/disks/github/ubuntu-noble-server-rocm-64-20260220-025112.img"
 DEFAULT_CLOUDINIT_URL = "https://storage.googleapis.com/cloudrift-vm-disks/cloudinit/ubuntu-base.cloudinit"
