@@ -1817,7 +1817,7 @@ configs:
       REDUCE: ''
       STAGE: ''
       RASTER: ''
-    identity: 00fad7e3173eb40842ecb7e782b44eda0ece144d0b5c4fbfba211f8e74adb57d
+    identity: 77701690827617eafed132285f6a3d56994969e6f1147e8f369089255a0e8c67
   - name: k_linear_reduce_9555fa.5b69f06e91a4.0a3b5f8777c8
     bindings: {}
     pins:
@@ -1828,7 +1828,7 @@ configs:
       REDUCE: ''
       STAGE: ''
       RASTER: ''
-    identity: 0a3b5f8777c866b5b46d63c1460ff11620e855c97b5e82ae3d22563540f63bad
+    identity: 77701690827617eafed132285f6a3d56994969e6f1147e8f369089255a0e8c67
   - name: k_linear_reduce_9555fa.5b69f06e91a4.38e2665a4a3d
     bindings: {}
     pins:
@@ -1837,7 +1837,7 @@ configs:
       WORK: ''
       REDUCE: ''
       RASTER: ''
-    identity: 38e2665a4a3d3ed909d8e5271785d60e556f8e04d736e2f7eb5f885a607c6ae3
+    identity: 514d7e75a1b542db25273161419678acddcb9c25f1e8f8029d701294c48d6898
   - name: k_linear_reduce_9555fa.5b69f06e91a4.5d16bd037eb3
     bindings: {}
     pins:
@@ -1846,7 +1846,7 @@ configs:
       WORK: ''
       REDUCE: ''
       RASTER: ''
-    identity: 5d16bd037eb39fe51d7bbb8336471920d1620ff34c79c770e1e299b210029ba5
+    identity: 367c4ee40ddfad17b1326a163592e71e2a45b130d325dad1aaaf6f03729be6e4
   - name: k_linear_reduce_9555fa.5b69f06e91a4.6134c61c27d1
     bindings: {}
     pins:
@@ -1879,7 +1879,7 @@ configs:
       REDUCE: ''
       STAGE: ''
       RASTER: ''
-    identity: a3b8f3b57201c826161806551465d0fce8e33eb92a76ea0dddf49dc3a5743f0b
+    identity: 260adfcd93f89d957aae00043f804561863616e086a9e83eeb44bd7368d3bb52
   - name: k_linear_reduce_9555fa.5b69f06e91a4.a68e791f6801
     bindings: {}
     pins:
@@ -1901,7 +1901,7 @@ configs:
       REDUCE: ''
       STAGE: ''
       RASTER: ''
-    identity: cb394d5e9cec69a5d84bc5030bed0897885114a61b4065659b4fc69497825f48
+    identity: 260adfcd93f89d957aae00043f804561863616e086a9e83eeb44bd7368d3bb52
   - name: k_linear_reduce_9555fa.5b69f06e91a4.d92a225b6b12
     bindings: {}
     pins:
@@ -1913,6 +1913,28 @@ configs:
       STAGE: ''
       RASTER: ''
     identity: d92a225b6b1212003df0aee2e8a1dfaf536880c2dfc0f7889b139139afe4f6cb
+  - name: k_linear_reduce_bbf90a.8ee925ac3b7f.b4d81b5ef70e
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: ''
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    identity: b4d81b5ef70e230fdb202be5279da6e9180d9308f8f17e2181d41aeba93914bc
+  - name: k_linear_reduce_bbf90a.8ee925ac3b7f.f9fbafb9cc4c
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: ''
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    identity: f9fbafb9cc4c358a0c6f2b0f3b8dbe8930ed6169ea35d22b62ebdd8ed95cd951
 loops:
 - inputs: [x]
   outputs: [x_static_fp4_scale_bits, x_static_fp4_bits]

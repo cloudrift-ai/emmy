@@ -761,7 +761,7 @@ configs:
       WORK: ''
       REDUCE: ''
       RASTER: ''
-    identity: 462d7f994930c023308a03c2a767ef915ae5f61a6da39e9a3db855c975fa9e26
+    identity: abd14c21edf0ac872b8ea84fd98db4e49c774fb9c397406f7abef16249d81bde
   - name: k_mean_9444af.d7b2f750acbc.ad1606bf3cc7
     bindings: {}
     pins:
@@ -772,7 +772,7 @@ configs:
       REDUCE@map.2/map.2/reduce: ''
       WORK: ''
       RASTER: ''
-    identity: ad1606bf3cc7b8988f9f33535d20c0f3de8395b6d1cad6f8c2a98618de2475ce
+    identity: 1294437fc42603cd5bf40091fe7d980212f9a823bda522e6dfdcc615de987a9b
 loops:
 - inputs: [x]
   outputs: [mul_static_fp4_scale_bits, mul_static_fp4_bits]

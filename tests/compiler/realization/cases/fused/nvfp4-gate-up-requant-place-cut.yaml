@@ -1752,7 +1752,7 @@ configs:
       STAGE@map.2/map.2/reduce.2/inner: ''
       WORK: ''
       RASTER: ''
-    identity: 8fd7e39b14e98280bcfb9421af0fc3804723bbdafdd16d32a36905a55a5a0bba
+    identity: 165fbb139c4454657f533beb847bb25dc5eab7995a27701b9eab7e118420b63e
 loops:
 - inputs: [x]
   outputs: [x_static_fp4_scale_bits, x_static_fp4_bits]

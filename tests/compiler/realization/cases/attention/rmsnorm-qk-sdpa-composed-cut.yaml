@@ -90,7 +90,7 @@ configs:
     knobs:
       WORK: ''
       RASTER: ''
-    identity: 776436a6fcf08ab127a1fff55bce64c99ede79aa8c5f07f601e8b35e43d9cf1b
+    identity: 4c3336ca44eb2d8a06619435854222c24657434050a4985a91068b534dc13a1a
   - name: k_sdpa_rms_norm_reduce_013db8.ab097c856229.8ffb84f09edb
     bindings: {}
     pins:
@@ -99,4 +99,4 @@ configs:
       WORK: ''
       REDUCE: ''
       RASTER: ''
-    identity: 8ffb84f09edb8644628edb98db10118eee5665ecad415bada6b6d63860bd23a5
+    identity: 3e178fcc53b1d4123d216dce37a77eb787e1ed36a272af048fd53c8490a2396c
