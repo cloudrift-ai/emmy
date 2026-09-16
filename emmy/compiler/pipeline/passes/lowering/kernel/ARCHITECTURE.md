@@ -496,8 +496,8 @@ smem→register double-buffer) stays warp-only (an `ldmatrix` transform). The ne
 accumulator lifetime is handled by seeding the per-cell accumulators once in `_ScalarOps.state` (outside the outer
 loop) and marking the inner drain `Loop(seed=False)` so it folds without re-declaring. A masked **M** is supported
 (the drain indexes the slab by LOCAL tile coords, so an overhanging row reads in-slab and its store is guarded); a
-masked **N** or a transposed **B** declines staging (gmem-direct) — the B-slab fill would fault a row-crossing copy.
-Unstaged is byte-identical gmem-direct.
+masked **N**, transposed **B**, or plainly transposed **A** declines staging (gmem-direct). TMA cannot transpose a
+physical `(K, M)` box into an `(M, K)` slab; issuing it poisons the CUDA context. Unstaged is byte-identical gmem-direct.
 
 **Split-K composes with staging.** A split partial is a fresh kernel whose own schedule fork resolves a `STAGE`
 spec against the SLICED view (the `kslice` extent + the `ksplit`-offset operand indices), so the partial kernel's
