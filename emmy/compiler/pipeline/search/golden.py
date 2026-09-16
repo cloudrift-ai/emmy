@@ -1227,7 +1227,10 @@ def _replay(
         return {**referenced, **entry.route, **{str(key): str(value) for key, value in entry.knobs.items()}}
 
     lead = record if lead is None else lead
-    named = {entry.identity: entry for entry in siblings if entry.identity is not None}
+    # Entries can share an identity — a routing row and a plain row of one target. The one that
+    # spells a route decides the cut fork (it sorts last, and last wins); a row spelling none would
+    # read the kernel as fused.
+    named = {entry.identity: entry for entry in sorted(siblings, key=lambda entry: bool(entry.route)) if entry.identity is not None}
     if record.identity is not None:
         named[record.identity] = record
     set_digest = digest(
@@ -1358,6 +1361,7 @@ def _replay(
             if exact is not None:
                 declared, hit = exact
                 offered_keys.setdefault(identity, set()).update(wanted_keys & declared)
+                offered_pairs.setdefault(identity, set())
                 for key, value in wanted_pairs:
                     try:
                         if key in declared and validate_family_value(key, value) == value:
