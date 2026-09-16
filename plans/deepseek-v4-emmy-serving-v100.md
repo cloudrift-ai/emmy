@@ -22,12 +22,13 @@ report is the durable record, not this file.
 
 **Main has moved under that measurement.** #804 (the Loop IR identity re-key) merged 2026-09-15 and left 87 of this
 golden's 372 rows stale — decoded row by row on main (6eb37188) on 2026-09-16: the file had no stale row before
-#804, #804 alone produces the 87, and #807 adds none. Among them are all five post-family placement cuts, #799's
-M=1 cut included, each failing on a seam path that no longer resolves; the fastest expert row at every width (the
-best live row is 12× slower at M=1 and 65× at the dynamic width); the pre family's best M=1 row; and
-`post1.k_div_43_reduce` at M=1, which has no live measured row left, so a strict boot from main should refuse
-there (unconfirmed — it needs a host boot). Seven of the 87 are old-spelling duplicates of a row that still
-decodes; the other 80 are real losses. The 2.03 s above describes 7e9336e6 + #807, not main.
+#804, #804 alone produces the 87, and #807 adds none. Two things did it, and neither is a lost schedule. #804
+stamped 145 receipts of cut sets with their fused target's identity instead of their piece's, so the decode
+replayed each against the wrong kernel; and the replay picks the entry that decides a fork by identity, last one
+wins, so a receipt stamped that way stood in for its lead at the cut fork and fused the set. PR #815 fixes the
+replay rule and re-keys 59 receipts to their piece (the piece whose tree matches the one the row decorated before
+the re-key): the file decodes 325/372 there. The expert rows are among the recovered, tensor-core rows included —
+the lead's cut still yields the same pieces on main. The 2.03 s above describes 7e9336e6 + #807, not main.
 
 Stages −1, 1 (#651), 2 (#656) and 3 (#662) are done, and Stage 0's question — whether the compiler can produce a
 schedule fast enough to serve this model — is answered yes. Gate (c) passed on the repository golden at 7e9336e6 +
@@ -164,14 +165,15 @@ independent reference on `run --golden` — the loop-IR CPU runner exists but is
 take 1.3 s each on main; the whole file decodes in about two and a half minutes. The goldens gate can protect this
 file again, and what it reports today is the 87 stale rows.
 
-**The restamp of those 87 rows is owed, and it is the next step.** #804 restamped 600 identity fields across the
-repository but accepted this file's rows as breakage. 371 of its 372 rows carry a stored `identity:` that deploy
-joins on, so a restamp must replay each cut under its pins and map the seam paths and child identities to their new
-spellings — re-lifting targets is not enough, and re-recording is not the answer either: the measurements are good,
-only the spellings moved. Two rows do not even report a verdict; they raise a `KeyError` inside the replay, where a
-kernel's offered keys are recorded through the declared-keys path without a matching offered-pairs entry. That is a
-one-line fix with a red-then-green test, and it ships first so the gate reads all 372 rows. A fresh strict boot from
-main comes after the restamp and before any new recording; the boot20 numbers do not describe main.
+**47 rows are still owed after #815.** The five post-family cut leads (`3836f9`, `8e1e80`, `366777`, `9e578e` and
+#799's `4e26cc`) and their receipts: their seams name the softmax-statistics cone, one DAG node reached from two
+consumers, which the site walk files under whichever consumer reaches it first — #804's statement order changed
+that consumer, so `map.3/map…` paths relocated under `map.4/map.2/inner…`, and on `4e26cc` and `9e578e` the twist
+carrier moved between the two contractions. Mapping those seams means aligning the old and new trees as one DAG;
+until then the post decode and prefill kernels elect without their cuts. Four expert M=1 rows whose piece changed
+under #807's fold, ten rows whose pre-#804 identity matched no fork root of their own replay, and six with two
+shape-equal new pieces. Re-recording is not the answer for any of them: the measurements are good. A fresh strict
+boot from main comes after this and before any new recording; the boot20 numbers do not describe main.
 
 ## Operations handoff
 
