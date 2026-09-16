@@ -210,26 +210,37 @@ def handle_run(args):
         import json
 
         from emmy.compiler.backend.native import benchmark_pack
+        from emmy.compiler.dim import DEFAULT_SEQ_HINT
 
+        compiling = any(
+            value is not None
+            for value in (
+                args.input,
+                args.code,
+                args.ir,
+                args.golden,
+                args.realization,
+                args.dynamic,
+                args.ab,
+                args.bench_backends,
+                args.layer,
+                args.quantize,
+                args.dump_dir,
+                args.nvcc_flags,
+                args.gpu_arch,
+            )
+        )
+        incompatible = any(
+            (args.profile, args.record, args.record_greedy, args.strict_evidence, args.strict_correctness, args.no_record_nodes, args.debug)
+        )
         if (
             not args.bench
             or not args.json
-            or any(
-                getattr(args, name, None)
-                for name in (
-                    "input",
-                    "code",
-                    "ir",
-                    "golden",
-                    "realization",
-                    "dynamic",
-                    "profile",
-                    "record",
-                    "record_greedy",
-                    "ab",
-                    "bench_backends",
-                )
-            )
+            or compiling
+            or incompatible
+            or args.adapter != "causal-lm"
+            or args.seq_len != DEFAULT_SEQ_HINT
+            or args.seed != 0
         ):
             logger.error("--pack requires --bench --json and cannot be combined with compilation or model benchmark options")
             sys.exit(2)

@@ -27,7 +27,17 @@ def test_run_pack_delegates_without_compilation(tmp_path, monkeypatch):
     assert json.loads(output.read_text()) == result
 
 
-@pytest.mark.parametrize("flags", [[], ["--bench"], ["--bench", "--json", "result.json", "--code", "x"]])
+@pytest.mark.parametrize(
+    "flags",
+    [
+        [],
+        ["--bench"],
+        *[
+            ["--bench", "--json", "result.json", *extra]
+            for extra in (["--code", "x"], ["--layer", "0"], ["--nvcc-flags", ""], ["--adapter", "dit"], ["--seed", "1"])
+        ],
+    ],
+)
 def test_run_pack_rejects_incomplete_or_mixed_modes(flags):
     with pytest.raises(SystemExit) as error:
         handle_run(parse(["--pack", "bundle", *flags]))
