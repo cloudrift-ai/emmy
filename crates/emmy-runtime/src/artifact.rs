@@ -75,7 +75,10 @@ pub struct CudaFeatures {
 }
 
 pub fn dimensions(factors: &[Vec<Value>]) -> Result<(u32, u32, u32)> {
-    ensure!(factors.len() == LAUNCH_DIMENSIONS, "launch dimensions must have three axes");
+    ensure!(
+        factors.len() == LAUNCH_DIMENSIONS,
+        "launch dimensions must have three axes"
+    );
     let mut dims = [1u32; LAUNCH_DIMENSIONS];
     for (out, axis) in dims.iter_mut().zip(factors) {
         for factor in axis {

@@ -52,7 +52,10 @@ fn read_frame(reader: &mut impl Read) -> Result<Option<Vec<u8>>> {
     }
     reader.read_exact(&mut header[1..])?;
     let size = u64::from_le_bytes(header);
-    ensure!(size <= MAX_CONTROL_FRAME_BYTES, "control frame exceeds {MAX_CONTROL_FRAME_BYTES} bytes");
+    ensure!(
+        size <= MAX_CONTROL_FRAME_BYTES,
+        "control frame exceeds {MAX_CONTROL_FRAME_BYTES} bytes"
+    );
     let mut bytes = vec![0; size as usize];
     reader.read_exact(&mut bytes)?;
     Ok(Some(bytes))
@@ -70,7 +73,10 @@ fn main() -> Result<()> {
     while let Some(frame) = read_frame(&mut input)? {
         let response = (|| -> Result<serde_json::Value> {
             let request: Request = serde_json::from_slice(&frame)?;
-            ensure!(request.version == PROTOCOL_VERSION, "unsupported control protocol version");
+            ensure!(
+                request.version == PROTOCOL_VERSION,
+                "unsupported control protocol version"
+            );
             match request.command {
                 Command::Load { root, program } => {
                     let started = Instant::now();
@@ -121,7 +127,9 @@ fn main() -> Result<()> {
         let failed = response.is_err();
         let value = match response {
             Ok(value) => json!({"version": PROTOCOL_VERSION, "result": value}),
-            Err(error) => json!({"version": PROTOCOL_VERSION, "error": format!("{error:#}"), "retire": true}),
+            Err(error) => {
+                json!({"version": PROTOCOL_VERSION, "error": format!("{error:#}"), "retire": true})
+            }
         };
         let bytes = serde_json::to_vec(&value)?;
         output.write_all(&(bytes.len() as u64).to_le_bytes())?;
@@ -151,8 +159,10 @@ mod tests {
     #[test]
     fn protocol_reads_operations_and_rejects_unknown_fields() {
         assert!(
-            serde_json::from_value::<Request>(json!({"version":PROTOCOL_VERSION,"command":{"op":"release"}}))
-                .is_ok()
+            serde_json::from_value::<Request>(
+                json!({"version":PROTOCOL_VERSION,"command":{"op":"release"}})
+            )
+            .is_ok()
         );
         assert!(
             serde_json::from_value::<Request>(

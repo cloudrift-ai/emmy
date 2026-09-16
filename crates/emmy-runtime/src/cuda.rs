@@ -66,7 +66,8 @@ impl Executor {
             let block = dimensions(&launch.block)?;
             let grid = dimensions(&launch.grid)?;
             ensure!(
-                u64::from(block.0) * u64::from(block.1) * u64::from(block.2) <= MAX_THREADS_PER_BLOCK
+                u64::from(block.0) * u64::from(block.1) * u64::from(block.2)
+                    <= MAX_THREADS_PER_BLOCK
                     && block.0 <= MAX_BLOCK_DIMENSIONS.0
                     && block.1 <= MAX_BLOCK_DIMENSIONS.1
                     && block.2 <= MAX_BLOCK_DIMENSIONS.2,
@@ -130,7 +131,10 @@ impl Executor {
         executor.load_times_ms = BTreeMap::from([
             ("module_ms", module_ms),
             ("allocation_zero_ms", allocation_ms),
-            ("upload_ms", started.elapsed().as_secs_f64() * MILLISECONDS_PER_SECOND),
+            (
+                "upload_ms",
+                started.elapsed().as_secs_f64() * MILLISECONDS_PER_SECOND,
+            ),
         ]);
         Ok(executor)
     }
