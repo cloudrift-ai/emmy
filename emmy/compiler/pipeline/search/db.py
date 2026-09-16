@@ -338,7 +338,9 @@ class SearchDB:
     #       shift); stale ``lowering`` rows would silently never match.
     #   5: typed buffer roles — ``identity_key(with_io=True)`` colors each buffer in the identity
     #       graph by dtype and shape instead of folding an io list in declaration order, so every
-    #       deploy identity and variant key shifts; stale rows would silently never match.
+    #       deploy identity and variant key shifts; stale rows would silently never match. The same
+    #       version folds ``Const`` into the pure ``Let`` binding: the online-softmax fold's body
+    #       changes, so every softmax and attention identity shifts with it.
     _SCHEMA_VERSION = 5
 
     _SCHEMA = [

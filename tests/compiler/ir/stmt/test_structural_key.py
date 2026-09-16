@@ -19,7 +19,7 @@ from emmy.compiler.ir.stmt.identity import canonicalize_identity
 from emmy.compiler.ir.stmt.leaves import (
     Accum,
     Assign,
-    Const,
+    Let,
     Init,
     Load,
     Mma,
@@ -553,7 +553,7 @@ def test_structural_key_equal_for_renamed_const_and_init() -> None:
     def make(constant: str, initial: str) -> Body:
         return Body(
             (
-                Const(name=constant, value=2),
+                Let(name=constant, value=2),
                 Init(name=initial, identity=0, dtype=F32),
                 Assign(name="result", op="add", args=(constant, initial)),
                 Write(output="O", index=(), value="result"),
@@ -812,7 +812,7 @@ def test_normalize_body_refines_large_asymmetric_sibling_partition() -> None:
     """Graph context splits a local-form tie before the exact ordering fallback."""
 
     def make(prefix: str, *, reverse: bool) -> Body:
-        constants = tuple(Const(name=f"{prefix}_source_{index}", value=index) for index in range(9))
+        constants = tuple(Let(name=f"{prefix}_source_{index}", value=index) for index in range(9))
         consumers = tuple(
             Cond(
                 cond=Literal(1, "int"),
@@ -919,7 +919,7 @@ def test_structural_key_preserves_effect_order() -> None:
 def test_structural_key_preserves_a_read_across_a_write_to_its_buffer() -> None:
     prefix = (
         Load(name="old", input="B", index=()),
-        Const(name="replacement", value=7),
+        Let(name="replacement", value=7),
         Write(output="P", index=(), value="old"),
     )
     write = Write(output="B", index=(), value="replacement")
@@ -952,8 +952,8 @@ def test_structural_key_preserves_when_accumulator_state_is_observed() -> None:
     """A state read remains after the update whose value it observes."""
     prefix = (
         Init(name="total", identity=0, dtype=F32),
-        Const(name="first", value=1),
-        Const(name="second", value=2),
+        Let(name="first", value=1),
+        Let(name="second", value=2),
         Accum(name="total", value="first"),
     )
     final_update = Accum(name="total", value="second")

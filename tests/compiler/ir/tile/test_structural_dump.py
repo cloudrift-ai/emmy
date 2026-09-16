@@ -29,7 +29,7 @@ from emmy.compiler.ir.schedule.classic import (
     ProjectionSchedule,
     ReductionSchedule,
 )
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Const, Load, Loop, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Let, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, TileOp
 from emmy.compiler.ir.tile._dump import pretty
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
@@ -221,7 +221,7 @@ def test_a_twisted_node_prints_its_stable_combine_then_psi_and_the_base_as_helpe
 
     fold = Fold(
         operands=(_stat_fold(),),
-        lift=Lambda(params=("k", "acc0"), body=Body((Const(name="one", value=1.0),)), results=("acc0", "one")),
+        lift=Lambda(params=("k", "acc0"), body=Body((Let(name="one", value=1.0),)), results=("acc0", "one")),
         init=(-1e30, 0.0),
         base=Lambda.componentwise(SOFTMAX.base[:2], ("m", "l")),
         twist=Twist(recipe=SOFTMAX, channels=(0,)),

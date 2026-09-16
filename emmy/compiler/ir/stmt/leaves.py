@@ -13,7 +13,7 @@ from functools import cached_property
 from emmy.compiler.dtype import F32, DataType
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl, reduce_spelling
-from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var, _float_lit
+from emmy.compiler.ir.expr import BinaryExpr, Expr, FlatIndex, Literal, Var, _float_lit
 from emmy.compiler.ir.stmt.base import (
     _INTEGER_DTYPES,
     RenderCtx,
@@ -706,35 +706,54 @@ class Init(Stmt):
 
 
 @dataclass(frozen=True)
-class Const(Stmt):
-    """A pure constant binding: ``<dtype> <name> = <value>;`` — one scalar literal as an SSA name.
+class Let(Stmt):
+    """A pure binding of one expression to an SSA name: ``<dtype> <name> = <value>;``.
 
-    The twisted carrier's injection needs it: online softmax folds each element as ``(score, 1)``,
-    and the denominator's ``1`` must be a def the lift can return, since a lambda's results are
-    names. Pure, so it is legal inside a stored ``Lambda`` body. ``dtype`` is stamped at kernel
-    lowering like an ``Assign``'s — f32 when nothing narrows it.
+    Three things reach a body this way — a scalar literal (the twisted carrier's injection binds
+    the ``1`` online softmax folds each element with, so the lift can return it by name), an
+    integer index precomputed once outside a nested hot loop, and a buffer coordinate's flattened
+    offset (:class:`~emmy.compiler.ir.expr.FlatIndex`) reused across a copy's trips. Pure, so it
+    is legal inside a stored ``Lambda`` body. A float literal's ``dtype`` is stamped at kernel
+    lowering like an ``Assign``'s (f32 when nothing narrows it); an index renders as ``auto``
+    and takes its expression's type. A bare number coerces to a float ``Literal``.
     """
 
     pure = True
 
     name: str
-    value: float
+    value: Expr
     dtype: DataType | None = None
 
+    def __post_init__(self) -> None:
+        if isinstance(self.value, (int, float)):
+            object.__setattr__(self, "value", Literal(float(self.value)))
+
     def deps(self) -> tuple[str, ...]:
-        return ()
+        return tuple(dict.fromkeys(self.value.free_vars()))
 
     def defines(self) -> tuple[str, ...]:
         return (self.name,)
 
+    def exprs(self) -> tuple[Expr, ...]:
+        return (self.value,)
+
+    def external_reads(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(e.buffer for e in self.value.subterms() if isinstance(e, FlatIndex)))
+
+    def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
+        value = self.value.rebuild(lambda e: replace(e, buffer=rename.get(e.buffer, e.buffer)) if isinstance(e, FlatIndex) else e)
+        return self if value == self.value else replace(self, value=value)
+
     def pretty(self, indent: str = "") -> list[str]:
-        return [f"{indent}{self.name} = {self.value:g}"]
+        prefix = f"{self.dtype.name} " if self.dtype is not None else ""
+        return [f"{indent}{prefix}{self.name} = {self.value.pretty()}"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
-        dtype = self.dtype or F32
-        ctx.ssa_dtypes[self.name] = dtype.name
-        return [f"{_pad(ctx.indent)}{ctx.type_name(dtype)} {self.name} = {ctx.identity_literal(self.value, dtype)};"]
-
+        if self.dtype is None:
+            return [f"{_pad(ctx.indent)}auto {self.name} = {self.value.render(ctx)};"]
+        ctx.ssa_dtypes[self.name] = self.dtype.name
+        value = ctx.identity_literal(self.value.value, self.dtype) if isinstance(self.value, Literal) else self.value.render(ctx)
+        return [f"{_pad(ctx.indent)}{ctx.type_name(self.dtype)} {self.name} = {value};"]
 
 # Map ``ElementwiseImpl`` op names to compound-assignment operator symbols
 # used by ``Write.pretty()`` for reduce-writes (split-K partial accumulation).

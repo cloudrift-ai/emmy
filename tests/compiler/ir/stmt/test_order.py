@@ -10,7 +10,7 @@ from emmy.compiler.ir.kernel.ir import CpAsyncCommit, CpAsyncWait, Sync, WgmmaCo
 from emmy.compiler.ir.stmt.blocks import Cond, Loop
 from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.identity import canonicalize_identity
-from emmy.compiler.ir.stmt.leaves import Assign, Const, Load, Write
+from emmy.compiler.ir.stmt.leaves import Assign, Let, Load, Write
 from emmy.compiler.ir.stmt.normalize import normalize_body
 from emmy.compiler.ir.stmt.order import _canonical_ranks, _equitable_partition, ordering_constraints
 
@@ -192,9 +192,9 @@ def test_identity_combines_buffer_rename_with_nested_reordering() -> None:
 
 def test_repeated_definition_capture_uses_nearest_predecessor() -> None:
     def make(name: str, inner: str, result: str, *, late_before_capture: bool) -> Body:
-        first = Const(name=name, value=1.0)
+        first = Let(name=name, value=1.0)
         capture = Cond(cond=Literal(True), body=(Assign(name=inner, op="abs", args=(name,)),))
-        second = Const(name=name, value=2.0)
+        second = Let(name=name, value=2.0)
         tail = Assign(name=result, op="exp", args=(name,))
         middle = (second, capture) if late_before_capture else (capture, second)
         return Body((first, *middle, tail))
@@ -215,15 +215,15 @@ def test_shadowing_after_the_read_keeps_the_outer_dependency() -> None:
                 cond=Literal(True),
                 body=(
                     Assign(name="y", op="abs", args=("x",)),
-                    Cond(cond=Literal(True), body=(Const(name="x", value=2.0), Write(output="P", index=(), value="x"))),
+                    Cond(cond=Literal(True), body=(Let(name="x", value=2.0), Write(output="P", index=(), value="x"))),
                     Write(output="O", index=(), value="y"),
                 ),
             ),
-            Const(name="x", value=1.0),
+            Let(name="x", value=1.0),
         )
     )
     normalized = normalize_body(body)
-    assert isinstance(normalized[0], Const)
+    assert isinstance(normalized[0], Let)
     assert isinstance(normalized[1], Cond)
 
 

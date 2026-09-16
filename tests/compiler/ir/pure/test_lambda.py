@@ -9,7 +9,7 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.twist import SOFTMAX
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Const, Init, Load, Loop, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Let, Init, Load, Loop, Write
 
 # --- Lambda formation: the Stmt.pure gate + results-defined ------------------------------------- #
 
@@ -62,8 +62,8 @@ def test_lambda_rejects_undefined_results() -> None:
 
 def test_lambda_allows_param_results_and_constant_results() -> None:
     """ι is spelled in the lift: softmax's singleton is ``(x, 1)`` — the constant component is a
-    ``Const`` def, a name like any other result."""
-    lam = Lambda(params=("k", "x"), body=Body((Const(name="one", value=1.0),)), results=("x", "one"))
+    ``Let`` def, a name like any other result."""
+    lam = Lambda(params=("k", "x"), body=Body((Let(name="one", value=1.0),)), results=("x", "one"))
     assert lam.results == ("x", "one") and lam.defined == frozenset({"k", "x", "one"})
 
 
