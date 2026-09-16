@@ -40,6 +40,7 @@ from emmy.compiler.ir.expr import (
     TernaryExpr,
     Var,
 )
+from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.stmt import (
     INDENT,
     Accum,
@@ -1168,6 +1169,7 @@ class FragmentApply(Stmt):
         lines.append(f"{pad}}}")
         return lines
 
+
 @dataclass(frozen=True)
 class FragmentRowReduce(Stmt):
     """Per-ROW reduction over one warp's ``mma.sync`` C fragments — the chunk pivot and the
@@ -1226,6 +1228,10 @@ class FragmentRowReduce(Stmt):
 #: layout offset) for these.
 FRAG_ROW = "__frow"
 FRAG_COL = "__fcol"
+#: The reserved offset Vars a :class:`RegStore` epilogue is written over — the element's row / col
+#: OFFSET within its fragment, added to the cell base the expression already carries.
+ELEM_ROW = "__M__"
+ELEM_COL = "__N__"
 
 
 # ---------------------------------------------------------------------------
@@ -2159,55 +2165,6 @@ class WgmmaWait(Stmt):
 
 
 @dataclass(frozen=True)
-class EpilogueLoad:
-    """One leaf operand of a fused pointwise epilogue (see :class:`RegEpilogue`).
-
-    Not a body :class:`Stmt` — a payload riding the :class:`RegStore`.
-    ``index`` is the cell-base coordinate tuple (struct-shared with the
-    epilogue's Write); per fragment element the render adds the element's own
-    row / col motion on every dim whose ``role`` is ``"m"`` / ``"n"`` (at
-    *this* buffer's dim stride — so a transposed or broadcast operand reads
-    correctly), and nothing on ``"fixed"`` dims (literals, batch / grid vars —
-    uniform across the cell)."""
-
-    name: str
-    buffer: str
-    index: tuple
-    roles: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class RegEpilogue:
-    """A pure pointwise SSA chain folded into the fragment store.
-
-    Captured by ``kernel/005_lower_atom_tile`` from the backward slice between
-    the accumulator and the Write (the scalar Load / Assign stmts are stripped
-    — the accumulator has no scalar SSA name on the fragment path). The render
-    evaluates the chain per fragment element with ``acc`` substituted by the
-    element and each leaf loaded at the element's own (row, col). Chain ops
-    reuse :class:`Assign` rendering, including its optional dtype, promotion,
-    native-op, and conversion rules. ``ops`` are ``(name, op_name, args,
-    dtype)`` in topological (body) order; ``result`` is the SSA name the Write
-    stored."""
-
-    acc: str
-    loads: tuple[EpilogueLoad, ...]
-    ops: tuple[tuple[str, str, tuple[str, ...], DataType | None], ...]
-    result: str
-    # Coord-predicated Selects (the causal attention mask), rendered as per-element ternaries as
-    # soon as their branch values are bound. Each is ``(name, branches)`` where
-    # ``branches`` is ``((cond_expr | None, value_name), ...)`` — the predicate
-    # carries its σ-applied cell bases plus ``__M__`` / ``__N__`` placeholder
-    # Vars the store substitutes with the fragment element's row/col offsets;
-    # the last branch is the else.
-    selects: tuple[tuple[str, tuple[tuple[Expr | None, str], ...]], ...] = ()
-    # Additional ``(acc_name, frag_name)`` accumulator bindings — a multi-fold contraction's
-    # extra C fragments (the fused gate/up edge): each name substitutes to its fragment's
-    # element alongside ``acc``, so the chain combines the folds per cell (SwiGLU et al).
-    extra_accs: tuple[tuple[str, str], ...] = ()
-
-
-@dataclass(frozen=True)
 class RegStore(Stmt):
     """Store an mma.sync f32 accumulator array to the output buffer with a
     per-lane epilogue downconvert.
@@ -2219,10 +2176,16 @@ class RegStore(Stmt):
     each value is converted via ``__float2half``. ``ldm`` is the output row stride
     (N) — ``0`` auto-resolves from the buffer's inner extent.
 
-    ``epilogue`` optionally carries a fused pointwise chain
-    (:class:`RegEpilogue` — residual adds, bias / scale broadcasts,
-    activations): evaluated per fragment element in f32 right before the
-    downconvert (the CUTLASS epilogue-visitor pattern).
+    ``epilogue`` optionally carries a fused pointwise chain — residual adds, bias / scale
+    broadcasts, activations, a coordinate ``Select`` — as a pure :class:`Lambda` over the
+    ordinary ``Load`` / ``Assign`` / ``Select`` stmts of the projection tail: its leading params
+    bind, in order, the accumulator names to ``frag`` and ``extra_frags`` (a multi-fold node's
+    additional C fragments, so the chain combines the channels per cell — SwiGLU et al.), its
+    trailing params are the coordinates the body reads (``Lambda.closing``), and its one result is
+    the stored value. Evaluated per fragment element in f32 right before the downconvert (the
+    CUTLASS epilogue-visitor pattern): each param substitutes to that element, and the reserved
+    :data:`ELEM_ROW` / :data:`ELEM_COL` vars in a ``Load`` index or ``Select`` predicate substitute
+    to the element's row / col offset within the fragment (the cell base is already in the expression).
 
     ``m_guard`` / ``n_guard`` carry a masked-tile boundary as ``(base Expr,
     bound Expr)`` — the tile's row / col coordinate of fragment element (0,0)
@@ -2259,7 +2222,8 @@ class RegStore(Stmt):
     frag: str
     shape: tuple[int, int, int]
     ldm: int = 0
-    epilogue: RegEpilogue | None = None
+    epilogue: Lambda | None = None
+    extra_frags: tuple[str, ...] = ()
     m_guard: tuple[Expr, Expr] | None = None
     n_guard: tuple[Expr, Expr] | None = None
     atomic: bool = False
@@ -2287,17 +2251,15 @@ class RegStore(Stmt):
     col_dim: int | None = None
 
     def deps(self) -> tuple[str, ...]:
-        extra = () if self.epilogue is None else tuple(fr for _, fr in self.epilogue.extra_accs)
-        return (self.frag, *extra)
+        return (self.frag, *self.extra_frags)
 
     def external_reads(self) -> tuple[str, ...]:
-        # The fused epilogue's leaf loads are gmem reads this stmt performs
-        # directly (their original Load stmts were stripped by
-        # 005_lower_atom_tile), so they must be declared here for the kernel
-        # signature / render shapes to include the buffers.
+        # The fused epilogue's leaf loads are gmem reads this stmt performs directly (their
+        # original Load stmts were stripped by the atom lowering), so they must be declared here for
+        # the kernel signature / render shapes to include the buffers.
         if self.epilogue is None:
             return ()
-        return tuple(ld.buffer for ld in self.epilogue.loads)
+        return tuple(dict.fromkeys(ld.input for ld in self.epilogue.body if isinstance(ld, Load)))
 
     def external_writes(self) -> tuple[str, ...]:
         return (self.dst_buffer,)
@@ -2307,7 +2269,7 @@ class RegStore(Stmt):
         return self if new == self.dst_buffer else replace(self, dst_buffer=new)
 
     def exprs(self) -> tuple[Expr, ...]:
-        epi = () if self.epilogue is None else tuple(e for ld in self.epilogue.loads for e in ld.index)
+        epi = () if self.epilogue is None else tuple(e for st in self.epilogue.body for e in st.exprs())
         guards = tuple(e for g in (self.m_guard, self.n_guard) if g is not None for e in g)
         return (*self.dst_index, *epi, *guards)
 
@@ -2315,8 +2277,8 @@ class RegStore(Stmt):
         idx = ", ".join(e.pretty() for e in self.dst_index)
         epi = ""
         if self.epilogue is not None:
-            chain = ", ".join(op for _, op, _, _ in self.epilogue.ops)
-            bufs = ", ".join(ld.buffer for ld in self.epilogue.loads)
+            chain = ", ".join(st.op.name for st in self.epilogue.body if isinstance(st, Assign))
+            bufs = ", ".join(self.external_reads())
             epi = f" epilogue[{chain}]({bufs or 'no loads'})"
         guards = ""
         if self.m_guard is not None:
@@ -2394,10 +2356,9 @@ class RegStore(Stmt):
         reads inside element ``i``'s boundary check). Without
         an epilogue the values are the bare ``frag[i]`` and the preambles are
         empty. With one, each element ``i`` (row ``_g``/``_g+8``, col
-        ``2_t+{0,1}``) declares its leaf loads (converted to f32; offsets per
-        the dim roles at each buffer's own stride) and the chain ops (via the
-        scalar ``Assign`` renderer), all scoped inside the store's ``{ }``
-        block. Leaf loads are
+        ``2_t+{0,1}``) declares its leaf loads (converted to f32, at the
+        element's own coordinates) and the chain ops (via the scalar
+        ``Assign`` renderer), all scoped inside the store's ``{ }`` block. Leaf loads are
         scalar; lanes ``_t = 0..3`` cover 8 contiguous columns, so the warp's
         accesses coalesce regardless."""
         coords = self._element_coords()
@@ -2407,56 +2368,29 @@ class RegStore(Stmt):
 
         epi = self.epilogue
         conv = {"f16": "__half2float({})", "bf16": "__bfloat162float({})"}
+        frags = (self.frag, *self.extra_frags)
         per_elem: list[list[str]] = []
         vals: list[str] = []
-        for i, (row, col, row_off, col_off) in enumerate(coords):
+        for i, (_row, _col, row_off, col_off) in enumerate(coords):
             lines: list[str] = []
-            env = {epi.acc: f"{self.frag}[{i}]", **{a: f"{fr}[{i}]" for a, fr in epi.extra_accs}}
+            env = {acc: f"{fr}[{i}]" for acc, fr in zip(epi.params, frags, strict=False)}
             for value in env.values():
                 ctx.ssa_dtypes[value] = "f32"
-            for ld in epi.loads:
-                temp = f"{ld.name}_e{i}"
-                if ld.buffer in ctx.literal_constants:
-                    lines.append(f"const float {temp} = {float(ctx.literal_constants[ld.buffer])!r}f;")
-                    env[ld.name] = temp
+            # The reserved ``ELEM_ROW`` / ``ELEM_COL`` vars substitute to this element's row / col offset
+            # within the fragment; a Load index and a Select predicate already carry the cell base.
+            coord = {ELEM_ROW: row_off, ELEM_COL: col_off}
+            for st in epi.body:
+                if isinstance(st, Load):
+                    temp = f"{st.name}_e{i}"
+                    if st.input in ctx.literal_constants:
+                        lines.append(f"const float {temp} = {float(ctx.literal_constants[st.input])!r}f;")
+                    else:
+                        flat = render_index(st.input, tuple(e.substitute(coord) for e in st.index), ctx)
+                        dt = ctx.buffer_dtypes.get(st.input, "f32")
+                        lines.append(f"const float {temp} = {conv.get(dt, '{}').format(f'{st.input}[{flat}]')};")
+                    env[st.name] = temp
                     ctx.ssa_dtypes[temp] = "f32"
-                    continue
-                flat = render_index(ld.buffer, ld.index, ctx)
-                parts = [flat]
-                for d, role in enumerate(ld.roles):
-                    if role == "fixed":
-                        continue
-                    stride = _dim_stride(ld.buffer, d, ctx)
-                    motion = row if role == "m" else col
-                    parts.append(motion if stride == 1 else f"{motion} * {stride}")
-                addr = " + ".join(parts)
-                dt = ctx.buffer_dtypes.get(ld.buffer, "f32")
-                lines.append(f"const float {temp} = {conv.get(dt, '{}').format(f'{ld.buffer}[{addr}]')};")
-                env[ld.name] = temp
-                ctx.ssa_dtypes[temp] = "f32"
-            # Coord-predicated Selects (the causal mask): a per-element ternary.
-            # ``__M__`` / ``__N__`` substitute to this element's row/col offset;
-            # the captured predicate already carries its semantic cell base.
-            coord = {"__M__": row_off, "__N__": col_off}
-            pending = list(epi.selects)
-            # A select renders once its branch values are bound: a mask over a loaded value renders
-            # ahead of the chain, a mask over an op's result right after that op.
-            for op in (None, *epi.ops):
-                if op is not None:
-                    name, op_name, args, dtype = op
-                    rendered_name = f"{name}_e{i}"
-                    rendered = Assign(
-                        name=rendered_name,
-                        op=op_name,
-                        args=tuple(env[arg] for arg in args),
-                        dtype=dtype,
-                    ).render(replace(ctx, indent=0))[0]
-                    lines.append(f"const {rendered}")
-                    env[name] = rendered_name
-                while ready := [sel for sel in pending if all(value in env for _, value in sel[1])]:
-                    sel_name, branches = ready[0]
-                    pending.remove(ready[0])
-
+                elif isinstance(st, Select):
                     # The select is declared f32, and a chain op keeps the tail's own dtype, so a
                     # branch value narrowed by an earlier op converts back here — a ternary over a
                     # ``__half`` and a ``float`` does not compile.
@@ -2464,15 +2398,19 @@ class RegStore(Stmt):
                         rendered = env[value]
                         return conv.get(ctx.ssa_dtypes.get(rendered, "f32"), "{}").format(rendered)
 
-                    expr = widened(branches[-1][1])
-                    for cond, value in reversed(branches[:-1]):
-                        rc = cond.substitute(coord).render(ctx)
-                        expr = f"(({rc}) ? {widened(value)} : {expr})"
-                    lines.append(f"const float {sel_name}_e{i} = {expr};")
-                    env[sel_name] = f"{sel_name}_e{i}"
-                    ctx.ssa_dtypes[env[sel_name]] = "f32"
+                    expr = widened(st.branches[-1].value)
+                    for br in reversed(st.branches[:-1]):
+                        rc = br.select.substitute(coord).render(ctx)
+                        expr = f"(({rc}) ? {widened(br.value)} : {expr})"
+                    lines.append(f"const float {st.name}_e{i} = {expr};")
+                    env[st.name] = f"{st.name}_e{i}"
+                    ctx.ssa_dtypes[env[st.name]] = "f32"
+                else:
+                    rendered = replace(st, name=f"{st.name}_e{i}", args=tuple(env[a] for a in st.args)).render(replace(ctx, indent=0))[0]
+                    lines.append(f"const {rendered}")
+                    env[st.name] = f"{st.name}_e{i}"
             per_elem.append(lines)
-            vals.append(env[epi.result])
+            vals.append(env[epi.results[0]])
         return per_elem, vals
 
     @staticmethod
@@ -3158,34 +3096,15 @@ def _(s: FragmentPromote, rename, sigma, axis_fn):
 
 @_rewrite_kind.register
 def _(s: RegStore, rename, sigma, axis_fn):
-    # The epilogue's chain SSA names are render-local (scoped per element
-    # inside the store's block), so only the load index Exprs σ-substitute —
-    # that threads the per-cell replication offsets through, exactly like
-    # ``dst_index``.
+    # The epilogue's chain SSA names are render-local (scoped per element inside the store's
+    # block), so only its Exprs σ-substitute — the load indices and the captured predicates thread
+    # the per-cell replication offsets through exactly like ``dst_index``. The lambda is re-closed
+    # over what the substituted body reads (its trailing coordinate params); the leading params
+    # stay bound to the store's fragments, which rename with the store.
     epilogue = s.epilogue
     if epilogue is not None:
-        epilogue = RegEpilogue(
-            acc=epilogue.acc,
-            loads=tuple(
-                EpilogueLoad(name=ld.name, buffer=ld.buffer, index=tuple(sigma.apply(e) for e in ld.index), roles=ld.roles)
-                for ld in epilogue.loads
-            ),
-            ops=epilogue.ops,
-            result=epilogue.result,
-            # Captured predicates carry semantic cell-base expressions plus
-            # placeholders, so replicate the real coordinate vars like load indices.
-            selects=tuple(
-                (
-                    name,
-                    tuple((None if cond is None else sigma.apply(cond), value) for cond, value in branches),
-                )
-                for name, branches in epilogue.selects
-            ),
-            # The extra channel accumulators rename with the store's own fragment (they are
-            # per-cell C-fragment names too) — dropping them here left the multi-channel combine
-            # (the gemma GeGLU ``acc2``) unbound at render.
-            extra_accs=tuple((a, rename(fr)) for a, fr in epilogue.extra_accs),
-        )
+        body = Body(tuple(st.rewrite(lambda n: n, sigma) for st in epilogue.body))
+        epilogue = Lambda.closing(epilogue.params[: 1 + len(s.extra_frags)], body, epilogue.results)
 
     # Guard base/bound Exprs σ-substitute like ``dst_index`` (the per-cell
     # replicator's offsets must reach the boundary predicate; the bound is a
@@ -3203,6 +3122,7 @@ def _(s: RegStore, rename, sigma, axis_fn):
         s,
         dst_index=tuple(sigma.apply(e) for e in s.dst_index),
         frag=rename(s.frag),
+        extra_frags=tuple(rename(f) for f in s.extra_frags),
         epilogue=epilogue,
         m_guard=_sub_guard(s.m_guard),
         n_guard=_sub_guard(s.n_guard),
@@ -3260,5 +3180,3 @@ def _(s: FragmentRowReduce, rename, sigma, axis_fn):
     return FragmentRowReduce(
         top=rename(s.top), bot=rename(s.bot), frags=tuple(rename(f) for f in s.frags), op=s.op, layout=s.layout, dtype=s.dtype
     )
-
-

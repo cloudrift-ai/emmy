@@ -28,9 +28,7 @@ __all__ = ["Labeling", "Ordering", "bound_axes", "ordering_constraints", "relati
 
 def _ordered_exported_accs(body: Body) -> tuple[str, ...]:
     """Accumulator names exported by ``body``, deduplicated in structural order."""
-    return tuple(
-        dict.fromkeys(name for stmt in Body.coerce(body).iter() if isinstance(stmt, Accum) for name in stmt.carried_names())
-    )
+    return tuple(dict.fromkeys(name for stmt in Body.coerce(body).iter() if isinstance(stmt, Accum) for name in stmt.carried_names()))
 
 
 def _ordered_sibling_defs(stmt: Stmt) -> tuple[str, ...]:

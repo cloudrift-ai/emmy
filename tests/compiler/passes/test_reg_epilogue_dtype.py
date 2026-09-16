@@ -31,7 +31,7 @@ def test_typed_copy_narrows_the_fragment_value_before_its_consumer() -> None:
         Assign(name="result", op=ElementwiseImpl("copy"), args=("narrow",)),
     )
 
-    assert epilogue.ops[0][3] is F16
+    assert epilogue.body[0].dtype is F16
     assert "const __half narrow_e0 = __float2half(_c[0]);" in source
     assert "const __half result_e0 = narrow_e0;" in source
 
@@ -39,7 +39,7 @@ def test_typed_copy_narrows_the_fragment_value_before_its_consumer() -> None:
 def test_untyped_copy_keeps_the_existing_f32_epilogue() -> None:
     source, epilogue = _render(Assign(name="result", op=ElementwiseImpl("copy"), args=("acc",)))
 
-    assert epilogue.ops[0][3] is None
+    assert epilogue.body[0].dtype is None
     assert "const float result_e0 = _c[0];" in source
     assert "__float2half(_c[0])" not in source
 
