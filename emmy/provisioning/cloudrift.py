@@ -16,8 +16,12 @@ from emmy.provisioning.types import VMConnectionInfo
 logger = logging.getLogger(__name__)
 
 DEFAULT_API_URL = os.environ.get("CLOUDRIFT_API_URL", "https://api.cloudrift.ai")
+# The same-day twin of the proprietary build below, and the same compute-only image
+# configuration, so it carries the NVLink fix too. The 2025-10-15 build it replaces predates that
+# fix. NVLink itself is unverified here: no A100 or H200 capacity was rentable to watch links come
+# up, and the RTX parts this image usually lands on have none.
 DEFAULT_IMAGE_URL_NVIDIA = (
-    "https://storage.googleapis.com/cloudrift-vm-disks/disks/github/ubuntu-noble-server-gpu-580-129-20251015-183936.img"
+    "https://storage.googleapis.com/cloudrift-vm-disks/disks/github/ubuntu-noble-server-gpu-580-129-20260810-232754.img"
 )
 # The 2026-04-30 build of this image disabled NVLink in the driver
 # (`NVreg_RegistryDwords=…NvLinkDisable=1`), so a four-card V100 rental staged every
