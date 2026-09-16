@@ -245,4 +245,23 @@ mod tests {
         buffer.dtype = "unknown".into();
         assert!(buffer.byte_len().is_err());
     }
+
+    #[test]
+    fn artifact_resolves_only_bundled_members() {
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!("emmy-artifact-{}-{nonce}", std::process::id()));
+        std::fs::create_dir_all(root.join("cubin")).unwrap();
+        std::fs::write(root.join("plan.json"), serde_json::to_vec(&example()).unwrap()).unwrap();
+        std::fs::write(root.join("w.bin"), 2.0f32.to_le_bytes()).unwrap();
+        std::fs::write(root.join("cubin/ab.cubin"), b"compiler binary").unwrap();
+        let mut manifest = json!({"format":1,"standalone":1,"environment":{"arch":"sm_89"},
+            "programs":{"p":"plan.json"},"bindings":{"p":{"w":"w.bin"}}});
+        std::fs::write(root.join("manifest.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+        assert!(Artifact::load(&root, "p").is_ok());
+        assert!(Artifact::load(&root, "missing").is_err());
+        manifest["programs"]["p"] = json!("/etc/passwd");
+        std::fs::write(root.join("manifest.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+        assert!(Artifact::load(&root, "p").is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
