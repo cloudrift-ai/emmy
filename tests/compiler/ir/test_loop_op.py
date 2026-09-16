@@ -7,7 +7,6 @@ from frozendict import frozendict
 
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
-from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.loop import (
     Accum,
     Assign,
@@ -19,6 +18,7 @@ from emmy.compiler.ir.loop import (
     SelectBranch,
     Write,
 )
+from emmy.compiler.ir.stmt.body import Body
 
 
 def Port(index=()):

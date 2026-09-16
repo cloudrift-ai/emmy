@@ -320,14 +320,14 @@ transfers; it is the strict golden decode's key), while `structural=False`
 names the exact kernel. Measured evidence itself joins a kernel by its `S_*` signature, not by
 this key.
 
-The design lesson the interface encodes: a fact a schedule reads must be in the body or the io
-fingerprint, never re-derived beside a caller. The pool digest once shipped without per-axis extents,
+The design lesson the interface encodes: a fact a schedule reads must be in the body or the typed
+buffer roles, never re-derived beside a caller. The pool digest once shipped without per-axis extents,
 so two matmuls with transposed M/N — equal terms, equal `S_ext_*` summaries — shared one pool
 entry over spaces of 57442 and 8280 candidates; buffer shapes and the output specifications were
 once missing too, so a `(128, 128)` output and a `(4, 32, 128)` one over the same iteration space
 collided — the split form spells its coordinate as a dim pair the fragment store can address only
 under a divisibility rule, and a golden measured on the flat kernel joined a kernel that could not
-realize its row. Both facts now live in the completed loop body and the io fingerprint.
+realize its row. Both facts now live in the completed loop body and its typed buffer roles.
 
 Static extent products used as structural features saturate at the largest finite float. Feature extraction therefore
 stays bounded even for a deeply nested symbolic-model fixture whose exact integer product is too large to convert,

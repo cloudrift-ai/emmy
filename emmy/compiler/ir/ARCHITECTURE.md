@@ -356,8 +356,8 @@ separate term hasher.
 The `TileOp`'s body identity is the canonical digest of the nest `lower()` derives (the body is the
 term's normal form); the variant key (`identity_key(with_io=True, with_knobs=True)`) folds the schedule-free body
 identity with the knobs; and the deploy join key (the deploy identity (`identity_key(with_io=True)`), over
-`TileOp.loop_body`) adds the io fingerprint, so term re-spellings and cluster-sibling ops that lower alike share
-schedule evidence.
+`TileOp.loop_body`) types the roles the body reads its buffers through, so term re-spellings and cluster-sibling ops
+that lower alike share schedule evidence.
 `Fold.deps()` exposes names captured outside the lift params, including captures reached recursively through operand
 edges. A contraction deliberately hides its pure lift body from generic nested-body walks, so this direct dependency
 surface is what keeps an operand's captured statistic ordered before the contraction that reads it. A read walk
@@ -557,9 +557,11 @@ canonicalized before validation:
   inner loop and the per-iter cost drops from XU divide to FMA
   multiply.
 - `hoist_loop_invariants` — pull loop-invariant Assigns out of reduce
-  Loops. Effect summaries are cached on immutable statements, and `Body.axis_dependencies` retains only the axes
-  reachable from each definition. Long SSA chains therefore remain linear in definitions × loop depth instead of
-  materializing the quadratic full SSA dependency closure.
+  Loops. The hoisted set is closed under the scope's ordering constraints, the same ones the sibling order respects:
+  the consumer of an accumulator a pinned reduction exports, a read of a buffer the loop writes, and anything behind
+  a barrier or a declaration stay in the loop. Effect summaries are cached on immutable statements, and
+  `Body.axis_dependencies` retains only the axes reachable from each definition. Long SSA chains therefore remain
+  linear in definitions × loop depth instead of materializing the quadratic full SSA dependency closure.
 - `dedup_loads` — after expression simplification, keep one `Load` for each identical
   `(input, index, width, dtype)` read in a scope and rewire every scalar or vector lane. A write invalidates retained
   reads of that buffer, including around a nested scope with a write. This is canonicalization for every Loop / Tile
@@ -579,7 +581,9 @@ canonicalized before validation:
   complete body tree, and chooses one dependency- and effect-valid statement order. Vertices represent scopes,
   statements, lexical definitions, axes, source axes, and external buffers; colored relations retain operand
   positions, captures, aliases, nesting, resource hazards, and ordered execution protocols. The graph is independent
-  of source order and spelling.
+  of source order and spelling, and it rides the normalized body: structural identity labels the same graph again
+  under its own buffer coloring instead of building it a second time. A scope that reads an enclosing binding
+  before rebinding the same spelling is refused, because any sort would move the rebind above the read.
 - A standard smaller-half worklist computes the equitable partition in
   `O((vertices + relations) log vertices)` relation visits. Exact individualization is isolated to partitions that
   refinement cannot distinguish; no exact near-linear worst-case graph-canonization algorithm is known. Canonical
@@ -588,13 +592,20 @@ canonicalized before validation:
 
 ### `ir/stmt/identity.py` — structural identity
 
-`Body.structural_key()` re-runs `normalize_body(self, hoist=False)`, assigns external arguments canonical names, and
-optionally collapses operations to their compute-unit cluster. Clear external argument names remain on executable
-bodies; these two transformations produce identity material only and must never be executed.
+`Body.identity()` takes the executable normal form (`normalize_body`), labels its relation graph with the external
+buffers colored by type, assigns the buffers canonical names by rank, and optionally collapses operations to their
+compute-unit cluster; `Body.structural_key()` is its digest. Clear external argument names remain on executable
+bodies; the identity body is digest material only and must never be executed. One normal form serves both, so a
+body keys the same whether it was held bare or constructed as a Loop op.
 
 - The same relation graph that orders statements ranks external buffers without using their spelling. Identity assigns
-  `b0`, `b1`, … by those ranks, preserving aliasing while making discovery order irrelevant, then runs the final
-  expression, statement-order, SSA, and operand cleanup once with those names.
+  `b0`, `b1`, … by those ranks, preserving aliasing while making discovery order irrelevant, and materializes the
+  labeled order directly — no second ordering pass after the rename.
+- The typed identity (`identity_key(with_io=True)`) colors each buffer vertex with its dtype and hint-free shape, so
+  the types bind to the ROLE a buffer plays. Two kernels whose typed argument lists read alike in declaration order
+  but assign the types to different roles key apart; declaring the same roles in another order keys the same. The
+  identity material also names which buffer fills each role (`Op.canonical_buffers`), which is how the kernel cache
+  rebinds a hit.
 - Optional operation clustering replaces each elementwise operation with its compute-unit representative before
   normalization. It is the only operation rewrite owned by identity; all executable canonicalization stays in
   `normalize_body`.

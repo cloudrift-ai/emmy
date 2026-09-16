@@ -336,7 +336,10 @@ class SearchDB:
     #       ``S_*`` feature, so ``identity_key(with_io=True, with_knobs=True)`` shifts for every
     #       TileOp/KernelOp (the realization corpus's 211 restamped identities are the same
     #       shift); stale ``lowering`` rows would silently never match.
-    _SCHEMA_VERSION = 4
+    #   5: typed buffer roles — ``identity_key(with_io=True)`` colors each buffer in the identity
+    #       graph by dtype and shape instead of folding an io list in declaration order, so every
+    #       deploy identity and variant key shifts; stale rows would silently never match.
+    _SCHEMA_VERSION = 5
 
     _SCHEMA = [
         """
