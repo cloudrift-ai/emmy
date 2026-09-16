@@ -98,6 +98,18 @@ def test_stage_to_remote_clean_gate_runs_before_dry_run_transfer(repo):
     with pytest.raises(RuntimeError, match="requires clean declared paths"):
         asyncio.run(stage_to_remote(repo, ["scripts"], "host", "key", 22, "/remote", dry_run=True, require_clean=True))
 
+
+def test_local_staging_keeps_path_scoped_provenance_without_transfer(repo, monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail("local staging must not build or send an archive")
+
+    monkeypatch.setattr("emmy.provisioning.staging.build_stage_tar", forbidden)
+    provenance = asyncio.run(stage_to_remote(repo, ["scripts"], "", "", 22, str(repo), local=True))
+    assert provenance.git_revision
+    assert provenance.git_dirty
+    with pytest.raises(RuntimeError, match="requires clean declared paths"):
+        asyncio.run(stage_to_remote(repo, ["scripts"], "", "", 22, str(repo), local=True, require_clean=True))
+
     (repo / "scripts" / "untracked.py").unlink()
     (repo / "other.txt").write_text("unrelated local edit\n")
     result = asyncio.run(stage_to_remote(repo, ["scripts"], "host", "key", 22, "/remote", dry_run=True, require_clean=True))
