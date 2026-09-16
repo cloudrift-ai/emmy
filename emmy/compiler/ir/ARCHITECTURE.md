@@ -582,8 +582,9 @@ canonicalized before validation:
   statements, lexical definitions, axes, source axes, and external buffers; colored relations retain operand
   positions, captures, aliases, nesting, resource hazards, and ordered execution protocols. The graph is independent
   of source order and spelling, and it rides the normalized body: structural identity labels the same graph again
-  under its own buffer coloring instead of building it a second time. A scope that reads an enclosing binding
-  before rebinding the same spelling is refused, because any sort would move the rebind above the read.
+  under its own buffer coloring instead of building it a second time. A scope's definitions bind its reads in any
+  order and shadow an enclosing binding of the same spelling; a deeper scope's definition binds nothing read above
+  it, so the block still depends on the enclosing definition it reads.
 - A standard smaller-half worklist computes the equitable partition in
   `O((vertices + relations) log vertices)` relation visits. Exact individualization is isolated to partitions that
   refinement cannot distinguish; no exact near-linear worst-case graph-canonization algorithm is known. Canonical

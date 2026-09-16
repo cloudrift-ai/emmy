@@ -44,8 +44,8 @@ def _ordered_sibling_defs(stmt: Stmt) -> tuple[str, ...]:
 def _free_ssa(stmt: Stmt) -> frozenset[str]:
     """SSA names ``stmt`` reads from the scope around it.
 
-    A nested scope binds only what it defines at its own level; a deeper scope's definition of the
-    same spelling is a different binder and hides nothing read above it.
+    A nested scope binds only what it defines at its own level, in any order; a deeper scope's
+    definition of the same spelling is a different binder and hides nothing read above it.
     """
     children = stmt.nested()
     if not children or stmt.deps_deep:
@@ -270,24 +270,15 @@ def ordering_constraints(body: Body, *, effects: bool, redefinitions: bool = Tru
     return incoming
 
 
-def topological_sort(stmts: Body, enclosing: frozenset[str] = frozenset()) -> Body:
+def topological_sort(stmts: Body) -> Body:
     """Stable recursive dependency sort used before structural normalization.
 
-    A scope that reads a name before it rebinds the same spelling, while an enclosing scope binds
-    that name too, is refused: sorting would move the rebinding above the read and silently
-    capture it. A nested scope's own carried accumulators are its binders, not an enclosing one's.
+    A scope's definitions bind its reads whatever order they were emitted in — the splicer lands
+    consumers above producers — and shadow an enclosing scope's binding of the same spelling.
     """
-    body = Body.coerce(stmts)
-    visible = enclosing | {name for stmt in body for name in _ordered_sibling_defs(stmt)}
-    for name in visible & enclosing & {name for stmt in body for name in _ordered_sibling_defs(stmt)}:
-        first = next(index for index, stmt in enumerate(body) if name in _ordered_sibling_defs(stmt))
-        if any(name in _free_ssa(stmt) for stmt in body[:first]):
-            raise ValueError(f"{name!r} is read before this scope rebinds it while an enclosing scope binds it too")
     body = Body(
-        stmt.with_bodies(tuple(topological_sort(child, visible - frozenset(_ordered_exported_accs(child))) for child in stmt.nested()))
-        if stmt.nested()
-        else stmt
-        for stmt in body
+        stmt.with_bodies(tuple(topological_sort(child) for child in stmt.nested())) if stmt.nested() else stmt
+        for stmt in Body.coerce(stmts)
     )
     return body.topological_order(ordering_constraints(body, effects=False, redefinitions=False))
 

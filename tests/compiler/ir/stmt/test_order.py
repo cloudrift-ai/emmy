@@ -206,30 +206,6 @@ def test_repeated_definition_capture_uses_nearest_predecessor() -> None:
     assert before != after
 
 
-def test_topological_sort_refuses_a_captured_rebind() -> None:
-    """A scope that reads an enclosing binding and later rebinds the same spelling is refused:
-    sorting the rebind above the read would silently retarget it."""
-    import pytest
-
-    body = Body(
-        (
-            Const(name="x", value=1.0),
-            Cond(
-                cond=Literal(True),
-                body=(
-                    Assign(name="y", op="abs", args=("x",)),
-                    Const(name="x", value=2.0),
-                    Assign(name="z", op="exp", args=("x",)),
-                    Write(output="O", index=(), value="y"),
-                    Write(output="P", index=(), value="z"),
-                ),
-            ),
-        )
-    )
-    with pytest.raises(ValueError, match="rebinds"):
-        normalize_body(body)
-
-
 def test_shadowing_after_the_read_keeps_the_outer_dependency() -> None:
     """A deeper scope's rebind of a name binds nothing read above it: the block still depends on
     the enclosing definition, so it cannot sort above it."""
