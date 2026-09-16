@@ -10,6 +10,10 @@ command:
     export EMMY_GOLDEN_FILE=
     export EMMY_TUNE_DB=$task_dir/autotune.db
     export EMMY_ONLINE_FILE=$task_dir/online.json
+    rustc --version > $task_dir/toolchain.txt
+    cargo --version >> $task_dir/toolchain.txt
+    sha256sum Cargo.lock target/release/emmy-runtime-worker >> $task_dir/toolchain.txt
+    ./venv/bin/python -m pip freeze --all > $task_dir/requirements.txt
     ./venv/bin/python - <<'PY'
     from pathlib import Path
     import numpy as np
@@ -33,7 +37,7 @@ command:
     save_executable(Path("$task_dir") / "pack", {"rms_norm": plan}, bindings={"rms_norm": {k: v.tobytes() for k, v in arrays.items()}}, key={"rows": $rows, "width": 1024, "seed": 0})
     PY
     ./venv/bin/emmy run --pack $task_dir/pack --bench --warmup 20 --iters 200 --json $task_dir/runtime.json
-  result_files: ["runtime.json", "pack/manifest.json", "pack/plan/*.json", "pack/bindings/*", "pack/cubin/*"]
+  result_files: ["runtime.json", "toolchain.txt", "requirements.txt", "pack/manifest.json", "pack/plan/*.json", "pack/bindings/*", "pack/cubin/*"]
   timeout: 120
 matrices:
   cross:
