@@ -714,7 +714,7 @@ class Let(Stmt):
     integer index precomputed once outside a nested hot loop, and a buffer coordinate's flattened
     offset (:class:`~emmy.compiler.ir.expr.FlatIndex`) reused across a copy's trips. Pure, so it
     is legal inside a stored ``Lambda`` body. A float literal's ``dtype`` is stamped at kernel
-    lowering like an ``Assign``'s (f32 when nothing narrows it); an index renders as ``auto``
+    lowering like an ``Assign``'s (f32 when nothing narrows it); an untyped index renders as ``auto``
     and takes its expression's type. A bare number coerces to a float ``Literal``.
     """
 

@@ -48,6 +48,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from emmy.compiler.dim import Dim
+from emmy.compiler.dtype import I32
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, Builtin, Expr, FlatIndex, FuncCallExpr, Literal, SimplifyCtx, TernaryExpr, Var, affine_form
 from emmy.compiler.ir.kernel.ir import (
@@ -272,7 +273,7 @@ def _volta_store_decl(*, op, ring: int, cta: CtaTile, elem_bytes: int) -> Let | 
         value = FuncCallExpr("emmy_volta_crosswise", (row, col, _lit(ring * op.shape[0])))
     else:
         value = FuncCallExpr("emmy_volta_b_congruous", (row, col, _lit(op.shape[1])))
-    return Let(name=name, value=value)
+    return Let(name=name, value=value, dtype=I32)
 
 
 def _volta_gmem_bases(*, op, cta: CtaTile, elem_bytes: int) -> tuple[list[tuple[Expr, Expr]], list[tuple[Expr, ...]]] | None:
