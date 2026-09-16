@@ -25,14 +25,14 @@ configs:
     origins:
     - scaled_dot_product_attention
   realizations:
-  - name: k_sdpa_83b511.cb6d3c8572f8
+  - name: k_sdpa_075fec.66f547ab2077
     bindings: {}
     pins:
       FAST_MATH: false
       PLACE: fuse
     knobs:
       REDUCE: g2k
-    identity: 9bfc9c3716b48514550e402279c93cf656da0c9051b702e56f0572585aa95d96
+    identity: 8db89cb22ff5dcaa207e4b8bbe5113f00fd107efb167492bd5963c1113889b54
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 22.498559951782227

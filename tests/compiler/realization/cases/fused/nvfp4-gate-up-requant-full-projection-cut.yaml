@@ -1685,7 +1685,7 @@ configs:
   target:
     loop: 1
   realizations:
-  - name: k_linear_reduce_9555fa.5b69f06e91a4
+  - name: k_linear_reduce_bbf90a.8ee925ac3b7f
     bindings: {}
     pins:
       FAST_MATH: false
@@ -1700,7 +1700,7 @@ configs:
       PLACE@map.2/map: cut
       PLACE@map.2/map.2/reduce.1/inner: cut
       PLACE@map.2/map.2/reduce.2/inner: cut
-    identity: c21d3b9f9969ad5ea5da1f330d1e42291332660fb200dbc210dfb7b05ee350f4
+    identity: 74259cc04c7701047d9597bcc13596a1c1aa7e89f4d010142811e354599be01e
   - name: k_linear_reduce_091a7c.2e4ea14a0191.191c23aba3c5
     bindings: {}
     pins:
@@ -2194,7 +2194,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_reshape_reduce_317809
+      name: k_reshape_reduce_88c553
     inputs: [x_static_fp4_floor, x_static_fp4_shift, x_static_fp4_f4_max, x_static_fp4_scale_2, x]
     outputs: [[x_static_fp4_scale_bits, f8e4m3, [128, 32, 1]], [x_static_fp4_bits, f4e2m1x2, [128, 256]]]
 - inputs: [x_static_fp4_scale_bits, x_static_fp4_bits]
@@ -4042,7 +4042,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_reduce_9555fa
+      name: k_linear_reduce_bbf90a
     inputs: [p_gate_weight_scale_2, x_static_fp4_scale_2, p_up_weight_scale_2, silu_one, mul_static_fp4_floor, mul_static_fp4_f4_max, mul_static_fp4_scale_2,
       mul_static_fp4_shift, x_static_fp4_scale_bits, p_gate_weight_scale_bits, x_static_fp4_bits, p_gate_weight_bits, x_static_fp4_r1_f4_pairs,
       p_gate_weight_f4_pairs, p_up_weight_scale_bits, x_static_fp4_r2_f4_pairs, p_up_weight_bits, p_up_weight_f4_pairs]
@@ -4474,7 +4474,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_eaa7df
+      name: k_linear_99c481
     inputs: [mul_static_fp4_scale_2, p_down_weight_scale_2, mul_static_fp4_bits, mul_static_fp4_scale_bits, p_down_weight_scale_bits, mul_static_fp4_r1_f4_pairs,
       p_down_weight_bits, p_down_weight_f4_pairs]
     outputs: [[linear_2, f16, [128, 512]]]

@@ -59,7 +59,7 @@ configs:
       FAST_MATH: false
     knobs:
       REDUCE@map.1/twist: g32k
-    identity: f83f2a8bccfad5228ebf6ab7aaa92746aa456be10580dc31e8e56b435dac8a9f
+    identity: 3f033e79b2a64bda5eaf71e87f324e4f8a1373347e3adae4f1d916d00d26c5e6
     measurements:
       emmy_us: 49.91715007456423
       reference_us: 43.32728742576036
@@ -77,7 +77,7 @@ configs:
       STAGE@twist.1/inner: d2/smem-async
       WORK: w4x1
       RASTER: ''
-    identity: f83f2a8bccfad5228ebf6ab7aaa92746aa456be10580dc31e8e56b435dac8a9f
+    identity: 3f033e79b2a64bda5eaf71e87f324e4f8a1373347e3adae4f1d916d00d26c5e6
     measurements:
       emmy_us: 44.82327266172929
       reference_us: 39.239680767059326
@@ -90,7 +90,7 @@ configs:
       WORK: ''
       REDUCE: ''
       RASTER: ''
-    identity: f83f2a8bccfad5228ebf6ab7aaa92746aa456be10580dc31e8e56b435dac8a9f
+    identity: 3f033e79b2a64bda5eaf71e87f324e4f8a1373347e3adae4f1d916d00d26c5e6
     measurements:
       emmy_us: 5.093877412834946
       reference_us: 4.087606658701037

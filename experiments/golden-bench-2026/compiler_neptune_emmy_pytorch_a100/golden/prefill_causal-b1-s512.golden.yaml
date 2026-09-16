@@ -51,7 +51,7 @@ configs:
       STAGE@map.1/twist.1/inner: d1/smem-async
       WORK: w4x1
       RASTER: ''
-    identity: 72df3af9c6397383c1eb45b694a9d0d5d59575b820d901ea6aad52388d837ce6
+    identity: a1975578954267a6b914ba7779dcdba8a174f21084b3a02693ccb11fee950ffd
     measurements:
       emmy_us: 66.69653256734212
       reference_us: 67.2426700592041

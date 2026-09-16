@@ -55,7 +55,7 @@ configs:
       STAGE@map.1/twist.1/inner: d2/smem-tma
       WORK: w4x1
       RASTER: gm8
-    identity: fff29460f3e5c8cbf1c92d408f73965f9f63f49ae900c7048e0018a844be2197
+    identity: 56e9894d82f20b946963bd9280c6a64c56a5c960f64f925956acdc6539f8f62c
     measurements:
       emmy_us: 873.9519715309143
       reference_us: 878.2399892807007

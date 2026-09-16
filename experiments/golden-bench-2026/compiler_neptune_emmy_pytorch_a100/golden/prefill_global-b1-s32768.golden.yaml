@@ -39,7 +39,7 @@ configs:
       WORK: w4x1
       LOOPIFY: '0'
       RASTER: ''
-    identity: 33c4b6d088c9ab5ef3af1c3aa679323c1ef9c1e377a61b9d041e54eaac86966b
+    identity: fdef6a62fd0433fe8be2c921fc0dc48307e70d0d962dc0ca66cbc16b02fbb5d2
     measurements:
       emmy_us: 172399.6124267578
       reference_us: 81443.32885742188

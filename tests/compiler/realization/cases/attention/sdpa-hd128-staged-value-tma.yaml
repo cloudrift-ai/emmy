@@ -31,7 +31,7 @@ configs:
   target:
     loop: 0
   realizations:
-  - name: k_sdpa_f5ead0.147663e75cce
+  - name: k_sdpa_c2141f.ad3afe08cbd8
     bindings: {}
     pins:
       FAST_MATH: true
@@ -45,7 +45,7 @@ configs:
       STAGE@map.1/twist.1/inner: ''
       LOOPIFY: '0'
       RASTER: ''
-    identity: dc3814f036e0408ff3c4dc7ce7dc4324f7d2b09607f0d86f4cea056cbd9ee0fa
+    identity: b49769b6aa994ab0d9140fe50061f018cfaeafd2aef4cf99df9e361e526be8a8
 loops:
 - inputs: [x0, x1, x2]
   outputs: [scaled_dot_product_attention]
@@ -278,6 +278,6 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_sdpa_f5ead0
+      name: k_sdpa_c2141f
     inputs: [scaled_dot_product_attention_scale, x1, x0, x2]
     outputs: [[scaled_dot_product_attention, f16, [1, 8, 512, 128]]]

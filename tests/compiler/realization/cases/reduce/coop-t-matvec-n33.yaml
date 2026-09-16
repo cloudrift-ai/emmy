@@ -22,14 +22,14 @@ configs:
     origins:
     - linear
   realizations:
-  - name: k_linear_1bc4b9.ab7b2396432d
+  - name: k_linear_4ec60d.280e1cc7051a
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
       WORK: t128
       REDUCE: coop-t
-    identity: e5ed149df857891e8cf6004872179f08caed9c3ecfb469788ec6c5e2a1367a66
+    identity: 9b056ed7ad56cb0fe53a57c035c497e5b6b29202375ea2b2fcfb50803b2d6a5a
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 4.662130759141156

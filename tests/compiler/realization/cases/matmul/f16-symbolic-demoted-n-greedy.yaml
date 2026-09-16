@@ -40,7 +40,7 @@ configs:
     - ws
     - xs
   realizations:
-  - name: k_linear_5a5568.393eb976abbf
+  - name: k_linear_a6e876.7122349841dd
     bindings: {}
     pins:
       FAST_MATH: false
@@ -49,7 +49,7 @@ configs:
       WORK: w2x2
       STAGE: d1/smem
       REDUCE: ''
-    identity: cbc3506f583f584498c6e82102d905583b1960c506fea8a38fc7582c2344cdf2
+    identity: 0ae9a5ff7fa915d7874c26ecc43faaa956b0a1f3849d6547a73f090073fd59b6
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 22.593454881147903
