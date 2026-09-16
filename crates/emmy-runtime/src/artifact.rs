@@ -144,10 +144,10 @@ impl Plan {
 }
 
 pub struct Artifact {
-    pub plan: Plan,
-    pub arch: String,
-    pub bindings: BTreeMap<String, Vec<u8>>,
-    pub binaries: BTreeMap<String, PathBuf>,
+    pub(crate) plan: Plan,
+    pub(crate) arch: String,
+    pub(crate) bindings: BTreeMap<String, Vec<u8>>,
+    pub(crate) binaries: BTreeMap<String, PathBuf>,
 }
 
 fn member(root: &Path, name: &str) -> Result<PathBuf> {
@@ -183,6 +183,49 @@ impl Artifact {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn example() -> Value {
+        json!({
+            "format": 1, "backend": "cuda", "inputs": ["x"], "outputs": ["y"],
+            "buffers": [
+                {"name":"x", "shape":[4], "dtype":"f32", "role":"input"},
+                {"name":"y", "shape":[4], "dtype":"f32", "role":"output"},
+                {"name":"w", "shape":[1], "dtype":"f32", "role":"constant"}
+            ],
+            "constants": {"w": 2.0}, "runtime_constants": {}, "weights": {},
+            "kernels": {"add": {"binary_key":"ab", "arch_specific":false}},
+            "symbols": {"bindings":{},"hints":{},"caps":{}},
+            "launches": [{"node_id":"y", "kernel":"add", "args":["x","w","y"],
+                "grid":[[1],[1],[1]],"block":[[32],[1],[1]],"smem":0,
+                "zero_outputs":[],"runtime_args":[],"cuda":{"tma":[]}}]
+        })
+    }
+
+    #[test]
+    fn plan_requires_bound_constants_and_rejects_unsupported_abi() {
+        let data = BTreeMap::from([("w".into(), 2.0f32.to_le_bytes().to_vec())]);
+        let plan: Plan = serde_json::from_value(example()).unwrap();
+        plan.validate(&data).unwrap();
+        assert!(plan.validate(&BTreeMap::new()).is_err());
+        assert!(plan.validate(&BTreeMap::from([("w".into(), vec![0])])).is_err());
+        for (pointer, value) in [
+            ("/format", json!(999)),
+            ("/buffers/0/shape/0", json!("n")),
+            ("/buffers/1/name", json!("x")),
+            ("/launches/0/args/0", json!("missing")),
+            ("/launches/0/runtime_args", json!(["n"])),
+            ("/launches/0/cuda/tma", json!([{}])),
+            ("/launches/0/kernel", json!("missing")),
+        ] {
+            let mut value_plan = example();
+            *value_plan.pointer_mut(pointer).unwrap() = value;
+            let plan: Plan = serde_json::from_value(value_plan).unwrap();
+            assert!(plan.validate(&data).is_err(), "accepted {pointer}");
+        }
+        let mut unknown = example();
+        unknown["launches"][0]["unrecognized_abi"] = json!(true);
+        assert!(serde_json::from_value::<Plan>(unknown).is_err());
+    }
 
     #[test]
     fn dimensions_multiply_factors_and_reject_unsupported_expressions() {
