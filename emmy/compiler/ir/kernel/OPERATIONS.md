@@ -43,7 +43,7 @@ Kernel IR to PTX compiler that handles only the unmarked operations covers every
 | --- | --- | --- |
 | `Load` | `names`, `input`, `index`, `dtype` | Read one value, or several consecutive values, from a buffer into SSA names. |
 | `Assign` | `name`, `op`, `args`, `dtype` | Bind `name = op(args)` for one elementwise operation over SSA names. |
-| `Let`* | `name`, `value`, `dtype` | Bind one pure expression to an SSA name: a scalar literal, a precomputed integer index, or a `FlatIndex` buffer offset. |
+| `Let` | `name`, `value`, `dtype` | Bind one pure expression to an SSA name: a scalar literal, a precomputed integer index, or a `FlatIndex` buffer offset. |
 | `Accum` | `name`, `value`, `op`, `dtype`, `axes`, `base` | Fold `value` into a reduce accumulator that starts at the operation's identity and is visible after the loop. |
 | `Init` | `name`, `identity`, `dtype` | Declare carried state seeded with a literal, so a masked tail can select the identity by name or a chunk loop can update it in place. |
 | `Select`* | `name`, `branches` (`value`, `select`) | Bind `name` to the value of the branch whose coordinate predicate holds. |
