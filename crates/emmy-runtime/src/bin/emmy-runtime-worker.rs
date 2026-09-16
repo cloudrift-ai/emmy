@@ -14,7 +14,7 @@ use std::path::PathBuf;
 enum Command {
     Load { root: PathBuf, program: String },
     Bind { inputs: BTreeMap<String, PathBuf> },
-    Run { warmup: u32, iterations: u32, outputs: BTreeMap<String, PathBuf> },
+    Run { warmup: u32, iterations: u32, capture: bool, outputs: BTreeMap<String, PathBuf> },
     Release,
 }
 
@@ -59,11 +59,11 @@ fn main() -> Result<()> {
                     for (name, path) in inputs { executor.bind(&name, &std::fs::read(path)?)?; }
                     Ok(json!({"bound": true}))
                 }
-                Command::Run { warmup, iterations, outputs } => {
+                Command::Run { warmup, iterations, capture, outputs } => {
                     let executor = executor.as_mut().context("no loaded program")?;
-                    let time_ms = executor.execute(warmup, iterations)?;
+                    let time_ms = executor.execute(warmup, iterations, capture)?;
                     for (name, path) in outputs { std::fs::write(path, executor.output(&name)?)?; }
-                    Ok(json!({"time_ms": time_ms, "captured": false}))
+                    Ok(json!({"time_ms": time_ms, "captured": capture}))
                 }
                 Command::Release => { executor = None; Ok(json!({"released": true})) }
             }

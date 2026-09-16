@@ -2,13 +2,14 @@
 
 use crate::artifact::{Artifact, Plan, dimensions};
 use anyhow::{Context, Result, ensure};
-use cudarc::driver::{CudaContext, CudaFunction, CudaSlice, CudaStream, LaunchConfig, PushKernelArg, sys};
+use cudarc::driver::{CudaContext, CudaFunction, CudaGraph, CudaSlice, CudaStream, LaunchConfig, PushKernelArg, sys};
 use cudarc::nvrtc::Ptx;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 pub struct Executor {
     plan: Plan,
+    graph: Option<CudaGraph>,
     stream: Arc<CudaStream>,
     arrays: BTreeMap<String, CudaSlice<u8>>,
     functions: BTreeMap<String, CudaFunction>,
@@ -44,7 +45,7 @@ impl Executor {
         for buffer in &artifact.plan.buffers {
             arrays.insert(buffer.name.clone(), stream.alloc_zeros::<u8>(buffer.byte_len()?.max(1))?);
         }
-        let mut executor = Self { plan: artifact.plan, stream, arrays, functions, bound: BTreeSet::new(), completed: false };
+        let mut executor = Self { plan: artifact.plan, graph: None, stream, arrays, functions, bound: BTreeSet::new(), completed: false };
         for (name, data) in artifact.bindings {
             executor.upload(&name, &data)?;
         }
@@ -73,7 +74,7 @@ impl Executor {
     fn submit(&mut self) -> Result<()> {
         ensure!(self.plan.inputs.iter().all(|n| self.bound.contains(n)), "all program inputs must be bound");
         for launch in &self.plan.launches {
-            for name in launch.zero_outputs.iter().chain(&launch.zero_prologues) {
+            for name in &launch.zero_outputs {
                 self.stream.memset_zeros(self.arrays.get_mut(name).unwrap())?;
             }
             let config = LaunchConfig {
@@ -93,18 +94,32 @@ impl Executor {
     }
 
     /// Time ordered program submissions with CUDA events; excludes I/O and control transport.
-    /// Includes exposed host submission gaps. This initial path does not capture a CUDA graph.
-    pub fn execute(&mut self, warmup: u32, iterations: u32) -> Result<f32> {
+    /// Uncaptured execution includes exposed host submission gaps.
+    pub fn execute(&mut self, warmup: u32, iterations: u32, capture: bool) -> Result<f32> {
         ensure!(iterations > 0 && iterations <= 1_000_000 && warmup <= 1_000_000, "invalid iteration count");
         self.completed = false;
-        for _ in 0..warmup { self.submit()?; }
+        if capture && self.graph.is_none() {
+            self.submit()?;
+            self.stream.synchronize()?;
+            self.stream.begin_capture(sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL)?;
+            let submitted = self.submit();
+            let captured = self.stream.end_capture(sys::CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH);
+            submitted?;
+            self.graph = Some(captured?.context("empty CUDA graph")?);
+        }
+        for _ in 0..warmup { self.step(capture)?; }
         self.stream.synchronize()?;
         let start = self.stream.record_event(None)?;
-        for _ in 0..iterations { self.submit()?; }
+        for _ in 0..iterations { self.step(capture)?; }
         let end = self.stream.record_event(None)?;
         let time = start.elapsed_ms(&end)? / iterations as f32;
         self.completed = true;
         Ok(time)
+    }
+
+    fn step(&mut self, capture: bool) -> Result<()> {
+        if capture { self.graph.as_ref().unwrap().launch()?; } else { self.submit()?; }
+        Ok(())
     }
 
     pub fn output(&self, name: &str) -> Result<Vec<u8>> {

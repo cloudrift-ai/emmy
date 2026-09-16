@@ -1622,6 +1622,18 @@ class _AsyncBenchWorker:
 
     _WORKER_MODULE = "emmy.compiler.backend.cuda._bench_worker"
     _STDERR_TAIL_CHARS = 4000
+    _ATTEMPTS = 2
+
+    def _command(self) -> list[str]:
+        return [_sys.executable, "-m", self._WORKER_MODULE]
+
+    @staticmethod
+    def _encode(request: dict) -> bytes:
+        return pickle.dumps(request, protocol=pickle.HIGHEST_PROTOCOL)
+
+    @staticmethod
+    def _decode(body: bytes) -> dict:
+        return pickle.loads(body)
 
     def __init__(self, *, device_id: int | None = None) -> None:
         self._proc: asyncio.subprocess.Process | None = None
@@ -1651,9 +1663,7 @@ class _AsyncBenchWorker:
 
     async def _spawn(self) -> None:
         self._proc = await asyncio.create_subprocess_exec(
-            _sys.executable,
-            "-m",
-            self._WORKER_MODULE,
+            *self._command(),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -1748,6 +1758,15 @@ class _AsyncBenchWorker:
         return self._stderr_tail
 
     async def run_job(self, request_obj: dict, *, wall_timeout_s: float) -> dict:
+        try:
+            return await self._run_job(request_obj, wall_timeout_s=wall_timeout_s)
+        except BenchWorkerJobError:
+            raise  # The response's retirement flag decides whether the context is healthy.
+        except BaseException:
+            await self.aclose()
+            raise
+
+    async def _run_job(self, request_obj: dict, *, wall_timeout_s: float) -> dict:
         """Send one request, read the response within ``wall_timeout_s`` (else SIGKILL
         + raise ``RuntimeError``), and return the unpickled response. A stale-worker
         race on send respawns and retries once; a response-side timeout is a hard
@@ -1755,10 +1774,10 @@ class _AsyncBenchWorker:
         and retries ONCE after a short drain grace — see the handler for why. A response
         flagged ``_retire_worker`` (a hung kernel or a poisoned context in the child) retires
         the child first — SIGKILL + reap — so the next request respawns clean."""
-        request = pickle.dumps(request_obj, protocol=pickle.HIGHEST_PROTOCOL)
+        request = self._encode(request_obj)
         frame = len(request).to_bytes(8, "little") + request
         deadline = _time_module.perf_counter() + wall_timeout_s
-        for attempt in (0, 1):
+        for attempt in range(self._ATTEMPTS):
             if self._proc is None or self._proc.returncode is not None:
                 await self._spawn()
             assert self._proc is not None  # for type narrowing
@@ -1777,7 +1796,7 @@ class _AsyncBenchWorker:
                 ) from exc
             except (BrokenPipeError, ConnectionResetError) as exc:
                 await self.aclose()
-                if attempt == 1:
+                if attempt + 1 == self._ATTEMPTS:
                     raise RuntimeError(f"bench worker died during request send: {exc}{self._tail_suffix()}") from exc
                 logger.info("[bench-worker] stale async worker on send (%s) — respawning", exc)
                 continue
@@ -1801,7 +1820,7 @@ class _AsyncBenchWorker:
                 stderr_tail = await self._stderr_snapshot()
                 death = await self._death_reason(proc)
                 await self.aclose()
-                if attempt == 1:
+                if attempt + 1 == self._ATTEMPTS:
                     raise RuntimeError(f"bench worker EOF before response ({death}); stderr tail: {stderr_tail}") from exc
                 # A mid-job EOF means the child went down without answering (a crash, a signal).
                 # Right after a SIGKILL'd predecessor (a wall kill, or a retired hung child), the
@@ -1815,7 +1834,7 @@ class _AsyncBenchWorker:
                 await asyncio.sleep(min(2.0, max(0.0, deadline - _time_module.perf_counter() - 1.0)))
                 continue
 
-            resp = pickle.loads(body)
+            resp = self._decode(body)
             if resp.pop("_retire_worker", False):
                 # The child's verdict that its context is done for: a hung kernel (a watchdog
                 # failure, or a greedy timing that hung after its same-input reference completed)
