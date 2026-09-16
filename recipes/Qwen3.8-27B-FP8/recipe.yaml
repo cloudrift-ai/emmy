@@ -46,6 +46,15 @@ engine:
       # --exclude-tools-when-tool-choice-none: with tool_choice "none" the tool list otherwise
       # stays in the prompt, the model still writes its <tool_call> markup, and nothing parses
       # it, so the markup comes back as the answer text (3/3 before this flag).
+      # --structured-outputs-config: tool_choice "required" is served by a JSON-array grammar, and
+      # the default grammar allows unlimited whitespace between tokens. Greedy decoding on a
+      # greeting ("Hi there!") then opens "[" and emits newlines forever: 256, 2,048 and 4,096
+      # max_tokens all ended at finish_reason "length" with zero tool calls (70 s of whitespace at
+      # 4,096), and the caller got neither content nor tool_calls. Sampling at temperature >= 0.7
+      # escapes it, greedy does not. disable_any_whitespace is honoured only by the xgrammar and
+      # guidance backends (vllm/config/structured_outputs.py), so the backend is pinned with it.
+      # The JSON carries no shell quotes: compose renders `command:` as a plain YAML scalar that
+      # Docker splits on whitespace, so quotes here would reach vLLM inside the value itself.
       extra_args: >-
         --dtype half
         --language-model-only
@@ -54,6 +63,7 @@ engine:
         --enable-auto-tool-choice
         --tool-call-parser qwen3_coder
         --exclude-tools-when-tool-choice-none
+        --structured-outputs-config {"backend":"xgrammar","disable_any_whitespace":true}
         --reasoning-parser qwen3
       extra_env:
         # Volta has no FP8 arithmetic. The fork serves FP8 checkpoints on sm_70 through its
