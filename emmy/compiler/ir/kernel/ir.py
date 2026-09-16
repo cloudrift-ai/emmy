@@ -6,8 +6,7 @@ machinery: ``Tile`` (thread/block coord bindings), ``Smem`` (``__shared__``
 arrays), ``Sync`` (barriers), the transports into shared memory
 (``CpAsync*``, ``Tma*`` + ``Mbarrier*``), the cross-thread combines
 (``WarpShuffle``, ``TreeHalve``) and the tensor-core register fragments
-(``RegFragment`` … ``RegStore``, ``Wgmma*``). ``OPERATIONS.md`` next to this
-module is the complete index.
+(``RegFragment`` … ``RegStore``, ``Wgmma*``).
 
 Pipeline shape::
 

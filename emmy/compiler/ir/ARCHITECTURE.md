@@ -743,9 +743,7 @@ See [`tile/ARCHITECTURE.md`](tile/ARCHITECTURE.md) for the exact storage and bou
 
 Reuses `Tile` + leaf stmts from Tile IR; adds hardware primitives
 materialized from scheduling decisions. `KernelOp` carries the body
-directly (no separate AST class). The complete operation index — every statement and expression
-with its arguments — is [`kernel/OPERATIONS.md`](kernel/OPERATIONS.md); the table below holds the
-design notes for the nodes that need them.
+directly (no separate AST class).
 
 | Symbol             | Role                                                              |
 |--------------------|-------------------------------------------------------------------|

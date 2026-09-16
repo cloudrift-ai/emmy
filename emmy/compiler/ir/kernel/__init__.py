@@ -6,7 +6,6 @@
   structural types (``Load``, ``Assign``, ``Loop``, ``StridedLoop``, …) come from
   ``ir.stmt``.
 - :mod:`.render` — ``render_kernelop`` emitting CUDA source.
-- ``OPERATIONS.md`` — the complete operation index with arguments.
 """
 
 from emmy.compiler.ir.axis import Axis
