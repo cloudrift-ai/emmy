@@ -114,7 +114,7 @@ class PackReference:
             raise ValueError("invalid iteration count")
         with self.stream:
             phase = perf_counter()
-            if capture:
+            if capture and self.program._e2e_graph is None:
                 self.program.run_once()
                 self.stream.synchronize()
                 self.program.capture_program_graph()

@@ -30,6 +30,12 @@ not substitute requested hardware for an unavailable live observation.
 
 ## Boundary
 
+For command-only groups, `--local` uses the current checkout and environment directly, without SSH or VM provisioning.
+Declared stage paths still supply the clean-source check and provenance; they do not create a frozen copy locally, so
+keep those paths unchanged throughout a measured run. Each row gets a separate work directory and normal result
+records. Local commands own a process group; timeout, cancellation, and command exit terminate their descendants.
+Other fixed-host and serving deployment paths retain their existing transport behavior.
+
 The orchestrator may:
 
 - expand and filter recipe matrices;

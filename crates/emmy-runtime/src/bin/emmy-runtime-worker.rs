@@ -1,7 +1,10 @@
 //! Persistent framed worker. stdout is reserved for control responses; tensors use binary files.
 
 use anyhow::{Context, Result, ensure};
-use emmy_runtime::{artifact::Artifact, cuda::{Device, Executor}};
+use emmy_runtime::{
+    artifact::Artifact,
+    cuda::{Device, Executor},
+};
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -12,9 +15,19 @@ use std::time::Instant;
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum Command {
-    Load { root: PathBuf, program: String },
-    Bind { inputs: BTreeMap<String, PathBuf> },
-    Run { warmup: u32, iterations: u32, capture: bool, outputs: BTreeMap<String, PathBuf> },
+    Load {
+        root: PathBuf,
+        program: String,
+    },
+    Bind {
+        inputs: BTreeMap<String, PathBuf>,
+    },
+    Run {
+        warmup: u32,
+        iterations: u32,
+        capture: bool,
+        outputs: BTreeMap<String, PathBuf>,
+    },
     Release,
 }
 
@@ -27,7 +40,9 @@ struct Request {
 
 fn read_frame(reader: &mut impl Read) -> Result<Option<Vec<u8>>> {
     let mut header = [0u8; 8];
-    if reader.read(&mut header[..1])? == 0 { return Ok(None); }
+    if reader.read(&mut header[..1])? == 0 {
+        return Ok(None);
+    }
     reader.read_exact(&mut header[1..])?;
     let size = u64::from_le_bytes(header);
     ensure!(size <= 1024 * 1024, "control frame exceeds 1 MiB");
@@ -37,7 +52,10 @@ fn read_frame(reader: &mut impl Read) -> Result<Option<Vec<u8>>> {
 }
 
 fn main() -> Result<()> {
-    ensure!(std::env::args().len() == 1, "worker accepts no arguments; select a GPU with CUDA_VISIBLE_DEVICES");
+    ensure!(
+        std::env::args().len() == 1,
+        "worker accepts no arguments; select a GPU with CUDA_VISIBLE_DEVICES"
+    );
     let mut input = std::io::stdin().lock();
     let mut output = std::io::stdout().lock();
     let mut context = None;
@@ -53,26 +71,44 @@ fn main() -> Result<()> {
                     let artifact_ms = started.elapsed().as_secs_f64() * 1000.0;
                     executor = None;
                     let started = Instant::now();
-                    if context.is_none() { context = Some(Device::new(0)?); }
+                    if context.is_none() {
+                        context = Some(Device::new(0)?);
+                    }
                     let context_ms = started.elapsed().as_secs_f64() * 1000.0;
                     executor = Some(Executor::load(context.as_ref().unwrap(), artifact)?);
-                    Ok(json!({"loaded": true, "artifact_ms": artifact_ms, "context_ms": context_ms,
-                        "load_times_ms": executor.as_ref().unwrap().load_times_ms}))
+                    Ok(
+                        json!({"loaded": true, "artifact_ms": artifact_ms, "context_ms": context_ms,
+                        "load_times_ms": executor.as_ref().unwrap().load_times_ms}),
+                    )
                 }
                 Command::Bind { inputs } => {
                     let executor = executor.as_mut().context("no loaded program")?;
-                    for (name, path) in inputs { executor.bind(&name, &std::fs::read(path)?)?; }
+                    for (name, path) in inputs {
+                        executor.bind(&name, &std::fs::read(path)?)?;
+                    }
                     Ok(json!({"bound": true}))
                 }
-                Command::Run { warmup, iterations, capture, outputs } => {
+                Command::Run {
+                    warmup,
+                    iterations,
+                    capture,
+                    outputs,
+                } => {
                     let executor = executor.as_mut().context("no loaded program")?;
                     let metrics = executor.execute(warmup, iterations, capture)?;
                     let started = Instant::now();
-                    for (name, path) in outputs { std::fs::write(path, executor.output(&name)?)?; }
-                    Ok(json!({"time_ms": metrics.time_ms, "captured": capture, "metrics": metrics,
-                        "output_ms": started.elapsed().as_secs_f64() * 1000.0}))
+                    for (name, path) in outputs {
+                        std::fs::write(path, executor.output(&name)?)?;
+                    }
+                    Ok(
+                        json!({"time_ms": metrics.time_ms, "captured": capture, "metrics": metrics,
+                        "output_ms": started.elapsed().as_secs_f64() * 1000.0}),
+                    )
                 }
-                Command::Release => { executor = None; Ok(json!({"released": true})) }
+                Command::Release => {
+                    executor = None;
+                    Ok(json!({"released": true}))
+                }
             }
         })();
         let failed = response.is_err();
@@ -107,7 +143,15 @@ mod tests {
 
     #[test]
     fn protocol_reads_operations_and_rejects_unknown_fields() {
-        assert!(serde_json::from_value::<Request>(json!({"version":1,"command":{"op":"release"}})).is_ok());
-        assert!(serde_json::from_value::<Request>(json!({"version":1,"command":{"op":"release"},"extra":true})).is_err());
+        assert!(
+            serde_json::from_value::<Request>(json!({"version":1,"command":{"op":"release"}}))
+                .is_ok()
+        );
+        assert!(
+            serde_json::from_value::<Request>(
+                json!({"version":1,"command":{"op":"release"},"extra":true})
+            )
+            .is_err()
+        );
     }
 }

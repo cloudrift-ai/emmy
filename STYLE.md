@@ -210,6 +210,12 @@ async def run_cmd(command, stream=True, timeout=600):
 
 On `TimeoutError`: kill the process, await termination, log, return `(1, "", "")`.
 
+## Rust
+
+Use the checked-in Cargo lockfile and standard Rustfmt formatting. Keep unsafe CUDA calls inside the runtime's CUDA
+module and document the ownership and synchronization that make each call valid. Validate artifact metadata before
+submission, and keep HTTP dependencies out of the execution runtime. Run Cargo tests and Clippy for native changes.
+
 ## Commit Messages
 
 - Keep the subject line short (under ~72 characters).

@@ -146,7 +146,7 @@ def _load_plan(plan: ExecutionPlan, *, deadline: float | None = None, cubin_dir:
     measured is lost."""
     kernels: dict[str, object] = {}
     for index, (name, spec) in enumerate(plan.kernels.items(), start=1):
-        kernels[name] = _load_kernel(name, spec, **({"cubin_dir": cubin_dir} if cubin_dir is not None else {}))
+        kernels[name] = _load_kernel(name, spec, cubin_dir=cubin_dir)
         if deadline is not None and _time_module.monotonic() > deadline:
             raise CompileBudgetExceeded(
                 f"compile stage exceeded its budget after {index} of {len(plan.kernels)} kernel(s) "

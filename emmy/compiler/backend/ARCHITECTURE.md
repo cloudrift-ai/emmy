@@ -110,6 +110,13 @@ kernels via cupy `RawKernel` (NVRTC-compiled).
 
 ## Execution plan + pack (`plan.py`, `pack.py`)
 
+`save_executable` bundles an existing pack with resolved constant/input bytes and its cubins for independent execution.
+It accepts explicit contiguous storage bytes and publishes only complete new directories. The Rust runtime supports
+static ordinary-pointer plans and rejects unsupported features; its contract and build instructions live in
+[`crates/emmy-runtime/ARCHITECTURE.md`](../../../crates/emmy-runtime/ARCHITECTURE.md). `native.py` reuses benchmark process
+supervision for the native worker and compares it with the existing Python dispatcher on identical artifacts through
+`emmy run --pack DIR --bench --json PATH`. This experimental comparison does not replace the general run/tune dispatcher.
+
 `plan.py` defines the **execution plan** — the serializable runtime projection of a lowered `Graph[CudaOp]`:
 buffer specs (one `BufferSpec` per BUFFER — a multi-output node mints one per output slot, each with its own
 role via `graph.buffer_role`), scalar/runtime constants, the launch list (`LaunchSpec.writes` names every

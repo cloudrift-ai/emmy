@@ -1,9 +1,7 @@
 """Independent cubin execution, stable graph bindings, and zero-before-launch semantics."""
 
 import asyncio
-import json
 import shutil
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -23,11 +21,17 @@ pytestmark = [requires_cuda, pytest.mark.xdist_group("cuda")]
 def _plan():
     return ExecutionPlan(
         "cuda", ["x"], ["y"],
-        [BufferSpec("x", (Dim(32),), F32, "input"), BufferSpec("y", (Dim(32),), F32, "output")],
-        {}, {},
-        [LaunchSpec("y", "add", ("y", "x"), ((1,), (1,), (1,)), ((32,), (1,), (1,)), 0, ("y",))],
-        {"add": KernelSpec(source='extern "C" __global__ void add(float* y, const float* x) { int i=threadIdx.x; y[i] += x[i]*2.0f; }')},
+        [BufferSpec("x", (Dim(32),), F32, "input"), BufferSpec("w", (Dim(1),), F32, "constant"),
+         BufferSpec("s", (Dim(32),), F32, "scratch"), BufferSpec("y", (Dim(32),), F32, "output")],
+        {"w": 2.0}, {},
+        [LaunchSpec(out, "add", (out, inp, "w"), ((1,), (1,), (1,)), ((32,), (1,), (1,)), 0, (out,))
+         for inp, out in (("x", "s"), ("s", "y"))],
+        {"add": KernelSpec(source='extern "C" __global__ void add(float* y, const float* x, const float* w) { int i=threadIdx.x; y[i] += x[i]*w[0]; }')},
     )
+
+
+def _bindings(x):
+    return {"x": x.tobytes(), "w": np.float32(2).tobytes()}
 
 
 def test_native_pack_parity_rebind_graph_and_retirement(tmp_path, monkeypatch):
@@ -41,7 +45,8 @@ def test_native_pack_parity_rebind_graph_and_retirement(tmp_path, monkeypatch):
         reference = CompiledProgram.build_from_plan(plan, {"x": x})
         reference.run_once()
         expected = reference.outputs()["y"]
-        root = save_executable(tmp_path / "bundle", {"test": plan}, bindings={"test": {"x": x.tobytes()}}, key={})
+        np.testing.assert_array_equal(expected, x * 4)
+        root = save_executable(tmp_path / "bundle", {"test": plan}, bindings={"test": _bindings(x)}, key={})
         del reference
         shutil.rmtree(tmp_path / "cache")
         # The native child cannot find Python, nvcc, or the removed cubin cache.
@@ -67,7 +72,7 @@ def test_native_pack_parity_rebind_graph_and_retirement(tmp_path, monkeypatch):
                 await worker.run_job(
                     {"op": "run", "warmup": 0, "iterations": 2, "capture": True, "outputs": {"y": str(output)}}, wall_timeout_s=30,
                 )
-                np.testing.assert_array_equal(np.fromfile(output, np.float32), (x + 10) * 2)
+                np.testing.assert_array_equal(np.fromfile(output, np.float32), (x + 10) * 4)
                 with pytest.raises(RuntimeError, match="unknown program output"):
                     await worker.run_job(
                         {"op": "run", "warmup": 0, "iterations": 1, "capture": False, "outputs": {"missing": str(output)}},
@@ -77,6 +82,51 @@ def test_native_pack_parity_rebind_graph_and_retirement(tmp_path, monkeypatch):
                 await worker.run_job({"op": "load", "root": str(root), "program": "test"}, wall_timeout_s=30)
                 assert worker._proc.pid != pid
                 await worker.run_job({"op": "release"}, wall_timeout_s=30)
+            finally:
+                await worker.aclose()
+
+        asyncio.run(check())
+
+
+@pytest.mark.parametrize("fault", ["deadline", "cuda_error"])
+def test_native_gpu_failure_restarts_cleanly(tmp_path, monkeypatch, fault):
+    executable = shutil.which("emmy-runtime-worker")
+    if not executable:
+        pytest.skip("build emmy-runtime-worker and add it to PATH")
+    monkeypatch.setenv("EMMY_CUBIN_CACHE", str(tmp_path / "cache"))
+    good = _plan()
+    bad = _plan()
+    body = (
+        "unsigned long long start=clock64(); while(clock64()-start < 1000000000ULL) {} y[threadIdx.x]=x[threadIdx.x];"
+        if fault == "deadline" else "*(volatile float*)0 = 1.0f;"
+    )
+    bad.kernels["add"] = KernelSpec(source='extern "C" __global__ void add(float* y, const float* x, const float* w) {' + body + '}')
+    with gpu_lock():
+        x = np.arange(32, dtype=np.float32)
+        root = save_executable(
+            tmp_path / "bundle", {"good": good, "bad": bad},
+            bindings={name: _bindings(x) for name in ("good", "bad")}, key={},
+        )
+
+        async def check():
+            worker = NativeWorker(executable=executable)
+            try:
+                await worker.run_job({"op": "load", "root": str(root), "program": "bad"}, wall_timeout_s=30)
+                old_pid = worker._proc.pid
+                with pytest.raises(RuntimeError):
+                    await worker.run_job(
+                        {"op": "run", "warmup": 0, "iterations": 1, "capture": False, "outputs": {}},
+                        wall_timeout_s=0.02 if fault == "deadline" else 30,
+                    )
+                assert worker._proc is None
+                await worker.run_job({"op": "load", "root": str(root), "program": "good"}, wall_timeout_s=30)
+                assert worker._proc.pid != old_pid
+                path = tmp_path / "out.bin"
+                await worker.run_job(
+                    {"op": "run", "warmup": 0, "iterations": 1, "capture": False, "outputs": {"y": str(path)}},
+                    wall_timeout_s=30,
+                )
+                np.testing.assert_array_equal(np.fromfile(path, np.float32), x * 4)
             finally:
                 await worker.aclose()
 

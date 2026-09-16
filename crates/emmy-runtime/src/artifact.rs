@@ -25,8 +25,12 @@ impl Buffer {
             other => bail!("unsupported dtype: {other}"),
         };
         self.shape.iter().try_fold(size, |bytes, dim| {
-            let n = dim.as_u64().context("only static nonnegative shapes are supported")?;
-            bytes.checked_mul(usize::try_from(n)?).context("buffer size overflow")
+            let n = dim
+                .as_u64()
+                .context("only static nonnegative shapes are supported")?;
+            bytes
+                .checked_mul(usize::try_from(n)?)
+                .context("buffer size overflow")
         })
     }
 }
@@ -70,8 +74,12 @@ pub fn dimensions(factors: &[Vec<Value>]) -> Result<(u32, u32, u32)> {
     let mut dims = [1u32; 3];
     for (out, axis) in dims.iter_mut().zip(factors) {
         for factor in axis {
-            let value = factor.as_u64().context("only static launch factors are supported")?;
-            *out = out.checked_mul(u32::try_from(value)?).context("launch dimension overflow")?;
+            let value = factor
+                .as_u64()
+                .context("only static launch factors are supported")?;
+            *out = out
+                .checked_mul(u32::try_from(value)?)
+                .context("launch dimension overflow")?;
         }
         ensure!(*out > 0, "launch dimensions must be positive");
     }
@@ -104,39 +112,98 @@ pub struct Symbols {
 
 impl Plan {
     pub fn validate(&self, bindings: &BTreeMap<String, Vec<u8>>) -> Result<()> {
-        ensure!([1, 3].contains(&self.format), "unsupported plan format {}", self.format);
+        ensure!(
+            [1, 3].contains(&self.format),
+            "unsupported plan format {}",
+            self.format
+        );
         ensure!(self.backend == "cuda", "only CUDA plans are supported");
-        ensure!(self.runtime_constants.is_empty() && self.symbols.bindings.is_empty()
-            && self.symbols.hints.is_empty() && self.symbols.caps.is_empty(), "dynamic plans are not yet supported");
+        ensure!(
+            self.runtime_constants.is_empty()
+                && self.symbols.bindings.is_empty()
+                && self.symbols.hints.is_empty()
+                && self.symbols.caps.is_empty(),
+            "dynamic plans are not yet supported"
+        );
         let mut names = BTreeSet::new();
         for buffer in &self.buffers {
-            ensure!(names.insert(buffer.name.as_str()), "duplicate buffer {}", buffer.name);
-            ensure!(["input", "constant", "output", "scratch"].contains(&buffer.role.as_str()), "invalid buffer role");
+            ensure!(
+                names.insert(buffer.name.as_str()),
+                "duplicate buffer {}",
+                buffer.name
+            );
+            ensure!(
+                ["input", "constant", "output", "scratch"].contains(&buffer.role.as_str()),
+                "invalid buffer role"
+            );
             let bytes = buffer.byte_len()?;
             if let Some(data) = bindings.get(&buffer.name) {
-                ensure!(["input", "constant"].contains(&buffer.role.as_str()), "only inputs and constants may be bound");
-                ensure!(data.len() == bytes, "binding size mismatch for {}", buffer.name);
+                ensure!(
+                    ["input", "constant"].contains(&buffer.role.as_str()),
+                    "only inputs and constants may be bound"
+                );
+                ensure!(
+                    data.len() == bytes,
+                    "binding size mismatch for {}",
+                    buffer.name
+                );
             } else {
-                ensure!(buffer.role != "constant", "missing constant bytes: {}", buffer.name);
+                ensure!(
+                    buffer.role != "constant",
+                    "missing constant bytes: {}",
+                    buffer.name
+                );
             }
         }
-        for name in self.inputs.iter().chain(&self.outputs).chain(bindings.keys()).chain(self.constants.keys()).chain(self.weights.keys()) {
+        for name in self
+            .inputs
+            .iter()
+            .chain(&self.outputs)
+            .chain(bindings.keys())
+            .chain(self.constants.keys())
+            .chain(self.weights.keys())
+        {
             ensure!(names.contains(name.as_str()), "unknown buffer {name}");
         }
         for (list, role) in [(&self.inputs, "input"), (&self.outputs, "output")] {
-            ensure!(list.iter().collect::<BTreeSet<_>>().len() == list.len(), "duplicate {role}");
+            ensure!(
+                list.iter().collect::<BTreeSet<_>>().len() == list.len(),
+                "duplicate {role}"
+            );
             for name in list {
-                ensure!(self.buffers.iter().any(|b| &b.name == name && b.role == role), "invalid {role} buffer {name}");
+                ensure!(
+                    self.buffers
+                        .iter()
+                        .any(|b| &b.name == name && b.role == role),
+                    "invalid {role} buffer {name}"
+                );
             }
         }
         for launch in &self.launches {
-            ensure!(self.kernels.contains_key(&launch.kernel), "unknown kernel {}", launch.kernel);
-            ensure!(launch.indirect.is_empty() && launch.cuda.tma.is_empty() && launch.runtime_args.is_empty(),
-                "indirect operands, descriptors, and runtime arguments are not yet supported");
+            ensure!(
+                self.kernels.contains_key(&launch.kernel),
+                "unknown kernel {}",
+                launch.kernel
+            );
+            ensure!(
+                launch.indirect.is_empty()
+                    && launch.cuda.tma.is_empty()
+                    && launch.runtime_args.is_empty(),
+                "indirect operands, descriptors, and runtime arguments are not yet supported"
+            );
             dimensions(&launch.grid)?;
             dimensions(&launch.block)?;
-            for name in launch.args.iter().chain(&launch.zero_outputs).chain(&launch.zero_prologues).chain(&launch.writes) {
-                ensure!(names.contains(name.as_str()), "unknown launch buffer {name}");
+            for name in launch
+                .args
+                .iter()
+                .chain(&launch.zero_outputs)
+                .chain(&launch.zero_prologues)
+                .chain(&launch.writes)
+            {
+                ensure!(
+                    names.contains(name.as_str()),
+                    "unknown launch buffer {name}"
+                );
             }
         }
         Ok(())
@@ -152,30 +219,66 @@ pub struct Artifact {
 
 fn member(root: &Path, name: &str) -> Result<PathBuf> {
     let path = root.join(name).canonicalize()?;
-    ensure!(path.starts_with(root) && path.is_file(), "artifact member escapes bundle: {name}");
+    ensure!(
+        path.starts_with(root) && path.is_file(),
+        "artifact member escapes bundle: {name}"
+    );
     Ok(path)
 }
 
 impl Artifact {
     pub fn load(root: &Path, program: &str) -> Result<Self> {
         let root = root.canonicalize()?;
-        let manifest: Value = serde_json::from_slice(&std::fs::read(member(&root, "manifest.json")?)?)?;
-        ensure!(manifest["format"] == 1 && manifest["standalone"] == 1, "unsupported standalone pack format");
-        let path = manifest["programs"][program].as_str().context("unknown program")?;
+        let manifest: Value =
+            serde_json::from_slice(&std::fs::read(member(&root, "manifest.json")?)?)?;
+        ensure!(
+            manifest["format"] == 1 && manifest["standalone"] == 1,
+            "unsupported standalone pack format"
+        );
+        let path = manifest["programs"][program]
+            .as_str()
+            .context("unknown program")?;
         let plan: Plan = serde_json::from_slice(&std::fs::read(member(&root, path)?)?)?;
         let mut bindings = BTreeMap::new();
-        for (name, path) in manifest["bindings"][program].as_object().context("missing binding index")? {
-            bindings.insert(name.clone(), std::fs::read(member(&root, path.as_str().context("invalid binding path")?)?)?);
+        for (name, path) in manifest["bindings"][program]
+            .as_object()
+            .context("missing binding index")?
+        {
+            bindings.insert(
+                name.clone(),
+                std::fs::read(member(
+                    &root,
+                    path.as_str().context("invalid binding path")?,
+                )?)?,
+            );
         }
         plan.validate(&bindings)?;
         let mut binaries = BTreeMap::new();
         for (name, kernel) in &plan.kernels {
-            ensure!(!kernel.arch_specific, "architecture-specific kernels are not yet supported");
-            ensure!(!kernel.binary_key.is_empty() && kernel.binary_key.bytes().all(|b| b.is_ascii_hexdigit()), "invalid cubin key");
-            binaries.insert(name.clone(), member(&root, &format!("cubin/{}.cubin", kernel.binary_key))?);
+            ensure!(
+                !kernel.arch_specific,
+                "architecture-specific kernels are not yet supported"
+            );
+            ensure!(
+                !kernel.binary_key.is_empty()
+                    && kernel.binary_key.bytes().all(|b| b.is_ascii_hexdigit()),
+                "invalid cubin key"
+            );
+            binaries.insert(
+                name.clone(),
+                member(&root, &format!("cubin/{}.cubin", kernel.binary_key))?,
+            );
         }
-        let arch = manifest["environment"]["arch"].as_str().context("missing target architecture")?.to_owned();
-        Ok(Self { plan, arch, bindings, binaries })
+        let arch = manifest["environment"]["arch"]
+            .as_str()
+            .context("missing target architecture")?
+            .to_owned();
+        Ok(Self {
+            plan,
+            arch,
+            bindings,
+            binaries,
+        })
     }
 }
 
@@ -207,7 +310,10 @@ mod tests {
         let plan: Plan = serde_json::from_value(example()).unwrap();
         plan.validate(&data).unwrap();
         assert!(plan.validate(&BTreeMap::new()).is_err());
-        assert!(plan.validate(&BTreeMap::from([("w".into(), vec![0])])).is_err());
+        assert!(
+            plan.validate(&BTreeMap::from([("w".into(), vec![0])]))
+                .is_err()
+        );
         for (pointer, value) in [
             ("/format", json!(999)),
             ("/buffers/0/shape/0", json!("n")),
@@ -229,15 +335,30 @@ mod tests {
 
     #[test]
     fn dimensions_multiply_factors_and_reject_unsupported_expressions() {
-        assert_eq!(dimensions(&[vec![json!(2), json!(3)], vec![json!(4)], vec![json!(1)]]).unwrap(), (6, 4, 1));
-        for factor in [json!("seq_len"), json!(-1), json!(0), json!(["+", 1, 2]), json!(true), json!(u64::MAX)] {
+        assert_eq!(
+            dimensions(&[vec![json!(2), json!(3)], vec![json!(4)], vec![json!(1)]]).unwrap(),
+            (6, 4, 1)
+        );
+        for factor in [
+            json!("seq_len"),
+            json!(-1),
+            json!(0),
+            json!(["+", 1, 2]),
+            json!(true),
+            json!(u64::MAX),
+        ] {
             assert!(dimensions(&[vec![factor], vec![json!(1)], vec![json!(1)]]).is_err());
         }
     }
 
     #[test]
     fn buffer_size_checks_dtype_shape_and_overflow() {
-        let mut buffer = Buffer { name: "x".into(), shape: vec![json!(2), json!(3)], dtype: "f16".into(), role: "input".into() };
+        let mut buffer = Buffer {
+            name: "x".into(),
+            shape: vec![json!(2), json!(3)],
+            dtype: "f16".into(),
+            role: "input".into(),
+        };
         assert_eq!(buffer.byte_len().unwrap(), 12);
         buffer.shape = vec![json!(u64::MAX)];
         assert!(buffer.byte_len().is_err());
@@ -248,19 +369,35 @@ mod tests {
 
     #[test]
     fn artifact_resolves_only_bundled_members() {
-        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let root = std::env::temp_dir().join(format!("emmy-artifact-{}-{nonce}", std::process::id()));
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("emmy-artifact-{}-{nonce}", std::process::id()));
         std::fs::create_dir_all(root.join("cubin")).unwrap();
-        std::fs::write(root.join("plan.json"), serde_json::to_vec(&example()).unwrap()).unwrap();
+        std::fs::write(
+            root.join("plan.json"),
+            serde_json::to_vec(&example()).unwrap(),
+        )
+        .unwrap();
         std::fs::write(root.join("w.bin"), 2.0f32.to_le_bytes()).unwrap();
         std::fs::write(root.join("cubin/ab.cubin"), b"compiler binary").unwrap();
         let mut manifest = json!({"format":1,"standalone":1,"environment":{"arch":"sm_89"},
             "programs":{"p":"plan.json"},"bindings":{"p":{"w":"w.bin"}}});
-        std::fs::write(root.join("manifest.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+        std::fs::write(
+            root.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
         assert!(Artifact::load(&root, "p").is_ok());
         assert!(Artifact::load(&root, "missing").is_err());
         manifest["programs"]["p"] = json!("/etc/passwd");
-        std::fs::write(root.join("manifest.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+        std::fs::write(
+            root.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
         assert!(Artifact::load(&root, "p").is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
