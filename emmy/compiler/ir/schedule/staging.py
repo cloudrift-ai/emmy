@@ -73,13 +73,12 @@ def _clamp_depth(depth: int, slot_bytes: int, budget: int) -> int:
     return min(depth, budget // slot_bytes)
 
 
-def _tma_operand_rank(index: tuple, tile_name: str, k_name: str) -> bool:
-    """Whether TMA's box can encode this operand's gmem index. The data plane is the TRAILING 2
-    dims; extra LEADING dims ride as extent-1 box dims whose origin is evaluated once per fill, so
-    those exprs must not move with the tile or the K loop."""
-    if not 2 <= len(index) <= 4:
+def _tma_operand_box(index: tuple, tile_name: str, k_name: str, order: tuple[str, str] | None = None) -> bool:
+    names = {tile_name, k_name}
+    if not 2 <= len(index) <= 4 or any(names & expr.free_vars() for expr in index[:-2]):
         return False
-    return all(not ({tile_name, k_name} & e.free_vars()) for e in index[:-2])
+    physical = tuple(next(iter(axes)) for expr in index[-2:] if len(axes := expr.free_vars() & names) == 1)
+    return order is None or len(physical) != 2 or set(physical) != names or physical == order
 
 
 def _warp_vector_copy(k_axis: Axis, tile_n: int, bk_elems: int, mask_n: bool, b_trans: bool, *, ragged: bool = False) -> bool:
@@ -167,7 +166,7 @@ def chunk_key_stage(tile: Tile, stage: Stage, inputs, producer, producer_k, k_ax
         if stage.transport == "smem-async"
         else (
             stage.transport == "smem-tma"
-            and _tma_operand_rank(slab.load.index, producer_k.name, k_axis.name)
+            and _tma_operand_box(slab.load.index, producer_k.name, k_axis.name)
             and max(span, bk_elems) <= _TMA_MAX_BOX
             and _warp_tma(k_axis, producer_k, span, bk_elems, nbytes, nbytes, False, False, ragged=ragged)
         )
@@ -221,7 +220,7 @@ def _chunk_warp_stage(
     vector_copy_ok = _warp_vector_copy(k_axis, n.tile, bk_elems, n.mask, view.b_trans, ragged=ragged)
     tma_ok = (
         stage.transport == "smem-tma"
-        and _tma_operand_rank(slab.load.index, n.axis.name, k_axis.name)
+        and _tma_operand_box(slab.load.index, n.axis.name, k_axis.name)
         and max(n.tile, bk_elems) <= _TMA_MAX_BOX
         and _warp_tma(k_axis, n.axis, n.tile, bk_elems, b_nbytes, b_nbytes, n.mask, view.b_trans, ragged=ragged)
     )
@@ -477,8 +476,8 @@ def resolve_warp_stage(
     rank_ok = (
         c.operands[0].as_slab() is not None
         and c.operands[1].as_slab() is not None  # a descriptor needs a gmem address on BOTH edges
-        and _tma_operand_rank(c.operands[0].as_slab().load.index, m.axis.name, k_axis.name)
-        and _tma_operand_rank(c.operands[1].as_slab().load.index, n.axis.name, k_axis.name)
+        and _tma_operand_box(c.operands[0].as_slab().load.index, m.axis.name, k_axis.name)
+        and _tma_operand_box(c.operands[1].as_slab().load.index, n.axis.name, k_axis.name)
     )
     box_ok = max(m.tile, n.tile, bk_elems) <= _TMA_MAX_BOX
     tma_ok = (
@@ -527,8 +526,8 @@ def resolve_scalar_stage(c: Fold, tile: Tile, stage: Stage, inputs, budget: int,
     ):
         return None
     if stage.transport == "smem-tma" and not (
-        _tma_operand_rank(c.operands[0].as_slab().load.index, tile.m.axis.name, k_axis.name)
-        and _tma_operand_rank(c.operands[1].as_slab().load.index, tile.n.axis.name, k_axis.name)
+        _tma_operand_box(c.operands[0].as_slab().load.index, tile.m.axis.name, k_axis.name, (tile.m.axis.name, k_axis.name))
+        and _tma_operand_box(c.operands[1].as_slab().load.index, tile.n.axis.name, k_axis.name, (k_axis.name, tile.n.axis.name))
     ):
         return None
     # Staging needs the CTA to BE one (tile_m x tile_n) output tile (the cooperative fill / drain
