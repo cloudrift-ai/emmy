@@ -9,20 +9,23 @@ import pytest
 from emmy.provisioning.ssh_transport import make_run_cmd
 
 
-@pytest.mark.parametrize("cancel", [False, True])
-async def test_local_timeout_or_cancellation_kills_descendants(tmp_path, cancel):
+@pytest.mark.parametrize("mode", ["timeout", "cancel", "exit"])
+async def test_local_command_kills_descendants(tmp_path, mode):
     pid_file = tmp_path / "child.pid"
     run = make_run_cmd(None, None, None, local=True)
-    job = asyncio.create_task(run(f"sleep 60 & echo $! > {pid_file}; wait", stream=False, timeout=0.2))
+    command = f"sleep 60 >/dev/null 2>&1 & echo $! > {pid_file}"
+    if mode != "exit":
+        command += "; wait"
+    job = asyncio.create_task(run(command, stream=False, timeout=0.2))
     while not pid_file.exists():
         await asyncio.sleep(0.005)
     child = int(pid_file.read_text())
-    if cancel:
+    if mode == "cancel":
         job.cancel()
         with pytest.raises(asyncio.CancelledError):
             await job
     else:
-        assert (await job)[0] == 1
+        assert (await job)[0] == (1 if mode == "timeout" else 0)
     try:
         os.kill(child, 0)
     except ProcessLookupError:

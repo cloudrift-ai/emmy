@@ -54,6 +54,7 @@ def make_run_cmd(server, ssh_key, ssh_port, dry_run=False, *, local=False):
 
         argv = ["bash", "-c", full_cmd] if local else [*ssh_base_args(server, ssh_key, ssh_port), full_cmd]
 
+        proc = None
         try:
             use_pipe = not stream or log_output
             proc = await asyncio.create_subprocess_exec(
@@ -87,18 +88,28 @@ def make_run_cmd(server, ssh_key, ssh_port, dry_run=False, *, local=False):
                 stderr = "" if stream else (stderr_bytes.decode() if stderr_bytes else "")
                 return proc.returncode, stdout, stderr
         except (TimeoutError, asyncio.CancelledError) as exc:
-            logger.error(f"Command timed out after {timeout}s: {command}")
-            if local:
-                os.killpg(proc.pid, signal.SIGKILL)
-            else:
-                proc.kill()
-            await proc.wait()
+            if not isinstance(exc, asyncio.CancelledError):
+                logger.error(f"Command timed out after {timeout}s: {command}")
+            if proc is not None:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL) if local else proc.kill()
+                except ProcessLookupError:
+                    pass
+                await proc.wait()
             if isinstance(exc, asyncio.CancelledError):
                 raise
             return 1, "", ""
         except Exception as e:
             logger.error(f"Error running SSH command: {e}")
             return 1, "", ""
+        finally:
+            if local and proc is not None:
+                # Background descendants belong to this finite command, including when the
+                # shell exits normally before they do. Never leak them into the next row.
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
     return run_cmd
 
