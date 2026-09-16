@@ -19,8 +19,8 @@ from emmy.compiler.ir.stmt.identity import canonicalize_identity
 from emmy.compiler.ir.stmt.leaves import (
     Accum,
     Assign,
-    Let,
     Init,
+    Let,
     Load,
     Mma,
     Write,

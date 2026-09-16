@@ -31,8 +31,8 @@ from dataclasses import dataclass, field, replace
 from emmy.compiler.dtype import F16, F32, DataType
 from emmy.compiler.dtype import get as dtype_get
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.expr import Literal
+from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Let, Load, Pack, Stmt, Unpack, Write
 from emmy.compiler.ir.stmt.base import dtype_promote
 from emmy.compiler.pipeline import Pattern, RuleSkipped

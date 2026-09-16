@@ -14,8 +14,8 @@ from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.leaves import (
     Accum,
     Assign,
-    Let,
     Init,
+    Let,
     Load,
     Mma,
     Pack,

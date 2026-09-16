@@ -9,7 +9,7 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.twist import SOFTMAX
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Let, Init, Load, Loop, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Let, Load, Loop, Write
 
 # --- Lambda formation: the Stmt.pure gate + results-defined ------------------------------------- #
 

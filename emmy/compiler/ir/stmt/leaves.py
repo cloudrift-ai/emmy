@@ -755,6 +755,7 @@ class Let(Stmt):
         value = ctx.identity_literal(self.value.value, self.dtype) if isinstance(self.value, Literal) else self.value.render(ctx)
         return [f"{_pad(ctx.indent)}{ctx.type_name(self.dtype)} {self.name} = {value};"]
 
+
 # Map ``ElementwiseImpl`` op names to compound-assignment operator symbols
 # used by ``Write.pretty()`` for reduce-writes (split-K partial accumulation).
 _REDUCE_OP_SYMBOL = {"add": "+", "sub": "-", "mul": "*", "div": "/"}
