@@ -6,6 +6,11 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+const SUPPORTED_PLAN_FORMATS: [u32; 2] = [1, 3];
+const PACK_FORMAT: u32 = 1;
+const STANDALONE_FORMAT: u32 = 1;
+const LAUNCH_DIMENSIONS: usize = 3;
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Buffer {
@@ -70,8 +75,8 @@ pub struct CudaFeatures {
 }
 
 pub fn dimensions(factors: &[Vec<Value>]) -> Result<(u32, u32, u32)> {
-    ensure!(factors.len() == 3, "launch dimensions must have three axes");
-    let mut dims = [1u32; 3];
+    ensure!(factors.len() == LAUNCH_DIMENSIONS, "launch dimensions must have three axes");
+    let mut dims = [1u32; LAUNCH_DIMENSIONS];
     for (out, axis) in dims.iter_mut().zip(factors) {
         for factor in axis {
             let value = factor
@@ -113,7 +118,7 @@ pub struct Symbols {
 impl Plan {
     pub fn validate(&self, bindings: &BTreeMap<String, Vec<u8>>) -> Result<()> {
         ensure!(
-            [1, 3].contains(&self.format),
+            SUPPORTED_PLAN_FORMATS.contains(&self.format),
             "unsupported plan format {}",
             self.format
         );
@@ -232,7 +237,7 @@ impl Artifact {
         let manifest: Value =
             serde_json::from_slice(&std::fs::read(member(&root, "manifest.json")?)?)?;
         ensure!(
-            manifest["format"] == 1 && manifest["standalone"] == 1,
+            manifest["format"] == PACK_FORMAT && manifest["standalone"] == STANDALONE_FORMAT,
             "unsupported standalone pack format"
         );
         let path = manifest["programs"][program]

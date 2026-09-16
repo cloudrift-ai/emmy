@@ -12,6 +12,13 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::time::Instant;
 
+const PROTOCOL_VERSION: u32 = 1;
+const FRAME_HEADER_BYTES: usize = size_of::<u64>();
+const MAX_CONTROL_FRAME_BYTES: u64 = 1024 * 1024;
+const MILLISECONDS_PER_SECOND: f64 = 1000.0;
+const GPU_ORDINAL: usize = 0;
+const FAILURE_EXIT_CODE: i32 = 1;
+
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 enum Command {
@@ -39,13 +46,13 @@ struct Request {
 }
 
 fn read_frame(reader: &mut impl Read) -> Result<Option<Vec<u8>>> {
-    let mut header = [0u8; 8];
+    let mut header = [0u8; FRAME_HEADER_BYTES];
     if reader.read(&mut header[..1])? == 0 {
         return Ok(None);
     }
     reader.read_exact(&mut header[1..])?;
     let size = u64::from_le_bytes(header);
-    ensure!(size <= 1024 * 1024, "control frame exceeds 1 MiB");
+    ensure!(size <= MAX_CONTROL_FRAME_BYTES, "control frame exceeds {MAX_CONTROL_FRAME_BYTES} bytes");
     let mut bytes = vec![0; size as usize];
     reader.read_exact(&mut bytes)?;
     Ok(Some(bytes))
@@ -63,18 +70,18 @@ fn main() -> Result<()> {
     while let Some(frame) = read_frame(&mut input)? {
         let response = (|| -> Result<serde_json::Value> {
             let request: Request = serde_json::from_slice(&frame)?;
-            ensure!(request.version == 1, "unsupported control protocol version");
+            ensure!(request.version == PROTOCOL_VERSION, "unsupported control protocol version");
             match request.command {
                 Command::Load { root, program } => {
                     let started = Instant::now();
                     let artifact = Artifact::load(&root, &program)?;
-                    let artifact_ms = started.elapsed().as_secs_f64() * 1000.0;
+                    let artifact_ms = started.elapsed().as_secs_f64() * MILLISECONDS_PER_SECOND;
                     executor = None;
                     let started = Instant::now();
                     if context.is_none() {
-                        context = Some(Device::new(0)?);
+                        context = Some(Device::new(GPU_ORDINAL)?);
                     }
-                    let context_ms = started.elapsed().as_secs_f64() * 1000.0;
+                    let context_ms = started.elapsed().as_secs_f64() * MILLISECONDS_PER_SECOND;
                     executor = Some(Executor::load(context.as_ref().unwrap(), artifact)?);
                     Ok(
                         json!({"loaded": true, "artifact_ms": artifact_ms, "context_ms": context_ms,
@@ -102,7 +109,7 @@ fn main() -> Result<()> {
                     }
                     Ok(
                         json!({"time_ms": metrics.time_ms, "captured": capture, "metrics": metrics,
-                        "output_ms": started.elapsed().as_secs_f64() * 1000.0}),
+                        "output_ms": started.elapsed().as_secs_f64() * MILLISECONDS_PER_SECOND}),
                     )
                 }
                 Command::Release => {
@@ -113,8 +120,8 @@ fn main() -> Result<()> {
         })();
         let failed = response.is_err();
         let value = match response {
-            Ok(value) => json!({"version": 1, "result": value}),
-            Err(error) => json!({"version": 1, "error": format!("{error:#}"), "retire": true}),
+            Ok(value) => json!({"version": PROTOCOL_VERSION, "result": value}),
+            Err(error) => json!({"version": PROTOCOL_VERSION, "error": format!("{error:#}"), "retire": true}),
         };
         let bytes = serde_json::to_vec(&value)?;
         output.write_all(&(bytes.len() as u64).to_le_bytes())?;
@@ -122,7 +129,7 @@ fn main() -> Result<()> {
         output.flush()?;
         if failed {
             // A CUDA fault may poison the context. Do not wait on or reuse its allocations.
-            std::process::exit(1);
+            std::process::exit(FAILURE_EXIT_CODE);
         }
     }
     Ok(())
@@ -136,7 +143,7 @@ mod tests {
     fn framing_rejects_truncation_and_oversized_metadata() {
         assert!(read_frame(&mut &[][..]).unwrap().is_none());
         assert!(read_frame(&mut &[1][..]).is_err());
-        assert!(read_frame(&mut &(2_000_000u64.to_le_bytes())[..]).is_err());
+        assert!(read_frame(&mut &((MAX_CONTROL_FRAME_BYTES + 1).to_le_bytes())[..]).is_err());
         let bytes = [3u64.to_le_bytes().as_slice(), b"ab"].concat();
         assert!(read_frame(&mut bytes.as_slice()).is_err());
     }
@@ -144,12 +151,12 @@ mod tests {
     #[test]
     fn protocol_reads_operations_and_rejects_unknown_fields() {
         assert!(
-            serde_json::from_value::<Request>(json!({"version":1,"command":{"op":"release"}}))
+            serde_json::from_value::<Request>(json!({"version":PROTOCOL_VERSION,"command":{"op":"release"}}))
                 .is_ok()
         );
         assert!(
             serde_json::from_value::<Request>(
-                json!({"version":1,"command":{"op":"release"},"extra":true})
+                json!({"version":PROTOCOL_VERSION,"command":{"op":"release"},"extra":true})
             )
             .is_err()
         );

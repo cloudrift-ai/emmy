@@ -11,6 +11,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Instant;
 
+const MAX_THREADS_PER_BLOCK: u64 = 1024;
+const MAX_BLOCK_DIMENSIONS: (u32, u32, u32) = (1024, 1024, 64);
+const MAX_GRID_DIMENSIONS: (u32, u32, u32) = (i32::MAX as u32, 65535, 65535);
+const DEFAULT_SHARED_MEMORY_BYTES: u32 = 48 * 1024;
+const MAX_RUN_ITERATIONS: u32 = 1_000_000;
+const MILLISECONDS_PER_SECOND: f64 = 1000.0;
+
 #[derive(Serialize)]
 pub struct RunMetrics {
     pub time_ms: f32,
@@ -59,14 +66,16 @@ impl Executor {
             let block = dimensions(&launch.block)?;
             let grid = dimensions(&launch.grid)?;
             ensure!(
-                u64::from(block.0) * u64::from(block.1) * u64::from(block.2) <= 1024
-                    && block.0 <= 1024
-                    && block.1 <= 1024
-                    && block.2 <= 64,
+                u64::from(block.0) * u64::from(block.1) * u64::from(block.2) <= MAX_THREADS_PER_BLOCK
+                    && block.0 <= MAX_BLOCK_DIMENSIONS.0
+                    && block.1 <= MAX_BLOCK_DIMENSIONS.1
+                    && block.2 <= MAX_BLOCK_DIMENSIONS.2,
                 "invalid CUDA block"
             );
             ensure!(
-                grid.0 <= i32::MAX as u32 && grid.1 <= 65535 && grid.2 <= 65535,
+                grid.0 <= MAX_GRID_DIMENSIONS.0
+                    && grid.1 <= MAX_GRID_DIMENSIONS.1
+                    && grid.2 <= MAX_GRID_DIMENSIONS.2,
                 "invalid CUDA grid"
             );
         }
@@ -84,7 +93,7 @@ impl Executor {
                 .map(|l| l.smem)
                 .max()
                 .unwrap_or(0);
-            if smem > 48 * 1024 {
+            if smem > DEFAULT_SHARED_MEMORY_BYTES {
                 function.set_attribute(
                     sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
                     i32::try_from(smem)?,
@@ -92,7 +101,7 @@ impl Executor {
             }
             functions.insert(name, function);
         }
-        let module_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let module_ms = started.elapsed().as_secs_f64() * MILLISECONDS_PER_SECOND;
         let started = Instant::now();
         let mut arrays = BTreeMap::new();
         for buffer in &artifact.plan.buffers {
@@ -102,7 +111,7 @@ impl Executor {
             );
         }
         stream.synchronize()?;
-        let allocation_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let allocation_ms = started.elapsed().as_secs_f64() * MILLISECONDS_PER_SECOND;
         let mut executor = Self {
             load_times_ms: BTreeMap::new(),
             plan: artifact.plan,
@@ -121,7 +130,7 @@ impl Executor {
         executor.load_times_ms = BTreeMap::from([
             ("module_ms", module_ms),
             ("allocation_zero_ms", allocation_ms),
-            ("upload_ms", started.elapsed().as_secs_f64() * 1000.0),
+            ("upload_ms", started.elapsed().as_secs_f64() * MILLISECONDS_PER_SECOND),
         ]);
         Ok(executor)
     }
@@ -188,7 +197,7 @@ impl Executor {
     /// Uncaptured execution includes exposed host submission gaps.
     pub fn execute(&mut self, warmup: u32, iterations: u32, capture: bool) -> Result<RunMetrics> {
         ensure!(
-            iterations > 0 && iterations <= 1_000_000 && warmup <= 1_000_000,
+            iterations > 0 && iterations <= MAX_RUN_ITERATIONS && warmup <= MAX_RUN_ITERATIONS,
             "invalid iteration count"
         );
         self.completed = false;
@@ -205,13 +214,13 @@ impl Executor {
             submitted?;
             self.graph = Some(captured?.context("empty CUDA graph")?);
         }
-        let preparation_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let preparation_ms = started.elapsed().as_secs_f64() * MILLISECONDS_PER_SECOND;
         let started = Instant::now();
         for _ in 0..warmup {
             self.step(capture)?;
         }
         self.stream.synchronize()?;
-        let warmup_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let warmup_ms = started.elapsed().as_secs_f64() * MILLISECONDS_PER_SECOND;
         let start = self
             .stream
             .context()
@@ -226,10 +235,10 @@ impl Executor {
             self.step(capture)?;
         }
         end.record(&self.stream)?;
-        let submission_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let submission_ms = started.elapsed().as_secs_f64() * MILLISECONDS_PER_SECOND;
         let started = Instant::now();
         let time = start.elapsed_ms(&end)? / iterations as f32;
-        let completion_wait_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let completion_wait_ms = started.elapsed().as_secs_f64() * MILLISECONDS_PER_SECOND;
         self.completed = true;
         Ok(RunMetrics {
             time_ms: time,
