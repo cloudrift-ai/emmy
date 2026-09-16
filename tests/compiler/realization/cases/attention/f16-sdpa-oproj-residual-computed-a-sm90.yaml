@@ -110,4 +110,4 @@ configs:
       STAGE@map.1/inner: d2/smem
       TILE@map.1/inner.1/map.1/twist.1/inner: mma_m16n8k16_f16_f32/f8x2/k4
       RASTER: ''
-    identity: 63f0a110c115cc2232028b09d3c48c1d74e5f3f96e60dc13b1397abd471e213d
+    identity: 9cc8b43dd16fa9012bc613d7d1893e6bebb267600b61d23c2d8b6290e5ac9a20
