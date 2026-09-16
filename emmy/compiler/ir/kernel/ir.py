@@ -891,27 +891,6 @@ class WarpShuffle(Stmt):
         return out
 
 
-@dataclass(frozen=True)
-class Reassign(Stmt):
-    """Reassign an already-declared carried scalar — ``name = value;`` (no ``float``
-    decl). The streaming-flash online-softmax stats (``m`` / ``l``) are carried across
-    the KV-tile loop: an enclosing ``Init`` declares them, the per-tile recurrence
-    computes fresh SSA temps, and this rebinds the carried name to the new value
-    (``Assign`` always *declares*, which would shadow the carried value)."""
-
-    name: str
-    value: str
-
-    def deps(self) -> tuple[str, ...]:
-        return (self.value,)
-
-    def pretty(self, indent: str = "") -> list[str]:
-        return [f"{indent}{self.name} := {self.value}"]
-
-    def render(self, ctx: RenderCtx) -> list[str]:
-        return [f"{_pad(ctx.indent)}{self.name} = {self.value};"]
-
-
 #: The per-arg distribution kinds of a :class:`FragmentApply` operand.
 FRAG = "frag"  # a C-fragment operand — indexed per element (``arg[i]``)
 ROW = "row"  # a per-row scalar — broadcast by row (suffix ``0`` for rows g, ``1`` for rows g+8)
@@ -3300,11 +3279,6 @@ def _(s: RegStore, rename, sigma, axis_fn):
 # through ``rename`` (the SSA canonicalizer / per-cell replicator); ``rename`` is
 # identity on non-SSA strings, so a literal scale (``"0.25f"``) passes through
 # unchanged while an SSA scalar (``"a0"``) renames.
-
-
-@_rewrite_kind.register
-def _(s: Reassign, rename, sigma, axis_fn):
-    return Reassign(name=rename(s.name), value=rename(s.value))
 
 
 @_rewrite_kind.register

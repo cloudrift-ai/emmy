@@ -20,7 +20,7 @@ from dataclasses import dataclass, fields
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.leaves import Accum, Assign, Init, Mma
+from emmy.compiler.ir.stmt.leaves import Accum, Assign, Init
 from emmy.compiler.structural import form
 
 __all__ = ["Labeling", "Ordering", "bound_axes", "ordering_constraints", "relation_graph", "topological_sort"]
@@ -29,7 +29,7 @@ __all__ = ["Labeling", "Ordering", "bound_axes", "ordering_constraints", "relati
 def _ordered_exported_accs(body: Body) -> tuple[str, ...]:
     """Accumulator names exported by ``body``, deduplicated in structural order."""
     return tuple(
-        dict.fromkeys(name for stmt in Body.coerce(body).iter() if isinstance(stmt, (Accum, Mma)) for name in stmt.carried_names())
+        dict.fromkeys(name for stmt in Body.coerce(body).iter() if isinstance(stmt, Accum) for name in stmt.carried_names())
     )
 
 
@@ -123,7 +123,7 @@ def _statement_shape(stmt: Stmt) -> tuple[str, tuple[_Occurrence, ...]]:
     stmt_fields = fields(templated)
     if isinstance(templated, Assign) and templated.op.commutative:
         unordered[(1 + next(index for index, field in enumerate(stmt_fields) if field.name == "args"),)] = "bag"
-    if isinstance(templated, (Accum, Mma)):
+    if isinstance(templated, Accum):
         unordered[(1 + next(index for index, field in enumerate(stmt_fields) if field.name == "axes"),)] = "set"
 
     occurrences: list[_Occurrence] = []
