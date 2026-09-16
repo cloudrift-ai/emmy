@@ -1669,9 +1669,10 @@ def test_regstore_rewrite_preserves_atomic():
 #
 # The contract now: the row stride is DERIVED from the index (``_addr.gmem_row_stride``, which
 # recovers the flat coordinate a delinearizing reshape splits across components), the columns must
-# be gmem-CONTIGUOUS, and TMA additionally needs the axes on the descriptor's own two trailing
-# dims. What no loader can read is left unmapped and falls back — a transposed operand to the
-# per-cell scalar tier, a re-strided one off TMA onto cp.async / gmem-direct.
+# be gmem-CONTIGUOUS, and TMA additionally needs the axes in the same order as the logical slab on
+# the descriptor's own two trailing dims. What no loader can read is left unmapped and falls back —
+# a transposed operand to the per-cell scalar tier, a re-strided one off TMA onto cp.async /
+# gmem-direct.
 
 _IMAP_N = 64  # output columns, shared by every case below
 
@@ -1792,3 +1793,12 @@ def test_transposed_a_warp_pin_restricts_the_schedule_to_empty(monkeypatch) -> N
     tile = next(node.op for node in out.nodes.values() if isinstance(node.op, TileOp))
 
     assert not tile.place.is_mapped and tile.schedule is None
+
+
+def test_transposed_a_tma_pin_is_refused(monkeypatch) -> None:
+    """TMA cannot transpose a physical ``(K, M)`` box into the logical ``(M, K)`` shared slab.
+    Refuse the pinned transport before its invalid transaction can poison the CUDA context."""
+    monkeypatch.setenv("EMMY_STAGE", "d2/smem-tma")
+
+    with pytest.raises(ValueError, match="does not resolve for this contraction"):
+        _run_tile_pass(_imap_graph("transpose_a")[0])
