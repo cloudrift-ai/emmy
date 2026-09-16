@@ -122,7 +122,9 @@ def register_run_command(subparsers):
         ),
     )
     parser.add_argument("--seed", type=int, default=0, help="RNG seed for --ir random inputs (default: 0).")
-    parser.add_argument("--pack", metavar="DIR", help="With --bench --json: compare Python and Rust on a standalone static executable pack.")
+    parser.add_argument(
+        "--pack", metavar="DIR", help="With --bench --json: compare Python and Rust on a standalone static executable pack."
+    )
     parser.add_argument(
         "--ab",
         action="append",
@@ -209,9 +211,25 @@ def handle_run(args):
 
         from emmy.compiler.backend.native import benchmark_pack
 
-        if not args.bench or not args.json or any(
-            getattr(args, name, None)
-            for name in ("input", "code", "ir", "golden", "realization", "dynamic", "profile", "record", "record_greedy", "ab", "bench_backends")
+        if (
+            not args.bench
+            or not args.json
+            or any(
+                getattr(args, name, None)
+                for name in (
+                    "input",
+                    "code",
+                    "ir",
+                    "golden",
+                    "realization",
+                    "dynamic",
+                    "profile",
+                    "record",
+                    "record_greedy",
+                    "ab",
+                    "bench_backends",
+                )
+            )
         ):
             logger.error("--pack requires --bench --json and cannot be combined with compilation or model benchmark options")
             sys.exit(2)

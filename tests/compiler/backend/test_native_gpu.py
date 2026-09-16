@@ -20,13 +20,26 @@ pytestmark = [requires_cuda, pytest.mark.xdist_group("cuda")]
 
 def _plan():
     return ExecutionPlan(
-        "cuda", ["x"], ["y"],
-        [BufferSpec("x", (Dim(32),), F32, "input"), BufferSpec("w", (Dim(1),), F32, "constant"),
-         BufferSpec("s", (Dim(32),), F32, "scratch"), BufferSpec("y", (Dim(32),), F32, "output")],
-        {"w": 2.0}, {},
-        [LaunchSpec(out, "add", (out, inp, "w"), ((1,), (1,), (1,)), ((32,), (1,), (1,)), 0, (out,))
-         for inp, out in (("x", "s"), ("s", "y"))],
-        {"add": KernelSpec(source='extern "C" __global__ void add(float* y, const float* x, const float* w) { int i=threadIdx.x; y[i] += x[i]*w[0]; }')},
+        "cuda",
+        ["x"],
+        ["y"],
+        [
+            BufferSpec("x", (Dim(32),), F32, "input"),
+            BufferSpec("w", (Dim(1),), F32, "constant"),
+            BufferSpec("s", (Dim(32),), F32, "scratch"),
+            BufferSpec("y", (Dim(32),), F32, "output"),
+        ],
+        {"w": 2.0},
+        {},
+        [
+            LaunchSpec(out, "add", (out, inp, "w"), ((1,), (1,), (1,)), ((32,), (1,), (1,)), 0, (out,))
+            for inp, out in (("x", "s"), ("s", "y"))
+        ],
+        {
+            "add": KernelSpec(
+                source='extern "C" __global__ void add(float* y, const float* x, const float* w) { int i=threadIdx.x; y[i] += x[i]*w[0]; }'
+            )
+        },
     )
 
 
@@ -70,7 +83,8 @@ def test_native_pack_parity_rebind_graph_and_retirement(tmp_path, monkeypatch):
                 changed.write_bytes((x + 10).tobytes())
                 await worker.run_job({"op": "bind", "inputs": {"x": str(changed)}}, wall_timeout_s=30)
                 await worker.run_job(
-                    {"op": "run", "warmup": 0, "iterations": 2, "capture": True, "outputs": {"y": str(output)}}, wall_timeout_s=30,
+                    {"op": "run", "warmup": 0, "iterations": 2, "capture": True, "outputs": {"y": str(output)}},
+                    wall_timeout_s=30,
                 )
                 np.testing.assert_array_equal(np.fromfile(output, np.float32), (x + 10) * 4)
                 with pytest.raises(RuntimeError, match="unknown program output"):
@@ -98,14 +112,17 @@ def test_native_gpu_failure_restarts_cleanly(tmp_path, monkeypatch, fault):
     bad = _plan()
     body = (
         "unsigned long long start=clock64(); while(clock64()-start < 1000000000ULL) {} y[threadIdx.x]=x[threadIdx.x];"
-        if fault == "deadline" else "*(volatile float*)0 = 1.0f;"
+        if fault == "deadline"
+        else "*(volatile float*)0 = 1.0f;"
     )
-    bad.kernels["add"] = KernelSpec(source='extern "C" __global__ void add(float* y, const float* x, const float* w) {' + body + '}')
+    bad.kernels["add"] = KernelSpec(source='extern "C" __global__ void add(float* y, const float* x, const float* w) {' + body + "}")
     with gpu_lock():
         x = np.arange(32, dtype=np.float32)
         root = save_executable(
-            tmp_path / "bundle", {"good": good, "bad": bad},
-            bindings={name: _bindings(x) for name in ("good", "bad")}, key={},
+            tmp_path / "bundle",
+            {"good": good, "bad": bad},
+            bindings={name: _bindings(x) for name in ("good", "bad")},
+            key={},
         )
 
         async def check():

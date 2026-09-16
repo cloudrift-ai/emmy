@@ -19,10 +19,22 @@ async def test_local_command_preserves_results_without_ssh(tmp_path, monkeypatch
 
     monkeypatch.setattr("emmy.provisioning.ssh_transport.scp_from_remote", no_ssh)
     recipe = Recipe(command=CommandConfig(run=f"echo evidence > $task_dir/raw.txt\nexit {exit_code}", result_files=["*.txt"]))
-    task = BenchmarkTask(recipe_dir="experiment", variant=_variant({"deploy.gpu": "NVIDIA GeForce RTX 4080", "deploy.gpu_count": 1}), recipe=recipe, run_dir=tmp_path)
+    task = BenchmarkTask(
+        recipe_dir="experiment",
+        variant=_variant({"deploy.gpu": "NVIDIA GeForce RTX 4080", "deploy.gpu_count": 1}),
+        recipe=recipe,
+        run_dir=tmp_path,
+    )
     success, info = await run_command_workload(
-        task, make_run_cmd(None, None, None, local=True), repo_dir=None,
-        task_dir=str(tmp_path / "work"), gpu_device_ids=[0], server=None, ssh_key=None, ssh_port=22, local=True,
+        task,
+        make_run_cmd(None, None, None, local=True),
+        repo_dir=None,
+        task_dir=str(tmp_path / "work"),
+        gpu_device_ids=[0],
+        server=None,
+        ssh_key=None,
+        ssh_port=22,
+        local=True,
     )
     assert success == (exit_code == 0)
     assert len(info["result_paths"]) == 1

@@ -44,7 +44,10 @@ async def test_native_timeout_and_cancellation_reap_process():
 
 
 async def test_native_bad_response_retires_process():
-    worker = StubWorker("import sys,time; sys.stdin.buffer.read(8); sys.stdout.buffer.write((1).to_bytes(8,'little')+b'?'); sys.stdout.flush(); time.sleep(60)")
+    worker = StubWorker(
+        "import sys,time; sys.stdin.buffer.read(8); sys.stdout.buffer.write((1).to_bytes(8,'little')+b'?'); "
+        "sys.stdout.flush(); time.sleep(60)"
+    )
     with pytest.raises(json.JSONDecodeError):
         await worker.run_job({"op": "release"}, wall_timeout_s=5)
     assert worker._proc is None

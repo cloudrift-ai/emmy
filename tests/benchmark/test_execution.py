@@ -23,11 +23,15 @@ async def test_local_command_group_skips_provisioning(tmp_path, monkeypatch):
     gpu = "NVIDIA GeForce RTX 4080"
     recipe = Recipe(command=CommandConfig(run="echo raw > $task_dir/result.txt", result_files=["result.txt"]))
     task = BenchmarkTask(
-        recipe_dir=str(tmp_path), variant=Variant(params={"deploy.gpu": gpu, "deploy.gpu_count": 1}),
-        recipe=recipe, run_dir=tmp_path,
+        recipe_dir=str(tmp_path),
+        variant=Variant(params={"deploy.gpu": gpu, "deploy.gpu_count": 1}),
+        recipe=recipe,
+        run_dir=tmp_path,
     )
     results = await run_execution_group(
-        ExecutionGroup(gpu_name=gpu, gpu_count=1, tasks=[task]), {"benchmark": {}}, "",
+        ExecutionGroup(gpu_name=gpu, gpu_count=1, tasks=[task]),
+        {"benchmark": {}},
+        "",
         preallocated_conn=VMConnectionInfo(host="127.0.0.1", username="test", is_local=True),
     )
     assert results[0][1]

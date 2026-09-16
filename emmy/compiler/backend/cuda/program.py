@@ -877,7 +877,12 @@ class CompiledProgram:
                 len(slab_plan.offsets),
             )
         return cls(
-            compiled=compiled, arrays=arrays, descs=descs, sym_values=sym_values, slab_plan=slab_plan, arena=arena,
+            compiled=compiled,
+            arrays=arrays,
+            descs=descs,
+            sym_values=sym_values,
+            slab_plan=slab_plan,
+            arena=arena,
             load_times_ms={"module_ms": (loaded - t0) * 1000, "allocation_upload_submit_ms": (allocated - loaded) * 1000},
         )
 

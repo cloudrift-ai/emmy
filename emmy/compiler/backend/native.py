@@ -143,9 +143,16 @@ class PackReference:
                 Path(path).write_bytes(cp.asnumpy(self.program.arrays[name]).tobytes())
             output_ms = (perf_counter() - phase) * 1000
         return {
-            "time_ms": time_ms, "captured": capture, "run_ms": (perf_counter() - started) * 1000, "output_ms": output_ms,
-            "metrics": {"preparation_ms": preparation_ms, "warmup_ms": warmup_ms,
-                        "submission_ms": submission_ms, "completion_wait_ms": completion_wait_ms},
+            "time_ms": time_ms,
+            "captured": capture,
+            "run_ms": (perf_counter() - started) * 1000,
+            "output_ms": output_ms,
+            "metrics": {
+                "preparation_ms": preparation_ms,
+                "warmup_ms": warmup_ms,
+                "submission_ms": submission_ms,
+                "completion_wait_ms": completion_wait_ms,
+            },
         }
 
 
@@ -185,7 +192,9 @@ async def benchmark_pack(root, *, warmup: int, iterations: int, repeats: int = 3
                                 load_result = None
                                 if lifetime == "one-shot" or repeat == 0:
                                     before = perf_counter()
-                                    load_result = await worker.run_job({"op": "load", "root": str(root), "program": program}, wall_timeout_s=60)
+                                    load_result = await worker.run_job(
+                                        {"op": "load", "root": str(root), "program": program}, wall_timeout_s=60
+                                    )
                                     load_ms = (perf_counter() - before) * 1000
                                 outputs = {name: str(Path(temporary) / f"output-{i}.bin") for i, name in enumerate(plan.outputs)}
                                 before = perf_counter()
@@ -199,20 +208,43 @@ async def benchmark_pack(root, *, warmup: int, iterations: int, repeats: int = 3
                                     if name not in reference:
                                         reference[name] = value.copy()
                                     np.testing.assert_array_equal(value, reference[name], err_msg=f"{runtime}/{program}/{name}")
-                                rows.append({
-                                    "program": program, "runtime": runtime, "capture": capture, "lifetime": lifetime, "repeat": repeat,
-                                    "load_roundtrip_ms": load_ms, "run_roundtrip_ms": roundtrip_ms, "time_ms": result["time_ms"],
-                                    "outputs_equal": True,
-                                    "load": load_result, "run": result,
-                                })
+                                rows.append(
+                                    {
+                                        "program": program,
+                                        "runtime": runtime,
+                                        "capture": capture,
+                                        "lifetime": lifetime,
+                                        "repeat": repeat,
+                                        "load_roundtrip_ms": load_ms,
+                                        "run_roundtrip_ms": roundtrip_ms,
+                                        "time_ms": result["time_ms"],
+                                        "outputs_equal": True,
+                                        "load": load_result,
+                                        "run": result,
+                                    }
+                                )
                                 if lifetime == "one-shot":
                                     await worker.aclose()
                             if lifetime == "persistent":
                                 before = perf_counter()
                                 result = await worker.run_job({"op": "load", "root": str(root), "program": program}, wall_timeout_s=60)
-                                reloads.append({"program": program, "runtime": runtime, "capture": capture,
-                                                "roundtrip_ms": (perf_counter() - before) * 1000, "load": result})
+                                reloads.append(
+                                    {
+                                        "program": program,
+                                        "runtime": runtime,
+                                        "capture": capture,
+                                        "roundtrip_ms": (perf_counter() - before) * 1000,
+                                        "load": result,
+                                    }
+                                )
                         finally:
                             await worker.aclose()
-    return {"format": 1, "artifact": str(root), "warmup": warmup, "iterations": iterations, "repeats": repeats,
-            "rows": rows, "reloads": reloads}
+    return {
+        "format": 1,
+        "artifact": str(root),
+        "warmup": warmup,
+        "iterations": iterations,
+        "repeats": repeats,
+        "rows": rows,
+        "reloads": reloads,
+    }
