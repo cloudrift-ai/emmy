@@ -675,7 +675,7 @@ class TileOp(Op):
         except StopIteration:
             raise KeyError(f"axis {name!r} is not in this kernel's axis table {[axis.name for axis in self.axes]}") from None
 
-    def _body_identity(self, *, structural: bool = True, typed: bool = False):  # noqa: ANN202
+    def _body_identity(self, *, structural: bool = True, typed: bool = False):
         """Override :meth:`Op._body_identity` with the DERIVED body: :attr:`loop_body`'s
         identity, so a golden record derives the SAME key from its persisted program (both
         sides lower through the one spelling) and term re-spellings that lower alike share it."""

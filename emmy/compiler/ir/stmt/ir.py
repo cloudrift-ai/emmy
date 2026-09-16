@@ -148,7 +148,7 @@ class BodyOp(Op):
         label themselves; duplicating it here would just rot."""
         return "\n".join(_pretty_body_stmts(self.body, "    "))
 
-    def _body_identity(self, *, structural: bool = True, typed: bool = False):  # noqa: ANN202
+    def _body_identity(self, *, structural: bool = True, typed: bool = False):
         """Override :meth:`Op._body_identity`: the stored body IS this op's Loop-IR body."""
         return self.body.identity(structural=structural, types=buffer_types(self) if typed else None)
 

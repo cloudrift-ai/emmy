@@ -165,7 +165,7 @@ class Op:
     # A fact a schedule reads that neither the body nor the io carries is a modeling gap to fix
     # there, never a side-channel fingerprint. ---- #
 
-    def _body_identity(self, *, structural: bool = True, typed: bool = False):  # noqa: ANN202 — ``stmt.identity.Identity``
+    def _body_identity(self, *, structural: bool = True, typed: bool = False):
         """Does this op COMPUTE the same thing, spelling aside? — the identity material of the
         op's complete Loop-IR body (``Body.identity``: SSA / axis / buffer names and
         commutative-arg order normalized away; the default ``structural=True`` also collapses
@@ -179,18 +179,19 @@ class Op:
         return None
 
     @cached_property
-    def _typed_identity_exact(self):  # noqa: ANN202
+    def _typed_identity_exact(self):
         return self._body_identity(structural=False, typed=True)
 
     @cached_property
-    def _typed_identity_clustered(self):  # noqa: ANN202
+    def _typed_identity_clustered(self):
         return self._body_identity(structural=True, typed=True)
 
-    def canonical_buffers(self, *, structural: bool = False) -> tuple[str, ...]:
-        """This op's external buffers in the order of the roles its typed identity names: two ops
-        with one ``identity_key(with_io=True)`` fill role ``i`` with ``canonical_buffers()[i]``,
-        whatever order each declared its io in. Empty for an op kind without a body."""
-        identity = self._typed_identity_clustered if structural else self._typed_identity_exact
+    def canonical_buffers(self) -> tuple[str, ...]:
+        """This op's external buffers in the order of the roles its exact typed identity names:
+        two ops with one ``identity_key(structural=False, with_io=True)`` fill role ``i`` with
+        ``canonical_buffers()[i]``, whatever order each declared its io in. Empty for an op kind
+        without a body."""
+        identity = self._typed_identity_exact
         return () if identity is None else identity.arguments
 
     def identity_key(self, *, structural: bool = True, with_io: bool = False, with_knobs: bool = False) -> str | None:

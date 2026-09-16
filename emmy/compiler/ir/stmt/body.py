@@ -302,7 +302,7 @@ class Body(tuple[Stmt, ...]):
         return result
 
     @cached_property
-    def _ordering(self):  # noqa: ANN202 — ``order.Ordering``; the module imports this one
+    def _ordering(self):
         """This body's colored relation graph, built once. Normalization stamps the graph it
         ordered by onto its result, so identity labels that graph again instead of rebuilding it."""
         from emmy.compiler.ir.stmt.order import relation_graph  # noqa: PLC0415
@@ -741,14 +741,12 @@ class Body(tuple[Stmt, ...]):
 
     # -- structural identity --------------------------------------------
 
-    def identity(self, *, structural: bool = True, types: Mapping[str, object] | None = None):  # noqa: ANN201 — ``identity.Identity``
+    def identity(self, *, structural: bool = True, types: Mapping[str, object] | None = None):
         """This body's identity material (:func:`~emmy.compiler.ir.stmt.identity.canonicalize_identity`):
         the canonical body over ``b0, b1, …``, which external buffer fills each role, and the
         role's type. The untyped flavors are cached on the instance — Body is immutable."""
-        from emmy.compiler.ir.stmt.identity import canonicalize_identity  # noqa: PLC0415
-
         if types is not None:
-            return canonicalize_identity(self, cluster=structural, types=types)
+            return _canonicalize_identity(self, structural, types)
         return self._identity_clustered if structural else self._identity_exact
 
     def structural_key(self, *, structural: bool = True, types: Mapping[str, object] | None = None) -> str:
@@ -775,16 +773,18 @@ class Body(tuple[Stmt, ...]):
         return self.identity(structural=structural, types=types).key
 
     @cached_property
-    def _identity_clustered(self):  # noqa: ANN202
-        from emmy.compiler.ir.stmt.identity import canonicalize_identity  # noqa: PLC0415
-
-        return canonicalize_identity(self, cluster=True)
+    def _identity_clustered(self):
+        return _canonicalize_identity(self, True, None)
 
     @cached_property
-    def _identity_exact(self):  # noqa: ANN202
-        from emmy.compiler.ir.stmt.identity import canonicalize_identity  # noqa: PLC0415
+    def _identity_exact(self):
+        return _canonicalize_identity(self, False, None)
 
-        return canonicalize_identity(self, cluster=False)
+
+def _canonicalize_identity(body: Body, cluster: bool, types: Mapping[str, object] | None):
+    from emmy.compiler.ir.stmt.identity import canonicalize_identity  # noqa: PLC0415 — identity imports this module
+
+    return canonicalize_identity(body, cluster=cluster, types=types)
 
 
 def refs_axis(s: Stmt, name: str) -> bool:
