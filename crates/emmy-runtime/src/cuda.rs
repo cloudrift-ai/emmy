@@ -7,6 +7,18 @@ use cudarc::nvrtc::Ptx;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+pub struct Device(Arc<CudaContext>);
+
+impl Device {
+    pub fn new(ordinal: usize) -> Result<Self> {
+        let context = CudaContext::new(ordinal)?;
+        // Every executor owns disjoint allocations on exactly one stream and synchronizes
+        // before releasing them. No device pointer or context escapes this module.
+        unsafe { context.disable_event_tracking(); }
+        Ok(Self(context))
+    }
+}
+
 pub struct Executor {
     plan: Plan,
     graph: Option<CudaGraph>,
@@ -19,7 +31,8 @@ pub struct Executor {
 
 impl Executor {
     /// Load a validated, trusted artifact; all buffers and functions belong to one stream.
-    pub fn load(context: &Arc<CudaContext>, artifact: Artifact) -> Result<Self> {
+    pub fn load(device: &Device, artifact: Artifact) -> Result<Self> {
+        let context = &device.0;
         artifact.plan.validate(&artifact.bindings)?;
         let (major, minor) = context.compute_capability()?;
         ensure!(artifact.arch == format!("sm_{major}{minor}"), "artifact GPU architecture mismatch");
@@ -109,9 +122,11 @@ impl Executor {
         }
         for _ in 0..warmup { self.step(capture)?; }
         self.stream.synchronize()?;
-        let start = self.stream.record_event(None)?;
+        let start = self.stream.context().new_event(Some(sys::CUevent_flags::CU_EVENT_DEFAULT))?;
+        let end = self.stream.context().new_event(Some(sys::CUevent_flags::CU_EVENT_DEFAULT))?;
+        start.record(&self.stream)?;
         for _ in 0..iterations { self.step(capture)?; }
-        let end = self.stream.record_event(None)?;
+        end.record(&self.stream)?;
         let time = start.elapsed_ms(&end)? / iterations as f32;
         self.completed = true;
         Ok(time)

@@ -1,8 +1,7 @@
 //! Persistent framed worker. stdout is reserved for control responses; tensors use binary files.
 
 use anyhow::{Context, Result, ensure};
-use cudarc::driver::CudaContext;
-use emmy_runtime::{artifact::Artifact, cuda::Executor};
+use emmy_runtime::{artifact::Artifact, cuda::{Device, Executor}};
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -50,7 +49,7 @@ fn main() -> Result<()> {
                 Command::Load { root, program } => {
                     let artifact = Artifact::load(&root, &program)?;
                     executor = None;
-                    if context.is_none() { context = Some(CudaContext::new(0)?); }
+                    if context.is_none() { context = Some(Device::new(0)?); }
                     executor = Some(Executor::load(context.as_ref().unwrap(), artifact)?);
                     Ok(json!({"loaded": true}))
                 }
