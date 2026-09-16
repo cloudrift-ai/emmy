@@ -144,8 +144,9 @@ mirrors the recipe CloudRift's `rift-console` surfaces only for hosts whose `bra
 The proprietary image is pinned to a build that leaves NVLink enabled. CloudRift's own catalog still defaults to the
 2026-04-30 build, whose compute-only modprobe config sets `NvLinkDisable=1`; a four-card V100 rental on it has no
 NVLink and no peer-to-peer, so every tensor-parallel all-reduce is staged through host memory — measured at 138
-prefill tok/s against 2,506 on the pinned build. The open-driver image is a 2025-10-15 build and has not been checked
-for the same flag.
+prefill tok/s against 2,506 on the pinned build. The open-driver image is pinned to the same-day twin of that build,
+built from the same image configuration; the 2025-10-15 build it replaces predates the fix. NVLink on the parts that
+have it (A100, H200, B200) is unverified there — neither was rentable at the time.
 
 ## NVSwitch hosts need Fabric Manager
 

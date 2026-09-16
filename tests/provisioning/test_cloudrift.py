@@ -782,6 +782,12 @@ def test_select_image_url_v100_image_is_the_nvlink_build():
     assert DEFAULT_IMAGE_URL_NVIDIA_PROPRIETARY.endswith("ubuntu-noble-server-gpup-580-129-20260810-232733.img")
 
 
+def test_select_image_url_open_driver_image_predates_no_nvlink_builds():
+    # Same-day twin of the proprietary build, and the same image configuration: the builds before
+    # it disable NVLink in the driver. Pinned so a revert to one of those fails here.
+    assert DEFAULT_IMAGE_URL_NVIDIA.endswith("ubuntu-noble-server-gpu-580-129-20260810-232754.img")
+
+
 def test_select_image_url_nvidia_rtx5090():
     assert select_image_url("rtx59-7-50-400-ec.1") == DEFAULT_IMAGE_URL_NVIDIA
 
