@@ -24,7 +24,7 @@ jobs:
     env:
       GH_REPO: ${{ github.repository }}
       MAINTAINED_MODEL_COUNT: 10
-      AGENT_MODEL: ${{ vars.ONBOARD_AGENT_MODEL || 'Qwen/Qwen3.6-35B-A3B-FP8' }}
+      AGENT_MODEL: ${{ vars.ONBOARD_AGENT_MODEL || 'Qwen/Qwen3.8-27B-FP8' }}
       CLOUDRIFT_INFERENCE_URL: ${{ vars.CLOUDRIFT_INFERENCE_URL || 'https://inference.cloudrift.ai/v1' }}
       OPENCODE_DISABLE_AUTOUPDATE: "true"
       WORKFLOW_SOURCE: /tmp/emmy-discovery-source-${{ github.run_id }}-${{ github.run_attempt }}

@@ -263,7 +263,7 @@ Agent workflows use these repository secrets as applicable:
 - `HF_TOKEN` for gated checkpoints;
 - `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` for an eligible verified prebuilt image.
 
-`ONBOARD_AGENT_MODEL` selects the discovery/onboarding model and defaults to `Qwen/Qwen3.6-35B-A3B-FP8`.
+`ONBOARD_AGENT_MODEL` selects the discovery/onboarding model and defaults to `Qwen/Qwen3.8-27B-FP8`.
 `CLOUDRIFT_TEAM_ID` must be the exact Robots team UUID; the verification/onboarding workflow fails before capacity
 selection if the variable is absent, malformed, or inaccessible to `CLOUDRIFT_API_KEY`.
 `CLOUDRIFT_INFERENCE_URL` selects its OpenAI-compatible endpoint and defaults to
