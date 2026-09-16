@@ -775,6 +775,13 @@ def test_select_image_url_amd_mi300x():
     assert select_image_url("mi300x-8-100-500-foo.4") == DEFAULT_IMAGE_URL_AMD
 
 
+def test_select_image_url_v100_image_is_the_nvlink_build():
+    # The 2026-04-30 proprietary image disables NVLink in the driver, which costs a four-card
+    # V100 rental most of its prefill speed (138 tok/s against 2,506). Pin the build that has it.
+    assert select_image_url("v100-6-52-400-generic.4") == DEFAULT_IMAGE_URL_NVIDIA_PROPRIETARY
+    assert DEFAULT_IMAGE_URL_NVIDIA_PROPRIETARY.endswith("ubuntu-noble-server-gpup-580-129-20260810-232733.img")
+
+
 def test_select_image_url_nvidia_rtx5090():
     assert select_image_url("rtx59-7-50-400-ec.1") == DEFAULT_IMAGE_URL_NVIDIA
 

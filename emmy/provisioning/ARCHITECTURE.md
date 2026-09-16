@@ -141,6 +141,12 @@ Both providers swallow termination errors and log them — the original failure 
 Mismatches leave the GPU unusable because the wrong kernel-module flavor is on disk. The proprietary-driver image
 mirrors the recipe CloudRift's `rift-console` surfaces only for hosts whose `brand_short` matches `/\bV100|P100\b/`.
 
+The proprietary image is pinned to a build that leaves NVLink enabled. CloudRift's own catalog still defaults to the
+2026-04-30 build, whose compute-only modprobe config sets `NvLinkDisable=1`; a four-card V100 rental on it has no
+NVLink and no peer-to-peer, so every tensor-parallel all-reduce is staged through host memory — measured at 138
+prefill tok/s against 2,506 on the pinned build. The open-driver image is a 2025-10-15 build and has not been checked
+for the same flag.
+
 ## NVSwitch hosts need Fabric Manager
 
 On NVSwitch-connected baseboards — V100 SXM3 (DGX-2/HGX-2) and the SXM A100/H100 HGX boards — the switch fabric must
