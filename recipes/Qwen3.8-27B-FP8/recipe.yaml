@@ -53,8 +53,10 @@ engine:
       # 4,096), and the caller got neither content nor tool_calls. Sampling at temperature >= 0.7
       # escapes it, greedy does not. disable_any_whitespace is honoured only by the xgrammar and
       # guidance backends (vllm/config/structured_outputs.py), so the backend is pinned with it.
-      # The JSON carries no shell quotes: compose renders `command:` as a plain YAML scalar that
-      # Docker splits on whitespace, so quotes here would reach vLLM inside the value itself.
+      # The single quotes around the JSON are required. Compose renders `command:` as one string
+      # and splits it with shell-style word splitting, which consumes the inner double quotes and
+      # hands vLLM the invalid {backend:xgrammar,...}. The single quotes are consumed instead, so
+      # the JSON arrives whole.
       extra_args: >-
         --dtype half
         --language-model-only
@@ -63,7 +65,7 @@ engine:
         --enable-auto-tool-choice
         --tool-call-parser qwen3_coder
         --exclude-tools-when-tool-choice-none
-        --structured-outputs-config {"backend":"xgrammar","disable_any_whitespace":true}
+        --structured-outputs-config '{"backend":"xgrammar","disable_any_whitespace":true}'
         --reasoning-parser qwen3
       extra_env:
         # Volta has no FP8 arithmetic. The fork serves FP8 checkpoints on sm_70 through its
