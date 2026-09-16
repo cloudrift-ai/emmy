@@ -165,15 +165,22 @@ independent reference on `run --golden` — the loop-IR CPU runner exists but is
 take 1.3 s each on main; the whole file decodes in about two and a half minutes. The goldens gate can protect this
 file again, and what it reports today is the 87 stale rows.
 
-**47 rows are still owed after #815.** The five post-family cut leads (`3836f9`, `8e1e80`, `366777`, `9e578e` and
-#799's `4e26cc`) and their receipts: their seams name the softmax-statistics cone, one DAG node reached from two
-consumers, which the site walk files under whichever consumer reaches it first — #804's statement order changed
-that consumer, so `map.3/map…` paths relocated under `map.4/map.2/inner…`, and on `4e26cc` and `9e578e` the twist
-carrier moved between the two contractions. Mapping those seams means aligning the old and new trees as one DAG;
-until then the post decode and prefill kernels elect without their cuts. Four expert M=1 rows whose piece changed
-under #807's fold, ten rows whose pre-#804 identity matched no fork root of their own replay, and six with two
-shape-equal new pieces. Re-recording is not the answer for any of them: the measurements are good. A fresh strict
-boot from main comes after this and before any new recording; the boot20 numbers do not describe main.
+**31 rows are still owed after the post-family cuts came back (2026-09-16).** The five post-family routing rows
+(`3836f9`, `8e1e80`, `366777`, `9e578e`, #799's `4e26cc`) are re-spelled on main by matching the pre-#804 and current
+lifted trees as one DAG — every node hashed once by its order-free subtree shape, seams matched top-down within
+their parent, a carrier that changed kind matched through the contraction inside it — and their receipts re-keyed
+to the kernel of the same shape at the same mint ordinal. Two things had moved. The shared softmax-statistics cone is
+filed under whichever consumer the walk reaches first, and #804's statement order changed that consumer. And on
+the three same-DAG rows one kernel boundary the old lowering made on its own is now a seam that must be spelled, so
+those routes carry one more cut than they recorded. Main no longer offers cutting a leaf operand, so the two trivial
+leaf pieces per set are fused into their consumer and their receipts double up on a same-shaped twin. All four
+same-shape sets decode whole with every kernel measured. On `9e578e` the old lift left a reduce carrier around the
+contraction that the new one recognizes as a twist: 18 of its 20 rows come back, one receipt of the old carrier
+kernel cannot, and the twist-form kernel it mints now has no measured row — one `run --golden --bench --record` on
+the host closes that. What remains: 18 division receipts and 9 pre-attention receipts whose routed keys are spelled
+on piece trees that moved the same way (the same mapping, applied per piece), and 4 expert M=1 rows whose piece
+changed under #807's fold. None need re-recording. A fresh strict boot from main comes next and before any new
+recording; the boot20 numbers do not describe main.
 
 ## Operations handoff
 
