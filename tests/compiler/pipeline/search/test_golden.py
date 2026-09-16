@@ -202,6 +202,21 @@ def test_every_recorded_row_of_a_model_golden_decodes(path: Path) -> None:
     assert not failures, f"{len(failures)}/{len(records)} recorded rows equal no enumerated leaf:\n{listed}{more}"
 
 
+def test_a_row_whose_every_site_is_re_spelled_still_gets_a_verdict() -> None:
+    """A row can lose every key it decided at once — an identity re-key moves a kernel's sites, and
+    the codec then declares none of the keys the recording spelled. That is a re-spelling like any
+    other and the decode has to say so. Two expert rows of the DeepSeek V4 golden raised instead
+    after #804 re-keyed the file: the replay filed the kernel's declared keys with no offered pair
+    behind them, then indexed the pair it never filed."""
+    from dataclasses import replace
+
+    records = _records_of(_HARDWARE_GOLDENS_DIR / "rtx5090_sm120.yaml")
+    record = next(r for r in records if r.name == "matmul.square.512" and _decode(r, records) is None)
+    respelled = replace(record, knobs={f"{key}@missing": value for key, value in record.knobs.items() if value not in ("", "0")})
+    reason = _decode(respelled, records)
+    assert reason is not None and "re-spelling" in reason and "@missing" in reason, reason
+
+
 def test_compiler_fingerprint_ignores_mtime_so_two_checkouts_share_one_memo(tmp_path):
     """Two byte-identical trees fingerprint alike however their mtimes differ.
 

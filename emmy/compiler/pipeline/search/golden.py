@@ -1358,6 +1358,7 @@ def _replay(
             if exact is not None:
                 declared, hit = exact
                 offered_keys.setdefault(identity, set()).update(wanted_keys & declared)
+                offered_pairs.setdefault(identity, set())
                 for key, value in wanted_pairs:
                     try:
                         if key in declared and validate_family_value(key, value) == value:
