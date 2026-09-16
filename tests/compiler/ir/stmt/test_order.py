@@ -313,3 +313,24 @@ def test_structural_key_is_invariant_under_random_renaming_and_reordering() -> N
 
     keys = {chains(seed, shuffle=shuffle).structural_key() for seed in range(12) for shuffle in (False, True)}
     assert len(keys) == 1
+
+
+def test_identity_ignores_a_buffer_spelling_that_reorders_the_executable_body() -> None:
+    """The executable order breaks symmetric ties by buffer spelling; identity labels the same
+    graph without it, so a rename that flips the executable order keys the same."""
+
+    def make(left: str, right: str) -> Body:
+        return Body(
+            (
+                Load(name="x", input=left, index=()),
+                Load(name="y", input=right, index=()),
+                Assign(name="z", op="add", args=("x", "y")),
+                Write(output="O", index=(), value="z"),
+            )
+        )
+
+    first, second = normalize_body(make("X", "Y")), normalize_body(make("z_input", "a_input"))
+    assert [stmt.input for stmt in first[:2]] == ["X", "Y"]
+    assert [stmt.input for stmt in second[:2]] == ["a_input", "z_input"]
+    assert first.structural_key() == second.structural_key()
+    assert first.structural_key(structural=False) == second.structural_key(structural=False)

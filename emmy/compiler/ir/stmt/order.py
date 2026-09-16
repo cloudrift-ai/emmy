@@ -177,14 +177,6 @@ class _Scope:
             shapes=tuple(self.shapes[index] for index in order),
         )
 
-    def rebound(self, body: Body) -> _Scope:
-        """This scope over ``body``, an order-preserving rename of its own."""
-        children = tuple(
-            tuple(child.rebound(nested) for child, nested in zip(scopes, stmt.nested(), strict=True))
-            for stmt, scopes in zip(body, self.children, strict=True)
-        )
-        return _Scope(body, self.vertex, self.statements, self.incoming, children, self.categories, self.shapes)
-
 
 @dataclass(frozen=True)
 class _Environment:
@@ -687,7 +679,11 @@ def _canonical_ranks(colors: Sequence[object], edges: Iterable[tuple[int, int, o
 
 @dataclass(frozen=True)
 class Ordering:
-    """One body's relation graph, built once and labeled under any resource coloring."""
+    """One body's relation graph, built once and labeled under any resource coloring.
+
+    The graph never spelled a name, so it also describes every alpha-rename of the body it was
+    built from; whoever materializes an order from it renames the result sequentially.
+    """
 
     colors: tuple[str, ...]
     edges: tuple[tuple[int, int, str], ...]
@@ -705,10 +701,6 @@ class Ordering:
                 colors[vertex] = repr(("resource", resource_color(name)))
         ranks, orbit_ranks = _canonical_labeling(colors, self.edges)
         return Labeling(self, ranks, orbit_ranks)
-
-    def rebound(self, body: Body) -> Ordering:
-        """This graph over ``body``, an order-preserving rename of the body it was built from."""
-        return Ordering(self.colors, self.edges, self.root.rebound(body), self.resources, self.fixed_names)
 
 
 @dataclass(frozen=True)
@@ -758,7 +750,8 @@ class Labeling:
                 return scope.categories[index], self.ranks[scope.statements[index]]
 
         order = body.topological_permutation(scope.incoming, priority)
-        return Body(body[index] for index in order), scope.permuted(order, body, tuple(children[index] for index in order))
+        ordered = Body(body[index] for index in order)
+        return ordered, scope.permuted(order, ordered, tuple(children[index] for index in order))
 
 
 def relation_graph(stmts: Body) -> Ordering:

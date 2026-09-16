@@ -71,7 +71,7 @@ def _normalize_body(stmts: Body) -> Body:
         if unified == stmts:
             unified = stmts
         else:
-            unified.__dict__["_ordering"] = stmts._ordering.rebound(unified)
+            unified.__dict__["_ordering"] = stmts._ordering
         reduced = dedup_loads(merge_sibling_reduce_loops(unified))
         if reduced == unified:
             return unified
@@ -1037,7 +1037,7 @@ def _canonical_order(stmts: Body) -> Body:
     stmts = _canonicalize_exprs(stmts)
     ordered, ordering = relation_graph(stmts).label().materialize(spelled=True)
     result = Body.coerce(sort_commutative_args(rename_ssa_sequential(ordered)))
-    result.__dict__["_ordering"] = ordering.rebound(result)
+    result.__dict__["_ordering"] = ordering
     return result
 
 
