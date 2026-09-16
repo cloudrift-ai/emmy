@@ -51,10 +51,10 @@ class _BudgetedBackend:
 async def test_auto_tune_uses_one_nominal_warmup_before_run_budget() -> None:
     backend = _BudgetedBackend(iter_ms=750.0)
 
-    stats, status, measured, _per_kernel = await bench_terminal_async(_candidate(), backend=backend, db=SearchDB())
+    stats, status, origin, _per_kernel = await bench_terminal_async(_candidate(), backend=backend, db=SearchDB())
 
     assert backend.calls == [(1, "auto")]
-    assert measured is True
+    assert origin == "live"
     assert status == "ok"
     assert stats.median == 750_000.0
 
@@ -85,10 +85,10 @@ async def test_compile_budget_overrun_records_nothing() -> None:
     db, cand = SearchDB(), _candidate()
     backend = _RaisingBackend(CompileBudgetExceeded("compile stage exceeded 12.0s budget (13.4s) — nothing measured"))
 
-    stats, status, measured, per_kernel = await bench_terminal_async(cand, backend=backend, db=db)
+    stats, status, origin, per_kernel = await bench_terminal_async(cand, backend=backend, db=db)
 
     assert status == "compile_timeout"
-    assert measured is True  # it burned real wall time; it must still spend the candidate budget
+    assert origin == "live"  # it burned real wall time; it must still spend the candidate budget
     assert stats.median == 0.0  # no latency was measured — none is invented
     assert per_kernel == []
     assert _perf_row(db, cand) is None
@@ -103,10 +103,10 @@ async def test_compile_budget_overrun_does_not_become_a_sticky_cache_hit() -> No
     await bench_terminal_async(cand, backend=_RaisingBackend(CompileBudgetExceeded("budget")), db=db)
 
     good = _BudgetedBackend(iter_ms=1.0)
-    stats, status, measured, _ = await bench_terminal_async(cand, backend=good, db=db)
+    stats, status, origin, _ = await bench_terminal_async(cand, backend=good, db=db)
 
     assert good.calls == [(1, "auto")], "the retry must reach the device, not be served the earlier failure"
-    assert (status, measured) == ("ok", True)
+    assert (status, origin) == ("ok", "live")
     assert stats.median == 1000.0
 
 
@@ -116,7 +116,7 @@ async def test_worker_side_compile_budget_overrun_is_recognized() -> None:
     db, cand = SearchDB(), _candidate()
     exc = BenchWorkerJobError("bench worker error: CompileBudgetExceeded(...)", compile_budget=True)
 
-    _stats, status, _measured, _ = await bench_terminal_async(cand, backend=_RaisingBackend(exc), db=db)
+    _stats, status, _origin, _ = await bench_terminal_async(cand, backend=_RaisingBackend(exc), db=db)
 
     assert status == "compile_timeout"
     assert _perf_row(db, cand) is None
@@ -127,7 +127,7 @@ async def test_a_real_bench_failure_still_records_bench_fail() -> None:
     IS evidence about the kernel, and stays a recorded ``bench_fail`` at the watchdog sentinel."""
     db, cand = SearchDB(), _candidate()
 
-    stats, status, _measured, _ = await bench_terminal_async(cand, backend=_RaisingBackend(RuntimeError("illegal memory access")), db=db)
+    stats, status, _origin, _ = await bench_terminal_async(cand, backend=_RaisingBackend(RuntimeError("illegal memory access")), db=db)
 
     assert status == "bench_fail"
     assert stats.median == 2_000_000.0
@@ -183,7 +183,7 @@ async def test_a_hung_kernel_is_blamed_alone() -> None:
     db, cand = SearchDB(), _candidate_pair()
     exc = BenchWorkerJobError("bench worker error: HungKernelError(\"kernel 'k_culprit (iter 0)' did not complete within 60000 ms\")")
 
-    _stats, status, _measured, per_kernel = await bench_terminal_async(cand, backend=_RaisingBackend(exc), db=db)
+    _stats, status, _origin, per_kernel = await bench_terminal_async(cand, backend=_RaisingBackend(exc), db=db)
 
     assert status == "bench_fail", "the terminal still failed — the search must move on"
     assert _fail_rows(db, cand) == {"k_culprit": "bench_fail"}, "the innocent kernel must carry no failure"
@@ -200,7 +200,7 @@ async def test_a_kernel_nvcc_refuses_is_blamed_alone() -> None:
     inner = RuntimeError("nvcc compile failed for kernel 'k_culprit': k.cu(135): error: identifier \"a26_1\" is undefined")
     exc = BenchWorkerJobError(f"bench worker error: {inner!r}")
 
-    _stats, status, _measured, _per_kernel = await bench_terminal_async(cand, backend=_RaisingBackend(exc), db=db)
+    _stats, status, _origin, _per_kernel = await bench_terminal_async(cand, backend=_RaisingBackend(exc), db=db)
 
     assert status == "bench_fail"
     assert _fail_rows(db, cand) == {"k_culprit": "bench_fail"}, "the refused kernel is the one nvcc named"
@@ -217,10 +217,10 @@ async def test_a_blamed_kernel_replays_the_hang_for_its_slice() -> None:
     await bench_terminal_async(cand, backend=_RaisingBackend(hang), db=db)
 
     retry = _BudgetedBackend(iter_ms=1.0)
-    _stats, status, measured, per_kernel = await bench_terminal_async(_candidate_pair(), backend=retry, db=db)
+    _stats, status, origin, per_kernel = await bench_terminal_async(_candidate_pair(), backend=retry, db=db)
 
     assert retry.calls == [], "a slice holding a kernel that hung is known-hung — it must not reach the device"
-    assert (status, measured) == ("bench_fail", False)
+    assert (status, origin) == ("bench_fail", "replay")
     assert _fail_rows(db, cand) == {"k_culprit": "bench_fail"}, "the replay adds no blame"
     assert [st for _knobs, _us, st in per_kernel] == ["bench_fail"], "only the culprit's row is evidence"
 
@@ -232,7 +232,7 @@ async def test_an_unattributable_failure_blames_no_kernel() -> None:
     db, cand = SearchDB(), _candidate_pair()
     exc = RuntimeError("bench worker did not accept the request within 74.0s wall budget — SIGKILL'd, stream cleaned")
 
-    _stats, status, _measured, per_kernel = await bench_terminal_async(cand, backend=_RaisingBackend(exc), db=db)
+    _stats, status, _origin, per_kernel = await bench_terminal_async(cand, backend=_RaisingBackend(exc), db=db)
 
     assert status == "bench_fail"
     assert _fail_rows(db, cand) == {}
@@ -250,14 +250,14 @@ async def test_an_unattributable_failure_is_replayed_for_its_kernel_set() -> Non
     await bench_terminal_async(cand, backend=_RaisingBackend(wall), db=db)
 
     retry = _BudgetedBackend(iter_ms=1.0)
-    _stats, status, measured, per_kernel = await bench_terminal_async(_candidate_pair(), backend=retry, db=db)
+    _stats, status, origin, per_kernel = await bench_terminal_async(_candidate_pair(), backend=retry, db=db)
 
     assert retry.calls == [], "the kernel set was wall-killed at this budget — it must not burn the budget again"
-    assert (status, measured) == ("bench_fail", False)
+    assert (status, origin) == ("bench_fail", "replay")
     assert per_kernel == [] and _fail_rows(db, cand) == {}, "still no kernel is blamed"
 
     solo = _BudgetedBackend(iter_ms=1.0)
-    _stats, status, _measured, _ = await bench_terminal_async(_candidate_solo("k_innocent"), backend=solo, db=db)
+    _stats, status, _origin, _ = await bench_terminal_async(_candidate_solo("k_innocent"), backend=solo, db=db)
 
     assert solo.calls == [(1, "auto")], "a kernel of the set is not condemned — on its own it still benches"
     assert status == "ok"

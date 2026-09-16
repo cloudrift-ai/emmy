@@ -53,8 +53,8 @@ def test_cached_replay_does_not_exhaust_live_measurement_patience() -> None:
     observed = []
     while (popped := search.pop()) is not None:
         token, candidate = popped
-        measured = candidate.resolved_knobs["WORK"] == "t5"
-        search.observe(token, point_stats(5.0 if measured else 10.0), "ok", measured=measured)
+        live = candidate.resolved_knobs["WORK"] == "t5"
+        search.observe(token, point_stats(5.0 if live else 10.0), "ok", origin="live" if live else "replay")
         observed.append(candidate.resolved_knobs["WORK"])
 
     assert search.measurements == 1, f"stopped after {observed} with no new measurement: {search.stop_reason}"
@@ -73,6 +73,12 @@ def test_cached_replay_does_not_exhaust_live_measurement_patience() -> None:
         (["cached"] * 8, {"max_visits": 2}, 2, "max_visits"),
         (["reject"] * 8, {"max_visits": 2}, 2, "max_visits"),
         (["cached", "live", "cached", "live", "live"], {"max_measurements": 2}, 4, "max_measurements"),
+        # A terminal that finished the pipeline still holding an un-lowered kernel node measured
+        # nothing, so it can never spend the measurement budget. Patience is the only thing that can
+        # stop a level whose whole schedule space ends that way, so it has to.
+        (["dead_end"] * 8, {}, 3, "patience"),
+        (["dead_end"] * 8, {"max_measurements": 2}, 3, "patience"),
+        (["live", "dead_end", "dead_end", "better", "dead_end", "dead_end", "live"], {}, 7, "patience"),
     ],
 )
 def test_stopping_accounts_for_evaluation_origin(events, limits, expected, reason) -> None:
@@ -87,8 +93,8 @@ def test_stopping_accounts_for_evaluation_origin(events, limits, expected, reaso
             search.observe(
                 token,
                 point_stats(5.0 if event == "better" else 10.0),
-                "bench_fail" if event == "fail" else "ok",
-                measured=event not in {"cached", "better"},
+                "bench_fail" if event in {"fail", "dead_end"} else "ok",
+                origin={"cached": "replay", "better": "replay", "dead_end": "dead_end"}.get(event, "live"),
             )
     assert search.pop() is None
     assert search.tree.root.visits == expected

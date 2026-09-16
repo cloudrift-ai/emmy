@@ -1066,9 +1066,10 @@ validated in full and the bytes written are the ones a full dump writes; canonic
 reserialize everything. On the 279-target DeepSeek V4 Flash V100 inventory a persist is 2.5 s before and 0.24 s
 after — the sweep's write path was most of its wall time.
 
-`--max-candidates N` is a hard per-kernel budget. Each supplied proposal reserves one slot even if its measurement is
-already cached, which makes hybrid-vs-MCTS comparisons charge LLM proposals consistently. MCTS receives the remaining
-slots and counts only terminals that reached a live backend; cached replay observations update the tree without
+`--max-candidates N` is a hard per-kernel budget on the **inner** search — the outer structural search takes no
+measurement cap at all, so it is bounded by `--patience` and by the outer tree being a chain today. Each supplied
+proposal reserves one slot even if its measurement is already cached, which makes hybrid-vs-MCTS comparisons charge
+LLM proposals consistently. MCTS receives the remaining slots and counts only terminals that reached a live backend; cached replay observations update the tree without
 spending the live-measurement budget. Ranking feedback is written under the entry's working-only `ranking` mapping,
 and the final tune winner is annotated or appended as another proposal only when one directly searched observation
 provides both its knob row and cost. When that row matches an existing proposal, the same entry is promoted from
@@ -1108,12 +1109,20 @@ with max-Q normalized UCB1:
 - **Expansion** is implicit (one rule batch per pop, one child per alternative).
 - **Simulation** is the actual `await backend.benchmark_async(...)` on the terminal.
 - **Backprop** walks the popped candidate's parent chain updating `visits` and `best_reward`.
-- **Patience** counts live benchmark attempts and failed expansion or lowering attempts since the last new global
-  best; the level exits when this count reaches `--patience N` (default 50). Cached and stub results still update the
-  tree but do not consume patience or the live measurement budget. A better cached result resets patience too.
-  Failed expansion or lowering backpropagates zero reward and a visit without inventing a latency or training row.
-  The optional visit limit counts all observations and these failures; the measurement limit counts only live
-  benchmark attempts. Cache-heavy searches can therefore explore more candidates before stopping.
+- **Two budgets, and what spends each.** `--max-candidates N` bounds live measurements; `--patience N` (default 50)
+  bounds evaluations since the last new global best. Every terminal is valued with an **origin** — `live`, `replay`
+  or `dead_end` (see `terminal_bench.bench_terminal_async`) — and the origin alone decides what it spends:
+  - `live`: the backend ran. Spends both budgets whether the verdict was `ok` or a failure — a failed bench cost the
+    same GPU time as a successful one.
+  - `replay`: a cache hit, a stub backend, or a graph with no `CudaOp`. Spends neither; a better cached result still
+    resets patience. Cache-heavy searches therefore explore more candidates before stopping.
+  - `dead_end`: the terminal finished the pipeline still holding an un-lowered kernel-bearing node, decided
+    `bench_fail` in the prelude before any backend call. It measured nothing, so it cannot spend the measurement
+    budget — but it is fresh work that can never improve the best, so it spends patience. That is what bounds a level
+    whose whole schedule space ends this way; nothing else would.
+  A raised expansion or lowering never reaches a terminal at all. It lands in the engine's dead-end sink, which
+  rejects the candidate: zero reward, one visit, patience spent, no latency or training row invented.
+  The optional visit limit counts every observation and every rejection.
 
 ### One measurement regime
 

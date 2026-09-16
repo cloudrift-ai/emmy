@@ -66,7 +66,7 @@ class Search(ABC):
         candidate: object | None = None,
         kernels: list | None = None,
         *,
-        measured: bool = True,
+        origin: str = "live",
     ) -> None:
         """Hook for the policy to consume a terminal's measurement.
         ``token`` is the one the terminal was popped with; ``stats``
@@ -79,8 +79,9 @@ class Search(ABC):
         PER-KERNEL ``(knobs, median_us, status)`` rows: a terminal is a Σ over
         the kernels it lowered to, and one a structural fork made several of holds
         several rows, so the row that earned a latency is a kernel's and never the
-        terminal's. ``measured`` distinguishes live backend work from cache or stub results;
-        only live work spends the measurement budget and patience. Default no-op; :class:`TuningSearch` overrides it."""
+        terminal's. ``origin`` is ``"live"``, ``"replay"`` or ``"dead_end"`` (see
+        :func:`bench_terminal_async`): only live work spends the measurement budget, and only replay
+        spends nothing at all. Default no-op; :class:`TuningSearch` overrides it."""
 
     def reject(self, token: object | None) -> None:  # noqa: B027
         """Account for a candidate whose expansion or lowering failed, without a measurement."""
@@ -90,5 +91,5 @@ class Search(ABC):
         worth (benching, caching, persistence, the training feed) is a search decision, and the
         engine only awaits it. The default benches the terminal's kernels (cache/stub-aware) and
         feeds :meth:`observe` with the measurement origin."""
-        stats, status, measured, per_kernel = await bench_terminal_async(cand, backend=backend, db=db)
-        self.observe(token, stats, status, candidate=cand, kernels=per_kernel, measured=measured)
+        stats, status, origin, per_kernel = await bench_terminal_async(cand, backend=backend, db=db)
+        self.observe(token, stats, status, candidate=cand, kernels=per_kernel, origin=origin)

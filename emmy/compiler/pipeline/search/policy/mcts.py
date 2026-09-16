@@ -203,7 +203,7 @@ class TuningSearch(Search):
         candidate: object | None = None,
         kernels: list | None = None,
         *,
-        measured: bool = True,
+        origin: str = "live",
     ) -> None:
         self.last_stats = stats
         self.last_status = status
@@ -221,8 +221,12 @@ class TuningSearch(Search):
         prev_best = self.tree.best_reward
         self.tree.record_terminal(token, reward)
         self.last_improved_best = status == "ok" and self.tree.best_reward > prev_best
-        self.measurements += int(measured)
-        self._stagnant = 0 if self.last_improved_best else self._stagnant + int(measured)
+        # Only a live bench spends the candidate budget — a replay measured nothing new and a dead
+        # end measured nothing at all. Patience is the wider question of progress, so everything a
+        # replay did not hand us spends it: a dead end is fresh work that can never improve the best,
+        # and a level whose terminals all end there has to stop on patience or not at all.
+        self.measurements += int(origin == "live")
+        self._stagnant = 0 if self.last_improved_best else self._stagnant + int(origin != "replay")
         if self.prior_model is not None:
             # Train on the rows that actually earned a latency: the terminal's own when it lowered
             # to one kernel, else one per KERNEL (its own decisions, its own measured µs, under
