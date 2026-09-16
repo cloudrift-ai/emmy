@@ -115,6 +115,12 @@ class Dim:
             hint = DEFAULT_SEQ_HINT
         object.__setattr__(self, "hint", hint)
 
+    def structural_key(self) -> str:
+        """Identity of the extent expression; the expected-size hint is advisory."""
+        from emmy.compiler.structural import digest, form  # noqa: PLC0415
+
+        return digest(form(self.expr))
+
     # ---- inspection ------------------------------------------------------
 
     @property

@@ -97,7 +97,8 @@ def _vectorize_body(top: KernelOp, body: Body) -> Body:
         if not replaced:
             out.append(descended[i])
             i += 1
-    return Body(tuple(out))
+    vectorized = Body(tuple(out))
+    return body if vectorized == body else vectorized
 
 
 def _try_vec_load(stmts: Iterable[Stmt], start: int, n: int, top: KernelOp) -> Load | None:

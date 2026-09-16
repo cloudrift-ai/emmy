@@ -14,7 +14,8 @@ Phase 1 surface (this file): the protocol that lets every
 as method-shaped wrappers around the existing free functions.
 
 Phase 2 surface: def-use queries (``definitions``, ``axis_dependencies``,
-``deps_closure``, ``depends_on`` / ``independent``, ``deps_of``), type-filtered lookups
+``deps_closure``, ``depends_on`` / ``independent``, ``deps_of``), Kahn
+``topological_order``, type-filtered lookups
 (``loads``, ``writes``, ``accums``, …), and dependence cones
 (:class:`Cone`, :meth:`Body.backward_cone`
 / :meth:`Body.defs_die_at`) — the shared substrate behind the rules
@@ -24,9 +25,10 @@ that slice computed-operand cones. Region transforms (``replace_at``,
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
-from functools import cached_property, lru_cache
+from functools import cached_property
+from heapq import heappop, heappush
 
 from emmy.compiler.ir.stmt.base import Stmt
 
@@ -198,8 +200,18 @@ class Body(tuple[Stmt, ...]):
     def rename_buffers(self, rename) -> Body:  # noqa: ANN001 — any str->str mapping
         """This body with every external-buffer reference renamed through ``rename`` — the
         body-level face of :meth:`Stmt.rename_buffers` (the recursive :meth:`map` reaches every
-        nested leaf, so wrapper stmts need no handling)."""
-        return self.map(lambda s: s.rename_buffers(rename))
+        nested leaf, so wrapper stmts need no handling). An injective spelling-only rename retains
+        this body's declared normal-form fixed points, while an aliasing rename must recompute
+        ordering because it changes memory dependencies."""
+        result = self.map(lambda s: s.rename_buffers(rename))
+        if result == self:
+            return self
+        resources = tuple(dict.fromkeys(name for stmt in self.iter() for name in (*stmt.external_reads(), *stmt.external_writes())))
+        if len({rename.get(name, name) for name in resources}) == len(resources):
+            for attr in ("_normalized", "_normalized_without_hoist"):
+                if self.__dict__.get(attr) is self:
+                    result.__dict__[attr] = result
+        return result
 
     def map(self, fn: Callable[[Stmt], Stmt | None | Iterable[Stmt]]) -> Body:
         """Recursive 1:N body transformer. Post-order: each block stmt's
@@ -241,6 +253,57 @@ class Body(tuple[Stmt, ...]):
             else:
                 out.extend(r)
         return Body(out)
+
+    def topological_order(
+        self,
+        incoming: Sequence[set[int] | frozenset[int]],
+        tie_break: Callable[[int, Stmt], object] | None = None,
+    ) -> Body:
+        """Kahn topological order over indexed predecessor sets.
+
+        Source order breaks ties by default. ``tie_break`` may supply a canonical priority while
+        the source index remains the final deterministic tie-break. A cycle leaves the body
+        unchanged so callers can preserve the validator's error path.
+        """
+        successors: list[list[int]] = [[] for _ in self]
+        degree = [len(sources) for sources in incoming]
+        for target, sources in enumerate(incoming):
+            for source in sources:
+                successors[source].append(target)
+
+        def priority(index: int) -> tuple[object, int]:
+            return (index if tie_break is None else tie_break(index, self[index])), index
+
+        ready = [priority(index) for index, count in enumerate(degree) if not count]
+        ready.sort()
+        ordered: list[Stmt] = []
+        while ready:
+            _, selected = heappop(ready)
+            ordered.append(self[selected])
+            for target in successors[selected]:
+                degree[target] -= 1
+                if not degree[target]:
+                    heappush(ready, priority(target))
+        return Body(ordered) if len(ordered) == len(self) else self
+
+    @cached_property
+    def _normalized(self) -> Body:
+        """Executable normal form, cached on this immutable body and its fixed point."""
+        from emmy.compiler.ir.stmt.normalize import _normalize_body  # noqa: PLC0415
+
+        result = _normalize_body(self, hoist=True)
+        result.__dict__["_normalized"] = result
+        result.__dict__["_normalized_without_hoist"] = result
+        return result
+
+    @cached_property
+    def _normalized_without_hoist(self) -> Body:
+        """Identity-safe normal form, cached on this immutable body and its fixed point."""
+        from emmy.compiler.ir.stmt.normalize import _normalize_body  # noqa: PLC0415
+
+        result = _normalize_body(self, hoist=False)
+        result.__dict__["_normalized_without_hoist"] = result
+        return result
 
     # -- generic backward dataflow --------------------------------------
 
@@ -320,19 +383,6 @@ class Body(tuple[Stmt, ...]):
         (``Loop`` / ``StridedLoop`` / ``Tile.axes``). Axes from
         enclosing scopes above this body are not included."""
         return frozenset(ax for s in self.iter() for ax in s.binds_axes())
-
-    @cached_property
-    def _exported_accums(self) -> frozenset[str]:
-        """Accumulator names exposed by this immutable subtree."""
-        from emmy.compiler.ir.stmt.leaves import Accum  # noqa: PLC0415
-
-        out: set[str] = set()
-        for stmt in self:
-            if isinstance(stmt, Accum):
-                out.add(stmt.name)
-            for child in stmt.nested():
-                out.update(child._exported_accums)
-        return frozenset(out)
 
     @cached_property
     def ssa_defs(self) -> frozenset[str]:
@@ -701,60 +751,36 @@ class Body(tuple[Stmt, ...]):
         for consumers to whom ``relu`` and ``gelu`` are different
         kernels (their latency differs even under one schedule).
 
-        Built by re-running :func:`normalize_body` with ``hoist=False``
-        (safe for both Loop-IR and Tile-IR bodies — hoisting can move
-        Loads above Stage decls in Tile bodies) and
-        ``canonical_buffers=True`` (renames ``Load.input`` /
-        ``Write.output`` to ``b0, b1, ...``). Cached on the
-        instance — Body is immutable."""
+        Built by canonicalizing the body with identity-safe normalization
+        (hoisting stays off because it can move Loads above Stage declarations
+        in Tile bodies), external-buffer roles, and optional operation clusters.
+        Cached on the instance — Body is immutable."""
         return self._structural_key_clustered if structural else self._structural_key_exact
 
     @cached_property
     def _structural_key_clustered(self) -> str:
-        # Both flavors delegate to a module-level lru_cache keyed by Body
-        # content (Body is ``tuple[Stmt, ...]`` and every Stmt subclass is
-        # a frozen dataclass, so the cache key is structural). Two
-        # different Body instances with identical stmts share the one
-        # ``normalize_body`` call — matters in tune mode where
-        # ``_record_op_inventory`` walks the source chain of every
-        # CudaOp in every terminal and hammers ``identity_key(with_io=True, with_knobs=True)`` ->
-        # ``Body.structural_key()`` on bodies that frequently recur
-        # structurally across variants.
-        return _shared_structural_key(self, True)
+        return _compute_structural_key(self, True)
 
     @cached_property
     def _structural_key_exact(self) -> str:
-        return _shared_structural_key(self, False)
+        return _compute_structural_key(self, False)
 
 
-@lru_cache(maxsize=4096)
-def _shared_structural_key(body: Body, cluster: bool) -> str:
-    """Module-level memoization for :meth:`Body.structural_key`.
+def _compute_structural_key(body: Body, cluster: bool) -> str:
+    """Compute one flavor of :meth:`Body.structural_key`.
 
-    The formula is fixed per flavor: ``normalize_body(body, hoist=False,
-    canonical_buffers=True, cluster_ops=cluster)`` rendered through
+    The formula is fixed per flavor: identity canonicalization (which applies the
+    identity-safe normal form) followed by rendering through
     :func:`~emmy.compiler.structural.form`. Structural, not the
     pretty text it used to join: ``pretty()`` is the human rendering, and
     a cosmetic change to how a statement prints must not re-key every
-    kernel that contains it. With every concrete ``Stmt`` subclass a frozen
-    dataclass and ``Body`` a ``tuple[Stmt, ...]`` subclass, equal-content
-    bodies hash equal — so two structurally identical Body instances
-    share one normalize+pretty walk through this cache. Tune mode hits
-    this hard from ``_record_op_inventory`` (one ``identity_key(with_io=True, with_knobs=True)`` call
-    per ancestor in every CudaOp's source chain, per terminal candidate).
-
-    Generic :func:`normalize_body` callers with other flags don't share
-    this cache — ``cluster_ops=True`` collapses semantically distinct ops
-    to a single cluster representative (``add``↔``sub``, ``div``↔``mod``,
-    …), which is the right canonicalization for structural-equivalence
-    queries but would be a *correctness bug* for any callsite running
-    the normalized body.
+    kernel that contains it. Clustered identity collapses semantically distinct ops to one
+    cluster representative, so this path is only for structural identity, never executable IR.
     """
-    from emmy.compiler.ir.stmt.normalize import normalize_body  # noqa: PLC0415
+    from emmy.compiler.ir.stmt.identity import canonicalize_identity  # noqa: PLC0415
     from emmy.compiler.structural import digest, form  # noqa: PLC0415
 
-    normalized = normalize_body(body, hoist=False, canonical_buffers=True, cluster_ops=cluster)
-    return digest(form(normalized))
+    return digest(form(canonicalize_identity(body, cluster=cluster)))
 
 
 def refs_axis(s: Stmt, name: str) -> bool:

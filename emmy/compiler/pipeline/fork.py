@@ -157,6 +157,8 @@ class _ScheduleTree:
     row_delta: Callable[[ScheduleContext, ScheduleContext], Mapping]
     leaf: Callable[[Schedule], Fork]
     pool_id: str
+    exact: Callable[[Mapping[str, str]], Fork | None] | None = None
+    exact_keys: frozenset[str] | None = None
 
     def step(self, context: ScheduleContext, row: Mapping) -> list[Fork]:
         forks = []
@@ -246,11 +248,32 @@ def schedule_forks(
     row_delta: Callable[[ScheduleContext, ScheduleContext], Mapping],
     leaf: Callable[[Schedule], Fork],
     pool_id: str,
+    exact: Callable[[Mapping[str, str]], Fork | None] | None = None,
+    exact_keys: frozenset[str] | None = None,
 ) -> list[Fork]:
     """Represent any schedule context as a lazy pipeline Fork tree: one unexpanded root, so
     nothing is enumerated until a consumer expands it — or narrows it to a row first."""
-    tree = _ScheduleTree(dict(branch_knobs), row_delta, leaf, pool_id)
+    tree = _ScheduleTree(dict(branch_knobs), row_delta, leaf, pool_id, exact, exact_keys)
     return [_ScheduleFork(tree, context, {})]
+
+
+def exact_schedule_leaf(
+    options: Sequence[Op | Graph | Fork], row: Mapping[str, str], required_keys: frozenset[str]
+) -> tuple[frozenset[str], Fork | None] | None:
+    """Decode one complete row through an unsampled semantic schedule without enumerating it.
+
+    ``None`` means the options are not the single root made by :func:`schedule_forks`. The declared
+    key set accompanies an exact hit or miss so a strict replay can distinguish stale site names.
+    This does not change :meth:`Fork.admits`: partial rows elsewhere may carry keys for later forks.
+    """
+    roots = [option for option in options if isinstance(option, _ScheduleFork)]
+    if len(roots) != 1 or len(options) != 1 or roots[0].tree.exact is None or roots[0].tree.exact_keys is None:
+        return None
+    root = roots[0]
+    keys = root.tree.exact_keys
+    if not required_keys <= keys:
+        return keys, None
+    return keys, root.tree.exact({key: str(value) for key, value in row.items() if key in keys})
 
 
 def iter_leaves(options: Iterable[Op | Graph | Fork]) -> Iterator[Op | Graph | Fork]:

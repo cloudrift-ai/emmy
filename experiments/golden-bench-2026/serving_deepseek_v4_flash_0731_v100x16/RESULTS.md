@@ -29,6 +29,12 @@ This also supersedes the earlier 30.79 tok/s figure as a reference point. That n
 context, which the Emmy arm cannot hold, so it was never a legitimate baseline for a compiler comparison. The rows
 below are at the envelope both arms can share.
 
+On 2026-09-15 the repository golden itself served the checkpoint for the first time — `main` plus #807, strict
+evidence, nothing host-local in the process: 2.03 s per output token and 44 s to first token at 2,275 input
+tokens, 13.8× and about 12× off the fork. The gap to the 0.899 s above is one election: the repository golden
+runs the M=1 post-attention decode at 45 ms per layer where the host-local file elected 18 ms. Details under
+"The repository golden serves".
+
 ## Measurements
 
 | Concurrency | Input → output | Repeats | Output tok/s, mean ± SD | Range | Mean TPOT | Mean TTFT | Failed |
@@ -84,6 +90,69 @@ Correctness at the serving level: greedy completions are coherent English ("Red,
 colors often used as primary colors in light-based systems (RGB)…"). There is no eager twin for a golden Loop IR
 target on this model, so no CLI-level numerical verdict was obtainable for the cut schedule alone. The cuts are code
 motion — hoisting a loop-invariant dot out of a sweep — which is why the equivalent `pre4096` cuts were bit-exact.
+
+### The repository golden serves (2026-09-15)
+
+Every number above was measured against a host-local golden; the repository's own golden could not answer a
+request. On 2026-09-15 it did, from `main` at `7e9336e6` plus #807, booted with `--strict-evidence` and an empty
+tune DB so the golden was the only measured evidence in the process. The boot reached health in twelve minutes —
+engine init, profiling, KV creation and warm-up took 83 s against 949 s on 2026-09-11 — and strict evidence
+refused the same single fork as before, the expert `m256` twin on all sixteen workers. KV capacity was 76,337
+tokens on the first stage and 78,722 on the second.
+
+Greedy decoding, single stream, streamed responses timestamped per chunk. Prefix caching is on in the launcher, so
+a repeated prompt's time to first token is a cache hit; the cold column is the first request at each shape.
+
+| Shape | TTFT, cold | TTFT, repeat | TPOT mean | TPOT range | Output tok/s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 5 in → 33 out | 6.14 s | 3.37 s | 2.032 s | 2.019 – 2.045 s | 0.49 |
+| 2,275 in → 9 out | 44.23 s | 16.02 s | 2.089 s | 2.085 – 2.095 s | 0.48 |
+
+The first decode step of the first request cost 4.20 s, the per-layer graph captures; every later step, including
+the first of the second request, was inside the range above. Against the fork's single-stream row: 13.8× per
+output token (2.03 s against 147.7 ms) and about 12× to first token (44.2 s at 2,275 input tokens against 3.77 s
+at 2,048) — directional, for the reasons under "What this run does not establish".
+
+**Where the time goes now.** The boot's roofline audit, identical on the first layer of each stage, beside the
+2026-09-12 boot that produced the 0.899 s:
+
+| Program | Measured | Over floor | 2026-09-12, host-local golden |
+| --- | ---: | ---: | ---: |
+| `pre.chunk.m4096` | 2.74 ms | 92× | 107× |
+| `post.decode.m1` | 44.7 ms | 750× | 294× |
+| `post.decode.m16` | 68.3 ms | 1,145× | 1,156× |
+| `post.chunk.m4096` | 688 ms | 352× | 321× |
+
+The pre decode programs no longer appear at all: #793 took the pre-attention family from seconds to
+microseconds, which is why time to first token at 2.3k input tokens halved from 88 s. The post family is
+untouched. And one election went backwards: the host-local golden elected an M=1 post-attention decode at about
+18 ms per layer; the repository golden, which carries the same cut since #799, elects 44.7 ms. Forty-three layers
+of that difference is the 1.1 s per token between the two boots. Why a recorded cut loses the election is the
+open question ahead of any new recording.
+
+**Greedy agreement against the fork**, the four-prompt corpus of 2026-08-26 at temperature 0, 32 tokens each,
+compared with the fork arm's dumps of 2026-08-27:
+
+| Prompt | Agreement | At the divergence |
+| --- | ---: | --- |
+| code | 32 / 32 | — |
+| medium | 32 / 32 | — |
+| short | 5 / 32 | ` Spain` (−1.114) against ` Italy` (−1.324) — the same near-tie as in August |
+| long | 1 / 32 | ` is` (−1.075) against `.` (−0.869) — agreed on all 32 in August |
+
+Both divergences are ties of about 0.2 nats and both continuations are coherent, but the long prompt — the one
+that spills past the sliding window into the compressed and indexed attention layers — did not diverge in August.
+This is the greedy half of gate (d) only; no tensor-level comparison was run. Evidence on the host under
+`~/serve-evidence/boot20-*` and `emmy_arm_boot20.json`.
+
+**What blocked it until now.** #801 found that with the expert rows recorded, the expert compile died at plan
+construction with a `RangeOp` node the backend could not place. That was not a lowering gap in the expert path.
+#793 had spelled the mxfp4 nibble shift as a two-lane range under a broadcast; the constant-fold pass deferred the
+range to the broadcast as its maximal root, and the broadcast root keeps scalar computation lazy for the kernel to
+inline. Nothing lowers a range, so it reached the kernel as an input no plan could feed. Neither `emmy compile
+--ir cuda` nor a `--golden --realization` replay reaches plan construction, which is why the failure was invisible
+off the serving path. #807 folds a range where it stands; the expert kernels change identity as a result, and
+#801's rows still deploy by structural match.
 
 ### The M=1 decode tier: what broke and what now guards it
 
@@ -230,7 +299,8 @@ recorded rows win the election on price.
 - **The Emmy rows are one repeat each.** The fork rows are five repeats with a reported spread; the Emmy rows are
   single runs, and their stability claim rests on the spread of decode steps within a run, not across runs.
 - **The Emmy row needs a golden carrying the recorded M=1 schedule.** Against the golden this experiment shipped
-  with, the M=1 decode tier is now dropped at boot and time per output token falls back to about 5.6 s.
+  with, the M=1 decode tier is now dropped at boot and time per output token falls back to about 5.6 s. As of 2026-09-15 the repository golden carries #799's rows for that
+  schedule and still elects the slower kernel; see "The repository golden serves".
 - **The Emmy rows came from direct HTTP requests**, not from `emmy bench`, so they have no experiment records and are
   not in the archive.
 - **It is not a regression check against the August run.** That run used different prompt shapes, a different context

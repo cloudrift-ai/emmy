@@ -43,17 +43,17 @@ configs:
     - sg
     - up
   realizations:
-  - name: k_matmul_reduce_5dff8a.ed840b3f0baa
+  - name: k_matmul_reduce_14b13f.1b752ef2fd57
     bindings: {}
     pins:
       FAST_MATH: false
     knobs: {}
-    identity: 556cfd7735588d13e5b49b0db1971b8e605e668dd99137d7238216a41e871979
+    identity: 09e1d716ed0989c13b85b4d19de39e08a5423c4cc6dba677fe861d7f1f87a8ca
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 115.85777335696751
         tcompile_us: 26.80888937579261
-  - name: k_matmul_reduce_50d680.a75f98bf82a6.04b23c94c05c
+  - name: k_matmul_reduce_7f1b3f.d46f28df8e40.c1e4b8349e87
     bindings: {}
     pins:
       FAST_MATH: false
@@ -63,8 +63,8 @@ configs:
       REDUCE: ''
       STAGE: ''
       RASTER: ''
-    identity: 04b23c94c05c4fd2f73bf3289f7b296c24a93a09ed47634af396f2b5bb949f0b
-  - name: k_matmul_reduce_f0697b.3a0fb8554f78.fe083afdb4bf
+    identity: c1e4b8349e877ca1d11195a276d50df5f52dcefc818a5629e6cac96d0661b6db
+  - name: k_matmul_reduce_14b13f.1b752ef2fd57.69c24fad8edb
     bindings: {}
     pins:
       FAST_MATH: false
@@ -74,15 +74,4 @@ configs:
       REDUCE: ''
       STAGE: ''
       RASTER: ''
-    identity: fe083afdb4bf8682866666a609a21a5fba94c4f94435db979e93d6bc08ef8e79
-  - name: k_matmul_reduce_5dff8a.ed840b3f0baa.c7f91f58a7e5
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      TILE: ''
-      REDUCE: ''
-      STAGE: ''
-      RASTER: ''
-    identity: c7f91f58a7e561f1c139997f3b9e303aa715bf1832bfc71be6ec18526905a702
+    identity: 69c24fad8edba264241d4a4344c1f69dd4138e5fdcaf3e7eb08ad6f2963c77f0

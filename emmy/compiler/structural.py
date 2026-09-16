@@ -10,6 +10,7 @@ exact include/exclude list.
 
 Implementers today:
 
+- :class:`emmy.compiler.dim.Dim` — the extent expression; excludes its advisory expected-size hint.
 - :class:`emmy.compiler.graph.Graph` — Merkle digest over op kinds,
   body structure, output shapes/dtypes, input wiring; excludes node ids,
   Tensor names, and Hints.

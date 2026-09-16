@@ -2,45 +2,27 @@ compute_cap:
 - 7
 - 0
 programs:
-- inputs:
-  - x0
-  - x1
-  outputs:
-  - matmul
+- inputs: [x0, x1]
+  outputs: [matmul]
   nodes:
   - id: x0
     op: input
-    outputs:
-    - - x0
-      - f32
-      - - 512
-        - 512
+    outputs: [[x0, f32, [512, 512]]]
   - id: x1
     op: input
-    outputs:
-    - - x1
-      - f32
-      - - 512
-        - 512
+    outputs: [[x1, f32, [512, 512]]]
   - id: matmul
     op: torch.matmul
-    attrs:
-      has_bias: false
-    inputs:
-    - x0
-    - x1
-    outputs:
-    - - matmul
-      - f32
-      - - 512
-        - 512
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f32, [512, 512]]]
 configs:
 - program: 0
   target:
     origins:
     - matmul
   realizations:
-  - name: k_matmul_befb76.313488d19410
+  - name: k_matmul_386cc3.11890d01147c
     bindings: {}
     pins:
       FAST_MATH: false
@@ -50,8 +32,8 @@ configs:
       REDUCE: g2k
       RASTER: ''
       STAGE: d2/smem
-    identity: 6c2eb36225dec295097d2206fc5f2b894f6ded2c127e51e0b7f4c281f112fa90
-  - name: k_matmul_befb76.313488d19410.ac3e12d7a7c1
+    identity: 7961db2f2298dbef6a0d5929b29db4a1cc3870c13f1f7c79865e4e3ffaf5e7f6
+  - name: k_matmul_2d0881.dfbda24a224b.94597cea094f
     bindings: {}
     pins:
       FAST_MATH: false
@@ -59,4 +41,13 @@ configs:
       WORK: ''
       REDUCE: ''
       RASTER: ''
-    identity: ac3e12d7a7c1f6080afc4b83555dc5c2545256d43821ee715b265df7362382a8
+    identity: 94597cea094f8c4111b71f0218dd87d27154fb515198adc09e70a4ac848ebe0e
+  - name: k_matmul_386cc3.11890d01147c.c20e0087753b
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: c20e0087753b6d30fce4fdd0a1b288afb6813312186342ed175318dc513138c0

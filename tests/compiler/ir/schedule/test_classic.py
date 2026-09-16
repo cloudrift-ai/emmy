@@ -45,6 +45,7 @@ from emmy.compiler.ir.schedule.classic import (
     parse_edge_site,
     parse_node_id,
 )
+from emmy.compiler.ir.schedule.classic.sites import _select
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, TileOp
 from emmy.compiler.pipeline.fork import DeferredFork, iter_leaves, schedule_forks
@@ -350,10 +351,34 @@ def test_an_authored_tile_bypasses_enumeration_precision_policy() -> None:
     offered = policy_only.node_site(site).nodes
     assert offered and all(not (choice.tile.is_warp and choice.tile.atom.operand_dtype("c").nbytes == 2) for choice in offered)
 
-    authored = policy_only.with_row({"WORK": "w1x4", "TILE": tile.spell()})
+    authored = policy_only.with_row({"WORK": "w1x4", "TILE": tile.spell()}, strict=True)
     assert [choice.tile for choice in authored.node_site(site).nodes] == [tile]
     schedule = next(iter(_enumerate_context(ClassicScheduleContext(source, target, authored))))
     assert schedule.nodes[site].tile == tile
+
+
+def test_strict_row_does_not_make_inherited_peer_pins_strict() -> None:
+    problem = ClassicProblem(*_problem(_contraction()), validate_pins=False)
+    tolerated = problem.with_row({"WORK": "not-a-work"})
+
+    assert tolerated.kernel_site.options
+    assert not problem.with_row({"WORK": "not-a-work"}, strict=True).kernel_site.options
+    assert tolerated.with_row({"RASTER": ""}, strict=True).kernel_site.options
+
+
+def test_exact_row_rejects_before_walking_a_catalog() -> None:
+    def unavailable():
+        raise AssertionError("an exact complete row must not fall back to its catalog")
+        yield "unused"
+
+    def parse(_value):
+        return None
+
+    def allowed(_value):
+        return False
+
+    assert _select("wanted", unavailable(), parse=parse, allowed=allowed, spell=str, bare=None, validate_pins=True, exact=True) == ()
+    assert _select("wanted", iter(("wanted",)), parse=parse, allowed=allowed, spell=str, bare=None, validate_pins=True) == ("wanted",)
 
 
 def test_node_ids_are_integers_with_one_wire_spelling() -> None:

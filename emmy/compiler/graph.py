@@ -1454,7 +1454,7 @@ def _rename_buf_in_op(op, old: str, new: str):
     if isinstance(op, LoopOp):
         # ``LoopOp.rename_buffers`` is the spelling-preserving clone: fields carried whole
         # (name / knobs / source identity preserved), io renamed, and NO ``__post_init__`` — a
-        # rename must never renormalize (``sort_commutative_args`` orders by buffer name).
+        # rename must never rerun canonical sibling ordering under the new buffer spelling.
         return op.rename_buffers({old: new})
     else:
 

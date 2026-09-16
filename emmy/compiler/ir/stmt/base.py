@@ -585,7 +585,31 @@ class Stmt(Structural):
         def rename_name(name: str) -> str:
             return lookup(name, name) if lookup is not None else names(name)
 
-        return self.rewrite(rename_name, Sigma.IDENTITY, lambda axis: replace(axis, name=rename_name(axis.name)))
+        def rename_expr(expr: Expr | None) -> Expr | None:
+            if expr is None:
+                return None
+            mapping = {name: Var(rename_name(name)) for name in expr.free_vars() if rename_name(name) != name}
+            return expr.substitute(mapping) if mapping else expr
+
+        def rename_axis_tree(axis: Axis, seen: frozenset[int]) -> Axis:
+            window = axis.window
+            if window is not None:
+                parent = window.parent
+                if parent is not None:
+                    parent = (
+                        replace(parent, name=rename_name(parent.name))
+                        if id(parent) in seen
+                        else rename_axis_tree(parent, seen | {id(axis)})
+                    )
+                window = replace(
+                    window,
+                    parent=parent,
+                    base=rename_expr(window.base),
+                    bound=rename_expr(window.bound),
+                )
+            return replace(axis, name=rename_name(axis.name), window=window)
+
+        return self.rewrite(rename_name, Sigma.IDENTITY, lambda axis: rename_axis_tree(axis, frozenset()))
 
     def substitute(self, coords: Sigma) -> Stmt:
         """β-SUBSTITUTE free coordinates by expressions — the split's reindex, the per-cell fill.
@@ -642,11 +666,11 @@ class Stmt(Structural):
         stmt run N times instead of M is observable, so it pins the
         enclosing iteration to its current scope.
 
-        Note: ``Accum`` / ``Init`` are *not* side-effecting in this
+        Note: ``Accum`` / ``Mma`` / ``Init`` are *not* side-effecting in this
         sense — they're scope-bound (their semantics depend on which
         Loop encloses them) but moving the *whole enclosing block* is
         safe. Hoisting passes that want to move a Loop containing an
-        Accum need a separate scope-bound check on the leaf, not
+        carried state need a separate scope-bound check on the leaf, not
         ``has_side_effects`` on the wrapper."""
         return any(c.has_side_effects for sub in self.nested() for c in sub)
 

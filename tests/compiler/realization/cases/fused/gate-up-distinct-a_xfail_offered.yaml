@@ -62,7 +62,7 @@ configs:
     - sg
     - up
   realizations:
-  - name: k_linear_reduce_622d72.464e949bd3d0
+  - name: k_linear_reduce_f03694.07d84a5fc09b
     bindings: {}
     pins:
       FAST_MATH: false
@@ -71,4 +71,32 @@ configs:
       WORK: w2x2
       TILE@map.1/inner: mma_m16n8k16_f16_f32/f2x2/k2
       TILE@map.2/inner: mma_m16n8k16_f16_f32/f2x2/k2
-    identity: 72429773105be873ce7f658f6b87b996b32af5c6e80b86878cb1e7b4846fcb96
+    identity: fe3e026e4b9d6a7ee2d49d91b078aac27d5bd0d5e9ea42a298530815203fa324
+  - name: k_linear_reduce_c82e0d.5d99ec1cba30.06ac2b96161b
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE@map.1/inner: ''
+      TILE@map.2/inner: ''
+      REDUCE@map.1/inner: ''
+      REDUCE@map.2/inner: ''
+      STAGE@map.1/inner: ''
+      STAGE@map.2/inner: ''
+      WORK: ''
+      RASTER: ''
+    identity: 06ac2b96161bd524e82f0372f258020987ed808ca7f7bd6ecc04ca4e34e6b292
+  - name: k_linear_reduce_f03694.07d84a5fc09b.70e8f2c2743b
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE@map.1/inner: ''
+      TILE@map.2/inner: ''
+      REDUCE@map.1/inner: ''
+      REDUCE@map.2/inner: ''
+      STAGE@map.1/inner: ''
+      STAGE@map.2/inner: ''
+      WORK: ''
+      RASTER: ''
+    identity: 70e8f2c2743bbc9ca064ecb53aaf530b6309ff8d093a1b6e27d83edbb70ada7e
