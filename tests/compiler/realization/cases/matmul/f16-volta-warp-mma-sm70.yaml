@@ -28,7 +28,7 @@ configs:
     origins:
     - o
   realizations:
-  - name: k_linear_3dbf1d.c3d36832a9da
+  - name: k_linear_3dbf1d
     bindings: {}
     pins:
       FAST_MATH: false

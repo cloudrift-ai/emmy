@@ -53,7 +53,7 @@ configs:
     origins:
     - rms_norm
   realizations:
-  - name: k_rms_norm_3fbe25.e023631f56b8
+  - name: k_rms_norm_3fbe25
     bindings: {}
     pins:
       FAST_MATH: false
@@ -63,7 +63,7 @@ configs:
       REDUCE: coop
       RASTER: ''
     identity: f49b6be4045dfe96b9de05bb139deec137cb0cf738d192da334eff4dd6d236e5
-  - name: k_rms_norm_5837b1.8efbdb0fd830.e604b8b4d05f
+  - name: k_rms_norm_3fbe25.b05eac70b4b1
     bindings: {}
     pins:
       FAST_MATH: false

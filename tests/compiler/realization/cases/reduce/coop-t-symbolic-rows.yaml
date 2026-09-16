@@ -19,7 +19,7 @@ configs:
     origins:
     - sum_1
   realizations:
-  - name: k_sum_1_reduce.d108847e9303
+  - name: k_sum_1_reduce
     bindings: {}
     pins:
       FAST_MATH: false

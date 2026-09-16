@@ -32,7 +32,7 @@ configs:
     origins:
     - o
   realizations:
-  - name: k_sdpa_d4bf3c.89052a167250
+  - name: k_sdpa_d4bf3c
     bindings: {}
     pins:
       FAST_MATH: false

@@ -22,7 +22,7 @@ configs:
     origins:
     - o
   realizations:
-  - name: k_rms_norm_ad59be.a95db682e10f
+  - name: k_rms_norm_ad59be
     bindings: {}
     pins:
       FAST_MATH: false

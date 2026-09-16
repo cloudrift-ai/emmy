@@ -48,7 +48,7 @@ configs:
     - reshape
     - to
   realizations:
-  - name: k_linear_15706d.33b29184e8d0
+  - name: k_linear_15706d
     bindings: {}
     pins:
       FAST_MATH: false

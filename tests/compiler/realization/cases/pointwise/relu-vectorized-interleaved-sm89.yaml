@@ -19,7 +19,7 @@ configs:
     origins:
     - relu
   realizations:
-  - name: k_relu_pointwise.42876545f010
+  - name: k_relu_pointwise
     bindings: {}
     pins:
       FAST_MATH: false

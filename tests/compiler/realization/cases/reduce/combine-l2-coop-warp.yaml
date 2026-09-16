@@ -31,7 +31,7 @@ configs:
     - sqrt
     - sum_1
   realizations:
-  - name: k_sqrt_reduce.ab927da198de
+  - name: k_sqrt_reduce
     bindings: {}
     pins:
       FAST_MATH: false

@@ -46,7 +46,7 @@ configs:
     - out
     - qn
   realizations:
-  - name: k_sdpa_rms_norm_reduce_6cbfba.549dfe5d1add
+  - name: k_sdpa_rms_norm_reduce_6cbfba
     bindings: {}
     pins:
       FAST_MATH: true

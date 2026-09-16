@@ -1679,7 +1679,7 @@ configs:
   target:
     loop: 1
   realizations:
-  - name: k_linear_reduce_bbf90a.8ee925ac3b7f
+  - name: k_linear_reduce_bbf90a
     bindings: {}
     pins:
       FAST_MATH: false
@@ -1691,7 +1691,7 @@ configs:
       STAGE: d1/smem-async
       RASTER: ''
     identity: 74259cc04c7701047d9597bcc13596a1c1aa7e89f4d010142811e354599be01e
-  - name: k_linear_reduce_091a7c.2e4ea14a0191.644854c2ff13
+  - name: k_linear_reduce_bbf90a.644854c2ff13
     bindings: {}
     pins:
       FAST_MATH: false
@@ -1722,7 +1722,7 @@ configs:
       WORK: ''
       RASTER: ''
     identity: 644854c2ff13fc8ba7f652ad011b4068a63cbbdc9902755dc7eda658372dd594
-  - name: k_linear_reduce_9555fa.5b69f06e91a4.8fd7e39b14e9
+  - name: k_linear_reduce_bbf90a.165fbb139c44
     bindings: {}
     pins:
       FAST_MATH: false

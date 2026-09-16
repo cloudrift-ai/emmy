@@ -100,7 +100,7 @@ configs:
     - scaled_dot_product_attention
     - transpose
   realizations:
-  - name: k_sdpa_linear_reduce_c532cd.56b2290ba280
+  - name: k_sdpa_linear_reduce_c532cd
     bindings: {}
     pins:
       FAST_MATH: false

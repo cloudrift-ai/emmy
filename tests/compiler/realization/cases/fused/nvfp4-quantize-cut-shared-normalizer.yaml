@@ -726,14 +726,14 @@ configs:
   target:
     loop: 0
   realizations:
-  - name: k_mean_e934a3.3355d13343a0
+  - name: k_mean_e934a3
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
       PLACE@map.1/map.2/reduce.2/map: cut
     identity: 561b2a5aa52cc91ea5710b9c934a6751b2f3b3dcc59b65d17f7328e2abd1d72f
-  - name: k_mean_5e4be9.775f7724680f.af51605583f5
+  - name: k_mean_e934a3.af51605583f5
     bindings: {}
     pins:
       FAST_MATH: false
@@ -742,7 +742,7 @@ configs:
       REDUCE: ''
       RASTER: ''
     identity: af51605583f50785693569256c86cbcce1b4f82589f2154affe0e1d2975dac26
-  - name: k_mean_5e4be9.775f7724680f.1e9d8c141b73
+  - name: k_mean_e934a3.1e9d8c141b73
     bindings: {}
     pins:
       FAST_MATH: false
@@ -753,7 +753,7 @@ configs:
       WORK: ''
       RASTER: ''
     identity: 1e9d8c141b7348b5c45b21df97901fe992f63ff6cbe1b8980c53c5b4ed367d48
-  - name: k_mean_9444af.d7b2f750acbc.462d7f994930
+  - name: k_mean_e934a3.abd14c21edf0
     bindings: {}
     pins:
       FAST_MATH: false
@@ -762,7 +762,7 @@ configs:
       REDUCE: ''
       RASTER: ''
     identity: abd14c21edf0ac872b8ea84fd98db4e49c774fb9c397406f7abef16249d81bde
-  - name: k_mean_9444af.d7b2f750acbc.ad1606bf3cc7
+  - name: k_mean_e934a3.1294437fc426
     bindings: {}
     pins:
       FAST_MATH: false

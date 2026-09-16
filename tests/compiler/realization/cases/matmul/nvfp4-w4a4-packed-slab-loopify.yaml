@@ -650,7 +650,7 @@ configs:
   target:
     loop: 1
   realizations:
-  - name: k_linear_feddc1.041dd457ea95
+  - name: k_linear_feddc1
     bindings: {}
     pins:
       FAST_MATH: false

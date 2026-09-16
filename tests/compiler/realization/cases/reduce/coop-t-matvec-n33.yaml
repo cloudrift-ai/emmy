@@ -22,7 +22,7 @@ configs:
     origins:
     - linear
   realizations:
-  - name: k_linear_4ec60d.280e1cc7051a
+  - name: k_linear_4ec60d
     bindings: {}
     pins:
       FAST_MATH: false

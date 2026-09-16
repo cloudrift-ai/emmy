@@ -31,7 +31,7 @@ configs:
     - h
     - n
   realizations:
-  - name: k_rms_norm_31ae5a.3901667b76ae
+  - name: k_rms_norm_31ae5a
     bindings: {}
     pins:
       FAST_MATH: false

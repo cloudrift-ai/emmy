@@ -28,7 +28,7 @@ configs:
     - o
     - xr
   realizations:
-  - name: k_matmul_df52fc.07cee76cfbaf
+  - name: k_matmul_df52fc
     bindings: {}
     pins:
       FAST_MATH: false

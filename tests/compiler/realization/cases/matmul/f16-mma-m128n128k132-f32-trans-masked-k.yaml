@@ -22,7 +22,7 @@ configs:
     origins:
     - o
   realizations:
-  - name: k_linear_ecd22e.8397badd48c2
+  - name: k_linear_ecd22e
     bindings: {}
     pins:
       FAST_MATH: false
