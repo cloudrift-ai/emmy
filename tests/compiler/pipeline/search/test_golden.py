@@ -217,6 +217,35 @@ def test_a_row_whose_every_site_is_re_spelled_still_gets_a_verdict() -> None:
     assert reason is not None and "re-spelling" in reason and "@missing" in reason, reason
 
 
+def test_a_sibling_sharing_the_target_identity_cannot_silence_the_lead_cut() -> None:
+    """A receipt decodes behind its lead's cut. The replay finds the entry that decides a fork by
+    the fork root's identity, so a plain receipt stamped with its lead's identity — what the #804
+    re-key did to 145 rows of the DeepSeek V4 golden — stands in for the lead at the cut fork,
+    fuses the kernel, and every receipt of the set reads as a re-spelling. Where entries share an
+    identity, the one that spells a route decides the cut. The set is the golden's own, the M=16
+    pre-attention statistic: a cut lead, a cross-CTA split of one piece, and three receipts."""
+    from dataclasses import replace
+
+    from emmy.compiler.pipeline.knob import schedule_match_key
+    from emmy.compiler.pipeline.search.golden import _replay, piece_row
+
+    def decodes(record, siblings) -> bool:  # the replay itself: the decode's verdict is memoized per record
+        wanted = schedule_match_key(piece_row(record.knobs))
+        return any(_replay(record, siblings=siblings, exhaustive=True, wanted=wanted).rows.values())
+
+    golden = Path(__file__).parents[4] / "recipes" / "DeepSeek-V4-Flash-0731" / "golden" / "v100_sm70.yaml"
+    records = _records_of(golden)
+    lead = next(r for r in records if r.name == "pre16.k_linear_mean_reduce_03c479.8caa25e24052.m16.dc6db94ec8ea.dc6db94ec8ea")
+    siblings = siblings_of(lead, records)
+    receipt = next(m for m in siblings if m.name.endswith(".5d9b14249e94"))
+    assert decodes(receipt, [lead, *(m for m in siblings if m is not receipt)]), "the receipt decodes behind its lead's cut"
+
+    other = next(m for m in siblings if m.name.endswith(".c607711d8ef8"))
+    impostor = replace(other, identity=lead.identity)
+    beside = [lead, *(impostor if m is other else m for m in siblings if m is not receipt)]
+    assert decodes(receipt, beside), "and beside a receipt stamped with the lead's identity"
+
+
 def test_compiler_fingerprint_ignores_mtime_so_two_checkouts_share_one_memo(tmp_path):
     """Two byte-identical trees fingerprint alike however their mtimes differ.
 

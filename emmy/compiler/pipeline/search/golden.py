@@ -1227,7 +1227,13 @@ def _replay(
         return {**referenced, **entry.route, **{str(key): str(value) for key, value in entry.knobs.items()}}
 
     lead = record if lead is None else lead
-    named = {entry.identity: entry for entry in siblings if entry.identity is not None}
+    # Entries can share an identity — a routing row and a plain row of one target, or a split of a
+    # piece and the cut that minted it. The one that spells a route decides the structural fork;
+    # a row that spells none would read the kernel as fused.
+    named: dict[str, GoldenRecord] = {}
+    for entry in siblings:
+        if entry.identity is not None and (entry.identity not in named or (entry.route and not named[entry.identity].route)):
+            named[entry.identity] = entry
     if record.identity is not None:
         named[record.identity] = record
     set_digest = digest(
