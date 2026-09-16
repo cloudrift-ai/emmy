@@ -1,0 +1,14 @@
+tags:
+  - onboarding
+  - untested
+
+model:
+  huggingface: "Qwen/Qwen3-30B-A3B-Instruct-2507"
+  revision: 0d7cf23991f47feeb3a57ecb4c9cee8ea4a17bfe
+  rationale: "30.5B BF16 parameters need about 61.1 GB for weights and 79.4 GB at the 1.3x minimum-serving estimate, fitting one 141 GB H200."
+  heat: 0
+  task: generate
+
+matrices:
+  deploy.gpu: "NVIDIA H200 141GB"
+  deploy.gpu_count: 1
