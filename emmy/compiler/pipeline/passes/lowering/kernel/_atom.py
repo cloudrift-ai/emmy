@@ -1013,7 +1013,7 @@ def _a_slab_operand(
             row_axis=row_axis,
             row_body=row_body,
             cta=cta,
-            stat=cone_stat(c.operands[0], axes),
+            stat=cone_stat(c.operands[0], k_name, axes),
             dtypes={nm: cuda_name(dt) for nm, dt in cone_stat_dtypes(pro, stats, inputs).items()},
         )
     before = None
