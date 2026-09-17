@@ -3197,8 +3197,6 @@ def _check_accuracy(outputs, eager_out) -> str | None:
     treats it as informational (a sliced reproducer is fed random *boundary* inputs
     that can be out-of-domain for the op, e.g. a kernel expecting a mean-of-squares
     gets random signed data → NaN from a downstream rsqrt)."""
-    import random  # noqa: PLC0415
-
     import numpy as np  # noqa: PLC0415
 
     # Multi-output: the eager reference may be a tuple — compare each backend
@@ -3211,19 +3209,21 @@ def _check_accuracy(outputs, eager_out) -> str | None:
         eager_refs = [eager_out[name] for name in outputs]
     else:
         eager_refs = list(eager_out) if isinstance(eager_out, (tuple, list)) else [eager_out]
-    eager_flats = [t.detach().cpu().flatten().tolist() for t in eager_refs]
-    if any(e != e for flat in eager_flats for e in flat):
+    # Arrays, never Python lists: a list holds one float object per element, so an LM-head output at
+    # sequence 512 (134M cells) took three lists, 13 GB and minutes of one core to reach the same verdict.
+    eager_flats = [t.detach().cpu().double().flatten().numpy() for t in eager_refs]
+    if any(np.isnan(flat).any() for flat in eager_flats):
         return "eager reference contains NaN (reproducer inputs out of domain)"
     failures: list[str] = []
     for pos, (buf_name, arr) in enumerate(outputs.items()):
         eager_flat = eager_flats[pos] if len(eager_flats) == len(outputs) else eager_flats[0]
-        values = arr.flatten().tolist()
-        if any(v != v for v in values):
+        values = np.asarray(arr, dtype=np.float64).ravel()
+        if np.isnan(values).any():
             return f"CORRECTNESS FAIL: output {buf_name} contains NaN"
         if len(values) == len(eager_flat):
-            diffs = [abs(a - e) for a, e in zip(values, eager_flat, strict=True)]
-            max_diff = max(diffs)
-            mean_diff = sum(diffs) / len(diffs)
+            diffs = np.abs(values - eager_flat)
+            max_diff = float(diffs.max())
+            mean_diff = float(diffs.mean())
             # Scale tolerance by max|eager| and by output dtype.
             #
             # fp32: matmul reduction-order drift grows with both K and
@@ -3314,16 +3314,14 @@ def _check_accuracy(outputs, eager_out) -> str | None:
             # on correct gemma runs), and widens only when split-K gets its f32 scratch.
             rel_tol = 1.0 if is_fp16 else 0.08
             abs_tol = 1e-1 if is_fp16 else 1e-3
-            peak = max((abs(e) for e in eager_flat), default=0.0)
+            peak = float(np.abs(eager_flat).max())
             tol = max(abs_tol, rel_tol * peak)
-            perm = list(eager_flat)
-            random.Random(0).shuffle(perm)
-            perm_floor = sum(abs(a - e) for a, e in zip(perm, eager_flat, strict=True)) / max(1, len(perm))
+            perm_floor = float(np.abs(np.random.default_rng(0).permutation(eager_flat) - eager_flat).mean())
             mean_tol = max(abs_tol, min(0.03 * peak, 0.7 * perm_floor))
             escape_tol = max(abs_tol, 0.005 * peak)
-            outliers = sum(1 for d in diffs if d > tol)
+            outliers = int((diffs > tol).sum())
             budget = max(4, len(diffs) // 65536)
-            rms = (sum(e * e for e in eager_flat) / max(1, len(eager_flat))) ** 0.5
+            rms = float(np.sqrt(np.mean(np.square(eager_flat))))
             heavy_tailed = peak > 8.0 * rms
             if is_fp16:
                 # The hard 4·tol garbage ceiling bounds BOTH pass paths: the escape hatch

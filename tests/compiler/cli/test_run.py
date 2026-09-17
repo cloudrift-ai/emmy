@@ -1661,6 +1661,27 @@ def test_accuracy_check_heavy_tailed_fp16_outputs():
     assert fails(rng.permutation(base)), "a permuted heavy-tailed output must fail the mean gate"
 
 
+def test_accuracy_check_holds_a_large_output_in_arrays_not_lists():
+    """The check once walked Python lists: an LM-head output at sequence 512 (134M cells) took three lists, 13 GB
+    and minutes of one core, and its bench worker was the process a session died beside. In arrays the same
+    verdict costs a few f64 copies of the output."""
+    import tracemalloc
+
+    import numpy as np
+    import torch
+
+    from emmy.commands.run import _check_accuracy
+
+    cells = 1 << 21
+    eager = torch.from_numpy(np.random.default_rng(0).standard_normal(cells).astype(np.float16))
+    tracemalloc.start()
+    assert _check_accuracy({"o": eager.numpy().copy()}, eager) is None
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    # Measured: 4.3 f64 copies of the output in arrays, 13.3 in lists.
+    assert peak < 8 * 8 * cells
+
+
 def test_write_ab_json_greedy_bench_fail_and_record_knobs(tmp_path):
     """The ``--json`` record survives a failed greedy row: the greedy block carries
     ``status: bench_fail`` + ``error`` with null timings, pinned rows carry their own
