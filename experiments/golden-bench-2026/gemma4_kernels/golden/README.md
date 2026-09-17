@@ -37,6 +37,28 @@ score and the softmax statistics stay FP32. The rows swept were the two- and thr
 64-key form (`f1x32/k4` over `f1x8`, `d1/smem-tma`), each with both accumulators. The rings land within 2% of each
 other; the single slab is 3% to 8% behind them, and there FP16 accumulation is worth 5% (41.2 to 39.0 us).
 
+## RTX 4090
+
+The card has no TMA, so every row streams its operands through the asynchronous-copy ring (`STAGE=d2/smem-async`);
+the synchronous fills (`d1/smem`, `d2/smem`) do not resolve for the attention kernel there at all. The projections
+prefer two warps by two (`WORK=w2x2`) and, unlike the 5090, lose to every cross-CTA split except `mlp_down`'s
+standard row. `RASTER=gm8` is worth 1% to 10% on the wide outputs.
+
+| Golden | Standard lane | Fast-math lane |
+| --- | --- | --- |
+| `q_proj` | `f16_f32/f2x8/k2`, `gm8` | `f16_f16/f4x8/k4`, `gm8` |
+| `kv_proj` | `f16_f32/f4x4/k8` | `f16_f16/f2x8/k8` |
+| `o_proj` | `f16_f32/f2x8/k2` | `f16_f16/f2x8/k4`, `w4x2` |
+| `mlp_gate_up` | `f16_f32/f2x8/k2`, `gm8` | `f16_f16/f4x8/k4`, `gm8` |
+| `mlp_down` | `f16_f32/f4x8/k2`, `g2k` | `f16_f16/f4x8/k4`, `gm8` |
+
+Attention keeps the 5090's shape — `f1x32/k2` value expectation over four warps — with the score at `f1x4/k4`
+(standard) and `f1x4/k2` (fast-math), both operands on the two-slot asynchronous ring. FP16 accumulation of the value
+product is worth 10% here (42.1 to 37.9 us), where the 5090's rings make it a wash.
+
+The rows swept were three passes of hand pins: the tile-by-split grid of the 5090's recipe, then the work split and
+transport around each winner, then the raster and the deeper K steps.
+
 ## How a golden is recorded
 
 Trace the matmul with FP16 inputs, bench a few pinned rows on the card in each lane, then record the fastest one
@@ -45,7 +67,7 @@ under the seed's exact name, once per lane:
 ```bash
 E=experiments/golden-bench-2026/gemma4_kernels
 code="torch.matmul(torch.randn(512,3840,dtype=torch.float16,device='cuda'), torch.randn(3840,4096,dtype=torch.float16,device='cuda'))"
-emmy trace -c "$code" -o $E/golden/q_proj-s512_rtx5090.golden.yaml
+emmy trace -c "$code" -o $E/golden/q_proj-s512_rtx5090.golden.yaml   # on the card the file names
 emmy run --golden $E/golden/q_proj-s512_rtx5090.golden.yaml --realization k_matmul_843d4a --bench --bench-backends eager,emmy \
   --ab "WORK=w4x2,TILE=mma_m16n8k16_f16_f32/f2x4/k2,STAGE=d2/smem-tma,REDUCE=g4k" --ab "…"
 EMMY_KNOBS="<the fastest row>" emmy run --golden $E/golden/q_proj-s512_rtx5090.golden.yaml \
@@ -61,6 +83,8 @@ The rows swept per kernel were the two tiles above crossed with the splits `g2k`
 split that wins moves with the shape: the narrow outputs take a wide split in the standard lane, the 30720-wide
 gate/up output loses to any split, and the fast-math tile prefers `g2k` except on the narrowest output.
 
-`--record-greedy` refuses a row whose `EMMY_KNOBS` pin did not realize, so read its exit status. Bench at the
+`--record-greedy` refuses a row whose `EMMY_KNOBS` pin did not realize, so read its exit status. Then replay the
+file with `--strict-evidence`, as the recipe does: the run fails instead of deploying the prior's pick wherever a
+fork has no recorded row, which is how a golden proves it is complete. Bench at the
 harness defaults (10 warmups, 100 iterations): on this display-attached card a longer loop reads eager about 10%
 slower, and only ratios within one run compare.
