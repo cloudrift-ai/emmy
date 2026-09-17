@@ -11745,7 +11745,7 @@ configs:
       FAST_MATH: false
     knobs:
       WORK: t32x8
-      TILE: ''
+      TILE: f1
       REDUCE: ''
       STAGE: d1/smem-tma
       LOOPIFY: '0'
@@ -12519,7 +12519,7 @@ configs:
       FAST_MATH: false
     knobs:
       WORK: t32x8
-      TILE: ''
+      TILE: f1
       REDUCE: ''
       STAGE: d1/smem-tma
       LOOPIFY: '0'
