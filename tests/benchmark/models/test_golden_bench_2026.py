@@ -491,6 +491,23 @@ def test_rtx5090_attention_comparison_is_recorded_and_bounded(project_root) -> N
     subprocess.run([sys.executable, str(directory / "run_baselines.py"), "--smoke"], check=True)
 
 
+def test_gemma4_projection_kernels_replay_a_hand_recorded_golden_per_lane(project_root) -> None:
+    recipe_dir = _experiment(project_root, "gemma4_kernels_rtx5090")
+    recipe = load_recipe(recipe_dir)
+    tasks = enumerate_tasks([recipe_dir])
+    assert {(task.variant.params["kernel"], task.variant.params["lane"]) for task in tasks} == {
+        (kernel, lane) for kernel in ("q_proj", "kv_proj", "o_proj", "mlp_gate_up", "mlp_down") for lane in ("std", "fm")
+    }
+    assert {task.recipe.deploy.gpu for task in tasks} == {"NVIDIA GeForce RTX 5090"}
+    # Every row replays a committed golden; nothing traces, tunes or pins, so the recorded rows alone decide.
+    for task in tasks:
+        assert (Path(recipe_dir) / "golden" / f"{task.variant.params['kernel']}-s512.golden.yaml").is_file()
+    run = recipe.command.run
+    assert "emmy trace" not in run and "emmy tune" not in run and "EMMY_KNOBS" not in run
+    assert "--bench-backends eager,tcompile,emmy" in run
+    assert recipe.command.strict is True
+
+
 def test_every_command_variant_renders(project_root) -> None:
     root = Path(project_root) / EXP
     rendered = 0
@@ -509,7 +526,7 @@ def test_every_command_variant_renders(project_root) -> None:
             assert "/task" in command
             subprocess.run(["bash", "-n"], input=command, text=True, check=True)
             rendered += 1
-    assert rendered == 89
+    assert rendered == 99
 
 
 def test_gemma_serving_ab_has_four_points_per_lane(project_root) -> None:
