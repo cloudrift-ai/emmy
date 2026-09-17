@@ -200,6 +200,10 @@ election of 2026-09-15 is not established: that boot ran a tree from before #804
 identities. No greedy-agreement run was made on this boot. Evidence on the host under `~/serve-evidence/boot21-*`,
 `boot22-*`, `boot23-*` and `elect825-*`.
 
+Main moved again the same day, after this boot: #813 retuned the post family and re-recorded both M=1 post cuts, and
+#827 fixed the splicer defect above. These numbers describe `main` at `3b5cc4ca`; the next strict boot from main is
+owed.
+
 ### The M=1 decode tier: what broke and what now guards it
 
 The tier exists as an optimization. The bucket twins already cover `T=1` by padding up; the M=1 twins exist only

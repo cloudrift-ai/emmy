@@ -21,11 +21,15 @@ and the caveats are in `experiments/golden-bench-2026/serving_deepseek_v4_flash_
 report is the durable record, not this file.
 
 **Main serves again, slower at decode (2026-09-17).** #804 (the Loop IR identity re-key) left 87 of this golden's
-372 rows stale; #815, #823, #825 and #826 brought the file back to 367 of 367 rows decoding, two M=1 post cuts
-re-recorded on the host among them. Booted from `main` at `3b5cc4ca` with the golden of #826, strict, empty tune DB:
-3.30 s per output token, 6.3 s to first token on a short prompt and 45.5 s at 2,275 input tokens, health in fifteen
-minutes. Prefill matches 2026-09-15; decode lost 1.27 s per token because strict evidence refuses the M=1 tier and a
-single-token step rides the width-16 twins. The report has the numbers and the two failed boots that preceded them.
+372 rows stale; #815, #823, #825 and #826 brought the file back, two M=1 post cuts re-recorded on the host among
+them. Booted from `main` at `3b5cc4ca` with that golden, strict, empty tune DB: 3.30 s per output token, 6.3 s to
+first token on a short prompt and 45.5 s at 2,275 input tokens, health in fifteen minutes. Prefill matched
+2026-09-15; decode lost 1.27 s per token because strict evidence refused the M=1 tier and a single-token step rode
+the width-16 twins. The report has the numbers and the two failed boots that preceded them. Main then moved again
+the same day: #813 retuned the post family on a four-card host (the Sinkhorn mixing kernel 454.8 ms → 1.07 ms, the
+M=1 post cuts `9e578e` and `4e26cc` at 0.74 and 0.76 ms), #827 fixed the cut splicer that kept the M=1 division
+piece from building, and #818 typed buffer roles into kernel identity. So those numbers describe `3b5cc4ca`, and
+the next strict boot from main is owed before anything else is measured.
 
 Stages −1, 1 (#651), 2 (#656) and 3 (#662) are done, and Stage 0's question — whether the compiler can produce a
 schedule fast enough to serve this model — is answered yes. Gate (c) passed on the repository golden at 7e9336e6 +
@@ -87,28 +91,11 @@ One mechanism that makes a recorded cut lose is now known: a schedule row carryi
 offered on reads as the fused kernel's own receipt and prices the fused arm with a piece's timing. Whether it
 explains 2026-09-15 is open; that tree predates #804.
 
-Then the rows. By the diagnostic above, every single-candidate row over 1 ms in the golden (372 realizations over
-152 configs) is a post kernel:
-
-| row | best measured |
-| --- | ---: |
-| `post4096.k_matmul_reduce_06fabe` @ m4096 | 453.5 ms |
-| `post4096.k_linear_softmax_mean_matmul_reduce_4682df` @ m4096 | 106.3 ms |
-| `post-sym.k_linear_softmax_mean_matmul_reduce_dba017` @ m4096 / dynamic / m16 / m1 | 106.3 / 97.5 / 46.9 / 30.5 ms |
-| `post-sym.k_matmul_reduce_d2b070` @ dynamic | 73.8 ms |
-| `post16.k_linear_softmax_mean_matmul_reduce_20ed9d` @ m16 | 46.9 ms |
-| `post16.k_matmul_reduce_9fab3b` @ m16 | 1.85 ms |
-
-Per-program sums of the best rows: `post4096` 560 ms, `post-sym` 356 ms, `post16` 49 ms, everything else under
-9 ms.
-
-- `post4096.k_matmul_reduce_06fabe` — the largest single cost anywhere in this model, inside `post.chunk.m4096`
-  (688 ms per layer, 352×). This is what holds time to first token. Its nest is the same defect in an extreme form:
-  every load comes from one 4×4 matrix per index, and the program recomputes that matrix's row sums at about eight
-  nesting levels, so it runs `4096 × 4^k` iterations over sixteen values.
-- `4682df`, `dba017` and `20ed9d` are `4e26cc` at other widths: structurally identical nests differing only in the
-  outermost token loop, and the same cut family binds on them. #799's six cuts are the template. `post.decode.m16`
-  (68 ms per layer, 1,145×) is off the single-stream decode path but on any concurrent one, and on prefill.
+The post-family rows that table used to list were retuned by #813 on 2026-09-17: the Sinkhorn mixing kernel
+`06fabe` @ m4096 from 454.8 ms to 1.07 ms, `dba017` @ m1 / m16 / dynamic / m4096 from 30.6 / 46.9 / 97.5 / 106
+ms to 0.81 / 3.58 / 11.5 / 40.5 ms, `9e578e` @ m1 to 0.37 ms, `3836f9` @ dynamic from 117.8 to 8.48 ms and `8e1e80`
+@ m16 to 16.6 ms; the dynamic-width Sinkhorn twin `d2b070` (74 ms) cannot take the cut and stays open, a reshape
+lowering lockout #813 names. What each of those elects at a strict boot from main is not measured yet.
 
 The restamp is done (#826), so recording is unblocked: a row recorded now is written once, against main's spellings.
 
@@ -160,23 +147,26 @@ independent reference on `run --golden` — the loop-IR CPU runner exists but is
 **The strict decode completes now.** The seven `k_div_*` `PLACE=cut` rows at m1 that #797 recorded took over
 29 minutes each before #804 — the pre-#804 compiler sits at full CPU on the first of them for 20+ minutes — and
 take 1.3 s each on main; the whole file decodes in about two and a half minutes. The goldens gate can protect this
-file again, and since #826 it passes.
+file again; after #826 the only red rows are four `k_div_35` receipts that decode on the tree before #813 and not
+on it — #813's compiler changes, not a stale spelling.
 
-**The golden is whole on main; the M=1 tier is what is owed (2026-09-17).** Every one of the file's 367 rows decodes
-and is enumerated by the kernel it names (#815, #823, #825, #826). Two checks came out of the boots and belong in any
-future restamp. The strict decode is pooled for a row without a cut pin — it passes when any kernel of the set
-enumerates the row — while the deploy needs the kernel the row NAMES to enumerate it; same-shaped twins are told
-apart by their `S_*` signature, which is unique per kernel in every post-family set, not by mint order. And a
-measured schedule row that carries the identity a cut fork is offered on prices the fused arm; the only legitimate
-one is a measurement of the fused kernel itself. Three kernel sets keep the M=1 tier off under strict evidence, in
-the order they should be taken. The M=1 division cut (`k_div_11/25/50/64`): its residual piece fits no recorded
-schedule and does not build under the prior's pick, because the cut splicer renames a workspace read but not the
-values derived from it (`v73`, `v206` declared twice); fix the splicer, then `run --bench --record-greedy` under the
-recorded cut. #799's cut (`4e26cc`): re-recorded on main at 777 µs, still refused at the residual kernel's schedule
-fork, whose only measured row is the all-OFF schedule — find out why that row does not vouch. The expert M=1 cut: two
-kernels became one, the prior's schedule for it runs about 4 s per launch, so it needs `emmy tune`, not a bench. The
-boot's roofline audit still has no time limit; one mispicked program hung a boot again. After the M=1 tier is back,
-the post-family kernel work above is the next cost, then Stage 4.
+**The golden deploys from main; the M=1 tier is what is owed (2026-09-17).** Two checks came out of the boots and
+belong in any future restamp, on top of the strict decode. The decode is pooled for a row without a cut pin — it
+passes when any kernel of the set enumerates the row — while the deploy needs the kernel the row NAMES to
+enumerate it; same-shaped twins are told apart by their `S_*` signature, unique per kernel in every post-family
+set, not by mint order. And a measured schedule row that carries the identity a cut fork is offered on prices the
+fused arm; the only legitimate one is a measurement of the fused kernel itself, and #826 drops the six that were
+not (the two empty pre-attention rows hung a boot for over fifteen minutes on one launch). #818 re-keyed piece
+identities without restamping this file, so about twenty receipts now name kernels the replay no longer mints;
+the deploy falls back to the pieces that enumerate them and the decode stays green, but a restamp by signature is
+owed with the next re-record. Three kernel sets keep the M=1 tier off under strict evidence, in the order they
+should be taken. The M=1 division cut (`k_div_11/25/50/64`): its residual piece fits no recorded schedule; #827
+made the prior's pick build, so one `run --bench --record-greedy` under the recorded cut closes it. #799's cut
+(`4e26cc`): re-recorded by #813 at 0.76 ms; the residual kernel's earlier refusal at its schedule fork, whose only
+measured row was the all-OFF schedule, is to be re-checked against that recording. The expert M=1 cut: two kernels
+became one, the prior's schedule for it runs about 4 s per launch, so it needs `emmy tune`, not a bench. The
+boot's roofline audit still has no time limit; one mispicked program hung a boot again. After the M=1 tier is
+back, the next strict boot from main gives the number #813's retune is worth, then Stage 4.
 
 ## Operations handoff
 
