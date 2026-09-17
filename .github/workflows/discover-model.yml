@@ -177,7 +177,8 @@ jobs:
                 -f "$WORKFLOW_SOURCE/.github/workflows/scripts/discovery_task.jq" \
             > "$AGENT_TASK"
           set +e
-          opencode run \
+          # TEMPORARY DEBUG: OpenCode logs to stderr, and one short line per agent event.
+          opencode --print-logs --log-level INFO run \
             "Complete the attached lifecycle task exactly." \
             --agent discover-models \
             --model cloudrift/agent \
@@ -187,8 +188,12 @@ jobs:
             --file "$WORKFLOW_SOURCE/prompts/discover-models/lifecycle.md" \
             --file "$WORKFLOW_SOURCE/prompts/discover-models/score-recipes.md" \
             --file "$WORKFLOW_SOURCE/prompts/discover-models/size-deployments.md" \
-            --file "$AGENT_TASK" > "$AGENT_EVENTS"
-          agent_status=$?
+            --file "$AGENT_TASK" \
+            | tee "$AGENT_EVENTS" \
+            | jq -R --unbuffered -r 'fromjson? // {type: "raw", raw: .}
+                | "agent-event: \(.type) \(.part.tool // "") \(.part.state.status // "")"
+                  + " \((.part.text // .error // .part.state.error // .raw // "") | tostring | .[0:300] | gsub("\n"; " "))"'
+          agent_status=${PIPESTATUS[0]}
           set -e
           jq -s -r '[.[] | select(.type == "text") | .part.text][-1] // empty' \
             "$AGENT_EVENTS" > "$AGENT_SELECTION"
