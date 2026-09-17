@@ -1,0 +1,71 @@
+# Gemma 4 12B projection kernels at sequence length 512 on one RTX 5090, in both precision lanes — the kernel
+# tables of the "Outperforming vLLM and Llama.cpp on Gemma4-12B" article, re-measured on the current compiler.
+#
+# Every row replays one hand-recorded golden committed beside this file (see golden/README.md): the schedule was
+# found by hand-pinned `emmy run --ab` rows on the card and written with `--record-greedy`, and the row only
+# re-measures it at deployable -O3 against eager PyTorch and torch.compile. Nothing here traces, tunes or pins:
+# the run starts from an empty tune DB and online prior, so the golden's rows alone decide what deploys. A missing
+# golden fails its row.
+#
+# `lane` selects the precision fork: `std` is the FP32-accumulate default, `fm` sets EMMY_FAST_MATH=1 (the hybrid
+# FP16/FP32 accumulation of the article). The correctness gate is the run command's default scaled check, not
+# --strict: at these accumulation depths PyTorch's default FP16 GEMM is itself outside --strict's flat 1e-3
+# tolerance against an FP64 reference on about one element in ten (RESULTS.md), so --strict rejects the
+# FP32-accumulate lane for eager's error, not Emmy's.
+#
+# Repro on a pre-allocated card (no cloud provisioning):
+#   emmy bench experiments/golden-bench-2026/gemma4_kernels_rtx5090 --local
+command:
+  stage:
+    - emmy
+    - pyproject.toml
+    - requirements.txt
+    - Makefile
+    - experiments/golden-bench-2026/gemma4_kernels_rtx5090/recipe.yaml
+    - experiments/golden-bench-2026/gemma4_kernels_rtx5090/golden
+  strict: true
+  run: |
+    set -euo pipefail
+    export PATH=/usr/local/cuda/bin:$$PATH
+    cd $repo_dir
+    finalize() {
+      final_status=$$?
+      trap - EXIT
+      printf 'kernel=%s\nlane=%s\nstatus=%s\n' "$kernel" "$lane" "$$final_status" > $task_dir/status.txt
+      archive_tmp=$task_dir.artifacts.tar.gz
+      tar -C $task_dir -czf "$$archive_tmp" . || final_status=1
+      mv "$$archive_tmp" $task_dir/artifacts.tar.gz || final_status=1
+      exit "$$final_status"
+    }
+    trap finalize EXIT
+
+    [ -d venv ] || make setup
+    ./venv/bin/pip freeze --all > $task_dir/requirements.freeze.txt
+    export EMMY_TUNE_DB=$task_dir/autotune.db
+    export EMMY_ONLINE_FILE=$task_dir/online.json
+    export EMMY_CUBIN_CACHE=$task_dir/cubins
+    case "$lane" in
+      std) ;;
+      fm) export EMMY_FAST_MATH=1 ;;
+      *) echo "unknown lane $lane" >&2; exit 2 ;;
+    esac
+
+    golden=$repo_dir/experiments/golden-bench-2026/gemma4_kernels_rtx5090/golden/$kernel-s512.golden.yaml
+    test -f "$$golden"
+    sha256sum "$$golden" > $task_dir/golden.sha256
+    # The seed is the file's one unmeasured realization; its greedy deploys the recorded rows. Naming it exactly
+    # keeps the receipts beside it evidence instead of targets of their own.
+    seed=$$(./venv/bin/python -c 'import sys, yaml; d = yaml.safe_load(open(sys.argv[1])); print(next(r["name"] for c in d["configs"] for r in c["realizations"] if not (r.get("measurements") or {}).get("emmy_us")))' "$$golden")
+    EMMY_NVCC_FLAGS= EMMY_BENCH_RUN_TIMEOUT_S=60 CUDA_VISIBLE_DEVICES="$gpu_device_ids" timeout --signal=TERM --kill-after=30s 900s \
+      ./venv/bin/emmy run --golden "$$golden" --realization "$$seed" --bench --no-record-nodes \
+      --bench-backends eager,tcompile,emmy --json $task_dir/$kernel.$lane.json 2>&1 | tee $task_dir/$kernel.$lane.log
+  result_files:
+    - artifacts.tar.gz
+  timeout: 3600
+
+matrices:
+  - cross:
+      kernel: [q_proj, kv_proj, o_proj, mlp_gate_up, mlp_down]
+      lane: [std, fm]
+      deploy.gpu: "NVIDIA GeForce RTX 5090"
+      deploy.gpu_count: 1
