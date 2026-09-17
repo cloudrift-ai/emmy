@@ -503,13 +503,14 @@ def _follow_reads(before: Fold, after: Fold, renamed: dict[str, str]) -> Fold:
 
     :func:`_read_name` tags a workspace read because the value can still be computed in place
     beside it. The same holds one step on: a statement over that read is a different statement from
-    its in-place twin — ``v = in0__ws… + b`` beside ``v = in0 + b`` — and a lowered scope binds a
-    name once, so under one name the pair is the same SSA fault (nvcc: *already declared*). Each
-    such definition takes the tags of the reads it depends on; a statement that reads no workspace
-    keeps its name and still shares with its twin. The term's readers follow through
-    :attr:`~emmy.compiler.ir.pure.fold.Fold.applied`, which is what walks the rename up the tree, one
-    rebuilt term at a time. It stops at a reduce: a carried state keeps its name, because a twisted
-    carrier's tile offer reads it. ``renamed`` collects what was minted, for the boundary stores.
+    the one still computed in place — ``v = in0__ws… + b`` beside ``v = in0 + b`` — and a lowered
+    scope binds a name once, so under one name the pair is the same SSA fault (nvcc: *already
+    declared*). Each such definition takes the tags of the reads it depends on; a statement that
+    reads no workspace keeps its name and still shares with its in-place copy. The term's readers
+    follow through :attr:`~emmy.compiler.ir.pure.fold.Fold.applied`, which is what walks the rename
+    up the tree, one rebuilt term at a time. It stops at a reduce: a carried state keeps its name,
+    because a twisted carrier's tile offer reads it. ``renamed`` collects what was minted, for the
+    boundary stores.
     """
     was = {param: edge.exposes[slot] for param, edge, slot in before.bindings}
     tags = {param: now.removeprefix(was[param]) for param, edge, slot in after.bindings if (now := edge.exposes[slot]) != was[param]}
