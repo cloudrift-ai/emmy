@@ -9,7 +9,7 @@ from emmy.compiler.ir.stmt import Assign, RenderCtx, Write
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import _warp_epilogue
 
 
-def _render(*assigns: Assign) -> tuple[str, object]:
+def _render(*assigns) -> tuple[str, object]:
     tail = [*assigns, Write(output="out", index=(Var("m"), Var("n")), value=assigns[-1].name)]
     epilogue = _warp_epilogue(tail, "acc", "m", "n", Sigma.IDENTITY)
     assert epilogue is not None
@@ -58,3 +58,22 @@ def test_transposed_fragment_store_uses_both_output_strides() -> None:
     assert "reinterpret_cast<__half2*>" not in source
     assert "(_t * 2 + 1) * 16" in source
     assert "out[n * 16 + m + _g + (_t * 2 + 0) * 16]" in source
+
+
+def test_a_mask_over_an_op_result_renders_after_that_op() -> None:
+    """A causal mask may select a value the chain computes (a scaled score), not only a loaded one:
+    the ternary renders once that op has run."""
+    from emmy.compiler.ir.expr import BinaryExpr, Literal
+    from emmy.compiler.ir.stmt import Load, Select, SelectBranch
+
+    source, _ = _render(
+        Load(name="ninf", input="neg_inf", index=(Literal(0, "int"),)),
+        Assign(name="scaled", op=ElementwiseImpl("multiply"), args=("acc", "acc")),
+        Select(
+            name="masked",
+            branches=(SelectBranch("scaled", BinaryExpr("<=", Var("n"), Var("m"))), SelectBranch("ninf", Literal(1, "int"))),
+        ),
+        Assign(name="result", op=ElementwiseImpl("copy"), args=("masked",)),
+    )
+
+    assert source.index("scaled_e0 =") < source.index("masked_e0 = ((") < source.index("result_e0 = masked_e0")
