@@ -1,14 +1,15 @@
-# Two Sinkhorn rounds fuse into one kernel whose hoisted row statistics are one cone. That cone passes the
-# epsilon constants through beside what it computes, so after the cut the residual piece reads an epsilon from the
-# workspace at its root while its nested reduces still read the same constant in place. Both then derive the same
-# value under one name, and with the serial row both declarations land in one scope (nvcc: already declared).
+# Three Sinkhorn rounds; the big fused kernel recomputes a row statistic under its reduces, and that nested cone
+# passes an epsilon constant through beside what it computes. Cutting it makes the reader, which sits under a
+# reduce, take the epsilon from the workspace while a sibling still reads the constant in place. Both derive the
+# same value under one name, and the serial row lands both declarations in one scope (nvcc: already declared).
+# Kernel lowering re-spells such a pair only where a root joins its own statements, which this reader is not.
 # Found on the DeepSeek V4 post-attention Sinkhorn kernel on a V100, where the prior picked such a row.
 compute_cap:
 - 7
 - 0
 programs:
 - inputs: [x]
-  outputs: [div_3]
+  outputs: [div_5]
   nodes:
   - id: add_1_c1
     op: constant
@@ -74,6 +75,48 @@ programs:
         - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
     inputs: [add_3_c1]
     outputs: [[add_3_c1_bc, f32, [1, 1, 1, 4]]]
+  - id: add_4_c1
+    op: constant
+    attrs:
+      name: add_4_c1
+      value: 1.0e-06
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[add_4_c1, f32, [1]]]
+  - id: add_4_c1_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 1}, {__dim__: 4}, {__dim__: 1}]}
+      sources: {__tuple__: [{__index_source__: {input_idx: 0, coord_map: [{var: out_coord_3}], select: null}}]}
+    inputs: [add_4_c1]
+    outputs: [[add_4_c1_bc, f32, [1, 1, 4, 1]]]
+  - id: add_5_c1
+    op: constant
+    attrs:
+      name: add_5_c1
+      value: 1.0e-06
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[add_5_c1, f32, [1]]]
+  - id: add_5_c1_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 1}, {__dim__: 1}, {__dim__: 4}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [add_5_c1]
+    outputs: [[add_5_c1_bc, f32, [1, 1, 1, 4]]]
   - id: add_c1
     op: constant
     attrs:
@@ -221,11 +264,72 @@ programs:
     attrs: {op: {__elementwise__: divide}}
     inputs: [div_2, add_3_bc]
     outputs: [[div_3, f32, [1, 1, 4, 4]]]
+  - id: sum_5
+    op: tensor.reduce
+    attrs: {op: {__elementwise__: sum}, axis: -1}
+    inputs: [div_3]
+    outputs: [[sum_5, f32, [1, 1, 4, 1]]]
+  - id: add_4
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [sum_5, add_4_c1_bc]
+    outputs: [[add_4, f32, [1, 1, 4, 1]]]
+  - id: add_4_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 1}, {__dim__: 4}, {__dim__: 4}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {var: out_coord_1}
+            - {var: out_coord_2}
+            - {literal: {value: 0, dtype: int}}
+            select: null
+    inputs: [add_4]
+    outputs: [[add_4_bc, f32, [1, 1, 4, 4]]]
+  - id: div_4
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: divide}}
+    inputs: [div_3, add_4_bc]
+    outputs: [[div_4, f32, [1, 1, 4, 4]]]
+  - id: sum_6
+    op: tensor.reduce
+    attrs: {op: {__elementwise__: sum}, axis: -2}
+    inputs: [div_4]
+    outputs: [[sum_6, f32, [1, 1, 1, 4]]]
+  - id: add_5
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [sum_6, add_5_c1_bc]
+    outputs: [[add_5, f32, [1, 1, 1, 4]]]
+  - id: add_5_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 1}, {__dim__: 4}, {__dim__: 4}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {var: out_coord_1}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_3}
+            select: null
+    inputs: [add_5]
+    outputs: [[add_5_bc, f32, [1, 1, 4, 4]]]
+  - id: div_5
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: divide}}
+    inputs: [div_4, add_5_bc]
+    outputs: [[div_5, f32, [1, 1, 4, 4]]]
 configs:
 - program: 0
   target:
     origins:
-    - add
     - add_1
     - add_1_bc
     - add_1_c1_bc
@@ -235,60 +339,82 @@ configs:
     - add_3
     - add_3_bc
     - add_3_c1_bc
-    - add_bc
-    - add_c1_bc
-    - div
+    - add_4
+    - add_4_bc
+    - add_4_c1_bc
+    - add_5
+    - add_5_bc
+    - add_5_c1_bc
     - div_1
     - div_2
     - div_3
-    - sum_1
+    - div_4
+    - div_5
     - sum_2
     - sum_3
     - sum_4
+    - sum_5
+    - sum_6
   realizations:
-  - name: k_div_3_reduce
+  - name: k_div_5_reduce
     bindings: {}
     pins:
       FAST_MATH: false
+      PLACE@map.1/map.2/inner.2/map.3/map: cut
     knobs:
-      PLACE@map.1/map: cut
-    identity: 158c228f4dfbd57897d784a9ade856ab98017b99e690fa0c43aa3ecfff67ceaf
-  - name: k_div_3_reduce.2bcdc116c4a6
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      RASTER: ''
-      TILE@map.5/inner: ''
-      TILE@map.5/inner.1/map.1/inner: ''
-      TILE@map.5/inner.1/map.1/inner.1/map.1/inner: ''
-      TILE@map.5/inner.2/map.3/map.1/inner: ''
-      REDUCE@map.5/inner: ''
-      REDUCE@map.5/inner.1/map.1/inner: ''
-      REDUCE@map.5/inner.1/map.1/inner.1/map.1/inner: ''
-      REDUCE@map.5/inner.1/map.1/inner.1/map.1/inner.2/map.1/reduce: ''
-      REDUCE@map.5/inner.1/map.1/inner.2/map.2/map.1/reduce: ''
-      REDUCE@map.5/inner.2/map.3/map.1/inner: ''
-      REDUCE@map.5/inner.2/map.3/map.1/inner.2/map.1/reduce: ''
-      STAGE@map.5/inner: ''
-      STAGE@map.5/inner.1/map.1/inner: ''
-      STAGE@map.5/inner.1/map.1/inner.1/map.1/inner: ''
-      STAGE@map.5/inner.2/map.3/map.1/inner: ''
-    identity: 2bcdc116c4a65f4fa70866b58bf25dc2041c844361461927f2f5ae69fafb8bc5
-  - name: k_div_3_reduce.424c24a56589
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
+      TILE@map.1/map.1/inner: ''
+      TILE@map.1/map.2/inner: ''
+      TILE@map.1/map.2/inner.1/map.1/inner: ''
+      TILE@map.1/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@map.2/inner: ''
       TILE@map.2/inner.1/map.1/inner: ''
-      REDUCE@map.1/reduce: ''
+      TILE@map.3/inner: ''
+      TILE@map.3/inner.1/map.1/inner: ''
+      TILE@map.3/inner.1/map.1/inner.1/map.1/inner: ''
+      TILE@map.3/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
+      TILE@map.3/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      REDUCE@map.1/map.1/inner: ''
+      REDUCE@map.1/map.1/inner.2/map.1/reduce: ''
+      REDUCE@map.1/map.2/inner: ''
+      REDUCE@map.1/map.2/inner.1/map.1/inner: ''
+      REDUCE@map.1/map.2/inner.1/map.1/inner.1/map.1/inner: ''
+      REDUCE@map.1/map.2/inner.1/map.1/inner.1/map.1/inner.2/map.1/reduce: ''
+      REDUCE@map.1/map.2/inner.1/map.1/inner.2/map.2/map.1/reduce: ''
       REDUCE@map.2/inner: ''
       REDUCE@map.2/inner.1/map.1/inner: ''
       REDUCE@map.2/inner.1/map.1/inner.2/map.1/reduce: ''
+      REDUCE@map.2/inner.2/map.2/map.1/reduce: ''
+      REDUCE@map.3/inner: ''
+      REDUCE@map.3/inner.1/map.1/inner: ''
+      REDUCE@map.3/inner.1/map.1/inner.1/map.1/inner: ''
+      REDUCE@map.3/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
+      REDUCE@map.3/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.2/map.1/reduce: ''
+      REDUCE@map.3/inner.1/map.1/inner.1/map.1/inner.2/map.2/map.1/reduce: ''
+      REDUCE@map.3/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      REDUCE@map.3/inner.1/map.1/inner.2/map.3/map.1/inner.2/map.1/reduce: ''
+      STAGE@map.1/map.1/inner: ''
+      STAGE@map.1/map.2/inner: ''
+      STAGE@map.1/map.2/inner.1/map.1/inner: ''
+      STAGE@map.1/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       STAGE@map.2/inner: ''
       STAGE@map.2/inner.1/map.1/inner: ''
+      STAGE@map.3/inner: ''
+      STAGE@map.3/inner.1/map.1/inner: ''
+      STAGE@map.3/inner.1/map.1/inner.1/map.1/inner: ''
+      STAGE@map.3/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
+      STAGE@map.3/inner.1/map.1/inner.2/map.3/map.1/inner: ''
       WORK: ''
       RASTER: ''
-    identity: 424c24a56589a63b64325f7f0d73b5eab28b4327fe2801323a0c13a9cafee52b
+    identity: ef5f5cc9470b181eb0b96c112b67c30cc7b432a966297dc03a53c5d2449c82e4
+  - name: k_div_5_reduce.6eda44867af8
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@map.1/inner: ''
+      REDUCE@map.1/inner.2/map.1/reduce: ''
+      WORK: ''
+      TILE: ''
+      STAGE: ''
+      RASTER: ''
+    identity: 6eda44867af8aa47bac2973d3075dc40e41623aa2ac02af6a41e6d3ed4b15884
