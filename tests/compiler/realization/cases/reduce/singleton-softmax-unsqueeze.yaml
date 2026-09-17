@@ -52,13 +52,13 @@ configs:
     - softmax
     - unsqueeze
   realizations:
-  - name: k_softmax_8dbb7a.3b8d183e9e36
+  - name: k_softmax_834f63
     bindings: {}
     pins:
       FAST_MATH: false
     knobs: {}
-    identity: 655f10665d0749b144006979c00d78a638999542227c659f87a79bf3ecf77e18
-  - name: k_softmax_396a5d.d31488f15e44.468da614a01b
+    identity: 74f9e75edec568edbdcea2d15f6230a61e18b296823ea92f2d2fc6ac2d2cd3b3
+  - name: k_softmax_834f63.468da614a01b
     bindings: {}
     pins:
       FAST_MATH: false
@@ -67,7 +67,7 @@ configs:
       TILE: ''
       RASTER: ''
     identity: 468da614a01b62debd315e800277d0162bbb2513c6bcb8f7fd9b7e8db660ab8b
-  - name: k_softmax_8dbb7a.3b8d183e9e36.3bd235c44277
+  - name: k_softmax_834f63.efd32c70547d
     bindings: {}
     pins:
       FAST_MATH: false
@@ -75,4 +75,4 @@ configs:
       WORK: ''
       TILE: ''
       RASTER: ''
-    identity: 3bd235c442776d01b707ad10a974f9d0b4627507f6abf3bf57931db0330e7d7a
+    identity: efd32c70547dd60e56a6c816b6cba2d3c69d88f889c00a2ca9ff671e407f7764

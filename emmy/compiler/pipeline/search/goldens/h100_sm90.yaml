@@ -1468,7 +1468,7 @@ configs:
       TILE@map.1/twist: mma_m16n8k16_f16_f16/f1x16/k4
       TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x8/k4
       WORK: w2x1
-    identity: dc3814f036e0408ff3c4dc7ce7dc4324f7d2b09607f0d86f4cea056cbd9ee0fa
+    identity: ddcad9a26d8efe6a8e50b65b04443daecceacb0af4e1154679ed8d8316cdd3e4
     measurements:
       emmy_us: 14.331
       reference_us: 11.236
@@ -1486,7 +1486,7 @@ configs:
       TILE@map.1/twist: mma_m16n8k16_f16_f32/f1x16/k4
       TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x8/k4
       WORK: w1x1
-    identity: dc3814f036e0408ff3c4dc7ce7dc4324f7d2b09607f0d86f4cea056cbd9ee0fa
+    identity: ddcad9a26d8efe6a8e50b65b04443daecceacb0af4e1154679ed8d8316cdd3e4
     measurements:
       emmy_us: 11.86
       reference_us: 11.236
@@ -1509,7 +1509,7 @@ configs:
       TILE@map.1/twist: mma_m16n8k16_f16_f16/f1x8/k4
       TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x8/k4
       WORK: w2x1
-    identity: dc3814f036e0408ff3c4dc7ce7dc4324f7d2b09607f0d86f4cea056cbd9ee0fa
+    identity: 9073cc56bc0f00809dd0afe50c48348c652b141956db020e21ad24610f15468f
     measurements:
       emmy_us: 7.88
       reference_us: 8.906
@@ -1527,7 +1527,7 @@ configs:
       TILE@map.1/twist: mma_m16n8k16_f16_f32/f1x8/k8
       TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x16/k4
       WORK: w2x1
-    identity: dc3814f036e0408ff3c4dc7ce7dc4324f7d2b09607f0d86f4cea056cbd9ee0fa
+    identity: 9073cc56bc0f00809dd0afe50c48348c652b141956db020e21ad24610f15468f
     measurements:
       emmy_us: 6.75
       reference_us: 8.906
@@ -1550,7 +1550,7 @@ configs:
       TILE@map.1/twist: mma_m16n8k16_f16_f16/f1x8/k4
       TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x8/k4
       WORK: w2x1
-    identity: dc3814f036e0408ff3c4dc7ce7dc4324f7d2b09607f0d86f4cea056cbd9ee0fa
+    identity: f77eff945adb72701417d7ad66e7de1c2faca4e50fbae52424fdd25f165f8b59
     measurements:
       emmy_us: 14.704
       reference_us: 11.696
@@ -1568,7 +1568,7 @@ configs:
       TILE@map.1/twist: mma_m16n8k16_f16_f32/f1x16/k4
       TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x8/k4
       WORK: w2x1
-    identity: dc3814f036e0408ff3c4dc7ce7dc4324f7d2b09607f0d86f4cea056cbd9ee0fa
+    identity: f77eff945adb72701417d7ad66e7de1c2faca4e50fbae52424fdd25f165f8b59
     measurements:
       emmy_us: 12.977
       reference_us: 11.696
@@ -1591,7 +1591,7 @@ configs:
       TILE@map.1/twist: mma_m16n8k16_f16_f16/f1x8/k8
       TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x16/k4
       WORK: w2x1
-    identity: dc3814f036e0408ff3c4dc7ce7dc4324f7d2b09607f0d86f4cea056cbd9ee0fa
+    identity: 9d3c3570d8ade6a0ee0f24b3db3c926392973b5d02c33fea25149f845dac2817
     measurements:
       emmy_us: 7.271
       reference_us: 9.218
@@ -1609,7 +1609,7 @@ configs:
       TILE@map.1/twist: mma_m16n8k16_f16_f32/f1x8/k8
       TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x16/k4
       WORK: w1x1
-    identity: dc3814f036e0408ff3c4dc7ce7dc4324f7d2b09607f0d86f4cea056cbd9ee0fa
+    identity: 9d3c3570d8ade6a0ee0f24b3db3c926392973b5d02c33fea25149f845dac2817
     measurements:
       emmy_us: 7.003
       reference_us: 9.218
@@ -1632,7 +1632,7 @@ configs:
       TILE@map.1/twist: mma_m16n8k16_f16_f32/f1x32/k2
       TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x4/k4
       WORK: w2x1
-    identity: dc3814f036e0408ff3c4dc7ce7dc4324f7d2b09607f0d86f4cea056cbd9ee0fa
+    identity: 7a49232ef454dbe0f05f2cf50dc2ac00e72ae81a8219be294d65035c8d44af26
     measurements:
       emmy_us: 44.145
       reference_us: 17.302
@@ -1650,7 +1650,7 @@ configs:
       TILE@map.1/twist: mma_m16n8k16_f16_f32/f1x32/k2
       TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x4/k4
       WORK: w4x1
-    identity: dc3814f036e0408ff3c4dc7ce7dc4324f7d2b09607f0d86f4cea056cbd9ee0fa
+    identity: 7a49232ef454dbe0f05f2cf50dc2ac00e72ae81a8219be294d65035c8d44af26
     measurements:
       emmy_us: 48.171
       reference_us: 17.302

@@ -37,7 +37,7 @@ from frozendict import frozendict
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.base import Op
+from emmy.compiler.ir.base import Op, buffer_types
 from emmy.compiler.ir.expr import BinaryExpr, Interval, Literal, SimplifyCtx, Var
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule import Placement, WarpSpec
@@ -675,13 +675,12 @@ class TileOp(Op):
         except StopIteration:
             raise KeyError(f"axis {name!r} is not in this kernel's axis table {[axis.name for axis in self.axes]}") from None
 
-    def _body_identity(self, *, structural: bool = True) -> str | None:
+    def _body_identity(self, *, structural: bool = True, typed: bool = False):
         """Override :meth:`Op._body_identity` with the DERIVED body: :attr:`loop_body`'s
-        canonical digest, so a golden record derives the SAME key from its persisted program
-        (both sides lower through the one spelling) and term re-spellings that lower alike
-        share it."""
+        identity, so a golden record derives the SAME key from its persisted program (both
+        sides lower through the one spelling) and term re-spellings that lower alike share it."""
         body = self.loop_body
-        return None if body is None else body.structural_key(structural=structural)
+        return None if body is None else body.identity(structural=structural, types=buffer_types(self) if typed else None)
 
 
 __all__ = [

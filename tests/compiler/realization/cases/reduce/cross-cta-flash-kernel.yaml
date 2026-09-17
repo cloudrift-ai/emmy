@@ -25,19 +25,19 @@ configs:
     origins:
     - scaled_dot_product_attention
   realizations:
-  - name: k_sdpa_83b511.cb6d3c8572f8
+  - name: k_sdpa_075fec
     bindings: {}
     pins:
       FAST_MATH: false
       PLACE: fuse
     knobs:
       REDUCE: g2k
-    identity: 9bfc9c3716b48514550e402279c93cf656da0c9051b702e56f0572585aa95d96
+    identity: e77f61d2440948781c3d2605e8eb11161fb86396cd49b0c624e300b407db5e3c
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 22.498559951782227
         tcompile_us: 8.232000283896923
-  - name: k_sdpa_5c434c.c536b10b1afd.87b2bf6c99a8
+  - name: k_sdpa_075fec.87b2bf6c99a8
     bindings: {}
     pins:
       FAST_MATH: false
@@ -46,7 +46,7 @@ configs:
       REDUCE: ''
       RASTER: ''
     identity: 87b2bf6c99a847a70436bfdb1ec996d1a432a0e43f34e3dce157ca9d41e319d6
-  - name: k_sdpa_5c434c.c536b10b1afd.8b77fda293c7
+  - name: k_sdpa_075fec.8b77fda293c7
     bindings: {}
     pins:
       FAST_MATH: false
@@ -58,7 +58,7 @@ configs:
       STAGE: ''
       RASTER: ''
     identity: 8b77fda293c729aeb5c1178682a6b101e2a1f9c5bdfa401f3996d67a8b8b3a39
-  - name: k_sdpa_b10719.407a8b374936.8f4a50ebac20
+  - name: k_sdpa_075fec.8f4a50ebac20
     bindings: {}
     pins:
       FAST_MATH: false
@@ -67,7 +67,7 @@ configs:
       REDUCE: ''
       RASTER: ''
     identity: 8f4a50ebac2018ffd2f33c1e413651294751769a9adbe8c1ecd3828b5503a889
-  - name: k_sdpa_b10719.407a8b374936.9a5f9a3a93a2
+  - name: k_sdpa_075fec.9a5f9a3a93a2
     bindings: {}
     pins:
       FAST_MATH: false
@@ -79,7 +79,7 @@ configs:
       STAGE: ''
       RASTER: ''
     identity: 9a5f9a3a93a28ec7bef70c3fb9da77d022f14b6d8b1178e387f4b6832983e190
-  - name: k_sdpa_fbd178.50222a02272c.1c4cbc6d14fc
+  - name: k_sdpa_075fec.1c4cbc6d14fc
     bindings: {}
     pins:
       FAST_MATH: false
@@ -88,7 +88,7 @@ configs:
       REDUCE: ''
       RASTER: ''
     identity: 1c4cbc6d14fcd989671d2fb95918afbe758319f0487768b7042bcc50cf1c67c7
-  - name: k_sdpa_fbd178.50222a02272c.5a2933635c03
+  - name: k_sdpa_075fec.5a2933635c03
     bindings: {}
     pins:
       FAST_MATH: false
@@ -100,7 +100,7 @@ configs:
       STAGE: ''
       RASTER: ''
     identity: 5a2933635c03c8d6da2ab5aefb24503b720d499a9fa5ff19cef36ddc49e8659d
-  - name: k_sdpa_fbd178.50222a02272c.75c279335783
+  - name: k_sdpa_075fec.75c279335783
     bindings: {}
     pins:
       FAST_MATH: false
@@ -112,7 +112,7 @@ configs:
       STAGE: ''
       RASTER: ''
     identity: 75c2793357838caef7114aa8e83911c2184a6f4248e734b346f060d70b57979d
-  - name: k_sdpa_fbd178.50222a02272c.1006fd017f81
+  - name: k_sdpa_075fec.1006fd017f81
     bindings: {}
     pins:
       FAST_MATH: false
@@ -124,7 +124,7 @@ configs:
       STAGE: ''
       RASTER: ''
     identity: 1006fd017f8155be78f84a0b4d255382535e48007fca8d1b791feef1c46b56cd
-  - name: k_sdpa_fbd178.50222a02272c.8d7d8cf4973e
+  - name: k_sdpa_075fec.8d7d8cf4973e
     bindings: {}
     pins:
       FAST_MATH: false
@@ -133,7 +133,7 @@ configs:
       REDUCE: ''
       RASTER: ''
     identity: 8d7d8cf4973ead77bea989c4b792b5226db77d473d96889199c8de8816781df3
-  - name: k_sdpa_fbd178.50222a02272c.71f3f4d022cf
+  - name: k_sdpa_075fec.71f3f4d022cf
     bindings: {}
     pins:
       FAST_MATH: false
@@ -145,7 +145,7 @@ configs:
       STAGE: ''
       RASTER: ''
     identity: 71f3f4d022cf69705ee580877fc0d3c19816feaafa7fd4b5fd2f12a30d17a990
-  - name: k_sdpa_fbd178.50222a02272c.9d4e8c6d3ba2
+  - name: k_sdpa_075fec.9d4e8c6d3ba2
     bindings: {}
     pins:
       FAST_MATH: false
@@ -154,7 +154,7 @@ configs:
       REDUCE: ''
       RASTER: ''
     identity: 9d4e8c6d3ba276f2722d32e648aa41aabc3b93bdbdd0c2b32528bcbe932ac1b7
-  - name: k_sdpa_fbd178.50222a02272c.2f9f43ff4cc3
+  - name: k_sdpa_075fec.2f9f43ff4cc3
     bindings: {}
     pins:
       FAST_MATH: false

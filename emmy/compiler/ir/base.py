@@ -44,19 +44,20 @@ class _ClassProperty:
         return self.fget(owner)
 
 
-def _io_fingerprint(op: Op) -> tuple:
-    """The dtypes and hint-free shapes of an op's buffers — operands, then outputs, in program
-    order: the two boundary facts the body digest canonicalizes away (buffer names normalize to
-    ``b0, b1, …``, so the types ride beside the key). An f16 and an f32 trace of one body key
-    apart (different atom eligibility), and so do a ``(128, 128)`` and a ``(4, 32, 128)`` output
-    over one iteration space — the buffer's dim spelling decides store addressability
-    (``ir.address.split_addressable``), and a golden measured on the flat kernel must not
-    join a kernel that cannot realize its row."""
+def buffer_types(op: Op) -> dict[str, tuple[str, tuple[str, ...]]]:
+    """The dtype and hint-free shape of each of an op's buffers, by buffer name — the boundary
+    facts the body digest canonicalizes away (buffer names normalize to ``b0, b1, …``) and the
+    typed identity colors its buffers with, so the types bind to the ROLE each buffer plays rather
+    than to the order the buffers were declared in. An f16 and an f32 trace of one body key apart
+    (different atom eligibility), and so do a ``(128, 128)`` and a ``(4, 32, 128)`` output over one
+    iteration space — the buffer's dim spelling decides store addressability
+    (``ir.address.split_addressable``), and a golden measured on the flat kernel must not join a
+    kernel that cannot realize its row."""
 
     def sig(t) -> tuple:
         return (str(t.dtype), tuple(str(d.as_static()) if d.is_static else "sym" for d in t.shape))
 
-    return (*(sig(t) for t in op.inputs.values()), "->", *(sig(t) for t in op.outputs.values()))
+    return {name: sig(t) for io in (op.inputs, op.outputs) for name, t in io.items()}
 
 
 @dataclass(frozen=True)
@@ -164,23 +165,34 @@ class Op:
     # A fact a schedule reads that neither the body nor the io carries is a modeling gap to fix
     # there, never a side-channel fingerprint. ---- #
 
-    def _body_identity(self, *, structural: bool = True) -> str | None:
-        """Does this op COMPUTE the same thing, spelling aside? — the canonical digest of the
-        op's complete Loop-IR body (``Body.structural_key``: SSA / axis / buffer names and
+    def _body_identity(self, *, structural: bool = True, typed: bool = False):
+        """Does this op COMPUTE the same thing, spelling aside? — the identity material of the
+        op's complete Loop-IR body (``Body.identity``: SSA / axis / buffer names and
         commutative-arg order normalized away; the default ``structural=True`` also collapses
-        compute-unit op clusters — the schedule-equivalent reading), or ``None`` for an op kind
-        that carries no Loop-IR body. The ONE identity override point: ``BodyOp`` answers with
-        its stored body, ``TileOp`` with the schedule-free :attr:`TileOp.loop_body` it derives
-        from its term. Cached on the body, which is immutable. Private — consumers go through
-        :meth:`identity_key` (the bare lattice point equals this)."""
+        compute-unit op clusters — the schedule-equivalent reading; ``typed`` colors each buffer
+        with its :func:`buffer_types` entry), or ``None`` for an op kind that carries no Loop-IR
+        body. The ONE identity override point: ``BodyOp`` answers with its stored body, ``TileOp``
+        with the schedule-free :attr:`TileOp.loop_body` it derives from its term. The untyped
+        flavors are cached on the body, the typed ones here; both are immutable. Private —
+        consumers go through :meth:`identity_key` (the bare lattice point digests this) and
+        :meth:`canonical_buffers`."""
         return None
 
     @cached_property
-    def _io_key(self) -> tuple:
-        """The cached io digest input (:func:`_io_fingerprint`). No invalidation exists or is
-        needed: an ``Op`` is frozen and its maps are ``frozendict``, so every cache on it is
-        sound outright."""
-        return _io_fingerprint(self)
+    def _typed_identity_exact(self):
+        return self._body_identity(structural=False, typed=True)
+
+    @cached_property
+    def _typed_identity_clustered(self):
+        return self._body_identity(structural=True, typed=True)
+
+    def canonical_buffers(self) -> tuple[str, ...]:
+        """This op's external buffers in the order of the roles its exact typed identity names:
+        two ops with one ``identity_key(structural=False, with_io=True)`` fill role ``i`` with
+        ``canonical_buffers()[i]``, whatever order each declared its io in. Empty for an op kind
+        without a body."""
+        identity = self._typed_identity_exact
+        return () if identity is None else identity.arguments
 
     def identity_key(self, *, structural: bool = True, with_io: bool = False, with_knobs: bool = False) -> str | None:
         """THE identity — one function, one lattice. The base fact is the canonical Loop-IR
@@ -189,7 +201,8 @@ class Op:
         - ``structural`` — collapse compute-unit op clusters (the schedule-equivalent reading,
           the default: cluster siblings share a schedule space and want the same schedule) vs
           the exact kernel (``structural=False`` — their latency differs);
-        - ``with_io`` — the io dtype/shape fingerprint: what a deployed kernel is bound to;
+        - ``with_io`` — the buffer dtypes and shapes, bound to the roles the body reads them
+          through: what a deployed kernel is bound to;
         - ``with_knobs`` — the knob row: which variant of the kernel this op is.
 
         ``None`` for an op kind that carries no Loop-IR body. ``CudaOp`` overrides the whole
@@ -198,15 +211,16 @@ class Op:
         reached via different rewrite paths produces the same key — ``source`` is never part
         of it, and neither is the dialect tag: every stage of one rewrite chain keys off the
         same Loop-IR content."""
-        key = self._body_identity(structural=structural)
-        if key is None:
-            return None
-        parts: list = [key]
         if with_io:
-            parts.append(self._io_key)
+            identity = self._typed_identity_clustered if structural else self._typed_identity_exact
+        else:
+            identity = self._body_identity(structural=structural)
+        if identity is None:
+            return None
+        parts: list = [identity.key]
         if with_knobs:
             parts.append(self._knob_key())
-        return key if len(parts) == 1 else digest(*parts)
+        return identity.key if len(parts) == 1 else digest(*parts)
 
     @_ClassProperty
     def dialect(cls) -> str | None:  # noqa: N805 — a class property; ``cls`` receives the owner

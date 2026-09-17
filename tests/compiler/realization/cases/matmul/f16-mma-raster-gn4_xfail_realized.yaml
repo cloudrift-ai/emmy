@@ -25,7 +25,7 @@ configs:
     origins:
     - o
   realizations:
-  - name: k_matmul_4ce9fc.59b0dd7bdccc
+  - name: k_matmul_057055
     bindings: {}
     pins:
       FAST_MATH: false
@@ -34,12 +34,12 @@ configs:
       WORK: w2x2
       STAGE: d2/smem-async
       RASTER: gn4
-    identity: 5caced56ad98e2c55bbeee897b393c5524e16bb1f016ae9b7d4360090c446a86
+    identity: d50a55c07f56e9db159bfd54372c52fa3912101af55e801f9f7753164d54ff8e
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 4.913512450545582
         tcompile_us: 6.129671685138152
-  - name: k_matmul_01fc9f.5998c16771fe.7284eb0c7733
+  - name: k_matmul_057055.7284eb0c7733
     bindings: {}
     pins:
       FAST_MATH: false
@@ -50,7 +50,7 @@ configs:
       STAGE: ''
       RASTER: ''
     identity: 7284eb0c7733396a70e8b53823965fc4c70c06b769b3bd782ba06cada5435a7d
-  - name: k_matmul_56c910.ad0e37733f9d.7d42324de3a3
+  - name: k_matmul_057055.7d42324de3a3
     bindings: {}
     pins:
       FAST_MATH: false
@@ -61,7 +61,7 @@ configs:
       STAGE: ''
       RASTER: ''
     identity: 7d42324de3a34159b23f9d843ea1ac93010dd19d4d3874c7850e57911d15d41d
-  - name: k_matmul_c9fce3.f94cf5b61790.c5b0a4184800
+  - name: k_matmul_057055.c5b0a4184800
     bindings: {}
     pins:
       FAST_MATH: false

@@ -14,8 +14,8 @@ from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.leaves import (
     Accum,
     Assign,
-    Const,
     Init,
+    Let,
     Load,
     Mma,
     Pack,
@@ -163,8 +163,8 @@ def _(s: Init, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
 
 
 @_rewrite_kind.register
-def _(s: Const, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
-    return Const(name=rename(s.name), value=s.value, dtype=s.dtype)
+def _(s: Let, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
+    return Let(name=rename(s.name), value=_rename_ssa_vars_in_expr(sigma.apply(s.value), rename), dtype=s.dtype)
 
 
 @_rewrite_kind.register

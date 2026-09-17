@@ -67,7 +67,7 @@ configs:
 - program: 0
   target: {origins: [c]}
   realizations:
-  - name: k_matmul_5b7645.167d5f47efce
+  - name: k_matmul_5b7645
     bindings: {}
     pins: {FAST_MATH: true}
     knobs: {WORK: w2x2, TILE: mma_m16n8k16_f16_f16/f4x8/k2, REDUCE: g2k, STAGE: ''}
@@ -78,17 +78,17 @@ Why each part, and why nothing else:
 
 - `programs` / `target` / `compute_cap` — the reproducer. Stable Torch IR rather than a code snippet, so a frontend
   change cannot silently alter what the corpus tests.
-- `name` — already carries the variant key (`identity_key(with_io=True, with_knobs=True)`)`[:12]`, so it detects
-  cache-key drift for free.
+- `name` — a label, written once and never re-derived: the kernel's provenance name for the target's entry
+  (`k_matmul_5b7645` — the ops it realizes, as the backend and the profiler show it), that name plus the piece's
+  identity prefix for a further entry. `--realization` selects a row by it, so it has to stay put whatever the
+  compiler does to keys and features.
 - `pins` / `knobs` — the authored schedule, one entry per kernel of the set. `pins` are the input regime; `knobs` are
   the row the entry's kernel realizes, spelled on that kernel's own tree — a kernel-set decision (`PLACE@seam: cut`,
   `REDUCE@k: g2k`) is an entry whose `identity` is the kernel the fork was offered on. Regeneration structurally cannot
   produce these, which is what makes the staleness mechanism safe.
 - `identity` — the record's deploy identity — `identity_key(with_io=True)`, structural flavor — is the digest of the
-  complete schedule-free Loop-IR body the term lowers to, folded with the io dtype/shape fingerprint. The variant key
-  (in `name`) is the
-  variant key — the same body + io folded with the knob row — so a knob-only change moves `name` while leaving
-  `identity` untouched.
+  complete schedule-free Loop-IR body the term lowers to, folded with the io dtype/shape fingerprint. It is the one
+  derived field a compiler change can move; the name never moves with it.
 - `identity` and the optional per-card `latency` block are the only additions the corpus makes to the golden schema,
   and both are optional keys the model goldens do not carry. On a further entry `identity` is authored: it is the
   selector that lets the replay apply that entry at its own kernel's forks (`golden._replay` walks a target's entries

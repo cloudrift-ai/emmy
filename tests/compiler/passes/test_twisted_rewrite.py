@@ -23,7 +23,7 @@ from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.pure.twist import SOFTMAX, WELFORD
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Const, Load, Loop, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Let, Load, Loop, Write
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op
@@ -107,10 +107,10 @@ def test_softmax_rewrites_to_twisted_pair() -> None:
     assert fold.twist.recipe is SOFTMAX and fold.combine == SOFTMAX.program(fold.as_reduction().states)
     assert len(fold.init) == 2 and fold.init[1] == 0.0
     assert [edge.as_slab() is not None for edge in fold.operands] == [True], "the score slab is its one operand"
-    assert [stmt.value for stmt in fold.lift.body if isinstance(stmt, Const)] == [1.0], "the stable singleton is (score, 1)"
+    assert [stmt.value.value for stmt in fold.lift.body if isinstance(stmt, Let)] == [1.0], "the stable singleton is (score, 1)"
     assert not [stmt for stmt in fold.lift.body if isinstance(stmt, Assign) and stmt.op.name == "exp"], "no exp in the term"
     assert [stmt.op.name for stmt in fold.based().body if isinstance(stmt, Assign)] == ["exp", "multiply"], "psi_inv restores it"
-    assert any(isinstance(stmt, Const) and stmt.value == 1.0 for stmt in fold.injected.body), "psi injects 1"
+    assert any(isinstance(stmt, Let) and stmt.value.value == 1.0 for stmt in fold.injected.body), "psi injects 1"
 
 
 def test_sdpa_rewrites_to_twisted_expectation() -> None:
@@ -270,12 +270,12 @@ def test_welford_variance_pair_fuses_into_one_carrier() -> None:
     assert fold.combine.alpha_eq(WELFORD.program(view.states))
     assert fold.init == (0.0, 0.0, 0.0, 0.0)
     score, one, mean, square = fold.lift.results
-    consts = {stmt.name: stmt.value for stmt in fold.lift.body if isinstance(stmt, Const)}
+    consts = {stmt.name: stmt.value.value for stmt in fold.lift.body if isinstance(stmt, Let)}
     products = {stmt.name: stmt.args for stmt in fold.lift.body if isinstance(stmt, Assign) and stmt.op.name == "multiply"}
     assert mean == score and consts[one] == 1.0, "the stable singleton is (x, 1, x, 0)"
     assert consts[square] == 0.0, "one element deviates from its own mean by nothing"
     assert products == {}, "no product in the term at all, so no channel reads bilinear"
-    injected = {stmt.name: stmt.value for stmt in fold.injected.body if isinstance(stmt, Const)}
+    injected = {stmt.name: stmt.value.value for stmt in fold.injected.body if isinstance(stmt, Let)}
     assert injected[fold.injected.results[3]] == 0.0, "psi takes it to 0 — a lone element deviates from its own mean by nothing"
     lowered = fold.lower(axes=axes)
     (loop,) = [stmt for stmt in lowered if isinstance(stmt, Loop)]  # ``1/N`` is hoisted ahead of it

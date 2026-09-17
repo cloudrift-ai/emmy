@@ -19,7 +19,7 @@ configs:
     origins:
     - relu
   realizations:
-  - name: k_relu_pointwise.1926901517d9
+  - name: k_relu_pointwise
     bindings: {}
     pins:
       FAST_MATH: false
@@ -30,4 +30,4 @@ configs:
       INTERLEAVE_LOADS: 'True'
       RASTER: ''
       VECTORIZE_LOADS: 'True'
-    identity: 979e842c6d6b2d3c71b299691ba88abbf60ea73a11c41bcdc199d313e1078fbb
+    identity: e4342b2a3987b65735daae4bfb678aa48080fd20a8b4bead4d13ecf5b2b4228e

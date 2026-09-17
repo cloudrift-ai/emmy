@@ -37,7 +37,7 @@ configs:
     - linear
     - scaled_dot_product_attention
   realizations:
-  - name: k_sdpa_linear_reduce_98718c.6e7cf7be1441
+  - name: k_sdpa_linear_reduce_2923e4
     bindings: {}
     pins:
       FAST_MATH: false
@@ -50,4 +50,4 @@ configs:
       STAGE: ''
       WORK: w1x1
       RASTER: ''
-    identity: 733f50f979ba805f97d6f805dbb379254634f29aae7dc45ca50bbd386a84d91c
+    identity: 63ea3e42817e79aeab0a81dd8b894c0da97d63fe93b66e2b9d0d9638c8c82e7c

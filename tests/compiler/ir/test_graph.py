@@ -231,11 +231,11 @@ def test_tile_op_scalar_atom_schedule_roundtrip(monkeypatch):
         KernelSchedule,
         ProjectionSchedule,
     )
-    from emmy.compiler.ir.stmt import Const
+    from emmy.compiler.ir.stmt import Let
     from emmy.compiler.ir.tile import TileOp
     from tests.compiler.terms import projection
 
-    fold = projection(body=(Const(name="zero", value=0.0),))
+    fold = projection(body=(Let(name="zero", value=0.0),))
     source = TileOp(op=fold)
     context = ClassicScheduleContext(source)
     classic = Schedule(

@@ -31,7 +31,7 @@ configs:
     - xn
     - y
   realizations:
-  - name: k_rms_norm_linear_reduce_883b8a.1a02f18cd01b
+  - name: k_rms_norm_linear_reduce_a5893c
     bindings: {}
     pins:
       FAST_MATH: false
@@ -39,7 +39,7 @@ configs:
     knobs:
       TILE: ''
       WORK: t128
-    identity: 454a60ba361aad846efa3cc6b17f30ce348ca36a11faf3f38db4b6b3a19ee54f
+    identity: f770e42f7cbe5824d0f364207e21880c2f7f032afd2dc03003e5d5ed0738e44a
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 80.04266520341237
