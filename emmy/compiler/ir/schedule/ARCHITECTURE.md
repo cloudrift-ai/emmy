@@ -27,10 +27,10 @@ visitor or feed contexts back themselves. The driver knows no concrete family, p
 enumeration slice. `narrowed(row)` is the one way a row enters after construction: an EMPTY prefix over the same
 problem with the row installed, which is what a descent that already holds a row asks for before expanding anything.
 Strict narrowing marks only the supplied codec keys as exact; inherited peer-kernel pins keep their ordinary tolerant
-reading. A row narrows WITHIN a pin that binds the kernel and never lifts it: where an evidence row and an environment
-pin name the same site with different values the site keeps the pin's, no leaf equals the row, and the descent that
-followed the row re-decides. A recorded receipt of the same kernel used to win that disagreement, so an `EMMY_KNOBS`
-fast-math pin silently deployed the standard receipt. A bare pin a peer kernel only tolerates is still replaced.
+reading. A row narrows WITHIN the live hand pins and never lifts one: where an evidence row and an environment pin name
+the same site with different values the site keeps the pin's, no leaf equals the row, and the descent that followed
+the row re-decides. A recorded receipt of the same kernel used to win that disagreement, so an `EMMY_KNOBS` fast-math
+pin silently deployed the standard receipt.
 The pipeline's generic schedule-fork adapter preserves the same contexts as deferred search branches without adding
 compatibility logic.
 
