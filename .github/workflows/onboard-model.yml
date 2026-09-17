@@ -31,7 +31,7 @@ on:
         type: boolean
 
 concurrency:
-  group: model-lifecycle
+  group: model-onboarding
   cancel-in-progress: false
 
 jobs:
@@ -756,26 +756,25 @@ jobs:
         env:
           ARTIFACT_BRANCH: ${{ steps.branch.outputs.branch }}
           BASE_BRANCH: ${{ github.event.repository.default_branch }}
-          EXPECTED_HEAD: ${{ steps.rebase.outputs.expected_head }}
+          BRANCH_EXISTED: ${{ steps.rebase.outputs.expected_head != '' }}
         run: |
           git commit -m "recipes: $ONBOARD_MODE $MODEL_ID on $TARGET_GPU x$TARGET_GPU_COUNT"
-          git fetch origin "+refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH"
-          if [ -n "$EXPECTED_HEAD" ]; then
-            git fetch origin "+refs/heads/$ARTIFACT_BRANCH:refs/remotes/origin/$ARTIFACT_BRANCH"
-            remote_head="$(git rev-parse "origin/$ARTIFACT_BRANCH")"
-            if [ "$remote_head" != "$EXPECTED_HEAD" ]; then
-              echo "Model lifecycle branch changed during qualification; refusing to overwrite $remote_head" >&2
+          # Qualification takes hours, so the lifecycle branch may have moved. Replay this run's
+          # single commit onto wherever it stands now; a conflict is a real overlap, not a race.
+          for attempt in 1 2 3; do
+            git fetch origin "+refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH"
+            onto="origin/$BASE_BRANCH"
+            if [ "$BRANCH_EXISTED" = "true" ] \
+              && git fetch origin "+refs/heads/$ARTIFACT_BRANCH:refs/remotes/origin/$ARTIFACT_BRANCH"; then
+              onto="origin/$ARTIFACT_BRANCH"
+            fi
+            git rebase "$onto" || { git rebase --abort; exit 1; }
+            git push origin "HEAD:refs/heads/$ARTIFACT_BRANCH" && break
+            if [ "$attempt" -eq 3 ]; then
               exit 1
             fi
-          fi
-          git rebase "origin/$BASE_BRANCH"
-          if [ -n "$EXPECTED_HEAD" ]; then
-            git push \
-              --force-with-lease="refs/heads/$ARTIFACT_BRANCH:$EXPECTED_HEAD" \
-              origin "HEAD:refs/heads/$ARTIFACT_BRANCH"
-          else
-            git push origin "HEAD:refs/heads/$ARTIFACT_BRANCH"
-          fi
+            sleep "$attempt"
+          done
 
       - name: Refresh GitHub App token
         if: steps.vm.outcome == 'success'

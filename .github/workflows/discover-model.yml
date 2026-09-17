@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: model-lifecycle
+  group: model-discovery
   cancel-in-progress: false
 
 jobs:
@@ -328,11 +328,15 @@ jobs:
           git add --all -- recipes
           git diff --cached --check
           git commit -m "recipes: refresh model lifecycle"
+          # An onboarding run may have pushed to this branch while the agent was deciding.
+          # Replay the lifecycle commit onto the branch as it stands now.
           for attempt in 1 2 3; do
-            git push origin "$branch" && break
+            git push origin "HEAD:refs/heads/$branch" && break
             if [ "$attempt" -eq 3 ]; then
               exit 1
             fi
+            git fetch origin "+refs/heads/$branch:refs/remotes/origin/$branch"
+            git rebase "origin/$branch" || { git rebase --abort; exit 1; }
             sleep "$attempt"
           done
           echo "branch=$branch" >> "$GITHUB_OUTPUT"

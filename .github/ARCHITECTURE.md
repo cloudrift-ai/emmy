@@ -203,9 +203,12 @@ evidence.
 
 ### Discovery lifecycle PR
 
-**Discover model** runs nightly or by manual dispatch. Discovery and qualification share a static concurrency group
-and one rolling draft PR rather than opening one PR per model. Each workflow fails closed if more than one rolling PR
-exists. It also adopts one unpaired
+**Discover model** runs nightly or by manual dispatch. Discovery and qualification share one rolling draft PR rather
+than opening one PR per model, but each holds only its own concurrency group: a qualification run keeps a rented GPU
+for up to a day, and serialising the two behind one group made every discovery run wait for it. What they share is the
+branch, so each does its long work on its own checkout and replays its commit onto the rolling branch as it stands at
+push time, retrying when the branch moved underneath. A conflict there is a genuine overlap and fails the run. Each
+workflow fails closed if more than one rolling PR exists. It also adopts one unpaired
 discovery branch left by an interrupted PR-creation step, while
 failing closed if multiple such branches would make ownership ambiguous. Before rendering inventory or running the
 agent, it rebases an existing rolling branch onto the latest default branch. The rebase push uses the exact original
