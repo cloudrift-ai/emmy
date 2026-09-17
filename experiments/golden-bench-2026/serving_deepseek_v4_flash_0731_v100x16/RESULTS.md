@@ -35,6 +35,11 @@ tokens, 13.8× and about 12× off the fork. The gap to the 0.899 s above is one 
 runs the M=1 post-attention decode at 45 ms per layer where the host-local file elected 18 ms. Details under
 "The repository golden serves".
 
+On 2026-09-17 `main` served again after the identity re-key of #804, from the golden of #826: 3.30 s per output
+token and 45.5 s to first token at 2,275 input tokens. Time to first token is where it was. Decode is 1.27 s slower
+because strict evidence now refuses the M=1 tier, so single-token decode rides the width-16 twins. Details under
+"Main after the identity re-key".
+
 ## Measurements
 
 | Concurrency | Input → output | Repeats | Output tok/s, mean ± SD | Range | Mean TPOT | Mean TTFT | Failed |
@@ -153,6 +158,47 @@ inline. Nothing lowers a range, so it reached the kernel as an input no plan cou
 --ir cuda` nor a `--golden --realization` replay reaches plan construction, which is why the failure was invisible
 off the serving path. #807 folds a range where it stands; the expert kernels change identity as a result, and
 #801's rows still deploy by structural match.
+
+### Main after the identity re-key (2026-09-17)
+
+#804 re-keyed every kernel identity on 2026-09-15 and left this golden's rows behind; #815, #823, #825 and #826
+brought them back. On 2026-09-17 `main` at `3b5cc4ca` booted from the golden of #826 with `--strict-evidence` and an
+empty tune DB: health in fifteen minutes, engine init 81.7 s, KV capacity 75,759 and 78,127 tokens. Same probe as
+2026-09-15, greedy, single stream, streamed.
+
+| Shape | TTFT, cold | TTFT, repeat | TPOT mean | TPOT range | Output tok/s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 5 in → 33 out | 6.33 s | 3.60 s | 3.302 s | 3.290 – 3.319 s | 0.30 |
+| 2,275 in → 9 out | 45.51 s | 16.61 s | 3.352 s | 3.345 – 3.363 s | 0.30 |
+
+| Program | Measured | Over floor | 2026-09-15 |
+| --- | ---: | ---: | ---: |
+| `pre.chunk.m4096` | 2.73 ms | 92× | 2.74 ms |
+| `post.decode.m1` | not deployed | — | 44.7 ms |
+| `post.decode.m16` | 69.8 ms | 1,175× | 68.3 ms |
+| `post.chunk.m4096` | 629.7 ms | 322× | 688 ms |
+
+Prefill is unchanged and decode is slower, for one reason: strict evidence refuses the M=1 post twin and the expert
+M=1 twin, so a single-token step runs the width-16 programs — 69.8 ms per layer against the 44.7 ms the M=1 program
+cost on 2026-09-15, which is the 1.27 s per token. Three kernel sets stand between `main` and an M=1 tier, and none
+is a stale row any more. The M=1 division cut mints a piece that no recorded schedule fits and that does not build
+under the schedule the prior picks: the cut splicer renames a workspace read but not the values derived from it, so
+the piece declares two values twice and nvcc refuses it. The expert M=1 cut now mints one kernel where it minted two,
+and the prior's schedule for it runs about 4 s per launch, past the bench budget; it needs a tune. And #799's cut,
+re-recorded on `main` at 777 µs, is still refused at its residual kernel, whose only measured row is the all-OFF
+schedule — that refusal is not understood yet. The fourth, the `9e578e` cut, was re-recorded at 9.4 ms for the whole
+M=1 program and elects under strict evidence.
+
+Two boots failed before this one, and each named a way a golden can decode in full and still not deploy. The strict
+decode accepts a row when any kernel of its cut set enumerates it; the deploy needs the kernel the row names to
+enumerate it. Seven receipts sat on the wrong one of several same-shaped kernels, strict evidence refused the
+width-4096 prefill twin, and vLLM had no prefill bucket to start with. Then the boot hung in the roofline audit, which
+has no time limit: a schedule row that carries the identity a cut fork is offered on reads as the fused kernel's own
+receipt, two empty rows of the pre-attention targets carried it with 19 µs and 130 µs, and the fused arm outbid the
+measured cut — one fused kernel whose single launch ran past fifteen minutes. Whether the same mechanism explains the
+election of 2026-09-15 is not established: that boot ran a tree from before #804, whose rows carried their own
+identities. No greedy-agreement run was made on this boot. Evidence on the host under `~/serve-evidence/boot21-*`,
+`boot22-*`, `boot23-*` and `elect825-*`.
 
 ### The M=1 decode tier: what broke and what now guards it
 

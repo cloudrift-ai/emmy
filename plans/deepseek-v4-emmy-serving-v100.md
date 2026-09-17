@@ -20,15 +20,12 @@ token — directional, because the two arms have not yet run at one envelope (St
 and the caveats are in `experiments/golden-bench-2026/serving_deepseek_v4_flash_0731_v100x16/RESULTS.md`; that
 report is the durable record, not this file.
 
-**Main has moved under that measurement.** #804 (the Loop IR identity re-key) merged 2026-09-15 and left 87 of this
-golden's 372 rows stale — decoded row by row on main (6eb37188) on 2026-09-16: the file had no stale row before
-#804, #804 alone produces the 87, and #807 adds none. Two things did it, and neither is a lost schedule. #804
-stamped 145 receipts of cut sets with their fused target's identity instead of their piece's, so the decode
-replayed each against the wrong kernel; and the replay picks the entry that decides a fork by identity, last one
-wins, so a receipt stamped that way stood in for its lead at the cut fork and fused the set. PR #815 fixes the
-replay rule and re-keys 59 receipts to their piece (the piece whose tree matches the one the row decorated before
-the re-key): the file decodes 325/372 there. The expert rows are among the recovered, tensor-core rows included —
-the lead's cut still yields the same pieces on main. The 2.03 s above describes 7e9336e6 + #807, not main.
+**Main serves again, slower at decode (2026-09-17).** #804 (the Loop IR identity re-key) left 87 of this golden's
+372 rows stale; #815, #823, #825 and #826 brought the file back to 367 of 367 rows decoding, two M=1 post cuts
+re-recorded on the host among them. Booted from `main` at `3b5cc4ca` with the golden of #826, strict, empty tune DB:
+3.30 s per output token, 6.3 s to first token on a short prompt and 45.5 s at 2,275 input tokens, health in fifteen
+minutes. Prefill matches 2026-09-15; decode lost 1.27 s per token because strict evidence refuses the M=1 tier and a
+single-token step rides the width-16 twins. The report has the numbers and the two failed boots that preceded them.
 
 Stages −1, 1 (#651), 2 (#656) and 3 (#662) are done, and Stage 0's question — whether the compiler can produce a
 schedule fast enough to serve this model — is answered yes. Gate (c) passed on the repository golden at 7e9336e6 +
@@ -83,9 +80,12 @@ programs stay under its threshold. That is what halved time to first token at 2.
 **One election is wrong before anything is recorded.** The boot audit reads `post.decode.m1` at 44.7 ms per layer
 (750× its floor) from the repository golden; the host-local golden the 2026-09-12 numbers came from elected about
 18 ms (294×) for the same program. #799 recorded that cut into the repository, and the election does not take it.
-Forty-three layers of the difference is the 1.1 s per token between 0.899 s and 2.03 s. On main the question has
-moved: #799's cut is one of the 87 stale rows, so it is not on the ballot at all. Restamp first, then ask why a
-recorded cut loses, ahead of recording anything new.
+Forty-three layers of the difference is the 1.1 s per token between 0.899 s and 2.03 s. On main the M=1 tier
+is not deployed at all (2026-09-17): strict evidence refuses the M=1 post twin and the expert M=1 twin, so the
+election question is behind three kernel sets that cannot be scheduled from evidence yet — see "Owed regardless".
+One mechanism that makes a recorded cut lose is now known: a schedule row carrying the identity a cut fork is
+offered on reads as the fused kernel's own receipt and prices the fused arm with a piece's timing. Whether it
+explains 2026-09-15 is open; that tree predates #804.
 
 Then the rows. By the diagnostic above, every single-candidate row over 1 ms in the golden (372 realizations over
 152 configs) is a post kernel:
@@ -110,10 +110,7 @@ Per-program sums of the best rows: `post4096` 560 ms, `post-sym` 356 ms, `post16
   outermost token loop, and the same cut family binds on them. #799's six cuts are the template. `post.decode.m16`
   (68 ms per layer, 1,145×) is off the single-stream decode path but on any concurrent one, and on prefill.
 
-Recording waits on the restamp of the 87 stale rows (see "Owed regardless"): #804 has landed, but it accepted this
-file's breakage instead of restamping it, and a row recorded against the stale spellings would be written twice.
-The discovery half — which seams, what they measure — does not depend on identity and can run on a host-local
-working golden meanwhile.
+The restamp is done (#826), so recording is unblocked: a row recorded now is written once, against main's spellings.
 
 ### Stage 4 — image and release plumbing (not started)
 
@@ -129,7 +126,7 @@ exists since #768 and is the single source for the twin widths; a headroom sweep
 cold-starts offline and EVERY one of the 16 workers reports its pack hit (today's verify accepts one `pack hit` line,
 which is insufficient), the cubin set is unchanged, and no request-time Triton JIT occurs. Build and verify only;
 registry publication is a separate approval. `serve-goldens` runs the strict decode of the golden, which
-completes in minutes since #804 but reports the 87 stale rows, so Stage 4 waits on the restamp.
+completes in minutes since #804 and passes since #826.
 
 Measured envelope to plan the sweep against (gate (c), `--max-model-len 4096 --kv-cache-dtype fp8 --block-size 256`,
 `--gpu-memory-utilization 0.90`): 30.8 GiB resident on a first-stage card and 31.75 on a second-stage one of 32, KV
@@ -163,30 +160,23 @@ independent reference on `run --golden` — the loop-IR CPU runner exists but is
 **The strict decode completes now.** The seven `k_div_*` `PLACE=cut` rows at m1 that #797 recorded took over
 29 minutes each before #804 — the pre-#804 compiler sits at full CPU on the first of them for 20+ minutes — and
 take 1.3 s each on main; the whole file decodes in about two and a half minutes. The goldens gate can protect this
-file again, and what it reports today is the 87 stale rows.
+file again, and since #826 it passes.
 
-**Nine rows are still owed, all to the host (2026-09-16).** The five post-family routing rows (`3836f9`, `8e1e80`,
-`366777`, `9e578e`, #799's `4e26cc`) were re-spelled on main by matching the pre-#804 and current lifted trees as one
-DAG — every node hashed once by its order-free subtree shape, seams matched top-down within their parent, a carrier
-that changed kind matched through the contraction inside it — and their receipts re-keyed to the kernel of the same
-shape at the same mint ordinal (#823). Two things had moved: the shared softmax-statistics cone is filed under
-whichever consumer the walk reaches first, and #804's statement order changed that consumer; and on the three
-same-DAG rows one kernel boundary the old lowering made on its own is now a seam that must be spelled. Main no
-longer offers cutting a leaf operand, so the two trivial leaf pieces per set are fused into their consumer. Of the
-31 rows left after that, 22 came back without a re-record. Sixteen were wrong only in the identity #804 stamped
-on them: a row that names the kernel a cut fork is offered on decides that fork itself, and a schedule row spells
-no route, so each of them read its own kernel as fused; they now name the piece that enumerates their row. Six
-division receipts also needed their keys re-spelled on their piece — same shape as before, but one carrier's operand
-order changed and the shared cone is filed under the other parent, so the sharing-aware DAG isomorphism between the
-two pieces (a shared node maps to one node, injectively) is unique and moves every key with it. The file decodes 363
-of 372 rows on main. The nine that do not: the four `cdfe3a37dc00` receipts of the M=1 division cut
-(`k_div_11/25/50/64`) tile two sites `f1x2` and `f4x2` that on main share one physical axis, so the schedule is no
-longer in that piece's space and the piece has no measured row; the four expert M=1 rows (`expert1`, `expert-sym`)
-decorated two kernels that main's cut mints as one — the range loop that used to leave with the cut-off leaf now
-wraps the reduce — so no single row carries them; and `9e578e`'s twist-form kernel has no row. Each is one
-`run --golden --bench --record` of the realization on the host, and a strict boot refuses those three kernels until
-then. A fresh strict boot from main comes next and before any new recording; the boot20 numbers do not describe
-main.
+**The golden is whole on main; the M=1 tier is what is owed (2026-09-17).** Every one of the file's 367 rows decodes
+and is enumerated by the kernel it names (#815, #823, #825, #826). Two checks came out of the boots and belong in any
+future restamp. The strict decode is pooled for a row without a cut pin — it passes when any kernel of the set
+enumerates the row — while the deploy needs the kernel the row NAMES to enumerate it; same-shaped twins are told
+apart by their `S_*` signature, which is unique per kernel in every post-family set, not by mint order. And a
+measured schedule row that carries the identity a cut fork is offered on prices the fused arm; the only legitimate
+one is a measurement of the fused kernel itself. Three kernel sets keep the M=1 tier off under strict evidence, in
+the order they should be taken. The M=1 division cut (`k_div_11/25/50/64`): its residual piece fits no recorded
+schedule and does not build under the prior's pick, because the cut splicer renames a workspace read but not the
+values derived from it (`v73`, `v206` declared twice); fix the splicer, then `run --bench --record-greedy` under the
+recorded cut. #799's cut (`4e26cc`): re-recorded on main at 777 µs, still refused at the residual kernel's schedule
+fork, whose only measured row is the all-OFF schedule — find out why that row does not vouch. The expert M=1 cut: two
+kernels became one, the prior's schedule for it runs about 4 s per launch, so it needs `emmy tune`, not a bench. The
+boot's roofline audit still has no time limit; one mispicked program hung a boot again. After the M=1 tier is back,
+the post-family kernel work above is the next cost, then Stage 4.
 
 ## Operations handoff
 
