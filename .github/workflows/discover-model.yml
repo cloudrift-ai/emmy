@@ -196,6 +196,14 @@ jobs:
               --rawfile selection "$AGENT_SELECTION" \
               -f "$WORKFLOW_SOURCE/.github/workflows/scripts/discovery_manifest.jq" \
               "$AGENT_TASK" > "$AGENT_MANIFEST" 2> "$AGENT_REJECTION"
+            # A reply carrying no JSON object matches nothing and leaves jq successful but silent.
+            if [ -s "$AGENT_MANIFEST" ]; then
+              return 0
+            fi
+            if [ ! -s "$AGENT_REJECTION" ]; then
+              echo "Your reply carried no selection JSON object." > "$AGENT_REJECTION"
+            fi
+            return 1
           }
           set +e
           : > "$AGENT_EVENTS"
