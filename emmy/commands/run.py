@@ -602,6 +602,8 @@ def _record_golden_latency(args, results: dict, golden_benches) -> None:
         sys.exit(2)
     emmy_us = _bench_total_us(measured[0].bench)[0] if measured else results.get("Emmy")
     tcompile_us, eager_us = results.get("torch.compile"), results.get("Eager PyTorch")
+    if isinstance(tcompile_us, str):
+        tcompile_us = None
     if not emmy_us:
         logger.error("--record measured no Emmy timing for %s", args.realization)
         sys.exit(2)
@@ -883,11 +885,12 @@ def _dump_bench_compare(dump_dir, results: dict, warmup: int, iters: int) -> Non
     payload = {
         "warmup": warmup,
         "iters": iters,
-        "backends": {name: {"latency_us": us} for name, us in results.items()},
+        "backends": {name: {"error": us} if isinstance(us, str) else {"latency_us": us} for name, us in results.items()},
     }
     if eager_us:
         for name, us in results.items():
-            payload["backends"][name]["speedup_vs_eager"] = (eager_us / us) if us else 0.0
+            if not isinstance(us, str):
+                payload["backends"][name]["speedup_vs_eager"] = (eager_us / us) if us else 0.0
     out = _Path(dump_dir) / "60_bench_compare.json"
     out.write_text(_json.dumps(payload, indent=2, default=str))
 
@@ -1789,11 +1792,13 @@ def _write_ab_json(
     captured = bool(getattr(bench, "captured", False))
     backend_semantics = "captured_whole_forward" if captured else "uncaptured_forward"
     backend_rows = {
-        name: {
+        name: {"status": "failed", "error": str(us)}
+        if isinstance(us, str)
+        else {
             "latency_us": us,
             "captured": captured,
             "timing_semantics": backend_semantics,
-            **({"correctness": {"status": "pass", "rtol": 1e-3, "atol": 1e-3, "fullgraph": True}} if name == "torch.compile" else {}),
+            **({"correctness": {"status": "pass", "reference": "eager", "tolerance": "scaled", "fullgraph": True}} if name == "torch.compile" else {}),
         }
         for name, us in (results or {}).items()
     }
@@ -1802,7 +1807,8 @@ def _write_ab_json(
     eager_us = (results or {}).get("Eager PyTorch")
     if eager_us:
         for name, us in (results or {}).items():
-            backend_rows[name]["speedup_vs_eager"] = eager_us / us if us else 0.0
+            if not isinstance(us, str):
+                backend_rows[name]["speedup_vs_eager"] = eager_us / us if us else 0.0
 
     payload = {
         "input": args.code or args.input or getattr(args, "ir", None),
@@ -3409,6 +3415,11 @@ def _resolve_backends(cli_value: str | None) -> set[str]:
     return selected
 
 
+class BackendFailure(str):
+    """A requested torch backend that could not be built, in the closure dict and then in the
+    results dict under its name, where its message stands where its latency would."""
+
+
 def _build_torch_fns(module, args, kwargs, warmup, *, backends: set[str]):
     """Pre-build the per-backend ``torch_fns`` dict, including the
     ``torch.compile`` JIT step when requested. The JIT (mostly
@@ -3446,10 +3457,18 @@ def _build_torch_fns(module, args, kwargs, warmup, *, backends: set[str]):
             with torch.no_grad():
                 eager_output = module(*args, **kwargs)
                 compiled_output = compiled_torch_module(*args, **kwargs)
-            torch.testing.assert_close(compiled_output, eager_output, rtol=1e-3, atol=1e-3)
+            # The same dtype-scaled verdict the Emmy output gets: a flat 1e-3 rejected Inductor's own
+            # FP16 GEMM against cuBLAS on three of the six Gemma 4 projections on an RTX 4090.
+            outputs = compiled_output if isinstance(compiled_output, (tuple, list)) else (compiled_output,)
+            verdict = _check_accuracy({f"out{i}": t.detach().cpu().double().numpy() for i, t in enumerate(outputs)}, eager_output)
+            if verdict:
+                raise ValueError(verdict)
             torch_fns["torch.compile"] = lambda: compiled_torch_module(*args, **kwargs)
         except Exception as e:  # noqa: BLE001
+            # The column is reported failed, never silently dropped: this runs in the bench worker,
+            # whose log the parent only shows on a crash.
             logger.warning("torch.compile failed: %s", e)
+            torch_fns["torch.compile"] = BackendFailure(f"{type(e).__name__}: {e}")
     return torch_fns
 
 
@@ -3490,6 +3509,9 @@ def _capture_torch_fns(torch_fns: dict) -> dict | None:
     whole invocation back to uncaptured timing."""
     captured: dict = {}
     for name, fn in torch_fns.items():
+        if isinstance(fn, BackendFailure):
+            captured[name] = fn
+            continue
         try:
             captured[name] = _capture_torch_fn(fn)
         except Exception as exc:  # noqa: BLE001 — capture is best-effort, fallback covers
@@ -3558,6 +3580,8 @@ async def _bench_interleaved(module, args, kwargs, backend, compiled_graph, warm
     # so peer torch backends time the same number of back-to-back
     # calls emmy does per CUDA event window — both sides then
     # measure sustained per-call latency, no warm-vs-cold asymmetry.
+    failed = {name: fn for name, fn in torch_fns.items() if isinstance(fn, BackendFailure)}
+    torch_fns = {name: fn for name, fn in torch_fns.items() if name not in failed}
     torch_events: dict[str, list[tuple[torch.cuda.Event, torch.cuda.Event, int]]] = {name: [] for name in torch_fns}
 
     def on_iter(batch_size: int = 1) -> None:
@@ -3591,6 +3615,7 @@ async def _bench_interleaved(module, args, kwargs, backend, compiled_graph, warm
     # end-to-end number (no cross-kernel cache effects).
     dep_ms = bench.e2e_min_ms if bench.e2e_min_ms is not None else (bench.min_ms if bench.min_ms is not None else bench.time_ms)
     results["Emmy"] = dep_ms * 1000
+    results.update(failed)
     return results, bench
 
 
@@ -3599,9 +3624,12 @@ def _print_table(results, note: str | None = None):
 
     eager_us = results.get("Eager PyTorch", 0)
     cols = [Col("Backend"), Col("Latency (us)", "r"), Col("vs Eager", "r")]
-    rows = [[name, f"{us:.0f}", f"{eager_us / us:.2f}x" if us > 0 else "-"] for name, us in results.items()]
+    rows = [[name, "failed" if isinstance(us, str) else f"{us:.0f}", f"{eager_us / us:.2f}x" if not isinstance(us, str) and us > 0 else "-"] for name, us in results.items()]
     print()
     for line in render_table(cols, rows, rule=True):
         print(line)
+    for name, us in results.items():
+        if isinstance(us, str):
+            print(f"{name}: {us}")
     if note:
         print(note)
