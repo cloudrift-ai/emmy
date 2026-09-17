@@ -1180,6 +1180,7 @@
  "tests/serving/generation/test_gen_pack_gpu.py::test_gen_pack_second_boot_hits_and_matches@cuda": 5.4,
  "tests/serving/generation/test_gen_runner.py::test_create_keeps_storage_coded_trunks_packed[exl3-True]": 5.0,
  "tests/serving/generation/test_gen_runner.py::test_create_keeps_storage_coded_trunks_packed[fp8-False]": 5.0,
+ "tests/serving/generation/test_gen_runner.py::test_create_keeps_storage_coded_trunks_packed[modelopt-True]": 5.1,
  "tests/serving/generation/test_gen_runner_gpu.py::test_expert_program_fp8_indirect_compose@cuda": 11.8,
  "tests/serving/generation/test_gen_runner_gpu.py::test_expert_program_fp8_inputs_match_reference@cuda": 10.1,
  "tests/serving/generation/test_gen_runner_gpu.py::test_gen_runner_stitch_matches_eager@cuda": 4.09,
