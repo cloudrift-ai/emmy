@@ -66,7 +66,7 @@ def test_depthwise_conv1d_matches_eager(run_graph, conv_module) -> None:
 
 
 def test_causal_conv1d_with_zero_width_chunk_pad_matches_eager(run_graph) -> None:
-    """The Qwen3.8 causal Conv1d target retains its empty chunk-alignment pad."""
+    """The Qwen3.8 causal Conv1d target accepts its empty chunk-alignment pad."""
     import torch
     import torch.nn as nn
     import torch.nn.functional as F  # noqa: N812

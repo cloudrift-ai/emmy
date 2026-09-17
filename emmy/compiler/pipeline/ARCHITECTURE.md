@@ -789,8 +789,10 @@ undecided fork a `decide` callback gets a `ForkPoint` (the `Match`, the raw opti
 as it was before the decision, `ctx`) and returns the option to apply.
 
 The returned trace — one `Decision(rule_name, node_id, chosen_kind, knob_delta, score, n_options)` per decided fork —
-is the resolution's only process-state output. Questions like "did this compile take a structural pick" or "what did
-the partition fork predict for this kernel" are trace queries, never accumulated policy attributes.
+is the resolution's process-state output. Questions like "did this compile take a structural pick" or "what did the
+partition fork predict for this kernel" are trace queries, never accumulated policy attributes. The greedy compile
+copies only the final trace's placement receipts into graph attribution so a later A/B integrity check can verify
+structural pins after the splice has consumed them.
 
 ### `Pipeline.run` — the greedy compile
 
@@ -1502,8 +1504,9 @@ explicit working file whose GPU header is checked against the selected tune devi
    knob's canonical `Knob.parse`, so alternative spellings of the same value, like `FAST_EXP=1`, do not raise a false
    alarm. A pin satisfied by ANY kernel counts as honored, which is what makes split main+finalize pairs
    work, but it does mean that a pin dropped on its intended kernel goes undetected if a sibling kernel happens to
-   match it. The `g<n>` cross-CTA stage of a `REDUCE` value is structural and cannot be read off a knob stamp, so the
-   check skips it. A split replaces the kernel it splits, and
+   match it. `PLACE` is consumed before CUDA emission, so the final greedy resolution's placement receipts ride the
+   compiled graph as attribution and supply its realized side. The `g<n>` cross-CTA stage of a `REDUCE` value is
+   structural and cannot be read off a knob stamp, so the check skips it. A split replaces the kernel it splits, and
    `knob.consume_kernel_row` strips the schedule row from the pieces it mints — no piece may carry the `g<n>` it came
    from — so the receipt is the piece's sliced reduce axis, not a stamp. Only that stage is exempt: the rest of the
    value (`coop` / `r<n>`) is decided by the piece on its own body and stays gated. The cost of the exemption is that a

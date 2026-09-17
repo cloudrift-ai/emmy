@@ -486,6 +486,32 @@ def test_child_identity_receipts_decode_per_child_and_join_by_stored_identity() 
     assert reason is not None and "equals none" in reason
 
 
+def test_child_decode_verdict_changes_with_sibling_route_owner() -> None:
+    """A cached child miss must not survive a sibling route-owner repair.
+
+    The child row itself is unchanged. Only the route sibling's identity changes from stale to the
+    current pre-cut owner, which makes the replay take the cut and expose the child's schedule.
+    """
+    fields = {**_receipt_fields(), "pins": ()}
+    common = {key: value for key, value in fields.items() if key != "name"}
+    route = {"PLACE@map.1/twist.1/inner": "cut"}
+    parent = GoldenRecord(name="cache.parent", knobs={}, **common)
+    owner = _lifted_target(parent).identity_key(with_io=True)
+    current_route = GoldenRecord(name="cache.route", knobs=route, identity=owner, **common)
+    children = {
+        identity: rows
+        for identity, rows in _replay(current_route, exhaustive=True).rows.items()
+        if identity is not None and identity != owner
+    }
+    child_identity, child_rows = max(children.items(), key=lambda child: len(child[1]))
+    child = GoldenRecord(name="cache.child", knobs=dict(next(row for row in child_rows if row)), identity=child_identity, **common)
+
+    stale_route = replace(current_route, identity="0" * 64)
+    reason = decode_record(child, (stale_route,))
+    assert reason is not None and "replay offers no" in reason
+    assert decode_record(child, (current_route,)) is None
+
+
 def test_post_schedule_receipt_does_not_steer_an_unowned_peer(monkeypatch) -> None:
     """A receipt identity that appears after scheduling selects only that materialized kernel.
 

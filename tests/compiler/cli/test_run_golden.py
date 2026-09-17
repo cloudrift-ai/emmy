@@ -377,6 +377,15 @@ def test_an_env_pin_that_did_not_realize_is_flagged_like_an_ab_pin(monkeypatch):
     flag = run_mod.env_pin_refusal([{"LOOPIFY": "0"}])
     assert flag is not None
     assert "TILE" in flag
+    monkeypatch.delenv("EMMY_TILE")
+
+    # Placement is consumed before CUDA emission, so its realized side comes from the
+    # greedy resolution trace rather than a kernel knob stamp.
+    monkeypatch.setenv("EMMY_PLACE@MAP.1/INNER.2/MAP", "cut")
+    flag = run_mod.env_pin_refusal(realized, [{"PLACE": "fuse"}])
+    assert flag is not None
+    assert "PLACE@map.1/inner.2/map=cut" in flag
+    assert run_mod.env_pin_refusal(realized, [{"PLACE@map.1/inner.2/map": "cut"}]) is None
 
 
 def test_a_reference_that_disagrees_with_itself_is_reported_unusable_not_per_row():

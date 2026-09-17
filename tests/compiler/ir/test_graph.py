@@ -277,6 +277,48 @@ def test_tile_op_scalar_atom_schedule_roundtrip(monkeypatch):
         Graph.from_dict(grouped_projection)
 
 
+def test_tile_op_twisted_recipe_roundtrip():
+    """A dumped tile-stage graph must rehydrate every class in a twist recipe."""
+    import json
+
+    from emmy.compiler.ir.axis import Axis
+    from emmy.compiler.ir.pure import Fold, Lambda
+    from emmy.compiler.ir.pure.twist import SOFTMAX, Channel, Twist
+    from emmy.compiler.ir.schedule import Placement
+    from emmy.compiler.ir.stmt import Assign, Body, Let
+    from emmy.compiler.ir.tile import TileOp
+    from tests.compiler.terms import projection, slab
+
+    m, k = Axis("m", 4), Axis("k", 128)
+    lift = Lambda.closing(
+        ("k", "y"),
+        Body((Assign(name="s", op="copy", args=("y",)), Let(name="one", value=1.0))),
+        ("s", "one"),
+    )
+    carrier = Fold(
+        operands=(slab("y", "y", "m", "k"),),
+        lift=lift,
+        init=(-1e30, 0.0),
+        base=Lambda.componentwise(SOFTMAX.base[:2], ("pivot", "total")),
+        twist=Twist(recipe=SOFTMAX, channels=(0,)),
+    )
+    root = projection((carrier,), (Assign(name="out", op="divide", args=("total", "pivot")),))
+    graph = Graph()
+    y = graph.add_node(InputOp(), [], Tensor("y", (4, 128), "f32"), node_id="y")
+    graph.add_node(
+        TileOp(op=root, place=Placement(free=(m,)), axes=(m, k)),
+        [y],
+        Tensor("out", (4,), "f32"),
+        node_id="out",
+    )
+    graph.inputs, graph.outputs = [y], ["out"]
+
+    loaded = Graph.from_dict(json.loads(json.dumps(graph.to_dict(), default=str)))
+    (loaded_carrier,) = loaded.nodes["out"].op.op.operands
+    assert loaded_carrier.twist == carrier.twist
+    assert all(isinstance(channel, Channel) for channel in loaded_carrier.twist.recipe.channels)
+
+
 def test_stmt_eval_scope_reads_non_finite_literals():
     """``repr(float('-inf'))`` is the bare token ``-inf``, which does not eval without a name.
 

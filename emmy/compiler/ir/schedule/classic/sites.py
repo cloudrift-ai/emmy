@@ -14,7 +14,7 @@ from frozendict import frozendict
 from emmy.compiler.ir.atom import ATOM_REGISTRY
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule.base import Schedule, ScheduleProblem, Site
-from emmy.compiler.ir.schedule.catalog import coop_reduce_moves, producer_band_moves, raster_moves, scalar_tile_moves
+from emmy.compiler.ir.schedule.catalog import producer_band_moves, raster_moves, scalar_tile_moves
 from emmy.compiler.ir.schedule.choices import PlacedTile, Raster, Reduce, Stage, Tile, Work, derive_inventory, resolve_site_tile
 from emmy.compiler.ir.schedule.staging import stage_target
 from emmy.compiler.ir.schedule.views import NodeId
@@ -42,7 +42,7 @@ from .schedule import (
     ReductionSchedule,
     classic_node_key,
     classic_stage_key,
-    no_site_claims_inventory,
+    output_sweep_works,
 )
 
 if TYPE_CHECKING:
@@ -313,20 +313,13 @@ class ClassicKernelSite(Site[ClassicSchedule]):
                     yield work
 
     def _sweep_widths(self) -> set[Work]:
-        # A kernel whose work IS its shared output sweep — a bare elementwise map, the half a
-        # placement cut leaves behind a reduction — has no site that folds out an inventory, so the
-        # derived domain is the direct per-cell form alone: one worker per output cell with the
-        # sweep serial inside it. Offer the widths a cooperative reduction would, so the sweep can
-        # be split across workers (``_factor`` distributes it through ``_lane_close``). This widens
-        # the worker inventory only; the grid stays the cell count, unlike promoting the axis into
-        # ``place.free``, which multiplies the grid by its extent.
+        # A kernel whose work IS its output sweep — a bare elementwise map or a placement residual
+        # whose reduction sites stay serial — otherwise has one worker per output cell with the
+        # sweep serial inside it. Offer the widths a cooperative reduction would, so each sibling
+        # sweep can be split across workers (``_factor`` distributes it through ``_lane_close``).
+        # This widens only the worker inventory; the grid stays the cell count.
         tile = self.problem.tile
-        if not (no_site_claims_inventory(tile) and tile.output_specs):
-            return set()
-        shared = set.intersection(*({axis.name for axis in store.sweep} for store in tile.output_specs))
-        if not shared:
-            return set()
-        return {Work(kind="thread", units=(move.coop, 1)) for move in coop_reduce_moves() if move.coop > 1}
+        return set(output_sweep_works(tile, None))
 
     def _works(self) -> tuple[Work, ...]:
         def catalog() -> tuple[Work, ...]:
@@ -427,7 +420,10 @@ class ClassicProblem(ScheduleProblem[ClassicSchedule]):
     def with_row(self, row: Mapping[str, str], *, strict: bool = False) -> ClassicProblem:
         supplied = {str(key): str(value) for key, value in row.items()}
         strict_row_keys = self._strict_row_keys | supplied.keys() if strict else self._strict_row_keys
-        return replace(self, row=frozendict({**self.row, **supplied}), _strict_row_keys=frozenset(strict_row_keys), loud_pins=False)
+        # ``self.row`` is the live hand-pin restriction installed when the schedule fork was
+        # built. A measured/prior row narrows that fork to one leaf, but cannot overwrite the
+        # restriction: hard pins are authoritative over every ranking source.
+        return replace(self, row=frozendict({**supplied, **self.row}), _strict_row_keys=frozenset(strict_row_keys), loud_pins=False)
 
     @cached_property
     def node_sites(self) -> tuple[ClassicNodeSite, ...]:

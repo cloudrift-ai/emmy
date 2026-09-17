@@ -400,13 +400,14 @@ def _stmt_eval_scope() -> dict:
     import emmy.compiler.ir.cuda.ir as _cuda_mod  # noqa: PLC0415
     import emmy.compiler.ir.kernel.ir as _kernel_mod  # noqa: PLC0415
     import emmy.compiler.ir.pure.fold as _fold_mod  # noqa: PLC0415
+    import emmy.compiler.ir.pure.twist as _twist_mod  # noqa: PLC0415
     import emmy.compiler.ir.schedule as _sched_mod  # noqa: PLC0415
     import emmy.compiler.ir.tile.ir as _tile_mod  # noqa: PLC0415
 
     # Kernel IR owns the bare ``Tile(...)`` repr used in body fields. The classic ``Tile`` choice
     # never enters this eval path (it uses ``ClassicScheduleCodec``), so kernel must precede the
     # schedule module when their class names collide.
-    for _mod in (_atom_mod, _axis_mod, _kernel_mod, _sched_mod, _fold_mod, _tile_mod, _cuda_mod):
+    for _mod in (_atom_mod, _axis_mod, _kernel_mod, _sched_mod, _fold_mod, _twist_mod, _tile_mod, _cuda_mod):
         for _nm in dir(_mod):
             _obj = getattr(_mod, _nm)
             if isinstance(_obj, type):

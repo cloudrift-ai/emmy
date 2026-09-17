@@ -1,0 +1,2667 @@
+# evidence: EXL3 loop15's A-only placement leaves a residual with independent 10-wide and 64x64 output sweeps.
+# Existing lane lowering stripes each sibling loop independently; its V100 residual is 3220 us when serial, so t128 must
+# remain an offered, exactly realizable schedule for this current Loop IR.
+compute_cap:
+- 7
+- 0
+programs:
+- inputs: [copy__6_base]
+  outputs: [copy__8_base, add_14]
+  nodes:
+  - id: copy__6_base
+    op: input
+    outputs: [[copy__6_base, f32, [1, 48, 8, 64, 64]]]
+  - id: select_14
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 48}, {__dim__: 8}, {__dim__: 64}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {var: out_coord_1}
+            - {var: out_coord_2}
+            - {literal: {value: 8, dtype: int}}
+            - {var: out_coord_3}
+            select: null
+    inputs: [copy__6_base]
+    outputs: [[select_14, f32, [1, 48, 8, 64]]]
+  - id: slice_30_c1
+    op: constant
+    attrs:
+      name: slice_30_c1
+      value: 3.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_30_c1, f32, [1]]]
+  - id: slice_30_c2
+    op: constant
+    attrs:
+      name: slice_30_c2
+      value: 0.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_30_c2, f32, [1]]]
+  - id: slice_30_c3
+    op: constant
+    attrs:
+      name: slice_30_c3
+      value: 8.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_30_c3, f32, [1]]]
+  - id: slice_30
+    op: torch.slice
+    attrs: {shape: {__tuple__: [1, 48, 8, 8]}, dim: 3, start: 0}
+    inputs: [select_14, slice_30_c1, slice_30_c2, slice_30_c3]
+    outputs: [[slice_30, f32, [1, 48, 8, 8]]]
+  - id: slice_31_c1
+    op: constant
+    attrs:
+      name: slice_31_c1
+      value: 3.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_31_c1, f32, [1]]]
+  - id: slice_31_c2
+    op: constant
+    attrs:
+      name: slice_31_c2
+      value: 0.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_31_c2, f32, [1]]]
+  - id: slice_31_c3
+    op: constant
+    attrs:
+      name: slice_31_c3
+      value: 8.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_31_c3, f32, [1]]]
+  - id: slice_31
+    op: torch.slice
+    attrs: {shape: {__tuple__: [1, 48, 8, 8, 64]}, dim: 3, start: 0}
+    inputs: [copy__6_base, slice_31_c1, slice_31_c2, slice_31_c3]
+    outputs: [[slice_31, f32, [1, 48, 8, 8, 64]]]
+  - id: slice_32_c1
+    op: constant
+    attrs:
+      name: slice_32_c1
+      value: 4.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_32_c1, f32, [1]]]
+  - id: slice_32_c2
+    op: constant
+    attrs:
+      name: slice_32_c2
+      value: 0.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_32_c2, f32, [1]]]
+  - id: slice_32_c3
+    op: constant
+    attrs:
+      name: slice_32_c3
+      value: 8.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_32_c3, f32, [1]]]
+  - id: slice_32
+    op: torch.slice
+    attrs: {shape: {__tuple__: [1, 48, 8, 8, 8]}, dim: 4, start: 0}
+    inputs: [slice_31, slice_32_c1, slice_32_c2, slice_32_c3]
+    outputs: [[slice_32, f32, [1, 48, 8, 8, 8]]]
+  - id: slice_34_c1
+    op: constant
+    attrs:
+      name: slice_34_c1
+      value: 3.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_34_c1, f32, [1]]]
+  - id: slice_34_c2
+    op: constant
+    attrs:
+      name: slice_34_c2
+      value: 0.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_34_c2, f32, [1]]]
+  - id: slice_34_c3
+    op: constant
+    attrs:
+      name: slice_34_c3
+      value: 9.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_34_c3, f32, [1]]]
+  - id: slice_35_c1
+    op: constant
+    attrs:
+      name: slice_35_c1
+      value: 3.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_35_c1, f32, [1]]]
+  - id: slice_35_c2
+    op: constant
+    attrs:
+      name: slice_35_c2
+      value: 0.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_35_c2, f32, [1]]]
+  - id: slice_35_c3
+    op: constant
+    attrs:
+      name: slice_35_c3
+      value: 9.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_35_c3, f32, [1]]]
+  - id: slice_36_c1
+    op: constant
+    attrs:
+      name: slice_36_c1
+      value: 4.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_36_c1, f32, [1]]]
+  - id: slice_36_c2
+    op: constant
+    attrs:
+      name: slice_36_c2
+      value: 0.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_36_c2, f32, [1]]]
+  - id: slice_36_c3
+    op: constant
+    attrs:
+      name: slice_36_c3
+      value: 9.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_36_c3, f32, [1]]]
+  - id: slice_38_c1
+    op: constant
+    attrs:
+      name: slice_38_c1
+      value: 3.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_38_c1, f32, [1]]]
+  - id: slice_38_c2
+    op: constant
+    attrs:
+      name: slice_38_c2
+      value: 0.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_38_c2, f32, [1]]]
+  - id: slice_38_c3
+    op: constant
+    attrs:
+      name: slice_38_c3
+      value: 10.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_38_c3, f32, [1]]]
+  - id: slice_39_c1
+    op: constant
+    attrs:
+      name: slice_39_c1
+      value: 3.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_39_c1, f32, [1]]]
+  - id: slice_39_c2
+    op: constant
+    attrs:
+      name: slice_39_c2
+      value: 0.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_39_c2, f32, [1]]]
+  - id: slice_39_c3
+    op: constant
+    attrs:
+      name: slice_39_c3
+      value: 10.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_39_c3, f32, [1]]]
+  - id: slice_40_c1
+    op: constant
+    attrs:
+      name: slice_40_c1
+      value: 4.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_40_c1, f32, [1]]]
+  - id: slice_40_c2
+    op: constant
+    attrs:
+      name: slice_40_c2
+      value: 0.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_40_c2, f32, [1]]]
+  - id: slice_40_c3
+    op: constant
+    attrs:
+      name: slice_40_c3
+      value: 10.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_40_c3, f32, [1]]]
+  - id: unsqueeze_11
+    op: torch.unsqueeze
+    attrs: {dim: -1}
+    inputs: [slice_30]
+    outputs: [[unsqueeze_11, f32, [1, 48, 8, 8, 1]]]
+  - id: unsqueeze_11_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 48}, {__dim__: 8}, {__dim__: 8}, {__dim__: 8}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {var: out_coord_1}
+            - {var: out_coord_2}
+            - {var: out_coord_3}
+            - {literal: {value: 0, dtype: int}}
+            select: null
+    inputs: [unsqueeze_11]
+    outputs: [[unsqueeze_11_bc, f32, [1, 48, 8, 8, 8]]]
+  - id: mul_18
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [unsqueeze_11_bc, slice_32]
+    outputs: [[mul_18, f32, [1, 48, 8, 8, 8]]]
+  - id: sum_10_keepdim
+    op: tensor.reduce
+    attrs: {op: {__elementwise__: sum}, axis: -2}
+    inputs: [mul_18]
+    outputs: [[sum_10_keepdim, f32, [1, 48, 8, 1, 8]]]
+  - id: sum_10
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 48}, {__dim__: 8}, {__dim__: 8}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {var: out_coord_1}
+            - {var: out_coord_2}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_3}
+            select: null
+    inputs: [sum_10_keepdim]
+    outputs: [[sum_10, f32, [1, 48, 8, 8]]]
+  - id: add_12
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [slice_30, sum_10]
+    outputs: [[add_12, f32, [1, 48, 8, 8]]]
+  - id: copy__7
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 48}, {__dim__: 8}, {__dim__: 8}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {var: out_coord_1}
+            - {var: out_coord_2}
+            - {var: out_coord_3}
+            select: null
+    inputs: [add_12]
+    outputs: [[copy__7, f32, [1, 48, 8, 8]]]
+  - id: copy__7_base
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 48}, {__dim__: 8}, {__dim__: 64}, {__dim__: 64}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - ternary:
+                cond:
+                  binary:
+                    op: '&&'
+                    left:
+                      binary:
+                        op: '&&'
+                        left:
+                          binary:
+                            op: '&&'
+                            left:
+                              binary:
+                                op: '&&'
+                                left:
+                                  binary:
+                                    op: '&&'
+                                    left: {literal: {value: true, dtype: bool}}
+                                    right:
+                                      binary:
+                                        op: '&&'
+                                        left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: {value: 0, dtype: int}}}}
+                                        right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: {value: 1, dtype: int}}}}
+                                right:
+                                  binary:
+                                    op: '&&'
+                                    left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: {value: 0, dtype: int}}}}
+                                    right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 48, dtype: int}}}}
+                            right:
+                              binary:
+                                op: '&&'
+                                left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: {value: 0, dtype: int}}}}
+                                right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: {value: 8, dtype: int}}}}
+                        right:
+                          binary:
+                            op: '&&'
+                            left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: {value: 8, dtype: int}}}}
+                            right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: {value: 9, dtype: int}}}}
+                    right:
+                      binary:
+                        op: '&&'
+                        left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: {value: 0, dtype: int}}}}
+                        right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: {value: 8, dtype: int}}}}
+                if_true: {var: out_coord_0}
+                if_false: {literal: {value: 0, dtype: int}}
+            - ternary:
+                cond:
+                  binary:
+                    op: '&&'
+                    left:
+                      binary:
+                        op: '&&'
+                        left:
+                          binary:
+                            op: '&&'
+                            left:
+                              binary:
+                                op: '&&'
+                                left:
+                                  binary:
+                                    op: '&&'
+                                    left: {literal: {value: true, dtype: bool}}
+                                    right:
+                                      binary:
+                                        op: '&&'
+                                        left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: {value: 0, dtype: int}}}}
+                                        right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: {value: 1, dtype: int}}}}
+                                right:
+                                  binary:
+                                    op: '&&'
+                                    left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: {value: 0, dtype: int}}}}
+                                    right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 48, dtype: int}}}}
+                            right:
+                              binary:
+                                op: '&&'
+                                left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: {value: 0, dtype: int}}}}
+                                right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: {value: 8, dtype: int}}}}
+                        right:
+                          binary:
+                            op: '&&'
+                            left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: {value: 8, dtype: int}}}}
+                            right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: {value: 9, dtype: int}}}}
+                    right:
+                      binary:
+                        op: '&&'
+                        left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: {value: 0, dtype: int}}}}
+                        right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: {value: 8, dtype: int}}}}
+                if_true: {var: out_coord_1}
+                if_false: {literal: {value: 0, dtype: int}}
+            - ternary:
+                cond:
+                  binary:
+                    op: '&&'
+                    left:
+                      binary:
+                        op: '&&'
+                        left:
+                          binary:
+                            op: '&&'
+                            left:
+                              binary:
+                                op: '&&'
+                                left:
+                                  binary:
+                                    op: '&&'
+                                    left: {literal: {value: true, dtype: bool}}
+                                    right:
+                                      binary:
+                                        op: '&&'
+                                        left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: {value: 0, dtype: int}}}}
+                                        right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: {value: 1, dtype: int}}}}
+                                right:
+                                  binary:
+                                    op: '&&'
+                                    left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: {value: 0, dtype: int}}}}
+                                    right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 48, dtype: int}}}}
+                            right:
+                              binary:
+                                op: '&&'
+                                left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: {value: 0, dtype: int}}}}
+                                right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: {value: 8, dtype: int}}}}
+                        right:
+                          binary:
+                            op: '&&'
+                            left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: {value: 8, dtype: int}}}}
+                            right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: {value: 9, dtype: int}}}}
+                    right:
+                      binary:
+                        op: '&&'
+                        left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: {value: 0, dtype: int}}}}
+                        right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: {value: 8, dtype: int}}}}
+                if_true: {var: out_coord_2}
+                if_false: {literal: {value: 0, dtype: int}}
+            - ternary:
+                cond:
+                  binary:
+                    op: '&&'
+                    left:
+                      binary:
+                        op: '&&'
+                        left:
+                          binary:
+                            op: '&&'
+                            left:
+                              binary:
+                                op: '&&'
+                                left:
+                                  binary:
+                                    op: '&&'
+                                    left: {literal: {value: true, dtype: bool}}
+                                    right:
+                                      binary:
+                                        op: '&&'
+                                        left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: {value: 0, dtype: int}}}}
+                                        right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: {value: 1, dtype: int}}}}
+                                right:
+                                  binary:
+                                    op: '&&'
+                                    left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: {value: 0, dtype: int}}}}
+                                    right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 48, dtype: int}}}}
+                            right:
+                              binary:
+                                op: '&&'
+                                left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: {value: 0, dtype: int}}}}
+                                right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: {value: 8, dtype: int}}}}
+                        right:
+                          binary:
+                            op: '&&'
+                            left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: {value: 8, dtype: int}}}}
+                            right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: {value: 9, dtype: int}}}}
+                    right:
+                      binary:
+                        op: '&&'
+                        left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: {value: 0, dtype: int}}}}
+                        right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: {value: 8, dtype: int}}}}
+                if_true: {var: out_coord_4}
+                if_false: {literal: {value: 0, dtype: int}}
+            select:
+              binary:
+                op: '&&'
+                left:
+                  binary:
+                    op: '&&'
+                    left:
+                      binary:
+                        op: '&&'
+                        left:
+                          binary:
+                            op: '&&'
+                            left:
+                              binary:
+                                op: '&&'
+                                left: {literal: {value: true, dtype: bool}}
+                                right:
+                                  binary:
+                                    op: '&&'
+                                    left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: {value: 0, dtype: int}}}}
+                                    right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: {value: 1, dtype: int}}}}
+                            right:
+                              binary:
+                                op: '&&'
+                                left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: {value: 0, dtype: int}}}}
+                                right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 48, dtype: int}}}}
+                        right:
+                          binary:
+                            op: '&&'
+                            left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: {value: 0, dtype: int}}}}
+                            right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: {value: 8, dtype: int}}}}
+                    right:
+                      binary:
+                        op: '&&'
+                        left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: {value: 8, dtype: int}}}}
+                        right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: {value: 9, dtype: int}}}}
+                right:
+                  binary:
+                    op: '&&'
+                    left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: {value: 0, dtype: int}}}}
+                    right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: {value: 8, dtype: int}}}}
+        - __index_source__:
+            input_idx: 1
+            coord_map:
+            - {var: out_coord_0}
+            - {var: out_coord_1}
+            - {var: out_coord_2}
+            - {var: out_coord_3}
+            - {var: out_coord_4}
+            select: null
+    inputs: [copy__7, copy__6_base]
+    outputs: [[copy__7_base, f32, [1, 48, 8, 64, 64]]]
+  - id: select_16
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 48}, {__dim__: 8}, {__dim__: 64}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {var: out_coord_1}
+            - {var: out_coord_2}
+            - {literal: {value: 9, dtype: int}}
+            - {var: out_coord_3}
+            select: null
+    inputs: [copy__7_base]
+    outputs: [[select_16, f32, [1, 48, 8, 64]]]
+  - id: slice_34
+    op: torch.slice
+    attrs: {shape: {__tuple__: [1, 48, 8, 9]}, dim: 3, start: 0}
+    inputs: [select_16, slice_34_c1, slice_34_c2, slice_34_c3]
+    outputs: [[slice_34, f32, [1, 48, 8, 9]]]
+  - id: slice_35
+    op: torch.slice
+    attrs: {shape: {__tuple__: [1, 48, 8, 9, 64]}, dim: 3, start: 0}
+    inputs: [copy__7_base, slice_35_c1, slice_35_c2, slice_35_c3]
+    outputs: [[slice_35, f32, [1, 48, 8, 9, 64]]]
+  - id: slice_36
+    op: torch.slice
+    attrs: {shape: {__tuple__: [1, 48, 8, 9, 9]}, dim: 4, start: 0}
+    inputs: [slice_35, slice_36_c1, slice_36_c2, slice_36_c3]
+    outputs: [[slice_36, f32, [1, 48, 8, 9, 9]]]
+  - id: unsqueeze_12
+    op: torch.unsqueeze
+    attrs: {dim: -1}
+    inputs: [slice_34]
+    outputs: [[unsqueeze_12, f32, [1, 48, 8, 9, 1]]]
+  - id: unsqueeze_12_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 48}, {__dim__: 8}, {__dim__: 9}, {__dim__: 9}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {var: out_coord_1}
+            - {var: out_coord_2}
+            - {var: out_coord_3}
+            - {literal: {value: 0, dtype: int}}
+            select: null
+    inputs: [unsqueeze_12]
+    outputs: [[unsqueeze_12_bc, f32, [1, 48, 8, 9, 9]]]
+  - id: mul_19
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [unsqueeze_12_bc, slice_36]
+    outputs: [[mul_19, f32, [1, 48, 8, 9, 9]]]
+  - id: sum_11_keepdim
+    op: tensor.reduce
+    attrs: {op: {__elementwise__: sum}, axis: -2}
+    inputs: [mul_19]
+    outputs: [[sum_11_keepdim, f32, [1, 48, 8, 1, 9]]]
+  - id: sum_11
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 48}, {__dim__: 8}, {__dim__: 9}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {var: out_coord_1}
+            - {var: out_coord_2}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_3}
+            select: null
+    inputs: [sum_11_keepdim]
+    outputs: [[sum_11, f32, [1, 48, 8, 9]]]
+  - id: add_13
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [slice_34, sum_11]
+    outputs: [[add_13, f32, [1, 48, 8, 9]]]
+  - id: copy__8
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 48}, {__dim__: 8}, {__dim__: 9}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {var: out_coord_1}
+            - {var: out_coord_2}
+            - {var: out_coord_3}
+            select: null
+    inputs: [add_13]
+    outputs: [[copy__8, f32, [1, 48, 8, 9]]]
+  - id: copy__8_base
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 48}, {__dim__: 8}, {__dim__: 64}, {__dim__: 64}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - ternary:
+                cond:
+                  binary:
+                    op: '&&'
+                    left:
+                      binary:
+                        op: '&&'
+                        left:
+                          binary:
+                            op: '&&'
+                            left:
+                              binary:
+                                op: '&&'
+                                left:
+                                  binary:
+                                    op: '&&'
+                                    left: {literal: {value: true, dtype: bool}}
+                                    right:
+                                      binary:
+                                        op: '&&'
+                                        left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: {value: 0, dtype: int}}}}
+                                        right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: {value: 1, dtype: int}}}}
+                                right:
+                                  binary:
+                                    op: '&&'
+                                    left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: {value: 0, dtype: int}}}}
+                                    right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 48, dtype: int}}}}
+                            right:
+                              binary:
+                                op: '&&'
+                                left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: {value: 0, dtype: int}}}}
+                                right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: {value: 8, dtype: int}}}}
+                        right:
+                          binary:
+                            op: '&&'
+                            left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: {value: 9, dtype: int}}}}
+                            right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: {value: 10, dtype: int}}}}
+                    right:
+                      binary:
+                        op: '&&'
+                        left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: {value: 0, dtype: int}}}}
+                        right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: {value: 9, dtype: int}}}}
+                if_true: {var: out_coord_0}
+                if_false: {literal: {value: 0, dtype: int}}
+            - ternary:
+                cond:
+                  binary:
+                    op: '&&'
+                    left:
+                      binary:
+                        op: '&&'
+                        left:
+                          binary:
+                            op: '&&'
+                            left:
+                              binary:
+                                op: '&&'
+                                left:
+                                  binary:
+                                    op: '&&'
+                                    left: {literal: {value: true, dtype: bool}}
+                                    right:
+                                      binary:
+                                        op: '&&'
+                                        left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: {value: 0, dtype: int}}}}
+                                        right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: {value: 1, dtype: int}}}}
+                                right:
+                                  binary:
+                                    op: '&&'
+                                    left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: {value: 0, dtype: int}}}}
+                                    right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 48, dtype: int}}}}
+                            right:
+                              binary:
+                                op: '&&'
+                                left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: {value: 0, dtype: int}}}}
+                                right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: {value: 8, dtype: int}}}}
+                        right:
+                          binary:
+                            op: '&&'
+                            left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: {value: 9, dtype: int}}}}
+                            right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: {value: 10, dtype: int}}}}
+                    right:
+                      binary:
+                        op: '&&'
+                        left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: {value: 0, dtype: int}}}}
+                        right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: {value: 9, dtype: int}}}}
+                if_true: {var: out_coord_1}
+                if_false: {literal: {value: 0, dtype: int}}
+            - ternary:
+                cond:
+                  binary:
+                    op: '&&'
+                    left:
+                      binary:
+                        op: '&&'
+                        left:
+                          binary:
+                            op: '&&'
+                            left:
+                              binary:
+                                op: '&&'
+                                left:
+                                  binary:
+                                    op: '&&'
+                                    left: {literal: {value: true, dtype: bool}}
+                                    right:
+                                      binary:
+                                        op: '&&'
+                                        left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: {value: 0, dtype: int}}}}
+                                        right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: {value: 1, dtype: int}}}}
+                                right:
+                                  binary:
+                                    op: '&&'
+                                    left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: {value: 0, dtype: int}}}}
+                                    right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 48, dtype: int}}}}
+                            right:
+                              binary:
+                                op: '&&'
+                                left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: {value: 0, dtype: int}}}}
+                                right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: {value: 8, dtype: int}}}}
+                        right:
+                          binary:
+                            op: '&&'
+                            left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: {value: 9, dtype: int}}}}
+                            right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: {value: 10, dtype: int}}}}
+                    right:
+                      binary:
+                        op: '&&'
+                        left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: {value: 0, dtype: int}}}}
+                        right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: {value: 9, dtype: int}}}}
+                if_true: {var: out_coord_2}
+                if_false: {literal: {value: 0, dtype: int}}
+            - ternary:
+                cond:
+                  binary:
+                    op: '&&'
+                    left:
+                      binary:
+                        op: '&&'
+                        left:
+                          binary:
+                            op: '&&'
+                            left:
+                              binary:
+                                op: '&&'
+                                left:
+                                  binary:
+                                    op: '&&'
+                                    left: {literal: {value: true, dtype: bool}}
+                                    right:
+                                      binary:
+                                        op: '&&'
+                                        left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: {value: 0, dtype: int}}}}
+                                        right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: {value: 1, dtype: int}}}}
+                                right:
+                                  binary:
+                                    op: '&&'
+                                    left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: {value: 0, dtype: int}}}}
+                                    right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 48, dtype: int}}}}
+                            right:
+                              binary:
+                                op: '&&'
+                                left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: {value: 0, dtype: int}}}}
+                                right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: {value: 8, dtype: int}}}}
+                        right:
+                          binary:
+                            op: '&&'
+                            left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: {value: 9, dtype: int}}}}
+                            right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: {value: 10, dtype: int}}}}
+                    right:
+                      binary:
+                        op: '&&'
+                        left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: {value: 0, dtype: int}}}}
+                        right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: {value: 9, dtype: int}}}}
+                if_true: {var: out_coord_4}
+                if_false: {literal: {value: 0, dtype: int}}
+            select:
+              binary:
+                op: '&&'
+                left:
+                  binary:
+                    op: '&&'
+                    left:
+                      binary:
+                        op: '&&'
+                        left:
+                          binary:
+                            op: '&&'
+                            left:
+                              binary:
+                                op: '&&'
+                                left: {literal: {value: true, dtype: bool}}
+                                right:
+                                  binary:
+                                    op: '&&'
+                                    left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: {value: 0, dtype: int}}}}
+                                    right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: {value: 1, dtype: int}}}}
+                            right:
+                              binary:
+                                op: '&&'
+                                left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: {value: 0, dtype: int}}}}
+                                right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 48, dtype: int}}}}
+                        right:
+                          binary:
+                            op: '&&'
+                            left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: {value: 0, dtype: int}}}}
+                            right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: {value: 8, dtype: int}}}}
+                    right:
+                      binary:
+                        op: '&&'
+                        left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: {value: 9, dtype: int}}}}
+                        right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: {value: 10, dtype: int}}}}
+                right:
+                  binary:
+                    op: '&&'
+                    left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: {value: 0, dtype: int}}}}
+                    right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: {value: 9, dtype: int}}}}
+        - __index_source__:
+            input_idx: 1
+            coord_map:
+            - {var: out_coord_0}
+            - {var: out_coord_1}
+            - {var: out_coord_2}
+            - {var: out_coord_3}
+            - {var: out_coord_4}
+            select: null
+    inputs: [copy__8, copy__7_base]
+    outputs: [[copy__8_base, f32, [1, 48, 8, 64, 64]]]
+  - id: select_18
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 48}, {__dim__: 8}, {__dim__: 64}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {var: out_coord_1}
+            - {var: out_coord_2}
+            - {literal: {value: 10, dtype: int}}
+            - {var: out_coord_3}
+            select: null
+    inputs: [copy__8_base]
+    outputs: [[select_18, f32, [1, 48, 8, 64]]]
+  - id: slice_38
+    op: torch.slice
+    attrs: {shape: {__tuple__: [1, 48, 8, 10]}, dim: 3, start: 0}
+    inputs: [select_18, slice_38_c1, slice_38_c2, slice_38_c3]
+    outputs: [[slice_38, f32, [1, 48, 8, 10]]]
+  - id: slice_39
+    op: torch.slice
+    attrs: {shape: {__tuple__: [1, 48, 8, 10, 64]}, dim: 3, start: 0}
+    inputs: [copy__8_base, slice_39_c1, slice_39_c2, slice_39_c3]
+    outputs: [[slice_39, f32, [1, 48, 8, 10, 64]]]
+  - id: slice_40
+    op: torch.slice
+    attrs: {shape: {__tuple__: [1, 48, 8, 10, 10]}, dim: 4, start: 0}
+    inputs: [slice_39, slice_40_c1, slice_40_c2, slice_40_c3]
+    outputs: [[slice_40, f32, [1, 48, 8, 10, 10]]]
+  - id: unsqueeze_13
+    op: torch.unsqueeze
+    attrs: {dim: -1}
+    inputs: [slice_38]
+    outputs: [[unsqueeze_13, f32, [1, 48, 8, 10, 1]]]
+  - id: unsqueeze_13_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 48}, {__dim__: 8}, {__dim__: 10}, {__dim__: 10}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {var: out_coord_1}
+            - {var: out_coord_2}
+            - {var: out_coord_3}
+            - {literal: {value: 0, dtype: int}}
+            select: null
+    inputs: [unsqueeze_13]
+    outputs: [[unsqueeze_13_bc, f32, [1, 48, 8, 10, 10]]]
+  - id: mul_20
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [unsqueeze_13_bc, slice_40]
+    outputs: [[mul_20, f32, [1, 48, 8, 10, 10]]]
+  - id: sum_12_keepdim
+    op: tensor.reduce
+    attrs: {op: {__elementwise__: sum}, axis: -2}
+    inputs: [mul_20]
+    outputs: [[sum_12_keepdim, f32, [1, 48, 8, 1, 10]]]
+  - id: sum_12
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 48}, {__dim__: 8}, {__dim__: 10}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {var: out_coord_1}
+            - {var: out_coord_2}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_3}
+            select: null
+    inputs: [sum_12_keepdim]
+    outputs: [[sum_12, f32, [1, 48, 8, 10]]]
+  - id: add_14
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [slice_38, sum_12]
+    outputs: [[add_14, f32, [1, 48, 8, 10]]]
+configs:
+- program: 0
+  target:
+    loop: 0
+  realizations:
+  - name: k_slice_unsqueeze_reduce_cf9205.ab6748b55b7d
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      PLACE@map.1/map.1/inner: cut
+    identity: 89f748c986ccb4ab30aa7a03a6a6b40ea597c693205cfbee13818008f6a74d0d
+  - name: k_slice_unsqueeze_reduce_cf9205.disjoint-sweeps-t128.87ab336243b6
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@inner: coop
+      REDUCE@inner.1/map.1/reduce: ''
+      REDUCE@inner.1/map.2/reduce: ''
+      REDUCE@inner.1/map.2/reduce.1/map.1/reduce: ''
+      WORK: t128
+      RASTER: ''
+    identity: bfb6b926c722ae97f41b2d8becd8e8d7bb6331df4000be7c31abf58dc9fbc685
+  - name: k_slice_unsqueeze_reduce_cf9205.disjoint-sweeps-t128.6ba8c72507d6
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@map.2/map.1/reduce: ''
+      REDUCE@map.2/map.2/reduce: ''
+      REDUCE@map.2/map.2/reduce.1/map.1/reduce: ''
+      WORK: t128
+      RASTER: ''
+    identity: ace320cf25a82e3df9683f5cf595ae4a60ee32df2c25ed80a38b3febeee4c776
+loops:
+- inputs: [copy__6_base]
+  outputs: [copy__8_base, add_14]
+  nodes:
+  - id: copy__6_base
+    op: input
+    outputs: [[copy__6_base, f32, [1, 48, 8, 64, 64]]]
+  - id: copy__8_base
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 48}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 8}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 10}, window: null}}
+                        body:
+                          body:
+                          - class: Loop
+                            fields:
+                              axis: {class: Axis, fields: {name: a3, extent: {dim: 10}, window: null}}
+                              body:
+                                body:
+                                - class: Loop
+                                  fields:
+                                    axis: {class: Axis, fields: {name: a4, extent: {dim: 8}, window: null}}
+                                    body:
+                                      body:
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in0]}
+                                          input: copy__6_base
+                                          index:
+                                            tuple:
+                                            - {expr: {literal: {value: 0, dtype: int}}}
+                                            - expr:
+                                                ternary:
+                                                  cond:
+                                                    binary:
+                                                      op: '&&'
+                                                      left:
+                                                        binary:
+                                                          op: '&&'
+                                                          left: {binary: {op: <, left: {var: a3}, right: {literal: {value: 9, dtype: int}}}}
+                                                          right: {binary: {op: <=, left: {literal: {value: 8, dtype: int}}, right: {var: a3}}}
+                                                      right: {binary: {op: <, left: {var: a2}, right: {literal: {value: 8, dtype: int}}}}
+                                                  if_true: {var: a0}
+                                                  if_false: {literal: {value: 0, dtype: int}}
+                                            - expr:
+                                                ternary:
+                                                  cond:
+                                                    binary:
+                                                      op: '&&'
+                                                      left:
+                                                        binary:
+                                                          op: '&&'
+                                                          left: {binary: {op: <, left: {var: a3}, right: {literal: {value: 9, dtype: int}}}}
+                                                          right: {binary: {op: <=, left: {literal: {value: 8, dtype: int}}, right: {var: a3}}}
+                                                      right: {binary: {op: <, left: {var: a2}, right: {literal: {value: 8, dtype: int}}}}
+                                                  if_true: {var: a1}
+                                                  if_false: {literal: {value: 0, dtype: int}}
+                                            - {expr: {literal: {value: 8, dtype: int}}}
+                                            - {expr: {var: a4}}
+                                          dtype: null
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in1]}
+                                          input: copy__6_base
+                                          index:
+                                            tuple:
+                                            - {expr: {literal: {value: 0, dtype: int}}}
+                                            - expr:
+                                                ternary:
+                                                  cond:
+                                                    binary:
+                                                      op: '&&'
+                                                      left:
+                                                        binary:
+                                                          op: '&&'
+                                                          left: {binary: {op: <, left: {var: a3}, right: {literal: {value: 9, dtype: int}}}}
+                                                          right: {binary: {op: <=, left: {literal: {value: 8, dtype: int}}, right: {var: a3}}}
+                                                      right: {binary: {op: <, left: {var: a2}, right: {literal: {value: 8, dtype: int}}}}
+                                                  if_true: {var: a0}
+                                                  if_false: {literal: {value: 0, dtype: int}}
+                                            - expr:
+                                                ternary:
+                                                  cond:
+                                                    binary:
+                                                      op: '&&'
+                                                      left:
+                                                        binary:
+                                                          op: '&&'
+                                                          left: {binary: {op: <, left: {var: a3}, right: {literal: {value: 9, dtype: int}}}}
+                                                          right: {binary: {op: <=, left: {literal: {value: 8, dtype: int}}, right: {var: a3}}}
+                                                      right: {binary: {op: <, left: {var: a2}, right: {literal: {value: 8, dtype: int}}}}
+                                                  if_true: {var: a1}
+                                                  if_false: {literal: {value: 0, dtype: int}}
+                                            - {expr: {var: a4}}
+                                            - expr:
+                                                ternary:
+                                                  cond:
+                                                    binary:
+                                                      op: '&&'
+                                                      left:
+                                                        binary:
+                                                          op: '&&'
+                                                          left: {binary: {op: <, left: {var: a3}, right: {literal: {value: 9, dtype: int}}}}
+                                                          right: {binary: {op: <=, left: {literal: {value: 8, dtype: int}}, right: {var: a3}}}
+                                                      right: {binary: {op: <, left: {var: a2}, right: {literal: {value: 8, dtype: int}}}}
+                                                  if_true: {var: a2}
+                                                  if_false: {literal: {value: 0, dtype: int}}
+                                          dtype: null
+                                      - class: Assign
+                                        fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: null}
+                                      - class: Accum
+                                        fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a4]}, base: null}
+                                    unroll: false
+                                    seed: true
+                                - class: Loop
+                                  fields:
+                                    axis: {class: Axis, fields: {name: a5, extent: {dim: 9}, window: null}}
+                                    body:
+                                      body:
+                                      - class: Loop
+                                        fields:
+                                          axis: {class: Axis, fields: {name: a6, extent: {dim: 8}, window: null}}
+                                          body:
+                                            body:
+                                            - class: Load
+                                              fields:
+                                                names: {tuple: [in2]}
+                                                input: copy__6_base
+                                                index:
+                                                  tuple:
+                                                  - {expr: {literal: {value: 0, dtype: int}}}
+                                                  - expr:
+                                                      ternary:
+                                                        cond:
+                                                          binary:
+                                                            op: '&&'
+                                                            left:
+                                                              binary:
+                                                                op: <
+                                                                left:
+                                                                  ternary:
+                                                                    cond:
+                                                                      binary:
+                                                                        op: '&&'
+                                                                        left: {binary: {op: <, left: {var: a2}, right: {literal: {value: 9, dtype: int}}}}
+                                                                        right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {
+                                                                              var: a3}}}
+                                                                    if_true: {var: a2}
+                                                                    if_false: {literal: {value: 0, dtype: int}}
+                                                                right: {literal: {value: 8, dtype: int}}
+                                                            right: {binary: {op: <=, left: {literal: {value: 8, dtype: int}}, right: {var: a5}}}
+                                                        if_true:
+                                                          ternary:
+                                                            cond:
+                                                              binary:
+                                                                op: '&&'
+                                                                left: {binary: {op: <, left: {var: a2}, right: {literal: {value: 9, dtype: int}}}}
+                                                                right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {var: a3}}}
+                                                            if_true: {var: a0}
+                                                            if_false: {literal: {value: 0, dtype: int}}
+                                                        if_false: {literal: {value: 0, dtype: int}}
+                                                  - expr:
+                                                      ternary:
+                                                        cond:
+                                                          binary:
+                                                            op: '&&'
+                                                            left:
+                                                              binary:
+                                                                op: <
+                                                                left:
+                                                                  ternary:
+                                                                    cond:
+                                                                      binary:
+                                                                        op: '&&'
+                                                                        left: {binary: {op: <, left: {var: a2}, right: {literal: {value: 9, dtype: int}}}}
+                                                                        right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {
+                                                                              var: a3}}}
+                                                                    if_true: {var: a2}
+                                                                    if_false: {literal: {value: 0, dtype: int}}
+                                                                right: {literal: {value: 8, dtype: int}}
+                                                            right: {binary: {op: <=, left: {literal: {value: 8, dtype: int}}, right: {var: a5}}}
+                                                        if_true:
+                                                          ternary:
+                                                            cond:
+                                                              binary:
+                                                                op: '&&'
+                                                                left: {binary: {op: <, left: {var: a2}, right: {literal: {value: 9, dtype: int}}}}
+                                                                right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {var: a3}}}
+                                                            if_true: {var: a1}
+                                                            if_false: {literal: {value: 0, dtype: int}}
+                                                        if_false: {literal: {value: 0, dtype: int}}
+                                                  - {expr: {literal: {value: 8, dtype: int}}}
+                                                  - {expr: {var: a6}}
+                                                dtype: null
+                                            - class: Load
+                                              fields:
+                                                names: {tuple: [in3]}
+                                                input: copy__6_base
+                                                index:
+                                                  tuple:
+                                                  - {expr: {literal: {value: 0, dtype: int}}}
+                                                  - expr:
+                                                      ternary:
+                                                        cond:
+                                                          binary:
+                                                            op: '&&'
+                                                            left:
+                                                              binary:
+                                                                op: <
+                                                                left:
+                                                                  ternary:
+                                                                    cond:
+                                                                      binary:
+                                                                        op: '&&'
+                                                                        left: {binary: {op: <, left: {var: a2}, right: {literal: {value: 9, dtype: int}}}}
+                                                                        right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {
+                                                                              var: a3}}}
+                                                                    if_true: {var: a2}
+                                                                    if_false: {literal: {value: 0, dtype: int}}
+                                                                right: {literal: {value: 8, dtype: int}}
+                                                            right: {binary: {op: <=, left: {literal: {value: 8, dtype: int}}, right: {var: a5}}}
+                                                        if_true:
+                                                          ternary:
+                                                            cond:
+                                                              binary:
+                                                                op: '&&'
+                                                                left: {binary: {op: <, left: {var: a2}, right: {literal: {value: 9, dtype: int}}}}
+                                                                right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {var: a3}}}
+                                                            if_true: {var: a0}
+                                                            if_false: {literal: {value: 0, dtype: int}}
+                                                        if_false: {literal: {value: 0, dtype: int}}
+                                                  - expr:
+                                                      ternary:
+                                                        cond:
+                                                          binary:
+                                                            op: '&&'
+                                                            left:
+                                                              binary:
+                                                                op: <
+                                                                left:
+                                                                  ternary:
+                                                                    cond:
+                                                                      binary:
+                                                                        op: '&&'
+                                                                        left: {binary: {op: <, left: {var: a2}, right: {literal: {value: 9, dtype: int}}}}
+                                                                        right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {
+                                                                              var: a3}}}
+                                                                    if_true: {var: a2}
+                                                                    if_false: {literal: {value: 0, dtype: int}}
+                                                                right: {literal: {value: 8, dtype: int}}
+                                                            right: {binary: {op: <=, left: {literal: {value: 8, dtype: int}}, right: {var: a5}}}
+                                                        if_true:
+                                                          ternary:
+                                                            cond:
+                                                              binary:
+                                                                op: '&&'
+                                                                left: {binary: {op: <, left: {var: a2}, right: {literal: {value: 9, dtype: int}}}}
+                                                                right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {var: a3}}}
+                                                            if_true: {var: a1}
+                                                            if_false: {literal: {value: 0, dtype: int}}
+                                                        if_false: {literal: {value: 0, dtype: int}}
+                                                  - {expr: {var: a6}}
+                                                  - expr:
+                                                      ternary:
+                                                        cond:
+                                                          binary:
+                                                            op: '&&'
+                                                            left:
+                                                              binary:
+                                                                op: <
+                                                                left:
+                                                                  ternary:
+                                                                    cond:
+                                                                      binary:
+                                                                        op: '&&'
+                                                                        left: {binary: {op: <, left: {var: a2}, right: {literal: {value: 9, dtype: int}}}}
+                                                                        right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {
+                                                                              var: a3}}}
+                                                                    if_true: {var: a2}
+                                                                    if_false: {literal: {value: 0, dtype: int}}
+                                                                right: {literal: {value: 8, dtype: int}}
+                                                            right: {binary: {op: <=, left: {literal: {value: 8, dtype: int}}, right: {var: a5}}}
+                                                        if_true:
+                                                          ternary:
+                                                            cond:
+                                                              binary:
+                                                                op: '&&'
+                                                                left: {binary: {op: <, left: {var: a2}, right: {literal: {value: 9, dtype: int}}}}
+                                                                right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {var: a3}}}
+                                                            if_true: {var: a2}
+                                                            if_false: {literal: {value: 0, dtype: int}}
+                                                        if_false: {literal: {value: 0, dtype: int}}
+                                                dtype: null
+                                            - class: Assign
+                                              fields: {name: v1, op: {elementwise: multiply}, args: {tuple: [in2, in3]}, dtype: null}
+                                            - class: Accum
+                                              fields: {name: acc1, value: v1, op: {elementwise: add}, dtype: null, axes: {tuple: [a6]}, base: null}
+                                          unroll: false
+                                          seed: true
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in4]}
+                                          input: copy__6_base
+                                          index:
+                                            tuple:
+                                            - {expr: {literal: {value: 0, dtype: int}}}
+                                            - expr:
+                                                ternary:
+                                                  cond:
+                                                    binary:
+                                                      op: '&&'
+                                                      left:
+                                                        binary:
+                                                          op: <
+                                                          left:
+                                                            ternary:
+                                                              cond:
+                                                                binary:
+                                                                  op: '&&'
+                                                                  left: {binary: {op: <, left: {var: a2}, right: {literal: {value: 9, dtype: int}}}}
+                                                                  right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {var: a3}}}
+                                                              if_true: {var: a2}
+                                                              if_false: {literal: {value: 0, dtype: int}}
+                                                          right: {literal: {value: 8, dtype: int}}
+                                                      right: {binary: {op: <=, left: {literal: {value: 8, dtype: int}}, right: {var: a5}}}
+                                                  if_true:
+                                                    ternary:
+                                                      cond:
+                                                        binary:
+                                                          op: '&&'
+                                                          left: {binary: {op: <, left: {var: a2}, right: {literal: {value: 9, dtype: int}}}}
+                                                          right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {var: a3}}}
+                                                      if_true: {var: a0}
+                                                      if_false: {literal: {value: 0, dtype: int}}
+                                                  if_false: {literal: {value: 0, dtype: int}}
+                                            - expr:
+                                                ternary:
+                                                  cond:
+                                                    binary:
+                                                      op: '&&'
+                                                      left:
+                                                        binary:
+                                                          op: <
+                                                          left:
+                                                            ternary:
+                                                              cond:
+                                                                binary:
+                                                                  op: '&&'
+                                                                  left: {binary: {op: <, left: {var: a2}, right: {literal: {value: 9, dtype: int}}}}
+                                                                  right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {var: a3}}}
+                                                              if_true: {var: a2}
+                                                              if_false: {literal: {value: 0, dtype: int}}
+                                                          right: {literal: {value: 8, dtype: int}}
+                                                      right: {binary: {op: <=, left: {literal: {value: 8, dtype: int}}, right: {var: a5}}}
+                                                  if_true:
+                                                    ternary:
+                                                      cond:
+                                                        binary:
+                                                          op: '&&'
+                                                          left: {binary: {op: <, left: {var: a2}, right: {literal: {value: 9, dtype: int}}}}
+                                                          right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {var: a3}}}
+                                                      if_true: {var: a1}
+                                                      if_false: {literal: {value: 0, dtype: int}}
+                                                  if_false: {literal: {value: 0, dtype: int}}
+                                            - {expr: {literal: {value: 8, dtype: int}}}
+                                            - expr:
+                                                ternary:
+                                                  cond:
+                                                    binary:
+                                                      op: '&&'
+                                                      left:
+                                                        binary:
+                                                          op: <
+                                                          left:
+                                                            ternary:
+                                                              cond:
+                                                                binary:
+                                                                  op: '&&'
+                                                                  left: {binary: {op: <, left: {var: a2}, right: {literal: {value: 9, dtype: int}}}}
+                                                                  right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {var: a3}}}
+                                                              if_true: {var: a2}
+                                                              if_false: {literal: {value: 0, dtype: int}}
+                                                          right: {literal: {value: 8, dtype: int}}
+                                                      right: {binary: {op: <=, left: {literal: {value: 8, dtype: int}}, right: {var: a5}}}
+                                                  if_true:
+                                                    ternary:
+                                                      cond:
+                                                        binary:
+                                                          op: '&&'
+                                                          left: {binary: {op: <, left: {var: a2}, right: {literal: {value: 9, dtype: int}}}}
+                                                          right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {var: a3}}}
+                                                      if_true: {var: a2}
+                                                      if_false: {literal: {value: 0, dtype: int}}
+                                                  if_false: {literal: {value: 0, dtype: int}}
+                                          dtype: null
+                                      - class: Assign
+                                        fields: {name: v2, op: {elementwise: add}, args: {tuple: [acc1, in4]}, dtype: null}
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in5]}
+                                          input: copy__6_base
+                                          index:
+                                            tuple:
+                                            - {expr: {literal: {value: 0, dtype: int}}}
+                                            - expr:
+                                                ternary:
+                                                  cond:
+                                                    binary:
+                                                      op: '&&'
+                                                      left: {binary: {op: <, left: {var: a2}, right: {literal: {value: 9, dtype: int}}}}
+                                                      right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {var: a3}}}
+                                                  if_true: {var: a0}
+                                                  if_false: {literal: {value: 0, dtype: int}}
+                                            - expr:
+                                                ternary:
+                                                  cond:
+                                                    binary:
+                                                      op: '&&'
+                                                      left: {binary: {op: <, left: {var: a2}, right: {literal: {value: 9, dtype: int}}}}
+                                                      right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {var: a3}}}
+                                                  if_true: {var: a1}
+                                                  if_false: {literal: {value: 0, dtype: int}}
+                                            - {expr: {literal: {value: 9, dtype: int}}}
+                                            - {expr: {var: a5}}
+                                          dtype: null
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in6]}
+                                          input: copy__6_base
+                                          index:
+                                            tuple:
+                                            - {expr: {literal: {value: 0, dtype: int}}}
+                                            - expr:
+                                                ternary:
+                                                  cond:
+                                                    binary:
+                                                      op: '&&'
+                                                      left: {binary: {op: <, left: {var: a2}, right: {literal: {value: 9, dtype: int}}}}
+                                                      right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {var: a3}}}
+                                                  if_true: {var: a0}
+                                                  if_false: {literal: {value: 0, dtype: int}}
+                                            - expr:
+                                                ternary:
+                                                  cond:
+                                                    binary:
+                                                      op: '&&'
+                                                      left: {binary: {op: <, left: {var: a2}, right: {literal: {value: 9, dtype: int}}}}
+                                                      right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {var: a3}}}
+                                                  if_true: {var: a1}
+                                                  if_false: {literal: {value: 0, dtype: int}}
+                                            - {expr: {var: a5}}
+                                            - expr:
+                                                ternary:
+                                                  cond:
+                                                    binary:
+                                                      op: '&&'
+                                                      left: {binary: {op: <, left: {var: a2}, right: {literal: {value: 9, dtype: int}}}}
+                                                      right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {var: a3}}}
+                                                  if_true: {var: a2}
+                                                  if_false: {literal: {value: 0, dtype: int}}
+                                          dtype: null
+                                      - class: Select
+                                        fields:
+                                          name: v3
+                                          branches:
+                                            tuple:
+                                            - class: SelectBranch
+                                              fields:
+                                                value: v2
+                                                select:
+                                                  expr:
+                                                    binary:
+                                                      op: '&&'
+                                                      left:
+                                                        binary:
+                                                          op: <
+                                                          left:
+                                                            ternary:
+                                                              cond:
+                                                                binary:
+                                                                  op: '&&'
+                                                                  left: {binary: {op: <, left: {var: a2}, right: {literal: {value: 9, dtype: int}}}}
+                                                                  right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {var: a3}}}
+                                                              if_true: {var: a2}
+                                                              if_false: {literal: {value: 0, dtype: int}}
+                                                          right: {literal: {value: 8, dtype: int}}
+                                                      right: {binary: {op: <=, left: {literal: {value: 8, dtype: int}}, right: {var: a5}}}
+                                            - {class: SelectBranch, fields: {value: in6, select: {expr: {literal: {value: true, dtype: bool}}}}}
+                                      - class: Select
+                                        fields:
+                                          name: v4
+                                          branches:
+                                            tuple:
+                                            - {class: SelectBranch, fields: {value: in5, select: {expr: {literal: {value: true, dtype: bool}}}}}
+                                      - class: Assign
+                                        fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [v3, v4]}, dtype: null}
+                                      - class: Accum
+                                        fields: {name: acc2, value: v5, op: {elementwise: add}, dtype: null, axes: {tuple: [a5]}, base: null}
+                                    unroll: false
+                                    seed: true
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in7]}
+                                    input: copy__6_base
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - expr:
+                                          ternary:
+                                            cond:
+                                              binary:
+                                                op: '&&'
+                                                left:
+                                                  binary:
+                                                    op: '&&'
+                                                    left: {binary: {op: <, left: {var: a3}, right: {literal: {value: 9, dtype: int}}}}
+                                                    right: {binary: {op: <=, left: {literal: {value: 8, dtype: int}}, right: {var: a3}}}
+                                                right: {binary: {op: <, left: {var: a2}, right: {literal: {value: 8, dtype: int}}}}
+                                            if_true: {var: a0}
+                                            if_false: {literal: {value: 0, dtype: int}}
+                                      - expr:
+                                          ternary:
+                                            cond:
+                                              binary:
+                                                op: '&&'
+                                                left:
+                                                  binary:
+                                                    op: '&&'
+                                                    left: {binary: {op: <, left: {var: a3}, right: {literal: {value: 9, dtype: int}}}}
+                                                    right: {binary: {op: <=, left: {literal: {value: 8, dtype: int}}, right: {var: a3}}}
+                                                right: {binary: {op: <, left: {var: a2}, right: {literal: {value: 8, dtype: int}}}}
+                                            if_true: {var: a1}
+                                            if_false: {literal: {value: 0, dtype: int}}
+                                      - {expr: {literal: {value: 8, dtype: int}}}
+                                      - expr:
+                                          ternary:
+                                            cond:
+                                              binary:
+                                                op: '&&'
+                                                left:
+                                                  binary:
+                                                    op: '&&'
+                                                    left: {binary: {op: <, left: {var: a3}, right: {literal: {value: 9, dtype: int}}}}
+                                                    right: {binary: {op: <=, left: {literal: {value: 8, dtype: int}}, right: {var: a3}}}
+                                                right: {binary: {op: <, left: {var: a2}, right: {literal: {value: 8, dtype: int}}}}
+                                            if_true: {var: a2}
+                                            if_false: {literal: {value: 0, dtype: int}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v6, op: {elementwise: add}, args: {tuple: [acc0, in7]}, dtype: null}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in8]}
+                                    input: copy__6_base
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - expr:
+                                          ternary:
+                                            cond:
+                                              binary:
+                                                op: '&&'
+                                                left: {binary: {op: <, left: {var: a2}, right: {literal: {value: 9, dtype: int}}}}
+                                                right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {var: a3}}}
+                                            if_true: {var: a0}
+                                            if_false: {literal: {value: 0, dtype: int}}
+                                      - expr:
+                                          ternary:
+                                            cond:
+                                              binary:
+                                                op: '&&'
+                                                left: {binary: {op: <, left: {var: a2}, right: {literal: {value: 9, dtype: int}}}}
+                                                right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {var: a3}}}
+                                            if_true: {var: a1}
+                                            if_false: {literal: {value: 0, dtype: int}}
+                                      - {expr: {literal: {value: 9, dtype: int}}}
+                                      - expr:
+                                          ternary:
+                                            cond:
+                                              binary:
+                                                op: '&&'
+                                                left: {binary: {op: <, left: {var: a2}, right: {literal: {value: 9, dtype: int}}}}
+                                                right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {var: a3}}}
+                                            if_true: {var: a2}
+                                            if_false: {literal: {value: 0, dtype: int}}
+                                    dtype: null
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in9]}
+                                    input: copy__6_base
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a0}}
+                                      - {expr: {var: a1}}
+                                      - {expr: {literal: {value: 10, dtype: int}}}
+                                      - {expr: {var: a3}}
+                                    dtype: null
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in10]}
+                                    input: copy__6_base
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a0}}
+                                      - {expr: {var: a1}}
+                                      - {expr: {var: a3}}
+                                      - {expr: {var: a2}}
+                                    dtype: null
+                                - class: Select
+                                  fields:
+                                    name: v7
+                                    branches:
+                                      tuple:
+                                      - class: SelectBranch
+                                        fields:
+                                          value: v6
+                                          select:
+                                            expr:
+                                              binary:
+                                                op: '&&'
+                                                left:
+                                                  binary:
+                                                    op: '&&'
+                                                    left: {binary: {op: <, left: {var: a3}, right: {literal: {value: 9, dtype: int}}}}
+                                                    right: {binary: {op: <=, left: {literal: {value: 8, dtype: int}}, right: {var: a3}}}
+                                                right: {binary: {op: <, left: {var: a2}, right: {literal: {value: 8, dtype: int}}}}
+                                      - class: SelectBranch
+                                        fields: {value: in10, select: {expr: {literal: {value: true, dtype: bool}}}}
+                                - class: Select
+                                  fields:
+                                    name: v8
+                                    branches:
+                                      tuple:
+                                      - {class: SelectBranch, fields: {value: in8, select: {expr: {literal: {value: true, dtype: bool}}}}}
+                                - class: Assign
+                                  fields: {name: v9, op: {elementwise: add}, args: {tuple: [acc2, v8]}, dtype: null}
+                                - class: Select
+                                  fields:
+                                    name: v10
+                                    branches:
+                                      tuple:
+                                      - class: SelectBranch
+                                        fields:
+                                          value: v9
+                                          select:
+                                            expr:
+                                              binary:
+                                                op: '&&'
+                                                left: {binary: {op: <, left: {var: a2}, right: {literal: {value: 9, dtype: int}}}}
+                                                right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {var: a3}}}
+                                      - {class: SelectBranch, fields: {value: v7, select: {expr: {literal: {value: true, dtype: bool}}}}}
+                                - class: Select
+                                  fields:
+                                    name: v11
+                                    branches:
+                                      tuple:
+                                      - {class: SelectBranch, fields: {value: in9, select: {expr: {literal: {value: true, dtype: bool}}}}}
+                                - class: Select
+                                  fields:
+                                    name: v12
+                                    branches:
+                                      tuple:
+                                      - {class: SelectBranch, fields: {value: v11, select: {expr: {literal: {value: true, dtype: bool}}}}}
+                                - class: Assign
+                                  fields: {name: v13, op: {elementwise: multiply}, args: {tuple: [v10, v12]}, dtype: null}
+                                - class: Accum
+                                  fields: {name: acc3, value: v13, op: {elementwise: add}, dtype: null, axes: {tuple: [a3]}, base: null}
+                              unroll: false
+                              seed: true
+                          - class: Load
+                            fields:
+                              names: {tuple: [in11]}
+                              input: copy__6_base
+                              index:
+                                tuple:
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {var: a0}}
+                                - {expr: {var: a1}}
+                                - {expr: {literal: {value: 10, dtype: int}}}
+                                - {expr: {var: a2}}
+                              dtype: null
+                          - class: Select
+                            fields:
+                              name: v14
+                              branches:
+                                tuple:
+                                - class: SelectBranch
+                                  fields: {value: in11, select: {expr: {literal: {value: true, dtype: bool}}}}
+                          - class: Select
+                            fields:
+                              name: v15
+                              branches:
+                                tuple:
+                                - {class: SelectBranch, fields: {value: v14, select: {expr: {literal: {value: true, dtype: bool}}}}}
+                          - class: Assign
+                            fields: {name: v16, op: {elementwise: add}, args: {tuple: [acc3, v15]}, dtype: null}
+                          - class: Write
+                            fields:
+                              output: add_14
+                              index:
+                                tuple:
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {var: a0}}
+                                - {expr: {var: a1}}
+                                - {expr: {var: a2}}
+                              values: {tuple: [v16]}
+                              value_dtype: null
+                              atomic: false
+                              swizzle: NONE
+                        unroll: false
+                        seed: true
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a7, extent: {dim: 64}, window: null}}
+                        body:
+                          body:
+                          - class: Loop
+                            fields:
+                              axis: {class: Axis, fields: {name: a8, extent: {dim: 64}, window: null}}
+                              body:
+                                body:
+                                - class: Loop
+                                  fields:
+                                    axis: {class: Axis, fields: {name: a9, extent: {dim: 8}, window: null}}
+                                    body:
+                                      body:
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in12]}
+                                          input: copy__6_base
+                                          index:
+                                            tuple:
+                                            - {expr: {literal: {value: 0, dtype: int}}}
+                                            - expr:
+                                                ternary:
+                                                  cond:
+                                                    binary:
+                                                      op: '&&'
+                                                      left:
+                                                        binary:
+                                                          op: '&&'
+                                                          left: {binary: {op: <, left: {var: a7}, right: {literal: {value: 9, dtype: int}}}}
+                                                          right: {binary: {op: <=, left: {literal: {value: 8, dtype: int}}, right: {var: a7}}}
+                                                      right: {binary: {op: <, left: {var: a8}, right: {literal: {value: 8, dtype: int}}}}
+                                                  if_true: {var: a0}
+                                                  if_false: {literal: {value: 0, dtype: int}}
+                                            - expr:
+                                                ternary:
+                                                  cond:
+                                                    binary:
+                                                      op: '&&'
+                                                      left:
+                                                        binary:
+                                                          op: '&&'
+                                                          left: {binary: {op: <, left: {var: a7}, right: {literal: {value: 9, dtype: int}}}}
+                                                          right: {binary: {op: <=, left: {literal: {value: 8, dtype: int}}, right: {var: a7}}}
+                                                      right: {binary: {op: <, left: {var: a8}, right: {literal: {value: 8, dtype: int}}}}
+                                                  if_true: {var: a1}
+                                                  if_false: {literal: {value: 0, dtype: int}}
+                                            - {expr: {literal: {value: 8, dtype: int}}}
+                                            - {expr: {var: a9}}
+                                          dtype: null
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in13]}
+                                          input: copy__6_base
+                                          index:
+                                            tuple:
+                                            - {expr: {literal: {value: 0, dtype: int}}}
+                                            - expr:
+                                                ternary:
+                                                  cond:
+                                                    binary:
+                                                      op: '&&'
+                                                      left:
+                                                        binary:
+                                                          op: '&&'
+                                                          left: {binary: {op: <, left: {var: a7}, right: {literal: {value: 9, dtype: int}}}}
+                                                          right: {binary: {op: <=, left: {literal: {value: 8, dtype: int}}, right: {var: a7}}}
+                                                      right: {binary: {op: <, left: {var: a8}, right: {literal: {value: 8, dtype: int}}}}
+                                                  if_true: {var: a0}
+                                                  if_false: {literal: {value: 0, dtype: int}}
+                                            - expr:
+                                                ternary:
+                                                  cond:
+                                                    binary:
+                                                      op: '&&'
+                                                      left:
+                                                        binary:
+                                                          op: '&&'
+                                                          left: {binary: {op: <, left: {var: a7}, right: {literal: {value: 9, dtype: int}}}}
+                                                          right: {binary: {op: <=, left: {literal: {value: 8, dtype: int}}, right: {var: a7}}}
+                                                      right: {binary: {op: <, left: {var: a8}, right: {literal: {value: 8, dtype: int}}}}
+                                                  if_true: {var: a1}
+                                                  if_false: {literal: {value: 0, dtype: int}}
+                                            - {expr: {var: a9}}
+                                            - expr:
+                                                ternary:
+                                                  cond:
+                                                    binary:
+                                                      op: '&&'
+                                                      left:
+                                                        binary:
+                                                          op: '&&'
+                                                          left: {binary: {op: <, left: {var: a7}, right: {literal: {value: 9, dtype: int}}}}
+                                                          right: {binary: {op: <=, left: {literal: {value: 8, dtype: int}}, right: {var: a7}}}
+                                                      right: {binary: {op: <, left: {var: a8}, right: {literal: {value: 8, dtype: int}}}}
+                                                  if_true: {var: a8}
+                                                  if_false: {literal: {value: 0, dtype: int}}
+                                          dtype: null
+                                      - class: Assign
+                                        fields: {name: v17, op: {elementwise: multiply}, args: {tuple: [in12, in13]}, dtype: null}
+                                      - class: Accum
+                                        fields: {name: acc4, value: v17, op: {elementwise: add}, dtype: null, axes: {tuple: [a9]}, base: null}
+                                    unroll: false
+                                    seed: true
+                                - class: Loop
+                                  fields:
+                                    axis: {class: Axis, fields: {name: a10, extent: {dim: 9}, window: null}}
+                                    body:
+                                      body:
+                                      - class: Loop
+                                        fields:
+                                          axis: {class: Axis, fields: {name: a11, extent: {dim: 8}, window: null}}
+                                          body:
+                                            body:
+                                            - class: Load
+                                              fields:
+                                                names: {tuple: [in14]}
+                                                input: copy__6_base
+                                                index:
+                                                  tuple:
+                                                  - {expr: {literal: {value: 0, dtype: int}}}
+                                                  - expr:
+                                                      ternary:
+                                                        cond:
+                                                          binary:
+                                                            op: '&&'
+                                                            left:
+                                                              binary:
+                                                                op: <
+                                                                left:
+                                                                  ternary:
+                                                                    cond:
+                                                                      binary:
+                                                                        op: '&&'
+                                                                        left:
+                                                                          binary:
+                                                                            op: '&&'
+                                                                            left: {binary: {op: <, left: {var: a7}, right: {literal: {value: 10,
+                                                                                    dtype: int}}}}
+                                                                            right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}},
+                                                                                right: {var: a7}}}
+                                                                        right: {binary: {op: <, left: {var: a8}, right: {literal: {value: 9, dtype: int}}}}
+                                                                    if_true: {var: a8}
+                                                                    if_false: {literal: {value: 0, dtype: int}}
+                                                                right: {literal: {value: 8, dtype: int}}
+                                                            right: {binary: {op: <=, left: {literal: {value: 8, dtype: int}}, right: {var: a10}}}
+                                                        if_true:
+                                                          ternary:
+                                                            cond:
+                                                              binary:
+                                                                op: '&&'
+                                                                left:
+                                                                  binary:
+                                                                    op: '&&'
+                                                                    left: {binary: {op: <, left: {var: a7}, right: {literal: {value: 10, dtype: int}}}}
+                                                                    right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {
+                                                                          var: a7}}}
+                                                                right: {binary: {op: <, left: {var: a8}, right: {literal: {value: 9, dtype: int}}}}
+                                                            if_true: {var: a0}
+                                                            if_false: {literal: {value: 0, dtype: int}}
+                                                        if_false: {literal: {value: 0, dtype: int}}
+                                                  - expr:
+                                                      ternary:
+                                                        cond:
+                                                          binary:
+                                                            op: '&&'
+                                                            left:
+                                                              binary:
+                                                                op: <
+                                                                left:
+                                                                  ternary:
+                                                                    cond:
+                                                                      binary:
+                                                                        op: '&&'
+                                                                        left:
+                                                                          binary:
+                                                                            op: '&&'
+                                                                            left: {binary: {op: <, left: {var: a7}, right: {literal: {value: 10,
+                                                                                    dtype: int}}}}
+                                                                            right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}},
+                                                                                right: {var: a7}}}
+                                                                        right: {binary: {op: <, left: {var: a8}, right: {literal: {value: 9, dtype: int}}}}
+                                                                    if_true: {var: a8}
+                                                                    if_false: {literal: {value: 0, dtype: int}}
+                                                                right: {literal: {value: 8, dtype: int}}
+                                                            right: {binary: {op: <=, left: {literal: {value: 8, dtype: int}}, right: {var: a10}}}
+                                                        if_true:
+                                                          ternary:
+                                                            cond:
+                                                              binary:
+                                                                op: '&&'
+                                                                left:
+                                                                  binary:
+                                                                    op: '&&'
+                                                                    left: {binary: {op: <, left: {var: a7}, right: {literal: {value: 10, dtype: int}}}}
+                                                                    right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {
+                                                                          var: a7}}}
+                                                                right: {binary: {op: <, left: {var: a8}, right: {literal: {value: 9, dtype: int}}}}
+                                                            if_true: {var: a1}
+                                                            if_false: {literal: {value: 0, dtype: int}}
+                                                        if_false: {literal: {value: 0, dtype: int}}
+                                                  - {expr: {literal: {value: 8, dtype: int}}}
+                                                  - {expr: {var: a11}}
+                                                dtype: null
+                                            - class: Load
+                                              fields:
+                                                names: {tuple: [in15]}
+                                                input: copy__6_base
+                                                index:
+                                                  tuple:
+                                                  - {expr: {literal: {value: 0, dtype: int}}}
+                                                  - expr:
+                                                      ternary:
+                                                        cond:
+                                                          binary:
+                                                            op: '&&'
+                                                            left:
+                                                              binary:
+                                                                op: <
+                                                                left:
+                                                                  ternary:
+                                                                    cond:
+                                                                      binary:
+                                                                        op: '&&'
+                                                                        left:
+                                                                          binary:
+                                                                            op: '&&'
+                                                                            left: {binary: {op: <, left: {var: a7}, right: {literal: {value: 10,
+                                                                                    dtype: int}}}}
+                                                                            right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}},
+                                                                                right: {var: a7}}}
+                                                                        right: {binary: {op: <, left: {var: a8}, right: {literal: {value: 9, dtype: int}}}}
+                                                                    if_true: {var: a8}
+                                                                    if_false: {literal: {value: 0, dtype: int}}
+                                                                right: {literal: {value: 8, dtype: int}}
+                                                            right: {binary: {op: <=, left: {literal: {value: 8, dtype: int}}, right: {var: a10}}}
+                                                        if_true:
+                                                          ternary:
+                                                            cond:
+                                                              binary:
+                                                                op: '&&'
+                                                                left:
+                                                                  binary:
+                                                                    op: '&&'
+                                                                    left: {binary: {op: <, left: {var: a7}, right: {literal: {value: 10, dtype: int}}}}
+                                                                    right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {
+                                                                          var: a7}}}
+                                                                right: {binary: {op: <, left: {var: a8}, right: {literal: {value: 9, dtype: int}}}}
+                                                            if_true: {var: a0}
+                                                            if_false: {literal: {value: 0, dtype: int}}
+                                                        if_false: {literal: {value: 0, dtype: int}}
+                                                  - expr:
+                                                      ternary:
+                                                        cond:
+                                                          binary:
+                                                            op: '&&'
+                                                            left:
+                                                              binary:
+                                                                op: <
+                                                                left:
+                                                                  ternary:
+                                                                    cond:
+                                                                      binary:
+                                                                        op: '&&'
+                                                                        left:
+                                                                          binary:
+                                                                            op: '&&'
+                                                                            left: {binary: {op: <, left: {var: a7}, right: {literal: {value: 10,
+                                                                                    dtype: int}}}}
+                                                                            right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}},
+                                                                                right: {var: a7}}}
+                                                                        right: {binary: {op: <, left: {var: a8}, right: {literal: {value: 9, dtype: int}}}}
+                                                                    if_true: {var: a8}
+                                                                    if_false: {literal: {value: 0, dtype: int}}
+                                                                right: {literal: {value: 8, dtype: int}}
+                                                            right: {binary: {op: <=, left: {literal: {value: 8, dtype: int}}, right: {var: a10}}}
+                                                        if_true:
+                                                          ternary:
+                                                            cond:
+                                                              binary:
+                                                                op: '&&'
+                                                                left:
+                                                                  binary:
+                                                                    op: '&&'
+                                                                    left: {binary: {op: <, left: {var: a7}, right: {literal: {value: 10, dtype: int}}}}
+                                                                    right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {
+                                                                          var: a7}}}
+                                                                right: {binary: {op: <, left: {var: a8}, right: {literal: {value: 9, dtype: int}}}}
+                                                            if_true: {var: a1}
+                                                            if_false: {literal: {value: 0, dtype: int}}
+                                                        if_false: {literal: {value: 0, dtype: int}}
+                                                  - {expr: {var: a11}}
+                                                  - expr:
+                                                      ternary:
+                                                        cond:
+                                                          binary:
+                                                            op: '&&'
+                                                            left:
+                                                              binary:
+                                                                op: <
+                                                                left:
+                                                                  ternary:
+                                                                    cond:
+                                                                      binary:
+                                                                        op: '&&'
+                                                                        left:
+                                                                          binary:
+                                                                            op: '&&'
+                                                                            left: {binary: {op: <, left: {var: a7}, right: {literal: {value: 10,
+                                                                                    dtype: int}}}}
+                                                                            right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}},
+                                                                                right: {var: a7}}}
+                                                                        right: {binary: {op: <, left: {var: a8}, right: {literal: {value: 9, dtype: int}}}}
+                                                                    if_true: {var: a8}
+                                                                    if_false: {literal: {value: 0, dtype: int}}
+                                                                right: {literal: {value: 8, dtype: int}}
+                                                            right: {binary: {op: <=, left: {literal: {value: 8, dtype: int}}, right: {var: a10}}}
+                                                        if_true:
+                                                          ternary:
+                                                            cond:
+                                                              binary:
+                                                                op: '&&'
+                                                                left:
+                                                                  binary:
+                                                                    op: '&&'
+                                                                    left: {binary: {op: <, left: {var: a7}, right: {literal: {value: 10, dtype: int}}}}
+                                                                    right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {
+                                                                          var: a7}}}
+                                                                right: {binary: {op: <, left: {var: a8}, right: {literal: {value: 9, dtype: int}}}}
+                                                            if_true: {var: a8}
+                                                            if_false: {literal: {value: 0, dtype: int}}
+                                                        if_false: {literal: {value: 0, dtype: int}}
+                                                dtype: null
+                                            - class: Assign
+                                              fields: {name: v18, op: {elementwise: multiply}, args: {tuple: [in14, in15]}, dtype: null}
+                                            - class: Accum
+                                              fields: {name: acc5, value: v18, op: {elementwise: add}, dtype: null, axes: {tuple: [a11]}, base: null}
+                                          unroll: false
+                                          seed: true
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in16]}
+                                          input: copy__6_base
+                                          index:
+                                            tuple:
+                                            - {expr: {literal: {value: 0, dtype: int}}}
+                                            - expr:
+                                                ternary:
+                                                  cond:
+                                                    binary:
+                                                      op: '&&'
+                                                      left:
+                                                        binary:
+                                                          op: '&&'
+                                                          left: {binary: {op: <, left: {var: a7}, right: {literal: {value: 10, dtype: int}}}}
+                                                          right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {var: a7}}}
+                                                      right: {binary: {op: <, left: {var: a8}, right: {literal: {value: 9, dtype: int}}}}
+                                                  if_true: {var: a0}
+                                                  if_false: {literal: {value: 0, dtype: int}}
+                                            - expr:
+                                                ternary:
+                                                  cond:
+                                                    binary:
+                                                      op: '&&'
+                                                      left:
+                                                        binary:
+                                                          op: '&&'
+                                                          left: {binary: {op: <, left: {var: a7}, right: {literal: {value: 10, dtype: int}}}}
+                                                          right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {var: a7}}}
+                                                      right: {binary: {op: <, left: {var: a8}, right: {literal: {value: 9, dtype: int}}}}
+                                                  if_true: {var: a1}
+                                                  if_false: {literal: {value: 0, dtype: int}}
+                                            - {expr: {literal: {value: 9, dtype: int}}}
+                                            - {expr: {var: a10}}
+                                          dtype: null
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in17]}
+                                          input: copy__6_base
+                                          index:
+                                            tuple:
+                                            - {expr: {literal: {value: 0, dtype: int}}}
+                                            - expr:
+                                                ternary:
+                                                  cond:
+                                                    binary:
+                                                      op: '&&'
+                                                      left:
+                                                        binary:
+                                                          op: '&&'
+                                                          left: {binary: {op: <, left: {var: a7}, right: {literal: {value: 10, dtype: int}}}}
+                                                          right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {var: a7}}}
+                                                      right: {binary: {op: <, left: {var: a8}, right: {literal: {value: 9, dtype: int}}}}
+                                                  if_true: {var: a0}
+                                                  if_false: {literal: {value: 0, dtype: int}}
+                                            - expr:
+                                                ternary:
+                                                  cond:
+                                                    binary:
+                                                      op: '&&'
+                                                      left:
+                                                        binary:
+                                                          op: '&&'
+                                                          left: {binary: {op: <, left: {var: a7}, right: {literal: {value: 10, dtype: int}}}}
+                                                          right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {var: a7}}}
+                                                      right: {binary: {op: <, left: {var: a8}, right: {literal: {value: 9, dtype: int}}}}
+                                                  if_true: {var: a1}
+                                                  if_false: {literal: {value: 0, dtype: int}}
+                                            - {expr: {var: a10}}
+                                            - expr:
+                                                ternary:
+                                                  cond:
+                                                    binary:
+                                                      op: '&&'
+                                                      left:
+                                                        binary:
+                                                          op: '&&'
+                                                          left: {binary: {op: <, left: {var: a7}, right: {literal: {value: 10, dtype: int}}}}
+                                                          right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {var: a7}}}
+                                                      right: {binary: {op: <, left: {var: a8}, right: {literal: {value: 9, dtype: int}}}}
+                                                  if_true: {var: a8}
+                                                  if_false: {literal: {value: 0, dtype: int}}
+                                          dtype: null
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in18]}
+                                          input: copy__6_base
+                                          index:
+                                            tuple:
+                                            - {expr: {literal: {value: 0, dtype: int}}}
+                                            - expr:
+                                                ternary:
+                                                  cond:
+                                                    binary:
+                                                      op: '&&'
+                                                      left:
+                                                        binary:
+                                                          op: <
+                                                          left:
+                                                            ternary:
+                                                              cond:
+                                                                binary:
+                                                                  op: '&&'
+                                                                  left:
+                                                                    binary:
+                                                                      op: '&&'
+                                                                      left: {binary: {op: <, left: {var: a7}, right: {literal: {value: 10, dtype: int}}}}
+                                                                      right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {
+                                                                            var: a7}}}
+                                                                  right: {binary: {op: <, left: {var: a8}, right: {literal: {value: 9, dtype: int}}}}
+                                                              if_true: {var: a8}
+                                                              if_false: {literal: {value: 0, dtype: int}}
+                                                          right: {literal: {value: 8, dtype: int}}
+                                                      right: {binary: {op: <=, left: {literal: {value: 8, dtype: int}}, right: {var: a10}}}
+                                                  if_true:
+                                                    ternary:
+                                                      cond:
+                                                        binary:
+                                                          op: '&&'
+                                                          left:
+                                                            binary:
+                                                              op: '&&'
+                                                              left: {binary: {op: <, left: {var: a7}, right: {literal: {value: 10, dtype: int}}}}
+                                                              right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {var: a7}}}
+                                                          right: {binary: {op: <, left: {var: a8}, right: {literal: {value: 9, dtype: int}}}}
+                                                      if_true: {var: a0}
+                                                      if_false: {literal: {value: 0, dtype: int}}
+                                                  if_false: {literal: {value: 0, dtype: int}}
+                                            - expr:
+                                                ternary:
+                                                  cond:
+                                                    binary:
+                                                      op: '&&'
+                                                      left:
+                                                        binary:
+                                                          op: <
+                                                          left:
+                                                            ternary:
+                                                              cond:
+                                                                binary:
+                                                                  op: '&&'
+                                                                  left:
+                                                                    binary:
+                                                                      op: '&&'
+                                                                      left: {binary: {op: <, left: {var: a7}, right: {literal: {value: 10, dtype: int}}}}
+                                                                      right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {
+                                                                            var: a7}}}
+                                                                  right: {binary: {op: <, left: {var: a8}, right: {literal: {value: 9, dtype: int}}}}
+                                                              if_true: {var: a8}
+                                                              if_false: {literal: {value: 0, dtype: int}}
+                                                          right: {literal: {value: 8, dtype: int}}
+                                                      right: {binary: {op: <=, left: {literal: {value: 8, dtype: int}}, right: {var: a10}}}
+                                                  if_true:
+                                                    ternary:
+                                                      cond:
+                                                        binary:
+                                                          op: '&&'
+                                                          left:
+                                                            binary:
+                                                              op: '&&'
+                                                              left: {binary: {op: <, left: {var: a7}, right: {literal: {value: 10, dtype: int}}}}
+                                                              right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {var: a7}}}
+                                                          right: {binary: {op: <, left: {var: a8}, right: {literal: {value: 9, dtype: int}}}}
+                                                      if_true: {var: a1}
+                                                      if_false: {literal: {value: 0, dtype: int}}
+                                                  if_false: {literal: {value: 0, dtype: int}}
+                                            - {expr: {literal: {value: 8, dtype: int}}}
+                                            - expr:
+                                                ternary:
+                                                  cond:
+                                                    binary:
+                                                      op: '&&'
+                                                      left:
+                                                        binary:
+                                                          op: <
+                                                          left:
+                                                            ternary:
+                                                              cond:
+                                                                binary:
+                                                                  op: '&&'
+                                                                  left:
+                                                                    binary:
+                                                                      op: '&&'
+                                                                      left: {binary: {op: <, left: {var: a7}, right: {literal: {value: 10, dtype: int}}}}
+                                                                      right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {
+                                                                            var: a7}}}
+                                                                  right: {binary: {op: <, left: {var: a8}, right: {literal: {value: 9, dtype: int}}}}
+                                                              if_true: {var: a8}
+                                                              if_false: {literal: {value: 0, dtype: int}}
+                                                          right: {literal: {value: 8, dtype: int}}
+                                                      right: {binary: {op: <=, left: {literal: {value: 8, dtype: int}}, right: {var: a10}}}
+                                                  if_true:
+                                                    ternary:
+                                                      cond:
+                                                        binary:
+                                                          op: '&&'
+                                                          left:
+                                                            binary:
+                                                              op: '&&'
+                                                              left: {binary: {op: <, left: {var: a7}, right: {literal: {value: 10, dtype: int}}}}
+                                                              right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {var: a7}}}
+                                                          right: {binary: {op: <, left: {var: a8}, right: {literal: {value: 9, dtype: int}}}}
+                                                      if_true: {var: a8}
+                                                      if_false: {literal: {value: 0, dtype: int}}
+                                                  if_false: {literal: {value: 0, dtype: int}}
+                                          dtype: null
+                                      - class: Assign
+                                        fields: {name: v19, op: {elementwise: add}, args: {tuple: [acc5, in18]}, dtype: null}
+                                      - class: Select
+                                        fields:
+                                          name: v20
+                                          branches:
+                                            tuple:
+                                            - class: SelectBranch
+                                              fields:
+                                                value: v19
+                                                select:
+                                                  expr:
+                                                    binary:
+                                                      op: '&&'
+                                                      left:
+                                                        binary:
+                                                          op: <
+                                                          left:
+                                                            ternary:
+                                                              cond:
+                                                                binary:
+                                                                  op: '&&'
+                                                                  left:
+                                                                    binary:
+                                                                      op: '&&'
+                                                                      left: {binary: {op: <, left: {var: a7}, right: {literal: {value: 10, dtype: int}}}}
+                                                                      right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {
+                                                                            var: a7}}}
+                                                                  right: {binary: {op: <, left: {var: a8}, right: {literal: {value: 9, dtype: int}}}}
+                                                              if_true: {var: a8}
+                                                              if_false: {literal: {value: 0, dtype: int}}
+                                                          right: {literal: {value: 8, dtype: int}}
+                                                      right: {binary: {op: <=, left: {literal: {value: 8, dtype: int}}, right: {var: a10}}}
+                                            - class: SelectBranch
+                                              fields: {value: in17, select: {expr: {literal: {value: true, dtype: bool}}}}
+                                      - class: Select
+                                        fields:
+                                          name: v21
+                                          branches:
+                                            tuple:
+                                            - class: SelectBranch
+                                              fields: {value: in16, select: {expr: {literal: {value: true, dtype: bool}}}}
+                                      - class: Assign
+                                        fields: {name: v22, op: {elementwise: multiply}, args: {tuple: [v20, v21]}, dtype: null}
+                                      - class: Accum
+                                        fields: {name: acc6, value: v22, op: {elementwise: add}, dtype: null, axes: {tuple: [a10]}, base: null}
+                                    unroll: false
+                                    seed: true
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in19]}
+                                    input: copy__6_base
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - expr:
+                                          ternary:
+                                            cond:
+                                              binary:
+                                                op: '&&'
+                                                left:
+                                                  binary:
+                                                    op: '&&'
+                                                    left: {binary: {op: <, left: {var: a7}, right: {literal: {value: 10, dtype: int}}}}
+                                                    right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {var: a7}}}
+                                                right: {binary: {op: <, left: {var: a8}, right: {literal: {value: 9, dtype: int}}}}
+                                            if_true: {var: a0}
+                                            if_false: {literal: {value: 0, dtype: int}}
+                                      - expr:
+                                          ternary:
+                                            cond:
+                                              binary:
+                                                op: '&&'
+                                                left:
+                                                  binary:
+                                                    op: '&&'
+                                                    left: {binary: {op: <, left: {var: a7}, right: {literal: {value: 10, dtype: int}}}}
+                                                    right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {var: a7}}}
+                                                right: {binary: {op: <, left: {var: a8}, right: {literal: {value: 9, dtype: int}}}}
+                                            if_true: {var: a1}
+                                            if_false: {literal: {value: 0, dtype: int}}
+                                      - {expr: {literal: {value: 9, dtype: int}}}
+                                      - expr:
+                                          ternary:
+                                            cond:
+                                              binary:
+                                                op: '&&'
+                                                left:
+                                                  binary:
+                                                    op: '&&'
+                                                    left: {binary: {op: <, left: {var: a7}, right: {literal: {value: 10, dtype: int}}}}
+                                                    right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {var: a7}}}
+                                                right: {binary: {op: <, left: {var: a8}, right: {literal: {value: 9, dtype: int}}}}
+                                            if_true: {var: a8}
+                                            if_false: {literal: {value: 0, dtype: int}}
+                                    dtype: null
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in20]}
+                                    input: copy__6_base
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - expr:
+                                          ternary:
+                                            cond:
+                                              binary:
+                                                op: '&&'
+                                                left:
+                                                  binary:
+                                                    op: '&&'
+                                                    left: {binary: {op: <, left: {var: a7}, right: {literal: {value: 9, dtype: int}}}}
+                                                    right: {binary: {op: <=, left: {literal: {value: 8, dtype: int}}, right: {var: a7}}}
+                                                right: {binary: {op: <, left: {var: a8}, right: {literal: {value: 8, dtype: int}}}}
+                                            if_true: {var: a0}
+                                            if_false: {literal: {value: 0, dtype: int}}
+                                      - expr:
+                                          ternary:
+                                            cond:
+                                              binary:
+                                                op: '&&'
+                                                left:
+                                                  binary:
+                                                    op: '&&'
+                                                    left: {binary: {op: <, left: {var: a7}, right: {literal: {value: 9, dtype: int}}}}
+                                                    right: {binary: {op: <=, left: {literal: {value: 8, dtype: int}}, right: {var: a7}}}
+                                                right: {binary: {op: <, left: {var: a8}, right: {literal: {value: 8, dtype: int}}}}
+                                            if_true: {var: a1}
+                                            if_false: {literal: {value: 0, dtype: int}}
+                                      - {expr: {literal: {value: 8, dtype: int}}}
+                                      - expr:
+                                          ternary:
+                                            cond:
+                                              binary:
+                                                op: '&&'
+                                                left:
+                                                  binary:
+                                                    op: '&&'
+                                                    left: {binary: {op: <, left: {var: a7}, right: {literal: {value: 9, dtype: int}}}}
+                                                    right: {binary: {op: <=, left: {literal: {value: 8, dtype: int}}, right: {var: a7}}}
+                                                right: {binary: {op: <, left: {var: a8}, right: {literal: {value: 8, dtype: int}}}}
+                                            if_true: {var: a8}
+                                            if_false: {literal: {value: 0, dtype: int}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v23, op: {elementwise: add}, args: {tuple: [acc4, in20]}, dtype: null}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in21]}
+                                    input: copy__6_base
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a0}}
+                                      - {expr: {var: a1}}
+                                      - {expr: {var: a7}}
+                                      - {expr: {var: a8}}
+                                    dtype: null
+                                - class: Select
+                                  fields:
+                                    name: v24
+                                    branches:
+                                      tuple:
+                                      - class: SelectBranch
+                                        fields:
+                                          value: v23
+                                          select:
+                                            expr:
+                                              binary:
+                                                op: '&&'
+                                                left:
+                                                  binary:
+                                                    op: '&&'
+                                                    left: {binary: {op: <, left: {var: a7}, right: {literal: {value: 9, dtype: int}}}}
+                                                    right: {binary: {op: <=, left: {literal: {value: 8, dtype: int}}, right: {var: a7}}}
+                                                right: {binary: {op: <, left: {var: a8}, right: {literal: {value: 8, dtype: int}}}}
+                                      - class: SelectBranch
+                                        fields: {value: in21, select: {expr: {literal: {value: true, dtype: bool}}}}
+                                - class: Select
+                                  fields:
+                                    name: v25
+                                    branches:
+                                      tuple:
+                                      - class: SelectBranch
+                                        fields: {value: in19, select: {expr: {literal: {value: true, dtype: bool}}}}
+                                - class: Assign
+                                  fields: {name: v26, op: {elementwise: add}, args: {tuple: [acc6, v25]}, dtype: null}
+                                - class: Select
+                                  fields:
+                                    name: v27
+                                    branches:
+                                      tuple:
+                                      - class: SelectBranch
+                                        fields:
+                                          value: v26
+                                          select:
+                                            expr:
+                                              binary:
+                                                op: '&&'
+                                                left:
+                                                  binary:
+                                                    op: '&&'
+                                                    left: {binary: {op: <, left: {var: a7}, right: {literal: {value: 10, dtype: int}}}}
+                                                    right: {binary: {op: <=, left: {literal: {value: 9, dtype: int}}, right: {var: a7}}}
+                                                right: {binary: {op: <, left: {var: a8}, right: {literal: {value: 9, dtype: int}}}}
+                                      - {class: SelectBranch, fields: {value: v24, select: {expr: {literal: {value: true, dtype: bool}}}}}
+                                - class: Write
+                                  fields:
+                                    output: copy__8_base
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a0}}
+                                      - {expr: {var: a1}}
+                                      - {expr: {var: a7}}
+                                      - {expr: {var: a8}}
+                                    values: {tuple: [v27]}
+                                    value_dtype: null
+                                    atomic: false
+                                    swizzle: NONE
+                              unroll: false
+                              seed: true
+                        unroll: false
+                        seed: true
+                  unroll: false
+                  seed: true
+            unroll: false
+            seed: true
+      name: k_slice_unsqueeze_reduce_3bb983
+    inputs: [copy__6_base]
+    outputs: [[copy__8_base, f32, [1, 48, 8, 64, 64]], [add_14, f32, [1, 48, 8, 10]]]

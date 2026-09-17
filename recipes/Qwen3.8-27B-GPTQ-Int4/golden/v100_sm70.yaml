@@ -37282,65 +37282,23 @@ configs:
 - program: 0
   target:
     origins:
-    - linear_2
-  realizations:
-  - name: k_linear_pointwise_796083.02975d9f92f5.b65b5970a866
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w1x2
-      TILE: mma_m8n8k4_f16_f32/f4x1
-      REDUCE: ''
-      STAGE: ''
-      RASTER: ''
-    identity: 5d87b40be22d31a5da525bdaec8a98737bbc0bfa7d934cdbfbdaf1022952c602
-    measurements:
-      emmy_us: 590.8480286598206
-      reference_us: 783.3600044250488
-      reference_backend: same-input-greedy
-- program: 0
-  target:
-    origins:
+    - add
+    - add_1
+    - add_1_bc
+    - add_1_c1_bc
+    - add_2
+    - add_c1_bc
     - exp
+    - linear
+    - linear_3
+    - mean
+    - mul
+    - mul_1
+    - mul_2
     - neg
     - neg_bc
-    - to_2
-  realizations:
-  - name: k_neg_bc_pointwise.dc4e732026de.c8412519fecd
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      TILE: f4
-      RASTER: ''
-    identity: 69255c4b660e83ef674fdf1da8661da3d9fd5f07ef0c5bb49aef0f7544b69f5e
-    measurements:
-      emmy_us: 1.3772513946341403
-      reference_us: 1.3682758328558384
-      reference_backend: same-input-greedy
-- program: 0
-  target:
-    origins:
     - p_linear_attn_dt_bias_bc
-  realizations:
-  - name: k_p_linear_attn_dt_bias_bc_pointwise.6b5e495c3aba.7e851768a7de
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      TILE: f4
-      RASTER: ''
-    identity: 184aa79069fdb02cc339e28f9397c35070b24c89fe1279f363bd99cb16f0a903
-    measurements:
-      emmy_us: 1.3079211683686867
-      reference_us: 1.3223748689800214
-      reference_backend: same-input-greedy
-- program: 0
-  target:
-    origins:
+    - p_linear_attn_in_proj_qkv_weight
     - p_linear_attn_in_proj_qkv_weight_centered
     - p_linear_attn_in_proj_qkv_weight_integers
     - p_linear_attn_in_proj_qkv_weight_integers_mask_bc
@@ -37363,131 +37321,72 @@ configs:
     - p_linear_attn_in_proj_qkv_weight_zeros_unbiased
     - p_linear_attn_in_proj_qkv_weight_zeros_view
     - p_linear_attn_in_proj_qkv_weight_zeros_view_bc
-  realizations:
-  - name: k_reshape_pointwise_a69add.b8966046e031.1119e63fd46d
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      TILE: f4
-      RASTER: ''
-    identity: 1fd146126b4b1b81306cf04ffad15c2dc04670e0114b1f3a4237fa9dbbc48db7
-    measurements:
-      emmy_us: 192.92160272598267
-      reference_us: 192.30719804763794
-      reference_backend: same-input-greedy
-- program: 0
-  target:
-    origins:
-    - linear
-    - p_linear_attn_in_proj_qkv_weight
-  realizations:
-  - name: k_linear_pointwise_fa224d.30b2c1ae8e46.2811adaa2827
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w8x1
-      TILE: mma_m8n8k4_f16_f32/f4x4/k8
-      REDUCE: ''
-      STAGE: d1/smem
-      RASTER: ''
-    identity: 2811adaa2827bf51cf9df013ca7910d630b17fbd8c151c30296756a1e85a642b
-    measurements:
-      emmy_us: 1391.6159868240356
-      reference_us: 1394.6880102157593
-      reference_backend: same-input-greedy
-  - name: k_linear_pointwise_fa224d.30b2c1ae8e46.2811adaa2827
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w16x2
-      TILE: mma_m8n8k4_f16_f32/f2x4/k8
-      REDUCE: ''
-      STAGE: d1/smem
-      RASTER: ''
-    identity: 2811adaa2827bf51cf9df013ca7910d630b17fbd8c151c30296756a1e85a642b
-    measurements:
-      emmy_us: 91373.56567382812
-      reference_us: 91334.65576171875
-      reference_backend: same-input-greedy
-- program: 0
-  target:
-    origins:
-    - linear_1
-    - p_linear_attn_in_proj_z_weight
-    - p_linear_attn_in_proj_z_weight_centered
-    - p_linear_attn_in_proj_z_weight_integers
-    - p_linear_attn_in_proj_z_weight_integers_mask_bc
-    - p_linear_attn_in_proj_z_weight_integers_nibble
-    - p_linear_attn_in_proj_z_weight_integers_shift_view_bc
-    - p_linear_attn_in_proj_z_weight_integers_shifted
-    - p_linear_attn_in_proj_z_weight_integers_view_bc
-    - p_linear_attn_in_proj_z_weight_scale_values
-    - p_linear_attn_in_proj_z_weight_scaled
-    - p_linear_attn_in_proj_z_weight_scales_view_bc
-    - p_linear_attn_in_proj_z_weight_values
-    - p_linear_attn_in_proj_z_weight_zero_bias_bc
-    - p_linear_attn_in_proj_z_weight_zeros
-    - p_linear_attn_in_proj_z_weight_zeros_grouped
-    - p_linear_attn_in_proj_z_weight_zeros_grouped_mask_bc
-    - p_linear_attn_in_proj_z_weight_zeros_grouped_nibble
-    - p_linear_attn_in_proj_z_weight_zeros_grouped_shift_view_bc
-    - p_linear_attn_in_proj_z_weight_zeros_grouped_shifted
-    - p_linear_attn_in_proj_z_weight_zeros_grouped_view_bc
-    - p_linear_attn_in_proj_z_weight_zeros_unbiased
-    - p_linear_attn_in_proj_z_weight_zeros_view
-    - p_linear_attn_in_proj_z_weight_zeros_view_bc
-  realizations:
-  - name: k_linear_pointwise_944f3d.61ef139dda03.a9b0cabcde6a
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w8x1
-      TILE: mma_m8n8k4_f16_f32/f2x4/k8
-      REDUCE: ''
-      STAGE: d1/smem
-      RASTER: ''
-    identity: 0622fcc3b58414d9610bd06f2c3159a8457c5e6ade79afef85f2a19b796b4568
-    measurements:
-      emmy_us: 1010.6879472732544
-      reference_us: 1015.8079862594604
-      reference_backend: same-input-greedy
-  - name: k_linear_pointwise_944f3d.61ef139dda03.a9b0cabcde6a
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w16x2
-      TILE: mma_m8n8k4_f16_f32/f1x16/k2
-      REDUCE: ''
-      STAGE: d2/smem
-      RASTER: ''
-    identity: 0622fcc3b58414d9610bd06f2c3159a8457c5e6ade79afef85f2a19b796b4568
-    measurements:
-      emmy_us: 47118.33572387695
-      reference_us: 47079.42581176758
-      reference_backend: same-input-greedy
-- program: 0
-  target:
-    origins:
+    - pad_4
+    - pow_1
+    - reshape_9
+    - rsqrt
+    - rsqrt_bc
+    - softplus
+    - to
     - to_1
+    - to_2
+    - to_3
+    - to_8
+    - transpose_6
+    - type_as
   realizations:
-  - name: k_to_1_pointwise.f3c2d87fb215.ae1ece0863f3
+  - name: k_linear_mean_reduce_b9a12f.287c3ea28d01
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 7576.576232910156
+        eager_us: 26574.848175048828
+    kernel_set:
+    - k_linear_mean_reduce_b9a12f.287c3ea28d01.60055f800e92
+  - name: k_linear_mean_reduce_b9a12f.287c3ea28d01.60055f800e92
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      WORK: ''
-      TILE: f4
-      RASTER: ''
-    identity: 95a17c5126c8b757d83239da4910166a36baa68bd5ead9b05cd21376f0ba89be
+      PLACE@map.1/map: cut
+    identity: 3d18ba949c4809ac39445de97339ba3333de4321e07897c34bea9f8234922fbc
     measurements:
-      emmy_us: 1.325257796185863
-      reference_us: 1.3261874238927882
+      emmy_us: 7576.575756072998
+      reference_us: 7576.575994491577
+      reference_backend: same-input-greedy
+  - name: k_linear_mean_reduce_b9a12f.287c3ea28d01.bb3792be2a0e
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@inner: ''
+      REDUCE@inner.1/map.3/map.1/reduce: ''
+      WORK: w4x1
+      TILE: mma_m8n8k4_f16_f32/f1x8/k4
+      STAGE: d1/smem
+      RASTER: ''
+    identity: bb3792be2a0e750330dd06ab51a7959432b937b9d12028a883ccf978d954a14d
+    measurements:
+      emmy_us: 4017.1518325805664
+      reference_us: 4012.0320320129395
+      reference_backend: same-input-greedy
+  - name: k_linear_mean_reduce_b9a12f.287c3ea28d01.d9f821a75d1f
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@map.2/inner: coop
+      REDUCE@map.2/inner.2/map.3/map.1/reduce: r2
+      WORK: t128
+      TILE: ''
+      STAGE: ''
+      RASTER: ''
+    identity: d9f821a75d1f22c3625b6c1b1b3e5f7492d01be0c5e150a7d57fb997f6a64bc1
+    measurements:
+      emmy_us: 3559.4239234924316
+      reference_us: 3564.5439624786377
       reference_backend: same-input-greedy
 - program: 0
   target:
@@ -37510,30 +37409,16 @@ configs:
 - program: 0
   target:
     origins:
-    - transpose_1
-  realizations:
-  - name: k_transpose_272034.97fa7ca9bcb7.43d6c76ebd75
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      TILE: f4
-      RASTER: ''
-    identity: 113a658e1260f0d8fd9c5c5371098275fe1a440363f01091b3cd409e4ed3be14
-    measurements:
-      emmy_us: 100.86400508880615
-      reference_us: 100.96640586853027
-      reference_backend: same-input-greedy
-- program: 0
-  target:
-    origins:
     - reshape_4
   realizations:
   - name: k_reshape_3457df.04f315152655.60a458a200e7
     bindings: {}
     pins:
       FAST_MATH: false
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 30.192485361388236
+        eager_us: 3.174399957060814
     knobs:
       WORK: ''
       TILE: f4
@@ -37561,6 +37446,37 @@ configs:
     measurements:
       emmy_us: 15.92888907780723
       reference_us: 16.350426634804148
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    origins:
+    - add_7
+    - mul_13
+    - select_4
+    - slice_10
+    - slice_11
+    - slice_12
+    - sum_5
+    - sum_5_keepdim
+    - unsqueeze_6
+    - unsqueeze_6_bc
+  realizations:
+  - name: k_slice_unsqueeze_reduce_1707ca.0e4dc4e50aea.c0061815228f
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.7989188701182872
+        eager_us: 90.46255575644004
+    knobs:
+      WORK: t32
+      REDUCE: coop-t
+      RASTER: ''
+    identity: c0061815228ff988b6b8b9ee571a701ba3eef90bb9cd1c44d16a4b212367d3ad
+    measurements:
+      emmy_us: 1.8175535323182814
+      reference_us: 1.8086956031080605
       reference_backend: same-input-greedy
 - program: 0
   target:
@@ -37649,18 +37565,22 @@ configs:
     - unsqueeze_10
     - unsqueeze_10_bc
   realizations:
-  - name: k_slice_unsqueeze_reduce_f2042a.f458261ac492.4331ef55215e
+  - name: k_slice_unsqueeze_reduce_fb6ca9.4bbee348735c.54da8b185a30
     bindings: {}
     pins:
       FAST_MATH: false
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.8386320110590484
+        eager_us: 91.7651398155522
     knobs:
-      WORK: t128
-      REDUCE: coop
+      WORK: t32
+      REDUCE: coop-t
       RASTER: ''
     identity: 54da8b185a30ca5421559f506dd59d720fd744b60e54955616e6505aea57c60d
     measurements:
-      emmy_us: 5.130502505180163
-      reference_us: 5.320223350098679
+      emmy_us: 1.8573110330038232
+      reference_us: 1.8507851494683158
       reference_backend: same-input-greedy
 - program: 0
   target:
@@ -37768,18 +37688,22 @@ configs:
     - unsqueeze_14
     - unsqueeze_14_bc
   realizations:
-  - name: k_slice_unsqueeze_reduce_6b3080.3992463a32e6.f1bc8513e8da
+  - name: k_slice_unsqueeze_reduce_8132d9.98e0428ad69c.14b8ee9d50c2
     bindings: {}
     pins:
       FAST_MATH: false
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 1.8966602958781706
+        eager_us: 92.39873720731349
     knobs:
-      WORK: t128
-      REDUCE: coop
+      WORK: t32
+      REDUCE: coop-t
       RASTER: ''
     identity: 14b8ee9d50c2da29004a9f6c708f84b06e94dff991b66798e8d9ab9a5a6bb419
     measurements:
-      emmy_us: 7.242744421436839
-      reference_us: 7.714712013632564
+      emmy_us: 1.9003263687046927
+      reference_us: 1.8978133655729748
       reference_backend: same-input-greedy
 - program: 0
   target:
@@ -37887,18 +37811,22 @@ configs:
     - unsqueeze_18
     - unsqueeze_18_bc
   realizations:
-  - name: k_slice_unsqueeze_reduce_25f842.bf07a4d50c22.5f562e90cc31
+  - name: k_slice_unsqueeze_reduce_448541.8753594f073b.f2a7a8624894
     bindings: {}
     pins:
       FAST_MATH: false
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 2.2968223718839273
+        eager_us: 98.44037528349975
     knobs:
-      WORK: t128
-      REDUCE: coop
+      WORK: t32
+      REDUCE: coop-t
       RASTER: ''
     identity: f2a7a86248940b79bec09efd8ad6dd76ef180e9b77e7e47db165e707cd211cc4
     measurements:
-      emmy_us: 9.808313612844431
-      reference_us: 10.080711046854654
+      emmy_us: 1.93708316500459
+      reference_us: 1.9404202815623597
       reference_backend: same-input-greedy
 - program: 0
   target:
@@ -37952,18 +37880,22 @@ configs:
     - unsqueeze_22
     - unsqueeze_22_bc
   realizations:
-  - name: k_slice_unsqueeze_reduce_26ce64.e2950a95390f.f501a759f4e0
+  - name: k_slice_unsqueeze_reduce_a8b164.10bfbe0e2573.8d560658f252
     bindings: {}
     pins:
       FAST_MATH: false
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 2.397598134980652
+        eager_us: 106.66252802876593
     knobs:
-      WORK: t128
-      REDUCE: coop
+      WORK: t32
+      REDUCE: coop-t
       RASTER: ''
     identity: 8d560658f252d48d380e0fcadef2dc8014a6c612c7227e10de10069a1f76cb13
     measurements:
-      emmy_us: 11.99190372444061
-      reference_us: 12.232648359762656
+      emmy_us: 1.9829840887160528
+      reference_us: 1.990656018257141
       reference_backend: same-input-greedy
 - program: 0
   target:
@@ -38052,18 +37984,22 @@ configs:
     - unsqueeze_26
     - unsqueeze_26_bc
   realizations:
-  - name: k_slice_unsqueeze_reduce_7a01f8.b2baee5bc6d2.59f8ef1685e2
+  - name: k_slice_unsqueeze_reduce_903062.9c615246ad0b.afe70c977be1
     bindings: {}
     pins:
       FAST_MATH: false
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 2.4455233639522618
+        eager_us: 120.96412601896905
     knobs:
-      WORK: t128
-      REDUCE: coop
+      WORK: t32
+      REDUCE: coop-t
       RASTER: ''
     identity: afe70c977be1759cdfd86044cc18a8b36a9344342d2a729126ef3ff71f588cbb
     measurements:
-      emmy_us: 13.547243298711004
-      reference_us: 14.718089530717082
+      emmy_us: 2.0293062647264337
+      reference_us: 2.031349554294493
       reference_backend: same-input-greedy
 - program: 0
   target:
@@ -38118,6 +38054,37 @@ configs:
     measurements:
       emmy_us: 178.1760056813558
       reference_us: 181.86240196228027
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    origins:
+    - add_31
+    - mul_37
+    - select_52
+    - slice_106
+    - slice_107
+    - slice_108
+    - sum_29
+    - sum_29_keepdim
+    - unsqueeze_30
+    - unsqueeze_30_bc
+  realizations:
+  - name: k_slice_unsqueeze_reduce_246fca.b799d8a6e33d.ec6513b344f9
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 2.606788441033027
+        eager_us: 132.72965234502487
+    knobs:
+      WORK: t32
+      REDUCE: coop-t
+      RASTER: ''
+    identity: ec6513b344f90237d5bb65c966c2183f4e0f79648b1b31aafbc70f1546386bfa
+    measurements:
+      emmy_us: 2.1515010505594234
+      reference_us: 2.149298883253528
       reference_backend: same-input-greedy
 - program: 0
   target:
@@ -38195,6 +38162,37 @@ configs:
 - program: 0
   target:
     origins:
+    - add_35
+    - mul_41
+    - select_60
+    - slice_122
+    - slice_123
+    - slice_124
+    - sum_33
+    - sum_33_keepdim
+    - unsqueeze_34
+    - unsqueeze_34_bc
+  realizations:
+  - name: k_slice_unsqueeze_reduce_245b7c.5f393dc1a4ab.a877fe61eed6
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 2.666780814767521
+        eager_us: 147.4477900540765
+    knobs:
+      WORK: t32
+      REDUCE: coop-t
+      RASTER: ''
+    identity: a877fe61eed662c7a77dda6b498af38399e0b1210069b612f736cfc61d2557e8
+    measurements:
+      emmy_us: 2.2431569249106094
+      reference_us: 2.245896585871664
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    origins:
     - copy__33
     - copy__33_base
   realizations:
@@ -38210,6 +38208,68 @@ configs:
     measurements:
       emmy_us: 16.02064505700142
       reference_us: 16.55466655890147
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    origins:
+    - add_39
+    - mul_45
+    - select_68
+    - slice_138
+    - slice_139
+    - slice_140
+    - sum_37
+    - sum_37_keepdim
+    - unsqueeze_38
+    - unsqueeze_38_bc
+  realizations:
+  - name: k_slice_unsqueeze_reduce_9aad7a.f042ccf20666.1a672a802f66
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 3.368054522949011
+        eager_us: 162.69837199030695
+    knobs:
+      WORK: t32
+      REDUCE: coop-t
+      RASTER: ''
+    identity: 1a672a802f660cd7c00c0652dee4adc504b0ff5cd8a891c824e582ae8bc06814
+    measurements:
+      emmy_us: 2.7287911910277147
+      reference_us: 2.740044023964431
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    origins:
+    - add_43
+    - mul_49
+    - select_76
+    - slice_154
+    - slice_155
+    - slice_156
+    - sum_41
+    - sum_41_keepdim
+    - unsqueeze_42
+    - unsqueeze_42_bc
+  realizations:
+  - name: k_slice_unsqueeze_reduce_97183d.b783b7ea8803.568db3802716
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 3.4309277419781767
+        eager_us: 188.4617494143981
+    knobs:
+      WORK: t32
+      REDUCE: coop-t
+      RASTER: ''
+    identity: 568db380271616eb3ae13e43f8b593eee19eeb736606d3a649a0492598cc416d
+    measurements:
+      emmy_us: 2.7993201534065917
+      reference_us: 2.7922027547594523
       reference_backend: same-input-greedy
 - program: 0
   target:
@@ -38233,6 +38293,37 @@ configs:
 - program: 0
   target:
     origins:
+    - add_47
+    - mul_53
+    - select_84
+    - slice_170
+    - slice_171
+    - slice_172
+    - sum_45
+    - sum_45_keepdim
+    - unsqueeze_46
+    - unsqueeze_46_bc
+  realizations:
+  - name: k_slice_unsqueeze_reduce_ff4e25.0280bad046a0.beda7a13dc6d
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 3.571061451082195
+        eager_us: 204.40445221718468
+    knobs:
+      WORK: t32
+      REDUCE: coop-t
+      RASTER: ''
+    identity: beda7a13dc6d0fb21b1c7e5bd38447ffc4313c79f5ff339eae74786a86aa34a7
+    measurements:
+      emmy_us: 2.9296095554645243
+      reference_us: 2.9291869624785924
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    origins:
     - add_51
     - mul_57
     - select_92
@@ -38244,18 +38335,22 @@ configs:
     - unsqueeze_50
     - unsqueeze_50_bc
   realizations:
-  - name: k_slice_unsqueeze_reduce_139309.b2fec2236f71.09f427b1e1f5
+  - name: k_slice_unsqueeze_reduce_3ac00f.11c92fbb231f.2ac0ae2c7429
     bindings: {}
     pins:
       FAST_MATH: false
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 3.6305453560569068
+        eager_us: 225.7491787997159
     knobs:
-      WORK: t128
-      REDUCE: coop
+      WORK: t32
+      REDUCE: coop-t
       RASTER: ''
     identity: 2ac0ae2c7429aa36b8e012c10e40ead4e2e64879e13e19dd339a2b2754087f5e
     measurements:
-      emmy_us: 26.4084213658383
-      reference_us: 27.710060278574627
+      emmy_us: 3.0402972971322737
+      reference_us: 3.024149535229644
       reference_backend: same-input-greedy
 - program: 0
   target:
@@ -38290,18 +38385,22 @@ configs:
     - unsqueeze_54
     - unsqueeze_54_bc
   realizations:
-  - name: k_slice_unsqueeze_reduce_a27124.9ec0265757c3.11c31371f5fd
+  - name: k_slice_unsqueeze_reduce_45cb6a.5c0a4ac68fe4.060022d62b1d
     bindings: {}
     pins:
       FAST_MATH: false
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 3.910551155646016
+        eager_us: 254.24227376622477
     knobs:
-      WORK: t128
-      REDUCE: coop
+      WORK: t32
+      REDUCE: coop-t
       RASTER: ''
     identity: 060022d62b1df42478bb371eec286d43213f16f65762565d9f8b6241173c3b51
     measurements:
-      emmy_us: 28.584228243146622
-      reference_us: 28.76235281719881
+      emmy_us: 3.468844304860257
+      reference_us: 3.4353549335165265
       reference_backend: same-input-greedy
 - program: 0
   target:
@@ -38347,16 +38446,20 @@ configs:
       FAST_MATH: false
     knobs:
       REDUCE@map.1/inner: coop
-      REDUCE@map.1/inner.2/map.1/reduce: ''
-      REDUCE@map.1/inner.2/map.2/reduce: ''
-      REDUCE@map.1/inner.2/map.2/reduce.2/map.1/reduce: ''
-      WORK: t128
+      REDUCE@map.1/inner.1/map.1/reduce: ''
+      REDUCE@map.1/inner.1/map.2/reduce: ''
+      REDUCE@map.1/inner.1/map.2/reduce.1/map.1/reduce: ''
+      WORK: t256
       RASTER: ''
-    identity: 4f7fc03383b625c29893b78ee7e3422d7e8e794f944a8786e8f5a97cc86e2896
+    identity: f0f7d54e4f4182891df1d1ccbf5259ae68a4052df44978738bfb1061116cfe16
     measurements:
-      emmy_us: 3303.4238815307617
-      reference_us: 3608.5760593414307
+      emmy_us: 3113.9841079711914
+      reference_us: 3113.9841079711914
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 3113.9841079711914
+        eager_us: 3173.3760833740234
 - program: 0
   target:
     origins:
@@ -38371,18 +38474,22 @@ configs:
     - unsqueeze_58
     - unsqueeze_58_bc
   realizations:
-  - name: k_slice_unsqueeze_reduce_662d50.d7eb10084dd6.aab8d3a8799d
+  - name: k_slice_unsqueeze_reduce_236e01.33f1bd6b522d.93dc5f8fb6e9
     bindings: {}
     pins:
       FAST_MATH: false
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 4.1257427441134
+        eager_us: 277.3722731720857
     knobs:
-      WORK: t128
-      REDUCE: coop
+      WORK: t32
+      REDUCE: coop-t
       RASTER: ''
     identity: 93dc5f8fb6e9d3e08a6b3bcc4fce9295073f1afbe81a8e296a7671c38090ae76
     measurements:
-      emmy_us: 30.880000442266464
-      reference_us: 32.3584000269572
+      emmy_us: 3.6437955215899613
+      reference_us: 3.6472809895147544
       reference_backend: same-input-greedy
 - program: 0
   target:
@@ -38428,16 +38535,20 @@ configs:
       FAST_MATH: false
     knobs:
       REDUCE@map.1/inner: coop
-      REDUCE@map.1/inner.2/map.1/reduce: ''
-      REDUCE@map.1/inner.2/map.2/reduce: ''
-      REDUCE@map.1/inner.2/map.2/reduce.2/map.1/reduce: ''
+      REDUCE@map.1/inner.1/map.1/reduce: ''
+      REDUCE@map.1/inner.1/map.2/reduce: ''
+      REDUCE@map.1/inner.1/map.2/reduce.1/map.1/reduce: ''
       WORK: t128
       RASTER: ''
     identity: f654bdfed112b82e48ebb5831192615a487f2aef57f3406fe63a8d99a24b5342
     measurements:
-      emmy_us: 4068.352222442627
-      reference_us: 4457.47184753418
+      emmy_us: 3842.047929763794
+      reference_us: 3831.808090209961
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 3832.832098007202
+        eager_us: 3232.7680587768555
 - program: 0
   target:
     origins:
@@ -38471,18 +38582,22 @@ configs:
     - unsqueeze_62
     - unsqueeze_62_bc
   realizations:
-  - name: k_slice_unsqueeze_reduce_58adc2.da56101bba28.660b64c13b06
+  - name: k_slice_unsqueeze_reduce_2cd2e5.fdd222956341.1b61ec03e8be
     bindings: {}
     pins:
       FAST_MATH: false
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 4.524218223311684
+        eager_us: 300.0507093455694
     knobs:
-      WORK: t128
-      REDUCE: coop
+      WORK: t32
+      REDUCE: coop-t
       RASTER: ''
     identity: 1b61ec03e8be72d41c5c23bf3877fa33720b2205e9bbb752f654d3974ded724c
     measurements:
-      emmy_us: 34.95724036775787
-      reference_us: 38.47876878885123
+      emmy_us: 4.225620237583852
+      reference_us: 4.207397604587188
       reference_backend: same-input-greedy
 - program: 0
   target:
@@ -38528,16 +38643,20 @@ configs:
       FAST_MATH: false
     knobs:
       REDUCE@map.1/inner: coop
-      REDUCE@map.1/inner.2/map.1/reduce: ''
-      REDUCE@map.1/inner.2/map.2/reduce: ''
-      REDUCE@map.1/inner.2/map.2/reduce.2/map.1/reduce: ''
+      REDUCE@map.1/inner.1/map.1/reduce: ''
+      REDUCE@map.1/inner.1/map.1/reduce.1/map.1/reduce: ''
+      REDUCE@map.1/inner.1/map.2/reduce: ''
       WORK: t128
       RASTER: ''
     identity: edf55184d3317f560773e0e74d37b024ab15168e25d89ce4a9580fe5abe900b8
     measurements:
-      emmy_us: 4766.719818115234
-      reference_us: 5108.736038208008
+      emmy_us: 4656.1279296875
+      reference_us: 4648.960113525391
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 4653.0561447143555
+        eager_us: 3304.447889328003
 - program: 0
   target:
     origins:
@@ -38614,6 +38733,50 @@ configs:
     measurements:
       emmy_us: 34.78069140993316
       reference_us: 35.43771377631596
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    origins:
+    - select_200
+  realizations:
+  - name: k_select_200_pointwise.497747b4970d.2c0e260b09cc
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 2.741581478784251
+        eager_us: 80.1287038923952
+    knobs:
+      WORK: ''
+      TILE: f4
+      RASTER: ''
+    identity: 2c0e260b09ccfcf98359bcf6e8275f5f0ed0bf1428dbaac1198fd4c544437b4a
+    measurements:
+      emmy_us: 2.3836172653727554
+      reference_us: 2.388516681616386
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    origins:
+    - sub_13
+  realizations:
+  - name: k_sub_13_pointwise.91a31fb3da03.3f199300ebab
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 3.100844965854161
+        eager_us: 4.373633945491952
+    knobs:
+      WORK: ''
+      TILE: f2
+      RASTER: ''
+    identity: 3f199300ebabcef55db378e771a765643726044e62a6d424c60d06f3ab1d8b62
+    measurements:
+      emmy_us: 2.72051901430697
+      reference_us: 2.6970929135390316
       reference_backend: same-input-greedy
 loops:
 - inputs: []

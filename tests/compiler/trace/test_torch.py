@@ -1059,6 +1059,23 @@ def test_trace_passthrough_ops_no_extra_nodes():
     assert len(g.outputs) >= 1
 
 
+def test_trace_zero_width_pad_is_an_alias():
+    """A statically empty pad preserves the input tensor and storage without a copy node."""
+    import torch
+    import torch.nn.functional as F  # noqa: N812
+    from torch import nn
+
+    from emmy.compiler.trace.torch import trace_module
+
+    class EmptyPad(nn.Module):
+        def forward(self, x):
+            return F.pad(x, (0, 0))
+
+    graph = trace_module(EmptyPad(), (torch.randn(2, 3),))
+    assert graph.outputs == graph.inputs
+    assert len(graph.nodes) == 1
+
+
 # ---------------------------------------------------------------------------
 # Edge cases
 # ---------------------------------------------------------------------------

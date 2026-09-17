@@ -25,6 +25,10 @@ from emmy.compiler.pipeline.knob import (
 #: silently reading ``g2k/coop`` as ``""``.
 _ANY_THREAD_WORK = Work(kind="thread", units=(1, 32))
 
+#: Graph hint carrying the final greedy resolution's placement receipts. Placement is consumed by
+#: a graph splice before CUDA kernels exist, so this is the realized side of a PLACE pin check.
+PLACEMENT_DECISIONS_HINT = "search.placement_decisions"
+
 
 def parse_reduce(spec: str) -> Reduce | None:
     """A ``REDUCE`` spelling read through :class:`Reduce` with the synthetic thread inventory, so a
@@ -116,7 +120,13 @@ def stampable_reduce(want: str) -> str | None:
     return Reduce(tuple(st for st in plan.stages if st.level is not Level.GRID)).spell()
 
 
-def unreproducible_pin_flag(pinned: dict, kernel_knobs: list[dict], *, reject_conflicts: bool = False) -> str | None:
+def unreproducible_pin_flag(
+    pinned: dict,
+    kernel_knobs: list[dict],
+    *,
+    placement_knobs: list[dict] | None = None,
+    reject_conflicts: bool = False,
+) -> str | None:
     """Describe pins not realized by any compiled CUDA kernel, or return ``None``.
 
     A registered family with no realized key is ungateable because serialized IR
@@ -125,13 +135,17 @@ def unreproducible_pin_flag(pinned: dict, kernel_knobs: list[dict], *, reject_co
     ``reject_conflicts`` additionally rejects any matching child scope that decided
     a different non-OFF value, even when another child realized the requested pin.
     """
-    if not any(kernel_knobs):
+    if not any(kernel_knobs) and not any(placement_knobs or []):
         return None
     misses: list[str] = []
     for name, want in pinned.items():
         fam = family_of(name)
         if fam == "PLACE":
-            continue  # graph placement is consumed by a splice, not stamped on either resulting kernel
+            if placement_knobs is None:
+                continue  # callers without a resolution trace cannot gate a splice receipt
+            realized_knobs = placement_knobs
+        else:
+            realized_knobs = kernel_knobs
         probe = want
         if fam == "REDUCE":
             # Likewise a realized cross-CTA split — but only its ``g<n>`` stage is structural,
@@ -145,7 +159,7 @@ def unreproducible_pin_flag(pinned: dict, kernel_knobs: list[dict], *, reject_co
         conflicts: list[str] = []
         saw_off = False
         hit = False
-        for raw in kernel_knobs:
+        for raw in realized_knobs:
             for key, got in raw.items():
                 if family_of(key) != fam:
                     continue
@@ -164,7 +178,9 @@ def unreproducible_pin_flag(pinned: dict, kernel_knobs: list[dict], *, reject_co
                 break
         if hit and (not reject_conflicts or not conflicts):
             continue
-        if not others and not saw_off and get(fam) is not None and fam not in CLASSIC_FAMILIES:
+        # An unstamped registered family is ungateable, except PLACE beside a resolution trace: the trace
+        # records every placement decision, so a pinned cut it does not carry was not taken.
+        if not others and not saw_off and get(fam) is not None and fam not in CLASSIC_FAMILIES and fam != "PLACE":
             continue
         ran_values = conflicts if reject_conflicts and conflicts else others
         ran = "/".join(ran_values) if ran_values else ("(off)" if saw_off else "(unset)")
