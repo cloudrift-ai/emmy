@@ -15,6 +15,7 @@ sm_80, sm_89 and sm_120.
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from importlib import import_module
 
 import pytest
@@ -22,13 +23,25 @@ import pytest
 from emmy.compiler.context import Context
 from emmy.compiler.dtype import F16
 from emmy.compiler.graph import Graph, Tensor
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Literal
 from emmy.compiler.ir.frontend.ir import LinearOp, SliceOp
+from emmy.compiler.ir.schedule import Placement, Raster, Reduce, Stage, Tile, Work, derive_inventory
+from emmy.compiler.ir.schedule.base import Schedule
+from emmy.compiler.ir.schedule.classic import (
+    ClassicMaterialization,
+    EdgeSchedule,
+    KernelSchedule,
+    ProjectionSchedule,
+    ReductionSchedule,
+)
 from emmy.compiler.ir.stmt import Assign, Body, Load
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
+from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 from emmy.compiler.target import set_target
+from tests.compiler.terms import projection, reduction, slab
 
 materialize = import_module("emmy.compiler.pipeline.passes.lowering.kernel.010_materialize")
 factor = import_module("emmy.compiler.pipeline.passes.lowering.kernel._factor")
@@ -70,6 +83,25 @@ def _gate_up_graph() -> Graph:
     graph.add_node(ElementwiseOp("multiply"), ["yg", "yu"], Tensor("y", (_M, _N), dtype=F16), node_id="y")
     graph.inputs, graph.outputs = ["x", "w", "c"], ["y"]
     return graph
+
+
+def _serial_tile(root, free: Axis, reduce_axis: Axis) -> TileOp:
+    """Stamp the all-OFF schedule used by the serial projection regressions below."""
+    tile = TileOp(op=root, place=Placement(free=(free,)), axes=(free, reduce_axis))
+    nodes = {
+        site: ProjectionSchedule(Tile()) if tile.views[site].axis is None else ReductionSchedule(Tile(), Reduce())
+        for site in tile.node_sites
+    }
+    work = derive_inventory((Tile(),), coop=1) or Work()
+    return replace(
+        tile,
+        schedule=Schedule(
+            KernelSchedule(work, Raster.parse("")),
+            nodes,
+            {edge: EdgeSchedule(Stage.direct()) for edge in tile.edge_sites},
+        ),
+        materialization=ClassicMaterialization({}, {}),
+    )
 
 
 @pytest.fixture
@@ -161,3 +193,69 @@ def test_two_cones_that_agree_keep_one_spelling() -> None:
     body = [Assign(name="v0", op="add", args=("a", "b"))] * 2
 
     assert [stmt.name for stmt in factor._one_value_per_name(body)] == ["v0", "v0"]
+
+
+def test_serial_nested_projections_re_spell_distinct_values_in_one_scope() -> None:
+    """A cut workspace and its fused twin may derive different values under one original SSA name."""
+    free, reduce_axis = Axis("m", 4), Axis("k", 8)
+    red = reduction(
+        reduce_axis,
+        (slab("x_e", "x", "m", "k"),),
+        (Assign(name="acc__v", op="copy", args=("x_e",)),),
+        ("acc",),
+    )
+    inner = projection(
+        (red, slab("ws", "cutbuf", "m"), slab("eps", "eps")),
+        (
+            Assign(name="v", op="add", args=("ws", "eps")),
+            Assign(name="inner_out", op="multiply", args=("acc", "v")),
+        ),
+        results=("inner_out",),
+    )
+    root = projection(
+        (inner, slab("base", "base", "m")),
+        (
+            Assign(name="v", op="add", args=("inner_out", "base")),
+            Assign(name="out", op="reciprocal", args=("v",)),
+        ),
+        results=("out",),
+    )
+    bound = factor.factorize(_serial_tile(root, free, reduce_axis), root=None)
+    additions = [stmt for stmt in bound.body if isinstance(stmt, Assign) and stmt.op.name == "add"]
+    reciprocal = next(stmt for stmt in bound.body if isinstance(stmt, Assign) and stmt.name == "out")
+
+    assert len(additions) == 2
+    assert additions[0].name != additions[1].name
+    assert reciprocal.args == (additions[1].name,)
+
+
+def test_serial_root_and_projection_tail_re_spell_distinct_values_in_one_scope() -> None:
+    """A serial fold's hoisted provider and its projection tail cannot redeclare one SSA name."""
+    free, reduce_axis = Axis("m", 4), Axis("k", 8)
+    provider = projection(
+        (slab("base", "base", "m"), slab("eps", "eps")),
+        (Assign(name="v", op="add", args=("base", "eps")),),
+        results=("v",),
+    )
+    red = reduction(
+        reduce_axis,
+        (slab("x_e", "x", "m", "k"), provider),
+        (Assign(name="acc__v", op="multiply", args=("x_e", "v")),),
+        ("acc",),
+    )
+    root = projection(
+        (red, slab("ws", "cutbuf", "m")),
+        (
+            Assign(name="v", op="add", args=("acc", "ws")),
+            Assign(name="out", op="reciprocal", args=("v",)),
+        ),
+        results=("out",),
+    )
+
+    bound = factor.factorize(_serial_tile(root, free, reduce_axis), root=None)
+    additions = [stmt for stmt in bound.body if isinstance(stmt, Assign) and stmt.op.name == "add"]
+    reciprocal = next(stmt for stmt in bound.body if isinstance(stmt, Assign) and stmt.name == "out")
+
+    assert len(additions) == 2
+    assert additions[0].name != additions[1].name
+    assert reciprocal.args == (additions[1].name,)

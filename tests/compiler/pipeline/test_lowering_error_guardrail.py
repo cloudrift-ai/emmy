@@ -32,6 +32,7 @@ shapes, and an un-lowered terminal is priced a ``bench_fail``.
 from __future__ import annotations
 
 import inspect
+from contextlib import contextmanager
 
 import pytest
 
@@ -43,7 +44,8 @@ from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline import FINAL_LOWERING_PASS, LoweringError
 from emmy.compiler.pipeline.pipeline import Pass, Pattern, Pipeline, Rule, RuleSkipped
 from emmy.compiler.pipeline.search.policy.terminal_bench import point_stats
-from emmy.compiler.pipeline.search.strategy.greedy import _raise_on_unlowered
+from emmy.compiler.pipeline.search.strategy import greedy as greedy_strategy
+from emmy.compiler.pipeline.search.strategy.greedy import GreedyStrategy, _raise_on_unlowered
 from tests.compiler.helpers import drain_tune
 
 
@@ -159,6 +161,28 @@ def test_tuning_does_not_raise_and_prunes_branch():
     # TileOp because its only lowering option was validate-filtered.
     assert terminals, "tuning should still yield the dead terminal"
     assert isinstance(terminals[0].graph.nodes["y"].op, TileOp)
+
+
+def test_truncated_kernel_pipeline_registers_measured_composed_routes(monkeypatch):
+    """``compile --ir kernel`` still runs the placement pass, so its measured multi-cut route
+    must be registered even though the truncated pipeline does not lower through CUDA."""
+    routes = [(frozenset({("S_shape", "128")}), ("PLACE@map", "PLACE@map.1/map"))]
+    registered = []
+
+    monkeypatch.setattr(greedy_strategy, "_measured_composed_routes", lambda _db, _ctx: routes)
+
+    @contextmanager
+    def capture_composed_routes(value):
+        registered.append(value)
+        yield
+
+    monkeypatch.setattr(greedy_strategy, "composed_routes", capture_composed_routes)
+    monkeypatch.setattr(greedy_strategy.Run, "resolve", lambda _run, graph, _decide: (graph, []))
+    pipeline = Pipeline(passes=[Pass(name="lowering/tile", rules=[], index=0), Pass(name="lowering/kernel", rules=[], index=1)])
+
+    GreedyStrategy(pipeline, db=object()).run(Graph(), ctx=_small_smem_ctx())
+
+    assert registered == [routes]
 
 
 # ---------------------------------------------------------------------------
@@ -657,6 +681,16 @@ def test_refused_piece_rows_rerank_within_the_composed_route(monkeypatch):
     pipeline = _composed_route_pipeline({"k_residual": {24, 16}}, rows=(8, 16, 24))
     terminal = pipeline.run(_graph_with_tile(), ctx=_small_smem_ctx())
     assert _kernels(terminal) == {"y_ws": ("k_ws", 24), "y": ("k_residual", 8)}, "the refused piece re-ranks onto its third row"
+
+
+def test_greedy_compile_retains_final_placement_receipt(monkeypatch):
+    """The A/B pin gate can verify a consumed graph splice after CUDA emission."""
+    from emmy.compiler.pipeline.search.pins import PLACEMENT_DECISIONS_HINT
+
+    _elect_composed_route(monkeypatch)
+    terminal = _composed_route_pipeline({}).run(_graph_with_tile(), ctx=_small_smem_ctx())
+
+    assert {"PLACE@seam": "cut"} in terminal.hints.get(PLACEMENT_DECISIONS_HINT)
 
 
 def test_exhausted_piece_retires_only_its_own_cut(monkeypatch, caplog):

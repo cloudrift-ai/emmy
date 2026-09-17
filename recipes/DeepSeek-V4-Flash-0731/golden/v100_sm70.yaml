@@ -28427,7 +28427,18 @@ configs:
   target:
     loop: 0
   realizations:
-  - name: expert-sym@mxfp4.k_linear_reduce_ee218c.d7a2bc50f91c.m16.db8aee179fe8
+  - bindings:
+      num_tokens: 16
+    pins:
+      FAST_MATH: false
+    name: expert-sym@mxfp4.k_linear_reduce_bd75fb.c7eb618908f4.m16
+    kernel_set:
+    - expert-sym@mxfp4.k_linear_reduce_bd75fb.c7eb618908f4.m16.285cde4f2e33
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 778.2400250434875
+        eager_us: 23696.383158365887
+  - name: expert-sym@mxfp4.k_linear_reduce_bd75fb.c7eb618908f4.m16.285cde4f2e33
     bindings:
       num_tokens: 16
     pins:
@@ -28436,40 +28447,40 @@ configs:
       PLACE@map.1/inner.1/map.1/inner: cut
     identity: 96287f89c44e20da4e414ef93c190df86437b6ed24baca58509414a7e859ede6
     measurements:
-      emmy_us: 1986.560046672821
-      reference_us: 1993.72798204422
+      emmy_us: 775.1680016517639
+      reference_us: 777.2160172462463
       reference_backend: same-input-greedy
-  - name: expert-sym@mxfp4.k_linear_reduce_ee218c.d7a2bc50f91c.m16.aa62e8ab2eca
+  - name: expert-sym@mxfp4.k_linear_reduce_bd75fb.c7eb618908f4.m16.ab4453e49a80
     bindings:
       num_tokens: 16
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w8x1
-      TILE: mma_m8n8k4_f16_f32/f1x4
+      WORK: w4x2
+      TILE: mma_m8n8k4_f16_f32/f1x1/k4
       REDUCE: ''
       STAGE: d2/smem
       RASTER: ''
     identity: 094b52221ad1019f4918f3542c814f23ea32d04e22ffd2363a44c40c65652b6e
     measurements:
-      emmy_us: 1381.376028060913
-      reference_us: 1375.2319812774658
+      emmy_us: 489.47200179100037
+      reference_us: 487.42398619651794
       reference_backend: same-input-greedy
-  - name: expert-sym@mxfp4.k_linear_reduce_ee218c.d7a2bc50f91c.m16.3e0afda0d181
+  - name: expert-sym@mxfp4.k_linear_reduce_bd75fb.c7eb618908f4.m16.1525c35672f6
     bindings:
       num_tokens: 16
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w1x1
-      TILE: mma_m8n8k4_f16_f32/f1x4/k2
+      WORK: w1x2
+      TILE: mma_m8n8k4_f16_f32/f1x2/k4
       REDUCE: ''
       STAGE: d1/smem
       RASTER: ''
     identity: 0d5b1b337b760e82331e930b18a48788f62fa192acb81cd05e7b6c9413724a7e
     measurements:
-      emmy_us: 605.184018611908
-      reference_us: 618.4960007667542
+      emmy_us: 281.0879945755005
+      reference_us: 288.08534145355225
       reference_backend: same-input-greedy
   - name: expert-sym@mxfp4.k_linear_reduce_ee218c.d7a2bc50f91c.m4096.65ee74075763
     bindings:
@@ -28515,7 +28526,17 @@ configs:
       emmy_us: 2551.8081188201904
       reference_us: 2553.8558959960938
       reference_backend: same-input-greedy
-  - name: expert-sym@mxfp4.k_linear_reduce_ee218c.d7a2bc50f91c.dynamic.187f411f215a
+  - bindings: {}
+    pins:
+      FAST_MATH: false
+    name: expert-sym@mxfp4.k_linear_reduce_bd75fb.c7eb618908f4.dynamic
+    kernel_set:
+    - expert-sym@mxfp4.k_linear_reduce_bd75fb.c7eb618908f4.dynamic.aeb34315b0ec
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 2444.2880153656006
+        eager_us: 24166.400909423828
+  - name: expert-sym@mxfp4.k_linear_reduce_bd75fb.c7eb618908f4.dynamic.aeb34315b0ec
     bindings: {}
     pins:
       FAST_MATH: false
@@ -28523,25 +28544,25 @@ configs:
       PLACE@map.1/inner.1/map: cut
     identity: 9115ddea6dd19d44687dc4756bb45d54e1aaf9cc7288a71fcf6baf61bf1c2e02
     measurements:
-      emmy_us: 39378.943622112274
-      reference_us: 39302.143931388855
+      emmy_us: 2441.215991973877
+      reference_us: 2441.215991973877
       reference_backend: same-input-greedy
-  - name: expert-sym@mxfp4.k_linear_reduce_ee218c.d7a2bc50f91c.dynamic.f59e8d134e2b
+  - name: expert-sym@mxfp4.k_linear_reduce_bd75fb.c7eb618908f4.dynamic.b4978c73ad77
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w1x4
-      TILE: mma_m8n8k4_f16_f32/f8x2
+      WORK: w8x1
+      TILE: mma_m8n8k4_f16_f32/f1x8
       REDUCE: ''
       STAGE: d2/smem
       RASTER: ''
-    identity: c859d21ce3047531b81bedebc3e5ef68b1bbc1b2a227dc0e6abbeff6943b11ce
+    identity: 91ab4fda6c22522b333dcdab0ae11f207d7426d0673d28513ec3700b8e054240
     measurements:
-      emmy_us: 38772.735595703125
-      reference_us: 38694.91195678711
+      emmy_us: 1819.648027420044
+      reference_us: 1820.6720352172852
       reference_backend: same-input-greedy
-  - name: expert-sym@mxfp4.k_linear_reduce_ee218c.d7a2bc50f91c.dynamic.679e00328545
+  - name: expert-sym@mxfp4.k_linear_reduce_bd75fb.c7eb618908f4.dynamic.8bc8f6d0b860
     bindings: {}
     pins:
       FAST_MATH: false
@@ -28551,10 +28572,10 @@ configs:
       REDUCE: ''
       STAGE: d2/smem
       RASTER: ''
-    identity: 91ab4fda6c22522b333dcdab0ae11f207d7426d0673d28513ec3700b8e054240
+    identity: c859d21ce3047531b81bedebc3e5ef68b1bbc1b2a227dc0e6abbeff6943b11ce
     measurements:
-      emmy_us: 606.2080264091492
-      reference_us: 607.2319746017456
+      emmy_us: 628.7360191345215
+      reference_us: 627.7120113372803
       reference_backend: same-input-greedy
   - name: expert-sym@mxfp4.k_linear_reduce_ee218c.d7a2bc50f91c.m1.e36acd193d87
     bindings:
@@ -28604,49 +28625,60 @@ configs:
   target:
     loop: 1
   realizations:
-  - name: expert16@mxfp4.k_linear_reduce_776fa6.57d54a4ea195.m16.db8aee179fe8
+  - bindings:
+      num_tokens: 16
+    pins:
+      FAST_MATH: false
+    name: expert16@mxfp4.k_linear_reduce_767b59.47d68d39d39b.m16
+    kernel_set:
+    - expert16@mxfp4.k_linear_reduce_767b59.47d68d39d39b.m16.285cde4f2e33
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 783.3600044250488
+        eager_us: 23684.09474690755
+  - name: expert16@mxfp4.k_linear_reduce_767b59.47d68d39d39b.m16.285cde4f2e33
     bindings:
       num_tokens: 16
     pins:
       FAST_MATH: false
     knobs:
-      PLACE@map.1/inner.1/map: cut
+      PLACE@map.1/inner.1/map.1/inner: cut
     identity: 96287f89c44e20da4e414ef93c190df86437b6ed24baca58509414a7e859ede6
     measurements:
-      emmy_us: 1750.527948141098
-      reference_us: 1748.9920258522034
+      emmy_us: 775.1680016517639
+      reference_us: 776.1920094490051
       reference_backend: same-input-greedy
-  - name: expert16@mxfp4.k_linear_reduce_776fa6.57d54a4ea195.m16.d4655f01c1c6
+  - name: expert16@mxfp4.k_linear_reduce_767b59.47d68d39d39b.m16.ab4453e49a80
     bindings:
       num_tokens: 16
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w1x1
-      TILE: mma_m8n8k4_f16_f32/f1x4
+      WORK: w4x2
+      TILE: mma_m8n8k4_f16_f32/f1x1/k4
       REDUCE: ''
       STAGE: d2/smem
       RASTER: ''
-    identity: 6fa7adbc23d028a6d1ac991c2b936579664c7e4cd5466bf80ea093976843ff0f
+    identity: 094b52221ad1019f4918f3542c814f23ea32d04e22ffd2363a44c40c65652b6e
     measurements:
-      emmy_us: 1276.9279479980469
-      reference_us: 1269.760012626648
+      emmy_us: 489.984005689621
+      reference_us: 487.42398619651794
       reference_backend: same-input-greedy
-  - name: expert16@mxfp4.k_linear_reduce_776fa6.57d54a4ea195.m16.601a8e6db27f
+  - name: expert16@mxfp4.k_linear_reduce_767b59.47d68d39d39b.m16.1525c35672f6
     bindings:
       num_tokens: 16
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w2x8
-      TILE: mma_m8n8k4_f16_f32/f1x1
+      WORK: w1x2
+      TILE: mma_m8n8k4_f16_f32/f1x2/k4
       REDUCE: ''
-      STAGE: d2/smem
-      RASTER: gm8
-    identity: fb63f72afea07c156715cc8f5dea12d1418972edb4fa95b79c92cdddb495daa6
+      STAGE: d1/smem
+      RASTER: ''
+    identity: 0d5b1b337b760e82331e930b18a48788f62fa192acb81cd05e7b6c9413724a7e
     measurements:
-      emmy_us: 473.60000014305115
-      reference_us: 479.2320132255554
+      emmy_us: 280.3199887275696
+      reference_us: 287.7440055211385
       reference_backend: same-input-greedy
 - program: 2
   target:
@@ -28700,49 +28732,60 @@ configs:
   target:
     loop: 3
   realizations:
-  - name: expert4096@mxfp4.k_linear_reduce_f42c83.dfd981e59b71.m4096.65ee74075763
+  - name: expert4096@mxfp4.k_linear_reduce_9a6fd8.998892e7cf7a.m4096
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    kernel_set:
+    - expert4096@mxfp4.k_linear_reduce_9a6fd8.998892e7cf7a.m4096.07c0c577b481
+    latency:
+      NVIDIA Tesla V100 SXM3 32GB:
+        emmy_us: 23165.952682495117
+        eager_us: 27809.791564941406
+  - name: expert4096@mxfp4.k_linear_reduce_9a6fd8.998892e7cf7a.m4096.07c0c577b481
     bindings:
       num_tokens: 4096
     pins:
       FAST_MATH: false
     knobs:
-      PLACE@map.1/inner.1/map.1/inner: cut
+      PLACE@map.1/inner.1/map: cut
     identity: 4511250f665da6e5c9778e9e640b63627ad893e888117796cc117560dae36e56
     measurements:
-      emmy_us: 57700.350761413574
-      reference_us: 57302.01721191406
+      emmy_us: 23181.312561035156
+      reference_us: 23136.255264282227
       reference_backend: same-input-greedy
-  - name: expert4096@mxfp4.k_linear_reduce_f42c83.dfd981e59b71.m4096.fc862508400a
+  - name: expert4096@mxfp4.k_linear_reduce_9a6fd8.998892e7cf7a.m4096.d291ecc9a2ec
     bindings:
       num_tokens: 4096
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w2x1
-      TILE: mma_m8n8k4_f16_f32/f2x8/k8
+      WORK: w8x1
+      TILE: mma_m8n8k4_f16_f32/f1x8
       REDUCE: ''
       STAGE: d2/smem
       RASTER: ''
-    identity: 898fd29178f3980f7a1323dbbc4e82f5e5f0e11993bf6d2ce74add9edfb12bbf
+    identity: 85d9eae1d5d75c19cbb092e48ea5e5f53db83d4f6f6a208b236cfde18bcf5fd1
     measurements:
-      emmy_us: 48922.62268066406
-      reference_us: 48514.0495300293
+      emmy_us: 20613.11912536621
+      reference_us: 20597.759246826172
       reference_backend: same-input-greedy
-  - name: expert4096@mxfp4.k_linear_reduce_f42c83.dfd981e59b71.m4096.072f0607103a
+  - name: expert4096@mxfp4.k_linear_reduce_9a6fd8.998892e7cf7a.m4096.1233a3740ea8
     bindings:
       num_tokens: 4096
     pins:
       FAST_MATH: false
     knobs:
       WORK: w4x1
-      TILE: mma_m8n8k4_f16_f32/f1x4
+      TILE: mma_m8n8k4_f16_f32/f2x4/k4
       REDUCE: ''
-      STAGE: d1/smem
+      STAGE: d2/smem
       RASTER: ''
-    identity: b95d03fa85514a7a43c95ddd55a444a3ca5aaf9d8a73ef5458a8ed9d03d311ec
+    identity: fb0569ea22d604c2c2a063cf66fd0b30c1e0899e9326d17dc58a12c3ee8fc21e
     measurements:
-      emmy_us: 8777.728080749512
-      reference_us: 8787.967681884766
+      emmy_us: 2582.5281143188477
+      reference_us: 2526.20792388916
       reference_backend: same-input-greedy
 - program: 4
   target:
@@ -31722,33 +31765,30 @@ configs:
   target:
     loop: 45
   realizations:
-  - name: post1.k_div_11_reduce.a4b561dea31a.m1.07039feea7ff
-    bindings:
+  - bindings:
       num_tokens: 1
     pins:
       FAST_MATH: false
+    name: post1.k_div_11_reduce.393de839665e.m1
+    kernel_set:
+    - post1.k_div_11_reduce.393de839665e.m1.d1b86723d9a6
     latency:
       NVIDIA Tesla V100 SXM3 32GB:
-        emmy_us: 52.2842337103451
-        eager_us: 305.71895534709347
-    kernel_set:
-    - post1.k_div_11_reduce.a4b561dea31a.m1.07039feea7ff.07039feea7ff
-    knobs: &id007
-      PLACE@map.1/map: cut
-    identity: b641b1f3a6572dcd89c27a5b1c31a0dc714e05b0abf4a9e28a24a77846a48516
-    measurements: &id008
-      emmy_us: 50.21909882339504
-      reference_us: 50.297079425939536
-      reference_backend: same-input-greedy
-  - name: post1.k_div_11_reduce.a4b561dea31a.m1.07039feea7ff.07039feea7ff
-    bindings:
+        emmy_us: 9.069714163030897
+        eager_us: 307.96800478540285
+  - bindings:
       num_tokens: 1
     pins:
       FAST_MATH: false
-    knobs: *id007
+    name: post1.k_div_11_reduce.393de839665e.m1.d1b86723d9a6
+    knobs:
+      PLACE@map.1/map: cut
     identity: b641b1f3a6572dcd89c27a5b1c31a0dc714e05b0abf4a9e28a24a77846a48516
-    measurements: *id008
-  - name: post1.k_div_11_reduce.a4b561dea31a.m1.07039feea7ff.9cef01bc6820
+    measurements:
+      emmy_us: 8.87632264864519
+      reference_us: 8.905498228428803
+      reference_backend: same-input-greedy
+  - name: post1.k_div_11_reduce.393de839665e.m1.4f1d82857b33
     bindings:
       num_tokens: 1
     pins:
@@ -31756,76 +31796,76 @@ configs:
     knobs:
       TILE@map.1/inner: ''
       TILE@map.2/inner: ''
-      TILE@map.2/inner.1/map.1/inner.2/map.3/map.1/inner: ''
-      TILE@map.2/inner.1/map.1/inner.2/map.3/map.1/inner.1/map.1/inner: ''
-      TILE@map.2/inner.2/map.4/map.2/inner: ''
-      TILE@map.2/inner.2/map.4/map.2/inner.1/map.1/inner: ''
-      TILE@map.2/inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@map.2/inner.1/map.1/inner: ''
       TILE@map.2/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@map.2/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
-      REDUCE@map.1/inner: coop
-      REDUCE@map.2/inner: coop
-      REDUCE@map.2/inner.1/map.1/inner.2/map.3/map.1/inner: ''
-      REDUCE@map.2/inner.1/map.1/inner.2/map.3/map.1/inner.1/map.1/inner: ''
-      REDUCE@map.2/inner.2/map.4/map.2/inner: coop/r4
-      REDUCE@map.2/inner.2/map.4/map.2/inner.1/map.1/inner: ''
-      REDUCE@map.2/inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
+      TILE@map.2/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      TILE@map.2/inner.1/map.1/inner.2/map.3/map.1/inner.1/map.1/inner: ''
+      TILE@map.2/inner.2/map.4/map.2/inner: ''
+      TILE@map.2/inner.2/map.4/map.2/inner.1/map.1/inner: ''
+      TILE@map.2/inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
+      REDUCE@map.1/inner: ''
+      REDUCE@map.2/inner: ''
       REDUCE@map.2/inner.1/map.1/inner: ''
       REDUCE@map.2/inner.1/map.1/inner.1/map.1/inner: ''
       REDUCE@map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
       REDUCE@map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
       REDUCE@map.2/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      REDUCE@map.2/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      REDUCE@map.2/inner.1/map.1/inner.2/map.3/map.1/inner.1/map.1/inner: ''
+      REDUCE@map.2/inner.2/map.4/map.2/inner: ''
+      REDUCE@map.2/inner.2/map.4/map.2/inner.1/map.1/inner: ''
+      REDUCE@map.2/inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       STAGE@map.1/inner: ''
       STAGE@map.2/inner: ''
       STAGE@map.2/inner.1/map.1/inner: ''
       STAGE@map.2/inner.1/map.1/inner.1/map.1/inner: ''
-      STAGE@map.2/inner.1/map.4/map.2/inner: ''
-      STAGE@map.2/inner.1/map.4/map.2/inner.1/map.1/inner: ''
-      STAGE@map.2/inner.1/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
-      STAGE@map.2/inner.2/map.1/inner: ''
-      STAGE@map.2/inner.2/map.1/inner.1/map.1/inner: ''
-      STAGE@map.2/inner.2/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      STAGE@map.2/inner.2/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      STAGE@map.2/inner.2/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
-      WORK: t128
+      STAGE@map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
+      STAGE@map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
+      STAGE@map.2/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      STAGE@map.2/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      STAGE@map.2/inner.1/map.1/inner.2/map.3/map.1/inner.1/map.1/inner: ''
+      STAGE@map.2/inner.2/map.4/map.2/inner: ''
+      STAGE@map.2/inner.2/map.4/map.2/inner.1/map.1/inner: ''
+      STAGE@map.2/inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
+      WORK: ''
       RASTER: ''
-    identity: 8e855a8fbdbb2f8d28a911d4c1cfe0b1834c4e298c76f5b590d8be75cb7ac106
+    identity: 4f1d82857b331aa9e5b8f324d6c11e2637a62a6f31ce99fe0e0c37412ac673af
     measurements:
-      emmy_us: 2.822526960129778
-      reference_us: 2.8029830105560647
+      emmy_us: 2.531411230261556
+      reference_us: 2.518626325058215
       reference_backend: same-input-greedy
-  - name: post1.k_div_11_reduce.a4b561dea31a.m1.07039feea7ff.cdfe3a37dc00
+  - name: post1.k_div_11_reduce.393de839665e.m1.ba49c887bb92
     bindings:
       num_tokens: 1
     pins:
       FAST_MATH: false
     knobs:
-      TILE@map.8/map.1/inner: f4x2
+      TILE@map.8/map.1/inner: ''
       TILE@map.8/map.1/inner.1/map.1/inner: ''
       TILE@map.8/map.2/inner: ''
       TILE@map.8/map.2/inner.1/map.1/inner: ''
-      TILE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner: f1x2
+      TILE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      TILE@map.8/map.2/inner.1/map.1/inner.1/map.4/map.2/inner: f1x2
-      TILE@map.8/map.2/inner.1/map.1/inner.1/map.4/map.2/inner.1/map.1/inner: ''
-      TILE@map.8/map.2/inner.1/map.1/inner.1/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
-      TILE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner: ''
-      TILE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner: f4x2
-      TILE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      TILE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      TILE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
-      TILE@map.8/map.2/inner.2/map.4/map.1/inner: f1x2
+      TILE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
+      TILE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
+      TILE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      TILE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      TILE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner.1/map.1/inner: ''
+      TILE@map.8/map.2/inner.1/map.1/inner.2/map.4/map.2/inner: ''
+      TILE@map.8/map.2/inner.1/map.1/inner.2/map.4/map.2/inner.1/map.1/inner: ''
+      TILE@map.8/map.2/inner.1/map.1/inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
+      TILE@map.8/map.2/inner.2/map.4/map.1/inner: ''
       TILE@map.8/map.2/inner.2/map.4/map.1/inner.1/map.1/inner: ''
-      TILE@map.8/map.2/inner.2/map.4/map.2/inner: f1x2
-      TILE@map.8/map.2/inner.2/map.4/map.2/inner.1/map.1/inner: f1x2
+      TILE@map.8/map.2/inner.2/map.4/map.2/inner: ''
+      TILE@map.8/map.2/inner.2/map.4/map.2/inner.1/map.1/inner: ''
       TILE@map.8/map.2/inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@map.8/map.2/inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      TILE@map.8/map.2/inner.2/map.4/map.2/inner.1/map.1/inner.2/map.3/map.1/inner: f1x2
-      TILE@map.9/inner: f4x2
-      TILE@map.9/inner.1/map.1/inner: f1x2
+      TILE@map.8/map.2/inner.2/map.4/map.2/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      TILE@map.9/inner: ''
+      TILE@map.9/inner.1/map.1/inner: ''
       TILE@map.9/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@map.9/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@map.9/inner.1/map.1/inner.2/map.3/map.1/inner: ''
@@ -31835,14 +31875,14 @@ configs:
       REDUCE@map.8/map.2/inner.1/map.1/inner: ''
       REDUCE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       REDUCE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      REDUCE@map.8/map.2/inner.1/map.1/inner.1/map.4/map.2/inner: ''
-      REDUCE@map.8/map.2/inner.1/map.1/inner.1/map.4/map.2/inner.1/map.1/inner: ''
-      REDUCE@map.8/map.2/inner.1/map.1/inner.1/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
-      REDUCE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner: ''
-      REDUCE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner: ''
-      REDUCE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      REDUCE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      REDUCE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      REDUCE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
+      REDUCE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
+      REDUCE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      REDUCE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      REDUCE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner.1/map.1/inner: ''
+      REDUCE@map.8/map.2/inner.1/map.1/inner.2/map.4/map.2/inner: ''
+      REDUCE@map.8/map.2/inner.1/map.1/inner.2/map.4/map.2/inner.1/map.1/inner: ''
+      REDUCE@map.8/map.2/inner.1/map.1/inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       REDUCE@map.8/map.2/inner.2/map.4/map.1/inner: ''
       REDUCE@map.8/map.2/inner.2/map.4/map.1/inner.1/map.1/inner: ''
       REDUCE@map.8/map.2/inner.2/map.4/map.2/inner: ''
@@ -31861,14 +31901,14 @@ configs:
       STAGE@map.8/map.2/inner.1/map.1/inner: ''
       STAGE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       STAGE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      STAGE@map.8/map.2/inner.1/map.1/inner.1/map.4/map.2/inner: ''
-      STAGE@map.8/map.2/inner.1/map.1/inner.1/map.4/map.2/inner.1/map.1/inner: ''
-      STAGE@map.8/map.2/inner.1/map.1/inner.1/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
-      STAGE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner: ''
-      STAGE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner: ''
-      STAGE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      STAGE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      STAGE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      STAGE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
+      STAGE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
+      STAGE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      STAGE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      STAGE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner.1/map.1/inner: ''
+      STAGE@map.8/map.2/inner.1/map.1/inner.2/map.4/map.2/inner: ''
+      STAGE@map.8/map.2/inner.1/map.1/inner.2/map.4/map.2/inner.1/map.1/inner: ''
+      STAGE@map.8/map.2/inner.1/map.1/inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       STAGE@map.8/map.2/inner.2/map.4/map.1/inner: ''
       STAGE@map.8/map.2/inner.2/map.4/map.1/inner.1/map.1/inner: ''
       STAGE@map.8/map.2/inner.2/map.4/map.2/inner: ''
@@ -31881,12 +31921,12 @@ configs:
       STAGE@map.9/inner.1/map.1/inner.1/map.1/inner: ''
       STAGE@map.9/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
       STAGE@map.9/inner.1/map.1/inner.2/map.3/map.1/inner: ''
-      WORK: t32x8
-      RASTER: gm8
-    identity: b641b1f3a6572dcd89c27a5b1c31a0dc714e05b0abf4a9e28a24a77846a48516
+      WORK: ''
+      RASTER: ''
+    identity: ba49c887bb92d1bd8fafda0620d6c80aca657f251c5b39e8e6eb02a2a466eb75
     measurements:
-      emmy_us: 47.396571863265265
-      reference_us: 47.494096415383474
+      emmy_us: 6.344911418383634
+      reference_us: 6.386871903370588
       reference_backend: same-input-greedy
 - program: 5
   target:
@@ -31936,33 +31976,30 @@ configs:
   target:
     loop: 48
   realizations:
-  - name: post1.k_div_18_reduce.99dac52c57f2.m1.978149a36e6f
+  - name: post1.k_div_18_reduce.4775a192d2e2.m1
     bindings:
       num_tokens: 1
     pins:
       FAST_MATH: false
+    kernel_set:
+    - post1.k_div_18_reduce.4775a192d2e2.m1.200d69df80c0
     latency:
       NVIDIA Tesla V100 SXM3 32GB:
-        emmy_us: 104.8320010304451
-        eager_us: 303.76927564098577
-    kernel_set:
-    - post1.k_div_18_reduce.99dac52c57f2.m1.978149a36e6f.978149a36e6f
-    knobs: &id009
-      PLACE@map.1/inner: cut
-    identity: 913ba5e57f0051a6fba4965e4bc3cae2fe41c704ff6c03479926f9d47aae2a07
-    measurements: &id010
-      emmy_us: 104.38367304129478
-      reference_us: 104.73954480165129
-      reference_backend: same-input-greedy
-  - name: post1.k_div_18_reduce.99dac52c57f2.m1.978149a36e6f.978149a36e6f
+        emmy_us: 11.175914477276544
+        eager_us: 308.0069066778931
+  - name: post1.k_div_18_reduce.4775a192d2e2.m1.200d69df80c0
     bindings:
       num_tokens: 1
     pins:
       FAST_MATH: false
-    knobs: *id009
+    knobs:
+      PLACE@map.1/inner: cut
     identity: 913ba5e57f0051a6fba4965e4bc3cae2fe41c704ff6c03479926f9d47aae2a07
-    measurements: *id010
-  - name: post1.k_div_18_reduce.99dac52c57f2.m1.978149a36e6f.3e6869468371
+    measurements:
+      emmy_us: 12.966400384902954
+      reference_us: 11.142881967688119
+      reference_backend: same-input-greedy
+  - name: post1.k_div_18_reduce.4775a192d2e2.m1.924d856b5b86
     bindings:
       num_tokens: 1
     pins:
@@ -31978,9 +32015,9 @@ configs:
       TILE@inner.1/map.1/inner.1/map.4/map.1/inner.2/map.3/map.1/inner: ''
       TILE@inner.1/map.1/inner.3/map.1/inner: ''
       TILE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner: ''
+      TILE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.1/map.3/map.1/inner: ''
       TILE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.2/map.1/inner: ''
       TILE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner: ''
-      TILE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.1/map.3/map.1/inner: ''
       TILE@inner.2/map.2/inner: ''
       TILE@inner.2/map.2/inner.1/map.1/inner: ''
       TILE@inner.2/map.2/inner.1/map.1/inner.1/map.1/inner: ''
@@ -31991,7 +32028,7 @@ configs:
       TILE@inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@inner.2/map.4/map.2/inner.1/map.1/inner.2/map.3/map.1/inner: ''
-      REDUCE@inner: coop
+      REDUCE@inner: ''
       REDUCE@inner.1/map.1/inner: ''
       REDUCE@inner.1/map.1/inner.1/map.1/inner: ''
       REDUCE@inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
@@ -32001,15 +32038,15 @@ configs:
       REDUCE@inner.1/map.1/inner.1/map.4/map.1/inner.2/map.3/map.1/inner: ''
       REDUCE@inner.1/map.1/inner.3/map.1/inner: ''
       REDUCE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner: ''
+      REDUCE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.1/map.3/map.1/inner: ''
       REDUCE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.2/map.1/inner: ''
       REDUCE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner: ''
-      REDUCE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.1/map.3/map.1/inner: ''
       REDUCE@inner.2/map.2/inner: ''
       REDUCE@inner.2/map.2/inner.1/map.1/inner: ''
       REDUCE@inner.2/map.2/inner.1/map.1/inner.1/map.1/inner: ''
-      REDUCE@inner.2/map.4/map.1/inner: coop
+      REDUCE@inner.2/map.4/map.1/inner: ''
       REDUCE@inner.2/map.4/map.1/inner.1/map.1/inner: ''
-      REDUCE@inner.2/map.4/map.2/inner: coop
+      REDUCE@inner.2/map.4/map.2/inner: ''
       REDUCE@inner.2/map.4/map.2/inner.1/map.1/inner: ''
       REDUCE@inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       REDUCE@inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
@@ -32024,9 +32061,9 @@ configs:
       STAGE@inner.1/map.1/inner.1/map.4/map.1/inner.2/map.3/map.1/inner: ''
       STAGE@inner.1/map.1/inner.3/map.1/inner: ''
       STAGE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner: ''
-      STAGE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      STAGE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      STAGE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      STAGE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.1/map.3/map.1/inner: ''
+      STAGE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.2/map.1/inner: ''
+      STAGE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner: ''
       STAGE@inner.2/map.2/inner: ''
       STAGE@inner.2/map.2/inner.1/map.1/inner: ''
       STAGE@inner.2/map.2/inner.1/map.1/inner.1/map.1/inner: ''
@@ -32037,30 +32074,30 @@ configs:
       STAGE@inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       STAGE@inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
       STAGE@inner.2/map.4/map.2/inner.1/map.1/inner.2/map.3/map.1/inner: ''
-      WORK: t128
+      WORK: ''
       RASTER: ''
-    identity: 41f0c2601e625ad775c44142bc0d90de365fe9b14de657357764140cda4b54b7
+    identity: 924d856b5b86e47e54e806234706a54f8daa4c84cf168b627c21a7aedb3c3db6
     measurements:
-      emmy_us: 6.386871903370588
-      reference_us: 6.333146505295092
+      emmy_us: 8.432941276486181
+      reference_us: 7.2422027587890625
       reference_backend: same-input-greedy
-  - name: post1.k_div_18_reduce.99dac52c57f2.m1.978149a36e6f.87399e45f9bc
+  - name: post1.k_div_18_reduce.4775a192d2e2.m1.dd9807b3f7ea
     bindings:
       num_tokens: 1
     pins:
       FAST_MATH: false
     knobs:
-      TILE@map.2/map.1/map.1/inner: f1x8
+      TILE@map.2/map.1/map.1/inner: ''
       TILE@map.2/map.1/map.1/inner.1/map.1/inner: ''
       TILE@map.2/map.1/map.2/inner: ''
-      TILE@map.2/map.1/map.2/inner.1/map.1/inner: f2x8
+      TILE@map.2/map.1/map.2/inner.1/map.1/inner: ''
       TILE@map.2/map.1/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@map.2/map.1/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      TILE@map.2/map.1/map.2/inner.1/map.1/inner.2/map.3/map.1/inner: f1x8
+      TILE@map.2/map.1/map.2/inner.1/map.1/inner.2/map.3/map.1/inner: ''
       TILE@map.2/map.2/inner: ''
-      TILE@map.2/map.2/inner.1/map.1/inner: f2x8
+      TILE@map.2/map.2/inner.1/map.1/inner: ''
       TILE@map.2/map.2/inner.1/map.1/inner.1/map.1/inner: ''
-      TILE@map.2/map.2/inner.1/map.4/map.1/inner: f2x8
+      TILE@map.2/map.2/inner.1/map.4/map.1/inner: ''
       TILE@map.2/map.2/inner.1/map.4/map.2/inner: ''
       TILE@map.2/map.2/inner.1/map.4/map.2/inner.1/map.1/inner: ''
       TILE@map.2/map.2/inner.1/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
@@ -32068,8 +32105,8 @@ configs:
       TILE@map.2/map.2/inner.3/map.1/inner.1/map.1/inner: ''
       TILE@map.2/map.2/inner.3/map.1/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@map.2/map.2/inner.3/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      TILE@map.2/map.2/inner.3/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: f2x8
-      TILE@map.2/map.3/inner: f1x8
+      TILE@map.2/map.2/inner.3/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      TILE@map.2/map.3/inner: ''
       TILE@map.2/map.3/inner.1/map.1/inner: ''
       TILE@map.2/map.3/inner.1/map.1/inner.1/map.1/inner: ''
       REDUCE@map.2/map.1/map.1/inner: ''
@@ -32116,12 +32153,12 @@ configs:
       STAGE@map.2/map.3/inner: ''
       STAGE@map.2/map.3/inner.1/map.1/inner: ''
       STAGE@map.2/map.3/inner.1/map.1/inner.1/map.1/inner: ''
-      WORK: t64x16
+      WORK: ''
       RASTER: ''
-    identity: 8e8c7fd4007e4a5710483a3eedbda19d74e7388dbe1b765a2fe705c0ab05be75
+    identity: dd9807b3f7eac19fcaa76461b4b032945a60f76b94a3103394ece9548559f59d
     measurements:
-      emmy_us: 97.9968011379242
-      reference_us: 98.4063982963562
+      emmy_us: 4.009638445444375
+      reference_us: 3.4917314987721797
       reference_backend: same-input-greedy
 - program: 5
   target:
@@ -32184,33 +32221,30 @@ configs:
   target:
     loop: 51
   realizations:
-  - name: post1.k_div_25_reduce.a4b561dea31a.m1.07039feea7ff
-    bindings:
+  - bindings:
       num_tokens: 1
     pins:
       FAST_MATH: false
+    name: post1.k_div_25_reduce.393de839665e.m1
+    kernel_set:
+    - post1.k_div_25_reduce.393de839665e.m1.d1b86723d9a6
     latency:
       NVIDIA Tesla V100 SXM3 32GB:
-        emmy_us: 52.34446946312399
-        eager_us: 305.86246961957954
-    kernel_set:
-    - post1.k_div_25_reduce.a4b561dea31a.m1.07039feea7ff.07039feea7ff
-    knobs: &id011
-      PLACE@map.1/map: cut
-    identity: b641b1f3a6572dcd89c27a5b1c31a0dc714e05b0abf4a9e28a24a77846a48516
-    measurements: &id012
-      emmy_us: 50.219803447199986
-      reference_us: 50.29571446235834
-      reference_backend: same-input-greedy
-  - name: post1.k_div_25_reduce.a4b561dea31a.m1.07039feea7ff.07039feea7ff
-    bindings:
+        emmy_us: 9.069714163030897
+        eager_us: 307.96800478540285
+  - bindings:
       num_tokens: 1
     pins:
       FAST_MATH: false
-    knobs: *id011
+    name: post1.k_div_25_reduce.393de839665e.m1.d1b86723d9a6
+    knobs:
+      PLACE@map.1/map: cut
     identity: b641b1f3a6572dcd89c27a5b1c31a0dc714e05b0abf4a9e28a24a77846a48516
-    measurements: *id012
-  - name: post1.k_div_25_reduce.a4b561dea31a.m1.07039feea7ff.9cef01bc6820
+    measurements:
+      emmy_us: 8.87632264864519
+      reference_us: 8.905498228428803
+      reference_backend: same-input-greedy
+  - name: post1.k_div_25_reduce.393de839665e.m1.4f1d82857b33
     bindings:
       num_tokens: 1
     pins:
@@ -32218,76 +32252,76 @@ configs:
     knobs:
       TILE@map.1/inner: ''
       TILE@map.2/inner: ''
-      TILE@map.2/inner.1/map.1/inner.2/map.3/map.1/inner: ''
-      TILE@map.2/inner.1/map.1/inner.2/map.3/map.1/inner.1/map.1/inner: ''
-      TILE@map.2/inner.2/map.4/map.2/inner: ''
-      TILE@map.2/inner.2/map.4/map.2/inner.1/map.1/inner: ''
-      TILE@map.2/inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@map.2/inner.1/map.1/inner: ''
       TILE@map.2/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@map.2/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
-      REDUCE@map.1/inner: coop
-      REDUCE@map.2/inner: coop
-      REDUCE@map.2/inner.1/map.1/inner.2/map.3/map.1/inner: ''
-      REDUCE@map.2/inner.1/map.1/inner.2/map.3/map.1/inner.1/map.1/inner: ''
-      REDUCE@map.2/inner.2/map.4/map.2/inner: coop/r4
-      REDUCE@map.2/inner.2/map.4/map.2/inner.1/map.1/inner: ''
-      REDUCE@map.2/inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
+      TILE@map.2/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      TILE@map.2/inner.1/map.1/inner.2/map.3/map.1/inner.1/map.1/inner: ''
+      TILE@map.2/inner.2/map.4/map.2/inner: ''
+      TILE@map.2/inner.2/map.4/map.2/inner.1/map.1/inner: ''
+      TILE@map.2/inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
+      REDUCE@map.1/inner: ''
+      REDUCE@map.2/inner: ''
       REDUCE@map.2/inner.1/map.1/inner: ''
       REDUCE@map.2/inner.1/map.1/inner.1/map.1/inner: ''
       REDUCE@map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
       REDUCE@map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
       REDUCE@map.2/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      REDUCE@map.2/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      REDUCE@map.2/inner.1/map.1/inner.2/map.3/map.1/inner.1/map.1/inner: ''
+      REDUCE@map.2/inner.2/map.4/map.2/inner: ''
+      REDUCE@map.2/inner.2/map.4/map.2/inner.1/map.1/inner: ''
+      REDUCE@map.2/inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       STAGE@map.1/inner: ''
       STAGE@map.2/inner: ''
       STAGE@map.2/inner.1/map.1/inner: ''
       STAGE@map.2/inner.1/map.1/inner.1/map.1/inner: ''
-      STAGE@map.2/inner.1/map.4/map.2/inner: ''
-      STAGE@map.2/inner.1/map.4/map.2/inner.1/map.1/inner: ''
-      STAGE@map.2/inner.1/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
-      STAGE@map.2/inner.2/map.1/inner: ''
-      STAGE@map.2/inner.2/map.1/inner.1/map.1/inner: ''
-      STAGE@map.2/inner.2/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      STAGE@map.2/inner.2/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      STAGE@map.2/inner.2/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
-      WORK: t128
+      STAGE@map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
+      STAGE@map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
+      STAGE@map.2/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      STAGE@map.2/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      STAGE@map.2/inner.1/map.1/inner.2/map.3/map.1/inner.1/map.1/inner: ''
+      STAGE@map.2/inner.2/map.4/map.2/inner: ''
+      STAGE@map.2/inner.2/map.4/map.2/inner.1/map.1/inner: ''
+      STAGE@map.2/inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
+      WORK: ''
       RASTER: ''
-    identity: 8e855a8fbdbb2f8d28a911d4c1cfe0b1834c4e298c76f5b590d8be75cb7ac106
+    identity: 4f1d82857b331aa9e5b8f324d6c11e2637a62a6f31ce99fe0e0c37412ac673af
     measurements:
-      emmy_us: 2.8232315839347195
-      reference_us: 2.801618046974868
+      emmy_us: 2.531411230261556
+      reference_us: 2.518626325058215
       reference_backend: same-input-greedy
-  - name: post1.k_div_25_reduce.a4b561dea31a.m1.07039feea7ff.cdfe3a37dc00
+  - name: post1.k_div_25_reduce.393de839665e.m1.ba49c887bb92
     bindings:
       num_tokens: 1
     pins:
       FAST_MATH: false
     knobs:
-      TILE@map.8/map.1/inner: f4x2
+      TILE@map.8/map.1/inner: ''
       TILE@map.8/map.1/inner.1/map.1/inner: ''
       TILE@map.8/map.2/inner: ''
       TILE@map.8/map.2/inner.1/map.1/inner: ''
-      TILE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner: f1x2
+      TILE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      TILE@map.8/map.2/inner.1/map.1/inner.1/map.4/map.2/inner: f1x2
-      TILE@map.8/map.2/inner.1/map.1/inner.1/map.4/map.2/inner.1/map.1/inner: ''
-      TILE@map.8/map.2/inner.1/map.1/inner.1/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
-      TILE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner: ''
-      TILE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner: f4x2
-      TILE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      TILE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      TILE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
-      TILE@map.8/map.2/inner.2/map.4/map.1/inner: f1x2
+      TILE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
+      TILE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
+      TILE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      TILE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      TILE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner.1/map.1/inner: ''
+      TILE@map.8/map.2/inner.1/map.1/inner.2/map.4/map.2/inner: ''
+      TILE@map.8/map.2/inner.1/map.1/inner.2/map.4/map.2/inner.1/map.1/inner: ''
+      TILE@map.8/map.2/inner.1/map.1/inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
+      TILE@map.8/map.2/inner.2/map.4/map.1/inner: ''
       TILE@map.8/map.2/inner.2/map.4/map.1/inner.1/map.1/inner: ''
-      TILE@map.8/map.2/inner.2/map.4/map.2/inner: f1x2
-      TILE@map.8/map.2/inner.2/map.4/map.2/inner.1/map.1/inner: f1x2
+      TILE@map.8/map.2/inner.2/map.4/map.2/inner: ''
+      TILE@map.8/map.2/inner.2/map.4/map.2/inner.1/map.1/inner: ''
       TILE@map.8/map.2/inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@map.8/map.2/inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      TILE@map.8/map.2/inner.2/map.4/map.2/inner.1/map.1/inner.2/map.3/map.1/inner: f1x2
-      TILE@map.9/inner: f4x2
-      TILE@map.9/inner.1/map.1/inner: f1x2
+      TILE@map.8/map.2/inner.2/map.4/map.2/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      TILE@map.9/inner: ''
+      TILE@map.9/inner.1/map.1/inner: ''
       TILE@map.9/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@map.9/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@map.9/inner.1/map.1/inner.2/map.3/map.1/inner: ''
@@ -32297,14 +32331,14 @@ configs:
       REDUCE@map.8/map.2/inner.1/map.1/inner: ''
       REDUCE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       REDUCE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      REDUCE@map.8/map.2/inner.1/map.1/inner.1/map.4/map.2/inner: ''
-      REDUCE@map.8/map.2/inner.1/map.1/inner.1/map.4/map.2/inner.1/map.1/inner: ''
-      REDUCE@map.8/map.2/inner.1/map.1/inner.1/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
-      REDUCE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner: ''
-      REDUCE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner: ''
-      REDUCE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      REDUCE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      REDUCE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      REDUCE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
+      REDUCE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
+      REDUCE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      REDUCE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      REDUCE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner.1/map.1/inner: ''
+      REDUCE@map.8/map.2/inner.1/map.1/inner.2/map.4/map.2/inner: ''
+      REDUCE@map.8/map.2/inner.1/map.1/inner.2/map.4/map.2/inner.1/map.1/inner: ''
+      REDUCE@map.8/map.2/inner.1/map.1/inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       REDUCE@map.8/map.2/inner.2/map.4/map.1/inner: ''
       REDUCE@map.8/map.2/inner.2/map.4/map.1/inner.1/map.1/inner: ''
       REDUCE@map.8/map.2/inner.2/map.4/map.2/inner: ''
@@ -32323,14 +32357,14 @@ configs:
       STAGE@map.8/map.2/inner.1/map.1/inner: ''
       STAGE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       STAGE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      STAGE@map.8/map.2/inner.1/map.1/inner.1/map.4/map.2/inner: ''
-      STAGE@map.8/map.2/inner.1/map.1/inner.1/map.4/map.2/inner.1/map.1/inner: ''
-      STAGE@map.8/map.2/inner.1/map.1/inner.1/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
-      STAGE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner: ''
-      STAGE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner: ''
-      STAGE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      STAGE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      STAGE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      STAGE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
+      STAGE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
+      STAGE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      STAGE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      STAGE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner.1/map.1/inner: ''
+      STAGE@map.8/map.2/inner.1/map.1/inner.2/map.4/map.2/inner: ''
+      STAGE@map.8/map.2/inner.1/map.1/inner.2/map.4/map.2/inner.1/map.1/inner: ''
+      STAGE@map.8/map.2/inner.1/map.1/inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       STAGE@map.8/map.2/inner.2/map.4/map.1/inner: ''
       STAGE@map.8/map.2/inner.2/map.4/map.1/inner.1/map.1/inner: ''
       STAGE@map.8/map.2/inner.2/map.4/map.2/inner: ''
@@ -32343,12 +32377,12 @@ configs:
       STAGE@map.9/inner.1/map.1/inner.1/map.1/inner: ''
       STAGE@map.9/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
       STAGE@map.9/inner.1/map.1/inner.2/map.3/map.1/inner: ''
-      WORK: t32x8
-      RASTER: gm8
-    identity: b641b1f3a6572dcd89c27a5b1c31a0dc714e05b0abf4a9e28a24a77846a48516
+      WORK: ''
+      RASTER: ''
+    identity: ba49c887bb92d1bd8fafda0620d6c80aca657f251c5b39e8e6eb02a2a466eb75
     measurements:
-      emmy_us: 47.396571863265265
-      reference_us: 47.494096415383474
+      emmy_us: 6.344911418383634
+      reference_us: 6.386871903370588
       reference_backend: same-input-greedy
 - program: 5
   target:
@@ -33124,33 +33158,30 @@ configs:
   target:
     loop: 64
   realizations:
-  - name: post1.k_div_50_reduce.a4b561dea31a.m1.07039feea7ff
-    bindings:
+  - bindings:
       num_tokens: 1
     pins:
       FAST_MATH: false
+    name: post1.k_div_50_reduce.393de839665e.m1
+    kernel_set:
+    - post1.k_div_50_reduce.393de839665e.m1.d1b86723d9a6
     latency:
       NVIDIA Tesla V100 SXM3 32GB:
-        emmy_us: 49.633881625007184
-        eager_us: 304.918103231361
-    kernel_set:
-    - post1.k_div_50_reduce.a4b561dea31a.m1.07039feea7ff.07039feea7ff
-    knobs: &id013
-      PLACE@map.1/map: cut
-    identity: b641b1f3a6572dcd89c27a5b1c31a0dc714e05b0abf4a9e28a24a77846a48516
-    measurements: &id014
-      emmy_us: 50.14942763418102
-      reference_us: 50.22639255970223
-      reference_backend: same-input-greedy
-  - name: post1.k_div_50_reduce.a4b561dea31a.m1.07039feea7ff.07039feea7ff
-    bindings:
+        emmy_us: 9.069714163030897
+        eager_us: 307.96800478540285
+  - bindings:
       num_tokens: 1
     pins:
       FAST_MATH: false
-    knobs: *id013
+    name: post1.k_div_50_reduce.393de839665e.m1.d1b86723d9a6
+    knobs:
+      PLACE@map.1/map: cut
     identity: b641b1f3a6572dcd89c27a5b1c31a0dc714e05b0abf4a9e28a24a77846a48516
-    measurements: *id014
-  - name: post1.k_div_50_reduce.a4b561dea31a.m1.07039feea7ff.9cef01bc6820
+    measurements:
+      emmy_us: 8.87632264864519
+      reference_us: 8.905498228428803
+      reference_backend: same-input-greedy
+  - name: post1.k_div_50_reduce.393de839665e.m1.4f1d82857b33
     bindings:
       num_tokens: 1
     pins:
@@ -33158,76 +33189,76 @@ configs:
     knobs:
       TILE@map.1/inner: ''
       TILE@map.2/inner: ''
-      TILE@map.2/inner.1/map.1/inner.2/map.3/map.1/inner: ''
-      TILE@map.2/inner.1/map.1/inner.2/map.3/map.1/inner.1/map.1/inner: ''
-      TILE@map.2/inner.2/map.4/map.2/inner: ''
-      TILE@map.2/inner.2/map.4/map.2/inner.1/map.1/inner: ''
-      TILE@map.2/inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@map.2/inner.1/map.1/inner: ''
       TILE@map.2/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@map.2/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
-      REDUCE@map.1/inner: coop
-      REDUCE@map.2/inner: coop
-      REDUCE@map.2/inner.1/map.1/inner.2/map.3/map.1/inner: ''
-      REDUCE@map.2/inner.1/map.1/inner.2/map.3/map.1/inner.1/map.1/inner: ''
-      REDUCE@map.2/inner.2/map.4/map.2/inner: coop/r4
-      REDUCE@map.2/inner.2/map.4/map.2/inner.1/map.1/inner: ''
-      REDUCE@map.2/inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
+      TILE@map.2/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      TILE@map.2/inner.1/map.1/inner.2/map.3/map.1/inner.1/map.1/inner: ''
+      TILE@map.2/inner.2/map.4/map.2/inner: ''
+      TILE@map.2/inner.2/map.4/map.2/inner.1/map.1/inner: ''
+      TILE@map.2/inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
+      REDUCE@map.1/inner: ''
+      REDUCE@map.2/inner: ''
       REDUCE@map.2/inner.1/map.1/inner: ''
       REDUCE@map.2/inner.1/map.1/inner.1/map.1/inner: ''
       REDUCE@map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
       REDUCE@map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
       REDUCE@map.2/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      REDUCE@map.2/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      REDUCE@map.2/inner.1/map.1/inner.2/map.3/map.1/inner.1/map.1/inner: ''
+      REDUCE@map.2/inner.2/map.4/map.2/inner: ''
+      REDUCE@map.2/inner.2/map.4/map.2/inner.1/map.1/inner: ''
+      REDUCE@map.2/inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       STAGE@map.1/inner: ''
       STAGE@map.2/inner: ''
       STAGE@map.2/inner.1/map.1/inner: ''
       STAGE@map.2/inner.1/map.1/inner.1/map.1/inner: ''
-      STAGE@map.2/inner.1/map.4/map.2/inner: ''
-      STAGE@map.2/inner.1/map.4/map.2/inner.1/map.1/inner: ''
-      STAGE@map.2/inner.1/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
-      STAGE@map.2/inner.2/map.1/inner: ''
-      STAGE@map.2/inner.2/map.1/inner.1/map.1/inner: ''
-      STAGE@map.2/inner.2/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      STAGE@map.2/inner.2/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      STAGE@map.2/inner.2/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
-      WORK: t128
+      STAGE@map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
+      STAGE@map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
+      STAGE@map.2/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      STAGE@map.2/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      STAGE@map.2/inner.1/map.1/inner.2/map.3/map.1/inner.1/map.1/inner: ''
+      STAGE@map.2/inner.2/map.4/map.2/inner: ''
+      STAGE@map.2/inner.2/map.4/map.2/inner.1/map.1/inner: ''
+      STAGE@map.2/inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
+      WORK: ''
       RASTER: ''
-    identity: 8e855a8fbdbb2f8d28a911d4c1cfe0b1834c4e298c76f5b590d8be75cb7ac106
+    identity: 4f1d82857b331aa9e5b8f324d6c11e2637a62a6f31ce99fe0e0c37412ac673af
     measurements:
-      emmy_us: 2.801618046974868
-      reference_us: 2.7810584203778537
+      emmy_us: 2.531411230261556
+      reference_us: 2.518626325058215
       reference_backend: same-input-greedy
-  - name: post1.k_div_50_reduce.a4b561dea31a.m1.07039feea7ff.cdfe3a37dc00
+  - name: post1.k_div_50_reduce.393de839665e.m1.ba49c887bb92
     bindings:
       num_tokens: 1
     pins:
       FAST_MATH: false
     knobs:
-      TILE@map.8/map.1/inner: f4x2
+      TILE@map.8/map.1/inner: ''
       TILE@map.8/map.1/inner.1/map.1/inner: ''
       TILE@map.8/map.2/inner: ''
       TILE@map.8/map.2/inner.1/map.1/inner: ''
-      TILE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner: f1x2
+      TILE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      TILE@map.8/map.2/inner.1/map.1/inner.1/map.4/map.2/inner: f1x2
-      TILE@map.8/map.2/inner.1/map.1/inner.1/map.4/map.2/inner.1/map.1/inner: ''
-      TILE@map.8/map.2/inner.1/map.1/inner.1/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
-      TILE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner: ''
-      TILE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner: f4x2
-      TILE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      TILE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      TILE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
-      TILE@map.8/map.2/inner.2/map.4/map.1/inner: f1x2
+      TILE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
+      TILE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
+      TILE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      TILE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      TILE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner.1/map.1/inner: ''
+      TILE@map.8/map.2/inner.1/map.1/inner.2/map.4/map.2/inner: ''
+      TILE@map.8/map.2/inner.1/map.1/inner.2/map.4/map.2/inner.1/map.1/inner: ''
+      TILE@map.8/map.2/inner.1/map.1/inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
+      TILE@map.8/map.2/inner.2/map.4/map.1/inner: ''
       TILE@map.8/map.2/inner.2/map.4/map.1/inner.1/map.1/inner: ''
-      TILE@map.8/map.2/inner.2/map.4/map.2/inner: f1x2
-      TILE@map.8/map.2/inner.2/map.4/map.2/inner.1/map.1/inner: f1x2
+      TILE@map.8/map.2/inner.2/map.4/map.2/inner: ''
+      TILE@map.8/map.2/inner.2/map.4/map.2/inner.1/map.1/inner: ''
       TILE@map.8/map.2/inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@map.8/map.2/inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      TILE@map.8/map.2/inner.2/map.4/map.2/inner.1/map.1/inner.2/map.3/map.1/inner: f1x2
-      TILE@map.9/inner: f4x2
-      TILE@map.9/inner.1/map.1/inner: f1x2
+      TILE@map.8/map.2/inner.2/map.4/map.2/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      TILE@map.9/inner: ''
+      TILE@map.9/inner.1/map.1/inner: ''
       TILE@map.9/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@map.9/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@map.9/inner.1/map.1/inner.2/map.3/map.1/inner: ''
@@ -33237,14 +33268,14 @@ configs:
       REDUCE@map.8/map.2/inner.1/map.1/inner: ''
       REDUCE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       REDUCE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      REDUCE@map.8/map.2/inner.1/map.1/inner.1/map.4/map.2/inner: ''
-      REDUCE@map.8/map.2/inner.1/map.1/inner.1/map.4/map.2/inner.1/map.1/inner: ''
-      REDUCE@map.8/map.2/inner.1/map.1/inner.1/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
-      REDUCE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner: ''
-      REDUCE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner: ''
-      REDUCE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      REDUCE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      REDUCE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      REDUCE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
+      REDUCE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
+      REDUCE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      REDUCE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      REDUCE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner.1/map.1/inner: ''
+      REDUCE@map.8/map.2/inner.1/map.1/inner.2/map.4/map.2/inner: ''
+      REDUCE@map.8/map.2/inner.1/map.1/inner.2/map.4/map.2/inner.1/map.1/inner: ''
+      REDUCE@map.8/map.2/inner.1/map.1/inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       REDUCE@map.8/map.2/inner.2/map.4/map.1/inner: ''
       REDUCE@map.8/map.2/inner.2/map.4/map.1/inner.1/map.1/inner: ''
       REDUCE@map.8/map.2/inner.2/map.4/map.2/inner: ''
@@ -33263,14 +33294,14 @@ configs:
       STAGE@map.8/map.2/inner.1/map.1/inner: ''
       STAGE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       STAGE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      STAGE@map.8/map.2/inner.1/map.1/inner.1/map.4/map.2/inner: ''
-      STAGE@map.8/map.2/inner.1/map.1/inner.1/map.4/map.2/inner.1/map.1/inner: ''
-      STAGE@map.8/map.2/inner.1/map.1/inner.1/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
-      STAGE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner: ''
-      STAGE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner: ''
-      STAGE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      STAGE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      STAGE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      STAGE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
+      STAGE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
+      STAGE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      STAGE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      STAGE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner.1/map.1/inner: ''
+      STAGE@map.8/map.2/inner.1/map.1/inner.2/map.4/map.2/inner: ''
+      STAGE@map.8/map.2/inner.1/map.1/inner.2/map.4/map.2/inner.1/map.1/inner: ''
+      STAGE@map.8/map.2/inner.1/map.1/inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       STAGE@map.8/map.2/inner.2/map.4/map.1/inner: ''
       STAGE@map.8/map.2/inner.2/map.4/map.1/inner.1/map.1/inner: ''
       STAGE@map.8/map.2/inner.2/map.4/map.2/inner: ''
@@ -33283,12 +33314,12 @@ configs:
       STAGE@map.9/inner.1/map.1/inner.1/map.1/inner: ''
       STAGE@map.9/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
       STAGE@map.9/inner.1/map.1/inner.2/map.3/map.1/inner: ''
-      WORK: t32x8
-      RASTER: gm8
-    identity: b641b1f3a6572dcd89c27a5b1c31a0dc714e05b0abf4a9e28a24a77846a48516
+      WORK: ''
+      RASTER: ''
+    identity: ba49c887bb92d1bd8fafda0620d6c80aca657f251c5b39e8e6eb02a2a466eb75
     measurements:
-      emmy_us: 47.34780958720616
-      reference_us: 47.44533413932437
+      emmy_us: 6.344911418383634
+      reference_us: 6.386871903370588
       reference_backend: same-input-greedy
 - program: 5
   target:
@@ -33338,33 +33369,30 @@ configs:
   target:
     loop: 67
   realizations:
-  - name: post1.k_div_57_reduce.99dac52c57f2.m1.978149a36e6f
+  - name: post1.k_div_57_reduce.4775a192d2e2.m1
     bindings:
       num_tokens: 1
     pins:
       FAST_MATH: false
+    kernel_set:
+    - post1.k_div_57_reduce.4775a192d2e2.m1.200d69df80c0
     latency:
       NVIDIA Tesla V100 SXM3 32GB:
-        emmy_us: 104.70400005578995
-        eager_us: 305.26123046875
-    kernel_set:
-    - post1.k_div_57_reduce.99dac52c57f2.m1.978149a36e6f.978149a36e6f
-    knobs: &id015
-      PLACE@map.1/inner: cut
-    identity: 913ba5e57f0051a6fba4965e4bc3cae2fe41c704ff6c03479926f9d47aae2a07
-    measurements: &id016
-      emmy_us: 104.26157980393141
-      reference_us: 104.32512124379475
-      reference_backend: same-input-greedy
-  - name: post1.k_div_57_reduce.99dac52c57f2.m1.978149a36e6f.978149a36e6f
+        emmy_us: 11.175914477276544
+        eager_us: 308.0069066778931
+  - name: post1.k_div_57_reduce.4775a192d2e2.m1.200d69df80c0
     bindings:
       num_tokens: 1
     pins:
       FAST_MATH: false
-    knobs: *id015
+    knobs:
+      PLACE@map.1/inner: cut
     identity: 913ba5e57f0051a6fba4965e4bc3cae2fe41c704ff6c03479926f9d47aae2a07
-    measurements: *id016
-  - name: post1.k_div_57_reduce.99dac52c57f2.m1.978149a36e6f.3e6869468371
+    measurements:
+      emmy_us: 12.966400384902954
+      reference_us: 11.142881967688119
+      reference_backend: same-input-greedy
+  - name: post1.k_div_57_reduce.4775a192d2e2.m1.924d856b5b86
     bindings:
       num_tokens: 1
     pins:
@@ -33380,9 +33408,9 @@ configs:
       TILE@inner.1/map.1/inner.1/map.4/map.1/inner.2/map.3/map.1/inner: ''
       TILE@inner.1/map.1/inner.3/map.1/inner: ''
       TILE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner: ''
+      TILE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.1/map.3/map.1/inner: ''
       TILE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.2/map.1/inner: ''
       TILE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner: ''
-      TILE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.1/map.3/map.1/inner: ''
       TILE@inner.2/map.2/inner: ''
       TILE@inner.2/map.2/inner.1/map.1/inner: ''
       TILE@inner.2/map.2/inner.1/map.1/inner.1/map.1/inner: ''
@@ -33393,7 +33421,7 @@ configs:
       TILE@inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@inner.2/map.4/map.2/inner.1/map.1/inner.2/map.3/map.1/inner: ''
-      REDUCE@inner: coop
+      REDUCE@inner: ''
       REDUCE@inner.1/map.1/inner: ''
       REDUCE@inner.1/map.1/inner.1/map.1/inner: ''
       REDUCE@inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
@@ -33403,15 +33431,15 @@ configs:
       REDUCE@inner.1/map.1/inner.1/map.4/map.1/inner.2/map.3/map.1/inner: ''
       REDUCE@inner.1/map.1/inner.3/map.1/inner: ''
       REDUCE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner: ''
+      REDUCE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.1/map.3/map.1/inner: ''
       REDUCE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.2/map.1/inner: ''
       REDUCE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner: ''
-      REDUCE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.1/map.3/map.1/inner: ''
       REDUCE@inner.2/map.2/inner: ''
       REDUCE@inner.2/map.2/inner.1/map.1/inner: ''
       REDUCE@inner.2/map.2/inner.1/map.1/inner.1/map.1/inner: ''
-      REDUCE@inner.2/map.4/map.1/inner: coop
+      REDUCE@inner.2/map.4/map.1/inner: ''
       REDUCE@inner.2/map.4/map.1/inner.1/map.1/inner: ''
-      REDUCE@inner.2/map.4/map.2/inner: coop
+      REDUCE@inner.2/map.4/map.2/inner: ''
       REDUCE@inner.2/map.4/map.2/inner.1/map.1/inner: ''
       REDUCE@inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       REDUCE@inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
@@ -33426,9 +33454,9 @@ configs:
       STAGE@inner.1/map.1/inner.1/map.4/map.1/inner.2/map.3/map.1/inner: ''
       STAGE@inner.1/map.1/inner.3/map.1/inner: ''
       STAGE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner: ''
-      STAGE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      STAGE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      STAGE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      STAGE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.1/map.3/map.1/inner: ''
+      STAGE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.2/map.1/inner: ''
+      STAGE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner: ''
       STAGE@inner.2/map.2/inner: ''
       STAGE@inner.2/map.2/inner.1/map.1/inner: ''
       STAGE@inner.2/map.2/inner.1/map.1/inner.1/map.1/inner: ''
@@ -33439,30 +33467,30 @@ configs:
       STAGE@inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       STAGE@inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
       STAGE@inner.2/map.4/map.2/inner.1/map.1/inner.2/map.3/map.1/inner: ''
-      WORK: t128
+      WORK: ''
       RASTER: ''
-    identity: 41f0c2601e625ad775c44142bc0d90de365fe9b14de657357764140cda4b54b7
+    identity: 924d856b5b86e47e54e806234706a54f8daa4c84cf168b627c21a7aedb3c3db6
     measurements:
-      emmy_us: 6.367179445731335
-      reference_us: 6.328320105870565
+      emmy_us: 8.432941276486181
+      reference_us: 7.2422027587890625
       reference_backend: same-input-greedy
-  - name: post1.k_div_57_reduce.99dac52c57f2.m1.978149a36e6f.87399e45f9bc
+  - name: post1.k_div_57_reduce.4775a192d2e2.m1.dd9807b3f7ea
     bindings:
       num_tokens: 1
     pins:
       FAST_MATH: false
     knobs:
-      TILE@map.2/map.1/map.1/inner: f1x8
+      TILE@map.2/map.1/map.1/inner: ''
       TILE@map.2/map.1/map.1/inner.1/map.1/inner: ''
       TILE@map.2/map.1/map.2/inner: ''
-      TILE@map.2/map.1/map.2/inner.1/map.1/inner: f2x8
+      TILE@map.2/map.1/map.2/inner.1/map.1/inner: ''
       TILE@map.2/map.1/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@map.2/map.1/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      TILE@map.2/map.1/map.2/inner.1/map.1/inner.2/map.3/map.1/inner: f1x8
+      TILE@map.2/map.1/map.2/inner.1/map.1/inner.2/map.3/map.1/inner: ''
       TILE@map.2/map.2/inner: ''
-      TILE@map.2/map.2/inner.1/map.1/inner: f2x8
+      TILE@map.2/map.2/inner.1/map.1/inner: ''
       TILE@map.2/map.2/inner.1/map.1/inner.1/map.1/inner: ''
-      TILE@map.2/map.2/inner.1/map.4/map.1/inner: f2x8
+      TILE@map.2/map.2/inner.1/map.4/map.1/inner: ''
       TILE@map.2/map.2/inner.1/map.4/map.2/inner: ''
       TILE@map.2/map.2/inner.1/map.4/map.2/inner.1/map.1/inner: ''
       TILE@map.2/map.2/inner.1/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
@@ -33470,8 +33498,8 @@ configs:
       TILE@map.2/map.2/inner.3/map.1/inner.1/map.1/inner: ''
       TILE@map.2/map.2/inner.3/map.1/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@map.2/map.2/inner.3/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      TILE@map.2/map.2/inner.3/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: f2x8
-      TILE@map.2/map.3/inner: f1x8
+      TILE@map.2/map.2/inner.3/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      TILE@map.2/map.3/inner: ''
       TILE@map.2/map.3/inner.1/map.1/inner: ''
       TILE@map.2/map.3/inner.1/map.1/inner.1/map.1/inner: ''
       REDUCE@map.2/map.1/map.1/inner: ''
@@ -33518,12 +33546,12 @@ configs:
       STAGE@map.2/map.3/inner: ''
       STAGE@map.2/map.3/inner.1/map.1/inner: ''
       STAGE@map.2/map.3/inner.1/map.1/inner.1/map.1/inner: ''
-      WORK: t64x16
+      WORK: ''
       RASTER: ''
-    identity: 8e8c7fd4007e4a5710483a3eedbda19d74e7388dbe1b765a2fe705c0ab05be75
+    identity: dd9807b3f7eac19fcaa76461b4b032945a60f76b94a3103394ece9548559f59d
     measurements:
-      emmy_us: 97.89440035820007
-      reference_us: 97.9968011379242
+      emmy_us: 4.009638445444375
+      reference_us: 3.4917314987721797
       reference_backend: same-input-greedy
 - program: 5
   target:
@@ -33573,33 +33601,30 @@ configs:
   target:
     loop: 70
   realizations:
-  - name: post1.k_div_64_reduce.a4b561dea31a.m1.07039feea7ff
-    bindings:
+  - bindings:
       num_tokens: 1
     pins:
       FAST_MATH: false
+    name: post1.k_div_64_reduce.393de839665e.m1
+    kernel_set:
+    - post1.k_div_64_reduce.393de839665e.m1.d1b86723d9a6
     latency:
       NVIDIA Tesla V100 SXM3 32GB:
-        emmy_us: 52.40470521590289
-        eager_us: 305.20089824547927
-    kernel_set:
-    - post1.k_div_64_reduce.a4b561dea31a.m1.07039feea7ff.07039feea7ff
-    knobs: &id017
-      PLACE@map.1/map: cut
-    identity: b641b1f3a6572dcd89c27a5b1c31a0dc714e05b0abf4a9e28a24a77846a48516
-    measurements: &id018
-      emmy_us: 50.40544247347447
-      reference_us: 50.73457210857387
-      reference_backend: same-input-greedy
-  - name: post1.k_div_64_reduce.a4b561dea31a.m1.07039feea7ff.07039feea7ff
-    bindings:
+        emmy_us: 9.069714163030897
+        eager_us: 307.96800478540285
+  - bindings:
       num_tokens: 1
     pins:
       FAST_MATH: false
-    knobs: *id017
+    name: post1.k_div_64_reduce.393de839665e.m1.d1b86723d9a6
+    knobs:
+      PLACE@map.1/map: cut
     identity: b641b1f3a6572dcd89c27a5b1c31a0dc714e05b0abf4a9e28a24a77846a48516
-    measurements: *id018
-  - name: post1.k_div_64_reduce.a4b561dea31a.m1.07039feea7ff.9cef01bc6820
+    measurements:
+      emmy_us: 8.87632264864519
+      reference_us: 8.905498228428803
+      reference_backend: same-input-greedy
+  - name: post1.k_div_64_reduce.393de839665e.m1.4f1d82857b33
     bindings:
       num_tokens: 1
     pins:
@@ -33607,76 +33632,76 @@ configs:
     knobs:
       TILE@map.1/inner: ''
       TILE@map.2/inner: ''
-      TILE@map.2/inner.1/map.1/inner.2/map.3/map.1/inner: ''
-      TILE@map.2/inner.1/map.1/inner.2/map.3/map.1/inner.1/map.1/inner: ''
-      TILE@map.2/inner.2/map.4/map.2/inner: ''
-      TILE@map.2/inner.2/map.4/map.2/inner.1/map.1/inner: ''
-      TILE@map.2/inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@map.2/inner.1/map.1/inner: ''
       TILE@map.2/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@map.2/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
-      REDUCE@map.1/inner: coop
-      REDUCE@map.2/inner: coop
-      REDUCE@map.2/inner.1/map.1/inner.2/map.3/map.1/inner: ''
-      REDUCE@map.2/inner.1/map.1/inner.2/map.3/map.1/inner.1/map.1/inner: ''
-      REDUCE@map.2/inner.2/map.4/map.2/inner: coop/r4
-      REDUCE@map.2/inner.2/map.4/map.2/inner.1/map.1/inner: ''
-      REDUCE@map.2/inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
+      TILE@map.2/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      TILE@map.2/inner.1/map.1/inner.2/map.3/map.1/inner.1/map.1/inner: ''
+      TILE@map.2/inner.2/map.4/map.2/inner: ''
+      TILE@map.2/inner.2/map.4/map.2/inner.1/map.1/inner: ''
+      TILE@map.2/inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
+      REDUCE@map.1/inner: ''
+      REDUCE@map.2/inner: ''
       REDUCE@map.2/inner.1/map.1/inner: ''
       REDUCE@map.2/inner.1/map.1/inner.1/map.1/inner: ''
       REDUCE@map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
       REDUCE@map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
       REDUCE@map.2/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      REDUCE@map.2/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      REDUCE@map.2/inner.1/map.1/inner.2/map.3/map.1/inner.1/map.1/inner: ''
+      REDUCE@map.2/inner.2/map.4/map.2/inner: ''
+      REDUCE@map.2/inner.2/map.4/map.2/inner.1/map.1/inner: ''
+      REDUCE@map.2/inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       STAGE@map.1/inner: ''
       STAGE@map.2/inner: ''
       STAGE@map.2/inner.1/map.1/inner: ''
       STAGE@map.2/inner.1/map.1/inner.1/map.1/inner: ''
-      STAGE@map.2/inner.1/map.4/map.2/inner: ''
-      STAGE@map.2/inner.1/map.4/map.2/inner.1/map.1/inner: ''
-      STAGE@map.2/inner.1/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
-      STAGE@map.2/inner.2/map.1/inner: ''
-      STAGE@map.2/inner.2/map.1/inner.1/map.1/inner: ''
-      STAGE@map.2/inner.2/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      STAGE@map.2/inner.2/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      STAGE@map.2/inner.2/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
-      WORK: t128
+      STAGE@map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
+      STAGE@map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
+      STAGE@map.2/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      STAGE@map.2/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      STAGE@map.2/inner.1/map.1/inner.2/map.3/map.1/inner.1/map.1/inner: ''
+      STAGE@map.2/inner.2/map.4/map.2/inner: ''
+      STAGE@map.2/inner.2/map.4/map.2/inner.1/map.1/inner: ''
+      STAGE@map.2/inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
+      WORK: ''
       RASTER: ''
-    identity: 8e855a8fbdbb2f8d28a911d4c1cfe0b1834c4e298c76f5b590d8be75cb7ac106
+    identity: 4f1d82857b331aa9e5b8f324d6c11e2637a62a6f31ce99fe0e0c37412ac673af
     measurements:
-      emmy_us: 2.8138243442892015
-      reference_us: 2.801618046974868
+      emmy_us: 2.531411230261556
+      reference_us: 2.518626325058215
       reference_backend: same-input-greedy
-  - name: post1.k_div_64_reduce.a4b561dea31a.m1.07039feea7ff.cdfe3a37dc00
+  - name: post1.k_div_64_reduce.393de839665e.m1.ba49c887bb92
     bindings:
       num_tokens: 1
     pins:
       FAST_MATH: false
     knobs:
-      TILE@map.8/map.1/inner: f4x2
+      TILE@map.8/map.1/inner: ''
       TILE@map.8/map.1/inner.1/map.1/inner: ''
       TILE@map.8/map.2/inner: ''
       TILE@map.8/map.2/inner.1/map.1/inner: ''
-      TILE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner: f1x2
+      TILE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      TILE@map.8/map.2/inner.1/map.1/inner.1/map.4/map.2/inner: f1x2
-      TILE@map.8/map.2/inner.1/map.1/inner.1/map.4/map.2/inner.1/map.1/inner: ''
-      TILE@map.8/map.2/inner.1/map.1/inner.1/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
-      TILE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner: ''
-      TILE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner: f4x2
-      TILE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      TILE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      TILE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
-      TILE@map.8/map.2/inner.2/map.4/map.1/inner: f1x2
+      TILE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
+      TILE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
+      TILE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      TILE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      TILE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner.1/map.1/inner: ''
+      TILE@map.8/map.2/inner.1/map.1/inner.2/map.4/map.2/inner: ''
+      TILE@map.8/map.2/inner.1/map.1/inner.2/map.4/map.2/inner.1/map.1/inner: ''
+      TILE@map.8/map.2/inner.1/map.1/inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
+      TILE@map.8/map.2/inner.2/map.4/map.1/inner: ''
       TILE@map.8/map.2/inner.2/map.4/map.1/inner.1/map.1/inner: ''
-      TILE@map.8/map.2/inner.2/map.4/map.2/inner: f1x2
-      TILE@map.8/map.2/inner.2/map.4/map.2/inner.1/map.1/inner: f1x2
+      TILE@map.8/map.2/inner.2/map.4/map.2/inner: ''
+      TILE@map.8/map.2/inner.2/map.4/map.2/inner.1/map.1/inner: ''
       TILE@map.8/map.2/inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@map.8/map.2/inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      TILE@map.8/map.2/inner.2/map.4/map.2/inner.1/map.1/inner.2/map.3/map.1/inner: f1x2
-      TILE@map.9/inner: f4x2
-      TILE@map.9/inner.1/map.1/inner: f1x2
+      TILE@map.8/map.2/inner.2/map.4/map.2/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      TILE@map.9/inner: ''
+      TILE@map.9/inner.1/map.1/inner: ''
       TILE@map.9/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@map.9/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@map.9/inner.1/map.1/inner.2/map.3/map.1/inner: ''
@@ -33686,14 +33711,14 @@ configs:
       REDUCE@map.8/map.2/inner.1/map.1/inner: ''
       REDUCE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       REDUCE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      REDUCE@map.8/map.2/inner.1/map.1/inner.1/map.4/map.2/inner: ''
-      REDUCE@map.8/map.2/inner.1/map.1/inner.1/map.4/map.2/inner.1/map.1/inner: ''
-      REDUCE@map.8/map.2/inner.1/map.1/inner.1/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
-      REDUCE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner: ''
-      REDUCE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner: ''
-      REDUCE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      REDUCE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      REDUCE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      REDUCE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
+      REDUCE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
+      REDUCE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      REDUCE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      REDUCE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner.1/map.1/inner: ''
+      REDUCE@map.8/map.2/inner.1/map.1/inner.2/map.4/map.2/inner: ''
+      REDUCE@map.8/map.2/inner.1/map.1/inner.2/map.4/map.2/inner.1/map.1/inner: ''
+      REDUCE@map.8/map.2/inner.1/map.1/inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       REDUCE@map.8/map.2/inner.2/map.4/map.1/inner: ''
       REDUCE@map.8/map.2/inner.2/map.4/map.1/inner.1/map.1/inner: ''
       REDUCE@map.8/map.2/inner.2/map.4/map.2/inner: ''
@@ -33712,14 +33737,14 @@ configs:
       STAGE@map.8/map.2/inner.1/map.1/inner: ''
       STAGE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       STAGE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      STAGE@map.8/map.2/inner.1/map.1/inner.1/map.4/map.2/inner: ''
-      STAGE@map.8/map.2/inner.1/map.1/inner.1/map.4/map.2/inner.1/map.1/inner: ''
-      STAGE@map.8/map.2/inner.1/map.1/inner.1/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
-      STAGE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner: ''
-      STAGE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner: ''
-      STAGE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      STAGE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      STAGE@map.8/map.2/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      STAGE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
+      STAGE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
+      STAGE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      STAGE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      STAGE@map.8/map.2/inner.1/map.1/inner.1/map.1/inner.2/map.3/map.1/inner.1/map.1/inner: ''
+      STAGE@map.8/map.2/inner.1/map.1/inner.2/map.4/map.2/inner: ''
+      STAGE@map.8/map.2/inner.1/map.1/inner.2/map.4/map.2/inner.1/map.1/inner: ''
+      STAGE@map.8/map.2/inner.1/map.1/inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       STAGE@map.8/map.2/inner.2/map.4/map.1/inner: ''
       STAGE@map.8/map.2/inner.2/map.4/map.1/inner.1/map.1/inner: ''
       STAGE@map.8/map.2/inner.2/map.4/map.2/inner: ''
@@ -33732,12 +33757,12 @@ configs:
       STAGE@map.9/inner.1/map.1/inner.1/map.1/inner: ''
       STAGE@map.9/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
       STAGE@map.9/inner.1/map.1/inner.2/map.3/map.1/inner: ''
-      WORK: t32x8
-      RASTER: gm8
-    identity: b641b1f3a6572dcd89c27a5b1c31a0dc714e05b0abf4a9e28a24a77846a48516
+      WORK: ''
+      RASTER: ''
+    identity: ba49c887bb92d1bd8fafda0620d6c80aca657f251c5b39e8e6eb02a2a466eb75
     measurements:
-      emmy_us: 47.59161812918527
-      reference_us: 47.932954061599006
+      emmy_us: 6.344911418383634
+      reference_us: 6.386871903370588
       reference_backend: same-input-greedy
 - program: 5
   target:
@@ -33787,33 +33812,30 @@ configs:
   target:
     loop: 73
   realizations:
-  - name: post1.k_div_71_reduce.99dac52c57f2.m1.978149a36e6f
+  - name: post1.k_div_71_reduce.4775a192d2e2.m1
     bindings:
       num_tokens: 1
     pins:
       FAST_MATH: false
+    kernel_set:
+    - post1.k_div_71_reduce.4775a192d2e2.m1.200d69df80c0
     latency:
       NVIDIA Tesla V100 SXM3 32GB:
-        emmy_us: 109.56799983978271
-        eager_us: 302.45828324822105
-    kernel_set:
-    - post1.k_div_71_reduce.99dac52c57f2.m1.978149a36e6f.978149a36e6f
-    knobs: &id019
-      PLACE@map.1/inner: cut
-    identity: 913ba5e57f0051a6fba4965e4bc3cae2fe41c704ff6c03479926f9d47aae2a07
-    measurements: &id020
-      emmy_us: 104.27972522510845
-      reference_us: 104.52822686000994
-      reference_backend: same-input-greedy
-  - name: post1.k_div_71_reduce.99dac52c57f2.m1.978149a36e6f.978149a36e6f
+        emmy_us: 11.175914477276544
+        eager_us: 308.0069066778931
+  - name: post1.k_div_71_reduce.4775a192d2e2.m1.200d69df80c0
     bindings:
       num_tokens: 1
     pins:
       FAST_MATH: false
-    knobs: *id019
+    knobs:
+      PLACE@map.1/inner: cut
     identity: 913ba5e57f0051a6fba4965e4bc3cae2fe41c704ff6c03479926f9d47aae2a07
-    measurements: *id020
-  - name: post1.k_div_71_reduce.99dac52c57f2.m1.978149a36e6f.3e6869468371
+    measurements:
+      emmy_us: 12.966400384902954
+      reference_us: 11.142881967688119
+      reference_backend: same-input-greedy
+  - name: post1.k_div_71_reduce.4775a192d2e2.m1.924d856b5b86
     bindings:
       num_tokens: 1
     pins:
@@ -33829,9 +33851,9 @@ configs:
       TILE@inner.1/map.1/inner.1/map.4/map.1/inner.2/map.3/map.1/inner: ''
       TILE@inner.1/map.1/inner.3/map.1/inner: ''
       TILE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner: ''
+      TILE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.1/map.3/map.1/inner: ''
       TILE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.2/map.1/inner: ''
       TILE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner: ''
-      TILE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.1/map.3/map.1/inner: ''
       TILE@inner.2/map.2/inner: ''
       TILE@inner.2/map.2/inner.1/map.1/inner: ''
       TILE@inner.2/map.2/inner.1/map.1/inner.1/map.1/inner: ''
@@ -33842,7 +33864,7 @@ configs:
       TILE@inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@inner.2/map.4/map.2/inner.1/map.1/inner.2/map.3/map.1/inner: ''
-      REDUCE@inner: coop
+      REDUCE@inner: ''
       REDUCE@inner.1/map.1/inner: ''
       REDUCE@inner.1/map.1/inner.1/map.1/inner: ''
       REDUCE@inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
@@ -33852,15 +33874,15 @@ configs:
       REDUCE@inner.1/map.1/inner.1/map.4/map.1/inner.2/map.3/map.1/inner: ''
       REDUCE@inner.1/map.1/inner.3/map.1/inner: ''
       REDUCE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner: ''
+      REDUCE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.1/map.3/map.1/inner: ''
       REDUCE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.2/map.1/inner: ''
       REDUCE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner: ''
-      REDUCE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.1/map.3/map.1/inner: ''
       REDUCE@inner.2/map.2/inner: ''
       REDUCE@inner.2/map.2/inner.1/map.1/inner: ''
       REDUCE@inner.2/map.2/inner.1/map.1/inner.1/map.1/inner: ''
-      REDUCE@inner.2/map.4/map.1/inner: coop
+      REDUCE@inner.2/map.4/map.1/inner: ''
       REDUCE@inner.2/map.4/map.1/inner.1/map.1/inner: ''
-      REDUCE@inner.2/map.4/map.2/inner: coop
+      REDUCE@inner.2/map.4/map.2/inner: ''
       REDUCE@inner.2/map.4/map.2/inner.1/map.1/inner: ''
       REDUCE@inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       REDUCE@inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
@@ -33875,9 +33897,9 @@ configs:
       STAGE@inner.1/map.1/inner.1/map.4/map.1/inner.2/map.3/map.1/inner: ''
       STAGE@inner.1/map.1/inner.3/map.1/inner: ''
       STAGE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner: ''
-      STAGE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      STAGE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      STAGE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      STAGE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.1/map.3/map.1/inner: ''
+      STAGE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.2/map.1/inner: ''
+      STAGE@inner.1/map.1/inner.3/map.1/inner.1/map.1/inner.2/map.1/inner.1/map.1/inner: ''
       STAGE@inner.2/map.2/inner: ''
       STAGE@inner.2/map.2/inner.1/map.1/inner: ''
       STAGE@inner.2/map.2/inner.1/map.1/inner.1/map.1/inner: ''
@@ -33888,30 +33910,30 @@ configs:
       STAGE@inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       STAGE@inner.2/map.4/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
       STAGE@inner.2/map.4/map.2/inner.1/map.1/inner.2/map.3/map.1/inner: ''
-      WORK: t128
+      WORK: ''
       RASTER: ''
-    identity: 41f0c2601e625ad775c44142bc0d90de365fe9b14de657357764140cda4b54b7
+    identity: 924d856b5b86e47e54e806234706a54f8daa4c84cf168b627c21a7aedb3c3db6
     measurements:
-      emmy_us: 6.385324866908371
-      reference_us: 6.326624162637504
+      emmy_us: 8.432941276486181
+      reference_us: 7.2422027587890625
       reference_backend: same-input-greedy
-  - name: post1.k_div_71_reduce.99dac52c57f2.m1.978149a36e6f.87399e45f9bc
+  - name: post1.k_div_71_reduce.4775a192d2e2.m1.dd9807b3f7ea
     bindings:
       num_tokens: 1
     pins:
       FAST_MATH: false
     knobs:
-      TILE@map.2/map.1/map.1/inner: f1x8
+      TILE@map.2/map.1/map.1/inner: ''
       TILE@map.2/map.1/map.1/inner.1/map.1/inner: ''
       TILE@map.2/map.1/map.2/inner: ''
-      TILE@map.2/map.1/map.2/inner.1/map.1/inner: f2x8
+      TILE@map.2/map.1/map.2/inner.1/map.1/inner: ''
       TILE@map.2/map.1/map.2/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@map.2/map.1/map.2/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      TILE@map.2/map.1/map.2/inner.1/map.1/inner.2/map.3/map.1/inner: f1x8
+      TILE@map.2/map.1/map.2/inner.1/map.1/inner.2/map.3/map.1/inner: ''
       TILE@map.2/map.2/inner: ''
-      TILE@map.2/map.2/inner.1/map.1/inner: f2x8
+      TILE@map.2/map.2/inner.1/map.1/inner: ''
       TILE@map.2/map.2/inner.1/map.1/inner.1/map.1/inner: ''
-      TILE@map.2/map.2/inner.1/map.4/map.1/inner: f2x8
+      TILE@map.2/map.2/inner.1/map.4/map.1/inner: ''
       TILE@map.2/map.2/inner.1/map.4/map.2/inner: ''
       TILE@map.2/map.2/inner.1/map.4/map.2/inner.1/map.1/inner: ''
       TILE@map.2/map.2/inner.1/map.4/map.2/inner.1/map.1/inner.1/map.1/inner: ''
@@ -33919,8 +33941,8 @@ configs:
       TILE@map.2/map.2/inner.3/map.1/inner.1/map.1/inner: ''
       TILE@map.2/map.2/inner.3/map.1/inner.1/map.1/inner.1/map.1/inner: ''
       TILE@map.2/map.2/inner.3/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.1/inner: ''
-      TILE@map.2/map.2/inner.3/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: f2x8
-      TILE@map.2/map.3/inner: f1x8
+      TILE@map.2/map.2/inner.3/map.1/inner.1/map.1/inner.2/map.3/map.1/inner: ''
+      TILE@map.2/map.3/inner: ''
       TILE@map.2/map.3/inner.1/map.1/inner: ''
       TILE@map.2/map.3/inner.1/map.1/inner.1/map.1/inner: ''
       REDUCE@map.2/map.1/map.1/inner: ''
@@ -33967,12 +33989,12 @@ configs:
       STAGE@map.2/map.3/inner: ''
       STAGE@map.2/map.3/inner.1/map.1/inner: ''
       STAGE@map.2/map.3/inner.1/map.1/inner.1/map.1/inner: ''
-      WORK: t64x16
+      WORK: ''
       RASTER: ''
-    identity: 8e8c7fd4007e4a5710483a3eedbda19d74e7388dbe1b765a2fe705c0ab05be75
+    identity: dd9807b3f7eac19fcaa76461b4b032945a60f76b94a3103394ece9548559f59d
     measurements:
-      emmy_us: 97.89440035820007
-      reference_us: 98.20160269737244
+      emmy_us: 4.009638445444375
+      reference_us: 3.4917314987721797
       reference_backend: same-input-greedy
 - program: 5
   target:
@@ -35643,10 +35665,10 @@ configs:
         eager_us: 289.146615677521
     kernel_set:
     - post4096.k_div_4_reduce.00626a8097c7.m4096.b53219ea724d.b53219ea724d
-    knobs: &id021
+    knobs: &id007
       PLACE@map.1/inner: cut
     identity: f66262f7cb1ed26dc3d7ee802f1b168132d73cc4ef31f02e7e17e1ff2c95559d
-    measurements: &id022
+    measurements: &id008
       emmy_us: 43.57793807097084
       reference_us: 44.05988123236584
       reference_backend: same-input-greedy
@@ -35655,9 +35677,9 @@ configs:
       num_tokens: 4096
     pins:
       FAST_MATH: false
-    knobs: *id021
+    knobs: *id007
     identity: f66262f7cb1ed26dc3d7ee802f1b168132d73cc4ef31f02e7e17e1ff2c95559d
-    measurements: *id022
+    measurements: *id008
   - name: post4096.k_div_4_reduce.00626a8097c7.m4096.b53219ea724d.eed10e285c5b
     bindings:
       num_tokens: 4096
@@ -35867,10 +35889,10 @@ configs:
         eager_us: 436.1916793020148
     kernel_set:
     - post4096.k_div_18_reduce.134a4c74f3b4.m4096.58c14ac215f1.58c14ac215f1
-    knobs: &id023
+    knobs: &id009
       PLACE@map.1/inner: cut
     identity: 4a72005aef248ca2fc640037251ba0dbca7939eee59fb7fefd00753026c67a5e
-    measurements: &id024
+    measurements: &id010
       emmy_us: 114.60535000205289
       reference_us: 116.28807706442493
       reference_backend: same-input-greedy
@@ -35879,9 +35901,9 @@ configs:
       num_tokens: 4096
     pins:
       FAST_MATH: false
-    knobs: *id023
+    knobs: *id009
     identity: 4a72005aef248ca2fc640037251ba0dbca7939eee59fb7fefd00753026c67a5e
-    measurements: *id024
+    measurements: *id010
   - name: post4096.k_div_18_reduce.134a4c74f3b4.m4096.58c14ac215f1.ffed470e6efd
     bindings:
       num_tokens: 4096
@@ -36091,10 +36113,10 @@ configs:
         eager_us: 291.6640563158212
     kernel_set:
     - post4096.k_div_30_reduce.00626a8097c7.m4096.6c04fba08441.6c04fba08441
-    knobs: &id025
+    knobs: &id011
       PLACE@map.1/inner: cut
     identity: f66262f7cb1ed26dc3d7ee802f1b168132d73cc4ef31f02e7e17e1ff2c95559d
-    measurements: &id026
+    measurements: &id012
       emmy_us: 43.45731385307167
       reference_us: 44.05248819381305
       reference_backend: same-input-greedy
@@ -36103,9 +36125,9 @@ configs:
       num_tokens: 4096
     pins:
       FAST_MATH: false
-    knobs: *id025
+    knobs: *id011
     identity: f66262f7cb1ed26dc3d7ee802f1b168132d73cc4ef31f02e7e17e1ff2c95559d
-    measurements: *id026
+    measurements: *id012
   - name: post4096.k_div_30_reduce.00626a8097c7.m4096.6c04fba08441.eed10e285c5b
     bindings:
       num_tokens: 4096
@@ -36660,10 +36682,10 @@ configs:
         eager_us: 393.97377014160156
     kernel_set:
     - post4096.k_div_43_reduce.4558499de9cd.m4096.ba542daaf470.ba542daaf470
-    knobs: &id027
+    knobs: &id013
       PLACE@map.1/inner: cut
     identity: cbb76e7ced9a43a09fe2118afe05e338ec010286591100132d34629ebfafbfdb
-    measurements: &id028
+    measurements: &id014
       emmy_us: 88.81462960995755
       reference_us: 89.80480134487152
       reference_backend: same-input-greedy
@@ -36672,9 +36694,9 @@ configs:
       num_tokens: 4096
     pins:
       FAST_MATH: false
-    knobs: *id027
+    knobs: *id013
     identity: cbb76e7ced9a43a09fe2118afe05e338ec010286591100132d34629ebfafbfdb
-    measurements: *id028
+    measurements: *id014
   - name: post4096.k_div_43_reduce.4558499de9cd.m4096.ba542daaf470.96269a097fd3
     bindings:
       num_tokens: 4096
@@ -36906,10 +36928,10 @@ configs:
         eager_us: 437.38812898334703
     kernel_set:
     - post4096.k_div_57_reduce.134a4c74f3b4.m4096.58c14ac215f1.58c14ac215f1
-    knobs: &id029
+    knobs: &id015
       PLACE@map.1/inner: cut
     identity: 4a72005aef248ca2fc640037251ba0dbca7939eee59fb7fefd00753026c67a5e
-    measurements: &id030
+    measurements: &id016
       emmy_us: 114.59568955113552
       reference_us: 116.33119255478618
       reference_backend: same-input-greedy
@@ -36918,9 +36940,9 @@ configs:
       num_tokens: 4096
     pins:
       FAST_MATH: false
-    knobs: *id029
+    knobs: *id015
     identity: 4a72005aef248ca2fc640037251ba0dbca7939eee59fb7fefd00753026c67a5e
-    measurements: *id030
+    measurements: *id016
   - name: post4096.k_div_57_reduce.134a4c74f3b4.m4096.58c14ac215f1.ffed470e6efd
     bindings:
       num_tokens: 4096
@@ -37152,10 +37174,10 @@ configs:
         eager_us: 436.4947176527703
     kernel_set:
     - post4096.k_div_71_reduce.134a4c74f3b4.m4096.58c14ac215f1.58c14ac215f1
-    knobs: &id031
+    knobs: &id017
       PLACE@map.1/inner: cut
     identity: 4a72005aef248ca2fc640037251ba0dbca7939eee59fb7fefd00753026c67a5e
-    measurements: &id032
+    measurements: &id018
       emmy_us: 114.46259056747085
       reference_us: 116.4064356821707
       reference_backend: same-input-greedy
@@ -37164,9 +37186,9 @@ configs:
       num_tokens: 4096
     pins:
       FAST_MATH: false
-    knobs: *id031
+    knobs: *id017
     identity: 4a72005aef248ca2fc640037251ba0dbca7939eee59fb7fefd00753026c67a5e
-    measurements: *id032
+    measurements: *id018
   - name: post4096.k_div_71_reduce.134a4c74f3b4.m4096.58c14ac215f1.ffed470e6efd
     bindings:
       num_tokens: 4096
@@ -37578,7 +37600,7 @@ configs:
       emmy_us: 19646556.762695312
       reference_us: 19647283.447265625
       reference_backend: same-input-greedy
-    kernel_set: &id033
+    kernel_set: &id019
     - pre4096.k_linear_mean_reduce_00af35.ab5352f7b147.m4096.940dcfd32db9.940dcfd32db9
   - name: pre4096.k_linear_mean_reduce_00af35.ab5352f7b147.m4096.bcc778a0e272
     bindings:
@@ -37611,7 +37633,7 @@ configs:
       emmy_us: 1932458.539903164
       reference_us: 1932547.7475643158
       reference_backend: same-input-greedy
-    kernel_set: *id033
+    kernel_set: *id019
   - name: pre4096.k_linear_mean_reduce_00af35.ab5352f7b147.m4096.92e740dfe6bf
     bindings:
       num_tokens: 4096

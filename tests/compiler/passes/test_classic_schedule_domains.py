@@ -2,6 +2,7 @@
 
 from dataclasses import replace as dc_replace
 from importlib import import_module
+from types import SimpleNamespace
 
 from emmy.compiler.context import Context
 from emmy.compiler.graph import Tensor
@@ -11,14 +12,16 @@ from emmy.compiler.ir.schedule import Reduce, ScheduleContext, ScheduleRefused, 
 from emmy.compiler.ir.schedule import schedule as advance_schedule
 from emmy.compiler.ir.schedule.catalog import coop_reduce_moves, scalar_tile_moves
 from emmy.compiler.ir.schedule.classic import (
+    ClassicKernelSite,
     ClassicProblem,
     ClassicScheduleCodec,
     ClassicScheduleContext,
     ReductionSchedule,
 )
 from emmy.compiler.ir.schedule.classic import refusals as classic
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
-from emmy.compiler.ir.tile import Placement, TileOp
+from emmy.compiler.ir.schedule.classic.schedule import output_sweep_works
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
+from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import carries_partition
 from emmy.compiler.pipeline.fork import iter_leaves
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
@@ -84,6 +87,33 @@ def _pointwise() -> TileOp:
     n = Axis("n", 8)
     root = projection((), (Load(name="x", input="x", index=(Var("n"),)), Assign("y", "add", ("x", "x"))), ("y",))
     return TileOp(op=root, place=Placement(free=(n,)), axes=(n,))
+
+
+def _sweep_tile(*sweeps: tuple[Axis, ...]):
+    specs = tuple(OutputSpec(Write(output=f"out{i}", index=(), value=f"v{i}"), sweep=sweep) for i, sweep in enumerate(sweeps))
+    return SimpleNamespace(family_sites={"TILE": (), "REDUCE": (0,)}, output_specs=specs)
+
+
+def _sweep_work(*sweeps: tuple[Axis, ...]) -> set[str]:
+    """Kernel-level WORK offers for serial reductions with the given output sweeps."""
+    tile = _sweep_tile(*sweeps)
+    return {work.spell() for work in ClassicKernelSite(SimpleNamespace(tile=tile))._sweep_widths()}
+
+
+def test_disjoint_output_sweeps_offer_worker_widths() -> None:
+    """Sibling output loops can share one lane width without sharing an axis."""
+    assert "t128" in _sweep_work((Axis("n", 16),), (Axis("p", 32),))
+
+
+def test_a_scalar_output_suppresses_sweep_worker_widths() -> None:
+    """A scalar sibling would be repeated by lanes, so mixed outputs stay serial."""
+    assert _sweep_work((Axis("n", 16),), ()) == set()
+
+
+def test_a_node_owned_inventory_suppresses_sweep_worker_widths() -> None:
+    """A cooperating node's inventory must compose through the ordinary equality relation."""
+    tile = _sweep_tile((Axis("n", 16),), (Axis("p", 32),))
+    assert not output_sweep_works(tile, Work.parse("t128"))
 
 
 def _row_sum(k: Axis, n: Axis) -> TileOp:
@@ -522,6 +552,18 @@ def _tiled_root_sets(tile: TileOp, target, monkeypatch) -> set[tuple[int, ...]]:
     return {tuple(site for site in roots if leaf.schedule.nodes[site].tile.is_tiled) for leaf in leaves}
 
 
+def _cooperative_root_sets(tile: TileOp, target, monkeypatch) -> set[tuple[int, ...]]:
+    """Which root sites each enumerated row partitions, over one cooperative reduction."""
+    cooperative = Reduce.of(coop=4)
+    monkeypatch.setattr(classic, "scalar_tile_moves", lambda: [Tile()])
+    monkeypatch.setattr(classic, "warp_tile_moves", lambda atoms: [])
+    monkeypatch.setattr(classic, "coop_reduce_moves", lambda: [cooperative])
+    roots = tuple(tile.node_id(edge) for edge in tile.op.operands)
+    leaves = _schedule_leaves(tile, "gate_up", target)
+    assert leaves
+    return {tuple(site for site in roots if leaf.schedule.nodes[site].reduce == cooperative) for leaf in leaves}
+
+
 def test_shared_output_projection_offers_at_most_one_output_tiled_root(monkeypatch) -> None:
     """One output reads BOTH accumulators, so the projection does not partition by root and the
     kernel binder binds at most one output-tiled root (the other reduce lowers serially inside
@@ -541,6 +583,25 @@ def test_shared_output_projection_offers_at_most_one_output_tiled_root(monkeypat
     )
     roots = tuple(tile.node_id(edge) for edge in tile.op.operands)
     assert _tiled_root_sets(tile, Context.from_target((12, 0)), monkeypatch) == {(), (roots[0],), (roots[1],)}
+
+
+def test_shared_output_projection_offers_at_most_one_cooperative_root(monkeypatch) -> None:
+    """A cooperative reduction selects the same kernel root as an output tile, so a projection
+    that does not partition by root may not offer cooperative plans for two roots at once."""
+    from emmy.compiler.ir.stmt import Write
+    from emmy.compiler.ir.tile import OutputSpec
+
+    m, n = Axis("m", 128), Axis("n", 128)
+    tile = _two_root_projection(
+        m,
+        n,
+        (Assign("v", "multiply", ("acc0", "acc1")),),
+        ("v",),
+        {"out": Tensor("out", (128, 128), "f16")},
+        (OutputSpec(Write(output="out", index=(Var("m"), Var("n")), value="v")),),
+    )
+    roots = tuple(tile.node_id(edge) for edge in tile.op.operands)
+    assert _cooperative_root_sets(tile, Context.from_target((12, 0)), monkeypatch) == {(), (roots[0],), (roots[1],)}
 
 
 def test_partitioned_projection_still_offers_both_roots_output_tiled(monkeypatch) -> None:
@@ -563,3 +624,4 @@ def test_partitioned_projection_still_offers_both_roots_output_tiled(monkeypatch
     )
     roots = tuple(tile.node_id(edge) for edge in tile.op.operands)
     assert roots in _tiled_root_sets(tile, Context.from_target((12, 0)), monkeypatch)
+    assert roots in _cooperative_root_sets(tile, Context.from_target((12, 0)), monkeypatch)

@@ -35,11 +35,12 @@ from .schedule import (
     ProjectionSchedule,
     ReductionSchedule,
     _is_edge_site,
+    binds_root,
     classic_node_key,
     classic_stage_key,
     edge_site_spelling,
-    no_site_claims_inventory,
     node_id_spelling,
+    output_sweep_works,
 )
 
 if TYPE_CHECKING:
@@ -475,9 +476,9 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
 
     @cached_property
     def _shared_roots(self) -> frozenset[NodeId]:
-        """The contraction roots that may not be output-tiled together
+        """The contraction roots that may not be scheduled together
         (:func:`~emmy.compiler.ir.tile.ops.refused_roots`): one of them is the kernel's root and
-        every other reduce lowers serially inside the projection, so a row tiling a second root
+        every other reduce lowers serially inside the projection, so a row selecting a second root
         spells a kernel the binder never builds. The binder's rule, applied at the offer. The
         placement lane asks a NEIGHBOURING question of the same projection
         (:func:`~emmy.compiler.ir.tile.ops.owns_outputs_it_cannot_bind`) and the two answers
@@ -519,10 +520,10 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         """Return why one locally supported pick cannot extend this prefix."""
         if (
             site in self._shared_roots
-            and support.node.tile.is_tiled
-            and any(self.schedule.nodes[other].tile.is_tiled for other in self._shared_roots if other in self.schedule.nodes)
+            and binds_root(support.node)
+            and any(binds_root(self.schedule.nodes[other]) for other in self._shared_roots if other in self.schedule.nodes)
         ):
-            return "a second output-tiled root on a projection its outputs do not partition by root"
+            return "a second scheduled root on a projection its outputs do not partition by root"
         for root, member in self._chain_pairs:
             if site not in (root, member):
                 continue
@@ -613,10 +614,10 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         ):
             self._refuse("pick is incompatible with the classic kernel position")
         work = self._work or Work()
-        # Same rule as :meth:`_kernel_composes`: a kernel no node constrains takes any inventory
-        # its own domain offers, so a bare elementwise map's output sweep is not left serial.
+        # Same rule as :meth:`_kernel_composes`: serial node choices leave output sweeps free to
+        # take one of their own offered worker inventories.
         if (pick.kernel.work.kind != work.kind or pick.kernel.work.units != work.units) and not (
-            self._work is None and self._no_site_claims_inventory()
+            self._output_sweeps_take(pick.kernel.work)
         ):
             self._refuse("kernel WORK does not realize the node choices")
         if not pick.kernel.raster.is_direct and not self._raster_eligible:
@@ -685,17 +686,15 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             if isinstance(choice.tile, PlacedTile):
                 self._refuse("node choices cannot contain placed tile geometry", site)
 
-    def _no_site_claims_inventory(self) -> bool:
-        return no_site_claims_inventory(self.tile_op)
+    def _output_sweeps_take(self, work: Work) -> bool:
+        """Whether this serial-node prefix may take this exact output-sweep WORK offer."""
+        return work in output_sweep_works(self.tile_op, self._work)
 
     def _kernel_composes(self, kernel: KernelSchedule) -> bool:
         work = self._work or Work()
-        # A kernel no node constrains takes any inventory its own domain offers: with nothing to
-        # disagree with, holding it to ``Work()`` is not a compatibility rule but the collapse that
-        # leaves an output sweep serial in one worker per cell.
-        agrees = (kernel.work.kind == work.kind and kernel.work.units == work.units) or (
-            self._work is None and self._no_site_claims_inventory()
-        )
+        # Serial node choices do not constrain a worker inventory used only to stripe output
+        # sweeps; a node-owned inventory still follows the ordinary equality relation.
+        agrees = (kernel.work.kind == work.kind and kernel.work.units == work.units) or self._output_sweeps_take(kernel.work)
         return agrees and (not kernel.work.producer or self._producer_eligible) and (kernel.raster.is_direct or self._raster_eligible)
 
     def node_choice(self, site: NodeId) -> NodeSchedule:

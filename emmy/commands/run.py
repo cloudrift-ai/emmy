@@ -19,7 +19,7 @@ from pathlib import Path
 
 from emmy import config
 from emmy.commands.compile import add_golden_arg
-from emmy.compiler.pipeline.search.pins import pinned_knobs, unreproducible_pin_flag
+from emmy.compiler.pipeline.search.pins import PLACEMENT_DECISIONS_HINT, pinned_knobs, unreproducible_pin_flag
 
 logger = logging.getLogger(__name__)
 
@@ -960,7 +960,7 @@ def _wrong_answer_flag(outputs: dict, ref_outputs: dict) -> str | None:
     return None
 
 
-def env_pin_refusal(kernel_knobs: list[dict]) -> str | None:
+def env_pin_refusal(kernel_knobs: list[dict], placement_knobs: list[dict] | None = None) -> str | None:
     """The live ``EMMY_<KNOB>`` pins a compiled graph did not realize, or ``None``.
 
     An ``--ab`` row has always been gated this way (:func:`unreproducible_pin_flag`), because benching a
@@ -979,7 +979,7 @@ def env_pin_refusal(kernel_knobs: list[dict]) -> str | None:
     from emmy.compiler.pipeline.knob import KERNEL_DECISION_FAMILIES, family_pins  # noqa: PLC0415
 
     pins = {name: value for family in KERNEL_DECISION_FAMILIES for name, value in family_pins(family)}
-    return unreproducible_pin_flag(pins, kernel_knobs) if pins else None
+    return unreproducible_pin_flag(pins, kernel_knobs, placement_knobs=placement_knobs) if pins else None
 
 
 REFERENCE_SELF_DISAGREES = (
@@ -1134,6 +1134,11 @@ def _cuda_knob_dicts(graph) -> list[dict]:
     return [dict(n.op.knobs or {}) for n in _launch_order_cuda_nodes(graph)]
 
 
+def _placement_knob_dicts(graph) -> list[dict]:
+    """Placement receipts from the final greedy resolution of ``graph``."""
+    return list(graph.hints.get(PLACEMENT_DECISIONS_HINT, []))
+
+
 def _ab_samples(specs, dynamic=None):
     """One shapeless pseudo-sample per ``--ab "K1=V1,K2=V2"`` spec: ``.knobs`` holds
     schedule pins, ``.pins`` Boolean input pins, ``.name`` the table label, and ``.shape None`` —
@@ -1270,7 +1275,11 @@ async def _bench_golden_variants(
             logger.warning("[golden] %s: compile of the pinned config failed (%s) — row kept as bench_fail", sample.name, exc)
             out.append(_GoldenBench(sample, None, None, [f"compile failed: {exc}"], "bench_fail"))
             continue
-        flag = unreproducible_pin_flag(replay_knobs, _cuda_knob_dicts(g_compiled))
+        flag = unreproducible_pin_flag(
+            replay_knobs,
+            _cuda_knob_dicts(g_compiled),
+            placement_knobs=_placement_knob_dicts(g_compiled),
+        )
         if flag:
             flags.append(f"{flag} — row NOT benched")
             logger.error(
@@ -1692,7 +1701,7 @@ def _write_ab_json(
         "kernels": _kernel_rows(graph, bench),
     }
     # An env pin gates THIS graph, so an unrealized one misrepresents the greedy row itself.
-    env_miss = env_pin_refusal(_cuda_knob_dicts(graph))
+    env_miss = env_pin_refusal(_cuda_knob_dicts(graph), _placement_knob_dicts(graph))
     if env_miss:
         greedy["flags"] = [f"{env_miss} — the env pin did not realize, so this row is the planner's own pick"]
         logger.error(
@@ -2155,14 +2164,19 @@ def _random_source_values(rng, shape, dtype):
     return rng.standard_normal(shape, dtype=np.float32) * 0.02
 
 
-def _random_input_values(rng, shape, dtype):
-    """Return random runtime values, preserving exact FP8 input storage bits."""
+def _random_input_values(rng, shape, dtype, *, name: str | None = None):
+    """Return random runtime values, preserving bit carriers and finite E8M0 scales."""
     import numpy as np  # noqa: PLC0415
 
     from emmy.compiler.dtype import get as get_dtype  # noqa: PLC0415
 
-    if get_dtype(dtype).name in {"f8e4m3", "f8e5m2"}:
+    canonical = get_dtype(dtype).name
+    if canonical in {"f8e4m3", "f8e5m2"}:
         return _random_source_values(rng, shape, dtype)
+    if canonical == "u8" and name is not None and "scale" in name:
+        # MXFP4 boundary scales are E8M0 bytes with bias 127. Arbitrary u8 codes span
+        # exponents that overflow a two-linear random reproducer before correctness can run.
+        return rng.integers(120, 123, shape, dtype=np.uint8)
     return rng.standard_normal(shape, dtype=np.float32)
 
 
@@ -2264,7 +2278,7 @@ async def bench_lowered_vs_torch(
     input_tensors: dict[str, object] = {}
     for nid, node in lowered.nodes.items():
         if isinstance(node.op, InputOp):
-            arr = _random_input_values(rng, _static(node.output.shape), node.output.dtype)
+            arr = _random_input_values(rng, _static(node.output.shape), node.output.dtype, name=nid)
             # Keep the ndarray shape (no flatten) — a symbolic graph's launch
             # reads the runtime seq_len off the input array's shape.
             input_data[nid] = arr
@@ -2541,8 +2555,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
     # the same table the --code path produces for a debug Graph IR input.
     # Non-frontend IR (loop/tile/…) has no torch twin → emmy-only bench, unless it is a
     # stored golden kernel whose embedded program holds the PyTorch slice it computes.
-    records = getattr(args, "_golden_records", None)
-    reference = graph if torch_ref.is_runnable(graph) else (records[0].reference_program if records else None)
+    reference = graph if torch_ref.is_runnable(graph) else getattr(args, "_golden_reference", None)
     frontend = reference.copy() if reference is not None and torch_ref.is_runnable(reference) else None
     same_input_greedy = strict_correctness and embedded is not None and frontend is None
 
@@ -2850,7 +2863,7 @@ async def _bench_ab_variants_ir(backend, ir_path, tail, specs, *, warmup, iters,
             logger.warning("[ab] %s: compile of the pinned config failed (%s) — row kept as bench_fail", sample.name, exc)
             out.append(_GoldenBench(sample, None, None, [f"compile failed: {exc}"], "bench_fail"))
             continue
-        flag = unreproducible_pin_flag(replay_knobs, _cuda_knob_dicts(g))
+        flag = unreproducible_pin_flag(replay_knobs, _cuda_knob_dicts(g), placement_knobs=_placement_knob_dicts(g))
         if flag:
             logger.error("[ab] %s: %s — the pinned config did not realize; fix the pin spelling (row kept unbenched)", sample.name, flag)
             out.append(_GoldenBench(sample, g, None, [f"{flag} — row NOT benched"], "pin_unmatched"))

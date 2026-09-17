@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from emmy.compiler.ir.schedule.base import Schedule
+from emmy.compiler.ir.schedule.catalog import coop_reduce_moves
 from emmy.compiler.ir.schedule.choices import Raster, Reduce, Stage, Tile, Work
 from emmy.compiler.ir.schedule.views import EdgeSite, NodeId
 
@@ -126,15 +127,20 @@ def classic_stage_key(sites, edge: EdgeSite) -> str:
     return "STAGE" if len(consumers) == 1 else f"STAGE@{sites.sites[edge[0]].path}"
 
 
-def no_site_claims_inventory(tile_op) -> bool:
-    """Whether this kernel has no node site that could fold out a worker inventory.
+def binds_root(choice: ProjectionSchedule | ReductionSchedule) -> bool:
+    """Whether the kernel binder builds around this node: an output tile, or a reduce that claims
+    a worker inventory. ``TILE`` and ``REDUCE`` both select the root the binder builds around, so
+    the offer and the binder read one predicate."""
+    return choice.tile.is_tiled or (isinstance(choice, ReductionSchedule) and (choice.reduce.coop > 1 or choice.reduce.reg > 1))
 
-    Only a tiled site or a cooperative reduction claims one, so a kernel with neither — a bare
-    elementwise map, the half a placement cut leaves behind a reduction — has a kernel work that no
-    node constrains. :class:`~emmy.compiler.ir.schedule.classic.sites.ClassicKernelSite` offers such a kernel the sweep
-    widths, and the two compatibility gates here let them through instead of filtering them back to
-    the direct per-cell form. Read off the tile rather than the projected domains, so validation
-    (which carries none) answers the same.
+
+def output_sweep_works(tile_op, claimed_work: Work | None) -> frozenset[Work]:
+    """The ``WORK`` values that may stripe every output sweep of a kernel whose nodes stay serial.
+
+    Each output must own a sweep, because a scalar sibling would be repeated by every lane. A tiled
+    or cooperative node choice that already claims an inventory must agree through the ordinary
+    compatibility relation instead.
     """
-    sites = tile_op.family_sites
-    return not sites["TILE"] and not sites["REDUCE"]
+    if claimed_work is not None or not tile_op.output_specs or not all(spec.sweep for spec in tile_op.output_specs):
+        return frozenset()
+    return frozenset(Work(kind="thread", units=(move.coop, 1)) for move in coop_reduce_moves() if move.coop > 1)
