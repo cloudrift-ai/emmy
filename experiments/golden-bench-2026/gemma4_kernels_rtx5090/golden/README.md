@@ -1,9 +1,9 @@
-# RTX 5090 Gemma 4 12B projection goldens
+# RTX 5090 Gemma 4 12B kernel goldens
 
-One working golden per projection of a Gemma 4 12B decoder layer at sequence length 512, named
-`KERNEL-s512.golden.yaml`. Each holds the traced FP16 matmul, its seed realization, and the receipts of the fastest
-row measured on the card by hand pin, once in the standard lane and once under `EMMY_FAST_MATH=1`. The recipe
-replays them as they are, does not tune, and fails when a golden is absent.
+One working golden per kernel of a Gemma 4 12B decoder layer at sequence length 512 — the five projections and the
+sliding layers' causal attention — named `KERNEL-s512.golden.yaml`. Each holds the traced FP16 program, its seed
+realization, and the receipts of the fastest row measured on the card by hand pin, once in the standard lane and once
+under `EMMY_FAST_MATH=1`. The recipe replays them as they are, does not tune, and fails when a golden is absent.
 
 | Golden | Matmul (M x K @ K x N) | Standard lane | Fast-math lane |
 | --- | --- | --- | --- |
@@ -13,9 +13,26 @@ replays them as they are, does not tune, and fails when a golden is absent.
 | `mlp_gate_up` | 512 x 3840 @ 3840 x 30720 | `f16_f32/f4x8/k4`, unsplit | `f16_f16/f4x8/k4`, unsplit |
 | `mlp_down` | 512 x 15360 @ 15360 x 3840 | `f16_f32/f2x4/k2`, `g4k` | `f16_f16/f4x8/k4`, `g2k` |
 
-Every row runs `WORK=w4x2` over a two-slot TMA ring (`STAGE=d2/smem-tma`); the tile's atom prefix is
+Every projection row runs `WORK=w4x2` over a two-slot TMA ring (`STAGE=d2/smem-tma`); the tile's atom prefix is
 `mma_m16n8k16_`. `g<n>k` is the cross-CTA split of the contraction axis with a separate finalize kernel, which the
 whole-program latency includes.
+
+## Attention
+
+`attention` is `scaled_dot_product_attention` over `(1, 16, 512, 256)` FP16 inputs with `is_causal=True`, one fused
+kernel with two schedule sites: the value expectation `TILE@map.1/twist` spans the 256-wide head in one warp column
+(`f1x32`) over 32-key chunks (`k2`), and the score `TILE@map.1/twist.1/inner` tiles those 32 keys (`f1x4`). Both
+operands ride a TMA ring, four warps per CTA (`WORK=w4x1`).
+
+| Lane | Value expectation | Score | Ring |
+| --- | --- | --- | --- |
+| Standard | `f16_f32/f1x32/k2` | `f16_f32/f1x4/k8`, `RASTER=gm8` | `d2/smem-tma` |
+| Fast-math | `f16_f16/f1x32/k2` | `f16_f32/f1x4/k4` | `d3/smem-tma` |
+
+The fast-math row accumulates the value product in FP16 and promotes it into the FP32 carrier once per chunk; the
+score and the softmax statistics stay FP32. The rows swept were the two- and three-slot rings and the single-slab
+64-key form (`f1x32/k4` over `f1x8`, `d1/smem-tma`), each with both accumulators. The rings land within 2% of each
+other; the single slab is 3% to 8% behind them, and there FP16 accumulation is worth 5% (41.2 to 39.0 us).
 
 ## How a golden is recorded
 
