@@ -142,7 +142,11 @@ backend output bits are decoded to numeric values before every command-layer cor
 that serves as the correctness reference runs inside `correctness_oracle`, which turns torch's reduced-precision GEMM
 reductions off: with them on, the FP16 GEMM at K = 15360 leaves one element in ten of its own output outside
 `rtol=atol=1e-3` of an FP64 product, and a kernel nearer the truth than eager failed `--strict` for eager's error.
-The TIMED eager forward keeps torch's defaults, the library a user runs. Both checks compare in arrays: a Python list
+The TIMED eager forward keeps torch's defaults, the library a user runs. The `torch.compile` column is admitted by the
+same dtype-scaled verdict as the Emmy output (Inductor's own FP16 GEMM is outside a flat `1e-3` of cuBLAS at these
+depths on an RTX 4090), and a backend that cannot be built travels as a failure in the results, printed `failed` in
+the table and recorded `status: failed`, because the builder runs in the bench worker, whose log the parent shows
+only on a crash. Both checks compare in arrays: a Python list
 holds one float object per cell, which for an LM-head output is gigabytes. The command records
 max/mean/relative error in `--json` and exits
 nonzero on any missing or failed evidence. Dynamic-shape parsing, quantized architecture twins and
