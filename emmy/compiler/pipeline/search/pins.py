@@ -178,7 +178,9 @@ def unreproducible_pin_flag(
                 break
         if hit and (not reject_conflicts or not conflicts):
             continue
-        if not others and not saw_off and get(fam) is not None and fam not in CLASSIC_FAMILIES:
+        # An unstamped registered family is ungateable, except PLACE beside a resolution trace: the trace
+        # records every placement decision, so a pinned cut it does not carry was not taken.
+        if not others and not saw_off and get(fam) is not None and fam not in CLASSIC_FAMILIES and fam != "PLACE":
             continue
         ran_values = conflicts if reject_conflicts and conflicts else others
         ran = "/".join(ran_values) if ran_values else ("(off)" if saw_off else "(unset)")
