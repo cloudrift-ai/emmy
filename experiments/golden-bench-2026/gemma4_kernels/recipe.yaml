@@ -1,8 +1,9 @@
-# Gemma 4 12B projection and attention kernels at sequence length 512 on one RTX 5090, in both precision lanes — the
-# kernel tables of the "Outperforming vLLM and Llama.cpp on Gemma4-12B" article, re-measured on the current compiler.
+# Gemma 4 12B projection and attention kernels at sequence length 512, one card per row, in both precision lanes —
+# the kernel tables of the "Outperforming vLLM and Llama.cpp on Gemma4-12B" article, re-measured on the current
+# compiler.
 #
 # Every row replays one hand-recorded golden committed beside this file (see golden/README.md): the schedule was
-# found by hand-pinned `emmy run --ab` rows on the card and written with `--record-greedy`, and the row only
+# found by hand-pinned `emmy run --ab` rows on that card and written with `--record-greedy`, and the row only
 # re-measures it at deployable -O3 against eager PyTorch and torch.compile. Nothing here traces, tunes or pins:
 # the run starts from an empty tune DB and online prior, so the golden's rows alone decide what deploys. A missing
 # golden fails its row.
@@ -14,15 +15,15 @@
 # FP32-accumulate lane for eager's error, not Emmy's.
 #
 # Repro on a pre-allocated card (no cloud provisioning):
-#   emmy bench experiments/golden-bench-2026/gemma4_kernels_rtx5090 --local
+#   emmy bench experiments/golden-bench-2026/gemma4_kernels --local --filter card=rtx5090
 command:
   stage:
     - emmy
     - pyproject.toml
     - README.md
     - LICENSE
-    - experiments/golden-bench-2026/gemma4_kernels_rtx5090/recipe.yaml
-    - experiments/golden-bench-2026/gemma4_kernels_rtx5090/golden
+    - experiments/golden-bench-2026/gemma4_kernels/recipe.yaml
+    - experiments/golden-bench-2026/gemma4_kernels/golden
   strict: true
   run: |
     set -euo pipefail
@@ -31,7 +32,7 @@ command:
     finalize() {
       final_status=$$?
       trap - EXIT
-      printf 'kernel=%s\nlane=%s\nstatus=%s\n' "$kernel" "$lane" "$$final_status" > $task_dir/status.txt
+      printf 'card=%s\nkernel=%s\nlane=%s\nstatus=%s\n' "$card" "$kernel" "$lane" "$$final_status" > $task_dir/status.txt
       archive_tmp=$task_dir.artifacts.tar.gz
       tar -C $task_dir -czf "$$archive_tmp" . || final_status=1
       mv "$$archive_tmp" $task_dir/artifacts.tar.gz || final_status=1
@@ -58,7 +59,7 @@ command:
       *) echo "unknown lane $lane" >&2; exit 2 ;;
     esac
 
-    golden=$repo_dir/experiments/golden-bench-2026/gemma4_kernels_rtx5090/golden/$kernel-s512.golden.yaml
+    golden=$repo_dir/experiments/golden-bench-2026/gemma4_kernels/golden/$kernel-s512_$card.golden.yaml
     test -f "$$golden"
     sha256sum "$$golden" > $task_dir/golden.sha256
     # The seed is the file's one unmeasured realization; its greedy deploys the recorded rows. Naming it exactly
@@ -75,5 +76,6 @@ matrices:
   - cross:
       kernel: [q_proj, kv_proj, o_proj, mlp_gate_up, mlp_down, attention]
       lane: [std, fm]
+      card: rtx5090
       deploy.gpu: "NVIDIA GeForce RTX 5090"
       deploy.gpu_count: 1

@@ -492,16 +492,17 @@ def test_rtx5090_attention_comparison_is_recorded_and_bounded(project_root) -> N
 
 
 def test_gemma4_kernels_replay_a_hand_recorded_golden_per_lane(project_root) -> None:
-    recipe_dir = _experiment(project_root, "gemma4_kernels_rtx5090")
+    recipe_dir = _experiment(project_root, "gemma4_kernels")
     recipe = load_recipe(recipe_dir)
     tasks = enumerate_tasks([recipe_dir])
     assert {(task.variant.params["kernel"], task.variant.params["lane"]) for task in tasks} == {
         (kernel, lane) for kernel in ("q_proj", "kv_proj", "o_proj", "mlp_gate_up", "mlp_down", "attention") for lane in ("std", "fm")
     }
-    assert {task.recipe.deploy.gpu for task in tasks} == {"NVIDIA GeForce RTX 5090"}
-    # Every row replays a committed golden; nothing traces, tunes or pins, so the recorded rows alone decide.
+    assert {(task.variant.params["card"], task.recipe.deploy.gpu) for task in tasks} == {("rtx5090", "NVIDIA GeForce RTX 5090")}
+    # Every row replays a golden recorded on its own card; nothing traces, tunes or pins, so those rows alone decide.
     for task in tasks:
-        assert (Path(recipe_dir) / "golden" / f"{task.variant.params['kernel']}-s512.golden.yaml").is_file()
+        name = f"{task.variant.params['kernel']}-s512_{task.variant.params['card']}.golden.yaml"
+        assert (Path(recipe_dir) / "golden" / name).is_file()
     run = recipe.command.run
     assert "emmy trace" not in run and "emmy tune" not in run and "EMMY_KNOBS" not in run
     assert "--bench-backends eager,tcompile,emmy" in run
