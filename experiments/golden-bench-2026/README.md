@@ -52,7 +52,7 @@ pinned checkpoint layer each, retain every distinct post-fusion target, skip sea
 decode-shaped sequence length 1 only. The working YAML and cubin cache are retained so review can verify the declared
 packed checkpoint inputs survive into the compiled programs instead of becoming dense checkpoint weights.
 
-The `gemma4_kernels_rtx5090` recipe is the fast-math evidence this suite otherwise leaves out. Its twelve tasks
+The `gemma4_kernels` recipe is the fast-math evidence this suite otherwise leaves out. Its twelve tasks
 replay six hand-recorded goldens (the five projections of a Gemma 4 12B decoder layer and its causal attention at
 sequence length 512) once with FP32 accumulation and once under `EMMY_FAST_MATH=1`, from an empty tune DB, against
 eager and Inductor on PyTorch 2.13.0. The rows were found by hand-pinned sweeps on the card, not by search. It uses the

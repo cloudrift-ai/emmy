@@ -1,9 +1,12 @@
-# RTX 5090 Gemma 4 12B kernel goldens
+# Gemma 4 12B kernel goldens
 
 One working golden per kernel of a Gemma 4 12B decoder layer at sequence length 512 — the five projections and the
-sliding layers' causal attention — named `KERNEL-s512.golden.yaml`. Each holds the traced FP16 program, its seed
-realization, and the receipts of the fastest row measured on the card by hand pin, once in the standard lane and once
-under `EMMY_FAST_MATH=1`. The recipe replays them as they are, does not tune, and fails when a golden is absent.
+sliding layers' causal attention — per card, named `KERNEL-s512_CARD.golden.yaml`. Each holds the traced FP16
+program, its seed realization, and the receipts of the fastest row measured on that card by hand pin, once in the
+standard lane and once under `EMMY_FAST_MATH=1`. The recipe replays them as they are, does not tune, and fails when a
+golden is absent. A schedule is a claim about one card: a row recorded on one is never replayed on another.
+
+## RTX 5090
 
 | Golden | Matmul (M x K @ K x N) | Standard lane | Fast-math lane |
 | --- | --- | --- | --- |
@@ -17,7 +20,7 @@ Every projection row runs `WORK=w4x2` over a two-slot TMA ring (`STAGE=d2/smem-t
 `mma_m16n8k16_`. `g<n>k` is the cross-CTA split of the contraction axis with a separate finalize kernel, which the
 whole-program latency includes.
 
-## Attention
+### Attention
 
 `attention` is `scaled_dot_product_attention` over `(1, 16, 512, 256)` FP16 inputs with `is_causal=True`, one fused
 kernel with two schedule sites: the value expectation `TILE@map.1/twist` spans the 256-wide head in one warp column
@@ -40,14 +43,14 @@ Trace the matmul with FP16 inputs, bench a few pinned rows on the card in each l
 under the seed's exact name, once per lane:
 
 ```bash
-E=experiments/golden-bench-2026/gemma4_kernels_rtx5090
+E=experiments/golden-bench-2026/gemma4_kernels
 code="torch.matmul(torch.randn(512,3840,dtype=torch.float16,device='cuda'), torch.randn(3840,4096,dtype=torch.float16,device='cuda'))"
-emmy trace -c "$code" -o $E/golden/q_proj-s512.golden.yaml
-emmy run --golden $E/golden/q_proj-s512.golden.yaml --realization k_matmul_843d4a --bench --bench-backends eager,emmy \
+emmy trace -c "$code" -o $E/golden/q_proj-s512_rtx5090.golden.yaml
+emmy run --golden $E/golden/q_proj-s512_rtx5090.golden.yaml --realization k_matmul_843d4a --bench --bench-backends eager,emmy \
   --ab "WORK=w4x2,TILE=mma_m16n8k16_f16_f32/f2x4/k2,STAGE=d2/smem-tma,REDUCE=g4k" --ab "…"
-EMMY_KNOBS="<the fastest row>" emmy run --golden $E/golden/q_proj-s512.golden.yaml \
+EMMY_KNOBS="<the fastest row>" emmy run --golden $E/golden/q_proj-s512_rtx5090.golden.yaml \
   --realization k_matmul_843d4a --bench --record-greedy
-EMMY_FAST_MATH=1 EMMY_KNOBS="<the fastest fast-math row>" emmy run --golden $E/golden/q_proj-s512.golden.yaml \
+EMMY_FAST_MATH=1 EMMY_KNOBS="<the fastest fast-math row>" emmy run --golden $E/golden/q_proj-s512_rtx5090.golden.yaml \
   --realization k_matmul_843d4a --bench --record-greedy
 ```
 
