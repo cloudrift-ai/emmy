@@ -165,22 +165,28 @@ independent reference on `run --golden` — the loop-IR CPU runner exists but is
 take 1.3 s each on main; the whole file decodes in about two and a half minutes. The goldens gate can protect this
 file again, and what it reports today is the 87 stale rows.
 
-**31 rows are still owed after the post-family cuts came back (2026-09-16).** The five post-family routing rows
-(`3836f9`, `8e1e80`, `366777`, `9e578e`, #799's `4e26cc`) are re-spelled on main by matching the pre-#804 and current
-lifted trees as one DAG — every node hashed once by its order-free subtree shape, seams matched top-down within
-their parent, a carrier that changed kind matched through the contraction inside it — and their receipts re-keyed
-to the kernel of the same shape at the same mint ordinal. Two things had moved. The shared softmax-statistics cone is
-filed under whichever consumer the walk reaches first, and #804's statement order changed that consumer. And on
-the three same-DAG rows one kernel boundary the old lowering made on its own is now a seam that must be spelled, so
-those routes carry one more cut than they recorded. Main no longer offers cutting a leaf operand, so the two trivial
-leaf pieces per set are fused into their consumer and their receipts double up on a same-shaped twin. All four
-same-shape sets decode whole with every kernel measured. On `9e578e` the old lift left a reduce carrier around the
-contraction that the new one recognizes as a twist: 18 of its 20 rows come back, one receipt of the old carrier
-kernel cannot, and the twist-form kernel it mints now has no measured row — one `run --golden --bench --record` on
-the host closes that. What remains: 18 division receipts and 9 pre-attention receipts whose routed keys are spelled
-on piece trees that moved the same way (the same mapping, applied per piece), and 4 expert M=1 rows whose piece
-changed under #807's fold. None need re-recording. A fresh strict boot from main comes next and before any new
-recording; the boot20 numbers do not describe main.
+**Nine rows are still owed, all to the host (2026-09-16).** The five post-family routing rows (`3836f9`, `8e1e80`,
+`366777`, `9e578e`, #799's `4e26cc`) were re-spelled on main by matching the pre-#804 and current lifted trees as one
+DAG — every node hashed once by its order-free subtree shape, seams matched top-down within their parent, a carrier
+that changed kind matched through the contraction inside it — and their receipts re-keyed to the kernel of the same
+shape at the same mint ordinal (#823). Two things had moved: the shared softmax-statistics cone is filed under
+whichever consumer the walk reaches first, and #804's statement order changed that consumer; and on the three
+same-DAG rows one kernel boundary the old lowering made on its own is now a seam that must be spelled. Main no
+longer offers cutting a leaf operand, so the two trivial leaf pieces per set are fused into their consumer. Of the
+31 rows left after that, 22 came back without a re-record. Sixteen were wrong only in the identity #804 stamped
+on them: a row that names the kernel a cut fork is offered on decides that fork itself, and a schedule row spells
+no route, so each of them read its own kernel as fused; they now name the piece that enumerates their row. Six
+division receipts also needed their keys re-spelled on their piece — same shape as before, but one carrier's operand
+order changed and the shared cone is filed under the other parent, so the sharing-aware DAG isomorphism between the
+two pieces (a shared node maps to one node, injectively) is unique and moves every key with it. The file decodes 363
+of 372 rows on main. The nine that do not: the four `cdfe3a37dc00` receipts of the M=1 division cut
+(`k_div_11/25/50/64`) tile two sites `f1x2` and `f4x2` that on main share one physical axis, so the schedule is no
+longer in that piece's space and the piece has no measured row; the four expert M=1 rows (`expert1`, `expert-sym`)
+decorated two kernels that main's cut mints as one — the range loop that used to leave with the cut-off leaf now
+wraps the reduce — so no single row carries them; and `9e578e`'s twist-form kernel has no row. Each is one
+`run --golden --bench --record` of the realization on the host, and a strict boot refuses those three kernels until
+then. A fresh strict boot from main comes next and before any new recording; the boot20 numbers do not describe
+main.
 
 ## Operations handoff
 
