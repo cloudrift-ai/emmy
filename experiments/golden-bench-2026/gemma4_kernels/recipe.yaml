@@ -5,8 +5,9 @@
 # Every row replays one hand-recorded golden committed beside this file (see golden/README.md): the schedule was
 # found by hand-pinned `emmy run --ab` rows on that card and written with `--record-greedy`, and the row only
 # re-measures it at deployable -O3 against eager PyTorch and torch.compile. Nothing here traces, tunes or pins:
-# the run starts from an empty tune DB and online prior, so the golden's rows alone decide what deploys. A missing
-# golden fails its row.
+# the run starts from an empty tune DB and online prior and passes --strict-evidence, so the golden's rows alone
+# decide what deploys and a fork no recorded row decides fails the row instead of falling to the prior. A missing
+# golden fails its row too.
 #
 # `lane` selects the precision fork: `std` is the FP32-accumulate default, `fm` sets EMMY_FAST_MATH=1 (the hybrid
 # FP16/FP32 accumulation of the article). The correctness gate is the run command's default scaled check, not
@@ -16,6 +17,7 @@
 #
 # Repro on a pre-allocated card (no cloud provisioning):
 #   emmy bench experiments/golden-bench-2026/gemma4_kernels --local --filter card=rtx5090
+#   emmy bench experiments/golden-bench-2026/gemma4_kernels --ssh USER@HOST[:PORT] --filter card=rtx4090
 command:
   stage:
     - emmy
@@ -66,7 +68,7 @@ command:
     # keeps the receipts beside it evidence instead of targets of their own.
     seed=$$("$$VENV/bin/python" -c 'import sys, yaml; d = yaml.safe_load(open(sys.argv[1])); print(next(r["name"] for c in d["configs"] for r in c["realizations"] if not (r.get("measurements") or {}).get("emmy_us")))' "$$golden")
     EMMY_NVCC_FLAGS= EMMY_BENCH_RUN_TIMEOUT_S=60 CUDA_VISIBLE_DEVICES="$gpu_device_ids" timeout --signal=TERM --kill-after=30s 900s \
-      "$$VENV/bin/emmy" run --golden "$$golden" --realization "$$seed" --bench --no-record-nodes \
+      "$$VENV/bin/emmy" run --golden "$$golden" --realization "$$seed" --bench --no-record-nodes --strict-evidence \
       --bench-backends eager,tcompile,emmy --json $task_dir/$kernel.$lane.json 2>&1 | tee $task_dir/$kernel.$lane.log
   result_files:
     - artifacts.tar.gz
@@ -78,4 +80,10 @@ matrices:
       lane: [std, fm]
       card: rtx5090
       deploy.gpu: "NVIDIA GeForce RTX 5090"
+      deploy.gpu_count: 1
+  - cross:
+      kernel: [q_proj, kv_proj, o_proj, mlp_gate_up, mlp_down, attention]
+      lane: [std, fm]
+      card: rtx4090
+      deploy.gpu: "NVIDIA GeForce RTX 4090"
       deploy.gpu_count: 1
