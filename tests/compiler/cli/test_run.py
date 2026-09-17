@@ -546,6 +546,19 @@ def test_strict_correctness_proof_uses_compiler_baseline_tolerance():
     assert greedy["max_rel_error"] > 0
 
 
+def test_strict_correctness_proof_accepts_a_mask_that_matches_its_reference():
+    """An attention mask holds -inf by design: it passes where the reference has the same -inf, and
+    fails where the two disagree."""
+    import numpy as np
+
+    from emmy.commands.run import _strict_correctness_proof
+
+    mask = {"o": np.array([0.0, -np.inf], dtype=np.float32)}
+    assert _strict_correctness_proof({"o": np.array([0.0005, -np.inf], dtype=np.float32)}, mask)["status"] == "pass"
+    for wrong in ([0.0, np.inf], [-np.inf, 0.0], [0.0, np.nan]):
+        assert _strict_correctness_proof({"o": np.array(wrong, dtype=np.float32)}, mask)["status"] == "fail"
+
+
 def test_unreproducible_pin_flag(monkeypatch):
     """The realized-vs-pinned gate: a pin the compile silently dropped (the fallback
     substituted the planner's own pick — the retired ``w2x1`` hd128 flash form) flags

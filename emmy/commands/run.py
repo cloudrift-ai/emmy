@@ -1037,8 +1037,9 @@ def _strict_correctness_proof(outputs: dict, reference_out, *, reference="eager"
     """Return a tolerance verdict against one named reference with reproducible error statistics.
 
     The pass rule is the same elementwise rule used by ``torch.testing.assert_close`` for
-    compiler baselines: ``abs(actual - expected) <= atol + rtol * abs(expected)``. Reference
-    outputs may be tensors, a positional tensor sequence, or an output-name mapping.
+    compiler baselines: ``abs(actual - expected) <= atol + rtol * abs(expected)``, and a non-finite
+    value must match the reference exactly. Reference outputs may be tensors, a positional tensor
+    sequence, or an output-name mapping.
     """
     import numpy as np  # noqa: PLC0415
 
@@ -1088,9 +1089,12 @@ def _strict_correctness_proof(outputs: dict, reference_out, *, reference="eager"
         if actual.shape != expected.shape:
             failure = f"output {name!r} shape {actual.shape} != {reference} {expected.shape}"
             break
-        if not np.isfinite(actual).all() or not np.isfinite(expected).all():
-            failure = f"output {name!r} contains non-finite values"
+        # A mask legitimately holds -inf; a non-finite value passes only where the reference has the same one.
+        finite = np.isfinite(expected)
+        if not np.array_equal(np.isfinite(actual), finite) or not np.array_equal(actual[~finite], expected[~finite], equal_nan=True):
+            failure = f"output {name!r} has non-finite values the {reference} output does not"
             break
+        actual, expected = actual[finite], expected[finite]
         absolute = np.abs(actual - expected)
         tolerance = atol + rtol * np.abs(expected)
         if absolute.size:
