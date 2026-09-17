@@ -542,7 +542,12 @@ gmem index never carries the carrier's key, so reading them inside the loop re-i
 go straight-line — a rolled loop has nowhere to keep them, and `LOOPIFY` re-rolls the run for a readable listing. The
 CARRIER is the other, and it is f32 whatever the expectation's cell accumulates in: on the reduced-accumulate cell the
 expectation's `mma.sync` targets a packed f16 fragment and one `FragmentPromote` per chunk folds it here, so the mma
-chain runs at the consumer-die full rate while the running sum stays f32. The score keeps that atom's f32 sibling
+chain runs at the consumer-die full rate while the running sum stays f32. While the row's partials fit the thread's
+registers every key step drains the whole register row and one promote sweep ends the chunk, the order that measures
+faster (14.8 us against 16.6 at head width 128 on an RTX 5090). Past the envelope the chunk drains one column pair
+through all its steps and promotes it at once, so two partials are live instead of the row; the pair is what one
+paired ldmatrix fills, so the load pairing survives. The width comes from the schedule's `chunk_partial_columns`, the
+same rule the offer's register budget counts with. The score keeps that atom's f32 sibling
 either way — its C fragments are what the pivot, the denominator and every channel's pattern are read off.
 
 A projection that reads no per-row carrier state is the ordinary sink's (a placement cut materializes the

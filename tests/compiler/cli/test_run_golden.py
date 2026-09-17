@@ -460,4 +460,3 @@ def test_the_correctness_oracle_runs_torch_gemms_at_full_precision_and_restores_
         assert not matmul.allow_fp16_reduced_precision_reduction
         assert not matmul.allow_bf16_reduced_precision_reduction
     assert (matmul.allow_fp16_reduced_precision_reduction, matmul.allow_bf16_reduced_precision_reduction) == before
-
