@@ -481,24 +481,47 @@ def _unchanged(pieces: tuple, members) -> bool:
     return len(pieces) == len(members) and all(piece is member for piece, member in zip(pieces, members, strict=True))
 
 
-def _replace_member(member, targets: dict[int, tuple]):
+def _replace_member(member, targets: dict[int, tuple], renamed: dict[str, str]):
     if id(member) in targets:
         return targets[id(member)]
     if isinstance(member, Fold):
-        return (_replace_fold(member, targets),)
+        return (_replace_fold(member, targets, renamed),)
     nested = member.nested()
     if not nested:
         return (member,)
     bodies = []
     changed = False
     for body in nested:
-        replaced = tuple(piece for child in body for piece in _replace_member(child, targets))
+        replaced = tuple(piece for child in body for piece in _replace_member(child, targets, renamed))
         changed = changed or not _unchanged(replaced, body)
         bodies.append(Body(replaced))
     return (member.with_bodies(tuple(bodies)) if changed else member,)
 
 
-def _replace_fold(node: Fold, targets: dict[int, tuple]) -> Fold:
+def _follow_reads(before: Fold, after: Fold, renamed: dict[str, str]) -> Fold:
+    """``after`` with every value its statements DERIVE from a re-spelled read re-spelled the same way.
+
+    :func:`_read_name` tags a workspace read because the value can still be computed in place
+    beside it. The same holds one step on: a statement over that read is a different statement from
+    its in-place twin — ``v = in0__ws… + b`` beside ``v = in0 + b`` — and a lowered scope binds a
+    name once, so under one name the pair is the same SSA fault (nvcc: *already declared*). Each
+    such definition takes the tags of the reads it depends on; a statement that reads no workspace
+    keeps its name and still shares with its twin. The term's readers follow through
+    :attr:`~emmy.compiler.ir.pure.fold.Fold.applied`, which is what walks the rename up the tree, one
+    rebuilt term at a time. It stops at a reduce: a carried state keeps its name, because a twisted
+    carrier's tile offer reads it. ``renamed`` collects what was minted, for the boundary stores.
+    """
+    was = {param: edge.exposes[slot] for param, edge, slot in before.bindings}
+    tags = {param: now.removeprefix(was[param]) for param, edge, slot in after.bindings if (now := edge.exposes[slot]) != was[param]}
+    for stmt in after.lift.body:
+        read = sorted({tags[name] for name in Body((stmt,)).ssa_uses if name in tags})
+        tags.update((name, "".join(read)) for name in stmt.defines() if read)
+    names = {name: f"{name}{tag}" for name, tag in tags.items() if name not in was}
+    renamed.update(names)
+    return replace(after, lift=after.lift.rename(names)) if names else after
+
+
+def _replace_fold(node: Fold, targets: dict[int, tuple], renamed: dict[str, str]) -> Fold:
     """Replace every stored occurrence of the target Folds in ONE walk — ``targets`` maps
     ``id(node)`` to its replacement stmts. One walk, because the rebuild copies every node on the
     way down: a second walk's target objects no longer exist in the first walk's output, so
@@ -515,7 +538,7 @@ def _replace_fold(node: Fold, targets: dict[int, tuple]) -> Fold:
     operands: list = []
     bound: list[bool] = []
     for edge in node.operands:
-        pieces = _replace_member(edge, targets)
+        pieces = _replace_member(edge, targets, renamed)
         components = len(edge.exposes) if isinstance(edge, Fold) else 0
         if any(piece is None for piece in pieces):
             bound.extend(piece is not None for piece in pieces)
@@ -524,7 +547,7 @@ def _replace_fold(node: Fold, targets: dict[int, tuple]) -> Fold:
             bound.extend([True] * components)
         operands.extend(pieces)
     operands = tuple(operands)
-    body = tuple(piece for stmt in node.lift.body for piece in _replace_member(stmt, targets))
+    body = tuple(piece for stmt in node.lift.body for piece in _replace_member(stmt, targets, renamed))
     if _unchanged(operands, node.operands) and _unchanged(body, node.lift.body):
         return node
     lift = replace(node.lift, body=Body(body))
@@ -533,7 +556,7 @@ def _replace_fold(node: Fold, targets: dict[int, tuple]) -> Fold:
         params = node.lift.params
         head, slots, tail = params[:lead], params[lead : lead + len(bound)], params[lead + len(bound) :]
         lift = replace(lift, params=(*head, *(name for name, keep in zip(slots, bound, strict=True) if keep), *tail))
-    return replace(node, operands=operands, lift=lift)
+    return _follow_reads(node, replace(node, operands=operands, lift=lift), renamed)
 
 
 def _stores_under(term: Fold, stored: set[str]) -> bool:
@@ -682,7 +705,8 @@ def _read_name(name: str, token: str, ordinal: int | None = None) -> str:
     sharing), or a second seam exposing that same value. Under one name those are two declarations
     at two different addresses, which is an SSA fault and which nvcc rejects (*already declared in
     the current scope*). Reads of ONE workspace at one address keep one name, so the emitted body
-    still binds each value once.
+    still binds each value once. What a reader derives from the read carries the tag on
+    (:func:`_follow_reads`).
     """
     return f"{name}__ws{token}" if ordinal is None else f"{name}__ws{token}s{ordinal}"
 
@@ -735,12 +759,13 @@ def realize(
     owning = tuple(seam for seam in seams if seam.owned is not None)
     seams = tuple(seam for seam in seams if seam.owned is None)
     pieces = []
-    # What each replaced cone's result is called once the consumer reads it back — the ONE
-    # rename this pass mints, collected as it is minted. A term's readers follow it for free (a
+    # What each replaced cone's result is called once the consumer reads it back, and what every
+    # value derived from such a read is called after it (:func:`_follow_reads`) — the renames this
+    # pass mints, collected as they are minted. A term's readers follow them for free (a
     # consumer's params are spelled as the result names of the edge they bind), but the kernel's
     # boundary stores are NOT part of the term: ``TileOp.output_specs`` names the stored value as
-    # a plain string, so a store of a cut cone's own result has to be re-spelled here or it names
-    # a value the consumer no longer defines.
+    # a plain string, so a store of a renamed value has to be re-spelled here or it names a value
+    # the consumer no longer defines.
     read_names: dict[str, str] = {}
     taken = _kept_components(tile)
     for seam in seams:
@@ -817,11 +842,19 @@ def realize(
     # cone contains the score dots whose operand cones are cut beside it), and that producer must
     # read the workspace like any other consumer. Containment is strict, so order is free.
     everything = {target: loads for *_, replacements in pieces for target, loads in replacements.items()}
-    parent_fold = _replace_fold(tile.op, everything)
+    parent_fold = _replace_fold(tile.op, everything, read_names)
+    specs = tuple(
+        replace(store, write=replace(store.write, values=tuple(read_names.get(value, value) for value in store.write.values)))
+        for store in tile.output_specs
+    )
     produced_pieces = []
     for seam, produced, axes, index, token, names, buffers, replacements in pieces:
         others = {target: loads for target, loads in everything.items() if target not in replacements}
-        produced_pieces.append((seam, _replace_fold(produced, others) if others else produced, axes, index, token, names, buffers))
+        # A piece that reads another seam's workspace re-spells what it derives from it too, and
+        # its own stores name those values.
+        derived: dict[str, str] = {}
+        produced = _replace_fold(produced, others, derived) if others else produced
+        produced_pieces.append((seam, produced, axes, index, token, tuple(derived.get(name, name) for name in names), buffers))
 
     fragment = _input_fragment(match, root)
     all_buffers = [buffer for *_, buffers in produced_pieces for buffer in buffers]
@@ -856,7 +889,7 @@ def realize(
 
     # A bare reduction carries NO output specification — its grid-cell store is materializer glue —
     # so the sibling's ports are read off the graph node, not off the stores.
-    consumer_fold, consumer_stores = parent_fold, tile.output_specs
+    consumer_fold, consumer_stores = parent_fold, specs
     consumer_outputs = set(root.buffer_names())
     if owning:
         chosen = {index: seam for index, edge in enumerate(tile.op.operands) for seam in owning if seam.node is edge}
@@ -866,8 +899,8 @@ def realize(
         # offer made, so the two agree by construction; a composed one replaces operand edges and
         # leaves the root body alone, which is what the partition reads. Either way it is positional
         # over the operands, so the regions line up with the seams that chose them.
-        regions = output_regions(parent_fold, tile.output_specs)
-        order = [store.write.output for store in tile.output_specs]
+        regions = output_regions(parent_fold, specs)
+        order = [store.write.output for store in specs]
         for index, seam in chosen.items():
             region, tail, stores = regions[index]
             stores = _in_source_order(stores, order)
@@ -898,12 +931,9 @@ def realize(
         name=tile.name,
         place=tile.place,
         axes=tile.axes,
-        # The stored value each boundary write reads is re-spelled where a workspace cut renamed it;
+        # ``specs`` already reads each stored value under the name the cut left it;
         # ``add_output_piece`` re-spells the BUFFER each write targets.
-        output_specs=tuple(
-            replace(store, write=replace(store.write, values=tuple(read_names.get(value, value) for value in store.write.values)))
-            for store in consumer_stores
-        ),
+        output_specs=consumer_stores,
         placement_decided=placement_decided,
         split_consumed=split_consumed,
     )
