@@ -70,6 +70,7 @@ from emmy.compiler.ir.kernel.ir import (
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.schedule import Side, Stage, Tile
+from emmy.compiler.ir.schedule.classic.refusals import chunk_partial_columns
 from emmy.compiler.ir.schedule.packing import block_scaled_atom, packed_readings
 from emmy.compiler.ir.schedule.staging import chunk_key_stage
 from emmy.compiler.ir.sigma import Sigma
@@ -3208,9 +3209,10 @@ class _FlashOps(_MmaOps):
         out += [self._frag(f"_b{j}_{t}", "b") for j in range(n.reg) for t in range(steps)]
         if _f16acc(atom):
             out += [self._frag(f"{cell}{i}_{j}", "c") for i in range(m.reg) for j in range(n.reg)]
-        for t in range(steps):
+
+        def repack(t: int) -> list[Stmt]:
             if atom.fragment_layout == "m8n8k4":
-                out += [
+                return [
                     FragmentRepack(
                         frag=self.frag(f"_a{i}_{t}"),
                         srcs=(weights[i, t // 4],),
@@ -3220,18 +3222,14 @@ class _FlashOps(_MmaOps):
                     )
                     for i in range(m.reg)
                 ]
-            else:
-                out += [
-                    FragmentRepack(
-                        frag=self.frag(f"_a{i}_{t}"),
-                        srcs=(weights[i, 2 * t], weights[i, 2 * t + 1]),
-                        ab_dtype=atom.ab_dtype,
-                    )
-                    for i in range(m.reg)
-                ]
+            return [
+                FragmentRepack(frag=self.frag(f"_a{i}_{t}"), srcs=(weights[i, 2 * t], weights[i, 2 * t + 1]), ab_dtype=atom.ab_dtype)
+                for i in range(m.reg)
+            ]
+
+        def drain(t: int, cols: range) -> list[Stmt]:
             row = BinaryExpr("+", base, Literal(t * atom.atom_k, "int"))
-            out += [self._value_read(staged, slot, n, offset, j, t, v_load, row, bound) for j in range(n.reg)]
-            out += [
+            return [self._value_read(staged, slot, n, offset, j, t, v_load, row, bound) for j in cols] + [
                 MmaSyncPtx(
                     c_frag=self.frag(f"{cell}{i}_{j}"),
                     a_frag=self.frag(f"_a{i}_{t}"),
@@ -3241,14 +3239,26 @@ class _FlashOps(_MmaOps):
                     c_dtype=atom.operand_dtype("c").name,
                 )
                 for i in range(m.reg)
-                for j in range(n.reg)
+                for j in cols
             ]
-        if _f16acc(atom):
-            out += [
-                FragmentPromote(dst=self.frag(f"_c{i}_{j}"), src=self.frag(f"{cell}{i}_{j}"), fragment_layout=atom.fragment_layout)
-                for i in range(m.reg)
-                for j in range(n.reg)
-            ]
+
+        # A reduced partial lives until its promote. While the row's partials fit the thread's registers every
+        # step drains the whole row; past that (head width 256: 64 registers over the envelope) the chunk drains
+        # ``width`` columns through all its steps and folds them at once — the offer's own rule.
+        producer = None if self.inner is None else self.inner[0]
+        width = chunk_partial_columns(self.c, producer, self.tile, self.stage) if _f16acc(atom) else n.reg
+        if width < n.reg:
+            out += [stmt for t in range(steps) for stmt in repack(t)]
+        for j0 in range(0, n.reg, width):
+            cols = range(j0, min(j0 + width, n.reg))
+            for t in range(steps):
+                out += (repack(t) if width == n.reg else []) + drain(t, cols)
+            if _f16acc(atom):
+                out += [
+                    FragmentPromote(dst=self.frag(f"_c{i}_{j}"), src=self.frag(f"{cell}{i}_{j}"), fragment_layout=atom.fragment_layout)
+                    for i in range(m.reg)
+                    for j in cols
+                ]
         return out
 
     def _value_read(self, value, slot, n, offset, j: int, t: int, v_load, row, bound) -> Stmt:

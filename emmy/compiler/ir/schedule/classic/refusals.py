@@ -603,33 +603,57 @@ def _fragment_registers(atom, role: str) -> int:
     return m * n // (64 if dtype.nbytes == 2 else 32)
 
 
-def _paired_budget_refusal(node: Fold, producer: Fold | None, placed: PlacedTile, stage: ResolvedStage | None) -> str | None:
-    if not (placed.is_warp and stage is not None and producer is not None):
-        return None
-    from emmy.compiler.ir.schedule.catalog import MAX_REGISTERS_PER_CTA, MAX_REGISTERS_PER_THREAD  # noqa: PLC0415
-
+def _paired_registers(node: Fold, producer: Fold, placed: PlacedTile, stage: ResolvedStage, partial_columns: int) -> int:
+    """The live fragment registers one thread of a paired contraction needs, with ``partial_columns``
+    register columns of reduced partials live at once."""
     atom = placed.atom
-    if stage.bk_elems % atom.atom_n:
-        return None
     a_regs = _fragment_registers(atom, "a")
     b_regs = _fragment_registers(atom, "b")
-    c_regs = _fragment_registers(atom, "c")
+    cells = placed.reg_m * placed.reg_n
+    cell_regs = cells * _fragment_registers(atom, "c")
     if atom.operand_dtype("c").nbytes == 2:
-        c_regs += atom.atom_m * atom.atom_n // 32
+        # A reduced accumulator promotes into an f32 shadow per cell, beside its live partials.
+        cell_regs = cells * (atom.atom_m * atom.atom_n // 32) + placed.reg_m * partial_columns * _fragment_registers(atom, "c")
     depth = max(1, stage.reg_depth)
     # C fragment SETS the consumer holds. A fused multi-channel edge keeps one per streamed
     # operand; a TWISTED carrier keeps one — its bilinear channel — beside per-row registers for
     # the states that are no product, so counting its operands claimed fragments it never declares.
     channels = len(node.bilinear_channels()) if node.chunked() else len(node.operands) - 1
-    consumer_c = channels * placed.reg_m * placed.reg_n * c_regs
-    consumer = placed.reg_m * depth * a_regs + channels * (placed.reg_n * depth * b_regs + placed.reg_m * placed.reg_n * c_regs)
+    consumer_c = channels * cell_regs
+    consumer = placed.reg_m * depth * a_regs + channels * (placed.reg_n * depth * b_regs + cell_regs)
     producer_n = stage.bk_elems // atom.atom_n
     # The producer accumulates at ITS own cell: a chunked consumer on the reduced-accumulate cell
     # still scores in f32 (``wide_accumulate``), so its score tile is no wider for it.
     producer_c = _fragment_registers(wide_accumulate(atom), "c")
     producer_regs = placed.reg_m * a_regs + (len(producer.operands) - 1) * (producer_n * b_regs + placed.reg_m * producer_n * producer_c)
-    required = max(consumer, consumer_c + producer_regs)
-    available = min(MAX_REGISTERS_PER_THREAD, MAX_REGISTERS_PER_CTA // placed.block_threads)
+    return max(consumer, consumer_c + producer_regs)
+
+
+def _register_envelope(placed: PlacedTile) -> int:
+    from emmy.compiler.ir.schedule.catalog import MAX_REGISTERS_PER_CTA, MAX_REGISTERS_PER_THREAD  # noqa: PLC0415
+
+    return min(MAX_REGISTERS_PER_THREAD, MAX_REGISTERS_PER_CTA // placed.block_threads)
+
+
+def chunk_partial_columns(node: Fold, producer: Fold | None, placed: PlacedTile, stage: ResolvedStage | None) -> int:
+    """How many register columns of reduced chunk partials a chunked carrier keeps live — the one rule the
+    offer and the emitter share. The whole row while the thread's envelope holds it: every key step then drains
+    the row at once, which measures faster (14.8 us against 16.6 at head width 128 on an RTX 5090). Past the
+    envelope the chunk drains one column pair through all its steps and folds it at once — a pair, because that
+    is what one paired ldmatrix fills."""
+    row = placed.reg_n
+    if not node.chunked() or producer is None or stage is None or stage.bk_elems % placed.atom.atom_n:
+        return row
+    return row if _paired_registers(node, producer, placed, stage, row) <= _register_envelope(placed) else min(row, 2)
+
+
+def _paired_budget_refusal(node: Fold, producer: Fold | None, placed: PlacedTile, stage: ResolvedStage | None) -> str | None:
+    if not (placed.is_warp and stage is not None and producer is not None):
+        return None
+    if stage.bk_elems % placed.atom.atom_n:
+        return None
+    required = _paired_registers(node, producer, placed, stage, chunk_partial_columns(node, producer, placed, stage))
+    available = _register_envelope(placed)
     if required <= available:
         return None
     return (
