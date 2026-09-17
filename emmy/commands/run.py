@@ -1782,7 +1782,11 @@ def _write_ab_json(
             "latency_us": us,
             "captured": captured,
             "timing_semantics": backend_semantics,
-            **({"correctness": {"status": "pass", "reference": "eager", "tolerance": "scaled", "fullgraph": True}} if name == "torch.compile" else {}),
+            **(
+                {"correctness": {"status": "pass", "reference": "eager", "tolerance": "scaled", "fullgraph": True}}
+                if name == "torch.compile"
+                else {}
+            ),
         }
         for name, us in (results or {}).items()
     }
@@ -3603,7 +3607,10 @@ def _print_table(results, note: str | None = None):
 
     eager_us = results.get("Eager PyTorch", 0)
     cols = [Col("Backend"), Col("Latency (us)", "r"), Col("vs Eager", "r")]
-    rows = [[name, "failed" if isinstance(us, str) else f"{us:.0f}", f"{eager_us / us:.2f}x" if not isinstance(us, str) and us > 0 else "-"] for name, us in results.items()]
+    rows = [
+        [name, "failed" if isinstance(us, str) else f"{us:.0f}", f"{eager_us / us:.2f}x" if not isinstance(us, str) and us > 0 else "-"]
+        for name, us in results.items()
+    ]
     print()
     for line in render_table(cols, rows, rule=True):
         print(line)

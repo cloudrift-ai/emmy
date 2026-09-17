@@ -410,7 +410,7 @@ def test_a_kernel_set_name_resolves_inside_the_realization_own_precision_lane(tm
     graph.add_node(InputOp(), [], Tensor("w", (Dim(64), Dim(64)), dtype=F16), node_id="w")
     graph.add_node(MatmulOp(), ["x", "w"], Tensor("y", (Dim(64), Dim(64)), dtype=F16), node_id="y")
     graph.inputs, graph.outputs = ["x", "w"], ["y"]
-    measured = {"emmy_us": 1.0, "reference_us": 2.0, "reference_backend": "torch"}
+    measured = {"measurements": {"emmy_us": 1.0, "reference_us": 2.0, "reference_backend": "torch"}}
     path = tmp_path / "working-two-lanes.yaml"
     dump_golden_file(
         {
@@ -422,8 +422,8 @@ def test_a_kernel_set_name_resolves_inside_the_realization_own_precision_lane(tm
                     "target": {"origins": ["y"]},
                     "realizations": [
                         {"name": "seed", "bindings": {}, "pins": {"FAST_MATH": False}, "kernel_set": ["seed.split"]},
-                        {"name": "seed.split", "bindings": {}, "pins": {"FAST_MATH": False}, "knobs": {"REDUCE": "g4k"}, "measurements": measured},
-                        {"name": "seed.split", "bindings": {}, "pins": {"FAST_MATH": True}, "knobs": {"REDUCE": "g2k"}, "measurements": measured},
+                        {"name": "seed.split", "bindings": {}, "pins": {"FAST_MATH": False}, "knobs": {"REDUCE": "g4k"}, **measured},
+                        {"name": "seed.split", "bindings": {}, "pins": {"FAST_MATH": True}, "knobs": {"REDUCE": "g2k"}, **measured},
                     ],
                 }
             ],
@@ -435,7 +435,6 @@ def test_a_kernel_set_name_resolves_inside_the_realization_own_precision_lane(tm
     resolve_golden_arg(args)
     (sample,) = args.golden_configs
     assert _sample_replay_knobs(sample) == {"FAST_MATH": False, "REDUCE": "g4k"}
-
 
 
 def test_selected_records_scope_the_tier_and_a_split_regime_publishes_nothing(monkeypatch, tmp_path):

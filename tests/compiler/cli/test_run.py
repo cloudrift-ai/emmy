@@ -286,7 +286,7 @@ def test_build_torch_fns_accepts_inductor_rounding_drift(monkeypatch):
 
     monkeypatch.setattr(torch._dynamo, "reset", lambda: None)
     reference = torch.full((8,), 60.0, dtype=torch.float16)
-    monkeypatch.setattr(torch, "compile", lambda _module, *, fullgraph, mode: (lambda: reference + 0.0625))
+    monkeypatch.setattr(torch, "compile", lambda _module, *, fullgraph, mode: lambda: reference + 0.0625)
 
     fns = _build_torch_fns(lambda: reference, (), {}, warmup=0, backends={"tcompile"})
 
