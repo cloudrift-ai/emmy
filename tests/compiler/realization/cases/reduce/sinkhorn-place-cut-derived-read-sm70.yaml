@@ -1,0 +1,294 @@
+# Two Sinkhorn rounds fuse into one kernel whose hoisted row statistics are one cone. That cone passes the
+# epsilon constants through beside what it computes, so after the cut the residual piece reads an epsilon from the
+# workspace at its root while its nested reduces still read the same constant in place. Both then derive the same
+# value under one name, and with the serial row both declarations land in one scope (nvcc: already declared).
+# Found on the DeepSeek V4 post-attention Sinkhorn kernel on a V100, where the prior picked such a row.
+compute_cap:
+- 7
+- 0
+programs:
+- inputs: [x]
+  outputs: [div_3]
+  nodes:
+  - id: add_1_c1
+    op: constant
+    attrs:
+      name: add_1_c1
+      value: 1.0e-06
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[add_1_c1, f32, [1]]]
+  - id: add_1_c1_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 1}, {__dim__: 1}, {__dim__: 4}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [add_1_c1]
+    outputs: [[add_1_c1_bc, f32, [1, 1, 1, 4]]]
+  - id: add_2_c1
+    op: constant
+    attrs:
+      name: add_2_c1
+      value: 1.0e-06
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[add_2_c1, f32, [1]]]
+  - id: add_2_c1_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 1}, {__dim__: 4}, {__dim__: 1}]}
+      sources: {__tuple__: [{__index_source__: {input_idx: 0, coord_map: [{var: out_coord_3}], select: null}}]}
+    inputs: [add_2_c1]
+    outputs: [[add_2_c1_bc, f32, [1, 1, 4, 1]]]
+  - id: add_3_c1
+    op: constant
+    attrs:
+      name: add_3_c1
+      value: 1.0e-06
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[add_3_c1, f32, [1]]]
+  - id: add_3_c1_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 1}, {__dim__: 1}, {__dim__: 4}]}
+      sources:
+        __tuple__:
+        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    inputs: [add_3_c1]
+    outputs: [[add_3_c1_bc, f32, [1, 1, 1, 4]]]
+  - id: add_c1
+    op: constant
+    attrs:
+      name: add_c1
+      value: 1.0e-06
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[add_c1, f32, [1]]]
+  - id: add_c1_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 1}, {__dim__: 4}, {__dim__: 1}]}
+      sources: {__tuple__: [{__index_source__: {input_idx: 0, coord_map: [{var: out_coord_3}], select: null}}]}
+    inputs: [add_c1]
+    outputs: [[add_c1_bc, f32, [1, 1, 4, 1]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [1, 1, 4, 4]]]
+  - id: sum_1
+    op: tensor.reduce
+    attrs: {op: {__elementwise__: sum}, axis: -1}
+    inputs: [x]
+    outputs: [[sum_1, f32, [1, 1, 4, 1]]]
+  - id: add
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [sum_1, add_c1_bc]
+    outputs: [[add, f32, [1, 1, 4, 1]]]
+  - id: add_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 1}, {__dim__: 4}, {__dim__: 4}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {var: out_coord_1}
+            - {var: out_coord_2}
+            - {literal: {value: 0, dtype: int}}
+            select: null
+    inputs: [add]
+    outputs: [[add_bc, f32, [1, 1, 4, 4]]]
+  - id: div
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: divide}}
+    inputs: [x, add_bc]
+    outputs: [[div, f32, [1, 1, 4, 4]]]
+  - id: sum_2
+    op: tensor.reduce
+    attrs: {op: {__elementwise__: sum}, axis: -2}
+    inputs: [div]
+    outputs: [[sum_2, f32, [1, 1, 1, 4]]]
+  - id: add_1
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [sum_2, add_1_c1_bc]
+    outputs: [[add_1, f32, [1, 1, 1, 4]]]
+  - id: add_1_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 1}, {__dim__: 4}, {__dim__: 4}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {var: out_coord_1}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_3}
+            select: null
+    inputs: [add_1]
+    outputs: [[add_1_bc, f32, [1, 1, 4, 4]]]
+  - id: div_1
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: divide}}
+    inputs: [div, add_1_bc]
+    outputs: [[div_1, f32, [1, 1, 4, 4]]]
+  - id: sum_3
+    op: tensor.reduce
+    attrs: {op: {__elementwise__: sum}, axis: -1}
+    inputs: [div_1]
+    outputs: [[sum_3, f32, [1, 1, 4, 1]]]
+  - id: add_2
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [sum_3, add_2_c1_bc]
+    outputs: [[add_2, f32, [1, 1, 4, 1]]]
+  - id: add_2_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 1}, {__dim__: 4}, {__dim__: 4}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {var: out_coord_1}
+            - {var: out_coord_2}
+            - {literal: {value: 0, dtype: int}}
+            select: null
+    inputs: [add_2]
+    outputs: [[add_2_bc, f32, [1, 1, 4, 4]]]
+  - id: div_2
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: divide}}
+    inputs: [div_1, add_2_bc]
+    outputs: [[div_2, f32, [1, 1, 4, 4]]]
+  - id: sum_4
+    op: tensor.reduce
+    attrs: {op: {__elementwise__: sum}, axis: -2}
+    inputs: [div_2]
+    outputs: [[sum_4, f32, [1, 1, 1, 4]]]
+  - id: add_3
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [sum_4, add_3_c1_bc]
+    outputs: [[add_3, f32, [1, 1, 1, 4]]]
+  - id: add_3_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 1}, {__dim__: 4}, {__dim__: 4}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {var: out_coord_1}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_3}
+            select: null
+    inputs: [add_3]
+    outputs: [[add_3_bc, f32, [1, 1, 4, 4]]]
+  - id: div_3
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: divide}}
+    inputs: [div_2, add_3_bc]
+    outputs: [[div_3, f32, [1, 1, 4, 4]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - add
+    - add_1
+    - add_1_bc
+    - add_1_c1_bc
+    - add_2
+    - add_2_bc
+    - add_2_c1_bc
+    - add_3
+    - add_3_bc
+    - add_3_c1_bc
+    - add_bc
+    - add_c1_bc
+    - div
+    - div_1
+    - div_2
+    - div_3
+    - sum_1
+    - sum_2
+    - sum_3
+    - sum_4
+  realizations:
+  - name: k_div_3_reduce.9e7c85a0f474
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      PLACE@map.1/map: cut
+    identity: a40e80ee781cbd2caac3767bc62babf8eae3350c9980d510b267b1bca60542c5
+  - name: k_div_3_reduce.9e7c85a0f474.49b4249e3e59
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      RASTER: ''
+      TILE@map.5/inner: ''
+      TILE@map.5/inner.1/map.1/inner: ''
+      TILE@map.5/inner.1/map.1/inner.1/map.1/inner: ''
+      TILE@map.5/inner.2/map.3/map.1/inner: ''
+      REDUCE@map.5/inner: ''
+      REDUCE@map.5/inner.1/map.1/inner: ''
+      REDUCE@map.5/inner.1/map.1/inner.1/map.1/inner: ''
+      REDUCE@map.5/inner.1/map.1/inner.1/map.1/inner.2/map.1/reduce: ''
+      REDUCE@map.5/inner.1/map.1/inner.2/map.2/map.1/reduce: ''
+      REDUCE@map.5/inner.2/map.3/map.1/inner: ''
+      REDUCE@map.5/inner.2/map.3/map.1/inner.2/map.1/reduce: ''
+      STAGE@map.5/inner: ''
+      STAGE@map.5/inner.1/map.1/inner: ''
+      STAGE@map.5/inner.1/map.1/inner.1/map.1/inner: ''
+      STAGE@map.5/inner.2/map.3/map.1/inner: ''
+    identity: 49b4249e3e59923c649f009ed3a95ecc1963daf4bf9b981c97ec99bb37d31d65
+  - name: k_div_3_reduce.9e7c85a0f474.160eb70bc39a
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE@map.2/inner: ''
+      TILE@map.2/inner.1/map.1/inner: ''
+      REDUCE@map.1/reduce: ''
+      REDUCE@map.2/inner: ''
+      REDUCE@map.2/inner.1/map.1/inner: ''
+      REDUCE@map.2/inner.1/map.1/inner.2/map.1/reduce: ''
+      STAGE@map.2/inner: ''
+      STAGE@map.2/inner.1/map.1/inner: ''
+      WORK: ''
+      RASTER: ''
+    identity: 160eb70bc39a42903384ea329bc8f3f93fcdbdb7e8f27171b0f7b012949c9178
