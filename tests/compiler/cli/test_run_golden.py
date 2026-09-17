@@ -388,6 +388,22 @@ def test_an_env_pin_that_did_not_realize_is_flagged_like_an_ab_pin(monkeypatch):
     assert run_mod.env_pin_refusal(realized, [{"PLACE@map.1/inner.2/map": "cut"}]) is None
 
 
+def test_a_greedy_pick_whose_env_pin_did_not_realize_is_never_recorded(monkeypatch):
+    """``--record-greedy`` under ``EMMY_KNOBS`` records the pin — so a pin that did not take records the
+    planner's own pick under the pin's lane. Measured while hand-recording a fast-math row beside a
+    standard one that split the same way: the greedy replayed the standard receipt, the run warned, and
+    the recording still filed an f32-accumulate schedule under ``FAST_MATH: true``."""
+    realized = [{"WORK": "w4x2", "TILE": "mma_m16n8k16_f16_f32/f2x4/k2", "STAGE": "d2/smem-tma"}]
+
+    assert run_mod.greedy_record_refusal(realized, accuracy_error=None) is None
+    assert "accuracy" in run_mod.greedy_record_refusal(realized, accuracy_error="max error 0.3")
+
+    monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f16/f4x8/k4")
+    refusal = run_mod.greedy_record_refusal(realized, accuracy_error=None)
+    assert refusal is not None
+    assert "f16_f16/f4x8/k4" in refusal and "f16_f32/f2x4/k2" in refusal
+
+
 def test_a_reference_that_disagrees_with_itself_is_reported_unusable_not_per_row():
     """A pinned row is checked against the greedy output. A row that realized the greedy's OWN config
     computes that output, so if it is flagged as disagreeing the reference does not reproduce -- and
