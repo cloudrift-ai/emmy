@@ -106,8 +106,10 @@ inspectable; the repository validator remains the authoritative completion gate.
 selects the configurable CloudRift model through an OpenAI-compatible Chat Completions endpoint and disables the
 model's chat-template thinking mode for the concise JSON result. Discovery never provisions hardware.
 
-OpenCode is provisioned on the self-hosted runners rather than maintained inside Emmy. `opencode.json` owns the model
-provider alias, while `.opencode/agents/` owns the separate discovery and onboarding limits and permissions. The
+OpenCode is provisioned on the self-hosted runners rather than maintained inside Emmy. `.opencode/opencode.json` owns
+the model provider alias, while `.opencode/agents/` owns the separate discovery and onboarding limits and permissions.
+Both live under `.opencode/` because the workflows point OpenCode's config directory at the exact workflow source,
+which loads after the checked-out branch's config; a provider setting anywhere else would come from that branch. The
 tracked `.agents/skills/` remain the canonical task definitions. Compatibility symlinks under `.claude/skills/`
 expose the same packages through OpenCode's native skill tool.
 
