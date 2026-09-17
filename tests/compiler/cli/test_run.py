@@ -1662,9 +1662,9 @@ def test_accuracy_check_heavy_tailed_fp16_outputs():
 
 
 def test_accuracy_check_holds_a_large_output_in_arrays_not_lists():
-    """The check once walked Python lists: an LM-head output at sequence 512 (134M cells) took three lists, 13 GB
-    and minutes of one core, and its bench worker was the process a session died beside. In arrays the same
-    verdict costs a few f64 copies of the output."""
+    """The check once walked Python lists, one float object per cell: measured at 2M cells it peaked at 13.3 f64
+    copies of the output and took 6.6 s, which for an LM-head output at sequence 512 (134M cells) is 14 GB. In
+    arrays the same verdict costs 4.3 copies and well under a second."""
     import tracemalloc
 
     import numpy as np
