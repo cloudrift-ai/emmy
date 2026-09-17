@@ -156,7 +156,7 @@ Everything in this table recurs on nearly every page below. The rest of the docu
 | **prior** | The ranking model — the fit-offline **offline prior** when cold, the CatBoost **online prior** trained from local measurements once data exists. |
 | **terminal** | A fully-lowered candidate (every fork on its path resolved) that can be benchmarked. |
 | **golden record** | A reviewed program-backed schedule measurement, selected by frontend provenance and used as deploy evidence and an A/B reference. |
-| **the variant key** | The variant key measurements are stored under — `identity_key(with_io=True, with_knobs=True)`: the canonical Loop-IR body (a `TileOp` derives it schedule-free from its term) + the io fingerprint + the knob row. Dialect-free: every stage of one rewrite chain keys off the same content. |
+| **the variant key** | The variant key measurements are stored under — `identity_key(with_io=True, with_knobs=True)`: the canonical Loop-IR body (a `TileOp` derives it schedule-free from its term) with its buffer roles typed + the knob row. Dialect-free: every stage of one rewrite chain keys off the same content. |
 
 ## Module map
 

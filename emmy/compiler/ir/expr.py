@@ -19,7 +19,7 @@ on the same AST.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, replace
 
 import numpy as np
 
@@ -111,6 +111,30 @@ class _ExprOps:
         """Conservative integer-range analysis. ``None`` when unknown.
         Subclasses override; default surfaces missing implementations."""
         return None
+
+    def subterms(self):
+        """Pre-order walk over this expression's tree, itself first."""
+        yield self
+        for f in fields(self):
+            v = getattr(self, f.name)
+            for child in v if isinstance(v, (tuple, list)) else (v,):
+                if isinstance(child, _ExprOps):
+                    yield from child.subterms()
+
+    def rebuild(self, fn) -> Expr:  # noqa: ANN001 — Expr -> Expr
+        """Bottom-up map: ``fn`` applied to every subterm once its children are rebuilt."""
+        changes = {}
+        for f in fields(self):
+            v = getattr(self, f.name)
+            if isinstance(v, _ExprOps):
+                new = v.rebuild(fn)
+            elif isinstance(v, (tuple, list)) and any(isinstance(c, _ExprOps) for c in v):
+                new = type(v)(c.rebuild(fn) if isinstance(c, _ExprOps) else c for c in v)
+            else:
+                continue
+            if new != v:
+                changes[f.name] = new
+        return fn(replace(self, **changes) if changes else self)
 
 
 def subst_index(index: tuple, sub: dict) -> tuple:
@@ -598,7 +622,43 @@ class CastExpr(_ExprOps):
         return CastExpr(self.dtype, inner)
 
 
-Expr = Var | Literal | BinaryExpr | Builtin | FuncCallExpr | TernaryExpr | CastExpr
+@dataclass(frozen=True)
+class FlatIndex(_ExprOps):
+    """The row-major element offset of coordinate ``index`` in ``buffer``.
+
+    Flattened against the buffer's declared shape when rendered — Kernel IR never bakes shapes
+    in — so it only ever appears in a kernel body, bound by a ``Let`` and reused across a copy's
+    trips where the address arithmetic would otherwise be repeated."""
+
+    buffer: str
+    index: tuple[Expr, ...]
+
+    def eval(self, env: dict[str, object]) -> object:
+        raise TypeError("FlatIndex has no host evaluation: the buffer shape is a render-time fact")
+
+    def pretty(self) -> str:
+        return f"{self.buffer}[{', '.join(e.pretty() for e in self.index)}]"
+
+    def substitute(self, mapping: dict[str, Expr]) -> Expr:
+        return FlatIndex(self.buffer, tuple(e.substitute(mapping) for e in self.index))
+
+    def free_vars(self) -> frozenset[str]:
+        return frozenset().union(*(e.free_vars() for e in self.index))
+
+    def render(self, ctx, parent_prec: int = 0) -> str:
+        from emmy.compiler.ir.stmt.base import render_index  # noqa: PLC0415 — stmt imports expr
+
+        text = render_index(self.buffer, self.index, ctx)
+        return f"({text})" if parent_prec > 0 else text
+
+    def simplify(self, ctx: SimplifyCtx) -> Expr:
+        return FlatIndex(self.buffer, tuple(e.simplify(ctx) for e in self.index))
+
+    def range(self, ctx: SimplifyCtx) -> Interval | None:
+        return None
+
+
+Expr = Var | Literal | BinaryExpr | Builtin | FuncCallExpr | TernaryExpr | CastExpr | FlatIndex
 
 
 # ---------------------------------------------------------------------------

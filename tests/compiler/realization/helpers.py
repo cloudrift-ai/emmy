@@ -176,10 +176,13 @@ def leading_comment(path: Path) -> str:
 
 # --- the derived half -------------------------------------------------------------------------
 #
-# Program wire, target, realization name and identity are all *derived* from the stored program by
-# the compiler in front of you; the authored pins and knobs are not, and regeneration structurally
-# cannot produce them. Recomputing the first group and comparing is what keeps a stored case from
-# rotting into a phantom lockout when a kernel identity or a schedule codec changes.
+# Program wire, target and the target's identity are *derived* from the stored program by the
+# compiler in front of you; the authored pins, knobs and names are not, and regeneration
+# structurally cannot produce them. Recomputing the first group and comparing is what keeps a
+# stored case from rotting into a phantom lockout when a kernel identity or a schedule codec
+# changes. A name is a label written once: the kernel's provenance name for the target's entry,
+# that name plus the piece's identity prefix for a further entry. Nothing re-derives it, so no
+# compiler change moves it and a pointer to a row (``--realization``) keeps landing.
 
 
 def regenerate(document: dict) -> dict:
@@ -207,9 +210,11 @@ def regenerate(document: dict) -> dict:
     template = dict(matched["realizations"][0])
     rows = []
     for index, realization in enumerate(realizations):
-        # The target's own entry takes the inventory writer's name; a further entry decides another
-        # kernel of the set and keeps the name and identity it was authored with.
-        row = dict(template) if index == 0 else {key: realization[key] for key in ("name",) if key in realization}
+        # Every entry keeps the name it was authored with; a further entry decides another kernel
+        # of the set and keeps its identity too.
+        row = dict(template) if index == 0 else {}
+        if "name" in realization:
+            row["name"] = realization["name"]
         row["bindings"] = dict(realization.get("bindings") or {})
         row["pins"] = dict(realization.get("pins") or {})
         row["knobs"] = canonical_knobs(realization["knobs"])

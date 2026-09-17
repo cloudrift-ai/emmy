@@ -22,7 +22,7 @@ configs:
     origins:
     - matmul
   realizations:
-  - name: k_matmul_386cc3.11890d01147c
+  - name: k_matmul_2967be
     bindings: {}
     pins:
       FAST_MATH: false
@@ -32,8 +32,8 @@ configs:
       REDUCE: g2k
       RASTER: ''
       STAGE: d2/smem-async
-    identity: 7961db2f2298dbef6a0d5929b29db4a1cc3870c13f1f7c79865e4e3ffaf5e7f6
-  - name: k_matmul_2d0881.dfbda24a224b.94597cea094f
+    identity: 36de740768cee2ab9c8b31829fefbfd3d05fbef43945a7dd0eb3200871f031fa
+  - name: k_matmul_2967be.94597cea094f
     bindings: {}
     pins:
       FAST_MATH: false
@@ -42,7 +42,7 @@ configs:
       REDUCE: ''
       RASTER: ''
     identity: 94597cea094f8c4111b71f0218dd87d27154fb515198adc09e70a4ac848ebe0e
-  - name: k_matmul_386cc3.11890d01147c.c20e0087753b
+  - name: k_matmul_2967be.c73bd7d12d00
     bindings: {}
     pins:
       FAST_MATH: false
@@ -50,4 +50,4 @@ configs:
       WORK: ''
       REDUCE: ''
       RASTER: ''
-    identity: c20e0087753b6d30fce4fdd0a1b288afb6813312186342ed175318dc513138c0
+    identity: c73bd7d12d002cf9a57afad02b14de1b18a696ba7cf5a97efa873ded5eafec40

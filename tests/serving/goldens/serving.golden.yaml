@@ -7938,11 +7938,11 @@ configs:
   target:
     loop: 0
   realizations:
-  - name: g000.k_linear_mean_reduce_56e96d.cb2fb23f0ece
+  - name: g000.k_linear_mean_reduce_aaadf3.b1d18e5d493d
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: g000.k_linear_mean_reduce_56e96d.cb2fb23f0ece.cfac74d04e03
+  - name: g000.k_linear_mean_reduce_aaadf3.b1d18e5d493d.3a3069dc4dd2
     bindings: {}
     pins:
       FAST_MATH: false
@@ -7964,28 +7964,22 @@ configs:
       STAGE@map.3/map.3/inner: ''
       WORK: ''
       RASTER: ''
-    identity: cfac74d04e03da5ec29597c4fc4fb6742036309164813241720008eab23e1b02
-  - name: g000.k_linear_mean_reduce_56e96d.cb2fb23f0ece.fc88acdad736
+    identity: 3a3069dc4dd2f9777cbd9d5b918d60a2ea71f6ed211e3e82b823c5817b9c3e57
+  - name: g000.k_linear_mean_reduce_aaadf3.b1d18e5d493d.3c718f5454ac
     bindings: {}
     pins:
       FAST_MATH: false
     knobs: {}
-    identity: fc88acdad73607968e5348d902b4e736660bfb7676c823b5b0f4bfe52066f32c
+    identity: 3c718f5454ac047c116a22f2ea287e845675e490ebb0af41ca0cbb12040ef237
 - program: 1
   target:
     loop: 1
   realizations:
-  - name: g001.k_linear_mean_reduce_70c27f.96989d11671e
+  - name: g001.k_linear_mean_reduce_683ce6.9e4385fa42fc
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: g001.k_linear_mean_reduce_70c27f.96989d11671e.3602ea0f63e4
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs: {}
-    identity: 3602ea0f63e43a67cf3d17556c9cf6fd1816b9c25ca0b0b92dfd854aadcb2051
-  - name: g001.k_linear_mean_reduce_70c27f.96989d11671e.42e874910091
+  - name: g001.k_linear_mean_reduce_683ce6.9e4385fa42fc.aaef050d3726
     bindings: {}
     pins:
       FAST_MATH: false
@@ -8011,16 +8005,28 @@ configs:
       STAGE@map.2/inner: ''
       WORK: ''
       RASTER: ''
-    identity: 42e874910091c763ec235d1927e97bf57db3d130afa215a729a47f9112b8d2f5
+    identity: aaef050d3726c0cd468e4c41dd303301ce881686c083a0dff6e8a7f61a01e481
+  - name: g001.k_linear_mean_reduce_683ce6.9e4385fa42fc.eea949e15281
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs: {}
+    identity: eea949e152817ea4e3bfed7d605641f8dfb3d19c6d8007a479f28d289535a917
 - program: 2
   target:
     loop: 2
   realizations:
-  - name: g002.k_linear_mean_reduce_57f286.9b844e930eb1
+  - name: g002.k_linear_mean_reduce_da16dd.a1491c772f1e
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: g002.k_linear_mean_reduce_57f286.9b844e930eb1.4aefa4d4f2ad
+  - name: g002.k_linear_mean_reduce_da16dd.a1491c772f1e.2e25f3959b6d
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs: {}
+    identity: 2e25f3959b6db59973d6b34a288c99f47c469e58da10a1eaa911713919511542
+  - name: g002.k_linear_mean_reduce_da16dd.a1491c772f1e.da4d89fa22be
     bindings: {}
     pins:
       FAST_MATH: false
@@ -8047,22 +8053,22 @@ configs:
       STAGE@map.3/map.2/inner: ''
       WORK: ''
       RASTER: ''
-    identity: 4aefa4d4f2ade9f86caeecdb05cccfae9f5795b6d0d0e69fe301edb10eda13d5
-  - name: g002.k_linear_mean_reduce_57f286.9b844e930eb1.b8a31d2b7efa
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs: {}
-    identity: b8a31d2b7efa4ed4e9fe15ac6c405e74e969221cd1547b3b1157ad86be42ab6d
+    identity: da4d89fa22beb646239832eb6f57ff2c5c3374d1d4140747daaf886370d9f186
 - program: 3
   target:
     loop: 3
   realizations:
-  - name: g003.k_linear_mean_reduce_5c9bb0.b5a6f2c785a5
+  - name: g003.k_linear_mean_reduce_2a2dab.7b0c8404cfd7
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: g003.k_linear_mean_reduce_5c9bb0.b5a6f2c785a5.37db6bb4cc9e
+  - name: g003.k_linear_mean_reduce_2a2dab.7b0c8404cfd7.4715e4436eeb
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs: {}
+    identity: 4715e4436eeb70dbc69cc03d6338e67b8b9ea34ff3dc229adff0cf913db4ad9d
+  - name: g003.k_linear_mean_reduce_2a2dab.7b0c8404cfd7.9fcb2236ea72
     bindings: {}
     pins:
       FAST_MATH: false
@@ -8088,28 +8094,22 @@ configs:
       STAGE@map.2/inner: ''
       WORK: ''
       RASTER: ''
-    identity: 37db6bb4cc9edf2fec2b4b645e3b279e5f8a4e8820c0e60b2c8de1d305e3ad37
-  - name: g003.k_linear_mean_reduce_5c9bb0.b5a6f2c785a5.b0c2dbd1997b
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs: {}
-    identity: b0c2dbd1997b0544f227576126ad60f87194458b6d9247a0725305c8ef8cf835
+    identity: 9fcb2236ea728b5c477497224ef0992b4e68bcbeb3f8d5eeb38f07da2e686baf
 - program: 4
   target:
     loop: 4
   realizations:
-  - name: g004.k_linear_mean_reduce_203978.c26c4097dc6e
+  - name: g004.k_linear_mean_reduce_f493c2.ffe877a53245
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: g004.k_linear_mean_reduce_203978.c26c4097dc6e.74061bd06ddb
+  - name: g004.k_linear_mean_reduce_f493c2.ffe877a53245.922d9a0d376e
     bindings: {}
     pins:
       FAST_MATH: false
     knobs: {}
-    identity: 74061bd06ddbdb876953bf509e6d78af83c9ad8d5b3b4718d2f968f1fe590155
-  - name: g004.k_linear_mean_reduce_203978.c26c4097dc6e.bc9f3e3f8a0d
+    identity: 922d9a0d376e7ab146a79800e0c39ccc5bd37dddb029cf1c7a01b37f7199911d
+  - name: g004.k_linear_mean_reduce_f493c2.ffe877a53245.c6f092ebf3ee
     bindings: {}
     pins:
       FAST_MATH: false
@@ -8134,22 +8134,22 @@ configs:
       STAGE@map.3/map.2/inner: ''
       WORK: ''
       RASTER: ''
-    identity: bc9f3e3f8a0d2b8bc5e10df84da8b2e1cb93eadb08a895f477c05d7371019eaf
+    identity: c6f092ebf3ee39e1dec1a70ef803da4fd86079afdeeefebeac2795b4340845f5
 - program: 5
   target:
     loop: 5
   realizations:
-  - name: g005.k_linear_mean_reduce_a34cc7.ad5b8aba9cbf
+  - name: g005.k_linear_mean_reduce_3cc53e.c115ac9f50f2
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: g005.k_linear_mean_reduce_a34cc7.ad5b8aba9cbf.8c2c59042960
+  - name: g005.k_linear_mean_reduce_3cc53e.c115ac9f50f2.8f769be9ce7f
     bindings: {}
     pins:
       FAST_MATH: false
     knobs: {}
-    identity: 8c2c59042960dc5e9ff807bc4c7157acf789f7165c9c8f12fa49a9a5c94f00bc
-  - name: g005.k_linear_mean_reduce_a34cc7.ad5b8aba9cbf.b10e3897bb3c
+    identity: 8f769be9ce7f51eea855558d04066684c106eed8f98148c38d86d1ad8de321e6
+  - name: g005.k_linear_mean_reduce_3cc53e.c115ac9f50f2.ec40c359c3ee
     bindings: {}
     pins:
       FAST_MATH: false
@@ -8175,16 +8175,16 @@ configs:
       STAGE@map.2/inner: ''
       WORK: ''
       RASTER: ''
-    identity: b10e3897bb3cbba321d57cb68b7e603f0b3692a4fa9194b2ffd132c9b8c7d9b3
+    identity: ec40c359c3eeb51ede72cbed6b638cb3d71a962fde2c8f8cae38186566e185a7
 - program: 6
   target:
     loop: 6
   realizations:
-  - name: g006.k_linear_reduce_416acd.4c6a62e326f1
+  - name: g006.k_linear_reduce_78f458.58701763f54a
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: g006.k_linear_reduce_416acd.4c6a62e326f1.1fe4c68490a4
+  - name: g006.k_linear_reduce_78f458.58701763f54a.63d76e170f0d
     bindings: {}
     pins:
       FAST_MATH: false
@@ -8197,22 +8197,28 @@ configs:
       STAGE@map.1/inner.1/map.1/inner: ''
       WORK: ''
       RASTER: ''
-    identity: 1fe4c68490a47c699bb71ba01361dc1e7cfcd035b9fef92e8958ebffcf665f93
-  - name: g006.k_linear_reduce_416acd.4c6a62e326f1.2f3072ecb0e6
+    identity: 63d76e170f0d1ed7d17a68bfaa56fb2d98ddfd543539b749f41cb699cabc8d57
+  - name: g006.k_linear_reduce_78f458.58701763f54a.a27dc411a67c
     bindings: {}
     pins:
       FAST_MATH: false
     knobs: {}
-    identity: 2f3072ecb0e69330cc40924a1697543936eaf45d29dd4a9a7564ae03eef0018a
+    identity: a27dc411a67c931fab2c781abff00eb27d70296f6c0724c82608a4a20f607832
 - program: 7
   target:
     loop: 7
   realizations:
-  - name: g007.k_linear_reduce_609b24.b8cefcc1eb41
+  - name: g007.k_linear_reduce_f2b3a2.253d2141ea24
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: g007.k_linear_reduce_609b24.b8cefcc1eb41.b49725c27c91
+  - name: g007.k_linear_reduce_f2b3a2.253d2141ea24.440763afd570
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs: {}
+    identity: 440763afd5703a7a7c0bb8a9c9be10a984f1f77a3bc953ac024ac3bddeb6368b
+  - name: g007.k_linear_reduce_f2b3a2.253d2141ea24.616e2ec8b5fd
     bindings: {}
     pins:
       FAST_MATH: false
@@ -8225,28 +8231,22 @@ configs:
       STAGE@map.1/inner.1/map.1/inner: ''
       WORK: ''
       RASTER: ''
-    identity: b49725c27c91fdbe5844efa80251c902676522f5acc37174ffda49f3c43d449f
-  - name: g007.k_linear_reduce_609b24.b8cefcc1eb41.f1e046400d7b
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs: {}
-    identity: f1e046400d7b64c7b9a59acb2c3eba91628fffecf4990cc547fd39a27213949c
+    identity: 616e2ec8b5fd6d711b1a0b79d5af9b3f1970e871a2ce429292a5803688f88ab8
 - program: 8
   target:
     loop: 8
   realizations:
-  - name: g008.k_linear_reduce_e9492c.32593e19c926
+  - name: g008.k_linear_reduce_4a7cf3.603951ee6b28
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: g008.k_linear_reduce_e9492c.32593e19c926.a973983a0604
+  - name: g008.k_linear_reduce_4a7cf3.603951ee6b28.3fdf87ee5e5b
     bindings: {}
     pins:
       FAST_MATH: false
     knobs: {}
-    identity: a973983a0604981a726fea404bf594db48521767eb4bc141d0424be91a2e5737
-  - name: g008.k_linear_reduce_e9492c.32593e19c926.b4b77a71013e
+    identity: 3fdf87ee5e5bfef4b6059f51059906ca29c95ca718ec8c814e4d281d85cadefd
+  - name: g008.k_linear_reduce_4a7cf3.603951ee6b28.d670ef10dc3a
     bindings: {}
     pins:
       FAST_MATH: false
@@ -8259,22 +8259,22 @@ configs:
       STAGE@map.1/inner.2/map.1/inner: ''
       WORK: ''
       RASTER: ''
-    identity: b4b77a71013e6be3a2ebbebb0049c0c573878d4acbafa6399ac447248b657674
+    identity: d670ef10dc3a3a779d381422486bf901df5b561ea48ee7ec99d4406e8cd6814b
 - program: 9
   target:
     loop: 9
   realizations:
-  - name: g009.k_linear_reduce_db769c.49f28c144c57
+  - name: g009.k_linear_reduce_d5433b.567cc0dcd67e
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: g009.k_linear_reduce_db769c.49f28c144c57.83e46fc6a541
+  - name: g009.k_linear_reduce_d5433b.567cc0dcd67e.e6d704a23919
     bindings: {}
     pins:
       FAST_MATH: false
     knobs: {}
-    identity: 83e46fc6a5418080c6006527c2790f7c763ffee599657be0766d3441106faed9
-  - name: g009.k_linear_reduce_db769c.49f28c144c57.fc3aaea0a6e6
+    identity: e6d704a239197d585de4076b887b2e059a8d8b140e9081c34e38e8845eb777a5
+  - name: g009.k_linear_reduce_d5433b.567cc0dcd67e.e7664f4b411a
     bindings: {}
     pins:
       FAST_MATH: false
@@ -8287,22 +8287,16 @@ configs:
       STAGE@map.1/inner.1/map.1/inner: ''
       WORK: ''
       RASTER: ''
-    identity: fc3aaea0a6e6289d9321be967ce1900d91738f5a8fabec3379b3a719f7c306c6
+    identity: e7664f4b411a10c7d9e01265f2acaf339fe5673059453119664eeead988beedf
 - program: 10
   target:
     loop: 10
   realizations:
-  - name: g011.k_linear_mean_reduce_b68dc7.954089333a9b
+  - name: g011.k_linear_mean_reduce_19f3ec.016116433085
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: g011.k_linear_mean_reduce_b68dc7.954089333a9b.13d53db4580d
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs: {}
-    identity: 13d53db4580d06bd74357ed03fdf9cea1bae13722e4c83c73436ae29b8d2ba80
-  - name: g011.k_linear_mean_reduce_b68dc7.954089333a9b.ed929b2bfc58
+  - name: g011.k_linear_mean_reduce_19f3ec.016116433085.25d69b9ff7ae
     bindings: {}
     pins:
       FAST_MATH: false
@@ -8321,16 +8315,22 @@ configs:
       STAGE@map.2/map.1/map.2/reduce.1/inner: ''
       WORK: ''
       RASTER: ''
-    identity: ed929b2bfc589ac445b642d8cfd4fb08671f5e9ae76d33ab3458c142ac71807e
+    identity: 25d69b9ff7ae27e45b0f41e24c1ce03cc254c50c050f90135546a9393eed8340
+  - name: g011.k_linear_mean_reduce_19f3ec.016116433085.9077f38fd09d
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs: {}
+    identity: 9077f38fd09d7ade38388b443ab3c8a0f3fb41ce5ea4bb0273846cb21e68ba7a
 - program: 11
   target:
     loop: 11
   realizations:
-  - name: g012.k_linear_mean_reduce_441fb1.287f1021a1b9
+  - name: g012.k_linear_mean_reduce_1cafbd.7c6658face55
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: g012.k_linear_mean_reduce_441fb1.287f1021a1b9.0d8a74796217
+  - name: g012.k_linear_mean_reduce_1cafbd.7c6658face55.30c39444f032
     bindings: {}
     pins:
       FAST_MATH: false
@@ -8344,22 +8344,28 @@ configs:
       STAGE@map.2/inner: ''
       WORK: ''
       RASTER: ''
-    identity: 0d8a74796217b0c181dfc1ecf3cb94712e0eb92334063f202987ef0252328a35
-  - name: g012.k_linear_mean_reduce_441fb1.287f1021a1b9.cee6003f6eee
+    identity: 30c39444f032bb0056ff1131125ff9fc395725b76e8b1c638ae395cb1cfea93f
+  - name: g012.k_linear_mean_reduce_1cafbd.7c6658face55.8a21d71b6951
     bindings: {}
     pins:
       FAST_MATH: false
     knobs: {}
-    identity: cee6003f6eee50644212eb740fa745a5f0d860aa90180a1886755eaac744a4af
+    identity: 8a21d71b6951a4d220471f075d6f4e87f3031d6bbd866f16452d4ad1195db417
 - program: 12
   target:
     loop: 12
   realizations:
-  - name: g013.k_linear_mean_reduce_8ec290.cba56168fa50
+  - name: g013.k_linear_mean_reduce_9cb86f.f23f74bd49c4
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: g013.k_linear_mean_reduce_8ec290.cba56168fa50.2b3be8022f3e
+  - name: g013.k_linear_mean_reduce_9cb86f.f23f74bd49c4.76f731b5cad0
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs: {}
+    identity: 76f731b5cad08cacb267fb1d9cc8a9bbfd8b73ae88f6890ec27452fc81e82173
+  - name: g013.k_linear_mean_reduce_9cb86f.f23f74bd49c4.a6557bf1dcab
     bindings: {}
     pins:
       FAST_MATH: false
@@ -8378,22 +8384,16 @@ configs:
       STAGE@map.2/map.1/map.2/reduce.1/inner: ''
       WORK: ''
       RASTER: ''
-    identity: 2b3be8022f3ee36dc0de116d5351ac2144e6604a8e2a57433aa728e263657570
-  - name: g013.k_linear_mean_reduce_8ec290.cba56168fa50.4dbe4a7f1e4d
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs: {}
-    identity: 4dbe4a7f1e4daafc5baf4bcc1803fa97eab454356057d280fa17d312f4ffaed5
+    identity: a6557bf1dcab4ef642a809654d3ed72a5ed6d87de4d26d2673cbd62b8d6b0131
 - program: 13
   target:
     loop: 13
   realizations:
-  - name: g014.k_linear_mean_reduce_6cbf01.2f24771856dc
+  - name: g014.k_linear_mean_reduce_206970.a893e280cad3
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: g014.k_linear_mean_reduce_6cbf01.2f24771856dc.4c8e6a343ca5
+  - name: g014.k_linear_mean_reduce_206970.a893e280cad3.079315997930
     bindings: {}
     pins:
       FAST_MATH: false
@@ -8407,28 +8407,28 @@ configs:
       STAGE@map.2/inner: ''
       WORK: ''
       RASTER: ''
-    identity: 4c8e6a343ca5fa26f96486afbe1b4acbb4e109e2b62ec57fb4b60ef98449970b
-  - name: g014.k_linear_mean_reduce_6cbf01.2f24771856dc.b3197ab50193
+    identity: 0793159979305ebd94da8aaa9b141900ffb368adbb50b92af45c2c9f5451f540
+  - name: g014.k_linear_mean_reduce_206970.a893e280cad3.9c7a4fe20d5a
     bindings: {}
     pins:
       FAST_MATH: false
     knobs: {}
-    identity: b3197ab50193c05c16fde5c3731fb68f0b2fc77bb763198717f71701f2f7f88d
+    identity: 9c7a4fe20d5a49d4b8967158de6a32f8c47712d9420f7eebc0f2dc96d7eb89b1
 - program: 14
   target:
     loop: 14
   realizations:
-  - name: g015.k_linear_mean_reduce_a5c75c.507793d009ad
+  - name: g015.k_linear_mean_reduce_b415e2.4137cfb29ad9
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: g015.k_linear_mean_reduce_a5c75c.507793d009ad.1acd1680ffbb
+  - name: g015.k_linear_mean_reduce_b415e2.4137cfb29ad9.706688d7cff8
     bindings: {}
     pins:
       FAST_MATH: false
     knobs: {}
-    identity: 1acd1680ffbbc6e67e998ff8a9e0e5a40480c027ce38e037b04f0d714009f7df
-  - name: g015.k_linear_mean_reduce_a5c75c.507793d009ad.ae0ec759fe03
+    identity: 706688d7cff83cf424d8a1b4c4eb676213523cb4e9946c47ebbc36eaf018b334
+  - name: g015.k_linear_mean_reduce_b415e2.4137cfb29ad9.955d3668cd93
     bindings: {}
     pins:
       FAST_MATH: false
@@ -8447,16 +8447,22 @@ configs:
       STAGE@map.2/map.1/map.2/reduce.1/inner: ''
       WORK: ''
       RASTER: ''
-    identity: ae0ec759fe032fbfe43981f57787b8a551f35ea2bc35fb6775ebb6c923b0016a
+    identity: 955d3668cd9312e7db1541a68ca7cb49753698d1949b01c98443f4d2322f79f4
 - program: 15
   target:
     loop: 15
   realizations:
-  - name: g016.k_linear_mean_reduce_c02161.443e1a4831d0
+  - name: g016.k_linear_mean_reduce_3c4987.6fe38aef11c3
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: g016.k_linear_mean_reduce_c02161.443e1a4831d0.31611f29175f
+  - name: g016.k_linear_mean_reduce_3c4987.6fe38aef11c3.3cc550305d9b
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs: {}
+    identity: 3cc550305d9bba40e3ed5b37ff297dbb1150c78664e32d6aeb18ed4f8d29d900
+  - name: g016.k_linear_mean_reduce_3c4987.6fe38aef11c3.4924e9151a4d
     bindings: {}
     pins:
       FAST_MATH: false
@@ -8470,22 +8476,16 @@ configs:
       STAGE@map.2/inner: ''
       WORK: ''
       RASTER: ''
-    identity: 31611f29175ffc04b1c68fce32378bf7446bbf2d11f3ee5acc7c50d1b0a7143f
-  - name: g016.k_linear_mean_reduce_c02161.443e1a4831d0.c83d042f2ec3
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs: {}
-    identity: c83d042f2ec34f71a908bd119c1da6e136fff999ea62e10a804e8c76136de54b
+    identity: 4924e9151a4dab7477107a9c260e3138238085cf39719eae1d200460e10b8f8f
 - program: 16
   target:
     loop: 16
   realizations:
-  - name: g017.k_linear_reduce_f3a192.3821fbee3870
+  - name: g017.k_linear_reduce_c92311.0eeabf744401
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: g017.k_linear_reduce_f3a192.3821fbee3870.388d64629293
+  - name: g017.k_linear_reduce_c92311.0eeabf744401.895e2ef15b51
     bindings: {}
     pins:
       FAST_MATH: false
@@ -8498,22 +8498,22 @@ configs:
       STAGE@map.1/inner.1/map.1/inner: ''
       WORK: ''
       RASTER: ''
-    identity: 388d64629293ca1ffd0bf21463990aafcfbb3b1bc4d0e8390a4c7bce1d2fb87f
-  - name: g017.k_linear_reduce_f3a192.3821fbee3870.9d73fefb1bf5
+    identity: 895e2ef15b51c22b35ecbe38bd11bae0bf923a7b4b625bf4a918ede64e45e23c
+  - name: g017.k_linear_reduce_c92311.0eeabf744401.f9acb2b219a9
     bindings: {}
     pins:
       FAST_MATH: false
     knobs: {}
-    identity: 9d73fefb1bf5251517d5d73a5092074b24ea6d34f013186e6ffeec56cd43055a
+    identity: f9acb2b219a9ed8f0740b65d4255ed9494c1d9122f68046f74503b6df61afd91
 - program: 17
   target:
     loop: 17
   realizations:
-  - name: g018.k_linear_mean_reduce_382ee0.0d173ce3bc02
+  - name: g018.k_linear_mean_reduce_ee4def.01a4f917e7a5
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: g018.k_linear_mean_reduce_382ee0.0d173ce3bc02.a65fd30b7eef
+  - name: g018.k_linear_mean_reduce_ee4def.01a4f917e7a5.9a6a5112a842
     bindings: {}
     pins:
       FAST_MATH: false
@@ -8532,22 +8532,22 @@ configs:
       STAGE@map.2/map.1/map.2/reduce.1/inner: ''
       WORK: ''
       RASTER: ''
-    identity: a65fd30b7eefdbd45623e085d765bed341859aec8be1dcbf099f5cbf657122f5
-  - name: g018.k_linear_mean_reduce_382ee0.0d173ce3bc02.df621d64b200
+    identity: 9a6a5112a8422b43e677144fc9be5e39a2787132b0d29a83e067e21ee66f43b7
+  - name: g018.k_linear_mean_reduce_ee4def.01a4f917e7a5.eab6671422d8
     bindings: {}
     pins:
       FAST_MATH: false
     knobs: {}
-    identity: df621d64b200920e6c0484e3a369b27f3a698689222eda4d90a137260f4060ad
+    identity: eab6671422d897328bb9a001ac5d8ba529b7861554fa033b5247006cb66d0e0e
 - program: 18
   target:
     loop: 18
   realizations:
-  - name: g019.k_linear_mean_reduce_05a5e4.1758a1db7575
+  - name: g019.k_linear_mean_reduce_5271a0.c9e72dbd741d
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: g019.k_linear_mean_reduce_05a5e4.1758a1db7575.5b380e30a257
+  - name: g019.k_linear_mean_reduce_5271a0.c9e72dbd741d.4754d7ab979b
     bindings: {}
     pins:
       FAST_MATH: false
@@ -8561,28 +8561,22 @@ configs:
       STAGE@map.2/inner: ''
       WORK: ''
       RASTER: ''
-    identity: 5b380e30a2570509ac8d4a527912751f16f981a103df56db22a889bcbf0d7a1d
-  - name: g019.k_linear_mean_reduce_05a5e4.1758a1db7575.a5edd40cad08
+    identity: 4754d7ab979b415a1933d0307e1026473058afbef6a4f118c67077bb3418ed48
+  - name: g019.k_linear_mean_reduce_5271a0.c9e72dbd741d.bf50fb5f698e
     bindings: {}
     pins:
       FAST_MATH: false
     knobs: {}
-    identity: a5edd40cad080aa5fd92784883e48e3328622a0f2146d1c11dbde566bc4b9d4d
+    identity: bf50fb5f698e77f29a7a0867aa2f644d664ee3ed3a00035169fa62cbcaec09e4
 - program: 19
   target:
     loop: 19
   realizations:
-  - name: g020.k_linear_reduce_9381eb.831cbc919c5e
+  - name: g020.k_linear_reduce_0b27d8.25e1c8489035
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: g020.k_linear_reduce_9381eb.831cbc919c5e.0f3c813fba0f
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs: {}
-    identity: 0f3c813fba0f048b255715ed166d21a27e384d1f8f17e4fa407ba9e9ed3f19f6
-  - name: g020.k_linear_reduce_9381eb.831cbc919c5e.d9a2e5c028e1
+  - name: g020.k_linear_reduce_0b27d8.25e1c8489035.1f08d7107b2c
     bindings: {}
     pins:
       FAST_MATH: false
@@ -8595,16 +8589,22 @@ configs:
       STAGE@map.1/inner.1/map.1/inner: ''
       WORK: ''
       RASTER: ''
-    identity: d9a2e5c028e17dba1a51d3f06a903eff030e2ca76d3bfc22d9776b4ef52ac0db
+    identity: 1f08d7107b2c3a019351a6e8d5fda04e326d6f5456b40ad5de1847002d7b8862
+  - name: g020.k_linear_reduce_0b27d8.25e1c8489035.24beec5d7e09
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs: {}
+    identity: 24beec5d7e09f40a677d30310ffb8dbc6d008dd0edc6e0503a18e53f57f04085
 - program: 20
   target:
     loop: 20
   realizations:
-  - name: g021.k_linear_reduce_026151.56fb512eb73d
+  - name: g021.k_linear_reduce_16702f.e35bac65183e
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: g021.k_linear_reduce_026151.56fb512eb73d.50ba4e924574
+  - name: g021.k_linear_reduce_16702f.e35bac65183e.d1d46c50329e
     bindings: {}
     pins:
       FAST_MATH: false
@@ -8617,28 +8617,28 @@ configs:
       STAGE@map.1/inner.1/map.1/inner: ''
       WORK: ''
       RASTER: ''
-    identity: 50ba4e9245748ccbd455ab50d0692a73d95b1f2dcdfbb63536a4fea59be4a5d4
-  - name: g021.k_linear_reduce_026151.56fb512eb73d.d2ec76b617a2
+    identity: d1d46c50329e58e10b0f411c59d41b66b72953a9f992e39d926181555113ecfa
+  - name: g021.k_linear_reduce_16702f.e35bac65183e.d395e0e32470
     bindings: {}
     pins:
       FAST_MATH: false
     knobs: {}
-    identity: d2ec76b617a25987859239edc2d36fc0440cd733e4b5825d6c82de1a7ac48935
+    identity: d395e0e324702274403f0267b65b83ffcbe27724bd018b40842c5ba5101e2b0b
 - program: 21
   target:
     loop: 21
   realizations:
-  - name: g022.k_linear_reduce_73cdf8.c8aba8c70e66
+  - name: g022.k_linear_reduce_6720e9.2f3ce2025f3b
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: g022.k_linear_reduce_73cdf8.c8aba8c70e66.094d2ef552c1
+  - name: g022.k_linear_reduce_6720e9.2f3ce2025f3b.29ced73865c4
     bindings: {}
     pins:
       FAST_MATH: false
     knobs: {}
-    identity: 094d2ef552c183b1ba417805e10180d63eba75b55399ba6464372355df5e9482
-  - name: g022.k_linear_reduce_73cdf8.c8aba8c70e66.ffede4e48c9c
+    identity: 29ced73865c484d0927628cfbff4bea1504c96f3505c6f9144ad41c2abbbbe96
+  - name: g022.k_linear_reduce_6720e9.2f3ce2025f3b.2c9f6cec4556
     bindings: {}
     pins:
       FAST_MATH: false
@@ -8651,22 +8651,22 @@ configs:
       STAGE@map.1/inner.2/map.1/inner: ''
       WORK: ''
       RASTER: ''
-    identity: ffede4e48c9c4365bd24b6452c99f14595040257192a79ce76d84d2fae706de8
+    identity: 2c9f6cec4556a28879d39612f252ca175b6551fc2e9697a86d031b82a24327cb
 - program: 22
   target:
     loop: 22
   realizations:
-  - name: g023.k_linear_reduce_17ebec.b5c744d2f435
+  - name: g023.k_linear_reduce_985492.8cec6affb169
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: g023.k_linear_reduce_17ebec.b5c744d2f435.755c1ba629c0
+  - name: g023.k_linear_reduce_985492.8cec6affb169.1a012d0cde53
     bindings: {}
     pins:
       FAST_MATH: false
     knobs: {}
-    identity: 755c1ba629c0825d5066a72b811b8529e95ed0810a3f4af8ee9d55c9b4db5c71
-  - name: g023.k_linear_reduce_17ebec.b5c744d2f435.c429784c847d
+    identity: 1a012d0cde534f4dec75e81f8f6167f43950d2461d93fa1f10476d8320eb3ab1
+  - name: g023.k_linear_reduce_985492.8cec6affb169.d4c3f81ad958
     bindings: {}
     pins:
       FAST_MATH: false
@@ -8679,16 +8679,22 @@ configs:
       STAGE@map.1/inner.1/map.1/inner: ''
       WORK: ''
       RASTER: ''
-    identity: c429784c847dfb8df5c3c3c4c391abad873144fffc5dcadf87e17fe2a3298ce3
+    identity: d4c3f81ad958977cf122e29c7baf722d3a58da09f50e73e69028cbbf1b8cab68
 - program: 23
   target:
     loop: 23
   realizations:
-  - name: g025.k_linear_reduce_12b509.478a5e149b47
+  - name: g025.k_linear_reduce_394027.6ada69cb8534
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: g025.k_linear_reduce_12b509.478a5e149b47.1a18494d7ded
+  - name: g025.k_linear_reduce_394027.6ada69cb8534.295f665b083c
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs: {}
+    identity: 295f665b083c324102b4cfd8363eccba9d55aa731d4d48fc73243eff0bf4aacb
+  - name: g025.k_linear_reduce_394027.6ada69cb8534.89cef6eecbc8
     bindings: {}
     pins:
       FAST_MATH: false
@@ -8701,22 +8707,16 @@ configs:
       STAGE@map.1/inner.1/map.1/inner: ''
       WORK: ''
       RASTER: ''
-    identity: 1a18494d7ded3d7bb9634deb6c4193bfd3ed3a54a8827f211e53e8fbf809d9e1
-  - name: g025.k_linear_reduce_12b509.478a5e149b47.6ea7eb53c03b
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs: {}
-    identity: 6ea7eb53c03b85a93a54c41c04b80af511310bc79675d882a17e70aabc2ec805
+    identity: 89cef6eecbc811fcea88285292d4bcfd669020de9d622d3a79d83d1f12ef5f3c
 - program: 24
   target:
     loop: 24
   realizations:
-  - name: g026.k_linear_mean_reduce_107c6d.396db46b188c
+  - name: g026.k_linear_mean_reduce_572307.bb2886a29f39
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: g026.k_linear_mean_reduce_107c6d.396db46b188c.19e8dbd04c59
+  - name: g026.k_linear_mean_reduce_572307.bb2886a29f39.5b2080f5ab78
     bindings: {}
     pins:
       FAST_MATH: false
@@ -8735,28 +8735,22 @@ configs:
       STAGE@map.2/map.1/map.2/reduce.1/inner: ''
       WORK: ''
       RASTER: ''
-    identity: 19e8dbd04c59aade5c0d63c6dbb03b18acc7ca54ee12fb95df633151f29de6b6
-  - name: g026.k_linear_mean_reduce_107c6d.396db46b188c.cba1cb4d9c90
+    identity: 5b2080f5ab7857a33e87a1248e08733047da4bcf72df7f28e626dbbe710bbb56
+  - name: g026.k_linear_mean_reduce_572307.bb2886a29f39.e70e1f01e708
     bindings: {}
     pins:
       FAST_MATH: false
     knobs: {}
-    identity: cba1cb4d9c90060173442a6fe82953fe9fbebfc68f97fa47252730f0c8b6f65d
+    identity: e70e1f01e7083cd1861bbc88fbda6fda3ff659124638230f8b3960cea839f518
 - program: 25
   target:
     loop: 25
   realizations:
-  - name: g027.k_linear_mean_reduce_c2fdaf.c4686f44313f
+  - name: g027.k_linear_mean_reduce_e91bd6.a338e36cd78d
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: g027.k_linear_mean_reduce_c2fdaf.c4686f44313f.a8a02f53d430
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs: {}
-    identity: a8a02f53d430662d56aa46f62bd7a77514d2ab31599eaced5937fdb3e68595ad
-  - name: g027.k_linear_mean_reduce_c2fdaf.c4686f44313f.b214f8893e87
+  - name: g027.k_linear_mean_reduce_e91bd6.a338e36cd78d.bbe596f999cd
     bindings: {}
     pins:
       FAST_MATH: false
@@ -8770,188 +8764,144 @@ configs:
       STAGE@map.2/inner: ''
       WORK: ''
       RASTER: ''
-    identity: b214f8893e8748766ced4dae63a718f49f97de5c90e2390d4083fff7d17283a1
+    identity: bbe596f999cdb658fb950604849a2b0329726559f34c7599d27f6c0c7c27a25c
+  - name: g027.k_linear_mean_reduce_e91bd6.a338e36cd78d.ebcd909b25b9
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs: {}
+    identity: ebcd909b25b918b7c3ec66d852606bf4f77b1c1542ba7bc9bebe515529ba5bd6
 - program: 26
   target:
     loop: 26
   realizations:
-  - name: g028.k_linear_mean_reduce_d0b149.ef80b201a4f7
+  - name: g028.k_linear_mean_reduce_33c052.853fad7f1da5
     bindings: {}
     pins:
       FAST_MATH: false
-    kernel_set:
-    - g028.k_linear_mean_reduce_d0b149.ef80b201a4f7.c2f492780e7d
-  - name: g028.k_linear_mean_reduce_d0b149.ef80b201a4f7.c2f492780e7d
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      PLACE@map.1/inner: cut
-    identity: c2f492780e7d85ab0f1be809cbb306d039bb945a38aa99ef8a2bd270c2fe3e9a
-  - name: g028.k_linear_mean_reduce_d0b149.ef80b201a4f7.629ccdcd7238
+  - name: g028.k_linear_mean_reduce_33c052.853fad7f1da5.470ff5173209
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@inner: coop-t
-      REDUCE@inner.1/map.3/map.1/reduce: ''
-      WORK: t32
-      TILE: ''
-      STAGE: ''
-      RASTER: ''
-    identity: 629ccdcd72383d334bcb64b6d52a43563fb8b7223d1ba3a6333861aee2af11f8
-  - name: g028.k_linear_mean_reduce_d0b149.ef80b201a4f7.dbdee4663a7c
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
+      TILE@map.1/inner: ''
+      TILE@map.2/inner: ''
       REDUCE@map.1/inner: ''
-      REDUCE@map.1/inner.1/map.3/map.1/reduce: coop
-      WORK: t64
-      TILE: ''
-      STAGE: ''
+      REDUCE@map.1/inner.1/map.3/map.1/reduce: ''
+      REDUCE@map.2/inner: ''
+      STAGE@map.1/inner: ''
+      STAGE@map.2/inner: ''
+      WORK: ''
       RASTER: ''
-    identity: dbdee4663a7c6aeefc741bc286491c18d3330da334e61d75cfb03d50316105bf
+    identity: 470ff517320978301c09cedd9109b07c936f563ff260d0a355856e4b9d6b4093
+  - name: g028.k_linear_mean_reduce_33c052.853fad7f1da5.7f653709f9c7
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs: {}
+    identity: 7f653709f9c74e219c559a871a2e96f22099ee2c1f654544eb18fa11b9350cf4
 - program: 27
   target:
     loop: 27
   realizations:
-  - name: g029.k_linear_mean_reduce_b4de4b.716c52c3a73f
+  - name: g029.k_linear_mean_reduce_5ba09c.7e571a82a69c
     bindings: {}
     pins:
       FAST_MATH: false
-    kernel_set:
-    - g029.k_linear_mean_reduce_b4de4b.716c52c3a73f.0c573420a46b
-  - name: g029.k_linear_mean_reduce_b4de4b.716c52c3a73f.0c573420a46b
+  - name: g029.k_linear_mean_reduce_5ba09c.7e571a82a69c.ada7f7e5ba60
     bindings: {}
     pins:
       FAST_MATH: false
-    knobs:
-      PLACE@map.1/inner: cut
-    identity: 0c573420a46b2579cda183836f87e83681b0fcf56e411010979371d310747203
-  - name: g029.k_linear_mean_reduce_b4de4b.716c52c3a73f.6dcbc3e8f953
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      REDUCE@inner: ''
-      REDUCE@inner.1/map.3/map.1/reduce: ''
-      WORK: t32x8
-      TILE: f4x14
-      STAGE: ''
-      RASTER: ''
-    identity: 6dcbc3e8f95327263386ed84928277a560272b877ae2915bff8ecfbdfcdd0f32
-  - name: g029.k_linear_mean_reduce_b4de4b.716c52c3a73f.94f41583db82
+    knobs: {}
+    identity: ada7f7e5ba60d4c8ea9e3938fca4d45604fbf49fb218560821368e222715725a
+  - name: g029.k_linear_mean_reduce_5ba09c.7e571a82a69c.d8e5e38b9244
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
+      TILE@map.1/inner: ''
+      TILE@map.2/inner: ''
       REDUCE@map.1/inner: ''
-      REDUCE@map.1/inner.1/map.3/map.1/reduce: coop
-      WORK: t32
-      TILE: ''
-      STAGE: ''
+      REDUCE@map.1/inner.1/map.3/map.1/reduce: ''
+      REDUCE@map.2/inner: ''
+      STAGE@map.1/inner: ''
+      STAGE@map.2/inner: ''
+      WORK: ''
       RASTER: ''
-    identity: 94f41583db82b999200dbfbb8a6ebff3282b075c70c4b8f4cac7b7233fa61760
+    identity: d8e5e38b9244f28aa7ec6e5731476d13f7b839be0bd8bd8737d043407339a0bf
 - program: 28
   target:
     loop: 28
   realizations:
-  - name: g030.k_linear_mean_reduce_0de810.8ac56ba96a0a
+  - name: g030.k_linear_mean_reduce_183990.d541a91f0eb5
     bindings: {}
     pins:
       FAST_MATH: false
-    kernel_set:
-    - g030.k_linear_mean_reduce_0de810.8ac56ba96a0a.dcd432da57b9
-    - g030.k_linear_mean_reduce_0de810.8ac56ba96a0a.58b0e2b587c4
-  - name: g030.k_linear_mean_reduce_0de810.8ac56ba96a0a.dcd432da57b9
+  - name: g030.k_linear_mean_reduce_183990.d541a91f0eb5.40d0fe42fd9d
     bindings: {}
     pins:
       FAST_MATH: false
-    knobs:
-      PLACE@map.1/inner: cut
-    identity: dcd432da57b94ed0a8ba3ebdb0737348da1d5bf77b3de3d12e0d838a13ce8be1
-  - name: g030.k_linear_mean_reduce_0de810.8ac56ba96a0a.58b0e2b587c4
+    knobs: {}
+    identity: 40d0fe42fd9d9daf3d3efa9abca04f5c162e26cf40730c26c3b14afb9586b17d
+  - name: g030.k_linear_mean_reduce_183990.d541a91f0eb5.ce0842ba4c97
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@inner: g8a
-    identity: 58b0e2b587c49a90f2dcafaa2143a21e523a572ec7228cd0ff2d6e2b15d1f067
-  - name: g030.k_linear_mean_reduce_0de810.8ac56ba96a0a.a0b55b9c3ffe
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      REDUCE@inner: ''
-      REDUCE@inner.1/map.3/map.1/reduce: ''
-      WORK: t16x16
-      TILE: f26x26
-      STAGE: ''
-      RASTER: ''
-    identity: a0b55b9c3ffe6dbd0e203ce58e7ba7fd660f17f12ffe92ac72c6655535b61c36
-  - name: g030.k_linear_mean_reduce_0de810.8ac56ba96a0a.630a2cd2927b
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
+      TILE@map.1/inner: ''
+      TILE@map.2/inner: ''
       REDUCE@map.1/inner: ''
-      REDUCE@map.1/inner.1/map.3/map.1/reduce: coop
-      WORK: t64
-      TILE: ''
-      STAGE: ''
+      REDUCE@map.1/inner.1/map.3/map.1/reduce: ''
+      REDUCE@map.2/inner: ''
+      STAGE@map.1/inner: ''
+      STAGE@map.2/inner: ''
+      WORK: ''
       RASTER: ''
-    identity: 630a2cd2927b00bf7d02d507dd0f1032c14308639f6250d2db5286210f99bcba
+    identity: ce0842ba4c9762ea37af13f76c2ae816a1e8494f524dab8a32c3b51b54dcf8a6
 - program: 29
   target:
     loop: 29
   realizations:
-  - name: g031.k_linear_mean_reduce_43d97c.e3741277d870
+  - name: g031.k_linear_mean_reduce_d3968d.ae81f3776a8b
     bindings: {}
     pins:
       FAST_MATH: false
-    kernel_set:
-    - g031.k_linear_mean_reduce_43d97c.e3741277d870.00cd1b61e38b
-  - name: g031.k_linear_mean_reduce_43d97c.e3741277d870.00cd1b61e38b
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      PLACE@map.1/inner: cut
-    identity: 00cd1b61e38b6a058fb95cba1b0db91b509b6aa9939336845d54d52fedf46f4a
-  - name: g031.k_linear_mean_reduce_43d97c.e3741277d870.4f3fc6dcda64
+  - name: g031.k_linear_mean_reduce_d3968d.ae81f3776a8b.15497eb25ae3
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE@inner: ''
-      REDUCE@inner.1/map.3/map.1/reduce: ''
-      WORK: t32x16
-      TILE: f4x10
-      STAGE: ''
-      RASTER: ''
-    identity: 4f3fc6dcda646a7029ee6e02ec20acf49a5e09b61428f4957958b20ddc9fc82e
-  - name: g031.k_linear_mean_reduce_43d97c.e3741277d870.b826b03dd6aa
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
+      TILE@map.1/inner: ''
+      TILE@map.2/inner: ''
       REDUCE@map.1/inner: ''
-      REDUCE@map.1/inner.1/map.3/map.1/reduce: coop
-      WORK: t64
-      TILE: ''
-      STAGE: ''
+      REDUCE@map.1/inner.1/map.3/map.1/reduce: ''
+      REDUCE@map.2/inner: ''
+      STAGE@map.1/inner: ''
+      STAGE@map.2/inner: ''
+      WORK: ''
       RASTER: ''
-    identity: b826b03dd6aa1accd25c302b92a0dde495a8fd7f87ea88618a72f68d59538cb1
+    identity: 15497eb25ae37f39ee488d616e3d9abf06f11fb8a1268b69701716b2613379c8
+  - name: g031.k_linear_mean_reduce_d3968d.ae81f3776a8b.174019f54337
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs: {}
+    identity: 174019f543376fa03aedeb29777c8a9fb165320ad34d0eca24d59c82224fff43
 - program: 30
   target:
     loop: 30
   realizations:
-  - name: g032.k_linear_mean_reduce_3a908e.9cacca7454ee
+  - name: g032.k_linear_mean_reduce_dd3d87.a14b164bd32e
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: g032.k_linear_mean_reduce_3a908e.9cacca7454ee.a84f78cc6627
+  - name: g032.k_linear_mean_reduce_dd3d87.a14b164bd32e.886db1b47166
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs: {}
+    identity: 886db1b47166864c1898489c12584a72b44b2e4c194402678cd9b9308455b024
+  - name: g032.k_linear_mean_reduce_dd3d87.a14b164bd32e.f44999d69638
     bindings: {}
     pins:
       FAST_MATH: false
@@ -8977,28 +8927,16 @@ configs:
       STAGE@map.2/inner: ''
       WORK: ''
       RASTER: ''
-    identity: a84f78cc662782e3847c54fc80b3d926ab1b86921675ea1e2b7184edc65a12a7
-  - name: g032.k_linear_mean_reduce_3a908e.9cacca7454ee.f795d460a288
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs: {}
-    identity: f795d460a2883e81c8c7d8e4b6853e9e41b9901915f2a65a1184a383e79a5fd0
+    identity: f44999d69638efd8c42fac9b71ea49dbbd5b4d98a4febde3a7463eba57b33b98
 - program: 31
   target:
     loop: 31
   realizations:
-  - name: g033.k_linear_mean_reduce_7159a4.7ac10d57f5fb
+  - name: g033.k_linear_mean_reduce_74c145.4a5d5528a08b
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: g033.k_linear_mean_reduce_7159a4.7ac10d57f5fb.2501cfd77637
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs: {}
-    identity: 2501cfd7763706a0fa2408e921798769e5348d690b8b452fea056c4b90f32d83
-  - name: g033.k_linear_mean_reduce_7159a4.7ac10d57f5fb.69dbe342e10c
+  - name: g033.k_linear_mean_reduce_74c145.4a5d5528a08b.e721c7dd30ef
     bindings: {}
     pins:
       FAST_MATH: false
@@ -9017,16 +8955,28 @@ configs:
       STAGE@map.2/map.1/map.2/reduce.1/inner: ''
       WORK: ''
       RASTER: ''
-    identity: 69dbe342e10c1602ba4abbfec7b8fbde5b703967119d8fc7d3ba9f37da1a208f
+    identity: e721c7dd30efc87977b1879037af455dee5b42cfad1c26df49dbb6c420fb02a7
+  - name: g033.k_linear_mean_reduce_74c145.4a5d5528a08b.f3aff909283c
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs: {}
+    identity: f3aff909283c985e5aa3555b2d896e481ad6a5e37f74c0138d28134daacb6f09
 - program: 32
   target:
     loop: 32
   realizations:
-  - name: g034.k_linear_mean_reduce_20f56b.9ee0bef73afc
+  - name: g034.k_linear_mean_reduce_a938a4.f4e4d7ff0950
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: g034.k_linear_mean_reduce_20f56b.9ee0bef73afc.34517f0c80c9
+  - name: g034.k_linear_mean_reduce_a938a4.f4e4d7ff0950.93333ae489a5
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs: {}
+    identity: 93333ae489a53b3e9203393435189d075207fa754016468594f1e7ca02133c89
+  - name: g034.k_linear_mean_reduce_a938a4.f4e4d7ff0950.a33daca232dd
     bindings: {}
     pins:
       FAST_MATH: false
@@ -9040,28 +8990,16 @@ configs:
       STAGE@map.2/inner: ''
       WORK: ''
       RASTER: ''
-    identity: 34517f0c80c94353041a41500d072f1445cddc4857d2325af080507bbf1eac25
-  - name: g034.k_linear_mean_reduce_20f56b.9ee0bef73afc.a393d7659986
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs: {}
-    identity: a393d7659986595aee13708b2ee1df94fbe29d239c95a16a3d4661da44e79c37
+    identity: a33daca232ddf91606b9a06137291cd6d85090b5210b12b311bbcb9040c8c539
 - program: 33
   target:
     loop: 33
   realizations:
-  - name: w-gemma3.post.k_linear_mean_reduce_30b2e3.ef362f01bfea
+  - name: w-gemma3.post.k_linear_mean_reduce_b8948b.557a6fde5e55
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: w-gemma3.post.k_linear_mean_reduce_30b2e3.ef362f01bfea.7edcdd98ee4c
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs: {}
-    identity: 7edcdd98ee4c147e09234af8ff73b6838e5dd28ab70df4f820f86f070c2e1766
-  - name: w-gemma3.post.k_linear_mean_reduce_30b2e3.ef362f01bfea.a117e833d2ad
+  - name: w-gemma3.post.k_linear_mean_reduce_b8948b.557a6fde5e55.2adf2f5c3dd1
     bindings: {}
     pins:
       FAST_MATH: false
@@ -9104,7 +9042,13 @@ configs:
       STAGE@map.3/inner: ''
       WORK: ''
       RASTER: ''
-    identity: a117e833d2ad8585d02ab7389e47118dd9feb56f208703fd18042284527a59b6
+    identity: 2adf2f5c3dd1006db4ff7050a66c53f75abbaf9eb0a74d41d8e724fe68b1c01d
+  - name: w-gemma3.post.k_linear_mean_reduce_b8948b.557a6fde5e55.8f247d826b0c
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs: {}
+    identity: 8f247d826b0ca8a7943a28e86935d90f51eec7017fc88cbf1bab599ae16b44ac
 loops:
 - inputs: [hidden]
   outputs: [reshape_2, reshape, reshape_1]
@@ -9608,7 +9552,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_mean_reduce_56e96d
+      name: k_linear_mean_reduce_aaadf3
     inputs: [mean_count, mean_2_count, mean_1_count, add_c1, add_2_c1, add_1_c1, hidden, p_input_layernorm_weight, linear_wt, p_q_norm_weight,
       linear_1_wt, p_k_norm_weight, linear_2_wt]
     outputs: [[reshape_2, f32, [{sym: num_tokens, hint: 512}, 32]], [reshape, f32, [{sym: num_tokens, hint: 512}, 64]], [reshape_1, f32, [{sym: num_tokens,
@@ -9959,7 +9903,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_mean_reduce_70c27f
+      name: k_linear_mean_reduce_683ce6
     inputs: [mean_count, add_1_c1, silu_one, residual, linear_wt, attn_out, p_post_attention_layernorm_weight, linear_1_wt, linear_2_wt, linear_3_wt]
     outputs: [[add_2, f32, [{sym: num_tokens, hint: 512}, 64]]]
 - inputs: [hidden]
@@ -10580,7 +10524,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_mean_reduce_57f286
+      name: k_linear_mean_reduce_da16dd
     inputs: [mean_count, mean_2_count, mean_1_count, add_c1, add_2_c1, add_1_c1, hidden, p_input_layernorm_weight, linear_1_wt, p_k_norm_weight,
       linear_wt, p_q_norm_weight, linear_2_wt]
     outputs: [[reshape_2, f32, [16, 32]], [reshape, f32, [16, 64]], [reshape_1, f32, [16, 32]]]
@@ -10930,7 +10874,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_mean_reduce_5c9bb0
+      name: k_linear_mean_reduce_2a2dab
     inputs: [mean_count, add_1_c1, silu_one, residual, linear_wt, attn_out, p_post_attention_layernorm_weight, linear_1_wt, linear_2_wt, linear_3_wt]
     outputs: [[add_2, f32, [16, 64]]]
 - inputs: [hidden]
@@ -11478,7 +11422,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_mean_reduce_203978
+      name: k_linear_mean_reduce_f493c2
     inputs: [hidden, mean_count, mean_2_count, mean_1_count, add_c1, add_2_c1, add_1_c1, p_input_layernorm_weight, linear_1_wt, p_k_norm_weight,
       linear_wt, p_q_norm_weight, linear_2_wt]
     outputs: [[reshape_2, f32, [1, 32]], [reshape, f32, [1, 64]], [reshape_1, f32, [1, 32]]]
@@ -11819,7 +11763,7 @@ loops:
                   swizzle: NONE
             unroll: false
             seed: true
-      name: k_linear_mean_reduce_a34cc7
+      name: k_linear_mean_reduce_3cc53e
     inputs: [mean_count, residual, linear_wt, attn_out, add_1_c1, silu_one, p_post_attention_layernorm_weight, linear_1_wt, linear_2_wt, linear_3_wt]
     outputs: [[add_2, f32, [1, 64]]]
 - inputs: [w_down, w_gate_up, x]
@@ -11965,7 +11909,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_reduce_416acd
+      name: k_linear_reduce_78f458
     inputs: [silu_one, mul_1_c1, x, w_gate_up, w_down]
     outputs: [[mul_1, f32, [{sym: num_tokens, hint: 512}, 64]]]
 - inputs: [w_down, w_gate_up, x]
@@ -12111,7 +12055,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_reduce_609b24
+      name: k_linear_reduce_f2b3a2
     inputs: [silu_one, mul_1_c1, x, w_gate_up, w_down]
     outputs: [[mul_1, f32, [16, 64]]]
 - inputs: [w_down, w_gate_up, x]
@@ -12250,7 +12194,7 @@ loops:
                   swizzle: NONE
             unroll: false
             seed: true
-      name: k_linear_reduce_e9492c
+      name: k_linear_reduce_4a7cf3
     inputs: [silu_one, mul_1_c1, x, w_gate_up, w_down]
     outputs: [[mul_1, f32, [1, 64]]]
 - inputs: [w_down, w_gate_up, x]
@@ -12396,7 +12340,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_reduce_db769c
+      name: k_linear_reduce_d5433b
     inputs: [silu_one, mul_1_c1, x, w_gate_up, w_down]
     outputs: [[mul_1, f32, [256, 64]]]
 - inputs: [hidden]
@@ -12841,7 +12785,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_mean_reduce_b68dc7
+      name: k_linear_mean_reduce_19f3ec
     inputs: [mean_count, mean_2_count, mean_1_count, add_c1, add_2_c1, add_1_c1, hidden, p_input_layernorm_weight, linear_1_wt, linear_wt, p_k_norm_weight,
       p_q_norm_weight, linear_2_wt]
     outputs: [[reshape_2, f32, [{sym: num_tokens, hint: 512}, 64]], [reshape, f32, [{sym: num_tokens, hint: 512}, 64]], [reshape_1, f32, [{sym: num_tokens,
@@ -13044,7 +12988,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_mean_reduce_441fb1
+      name: k_linear_mean_reduce_1cafbd
     inputs: [mean_count, add_1_c1, residual, linear_wt, attn_out, p_post_attention_layernorm_weight]
     outputs: [[to, f32, [{sym: num_tokens, hint: 512}, 64]], [mul_1, f32, [{sym: num_tokens, hint: 512}, 64]]]
 - inputs: [hidden]
@@ -13489,7 +13433,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_mean_reduce_8ec290
+      name: k_linear_mean_reduce_9cb86f
     inputs: [mean_count, mean_2_count, mean_1_count, add_c1, add_2_c1, add_1_c1, hidden, p_input_layernorm_weight, linear_1_wt, linear_wt, p_k_norm_weight,
       p_q_norm_weight, linear_2_wt]
     outputs: [[reshape_2, f32, [16, 64]], [reshape, f32, [16, 64]], [reshape_1, f32, [16, 64]]]
@@ -13691,7 +13635,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_mean_reduce_6cbf01
+      name: k_linear_mean_reduce_206970
     inputs: [mean_count, add_1_c1, residual, linear_wt, attn_out, p_post_attention_layernorm_weight]
     outputs: [[to, f32, [16, 64]], [mul_1, f32, [16, 64]]]
 - inputs: [hidden]
@@ -14123,7 +14067,7 @@ loops:
                   swizzle: NONE
             unroll: false
             seed: true
-      name: k_linear_mean_reduce_a5c75c
+      name: k_linear_mean_reduce_b415e2
     inputs: [hidden, mean_count, add_c1, mean_2_count, p_input_layernorm_weight, linear_1_wt, mean_1_count, linear_wt, add_2_c1, add_1_c1, p_k_norm_weight,
       p_q_norm_weight, linear_2_wt]
     outputs: [[reshape_2, f32, [1, 64]], [reshape, f32, [1, 64]], [reshape_1, f32, [1, 64]]]
@@ -14316,7 +14260,7 @@ loops:
                   swizzle: NONE
             unroll: false
             seed: true
-      name: k_linear_mean_reduce_c02161
+      name: k_linear_mean_reduce_3c4987
     inputs: [mean_count, residual, linear_wt, attn_out, add_1_c1, p_post_attention_layernorm_weight]
     outputs: [[to, f32, [1, 64]], [mul_1, f32, [1, 64]]]
 - inputs: [w_down, w_gate_up, x]
@@ -14462,7 +14406,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_reduce_f3a192
+      name: k_linear_reduce_c92311
     inputs: [silu_one, mul_1_c1, x, w_gate_up, w_down]
     outputs: [[mul_1, f32, [8, 64]]]
 - inputs: [hidden]
@@ -14907,7 +14851,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_mean_reduce_382ee0
+      name: k_linear_mean_reduce_ee4def
     inputs: [mean_count, mean_2_count, mean_1_count, add_c1, add_2_c1, add_1_c1, hidden, p_input_layernorm_weight, linear_1_wt, linear_wt, p_k_norm_weight,
       p_q_norm_weight, linear_2_wt]
     outputs: [[reshape_2, f32, [8, 64]], [reshape, f32, [8, 64]], [reshape_1, f32, [8, 64]]]
@@ -15109,7 +15053,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_mean_reduce_05a5e4
+      name: k_linear_mean_reduce_5271a0
     inputs: [mean_count, add_1_c1, residual, linear_wt, attn_out, p_post_attention_layernorm_weight]
     outputs: [[to, f32, [8, 64]], [mul_1, f32, [8, 64]]]
 - inputs: [w_down, w_gate_up, x]
@@ -15255,7 +15199,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_reduce_9381eb
+      name: k_linear_reduce_0b27d8
     inputs: [silu_one, mul_1_c1, x, w_gate_up, w_down]
     outputs: [[mul_1, f32, [{sym: num_tokens, hint: 512}, 64]]]
 - inputs: [w_down, w_gate_up, x]
@@ -15401,7 +15345,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_reduce_026151
+      name: k_linear_reduce_16702f
     inputs: [silu_one, mul_1_c1, x, w_gate_up, w_down]
     outputs: [[mul_1, f32, [8, 64]]]
 - inputs: [w_down, w_gate_up, x]
@@ -15540,7 +15484,7 @@ loops:
                   swizzle: NONE
             unroll: false
             seed: true
-      name: k_linear_reduce_73cdf8
+      name: k_linear_reduce_6720e9
     inputs: [silu_one, mul_1_c1, x, w_gate_up, w_down]
     outputs: [[mul_1, f32, [1, 64]]]
 - inputs: [w_down, w_gate_up, x]
@@ -15686,7 +15630,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_reduce_17ebec
+      name: k_linear_reduce_985492
     inputs: [silu_one, mul_1_c1, x, w_gate_up, w_down]
     outputs: [[mul_1, f32, [256, 64]]]
 - inputs: [w_down, w_gate_up, x]
@@ -15832,7 +15776,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_reduce_12b509
+      name: k_linear_reduce_394027
     inputs: [silu_one, mul_1_c1, x, w_gate_up, w_down]
     outputs: [[mul_1, f32, [4, 64]]]
 - inputs: [hidden]
@@ -16277,7 +16221,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_mean_reduce_107c6d
+      name: k_linear_mean_reduce_572307
     inputs: [mean_count, mean_2_count, mean_1_count, add_c1, add_2_c1, add_1_c1, hidden, p_input_layernorm_weight, linear_1_wt, linear_wt, p_k_norm_weight,
       p_q_norm_weight, linear_2_wt]
     outputs: [[reshape_2, f32, [4, 64]], [reshape, f32, [4, 64]], [reshape_1, f32, [4, 64]]]
@@ -16479,7 +16423,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_mean_reduce_c2fdaf
+      name: k_linear_mean_reduce_e91bd6
     inputs: [mean_count, add_1_c1, residual, linear_wt, attn_out, p_post_attention_layernorm_weight]
     outputs: [[to, f32, [4, 64]], [mul_1, f32, [4, 64]]]
 - inputs: [hidden]
@@ -16732,7 +16676,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_mean_reduce_d0b149
+      name: k_linear_mean_reduce_33c052
     inputs: [mean_count, add_c1, hidden, p_input_layernorm_weight, linear_2_wt, linear_1_wt, linear_wt]
     outputs: [[reshape, f32, [{sym: num_tokens, hint: 512}, 64]], [reshape_1, f32, [{sym: num_tokens, hint: 512}, 32]], [reshape_2, f32, [{sym: num_tokens,
             hint: 512}, 32]]]
@@ -16986,7 +16930,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_mean_reduce_b4de4b
+      name: k_linear_mean_reduce_5ba09c
     inputs: [mean_count, add_c1, hidden, p_input_layernorm_weight, linear_2_wt, linear_1_wt, linear_wt]
     outputs: [[reshape, f32, [16, 64]], [reshape_1, f32, [16, 32]], [reshape_2, f32, [16, 32]]]
 - inputs: [hidden]
@@ -17155,11 +17099,11 @@ loops:
                     - class: Assign
                       fields: {name: v7, op: {elementwise: multiply}, args: {tuple: [in6, v4]}, dtype: null}
                     - class: Assign
-                      fields: {name: v8, op: {elementwise: multiply}, args: {tuple: [in5, v7]}, dtype: null}
+                      fields: {name: v8, op: {elementwise: multiply}, args: {tuple: [in4, v7]}, dtype: null}
                     - class: Accum
                       fields: {name: acc1, value: v8, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
                     - class: Assign
-                      fields: {name: v9, op: {elementwise: multiply}, args: {tuple: [in4, v6]}, dtype: null}
+                      fields: {name: v9, op: {elementwise: multiply}, args: {tuple: [in5, v6]}, dtype: null}
                     - class: Accum
                       fields: {name: acc2, value: v9, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
                   unroll: false
@@ -17168,7 +17112,7 @@ loops:
                 fields:
                   output: reshape_1
                   index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a1}}]}
-                  values: {tuple: [acc2]}
+                  values: {tuple: [acc1]}
                   value_dtype: null
                   atomic: false
                   swizzle: NONE
@@ -17176,7 +17120,7 @@ loops:
                 fields:
                   output: reshape_2
                   index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a1}}]}
-                  values: {tuple: [acc1]}
+                  values: {tuple: [acc2]}
                   value_dtype: null
                   atomic: false
                   swizzle: NONE
@@ -17230,7 +17174,7 @@ loops:
                   swizzle: NONE
             unroll: false
             seed: true
-      name: k_linear_mean_reduce_0de810
+      name: k_linear_mean_reduce_183990
     inputs: [hidden, mean_count, add_c1, p_input_layernorm_weight, linear_2_wt, linear_1_wt, linear_wt]
     outputs: [[reshape, f32, [1, 64]], [reshape_1, f32, [1, 32]], [reshape_2, f32, [1, 32]]]
 - inputs: [hidden]
@@ -17483,7 +17427,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_mean_reduce_43d97c
+      name: k_linear_mean_reduce_d3968d
     inputs: [mean_count, add_c1, hidden, p_input_layernorm_weight, linear_2_wt, linear_1_wt, linear_wt]
     outputs: [[reshape, f32, [32, 64]], [reshape_1, f32, [32, 32]], [reshape_2, f32, [32, 32]]]
 - inputs: [attn_out, residual]
@@ -17832,7 +17776,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_mean_reduce_3a908e
+      name: k_linear_mean_reduce_dd3d87
     inputs: [mean_count, add_1_c1, silu_one, residual, linear_wt, attn_out, p_post_attention_layernorm_weight, linear_1_wt, linear_2_wt, linear_3_wt]
     outputs: [[add_2, f32, [32, 64]]]
 - inputs: [hidden]
@@ -18277,7 +18221,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_mean_reduce_7159a4
+      name: k_linear_mean_reduce_74c145
     inputs: [mean_count, mean_2_count, mean_1_count, add_c1, add_2_c1, add_1_c1, hidden, p_input_layernorm_weight, linear_1_wt, linear_wt, p_k_norm_weight,
       p_q_norm_weight, linear_2_wt]
     outputs: [[reshape_2, f32, [512, 64]], [reshape, f32, [512, 64]], [reshape_1, f32, [512, 64]]]
@@ -18479,7 +18423,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_mean_reduce_20f56b
+      name: k_linear_mean_reduce_a938a4
     inputs: [mean_count, add_1_c1, residual, linear_wt, attn_out, p_post_attention_layernorm_weight]
     outputs: [[to, f32, [512, 64]], [mul_1, f32, [512, 64]]]
 - inputs: [attn_out, residual]
@@ -19353,7 +19297,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_mean_reduce_30b2e3
+      name: k_linear_mean_reduce_b8948b
     inputs: [mean_1_count, gelu_c1, add_3_c1, gelu_c0, gelu_one, gelu_half, mean_count, mean_2_count, add_c1, add_5_c1, linear_wt, attn_out, add_1,
       residual, add_4, linear_1_wt, linear_2_wt, linear_3_wt, add_6]
     outputs: [[add_7, f32, [{sym: num_tokens, hint: 512}, 64]]]

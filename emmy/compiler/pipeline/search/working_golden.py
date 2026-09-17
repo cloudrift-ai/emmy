@@ -261,18 +261,16 @@ def _append_trace_inventory(
     }
 
     for node_id, node, origins in inventory:
-        key = node.op.identity_key(with_io=True, with_knobs=True)
-        suffix = key[:12] if key is not None else node_id
-        name = f"{node.op.name or node_id}.{suffix}"
+        # The entry's name is a label, never re-derived: the kernel's provenance name (the ops it
+        # realizes, as the backend and the profiler show it), so a reader can tell what a row is.
+        name = node.op.name or node_id
         if name_prefix:
             name = f"{name_prefix}.{name}"
         if name in used_names:
-            # One kernel body/cache key can occur at multiple exact Loop
-            # targets whose boundary shapes or checkpoint sources differ.
-            # ``emmy run --golden`` resolves by name, so retaining the bare
-            # duplicate makes the generated file impossible to replay. Node
-            # ids are deterministic within the persisted source program and
-            # distinguish these otherwise same-bodied target sites.
+            # One kernel name can occur at multiple exact Loop targets whose boundary shapes or
+            # checkpoint sources differ. ``emmy run --golden`` resolves by name, so retaining the
+            # bare duplicate makes the generated file impossible to replay. Node ids are
+            # deterministic within the persisted source program and distinguish these sites.
             base = f"{name}.{node_id}"
             name = base
             duplicate = 2

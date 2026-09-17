@@ -62,7 +62,7 @@ configs:
     - sg
     - up
   realizations:
-  - name: k_linear_reduce_f03694.07d84a5fc09b
+  - name: k_linear_reduce_775efd
     bindings: {}
     pins:
       FAST_MATH: false
@@ -71,8 +71,8 @@ configs:
       WORK: w2x2
       TILE@map.1/inner: mma_m16n8k16_f16_f32/f2x2/k2
       TILE@map.2/inner: mma_m16n8k16_f16_f32/f2x2/k2
-    identity: fe3e026e4b9d6a7ee2d49d91b078aac27d5bd0d5e9ea42a298530815203fa324
-  - name: k_linear_reduce_c82e0d.5d99ec1cba30.06ac2b96161b
+    identity: 52c7f0fdf0be119000f08e3720e0ca55d79992eb4ed76f78f931417e06a7b29e
+  - name: k_linear_reduce_775efd.06ac2b96161b
     bindings: {}
     pins:
       FAST_MATH: false
@@ -86,7 +86,7 @@ configs:
       WORK: ''
       RASTER: ''
     identity: 06ac2b96161bd524e82f0372f258020987ed808ca7f7bd6ecc04ca4e34e6b292
-  - name: k_linear_reduce_f03694.07d84a5fc09b.70e8f2c2743b
+  - name: k_linear_reduce_775efd.95ff96827f75
     bindings: {}
     pins:
       FAST_MATH: false
@@ -99,4 +99,4 @@ configs:
       STAGE@map.2/inner: ''
       WORK: ''
       RASTER: ''
-    identity: 70e8f2c2743bbc9ca064ecb53aaf530b6309ff8d093a1b6e27d83edbb70ada7e
+    identity: 95ff96827f7573429fc0653058b55cc71e85b698b6871a50f1b8c8e00f780a9a

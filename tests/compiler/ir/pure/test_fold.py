@@ -23,7 +23,7 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.pure.twist import SOFTMAX, Twist
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Const, Loop, OutputSpec, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Let, Loop, OutputSpec, Write
 from tests.compiler.terms import contraction, projection, reduction, slab
 
 M_AXIS, N_AXIS, K_AXIS = Axis("m", Dim(8)), Axis("n", Dim(4)), Axis("k", Dim(16))
@@ -111,7 +111,7 @@ def test_a_value_a_sibling_operand_produces_is_not_a_free_coordinate() -> None:
     Counting it as one made ``lower`` demand a loop extent for a value — ``no extent for
     coordinates ['in5']`` — and refuse an otherwise well-formed cut. On Qwen3.8-27B's layer-3
     attention that took every cheap cut set off the ballot and left only a 24-kernel over-cut."""
-    fills = projection(body=(Const(name="fill", value=-1e30), Const(name="zero", value=0.0)), results=("fill", "zero"))
+    fills = projection(body=(Let(name="fill", value=-1e30), Let(name="zero", value=0.0)), results=("fill", "zero"))
     reader = projection(
         operands=(slab("s", "x", "m", "k"),),
         body=(Assign(name="masked", op="add", args=("s", "fill")),),
@@ -279,7 +279,7 @@ def _twisted(states: tuple[str, str] = ("m", "l")) -> Fold:
     """The exp-family ``(m, l)`` carrier in STABLE coordinates: the lift contributes the singleton
     ``(score, 1)`` the carrier's own ⊕ folds, and naming the softmax recipe is what derives both
     that ⊕ and the base reading ``(score, exp score)`` a matcher asks for."""
-    body = Body((Assign(name="s", op="copy", args=("y",)), Const(name="one", value=1.0)))
+    body = Body((Assign(name="s", op="copy", args=("y",)), Let(name="one", value=1.0)))
     lift = Lambda.closing(("k", "y"), body, ("s", "one"))
     base = Lambda.componentwise(SOFTMAX.base[:2], states)
     twist = Twist(recipe=SOFTMAX, channels=(0,))

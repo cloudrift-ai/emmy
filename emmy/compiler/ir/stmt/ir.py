@@ -18,7 +18,7 @@ from dataclasses import dataclass, field, replace
 from frozendict import frozendict
 
 from emmy.compiler.dtype import F32
-from emmy.compiler.ir.base import ConstantOp, Op
+from emmy.compiler.ir.base import ConstantOp, Op, buffer_types
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.base import pretty_body as _pretty_body_stmts
 from emmy.compiler.ir.stmt.body import Body
@@ -148,9 +148,9 @@ class BodyOp(Op):
         label themselves; duplicating it here would just rot."""
         return "\n".join(_pretty_body_stmts(self.body, "    "))
 
-    def _body_identity(self, *, structural: bool = True) -> str | None:
+    def _body_identity(self, *, structural: bool = True, typed: bool = False):
         """Override :meth:`Op._body_identity`: the stored body IS this op's Loop-IR body."""
-        return self.body.structural_key(structural=structural)
+        return self.body.identity(structural=structural, types=buffer_types(self) if typed else None)
 
 
 def _tensor_for_buffer(graph, name: str) -> Tensor | None:  # noqa: ANN001 — Graph lives in compiler.graph; would cycle to import.

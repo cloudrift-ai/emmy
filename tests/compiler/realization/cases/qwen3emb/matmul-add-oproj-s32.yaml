@@ -31,7 +31,7 @@ configs:
     - ab
     - o
   realizations:
-  - name: k_matmul_47545f.2b5e6a8bbfed
+  - name: k_matmul_a07c39
     bindings: {}
     pins:
       FAST_MATH: false
@@ -41,7 +41,7 @@ configs:
       STAGE: d1/smem-tma
       RASTER: ''
       WORK: t16x8
-    identity: 398d515326c0388899c9f74e22a690bfb125d48264ade36c13dff98b0290acb3
+    identity: c02729969daf1fa2e7af65ad59c286b67525f4022ec4dcd0fa5b5113fe3d93ec
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 26.935351861489785

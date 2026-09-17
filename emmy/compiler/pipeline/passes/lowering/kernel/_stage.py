@@ -48,16 +48,15 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from emmy.compiler.dim import Dim
+from emmy.compiler.dtype import I32
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import BinaryExpr, Builtin, Expr, FuncCallExpr, Literal, SimplifyCtx, TernaryExpr, Var, affine_form
+from emmy.compiler.ir.expr import BinaryExpr, Builtin, Expr, FlatIndex, FuncCallExpr, Literal, SimplifyCtx, TernaryExpr, Var, affine_form
 from emmy.compiler.ir.kernel.ir import (
     VOLTA_B_CONGRUOUS,
     VOLTA_CROSSWISE,
     CpAsyncCommit,
     CpAsyncCopy,
     CpAsyncWait,
-    FlatIndexDecl,
-    IndexDecl,
     MbarrierArrive,
     MbarrierArriveExpectTx,
     MbarrierInit,
@@ -69,7 +68,7 @@ from emmy.compiler.ir.kernel.ir import (
     TmaLoad,
     swizzle_base,
 )
-from emmy.compiler.ir.stmt import Body, Cond, Load, Loop, Stmt, StridedLoop, Write
+from emmy.compiler.ir.stmt import Body, Cond, Let, Load, Loop, Stmt, StridedLoop, Write
 
 
 def _mul(a: Expr, b: Expr) -> Expr:
@@ -262,7 +261,7 @@ def _volta_store_plan(*, slab: str, shape: tuple[int, int], cta: CtaTile, elem_b
     return None
 
 
-def _volta_store_decl(*, op, ring: int, cta: CtaTile, elem_bytes: int) -> IndexDecl | None:
+def _volta_store_decl(*, op, ring: int, cta: CtaTile, elem_bytes: int) -> Let | None:
     """Precompute trip zero's physical shared address for a paired Volta copy."""
     eb = op.elem_bytes or elem_bytes
     plan = _volta_store_plan(slab=op.slab, shape=op.shape, cta=cta, elem_bytes=eb, swizzle=op.swizzle)
@@ -274,7 +273,7 @@ def _volta_store_decl(*, op, ring: int, cta: CtaTile, elem_bytes: int) -> IndexD
         value = FuncCallExpr("emmy_volta_crosswise", (row, col, _lit(ring * op.shape[0])))
     else:
         value = FuncCallExpr("emmy_volta_b_congruous", (row, col, _lit(op.shape[1])))
-    return IndexDecl(name=name, value=value)
+    return Let(name=name, value=value, dtype=I32)
 
 
 def _volta_gmem_bases(*, op, cta: CtaTile, elem_bytes: int) -> tuple[list[tuple[Expr, Expr]], list[tuple[Expr, ...]]] | None:
@@ -297,7 +296,7 @@ def _volta_gmem_bases(*, op, cta: CtaTile, elem_bytes: int) -> tuple[list[tuple[
     return coords, bases
 
 
-def _volta_gmem_decls(*, op, cta: CtaTile, elem_bytes: int) -> list[FlatIndexDecl]:
+def _volta_gmem_decls(*, op, cta: CtaTile, elem_bytes: int) -> list[Let]:
     """Precompute each lane's invariant global-copy bases and its K stride."""
     planned = _volta_gmem_bases(op=op, cta=cta, elem_bytes=elem_bytes)
     if planned is None:
@@ -305,8 +304,8 @@ def _volta_gmem_decls(*, op, cta: CtaTile, elem_bytes: int) -> list[FlatIndexDec
     coords, bases = planned
     step = tuple(op.index(_lit(1))(*coords[0]))
     return [
-        FlatIndexDecl(name=f"_{op.tag}_gmem_stride", buffer=op.buf, index=step, origin=bases[0]),
-        *(FlatIndexDecl(name=f"_{op.tag}_gmem{trip}", buffer=op.buf, index=base) for trip, base in enumerate(bases)),
+        Let(name=f"_{op.tag}_gmem_stride", value=FlatIndex(op.buf, step) - FlatIndex(op.buf, bases[0])),
+        *(Let(name=f"_{op.tag}_gmem{trip}", value=FlatIndex(op.buf, base)) for trip, base in enumerate(bases)),
     ]
 
 

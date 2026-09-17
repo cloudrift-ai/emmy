@@ -91,8 +91,8 @@ def _spell(cap: tuple[int, int]) -> str:
 
 @pytest.mark.parametrize("path", helpers.case_files(), ids=lambda path: path.relative_to(helpers.CASES_DIR).as_posix())
 def test_case_derived_half_is_current(path):
-    """The stored program wire, target, realization name, identity and canonical knobs still equal
-    what this compiler derives from the case's own program."""
+    """The stored program wire, target, identity and canonical knobs still equal what this compiler
+    derives from the case's own program."""
     case = helpers.load_case(path)
     assert helpers.regenerate(case.document) == case.document, (
         f"{path.name} is stale — a kernel identity or a schedule codec moved under it. "
