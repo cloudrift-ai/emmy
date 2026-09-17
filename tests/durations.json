@@ -754,6 +754,7 @@
  "tests/compiler/realization/test_realization.py::test_realization[attention/sdpa-hd128-softmax-v-mma.yaml-realized]": 7.64,
  "tests/compiler/realization/test_realization.py::test_realization[attention/sdpa-hd128-staged-value-tma.yaml-built]@cuda": 4.57,
  "tests/compiler/realization/test_realization.py::test_realization[attention/sdpa-hd128-staged-value-tma.yaml-correct]@cuda": 26.29,
+ "tests/compiler/realization/test_realization.py::test_realization[attention/sdpa-hd256-f16acc-value-wide-row.yaml-correct]@cuda": 2.6,
  "tests/compiler/realization/test_realization.py::test_realization[attention/sdpa-hd128-staged-value-tma.yaml-realized]": 4.78,
  "tests/compiler/realization/test_realization.py::test_realization[attention/sdpa-hd128-staged-value.yaml-built]@cuda": 4.69,
  "tests/compiler/realization/test_realization.py::test_realization[attention/sdpa-hd128-staged-value.yaml-correct]@cuda": 22.7,

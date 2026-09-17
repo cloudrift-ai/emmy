@@ -419,6 +419,14 @@ types an edge's results; a name whose statement kind carries no dtype keeps the 
 mask — returns as f32, and the bit operations reading it have no f32 spelling at all, so the kernel fails to render
 rather than computing something wrong.
 
+**The prologue's statistic is summed cooperatively, and its fold is found by the seam's own order.** A warp's 32
+lanes stride the statistic's reduce and close it with the fold's shuffle butterfly (`sync_stat_fill`); without the
+fold the prologue falls back to one serial row per thread. `cone_stat` finds that fold by walking the cone's
+row-invariant edges in operand order, the order the seam lowers them in, and skipping every edge that varies with the
+contraction axis. It may not read the first operand alone: formation orders a cone's edges its own way, and a fused
+norm→linear cone is two gmem reads followed by the norm. Reading position zero cost the Gemma 4 norm → gate/up →
+GeGLU prefill kernel 1.6x (7.7 to 12.6 ms at 4096 tokens on an RTX 5090) with nothing failing.
+
 **A statistic over a K group is bridged per chunk.** A reduce edge that varies with K only through one block guard
 — the maximum a grouped activation scale takes over each 128-wide K group — is neither row-invariant nor worth a
 per-cell evaluation, which would re-read the whole group for every slab cell. The seam splits it off as its `chunk`
