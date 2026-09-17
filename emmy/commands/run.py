@@ -1008,6 +1008,18 @@ def env_pin_refusal(kernel_knobs: list[dict], placement_knobs: list[dict] | None
     return unreproducible_pin_flag(pins, kernel_knobs, placement_knobs=placement_knobs) if pins else None
 
 
+def greedy_record_refusal(kernel_knobs: list[dict], accuracy_error: str | None) -> str | None:
+    """Why ``--record-greedy`` must not write this greedy pick, or ``None``.
+
+    A recorded row outranks every later compile, so two picks never become one. A row whose answer
+    ``--strict`` rejected: on sm_70 a wrong answer can run FASTER than the right neighbour. And a row whose
+    env pin did not realize: under ``EMMY_KNOBS`` the recorded pick IS the pin, so an unrealized pin files
+    the planner's own schedule under the pin's name and lane."""
+    if accuracy_error is not None:
+        return f"it failed the strict accuracy check: {accuracy_error}"
+    return env_pin_refusal(kernel_knobs)
+
+
 REFERENCE_SELF_DISAGREES = (
     "wrong-answer reference unusable: a row realizing the greedy's own config disagrees with the "
     "greedy output, so no row's comparison against it carries information"
@@ -2836,14 +2848,14 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
         )
     if getattr(args, "record", False):
         _record_golden_latency(args, results or {}, ab_benches)
+    record_refusal = None
     if getattr(args, "record_greedy", False):
-        # A recorded row outranks every later compile, so a row whose answer --strict rejected must
-        # never become one: on sm_70 a wrong answer can run FASTER than the right neighbour, and the
-        # recording ran before the exit that reports it. Only the ANSWER is grounds to refuse — the
-        # other strict errors are about the FILE (a working inventory holds no pinned row yet), and
-        # refusing on those would leave a recording walk recording nothing at all.
-        if strict_correctness and accuracy_error is not None:
-            logger.error("not recording the greedy pick of %s — it failed the strict accuracy check: %s", args.realization, accuracy_error)
+        # The recording ran before the exit that reports a rejected answer. Only the ANSWER and the pin
+        # are grounds to refuse — the other strict errors are about the FILE (a working inventory holds
+        # no pinned row yet), and refusing on those would leave a recording walk recording nothing at all.
+        record_refusal = greedy_record_refusal(_cuda_knob_dicts(graph), accuracy_error if strict_correctness else None)
+        if record_refusal is not None:
+            logger.error("not recording the greedy pick of %s — %s", args.realization, record_refusal)
         else:
             _record_greedy_pick(args, graph, bench, greedy_iso, taken)
     for error in strict_errors or []:
@@ -2855,7 +2867,8 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
     if args.profile and greedy_fail is None:
         _run_ncu_profile(args, dump_dir=dump.dir if dump else None)
     if (
-        (strict_correctness and accuracy_error is not None)
+        record_refusal is not None
+        or (strict_correctness and accuracy_error is not None)
         or bool(strict_errors)
         or greedy_fail is not None
         or (greedy_iso is not None and greedy_iso.status != "ok")
