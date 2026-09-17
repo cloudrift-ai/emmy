@@ -739,8 +739,15 @@ def kernel_set_pins(record: GoldenRecord, records: Sequence[GoldenRecord]) -> di
     pieces the earlier ones mint, and a scoped ``PLACE`` pin that resolves on no kernel addresses
     another kernel of the graph (``030_cut._placement_restriction``), so publishing every routing
     row's keys at once reproduces the whole cascade rather than only its first step. Empty for a
-    record that names no route, which is the ordinary row whose own knobs are its pin."""
-    by_name = {other.name: other for other in records}
+    record that names no route, which is the ordinary row whose own knobs are its pin.
+
+    Both precision lanes record their rows under one name, so a listed name resolves inside the
+    record's own regime first: the standard lane's split is not the fast-math lane's."""
+    regime = regime_pins(record)
+    by_name: dict[str, GoldenRecord] = {}
+    for other in records:
+        if other.name not in by_name or regime_pins(other) == regime:
+            by_name[other.name] = other
     pins: dict[str, str] = {}
     for name in record.kernel_set:
         referenced = by_name.get(name)
