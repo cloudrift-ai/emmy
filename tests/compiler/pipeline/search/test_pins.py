@@ -108,4 +108,3 @@ def test_a_family_pinned_off_is_realized_by_a_kernel_that_never_stamps_it() -> N
 
     # A non-OFF pin the kernel never stamps is still a miss.
     assert unreproducible_pin_flag({"TILE": "f4"}, per_cell) is not None
-
