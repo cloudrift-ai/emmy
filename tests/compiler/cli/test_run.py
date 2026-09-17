@@ -252,10 +252,13 @@ def test_build_torch_fns_resets_dynamo_before_compile(monkeypatch):
     assert "Eager PyTorch" in fns
 
 
-def test_build_torch_fns_rejects_wrong_inductor_output(monkeypatch):
+def test_build_torch_fns_reports_a_wrong_inductor_output_as_a_failed_backend(monkeypatch, capsys):
+    """A torch.compile that answers wrong is not a baseline, and it is not dropped either: the
+    builder runs in the bench worker, whose log the parent never shows, so the failure travels
+    in the closure dict and stands in the table and the record where the latency would."""
     import torch._dynamo
 
-    from emmy.commands.run import _build_torch_fns
+    from emmy.commands.run import BackendFailure, _build_torch_fns, _print_table
 
     monkeypatch.setattr(torch._dynamo, "reset", lambda: None)
 
@@ -268,7 +271,26 @@ def test_build_torch_fns_rejects_wrong_inductor_output(monkeypatch):
 
     fns = _build_torch_fns(lambda: torch.tensor([1.0]), (), {}, warmup=0, backends={"tcompile"})
 
-    assert "torch.compile" not in fns
+    assert isinstance(fns["torch.compile"], BackendFailure) and "accuracy check failed" in fns["torch.compile"]
+    _print_table({"Eager PyTorch": 10.0, "torch.compile": fns["torch.compile"], "Emmy": 5.0})
+    out = capsys.readouterr().out
+    assert "failed" in out and "accuracy check failed" in out and "2.00x" in out
+
+
+def test_build_torch_fns_accepts_inductor_rounding_drift(monkeypatch):
+    """Inductor's own FP16 GEMM differs from cuBLAS by output rounding at large K; the gate is the
+    scaled check the Emmy output gets, not a flat 1e-3 that rejected it on three of six shapes."""
+    import torch._dynamo
+
+    from emmy.commands.run import _build_torch_fns
+
+    monkeypatch.setattr(torch._dynamo, "reset", lambda: None)
+    reference = torch.full((8,), 60.0, dtype=torch.float16)
+    monkeypatch.setattr(torch, "compile", lambda _module, *, fullgraph, mode: (lambda: reference + 0.0625))
+
+    fns = _build_torch_fns(lambda: reference, (), {}, warmup=0, backends={"tcompile"})
+
+    assert callable(fns["torch.compile"])
 
 
 def test_run_ab_requires_bench(run_cli):
