@@ -3230,8 +3230,8 @@ def _check_accuracy(outputs, eager_out) -> str | None:
         eager_refs = [eager_out[name] for name in outputs]
     else:
         eager_refs = list(eager_out) if isinstance(eager_out, (tuple, list)) else [eager_out]
-    # Arrays, never Python lists: a list holds one float object per element, so an LM-head output at
-    # sequence 512 (134M cells) took three lists, 13 GB and minutes of one core to reach the same verdict.
+    # Arrays, never Python lists: a list holds one float object per element. Measured at 2M cells the lists
+    # peaked at 13.3 f64 copies of the output against 4.3 here, which at an LM-head output (134M cells) is 14 GB.
     eager_flats = [t.detach().cpu().double().flatten().numpy() for t in eager_refs]
     if any(np.isnan(flat).any() for flat in eager_flats):
         return "eager reference contains NaN (reproducer inputs out of domain)"
