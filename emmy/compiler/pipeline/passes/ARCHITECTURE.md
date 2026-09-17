@@ -92,9 +92,13 @@ resolve outward. A workspace load is named after its WORKSPACE — the cone's re
 after the cone alone: a lowered body reads producer names throughout, and the value a cut materialized can still be
 computed in place elsewhere in the same kernel (a cone the replacement did not reach, or a second seam exposing the
 same value), which under one shared name is a rebind the emitted source cannot carry.
-That rename reaches the term's own readers for free — a consumer's params are spelled as the result names of the edge
+What a reader DERIVES from the load carries the tag on, for the same reason: a statement over the load is a different
+statement from the one still computed in place, so each definition that depends on a workspace load takes that load's
+tag, while a statement that reads no workspace keeps its name and still shares with its in-place copy. The rename
+stops at a reduce, whose carried state keeps its name.
+Both renames reach a term's own readers for free — a consumer's params are spelled as the result names of the edge
 they bind — but a kernel-boundary store sits OUTSIDE the term: `TileOp.output_specs` names its stored value as a plain
-string, so the consumer's stores are re-spelled through the same map. Cutting a branch the kernel stores WHOLE leaves
+string, so every piece's stores are re-spelled through the same map. Cutting a branch the kernel stores WHOLE leaves
 that store as the only reader the value has, and unre-spelled it names a value the consumer no longer defines.
 A seam whose cone solely produces some of the kernel's OWN outputs realizes as an OUTPUT-OWNING cut instead: the piece
 writes those outputs and the sibling piece keeps the rest, so no workspace is written and no dtype has to be
