@@ -1,5 +1,5 @@
-# Gemma 4 12B projection kernels at sequence length 512 on one RTX 5090, in both precision lanes — the kernel
-# tables of the "Outperforming vLLM and Llama.cpp on Gemma4-12B" article, re-measured on the current compiler.
+# Gemma 4 12B projection and attention kernels at sequence length 512 on one RTX 5090, in both precision lanes — the
+# kernel tables of the "Outperforming vLLM and Llama.cpp on Gemma4-12B" article, re-measured on the current compiler.
 #
 # Every row replays one hand-recorded golden committed beside this file (see golden/README.md): the schedule was
 # found by hand-pinned `emmy run --ab` rows on the card and written with `--record-greedy`, and the row only
@@ -73,7 +73,7 @@ command:
 
 matrices:
   - cross:
-      kernel: [q_proj, kv_proj, o_proj, mlp_gate_up, mlp_down]
+      kernel: [q_proj, kv_proj, o_proj, mlp_gate_up, mlp_down, attention]
       lane: [std, fm]
       deploy.gpu: "NVIDIA GeForce RTX 5090"
       deploy.gpu_count: 1
