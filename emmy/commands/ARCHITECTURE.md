@@ -141,7 +141,12 @@ a kernel that accumulates at full width. The worker restores the prior precision
 job, including failures. `--strict-evidence` (`run`, `compile`, `serve`; `EMMY_STRICT_EVIDENCE`) is the
 deploy-side strictness: a fork no measured row decides raises `EvidenceError` naming the kernel instead of deploying
 a prediction. BF16 inputs and constants bind through the compiler's raw `uint16` carrier, and
-backend output bits are decoded to numeric values before every command-layer correctness check. The command records
+backend output bits are decoded to numeric values before every command-layer correctness check. The eager forward
+that serves as the correctness reference runs inside `correctness_oracle`, which turns torch's reduced-precision GEMM
+reductions off: with them on, the FP16 GEMM at K = 15360 leaves one element in ten of its own output outside
+`rtol=atol=1e-3` of an FP64 product, and a kernel nearer the truth than eager failed `--strict` for eager's error.
+The TIMED eager forward keeps torch's defaults, the library a user runs. Both checks compare in arrays: a Python list
+holds one float object per cell, which for an LM-head output is gigabytes. The command records
 max/mean/relative error in `--json` and exits
 nonzero on any missing or failed evidence. Dynamic-shape parsing, quantized architecture twins and
 their in-graph storage algebra, sliding-window stamps, and the guarded `trust_remote_code` fallback therefore behave
@@ -281,7 +286,9 @@ summed isolated launches of the kernels that decision produced, and one child-id
 its own isolated launch, both with the greedy comparison row as their `same-input-greedy` reference
 (`working_golden.record_greedy_pick`; the pipeline ARCHITECTURE's golden-record Part has the spelling and the
 pricing). That is how a pick the prior made becomes rows a strict-evidence compile of the file deploys
-from without a prior. Independently of both, every clean pinned row and the greedy isolated re-bench are written into
+from without a prior. Under `EMMY_KNOBS` the recorded pick IS the pin, so the recording refuses, and the run exits
+nonzero, when the env pin did not realize (`greedy_record_refusal`): the row would file the planner's own schedule
+under the pin's name and lane. It refuses a pick whose answer `--strict` rejected for the same reason. Independently of both, every clean pinned row and the greedy isolated re-bench are written into
 the tune DB by default at tune-standard measurement quality: per-kernel `perf` rows through the tuner's own writer —
 the deploy evidence the next `compile` / `run` / `serve` picks from, which is how a replayed golden or a hand-pinned
 `--ab` row becomes what the compiler chooses — and node-store leaves for the offline prior's training data. An

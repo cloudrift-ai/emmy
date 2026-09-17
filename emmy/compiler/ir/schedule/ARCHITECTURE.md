@@ -27,7 +27,10 @@ visitor or feed contexts back themselves. The driver knows no concrete family, p
 enumeration slice. `narrowed(row)` is the one way a row enters after construction: an EMPTY prefix over the same
 problem with the row installed, which is what a descent that already holds a row asks for before expanding anything.
 Strict narrowing marks only the supplied codec keys as exact; inherited peer-kernel pins keep their ordinary tolerant
-reading.
+reading. A row narrows WITHIN a pin that binds the kernel and never lifts it: where an evidence row and an environment
+pin name the same site with different values the site keeps the pin's, no leaf equals the row, and the descent that
+followed the row re-decides. A recorded receipt of the same kernel used to win that disagreement, so an `EMMY_KNOBS`
+fast-math pin silently deployed the standard receipt. A bare pin a peer kernel only tolerates is still replaced.
 The pipeline's generic schedule-fork adapter preserves the same contexts as deferred search branches without adding
 compatibility logic.
 
@@ -98,6 +101,11 @@ fragment-seam combinations before they create subtrees, without materializing th
 form the final frontier: the kernel site's catalog is what the node sites' choices imply, so it is the last site. The
 fragment-seam relation has no pipeline-side copy.
 
+A pointwise map's site reads a catalog of its own (`map_tile_moves`): the per-cell form and the register strips that
+hand one thread 2, 3, 4 or 8 contiguous inner-axis elements, each offered when it divides a static inner extent. It
+is not the scalar-contraction ladder, which stops at 4 because a contraction's strip also carries accumulators; a map
+holds none, and sharing the ladder once dropped the 8-wide strip a recorded QK-norm row deploys.
+
 Classic domain projection, move catalogs, packed-operand readings, staging resolution, materialization, and
 compatibility all live in `ir/schedule`. The sites are the only source of choices; pipeline search neither defines
 nor filters them. `ir/schedule` may import other IR modules but never the pipeline layer. The pipeline retains only
@@ -145,7 +153,12 @@ fragment per atom-K step, so a symbolic extent there has no step count to hold t
 EXPECTATION's — the score keeps that atom's f32 sibling (`wide_accumulate`), so the reduced-accumulate cell can run
 the expectation's mma chain at the consumer-die full rate without moving the softmax's running max and denominator off
 f32; the chunk partial promotes into the f32 carrier once per chunk, which is the promote cadence. The streamed
-value selects the multiplicand dtype; the score's wider accumulator does not select a different atom family.
+value selects the multiplicand dtype; the score's wider accumulator does not select a different atom family. How many
+register columns of those partials are live at once is one rule the offer and the emitter both ask
+(`chunk_partial_columns`): the whole row while the thread's register envelope holds it, else one column pair. At head
+width 256 the row is 32 fragments, and with every partial live beside the carrier and the hoisted query the thread
+needs 260 registers against 255; the register budget counts the pair there, so the reduced-accumulate expectation is
+offered.
 
 The tier's other refusals (`_chunk_refusal`) are the same kind of statement, and two of them are about the score's own
 PREFIX — the carrier's lift cut to its score role, which is where an SDPA mask lands. Only what reaches a fragment
