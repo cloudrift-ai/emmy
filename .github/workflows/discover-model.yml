@@ -33,6 +33,7 @@ jobs:
       AGENT_EVENTS: /tmp/emmy-discovery-events-${{ github.run_id }}-${{ github.run_attempt }}.jsonl
       AGENT_SELECTION: /tmp/emmy-discovery-selection-${{ github.run_id }}-${{ github.run_attempt }}.json
       AGENT_MANIFEST: /tmp/emmy-discovery-manifest-${{ github.run_id }}-${{ github.run_attempt }}.json
+      AGENT_REJECTION: /tmp/emmy-discovery-rejection-${{ github.run_id }}-${{ github.run_attempt }}.txt
       DISCOVERY_SUMMARY: /tmp/emmy-discovery-summary-${{ github.run_id }}-${{ github.run_attempt }}.md
     steps:
       - name: Generate GitHub App token
@@ -176,39 +177,60 @@ jobs:
                 --argjson batch_size 6 \
                 -f "$WORKFLOW_SOURCE/.github/workflows/scripts/discovery_task.jq" \
             > "$AGENT_TASK"
+          run_agent() {
+            # TEMPORARY DEBUG: OpenCode logs to stderr, and one short line per agent event.
+            opencode --print-logs --log-level INFO run "$@" \
+              --agent discover-models \
+              --model cloudrift/agent \
+              --format json \
+              | tee -a "$AGENT_EVENTS" \
+              | jq -R --unbuffered -r 'fromjson? // {type: "raw", raw: .}
+                  | "agent-event: \(.type) \(.part.tool // "") \(.part.state.status // "")"
+                    + " \((.part.text // .error // .part.state.error // .raw // "") | tostring | .[0:300] | gsub("\n"; " "))"'
+            return "${PIPESTATUS[0]}"
+          }
+          build_manifest() {
+            jq -s -r '[.[] | select(.type == "text") | .part.text][-1] // empty' \
+              "$AGENT_EVENTS" > "$AGENT_SELECTION"
+            jq \
+              --rawfile selection "$AGENT_SELECTION" \
+              -f "$WORKFLOW_SOURCE/.github/workflows/scripts/discovery_manifest.jq" \
+              "$AGENT_TASK" > "$AGENT_MANIFEST" 2> "$AGENT_REJECTION"
+          }
           set +e
-          # TEMPORARY DEBUG: OpenCode logs to stderr, and one short line per agent event.
-          opencode --print-logs --log-level INFO run \
-            "Complete the attached lifecycle task exactly." \
-            --agent discover-models \
-            --model cloudrift/agent \
-            --format json \
+          : > "$AGENT_EVENTS"
+          run_agent "Complete the attached lifecycle task exactly." \
             --file "$WORKFLOW_SOURCE/.agents/skills/discover-models/SKILL.md" \
             --file "$WORKFLOW_SOURCE/prompts/model-fit.md" \
             --file "$WORKFLOW_SOURCE/prompts/discover-models/lifecycle.md" \
             --file "$WORKFLOW_SOURCE/prompts/discover-models/score-recipes.md" \
             --file "$WORKFLOW_SOURCE/prompts/discover-models/size-deployments.md" \
-            --file "$AGENT_TASK" \
-            | tee "$AGENT_EVENTS" \
-            | jq -R --unbuffered -r 'fromjson? // {type: "raw", raw: .}
-                | "agent-event: \(.type) \(.part.tool // "") \(.part.state.status // "")"
-                  + " \((.part.text // .error // .part.state.error // .raw // "") | tostring | .[0:300] | gsub("\n"; " "))"'
-          agent_status=${PIPESTATUS[0]}
+            --file "$AGENT_TASK"
+          agent_status=$?
+          build_manifest
+          manifest_status=$?
+          # A rejected selection goes back to the same session once, with the exact reason.
+          session_id=$(jq -R -r -s '[splits("\n") | fromjson? | .sessionID // empty][0] // empty' "$AGENT_EVENTS")
+          if [ "$manifest_status" -ne 0 ] && [ -n "$session_id" ]; then
+            rejection=$(sed 's/^jq: error ([^)]*): //' "$AGENT_REJECTION")
+            echo "::warning::Discovery selection rejected, asking the agent to correct it: $rejection"
+            run_agent "The workflow rejected your final selection: $rejection
+          Correct only that problem, keeping the rest of your decisions, and reply with the complete corrected selection JSON object." \
+              --session "$session_id"
+            agent_status=$?
+            build_manifest
+            manifest_status=$?
+          fi
           set -e
-          jq -s -r '[.[] | select(.type == "text") | .part.text][-1] // empty' \
-            "$AGENT_EVENTS" > "$AGENT_SELECTION"
           if [ -s "$AGENT_SELECTION" ]; then
             sed 's/^/discover-models: /' "$AGENT_SELECTION"
           else
             echo "::error::Discovery agent produced no final text output"
           fi
-          if [ "$agent_status" -ne 0 ] && [ ! -s "$AGENT_SELECTION" ]; then
-            exit "$agent_status"
+          if [ "$manifest_status" -ne 0 ]; then
+            cat "$AGENT_REJECTION" >&2
+            exit 1
           fi
-          jq \
-            --rawfile selection "$AGENT_SELECTION" \
-            -f "$WORKFLOW_SOURCE/.github/workflows/scripts/discovery_manifest.jq" \
-            "$AGENT_TASK" > "$AGENT_MANIFEST"
           if [ "$agent_status" -ne 0 ]; then
             echo "Agent confirmation failed after the manifest was written; continuing to repository validation."
           fi
@@ -364,6 +386,7 @@ jobs:
             "$AGENT_TASK" \
             "$AGENT_SELECTION" \
             "$AGENT_MANIFEST" \
+            "$AGENT_REJECTION" \
             "$DISCOVERY_SUMMARY"
           case "$WORKFLOW_SOURCE" in
             /tmp/emmy-discovery-source-*) rm -rf -- "$WORKFLOW_SOURCE" ;;
