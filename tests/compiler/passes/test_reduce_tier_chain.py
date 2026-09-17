@@ -188,6 +188,29 @@ def test_a_contraction_chain_member_binds_through_the_chain_arm() -> None:
     assert any(isinstance(s, (WarpShuffle, TreeHalve, Smem)) for s in flat), "the cross-thread combine must close the fold"
 
 
+def test_a_partitioned_second_projection_root_is_the_bound_root() -> None:
+    """A reduce plan on a projection's second contraction root must select that root for binding.
+
+    The output-tile selector already did this for ``TILE`` rows, but a ``REDUCE``-only row still
+    bound the first root and lowered the selected root serially in the projection tail. The row was
+    offered and stamped while producing byte-identical Kernel IR to the all-off row.
+    """
+
+    def matvec(axis: Axis, source: str, weight: str, acc: str) -> Fold:
+        a = Load(name=f"{source}_e", input=source, index=(Var("m"), Var(axis.name)))
+        b = Load(name=f"{weight}_e", input=weight, index=(Var(axis.name),))
+        return contraction(axis, a, (b, acc))
+
+    first = matvec(_K, "x", "w", "acc")
+    second = matvec(_J, "y", "v", "acc2")
+    root = projection((first, second), (Assign(name="out", op="add", args=("acc", "acc2")),), results=("out",))
+    bound = factorize(_stamped(root, {second: Reduce.of(coop=64)}, axes=(_K, _J)), root=None)
+
+    strided = [stmt for stmt in _flat(bound.body) if isinstance(stmt, StridedLoop)]
+    assert [(stmt.axis.name, stmt.start, stmt.step.value) for stmt in strided] == [("j", Var("j_co"), 64)]
+    assert bound.block_threads == 64
+
+
 def test_the_walk_offers_and_the_binder_realizes_two_partitioned_members(monkeypatch) -> None:
     """End-to-end through the ACTUAL enumeration, no direct stamping: a chain kernel with two
     reduce members enumerates rows where both members carry the coop band — a row holds ONE worker

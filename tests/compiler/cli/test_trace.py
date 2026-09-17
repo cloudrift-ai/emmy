@@ -229,12 +229,16 @@ def test_trace_accepts_debug_graph_json_as_input_but_emits_yaml(monkeypatch, tmp
 
 
 def test_trace_writes_deterministic_self_contained_programs(tmp_path) -> None:
+    from emmy.compiler.torch_wire import graph_to_wire
+
     graph = trace_inline_code("torch.relu(torch.randn(16,32))")["graph"]
+    original_wire = graph_to_wire(graph)
     first, second = tmp_path / "first.yaml", tmp_path / "second.yaml"
     write_trace_inventory(graph.copy(), first, model="org/model", ctx=_TARGET_CTX)
     write_trace_inventory(graph.copy(), second, model="org/model", ctx=_TARGET_CTX)
     first_doc, second_doc = load_golden_file(first), load_golden_file(second)
     assert first_doc == second_doc
+    assert first_doc["programs"] == [original_wire]
     assert first_doc["programs"] and first_doc["configs"]
     assert all(set(entry) == {"program", "target", "realizations"} for entry in first_doc["configs"])
     assert all(set(entry["realizations"][0]) == {"name", "bindings", "pins"} for entry in first_doc["configs"])

@@ -184,6 +184,24 @@ def test_a_pool_that_holds_the_recorded_row_is_not_walked_whole(monkeypatch) -> 
     assert reason is not None and "WORK@missing" in reason and "re-spelling" in reason
 
 
+def test_a_row_with_only_an_invalid_offered_value_reports_a_semantic_miss() -> None:
+    """An offered key whose requested value is invalid is a normal decode miss, not an error.
+
+    The replay tracks offered keys separately from validated key/value pairs.  When every requested
+    value is invalid, that second set is deliberately empty; the diagnostic still has enough
+    information to report narrowing without indexing a pair set that was never populated.
+    """
+    from dataclasses import replace
+
+    records = _records_of(_HARDWARE_GOLDENS_DIR / "rtx5090_sm120.yaml")
+    record = next(r for r in records if r.name == "matmul.square.512" and _decode(r, records) is None)
+    decided = next(key for key, value in record.knobs.items() if value not in ("", "0"))
+    invalid = replace(record, knobs={decided: "not-a-real-value"})
+
+    reason = decode_record(invalid, siblings_of(invalid, records))
+    assert reason is not None and "NARROWING" in reason and decided in reason
+
+
 def _recipe_paths() -> list[Path]:
     """The recipe-local model goldens — the repository set minus the hardware files above."""
     with _repository_golden_paths() as paths:

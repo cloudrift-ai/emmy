@@ -13,7 +13,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F16
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
-from emmy.compiler.ir.frontend.ir import MatmulOp, RmsNormOp
+from emmy.compiler.ir.frontend.ir import MatmulOp, ReshapeOp, RmsNormOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.loop_wire import loop_graph_from_wire, loop_graph_to_wire
@@ -194,6 +194,41 @@ def test_a_realization_substring_resolves_to_the_exact_name_on_args(tmp_path):
     assert args.realization == "working.relu"
 
 
+def test_dynamic_realization_uses_its_own_reference_instead_of_the_first_sibling(tmp_path):
+    """A selected dynamic row must not inherit the first sibling's static frontend binding."""
+    import torch
+
+    from emmy.commands.compile import resolve_golden_arg
+    from emmy.compiler.backend import torch_ref
+
+    tokens = Dim("num_tokens")
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (tokens, 4)), node_id="x")
+    graph.add_node(ReshapeOp(shape=(1, "num_tokens", 4)), ["x"], Tensor("y", (1, tokens, 4)), node_id="y")
+    graph.inputs, graph.outputs = ["x"], ["y"]
+
+    path = tmp_path / "working-dynamic.yaml"
+    write_trace_inventory(graph, path, ctx=Context.from_target((8, 9)), force_loop_targets=True)
+    document = load_golden_file(path)
+    document["configs"][0]["realizations"] = [
+        {"name": "working.m1", "bindings": {"num_tokens": 1}, "pins": {"FAST_MATH": False}},
+        {"name": "working.dynamic", "bindings": {}, "pins": {"FAST_MATH": False}},
+    ]
+    dump_golden_file(document, path, overwrite=True)
+
+    args = _args(path, realization="working.dynamic")
+    resolve_golden_arg(args)
+
+    assert dict(args._golden_records[0].bindings) == {"num_tokens": 1}
+    x = torch.arange(24).reshape(6, 4)
+    first_fn, first_inputs = torch_ref.build_callable(args._golden_records[0].reference_program, {"x": x})
+    with pytest.raises(RuntimeError, match="shape"):
+        first_fn(*first_inputs)
+    reference = args._golden_reference
+    fn, inputs = torch_ref.build_callable(reference, {"x": x})
+    assert fn(*inputs).shape == (1, 6, 4)
+
+
 def test_duplicate_name_requires_target_scoped_working_file(tmp_path, caplog):
     """A repeated shape name must not silently choose between distinct embedded targets."""
     from emmy.commands.compile import resolve_golden_arg
@@ -249,6 +284,84 @@ def test_named_proposal_is_pinned_and_a_file_walk_leaves_it_to_the_tuner(tmp_pat
     walked = _args(path, _explicit_realization=False)
     resolve_golden_arg(walked)
     assert walked.golden_configs == []
+
+
+def test_named_frontend_kernel_set_child_stays_pinned_after_greedy_compile(tmp_path):
+    """The greedy comparison must not let its measured row supersede a named child's hard pins."""
+    from emmy.commands.compile import resolve_golden_arg
+    from emmy.commands.run import _bench_golden_variants, _cuda_knob_dicts, _sample_replay_knobs
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+    from emmy.compiler.pipeline.search.golden import records_override
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+    from emmy.compiler.torch_wire import graph_to_wire
+
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (Dim(64), Dim(64)), dtype=F16), node_id="x")
+    graph.add_node(InputOp(), [], Tensor("w", (Dim(64), Dim(64)), dtype=F16), node_id="w")
+    graph.add_node(MatmulOp(), ["x", "w"], Tensor("y", (Dim(64), Dim(64)), dtype=F16), node_id="y")
+    graph.inputs, graph.outputs = ["x", "w"], ["y"]
+    desired = {"WORK": "t16x8", "TILE": "f4x6", "REDUCE": "", "STAGE": "", "RASTER": ""}
+    incumbent = {"WORK": "t32x8", "TILE": "f2x6", "REDUCE": "", "STAGE": "", "RASTER": ""}
+    path = tmp_path / "working-kernel-set.yaml"
+    dump_golden_file(
+        {
+            "compute_cap": [8, 9],
+            "programs": [graph_to_wire(graph)],
+            "configs": [
+                {
+                    "program": 0,
+                    "target": {"origins": ["y"]},
+                    "realizations": [
+                        {
+                            "name": "working.parent",
+                            "bindings": {},
+                            "pins": {"FAST_MATH": False},
+                            "kernel_set": ["working.child"],
+                        },
+                        {
+                            "name": "working.child",
+                            "bindings": {},
+                            "pins": {"FAST_MATH": False},
+                            "knobs": desired,
+                        },
+                        {
+                            "name": "working.incumbent",
+                            "bindings": {},
+                            "pins": {"FAST_MATH": False},
+                            "knobs": incumbent,
+                            "measurements": {"emmy_us": 1.0, "reference_us": 2.0, "reference_backend": "torch"},
+                        },
+                    ],
+                }
+            ],
+        },
+        path,
+        overwrite=True,
+    )
+    args = _args(path, realization="working.parent")
+    resolve_golden_arg(args)
+    (sample,) = args.golden_configs
+    expected = {"FAST_MATH": False, **desired}
+    assert _sample_replay_knobs(sample) == expected
+
+    ctx = Context.from_target((8, 9))
+
+    class Backend:
+        def compile(self, source):
+            return Pipeline.build(CUDA_PASSES).run(source, ctx=ctx, db=None)
+
+        async def bench_pinned_async(self, _graph, *, run_inputs=None, run_inputs_key=None, warmup, num_iters):
+            del run_inputs, run_inputs_key, warmup, num_iters
+            return SimpleNamespace(min_ms=1.0, time_ms=1.0, per_launch=[]), None
+
+    backend = Backend()
+    with records_override(args._golden_records):
+        with pinned_knobs({"FAST_MATH": False}):
+            greedy = backend.compile(args._golden_graph.copy())
+        (bench,) = asyncio.run(_bench_golden_variants(backend, args._golden_graph, [sample], warmup=1, iters=1))
+
+    assert any({key: row.get(key, "") for key in incumbent} == incumbent for row in _cuda_knob_dicts(greedy))
+    assert bench.status == "ok" and any({key: row.get(key, "") for key in desired} == desired for row in _cuda_knob_dicts(bench.graph))
 
 
 @pytest.mark.parametrize("explicit", [False, True], ids=["ordinary", "explicit"])

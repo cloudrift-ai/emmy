@@ -1631,7 +1631,9 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             copy_sync=not tile.is_warp or tile.atom.sync_copy_staging,
             # A ring under a blocking copy asks for the register-staged split — that is what makes
             # ``depth`` mean chunks-in-flight here, as it does on the cp.async / TMA transports.
-            staged=stage.depth >= 2,
+            # A static one-chunk stream has no resident chunk to overlap, so splitting its only
+            # copy would issue before the drain and deposit after the drain into uninitialized smem.
+            staged=stage.depth >= 2 and (not isinstance(n_chunks, int) or n_chunks >= 2),
         )
     else:
         assert len(ops.channels) == 1, "cp.async / TMA staging is single-fold — a multi-B node rides the smem compute fill"
