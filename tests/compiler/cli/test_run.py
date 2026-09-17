@@ -603,7 +603,8 @@ def test_unreproducible_pin_flag(monkeypatch):
     assert unreproducible_pin_flag({"TILE": "w2x1"}, [{}]) is None
     assert unreproducible_pin_flag({"TILE": "w2x1"}, [{}, {}]) is None
     # A pinned cut the resolution trace does not carry was not taken: the compile kept the fused kernel.
-    assert "PLACE@map.1/inner=cut realized (unset)" in unreproducible_pin_flag({"PLACE@map.1/inner": "cut"}, [{"TILE": "f2"}], placement_knobs=[])
+    untaken = unreproducible_pin_flag({"PLACE@map.1/inner": "cut"}, [{"TILE": "f2"}], placement_knobs=[])
+    assert "PLACE@map.1/inner=cut realized (unset)" in untaken
     assert unreproducible_pin_flag({"PLACE@map.1/inner": "cut"}, [{"TILE": "f2"}]) is None, "no trace, no gate"
 
 
@@ -688,6 +689,36 @@ def test_bench_golden_variants_unmatched_place_pin_fails_row_without_benching(mo
     assert any("PLACE@map.1/inner.2/map=cut" in flag for flag in benches[0].flags)
     assert benches[1].status == "ok" and benches[1].flags == []
     assert len(benched) == 1
+
+
+def test_bench_golden_variants_gates_the_live_env_route_too(monkeypatch):
+    """A sweep publishes its route through EMMY_KNOBS and varies schedules per --ab row: a row
+    whose compile dropped that route must not bench as a clean result under the row's name."""
+    from types import SimpleNamespace
+
+    from emmy.commands import trace as tmod
+    from emmy.commands.run import _bench_golden_variants
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.cuda.ir import CudaOp
+    from emmy.compiler.pipeline.search.pins import PLACEMENT_DECISIONS_HINT
+
+    monkeypatch.setattr(tmod, "graph_from_code", lambda code, dynamic_shapes=None: (object(), "slug", (None, (), {})))
+    monkeypatch.setenv("EMMY_PLACE@MAP.1/INNER", "cut")
+
+    graph = Graph()
+    graph.add_node(op=CudaOp(kernel_name="k", knobs={"WORK": "t128"}), inputs=[], output=Tensor("o", (4,)), node_id="n0")
+    graph.hints.set(PLACEMENT_DECISIONS_HINT, [])
+
+    async def fake_bench_pinned_async(g, *, run_inputs=None, run_inputs_key=None, warmup, num_iters):
+        raise AssertionError("a row whose env route did not realize must not be benched")
+
+    backend = SimpleNamespace(compile=lambda g: graph, bench_pinned_async=fake_bench_pinned_async)
+    row = SimpleNamespace(name="g.row", knobs={"WORK": "t128"}, shape=None, dynamic=None)
+
+    (bench,) = asyncio.run(_bench_golden_variants(backend, "torch.exp(a)", [row], warmup=1, iters=1))
+
+    assert bench.status == "pin_unmatched" and bench.bench is None
+    assert any("PLACE@map.1/inner=cut" in flag for flag in bench.flags)
 
 
 @pytest.mark.parametrize(

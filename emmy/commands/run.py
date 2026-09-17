@@ -1275,11 +1275,14 @@ async def _bench_golden_variants(
             logger.warning("[golden] %s: compile of the pinned config failed (%s) — row kept as bench_fail", sample.name, exc)
             out.append(_GoldenBench(sample, None, None, [f"compile failed: {exc}"], "bench_fail"))
             continue
+        # The row's own pins AND the live env pins: a sweep publishes its route through
+        # ``EMMY_KNOBS`` and varies schedules per row, so a row whose compile dropped that route
+        # would otherwise bench the planner's own kernel set under the row's name.
         flag = unreproducible_pin_flag(
             replay_knobs,
             _cuda_knob_dicts(g_compiled),
             placement_knobs=_placement_knob_dicts(g_compiled),
-        )
+        ) or env_pin_refusal(_cuda_knob_dicts(g_compiled), _placement_knob_dicts(g_compiled))
         if flag:
             flags.append(f"{flag} — row NOT benched")
             logger.error(
