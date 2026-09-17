@@ -2540,10 +2540,18 @@ class RegStore(Stmt):
                 while ready := [sel for sel in pending if all(value in env for _, value in sel[1])]:
                     sel_name, branches = ready[0]
                     pending.remove(ready[0])
-                    expr = env[branches[-1][1]]
+
+                    # The select is declared f32, and a chain op keeps the tail's own dtype, so a
+                    # branch value narrowed by an earlier op converts back here — a ternary over a
+                    # ``__half`` and a ``float`` does not compile.
+                    def widened(value, ctx=ctx, env=env):
+                        rendered = env[value]
+                        return conv.get(ctx.ssa_dtypes.get(rendered, "f32"), "{}").format(rendered)
+
+                    expr = widened(branches[-1][1])
                     for cond, value in reversed(branches[:-1]):
                         rc = cond.substitute(coord).render(ctx)
-                        expr = f"(({rc}) ? {env[value]} : {expr})"
+                        expr = f"(({rc}) ? {widened(value)} : {expr})"
                     lines.append(f"const float {sel_name}_e{i} = {expr};")
                     env[sel_name] = f"{sel_name}_e{i}"
                     ctx.ssa_dtypes[env[sel_name]] = "f32"

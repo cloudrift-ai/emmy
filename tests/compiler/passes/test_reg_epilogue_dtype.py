@@ -77,3 +77,23 @@ def test_a_mask_over_an_op_result_renders_after_that_op() -> None:
     )
 
     assert source.index("scaled_e0 =") < source.index("masked_e0 = ((") < source.index("result_e0 = masked_e0")
+
+
+def test_a_mask_over_a_narrowed_value_widens_both_branches() -> None:
+    """A chain op keeps the tail's dtype, so a mask over a narrowed value converts back: a ternary
+    mixing ``__half`` and ``float`` does not compile."""
+    from emmy.compiler.ir.expr import BinaryExpr, Literal
+    from emmy.compiler.ir.stmt import Load, Select, SelectBranch
+
+    source, _ = _render(
+        Load(name="ninf", input="neg_inf", index=(Literal(0, "int"),)),
+        Assign(name="narrow", op=ElementwiseImpl("copy"), args=("acc",), dtype=F16),
+        Select(
+            name="masked",
+            branches=(SelectBranch("narrow", BinaryExpr("<=", Var("n"), Var("m"))), SelectBranch("ninf", Literal(1, "int"))),
+        ),
+        Assign(name="result", op=ElementwiseImpl("copy"), args=("masked",)),
+    )
+
+    assert "const __half narrow_e0 = __float2half(_c[0]);" in source
+    assert "const float masked_e0 = ((n + (_t * 2 + 0) <= m + _g) ? __half2float(narrow_e0) : ninf_e0);" in source
