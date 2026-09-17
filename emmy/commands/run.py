@@ -9,6 +9,7 @@ the same shape as ``scripts/bench_block.py`` but for arbitrary inline ops.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import re
@@ -410,7 +411,8 @@ def _handle_run_once(args):
                 run_result, _ = backend.run(compiled, input_data=input_data)
                 if dump and backend.last_debug_result is not None:
                     dump.dump_per_launch_values(backend.last_debug_result.per_launch)
-                err = _check_accuracy(run_result.outputs, _eager_output(module, example_args, example_kwargs))
+                with correctness_oracle():
+                    err = _check_accuracy(run_result.outputs, _eager_output(module, example_args, example_kwargs))
                 if err is not None:
                     logger.log(logging.INFO if quantized else logging.ERROR, "%s", err)
                     if not quantized:
@@ -2361,7 +2363,7 @@ async def bench_lowered_vs_torch(
     if frontend is not None:
         try:
             torch_fn, torch_inputs = torch_ref.build_callable(frontend, input_tensors)
-            with torch.no_grad():
+            with torch.no_grad(), correctness_oracle():
                 eager_out = torch_fn(*torch_inputs)
             if strict_accuracy:
                 correctness = _strict_correctness_proof(result_outputs, eager_out)
@@ -3126,6 +3128,24 @@ def _symbolic_bench_note(sym_env: dict[str, int]) -> str | None:
         return None
     dims = ", ".join(f"{name}={size}" for name, size in sorted(sym_env.items()))
     return f"benched at {dims} (symbolic hint; torch inputs tiled to match)"
+
+
+@contextlib.contextmanager
+def correctness_oracle():
+    """Torch as the CORRECTNESS reference: its GEMMs without the reduced-precision reductions it enables by
+    default. Those trade accuracy for speed inside the reference itself — at K=15360 the default FP16 GEMM
+    leaves 9.6% of its own elements outside ``rtol=atol=1e-3`` of an FP64 product, 0.1% with them off — so a
+    kernel nearer the truth than eager failed ``--strict`` for eager's error. The TIMED eager forward keeps
+    torch's defaults: that is the library a user runs."""
+    import torch
+
+    matmul = torch.backends.cuda.matmul
+    saved = (matmul.allow_fp16_reduced_precision_reduction, matmul.allow_bf16_reduced_precision_reduction)
+    matmul.allow_fp16_reduced_precision_reduction = matmul.allow_bf16_reduced_precision_reduction = False
+    try:
+        yield
+    finally:
+        matmul.allow_fp16_reduced_precision_reduction, matmul.allow_bf16_reduced_precision_reduction = saved
 
 
 def _eager_output(module, args, kwargs):

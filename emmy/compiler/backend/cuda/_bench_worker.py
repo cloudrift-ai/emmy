@@ -242,13 +242,15 @@ async def _run_job(req: dict) -> dict:
                     _comparison_outputs,
                     _eager_output,
                     _strict_correctness_proof,
+                    correctness_oracle,
                 )
 
                 input_data = _bind_inputs(req["graph"], module, args_t, kwargs, checkpoint=payload.get("input"))
                 run_result, _ = backend.run(req["graph"], input_data=input_data)
                 run_outputs = _comparison_outputs(run_result.outputs, req["graph"])
                 if req.get("accuracy") or req.get("strict_accuracy"):
-                    eager_out = _eager_output(module, args_t, kwargs)
+                    with correctness_oracle():
+                        eager_out = _eager_output(module, args_t, kwargs)
                     if req.get("strict_accuracy"):
                         correctness = _strict_correctness_proof(run_outputs, eager_out)
                         if correctness["status"] != "pass":
