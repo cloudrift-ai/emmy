@@ -33,7 +33,16 @@ engine:
     # The full native window fits: the measured KV pool holds 288,281 tokens, 1.10x concurrency at
     # full context, and a planted marker was retrieved from a 249,581-token prompt in 206 s.
     context_length: 262144
-    max_concurrent_requests: 4
+    # Concurrency 16, not 4. At 1,000-token prompts the cap drives throughput almost linearly:
+    # 40.8 tok/s at 4, 76.8 at 8, 133.8 at 16, 235.5 at 32, while per-token decode latency moves
+    # only 92 -> 116 ms across that range. 16 holds P99 time to first token under 6 s; 32 pushes it
+    # to 9.9 s, which is the wrong trade when a caller is waiting. Long prompts are not harmed: the
+    # engine admits what the KV pool holds and queues the rest, so a full-window request serializes
+    # (1.10x at 262,144 tokens) whatever this cap says, and queued time to first token grows by
+    # whole prefills rather than collapsing into preemption. Raising --max-num-batched-tokens to
+    # 8192 was measured and rejected: it grew the pool to 355,162 tokens but left every row inside
+    # run-to-run noise and made 4K prompts at 16 concurrent 69% slower. See RESULTS.md.
+    max_concurrent_requests: 16
     vllm:
       # Stock vLLM has no sm_70 support. This is the 1Cat-vLLM Volta fork; the tag is named for
       # the model it was first built for, but the wheel is the whole fork. It is the first

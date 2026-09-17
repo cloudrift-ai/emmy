@@ -32,7 +32,7 @@ through NCCL, which can ring over linked pairs only.
 | Model | `Qwen/Qwen3.8-27B-FP8@017b9c7af6b5689d5dd426a76e0bc077eb5ca20a` |
 | GPUs | 4 x NVIDIA Tesla V100 SXM2 16GB, compute capability 7.0, driver 580.173.02, NVLink as above |
 | Engine image | `cloudriftai/1cat-vllm-deepseek-v4-flash-0731:1.2.3-d76126608` (vLLM `1.2.3.dev87+gd76126608.d20260810`) |
-| Serving shape | TP4, context 262,144, max 4 concurrent requests, `gpu_memory_utilization` 0.88, text-only |
+| Serving shape | TP4, context 262,144, `gpu_memory_utilization` 0.88, text-only, concurrency cap 4 — the cap this table was measured at; the recipe now ships 16, see Concurrency below |
 | Backends | FLASH_ATTN_V100 attention, Triton Gated DeltaNet prefill, TurboMind FP8 dequantization |
 | Workload | 16 prompts, 1,000 input / 1,000 output tokens, client concurrency 4, temperature 0, ignored EOS, 2 warm-ups, three repeats on one server with seeds 0, 1, 2 |
 
@@ -130,6 +130,52 @@ request with thinking on reasoned past `finish_reason: length` at both 256 and 1
 no call. The same request with three tools offered closed its reasoning after ~320 tokens and produced a call, so the
 failure depends on the prompt rather than on the platform, and it is not fixed. Clients forcing a call should keep
 thinking off for that request, or cap `max_tokens`.
+
+### Concurrency
+
+The cap was raised from 4 to 16 after measuring it. Both tables below are one run per point on one four-card SXM2
+host, so treat differences under about 10% as noise — the qualification lane's own repeats spread that far.
+
+Throughput against the cap, at 1,000-token prompts with client concurrency matched to the server cap:
+
+| Cap | Output throughput | Median TTFT | P99 TTFT | Median TPOT |
+| ---: | ---: | ---: | ---: | ---: |
+| 4 | 40.8 tok/s | 1,024 ms | 2,500 ms | 92 ms |
+| 8 | 76.8 tok/s | 1,686 ms | 4,176 ms | 96 ms |
+| 16 | 133.8 tok/s | 3,310 ms | 5,828 ms | 105 ms |
+| 32 | 235.5 tok/s | 4,778 ms | 9,917 ms | 116 ms |
+
+Throughput scales almost linearly while per-token decode latency barely moves, so the cost of concurrency is paid
+almost entirely in waiting for a prefill slot. 16 was chosen over 32 because it keeps P99 time to first token under
+6 s.
+
+The question that decides whether 16 is safe is what it does to long prompts. Measured at cap 16 against one request
+at a time on the same server:
+
+| Prompt | One request | 16 concurrent, median | 16 concurrent, P99 |
+| ---: | ---: | ---: | ---: |
+| 4K | 1.4 s | 6.2 s | 22.3 s |
+| 16K | 5.6 s | 22.8 s | 112.5 s |
+| 32K | 12.2 s | 132.2 s | 266.0 s |
+| 128K | 75.0 s | 208.5 s | 337.6 s |
+| 262K | 219.2 s | 438.4 s | 653.1 s |
+
+Nothing fails and nothing thrashes. At the full window the behaviour is plain serialization: one request takes
+219 s, and three in flight put the median at 438 s, which is twice that. The engine admits what the pool holds and
+queues the remainder rather than preempting. The knee is at 32K, and it is the pool rather than the cap: sixteen
+32K prompts need 524,288 tokens of key/value cache against a pool of 288,281, so half the batch waits a full cycle.
+Sixteen 16K prompts need 262,144, which still fits.
+
+Two limits here are properties of context length, not of this cap. A full-window prompt costs 219 s of prefill with
+one request and an idle server, which already exceeds a 300 s client timeout. And the engine reports its own ceiling
+at startup: maximum concurrency for 262,144 tokens per request is 1.10x, so one full-window request owns the pool
+whatever the cap says. A client sending many long prompts needs its own concurrency limit or a longer timeout; a
+smaller server cap does not help it.
+
+`--max-num-batched-tokens` was tested at 8192 against the shipped 4096 and rejected. It raised the KV pool from
+288,281 to 355,162 tokens, but no row improved beyond noise, and 4K prompts at 16 concurrent got 69% slower
+(6.2 s to 10.4 s median) because a request arriving mid-step waits longer for a larger step to finish.
+`gpu_memory_utilization` and FP8 key/value cache were not tested, so no claim is made about them.
 
 ### Fit
 
