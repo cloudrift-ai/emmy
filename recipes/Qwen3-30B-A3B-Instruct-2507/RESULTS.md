@@ -52,11 +52,11 @@ the entire advertised context available to one request and matches the measured 
 
 ## Limitations
 
-- FCBK's rental network could not fetch the model or image from their public origins during qualification. The exact
-  model snapshot and a local mirror of the stock image were staged manually. The recipe uses the normal public image
-  and Hugging Face model identifiers; fresh-VM deployment at FCBK still needs working outbound artifact access or a
-  supported provider-local artifact path.
-- The built-in Emmy benchmark client did not mount FCBK's manually staged `/mnt/models` directory. The same vLLM
+- The qualification host could not fetch the model or image from their public origins. The exact model snapshot and
+  a local mirror of the stock image were staged manually. The recipe uses the normal public image and Hugging Face
+  model identifiers; fresh-VM deployment in a restricted network needs outbound artifact access or a supported
+  provider-local artifact path.
+- The built-in Emmy benchmark client did not mount the manually staged `/mnt/models` directory. The same vLLM
   benchmark client and workload were therefore run from the pinned image with that directory mounted read-only.
 - Emmy compiler coverage was not evaluated. This is a stock-vLLM serving qualification, so no compiler golden or
   Emmy comparison is claimed.

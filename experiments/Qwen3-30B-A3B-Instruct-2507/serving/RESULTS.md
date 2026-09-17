@@ -2,7 +2,7 @@
 
 The H200 qualification used the stock-vLLM configuration selected by the canonical recipe: TP1, PP1, 262,144-token
 context, maximum concurrency 1, `gpu_memory_utilization` 0.90, 4,096 maximum batched tokens, and the Hermes tool
-parser. FCBK's restricted outbound path required the pinned model snapshot and image to be staged before the run.
+parser. The restricted outbound path required the pinned model snapshot and image to be staged before the run.
 
 ## NVIDIA H200 141GB x1
 

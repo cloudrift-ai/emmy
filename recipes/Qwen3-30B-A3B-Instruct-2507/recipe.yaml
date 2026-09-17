@@ -2,7 +2,7 @@
 #
 # The checkpoint fits without quantization. The full native context starts successfully and
 # was exercised with retrieval prompts up to 237,815 tokens. See RESULTS.md for the measured
-# workload and the FCBK artifact-delivery limitation.
+# workload and the restricted-network artifact-delivery limitation.
 tags:
   - best-effort
 
