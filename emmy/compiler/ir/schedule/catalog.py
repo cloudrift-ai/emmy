@@ -211,6 +211,13 @@ def scalar_tile_moves() -> list[Tile]:
     return moves
 
 
+def map_tile_moves() -> list[Tile]:
+    """Return the finite pointwise-map tile domain: the per-cell form and the register strips that
+    hand one thread ``reg_n`` contiguous inner-axis elements. The strip runs one step past the
+    scalar-contraction ladder — a map holds no accumulator, so ``f8`` is a width its registers carry."""
+    return [Tile(), *(Tile(regs=(1, reg_n)) for reg_n in (2, 3, 4, 8))]
+
+
 # ``fn`` runs past ``fm``'s widest point because a register row is what covers an output axis a
 # single warp column has to span whole: attention's expectation tiles the value's head dim on N, and
 # at head_dim 256 the score's seam allows exactly one warp column there, so the 32 atoms are the only

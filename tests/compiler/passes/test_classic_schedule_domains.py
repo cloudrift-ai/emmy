@@ -141,7 +141,10 @@ def test_production_enumeration_is_the_compatible_independent_product() -> None:
     leaves = _schedule_leaves(tile, "pointwise", target)
 
     assert {_signature(codec, leaf.schedule) for leaf in leaves} == reference
-    assert len(reference) == offers.bounds[0] == 3
+    # The per-cell form and every register strip dividing the 8-wide axis, ``f8`` included: a map's
+    # strip ladder runs past the scalar-contraction one.
+    assert {dict(row)["TILE"] for row in reference} == {"", "f2", "f4", "f8"}
+    assert len(reference) == offers.bounds[0] == 4
     (materialized,) = leaves[0].expand()
     assert materialized.schedule == leaves[0].schedule
     assert materialized.place == tile.place.on_grid()
