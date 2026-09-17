@@ -1,6 +1,10 @@
+# Stock-vLLM serving configuration qualified on one H200 141GB.
+#
+# The checkpoint fits without quantization. The full native context starts successfully and
+# was exercised with retrieval prompts up to 237,815 tokens. See RESULTS.md for the measured
+# workload and the FCBK artifact-delivery limitation.
 tags:
-  - onboarding
-  - untested
+  - best-effort
 
 model:
   huggingface: "Qwen/Qwen3-30B-A3B-Instruct-2507"
@@ -8,6 +12,23 @@ model:
   rationale: "30.5B BF16 parameters need about 61.1 GB for weights and 79.4 GB at the 1.3x minimum-serving estimate, fitting one 141 GB H200."
   heat: 0
   task: generate
+
+engine:
+  llm:
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    gpu_memory_utilization: 0.9
+    context_length: 262144
+    max_concurrent_requests: 1
+    vllm:
+      image: "vllm/vllm-openai:v0.17.0"
+      # This instruct checkpoint emits Hermes-style JSON tool calls and does not expose a
+      # separate reasoning channel. A 4,096-token prefill chunk leaves ample KV headroom while
+      # bounding activation memory for long prompts.
+      extra_args: >-
+        --max-num-batched-tokens 4096
+        --enable-auto-tool-choice
+        --tool-call-parser hermes
 
 matrices:
   deploy.gpu: "NVIDIA H200 141GB"
