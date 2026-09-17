@@ -445,3 +445,19 @@ def test_a_reference_that_disagrees_with_itself_is_reported_unusable_not_per_row
     # Without the greedy's realized knobs there is nothing to compare, so verdicts pass through.
     assert run_mod.resolve_reference_disagreement([(other, verdict)], None) == [verdict]
     assert run_mod.resolve_reference_disagreement([(other, verdict)], []) == [verdict]
+
+
+def test_the_correctness_oracle_runs_torch_gemms_at_full_precision_and_restores_the_defaults():
+    """The reference a kernel is judged against must not carry torch's speed-for-accuracy reductions: at
+    K=15360 the default FP16 GEMM misses ``--strict``'s own tolerance against an FP64 product on one element
+    in ten, so ``--strict`` rejected an FP32-accumulate kernel for eager's error. The timed eager forward runs
+    outside the context and keeps the defaults."""
+    import torch
+
+    matmul = torch.backends.cuda.matmul
+    before = (matmul.allow_fp16_reduced_precision_reduction, matmul.allow_bf16_reduced_precision_reduction)
+    with run_mod.correctness_oracle():
+        assert not matmul.allow_fp16_reduced_precision_reduction
+        assert not matmul.allow_bf16_reduced_precision_reduction
+    assert (matmul.allow_fp16_reduced_precision_reduction, matmul.allow_bf16_reduced_precision_reduction) == before
+
