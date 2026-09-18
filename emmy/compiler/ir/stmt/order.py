@@ -456,11 +456,15 @@ def _equitable_partition(
     partition: tuple[tuple[int, ...], ...],
     incoming: Sequence[Sequence[tuple[int, int]]],
     outgoing: Sequence[Sequence[tuple[int, int]]],
+    *,
+    splitters: Sequence[int] | None = None,
 ) -> tuple[tuple[int, ...], ...]:
     """Refine vertex colors with the standard smaller-half worklist algorithm.
 
     Each directed relation color is a separate splitter.  Processing only a cell's smaller
-    replacement parts bounds relation visits by ``O((vertices + edges) log vertices)``.
+    replacement parts bounds relation visits by ``O((vertices + edges) log vertices)``. A
+    partition that is equitable but for the cells ``splitters`` names — one already refined, with
+    one vertex individualized out of a cell — starts from those cells alone.
     """
     owner: list[_PartitionCell | None] = [None] * sum(map(len, partition))
     cells: dict[int, _PartitionCell] = {}
@@ -478,7 +482,10 @@ def _equitable_partition(
         next_serial += 1
         for vertex in vertices:
             owner[vertex] = cell
-        enqueue(cell)
+        if splitters is None:
+            enqueue(cell)
+    for index in splitters or ():
+        enqueue(cells[index])
 
     while work:
         splitter = work.popleft()
@@ -601,31 +608,51 @@ def _canonical_labeling(
                     work.append(mapped)
         return frozenset(reached)
 
-    def search(partition: tuple[tuple[int, ...], ...], prefix: tuple[int, ...], *, refined: bool = False) -> tuple[tuple, tuple[int, ...]]:
-        if not refined:
-            partition = _equitable_partition(partition, incoming, outgoing)
+    def learn(left: tuple[int, ...], right: tuple[int, ...]) -> None:
+        if (generator := automorphism(left, right)) is not None and generator not in generators:
+            generators.extend((generator, inverse(generator)))
+
+    # The first leaf and the least leaf so far, by certificate: a later leaf equal to either is
+    # its image under an automorphism, and so is the whole subtree that leaf hangs from, up to the
+    # node where its path leaves the reference's — every certificate in there was already seen.
+    references: dict[tuple, tuple[tuple[int, ...], tuple[int, ...]]] = {}
+
+    def search(
+        partition: tuple[tuple[int, ...], ...], prefix: tuple[int, ...], *, splitters: Sequence[int] | None = None
+    ) -> tuple[tuple, tuple[int, ...], tuple[int, ...]]:
+        if splitters is not None:
+            partition = _equitable_partition(partition, incoming, outgoing, splitters=splitters)
         choices = [(len(cell), index) for index, cell in enumerate(partition) if len(cell) > 1]
         if not choices:
             order = tuple(cell[0] for cell in partition)
-            return certificate(order), order
+            return certificate(order), order, prefix
 
         _, cell_index = min(choices)
         cell = partition[cell_index]
         candidate_set = frozenset(cell)
         covered: set[int] = set()
-        best: tuple[tuple, tuple[int, ...]] | None = None
+        best: tuple[tuple, tuple[int, ...], tuple[int, ...]] | None = None
         for vertex in cell:
             if vertex in covered:
                 continue
             covered.update(orbit(vertex, candidate_set, prefix) if _prune else {vertex})
             rest = tuple(member for member in cell if member != vertex)
             individualized = (*partition[:cell_index], (vertex,), rest, *partition[cell_index + 1 :])
-            result = search(individualized, (*prefix, vertex))
+            result = search(individualized, (*prefix, vertex), splitters=(cell_index,))
             if best is None or result[0] < best[0]:
                 best = result
             elif result[0] == best[0]:
-                if (generator := automorphism(best[1], result[1])) is not None and generator not in generators:
-                    generators.extend((generator, inverse(generator)))
+                learn(best[1], result[1])
+            known = references.get(result[0])
+            if known is None:
+                if _prune and (not references or result[0] < min(references)):
+                    if len(references) > 1:
+                        del references[max(references)]
+                    references[result[0]] = (result[1], result[2])
+            elif known[1] != result[2]:
+                learn(known[0], result[1])
+                if known[1][: len(prefix)] != prefix:
+                    return best
         assert best is not None
         return best
 
@@ -636,7 +663,7 @@ def _canonical_labeling(
     else:
         # Exact graph canonization has no known near-linear worst-case algorithm.  Keep the
         # individualization search off the ordinary path and use it only for unresolved cells.
-        labeling = search(refined, (), refined=True)
+        labeling = search(refined, ())
     ranks = [0] * count
     for rank, vertex in enumerate(labeling[1]):
         ranks[vertex] = rank
