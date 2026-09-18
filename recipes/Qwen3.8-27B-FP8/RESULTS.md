@@ -172,6 +172,29 @@ at startup: maximum concurrency for 262,144 tokens per request is 1.10x, so one 
 whatever the cap says. A client sending many long prompts needs its own concurrency limit or a longer timeout; a
 smaller server cap does not help it.
 
+Raising the cap does not slow a request that arrives alone. Per-token prefill rate at concurrency 1 on the cap-16
+server, against the single-request ladder above that was measured with the cap at 4:
+
+| Prompt | TTFT at concurrency 1 | Prefill rate | Against cap 4 |
+| ---: | ---: | ---: | ---: |
+| 4K | 1.37 s | 2,998 tok/s | see note |
+| 16K | 5.60 s | 2,924 tok/s | +0.5% |
+| 32K | 12.21 s | 2,683 tok/s | -0.3% |
+| 128K | 75.03 s | 1,747 tok/s | 0.0% |
+| 262K | 219.24 s | 1,195 tok/s | -1.4% |
+
+The cap governs how many requests are admitted, not how fast one is processed, and the measurement agrees from 16K
+up. The 4K row reads 18.8% faster on the cap-16 server, which is protocol rather than platform: the published ladder
+planted a passphrase in each prompt and streamed one request, while this lane sent random prompts through the bench
+client, and at 1.4 s the fixed per-request overhead is a large share of the total. Where prefill dominates the two
+methods agree within 1.4%.
+
+The same rows show what context length alone costs. Prefill runs at about 3,000 tokens/s up to 16K, holds 90% of that
+at 32K, and falls to 1,747 at 128K and 1,195 at the full window - 2.5x slower per token across a 64x longer prompt,
+which is 160x the wall-clock time. The degradation is that mild because 48 of the 64 layers are Gated DeltaNet, whose
+cost is linear in sequence length; only the remaining 16 pay the quadratic attention cost. The floor this sets is
+219 s to first token for a full-window prompt on an idle server, which no cap setting changes.
+
 `--max-num-batched-tokens` was tested at 8192 against the shipped 4096 and rejected. It raised the KV pool from
 288,281 to 355,162 tokens, but no row improved beyond noise, and 4K prompts at 16 concurrent got 69% slower
 (6.2 s to 10.4 s median) because a request arriving mid-step waits longer for a larger step to finish.
