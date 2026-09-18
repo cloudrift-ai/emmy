@@ -258,6 +258,7 @@
  "tests/compiler/passes/test_classic_schedule_domains.py::test_tensor_core_enumeration_is_the_compatible_independent_product": 0.09,
  "tests/compiler/passes/test_conv1d_einsum_rules.py::test_causal_conv1d_with_zero_width_chunk_pad_matches_eager[loop]": 0.07,
  "tests/compiler/passes/test_conv1d_einsum_rules.py::test_depthwise_conv1d_matches_eager[loop]": 0.07,
+ "tests/compiler/passes/test_cut_forks.py::test_a_composed_route_skips_a_bare_key_and_still_fails_on_a_broken_one": 5.3,
  "tests/compiler/passes/test_cut_forks.py::test_a_recorded_kernel_set_deploys_the_cut_every_entry_spells": 11.55,
  "tests/compiler/passes/test_cut_forks.py::test_a_recorded_schedule_row_never_routes": 7.6,
  "tests/compiler/passes/test_cut_forks.py::test_bare_and_scoped_place_cuts_compose_in_one_decision": 0.26,
