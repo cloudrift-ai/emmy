@@ -90,16 +90,14 @@ def _contraction_reductions(tile: TileOp, node, facts: ContractionFacts) -> tupl
     return _reduction_domain(tile, node) if facts.k_axis.extent.is_static else (Reduce(),)
 
 
-def _fold_states(op) -> frozenset[str]:
-    """Return the Fold state names visible to the projection tail."""
-    if not isinstance(op, Fold):
-        return frozenset()
-    # What the term binds into its consumer, at either arity: a reducing fold exposes its carried
-    # state, a projection its operands'. ``lift.body`` holds statements only, so the terms below a
-    # projection are exactly its operands.
-    if op.axis is not None:
-        return frozenset(op.exposes)
-    return frozenset(name for edge in op.operands for name in edge.exposes)
+def _fragment_projection(tile: TileOp) -> tuple[list, frozenset[str]]:
+    """The lowered work outside the computed roots, including nested sibling projections."""
+    from emmy.compiler.ir.tile.ops import kernel_roots  # noqa: PLC0415 — tile.ops reads this package
+
+    roots = kernel_roots(tile.op)
+    computed = {stmt for root in roots for stmt in root.lower(axes=tile.axes)}
+    tail = [stmt for stmt in tile.op.lower(stores=tuple(tile.output_specs), axes=tile.axes) if stmt not in computed]
+    return tail, frozenset(name for root in roots for name in root.exposes)
 
 
 def _fragment_epilogue_ok(tail: list, states: frozenset[str]) -> bool:
@@ -325,12 +323,7 @@ def _atom_families(tile: TileOp, target, node, tail: list, packed: tuple = (None
 
 def _warp_atoms(tile: TileOp, target, node) -> tuple[str, ...]:
     """Project tensor-core atoms from contraction, dtype, address, and target facts."""
-    from emmy.compiler.ir.tile.ops import kernel_roots  # noqa: PLC0415 — tile.ops reads this package; module level would cycle
-
-    roots = kernel_roots(tile.op)
-    computed = {stmt for root in roots for stmt in root.lower(axes=tile.axes)}
-    tail = [stmt for stmt in tile.op.lower(stores=tuple(tile.output_specs), axes=tile.axes) if stmt not in computed]
-    states = frozenset(name for root in roots for name in root.exposes)
+    tail, states = _fragment_projection(tile)
     packed = tile.packed_reading(node)
     if _node_refusal(tile, target, node, _fragment_epilogue_ok(tail, states), packed) is not None:
         return ()
