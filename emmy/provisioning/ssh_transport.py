@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import signal
 import tempfile
 
 logger = logging.getLogger(__name__)
@@ -35,27 +36,30 @@ def ssh_base_args(server, ssh_key, ssh_port):
     return args
 
 
-def make_run_cmd(server, ssh_key, ssh_port, dry_run=False):
-    """Create a run_cmd callable for SSH execution."""
+def make_run_cmd(server, ssh_key, ssh_port, dry_run=False, *, local=False):
+    """Create a run_cmd callable for SSH or local command execution."""
 
     async def run_cmd(command, stream=True, timeout=600, log_output=False):
         # Use sg to run docker commands under the docker group
-        if command.strip().startswith("docker"):
+        if local:
+            full_cmd = command
+        elif command.strip().startswith("docker"):
             escaped = command.replace('"', '\\"')
             full_cmd = f'sg docker -c "cd {REMOTE_DEPLOY_DIR} && {escaped}"'
         else:
             full_cmd = f"cd {REMOTE_DEPLOY_DIR} && {command}"
         if dry_run:
-            logger.info(f"[dry-run] ssh {server}: {full_cmd}")
+            logger.info(f"[dry-run] {'local' if local else f'ssh {server}'}: {full_cmd}")
             return 0, "", ""
 
-        ssh_args = ssh_base_args(server, ssh_key, ssh_port)
-        ssh_args.append(full_cmd)
+        argv = ["bash", "-c", full_cmd] if local else [*ssh_base_args(server, ssh_key, ssh_port), full_cmd]
 
+        proc = None
         try:
             use_pipe = not stream or log_output
             proc = await asyncio.create_subprocess_exec(
-                *ssh_args,
+                *argv,
+                start_new_session=local,
                 stdout=asyncio.subprocess.PIPE if use_pipe else None,
                 stderr=asyncio.subprocess.PIPE if use_pipe else None,
             )
@@ -83,14 +87,29 @@ def make_run_cmd(server, ssh_key, ssh_port, dry_run=False):
                 stdout = "" if stream else (stdout_bytes.decode() if stdout_bytes else "")
                 stderr = "" if stream else (stderr_bytes.decode() if stderr_bytes else "")
                 return proc.returncode, stdout, stderr
-        except TimeoutError:
-            logger.error(f"Command timed out after {timeout}s: {command}")
-            proc.kill()
-            await proc.wait()
+        except (TimeoutError, asyncio.CancelledError) as exc:
+            if not isinstance(exc, asyncio.CancelledError):
+                logger.error(f"Command timed out after {timeout}s: {command}")
+            if proc is not None:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL) if local else proc.kill()
+                except ProcessLookupError:
+                    pass
+                await proc.wait()
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             return 1, "", ""
         except Exception as e:
             logger.error(f"Error running SSH command: {e}")
             return 1, "", ""
+        finally:
+            if local and proc is not None:
+                # Background descendants belong to this finite command, including when the
+                # shell exits normally before they do. Never leak them into the next row.
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
     return run_cmd
 

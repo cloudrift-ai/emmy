@@ -134,7 +134,7 @@ def test_compile_budget_stops_between_kernels_instead_of_after_the_whole_load(mo
     from emmy.compiler.backend.cuda import program
 
     compiled = []
-    monkeypatch.setattr(program, "_load_kernel", lambda name, spec: compiled.append(name))
+    monkeypatch.setattr(program, "_load_kernel", lambda name, spec, **kwargs: compiled.append(name))
 
     def _at(*ticks):
         clock = iter(ticks)
@@ -160,7 +160,7 @@ def test_the_compile_budget_reaches_the_kernel_load_as_a_deadline(monkeypatch):
     seen = {}
     monkeypatch.setattr(program, "_time_module", SimpleNamespace(monotonic=lambda: 100.0))
 
-    def _capture(plan, *, deadline=None):
+    def _capture(plan, *, deadline=None, cubin_dir=None):
         seen["deadline"] = deadline
         raise program.CompileBudgetExceeded("stop here")
 

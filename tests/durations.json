@@ -40,6 +40,8 @@
  "tests/compiler/backend/test_emit.py::test_reduce_emits_k_loop": 0.11,
  "tests/compiler/backend/test_emit.py::test_softmax_emits_multiple_k_loops": 0.08,
  "tests/compiler/backend/test_emit.py::test_softmax_emits_per_element_store": 0.07,
+ "tests/compiler/backend/test_native_gpu.py::test_native_gpu_failure_restarts_cleanly[cuda_error]@cuda": 0.53,
+ "tests/compiler/backend/test_native_gpu.py::test_native_gpu_failure_restarts_cleanly[deadline]@cuda": 0.57,
  "tests/compiler/backend/test_source_determinism.py::test_kernel_source_identical_across_processes": 2.81,
  "tests/compiler/backend/test_torch_ref.py::test_dynamic_w8a8_torch_compile_is_fullgraph": 1.23,
  "tests/compiler/backend/test_torch_ref.py::test_zero_width_pad_is_runnable_identity[f16-torch_dtype0]": 0.19,

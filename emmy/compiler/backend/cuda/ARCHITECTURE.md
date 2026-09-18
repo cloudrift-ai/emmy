@@ -344,6 +344,12 @@ launch — consumed by `--dump-dir` runs.
 
 ## Invariants
 
+Standalone pack comparisons reuse `CompiledProgram.build_from_plan` with an explicit cubin directory. The persistent
+Python worker retains one reference program, while the native worker shares its parent-side supervisor with a JSON
+codec and no retries. Process cancellation and malformed responses kill/reap the child; ordinary Python job errors
+still honor the child's healthy/retire verdict. See the standalone runtime architecture for the supported subset and
+timing boundaries. Existing autotune and model comparison behavior remains unchanged.
+
 - `CudaOp.arg_order` embeds the original node id as the output buffer
   name. The lowering rules therefore mutate node ops **in place**
   instead of splicing a fresh node — see `pipeline/ARCHITECTURE.md`

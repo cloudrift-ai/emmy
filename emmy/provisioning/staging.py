@@ -98,6 +98,7 @@ async def stage_to_remote(
     remote_dir: str,
     dry_run: bool = False,
     require_clean: bool = False,
+    local: bool = False,
 ) -> StagedSourceProvenance | None:
     """Stream a tar of staged files into `remote_dir` on the remote VM.
 
@@ -117,6 +118,9 @@ async def stage_to_remote(
         git_revision=await _git_output(repo_root, "rev-parse", "HEAD"),
         git_dirty=bool(dirty),
     )
+
+    if local:
+        return provenance
 
     if dry_run:
         logger.info(f"[dry-run] stage {len(files)} files to {server}:{remote_dir}")

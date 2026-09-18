@@ -85,3 +85,6 @@ docs/.vercel
 
 # Recipes staged into the package for a distribution build (scripts/prepare_dist.py)
 /emmy/recipes/
+
+# Native runtime build output
+/target/

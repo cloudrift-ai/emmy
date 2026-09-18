@@ -100,6 +100,10 @@ so every task's result reflects its host's stand-up cost. `vm_provision` is omit
 
 ## Command source staging
 
+An explicitly local command host bypasses remote provisioning and SSH. Its transport runs a local shell in an owned
+process group and terminates descendants on timeout, cancellation, or shell exit. Local staging validates the declared
+paths and records provenance while leaving execution in the live checkout; callers must keep that source stable.
+
 Command recipes stage only the Git-visible files under their declared paths: tracked and untracked files are included,
 while ignored files are excluded. `command.strict` rejects dirty selected paths before any transfer. Staging returns
 the invoking worktree's revision and path-scoped dirty flag to the benchmark runner, which records that source instead

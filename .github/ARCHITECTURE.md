@@ -33,7 +33,7 @@ outside the repository, post that body to GitHub, and leave the tracked template
 
 ## Pull-request checks
 
-**Tests** runs three parallel jobs and installs the CI dependency set on Python 3.13. A newer commit cancels the
+**Tests** runs four parallel jobs and installs the CI dependency set on Python 3.13. A newer commit cancels the
 previous run for the same pull request. The GitHub-hosted lint job runs Ruff check and format verification. The
 compiler-heavy job uses `ubuntu-runners` for `make test`, including `tests/github/` coverage for helpers under
 `.github/scripts/` and `.github/workflows/scripts/`. Hugging Face downloads used by tests are cached because anonymous
@@ -42,6 +42,9 @@ non-publishing build path used by the release workflow, and requires one wheel a
 workflow has no write permission and does not use deployment credentials. The test step has a 38-minute execution cap
 and reuses the environment installed before that step; the outer 45-minute job allowance also covers dependency
 installation and cache setup.
+
+The native-runtime job runs Rustfmt, Clippy with warnings denied, and locked Cargo tests on a GitHub-hosted runner.
+These checks require no GPU. Native GPU parity and failure recovery run through `make test-native` on supplied hardware.
 
 ## Package publication
 
