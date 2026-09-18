@@ -61,6 +61,14 @@ It uses the run command's scaled correctness check: periodic promotion trades ac
 at K = 15360 a flat `1e-3` tolerance does not hold for an FP16 output even in the FP32-accumulate lane. Report each
 lane against its own task's eager, and keep the two lanes in separate columns.
 
+The `gemma4_serving` recipe is the same article's serving table: its six points in its three vLLM lanes (stock vLLM
+0.23.0, vLLM with the Emmy plugin, and the plugin's fast-math fork), eighteen tasks on one RTX 5090 with the article's
+per-workload knobs. Every Emmy lane boots under `EMMY_STRICT_EVIDENCE=1`, so the RTX 5090 Gemma 4 serving golden's
+rows decide every kernel the server compiles and a fork no row decides fails the boot; the image is the plain
+`vllm-emmy` base built at the commit the run names, compiling its programs on first boot. It is a reproduction of the
+article's protocol on the current compiler, not the preregistered same-image A/B below, which runs the standard lane
+only from the warmed derivative image.
+
 The two block-scaled FP8 tasks trace `Qwen/Qwen3-0.6B-FP8`: 128×128 weight blocks with activations quantized per
 token and per 128-wide K group, the form of the official Qwen, DeepSeek, and GLM FP8 releases and of the datacenter
 serving rows, while the per-channel dynamic form stays in the kernels recipe's `fp8-common` study. Instead of tracing,
@@ -167,6 +175,7 @@ form; the separate FP8 and NVFP4 rows cover them.
 | Platform | Recipe | Purpose | Claim status |
 | --- | --- | --- | --- |
 | RTX 5090 | Gemma-4-12B-it, TP1 | Same-image stock and Emmy A/B | Primary matched-system result after semantic review |
+| RTX 5090 | Gemma-4-12B-it, TP1 (`gemma4_serving`) | The article's three-lane matrix under strict evidence | Reproduction of the article's protocol; both precision lanes |
 | 16x V100 | DeepSeek-V4-Flash-0731, TP8xPP2 | New checkpoint on the proven SM70 serving path | Portability result until a matched stock arm exists |
 | 1x A100 | Qwen3-8B BF16, TP1 | vLLM and megakernel (MPK) decode comparison | MPK harness pair and stock vLLM |
 

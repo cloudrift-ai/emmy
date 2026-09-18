@@ -514,6 +514,33 @@ def test_gemma4_kernels_replay_a_hand_recorded_golden_per_lane(project_root) -> 
     assert recipe.command.strict is True
 
 
+def test_gemma4_serving_runs_the_article_matrix_with_the_golden_deciding_every_emmy_lane(project_root) -> None:
+    """The article's six points in its three vLLM lanes; every Emmy lane boots under strict evidence, so the
+    serving golden's rows decide every kernel and a fork no row decides fails the boot rather than the prior."""
+    tasks = enumerate_tasks([_experiment(project_root, "gemma4_serving")])
+    assert len(tasks) == 18
+    points = {}
+    for task in tasks:
+        assert task.recipe.model.revision == "707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7"
+        assert task.recipe.deploy.gpu == "NVIDIA GeForce RTX 5090" and task.recipe.engine.llm.gpu_memory_utilization == 0.96
+        benchmark = task.recipe.benchmark
+        assert benchmark.seed == 0 and benchmark.temperature == 0 and benchmark.ignore_eos is True
+        assert "--no-enable-prefix-caching" in task.recipe.engine.llm.vllm.extra_args
+        vllm = task.recipe.engine.llm.vllm
+        lane = "stock" if "EmmyGenModel" not in vllm.extra_args else ("fm" if "EMMY_FAST_MATH=1" in vllm.extra_env else "std")
+        if lane != "stock":
+            assert "EMMY_STRICT_EVIDENCE=1" in vllm.extra_env and vllm.image.startswith("cloudriftai/vllm-emmy:")
+        points.setdefault((benchmark.random_input_len, benchmark.random_output_len, benchmark.max_concurrency), set()).add(lane)
+    assert points == {
+        (256, 256, 1): {"stock", "std", "fm"},
+        (256, 256, 64): {"stock", "std", "fm"},
+        (4096, 4096, 1): {"stock", "std", "fm"},
+        (4096, 4096, 4): {"stock", "std", "fm"},
+        (4096, 4096, 8): {"stock", "std", "fm"},
+        (8192, 256, 4): {"stock", "std", "fm"},
+    }
+
+
 def test_every_command_variant_renders(project_root) -> None:
     root = Path(project_root) / EXP
     rendered = 0
