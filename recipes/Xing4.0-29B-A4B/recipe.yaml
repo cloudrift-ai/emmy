@@ -1,0 +1,11 @@
+tags:
+- onboarding
+- untested
+model:
+  huggingface: XingChen-AGI/Xing4.0-29B-A4B
+  rationale: Fresh 31B/4B-active MoE, strong early HF trending, apache-2.0.
+  heat: 75
+  task: generate
+matrices:
+- deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Workstation Edition
+  deploy.gpu_count: 2

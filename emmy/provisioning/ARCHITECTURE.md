@@ -38,8 +38,10 @@ provisioning/
 
 A GPU missing from `GPU_INSTANCE_TYPES`, or mapped only to base types the provider no longer stocks, is
 unreachable: `iter_candidates()` raises or yields instance types with no nodes, and the recipe-query availability
-annotation quietly reports the deployment as unavailable rather than failing. Every GPU a recipe declares must
-therefore have a current entry, and the entries stay ordered with the stocked base type first.
+annotation quietly reports the deployment as unavailable rather than failing. Every GPU a provider rents must
+therefore have a current entry, and the entries stay ordered with the stocked base type first. A recipe may still
+name a GPU nobody rents, such as a local card: it is never selected for a rented run. Tests check only that a
+recipe's GPU is a known card, so a rented GPU missing its entry is not caught offline.
 
 The orchestrator tries candidates in this order until one succeeds or all are exhausted. Without a provider filter,
 fallback follows the hardware table across providers. An explicit `--provider` restricts the entire candidate list,

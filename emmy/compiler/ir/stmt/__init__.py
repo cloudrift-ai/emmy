@@ -5,12 +5,9 @@ Defined here rather than under any one IR package because all three IRs
 (Loop, Tile, Kernel) consume the same leaf vocabulary:
 
 - ``Stmt`` — abstract base for every body statement.
-- Leaves: ``Load``, ``Assign``, ``Accum``, ``Mma``, ``Init``, ``Write``,
+- Leaves: ``Load``, ``Assign``, ``Accum``, ``Init``, ``Write``,
   ``Select``, ``SelectBranch`` — pure compute primitives that read/write SSA
-  names and external buffers (in :mod:`.leaves`). ``Mma`` is the tensor-core
-  fused multiply-accumulate (``c += a @ b``) — it carries the atom kind and
-  names its A/B operand ``Load``s by SSA value (the operand loads stay plain),
-  and is lowered by ``kernel/005_lower_atom_tile``.
+  names and external buffers (in :mod:`.leaves`).
 - Block stmts: ``Loop``, ``StridedLoop``, ``Cond`` — carry child bodies
   (in :mod:`.blocks`).
 - Tree walks: :meth:`Body.iter` (pre-order recursive) and
@@ -60,12 +57,9 @@ from emmy.compiler.ir.stmt.leaves import (
     Init,
     Let,
     Load,
-    Mma,
     OutputSpec,
-    Pack,
     Select,
     SelectBranch,
-    Unpack,
     Write,
     ZeroPrologue,
     mask_select_predicate,
@@ -84,16 +78,13 @@ __all__ = [
     "Let",
     "Load",
     "Loop",
-    "Mma",
     "mask_select_predicate",
-    "Pack",
     "RenderCtx",
     "ZeroPrologue",
     "Select",
     "SelectBranch",
     "Stmt",
     "StridedLoop",
-    "Unpack",
     "Write",
     "OutputSpec",
     "normalize_body",

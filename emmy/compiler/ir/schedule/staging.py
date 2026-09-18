@@ -213,7 +213,7 @@ def _chunk_warp_stage(
     # dim, so the extent enters neither the chunk width nor the gmem row stride, and the last chunk
     # simply overhangs. Both ends of that tail are already disciplined: the fill clamps the
     # overhanging key row to the last valid one (a TMA box zero-fills instead), and the drain's
-    # boundary ``FragmentMask`` has put those keys at the pivot identity, so they weigh exactly
+    # boundary mask has put those keys at the pivot identity, so they weigh exactly
     # zero and the duplicate value rows fold to nothing. A TRANSPOSED value strides its gmem rows
     # BY the key extent, so it keeps the static, chunk-divisible demand every staged operand makes.
     ragged = not k_axis.extent.is_static and not view.b_trans

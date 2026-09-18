@@ -16,11 +16,11 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Expr, Var
 from emmy.compiler.ir.stmt.base import INDENT, RenderCtx, Stmt, _pad, pretty_body, render_body
 from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.leaves import Accum, Mma
+from emmy.compiler.ir.stmt.leaves import Accum
 
 # The loop-carried reduce accumulators — a Loop is a *reduce* loop iff its immediate
 # body holds one of these (the predicate `is_reduce` keys off, see below).
-_CARRIERS = (Accum, Mma)
+_CARRIERS = (Accum,)
 
 
 def _source_suffix(axis: Axis) -> str:
@@ -90,8 +90,8 @@ class Loop(Stmt):
 
     @property
     def is_reduce(self) -> bool:
-        """A loop is a reduce-loop iff its immediate body contains a carrier (``Accum`` or its
-        tensor-core form ``Mma``) — read off the body, never annotated."""
+        """A loop is a reduce-loop iff its immediate body contains a carrier (``Accum``) — read off
+        the body, never annotated."""
         return any(isinstance(s, _CARRIERS) for s in self.body)
 
     def pretty(self, indent: str = "") -> list[str]:
@@ -289,8 +289,8 @@ class StridedLoop(Stmt):
 
     @property
     def is_reduce(self) -> bool:
-        """A strided loop is a reduce-loop iff its immediate body contains a carrier (``Accum`` /
-        ``Mma``) — read off the body, never annotated."""
+        """A strided loop is a reduce-loop iff its immediate body contains a carrier (``Accum``) —
+        read off the body, never annotated."""
         return any(isinstance(s, _CARRIERS) for s in self.body)
 
     def pretty(self, indent: str = "") -> list[str]:

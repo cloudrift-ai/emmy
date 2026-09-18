@@ -15,7 +15,7 @@ Stamping rules:
   and ``pow`` are promoted to f32 (overflow guard, below).
 - ``Write(output, value)`` — ``value_dtype = ssa[value]``. The destination
   buffer dtype stays a render-time concern; only the value side is stamped.
-- ``Accum`` / ``Init`` / ``Pack`` / ``Unpack`` are already typed — register
+- ``Accum`` / ``Init`` are already typed — register
   them in the running ``ssa_dtypes`` so downstream Assigns / Writes pick up
   the right arg dtype.
 
@@ -33,7 +33,7 @@ from emmy.compiler.dtype import get as dtype_get
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.expr import Literal
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Let, Load, Pack, Stmt, Unpack, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Let, Load, Stmt, Write
 from emmy.compiler.ir.stmt.base import dtype_promote
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 
@@ -77,11 +77,6 @@ def _seed_explicit_dtypes(body: Body, ctx: _StampCtx) -> None:
             ctx.ssa_dtypes.update((name, s.dtype) for name in s.names)
         elif isinstance(s, (Assign, Accum, Init, Let)) and s.dtype is not None:
             ctx.ssa_dtypes[s.name] = s.dtype
-        elif isinstance(s, Pack):
-            ctx.ssa_dtypes[s.name] = s.dtype
-        elif isinstance(s, Unpack):
-            ctx.ssa_dtypes[s.low_name] = s.lane_dtype
-            ctx.ssa_dtypes[s.high_name] = s.lane_dtype
         for nested in s.nested():
             _seed_explicit_dtypes(nested, ctx)
 
@@ -108,13 +103,6 @@ def _stamp_stmt(s: Stmt, ctx: _StampCtx) -> Stmt:
             s = replace(s, dtype=F32)
         if s.dtype is not None:
             ctx.ssa_dtypes[s.name] = s.dtype
-        return s
-    if isinstance(s, Pack):
-        ctx.ssa_dtypes[s.name] = s.dtype
-        return s
-    if isinstance(s, Unpack):
-        ctx.ssa_dtypes[s.low_name] = s.lane_dtype
-        ctx.ssa_dtypes[s.high_name] = s.lane_dtype
         return s
     # Block-structured stmts (Tile / Loop / StridedLoop / Cond, …):
     # recurse through children via the generic ``nested()`` / ``with_bodies()``

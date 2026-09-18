@@ -44,7 +44,7 @@ projection recomputes the gate and up products inside its operand; neither runs 
 length, and both are left out of the goldens. The seq-512 causal-mask kernel is left out as well: its output is -inf
 by construction, which the strict check refuses. The previous decode golden covered the q and k projections; that
 coverage returns with a fusion change. Projection performance is measured separately, on isolated linears against
-vLLM's block-FP8 kernels, in `evaluation_results/2026-09-10_fp8-block-linear-rtx5090.md`.
+vLLM's block-FP8 kernels, by `scripts/bench_quant_linear.py --format fp8-block`.
 
 **Run.** Timestamp 2026-09-11T03:38:27Z, run ID `20260911T033827Z`, `emmy bench --local` on the host `kenshin`: one
 NVIDIA GeForce RTX 5090 (driver 580.173.02), AMD Ryzen 9 9950X3D, Ubuntu 24.04.2, kernel 7.0.0-28. The lane's staged

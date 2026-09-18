@@ -129,12 +129,11 @@ class ShapeKey:
         constructors, so a new key dimension (e.g. the planned symbolic-axis flag)
         lands in one place instead of per join site.
 
-        ``is_warp`` derives from the operand-dtype multiset (``S_dtype_f32``), NOT
-        ``S_n_mma``: the stamp pass runs at fusion end, before the tile tier emits
-        ``Mma`` stmts, so ``S_n_mma`` is 0.0 on every stamped row — keying on it
-        merged the fp32/fp16 twins (and silently dropped fp16 goldens from the
-        diagnostics joins), the bug class this single constructor exists to
-        prevent.
+        ``is_warp`` derives from the operand-dtype multiset (``S_dtype_f32``): the stamp
+        pass runs at fusion end, before any tensor-core decision, so no stamped feature can
+        tell the fp32/fp16 twins apart except the dtype one — keying on anything else merged
+        them (and silently dropped fp16 goldens from the diagnostics joins), the bug class this
+        single constructor exists to prevent.
 
         ``kind`` classifies the sweep kinds off the stamped histogram (values measured
         by tracing each golden kind's snippet to the stamped op): a sweep op has
@@ -213,12 +212,9 @@ class ShapeKey:
 
 def is_matmul(s: dict) -> bool:
     """Histogram heuristic for "these ``S_*`` features describe a matmul": a product feeding a
-    reduce-add over >=2 distinct inputs.
-
-    ``S_n_mma`` is NOT usable as the marker: the stamp pass runs at fusion end, before the tile
-    tier emits ``Mma`` stmts, so it is 0.0 on every stamped row — gating on it made golden
-    coverage permanently empty and dropped every fp16 golden from the rank/deploy joins (the same
-    trap :meth:`ShapeKey.from_s_features` documents)."""
+    reduce-add over >=2 distinct inputs. The stamp pass runs at fusion end, before any tensor-core
+    decision, so the histogram is the only marker there is (the same trap
+    :meth:`ShapeKey.from_s_features` documents)."""
     return bool(s.get("S_reduce_add", 0) and s.get("S_pw_multiply", 0) and s.get("S_n_distinct_input", 0) >= 2)
 
 

@@ -79,7 +79,7 @@ An exact-SHA `emmy recipe query` reads the rolling `recipes/` root and expands i
 tracked `discovery_task.jq` filter groups those rows into recipe records and bounded scoring batches. The skill's
 lifecycle and scoring prompts are attached from that same workflow commit, so the skill and GitHub Actions share one
 prompt source. Three source investigators collect independent demand evidence, then hidden scorer subagents score the
-deterministic batches without selecting lifecycle states. Hidden fit subagents size one onboarding model each, in
+deterministic batches without selecting lifecycle states. Hidden fit subagents size one new candidate each, in
 parallel, reading that checkpoint's published configuration and the `emmy/gpu.py` capacity registry under the shared
 `prompts/model-fit.md` contract; the parent relays their deployments and authors no hardware itself. The parent
 returns only scores, maintained IDs, obsolete proposals, new onboarding models, and the sized deployments. The tracked
@@ -102,10 +102,9 @@ plugin directory, attached discovery skill, and prompt files come from the exact
 This lets a manual dispatch test a workflow PR without copying its implementation commits into the rolling branch or
 silently using an older manifest contract. The manifest filter reads the last fenced or bare object carrying exactly
 the five expected selection fields, so reasoning before or after it is tolerated, and requires exactly the five
-expected selection fields before assembling the manifest. A sized deployment replaces an existing onboarding shell's
-matrix, so a shell's hardware is corrected as the fleet and the checkpoint's published form become better understood.
-An empty sized result drops a new candidate that nothing in the fleet can serve and leaves an existing shell's matrix
-untouched, which keeps one unreadable checkpoint from failing the run. The named discovery agent denies repository
+expected selection fields before assembling the manifest. Only new candidates are sized: an existing onboarding
+shell keeps the matrix it was created with, because sizing it again every run only reshuffled its hardware. An empty
+sized result drops a new candidate that nothing in the fleet can serve. The named discovery agent denies repository
 edits and permits only the tracked discovery skill, public-web tools, repository reads, read-only Git inspection, the
 three named read-only source subagents, the tool-free batch scorer, and the fit subagent. Parent work caps at 64
 agentic steps. The Reddit, Hugging Face, and OpenRouter/Arena investigators run as independent bounded sources; Reddit
@@ -153,14 +152,15 @@ lifecycle tag. Both modes preserve discovery-managed `model.heat`. Before the ag
 small remote Python/rsync prerequisite set and
 requires `$HOME/.cache/emmy` to be durable storage with at least 8 GiB free. Compiler staging keeps its checkout,
 venv, cache, and build temporary files there rather than on a small `/tmp` tmpfs. The job has a 24-hour limit and gives
-the agent a 23.5-hour deadline so artifact validation and cleanup retain 30 minutes. For the selected recipe and GPU,
-the same nightly qualification validates the recipe-local golden schema, strictly decodes every stored row, and
-replays it on the exact card; pull-request tests do not load checked-in golden YAML. The shared serving experiment
-retains one LFS archive per exact GPU platform plus one cumulative `RESULTS.md`; each archive includes its system-only
-row records, and a run replaces only its platform snapshot. Ignored dated run directories, loose benchmark output,
-top-level row-record copies, and qualification summaries are not repository artifacts. An Emmy-tuned prebuilt image
-is produced only when every release gate passes.
-Nightly image publication is disabled unless
+the agent a 23.5-hour deadline so artifact validation and cleanup retain 30 minutes. The deadline is the agent's only
+budget. It has no step cap: a capped agent can only answer in text once it reaches the cap, so it never writes its
+summary. An agent that ends without a summary fails its step, and the failure notice says so. For the selected
+recipe and GPU, the same nightly qualification validates the recipe-local golden schema, strictly decodes every stored
+row, and replays it on the exact card; pull-request tests do not load checked-in golden YAML. The shared serving
+experiment retains one LFS archive per exact GPU platform plus one cumulative `RESULTS.md`; each archive includes its
+system-only row records, and a run replaces only its platform snapshot. Ignored dated run directories, loose benchmark
+output, top-level row-record copies, and qualification summaries are not repository artifacts. An Emmy-tuned prebuilt
+image is produced only when every release gate passes. Nightly image publication is disabled unless
 `NIGHTLY_ONBOARD_PUBLISH_IMAGE` is `true`; manual dispatch retains an explicit input.
 
 The artifact worktree stays on the rolling lifecycle branch, while Python control code is loaded from the exact
@@ -238,19 +238,21 @@ lower-priority model IDs cannot stand in for an omitted recipe because every rea
 checkpoint name is normalized across a missing or incorrect organization only when it uniquely identifies one existing
 recipe; ambiguous or unknown maintained IDs still fail validation because all ten selections must resolve exactly. The
 agent must use `best-effort` when the old model retains any material capability or operating advantage. Every complete
-recipe stores the current rationale and heat immediately after `model.huggingface`. Obsolete recipes remain in git but
-cannot be deployed, benchmarked, published, or bundled; a later reassessment may return one to the maintained or
-best-effort set.
+recipe stores its rationale and heat immediately after `model.huggingface`. Every run scores every recipe afresh,
+rewording the rationale and moving the heat a few points even when nothing changed, so a recipe keeps its recorded
+pair until its lifecycle changes or its heat moves by at least 10; rewriting both every run buried the real changes
+of each rolling PR. Obsolete recipes remain in git but cannot be deployed, benchmarked, published, or bundled; a later
+reassessment may return one to the maintained or best-effort set.
 
 The workflow creates every selected `onboarding`/`untested` shell through the same catalog library that backs
 `emmy recipe create`. Each shell stores its rationale and heat under `model` and a list of one to three candidate
-deployment entries under `matrices`; subsequent runs preserve the task and setups mechanically while refreshing heat
-and rationale. A shell does not claim qualification. The workflow commits lifecycle updates to the rolling branch and
-uses the API-only `make setup-agent` target for repository helpers plus `gh` for rolling-PR discovery and updates. It
-never rents a VM. Network operations use bounded retries, and discovery keeps source evidence, batched recipe context,
-retained history, and final output within the inference endpoint's context limit. The workflow filters perform only
-structural batching and manifest assembly; the lifecycle validator retains classification policy and manifest
-application.
+deployment entries under `matrices`; subsequent runs preserve the task and setups mechanically and refresh heat and
+rationale under the same rule. A shell does not claim qualification. The workflow commits lifecycle updates to the
+rolling branch and uses the API-only `make setup-agent` target for repository helpers plus `gh` for rolling-PR
+discovery and updates. It never rents a VM. Network operations use bounded retries, and discovery keeps source
+evidence, batched recipe context, retained history, and final output within the inference endpoint's context limit.
+The workflow filters perform only structural batching and manifest assembly; the lifecycle validator retains
+classification policy and manifest application.
 
 ## Credentials, VM ownership, and cleanup
 
@@ -263,7 +265,9 @@ credentials.
 provider handle, exact request, workflow owner, and SSH target. Cleanup first deletes and audits that handle, then
 lists and terminates every still-active CloudRift VM carrying the complete run-unique tag set. The tag audit catches a
 VM created before the lease was durable without selecting another job's rentals. An `if: always()` step performs both
-paths after OpenCode exits and fails the job if either ownership audit leaves a VM active.
+paths after OpenCode exits and fails the job if either ownership audit leaves a VM active. A runner that dies
+mid-job runs no further step, so each onboarding run first terminates every VM carrying the workflow's tags other
+than the job tag: the concurrency group serializes runs, so such a VM belongs to a run that is already dead.
 
 GitHub App credentials are used for long-lived branch writes and PR operations. Private keys and temporary provider
 configuration live only under run-specific `/tmp/emmy-*` paths and are removed by unconditional cleanup steps.

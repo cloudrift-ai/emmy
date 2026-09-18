@@ -38,26 +38,26 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, TernaryExpr, Var, affine_form
 from emmy.compiler.ir.kernel.ir import (
+    COORD,
+    ELEM_COL,
+    ELEM_ROW,
     FRAG,
     FRAG_COL,
     FRAG_ROW,
+    GMEM,
     M16N8,
     ROW,
     UNIFORM,
     VOLTA_B_CONGRUOUS,
     VOLTA_CROSSWISE,
     BlockScaleLoad,
-    EpilogueLoad,
     FragLayout,
     FragmentApply,
-    FragmentBiasAdd,
-    FragmentMask,
     FragmentPromote,
     FragmentRepack,
     FragmentRowReduce,
     LdmatrixLoad,
     MmaSyncPtx,
-    RegEpilogue,
     RegFragment,
     RegStore,
     WgmmaCommit,
@@ -68,6 +68,7 @@ from emmy.compiler.ir.kernel.ir import (
     frag_layout,
 )
 from emmy.compiler.ir.pure.fold import Fold
+from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.schedule import Side, Stage, Tile
 from emmy.compiler.ir.schedule.packing import block_scaled_atom, packed_readings
 from emmy.compiler.ir.schedule.staging import chunk_key_stage
@@ -281,45 +282,42 @@ def _warp_roles(index, m_name: str, n_name: str) -> tuple[str, ...]:
     return tuple(roles)
 
 
-def _warp_epilogue(
-    tail: list[Stmt], acc: str, m_name: str, n_name: str, sigma: Sigma, extra_accs: tuple[tuple[str, str], ...] = ()
-) -> RegEpilogue | None:
-    """Fold the projection (zero-axis) fold into a :class:`RegEpilogue` for cell ``sigma``. ``None`` when
-    there is no projection (a bare ``Write`` of the accumulator). ``extra_accs`` binds a multi-fold
-    node's additional ``(acc, C-fragment)`` pairs so the chain combines the channels per element.
+def _warp_epilogue(tail: list[Stmt], acc: str, m_name: str, n_name: str, sigma: Sigma, extra_accs: tuple[str, ...] = ()) -> Lambda | None:
+    """Fold the projection (zero-axis) fold into the store's epilogue :class:`Lambda` for cell
+    ``sigma``. ``None`` when there is no projection (a bare ``Write`` of the accumulator).
+    ``extra_accs`` are a multi-fold node's additional accumulator names, bound after ``acc`` so
+    the chain combines the channels per element.
 
     The projection is the post-reduce ``tail`` stmts: the leaf ``Load``s + pointwise ``Assign``s +
-    an optional causal ``Select``. Each leaf ``Load`` becomes an :class:`EpilogueLoad` at the
-    cell-base coordinate (σ-applied; the render adds the per-element row/col motion on the
-    ``m``/``n`` dims); each ``Assign`` becomes an ``(name, op, args, dtype)`` op; a coord-predicated
-    ``Select`` (causal mask) captures its σ-applied cell bases plus ``__M__`` / ``__N__``
-    placeholders; the store substitutes only the element's row/col offsets. This keeps semantic
-    source coordinates independent of a later store to a tile-local shared-memory slab. Keeping
-    the optional dtype makes the register epilogue obey the scalar Loop tail's promotion and
+    an optional causal ``Select``. They stay what they are; only the coordinates move. A leaf
+    ``Load`` is σ-applied to the cell base, and the innermost dim carrying the output row / col
+    axis gains the reserved ``ELEM_ROW`` / ``ELEM_COL`` offset (the same reading as :func:`_row_dim`: a
+    re-fused split axis reaches the load as ``[…, f/Q, …, f%Q]`` and within an atom the quotient
+    dim is uniform — offsetting both dims would add the lane offset at two strides); a
+    coord-predicated ``Select`` (causal mask) captures its σ-applied cell bases plus the same
+    placeholders. The store substitutes only the element's row / col offsets, so semantic source
+    coordinates stay independent of a later store to a tile-local shared-memory slab. Keeping the
+    ``Assign`` dtype makes the register epilogue obey the scalar Loop tail's promotion and
     conversion rules."""
-    loads, ops, selects = [], [], []
+    body: list[Stmt] = []
     write = None
-    ph = {
-        m_name: BinaryExpr("+", sigma.apply(Var(m_name)), Var("__M__")),
-        n_name: BinaryExpr("+", sigma.apply(Var(n_name)), Var("__N__")),
-    }
+    offset = {"m": Var(ELEM_ROW), "n": Var(ELEM_COL)}
+    ph = {name: BinaryExpr("+", sigma.apply(Var(name)), offset[role]) for role, name in (("m", m_name), ("n", n_name))}
     for s in tail:
         if isinstance(s, Load):
-            loads.append(
-                EpilogueLoad(
-                    name=s.names[0],
-                    buffer=s.input,
-                    index=tuple(sigma.apply(e) for e in s.index),
-                    roles=_warp_roles(s.index, m_name, n_name),
-                )
+            roles = _warp_roles(s.index, m_name, n_name)
+            index = tuple(
+                BinaryExpr("+", sigma.apply(e), offset[role]) if role != "fixed" else sigma.apply(e)
+                for e, role in zip(s.index, roles, strict=True)
             )
+            body.append(Load(names=s.names, input=s.input, index=index, dtype=s.dtype))
         elif isinstance(s, Assign):
-            ops.append((s.name, s.op.name, tuple(s.args), s.dtype))
+            body.append(s)
         elif isinstance(s, Select):
-            selects.append((s.name, tuple((br.select.substitute(ph), br.value) for br in s.branches)))
+            body.append(Select(name=s.name, branches=tuple(SelectBranch(br.value, br.select.substitute(ph)) for br in s.branches)))
         elif isinstance(s, Write):
             write = s
-    if write is None or (not ops and not selects):
+    if write is None or not any(isinstance(s, (Assign, Select)) for s in body):
         return None
     # Every chain-op arg must be BOUND in the render env (the accumulator(s), a leaf load, a
     # select, or an earlier op) — an unbound name means the variant's projection tail reads a
@@ -332,29 +330,15 @@ def _warp_epilogue(
     # into the ``LoweringError`` a truncated pipeline can still raise.
     from emmy.compiler.pipeline import RuleSkipped  # noqa: PLC0415 — avoid an import cycle
 
-    bound = {acc, *(a for a, _ in extra_accs), *(ld.name for ld in loads)}
-    pending = list(selects)
-
-    def bind_ready_selects():
-        # The render's order: a select binds as soon as its branch values are bound.
-        nonlocal pending
-        while ready := [sel for sel in pending if all(value in bound for _, value in sel[1])]:
-            bound.update(name for name, _ in ready)
-            pending = [sel for sel in pending if sel not in ready]
-
-    bind_ready_selects()
-    for name, _op, args, _dtype in ops:
-        unbound = [a for a in args if a not in bound]
-        if unbound:
+    bound = {acc, *extra_accs}
+    for st in body:
+        reads = st.args if isinstance(st, Assign) else tuple(br.value for br in st.branches) if isinstance(st, Select) else ()
+        if unbound := [a for a in reads if a not in bound]:
             raise RuleSkipped(
                 f"projection epilogue reads {unbound} this node does not compute (mis-sliced multi-channel tail)", reject=True
             )
-        bound.add(name)
-        bind_ready_selects()
-    if pending:
-        unread = [name for name, _ in pending]
-        raise RuleSkipped(f"projection epilogue selects {unread} read values this node does not compute", reject=True)
-    return RegEpilogue(acc=acc, loads=tuple(loads), ops=tuple(ops), result=write.value, selects=tuple(selects), extra_accs=extra_accs)
+        bound.update(st.defines())
+    return Lambda.closing((acc, *extra_accs), Body(body), (write.value,))
 
 
 # ---- operand staging (smem slab + ldmatrix drain) ---------------------------------------------- #
@@ -1419,7 +1403,7 @@ def _block_scaled_operands(
 
 def _mask_add(stmt, selects: dict, frags) -> tuple[Select, str] | None:
     """The coordinate mask ``stmt`` adds to a fragment value, with the value's name — the statement
-    pair the chunk tier lands as a ``FragmentMask`` and reads for its stream bounds — or ``None``
+    pair the chunk tier lands as a coordinate-masking ``FragmentApply`` and reads for its stream bounds — or ``None``
     for any other statement."""
     if not isinstance(stmt, Assign) or stmt.op.name != "add":
         return None
@@ -1440,7 +1424,7 @@ def _mask_key_bounds(stmts, held: str, key: Axis, row: str, offset, bk: int) -> 
     ``(k_first, k_end)``, each ``None`` when no mask bounds the keys on that side.
 
     The masks are the coordinate ``Select`` statements the prefix adds to the score (the pairs
-    :func:`_residence` turns into a ``FragmentMask``), each read ONCE, ahead of the loop, for what
+    :func:`_residence` turns into a coordinate mask), each read ONCE, ahead of the loop, for what
     its masked branch says about whole chunks. ``key + ck > row + cr`` (or ``>=``) masks every key
     from ``block_end + cr − ck`` on for the block's last row, and so for every row before it: the
     stream stops there. ``key + ck < row + cr`` (or ``<=``) masks every key before
@@ -2315,7 +2299,7 @@ class _MmaOps(_AtomOps):
 
     def store(self, i, j, offset, mn):
         """Store cell ``(i, j)``'s ``_c`` fragment to the output, folding the projection ``tail`` into a
-        :class:`RegEpilogue` and guarding overhanging M/N rows. A multi-fold node binds its extra C
+        an epilogue ``Lambda`` and guarding overhanging M/N rows. A multi-fold node binds its extra C
         fragments as additional epilogue accumulators (the combine — SwiGLU — reads them per cell)."""
         atom = self.tile.atom
         volta_interleaved = self._volta_pair_layout(mn)
@@ -2350,13 +2334,16 @@ class _MmaOps(_AtomOps):
                 # nothing else lowers the node and the terminal keeps an unlowered ``TileOp``.
                 raise RuleSkipped(f"fragment projection for {write.output!r} reads no contraction accumulator", reject=True)
             primary = used[0]
-            extra = tuple((accs[f], frags[f]) for f in used[1:])
-            epi = _warp_epilogue([*cone.members, write], accs[primary], m.axis.name, n.axis.name, sigma, extra_accs=extra)
+            extra = tuple(used[1:])
+            epi = _warp_epilogue(
+                [*cone.members, write], accs[primary], m.axis.name, n.axis.name, sigma, extra_accs=tuple(accs[f] for f in extra)
+            )
             out.append(
                 RegStore(
                     dst_buffer=write.output,
                     dst_index=tuple(sigma.apply(e) for e in write.index),
                     frag=frags[primary],
+                    extra_frags=tuple(frags[f] for f in extra),
                     shape=atom.shape,
                     epilogue=epi,
                     m_guard=_guard(m, mcell),
@@ -2584,17 +2571,21 @@ def _residence(
             if predicate is None:
                 raise RuleSkipped("the chunk tier needs complementary branches for a coordinate mask")
             name = f"{frag_tag}{stmt.name}"
-            out.append(FragmentApply(out=name, op=ElementwiseImpl("copy"), args=(frags[source],), kinds=(FRAG,), layout=layout))
+            # The keep branch applies the authored scalar to every element; the masked elements then
+            # take the carrier's finite identity, so an all-masked chunk never sees ``-inf - -inf``.
             out.append(
-                FragmentMask(
-                    frag=name,
-                    mask_when=select_sigma.apply(predicate),
+                FragmentApply(out=name, op=stmt.op, args=(frags[source], mask.branches[0].value), kinds=(FRAG, UNIFORM), layout=layout)
+            )
+            out.append(
+                FragmentApply(
+                    out=name,
+                    op=ElementwiseImpl("where"),
+                    args=(select_sigma.apply(predicate), Literal(float(mask_fill)), name),
+                    kinds=(COORD, UNIFORM, FRAG),
+                    in_place=True,
+                    layout=layout,
                     row_base=row_base,
                     col_base=col_base,
-                    fill=mask_fill,
-                    keep=mask.branches[0].value,
-                    keep_op=stmt.op,
-                    layout=layout,
                 )
             )
             frags[stmt.name] = name
@@ -2865,12 +2856,18 @@ class _FlashOps(_MmaOps):
                     scored[i, j] = frags[self.c.roles[0]]
                     if bound is not None:
                         body.append(
-                            FragmentMask(
-                                frag=scored[i, j],
-                                mask_when=BinaryExpr(">=", Var(FRAG_COL), bound),
-                                col_base=BinaryExpr("+", base, Literal(j * atom.atom_n, "int")),
-                                fill=self.c.base.components()[0].identity,
+                            FragmentApply(
+                                out=scored[i, j],
+                                op=ElementwiseImpl("where"),
+                                args=(
+                                    BinaryExpr(">=", Var(FRAG_COL), bound),
+                                    Literal(float(self.c.base.components()[0].identity)),
+                                    scored[i, j],
+                                ),
+                                kinds=(COORD, UNIFORM, FRAG),
+                                in_place=True,
                                 layout=layout,
+                                col_base=BinaryExpr("+", base, Literal(j * atom.atom_n, "int")),
                             )
                         )
                 pivots[i] = _row_pair(self.frag("_g"), i)
@@ -2945,7 +2942,7 @@ class _FlashOps(_MmaOps):
         # softmax, and a single slot refills each at its kill point — the key under the softmax
         # and expectation, the value under the next score.
         # A RAGGED key extent stages too (``_chunk_warp_stage`` states when): the last chunk
-        # overhangs, its value rows read the last valid key, and the boundary ``FragmentMask``
+        # overhangs, its value rows read the last valid key, and the boundary mask
         # above has already put those keys at the pivot identity — so they weigh exactly zero and
         # the duplicates fold to nothing, the same discipline the gmem-direct arm carries.
         k_extent, n_chunks = _chunk_stream(key, bk)
@@ -3050,10 +3047,10 @@ class _FlashOps(_MmaOps):
         whose probabilities arrive as an input), so there is nothing to contract.
 
         Each ``(row, chunk)`` C fragment is gathered from that tile at the fragment's own lane map:
-        a role-``c`` :class:`RegFragment` declares zero, so one :class:`FragmentBiasAdd` per
+        a role-``c`` :class:`RegFragment` declares zero, so one GMEM-adding :class:`FragmentApply` per
         fragment IS the fragment. Both coordinates are read wrapped in-bounds — an overhanging row
         is discarded by the store guard and an overhanging column is refilled with the pivot ⊕'s
-        identity by the boundary :class:`FragmentMask` the caller emits, exactly as the contracted
+        identity by the boundary mask the caller emits, exactly as the contracted
         form's clamped reads are."""
         m, _ = mn
         atom, load = self._score_atom, self.c.operands[0].as_slab().load
@@ -3065,13 +3062,15 @@ class _FlashOps(_MmaOps):
             for j in range(cols):
                 out.append(self._frag(f"_s{i}_{j}", "c", atom))
                 out.append(
-                    FragmentBiasAdd(
-                        frag=self.frag(f"_s{i}_{j}"),
-                        buf=load.input,
-                        index=index,
+                    FragmentApply(
+                        out=self.frag(f"_s{i}_{j}"),
+                        op=ElementwiseImpl("add"),
+                        args=(self.frag(f"_s{i}_{j}"), (load.input, index)),
+                        kinds=(FRAG, GMEM),
+                        in_place=True,
+                        layout=frag_layout(atom.fragment_layout),
                         row_base=offset[0].base(i),
                         col_base=BinaryExpr("+", base, Literal(j * atom.atom_n, "int")),
-                        layout=frag_layout(atom.fragment_layout),
                     )
                 )
         return out
@@ -3352,8 +3351,8 @@ class _FlashOps(_MmaOps):
 
     def store(self, i, j, offset, mn):
         """Write cell ``(i, j)``'s expectation, the projection applied at each value's residence —
-        a carried state the tier keeps as a per-row register is not something a :class:`RegEpilogue`
-        chain can bind, so the projection evaluates ahead of the store and the store writes the
+        a carried state the tier keeps as a per-row register is not something the store's epilogue
+        ``Lambda`` can bind, so the projection evaluates ahead of the store and the store writes the
         fragment. A projection that reads no such state is the ordinary sink's (a placement cut
         materializes the denominator, and the tail is then a per-cell chain like any other)."""
         from emmy.compiler.pipeline import RuleSkipped  # noqa: PLC0415 — avoid an import cycle

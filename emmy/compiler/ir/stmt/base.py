@@ -666,7 +666,7 @@ class Stmt(Structural):
         stmt run N times instead of M is observable, so it pins the
         enclosing iteration to its current scope.
 
-        Note: ``Accum`` / ``Mma`` / ``Init`` are *not* side-effecting in this
+        Note: ``Accum`` / ``Init`` are *not* side-effecting in this
         sense — they're scope-bound (their semantics depend on which
         Loop encloses them) but moving the *whole enclosing block* is
         safe. Hoisting passes that want to move a Loop containing an
@@ -818,7 +818,7 @@ def render_body(body: Body, ctx: RenderCtx) -> list[str]:
             ):
                 continue
             # The sole reader must render its operands through ``op_to_expr`` / ``Var.render`` (only
-            # ``Assign`` does) — folding into an ``Accum`` / ``Reassign`` / ``Write`` would drop the temp
+            # ``Assign`` does) — folding into an ``Accum`` / ``Write`` would drop the temp
             # without substituting it, leaving an undefined reference.
             ri = next((j for j, r in enumerate(stmts) if s.name in r.deps()), None)
             if ri is None or not isinstance(stmts[ri], Assign):

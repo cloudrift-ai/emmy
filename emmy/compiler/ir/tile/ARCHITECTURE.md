@@ -143,7 +143,8 @@ not bind past is one that cut hands its own kernel, after which the piece reads 
 binds. Stating the rule once keeps all three answers one rule rather than copies of it.
 
 Root ownership is asked twice, in two shapes, and the answers differ. `refused_roots` names the contraction roots the
-binder will not bind together, and the schedule projection refuses a prefix that output-tiles a second of them.
+binder will not bind together, and the schedule projection refuses a prefix that schedules a second of them (an
+output tile, or a cooperative or ILP reduce).
 `owns_outputs_it_cannot_bind` asks what the full-projection cut is offered on: every output has one producing branch,
 and some branch is not about a single reduce — it reads several, or none. Both are needed. A projection whose outputs
 do not partition at all still refuses roots, and a projection the binder found one root in refuses none here yet is
@@ -371,7 +372,7 @@ choice. Construction rejects missing, extra, mismatched, or partly attached fact
 - Kernel, node, and edge domains are projected independently. Enumeration is the compatible subset of their Cartesian
   product, so changing traversal order may change work but can never change membership. The compatibility relations
   are the kernel binder's own facts read at the offer — worker inventory, physical-axis geometry, fragment seams, and
-  root ownership (a projection whose outputs do not partition by root carries at most one output-tiled root) — so a
+  root ownership (a projection whose outputs do not partition by root carries at most one scheduled root) — so a
   row the binder would refuse is never enumerated.
 - `ClassicScheduleCodec` is the sole wire boundary. Kernel keys are bare `WORK` / `RASTER`. A node family is bare
   when it has one applicable site and carries the site's route (`TILE@map.1/twist.1/inner`, the same grammar as
