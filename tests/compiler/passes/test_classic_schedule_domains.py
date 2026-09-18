@@ -625,3 +625,32 @@ def test_partitioned_projection_still_offers_both_roots_output_tiled(monkeypatch
     roots = tuple(tile.node_id(edge) for edge in tile.op.operands)
     assert roots in _tiled_root_sets(tile, Context.from_target((12, 0)), monkeypatch)
     assert roots in _cooperative_root_sets(tile, Context.from_target((12, 0)), monkeypatch)
+
+
+def test_fragment_domain_includes_the_reduction_in_a_sibling_projection():
+    """A matmul result normalized by another reduction is not a straight-line fragment epilogue."""
+    from tests.compiler.terms import reduction
+
+    m, n, k, r = Axis("m", 32), Axis("n", 32), Axis("k", 64), Axis("r", 32)
+    matmul = contraction(
+        k,
+        Load(name="av", input="a", index=(Var("m"), Var("k"))),
+        (Load(name="bv", input="b", index=(Var("k"), Var("n"))), "acc"),
+    )
+    statistic = reduction(
+        r,
+        (Load(name="xv", input="x", index=(Var("m"), Var("r"))),),
+        (Assign("sum__v", "multiply", ("xv", "xv")),),
+        ("sum",),
+    )
+    scale = projection((statistic,), (Assign("scale", "rsqrt", ("sum",)),), ("scale",))
+    root = projection((matmul, scale), (Assign("y", "multiply", ("acc", "scale")),), ("y",))
+    tile = TileOp(
+        op=root,
+        place=Placement(free=(m, n)),
+        axes=(m, n, k, r),
+        inputs={name: Tensor(name, shape, "f16") for name, shape in {"a": (32, 64), "b": (64, 32), "x": (32, 32)}.items()},
+        outputs={"out": Tensor("out", (32, 32), "f16")},
+        output_specs=(OutputSpec(Write(output="out", index=(Var("m"), Var("n")), value="y")),),
+    )
+    assert not classic._warp_atoms(tile, Context.from_target((8, 9)), matmul)

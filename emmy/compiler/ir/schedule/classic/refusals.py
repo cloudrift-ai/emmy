@@ -325,11 +325,14 @@ def _atom_families(tile: TileOp, target, node, tail: list, packed: tuple = (None
 
 def _warp_atoms(tile: TileOp, target, node) -> tuple[str, ...]:
     """Project tensor-core atoms from contraction, dtype, address, and target facts."""
-    from emmy.compiler.ir.tile.ops import projection_tail  # noqa: PLC0415 — tile.ops reads this package; module level would cycle
+    from emmy.compiler.ir.tile.ops import kernel_roots  # noqa: PLC0415 — tile.ops reads this package; module level would cycle
 
-    tail = projection_tail(tile)
+    roots = kernel_roots(tile.op)
+    computed = {stmt for root in roots for stmt in root.lower(axes=tile.axes)}
+    tail = [stmt for stmt in tile.op.lower(stores=tuple(tile.output_specs), axes=tile.axes) if stmt not in computed]
+    states = frozenset(name for root in roots for name in root.exposes)
     packed = tile.packed_reading(node)
-    if _node_refusal(tile, target, node, _fragment_epilogue_ok(tail, _fold_states(tile.op)), packed) is not None:
+    if _node_refusal(tile, target, node, _fragment_epilogue_ok(tail, states), packed) is not None:
         return ()
     return _atom_families(tile, target, node, tail, packed)
 
