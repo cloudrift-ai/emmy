@@ -2,19 +2,20 @@
 
 Kernel IR sits between Tile IR (schedule decisions as structural Stmts)
 and CUDA source (text). Its body contains the explicit hardware
-machinery: ``Tile`` (thread/block coord bindings), ``Smem``
-(``__shared__`` arrays), ``Sync`` (``__syncthreads`` barriers),
-``TreeHalve`` (cross-thread reduction over smem), ``StridedLoop``
-(strided per-thread loop).
+machinery: ``Tile`` (thread/block coord bindings), ``Smem`` (``__shared__``
+arrays), ``Sync`` (barriers), the transports into shared memory
+(``CpAsync*``, ``Tma*`` + ``Mbarrier*``), the cross-thread combines
+(``WarpShuffle``, ``TreeHalve``) and the tensor-core register fragments
+(``RegFragment`` … ``RegStore``, ``Wgmma*``).
 
 Pipeline shape::
 
     Tile IR ──materialize_tile──▶ Kernel IR
                     ──render_kernelop──▶ CUDA source
 
-**Leaf compute reuses Loop IR directly**. ``Load`` / ``Assign`` /
-``Select`` / ``Write`` / ``Accum`` / ``Cond`` / ``Loop`` come straight
-from ``ir.loop`` — buf names are strings so they're directly renderable.
+**Leaf compute reuses the shared statements directly**. ``Load`` / ``Assign`` /
+``Let`` / ``Select`` / ``Write`` / ``Accum`` / ``Cond`` / ``Loop`` come straight
+from ``ir.stmt`` — buffer names are strings, so they render as they are.
 
 Kernel IR deliberately contains no scheduling decisions — those live in
 Tile IR and are materialized away before reaching this layer. A
@@ -40,6 +41,7 @@ from emmy.compiler.ir.expr import (
     TernaryExpr,
     Var,
 )
+from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.stmt import (
     INDENT,
     Accum,
@@ -891,31 +893,12 @@ class WarpShuffle(Stmt):
         return out
 
 
-@dataclass(frozen=True)
-class Reassign(Stmt):
-    """Reassign an already-declared carried scalar — ``name = value;`` (no ``float``
-    decl). The streaming-flash online-softmax stats (``m`` / ``l``) are carried across
-    the KV-tile loop: an enclosing ``Init`` declares them, the per-tile recurrence
-    computes fresh SSA temps, and this rebinds the carried name to the new value
-    (``Assign`` always *declares*, which would shadow the carried value)."""
-
-    name: str
-    value: str
-
-    def deps(self) -> tuple[str, ...]:
-        return (self.value,)
-
-    def pretty(self, indent: str = "") -> list[str]:
-        return [f"{indent}{self.name} := {self.value}"]
-
-    def render(self, ctx: RenderCtx) -> list[str]:
-        return [f"{_pad(ctx.indent)}{self.name} = {self.value};"]
-
-
 #: The per-arg distribution kinds of a :class:`FragmentApply` operand.
 FRAG = "frag"  # a C-fragment operand — indexed per element (``arg[i]``)
 ROW = "row"  # a per-row scalar — broadcast by row (suffix ``0`` for rows g, ``1`` for rows g+8)
 UNIFORM = "uniform"  # a cell-uniform scalar / literal — the same value for all 4 elements
+COORD = "coord"  # a predicate over the element's absolute coordinates (``FRAG_ROW`` / ``FRAG_COL``)
+GMEM = "gmem"  # a ``(buffer, index)`` load template over the element's absolute coordinates
 
 
 @dataclass(frozen=True)
@@ -933,8 +916,8 @@ class FragLayout:
     - ``lane_names`` — the names declared by that preamble.
     - ``row_off`` / ``col_off`` — the per-element coordinate **offsets as ``Expr``s** (over the
       ``lane_decl`` locals): ``row_off[r]`` the in-tile row of row-index ``r``, ``col_off[i]`` the
-      in-N-atom column of element ``i``. :class:`FragmentMask` adds the tile origin and substitutes
-      these into its coordinate predicate (so the mask is a generic ``Expr``, not hard-coded CUDA).
+      in-N-atom column of element ``i``. A :class:`FragmentApply` COORD / GMEM operand adds the tile
+      origin and substitutes these into its template (so a mask is a generic ``Expr``, not hard-coded CUDA).
 
     ``frag_layout`` raises for an unmodeled atom, so one fails loudly rather than miscompiling."""
 
@@ -1008,32 +991,42 @@ def _lane_preamble(ctx: RenderCtx, pad: str, decl: str, names: tuple[str, ...] =
 
 @dataclass(frozen=True)
 class FragmentApply(Stmt):
-    """Generic per-element pointwise op over an ``mma.sync`` C fragment — the carrier-generic
-    fragment-tier sibling of the scalar ``Assign``, and the one fragment pointwise node.
+    """The one per-element pointwise node over an ``mma.sync`` C fragment — the fragment-tier
+    sibling of the scalar ``Assign``.
 
     Writes ``out`` (a layout-sized f32 C fragment) ``= op(args…)`` per element ``i`` via the same
     ``op_to_expr`` translation the scalar ``Assign`` uses — so ANY elementwise op reaches the
-    tensor-core tier, not just softmax's ``exp`` / scale. Each arg is one of three
-    :data:`FRAG` / :data:`ROW` / :data:`UNIFORM` ``kinds``:
+    tensor-core tier, not just softmax's ``exp`` / scale. Each arg is one of five ``kinds``:
 
     - ``FRAG`` — a C-fragment, indexed ``arg[i]``;
     - ``ROW`` — a per-row scalar pair, broadcast by the layout's element-to-row map;
-    - ``UNIFORM`` — a cell-uniform scalar or literal, the same value for every element.
+    - ``UNIFORM`` — a cell-uniform scalar name or ``Literal``, the same value for every element;
+    - ``COORD`` — a predicate ``Expr`` over the element's ABSOLUTE coordinates, written with the
+      reserved :data:`FRAG_ROW` / :data:`FRAG_COL` vars (causal ``__fcol > __frow``, a symbolic
+      boundary ``__fcol >= seq_len``); the render substitutes tile origin + layout offset;
+    - ``GMEM`` — a ``(buffer, index)`` load template over the same reserved vars, read at each
+      element's absolute coordinates and converted to f32 (SDPA's additive ``attn_mask`` bias;
+      the gathered score tile of the softmax@V carrier).
+
+    ``row_base`` / ``col_base`` are the tile origin the ``COORD`` / ``GMEM`` kinds add to the
+    layout's per-element offsets; ``row_base`` is required iff a template references ``__frow``.
 
     Realizations: ``exp(s − m)`` = a ``subtract`` (FRAG, ROW) then an ``exp`` (FRAG); ``O *= α`` =
-    an in-place ``multiply`` (FRAG, ROW); ``O /= l`` = an in-place ``divide`` (FRAG, ROW); ``S *=
-    scale`` = an in-place ``multiply`` (FRAG, UNIFORM). ``in_place`` reassigns ``out`` (no ``float
-    out[4]`` decl — ``out`` must be the first FRAG arg).
+    an in-place ``multiply`` (FRAG, ROW); ``S *= scale`` = an in-place ``multiply`` (FRAG, UNIFORM);
+    a coordinate mask = an in-place ``where`` (COORD, UNIFORM fill, FRAG) — the masked branch takes
+    the carrier's finite identity instead of producing ``-inf - -inf`` in an all-masked chunk;
+    a gmem bias = an in-place ``add`` (FRAG, GMEM). ``in_place`` reassigns ``out`` (no ``float
+    out[4]`` decl — ``out`` must be a FRAG arg).
 
-    Each ``args`` entry is a ``str`` for a FRAG / UNIFORM operand, or a ``(row0, row1)`` pair of
-    SSA names for a ROW operand (the two per-row scalars stored explicitly — so SSA rename keeps
-    them consistent with their definitions; a bare name plus a render-time suffix would diverge
-    under rename)."""
+    Each ``args`` entry is a ``str`` for a FRAG / UNIFORM operand, a ``(row0, row1)`` pair of SSA
+    names for a ROW operand (the two per-row scalars stored explicitly — so SSA rename keeps them
+    consistent with their definitions), an ``Expr`` for COORD or a UNIFORM literal, and a
+    ``(buffer, index)`` tuple for GMEM."""
 
     out: str
     op: ElementwiseImpl
-    args: tuple[object, ...]  # str (FRAG / UNIFORM) | per-row name tuple (ROW)
-    kinds: tuple[str, ...]  # per-arg: FRAG | ROW | UNIFORM
+    args: tuple[object, ...]
+    kinds: tuple[str, ...]
     in_place: bool = False
     layout: FragLayout = M16N8  # the per-atom C-fragment geometry (n_elems + elem→row)
     # Extra UNARY ops composed onto the result, outermost last — so ``exp(s − m)`` is one node
@@ -1041,19 +1034,48 @@ class FragmentApply(Stmt):
     # subtract stmt feeding an exp stmt. Populated only by ``100_loopify``'s pin-gated chain fusion;
     # empty by default (the base op alone).
     post: tuple[ElementwiseImpl, ...] = ()
+    row_base: Expr | None = None
+    col_base: Expr | None = None
 
     def deps(self) -> tuple[str, ...]:
         out: list[str] = []
         for a, k in zip(self.args, self.kinds, strict=True):
-            out += list(a) if k == ROW else [a]
+            if k == ROW:
+                out += list(a)
+            elif k in (FRAG, UNIFORM) and isinstance(a, str):
+                out.append(a)
         return tuple(out)
 
     def defines(self) -> tuple[str, ...]:
         return (self.out,)
 
+    def exprs(self) -> tuple[Expr, ...]:
+        out: list[Expr] = []
+        for a, k in zip(self.args, self.kinds, strict=True):
+            if k == COORD or (k == UNIFORM and not isinstance(a, str)):
+                out.append(a)
+            elif k == GMEM:
+                out += list(a[1])
+        return (*out, *(b for b in (self.row_base, self.col_base) if b is not None))
+
+    def external_reads(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(a[0] for a, k in zip(self.args, self.kinds, strict=True) if k == GMEM))
+
+    def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
+        args = tuple((rename.get(a[0], a[0]), a[1]) if k == GMEM else a for a, k in zip(self.args, self.kinds, strict=True))
+        return self if args == self.args else replace(self, args=args)
+
     def pretty(self, indent: str = "") -> list[str]:
         def _show(a: object, k: str) -> str:
-            return f"{a}[]" if k == FRAG else (f"{list(a)}" if k == ROW else str(a))
+            if k == FRAG:
+                return f"{a}[]"
+            if k == ROW:
+                return f"{list(a)}"
+            if k == COORD:
+                return a.pretty()
+            if k == GMEM:
+                return f"{a[0]}[{', '.join(e.pretty() for e in a[1])}]"
+            return a.pretty() if isinstance(a, Expr) else str(a)
 
         shown = ", ".join(_show(a, k) for a, k in zip(self.args, self.kinds, strict=True))
         chain = "".join(f" |> {p.name}" for p in self.post)
@@ -1076,15 +1098,39 @@ class FragmentApply(Stmt):
             expr = TernaryExpr(BinaryExpr("==", Var("_e"), Literal(i, "int")), Var(names[lay.elem_row[i]]), expr)
         return expr
 
-    def _arg_e(self, name: object, kind: str, ctx: RenderCtx) -> Expr:
-        """The loop-body operand expression (indexed by the element loop var ``_e``)."""
+    def _coords(self, i: int) -> dict[str, Expr]:
+        """Element ``i``'s absolute coordinates for the reserved vars: tile origin + layout offset."""
+        lay = self.layout
+        sub: dict[str, Expr] = {}
+        if self.col_base is not None:
+            sub[FRAG_COL] = BinaryExpr("+", self.col_base, lay.col_off[i])
+        if self.row_base is not None:
+            sub[FRAG_ROW] = BinaryExpr("+", self.row_base, lay.row_off[lay.elem_row[i]])
+        return sub
+
+    def _arg(self, name: object, kind: str, ctx: RenderCtx, i: int | None) -> Expr:
+        """One operand's expression for element ``i`` — or for the loop var ``_e`` when ``None``."""
         if kind == FRAG:
-            return Var(f"{name}[_e]")
+            return Var(f"{name}[{'_e' if i is None else i}]")
         if kind == ROW:
-            return self._row_expr(name)
+            return self._row_expr(name) if i is None else Var(name[self.layout.elem_row[i]])
+        if kind == COORD:
+            return name.substitute(self._coords(i))
+        if kind == GMEM:
+            from emmy.compiler.ir.stmt import render_index  # noqa: PLC0415
+
+            buf, index = name
+            sub = self._coords(i)
+            text = f"{buf}[{render_index(buf, tuple(e.substitute(sub) for e in index), ctx)}]"
+            dt = ctx.buffer_dtypes.get(buf, "f32")
+            return Var(text if dt == "f32" else ctx.target.convert(text, dt, "f32"))
         # UNIFORM — the fragment algebra is f32; a narrower scalar (e.g. an ``__half`` constant
         # load) converts through the target intrinsic, like the scalar ``Assign``'s promote rule.
+        if isinstance(name, Expr):
+            return name
         nm = str(name)
+        if ctx.literal_ssa and nm in ctx.literal_ssa:
+            return Literal(float(ctx.literal_ssa[nm]))
         dt = ctx.ssa_dtypes.get(nm) if ctx.ssa_dtypes else None
         if dt and dt != "f32":
             from emmy.compiler.ir.expr import FuncCallExpr  # noqa: PLC0415
@@ -1095,25 +1141,32 @@ class FragmentApply(Stmt):
                 return FuncCallExpr(converted[:paren], [Var(nm)])
         return Var(nm)
 
+    def _element(self, ctx: RenderCtx, i: int | None) -> str:
+        from emmy.compiler.ir.stmt.base import op_to_expr  # noqa: PLC0415
+
+        argvars = [self._arg(a, k, ctx, i) for a, k in zip(self.args, self.kinds, strict=True)]
+        expr = op_to_expr(self.op.name, argvars)
+        for post_op in self.post:  # compose the fused unary tail (outermost last)
+            expr = op_to_expr(post_op.name, [expr])
+        return expr.render(ctx)
+
     def render(self, ctx: RenderCtx) -> list[str]:
         """One ``#pragma unroll`` loop over the fragment's ``n_elems`` — ``out[_e] = post…(op(args_e))``
         — instead of ``n_elems`` straight-line assignments. The ROW operand renders as the row-split
         ternary, so the m16n8 2-rows/lane structure stays legible (``_e < 2 ? row0 : row1``); identical
-        SASS (nvcc unrolls the pragma)."""
-        from emmy.compiler.ir.stmt.base import op_to_expr  # noqa: PLC0415
-
+        SASS (nvcc unrolls the pragma). A COORD / GMEM operand differs per element in its coordinate
+        expression rather than in an index, so it renders unrolled, one guarded line per element."""
         pad = _pad(ctx.indent)
-        n = self.layout.n_elems
-        inner = ctx.child()
-        ipad = _pad(inner.indent)
-        argvars = [self._arg_e(a, k, inner) for a, k in zip(self.args, self.kinds, strict=True)]
-        expr = op_to_expr(self.op.name, argvars)
-        for post_op in self.post:  # compose the fused unary tail (outermost last)
-            expr = op_to_expr(post_op.name, [expr])
+        lay = self.layout
+        n = lay.n_elems
         lines = [] if self.in_place else [f"{pad}float {self.out}[{n}];"]
+        if any(k in (COORD, GMEM) for k in self.kinds):
+            lines += _lane_preamble(ctx, pad, lay.lane_decl, lay.lane_names)
+            return lines + [f"{pad}{self.out}[{i}] = {self._element(ctx, i)};" for i in range(n)]
+        inner = ctx.child()
         lines.append(f"{pad}#pragma unroll")
         lines.append(f"{pad}for (int _e = 0; _e < {n}; _e++) {{")
-        lines.append(f"{ipad}{self.out}[_e] = {expr.render(inner)};")
+        lines.append(f"{_pad(inner.indent)}{self.out}[_e] = {self._element(inner, None)};")
         lines.append(f"{pad}}}")
         return lines
 
@@ -1171,145 +1224,15 @@ class FragmentRowReduce(Stmt):
         return out
 
 
-#: The reserved coordinate Vars a :class:`FragmentMask` predicate is written over — the element's
+#: The reserved coordinate Vars a :class:`FragmentApply` COORD / GMEM template is written over — the element's
 #: ABSOLUTE query row / key column; the render substitutes each element's coords (tile origin +
 #: layout offset) for these.
 FRAG_ROW = "__frow"
 FRAG_COL = "__fcol"
-
-
-@dataclass(frozen=True)
-class FragmentMask(Stmt):
-    """Generic per-element coordinate mask over an mma C-fragment.
-
-    Writes ``fill`` to every element whose absolute coordinates satisfy ``mask_when``. When
-    ``keep`` and ``keep_op`` are present, the other branch applies
-    ``keep_op(fragment, keep)``. This realizes an additive coordinate ``Select`` as a stable mask:
-    the masked branch becomes the carrier's finite identity instead of producing ``-inf - -inf``
-    in an all-masked chunk, while the keep branch retains its authored scalar value.
-
-    The render adds the tile origin (``row_base`` / ``col_base``) to the layout's per-element offset
-    and substitutes the result for ``__frow`` / ``__fcol``, then emits a guarded write — so the
-    predicate is a generic ``Expr``, not hard-coded CUDA. Causal = ``__fcol > __frow``; symbolic
-    boundary = ``__fcol >= seq_len``; any coordinate predicate (windowed, banded, …) is a different
-    ``mask_when`` over the same node. Applied to the scaled score before the rowmax; emitting two
-    boundary masks in sequence AND their keep-predicates. ``row_base`` is required iff
-    ``mask_when`` references ``__frow``."""
-
-    frag: str
-    mask_when: Expr
-    col_base: Expr
-    row_base: Expr | None = None
-    fill: float = -1e30
-    keep: str | None = None
-    keep_op: ElementwiseImpl | None = None
-    layout: FragLayout = M16N8
-
-    def __post_init__(self) -> None:
-        if (self.keep is None) != (self.keep_op is None):
-            raise ValueError("FragmentMask keep and keep_op must be provided together")
-
-    def deps(self) -> tuple[str, ...]:
-        keep = (self.keep,) if self.keep is not None else ()
-        return (self.frag, *keep)
-
-    def defines(self) -> tuple[str, ...]:
-        return (self.frag,)
-
-    def exprs(self) -> tuple[Expr, ...]:
-        base = (self.mask_when, self.col_base)
-        return base + ((self.row_base,) if self.row_base is not None else ())
-
-    def pretty(self, indent: str = "") -> list[str]:
-        return [f"{indent}FragmentMask({self.frag} where {self.mask_when.pretty()})"]
-
-    def render(self, ctx: RenderCtx) -> list[str]:
-        pad = _pad(ctx.indent)
-        lay = self.layout
-
-        fill = ctx.identity_literal(self.fill, "f32")
-
-        def keep_update(i: int) -> str:
-            assert self.keep is not None and self.keep_op is not None
-            literal = ctx.literal_ssa.get(self.keep) if ctx.literal_ssa else None
-            if literal is not None:
-                keep = ctx.identity_literal(literal, "f32")
-            else:
-                dtype = ctx.ssa_dtypes.get(self.keep, "f32")
-                keep = self.keep if dtype == "f32" else ctx.target.convert(self.keep, dtype, "f32")
-            return _binary_combine_expr(self.keep_op, f"{self.frag}[{i}]", keep, ctx.target, "f32")
-
-        lines = _lane_preamble(ctx, pad, lay.lane_decl, lay.lane_names)
-        for i in range(lay.n_elems):
-            sub: dict[str, Expr] = {FRAG_COL: BinaryExpr("+", self.col_base, lay.col_off[i])}
-            if self.row_base is not None:
-                sub[FRAG_ROW] = BinaryExpr("+", self.row_base, lay.row_off[lay.elem_row[i]])
-            pred = self.mask_when.substitute(sub).render(ctx)
-            line = f"{pad}if ({pred}) {self.frag}[{i}] = {fill};"
-            if self.keep is not None:
-                line += f" else {self.frag}[{i}] = {keep_update(i)};"
-            lines.append(line)
-        return lines
-
-
-@dataclass(frozen=True)
-class FragmentBiasAdd(Stmt):
-    """Per-element **additive gmem bias** over an mma C-fragment — the fragment-tier realization of
-    the explicit additive score mask (SDPA's ``attn_mask`` float bias: the HF precomputed causal /
-    sliding-window band). For every element, load ``buf`` at the element's ABSOLUTE ``(row, col)``
-    coordinates and add it into the fragment: the render adds the tile origin (``row_base`` /
-    ``col_base``) to the layout's per-element offset and substitutes the result for the reserved
-    :data:`FRAG_ROW` / :data:`FRAG_COL` vars in ``index`` — the load-index TEMPLATE the realizer
-    built from the bias ``Load``'s own index (leading broadcast dims pre-folded to literals; a
-    symbolic seq pre-clamps the coordinate exprs, and the clamped duplicates land on cells the
-    boundary :class:`FragmentMask` / store guard discards). The buffer element converts to f32 on
-    the add (the fragment algebra is f32); lanes ``_t = 0..3`` of a column group read 8 contiguous
-    columns, so the warp's bias reads coalesce like the epilogue leaf loads."""
-
-    frag: str
-    buf: str
-    index: tuple[Expr, ...]  # load-index template over FRAG_ROW / FRAG_COL
-    col_base: Expr
-    row_base: Expr
-    layout: FragLayout = M16N8
-
-    def deps(self) -> tuple[str, ...]:
-        return (self.frag,)
-
-    def defines(self) -> tuple[str, ...]:
-        return (self.frag,)
-
-    def external_reads(self) -> tuple[str, ...]:
-        return (self.buf,)
-
-    def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
-        new = rename.get(self.buf, self.buf)
-        return self if new == self.buf else replace(self, buf=new)
-
-    def exprs(self) -> tuple[Expr, ...]:
-        return (*self.index, self.col_base, self.row_base)
-
-    def pretty(self, indent: str = "") -> list[str]:
-        idx = ", ".join(e.pretty() for e in self.index)
-        return [f"{indent}FragmentBiasAdd({self.frag} += {self.buf}[{idx}])"]
-
-    def render(self, ctx: RenderCtx) -> list[str]:
-        from emmy.compiler.ir.stmt import render_index  # noqa: PLC0415
-
-        pad = _pad(ctx.indent)
-        lay = self.layout
-        conv = {"f16": "__half2float({})", "bf16": "__bfloat162float({})"}
-        dt = ctx.buffer_dtypes.get(self.buf, "f32")
-        lines = _lane_preamble(ctx, pad, lay.lane_decl, lay.lane_names)
-        for i in range(lay.n_elems):
-            sub: dict[str, Expr] = {
-                FRAG_COL: BinaryExpr("+", self.col_base, lay.col_off[i]),
-                FRAG_ROW: BinaryExpr("+", self.row_base, lay.row_off[lay.elem_row[i]]),
-            }
-            idx = tuple(e.substitute(sub) for e in self.index)
-            flat = render_index(self.buf, idx, ctx)
-            lines.append(f"{pad}{self.frag}[{i}] += {conv.get(dt, '{}').format(f'{self.buf}[{flat}]')};")
-        return lines
+#: The reserved offset Vars a :class:`RegStore` epilogue is written over — the element's row / col
+#: OFFSET within its fragment, added to the cell base the expression already carries.
+ELEM_ROW = "__M__"
+ELEM_COL = "__N__"
 
 
 # ---------------------------------------------------------------------------
@@ -1319,7 +1242,7 @@ class FragmentBiasAdd(Stmt):
 # referenced positionally inside inline PTX (``RegFragment`` / ``LdmatrixLoad``
 # / ``MmaSyncPtx`` / ``RegStore``), rendered via the ``_MMA_SYNC_PRELUDE``
 # helper wrappers (pure PTX — NVRTC-clean, no ``<mma.h>``). Emitted by
-# ``kernel/005_lower_atom_tile`` from the ``Mma`` op's ``Atom`` spec.
+# the kernel atom lowering (``lowering/kernel/_atom.py``) from the tile's ``Atom`` spec.
 # (The opaque ``nvcuda::wmma`` node family was removed — the swizzled mma.sync
 # slab beat it.)
 # ---------------------------------------------------------------------------
@@ -1634,7 +1557,7 @@ class LdmatrixLoad(Stmt):
     (``staged=False``, ``src_buffer`` is the gmem operand) the render emits the
     ``emmy_mma_load_{a,b}_gmem`` helper instead — a gmem-direct fragment load that
     replicates the same lane→element map without ldmatrix. Slower (no smem reuse)
-    but correct; ``005_lower_atom_tile`` picks per operand based on whether an
+    but correct; the atom lowering picks per operand based on whether an
     enclosing ``StageBundle`` staged it.
 
     ``gmem_guard`` (gmem-direct only) carries a masked-tile boundary as
@@ -2243,55 +2166,6 @@ class WgmmaWait(Stmt):
 
 
 @dataclass(frozen=True)
-class EpilogueLoad:
-    """One leaf operand of a fused pointwise epilogue (see :class:`RegEpilogue`).
-
-    Not a body :class:`Stmt` — a payload riding the :class:`RegStore`.
-    ``index`` is the cell-base coordinate tuple (struct-shared with the
-    epilogue's Write); per fragment element the render adds the element's own
-    row / col motion on every dim whose ``role`` is ``"m"`` / ``"n"`` (at
-    *this* buffer's dim stride — so a transposed or broadcast operand reads
-    correctly), and nothing on ``"fixed"`` dims (literals, batch / grid vars —
-    uniform across the cell)."""
-
-    name: str
-    buffer: str
-    index: tuple
-    roles: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class RegEpilogue:
-    """A pure pointwise SSA chain folded into the fragment store.
-
-    Captured by ``kernel/005_lower_atom_tile`` from the backward slice between
-    the accumulator and the Write (the scalar Load / Assign stmts are stripped
-    — the accumulator has no scalar SSA name on the fragment path). The render
-    evaluates the chain per fragment element with ``acc`` substituted by the
-    element and each leaf loaded at the element's own (row, col). Chain ops
-    reuse :class:`Assign` rendering, including its optional dtype, promotion,
-    native-op, and conversion rules. ``ops`` are ``(name, op_name, args,
-    dtype)`` in topological (body) order; ``result`` is the SSA name the Write
-    stored."""
-
-    acc: str
-    loads: tuple[EpilogueLoad, ...]
-    ops: tuple[tuple[str, str, tuple[str, ...], DataType | None], ...]
-    result: str
-    # Coord-predicated Selects (the causal attention mask), rendered as per-element ternaries as
-    # soon as their branch values are bound. Each is ``(name, branches)`` where
-    # ``branches`` is ``((cond_expr | None, value_name), ...)`` — the predicate
-    # carries its σ-applied cell bases plus ``__M__`` / ``__N__`` placeholder
-    # Vars the store substitutes with the fragment element's row/col offsets;
-    # the last branch is the else.
-    selects: tuple[tuple[str, tuple[tuple[Expr | None, str], ...]], ...] = ()
-    # Additional ``(acc_name, frag_name)`` accumulator bindings — a multi-fold contraction's
-    # extra C fragments (the fused gate/up edge): each name substitutes to its fragment's
-    # element alongside ``acc``, so the chain combines the folds per cell (SwiGLU et al).
-    extra_accs: tuple[tuple[str, str], ...] = ()
-
-
-@dataclass(frozen=True)
 class RegStore(Stmt):
     """Store an mma.sync f32 accumulator array to the output buffer with a
     per-lane epilogue downconvert.
@@ -2303,10 +2177,16 @@ class RegStore(Stmt):
     each value is converted via ``__float2half``. ``ldm`` is the output row stride
     (N) — ``0`` auto-resolves from the buffer's inner extent.
 
-    ``epilogue`` optionally carries a fused pointwise chain
-    (:class:`RegEpilogue` — residual adds, bias / scale broadcasts,
-    activations): evaluated per fragment element in f32 right before the
-    downconvert (the CUTLASS epilogue-visitor pattern).
+    ``epilogue`` optionally carries a fused pointwise chain — residual adds, bias / scale
+    broadcasts, activations, a coordinate ``Select`` — as a pure :class:`Lambda` over the
+    ordinary ``Load`` / ``Assign`` / ``Select`` stmts of the projection tail: its leading params
+    bind, in order, the accumulator names to ``frag`` and ``extra_frags`` (a multi-fold node's
+    additional C fragments, so the chain combines the channels per cell — SwiGLU et al.), its
+    trailing params are the coordinates the body reads (``Lambda.closing``), and its one result is
+    the stored value. Evaluated per fragment element in f32 right before the downconvert (the
+    CUTLASS epilogue-visitor pattern): each param substitutes to that element, and the reserved
+    :data:`ELEM_ROW` / :data:`ELEM_COL` vars in a ``Load`` index or ``Select`` predicate substitute
+    to the element's row / col offset within the fragment (the cell base is already in the expression).
 
     ``m_guard`` / ``n_guard`` carry a masked-tile boundary as ``(base Expr,
     bound Expr)`` — the tile's row / col coordinate of fragment element (0,0)
@@ -2343,7 +2223,8 @@ class RegStore(Stmt):
     frag: str
     shape: tuple[int, int, int]
     ldm: int = 0
-    epilogue: RegEpilogue | None = None
+    epilogue: Lambda | None = None
+    extra_frags: tuple[str, ...] = ()
     m_guard: tuple[Expr, Expr] | None = None
     n_guard: tuple[Expr, Expr] | None = None
     atomic: bool = False
@@ -2371,17 +2252,15 @@ class RegStore(Stmt):
     col_dim: int | None = None
 
     def deps(self) -> tuple[str, ...]:
-        extra = () if self.epilogue is None else tuple(fr for _, fr in self.epilogue.extra_accs)
-        return (self.frag, *extra)
+        return (self.frag, *self.extra_frags)
 
     def external_reads(self) -> tuple[str, ...]:
-        # The fused epilogue's leaf loads are gmem reads this stmt performs
-        # directly (their original Load stmts were stripped by
-        # 005_lower_atom_tile), so they must be declared here for the kernel
-        # signature / render shapes to include the buffers.
+        # The fused epilogue's leaf loads are gmem reads this stmt performs directly (their
+        # original Load stmts were stripped by the atom lowering), so they must be declared here for
+        # the kernel signature / render shapes to include the buffers.
         if self.epilogue is None:
             return ()
-        return tuple(ld.buffer for ld in self.epilogue.loads)
+        return tuple(dict.fromkeys(ld.input for ld in self.epilogue.body if isinstance(ld, Load)))
 
     def external_writes(self) -> tuple[str, ...]:
         return (self.dst_buffer,)
@@ -2391,7 +2270,7 @@ class RegStore(Stmt):
         return self if new == self.dst_buffer else replace(self, dst_buffer=new)
 
     def exprs(self) -> tuple[Expr, ...]:
-        epi = () if self.epilogue is None else tuple(e for ld in self.epilogue.loads for e in ld.index)
+        epi = () if self.epilogue is None else tuple(e for st in self.epilogue.body for e in st.exprs())
         guards = tuple(e for g in (self.m_guard, self.n_guard) if g is not None for e in g)
         return (*self.dst_index, *epi, *guards)
 
@@ -2399,8 +2278,8 @@ class RegStore(Stmt):
         idx = ", ".join(e.pretty() for e in self.dst_index)
         epi = ""
         if self.epilogue is not None:
-            chain = ", ".join(op for _, op, _, _ in self.epilogue.ops)
-            bufs = ", ".join(ld.buffer for ld in self.epilogue.loads)
+            chain = ", ".join(st.op.name for st in self.epilogue.body if isinstance(st, Assign))
+            bufs = ", ".join(self.external_reads())
             epi = f" epilogue[{chain}]({bufs or 'no loads'})"
         guards = ""
         if self.m_guard is not None:
@@ -2478,10 +2357,9 @@ class RegStore(Stmt):
         reads inside element ``i``'s boundary check). Without
         an epilogue the values are the bare ``frag[i]`` and the preambles are
         empty. With one, each element ``i`` (row ``_g``/``_g+8``, col
-        ``2_t+{0,1}``) declares its leaf loads (converted to f32; offsets per
-        the dim roles at each buffer's own stride) and the chain ops (via the
-        scalar ``Assign`` renderer), all scoped inside the store's ``{ }``
-        block. Leaf loads are
+        ``2_t+{0,1}``) declares its leaf loads (converted to f32, at the
+        element's own coordinates) and the chain ops (via the scalar
+        ``Assign`` renderer), all scoped inside the store's ``{ }`` block. Leaf loads are
         scalar; lanes ``_t = 0..3`` cover 8 contiguous columns, so the warp's
         accesses coalesce regardless."""
         coords = self._element_coords()
@@ -2491,56 +2369,29 @@ class RegStore(Stmt):
 
         epi = self.epilogue
         conv = {"f16": "__half2float({})", "bf16": "__bfloat162float({})"}
+        frags = (self.frag, *self.extra_frags)
         per_elem: list[list[str]] = []
         vals: list[str] = []
-        for i, (row, col, row_off, col_off) in enumerate(coords):
+        for i, (_row, _col, row_off, col_off) in enumerate(coords):
             lines: list[str] = []
-            env = {epi.acc: f"{self.frag}[{i}]", **{a: f"{fr}[{i}]" for a, fr in epi.extra_accs}}
+            env = {acc: f"{fr}[{i}]" for acc, fr in zip(epi.params, frags, strict=False)}
             for value in env.values():
                 ctx.ssa_dtypes[value] = "f32"
-            for ld in epi.loads:
-                temp = f"{ld.name}_e{i}"
-                if ld.buffer in ctx.literal_constants:
-                    lines.append(f"const float {temp} = {float(ctx.literal_constants[ld.buffer])!r}f;")
-                    env[ld.name] = temp
+            # The reserved ``ELEM_ROW`` / ``ELEM_COL`` vars substitute to this element's row / col offset
+            # within the fragment; a Load index and a Select predicate already carry the cell base.
+            coord = {ELEM_ROW: row_off, ELEM_COL: col_off}
+            for st in epi.body:
+                if isinstance(st, Load):
+                    temp = f"{st.name}_e{i}"
+                    if st.input in ctx.literal_constants:
+                        lines.append(f"const float {temp} = {float(ctx.literal_constants[st.input])!r}f;")
+                    else:
+                        flat = render_index(st.input, tuple(e.substitute(coord) for e in st.index), ctx)
+                        dt = ctx.buffer_dtypes.get(st.input, "f32")
+                        lines.append(f"const float {temp} = {conv.get(dt, '{}').format(f'{st.input}[{flat}]')};")
+                    env[st.name] = temp
                     ctx.ssa_dtypes[temp] = "f32"
-                    continue
-                flat = render_index(ld.buffer, ld.index, ctx)
-                parts = [flat]
-                for d, role in enumerate(ld.roles):
-                    if role == "fixed":
-                        continue
-                    stride = _dim_stride(ld.buffer, d, ctx)
-                    motion = row if role == "m" else col
-                    parts.append(motion if stride == 1 else f"{motion} * {stride}")
-                addr = " + ".join(parts)
-                dt = ctx.buffer_dtypes.get(ld.buffer, "f32")
-                lines.append(f"const float {temp} = {conv.get(dt, '{}').format(f'{ld.buffer}[{addr}]')};")
-                env[ld.name] = temp
-                ctx.ssa_dtypes[temp] = "f32"
-            # Coord-predicated Selects (the causal mask): a per-element ternary.
-            # ``__M__`` / ``__N__`` substitute to this element's row/col offset;
-            # the captured predicate already carries its semantic cell base.
-            coord = {"__M__": row_off, "__N__": col_off}
-            pending = list(epi.selects)
-            # A select renders once its branch values are bound: a mask over a loaded value renders
-            # ahead of the chain, a mask over an op's result right after that op.
-            for op in (None, *epi.ops):
-                if op is not None:
-                    name, op_name, args, dtype = op
-                    rendered_name = f"{name}_e{i}"
-                    rendered = Assign(
-                        name=rendered_name,
-                        op=op_name,
-                        args=tuple(env[arg] for arg in args),
-                        dtype=dtype,
-                    ).render(replace(ctx, indent=0))[0]
-                    lines.append(f"const {rendered}")
-                    env[name] = rendered_name
-                while ready := [sel for sel in pending if all(value in env for _, value in sel[1])]:
-                    sel_name, branches = ready[0]
-                    pending.remove(ready[0])
-
+                elif isinstance(st, Select):
                     # The select is declared f32, and a chain op keeps the tail's own dtype, so a
                     # branch value narrowed by an earlier op converts back here — a ternary over a
                     # ``__half`` and a ``float`` does not compile.
@@ -2548,15 +2399,19 @@ class RegStore(Stmt):
                         rendered = env[value]
                         return conv.get(ctx.ssa_dtypes.get(rendered, "f32"), "{}").format(rendered)
 
-                    expr = widened(branches[-1][1])
-                    for cond, value in reversed(branches[:-1]):
-                        rc = cond.substitute(coord).render(ctx)
-                        expr = f"(({rc}) ? {widened(value)} : {expr})"
-                    lines.append(f"const float {sel_name}_e{i} = {expr};")
-                    env[sel_name] = f"{sel_name}_e{i}"
-                    ctx.ssa_dtypes[env[sel_name]] = "f32"
+                    expr = widened(st.branches[-1].value)
+                    for br in reversed(st.branches[:-1]):
+                        rc = br.select.substitute(coord).render(ctx)
+                        expr = f"(({rc}) ? {widened(br.value)} : {expr})"
+                    lines.append(f"const float {st.name}_e{i} = {expr};")
+                    env[st.name] = f"{st.name}_e{i}"
+                    ctx.ssa_dtypes[env[st.name]] = "f32"
+                else:
+                    rendered = replace(st, name=f"{st.name}_e{i}", args=tuple(env[a] for a in st.args)).render(replace(ctx, indent=0))[0]
+                    lines.append(f"const {rendered}")
+                    env[st.name] = f"{st.name}_e{i}"
             per_elem.append(lines)
-            vals.append(env[epi.result])
+            vals.append(env[epi.results[0]])
         return per_elem, vals
 
     @staticmethod
@@ -3242,34 +3097,15 @@ def _(s: FragmentPromote, rename, sigma, axis_fn):
 
 @_rewrite_kind.register
 def _(s: RegStore, rename, sigma, axis_fn):
-    # The epilogue's chain SSA names are render-local (scoped per element
-    # inside the store's block), so only the load index Exprs σ-substitute —
-    # that threads the per-cell replication offsets through, exactly like
-    # ``dst_index``.
+    # The epilogue's chain SSA names are render-local (scoped per element inside the store's
+    # block), so only its Exprs σ-substitute — the load indices and the captured predicates thread
+    # the per-cell replication offsets through exactly like ``dst_index``. The lambda is re-closed
+    # over what the substituted body reads (its trailing coordinate params); the leading params
+    # stay bound to the store's fragments, which rename with the store.
     epilogue = s.epilogue
     if epilogue is not None:
-        epilogue = RegEpilogue(
-            acc=epilogue.acc,
-            loads=tuple(
-                EpilogueLoad(name=ld.name, buffer=ld.buffer, index=tuple(sigma.apply(e) for e in ld.index), roles=ld.roles)
-                for ld in epilogue.loads
-            ),
-            ops=epilogue.ops,
-            result=epilogue.result,
-            # Captured predicates carry semantic cell-base expressions plus
-            # placeholders, so replicate the real coordinate vars like load indices.
-            selects=tuple(
-                (
-                    name,
-                    tuple((None if cond is None else sigma.apply(cond), value) for cond, value in branches),
-                )
-                for name, branches in epilogue.selects
-            ),
-            # The extra channel accumulators rename with the store's own fragment (they are
-            # per-cell C-fragment names too) — dropping them here left the multi-channel combine
-            # (the gemma GeGLU ``acc2``) unbound at render.
-            extra_accs=tuple((a, rename(fr)) for a, fr in epilogue.extra_accs),
-        )
+        body = Body(tuple(st.rewrite(lambda n: n, sigma) for st in epilogue.body))
+        epilogue = Lambda.closing(epilogue.params[: 1 + len(s.extra_frags)], body, epilogue.results)
 
     # Guard base/bound Exprs σ-substitute like ``dst_index`` (the per-cell
     # replicator's offsets must reach the boundary predicate; the bound is a
@@ -3287,6 +3123,7 @@ def _(s: RegStore, rename, sigma, axis_fn):
         s,
         dst_index=tuple(sigma.apply(e) for e in s.dst_index),
         frag=rename(s.frag),
+        extra_frags=tuple(rename(f) for f in s.extra_frags),
         epilogue=epilogue,
         m_guard=_sub_guard(s.m_guard),
         n_guard=_sub_guard(s.n_guard),
@@ -3303,14 +3140,27 @@ def _(s: RegStore, rename, sigma, axis_fn):
 
 
 @_rewrite_kind.register
-def _(s: Reassign, rename, sigma, axis_fn):
-    return Reassign(name=rename(s.name), value=rename(s.value))
-
-
-@_rewrite_kind.register
 def _(s: FragmentApply, rename, sigma, axis_fn):
-    args = tuple((rename(a[0]), rename(a[1])) if k == ROW else rename(a) for a, k in zip(s.args, s.kinds, strict=True))
-    return FragmentApply(out=rename(s.out), op=s.op, args=args, kinds=s.kinds, in_place=s.in_place, layout=s.layout, post=s.post)
+    # SSA operands route through ``rename``; a COORD predicate, a GMEM template and the tile-origin
+    # bases σ-substitute (the canonicalizer renames the query / kv axis vars). The reserved
+    # ``__frow`` / ``__fcol`` coordinate vars and any free runtime symbol (``seq_len``) are not
+    # local axes, so σ leaves them alone.
+    def _arg(a, k):  # noqa: ANN001, ANN202
+        if k == ROW:
+            return (rename(a[0]), rename(a[1]))
+        if k == COORD:
+            return sigma.apply(a)
+        if k == GMEM:
+            return (a[0], tuple(sigma.apply(e) for e in a[1]))
+        return rename(a) if isinstance(a, str) else a
+
+    return replace(
+        s,
+        out=rename(s.out),
+        args=tuple(_arg(a, k) for a, k in zip(s.args, s.kinds, strict=True)),
+        row_base=sigma.apply(s.row_base) if s.row_base is not None else None,
+        col_base=sigma.apply(s.col_base) if s.col_base is not None else None,
+    )
 
 
 @_rewrite_kind.register
@@ -3330,37 +3180,4 @@ def _(s: FragmentRepack, rename, sigma, axis_fn):
 def _(s: FragmentRowReduce, rename, sigma, axis_fn):
     return FragmentRowReduce(
         top=rename(s.top), bot=rename(s.bot), frags=tuple(rename(f) for f in s.frags), op=s.op, layout=s.layout, dtype=s.dtype
-    )
-
-
-@_rewrite_kind.register
-def _(s: FragmentBiasAdd, rename, sigma, axis_fn):
-    # Same shape as :class:`FragmentMask`'s: ``frag`` is SSA, the tile-origin bases and the load
-    # template σ-substitute, and the reserved ``__frow`` / ``__fcol`` coordinate vars are not local
-    # axes, so σ leaves them alone.
-    return FragmentBiasAdd(
-        frag=rename(s.frag),
-        buf=s.buf,
-        index=tuple(sigma.apply(e) for e in s.index),
-        col_base=sigma.apply(s.col_base),
-        row_base=sigma.apply(s.row_base),
-        layout=s.layout,
-    )
-
-
-@_rewrite_kind.register
-def _(s: FragmentMask, rename, sigma, axis_fn):
-    # ``frag`` is SSA (the score fragment); the tile-origin bases + the predicate σ-substitute so
-    # the canonicalizer renames the query / kv axis vars (``qb``→``a1``, ``kv``→``a3``). The
-    # reserved ``__frow`` / ``__fcol`` coordinate vars + any free runtime symbol (``seq_len``) are
-    # untouched by σ over the local axes.
-    return FragmentMask(
-        frag=rename(s.frag),
-        mask_when=sigma.apply(s.mask_when),
-        col_base=sigma.apply(s.col_base),
-        row_base=sigma.apply(s.row_base) if s.row_base is not None else None,
-        fill=s.fill,
-        keep=rename(s.keep) if s.keep is not None else None,
-        keep_op=s.keep_op,
-        layout=s.layout,
     )

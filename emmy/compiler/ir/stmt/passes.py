@@ -17,11 +17,8 @@ from emmy.compiler.ir.stmt.leaves import (
     Init,
     Let,
     Load,
-    Mma,
-    Pack,
     Select,
     SelectBranch,
-    Unpack,
     Write,
     ZeroPrologue,
 )
@@ -86,21 +83,6 @@ def _(s: Load, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
 
 
 @_rewrite_kind.register
-def _(s: Pack, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
-    return Pack(name=rename(s.name), low=rename(s.low), high=rename(s.high), dtype=s.dtype)
-
-
-@_rewrite_kind.register
-def _(s: Unpack, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
-    return Unpack(
-        low_name=rename(s.low_name),
-        high_name=rename(s.high_name),
-        value=rename(s.value),
-        lane_dtype=s.lane_dtype,
-    )
-
-
-@_rewrite_kind.register
 def _(s: Assign, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
     return Assign(name=rename(s.name), op=s.op, args=tuple(rename(a) for a in s.args), dtype=s.dtype)
 
@@ -115,26 +97,6 @@ def _(s: Accum, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
         dtype=s.dtype,
         axes=new_axes,
         base=rename(s.base) if s.base is not None else None,
-    )
-
-
-@_rewrite_kind.register
-def _(s: Mma, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
-    new_axes = tuple(sorted({rename(n) for old in s.axes for n in _rewrite_axis_name(old, sigma)}))
-
-    def _g(guard):  # σ-substitute a (base, bound) guard's exprs so axis vars canonicalize
-        return None if guard is None else tuple(_rename_ssa_vars_in_expr(sigma.apply(expr), rename) for expr in guard)
-
-    return Mma(
-        c=rename(s.c),
-        a=rename(s.a),
-        b=rename(s.b),
-        atom=s.atom,
-        axes=new_axes,
-        b_trans=s.b_trans,
-        m_guard=_g(s.m_guard),
-        n_guard=_g(s.n_guard),
-        k_zero=_g(s.k_zero),
     )
 
 

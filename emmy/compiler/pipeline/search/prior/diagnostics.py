@@ -147,7 +147,7 @@ def golden_deploy_perf(prior, kernel_filter: str | None = None) -> dict[str, flo
     # Deployable (-O3) measured rows per matmul op group, indexed by ShapeKey.
     # An fp32 square and its ``.fp16`` twin share (free_prod, reduce), so the key's
     # dtype flag is what keeps them apart — ``ShapeKey.from_s_features`` derives it
-    # from ``S_dtype_f32`` (see its docstring for why ``S_n_mma`` can't be the key).
+    # from ``S_dtype_f32`` (see its docstring for why nothing else can be the key).
     index: dict[ShapeKey, list] = {}
     for sig, samples in Dataset.from_prior(prior).group_by_op().items():
         d = dict(sig)

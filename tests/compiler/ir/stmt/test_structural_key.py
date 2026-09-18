@@ -10,7 +10,6 @@ from itertools import permutations, product
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F32
-from emmy.compiler.ir.atom import SCALAR_ATOM
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.stmt.blocks import Cond, Loop
@@ -22,7 +21,6 @@ from emmy.compiler.ir.stmt.leaves import (
     Init,
     Let,
     Load,
-    Mma,
     Write,
 )
 from emmy.compiler.ir.stmt.normalize import normalize_body, sort_commutative_args
@@ -705,31 +703,6 @@ def test_normalize_body_canonicalizes_outer_captures_before_nested_order() -> No
     assert normalize_body(make("renamed_x")) == canonical
     assert normalize_body(canonical) == canonical
     assert normalize_body(canonical) is canonical
-
-
-def test_normalize_body_keeps_mma_in_its_reduction_loop() -> None:
-    """An Mma is loop-carried state even when its scalar operands are loop invariant."""
-
-    def make(axis: str) -> Body:
-        return Body(
-            (
-                Loop(
-                    axis=Axis(axis, 8),
-                    body=(
-                        Load(name="a", input="A", index=()),
-                        Load(name="b", input="B", index=()),
-                        Mma(c="state", a="a", b="b", atom=SCALAR_ATOM, axes=(axis,)),
-                    ),
-                ),
-                Write(output="O", index=(), value="state"),
-            )
-        )
-
-    canonical = normalize_body(make("k"))
-    assert canonical == normalize_body(make("renamed_k"))
-    assert isinstance(canonical[2], Loop)
-    assert isinstance(canonical[2].body[0], Mma)
-    assert canonical[2].body[0].axes == (canonical[2].axis.name,)
 
 
 def test_structural_key_equal_when_a_copy_alias_precedes_a_sibling_scope() -> None:

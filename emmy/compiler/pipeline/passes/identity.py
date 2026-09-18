@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.stmt import Body
 from emmy.compiler.ir.stmt.blocks import Cond, Loop
-from emmy.compiler.ir.stmt.leaves import Assign, Mma
+from emmy.compiler.ir.stmt.leaves import Assign
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline.knob import STRUCT_PREFIX
 from emmy.compiler.pipeline.strategy import PassEndEvent, PipelineStrategy, RunStartEvent, SpliceEvent
@@ -149,7 +149,6 @@ def _skeleton(body: Body, graph: Graph | None) -> dict[str, float]:
     feats["S_n_distinct_input"] = len({ld.input for ld in loads})
     feats["S_n_write"] = len(body.writes)
     feats["S_n_accum"] = len(body.accums)
-    feats["S_n_mma"] = len(body.iter_of_type(Mma))
     feats["S_n_cond"] = len(body.iter_of_type(Cond))
     assigns = body.iter_of_type(Assign)
     feats["S_n_assign"] = len(assigns)

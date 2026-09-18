@@ -336,11 +336,9 @@ def _stmt_eval_scope() -> dict:
         Let,
         Load,
         Loop,
-        Pack,
         Select,
         SelectBranch,
         StridedLoop,
-        Unpack,
         Write,
     )
     from emmy.compiler.ir.tensor.ir import IndexSource
@@ -356,8 +354,6 @@ def _stmt_eval_scope() -> dict:
         "TernaryExpr": TernaryExpr,
         "CastExpr": CastExpr,
         "Load": Load,
-        "Pack": Pack,
-        "Unpack": Unpack,
         "Assign": Assign,
         "Accum": Accum,
         "Init": Init,
