@@ -128,11 +128,13 @@ def handle_trace(args):
         if args.model_provenance and args.model_provenance != serving.model_provenance:
             logger.error("--model-provenance must match the serving config (%s)", serving.model_provenance)
             sys.exit(2)
+        from emmy.serving.twins import twin_width  # noqa: PLC0415
+
         result = write_trace_inventories(
             graphs,
             destination,
             model=serving.model_provenance,
-            realizations=[row.to_golden() for row in serving.realizations],
+            realizations={name: [row.to_golden() for row in serving.realizations_for(twin_width(name))] for name in graphs},
         )
         logger.info(
             "Saved serving-twin golden YAML: %s (%d graph(s), %d distinct kernel(s))",

@@ -37,6 +37,8 @@ changes the model's forward changes these twins — exactly as it would change s
 
 from __future__ import annotations
 
+import re
+
 import logging
 from dataclasses import replace
 from typing import TYPE_CHECKING
@@ -51,6 +53,13 @@ logger = logging.getLogger(__name__)
 #: Serving's default static widths (``EmmyGenRunner`` / ``capture_gen_twins`` conventions).
 DECODE_BUCKET = 32
 PREFILL_BUCKET = 256
+
+
+def twin_width(name: str) -> int | None:
+    """The static token width a twin's name spells (``post32``, ``pre8-global``, ``expert16@mxfp4``),
+    or ``None`` for a symbolic twin (``pre-sym``)."""
+    match = re.match(r"[a-z_]+(\d+)", name)
+    return int(match.group(1)) if match else None
 
 
 def _serving_twin_buckets(

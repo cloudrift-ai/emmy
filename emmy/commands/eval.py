@@ -480,9 +480,14 @@ def handle_eval_golden(args) -> None:
         logger.error("golden model provenance %s does not cover %s", ", ".join(recorded) or "(none)", serving.model_provenance)
         sys.exit(1)
 
-    expected = {(row.bindings, row.pins) for row in serving.realizations}
+    from emmy.serving.twins import twin_width  # noqa: PLC0415
+
     missing = []
     for config_index, config in enumerate(document["configs"]):
+        # A target's rows are the ones its twin reaches: a static twin is compiled at its own
+        # width, a symbolic one for any width. The twin is the realization name's first field.
+        twin = config["realizations"][0]["name"].split(".", 1)[0]
+        expected = {(row.bindings, row.pins) for row in serving.realizations_for(twin_width(twin))}
         actual = {
             (tuple(sorted(realization["bindings"].items())), tuple(sorted(realization["pins"].items())))
             for realization in config["realizations"]
