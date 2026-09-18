@@ -749,7 +749,15 @@ def _reformed(piece: TileOp) -> TileOp:
         formed = lift_kernel(LoopOp(body=body), name=piece.name)
     except ValueError:
         return piece
-    return replace(piece, op=rewrite_twisted(formed.op, formed.axes), place=formed.place, axes=formed.axes, output_specs=formed.output_specs)
+    # The lift peels every outer plain loop into the grid, a store's sweep included when nothing
+    # sits ahead of it; the piece keeps the grid it was minted with, and an axis peeled past it
+    # goes back to being the sweep of the stores that ride it.
+    grid, peeled = formed.place.free[: len(piece.place.free)], formed.place.free[len(piece.place.free) :]
+    specs = tuple(
+        replace(spec, sweep=(*spec.sweep, *(axis for axis in peeled if any(axis.name in index.free_vars() for index in spec.write.index))))
+        for spec in formed.output_specs
+    )
+    return replace(piece, op=rewrite_twisted(formed.op, formed.axes), place=replace(formed.place, free=grid), axes=formed.axes, output_specs=specs)
 
 
 def _producer_order(pieces) -> list:
