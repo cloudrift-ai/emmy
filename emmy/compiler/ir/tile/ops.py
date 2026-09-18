@@ -420,9 +420,9 @@ def axis_names(root) -> set[str]:
 def projection_tail(tile) -> list[Stmt]:
     """The kernel's EFFECTFUL projection stmt stream — the root zero-axis fold's (pure) body with the
     kernel-boundary ``TileOp.output_specs`` reconstituted (:func:`~emmy.compiler.ir.tile.ir.apply_output_specs`).
-    The ONE read every scheduler gate that inspects "the tail" goes through, so the
-    ``coop-t`` band's no-sweep-``Loop`` condition keeps excluding rms/softmax rows after their
-    sweep moved to an ``OutputSpec`` decoration."""
+    This reads the outer projection, not work nested in its operands. The ``coop-t`` band's
+    no-sweep-``Loop`` condition keeps excluding rms/softmax rows after their sweep moved to an
+    ``OutputSpec`` decoration; fragment legality additionally checks nested projection work."""
     op = tile.op
     body = list(op.lift.body) if isinstance(op, Fold) and op.axis is None else []
     return apply_output_specs(body, tile.output_specs)

@@ -14,8 +14,9 @@ instead of vLLM. Keep vLLM as the default. Qualify dense Qwen3-0.6B in FP16 on o
 experiments. It does not implement native LLM serving. This plan remains open until the remaining work is completed
 or its scope is explicitly revised.
 
-- **Milestone 0 — partial.** API reuse was investigated and stock vLLM was measured. All three Emmy serving
-  configurations timed out during compilation, so the dispatch and shape/memory comparisons remain incomplete.
+- **Milestone 0 — partial.** API reuse was investigated and stock vLLM was measured. The first Emmy comparison
+  timed out during compilation. The follow-up compiles successfully but still misses readiness during GPU
+  initialization, so the dispatch and shape/memory comparisons remain incomplete.
   See the [baseline report](../experiments/Qwen3-0.6B/native_baseline/RESULTS.md) and its linked investigations.
 - **Milestone 1 — mostly implemented.** Static executable packs, a Rust CUDA executor, graph replay, persistent
   worker supervision, and timeout/CUDA-error recovery are implemented. The run command compares Python and Rust
@@ -31,10 +32,12 @@ speedup. Before that merge, full-suite validation had failures reproduced on mai
 partly checked against main. The merged PR records those validation limits.
 
 **Selected next step:** fix the existing serving baseline before expanding. Draft
-[PR #835](https://github.com/cloudrift-ai/emmy/pull/835) rejects unsupported fragment epilogues before scheduling.
-The isolated Qwen3 pre-attention program compiles without the previous retries and passes GPU parity with synthetic
-weights at 1, 4, and 8 tokens. Complete serving startup, repository validation, and the comparison matrix remain pending.
-The serving rerun must hold source fixed throughout, since the failed baseline rows used a changing local checkout.
+[PR #835](https://github.com/cloudrift-ai/emmy/pull/835) rejects unsupported nested fragment epilogues and contraction
+roots the binder cannot compute together. The isolated Qwen3 pre-attention program passes GPU parity with synthetic
+weights at 1, 4, and 8 tokens. A complete four-configuration rerun held source fixed: stock passed; all three Emmy
+configurations compiled their programs without the reproduced rejections, then missed readiness during GPU
+initialization. An isolated width-16 post-attention program exceeds its watchdog as one kernel, while explicit
+placement cuts pass numerical checks. The remaining work is to qualify serving schedules and repeat the comparison.
 Evidence gathering still precedes performance claims and runtime expansion.
 
 ## Evidence before implementation
