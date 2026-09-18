@@ -606,7 +606,13 @@ canonicalized before validation:
   it, so the block still depends on the enclosing definition it reads.
 - A standard smaller-half worklist computes the equitable partition in
   `O((vertices + relations) log vertices)` relation visits. Exact individualization is isolated to partitions that
-  refinement cannot distinguish; no exact near-linear worst-case graph-canonization algorithm is known. Canonical
+  refinement cannot distinguish; no exact near-linear worst-case graph-canonization algorithm is known. The search
+  keeps its cost near the number of leaves it must see: each node refines from its individualized cell alone (the
+  parent partition is already equitable), and a leaf equal to the first or the least leaf seen is its image under
+  an automorphism, so the search stops the subtree that leaf hangs from where its path leaves the reference's —
+  everything in there was already labeled. A kernel's k register fragments, which no refinement tells apart, thus
+  cost one refinement per level and arm rather than a full refinement of every node of a cubic tree (85 s to 1.4 s
+  on a 16-fragment o_proj piece). Canonical
   vertex ranks then serve as the optional tie-break for `Body.topological_order`, a heap-based Kahn sort. Ready nested
   scopes stay ahead of leaf epilogues so normalization does not widen schedule search or obscure contractions.
 

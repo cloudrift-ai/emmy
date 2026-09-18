@@ -616,19 +616,30 @@ def _canonical_labeling(
                     work.append(mapped)
         return frozenset(reached)
 
-    def search(partition: tuple[tuple[int, ...], ...], prefix: tuple[int, ...], *, refined: bool = False) -> tuple[tuple, tuple[int, ...]]:
+    def learn(left: tuple[int, ...], right: tuple[int, ...]) -> None:
+        if (generator := automorphism(left, right)) is not None and generator not in generators:
+            generators.extend((generator, inverse(generator)))
+
+    # The first leaf and the least leaf so far, by certificate: a later leaf equal to either is
+    # its image under an automorphism, and so is the whole subtree that leaf hangs from, up to the
+    # node where its path leaves the reference's — every certificate in there was already seen.
+    references: dict[tuple, tuple[tuple[int, ...], tuple[int, ...]]] = {}
+
+    def search(
+        partition: tuple[tuple[int, ...], ...], prefix: tuple[int, ...], *, refined: bool = False
+    ) -> tuple[tuple, tuple[int, ...], tuple[int, ...]]:
         if not refined:
             partition = _equitable_partition(partition, incoming, outgoing)
         choices = [(len(cell), index) for index, cell in enumerate(partition) if len(cell) > 1]
         if not choices:
             order = tuple(cell[0] for cell in partition)
-            return certificate(order), order
+            return certificate(order), order, prefix
 
         _, cell_index = min(choices)
         cell = partition[cell_index]
         candidate_set = frozenset(cell)
         covered: set[int] = set()
-        best: tuple[tuple, tuple[int, ...]] | None = None
+        best: tuple[tuple, tuple[int, ...], tuple[int, ...]] | None = None
         for vertex in cell:
             if vertex in covered:
                 continue
@@ -639,8 +650,17 @@ def _canonical_labeling(
             if best is None or result[0] < best[0]:
                 best = result
             elif result[0] == best[0]:
-                if (generator := automorphism(best[1], result[1])) is not None and generator not in generators:
-                    generators.extend((generator, inverse(generator)))
+                learn(best[1], result[1])
+            known = references.get(result[0])
+            if known is None:
+                if _prune and (not references or result[0] < min(references)):
+                    if len(references) > 1:
+                        del references[max(references)]
+                    references[result[0]] = (result[1], result[2])
+            elif known[1] != result[2]:
+                learn(known[0], result[1])
+                if known[1][: len(prefix)] != prefix:
+                    return best
         assert best is not None
         return best
 
