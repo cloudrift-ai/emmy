@@ -564,11 +564,8 @@ def _cooperative_root_sets(tile: TileOp, target, monkeypatch) -> set[tuple[int, 
     return {tuple(site for site in roots if leaf.schedule.nodes[site].reduce == cooperative) for leaf in leaves}
 
 
-def test_shared_output_projection_offers_at_most_one_output_tiled_root(monkeypatch) -> None:
-    """One output reads BOTH accumulators, so the projection does not partition by root and the
-    kernel binder binds at most one output-tiled root (the other reduce lowers serially inside
-    the projection). The offer applies the binder's rule: no row tiles both roots — that row was
-    offered and then refused at materialize — while each root still reaches the tile tier alone."""
+def test_shared_output_projection_refuses_fragment_atoms(monkeypatch) -> None:
+    """One output reads both roots, so either fragment would have a serial reduction in its epilogue."""
     from emmy.compiler.ir.stmt import Write
     from emmy.compiler.ir.tile import OutputSpec
 
@@ -581,8 +578,7 @@ def test_shared_output_projection_offers_at_most_one_output_tiled_root(monkeypat
         {"out": Tensor("out", (128, 128), "f16")},
         (OutputSpec(Write(output="out", index=(Var("m"), Var("n")), value="v")),),
     )
-    roots = tuple(tile.node_id(edge) for edge in tile.op.operands)
-    assert _tiled_root_sets(tile, Context.from_target((12, 0)), monkeypatch) == {(), (roots[0],), (roots[1],)}
+    assert _tiled_root_sets(tile, Context.from_target((12, 0)), monkeypatch) == {()}
 
 
 def test_shared_output_projection_offers_at_most_one_cooperative_root(monkeypatch) -> None:
