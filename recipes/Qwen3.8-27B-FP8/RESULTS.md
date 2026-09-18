@@ -173,7 +173,86 @@ the slowest of the three measured setups (table above), and it cannot hold a 250
 
 ## Emmy
 
-There is no Emmy lane. The recipe serves the stock 1Cat-vLLM fork, and every figure here is that engine.
+There is still no Emmy serving lane: the recipe serves the stock 1Cat-vLLM fork, and every serving figure above is
+that engine. What follows is compiler evidence — measured CUDA kernels for this checkpoint's decoder path on one
+V100 — and it does not imply that Emmy can serve the model.
+
+Compiler-qualified 2026-09-18 against `962378ed4` on four Tesla V100-SXM2-16GB (one card per walk), CUDA 12.9,
+torch 2.13.0+cu126, at nvcc's deployable `-O3`.
+
+### Coverage
+
+| Item | Value |
+| --- | --- |
+| Archetypes traced | layer 0 (Gated DeltaNet, 116 kernels) and layer 3 (full attention, 14), covering all 64 layers |
+| Distinct targets | 129 |
+| In the golden | 120 targets, 125 measured rows, every row strict-decoding against this compiler |
+| Not measured | 9 targets — every one a kernel that does not finish 60 s of GPU time (below) |
+| Reference | the isolated re-bench of each target's own greedy pick (`same-input-greedy`), 10 warm-up / 100 measured |
+
+The checkpoint's weights reach the kernels as stored e4m3 bytes with one scale per 128x128 block, and its declared
+dynamic per-token activation scaling is spelled in the graph, so these kernels compute the W8A8 form the checkpoint
+declares rather than a dequantized f16 stand-in.
+
+Summed over the 120 measured targets, the recorded kernels take **27.6 ms** against **119.2 ms** eager and
+**6.7 ms** `torch.compile`. Emmy is 4.3x eager and 4.1x slower than `torch.compile`, and the gap is one family
+(below), not a spread.
+
+### Where tuning moved a kernel
+
+Four targets were tuned by hand; `emmy tune` was not used. Each row is a deployable `-O3` measurement on this card.
+
+| target | greedy | tuned | knobs | `torch.compile` | eager |
+| --- | ---: | ---: | --- | ---: | ---: |
+| `k_matmul_pointwise_bbd2dd` (GDN matmul) | 1,901 us | **16.4 us** | `WORK=t32x16,TILE=f4x4,RASTER=gm8` | 24.6 us | 36.9 us |
+| `k_reshape_e4801c` (activation quantize) | 3,706 us | **158.5 us** | `WORK=,REDUCE=` (serial) | — | 604 us |
+| `k_linear_pointwise_927765` (qkv projection) | 3,055 us | **1,976 us** | `WORK=w8x1,TILE=mma_m8n8k4_f16_f32/f4x4/k8,STAGE=d1/smem` | 863 us | 5,130 us |
+| `k_linear_pointwise_3410af` (MLP projection) | 4,039 us | **1,991 us** | the same schedule | 1,320 us | 8,369 us |
+
+The two projections take the same schedule, which is the shape the DeepSeek-V4 and EXL3 V100 goldens already favour
+for a Volta `mma.sync` fold: eight warps down M, a 4x4 output fragment, k8, single-buffered shared memory. The
+quantizer's greedy pick recomputes its 128-wide group maximum once per output element; the serial schedule computes
+it once per group.
+
+### What is wrong
+
+**Nine kernels never finish 60 s of GPU time**, and each is the largest fusion on its path: both full-attention
+blocks (`k_sdpa_linear_mean_reduce_68bd08`, `91af59` — one fused kernel holding about thirty `mma` sites), the fused
+gate/up/down MLP (`k_linear_reduce_624aa0`, also with each of the two projection winners pinned), one piece of
+`k_conv1d_linear_mean_reduce_e6909b`'s cut set at grid 3,145,728, and five matmul reduces of the Gated DeltaNet and
+attention paths. Emmy fuses
+a whole block here and the result does not run. This is the largest gap in the inventory and the reason the golden
+holds 120 targets rather than 129.
+
+**The Gated DeltaNet chunk family is 25-55x `torch.compile`** and does not respond to scheduling.
+`torch.export` unrolls the delta rule's chunk loop, so chunk *k* carries O(*k*) work that eager amortizes. The worst
+row, `k_slice_unsqueeze_reduce_d1044a`, is 4,843 us against 88 us. It offers eight single cuts; every one of them,
+and every combination measured (all eight together, three composed sets, with and without a serial reduce), is slower
+than the fused greedy, because the cut peels off a small kernel and the remainder keeps the 4.8 ms schedule. This
+family is a fusion and code-generation gap, not a search shortfall, and it dominates the 4.1x aggregate above.
+
+**The quantize kernel's greedy schedule is non-deterministic.** A second row realizing that same configuration
+disagrees with its output, so `WORK=t128,REDUCE=coop` on this kernel has a race. The recorded row is the serial
+schedule, which is also 23x faster.
+
+**Strict eager correctness cannot gate a W8A8 kernel here.** The eager twin dequantizes the weights and computes in
+f16, so it does not carry the checkpoint's own activation-quantization error: a synthetic block-FP8 linear traced
+with `--quantize fp8-block` and benched under `--strict` disagrees with it on 261,803 of 262,144 elements. The rows
+here are therefore recorded against each target's own greedy pick, as the sibling V100 goldens are. One separate
+disagreement is unresolved: the quantizer differs from eager on 346 of 2.6M elements by one e4m3 step (index 145255,
+288 against 320). It is not a rounding-mode difference — this card's `__nv_fp8_e4m3` conversion rounds 9.5 to 10
+correctly — and it is not normalization's `amax * (1/448)` rewrite either: the same elements fail with that rewrite
+removed.
+
+### Reproduce
+
+```bash
+emmy trace Qwen/Qwen3.8-27B-FP8 --layer 0 --target sm_70 -o layer0.yaml     # and --layer 3
+emmy run --golden recipes/Qwen3.8-27B-FP8/golden/v100_sm70.yaml --bench --bench-backends eager,tcompile,emmy
+```
+
+On a Volta host, install a torch build that still ships `sm_70` kernels (`torch==2.13.0+cu126`) and preload a CUDA 12
+NVRTC, per the README's pre-Turing notes.
 
 ## Reproduce
 

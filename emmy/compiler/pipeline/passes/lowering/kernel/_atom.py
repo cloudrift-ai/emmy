@@ -332,7 +332,17 @@ def _warp_epilogue(
     # into the ``LoweringError`` a truncated pipeline can still raise.
     from emmy.compiler.pipeline import RuleSkipped  # noqa: PLC0415 — avoid an import cycle
 
-    bound = {acc, *(a for a, _ in extra_accs), *(ld.name for ld in loads), *(nm for nm, _ in selects)}
+    bound = {acc, *(a for a, _ in extra_accs), *(ld.name for ld in loads)}
+    pending = list(selects)
+
+    def bind_ready_selects():
+        # The render's order: a select binds as soon as its branch values are bound.
+        nonlocal pending
+        while ready := [sel for sel in pending if all(value in bound for _, value in sel[1])]:
+            bound.update(name for name, _ in ready)
+            pending = [sel for sel in pending if sel not in ready]
+
+    bind_ready_selects()
     for name, _op, args, _dtype in ops:
         unbound = [a for a in args if a not in bound]
         if unbound:
@@ -340,6 +350,10 @@ def _warp_epilogue(
                 f"projection epilogue reads {unbound} this node does not compute (mis-sliced multi-channel tail)", reject=True
             )
         bound.add(name)
+        bind_ready_selects()
+    if pending:
+        unread = [name for name, _ in pending]
+        raise RuleSkipped(f"projection epilogue selects {unread} read values this node does not compute", reject=True)
     return RegEpilogue(acc=acc, loads=tuple(loads), ops=tuple(ops), result=write.value, selects=tuple(selects), extra_accs=extra_accs)
 
 
@@ -1019,7 +1033,7 @@ def _a_slab_operand(
     if chunk_stats:
         chunk_dtypes = {nm: cuda_name(dt) for nm, dt in cone_stat_dtypes(chunk_pro, chunk_stats, inputs).items()}
         prologue += stat_rows(chunk_stats, _stat_slab, row_axis, dtypes=chunk_dtypes)
-        reads = [nm for nm in stats if nm in Body(chunk_pro).ssa_uses]
+        reads = [nm for nm in stats if nm in Body(chunk_pro).ssa_uses - Body(chunk_pro).ssa_defs]
         stat = next(edge for edge in c.operands[0].operands if set(chunk_stats) & set(edge.exposes))
 
         def before(k0):
