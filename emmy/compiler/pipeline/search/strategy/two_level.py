@@ -34,9 +34,7 @@ import asyncio
 import logging
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING
-from uuid import uuid4
 
 from emmy.compiler.context import Context
 from emmy.compiler.ir.loop import LoopOp
@@ -156,12 +154,6 @@ def _point_stats(us: float) -> PerfStats:
     return PerfStats(median=us, min=us, max=us, mean=us, variance=0.0, n_samples=0)
 
 
-def _mint_run_id() -> str:
-    """A sortable, unique tune-session id stamped on this run's ``node`` rows —
-    UTC timestamp + a uuid tail (two sessions in the same second stay distinct)."""
-    return f"{datetime.now(UTC):%Y%m%dT%H%M%SZ}-{uuid4().hex[:8]}"
-
-
 def _kernel_nodes(graph: Graph) -> list[tuple[str, object]]:
     """Post-fusion kernel nodes — ``(node_id, op)`` for every kernel-bearing op.
 
@@ -237,7 +229,6 @@ class TwoLevelStrategy(SearchStrategy):
         dump=None,
         progress=None,
         prior_seed: int = 0,
-        run_id: str | None = None,
         max_candidates: int | None = None,
         prior=None,
         manage_prior: bool = True,
@@ -252,9 +243,6 @@ class TwoLevelStrategy(SearchStrategy):
         self.dump = dump
         self.progress = progress
         self.prior_seed = prior_seed
-        # One session id for every node row this run writes — minted by the caller
-        # (``handle_tune``: one id per CLI invocation) or here as a fallback.
-        self.run_id = run_id or _mint_run_id()
         self.max_candidates = max_candidates
         self.prior = prior
         self.manage_prior = manage_prior
@@ -352,7 +340,6 @@ class TwoLevelStrategy(SearchStrategy):
         it."""
         db, prior, progress = self.db, self.prior, self.progress
         identity = _identity()
-        ctx_key = ctx.structural_key()
         backend_name = getattr(self.pool[0], "name", "cuda")
         # Group structurally-identical kernel roots under one ``identity_key(with_io=True, with_knobs=True)`` — insertion order =
         # first occurrence (drives the progress tail name). Ops with no cache key are
@@ -432,31 +419,20 @@ class TwoLevelStrategy(SearchStrategy):
                 if best_total is not None:
                     # captured=True: the sweep benches under graph capture by default, so this
                     # Σ-best bookkeeping row derives from captured measurements.
-                    db.record_perf(ctx_key, work.key, backend=backend_name, status="ok", stats=_point_stats(best_total), captured=True)
+                    db.record_perf(ctx, work.key, backend=backend_name, status="ok", stats=_point_stats(best_total), captured=True)
                 if prior is not None:
                     # In-flight refit (single-threaded → no lock): stream this op's rows into
                     # the global reservoir; refit + checkpoint once enough new rows accumulate.
                     prior.add_rows(inner._collect_rows())
                     if prior.maybe_refit():
                         prior.checkpoint()
-                # Persist every search-tree node to the keyed/deduped ``node`` table. The
-                # ``op_sig`` is the kernel's OWN structural identity — an enrolled piece's rows
-                # are its own evidence, never its parent's.
-                db.record_nodes(
-                    inner._collect_node_records(
-                        context_key=ctx_key,
-                        op_sig=identity.op_sig(work.op),
-                        gpu=ctx.hardware_id(),
-                        run_id=self.run_id,
-                    )
-                )
                 if work.enrolled:
                     if best_total is not None:
                         logger.info("[tune] enrolled minted kernel %s: Σ best %.2f us", name, best_total)
                     else:
                         logger.info("[tune] enrolled minted kernel %s: no clean measurement", name)
                     return
-                best = db.best_per_op_time(ctx_key, work.key, backend=backend_name)
+                best = db.best_per_op_time(ctx, work.key, backend=backend_name)
                 searched_knobs = searched_us = searched_cuda_ops = None
                 searched_structural = False
                 if searched is not None:

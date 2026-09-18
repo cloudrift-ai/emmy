@@ -1097,7 +1097,7 @@ def test_run_files_a_hung_greedy_kernel_as_bench_fail_evidence(monkeypatch, tmp_
     try:
         with pytest.raises(SystemExit):
             run_module._handle_run_ir(args, FakeBackend, FakeDump)
-        context_key = Context.probe().structural_key()
+        probed = Context.probe()
     finally:
         target_mod.set_target(None)
 
@@ -1106,7 +1106,7 @@ def test_run_files_a_hung_greedy_kernel_as_bench_fail_evidence(monkeypatch, tmp_
     db = SearchDB(db_path)
     try:
         keys = {n.op.kernel_name: n.op.identity_key(with_io=True, with_knobs=True) for n in nodes}
-        rows = {name: db.lookup_perf(context_key, key, backend="cuda") for name, key in keys.items()}
+        rows = {name: db.lookup_perf(probed, key, backend="cuda") for name, key in keys.items()}
     finally:
         db.close()
     filed = {name: row.status for name, row in rows.items() if row is not None}

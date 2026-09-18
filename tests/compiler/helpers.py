@@ -280,7 +280,6 @@ def run_inner_reward(
     seed=0,
     progress=None,
     prior=None,
-    run_id="",
 ):
     """Synchronously run the two-level strategy's separable terminal scoring for tests."""
     from emmy.compiler.pipeline import TuningSearch
@@ -297,7 +296,6 @@ def run_inner_reward(
         explore_eps=explore_eps,
         progress=progress,
         prior_seed=seed,
-        run_id=run_id,
         prior=prior,
     )
     return asyncio.run(strategy._evaluate_terminal(fused_graph, ctx))

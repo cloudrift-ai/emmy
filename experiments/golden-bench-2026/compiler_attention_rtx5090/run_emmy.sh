@@ -34,7 +34,7 @@ for sequence_length in "${sequence_lengths[@]}"; do
 
   if EMMY_NVCC_FLAGS= timeout --signal=TERM --kill-after=30s 1200s \
     "$emmy" run --golden "$golden" --bench --bench-backends emmy \
-    --warmup 1 --iters 10 --no-record-nodes \
+    --warmup 1 --iters 10 --no-record-evidence \
     --json "$results/json/$setup.replay" --dump-dir "$results/dumps/$setup.replay" \
     2>&1 | tee "$results/logs/$setup.replay.log"; then
     replay_status=ok
@@ -43,7 +43,7 @@ for sequence_length in "${sequence_lengths[@]}"; do
   fi
   if EMMY_NVCC_FLAGS= timeout --signal=TERM --kill-after=30s 1200s \
     "$emmy" run -c "$source_code" --bench --strict --bench-backends eager,tcompile,emmy \
-    --warmup 1 --iters 10 --no-record-nodes --json "$results/json/$setup.reference.json" \
+    --warmup 1 --iters 10 --no-record-evidence --json "$results/json/$setup.reference.json" \
     2>&1 | tee "$results/logs/$setup.reference.log"; then
     reference_status=ok
   else

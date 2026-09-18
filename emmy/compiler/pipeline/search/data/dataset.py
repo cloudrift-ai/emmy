@@ -1,6 +1,6 @@
 """``Dataset`` — a queryable read-view over a bag of :class:`Sample`s, with one
-adapter per measurement-data source (golden / tune-DB / online-prior reservoir)
-and the two grouping axes the consumers need.
+adapter per measurement-data source (a DB instance's ``perf`` rows / the online-prior
+reservoir) and the two grouping axes the consumers need.
 
 The two groupings are deliberately distinct and do **not** collapse:
 
@@ -38,39 +38,10 @@ class Dataset:
     # --- adapters: one per source -----------------------------------------
 
     @classmethod
-    def from_golden(
-        cls,
-        *,
-        name: str | None = None,
-        kernel: str | None = None,
-        dtype: str | None = None,
-        compile_s_feats: bool = False,
-        live_gpu: bool = False,
-    ) -> Dataset:
-        """Every golden config (matmul / reduce / pointwise), optionally narrowed by
-        exact ``name``, name substring ``kernel``, or ``dtype``. ``compile_s_feats``
-        derives the full ``S_*`` histogram per config (needed only for online-prior
-        featurization). ``live_gpu`` scopes to the live card's goldens
-        (:func:`goldens_for_live_gpu`) — so a multi-GPU goldens dir doesn't return
-        another card's config under the same name (cards with no recorded golden fall
-        back to the full set; ``tune`` rejects that fallback via
-        :func:`live_recorded_goldens` — golden tuning targets the live card only)."""
-        from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS, goldens_for_live_gpu  # noqa: PLC0415
-
-        configs = list(goldens_for_live_gpu() if live_gpu else GOLDEN_RECORDS)
-        if name is not None:
-            configs = [g for g in configs if g.name == name]
-        if kernel:
-            configs = [g for g in configs if kernel in g.name]
-        if dtype:
-            configs = [g for g in configs if g.dtype == dtype]
-        return cls([Sample.from_golden(g, compile_s_feats=compile_s_feats) for g in configs])
-
-    @classmethod
     def from_db(
         cls, path: Path | str, *, kernel: str | None = None, min_latency: float = 0.0, backend: str | None = None, status: str = "ok"
     ) -> Dataset:
-        """Every measured ``ok`` variant in the tune DB (``perf ⋈ cuda_op``), opened
+        """Every measured ``ok`` variant in a DB instance's ``perf`` rows, opened
         read-only so a concurrent ``tune`` writer isn't blocked. ``backend=None``
         spans every backend (matching the legacy ``eval knobs`` query); ``kernel``
         filters on the parsed C identifier. ``status`` selects the row status
@@ -96,48 +67,6 @@ class Dataset:
         return cls([Sample.from_prior_row(k, v) for k, v in prior._dataset])
 
     # --- grouping ----------------------------------------------------------
-
-    @staticmethod
-    def fold_node_rows(rows, by: str) -> dict[str, list]:
-        """Partition node rows into **group-holdout folds** — the split unit for
-        out-of-sample prior evaluation (train on all-but-one fold, evaluate on the
-        held-out one). Operates on :class:`db.NodeRow`s (not :class:`Sample`s) so a
-        fold keeps every column the future train/eval sides need, and so fold
-        atomicity is guaranteed by the row's own group key, never inferred from
-        features.
-
-        ``by`` selects the axis:
-
-        - ``"op"`` — key on ``op_sig``: leave-one-op-out. An op's whole search tree and its
-          ``bench_fail`` leaves share one ``op_sig`` (and ``parent_key`` edges never leave an
-          op's tree), so the whole op moves to one side atomically — a row-level split would leak
-          the value-correlated parent/child chains. A store written before sweeps moved to the
-          deployable regime also holds that op's rows under two opt levels; those move together
-          too, for the same reason.
-        - ``"gpu"`` — key on ``gpu``: leave-one-GPU-out (cross-hardware transfer).
-
-        ``"run"`` is **rejected**: ``run_id`` is provenance, not a fold axis — the
-        table keeps ONE deduped row per config across sessions (branch keep-min /
-        leaf newest-measurement), so a config measured in several runs carries only
-        the surviving run's id and a per-run split would mis-assign it.
-
-        Rows missing the key (pre-enrichment ``gpu``/``op_sig`` gaps) land in the
-        ``""`` bucket — filter or drop it before splitting."""
-        from collections import defaultdict  # noqa: PLC0415
-
-        keys = {"op": "op_sig", "gpu": "gpu"}
-        if by not in keys:
-            if by == "run":
-                raise ValueError(
-                    "run is not a fold axis: node rows are deduped per config across sessions, so run_id is "
-                    "provenance of the surviving value only — fold by 'op' or 'gpu'"
-                )
-            raise ValueError(f"unknown fold axis {by!r} — expected 'op' or 'gpu'")
-        attr = keys[by]
-        folds: dict[str, list] = defaultdict(list)
-        for r in rows:
-            folds[getattr(r, attr) or ""].append(r)
-        return dict(folds)
 
     def group_by_op(self) -> dict[tuple, list[Sample]]:
         """Group by the full ``S_*`` structural signature (sorted items) — the key

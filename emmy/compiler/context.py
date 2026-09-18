@@ -149,9 +149,9 @@ class Context:
     # PCIe product name of the card this context is for (e.g. "NVIDIA H200 141GB"),
     # set by ``from_target(gpu_name=…)`` or probed live (``gpu.live_name``). The one
     # identity that separates same-die SKUs (H100 vs H200: identical cc + SM features,
-    # different VRAM) — used by the node-store key + ``gpu`` column so cross-hardware
-    # tuning data never collides. NOT in ``structural_key`` (the perf cache stays
-    # SKU-coarse on purpose; only the node *dataset* keys on it). ``None`` ⇒ unknown.
+    # different VRAM) — the ``perf`` table's ``gpu`` key column, so cross-hardware
+    # measurements never collide. NOT in ``structural_key``, which spells the regime (compute
+    # capability + compiler flags) and nothing about the card. ``None`` ⇒ unknown.
     gpu_name: str | None = None
     # Identifies which backend's perf rows this compile reads/writes — the
     # tune DB keys ``perf`` by ``(context_key, op_key, backend)``. Defaults to
@@ -295,11 +295,11 @@ class Context:
         return digest("Context", self.compute_capability, *split_opt_level(self.compile_flags))
 
     def hardware_id(self) -> str:
-        """A stable per-card identity for the node-store key + ``gpu`` column: the PCIe
+        """A stable per-card identity for the ``perf`` table's ``gpu`` key column: the PCIe
         product name when known, else a digest of the device-physical regime (``H_*``
         features + capability). Separates same-die SKUs (H100 vs H200) that
         ``structural_key`` (cc + opt only) and the SM-only ``H_*`` features can't, so a
-        cross-hardware node dataset never collides."""
+        cross-hardware dataset never collides."""
         if self.gpu_name:
             return self.gpu_name
         from emmy.compiler.structural import digest  # noqa: PLC0415

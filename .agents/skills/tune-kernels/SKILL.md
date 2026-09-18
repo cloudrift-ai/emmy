@@ -236,8 +236,9 @@ CUDA_VISIBLE_DEVICES=<selected-ordinal> EMMY_NVCC_FLAGS= \
 ```
 
 Every clean row such a run benches is recorded into the tune DB by default — per-kernel perf rows, the measured
-evidence the next `compile` / `run` / `serve` on this card deploys from, plus node rows for the offline prior — so a
-verified winner deploys without any further promotion step; `--no-record-nodes` opts out. `--record` additionally
+evidence the next `compile` / `run` / `serve` on this card deploys from, and training data once the tune DB is
+imported into a dataset DB (`emmy dataset import <tune.db>`) — so a verified winner deploys without any further
+promotion step; `--no-record-evidence` opts out. `--record` additionally
 writes the measured latency back into the golden file. Add `--strict-evidence` when the run must fail rather than
 let a prediction decide any fork of the target.
 
@@ -274,7 +275,7 @@ Start with:
 ```bash
 emmy eval variants --kernel <substring>
 emmy eval failures
-emmy eval prior --dataset nodes --kernel <substring>
+emmy eval prior --dataset db --db ~/.cache/emmy/autotune.db --kernel <substring>
 ```
 
 For a serving golden, run the unified release audit on the pinned GPU; it validates that every structural target has
@@ -288,7 +289,7 @@ emmy eval prior --dataset golden --kernel <substring>
 Classify every meaningful loss:
 
 1. **Search shortfall:** the best measured or replayed configuration exists, but the prior or patience does not reach
-   it. Use variant rank, and the rank correlation and regret `eval prior --dataset nodes` reports per card and
+   it. Use variant rank, and the rank correlation and regret `eval prior --dataset db` reports per card and
    compile regime. Keep offline-prior and online-prior evidence separate because cold-start feature errors and
    learned-model calibration errors require different fixes.
 2. **Eligibility or optimization lockout:** the desired schedule family is never offered. Cite the lowering or

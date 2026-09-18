@@ -229,7 +229,7 @@ def test_unlowered_terminal_is_bench_fail_despite_cached_residual_kernel():
     g.outputs = ["z"]
     db = SearchDB()
     b = _terminal_bench(g, backend=_StubBackend(), db=db)
-    db.record_perf(b.context_key, cuda.identity_key(with_io=True, with_knobs=True), backend="cuda", status="ok", stats=point_stats(104.0))
+    db.record_perf(b.ctx, cuda.identity_key(with_io=True, with_knobs=True), backend="cuda", status="ok", stats=point_stats(104.0))
     kind, (stats, status) = b.prelude()
     assert kind == "done"
     assert status == "bench_fail"

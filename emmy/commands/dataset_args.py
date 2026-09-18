@@ -1,9 +1,7 @@
 """Shared ``--dataset`` CLI vocabulary for measurement-analysis commands (``eval``):
 one place registers the source flags (``--dataset`` / ``--db`` / ``--kernel`` /
 ``--min-variants``), one helper publishes ``--online-file``, and one guard fails loud
-on a degenerate source. Handlers then build the actual
-:class:`~emmy.compiler.pipeline.search.data.Dataset` via its ``from_golden`` /
-``from_db`` adapters — so every command selects a golden / DB dataset (and a subset)
+on a degenerate source — so every command selects a golden / DB dataset (and a subset)
 through the same vocabulary instead of reimplementing golden filtering or opening
 the DB by hand.
 
@@ -30,23 +28,21 @@ def add_dataset_args(parser, *, default: str, with_min_variants: bool = False) -
     threshold."""
     parser.add_argument(
         "--dataset",
-        choices=["golden", "db", "nodes"],
+        choices=["golden", "db"],
         default=default,
-        help="Measurement-data source: 'golden' (recorded golden configs), 'db' (tune DB perf rows), or 'nodes' "
-        f"(tune DB search-tree node store — or a measurement freeze — for `eval prior`). Default: {default}.",
+        help=f"Measurement-data source: 'golden' (recorded golden configs) or 'db' (a DB instance's perf rows). Default: {default}.",
     )
     parser.add_argument(
         "--db",
-        help="Measurement source to override the default. For --dataset nodes the default is the repo-checked "
-        "measurement freeze (EMMY_FREEZE_DIR, else search/freezes/) — pass a tune DB or another freeze directory "
-        "here to look at one machine's data instead. For --dataset db the default is EMMY_TUNE_DB or "
-        "~/.cache/emmy/autotune.db.",
+        help="DB instance to read with --dataset db. `eval prior` defaults to the dataset DB (EMMY_DATASET_DB, else "
+        "~/.cache/emmy/dataset.db — fill it with `emmy dataset import`); the per-kernel views default to the tune DB "
+        "(EMMY_TUNE_DB, else ~/.cache/emmy/autotune.db), whose rows carry the kernel sources they name kernels by.",
     )
     parser.add_argument(
         "--kernel",
         help="Filter by substring: realization name (the SAME identifier `compile/run --realization` selects a "
-        "single shape with); kernel C identifier for --dataset db; op label (e.g. 'matmul', 'reduce', 'free=512') "
-        "for --dataset nodes.",
+        "single shape with); kernel C identifier for the per-kernel views; op label (e.g. 'matmul', 'reduce', "
+        "'free=512') for `eval prior --dataset db`.",
     )
     if with_min_variants:
         parser.add_argument(
