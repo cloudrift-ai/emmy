@@ -7,10 +7,12 @@ tags:
   - untested
 model:
   huggingface: openai/gpt-oss-120b
-  rationale: "5K likes, 5M downloads, trending 5121; breakout attention across sources."
-  heat: 92
+  rationale: "GPT-OSS cooling per shared sources; prior momentum not sustained in current window."
+  heat: 70
   revision: b5c939de8f754692c1647ca79fbf85e8c1e70f8a
   task: generate
 matrices:
-- deploy.gpu: NVIDIA Tesla V100 SXM3 32GB
-  deploy.gpu_count: 4
+- deploy.gpu: NVIDIA H200 141GB
+  deploy.gpu_count: 1
+- deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Server Edition
+  deploy.gpu_count: 1

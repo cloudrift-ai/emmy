@@ -3,7 +3,7 @@ tags:
   - untested
 model:
   huggingface: baidu/Unlimited-OCR
-  rationale: "High HF trending (4119), strong downloads and likes; practical OCR model."
+  rationale: "High historical HF trending, downloads, and likes for a practical OCR task."
   heat: 78
   task: generate
 matrices:

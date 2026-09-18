@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3-Coder-Next-FP8"
-  rationale: "FP8 coding quant provides moderate niche serving value for developers."
+  rationale: "Current-gen vendor FP8 coder serving 256K context; active Qwen coder momentum, niche developer value."
   heat: 52
 engine:
   llm:

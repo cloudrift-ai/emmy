@@ -3,9 +3,9 @@ tags:
   - untested
 model:
   huggingface: openai/gpt-oss-20b
-  rationale: "4948 trending score, 5K likes, 7M downloads; strong HF momentum."
-  heat: 82
+  rationale: "GPT-OSS cooling; strong prior momentum no longer visible in current shared evidence."
+  heat: 60
   task: generate
 matrices:
 - deploy.gpu: NVIDIA A100 80GB
-  deploy.gpu_count: 2
+  deploy.gpu_count: 1

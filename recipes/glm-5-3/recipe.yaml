@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: THUDM/glm-5-3
-  rationale: "GLM-5.3-max leads arena rank 13; strong technical novelty in speculative decoding."
-  heat: 70
+  rationale: "GLM-5.3 wave active via related trending checkpoints, but this exact repo is unreadable."
+  heat: 85
   task: generate
 matrices:
 - deploy.gpu: NVIDIA B200

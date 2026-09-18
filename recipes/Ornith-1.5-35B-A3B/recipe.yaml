@@ -3,9 +3,11 @@ tags:
   - untested
 model:
   huggingface: Ornith-ai/Ornith-1.5-35B-A3B
-  rationale: "No trending evidence found; likely unmaintained fork with no signal."
-  heat: 5
+  rationale: "No trending or community evidence in shared sources; unmaintained fork with no signal."
+  heat: 2
   task: generate
 matrices:
-- deploy.gpu: NVIDIA A100 80GB
+- deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition
+  deploy.gpu_count: 2
+- deploy.gpu: NVIDIA H100 80GB
   deploy.gpu_count: 2

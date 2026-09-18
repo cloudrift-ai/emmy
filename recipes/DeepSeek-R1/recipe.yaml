@@ -3,9 +3,11 @@ tags:
   - untested
 model:
   huggingface: deepseek-ai/DeepSeek-R1
-  rationale: "Top HF trending (13584), strong Reddit and arena presence across all sources."
-  heat: 96
+  rationale: "No current trend in shared sources; older DeepSeek line superseded by active V4 wave."
+  heat: 30
   task: generate
 matrices:
+- deploy.gpu: NVIDIA H200 141GB
+  deploy.gpu_count: 8
 - deploy.gpu: NVIDIA H200 141GB
   deploy.gpu_count: 16

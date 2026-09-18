@@ -3,7 +3,7 @@ tags:
   - untested
 model:
   huggingface: openbmb/MiniCPM5-1B
-  rationale: "Modest edge demand with limited supporting evidence vs. breakout competitors."
+  rationale: "Related MiniCPM5-2B trending supports modest edge demand; limited direct evidence for 1B."
   heat: 40
   task: generate
 matrices:

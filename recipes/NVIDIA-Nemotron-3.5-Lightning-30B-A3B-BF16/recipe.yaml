@@ -3,7 +3,7 @@ tags:
   - untested
 model:
   huggingface: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
-  rationale: "No trending data, community mentions, or arena ranking found."
+  rationale: "No trending, community, or arena evidence found in shared sources."
   heat: 10
   task: generate
 matrices:

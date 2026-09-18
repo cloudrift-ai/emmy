@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.6-35B-A3B-FP8"
-  rationale: "FP8 variant exists but carries less direct signal than base model."
-  heat: 40
+  rationale: "Secondary FP8 variant with limited distinct community attention; Qwen wave support only."
+  heat: 35
 engine:
   llm:
     tensor_parallel_size: 1

@@ -1,10 +1,10 @@
 tags:
-- onboarding
-- untested
+  - onboarding
+  - untested
 model:
   huggingface: google/gemma-4-26B-A4B-it
-  rationale: Gemma 4 MoE with strong arena rank 84; fills gap in Gemma 4 lineup.
-  heat: 72
+  rationale: "Gemma 4 MoE with arena signal; moderate niche interest amid cooling family."
+  heat: 55
   task: generate
 matrices:
 - deploy.gpu: NVIDIA A100 80GB

@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: Qwen/Qwen3.8-2.4T-A95B
-  rationale: "Dominant 2.4T MoE; unmatched family momentum and very high downloads."
-  heat: 95
+  rationale: "Flagship Qwen3.8 MoE riding unmatched family momentum, but no direct trending metrics for this ID."
+  heat: 55
   task: generate
 matrices:
 - deploy.gpu: NVIDIA B200

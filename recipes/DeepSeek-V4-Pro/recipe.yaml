@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: deepseek-ai/DeepSeek-V4-Pro
-  rationale: "Strong HF trending (5472), high downloads, and arena rank 52."
-  heat: 65
+  rationale: "Active V4.x wave; solid interest, but trailing the newer V4.1-Flash momentum."
+  heat: 55
   task: generate
 matrices:
 - deploy.gpu: NVIDIA B200

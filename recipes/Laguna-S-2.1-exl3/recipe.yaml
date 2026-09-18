@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: riftstack/Laguna-S-2.1-exl3
-  rationale: "Niche exl3 format with minimal community signals and low visibility."
-  heat: 10
+  rationale: "Niche EXL3 variant lacking trending, download, or community evidence."
+  heat: 3
   task: generate
 matrices:
 - deploy.gpu: NVIDIA A100 80GB

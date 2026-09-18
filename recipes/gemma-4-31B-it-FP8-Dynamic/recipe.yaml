@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "RedHatAI/gemma-4-31B-it-FP8-Dynamic"
-  rationale: "Cooling post-Qwen3.8 surge; minimal evidence of sustained momentum."
+  rationale: "Gemma 4 cooling post-Qwen3.8 surge; minimal sustained momentum in current sources."
   heat: 15
 engine:
   llm:

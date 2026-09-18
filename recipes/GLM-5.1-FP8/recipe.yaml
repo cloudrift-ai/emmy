@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "zai-org/GLM-5.1-FP8"
-  rationale: "Predecessor to GLM-5.2 which dominates trending; GLM-5.1 has limited momentum."
-  heat: 35
+  rationale: "Superseded by active GLM-5.3 trending wave; limited current momentum."
+  heat: 20
 engine:
   llm:
     tensor_parallel_size: 8

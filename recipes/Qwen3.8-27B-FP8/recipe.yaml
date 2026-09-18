@@ -13,12 +13,12 @@
 #
 # There is no Emmy lane: this recipe serves the stock 1Cat-vLLM fork. See RESULTS.md.
 tags:
-  - best-effort
+  - maintained
 
 model:
   huggingface: Qwen/Qwen3.8-27B-FP8
-  rationale: "FP8 variant of top-ranking Qwen 3.8; inherits strong community and arena signals."
-  heat: 95
+  rationale: "FP8 variant of top-trending Qwen3.8-27B inherits strong community and serving signals."
+  heat: 85
   revision: 017b9c7af6b5689d5dd426a76e0bc077eb5ca20a
   task: generate
 

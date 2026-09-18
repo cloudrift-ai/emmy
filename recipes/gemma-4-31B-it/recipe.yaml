@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "google/gemma-4-31B-it"
-  rationale: "Top vision score, strong HF downloads and trend; high community interest."
-  heat: 75
+  rationale: "Gemma 4 cooling, but strong vision scores retain stable mid-range interest."
+  heat: 60
 engine:
   llm:
     tensor_parallel_size: 1

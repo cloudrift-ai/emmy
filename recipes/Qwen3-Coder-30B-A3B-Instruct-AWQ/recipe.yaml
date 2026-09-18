@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
-  rationale: "Qwen/Qwen3-Coder-Next-FP8 supersedes this recipe: AWQ quant of older coder model; no independent trending evidence."
-  heat: 10
+  rationale: "Qwen/Qwen3-Coder-Next-FP8 supersedes this recipe: Older AWQ coder; superseded by newer Qwen coder releases, no current demand evidence."
+  heat: 3
 engine:
   llm:
     tensor_parallel_size: 1

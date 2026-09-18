@@ -3,7 +3,7 @@ tags:
   - untested
 model:
   huggingface: openbmb/MiniCPM-o-4_5
-  rationale: "Reddit mindshare and massive downloads confirm strong multimodal demand."
+  rationale: "MiniCPM5 wave active on HF trending, but no direct signal for this older variant."
   heat: 20
   task: generate
 matrices:

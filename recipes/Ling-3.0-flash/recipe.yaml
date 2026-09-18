@@ -3,7 +3,7 @@ tags:
   - untested
 model:
   huggingface: inclusionAI/Ling-3.0-flash
-  rationale: "No evidence across HF trends, Reddit, and serving signals."
+  rationale: "No trend, Reddit, or serving evidence found across shared sources."
   heat: 5
   task: generate
 matrices:

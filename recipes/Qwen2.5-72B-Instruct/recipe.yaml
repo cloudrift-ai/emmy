@@ -3,9 +3,11 @@ tags:
   - untested
 model:
   huggingface: Qwen/Qwen2.5-72B-Instruct
-  rationale: "Established but older; superseded by Qwen3 series in current heat."
-  heat: 25
+  rationale: "Older dense Qwen line cooling; superseded by Qwen3 generations in current momentum."
+  heat: 15
   task: generate
 matrices:
+- deploy.gpu: NVIDIA H100 80GB
+  deploy.gpu_count: 16
 - deploy.gpu: NVIDIA H200 141GB
-  deploy.gpu_count: 2
+  deploy.gpu_count: 16
