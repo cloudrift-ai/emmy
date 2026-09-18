@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import tarfile
@@ -9,6 +10,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from emmy.provisioning import cloudrift
 from emmy.recipe.catalog import MAX_STUB_DEPLOYMENTS
 
 MODULE_PATH = Path(__file__).parents[2] / ".github" / "workflows" / "scripts" / "discovery_lifecycle.py"
@@ -192,6 +194,8 @@ def test_onboarding_uses_bounded_read_only_investigator():
     investigator_config = yaml.safe_load(investigator.split("---", 2)[1])
 
     assert parent_config["permission"]["task"] == {"*": "deny", "onboard-investigator": "allow"}
+    # The deadline bounds qualification; a step cap ended a run after 1h45m, with no summary written.
+    assert "steps" not in parent_config
     assert investigator_config["mode"] == "subagent"
     assert investigator_config["hidden"] is True
     assert investigator_config["steps"] == 20
@@ -333,6 +337,45 @@ def test_onboarding_creates_platform_archive_and_preserves_other_platform(tmp_pa
     assert not any(path.endswith(".experiment.yaml") for path in updated_summary["experiment_artifacts"])
 
 
+def test_onboarding_terminates_vms_an_interrupted_run_left_before_selecting(monkeypatch):
+    document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "onboard-model.yml").read_text())
+    job = document["jobs"]["onboard"]
+    names = [step.get("name") for step in job["steps"]]
+    sweep = job["steps"][names.index("Terminate VMs left by an interrupted run")]
+    source = sweep["run"].split("<<'PY'\n", 1)[1].split("\nPY", 1)[0]
+    calls = []
+
+    async def terminate(api_key, tags):
+        calls.append((api_key, tags))
+
+    monkeypatch.setattr(cloudrift, "terminate_instances_by_tags", terminate)
+    monkeypatch.setenv("CLOUDRIFT_API_KEY", "key")
+    monkeypatch.setenv("EMMY_RENTAL_TAGS", re.sub(r"\$\{\{[^}]*\}\}", "1", job["env"]["EMMY_RENTAL_TAGS"]))
+    exec(source, {})
+
+    assert names.index("Terminate VMs left by an interrupted run") < names.index("Select one available deployment")
+    assert "if" not in sweep
+    assert calls == [("key", ["emmy", "workflow:model-verification-onboarding"])]
+
+
+def test_onboarding_fails_legibly_when_the_agent_writes_no_summary(tmp_path):
+    document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "onboard-model.yml").read_text())
+    steps = document["jobs"]["onboard"]["steps"]
+    agent_script = next(step["run"] for step in steps if step.get("name") == "Run onboard-model agent")
+    notice = next(step for step in steps if step.get("id") == "notice")
+    source = notice["run"].split("<<'PY'\n", 1)[1].split("\nPY", 1)[0]
+    output = tmp_path / "github-output"
+    env = {**os.environ, "ONBOARD_SUMMARY": str(tmp_path / "missing.json"), "GITHUB_OUTPUT": str(output)}
+
+    subprocess.run([sys.executable, "-"], input=source, text=True, env=env, check=True)
+
+    assert 'if [ ! -s "$ONBOARD_SUMMARY" ]; then' in agent_script
+    assert output.read_text().splitlines() == [
+        "failure_kind=failure",
+        "failure_summary=The onboarding agent ended without writing its summary",
+    ]
+
+
 def test_onboarding_selects_with_generic_recipe_query():
     document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "onboard-model.yml").read_text())
     script = next(step["run"] for step in document["jobs"]["onboard"]["steps"] if step.get("name") == "Select one available deployment")
@@ -368,7 +411,8 @@ def test_discovery_counts_lifecycle_with_recipe_query():
 def test_discovery_prompt_keeps_obsolete_classification_conservative():
     prompt = " ".join((Path(__file__).parents[2] / "prompts" / "discover-models" / "lifecycle.md").read_text().split())
 
-    assert "Invoke `discover-fit` once per onboarding model and in parallel" in prompt
+    assert "Invoke `discover-fit` once per model in `new_onboarding_models`, in parallel" in prompt
+    assert "Do not size an existing onboarding shell" in prompt
     assert "you never author hardware here" in prompt
     assert "A replacement that is merely comparable is not" in prompt
     assert "read both recipe files" in prompt
@@ -722,35 +766,57 @@ def test_preserves_existing_onboarding_shell(tmp_path):
     assert "`NVIDIA H200 141GB x1`" in (tmp_path / "summary.md").read_text()
 
 
-def test_resizes_an_existing_onboarding_shell_matrix(tmp_path):
+def test_never_rewrites_an_existing_onboarding_shell_matrix(tmp_path):
     _recipe(tmp_path, "ready", "org/ready")
     shell = _recipe(tmp_path, "pending", "org/pending", tags=["onboarding", "untested"])
+    before = shell.read_text()
     selection = tmp_path / "selection.json"
     resized = [{"deploy.gpu": GPU, "deploy.gpu_count": 4}, {"deploy.gpu": "NVIDIA B200", "deploy.gpu_count": 4}]
     _manifest(selection, ["org/ready"], onboarding=[_candidate("org/pending", deployments=resized)])
 
     manifest = discovery_lifecycle.validate_manifest(selection, tmp_path)
-    assert discovery_lifecycle.apply_manifest(manifest, tmp_path, tmp_path / "summary.md") == {"changed": True}
+    discovery_lifecycle.apply_manifest(manifest, tmp_path, tmp_path / "summary.md")
 
-    config = yaml.safe_load(shell.read_text())
-    assert config["matrices"] == resized
-    assert config["tags"] == ["onboarding", "untested"]
-    assert config["model"]["huggingface"] == "org/pending"
+    assert shell.read_text().split("matrices:", 1)[1] == before.split("matrices:", 1)[1]
+
+
+@pytest.mark.parametrize(
+    ("tags", "heat", "rewritten"),
+    [
+        (["maintained"], 59, False),
+        (["maintained"], 41, False),
+        (["maintained"], 60, True),
+        (["maintained"], 40, True),
+        (["best-effort"], 50, True),
+    ],
+)
+def test_keeps_recorded_rationale_and_heat_until_heat_moves_materially(tmp_path, tags, heat, rewritten):
+    recipe = _recipe(tmp_path, "ready", "org/ready", tags=tags)
+    recipe.write_text(recipe.read_text().replace("  heat: 50\n", "  rationale: Recorded wording.\n  heat: 50\n"))
+    before = recipe.read_text()
+    selection = tmp_path / "selection.json"
+    _manifest(selection, [_decision("org/ready", "Fresh wording of the same evidence.", heat)])
+
+    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path)
+    result = discovery_lifecycle.apply_manifest(manifest, tmp_path, tmp_path / "summary.md")
+
+    assert result == {"changed": rewritten}
+    assert (recipe.read_text() != before) is rewritten
+    kept = {"rationale": "Recorded wording.", "heat": 50}
+    assert ({key: manifest["maintained_models"][0][key] for key in kept} != kept) is rewritten
 
 
 def test_rewrites_unindented_yaml_tag_lists_without_leaving_duplicate_items(tmp_path):
-    _recipe(tmp_path, "ready", "org/ready")
-    shell = _recipe(tmp_path, "pending", "org/pending", tags=["onboarding", "untested"])
-    shell.write_text(shell.read_text().replace("  - onboarding\n  - untested\n", "- onboarding\n- untested\n"))
+    recipe = _recipe(tmp_path, "ready", "org/ready", tags=["best-effort"])
+    recipe.write_text(recipe.read_text().replace("  - best-effort\n", "- best-effort\n"))
     selection = tmp_path / "selection.json"
-    pending = _candidate("org/pending", deployments=[{"deploy.gpu": GPU, "deploy.gpu_count": 1}])
-    _manifest(selection, ["org/ready"], onboarding=[pending])
+    _manifest(selection, ["org/ready"])
 
     manifest = discovery_lifecycle.validate_manifest(selection, tmp_path)
     discovery_lifecycle.apply_manifest(manifest, tmp_path, tmp_path / "summary.md")
 
-    assert yaml.safe_load(shell.read_text())["tags"] == ["onboarding", "untested"]
-    assert shell.read_text().count("- onboarding") == 1
+    assert yaml.safe_load(recipe.read_text())["tags"] == ["maintained"]
+    assert "best-effort" not in recipe.read_text()
 
 
 def test_moves_existing_rationale_immediately_below_model_id(tmp_path):

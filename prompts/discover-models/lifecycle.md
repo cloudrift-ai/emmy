@@ -44,14 +44,14 @@ appears only in `scores`. Do not claim an onboarding shell was deployed or bench
 
 ## Deployment sizing
 
-Invoke `discover-fit` once per onboarding model and in parallel: every model in `new_onboarding_models`, plus every
-existing recipe in the inventory tagged `onboarding`. Give each the complete contents of the attached `model-fit.md`
-and `size-deployments.md`, and exactly one model ID. Return every result in `onboarding_deployments`, copying each
-subagent's `model_id` and `deployments` verbatim.
+Invoke `discover-fit` once per model in `new_onboarding_models`, in parallel. Give each the complete contents of the
+attached `model-fit.md` and `size-deployments.md`, and exactly one model ID. Return every result in
+`onboarding_deployments`, copying each subagent's `model_id` and `deployments` verbatim. Do not size an existing
+onboarding shell: it was sized when it was created, and the workflow keeps its matrix.
 
 You do not review, adjust, extend, or replace a returned deployment, and you never supply one a subagent did not
-return. An empty `deployments` array is a valid result: repository code drops that new candidate and leaves an
-existing shell's current matrix untouched. A candidate the fleet cannot serve is not worth rented GPU hours.
+return. An empty `deployments` array is a valid result: repository code drops that new candidate. A candidate the
+fleet cannot serve is not worth rented GPU hours.
 
 ## Output
 
@@ -71,8 +71,7 @@ Return exactly one JSON object without prose or a Markdown fence:
     {"model_id": "exact/new-id", "task": "generate", "rationale": "Why this model is worth onboarding.", "heat": 90}
   ],
   "onboarding_deployments": [
-    {"model_id": "exact/new-id", "deployments": [{"deploy.gpu": "NVIDIA H200 141GB", "deploy.gpu_count": 1}]},
-    {"model_id": "exact/existing-shell-id", "deployments": []}
+    {"model_id": "exact/new-id", "deployments": [{"deploy.gpu": "NVIDIA H200 141GB", "deploy.gpu_count": 1}]}
   ]
 }
 ```
@@ -82,8 +81,7 @@ existing `model_id` letter for letter. Each score contains exactly `model_id`, `
 integer from 0 through 100. `maintained_model_ids` contains exact IDs only. Each obsolete entry contains `model_id`
 and optionally `replacement_model_id`. Each new onboarding entry contains exactly `model_id`, `task`, `rationale`, and
 `heat`; `new_onboarding_models` contains new models only. Each `onboarding_deployments` entry contains exactly
-`model_id` and `deployments`, and the array covers every new candidate and every existing onboarding shell exactly
-once.
+`model_id` and `deployments`, and the array covers every new candidate exactly once.
 
 Before returning, verify that the scores cover every batch row and that the maintained count is exact. If OpenCode
 requests the final response, return the best complete selection immediately without another tool call.
