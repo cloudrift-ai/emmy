@@ -274,6 +274,7 @@
  "tests/compiler/passes/test_cut_forks.py::test_disjoint_output_sweeps_offer_an_output_owning_seam": 0.11,
  "tests/compiler/passes/test_cut_forks.py::test_every_seam_is_an_unpinned_arm": 0.26,
  "tests/compiler/passes/test_cut_forks.py::test_evidence_rows_key_each_row_by_the_kernel_it_decides": 4.98,
+ "tests/compiler/passes/test_cut_forks.py::test_evidence_rows_keep_an_empty_receipt_as_its_kernel_fused_arm_evidence": 4.53,
  "tests/compiler/passes/test_cut_forks.py::test_evidence_rows_replay_an_identityless_kernel_set_lead": 10.7,
  "tests/compiler/passes/test_cut_forks.py::test_mimo_cut_preserves_both_outputs_and_lowers_both_pieces": 2.09,
  "tests/compiler/passes/test_cut_forks.py::test_output_owning_cut_leaves_single_output_pieces_that_promote": 0.26,
