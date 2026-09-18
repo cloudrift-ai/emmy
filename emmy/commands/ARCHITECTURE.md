@@ -186,7 +186,11 @@ pre/post/expert and coded rate-profile kernel into one document, and stores each
 Loop IR. The pinned env supplies the model provenance and complete realization matrix: decode, prefill, M=1, extra
 warm shapes, symbolic fallbacks, and standard/precision-trading input pin regimes. Each target receives a
 `realizations` array with those named bindings and explicit registered input pins; trace no longer accepts an
-independent serving-shape surface. A static-only release is accepted
+independent serving-shape surface. Every twin is its own structural target — serving compiles a static twin at
+its own width, and today's loop fusion gives each width its own fused kernel — so a target carries the rows its
+twin reaches (`ServingConfig.realizations_for`, keyed on the width the twin's name spells): a static twin's
+target holds that width's rows in both lanes, a symbolic twin's the dynamic rows. The audit expects the same
+split per target. A static-only release is accepted
 only when the same env proves that no wider or symbolic path is reachable. The resulting working file is consumed
 directly by `tune --golden PATH` and verified by `run --golden PATH [--realization NAME]`.
 
@@ -309,8 +313,9 @@ knob rows into either baseline as proposals. Canonical goldens remain the common
 `emmy eval golden --golden GOLDEN_YAML --serving-config PATH` is the release audit. The env must name that exact
 canonical file. The command validates the nested schema and model provenance, requires the live GPU to match both the
 config
-and YAML, proves that every structural target has every config-derived realization, reproduces the recorded rows,
-and re-traces the exact static/symbolic precision matrix. Any missing realization, unrealized entry, or twin the
+and YAML, proves that every structural target has every config-derived realization its twin reaches (the width
+rows of a static twin, the dynamic rows of a symbolic one), reproduces the recorded rows, and re-traces the exact
+static/symbolic precision matrix. Any missing realization, unrealized entry, or twin the
 golden rows do not decide is a non-zero release failure. Model, revision, GPU, and serving widths therefore have no
 independent audit flags.
 
