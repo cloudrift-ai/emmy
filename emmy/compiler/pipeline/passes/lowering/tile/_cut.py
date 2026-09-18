@@ -484,7 +484,7 @@ def _cluster_value_seams(seams: list[CutSite], axes: tuple) -> tuple[CutSite, ..
     statistic's and at the residual add. Those copies are one VALUE: the cluster's first seam
     becomes the decision for all of them, carrying each duplicate as a sibling with its
     positional capture correspondence (:class:`CutSite`), so one cut materializes the value once
-    and every occurrence reads the workspace. Membership is :func:`_value_form` equality; a member
+    and every occurrence reads the workspace. Membership is :func:`_value_forms` inclusion; a member
     joins only when its paired axes agree on extent and window, its workspace dtypes match, and
     every workspace axis is a mapped capture — otherwise it stays its own seam. An output-owning
     seam writes the kernel's outputs and a frontier seam its raw storage bits; neither is a
