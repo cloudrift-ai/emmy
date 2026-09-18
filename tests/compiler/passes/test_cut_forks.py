@@ -606,6 +606,27 @@ def test_evidence_rows_key_each_row_by_the_kernel_it_decides() -> None:
     ]
 
 
+def test_evidence_rows_keep_an_empty_receipt_as_its_kernel_fused_arm_evidence() -> None:
+    """A child-identity receipt whose schedule row is empty is still that kernel's measured row.
+    ``run --record-greedy`` writes ``knobs: {}`` for a piece the pick took no knobs on — the
+    OFF fill skips an op that never carried one — and an empty row spells the fused, unsplit arm
+    at the piece's kernel-set forks (``pins.spelled_arm``). Dropping it left the piece with no
+    measured row at its placement fork, which strict evidence refuses."""
+    from emmy.compiler.pipeline.search.golden import evidence_rows, records_override
+
+    fields = {**_receipt_fields(), "measurements": {"emmy_us": 1.0, "reference_us": 2.0, "reference_backend": "torch"}}
+    routing = GoldenRecord(knobs={"PLACE@map.1/twist.1/inner": "cut"}, **{**fields, "pins": ()})
+    parent = GoldenRecord(knobs={}, **fields)
+    lift_identity = _lifted_target(parent).identity_key(with_io=True)
+    replay = _replay(parent, exhaustive=True)
+    child = next(identity for identity in replay.rows if identity is not None and identity != lift_identity)
+    receipt = GoldenRecord(knobs={}, identity=child, **fields)
+
+    with records_override([routing, receipt]):
+        got = evidence_rows("", (12, 0))
+    assert (replay.signatures[child], {}, 1.0, receipt.name) in got
+
+
 def test_evidence_rows_replay_an_identityless_kernel_set_lead() -> None:
     """A seed with no row of its own still contributes the routes listed by ``kernel_set``."""
     from emmy.compiler.pipeline.search.golden import evidence_rows, records_override

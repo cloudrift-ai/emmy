@@ -631,8 +631,9 @@ def schedule_match_key(knobs: dict) -> tuple[tuple[str, str], ...]:
     anchor carries no schedule content either way — it records a pass that declined. Comparing the
     spellings exactly is what left two thirds of the recorded golden rows matching nothing.
 
-    Recording keeps the anchors: a forkless kernel's row IS its OFF anchors, and dropping them
-    there writes an empty row that spells no decision at all."""
+    Recording keeps the anchors: a forkless kernel's row IS its OFF anchors. A kernel that never
+    carried one is recorded as an empty row, which the evidence index reads the same way — the
+    fused, unsplit arm of the kernel it names, with nothing left to schedule."""
     return tuple((key, value) for key, value in schedule_row_key(knobs) if not is_off_value(family_of(key), value))
 
 

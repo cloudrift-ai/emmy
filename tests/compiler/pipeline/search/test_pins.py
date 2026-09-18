@@ -23,6 +23,7 @@ def test_a_placement_fork_reads_cut_fuse_and_stale_rows() -> None:
     assert spelled_arm(options, {"PLACE": "cut"}) == (cut_a, {"PLACE@map.1/map": "cut"}), "a bare cut is the root-most offered seam"
     assert spelled_arm(options, {"WORK": "t8", "TILE": "f2"}) == (fuse, {"PLACE": "fuse"}), "a schedule row says the kernel ran fused"
     assert spelled_arm(options, {"PLACE@map.1/map": "fuse"}) == (fuse, {"PLACE": "fuse"})
+    assert spelled_arm(options, {}) == (fuse, {"PLACE": "fuse"}), "an empty receipt row says the same"
     assert spelled_arm(options, {"PLACE@map.9/twist": "cut"}) is None, "a cut this kernel does not offer decides nothing"
 
 

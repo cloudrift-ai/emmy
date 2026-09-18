@@ -556,8 +556,9 @@ At a **schedule fork** (one kernel's row):
    in scope (`golden.evidence_rows`): every MEASURED record in the live input regime (`golden.regime_live`), keyed by
    its fork-time `S_*` signature — a record that decorates one kernel under the kernel its target lifts to; any other
    record through its replay (`golden._replay`), which files each kernel-set arm the record spelled under the kernel
-   that fork was offered on and its schedule row under the kernel its stored identity names, or, for a row that
-   speaks for a kernel set collectively, under every piece whose enumerated rows it vouches for. An unmeasured
+   that fork was offered on and its schedule row under the kernel its stored identity names (an empty row too: a
+   piece the pick took no knobs on is recorded as `knobs: {}`, and that row spells its fused, unsplit arm), or, for a
+   row that speaks for a kernel set collectively, under every piece whose enumerated rows it vouches for. An unmeasured
    record (a proposal) is not evidence: `run --golden PATH --bench` measures it under a hand pin and writes the
    measurement as `perf` rows, after which it deploys like any other;
 3. the prior's `mean_scores` argmin — only when no candidate has any evidence at all. Score ties break by
@@ -686,8 +687,8 @@ where a row they contradict finds no leaf), its knobs followed fork by fork thro
 deploy reads a route row with — the seams an entry of the set marks `cut` together offered as one composed arm on the
 replay's kernels, exactly as the deploy offers them. Each kernel-set arm the knobs spelled is a route row under the
 signature of the kernel that fork was offered on; its schedule row is keyed under the child its stored identity
-names, or — for a row the
-tuner merged with the parent's split — under the one child whose enumerated rows contain it. A piece inherits nothing
+names — an empty receipt row included, which says the child ran fused and unsplit — or, for a row the tuner merged
+with the parent's split, under the one child whose enumerated rows contain it. A piece inherits nothing
 from the kernel it replaced, so a record's remaining keys are read against the piece's own offers; a key no piece
 offers, or a schedule row no kernel of the replay enumerates, is stale and is no evidence. Whether a record still
 realizes is the question the nightly `onboard-model` workflow asks with the strict decode (`golden.decode_record`),
