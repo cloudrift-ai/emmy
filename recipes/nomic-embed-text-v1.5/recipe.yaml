@@ -3,7 +3,7 @@ tags:
   - untested
 model:
   huggingface: nomic-ai/nomic-embed-text-v1.5
-  rationale: "Proven Apache 2.0 embedding with huge historical downloads and RAG utility."
+  rationale: "Proven Apache-2.0 embedding with huge historical downloads and RAG utility; no fresh trend."
   heat: 55
   task: embed
 matrices:

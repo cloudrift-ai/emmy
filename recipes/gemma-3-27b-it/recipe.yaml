@@ -3,9 +3,9 @@ tags:
   - untested
 model:
   huggingface: google/gemma-3-27b-it
-  rationale: "Eclipsed by newer Gemma 4; no current momentum in shared sources."
-  heat: 10
+  rationale: "Eclipsed by Gemma 4; no independent current momentum or trend."
+  heat: 8
   task: generate
 matrices:
-- deploy.gpu: NVIDIA A100 80GB
-  deploy.gpu_count: 1
+- deploy.gpu: NVIDIA GeForce RTX 4090
+  deploy.gpu_count: 4

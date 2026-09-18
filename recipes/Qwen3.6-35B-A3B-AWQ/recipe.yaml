@@ -39,8 +39,8 @@ model:
   # mlp.gate / linear_attn / visual in modules_to_not_convert. That AWQ path matches
   # what 1Cat patched for Volta.
   huggingface: "QuantTrio/Qwen3.6-35B-A3B-AWQ"
-  rationale: "Edge-style 4-bit MoE attention visible via Edge0; useful low-VRAM coverage of an active family."
-  heat: 68
+  rationale: "Qwen3.6 cooling; Edge0 drives A3B mindshare. Useful low-VRAM quant coverage of the A3B class."
+  heat: 48
 engine:
   llm:
     tensor_parallel_size: 1

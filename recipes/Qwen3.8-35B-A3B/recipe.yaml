@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: Qwen/Qwen3.8-35B-A3B
-  rationale: "Qwen3.8 family derived; overshadowed by dominant 27B and repo currently unreadable for sizing."
-  heat: 35
+  rationale: "Qwen3.8 family dominates attention; exact repo unreadable so overshadowed by the 27B line."
+  heat: 75
   task: generate
 matrices:
 - deploy.gpu: NVIDIA H200 141GB

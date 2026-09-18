@@ -1,10 +1,10 @@
 tags:
-  - best-effort
+  - maintained
 
 model:
   huggingface: "Qwen/Qwen3.6-27B-FP8"
-  rationale: "Related to hot Qwen3.8 wave; FP8 serving value, but no direct trending data."
-  heat: 45
+  rationale: "Rides adjacent Qwen3.8 wave; strong single-Pro6000/H200 FP8 serving value at 262K context."
+  heat: 55
 engine:
   llm:
     tensor_parallel_size: 1

@@ -4,7 +4,7 @@ tags:
 model:
   huggingface: meta-llama/Llama-4-Scout-17B-16E
   rationale: "Llama cooling; active MoE serving presence, but gated repo limits direct momentum."
-  heat: 60
+  heat: 55
   task: generate
 matrices:
 - deploy.gpu: NVIDIA H200 141GB

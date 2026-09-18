@@ -1,0 +1,16 @@
+tags:
+- onboarding
+- untested
+model:
+  huggingface: Qwen/Qwen3.8-Flash-Next
+  rationale: 'New Qwen4-preview hybrid MoE VLM (180B, 6B active): 5.4K likes, 706K downloads, top agentic-coding benchmarks,
+    vLLM/SGLang recipes published.'
+  heat: 90
+  task: generate
+matrices:
+- deploy.gpu: NVIDIA H200 141GB
+  deploy.gpu_count: 4
+- deploy.gpu: NVIDIA H100 80GB
+  deploy.gpu_count: 8
+- deploy.gpu: NVIDIA B200
+  deploy.gpu_count: 8

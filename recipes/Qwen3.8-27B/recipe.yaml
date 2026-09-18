@@ -18,7 +18,7 @@ tags:
 
 model:
   huggingface: Qwen/Qwen3.8-27B
-  rationale: "Top HF trending Qwen3.8-27B, created 2026-08-05, 15.5K likes, 7.4M downloads confirm current demand."
+  rationale: "Top HF trending, 15.5K likes and 7.4M downloads confirm breakout Qwen3.8 demand."
   heat: 95
   revision: 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
   task: generate

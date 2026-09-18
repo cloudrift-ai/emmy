@@ -6,7 +6,7 @@ tags:
 
 model:
   huggingface: "google/gemma-4-12B"
-  rationale: "Gemma 4 cooling; base model lacks instruction-tuned variant attention."
+  rationale: "Gemma 4 cooling; base variant lacks instruction attention and current trend."
   heat: 15
   revision: 023679ed352de9bb66cc873c9009ce3482585c08
   smoke_test: completion

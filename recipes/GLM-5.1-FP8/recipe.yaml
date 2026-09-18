@@ -1,9 +1,9 @@
 tags:
-  - best-effort
+  - maintained
 
 model:
   huggingface: "zai-org/GLM-5.1-FP8"
-  rationale: "Superseded by active GLM-5.3 trending wave; limited current momentum."
+  rationale: "Superseded by the active GLM-5.3 trending wave; limited current momentum."
   heat: 20
 engine:
   llm:

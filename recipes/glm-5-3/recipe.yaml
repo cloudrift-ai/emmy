@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: THUDM/glm-5-3
-  rationale: "GLM-5.3 wave active via related trending checkpoints, but this exact repo is unreadable."
-  heat: 85
+  rationale: "Rides the active GLM-5.3 wave (trending 162, 2.45M downloads), but exact repo unreadable/401."
+  heat: 70
   task: generate
 matrices:
 - deploy.gpu: NVIDIA B200

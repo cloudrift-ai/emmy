@@ -1,10 +1,10 @@
 tags:
-  - maintained
+  - best-effort
 
 model:
   huggingface: "Qwen/Qwen3-Coder-Next-FP8"
-  rationale: "Current-gen vendor FP8 coder serving 256K context; active Qwen coder momentum, niche developer value."
-  heat: 52
+  rationale: "Current-gen vendor FP8 coder serving 262K context; active Qwen coder momentum, niche developer value."
+  heat: 48
 engine:
   llm:
     tensor_parallel_size: 1

@@ -24,8 +24,8 @@ model:
   # build uses real `quant_method="awq"`, group_size=128, dense 27B with Gated DeltaNet
   # + Gated Attention. That AWQ path is the one 1Cat patched for Volta.
   huggingface: "QuantTrio/Qwen3.5-27B-AWQ"
-  rationale: "Qwen3.5 line cooling as attention moves to Qwen3.8; AWQ derivative carries little independent demand."
-  heat: 5
+  rationale: "Qwen3.5 line cooling as attention shifts to Qwen3.8; AWQ derivative carries little independent demand."
+  heat: 10
 engine:
   llm:
     tensor_parallel_size: 4

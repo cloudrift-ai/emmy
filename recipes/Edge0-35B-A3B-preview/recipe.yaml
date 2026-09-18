@@ -1,10 +1,11 @@
 tags:
-  - onboarding
-  - untested
+- onboarding
+- untested
 model:
-  huggingface: Ornith-ai/Ornith-1.5-35B-A3B
-  rationale: "No trending or community evidence found; unmaintained A3B fork with no current signal."
-  heat: 5
+  huggingface: Edge0/Edge0-35B-A3B-preview
+  rationale: 'Breakout A3B-class MoE serving from SSD (edge0): trending 2454, 3.3K likes, novel low-VRAM serving architecture
+    for benchmarking.'
+  heat: 78
   task: generate
 matrices:
 - deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition

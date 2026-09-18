@@ -1,10 +1,10 @@
 tags:
-  - maintained
+  - best-effort
 
 model:
   huggingface: "Qwen/Qwen3.6-35B-A3B"
-  rationale: "Indirect MoE signal from trending A3B variants; base demand less direct than Qwen3.8."
-  heat: 65
+  rationale: "A3B MoE mindshare from Edge0 breakout; Qwen3.6 base cooling, so moderate."
+  heat: 55
 engine:
   llm:
     tensor_parallel_size: 2

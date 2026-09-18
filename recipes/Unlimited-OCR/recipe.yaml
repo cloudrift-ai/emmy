@@ -3,9 +3,9 @@ tags:
   - untested
 model:
   huggingface: baidu/Unlimited-OCR
-  rationale: "High historical HF trending, downloads, and likes for a practical OCR task."
-  heat: 78
+  rationale: "High historical interest for a practical OCR task, but the evidence is aging."
+  heat: 60
   task: generate
 matrices:
-- deploy.gpu: NVIDIA Tesla V100 SXM2 16GB
+- deploy.gpu: NVIDIA GeForce RTX 4090
   deploy.gpu_count: 1

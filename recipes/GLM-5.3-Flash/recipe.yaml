@@ -1,0 +1,14 @@
+tags:
+- onboarding
+- untested
+model:
+  huggingface: zai-org/GLM-5.3-Flash
+  rationale: 'GLM-5.3 wave: trending 162, 2.4K likes, 2.45M downloads; 321B FP8 MoE that is vLLM-servable, unlike the
+    unreadable 753B GLM-5.2 line.'
+  heat: 85
+  task: generate
+matrices:
+- deploy.gpu: AMD Instinct MI350X
+  deploy.gpu_count: 2
+- deploy.gpu: NVIDIA B200
+  deploy.gpu_count: 4

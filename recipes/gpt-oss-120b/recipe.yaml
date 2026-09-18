@@ -7,12 +7,14 @@ tags:
   - untested
 model:
   huggingface: openai/gpt-oss-120b
-  rationale: "GPT-OSS cooling per shared sources; prior momentum not sustained in current window."
+  rationale: "GPT-OSS cooling per shared sources, but strong serving volume and practical value remain."
   heat: 70
   revision: b5c939de8f754692c1647ca79fbf85e8c1e70f8a
   task: generate
 matrices:
-- deploy.gpu: NVIDIA H200 141GB
+- deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition
   deploy.gpu_count: 1
-- deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Server Edition
+- deploy.gpu: NVIDIA H100 80GB
+  deploy.gpu_count: 1
+- deploy.gpu: NVIDIA A100 80GB
   deploy.gpu_count: 1

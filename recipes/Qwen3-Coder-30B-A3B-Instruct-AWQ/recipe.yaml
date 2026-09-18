@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
-  rationale: "Qwen/Qwen3-Coder-Next-FP8 supersedes this recipe: Older AWQ coder; superseded by newer Qwen coder releases, no current demand evidence."
-  heat: 3
+  rationale: "Qwen/Qwen3-Coder-Next-FP8 supersedes: 262K context and maintained FP8 serve at lower VRAM (40 vs 47 GB)."
+  heat: 5
 engine:
   llm:
     tensor_parallel_size: 1

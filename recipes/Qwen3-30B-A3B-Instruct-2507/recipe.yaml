@@ -8,8 +8,8 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3-30B-A3B-Instruct-2507"
-  rationale: "Qwen MoE momentum plus single-H200 serving supports steady mid-size interest."
-  heat: 55
+  rationale: "Rides strong Qwen MoE momentum; single-H200 serving supports steady mid-size interest."
+  heat: 58
   revision: 0d7cf23991f47feeb3a57ecb4c9cee8ea4a17bfe
   task: generate
 

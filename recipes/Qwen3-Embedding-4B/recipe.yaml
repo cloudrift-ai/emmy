@@ -13,8 +13,8 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3-Embedding-4B"
-  rationale: "Mid-tier embedding with steady interest within active Qwen embedding family."
-  heat: 40
+  rationale: "Established Qwen embedding line with steady mid-tier search interest."
+  heat: 45
   task: embed
 
 engine:

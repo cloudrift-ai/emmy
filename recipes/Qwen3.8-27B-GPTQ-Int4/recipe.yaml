@@ -19,8 +19,8 @@ model:
   # (quant_method="gptq", 4-bit, group_size=128, desc_act=false, sym=true) and was prepared and
   # tested by its author on a V100, which is why it is the 4-bit checkpoint this recipe serves.
   huggingface: "Max73333/Qwen3.8-27B-GPTQ-Int4-V100"
-  rationale: "Volta-capable Qwen3.8-27B build; family dominates current attention, but this community quant has no direct signal."
-  heat: 25
+  rationale: "Qwen3.8 family dominates attention; this community quant has no direct current evidence. Volta coverage."
+  heat: 35
   revision: d5a18cc1477e301e50d3fe4167fbf76db9337edc
   task: generate
 

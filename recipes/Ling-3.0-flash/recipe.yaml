@@ -3,11 +3,13 @@ tags:
   - untested
 model:
   huggingface: inclusionAI/Ling-3.0-flash
-  rationale: "No trend, Reddit, or serving evidence found across shared sources."
+  rationale: "No trend, Reddit, or serving evidence for this exact text recipe in shared sources."
   heat: 5
   task: generate
 matrices:
-- deploy.gpu: NVIDIA H200 141GB
+- deploy.gpu: NVIDIA B200
+  deploy.gpu_count: 2
+- deploy.gpu: AMD Instinct MI350X
+  deploy.gpu_count: 2
+- deploy.gpu: NVIDIA B200
   deploy.gpu_count: 4
-- deploy.gpu: NVIDIA H100 80GB
-  deploy.gpu_count: 8
