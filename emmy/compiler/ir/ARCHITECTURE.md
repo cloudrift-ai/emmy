@@ -579,8 +579,12 @@ canonicalized before validation:
   linear in definitions × loop depth instead of materializing the quadratic full SSA dependency closure.
 - `dedup_loads` — after expression simplification, keep one `Load` for each identical
   `(input, index, width, dtype)` read in a scope and rewire every scalar or vector lane. A write invalidates retained
-  reads of that buffer, including around a nested scope with a write. This is canonicalization for every Loop / Tile
-  body, not a fusion profitability decision.
+  reads of that buffer, including around a nested scope with a write. The same walk keeps one `Assign` per identical
+  operation over identical arguments and one `Accum` per identical accumulation — a value the loop tree computes
+  twice (a contraction spelled on both sides of a cut seam, a repeated pure expression) folds to one definition, and
+  an accumulator alias carries out of the loop that defined it to the scope that reads the sum. This is
+  canonicalization for every Loop / Tile body, not a fusion profitability decision; the structural key inherits it,
+  so two bodies that differ by a repeated computation key alike.
 - `rename_ssa_sequential` — cosmetic: `Load` names become `in0, in1, …`, accumulator state becomes `acc0, …`, and
   every other definition becomes `v0, v1, …`, in lexical definition order. Names stay globally unique while each
   nested body tracks its own binders, so sibling scopes may reuse the same source spelling without collapsing. Axis
@@ -677,7 +681,11 @@ slices, broadcasts, and conversions remain ordinary edges. The proof compares ea
 mixed-radix digit of the destination's dense flat address, then composes those inverse layouts across the chain. The
 splicer retargets the computed source's `Write` through that inverse and removes the copy roots from reconstruction.
 This preserves the producer's loop geometry through terminal reshape/transpose chains without enumerating the output
-domain.
+domain. A leading dimension both shapes share as the same symbol (the token axis of a serving prefill program) has
+no dense flat address to digitize; the proof strips it, proves the static trailing shapes, and the retarget carries
+the source's leading index through unchanged. Without that the symbolic prefill twin kept its reshape copies as
+ordinary edges, and the fused half took a different form from its static twins — projections recomputed under
+every per-column statistic.
 
 A `Write` that observes an `Accum` inside that accumulator's own reduce scope is an ordered prefix output. The
 splicer refuses that shape whether it is the merged root or a producer edge: dependency reconstruction would freshen
