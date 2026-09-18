@@ -226,3 +226,27 @@ def test_normalization_does_not_build_the_full_ssa_dependency_closure() -> None:
 
     assert "deps_closure" not in body.__dict__
     assert "deps_closure" not in split.__dict__
+
+
+def test_hoist_keeps_a_read_of_a_buffer_the_loop_writes() -> None:
+    """Axis-invariance alone does not earn a hoist: a read behind a write to its own buffer, or
+    behind an ordered execution protocol, follows the scope's ordering constraints and stays."""
+    from emmy.compiler.ir.kernel.ir import Sync
+
+    body = Body(
+        (
+            Loop(
+                axis=Axis("i", 4),
+                body=(
+                    Write(output="O", index=(Literal(0, "int"),), value="one"),
+                    Load(name="back", input="O", index=(Literal(0, "int"),)),
+                    Sync(),
+                    Load(name="staged", input="S", index=(Literal(0, "int"),)),
+                    Write(output="P", index=(Var("i"),), value="back"),
+                    Write(output="Q", index=(Var("i"),), value="staged"),
+                ),
+            ),
+        )
+    )
+    (loop,) = hoist_loop_invariants(body)
+    assert [type(stmt).__name__ for stmt in loop.body] == ["Write", "Load", "Sync", "Load", "Write", "Write"]

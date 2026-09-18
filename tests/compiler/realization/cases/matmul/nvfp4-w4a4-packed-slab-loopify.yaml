@@ -650,7 +650,7 @@ configs:
   target:
     loop: 1
   realizations:
-  - name: k_linear_db872e.774a5015ab9c
+  - name: k_linear_feddc1
     bindings: {}
     pins:
       FAST_MATH: false
@@ -661,7 +661,7 @@ configs:
       REDUCE: ''
       STAGE: d3/smem-async
       RASTER: ''
-    identity: 663ccf6870478cbee2a0abd6fcf8b28a0cd9a5a79552b7c42a70c94892b82db0
+    identity: 080558504449b5f786062eb6226ed01787da57d924c3d11e15975c8ce6833218
 loops:
 - inputs: [input]
   outputs: [input_static_fp4_scale_bits, input_static_fp4_bits]
@@ -940,7 +940,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_reshape_reduce_5fc21e
+      name: k_reshape_reduce_2b63db
     inputs: [input_static_fp4_floor, input_static_fp4_shift, input_static_fp4_f4_max, input_static_fp4_scale_2, input]
     outputs: [[input_static_fp4_scale_bits, f8e4m3, [128, 32, 1]], [input_static_fp4_bits, f4e2m1x2, [128, 256]]]
 - inputs: [input_static_fp4_scale_bits, input_static_fp4_bits]
@@ -1364,7 +1364,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_db872e
+      name: k_linear_feddc1
     inputs: [p_weight_scale_2, input_static_fp4_scale_2, p_weight_scale_bits, input_static_fp4_scale_bits, p_weight_bits, input_static_fp4_bits,
       p_weight_f4_pairs, input_static_fp4_r1_f4_pairs]
     outputs: [[linear, f32, [128, 256]]]

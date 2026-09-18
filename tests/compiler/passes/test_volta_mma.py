@@ -293,6 +293,28 @@ def test_sm70_ring_splits_the_blocking_copy_across_the_drain(monkeypatch) -> Non
         assert forbidden not in src
 
 
+def test_sm70_depth_two_single_chunk_keeps_the_blocking_copy_before_the_drain(monkeypatch) -> None:
+    """A requested ring that holds only one K chunk is the depth-one blocking copy.
+
+    Splitting that lone copy leaves no resident chunk to overlap: issue-before-drain followed by
+    deposit-after-drain makes the first drain read uninitialized shared memory. The depth-two row
+    must therefore lower exactly like its correct depth-one control while retaining its authored
+    schedule spelling.
+    """
+    monkeypatch.setenv("EMMY_TILE", f"{VOLTA}/f2x2/k8")
+    monkeypatch.setenv("EMMY_WORK", "w2x2")
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    ctx = Context(compute_capability=(7, 0))
+
+    monkeypatch.setenv("EMMY_STAGE", "d1/smem")
+    depth_one, _ = _source(_graph(m=64, n=64, k=32), ctx)
+    monkeypatch.setenv("EMMY_STAGE", "d2/smem")
+    depth_two, knobs = _source(_graph(m=64, n=64, k=32), ctx)
+
+    assert family_value(knobs, "STAGE") == "d2/smem"
+    assert depth_two == depth_one
+
+
 def test_sm70_shallow_k_tile_keeps_store_addresses_near_the_deposit(monkeypatch) -> None:
     """Hoisting Volta store addresses slows the shallower K tile despite reducing its SASS."""
     monkeypatch.setenv("EMMY_TILE", f"{VOLTA}/f2x2/k4")

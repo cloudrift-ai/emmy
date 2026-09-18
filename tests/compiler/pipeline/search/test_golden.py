@@ -184,6 +184,24 @@ def test_a_pool_that_holds_the_recorded_row_is_not_walked_whole(monkeypatch) -> 
     assert reason is not None and "WORK@missing" in reason and "re-spelling" in reason
 
 
+def test_a_row_with_only_an_invalid_offered_value_reports_a_semantic_miss() -> None:
+    """An offered key whose requested value is invalid is a normal decode miss, not an error.
+
+    The replay tracks offered keys separately from validated key/value pairs.  When every requested
+    value is invalid, that second set is deliberately empty; the diagnostic still has enough
+    information to report narrowing without indexing a pair set that was never populated.
+    """
+    from dataclasses import replace
+
+    records = _records_of(_HARDWARE_GOLDENS_DIR / "rtx5090_sm120.yaml")
+    record = next(r for r in records if r.name == "matmul.square.512" and _decode(r, records) is None)
+    decided = next(key for key, value in record.knobs.items() if value not in ("", "0"))
+    invalid = replace(record, knobs={decided: "not-a-real-value"})
+
+    reason = decode_record(invalid, siblings_of(invalid, records))
+    assert reason is not None and "NARROWING" in reason and decided in reason
+
+
 def _recipe_paths() -> list[Path]:
     """The recipe-local model goldens — the repository set minus the hardware files above."""
     with _repository_golden_paths() as paths:
@@ -200,6 +218,50 @@ def test_every_recorded_row_of_a_model_golden_decodes(path: Path) -> None:
     listed = "\n".join(failures[:20])
     more = f"\n  ... and {len(failures) - 20} more" if len(failures) > 20 else ""
     assert not failures, f"{len(failures)}/{len(records)} recorded rows equal no enumerated leaf:\n{listed}{more}"
+
+
+def test_a_row_whose_every_site_is_re_spelled_still_gets_a_verdict() -> None:
+    """A row can lose every key it decided at once — an identity re-key moves a kernel's sites, and
+    the codec then declares none of the keys the recording spelled. That is a re-spelling like any
+    other and the decode has to say so. Two expert rows of the DeepSeek V4 golden raised instead
+    after #804 re-keyed the file: the replay filed the kernel's declared keys with no offered pair
+    behind them, then indexed the pair it never filed."""
+    from dataclasses import replace
+
+    records = _records_of(_HARDWARE_GOLDENS_DIR / "rtx5090_sm120.yaml")
+    record = next(r for r in records if r.name == "matmul.square.512" and _decode(r, records) is None)
+    respelled = replace(record, knobs={f"{key}@missing": value for key, value in record.knobs.items() if value not in ("", "0")})
+    reason = _decode(respelled, records)
+    assert reason is not None and "re-spelling" in reason and "@missing" in reason, reason
+
+
+def test_a_sibling_sharing_the_target_identity_cannot_silence_the_lead_cut() -> None:
+    """A receipt decodes behind its lead's cut. The replay finds the entry that decides a fork by
+    the fork root's identity, so a plain receipt stamped with its lead's identity — what the #804
+    re-key did to 145 rows of the DeepSeek V4 golden — stands in for the lead at the cut fork,
+    fuses the kernel, and every receipt of the set reads as a re-spelling. Where entries share an
+    identity, the one that spells a route decides the cut. The set is the golden's own, the M=16
+    pre-attention statistic: a cut lead, a cross-CTA split of one piece, and three receipts."""
+    from dataclasses import replace
+
+    from emmy.compiler.pipeline.knob import schedule_match_key
+    from emmy.compiler.pipeline.search.golden import _replay, piece_row
+
+    def decodes(record, siblings) -> bool:  # the replay itself: the decode's verdict is memoized per record
+        wanted = schedule_match_key(piece_row(record.knobs))
+        return any(_replay(record, siblings=siblings, exhaustive=True, wanted=wanted).rows.values())
+
+    golden = Path(__file__).parents[4] / "recipes" / "DeepSeek-V4-Flash-0731" / "golden" / "v100_sm70.yaml"
+    records = _records_of(golden)
+    lead = next(r for r in records if r.name == "pre16.k_linear_mean_reduce_03c479.8caa25e24052.m16.dc6db94ec8ea.dc6db94ec8ea")
+    siblings = siblings_of(lead, records)
+    receipt = next(m for m in siblings if m.name.endswith(".5d9b14249e94"))
+    assert decodes(receipt, [lead, *(m for m in siblings if m is not receipt)]), "the receipt decodes behind its lead's cut"
+
+    other = next(m for m in siblings if m.name.endswith(".c607711d8ef8"))
+    impostor = replace(other, identity=lead.identity)
+    beside = [lead, *(impostor if m is other else m for m in siblings if m is not receipt)]
+    assert decodes(receipt, beside), "and beside a receipt stamped with the lead's identity"
 
 
 def test_compiler_fingerprint_ignores_mtime_so_two_checkouts_share_one_memo(tmp_path):

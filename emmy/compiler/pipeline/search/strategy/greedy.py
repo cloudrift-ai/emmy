@@ -18,7 +18,7 @@ from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline.knob import family_of
 from emmy.compiler.pipeline.pipeline import Decision, LoweringError, Run
 from emmy.compiler.pipeline.search.db import SearchDB
-from emmy.compiler.pipeline.search.pins import composed_routes
+from emmy.compiler.pipeline.search.pins import PLACEMENT_DECISIONS_HINT, composed_routes
 from emmy.compiler.pipeline.search.policy.greedy import _db_measured_index, _strip_fork_stamps, greedy_decide, logger, tile_identity
 from emmy.compiler.pipeline.search.strategy.base import SearchStrategy
 
@@ -84,7 +84,8 @@ class GreedyStrategy(SearchStrategy):
         # the row can spell it (``spelled_arm``), the way the pinned compile that measured it did.
         # Only a pipeline that reaches the cut pass consults it: the loop-level lowerings a golden
         # record's derivations run (hundreds per file) never do, and must not pay the evidence import.
-        with composed_routes(_measured_composed_routes(db, ctx) if complete else []):
+        reaches_placement = any(pass_.name == "lowering/tile" for pass_ in pipeline.passes)
+        with composed_routes(_measured_composed_routes(db, ctx) if reaches_placement else []):
             for _attempt in range(_MAX_GREEDY_RETRIES):
                 rejections: list[tuple[str, str, str]] = []
                 run = Run(pipeline=pipeline, ctx=ctx, db=db, backend=backend, dump=dump, rejections=rejections)
@@ -102,8 +103,16 @@ class GreedyStrategy(SearchStrategy):
             if _stuck(terminal, rejections, lowers_to_cuda=complete):
                 rejections = []
                 run = Run(pipeline=pipeline, ctx=ctx, db=db, backend=backend, dump=dump, rejections=rejections)
-                terminal, _ = run.resolve(graph.copy(), greedy_decide(blocked=blocked, prior=None, db=db))
+                terminal, trace = run.resolve(graph.copy(), greedy_decide(blocked=blocked, prior=None, db=db))
         _raise_on_unlowered(terminal, rejections, lowers_to_cuda=complete)
+        terminal.hints.set(
+            PLACEMENT_DECISIONS_HINT,
+            [
+                {str(key): str(value) for key, value in decision.knob_delta.items() if family_of(str(key)) == "PLACE"}
+                for decision in trace
+                if any(family_of(str(key)) == "PLACE" for key in decision.knob_delta)
+            ],
+        )
         logger.info("compile: total %.2fs (deterministic resolve)", time.monotonic() - t_start)
         return terminal
 

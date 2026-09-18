@@ -22,19 +22,19 @@ configs:
     origins:
     - matmul
   realizations:
-  - name: k_matmul_a8deb7.3857c8615dfc
+  - name: k_matmul_edd56e
     bindings: {}
     pins:
       FAST_MATH: false
       PLACE: fuse
     knobs:
       REDUCE: g2k
-    identity: c396762adfc9e14fd428795cf8c3b2ba1ff0a6b521a00cc839e0cc7f41e20068
+    identity: 6a5dde8beaeb12afafe881714f580bcc74e706c108351d3769d12bf28a5a9eb4
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 14.32768865065141
         tcompile_us: 4.1000759052390325
-  - name: k_matmul_b85f71.f95a17733e5f.52d501c5c222
+  - name: k_matmul_edd56e.52d501c5c222
     bindings: {}
     pins:
       FAST_MATH: false
@@ -43,7 +43,7 @@ configs:
       REDUCE: ''
       RASTER: ''
     identity: 52d501c5c222dd5d5038d084d6f35534fc052f3c072cff9079efaafee5d888b5
-  - name: k_matmul_b85f71.f95a17733e5f.957cb7c082db
+  - name: k_matmul_edd56e.957cb7c082db
     bindings: {}
     pins:
       FAST_MATH: false
@@ -54,7 +54,7 @@ configs:
       STAGE: ''
       RASTER: ''
     identity: 957cb7c082dbb0bbc8c085602cd07b82a4fcaade3222b1d0e653d6311b2526fa
-  - name: k_matmul_32a81d.1cb699819a8d.8b5968ade20b
+  - name: k_matmul_edd56e.8b5968ade20b
     bindings: {}
     pins:
       FAST_MATH: false
@@ -65,7 +65,7 @@ configs:
       STAGE: ''
       RASTER: ''
     identity: 8b5968ade20b30d02ff3a4dc7092ea178f744c08109e89b4f6e3a858b4963208
-  - name: k_matmul_32a81d.1cb699819a8d.965cbeb93597
+  - name: k_matmul_edd56e.965cbeb93597
     bindings: {}
     pins:
       FAST_MATH: false
@@ -74,7 +74,7 @@ configs:
       REDUCE: ''
       RASTER: ''
     identity: 965cbeb93597884917d5fb2d529d6054bc0f4d735ba09105a56aabff09e16334
-  - name: k_matmul_377e9d.5494be3a6cfd.3757bada9b9f
+  - name: k_matmul_edd56e.3757bada9b9f
     bindings: {}
     pins:
       FAST_MATH: false
@@ -83,7 +83,7 @@ configs:
       REDUCE: ''
       RASTER: ''
     identity: 3757bada9b9f74708043891d1d70308825246208385dcd124d7fdfd95e04ebb7
-  - name: k_matmul_377e9d.5494be3a6cfd.c8075b846066
+  - name: k_matmul_edd56e.c8075b846066
     bindings: {}
     pins:
       FAST_MATH: false

@@ -33,7 +33,7 @@ configs:
     - o
     - probs
   realizations:
-  - name: k_matmul_softmax_reduce_2b2a4c.202ea0138e90
+  - name: k_matmul_softmax_reduce_60ce07
     bindings: {}
     pins:
       FAST_MATH: false
@@ -41,7 +41,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x2/k2
       WORK: w2x2
       REDUCE: ''
-    identity: f08090c7cd801bda338758ad27bb174aedfbf9250093c618a9f95dbc0cd97be9
+    identity: 40807d8f51da50cc87e8b46c38fc405fdea693e653e79ae9e9ac221b6de9070f
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 33.37813218434651

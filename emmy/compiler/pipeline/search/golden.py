@@ -1051,7 +1051,26 @@ def decode_record(record: GoldenRecord, siblings: Sequence[GoldenRecord] = ()) -
     one of THAT kernel's rows — a sibling child's row must not vouch for it."""
     from emmy.compiler.pipeline.knob import schedule_match_key  # noqa: PLC0415
 
-    verdict_key = digest(_record_fingerprint(record), str(sorted(record.knobs.items())), str(record.pins), record.identity or "")
+    sibling_spelling = tuple(
+        (
+            sibling.name,
+            _record_fingerprint(sibling),
+            tuple(sorted(sibling.knobs.items())),
+            sibling.pins,
+            sibling.identity,
+            sibling.kernel_set,
+        )
+        for sibling in siblings
+    )
+    verdict_key = digest(
+        record.name,
+        _record_fingerprint(record),
+        str(sorted(record.knobs.items())),
+        str(record.pins),
+        record.identity or "",
+        str(record.kernel_set),
+        str(sibling_spelling),
+    )
     store = _identity_store()
     verdicts = store.setdefault("verdicts", {})
     if verdict_key in verdicts:
@@ -1227,7 +1246,10 @@ def _replay(
         return {**referenced, **entry.route, **{str(key): str(value) for key, value in entry.knobs.items()}}
 
     lead = record if lead is None else lead
-    named = {entry.identity: entry for entry in siblings if entry.identity is not None}
+    # Entries can share an identity — a routing row and a plain row of one target. The one that
+    # spells a route decides the cut fork (it sorts last, and last wins); a row spelling none would
+    # read the kernel as fused.
+    named = {entry.identity: entry for entry in sorted(siblings, key=lambda entry: bool(entry.route)) if entry.identity is not None}
     if record.identity is not None:
         named[record.identity] = record
     set_digest = digest(
@@ -1358,6 +1380,7 @@ def _replay(
             if exact is not None:
                 declared, hit = exact
                 offered_keys.setdefault(identity, set()).update(wanted_keys & declared)
+                offered_pairs.setdefault(identity, set())
                 for key, value in wanted_pairs:
                     try:
                         if key in declared and validate_family_value(key, value) == value:
@@ -1435,7 +1458,7 @@ def _replay(
         tuple(arms),
         tuple(sorted(pending)),
         realized,
-        {identity: (frozenset(keys), frozenset(offered_pairs[identity])) for identity, keys in offered_keys.items()},
+        {identity: (frozenset(keys), frozenset(offered_pairs.get(identity, ()))) for identity, keys in offered_keys.items()},
     )
     if not exhaustive:
         _REPLAY_CACHE[cache_key] = result

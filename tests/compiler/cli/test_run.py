@@ -39,6 +39,33 @@ def _randn(shape: str, dtype, scale: float | None = None) -> str:
     return f"torch.randn({shape})"
 
 
+def test_random_input_values_bound_u8_scale_codes_without_changing_adjacent_inputs():
+    """MXFP4 boundary scales use biased E8M0 bytes, so arbitrary signed-looking values overflow.
+
+    The input name distinguishes those scale codes from ordinary u8 storage. Plain u8 inputs retain
+    the existing random values, while native fp8 carriers still filter non-finite encodings.
+    """
+    import numpy as np
+
+    from emmy.commands.run import _random_input_values
+    from emmy.compiler.dtype import decode_f8
+
+    scales = _random_input_values(np.random.default_rng(7), (1024,), "u8", name="w_gate_up_scale")
+    assert scales.dtype == np.uint8
+    assert 120 <= int(scales.min()) <= int(scales.max()) <= 122
+    decoded_scales = np.exp2(scales.astype(np.int16) - 127)
+    assert np.isfinite(decoded_scales).all() and float(decoded_scales.max()) <= 1 / 32
+
+    plain_rng = np.random.default_rng(11)
+    expected_rng = np.random.default_rng(11)
+    plain = _random_input_values(plain_rng, (32,), "u8", name="w_gate_up")
+    expected = expected_rng.standard_normal((32,), dtype=np.float32)
+    assert np.array_equal(plain, expected), "ordinary u8 input generation must not change"
+
+    fp8 = _random_input_values(np.random.default_rng(13), (256,), "f8e4m3", name="activation_scale")
+    assert fp8.dtype == np.uint8 and np.isfinite(decode_f8(fp8, "f8e4m3")).all()
+
+
 def test_run_no_code_errors(run_cli):
     rc, stdout, stderr = run_cli("run")
     assert rc != 0
@@ -358,6 +385,7 @@ def test_ir_ab_replay_retains_boolean_input_pins(tmp_path, monkeypatch):
     source.write_text("{}")
     monkeypatch.setattr(run_mod, "pinned_knobs", capture_pins)
     monkeypatch.setattr(run_mod, "_cuda_knob_dicts", lambda _graph: [{"TILE": "f2x4"}])
+    monkeypatch.setattr(run_mod, "_placement_knob_dicts", lambda _graph: [])
     monkeypatch.setattr(Graph, "from_dict", staticmethod(lambda _document: object()))
 
     rows = asyncio.run(run_mod._bench_ab_variants_ir(Backend(), source, (), ["FAST_MATH=False,TILE=f2x4"], warmup=1, iters=2))
@@ -518,6 +546,19 @@ def test_strict_correctness_proof_uses_compiler_baseline_tolerance():
     assert greedy["max_rel_error"] > 0
 
 
+def test_strict_correctness_proof_accepts_a_mask_that_matches_its_reference():
+    """An attention mask holds -inf by design: it passes where the reference has the same -inf, and
+    fails where the two disagree."""
+    import numpy as np
+
+    from emmy.commands.run import _strict_correctness_proof
+
+    mask = {"o": np.array([0.0, -np.inf], dtype=np.float32)}
+    assert _strict_correctness_proof({"o": np.array([0.0005, -np.inf], dtype=np.float32)}, mask)["status"] == "pass"
+    for wrong in ([0.0, np.inf], [-np.inf, 0.0], [0.0, np.nan]):
+        assert _strict_correctness_proof({"o": np.array(wrong, dtype=np.float32)}, mask)["status"] == "fail"
+
+
 def test_unreproducible_pin_flag(monkeypatch):
     """The realized-vs-pinned gate: a pin the compile silently dropped (the fallback
     substituted the planner's own pick — the retired ``w2x1`` hd128 flash form) flags
@@ -574,6 +615,10 @@ def test_unreproducible_pin_flag(monkeypatch):
     assert unreproducible_pin_flag({"TILE": "w2x1"}, []) is None
     assert unreproducible_pin_flag({"TILE": "w2x1"}, [{}]) is None
     assert unreproducible_pin_flag({"TILE": "w2x1"}, [{}, {}]) is None
+    # A pinned cut the resolution trace does not carry was not taken: the compile kept the fused kernel.
+    untaken = unreproducible_pin_flag({"PLACE@map.1/inner": "cut"}, [{"TILE": "f2"}], placement_knobs=[])
+    assert "PLACE@map.1/inner=cut realized (unset)" in untaken
+    assert unreproducible_pin_flag({"PLACE@map.1/inner": "cut"}, [{"TILE": "f2"}]) is None, "no trace, no gate"
 
 
 def test_bench_golden_variants_unmatched_pin_fails_row_without_benching(monkeypatch):
@@ -613,6 +658,80 @@ def test_bench_golden_variants_unmatched_pin_fails_row_without_benching(monkeypa
     assert any("unreproducible pin" in f and "NOT benched" in f for f in benches[0].flags)
     assert len(benched) == 1  # only the honored row spent GPU time
     assert benches[1].status == "ok" and benches[1].flags == [] and benches[1].bench is not None
+
+
+def test_bench_golden_variants_unmatched_place_pin_fails_row_without_benching(monkeypatch):
+    """A structural PLACE pin is checked against the greedy resolution trace, not CUDA
+    knob stamps: the splice consumes placement before either resulting kernel exists."""
+    from types import SimpleNamespace
+
+    from emmy.commands import trace as tmod
+    from emmy.commands.run import _bench_golden_variants
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.cuda.ir import CudaOp
+    from emmy.compiler.pipeline.search.pins import PLACEMENT_DECISIONS_HINT
+
+    monkeypatch.setattr(tmod, "graph_from_code", lambda code, dynamic_shapes=None: (object(), "slug", (None, (), {})))
+
+    def graph_with(route):
+        graph = Graph()
+        graph.add_node(op=CudaOp(kernel_name="k"), inputs=[], output=Tensor("o", (4,)), node_id="n0")
+        graph.hints.set(PLACEMENT_DECISIONS_HINT, [route])
+        return graph
+
+    compiled = iter(
+        [
+            graph_with({"PLACE": "fuse"}),
+            graph_with({"PLACE@map.1/inner.2/map": "cut"}),
+        ]
+    )
+    benched: list = []
+
+    async def fake_bench_pinned_async(graph, *, run_inputs=None, run_inputs_key=None, warmup, num_iters):
+        benched.append(graph)
+        return SimpleNamespace(min_ms=1.0, time_ms=1.0, per_launch=[]), None
+
+    backend = SimpleNamespace(compile=lambda graph: next(compiled), bench_pinned_async=fake_bench_pinned_async)
+    pin = {"PLACE@map.1/inner.2/map": "cut"}
+    missed = SimpleNamespace(name="g.missed", knobs=pin, shape=None, dynamic=None)
+    realized = SimpleNamespace(name="g.realized", knobs=pin, shape=None, dynamic=None)
+
+    benches = asyncio.run(_bench_golden_variants(backend, "torch.exp(a)", [missed, realized], warmup=1, iters=1))
+
+    assert benches[0].status == "pin_unmatched" and benches[0].bench is None
+    assert any("PLACE@map.1/inner.2/map=cut" in flag for flag in benches[0].flags)
+    assert benches[1].status == "ok" and benches[1].flags == []
+    assert len(benched) == 1
+
+
+def test_bench_golden_variants_gates_the_live_env_route_too(monkeypatch):
+    """A sweep publishes its route through EMMY_KNOBS and varies schedules per --ab row: a row
+    whose compile dropped that route must not bench as a clean result under the row's name."""
+    from types import SimpleNamespace
+
+    from emmy.commands import trace as tmod
+    from emmy.commands.run import _bench_golden_variants
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.cuda.ir import CudaOp
+    from emmy.compiler.pipeline.search.pins import PLACEMENT_DECISIONS_HINT
+
+    monkeypatch.setattr(tmod, "graph_from_code", lambda code, dynamic_shapes=None: (object(), "slug", (None, (), {})))
+    monkeypatch.setenv("EMMY_PLACE@MAP.1/INNER", "cut")
+
+    graph = Graph()
+    graph.add_node(op=CudaOp(kernel_name="k", knobs={"WORK": "t128"}), inputs=[], output=Tensor("o", (4,)), node_id="n0")
+    graph.hints.set(PLACEMENT_DECISIONS_HINT, [])
+
+    async def fake_bench_pinned_async(g, *, run_inputs=None, run_inputs_key=None, warmup, num_iters):
+        raise AssertionError("a row whose env route did not realize must not be benched")
+
+    backend = SimpleNamespace(compile=lambda g: graph, bench_pinned_async=fake_bench_pinned_async)
+    row = SimpleNamespace(name="g.row", knobs={"WORK": "t128"}, shape=None, dynamic=None)
+
+    (bench,) = asyncio.run(_bench_golden_variants(backend, "torch.exp(a)", [row], warmup=1, iters=1))
+
+    assert bench.status == "pin_unmatched" and bench.bench is None
+    assert any("PLACE@map.1/inner=cut" in flag for flag in bench.flags)
 
 
 @pytest.mark.parametrize(
@@ -824,6 +943,7 @@ def test_ab_json_labels_each_row_with_its_lane(tmp_path, monkeypatch):
         return [_node(knobs)]
 
     monkeypatch.setattr(run_mod, "_launch_order_cuda_nodes", _nodes)
+    monkeypatch.setattr(run_mod, "_placement_knob_dicts", lambda _graph: [])
 
     fm = Sample(
         knobs={"TILE": "mma_m16n8k16_f16_f16/f2x2/k4"},

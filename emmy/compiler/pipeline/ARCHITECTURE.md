@@ -156,7 +156,7 @@ Everything in this table recurs on nearly every page below. The rest of the docu
 | **prior** | The ranking model — the fit-offline **offline prior** when cold, the CatBoost **online prior** trained from local measurements once data exists. |
 | **terminal** | A fully-lowered candidate (every fork on its path resolved) that can be benchmarked. |
 | **golden record** | A reviewed program-backed schedule measurement, selected by frontend provenance and used as deploy evidence and an A/B reference. |
-| **the variant key** | The variant key measurements are stored under — `identity_key(with_io=True, with_knobs=True)`: the canonical Loop-IR body (a `TileOp` derives it schedule-free from its term) + the io fingerprint + the knob row. Dialect-free: every stage of one rewrite chain keys off the same content. |
+| **the variant key** | The variant key measurements are stored under — `identity_key(with_io=True, with_knobs=True)`: the canonical Loop-IR body (a `TileOp` derives it schedule-free from its term) with its buffer roles typed + the knob row. Dialect-free: every stage of one rewrite chain keys off the same content. |
 
 ## Module map
 
@@ -789,8 +789,10 @@ undecided fork a `decide` callback gets a `ForkPoint` (the `Match`, the raw opti
 as it was before the decision, `ctx`) and returns the option to apply.
 
 The returned trace — one `Decision(rule_name, node_id, chosen_kind, knob_delta, score, n_options)` per decided fork —
-is the resolution's only process-state output. Questions like "did this compile take a structural pick" or "what did
-the partition fork predict for this kernel" are trace queries, never accumulated policy attributes.
+is the resolution's process-state output. Questions like "did this compile take a structural pick" or "what did the
+partition fork predict for this kernel" are trace queries, never accumulated policy attributes. The greedy compile
+copies only the final trace's placement receipts into graph attribution so a later A/B integrity check can verify
+structural pins after the splice has consumed them.
 
 ### `Pipeline.run` — the greedy compile
 
@@ -1435,7 +1437,9 @@ the compile's own, not the seed's (`pins.measured_precision_pins`): a row measur
 native-fp8 cell offered has to say so, or the replay republishes a regime that no longer enumerates it — measured
 evidence for a pick nothing can take again. A nested cut is a routing row of the
 piece it was offered on, so a cascade of cuts is as many routing rows, and the replay walks the set together: the entry
-whose identity a fork's kernel carries decides that fork, and the set's lead decides the rest. Receipts written this way
+whose identity a fork's kernel carries decides that fork — where several carry it, as a routing row and a plain row of
+one target do under the canonical identity, the one spelling a route — and the set's lead decides the rest. Receipts
+written this way
 carry NO route in `pins`, unlike the corpus convention above: seam spellings are kernel-local, and a cut key copied
 onto every receipt re-cuts any piece that happens to offer a same-spelled seam (a 4096-token DeepSeek V4 serving twin
 cuts its residual at `PLACE@map.3/map` twice, at two cascade steps, and a piece of it offers a third). For the same
@@ -1500,8 +1504,9 @@ explicit working file whose GPU header is checked against the selected tune devi
    knob's canonical `Knob.parse`, so alternative spellings of the same value, like `FAST_EXP=1`, do not raise a false
    alarm. A pin satisfied by ANY kernel counts as honored, which is what makes split main+finalize pairs
    work, but it does mean that a pin dropped on its intended kernel goes undetected if a sibling kernel happens to
-   match it. The `g<n>` cross-CTA stage of a `REDUCE` value is structural and cannot be read off a knob stamp, so the
-   check skips it. A split replaces the kernel it splits, and
+   match it. `PLACE` is consumed before CUDA emission, so the final greedy resolution's placement receipts ride the
+   compiled graph as attribution and supply its realized side. The `g<n>` cross-CTA stage of a `REDUCE` value is
+   structural and cannot be read off a knob stamp, so the check skips it. A split replaces the kernel it splits, and
    `knob.consume_kernel_row` strips the schedule row from the pieces it mints — no piece may carry the `g<n>` it came
    from — so the receipt is the piece's sliced reduce axis, not a stamp. Only that stage is exempt: the rest of the
    value (`coop` / `r<n>`) is decided by the piece on its own body and stays gated. The cost of the exemption is that a

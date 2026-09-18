@@ -1,37 +1,58 @@
 """Canonical argument names and operation clusters for statement-body identity.
 
 The output is digest material and must never be executed. All semantics-preserving canonicalization
-remains in :mod:`emmy.compiler.ir.stmt.normalize`.
+remains in :mod:`emmy.compiler.ir.stmt.normalize`; identity labels the graph that normalization
+ordered by once more, with the external buffers colored by type instead of left bare, and
+materializes that order without reading a spelling.
 """
 
 from __future__ import annotations
 
-from dataclasses import replace
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
+from functools import cached_property
 
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.normalize import _renormalize_external_order, normalize_body
-from emmy.compiler.ir.stmt.order import _canonical_resource_order
+from emmy.compiler.ir.stmt.normalize import normalize_body, rename_ssa_sequential, sort_commutative_args
+from emmy.compiler.structural import digest, form
 
-__all__ = ["canonicalize_identity"]
-
-
-# ---------------------------------------------------------------------------
-# Identity-only canonicalization: external arguments and operation clusters.
-# ---------------------------------------------------------------------------
+__all__ = ["Identity", "canonicalize_identity"]
 
 
-def canonicalize_identity(stmts: Body, *, cluster: bool = False) -> Body:
-    """Rename external arguments and optionally collapse operations to compute-unit clusters."""
+@dataclass(frozen=True)
+class Identity:
+    """A body's identity material: its canonical body over ``b0, b1, …``, the type of each of
+    those roles, and which external buffer fills each — spelling, so outside the key."""
+
+    body: Body
+    #: External buffer names in canonical rank order: ``arguments[i]`` fills ``b<i>``.
+    arguments: tuple[str, ...]
+    #: Each role's type in the same order; ``None`` when none was given.
+    roles: tuple[object, ...]
+
+    @cached_property
+    def key(self) -> str:
+        """The digest: the canonical body rendered structurally, beside the typed roles."""
+        return digest(form(self.body), self.roles)
+
+
+def canonicalize_identity(stmts: Body, *, cluster: bool = False, types: Mapping[str, object] | None = None) -> Identity:
+    """Rename external arguments by canonical rank and optionally collapse operations to compute-unit clusters.
+
+    ``types`` colors each external buffer in the relation graph, so differently typed roles never
+    share a rank and the order the buffers were declared in never reaches the key.
+    """
     stmts = Body.coerce(stmts)
     if cluster:
         stmts = _canonicalize_op_clusters(stmts)
-    stmts = normalize_body(stmts, hoist=False)
-    resources = _canonical_resource_order(stmts)
-    if not resources:
-        return stmts
+    stmts = normalize_body(stmts)
+    labeling = stmts._ordering.label(None if types is None else types.get)
+    ordered, _ = labeling.materialize(spelled=False)
+    resources = labeling.resources()
     rename = {name: f"b{index}" for index, name in enumerate(resources)}
-    return _renormalize_external_order(stmts.rename_buffers(rename))
+    body = Body.coerce(sort_commutative_args(rename_ssa_sequential(ordered.rename_buffers(rename))))
+    return Identity(body, resources, tuple(None if types is None else types.get(name) for name in resources))
 
 
 # ---------------------------------------------------------------------------

@@ -25,7 +25,7 @@ def test_normalize_body_dedups_loads_and_rewires_gather_indices() -> None:
         )
     )
 
-    (loop,) = normalize_body(body, hoist=False)
+    (loop,) = normalize_body(body)
 
     assert [stmt for stmt in loop.body if isinstance(stmt, Load)] == [
         Load(name="in0", input="indices", index=(Var("a0"),)),

@@ -366,6 +366,14 @@ def test_strict_row_does_not_make_inherited_peer_pins_strict() -> None:
     assert tolerated.with_row({"RASTER": ""}, strict=True).kernel_site.options
 
 
+def test_narrowing_row_cannot_override_existing_hand_pins() -> None:
+    problem = ClassicProblem(*_problem(_contraction()), row={"WORK": "t16x8", "RASTER": ""})
+
+    narrowed = problem.with_row({"WORK": "t32x8", "RASTER": "gn2", "TILE": "f4x6"})
+
+    assert narrowed.row == {"WORK": "t16x8", "RASTER": "", "TILE": "f4x6"}
+
+
 def test_exact_row_rejects_before_walking_a_catalog() -> None:
     def unavailable():
         raise AssertionError("an exact complete row must not fall back to its catalog")

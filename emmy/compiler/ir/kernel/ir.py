@@ -130,65 +130,6 @@ class Smem(Stmt):
 
 
 @dataclass(frozen=True)
-class IndexDecl(Stmt):
-    """Declare one kernel-local integer index before a nested hot loop."""
-
-    name: str
-    value: Expr
-
-    pure = True
-
-    def defines(self) -> tuple[str, ...]:
-        return (self.name,)
-
-    def exprs(self) -> tuple[Expr, ...]:
-        return (self.value,)
-
-    def pretty(self, indent: str = "") -> list[str]:
-        return [f"{indent}Index {self.name} = {self.value.pretty()}"]
-
-    def render(self, ctx: RenderCtx) -> list[str]:
-        return [f"{_pad(ctx.indent)}int {self.name} = {self.value.render(ctx)};"]
-
-
-@dataclass(frozen=True)
-class FlatIndexDecl(Stmt):
-    """Bind a buffer coordinate's flattened index, optionally relative to another coordinate."""
-
-    name: str
-    buffer: str
-    index: tuple[Expr, ...]
-    origin: tuple[Expr, ...] = ()
-
-    pure = True
-
-    def defines(self) -> tuple[str, ...]:
-        return (self.name,)
-
-    def exprs(self) -> tuple[Expr, ...]:
-        return (*self.index, *self.origin)
-
-    def external_reads(self) -> tuple[str, ...]:
-        return (self.buffer,)
-
-    def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
-        new = rename.get(self.buffer, self.buffer)
-        return self if new == self.buffer else replace(self, buffer=new)
-
-    def pretty(self, indent: str = "") -> list[str]:
-        index = ", ".join(expr.pretty() for expr in self.index)
-        return [f"{indent}FlatIndex {self.name} = {self.buffer}[{index}]"]
-
-    def render(self, ctx: RenderCtx) -> list[str]:
-        from emmy.compiler.ir.stmt import render_index  # noqa: PLC0415
-
-        value = render_index(self.buffer, self.index, ctx)
-        if self.origin:
-            value = f"({value}) - ({render_index(self.buffer, self.origin, ctx)})"
-        return [f"{_pad(ctx.indent)}auto {self.name} = {value};"]
-
-
-@dataclass(frozen=True)
 class Sync(Stmt):
     """Thread-group barrier.
 
@@ -2337,8 +2278,8 @@ class RegEpilogue:
     loads: tuple[EpilogueLoad, ...]
     ops: tuple[tuple[str, str, tuple[str, ...], DataType | None], ...]
     result: str
-    # Coord-predicated Selects (the causal attention mask), rendered before the
-    # ``ops`` chain as per-element ternaries. Each is ``(name, branches)`` where
+    # Coord-predicated Selects (the causal attention mask), rendered as per-element ternaries as
+    # soon as their branch values are bound. Each is ``(name, branches)`` where
     # ``branches`` is ``((cond_expr | None, value_name), ...)`` — the predicate
     # carries its σ-applied cell bases plus ``__M__`` / ``__N__`` placeholder
     # Vars the store substitutes with the fragment element's row/col offsets;
@@ -2581,24 +2522,39 @@ class RegStore(Stmt):
             # ``__M__`` / ``__N__`` substitute to this element's row/col offset;
             # the captured predicate already carries its semantic cell base.
             coord = {"__M__": row_off, "__N__": col_off}
-            for sel_name, branches in epi.selects:
-                expr = env[branches[-1][1]]
-                for cond, value in reversed(branches[:-1]):
-                    rc = cond.substitute(coord).render(ctx)
-                    expr = f"(({rc}) ? {env[value]} : {expr})"
-                lines.append(f"const float {sel_name}_e{i} = {expr};")
-                env[sel_name] = f"{sel_name}_e{i}"
-                ctx.ssa_dtypes[env[sel_name]] = "f32"
-            for name, op_name, args, dtype in epi.ops:
-                rendered_name = f"{name}_e{i}"
-                rendered = Assign(
-                    name=rendered_name,
-                    op=op_name,
-                    args=tuple(env[arg] for arg in args),
-                    dtype=dtype,
-                ).render(replace(ctx, indent=0))[0]
-                lines.append(f"const {rendered}")
-                env[name] = rendered_name
+            pending = list(epi.selects)
+            # A select renders once its branch values are bound: a mask over a loaded value renders
+            # ahead of the chain, a mask over an op's result right after that op.
+            for op in (None, *epi.ops):
+                if op is not None:
+                    name, op_name, args, dtype = op
+                    rendered_name = f"{name}_e{i}"
+                    rendered = Assign(
+                        name=rendered_name,
+                        op=op_name,
+                        args=tuple(env[arg] for arg in args),
+                        dtype=dtype,
+                    ).render(replace(ctx, indent=0))[0]
+                    lines.append(f"const {rendered}")
+                    env[name] = rendered_name
+                while ready := [sel for sel in pending if all(value in env for _, value in sel[1])]:
+                    sel_name, branches = ready[0]
+                    pending.remove(ready[0])
+
+                    # The select is declared f32, and a chain op keeps the tail's own dtype, so a
+                    # branch value narrowed by an earlier op converts back here — a ternary over a
+                    # ``__half`` and a ``float`` does not compile.
+                    def widened(value, ctx=ctx, env=env):
+                        rendered = env[value]
+                        return conv.get(ctx.ssa_dtypes.get(rendered, "f32"), "{}").format(rendered)
+
+                    expr = widened(branches[-1][1])
+                    for cond, value in reversed(branches[:-1]):
+                        rc = cond.substitute(coord).render(ctx)
+                        expr = f"(({rc}) ? {widened(value)} : {expr})"
+                    lines.append(f"const float {sel_name}_e{i} = {expr};")
+                    env[sel_name] = f"{sel_name}_e{i}"
+                    ctx.ssa_dtypes[env[sel_name]] = "f32"
             per_elem.append(lines)
             vals.append(env[epi.result])
         return per_elem, vals
@@ -2984,8 +2940,6 @@ __all__ = [
     # Kernel-IR statements
     "Tile",
     "Smem",
-    "IndexDecl",
-    "FlatIndexDecl",
     "Sync",
     "TreeHalve",
     "WarpShuffle",
@@ -3063,24 +3017,6 @@ def _(s: Tile, rename, sigma, axis_fn):
 @_rewrite_kind.register
 def _(s: Smem, rename, sigma, axis_fn):
     return s
-
-
-@_rewrite_kind.register
-def _(s: IndexDecl, rename, sigma, axis_fn):
-    return IndexDecl(name=rename(s.name), value=_rename_ssa_vars_in_expr(sigma.apply(s.value), rename))
-
-
-@_rewrite_kind.register
-def _(s: FlatIndexDecl, rename, sigma, axis_fn):
-    def rewrite(expr):
-        return _rename_ssa_vars_in_expr(sigma.apply(expr), rename)
-
-    return FlatIndexDecl(
-        name=rename(s.name),
-        buffer=s.buffer,
-        index=tuple(rewrite(expr) for expr in s.index),
-        origin=tuple(rewrite(expr) for expr in s.origin),
-    )
 
 
 @_rewrite_kind.register

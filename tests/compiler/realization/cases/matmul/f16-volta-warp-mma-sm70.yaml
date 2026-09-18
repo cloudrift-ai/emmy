@@ -28,7 +28,7 @@ configs:
     origins:
     - o
   realizations:
-  - name: k_linear_62a091.3421de30ca43
+  - name: k_linear_3dbf1d
     bindings: {}
     pins:
       FAST_MATH: false
@@ -37,4 +37,4 @@ configs:
       TILE: mma_m8n8k4_f16_f32/f2x2/k8
       STAGE: d1/smem
       REDUCE: ''
-    identity: b55c75db9d372931ce534ae646569727e46734257dee478414ad83c9a7f1c075
+    identity: b00e14c335ff108dcd182fcf202732761d65cb5f3b7648477edec2150593fc12

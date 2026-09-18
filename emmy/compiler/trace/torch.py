@@ -1696,7 +1696,7 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
         "minimum",
     }
     # Some chunked recurrent paths call ``F.pad`` even when the static sequence length
-    # already fills the chunk. Preserve that unary no-op in the graph for provenance, but
+    # already fills the chunk. Drop that unary no-op like the other pure aliases below, but
     # reject every non-empty pad here: the generic elementwise spelling has no pad-width,
     # mode, or fill-value fields and therefore cannot represent changed coordinates.
     if op_name == "pad":
@@ -1708,12 +1708,7 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
         input_shape = tuple(g.nodes[input_ids[0]].output.shape)
         if input_shape != tuple(shape):
             raise ValueError(f"zero-width aten.pad changed shape from {input_shape} to {tuple(shape)}")
-        node_map[name] = g.add_node(
-            op=ElementwiseOp(op="pad"),
-            inputs=input_ids,
-            output=Tensor(name, shape, dtype),
-            node_id=name,
-        )
+        node_map[name] = input_ids[0]
         return
     # --- Clamp ---
     # ``aten.clamp(x, min, max)`` / ``clamp_min`` / ``clamp_max`` decompose to the

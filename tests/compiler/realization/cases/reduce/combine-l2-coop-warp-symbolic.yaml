@@ -31,14 +31,14 @@ configs:
     - sqrt
     - sum_1
   realizations:
-  - name: k_sqrt_reduce.420bab112063
+  - name: k_sqrt_reduce
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
       REDUCE: coop
       WORK: t32
-    identity: fb4e459f0c0db3a1767255d904a91498e93cefabca9d9a34ea8c5d6bb3838380
+    identity: 1fcb8b0b7a1d07180c052a2a7bfd3928034245c2fab1e518cf65a496317c00f1
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 1.010850192564219

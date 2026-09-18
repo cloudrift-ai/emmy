@@ -55,6 +55,7 @@ from emmy.compiler.ir.kernel import Tile
 from emmy.compiler.ir.kernel.ir import Smem, Sync, TreeHalve, WarpShuffle
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule import Raster
+from emmy.compiler.ir.schedule.classic.schedule import binds_root
 from emmy.compiler.ir.schedule.views import cone_seam
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
@@ -183,6 +184,12 @@ def factorize(tile, root, store=None, sm_count: int = 0) -> Tile:
     return _factorize(op, ctx, tail=(), out_val=out_val, store=store, output_specs=tuple(tile.output_specs))
 
 
+def _root_is_scheduled(root: Fold, ctx: Ctx) -> bool:
+    """Whether a contraction root carries a choice the binder builds around (:func:`binds_root`)."""
+    sched = ctx.sched
+    return sched.schedule is not None and binds_root(sched.schedule.nodes[sched.tile.node_id(root)])
+
+
 def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs: tuple = ()) -> Tile:
     """The recursive root walk — peel the projecting zero-axis ``Fold``\\ s, then bind each leaf to the grid via
     the ONE binding pipeline. A zero-axis :class:`Fold` with an operand recurses: its ``body`` (the projection /
@@ -192,13 +199,15 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
     the node's SCHEDULE (which axes are tiled), never a kernel kind. Nested scheduled contractions
     and their enclosing carrier factorize through this same walk."""
     if (isinstance(op, Fold) and op.axis is None) and op.operands:
-        # An output-tiled root may sit under its sweep's epilogue projection (``projection_root``).
-        tiled = tiled_edges(op.operands, lambda root: ctx.sched.tile_of(root) is not None)
-        if len(tiled) > 1:
+        # A scheduled root may sit under its sweep's epilogue projection (``projection_root``).
+        # TILE and REDUCE both select the root the binder builds around; ignoring the latter stamps
+        # a cooperative row while lowering that root serially in a sibling projection tail.
+        scheduled = tiled_edges(op.operands, lambda root: _root_is_scheduled(root, ctx))
+        if len(scheduled) > 1:
             return _bind_roots(op, ctx, output_specs)
         # The peel stops at a projection whose operands are slabs alone: a slab is no site — it
         # carries no schedule to bind — so the pointwise cell itself is the leaf.
-        root = tiled[0] if tiled else next((edge for edge in op.operands if edge.as_slab() is None), None)
+        root = scheduled[0] if scheduled else next((edge for edge in op.operands if edge.as_slab() is None), None)
         if root is None:
             return _bind(op, ctx, tail, out_val, store, output_specs=output_specs)
         # A sibling that holds the peeled root among its operands (the ``1/l`` epilogue over the fused
@@ -212,7 +221,6 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
         axes = ctx.sched.tile.axes
         step = list(op.step())
         reducing = _peeled_root(root, ctx)
-        aside_copies = False
         # A CHUNKED twisted carrier is the exception the aside copy does not serve: the chunk tier
         # produces every carried state — the pivot and the denominator as per-row registers, the
         # expectation as the accumulator fragment — so the sibling reads them by name like the
@@ -222,7 +230,6 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
             placed = set(root.lower(axes=axes))
             siblings = [stmt for edge in op.operands if edge is not root for stmt in edge.lower(axes=axes) if stmt not in placed]
         else:
-            aside_copies = True
             # The root's results keep their names (the cell's own accumulators, the values its step
             # defines per cell); everything else its lowering defines — the cone's statistic a
             # sibling shares — is read through the sibling's copy, by the step too.
@@ -250,7 +257,7 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
         if plain:
             proj = apply_output_specs(proj, plain)
         # Two peel levels may each carry a sibling's copy of one shared cone; a statement is one value.
-        joined = tuple(_one_value_per_name(dict.fromkeys((*proj, *tail)))) if aside_copies else (*proj, *tail)
+        joined = tuple(_one_value_per_name(dict.fromkeys((*proj, *tail))))
         return _factorize(root, ctx, tail=joined, out_val=out_val, store=store, output_specs=streamed)
     if output_specs and isinstance(op, Fold) and op.axis is None:
         # A zero-axis root with no operand edge still owns a real projection body. Reconstitute
@@ -274,12 +281,12 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
 
 def _peeled_root(edge, ctx: Ctx):
     """The node :func:`_factorize`'s peel binds for ``edge`` — through each zero-axis projection to
-    the contraction root of a tiled edge, else its first non-slab operand — or ``None`` when the
+    the contraction root of a scheduled edge, else its first non-slab operand — or ``None`` when the
     peel reaches a slab alone."""
     node = edge
     while isinstance(node, Fold) and node.axis is None and node.operands:
-        tiled = tiled_edges(node.operands, lambda r: ctx.sched.tile_of(r) is not None)
-        node = tiled[0] if tiled else next((e for e in node.operands if e.as_slab() is None), None)
+        scheduled = tiled_edges(node.operands, lambda root: _root_is_scheduled(root, ctx))
+        node = scheduled[0] if scheduled else next((e for e in node.operands if e.as_slab() is None), None)
     return node
 
 
@@ -544,7 +551,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
             # kernel's identity (``TileOp.loop_body``) already reads.
             axes = ctx.sched.tile.axes
             placed = op.lower(frozenset(axis.name for axis in ctx.grid), output_specs, axes) if output_specs else op.lower(axes=axes)
-            body = list(dict.fromkeys([*placed, *tail]))
+            body = _one_value_per_name(dict.fromkeys([*placed, *tail]))
             # A kernel whose only work is a FREE output sweep — the elementwise half a placement
             # cut leaves behind a reduction — distributes that sweep across threads exactly as a
             # cooperating reduce distributes its projection (:func:`_lane_close`). Each lane owns a

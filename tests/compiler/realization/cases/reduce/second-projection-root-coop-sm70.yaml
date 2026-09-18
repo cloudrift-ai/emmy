@@ -1,0 +1,51 @@
+compute_cap:
+- 7
+- 0
+programs:
+- inputs: [x0, x1, x2, x3]
+  outputs: [add]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f32, [4, 128]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f32, [128, 1]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f32, [4, 1]]]
+  - id: x2
+    op: input
+    outputs: [[x2, f32, [4, 256]]]
+  - id: x3
+    op: input
+    outputs: [[x3, f32, [256, 1]]]
+  - id: matmul_1
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x2, x3]
+    outputs: [[matmul_1, f32, [4, 1]]]
+  - id: add
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [matmul, matmul_1]
+    outputs: [[add, f32, [4, 1]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - add
+    - matmul
+    - matmul_1
+  realizations:
+  - name: k_matmul_reduce_7a3cbf.a7026bf258c6
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@map.1/inner: ''
+      REDUCE@map.2/inner: coop
+      WORK: t128
+    identity: 668fd5a0efd898f9d02da0d4b536b856aad47d2d93ec1059a689de86870de00f

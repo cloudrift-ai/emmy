@@ -44,7 +44,7 @@ configs:
     - out
     - qn
   realizations:
-  - name: k_sdpa_rms_norm_reduce_013db8.ab097c856229
+  - name: k_sdpa_rms_norm_reduce_64db54
     bindings: {}
     pins:
       FAST_MATH: false
@@ -55,12 +55,12 @@ configs:
       REDUCE: ''
       STAGE: ''
       RASTER: ''
-    identity: 60755dc0e90698b46f9b33c165e7792fa8c44b7d884ef798a69cb70f908fd363
-  - name: k_sdpa_rms_norm_reduce_4d8763.ce41afa48ec9.c26db17d421b
+    identity: 87471bcd36f5a0ef35c261aff5a83a6d21c5101c3a5171e826d71c9ff4e1da33
+  - name: k_sdpa_rms_norm_reduce_64db54.c38a41867b53
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
       WORK: ''
       RASTER: ''
-    identity: c26db17d421be1ecf68104ab223799709b7b084fefbdcb25b33ab630061d9d47
+    identity: c38a41867b53d24b4fca1730dcfbd80da4ccfc3feee31afd455f605aa5f06381
