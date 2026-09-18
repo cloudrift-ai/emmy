@@ -8,8 +8,32 @@ and launcher. The runtime executes Emmy's exported programs independently for be
 Once complete cached generation works, add `--native` to the existing serving command to launch `emmy-server`
 instead of vLLM. Keep vLLM as the default. Qualify dense Qwen3-0.6B in FP16 on one GPU first.
 
-This is a plan-only PR. The performance opportunities below are hypotheses, not measured Rust gains. No new GPU
-experiments have been run for this plan. Evidence gathering precedes performance claims and runtime expansion.
+## Implementation status — PR #820
+
+[PR #820](https://github.com/cloudrift-ai/emmy/pull/820) implements the static runtime foundation and records RTX 4080
+experiments. It does not implement native LLM serving. This plan remains open until the remaining work is completed
+or its scope is explicitly revised.
+
+- **Milestone 0 — partial.** API reuse was investigated and stock vLLM was measured. All three Emmy serving
+  configurations timed out during compilation, so the dispatch and shape/memory comparisons remain incomplete.
+  See the [baseline report](../experiments/Qwen3-0.6B/native_baseline/RESULTS.md) and its linked investigations.
+- **Milestone 1 — mostly implemented.** Static executable packs, a Rust CUDA executor, graph replay, persistent
+  worker supervision, and timeout/CUDA-error recovery are implemented. The run command compares Python and Rust
+  using identical artifacts with persistent and one-shot workers. GPU parity and recovery checks pass. General tune
+  integration and separately isolated serialization costs remain outstanding. Unsupported dynamic shapes, indirect
+  operands, TMA, and buffer aliasing remain explicit limits of the initial static subset.
+- **Milestones 2–4 — not implemented.** Complete cached generation, native HTTP serving, and serving optimizations
+  remain future work. Existing Python dispatch and vLLM serving remain in place.
+
+The [runtime report](../experiments/Qwen3-0.6B/native_runtime/RESULTS.md) shows reduced uncaptured submission cost,
+but little change in captured GPU time for the tested small programs. This is not evidence of a full-model serving
+speedup. Full-suite validation has failures reproduced on main; model-golden failures are only partly checked against
+main. The draft PR records those limits and is not ready for review.
+
+**Pending decision:** fix the existing serving baseline before expanding, or explicitly continue native generation
+with the comparison incomplete. Fixing the baseline is the current recommendation; no direction has been selected.
+The serving rerun must hold source fixed throughout, since the failed baseline rows used a changing local checkout.
+Evidence gathering still precedes performance claims and runtime expansion.
 
 ## Evidence before implementation
 
@@ -56,7 +80,7 @@ matrix in the recipe so comparisons can be rerun. GPU provisioning and long expe
 Reports distinguish existing observations, new measurements, estimates, and unresolved questions. Link every
 numeric claim to its raw result and configuration. Estimate the upper bound from exposed overhead, not total CPU
 activity: removing a non-overlapped fraction f yields at most 1/(1-f) speedup if other costs stay fixed.
-Do not invent report results to complete this planning PR. If no meaningful opportunity appears, revise or stop
+Do not substitute estimates for missing measurements. If no meaningful opportunity appears, revise or stop
 with the user before expanding implementation.
 
 ## Potential gains and risks

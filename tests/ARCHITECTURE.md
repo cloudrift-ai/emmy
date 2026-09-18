@@ -61,6 +61,11 @@ restoring the search. Regenerate with `python -m tests.serving.regen` when a sha
 
 ## Test Layers
 
+The standalone Rust runtime keeps unit tests beside its modules. `make test-native` builds the worker and runs the
+Python parity and process-recovery tests against it; GPU cases skip when CUDA or the worker binary is unavailable.
+The normal Python suite still exercises export, protocol, and command validation. Pull-request CI also runs locked
+Cargo tests, Rustfmt, and Clippy without a GPU.
+
 The suite runs in four layers, distinguished by what they touch rather than by where they live:
 
 - **Unit** — pure functions and dataclasses with synthetic inputs. No I/O. Compiler IR units also pin construction

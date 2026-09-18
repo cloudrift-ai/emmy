@@ -123,6 +123,9 @@ def register_run_command(subparsers):
     )
     parser.add_argument("--seed", type=int, default=0, help="RNG seed for --ir random inputs (default: 0).")
     parser.add_argument(
+        "--pack", metavar="DIR", help="With --bench --json: compare Python and Rust on a standalone static executable pack."
+    )
+    parser.add_argument(
         "--ab",
         action="append",
         default=None,
@@ -203,6 +206,48 @@ def register_run_command(subparsers):
 
 
 def handle_run(args):
+    if getattr(args, "pack", None):
+        import json
+
+        from emmy.compiler.backend.native import benchmark_pack
+        from emmy.compiler.dim import DEFAULT_SEQ_HINT
+
+        compiling = any(
+            value is not None
+            for value in (
+                args.input,
+                args.code,
+                args.ir,
+                args.golden,
+                args.realization,
+                args.dynamic,
+                args.ab,
+                args.bench_backends,
+                args.layer,
+                args.quantize,
+                args.dump_dir,
+                args.nvcc_flags,
+                args.gpu_arch,
+            )
+        )
+        incompatible = any(
+            (args.profile, args.record, args.record_greedy, args.strict_evidence, args.strict_correctness, args.no_record_nodes, args.debug)
+        )
+        if (
+            not args.bench
+            or not args.json
+            or compiling
+            or incompatible
+            or args.adapter != "causal-lm"
+            or args.seq_len != DEFAULT_SEQ_HINT
+            or args.seed != 0
+        ):
+            logger.error("--pack requires --bench --json and cannot be combined with compilation or model benchmark options")
+            sys.exit(2)
+        result = asyncio.run(benchmark_pack(args.pack, warmup=args.warmup, iterations=args.iters))
+        Path(args.json).write_text(json.dumps(result, indent=2))
+        logger.info("Both runtimes produced identical outputs; measurements saved to %s", args.json)
+        return
     from emmy.commands.compile import apply_nvcc_flags
     from emmy.compiler.target import apply_target_arg
 
@@ -1037,8 +1082,9 @@ def _strict_correctness_proof(outputs: dict, reference_out, *, reference="eager"
     """Return a tolerance verdict against one named reference with reproducible error statistics.
 
     The pass rule is the same elementwise rule used by ``torch.testing.assert_close`` for
-    compiler baselines: ``abs(actual - expected) <= atol + rtol * abs(expected)``. Reference
-    outputs may be tensors, a positional tensor sequence, or an output-name mapping.
+    compiler baselines: ``abs(actual - expected) <= atol + rtol * abs(expected)``, and a non-finite
+    value must match the reference exactly. Reference outputs may be tensors, a positional tensor
+    sequence, or an output-name mapping.
     """
     import numpy as np  # noqa: PLC0415
 
@@ -1088,9 +1134,12 @@ def _strict_correctness_proof(outputs: dict, reference_out, *, reference="eager"
         if actual.shape != expected.shape:
             failure = f"output {name!r} shape {actual.shape} != {reference} {expected.shape}"
             break
-        if not np.isfinite(actual).all() or not np.isfinite(expected).all():
-            failure = f"output {name!r} contains non-finite values"
+        # A mask legitimately holds -inf; a non-finite value passes only where the reference has the same one.
+        finite = np.isfinite(expected)
+        if not np.array_equal(np.isfinite(actual), finite) or not np.array_equal(actual[~finite], expected[~finite], equal_nan=True):
+            failure = f"output {name!r} has non-finite values the {reference} output does not"
             break
+        actual, expected = actual[finite], expected[finite]
         absolute = np.abs(actual - expected)
         tolerance = atol + rtol * np.abs(expected)
         if absolute.size:

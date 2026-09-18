@@ -9,6 +9,7 @@ experiment results directory.
 
 import logging
 import shlex
+import shutil
 from string import Template
 
 from emmy.planner import BenchmarkTask
@@ -105,6 +106,7 @@ async def run_command_workload(
     ssh_key: str,
     ssh_port: int,
     dry_run: bool = False,
+    local: bool = False,
 ) -> tuple[bool, dict]:
     """Run one command-recipe task on the remote VM.
 
@@ -164,7 +166,14 @@ async def run_command_workload(
         for rel in rel_paths:
             local_path = task.run_dir / _local_result_name(task.file_stem, rel)
             local_path.parent.mkdir(parents=True, exist_ok=True)
-            rc_scp, stderr = await scp_from_remote(server, ssh_key, ssh_port, f"{task_dir}/{rel}", str(local_path))
+            if local:
+                try:
+                    shutil.copyfile(f"{task_dir}/{rel}", local_path)
+                    rc_scp, stderr = 0, ""
+                except OSError as exc:
+                    rc_scp, stderr = 1, str(exc)
+            else:
+                rc_scp, stderr = await scp_from_remote(server, ssh_key, ssh_port, f"{task_dir}/{rel}", str(local_path))
             if rc_scp != 0:
                 message = f"scp_from_remote failed for {task_dir}/{rel}: {stderr}"
                 logger.warning(message)

@@ -120,6 +120,12 @@ async def _handle_foo(args):
     await ...
 ```
 
+`run --pack DIR --bench --json PATH` is the standalone artifact comparison: it bypasses tracing and compares the
+existing Python dispatcher with the Rust worker on the same bundled binaries and inputs. It requires a matching
+`emmy-runtime-worker` on `PATH`; `--warmup` and `--iters` retain their meaning. Captured/uncaptured execution and both
+worker lifetimes are recorded with three repeats. See the backend and native runtime architectures for the supported
+static subset and timing boundaries. It cannot be combined with model/IR inputs or compilation benchmark modes.
+
 The compiler commands (`trace`, `compile`, `run`, and `tune`) share the same input loader and model-adapter selector.
 They accept a Hugging Face model, debug Graph IR, or inline `--code`; `causal-lm` is the default and
 keeps the existing Transformers path. `dit` delegates to the Diffusers block adapter in `compiler/trace/dit.py`; it

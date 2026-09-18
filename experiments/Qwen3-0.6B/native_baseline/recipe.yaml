@@ -1,0 +1,81 @@
+# Compare the current integration before implementing a standalone runtime.
+# Run on the local RTX 4080 with emmy bench EXPERIMENT --local.
+command:
+  stage: [emmy, pyproject.toml]
+  run: |
+    set -eu
+    cd $repo_dir
+    export PATH=$repo_dir/venv/bin:/usr/local/cuda/bin:$$PATH
+    export CUDA_VISIBLE_DEVICES=$gpu_device_ids
+    export HF_HUB_OFFLINE=1
+    export EMMY_GEN_DECODE_BUCKET=16
+    export EMMY_GEN_M1_TIER=$m1
+    export EMMY_GEN_PREFILL_CAPACITY=$capacity
+    export EMMY_GEN_PREFILL_BUCKET=256
+    export EMMY_GEN_CHUNK_CAPTURE=1
+    export EMMY_GOLDEN_FILE=$repo_dir/emmy/compiler/pipeline/search/goldens/rtx4080_sm89.yaml
+    export EMMY_TUNE_DB=$task_dir/autotune.db
+    export EMMY_ONLINE_FILE=$task_dir/online.json
+    export EMMY_PACK_DIR=$task_dir/packs
+    export EMMY_NVCC_FLAGS=
+    model=Qwen/Qwen3-0.6B
+    revision=c1899de289a04d12100db370d81485cdf75e47ca
+    mkdir -p $task_dir/traces
+    ./venv/bin/python -m pip freeze --all > $task_dir/requirements.txt
+    sha256sum $$EMMY_GOLDEN_FILE > $task_dir/golden.txt
+    stock=
+    if [ "$lane" = stock ]; then stock=--stock; fi
+    ./venv/bin/emmy serve $$model --generate $$stock --revision $$revision \
+      --host 127.0.0.1 --port 8127 --dtype float16 --max-model-len 4096 \
+      --gpu-memory-utilization 0.6 --max-num-seqs 4 --max-num-batched-tokens 256 \
+      --no-enable-prefix-caching --attention-backend TRITON_ATTN \
+      --compilation-config '{"cudagraph_mode":"FULL","cudagraph_capture_sizes":[1,2,4,8,16,32,64,128,256],"custom_ops":["+rotary_embedding"]}' \
+      --profiler-config '{"profiler":"torch","torch_profiler_dir":"$task_dir/traces","torch_profiler_with_stack":false,"torch_profiler_record_shapes":true,"torch_profiler_with_memory":true}' \
+      > $task_dir/server.log 2>&1 &
+    server_pid=$$!
+    stop() {
+      kill "$$server_pid" 2>/dev/null || true
+      wait "$$server_pid" 2>/dev/null || true
+    }
+    trap stop EXIT
+    ready=0
+    for attempt in $$(seq 1 180); do
+      if curl -sf http://127.0.0.1:8127/health >/dev/null; then ready=1; break; fi
+      kill -0 "$$server_pid" 2>/dev/null || exit 1
+      sleep 5
+    done
+    test "$$ready" = 1
+    nvidia-smi --query-gpu=name,uuid,driver_version,memory.used,memory.total --format=csv > $task_dir/memory.txt
+    for concurrency in 1 4; do
+      for input in 32 256 1024; do
+        for repeat in 1 2 3; do
+          label=c$${concurrency}_i$${input}_r$${repeat}
+          ./venv/bin/vllm bench serve --model $$model --tokenizer $$model --dataset-name random \
+            --base-url http://127.0.0.1:8127 --random-input-len $$input --random-output-len 64 \
+            --random-range-ratio 0 --num-prompts 8 --max-concurrency $$concurrency --num-warmups 2 \
+            --ignore-eos --temperature 0 --seed 0 --save-result --save-detailed \
+            --result-dir $task_dir --result-filename $$label.json > $task_dir/$$label.log 2>&1
+        done
+      done
+    done
+    ./venv/bin/vllm bench serve --model $$model --tokenizer $$model --dataset-name random \
+      --base-url http://127.0.0.1:8127 --random-input-len 512 --random-output-len 64 \
+      --random-range-ratio '{"input":0.5,"output":0}' --num-prompts 8 --max-concurrency 4 --num-warmups 2 \
+      --ignore-eos --temperature 0 --seed 0 --save-result --save-detailed \
+      --result-dir $task_dir --result-filename mixed.json > $task_dir/mixed.log 2>&1
+    ./venv/bin/vllm bench serve --model $$model --tokenizer $$model --dataset-name random \
+      --base-url http://127.0.0.1:8127 --random-input-len 32 --random-output-len 32 \
+      --random-range-ratio 0 --num-prompts 2 --max-concurrency 1 --num-warmups 2 --profile \
+      --ignore-eos --temperature 0 --seed 0 --save-result --save-detailed \
+      --result-dir $task_dir --result-filename profile.json > $task_dir/profile.log 2>&1
+  result_files: ["*.json", "*.log", "*.txt", "traces/*"]
+  timeout: 2400
+
+matrices:
+  cross:
+    deploy.gpu: "NVIDIA GeForce RTX 4080"
+    deploy.gpu_count: 1
+    zip:
+      lane: [stock, bucket16, m1, m1_small]
+      m1: [1, 0, 1, 1]
+      capacity: [1024, 1024, 1024, 256]

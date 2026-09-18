@@ -22,6 +22,7 @@ import pickle
 import sys as _sys
 import time as _time_module
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -111,14 +112,14 @@ class _Compiled:
     runtime_constants: dict = field(default_factory=dict)
 
 
-def _load_kernel(name: str, spec: KernelSpec):
+def _load_kernel(name: str, spec: KernelSpec, *, cubin_dir: Path | None = None):
     """Obtain one launchable kernel from its :class:`KernelSpec`. A ``binary_key`` (the pack
     path) loads the content-addressed cubin straight from the cache; otherwise the ``source``
     compiles through the same cache (``nvcc.load_function``). A key whose cubin has been
     evicted falls back to the source when present, and errors otherwise — the pack loader
     pre-checks cubin existence, so hitting this means the cache was cleared mid-boot."""
     if spec.binary_key is not None:
-        path = nvcc.cubin_cache_dir() / f"{spec.binary_key}.cubin"
+        path = (cubin_dir or nvcc.cubin_cache_dir()) / f"{spec.binary_key}.cubin"
         if path.exists():
             return nvcc.load_cubin_function(path, name)
         if spec.source is None:
@@ -133,7 +134,7 @@ def _load_kernel(name: str, spec: KernelSpec):
     return nvcc.load_function(spec.source, name, _nvrtc_options(arch_specific=spec.arch_specific), arch_specific=spec.arch_specific)
 
 
-def _load_plan(plan: ExecutionPlan, *, deadline: float | None = None) -> _Compiled:
+def _load_plan(plan: ExecutionPlan, *, deadline: float | None = None, cubin_dir: Path | None = None) -> _Compiled:
     """Materialize the runtime object from a plan: load every kernel (cubin-by-key or
     source-via-cache), and adopt the plan's pure-data fields as-is.
 
@@ -145,7 +146,7 @@ def _load_plan(plan: ExecutionPlan, *, deadline: float | None = None) -> _Compil
     measured is lost."""
     kernels: dict[str, object] = {}
     for index, (name, spec) in enumerate(plan.kernels.items(), start=1):
-        kernels[name] = _load_kernel(name, spec)
+        kernels[name] = _load_kernel(name, spec, cubin_dir=cubin_dir)
         if deadline is not None and _time_module.monotonic() > deadline:
             raise CompileBudgetExceeded(
                 f"compile stage exceeded its budget after {index} of {len(plan.kernels)} kernel(s) "
@@ -757,6 +758,7 @@ class CompiledProgram:
     compiled: _Compiled
     arrays: dict[str, cp.ndarray]
     descs: dict[int, dict[str, cp.ndarray]]
+    load_times_ms: dict[str, float] = field(default_factory=dict)
     # Per-symbolic-axis runtime ``int`` resolved at ``build`` time from the
     # supplied input shapes — fed straight to ``_launch`` for grid /
     # block resolution and the runtime-arg tail. Empty for fully-static
@@ -835,6 +837,7 @@ class CompiledProgram:
         *,
         compile_timeout_s: float | None = None,
         arena: BufferArena | None = None,
+        cubin_dir: Path | None = None,
     ) -> CompiledProgram:
         """Load every kernel (cubin-by-key or source-via-cache), allocate every
         buffer (the plan's generated constants fill themselves — see
@@ -849,10 +852,12 @@ class CompiledProgram:
         Caller is expected to hold ``gpu_lock()`` around this call and
         every subsequent method on the returned program."""
         t0 = _time_module.monotonic()
-        compiled = _load_plan(plan, deadline=None if compile_timeout_s is None else t0 + compile_timeout_s)
+        compiled = _load_plan(plan, deadline=None if compile_timeout_s is None else t0 + compile_timeout_s, cubin_dir=cubin_dir)
+        loaded = _time_module.monotonic()
         input_data = _with_generated_constants(plan, input_data or {})
         sym_values = _resolve_symbolic(compiled, input_data)
         arrays, slab_plan = _allocate(compiled, input_data, arena)
+        allocated = _time_module.monotonic()
         descs = _prebuild_descriptors(compiled, arrays)
         elapsed = _time_module.monotonic() - t0
         if compile_timeout_s is not None and elapsed > compile_timeout_s:
@@ -871,7 +876,15 @@ class CompiledProgram:
                 slab_plan.naive_bytes / max(1, slab_plan.total_bytes),
                 len(slab_plan.offsets),
             )
-        return cls(compiled=compiled, arrays=arrays, descs=descs, sym_values=sym_values, slab_plan=slab_plan, arena=arena)
+        return cls(
+            compiled=compiled,
+            arrays=arrays,
+            descs=descs,
+            sym_values=sym_values,
+            slab_plan=slab_plan,
+            arena=arena,
+            load_times_ms={"module_ms": (loaded - t0) * 1000, "allocation_upload_submit_ms": (allocated - loaded) * 1000},
+        )
 
     def rebind(self, input_data: dict[str, np.ndarray]) -> None:
         """Re-bind ``input_data`` on an already-built program, re-sizing
@@ -1622,6 +1635,18 @@ class _AsyncBenchWorker:
 
     _WORKER_MODULE = "emmy.compiler.backend.cuda._bench_worker"
     _STDERR_TAIL_CHARS = 4000
+    _ATTEMPTS = 2
+
+    def _command(self) -> list[str]:
+        return [_sys.executable, "-m", self._WORKER_MODULE]
+
+    @staticmethod
+    def _encode(request: dict) -> bytes:
+        return pickle.dumps(request, protocol=pickle.HIGHEST_PROTOCOL)
+
+    @staticmethod
+    def _decode(body: bytes) -> dict:
+        return pickle.loads(body)
 
     def __init__(self, *, device_id: int | None = None) -> None:
         self._proc: asyncio.subprocess.Process | None = None
@@ -1651,9 +1676,7 @@ class _AsyncBenchWorker:
 
     async def _spawn(self) -> None:
         self._proc = await asyncio.create_subprocess_exec(
-            _sys.executable,
-            "-m",
-            self._WORKER_MODULE,
+            *self._command(),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -1748,6 +1771,15 @@ class _AsyncBenchWorker:
         return self._stderr_tail
 
     async def run_job(self, request_obj: dict, *, wall_timeout_s: float) -> dict:
+        try:
+            return await self._run_job(request_obj, wall_timeout_s=wall_timeout_s)
+        except BenchWorkerJobError:
+            raise  # The response's retirement flag decides whether the context is healthy.
+        except BaseException:
+            await self.aclose()
+            raise
+
+    async def _run_job(self, request_obj: dict, *, wall_timeout_s: float) -> dict:
         """Send one request, read the response within ``wall_timeout_s`` (else SIGKILL
         + raise ``RuntimeError``), and return the unpickled response. A stale-worker
         race on send respawns and retries once; a response-side timeout is a hard
@@ -1755,10 +1787,10 @@ class _AsyncBenchWorker:
         and retries ONCE after a short drain grace — see the handler for why. A response
         flagged ``_retire_worker`` (a hung kernel or a poisoned context in the child) retires
         the child first — SIGKILL + reap — so the next request respawns clean."""
-        request = pickle.dumps(request_obj, protocol=pickle.HIGHEST_PROTOCOL)
+        request = self._encode(request_obj)
         frame = len(request).to_bytes(8, "little") + request
         deadline = _time_module.perf_counter() + wall_timeout_s
-        for attempt in (0, 1):
+        for attempt in range(self._ATTEMPTS):
             if self._proc is None or self._proc.returncode is not None:
                 await self._spawn()
             assert self._proc is not None  # for type narrowing
@@ -1777,7 +1809,7 @@ class _AsyncBenchWorker:
                 ) from exc
             except (BrokenPipeError, ConnectionResetError) as exc:
                 await self.aclose()
-                if attempt == 1:
+                if attempt + 1 == self._ATTEMPTS:
                     raise RuntimeError(f"bench worker died during request send: {exc}{self._tail_suffix()}") from exc
                 logger.info("[bench-worker] stale async worker on send (%s) — respawning", exc)
                 continue
@@ -1801,7 +1833,7 @@ class _AsyncBenchWorker:
                 stderr_tail = await self._stderr_snapshot()
                 death = await self._death_reason(proc)
                 await self.aclose()
-                if attempt == 1:
+                if attempt + 1 == self._ATTEMPTS:
                     raise RuntimeError(f"bench worker EOF before response ({death}); stderr tail: {stderr_tail}") from exc
                 # A mid-job EOF means the child went down without answering (a crash, a signal).
                 # Right after a SIGKILL'd predecessor (a wall kill, or a retired hung child), the
@@ -1815,7 +1847,7 @@ class _AsyncBenchWorker:
                 await asyncio.sleep(min(2.0, max(0.0, deadline - _time_module.perf_counter() - 1.0)))
                 continue
 
-            resp = pickle.loads(body)
+            resp = self._decode(body)
             if resp.pop("_retire_worker", False):
                 # The child's verdict that its context is done for: a hung kernel (a watchdog
                 # failure, or a greedy timing that hung after its same-input reference completed)
