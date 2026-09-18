@@ -800,7 +800,8 @@ def simplify_body(body: Body) -> Body:
 
 
 def dedup_loads(stmts: Body) -> Body:
-    """Drop duplicate ``Load`` stmts within nested scopes.
+    """Drop duplicate ``Load`` stmts within nested scopes, and with them the duplicate pure
+    statements they feed.
 
     Two ``Load`` stmts with the same ``(input, index)`` read the same
     value; keep the first and rewire downstream SSA references to its
@@ -808,6 +809,13 @@ def dedup_loads(stmts: Body) -> Body:
     inner siblings (their identical ``index`` doesn't reference any
     inner-axis Var, so the values are equal). Loads inside a nested
     scope are not visible to outer / sibling scopes.
+
+    An ``Assign`` or ``Accum`` spelling the same operation over the same (already rewired) names
+    as one before it in scope is the same value too — the fusion splice inlines a producer at
+    every use, and two consumers in one reduce loop then carry two copies of one accumulation
+    (a decoder half's gate and up channels each fold the o_proj result their norm reads). Keeping
+    the first and aliasing the second is what makes those copies one cone the tile lift can cut
+    once; the pass is named for the loads because that is where a duplicate chain starts.
 
     Hygienic: an inner scope that re-binds a name the outer scope
     deduped keeps its own binding — those are different variables
@@ -821,7 +829,7 @@ def dedup_loads(stmts: Body) -> Body:
             (*stmt.external_writes(), *(name for child in stmt.nested() for member in child.iter() for name in member.external_writes()))
         )
 
-    def walk(body: Body, env: dict[tuple[str, tuple[str, ...], int, object], tuple[str, ...]]) -> Body:
+    def walk(body: Body, env: dict[tuple, tuple[str, ...]], carried: dict[str, str]) -> Body:
         local = dict(env)
         alias: dict[str, str] = {}
 
@@ -832,9 +840,11 @@ def dedup_loads(stmts: Body) -> Body:
             """Enter ``inner``'s scope, dropping every alias / kept name whose spelling ``inner``
             re-binds. SSA names bound inside a Loop / Cond body are scoped to it, so such a name is
             a DIFFERENT variable — following it out would rewire the inner arithmetic to the outer
-            value and redeclare the survivor."""
+            value and redeclare the survivor. An accumulator the inner loop aliased is visible out
+            here once the loop closes, so that alias comes back up."""
             shadowed = Body.coerce(inner).ssa_defs
-            return walk(inner, {k: v for k, v in local.items() if k[0] not in clobbered and not shadowed.intersection(v)})
+            out = walk(inner, {k: v for k, v in local.items() if k[0] not in clobbered and not shadowed.intersection(v)}, alias)
+            return out
 
         def invalidate(buffers: frozenset[str]) -> None:
             for key in tuple(local):
@@ -856,6 +866,20 @@ def dedup_loads(stmts: Body) -> Body:
                     continue
                 local[key] = s.names
                 out.append(s)
+            elif isinstance(s, Assign | Accum):
+                s = rename_free(s, alias)
+                key = (
+                    ("assign", s.op, s.args, s.dtype)
+                    if isinstance(s, Assign)
+                    else ("accum", s.value, s.op, s.dtype, s.axes, repr(s.base))
+                )
+                if key in local:
+                    alias[s.name] = local[key][0]
+                    if isinstance(s, Accum):
+                        carried[s.name] = local[key][0]
+                    continue
+                local[key] = (s.name,)
+                out.append(s)
             elif s.nested():
                 clobbered = written_buffers(s)
                 renamed = rename_free(s, alias)
@@ -866,7 +890,7 @@ def dedup_loads(stmts: Body) -> Body:
                 invalidate(frozenset(s.external_writes()))
         return Body(out)
 
-    return walk(stmts, {})
+    return walk(stmts, {}, {})
 
 
 # ---------------------------------------------------------------------------

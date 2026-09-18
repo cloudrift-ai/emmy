@@ -35,6 +35,7 @@ from emmy.compiler.dtype import F32
 from emmy.compiler.dtype import get as get_dtype
 from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.base import InputOp
+from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure.fold import (
     Fold,
@@ -54,7 +55,9 @@ from emmy.compiler.ir.tile.ops import (
 from emmy.compiler.ir.tile.path import family_sites, sites, spell
 from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.knob import consume_kernel_row
+from emmy.compiler.pipeline.passes.lowering.tile._row import lift_kernel
 from emmy.compiler.pipeline.passes.lowering.tile._split import add_output_piece, output_root
+from emmy.compiler.pipeline.passes.lowering.tile._twist import rewrite_twisted
 from emmy.compiler.structural import digest
 from emmy.compiler.tensor import Tensor
 
@@ -706,7 +709,7 @@ def _region_piece(tile: TileOp, regions: tuple, tail, stores: tuple, placement_d
         placement_decided=placement_decided,
         split_consumed=split_consumed,
     )
-    return replace(piece, knobs=consume_kernel_row(piece.knobs))
+    return replace(_reformed(piece), knobs=consume_kernel_row(piece.knobs))
 
 
 def _read_name(name: str, token: str, ordinal: int | None = None) -> str:
@@ -725,6 +728,28 @@ def _read_name(name: str, token: str, ordinal: int | None = None) -> str:
     (:func:`_follow_reads`).
     """
     return f"{name}__ws{token}" if ordinal is None else f"{name}__ws{token}s{ordinal}"
+
+
+
+def _reformed(piece: TileOp) -> TileOp:
+    """``piece`` formed as its own kernel: its tree lowered to the closed loop nest and lifted
+    again, the way a kernel fusion had ended at a graph edge is formed.
+
+    A piece minted by replacing cones in the parent's tree keeps the parent's structure, and that
+    structure was formed around what is now a workspace read: a decoder half's gate and up
+    contractions are two terms when a contraction feeds the norm ahead of them, and one twin term
+    with both channels once the o_proj result is a load. The twin is the term the warp tier tiles;
+    two terms give one of them the scalar tier. Formed fresh, the piece is the kernel the same
+    program gets on its own, which is also the kernel the card's rows were recorded on. A nest the
+    lift cannot take whole keeps the piece as minted."""
+    body = piece.op.lower(bound=frozenset(), stores=piece.output_specs, axes=piece.axes)
+    try:
+        # Through the LoopOp's normalization: that is where two reduce loops over one axis become
+        # one loop with two accumulators, the twin the lift forms one term from.
+        formed = lift_kernel(LoopOp(body=body), name=piece.name)
+    except ValueError:
+        return piece
+    return replace(piece, op=rewrite_twisted(formed.op, formed.axes), place=formed.place, axes=formed.axes, output_specs=formed.output_specs)
 
 
 def _producer_order(pieces) -> list:
@@ -892,7 +917,7 @@ def realize(
             placement_decided=placement_decided,
             split_consumed=split_consumed,
         )
-        producer = replace(producer, knobs=consume_kernel_row(producer.knobs))
+        producer = replace(_reformed(producer), knobs=consume_kernel_row(producer.knobs))
         shape = tuple(axis.extent for axis in axes)
         workspace_tensors = tuple(Tensor(name=buffer, shape=shape, dtype=dtype) for buffer, dtype in zip(buffers, seam.dtypes, strict=True))
         reads = _buffer_reads(produced)
@@ -953,7 +978,7 @@ def realize(
         placement_decided=placement_decided,
         split_consumed=split_consumed,
     )
-    consumer = replace(consumer, knobs=consume_kernel_row(consumer.knobs))
+    consumer = replace(_reformed(consumer), knobs=consume_kernel_row(consumer.knobs))
     add_output_piece(
         match,
         fragment,
