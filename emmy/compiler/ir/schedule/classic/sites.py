@@ -136,13 +136,13 @@ class ClassicNodeSite(Site[ClassicSchedule]):
         if why := _wgmma_refusal(plan, None if stage is None else Stage.parse(stage)):
             raise ValueError(why)
 
-    def _select_plans(self, named: str | None, catalog, *, allowed) -> tuple[Tile, ...]:
+    def _select_plans(self, named: str | None, catalog, *, allowed, work: Work | None = None) -> tuple[Tile, ...]:
         if named is not None:
             self._wgmma_pin_refusal(named)
 
         def parse(spelling: str) -> Tile | None:
             try:
-                return resolve_site_tile(spelling, self.problem.work)
+                return resolve_site_tile(spelling, work)
             except ValueError:
                 return None
 
@@ -170,6 +170,8 @@ class ClassicNodeSite(Site[ClassicSchedule]):
             extent = inner.extent.as_static() if inner.extent.is_static else 0
 
             catalog = tuple(plan for plan in map_tile_moves() if plan.reg_n == 1 or (extent and extent % plan.reg_n == 0))
+            # A strip never carries the worker inventory: the row's WORK is the kernel's sweep
+            # width, so a named strip parses bare, as the catalog spells it.
             return tuple(
                 ProjectionSchedule(plan) for plan in self._select_plans(self._named("TILE"), catalog, allowed=lambda p: p in catalog)
             )
@@ -183,6 +185,7 @@ class ClassicNodeSite(Site[ClassicSchedule]):
                 self._named("TILE"),
                 _contraction_plans(node, facts, self.problem.policy_atoms(self.id)),
                 allowed=lambda plan: _contraction_plan_allowed(node, facts, atoms, plan),
+                work=self.problem.work,
             )
             # A tiled plan folds serially per cell; an untiled one takes every per-cell reduction.
             choices = (
