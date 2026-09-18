@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: THUDM/glm-5-3
-  rationale: "Strong Reddit mindshare and family momentum driving current interest."
-  heat: 70
+  rationale: "Active GLM-5.3 wave with high downloads, but exact repo unreadable."
+  heat: 68
   task: generate
 matrices:
 - deploy.gpu: NVIDIA B200

@@ -134,7 +134,7 @@ projection, so no wrap position encloses it): the serial fold binds the projecti
 operand and projection together, and a cooperative / ILP row — whose lanes the sweep would be distributed across —
 declines via `UnbindableProjection` (`RuleSkipped(reject=True)` at the pass boundary; the greedy retries the next
 row). The other `UnbindableProjection` — a multi-root binding of a projection whose outputs do not partition by root
-(`ops.projection_regions`) — is a term fact the schedule context reads at the offer, so no enumerated row tiles a
+(`ops.projection_regions`) — is a term fact the schedule context reads at the offer, so no enumerated row schedules a
 second root there and the decline is a bug, not a retry. The
 recursion, the binder, the reduce-axis tiling, and the shared-row staging apply live in `_factor.py`; the four tiling
 levels every tier seals through are `_tiling.py`, which knows a `Side` pair, integer counts and three callables — no
@@ -224,7 +224,7 @@ width nor the gmem row stride and the last chunk simply overhangs. It keeps the 
 top of that tail hangs the kernel and poisons the context, undiagnosed, so the resolver refuses the depth rather than
 offering a row that fails at the card. Both ends of the tail itself are already disciplined —
 the fill clamps the overhanging key row onto the last valid one (a TMA box zero-fills instead) and the drain's
-boundary `FragmentMask` has put those keys at the pivot identity — so a serving-shaped attention kernel, whose key
+boundary mask has put those keys at the pivot identity — so a serving-shaped attention kernel, whose key
 extent IS the KV cache length, stages like any other. On an RTX 5090 that is 2.5x on the `attention.hd64.softmax_v`
 golden target (28.7 us gmem-direct against 11.4 us at `d1/smem-tma`). A TRANSPOSED value keeps the static demand: its
 gmem rows stride by the extent. On the FUSED kernel `F.scaled_dot_product_attention` traces to, the key slab, the
@@ -354,7 +354,7 @@ with an unlowered `TileOp` instead of falling back.
 The tensor-core form of a twisted carrier is the CHUNK tier (`_atom._FlashOps`), and the emitter it needs is not the
 one this tree used to carry — see "What may not come back" below. Its chunk's score is CONTRACTED into C fragments when
 a nested contraction supplies it and GATHERED into them when the carrier's own A edge is already the stored tile
-(softmax@V, whose probabilities arrive as an input): a role-`c` `RegFragment` declares zero and `FragmentBiasAdd` reads
+(softmax@V, whose probabilities arrive as an input): a role-`c` `RegFragment` declares zero and a `GMEM`-adding `FragmentApply` reads
 gmem at the fragment's own lane map, so one of those per fragment IS the fragment, and everything above it — the row
 reduce, the channel patterns, the repack — reads the same C fragments either way.
 
@@ -371,7 +371,7 @@ and clamping only its start still copies past the extent. A **multi-channel prod
 `(b, acc)` channels over one shared A edge, either a computed cone or a materialized load; `_AtomOps.channels` reads
 them off the node) fills one B slab per channel, drains N mma chains off the ONE ldmatrix'd A fragment into
 per-channel C fragments (`_fold_frag`), and the projection (SwiGLU) combines the channels per element in the store's
-`RegEpilogue` (`extra_accs`). Materialized A copies into the same single A slab; computed A evaluates into it. Both
+epilogue `Lambda` (`extra_frags`). Materialized A copies into the same single A slab; computed A evaluates into it. Both
 forms use the synchronous compute fill because the gmem-direct and single-sided byte-copy MMA paths remain
 single-channel. The block-scaled fp4 cell is the exception: it carries N channels on cp.async, staging `2 + 2N` slabs
 over the one shared A pair, and names each channel's block-scale fragment per channel just as its data fragment is.
@@ -557,7 +557,7 @@ readings the tier would otherwise refuse. Its LEAVES are read once ahead of the 
 one needs no gmem address at all: a causal mask's fill / zero constants are a computed pair, and only the pivot source
 and the streamed value are ever asked for a slab. And a `Select` on the score fragment's OWN coordinates — the row the
 carrier folds and the chunk it folds over — is per ELEMENT, not cell-uniform, so `_residence` lands it as a
-`FragmentMask` under the same coordinate substitution the boundary mask performs. The same `Select`s are also read
+coordinate-masking `FragmentApply` under the same coordinate substitution the boundary mask performs. The same `Select`s are also read
 ONCE, ahead of the loop, for what they say about whole chunks (`_mask_key_bounds`). Expression normalization may
 reverse either comparison's operands, so the bound reader first restores the `key − row` orientation. A mask whose
 masked branch reads `key > row + c` (or `>=`) with `c ≥ 0` masks every key from the CTA's block end onward for every

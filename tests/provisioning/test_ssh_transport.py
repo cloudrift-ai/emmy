@@ -26,10 +26,17 @@ async def test_local_command_kills_descendants(tmp_path, mode):
             await job
     else:
         assert (await job)[0] == (1 if mode == "timeout" else 0)
-    try:
-        os.kill(child, 0)
-    except ProcessLookupError:
-        pass
-    else:
-        # An orphan can remain briefly as a zombie until the host's init reaps it.
-        assert Path(f"/proc/{child}/stat").read_text().split()[2] == "Z"
+    # The signal reaches the group before the kernel schedules the descendant out, so a loaded
+    # host can still report it running for a moment; an orphan then remains a zombie until the
+    # host's init reaps it. Both are transient, and only a survivor is a failure. The process can
+    # also disappear mid-check, which procfs reports as either a missing entry or a dead process.
+    procfs = Path("/proc")
+    for _ in range(500):
+        try:
+            os.kill(child, 0)
+            if procfs.is_dir() and (procfs / str(child) / "stat").read_text().split()[2] == "Z":
+                return
+        except (ProcessLookupError, FileNotFoundError):
+            return
+        await asyncio.sleep(0.01)
+    pytest.fail(f"descendant {child} outlived the run")

@@ -2,7 +2,6 @@
 description: Qualify one model on the workflow-owned GPU and produce reviewed Emmy artifacts
 mode: primary
 temperature: 0.1
-steps: 160
 permission:
   "*": allow
   question: deny

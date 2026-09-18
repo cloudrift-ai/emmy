@@ -477,13 +477,18 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
     @cached_property
     def _shared_roots(self) -> frozenset[NodeId]:
         """The contraction roots that may not be scheduled together
-        (:func:`~emmy.compiler.ir.tile.ops.refused_roots`): one of them is the kernel's root and
-        every other reduce lowers serially inside the projection, so a row selecting a second root
-        spells a kernel the binder never builds. The binder's rule, applied at the offer. The
-        placement lane asks a NEIGHBOURING question of the same projection
-        (:func:`~emmy.compiler.ir.tile.ops.owns_outputs_it_cannot_bind`) and the two answers
-        differ — a projection this one finds nothing shared in can still be one that cut takes
-        apart."""
+        (:func:`~emmy.compiler.ir.tile.ops.refused_roots`): the binder builds a kernel around several
+        roots only where the projection partitions its outputs by root; where it does not, one root
+        is the kernel's and every other reduce lowers serially inside the projection, so a row
+        selecting a second root — an output tile, or a cooperative or ILP reduce
+        (:func:`binds_root`) — spells a kernel the binder never builds. The binder's rule, applied
+        at the offer. While the offer refused only a second output TILE, a row spelling cooperative
+        reduces on two sibling seams was accepted, the binder honoured neither, and its measurement
+        belonged to a kernel the row does not spell (DeepSeek V4's ``k_div_35_reduce``: the plain
+        serial kernel, under a ``coop`` / ``coop`` row). The placement lane asks a NEIGHBOURING
+        question of the same projection (:func:`~emmy.compiler.ir.tile.ops.owns_outputs_it_cannot_bind`)
+        and the two answers differ — a projection this one finds nothing shared in can still be one
+        that cut takes apart."""
         from emmy.compiler.ir.tile.ops import refused_roots  # noqa: PLC0415
 
         return frozenset(self.tile_op.node_id(root) for root in refused_roots(self.tile_op.op, tuple(self.tile_op.output_specs)))

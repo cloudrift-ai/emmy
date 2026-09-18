@@ -31,7 +31,7 @@ on:
         type: boolean
 
 concurrency:
-  group: model-lifecycle
+  group: model-onboarding
   cancel-in-progress: false
 
 jobs:
@@ -75,7 +75,7 @@ jobs:
       APP_KEY_FILE: /tmp/emmy-onboard-app-key-${{ github.run_id }}-${{ github.run_attempt }}.pem
       WORKFLOW_SOURCE: /tmp/emmy-onboard-source-${{ github.run_id }}-${{ github.run_attempt }}
       OPENCODE_CONFIG_DIR: /tmp/emmy-onboard-source-${{ github.run_id }}-${{ github.run_attempt }}/.opencode
-      AGENT_MODEL: ${{ vars.ONBOARD_AGENT_MODEL || 'Qwen/Qwen3.6-35B-A3B-FP8' }}
+      AGENT_MODEL: ${{ vars.ONBOARD_AGENT_MODEL || 'Qwen/Qwen3.8-27B-FP8' }}
       CLOUDRIFT_INFERENCE_URL: ${{ vars.CLOUDRIFT_INFERENCE_URL || 'https://inference.cloudrift.ai/v1' }}
       OPENCODE_DISABLE_AUTOUPDATE: "true"
     steps:
@@ -219,6 +219,22 @@ jobs:
           lfs_attribute='experiments/**/results_*.tar.gz filter=lfs diff=lfs merge=lfs -text'
           grep -qxF "$lfs_attribute" .git/info/attributes 2>/dev/null || \
             printf '%s\n' "$lfs_attribute" >> .git/info/attributes
+
+      - name: Terminate VMs left by an interrupted run
+        env:
+          CLOUDRIFT_API_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
+        run: |
+          # Runs are serialized by the concurrency group, so any VM still carrying this workflow's tag belongs to a run
+          # whose runner died before its always() cleanup could terminate it.
+          ./venv/bin/python - <<'PY'
+          import asyncio
+          import os
+
+          from emmy.provisioning.cloudrift import terminate_instances_by_tags
+
+          tags = [tag for tag in os.environ["EMMY_RENTAL_TAGS"].split(",") if tag and not tag.startswith("gh-job:")]
+          asyncio.run(terminate_instances_by_tags(os.environ["CLOUDRIFT_API_KEY"], tags))
+          PY
 
       - name: Select one available deployment
         id: selection
@@ -489,6 +505,10 @@ jobs:
           else
             echo "::error::Onboarding agent produced no final text output"
           fi
+          if [ ! -s "$ONBOARD_SUMMARY" ]; then
+            echo "::error::Onboarding agent ended without writing its summary"
+            exit 1
+          fi
           exit "$agent_status"
 
       - name: Collect onboarding failure notice
@@ -503,6 +523,9 @@ jobs:
           kind = ""
           message = ""
           summary_path = Path(os.environ["ONBOARD_SUMMARY"])
+          if not summary_path.is_file():
+              kind = "failure"
+              message = "The onboarding agent ended without writing its summary"
           try:
               summary = json.loads(summary_path.read_text())
               failure = summary.get("failure") or {}
@@ -756,26 +779,25 @@ jobs:
         env:
           ARTIFACT_BRANCH: ${{ steps.branch.outputs.branch }}
           BASE_BRANCH: ${{ github.event.repository.default_branch }}
-          EXPECTED_HEAD: ${{ steps.rebase.outputs.expected_head }}
+          BRANCH_EXISTED: ${{ steps.rebase.outputs.expected_head != '' }}
         run: |
           git commit -m "recipes: $ONBOARD_MODE $MODEL_ID on $TARGET_GPU x$TARGET_GPU_COUNT"
-          git fetch origin "+refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH"
-          if [ -n "$EXPECTED_HEAD" ]; then
-            git fetch origin "+refs/heads/$ARTIFACT_BRANCH:refs/remotes/origin/$ARTIFACT_BRANCH"
-            remote_head="$(git rev-parse "origin/$ARTIFACT_BRANCH")"
-            if [ "$remote_head" != "$EXPECTED_HEAD" ]; then
-              echo "Model lifecycle branch changed during qualification; refusing to overwrite $remote_head" >&2
+          # Qualification takes hours, so the lifecycle branch may have moved. Replay this run's
+          # single commit onto wherever it stands now; a conflict is a real overlap, not a race.
+          for attempt in 1 2 3; do
+            git fetch origin "+refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH"
+            onto="origin/$BASE_BRANCH"
+            if [ "$BRANCH_EXISTED" = "true" ] \
+              && git fetch origin "+refs/heads/$ARTIFACT_BRANCH:refs/remotes/origin/$ARTIFACT_BRANCH"; then
+              onto="origin/$ARTIFACT_BRANCH"
+            fi
+            git rebase "$onto" || { git rebase --abort; exit 1; }
+            git push origin "HEAD:refs/heads/$ARTIFACT_BRANCH" && break
+            if [ "$attempt" -eq 3 ]; then
               exit 1
             fi
-          fi
-          git rebase "origin/$BASE_BRANCH"
-          if [ -n "$EXPECTED_HEAD" ]; then
-            git push \
-              --force-with-lease="refs/heads/$ARTIFACT_BRANCH:$EXPECTED_HEAD" \
-              origin "HEAD:refs/heads/$ARTIFACT_BRANCH"
-          else
-            git push origin "HEAD:refs/heads/$ARTIFACT_BRANCH"
-          fi
+            sleep "$attempt"
+          done
 
       - name: Refresh GitHub App token
         if: steps.vm.outcome == 'success'

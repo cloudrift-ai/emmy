@@ -4,13 +4,13 @@
 # was exercised with retrieval prompts up to 237,815 tokens. See RESULTS.md for the measured
 # workload and the restricted-network artifact-delivery limitation.
 tags:
-  - best-effort
+  - maintained
 
 model:
   huggingface: "Qwen/Qwen3-30B-A3B-Instruct-2507"
+  rationale: "Rides strong Qwen MoE momentum; steady mid-size interest supported by serving."
+  heat: 58
   revision: 0d7cf23991f47feeb3a57ecb4c9cee8ea4a17bfe
-  rationale: "30.5B BF16 parameters need about 61.1 GB for weights and 79.4 GB at the 1.3x minimum-serving estimate, fitting one 141 GB H200."
-  heat: 0
   task: generate
 
 engine:

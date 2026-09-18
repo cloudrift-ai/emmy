@@ -26,7 +26,7 @@ from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
 from emmy.compiler.ir.stmt.body import Body, free_names
-from emmy.compiler.ir.stmt.leaves import Accum, Assign, Init, Load, Mma, SelectBranch, Write
+from emmy.compiler.ir.stmt.leaves import Accum, Assign, Init, Load, SelectBranch, Write
 from emmy.compiler.ir.stmt.order import _ordered_exported_accs, bound_axes, ordering_constraints, relation_graph, topological_sort
 
 __all__ = ["normalize_body"]
@@ -516,7 +516,7 @@ def _carried_out(body: Body) -> frozenset[str]:
     later statement can still read. Every other definition lives inside the block the loop closes,
     which is what makes it renamable when two loops merge.
     """
-    out = {name for stmt in body if isinstance(stmt, (Accum, Mma)) for name in stmt.carried_names()}
+    out = {name for stmt in body if isinstance(stmt, Accum) for name in stmt.carried_names()}
     for stmt in body:
         if isinstance(stmt, Loop) and not stmt.seed:
             out |= _carried_out(stmt.body)
@@ -703,7 +703,7 @@ def hoist_loop_invariants(stmts: Body) -> Body:
     move together: hoisting just the consumer would leave it referencing
     an Accum still defined inside the outer Loop body.
 
-    ``Accum`` / ``Mma`` / ``Init`` / ``Write`` always stay (iteration-tied
+    ``Accum`` / ``Init`` / ``Write`` always stay (iteration-tied
     semantics). Axis-invariance alone does not earn a hoist: the hoisted set is closed under the
     scope's ordering constraints (:func:`~emmy.compiler.ir.stmt.order.ordering_constraints`), so
     a statement that must follow one that stays — the consumer of an accumulator a pinned
@@ -738,7 +738,7 @@ def hoist_loop_invariants(stmts: Body) -> Body:
         # Accum or a Carrier's state per output cell) — they can't move alone, but the
         # whole enclosing block can. Side-effecting stmts (Write, or any block containing a
         # Write) pin their iteration count and stay put.
-        if isinstance(s, (Accum, Mma, Init)) or s.has_side_effects:
+        if isinstance(s, (Accum, Init)) or s.has_side_effects:
             return False
         return axis not in _axis_deps(s)
 
@@ -909,7 +909,7 @@ def topo_sort_siblings(stmts: Body) -> Body:
 def _ssa_prefix(stmt: Stmt) -> str:
     if isinstance(stmt, Load):
         return "in"
-    if isinstance(stmt, (Accum, Mma, Init)):
+    if isinstance(stmt, (Accum, Init)):
         return "acc"
     return "v"
 

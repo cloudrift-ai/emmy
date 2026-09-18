@@ -120,11 +120,14 @@ cooperative reduce evaluating a 16384-wide statistic once per thread. The contra
 projection, so a contraction inherits those readings rather than restating them.
 
 Two binder facts are relations between sites rather than node domains, so they compose in `extend` beside the worker
-and physical-axis agreements. The binder builds a kernel around several output-tiled roots only where the projection
+and physical-axis agreements. The binder builds a kernel around several scheduled roots only where the projection
 partitions its outputs by root (`ops.projection_regions` — each store reads exactly one root's region); where it does
-not, one tiled root is the kernel's root and every other reduce lowers serially, so the context refuses a second
-output-tiled root among those roots. The row that tiled both — a gate/up projection whose one output reads both
-channels — used to be offered, ranked first, and refused at materialize. And a chain binds only in the binder's
+not, one root is the kernel's root and every other reduce lowers serially, so the context refuses a second scheduled
+root among those roots — an output tile, or a cooperative or ILP reduce, since `TILE` and `REDUCE` both select the
+root the binder builds around. The row that tiled both — a gate/up projection whose one output reads both channels —
+used to be offered, ranked first, and refused at materialize; the row that cooperated on both — DeepSeek V4's
+`k_div_35_reduce` — was accepted while the binder honoured neither, so its measurement belonged to the serial kernel.
+And a chain binds only in the binder's
 untiled arm, so the context refuses a partitioned chain member beside an output-tiled root: there the fill evaluates
 the cone per cell, statistic included, and the member's partition would realize as nothing — an unreproducible pin
 rather than a refusal.

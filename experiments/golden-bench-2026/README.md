@@ -64,7 +64,7 @@ broadcasts. The layer's projections are not among them. At both lengths they fus
 attention with the q, k, v and o projections, and the MLP, whose down projection recomputes the gate and up products
 inside its operand — and neither runs within the budget. The prefill causal-mask kernel stays out too: its output is
 -inf by construction, which the strict check refuses. The projections' performance is measured on isolated linears
-against vLLM's block-FP8 kernels in evaluation_results/2026-09-10_fp8-block-linear-rtx5090.md. Eager is the
+against vLLM's block-FP8 kernels by `scripts/bench_quant_linear.py --format fp8-block`. Eager is the
 correctness oracle here, not a vendor-kernel speed baseline: a single-layer trace cannot reach vLLM's kernels.
 
 The NVFP4, AWQ, and Trellis rows have no tuned latency claim. The block-FP8 rows carry one per-layer eager comparison

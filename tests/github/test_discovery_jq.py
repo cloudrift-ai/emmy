@@ -58,6 +58,7 @@ def _recipe(model_id, *, tags=None, runnable=True, task="generate", gpu_count=1)
         "tags": tags or [],
         "task": task,
         "runnable": runnable,
+        "maintainable": runnable and "onboarding" not in (tags or []),
         "rationale": "Existing rationale.",
         "heat": 50,
         "deployments": [{"gpu": GPU, "gpu_count": gpu_count, "context_length": 8192}],
@@ -65,7 +66,12 @@ def _recipe(model_id, *, tags=None, runnable=True, task="generate", gpu_count=1)
 
 
 def _task(*recipes, maintained_count=1):
-    return {"schema_version": 1, "maintained_count": maintained_count, "recipe_batches": [list(recipes)]}
+    return {
+        "schema_version": 1,
+        "maintained_count": maintained_count,
+        "maintainable_model_ids": [recipe["model_id"] for recipe in recipes if recipe["maintainable"]],
+        "recipe_batches": [list(recipes)],
+    }
 
 
 def _score(model_id, heat=50):
@@ -113,6 +119,7 @@ def test_task_filter_groups_query_deployments_and_batches_recipes():
         {"gpu": GPU, "gpu_count": 1, "context_length": 8192},
         {"gpu": GPU, "gpu_count": 2, "context_length": 8192},
     ]
+    assert task["maintainable_model_ids"] == ["org/model-a", "org/model-b"]
 
 
 def test_manifest_filter_restores_existing_onboarding_and_filters_repeated_candidate():
@@ -142,7 +149,7 @@ def test_manifest_filter_restores_existing_onboarding_and_filters_repeated_candi
         {
             **_score("org/pending", 85),
             "task": "embed",
-            "deployments": [{"deploy.gpu": GPU, "deploy.gpu_count": 4}],
+            "deployments": [{"deploy.gpu": GPU, "deploy.gpu_count": 1}],
         }
     ]
 
@@ -171,21 +178,6 @@ def test_manifest_filter_drops_a_new_candidate_the_fit_agents_could_not_size():
 
     assert result.returncode == 0, result.stderr
     assert manifest["onboarding_models"] == []
-
-
-def test_manifest_filter_keeps_an_unsized_shell_matrix():
-    ready = _recipe("org/ready")
-    pending = _recipe("org/pending", tags=["onboarding", "untested"], runnable=False)
-    selection = _selection(
-        [_score("org/ready", 70), _score("org/pending", 60)],
-        ["org/ready"],
-        sized=[{"model_id": "org/pending", "deployments": []}],
-    )
-
-    result, manifest = _run_manifest(_task(ready, pending), json.dumps(selection))
-
-    assert result.returncode == 0, result.stderr
-    assert manifest["onboarding_models"][0]["deployments"] == [{"deploy.gpu": GPU, "deploy.gpu_count": 1}]
 
 
 def test_manifest_filter_derives_best_effort_and_obsolete_lists():

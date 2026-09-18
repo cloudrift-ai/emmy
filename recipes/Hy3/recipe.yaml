@@ -1,0 +1,11 @@
+tags:
+- onboarding
+- untested
+model:
+  huggingface: tencent/Hy3
+  rationale: Tencent Hy4/Hy3 series top OpenRouter open volume (11.6T and 4.69T tokens); Hy3 is the public 295B open checkpoint.
+  heat: 88
+  task: generate
+matrices:
+- deploy.gpu: NVIDIA H200 141GB
+  deploy.gpu_count: 8

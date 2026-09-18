@@ -204,6 +204,101 @@ Main moved again the same day, after this boot: #813 retuned the post family and
 #827 fixed the splicer defect above. These numbers describe `main` at `3b5cc4ca`; the next strict boot from main is
 owed.
 
+### Main after #813's retune (2026-09-18)
+
+`main` at `483e4cb7` — #813's retune of the post-attention family, #818's typed buffer roles, #827's cut splicer fix
+and #826's re-key — did not boot from the golden as merged. Strict evidence refused the symbolic post-attention twin
+at one piece of #813's twenty-seam route, on that piece's own cut fork, with no measured row spelling an arm. The
+symbolic twin is required, so the workers died sixteen minutes in. The same election replayed on the host refuses all
+three post twins (dynamic, m16 and m4096) at the same node, and refuses on the tree at #813's merge before #827, so
+#827 is not the cause.
+
+Two things about #813's rows explain it, and neither is visible to the strict decode. Three of the dynamic twin's
+receipts and four of the M=1 post twin's carry an empty schedule row; the deploy's evidence index drops a record with
+no knobs, so a piece whose only receipt is empty has no measured row at its cut fork. And the m16 and m4096 sets hold
+receipts for eight of the seventeen pieces the route mints on `main`. #813 recorded on an earlier tree and re-keyed
+its rows onto `main`, where the pooled strict decode accepted every one of them.
+
+The three post twins were re-recorded on this host under #813's route, pinned, with a fresh tune DB, into a copy of
+the golden: the record appends a knob row for every uncovered piece and re-times the rest. Each twin then elects its
+route under strict evidence on `main`.
+
+| Twin | #813's row | Re-recorded here | Pieces with a receipt |
+| --- | ---: | ---: | ---: |
+| `post-sym` `3836f9` @ dynamic | 117.8 ms | 64.9 ms | 17 → 17 (3 were empty) |
+| `post16` `8e1e80` @ m16 | 18.6 ms | 9.9 ms | 8 → 17 |
+| `post4096` `366777` @ m4096 | 126.1 ms | 536.8 ms | 8 → 17 |
+
+The m4096 number is honest and bad: the nine pieces #813 never recorded take the prior's schedules here, four of
+them at 92–140 ms each, and the whole twin is worse than the 126 ms #813's row claims for a kernel set that never
+deployed. The dynamic twin's `a47f22fa9713` piece is the same story at 24.7 ms against an empty row that said 178 µs.
+Both are tuning work on the pieces, not blockers.
+
+The boot from that copy died one refusal further, at the `k_div_35` kernel of the same twin: its recorded schedule
+puts a cooperative reduce on two seams that #813's schedule codec no longer allows together ("a second scheduled root
+on a projection its outputs do not partition by root"), either alone decodes, and the deploy's own warning says one
+measured row matches none of 468 offered candidates. Those are the four rows that went red at #813's merge; at 3.5–20
+µs the kernel is not a cost, but under strict evidence a required twin with one unvouched fork does not boot. Main's
+own pick for it is poor — the prior puts the cooperative reduce on a nested seam, 140 µs at dynamic width and 492 µs
+at m4096 — so the two single-seam forms were benched as A/B rows and the better one recorded at each width, as new
+rows beside the red ones, which stay so the gate keeps naming the change that dropped their schedule.
+
+| `k_div_35` width | red row (two coop) | main's pick | one coop-t seam, recorded |
+| --- | ---: | ---: | ---: |
+| dynamic | 3.5 µs | 140.4 µs | 16.7 µs |
+| m16 | 3.7 µs | 4.7 µs | 2.5 µs |
+| m4096 | 7.3 µs | 492.0 µs | 53.5 µs |
+| m1 | 19.9 µs | 2.1 µs | main's pick kept |
+
+With those rows the boot came up: `main` at `483e4cb7`, strict, empty tune DB, health seventeen minutes after
+launch, engine init 51.5 s, KV capacity 76,043 and 78,419 tokens. The only strict refusals are the two expert
+twins, as in every boot since 2026-09-11; the M=1 tier deployed for the first time since #804. Same probe as before,
+greedy, single stream, streamed; the long prompt tokenizes to 2,155 tokens on this boot.
+
+| Shape | TTFT, cold | TTFT, repeat | TPOT mean | TPOT range | Output tok/s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 5 in → 33 out | 3.73 s | 0.96 s | 0.267 s | 0.260 – 0.274 s | 3.75 |
+| 2,155 in → 9 out | 29.32 s | 2.70 s | 0.327 s | 0.320 – 0.335 s | 3.06 |
+
+| Program | Measured | Over floor | 2026-09-17 | 2026-09-15 |
+| --- | ---: | ---: | ---: | ---: |
+| `pre.chunk.m4096` | 25.4 ms | 850× | 2.73 ms | 2.74 ms |
+| `post.decode.m1` | 3.2 – 3.6 ms | 57× | not deployed | 44.7 ms |
+| `post.decode.m16` | 13.6 ms | 229× | 69.8 ms | 68.3 ms |
+| `post.chunk.m4096` | 599 ms | 306× | 629.7 ms | 688 ms |
+
+Decode is 12.4× faster than the previous boot and 3.4× faster than the 0.899 s per token of 2026-09-12, which was
+the best this host had produced: the M=1 post twin runs in 3.4 ms per layer where the m16 twin it replaced ran
+69.8 ms, and #813's Sinkhorn cut is inside both. Against the pinned fork's 0.147 s per token from the same host the
+repository arm is now 1.8× slower, directional as before. Time to first token at the long prompt fell from 45.5 s
+to 29.3 s with the m4096 post twin barely moved, so the gain there is mostly the m16 decode steps that precede the
+first token. One program went backwards: the m4096 pre-attention twin elects the same three-kernel cut as before
+but measures 25.4 ms against 2.73 ms. Evidence on the host under `~/serve-evidence/boot24-*`, `boot25-*`,
+`boot26-*`, `elect826-*`, `rec826*` and `ab826-*`.
+
+The cause is the cut's residual receipt, not the compiler. Its row, `WORK: t128, REDUCE: coop`, was recorded while
+the kernel binder ignored a cooperative reduce on that residual, so the time it carries is the serial kernel's: one
+thread per output cell, the four-element reduce serial inside. Before #813 that row and the all-serial row render
+the same source byte for byte. #813 made the binder honour the row, and 128 threads now share a four-element
+reduce in one block per output cell. The schedule is lowered correctly and it is a bad schedule. Strict evidence
+cannot see the change, because the spelling is still offered and only its meaning moved; the boot's roofline audit
+is what caught it. The m16 and dynamic twins' residual receipts carried the same spelling. The three receipts are
+re-recorded from `main` as the serial row, and a second plain row of the same kernel and spelling is dropped at
+m4096 and at dynamic, where it would outbid the serial row:
+
+| Residual of | Recorded row on `main` | Serial row on `main` | Figure the golden carried | Program, before → after |
+| --- | ---: | ---: | ---: | ---: |
+| `pre16` (m16) | 90.8 µs | 2.3 µs | 2.3 µs | 1.55 → 1.27 ms |
+| `pre4096` (m4096) | 22,574 µs | 224 µs | 228 µs | 25.1 → 2.82 ms |
+| `pre-sym` (dynamic) | 115 µs | 31.1 µs | 31.1 µs | 4.71 → 4.78 ms |
+
+The serial kernel reproduces the carried figure at every width, which is what says the rows measured it. The
+dynamic program does not move: its 4.2 ms first piece varies by more between runs than the residual gains. The m1
+twin is not affected: its recorded rows and their serial respelling build the same kernels on `main`. One V100,
+strict evidence, an empty tune DB per run; logs on the host under `~/serve-evidence/recpre4096-*` and `recpre3-*`.
+No boot was run on the re-recorded file.
+
+
 ### The M=1 decode tier: what broke and what now guards it
 
 The tier exists as an optimization. The bucket twins already cover `T=1` by padding up; the M=1 twins exist only

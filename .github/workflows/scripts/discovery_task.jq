@@ -18,6 +18,8 @@ else
         tags,
         task,
         runnable,
+        # Selectable as maintained: a complete recipe, not an untested onboarding shell.
+        maintainable: (.runnable and ((.tags | index("onboarding")) == null)),
         rationale,
         heat,
         deployments: [
@@ -27,7 +29,7 @@ else
         ]
       }
   ] as $recipes
-  | ($recipes | map(select(.runnable and ((.tags | index("onboarding")) == null))) | length) as $maintainable_count
+  | ($recipes | map(select(.maintainable)) | length) as $maintainable_count
   | if ($recipes | length) == 0 then
       error("Recipe query returned no recipes")
     elif $maintained_count > $maintainable_count then
@@ -36,6 +38,9 @@ else
       {
         schema_version: 1,
         maintained_count: $maintained_count,
+        # The parent agent assembles its answer from subagent reports, with the batch rows long
+        # out of view, so the selectable set is also stated once as a flat list.
+        maintainable_model_ids: [$recipes[] | select(.maintainable) | .model_id],
         recipe_batches: [
           range(0; ($recipes | length); $batch_size) as $index
           | $recipes[$index:$index + $batch_size]
