@@ -10,7 +10,7 @@ instead of vLLM. Keep vLLM as the default. Qualify dense Qwen3-0.6B in FP16 on o
 
 ## Implementation status — PR #820
 
-[PR #820](https://github.com/cloudrift-ai/emmy/pull/820) implements the static runtime foundation and records RTX 4080
+[PR #820](https://github.com/cloudrift-ai/emmy/pull/820) merged the static runtime foundation and records RTX 4080
 experiments. It does not implement native LLM serving. This plan remains open until the remaining work is completed
 or its scope is explicitly revised.
 
@@ -27,11 +27,13 @@ or its scope is explicitly revised.
 
 The [runtime report](../experiments/Qwen3-0.6B/native_runtime/RESULTS.md) shows reduced uncaptured submission cost,
 but little change in captured GPU time for the tested small programs. This is not evidence of a full-model serving
-speedup. Full-suite validation has failures reproduced on main; model-golden failures are only partly checked against
-main. The draft PR records those limits and is not ready for review.
+speedup. Before that merge, full-suite validation had failures reproduced on main; model-golden failures were only
+partly checked against main. The merged PR records those validation limits.
 
-**Pending decision:** fix the existing serving baseline before expanding, or explicitly continue native generation
-with the comparison incomplete. Fixing the baseline is the current recommendation; no direction has been selected.
+**Selected next step:** fix the existing serving baseline before expanding. Draft
+[PR #835](https://github.com/cloudrift-ai/emmy/pull/835) rejects unsupported fragment epilogues before scheduling.
+The isolated Qwen3 pre-attention program compiles without the previous retries and passes GPU parity with synthetic
+weights at 1, 4, and 8 tokens. Complete serving startup, repository validation, and the comparison matrix remain pending.
 The serving rerun must hold source fixed throughout, since the failed baseline rows used a changing local checkout.
 Evidence gathering still precedes performance claims and runtime expansion.
 

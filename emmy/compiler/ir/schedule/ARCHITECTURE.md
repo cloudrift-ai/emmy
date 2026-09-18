@@ -103,6 +103,10 @@ compatibility all live in `ir/schedule`. The sites are the only source of choice
 nor filters them. `ir/schedule` may import other IR modules but never the pipeline layer. The pipeline retains only
 knob/pin reads (folded into the row), pool identity, sampling, and the generic lazy-Fork adapter.
 
+Fragment epilogue legality reads the lowered term outside its computed roots, including sibling projections and
+boundary stores. A sibling reduction is work the epilogue must execute, not an already available accumulator; its
+loop therefore excludes tensor-core atoms before ranking, rather than causing repeated materialization refusals.
+
 A reduction domain is projected from node and kernel facts alone, so the shapes the kernel factorizer cannot bind are
 decided once, at the offer, and never dropped from a priced row later. The partition catalog is offered on the reduce
 nodes the binder builds the kernel around — the roots it peels from the root projection (`ops.kernel_roots`: a tiled
