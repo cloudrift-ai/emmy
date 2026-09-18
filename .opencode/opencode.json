@@ -12,7 +12,7 @@
       "options": {
         "apiKey": "{env:CLOUDRIFT_API_KEY}",
         "baseURL": "{env:CLOUDRIFT_INFERENCE_URL}",
-        "timeout": 600000
+        "timeout": 7200000
       },
       "models": {
         "agent": {

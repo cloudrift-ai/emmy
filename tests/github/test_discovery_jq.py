@@ -58,6 +58,7 @@ def _recipe(model_id, *, tags=None, runnable=True, task="generate", gpu_count=1)
         "tags": tags or [],
         "task": task,
         "runnable": runnable,
+        "maintainable": runnable and "onboarding" not in (tags or []),
         "rationale": "Existing rationale.",
         "heat": 50,
         "deployments": [{"gpu": GPU, "gpu_count": gpu_count, "context_length": 8192}],
@@ -65,7 +66,12 @@ def _recipe(model_id, *, tags=None, runnable=True, task="generate", gpu_count=1)
 
 
 def _task(*recipes, maintained_count=1):
-    return {"schema_version": 1, "maintained_count": maintained_count, "recipe_batches": [list(recipes)]}
+    return {
+        "schema_version": 1,
+        "maintained_count": maintained_count,
+        "maintainable_model_ids": [recipe["model_id"] for recipe in recipes if recipe["maintainable"]],
+        "recipe_batches": [list(recipes)],
+    }
 
 
 def _score(model_id, heat=50):
@@ -113,6 +119,7 @@ def test_task_filter_groups_query_deployments_and_batches_recipes():
         {"gpu": GPU, "gpu_count": 1, "context_length": 8192},
         {"gpu": GPU, "gpu_count": 2, "context_length": 8192},
     ]
+    assert task["maintainable_model_ids"] == ["org/model-a", "org/model-b"]
 
 
 def test_manifest_filter_restores_existing_onboarding_and_filters_repeated_candidate():

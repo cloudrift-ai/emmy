@@ -87,6 +87,15 @@ returns only scores, maintained IDs, obsolete proposals, new onboarding models, 
 candidates, and mechanically assembles the four-list manifest before the lifecycle validator applies policy. An
 exact-SHA recipe query against the rolling root enforces the maintained count after application.
 
+A rejected selection is not a failed run on its own: the step resumes the same OpenCode session with the exact
+rejection and accepts a corrected selection, twice, before failing. A reply carrying no JSON object counts as a
+rejection too, since it matches nothing in the filter, which would otherwise succeed having written an empty manifest
+and fail the run two steps later on a parse error. The rejection names the offending IDs and the set to choose from,
+because the agent assembles its answer from subagent reports with the batch rows long out of context; for the same
+reason the task states the selectable set once as `maintainable_model_ids` rather than only as a per-row flag. The
+step prints one line per agent event: a run in progress is visible only through the job log, and a rejected decision
+has to stay readable afterwards.
+
 The workflow checks that the agent did not modify the checkout, then validates and applies its lifecycle manifest. Its
 artifact worktree remains on the rolling lifecycle branch, while the catalog, workflow scripts, OpenCode agent and
 plugin directory, attached discovery skill, and prompt files come from the exact `github.sha` that started the run.
@@ -106,8 +115,10 @@ inspectable; the repository validator remains the authoritative completion gate.
 selects the configurable CloudRift model through an OpenAI-compatible Chat Completions endpoint and disables the
 model's chat-template thinking mode for the concise JSON result. Discovery never provisions hardware.
 
-OpenCode is provisioned on the self-hosted runners rather than maintained inside Emmy. `opencode.json` owns the model
-provider alias, while `.opencode/agents/` owns the separate discovery and onboarding limits and permissions. The
+OpenCode is provisioned on the self-hosted runners rather than maintained inside Emmy. `.opencode/opencode.json` owns
+the model provider alias, while `.opencode/agents/` owns the separate discovery and onboarding limits and permissions.
+Both live under `.opencode/` because the workflows point OpenCode's config directory at the exact workflow source,
+which loads after the checked-out branch's config; a provider setting anywhere else would come from that branch. The
 tracked `.agents/skills/` remain the canonical task definitions. Compatibility symlinks under `.claude/skills/`
 expose the same packages through OpenCode's native skill tool.
 
@@ -201,9 +212,12 @@ evidence.
 
 ### Discovery lifecycle PR
 
-**Discover model** runs nightly or by manual dispatch. Discovery and qualification share a static concurrency group
-and one rolling draft PR rather than opening one PR per model. Each workflow fails closed if more than one rolling PR
-exists. It also adopts one unpaired
+**Discover model** runs nightly or by manual dispatch. Discovery and qualification share one rolling draft PR rather
+than opening one PR per model, but each holds only its own concurrency group: a qualification run keeps a rented GPU
+for up to a day, and serialising the two behind one group made every discovery run wait for it. What they share is the
+branch, so each does its long work on its own checkout and replays its commit onto the rolling branch as it stands at
+push time, retrying when the branch moved underneath. A conflict there is a genuine overlap and fails the run. Each
+workflow fails closed if more than one rolling PR exists. It also adopts one unpaired
 discovery branch left by an interrupted PR-creation step, while
 failing closed if multiple such branches would make ownership ambiguous. Before rendering inventory or running the
 agent, it rebases an existing rolling branch onto the latest default branch. The rebase push uses the exact original
@@ -263,7 +277,7 @@ Agent workflows use these repository secrets as applicable:
 - `HF_TOKEN` for gated checkpoints;
 - `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` for an eligible verified prebuilt image.
 
-`ONBOARD_AGENT_MODEL` selects the discovery/onboarding model and defaults to `Qwen/Qwen3.6-35B-A3B-FP8`.
+`ONBOARD_AGENT_MODEL` selects the discovery/onboarding model and defaults to `Qwen/Qwen3.8-27B-FP8`.
 `CLOUDRIFT_TEAM_ID` must be the exact Robots team UUID; the verification/onboarding workflow fails before capacity
 selection if the variable is absent, malformed, or inaccessible to `CLOUDRIFT_API_KEY`.
 `CLOUDRIFT_INFERENCE_URL` selects its OpenAI-compatible endpoint and defaults to
