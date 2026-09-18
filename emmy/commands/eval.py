@@ -501,19 +501,25 @@ def handle_eval_golden(args) -> None:
 
     # The serving-matrix half of the gate: each lane's twins compiled with that lane's rows as
     # the only evidence, strictly, on the live card the golden names — a fork no golden row
-    # decides is an EvidenceError naming the kernel, never a prediction the prior makes.
+    # decides is an EvidenceError naming the kernel, never a prediction the prior makes. A lane
+    # reaches the widths the config warms in it (a shape's ``:fm`` suffix names its lane), so a
+    # static twin is compiled in the lanes that list its width; a symbolic twin in every lane.
     failed = False
     for pins in sorted({row.pins for row in serving.realizations}, key=repr):
         lane = _format_pins(pins)
+        reached = {dict(row.bindings).get("num_tokens") if row.bindings else None for row in serving.realizations if row.pins == pins}
         broken = 0
         with pinned_knobs(dict(pins)), sole_evidence([record for record in records if record.pins == pins]):
             for name, graph in graphs.items():
+                if twin_width(name) not in reached:
+                    continue
                 try:
                     Pipeline.build(CUDA_PASSES).run(graph, ctx=ctx)
                 except Exception as exc:  # noqa: BLE001 — one twin's failure is that twin's verdict
                     broken += 1
                     logger.error("%s: %s: %s", lane, name, " ".join(f"{type(exc).__name__}: {exc}".split()))
-        logger.info("%s: %d twin(s) deploy from the golden rows alone, %d do not", lane, len(graphs) - broken, broken)
+        compiled = sum(1 for name in graphs if twin_width(name) in reached)
+        logger.info("%s: %d twin(s) deploy from the golden rows alone, %d do not", lane, compiled - broken, broken)
         failed |= bool(broken)
     if failed:
         logger.error("serving audit failed: every fork of every reachable kernel must be decided by a golden row")

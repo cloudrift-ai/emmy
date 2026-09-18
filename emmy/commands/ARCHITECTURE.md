@@ -320,7 +320,10 @@ knob rows into either baseline as proposals. Canonical goldens remain the common
 canonical file. The command validates the nested schema and model provenance, requires the live GPU to match both the
 config and YAML, proves that every structural target has every config-derived realization its twin reaches (the width
 rows of a static twin, the dynamic rows of a symbolic one), validates the recorded rows, and re-traces the exact
-static/symbolic precision matrix. Any missing realization, unrealized entry, or twin the
+static/symbolic precision matrix. A warm shape names its lane (the ``:fm`` suffix), so a served process in a lane
+compiles the static twins of that lane's widths and nothing else; the serving-matrix compile asks the same of each
+lane's rows — a symbolic twin in every lane, a static twin where its width is warmed. Any missing realization,
+unrealized entry, or twin the
 golden rows do not decide is a non-zero release failure. Model, revision, GPU, and serving widths therefore have no
 independent audit flags.
 
