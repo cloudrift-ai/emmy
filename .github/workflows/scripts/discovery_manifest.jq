@@ -74,6 +74,7 @@ def model_ids($items):
 | require(
     $unselectable == [];
     "Maintained selections must be recipes the task marks maintainable, unlike: " + ($unselectable | join(", "))
+      + ". Choose only from: " + ($maintainable_ids | join(", "))
   )
 | require(
     ($choice.obsolete_models | type) == "array"

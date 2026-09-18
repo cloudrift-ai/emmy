@@ -217,9 +217,12 @@ jobs:
           agent_status=$?
           build_manifest
           manifest_status=$?
-          # A rejected selection goes back to the same session once, with the exact reason.
+          # A rejected selection goes back to the same session, with the exact reason.
           session_id=$(jq -R -r -s '[splits("\n") | fromjson? | .sessionID // empty][0] // empty' "$AGENT_EVENTS")
-          if [ "$manifest_status" -ne 0 ] && [ -n "$session_id" ]; then
+          for correction in 1 2; do
+            if [ "$manifest_status" -eq 0 ] || [ -z "$session_id" ]; then
+              break
+            fi
             rejection=$(sed 's/^jq: error ([^)]*): //' "$AGENT_REJECTION")
             echo "::warning::Discovery selection rejected, asking the agent to correct it: $rejection"
             run_agent "The workflow rejected your final selection: $rejection
@@ -228,7 +231,7 @@ jobs:
             agent_status=$?
             build_manifest
             manifest_status=$?
-          fi
+          done
           set -e
           if [ -s "$AGENT_SELECTION" ]; then
             sed 's/^/discover-models: /' "$AGENT_SELECTION"
