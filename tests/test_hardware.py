@@ -4,6 +4,7 @@ from pathlib import Path
 
 import yaml
 
+from emmy import gpu as gpu_registry
 from emmy.hardware import GPU_INSTANCE_TYPES, GPU_SHORT_NAMES, gpu_short_name, resolve_instance_type
 from emmy.recipe.catalog import deployment_setups
 
@@ -69,11 +70,12 @@ def test_gpu_short_names_covers_all_instance_types():
         assert gpu_name in GPU_SHORT_NAMES, f"GPU '{gpu_name}' missing from GPU_SHORT_NAMES"
 
 
-def test_every_declared_recipe_deployment_is_provisionable():
-    """A recipe deployment naming a GPU absent from the table can never be rented or selected."""
+def test_every_declared_recipe_deployment_names_a_known_gpu():
+    """A recipe may name a GPU nobody rents, which the selector reports unavailable; a misspelled one matches nothing."""
     recipes = Path(__file__).parents[1] / "recipes"
     for recipe_path in sorted(recipes.glob("*/recipe.yaml")):
         config = yaml.safe_load(recipe_path.read_text()) or {}
         for setup in deployment_setups(config):
             gpu_name = setup["deploy.gpu"]
-            assert gpu_name in GPU_INSTANCE_TYPES, f"{recipe_path} declares '{gpu_name}', missing from GPU_INSTANCE_TYPES"
+            spec = gpu_registry.by_name(gpu_name)
+            assert spec is not None and spec.name == gpu_name, f"{recipe_path} declares unknown GPU '{gpu_name}'"
