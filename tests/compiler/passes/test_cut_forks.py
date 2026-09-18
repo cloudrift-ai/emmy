@@ -894,6 +894,52 @@ def test_a_clustered_value_cut_once_computes_the_right_answer() -> None:
     np.testing.assert_allclose(got, expected, rtol=2e-2, atol=2e-1)
 
 
+def _twin_norm_graph() -> Graph:
+    """``k = x @ wk`` and ``v = x @ wv`` over one input, with ``k`` normed: the k/v projection pair
+    of a fused pre-attention half. Lifting folds the two contractions into one twin; the norm's
+    statistic recomputes ``k`` alone under its reduce."""
+    from emmy.commands.trace import graph_from_code
+
+    code = (
+        "(lambda x, wk, wv: (lambda k, v: k * torch.rsqrt(k.pow(2).mean(-1, keepdim=True) + 1e-6) + v)"
+        "(torch.matmul(x, wk), torch.matmul(x, wv)))"
+        "(torch.randn(16, 64, dtype=torch.float16), torch.randn(64, 32, dtype=torch.float16), torch.randn(64, 32, dtype=torch.float16))"
+    )
+    return graph_from_code(code)[0]
+
+
+def test_a_lone_contraction_is_a_channel_of_the_twin_it_equals() -> None:
+    """The twin exposes two values; the cone under the reduce exposes one of them. One placement
+    decision materializes the twin, and the lone copy reads the channel that is its value."""
+    parent = _lifted_parent(_twin_norm_graph())
+    contractions = [seam for seam in cuttable_seams(parent) if seam.node.as_contraction() is not None]
+    assert len(contractions) == 1, [seam.spelling for seam in cuttable_seams(parent)]
+    (twin,) = contractions
+    ((sibling, _, channels),) = twin.siblings
+    assert len(twin.node.exposes) == 2 and len(sibling.exposes) == 1 and channels == (0,)
+    cut = _lower_cut(_twin_norm_graph(), twin.spelling)
+    cuda = [node for node in cut.nodes.values() if type(node.op).__name__ == "CudaOp"]
+    assert len(cuda) == 2
+
+
+@requires_cuda
+def test_a_twin_cut_once_serves_its_lone_channel_reader() -> None:
+    graph = _twin_norm_graph()
+    (seam,) = [seam for seam in cuttable_seams(_lifted_parent(graph.copy())) if seam.node.as_contraction() is not None]
+    cut = _lower_cut(graph, seam.spelling)
+    rng = np.random.default_rng(0)
+    x = rng.standard_normal((16, 64)).astype(np.float16)
+    wk = rng.standard_normal((64, 32)).astype(np.float16)
+    wv = rng.standard_normal((64, 32)).astype(np.float16)
+    inputs = dict(zip(cut.inputs, (x, wk, wv), strict=True))
+    (out_name,) = cut.outputs
+    got = CudaBackend().run(cut, input_data=inputs)[0].outputs[out_name].astype(np.float32)
+    k = x.astype(np.float32) @ wk.astype(np.float32)
+    v = x.astype(np.float32) @ wv.astype(np.float32)
+    expected = k / np.sqrt((k * k).mean(-1, keepdims=True) + 1e-6) + v
+    np.testing.assert_allclose(got, expected, rtol=2e-2, atol=2e-1)
+
+
 def test_a_scalar_operand_is_no_seam() -> None:
     """A value uniform over the kernel — an sdpa scale beside its mask fills — offers no cut. The
     piece would be a kernel writing scalars to a workspace so its reader could read them back, and

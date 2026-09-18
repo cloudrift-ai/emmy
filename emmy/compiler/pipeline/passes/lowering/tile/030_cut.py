@@ -48,7 +48,7 @@ class _CutContext(ScheduleContext[DeferredFork, object, object]):
 
 def _seam_index(seams) -> dict[int, object]:
     """Map every seam node and clustered sibling to its shared decision."""
-    return {id(node): seam for seam in seams for node in (seam.node, *(sibling for sibling, _ in seam.siblings))}
+    return {id(node): seam for seam in seams for node in (seam.node, *(sibling for sibling, *_ in seam.siblings))}
 
 
 def _rootmost(seams, all_sites, refuse: frozenset[str] = frozenset()):
