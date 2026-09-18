@@ -152,7 +152,7 @@ def _drop_repeated_declarations(body: Body) -> Body:
 
     The repeat binds nothing new, so it is dropped with NO rewrite: every downstream use already
     names the survivor. That is what keeps the guard narrow, and narrow is what makes it safe over
-    a WHOLE kernel body. The renaming forms (``_atom._dedup_loads``, ``stmt.dedup_loads``) collapse
+    a WHOLE kernel body. The renaming forms (``_atom._dedup_loads``, ``stmt.dedup_values``) collapse
     two DIFFERENT names at one address, which needs the memory-effect reasoning neither does: a
     ``Write`` or an async fill between two identical loads of a staged buffer makes the second a
     different value. A same-name repeat cannot hide such a reload — a rebind in one C scope is

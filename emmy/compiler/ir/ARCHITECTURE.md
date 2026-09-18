@@ -511,7 +511,7 @@ two are safe together only for a whole-subtree renumbering (`rename_ssa_sequenti
 from *dropping* a binding — load dedup, CSE — an inner scope that merely re-uses the dropped name's spelling is a
 different variable, and renaming it both redeclares the survivor inside the scope and rewires the inner arithmetic to
 the outer value. `passes.rename_free(stmt, alias)` is the hygienic form: it prunes the alias of whatever each child
-scope re-binds before descending. `normalize.dedup_loads` applies the same rule while threading its own per-scope
+scope re-binds before descending. `normalize.dedup_values` applies the same rule while threading its own per-scope
 environment. σ has the same hazard with axis names, which collide across a tree by design (a cone statistic's axis
 may spell the same as the enclosing contraction's): `fold.subst_free(stmt, sigma)` is σ's hygienic form — it stops at
 a `Loop` / reducing `Fold` binder that re-binds a substituted name, and is what the smem compute fill substitutes
@@ -562,10 +562,15 @@ canonicalized before validation:
   a barrier or a declaration stay in the loop. Effect summaries are cached on immutable statements, and
   `Body.axis_dependencies` retains only the axes reachable from each definition. Long SSA chains therefore remain
   linear in definitions × loop depth instead of materializing the quadratic full SSA dependency closure.
-- `dedup_loads` — after expression simplification, keep one `Load` for each identical
-  `(input, index, width, dtype)` read in a scope and rewire every scalar or vector lane. A write invalidates retained
-  reads of that buffer, including around a nested scope with a write. This is canonicalization for every Loop / Tile
-  body, not a fusion profitability decision.
+- `dedup_values` — after expression simplification, keep one definition per value in a scope and rewire every reader:
+  one `Load` for each identical `(input, index, width, dtype)` read (every scalar or vector lane), one `Assign` /
+  `Let` / `Select` for each identical operation over the same names (a commutative operation in either argument
+  order), and one accumulator for each identical fold over the same value in one reduce `Loop`. Fusion inlines a
+  producer once per reader, so a shared value arrives as copies and a copied reduction is folded once per copy. A
+  write invalidates retained reads of that buffer, including around a nested scope with a write; a binding that reads
+  an accumulator in flight is forgotten when the accumulator advances; an accumulator two statements fold, or one
+  with a rescaled base, is never merged. This is canonicalization for every Loop / Tile body, not a fusion
+  profitability decision, and it moves the identity of every kernel that carried a copy.
 - `rename_ssa_sequential` — cosmetic: `Load` names become `in0, in1, …`, accumulator state becomes `acc0, …`, and
   every other definition becomes `v0, v1, …`, in lexical definition order. Names stay globally unique while each
   nested body tracks its own binders, so sibling scopes may reuse the same source spelling without collapsing. Axis

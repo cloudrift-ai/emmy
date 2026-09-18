@@ -26,7 +26,7 @@ from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
 from emmy.compiler.ir.stmt.body import Body, free_names
-from emmy.compiler.ir.stmt.leaves import Accum, Assign, Init, Load, Mma, SelectBranch, Write
+from emmy.compiler.ir.stmt.leaves import Accum, Assign, Init, Let, Load, Mma, Select, SelectBranch, Write
 from emmy.compiler.ir.stmt.order import _ordered_exported_accs, bound_axes, ordering_constraints, relation_graph, topological_sort
 
 __all__ = ["normalize_body"]
@@ -58,11 +58,11 @@ def _normalize_body(stmts: Body) -> Body:
     stmts = split_invariant_divides(stmts)
     stmts = hoist_loop_invariants(stmts)
     stmts = simplify_body(stmts)
-    stmts = dedup_loads(stmts)
+    stmts = dedup_values(stmts)
     # Hoisting, simplification, and a parent merge can expose sibling reductions after the first
     # merge. Close that dependency here: unifying their axes may enable a merge, which may then
-    # expose duplicate loads and require one new canonical order. Every changed round removes a
-    # loop or a load, so this reaches a fixed point without a fixed iteration bound.
+    # expose duplicate values and require one new canonical order. Every changed round removes a
+    # loop or a definition, so this reaches a fixed point without a fixed iteration bound.
     stmts = _canonical_order(stmts)
     while True:
         # Unification renames sibling reduce axes in place: an order-preserving alpha-rename the
@@ -72,7 +72,7 @@ def _normalize_body(stmts: Body) -> Body:
             unified = stmts
         else:
             unified.__dict__["_ordering"] = stmts._ordering
-        reduced = dedup_loads(merge_sibling_reduce_loops(unified))
+        reduced = dedup_values(merge_sibling_reduce_loops(unified))
         if reduced == unified:
             return unified
         stmts = _canonical_order(reduced)
@@ -454,7 +454,7 @@ def _reduce_axis_source_positions(body: Body, reduce_axis_name: str) -> set[tupl
 # name, adjacent reduce Loops with the same axis name/extent become
 # structurally identical iteration scopes. Merging concatenates their
 # bodies into one Loop so the reduce axis is traversed once instead of
-# twice. Later normalization by ``dedup_loads`` collapses the duplicate Loads
+# twice. Later normalization by ``dedup_values`` collapses the duplicate Loads
 # both halves share — e.g. ``load x[0, a0, k]`` in the gated-MLP
 # pattern ``silu(x@Wg) * (x@Wu)`` where both matmuls reduce over the
 # same K and share x as a Load source. Symmetric staging follows: once
@@ -795,78 +795,113 @@ def simplify_body(body: Body) -> Body:
 
 
 # ---------------------------------------------------------------------------
-# Pass: deduplicate Load stmts with identical (input, index)
+# Pass: keep one definition per value
 # ---------------------------------------------------------------------------
 
 
-def dedup_loads(stmts: Body) -> Body:
-    """Drop duplicate ``Load`` stmts within nested scopes.
+def _value_key(s: Stmt) -> tuple | None:
+    """What determines the value a pure binding defines — everything but the name it binds — or
+    ``None`` for a statement that is no such binding."""
+    if isinstance(s, Load):
+        return ("load", s.input, tuple(e.pretty() for e in s.index), s.width, s.dtype)
+    if isinstance(s, Assign):
+        return ("assign", s.op, tuple(sorted(s.args)) if s.op.commutative else s.args, s.dtype)
+    if isinstance(s, Let):
+        return ("let", s.value.pretty(), s.dtype)
+    if isinstance(s, Select):
+        return ("select", tuple((b.value, b.select.pretty()) for b in s.branches))
+    return None
 
-    Two ``Load`` stmts with the same ``(input, index)`` read the same
-    value; keep the first and rewire downstream SSA references to its
-    name. Operates per-scope: a Load at an outer scope is reused by
-    inner siblings (their identical ``index`` doesn't reference any
-    inner-axis Var, so the values are equal). Loads inside a nested
-    scope are not visible to outer / sibling scopes.
 
-    Hygienic: an inner scope that re-binds a name the outer scope
-    deduped keeps its own binding — those are different variables
+def dedup_values(stmts: Body) -> Body:
+    """Keep one definition per value within nested scopes.
+
+    Two ``Load`` stmts with the same ``(input, index)``, two ``Assign`` / ``Let`` / ``Select``
+    stmts with the same operation over the same names, and two accumulators one reduce ``Loop``
+    folds with the same op over the same value each define one value twice: fusion inlines a
+    producer once per reader, so a value two readers share arrives as two copies, and a copied
+    reduction is folded once per copy. Keep the first and rewire downstream SSA references to its
+    name. Operates per-scope: a value bound at an outer scope is reused by inner siblings (it reads
+    nothing an inner scope binds, so the values are equal). A value bound inside a nested scope is
+    not visible to outer / sibling scopes — except an accumulator, which its ``Loop`` still binds
+    after it closes (:func:`_carried_out`), so a dropped accumulator's alias follows it out.
+
+    An accumulator is its key only when ONE statement folds it: a name two ``Accum`` stmts target
+    sums both contributions, and a rescaled fold (``Accum.base``) reads a state the key does not
+    spell. A binding that reads an accumulator in flight is forgotten when the accumulator advances.
+
+    Hygienic: an inner scope that re-binds a name a kept value binds or reads sees a DIFFERENT
+    variable, so that value does not reach it
     (see :func:`~emmy.compiler.ir.stmt.passes.rename_free`)."""
     from emmy.compiler.ir.stmt.passes import rename_free  # noqa: PLC0415
 
     stmts = Body.coerce(stmts)
+    folded: dict[str, int] = {}
+    for s in stmts.iter():
+        if isinstance(s, Accum):
+            folded[s.name] = folded.get(s.name, 0) + 1
 
     def written_buffers(stmt: Stmt) -> frozenset[str]:
         return frozenset(
             (*stmt.external_writes(), *(name for child in stmt.nested() for member in child.iter() for name in member.external_writes()))
         )
 
-    def walk(body: Body, env: dict[tuple[str, tuple[str, ...], int, object], tuple[str, ...]]) -> Body:
-        local = dict(env)
+    def walk(body: Body, env: dict[tuple, tuple[tuple[str, ...], frozenset[str]]]) -> tuple[Body, dict[str, str]]:
+        local = dict(env)  # value key -> (the names kept for it, the names it reads)
+        folds: dict[tuple, str] = {}  # this body's accumulators: never an inner or outer scope's
         alias: dict[str, str] = {}
 
-        def rename(n: str) -> str:
-            return alias.get(n, n)
-
-        def descend(inner: Body, clobbered: frozenset[str]) -> Body:
-            """Enter ``inner``'s scope, dropping every alias / kept name whose spelling ``inner``
-            re-binds. SSA names bound inside a Loop / Cond body are scoped to it, so such a name is
-            a DIFFERENT variable — following it out would rewire the inner arithmetic to the outer
+        def descend(inner: Body, clobbered: frozenset[str]) -> tuple[Body, dict[str, str]]:
+            """Enter ``inner``'s scope, dropping every kept value whose spelling ``inner`` re-binds.
+            SSA names bound inside a Loop / Cond body are scoped to it, so such a name is a
+            DIFFERENT variable — following it out would rewire the inner arithmetic to the outer
             value and redeclare the survivor."""
             shadowed = Body.coerce(inner).ssa_defs
-            return walk(inner, {k: v for k, v in local.items() if k[0] not in clobbered and not shadowed.intersection(v)})
+            return walk(
+                inner,
+                {
+                    key: (names, reads)
+                    for key, (names, reads) in local.items()
+                    if not (key[0] == "load" and key[1] in clobbered) and not shadowed & (frozenset(names) | reads)
+                },
+            )
 
-        def invalidate(buffers: frozenset[str]) -> None:
-            for key in tuple(local):
-                if key[0] in buffers:
+        def forget(buffers: frozenset[str] = frozenset(), names: frozenset[str] = frozenset()) -> None:
+            for key, (_, reads) in tuple(local.items()):
+                if (key[0] == "load" and key[1] in buffers) or reads & names:
                     del local[key]
 
         out: list[Stmt] = []
         for s in body:
-            if isinstance(s, Load):
-                # Rewire any SSA names in this Load's *index* to their deduped
-                # alias first — a gather ``weight[(int)in0, a]`` whose index
-                # Load ``in0`` was itself deduped must follow ``in0`` to the
-                # kept name, or the index dangles after the duplicate is
-                # dropped. (No-op for plain axis indices: axes aren't aliased.)
-                s = s.rewrite(rename)
-                key = (s.input, tuple(e.pretty() for e in s.index), s.width, s.dtype)
-                if key in local:
-                    alias.update(dict(zip(s.names, local[key], strict=True)))
-                    continue
-                local[key] = s.names
-                out.append(s)
-            elif s.nested():
+            if s.nested():
                 clobbered = written_buffers(s)
                 renamed = rename_free(s, alias)
-                out.append(renamed.with_bodies(tuple(descend(child, clobbered) for child in renamed.nested())))
-                invalidate(clobbered)
-            else:
-                out.append(rename_free(s, alias))
-                invalidate(frozenset(s.external_writes()))
-        return Body(out)
+                children = [descend(child, clobbered) for child in renamed.nested()]
+                out.append(renamed.with_bodies(tuple(child for child, _ in children)))
+                forget(clobbered, frozenset(name for child in renamed.nested() for name in child.ssa_defs))
+                for _, carried in children:
+                    alias.update(carried)
+                continue
+            # Rewire the names this statement reads to their kept alias first — a gather
+            # ``weight[(int)in0, a]`` whose index Load ``in0`` was itself dropped must follow
+            # ``in0`` to the kept name, or the index dangles. (No-op for axes: axes aren't aliased.)
+            s = s.rewrite(lambda n: alias.get(n, n)) if isinstance(s, Load) else rename_free(s, alias)
+            if isinstance(s, Accum):
+                key = (s.op, s.value, s.dtype, s.axes)
+                if s.base is None and folded[s.name] == 1 and folds.setdefault(key, s.name) != s.name:
+                    alias[s.name] = folds[key]
+                    continue
+                forget(names=frozenset({s.name}))
+            elif (key := _value_key(s)) is not None:
+                if key in local:
+                    alias.update(dict(zip(s.defines(), local[key][0], strict=True)))
+                    continue
+                local[key] = (s.defines(), frozenset(s.deps()))
+            out.append(s)
+            forget(frozenset(s.external_writes()))
+        return Body(out), {name: kept for name, kept in alias.items() if name in _carried_out(body)}
 
-    return walk(stmts, {})
+    return walk(stmts, {})[0]
 
 
 # ---------------------------------------------------------------------------

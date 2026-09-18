@@ -13,7 +13,7 @@ afterwards.
 `buf[0]` `Load`, under the same SSA name and at the same address; flattened into one loop body that is two C
 declarations of one name, which nvcc rejects (*already declared in the current scope*). The repeat binds nothing new,
 so it is dropped with NO rewrite — which is what keeps the guard narrow enough to run over a WHOLE kernel body. The
-renaming forms (`_atom._dedup_loads`, `stmt.dedup_loads`) collapse two DIFFERENT names at one address, which needs a
+renaming forms (`_atom._dedup_loads`, `stmt.dedup_values`) collapse two DIFFERENT names at one address, which needs a
 memory-effect reading neither has: a `Write` or an async fill between two identical loads of a staged buffer makes the
 second a different value. A same-name repeat cannot hide such a reload, since a rebind in one C scope is already
 illegal. A name re-bound to a DIFFERENT address is left alone: that is an SSA fault and must surface as one.

@@ -866,8 +866,9 @@ def test_structural_key_distinguishes_reordered_noncommutative_arguments() -> No
     assert left_minus_right.structural_key(structural=False) != right_minus_left.structural_key(structural=False)
 
 
-def test_structural_key_distinguishes_repeated_computation() -> None:
-    """Canonical ordering retains duplicate instructions because they change kernel work."""
+def test_structural_key_reads_repeated_computation_as_the_shared_value() -> None:
+    """A value computed twice is one value: normalization keeps one definition, so the executable
+    form and the key agree — the key never calls two bodies equal that do different work."""
     axis = Axis("element", 4)
     load = Load(name="input", input="input_buffer", index=(Var("element"),))
     first = Assign(name="first", op="abs", args=("input",))
@@ -899,7 +900,8 @@ def test_structural_key_distinguishes_repeated_computation() -> None:
             ),
         )
     )
-    assert repeated.structural_key(structural=False) != shared.structural_key(structural=False)
+    assert normalize_body(repeated) == normalize_body(shared)
+    assert repeated.structural_key(structural=False) == shared.structural_key(structural=False)
 
 
 def test_structural_key_preserves_effect_order() -> None:
