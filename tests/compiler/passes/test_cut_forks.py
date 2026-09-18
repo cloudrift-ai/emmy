@@ -838,11 +838,60 @@ def test_alpha_equivalent_operand_cones_cluster_into_one_seam() -> None:
     carries the other as a sibling with its capture correspondence."""
     from emmy.compiler.pipeline.passes.lowering.tile._cut import _cluster_value_seams
 
-    consumer = object()
     same = [_cone_seam(), _cone_seam()]
 
-    clustered = _cluster_value_seams(same, {id(seam.node): consumer for seam in same})
+    clustered = _cluster_value_seams(same, (Axis("n", 8), Axis("k", 8)))
     assert len(clustered) == 1 and len(clustered[0].siblings) == 1
+
+
+def _norm_residual_graph() -> Graph:
+    """``y = x @ w`` read twice: under the norm's statistic reduce and at the residual add — the
+    shape of a fused decoder half, whose o_proj result feeds the post-attention norm and the
+    residual stream. Fusion keeps one definition; the lifted tree holds one cone per scope."""
+    from emmy.commands.trace import graph_from_code
+
+    code = (
+        "(lambda y: y * torch.rsqrt(y.pow(2).mean(-1, keepdim=True) + 1e-6) + y)"
+        "(torch.matmul(torch.randn(16, 64, dtype=torch.float16), torch.randn(64, 32, dtype=torch.float16)))"
+    )
+    return graph_from_code(code)[0]
+
+
+def _lifted_parent(graph: Graph) -> TileOp:
+    """The one fused kernel of ``graph`` as the cut pass first sees it."""
+    lowered = Pipeline.build(LOOP_PASSES).run(graph, ctx=_CTX)
+    lifted = Pipeline.build(["lowering/tile"], select={"lift", "twisted"}).run(lowered, ctx=_CTX)
+    (tile,) = [node.op for node in lifted.nodes.values() if isinstance(node.op, TileOp)]
+    return tile
+
+
+def test_a_value_read_under_a_reduce_and_at_the_free_axis_is_one_seam() -> None:
+    """The two copies of the contraction bind the hidden coordinate under different names (the
+    reduce's own axis, the kernel's free axis) and their slab params may sit in another order, so
+    their canonical forms differ; they are one value, and cutting it once must materialize it once
+    with every occurrence reading the workspace."""
+    parent = _lifted_parent(_norm_residual_graph())
+    contractions = [seam for seam in cuttable_seams(parent) if seam.node.as_contraction() is not None]
+    assert len(contractions) == 1 and len(contractions[0].siblings) == 1, [seam.spelling for seam in cuttable_seams(parent)]
+    cut = _lower_cut(_norm_residual_graph(), contractions[0].spelling)
+    cuda = [node for node in cut.nodes.values() if type(node.op).__name__ == "CudaOp"]
+    assert len(cuda) == 2
+
+
+@requires_cuda
+def test_a_clustered_value_cut_once_computes_the_right_answer() -> None:
+    graph = _norm_residual_graph()
+    (seam,) = [seam for seam in cuttable_seams(_lifted_parent(graph.copy())) if seam.node.as_contraction() is not None]
+    cut = _lower_cut(graph, seam.spelling)
+    rng = np.random.default_rng(0)
+    x = rng.standard_normal((16, 64)).astype(np.float16)
+    w = rng.standard_normal((64, 32)).astype(np.float16)
+    inputs = dict(zip(cut.inputs, (x, w), strict=True))
+    (out_name,) = cut.outputs
+    got = CudaBackend().run(cut, input_data=inputs)[0].outputs[out_name].astype(np.float32)
+    y = x.astype(np.float32) @ w.astype(np.float32)
+    expected = y / np.sqrt((y * y).mean(-1, keepdims=True) + 1e-6) + y
+    np.testing.assert_allclose(got, expected, rtol=2e-2, atol=2e-1)
 
 
 def test_a_scalar_operand_is_no_seam() -> None:

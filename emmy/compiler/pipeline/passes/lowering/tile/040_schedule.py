@@ -55,10 +55,15 @@ def pin_row(*, split_consumed: bool) -> dict[str, str]:
     return row
 
 
-def classic_forks(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
+def classic_forks(tile: TileOp, name: str, knobs: dict, ctx, *, kernel_set: bool = False) -> list[Fork]:
     """Adapt the classic semantic enumeration to the pipeline's lazy search tree: one unexpanded
     root over the problem (a one-element list, the shape every fork builder returns), its sites
-    sourced from the environment's pins where they name them."""
+    sourced from the environment's pins where they name them.
+
+    ``kernel_set`` says the kernel is one piece of a cut kernel set. A hand pin is published to
+    every piece at once, so each takes the values it can and keeps its catalog where it cannot —
+    the reading a row published across peer kernels takes — instead of refusing a value that names
+    a sibling piece; the post-compile pin check still asks that SOME kernel realized the pin."""
     from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, FP8_MMA, precision_pin  # noqa: PLC0415
 
     # A bare WORK / RASTER / REDUCE pin is published across the kernels a split minted and names the
@@ -73,7 +78,7 @@ def classic_forks(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
         row=pin_row(split_consumed=tile.split_consumed or carries_partition(tile)),
         allow_f16_accumulate=precision_pin(F16_MMA_F32_ACC) is True,
         allow_fp8=precision_pin(FP8_MMA) is True,
-        validate_pins=ctx.validate_pins,
+        validate_pins=ctx.validate_pins and not kernel_set,
         tolerate_kernel_pins=peer,
     )
     context = ClassicScheduleContext(tile, ctx, problem)
@@ -118,7 +123,9 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[Fork]:
     assert any(k.startswith(STRUCT_PREFIX) for k in tile.knobs), (
         f"{tile.name!r}: scheduling a kernel with no structural identity — the IdentityStrategy stamps at birth"
     )
-    options = classic_forks(tile, tile.name, tile.knobs, ctx)
+    # A cut's pieces carry the seam token in their name or read a workspace named by one.
+    kernel_set = "__place_" in tile.name or any("__place_" in buffer for buffer in root.inputs)
+    options = classic_forks(tile, tile.name, tile.knobs, ctx, kernel_set=kernel_set)
     if not options:
         raise RuleSkipped("no enumerable schedule row for this term — leave it unmapped")
     return options if len(options) > 1 else options[0]
