@@ -25,7 +25,7 @@ def model_ids($items):
 
 .
 | require(
-    type == "object" and exact_fields(["schema_version", "maintained_count", "recipe_batches"]);
+    type == "object" and exact_fields(["schema_version", "maintained_count", "maintainable_model_ids", "recipe_batches"]);
     "Discovery task has an invalid shape"
   )
 | require(.schema_version == 1; "Unsupported discovery task schema version")
@@ -69,7 +69,11 @@ def model_ids($items):
       and ($choice.maintained_model_ids | length) == ($choice.maintained_model_ids | unique | length);
     "maintained_model_ids must contain the exact requested number of unique IDs"
   )
-| [$recipes[] | select(.maintainable) | .model_id] as $maintainable_ids
+| $task.maintainable_model_ids as $maintainable_ids
+| require(
+    ($maintainable_ids | sort) == ([$recipes[] | select(.maintainable) | .model_id] | sort);
+    "Discovery task maintainable_model_ids must match the maintainable rows"
+  )
 | [$choice.maintained_model_ids[] | select(. as $model_id | ($maintainable_ids | index($model_id)) == null)] as $unselectable
 | require(
     $unselectable == [];

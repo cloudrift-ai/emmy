@@ -38,6 +38,9 @@ else
       {
         schema_version: 1,
         maintained_count: $maintained_count,
+        # The parent agent assembles its answer from subagent reports, with the batch rows long
+        # out of view, so the selectable set is also stated once as a flat list.
+        maintainable_model_ids: [$recipes[] | select(.maintainable) | .model_id],
         recipe_batches: [
           range(0; ($recipes | length); $batch_size) as $index
           | $recipes[$index:$index + $batch_size]
