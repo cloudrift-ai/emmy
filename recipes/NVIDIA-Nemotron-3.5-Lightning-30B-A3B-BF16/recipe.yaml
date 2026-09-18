@@ -9,7 +9,3 @@ model:
 matrices:
 - deploy.gpu: NVIDIA H200 141GB
   deploy.gpu_count: 1
-- deploy.gpu: NVIDIA B200
-  deploy.gpu_count: 1
-- deploy.gpu: NVIDIA H100 80GB
-  deploy.gpu_count: 8

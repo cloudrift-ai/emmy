@@ -1,10 +1,9 @@
 tags:
-- onboarding
-- untested
+  - onboarding
+  - untested
 model:
   huggingface: zai-org/GLM-5.3-Flash
-  rationale: 'GLM-5.3 wave: trending 162, 2.4K likes, 2.45M downloads; 321B FP8 MoE that is vLLM-servable, unlike the
-    unreadable 753B GLM-5.2 line.'
+  rationale: "Active GLM-5.3 wave with strong trending, servable, and download signals."
   heat: 85
   task: generate
 matrices:

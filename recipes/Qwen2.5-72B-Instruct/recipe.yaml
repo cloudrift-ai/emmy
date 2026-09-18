@@ -3,13 +3,11 @@ tags:
   - untested
 model:
   huggingface: Qwen/Qwen2.5-72B-Instruct
-  rationale: "Older dense Qwen line cooling; superseded by current Qwen3 generations in momentum."
+  rationale: "Older dense Qwen line cooling; superseded by current Qwen3 generations."
   heat: 12
   task: generate
 matrices:
-- deploy.gpu: NVIDIA L40S
-  deploy.gpu_count: 4
-- deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Workstation Edition
-  deploy.gpu_count: 2
 - deploy.gpu: NVIDIA H200 141GB
+  deploy.gpu_count: 2
+- deploy.gpu: NVIDIA B200
   deploy.gpu_count: 2

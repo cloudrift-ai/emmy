@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: Qwen/Qwen3.8-2.4T-A95B
-  rationale: "Flagship Qwen3.8 MoE riding unmatched family momentum, though this BF16 repo has no fleet deployment."
-  heat: 75
+  rationale: "Rides massive Qwen3.8 breakout momentum; flagship MoE status despite lack of fleet deployment."
+  heat: 85
   task: generate
 matrices:
 - deploy.gpu: NVIDIA B200

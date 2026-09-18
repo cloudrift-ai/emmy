@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: openbmb/MiniCPM5-2B
-  rationale: "Fresh on-device flagship, trending 390 and 330K downloads, filling the small-size edge slot."
-  heat: 80
+  rationale: "Fresh on-device flagship with strong HuggingFace trending and significant recent downloads."
+  heat: 85
   task: generate
 matrices:
 - deploy.gpu: NVIDIA GeForce RTX 4080

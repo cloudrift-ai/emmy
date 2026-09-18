@@ -3,11 +3,9 @@ tags:
   - untested
 model:
   huggingface: openai/gpt-oss-20b
-  rationale: "GPT-OSS cooling; prior momentum no longer visible in current shared evidence."
-  heat: 60
+  rationale: "Cooling family; real serving volume exists but fresh momentum has faded from shared evidence."
+  heat: 45
   task: generate
 matrices:
 - deploy.gpu: NVIDIA GeForce RTX 4090
-  deploy.gpu_count: 1
-- deploy.gpu: NVIDIA GeForce RTX 5090
   deploy.gpu_count: 1

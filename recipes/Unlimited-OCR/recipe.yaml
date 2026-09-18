@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: baidu/Unlimited-OCR
-  rationale: "High historical interest for a practical OCR task, but the evidence is aging."
-  heat: 60
+  rationale: "High historical interest for practical OCR, but evidence is noticeably aging now."
+  heat: 45
   task: generate
 matrices:
 - deploy.gpu: NVIDIA GeForce RTX 4090

@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: deepseek-ai/DeepSeek-R1
-  rationale: "Older 2025 line; superseded by the active V4 wave, low current trend."
-  heat: 25
+  rationale: "Older 2025 line; superseded by active V4 wave, low current trend."
+  heat: 20
   task: generate
 matrices:
 - deploy.gpu: NVIDIA H200 141GB

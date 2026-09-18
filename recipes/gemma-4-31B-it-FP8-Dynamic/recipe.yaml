@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "RedHatAI/gemma-4-31B-it-FP8-Dynamic"
-  rationale: "Gemma 4 cooling post-Qwen3.8 surge; minimal sustained momentum in current sources."
-  heat: 15
+  rationale: "Gemma 4 cooling, eclipsed by Qwen3.8, minimal current momentum."
+  heat: 18
 engine:
   llm:
     tensor_parallel_size: 1

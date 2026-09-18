@@ -1,16 +1,11 @@
 tags:
-- onboarding
-- untested
+  - onboarding
+  - untested
 model:
   huggingface: Edge0/Edge0-35B-A3B-preview
-  rationale: 'Breakout A3B-class MoE serving from SSD (edge0): trending 2454, 3.3K likes, novel low-VRAM serving architecture
-    for benchmarking.'
+  rationale: "Breakout A3B-class MoE serving with novel low-VRAM architecture, though exact model evidence is absent from sources."
   heat: 78
   task: generate
 matrices:
-- deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition
-  deploy.gpu_count: 2
-- deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Workstation Edition
-  deploy.gpu_count: 2
-- deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Server Edition
-  deploy.gpu_count: 2
+- deploy.gpu: NVIDIA H200 141GB
+  deploy.gpu_count: 1

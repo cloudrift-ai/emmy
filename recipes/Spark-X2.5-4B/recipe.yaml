@@ -1,0 +1,11 @@
+tags:
+- onboarding
+- untested
+model:
+  huggingface: XHToken/Spark-X2.5-4B
+  rationale: Fresh 4B dense flagship, trending 179, 28K downloads, 1.3K likes; fills the small-model slot with a new architecture.
+  heat: 60
+  task: generate
+matrices:
+- deploy.gpu: NVIDIA GeForce RTX 4080
+  deploy.gpu_count: 1

@@ -3,7 +3,7 @@ tags:
   - untested
 model:
   huggingface: zai-org/GLM-5.2
-  rationale: "Strong prior GLM-5.2 momentum, but current trend favors GLM-5.3 checkpoints and the BF16 repo is unservable."
+  rationale: "BF16 753B repo unservable in fleet; GLM-5.3 wave shifted attention to servable checkpoints."
   heat: 40
   task: generate
 matrices:

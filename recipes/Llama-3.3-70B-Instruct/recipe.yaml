@@ -3,13 +3,9 @@ tags:
   - untested
 model:
   huggingface: meta-llama/Llama-3.3-70B-Instruct
-  rationale: "Llama cooling, but strong serving volume and established presence offset the novelty gap."
-  heat: 65
+  rationale: "Strong serving volume offsets cooling Llama family novelty gap."
+  heat: 60
   task: generate
 matrices:
-- deploy.gpu: NVIDIA B200
-  deploy.gpu_count: 1
 - deploy.gpu: NVIDIA H200 141GB
   deploy.gpu_count: 2
-- deploy.gpu: NVIDIA H100 80GB
-  deploy.gpu_count: 4

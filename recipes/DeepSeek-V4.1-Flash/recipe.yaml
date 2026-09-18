@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: deepseek-ai/DeepSeek-V4.1-Flash
-  rationale: "OpenRouter 11.9T tokens, 391K downloads in nine days, 3K likes, trending 1257."
-  heat: 92
+  rationale: "Breakout attention across OpenRouter volume, download velocity, and Hugging Face trending signals."
+  heat: 94
   task: generate
 matrices:
 - deploy.gpu: NVIDIA B200

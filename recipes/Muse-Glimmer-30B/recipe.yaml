@@ -7,5 +7,5 @@ model:
   heat: 30
   task: generate
 matrices:
-- deploy.gpu: NVIDIA L40S
-  deploy.gpu_count: 2
+- deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition
+  deploy.gpu_count: 1

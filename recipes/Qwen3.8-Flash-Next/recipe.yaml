@@ -1,10 +1,9 @@
 tags:
-- onboarding
-- untested
+  - onboarding
+  - untested
 model:
   huggingface: Qwen/Qwen3.8-Flash-Next
-  rationale: 'New Qwen4-preview hybrid MoE VLM (180B, 6B active): 5.4K likes, 706K downloads, top agentic-coding benchmarks,
-    vLLM/SGLang recipes published.'
+  rationale: "New hybrid MoE VLM, top agentic benchmarks, high likes/downloads, recipes published."
   heat: 90
   task: generate
 matrices:

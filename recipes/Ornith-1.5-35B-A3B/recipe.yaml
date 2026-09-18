@@ -3,13 +3,9 @@ tags:
   - untested
 model:
   huggingface: Ornith-ai/Ornith-1.5-35B-A3B
-  rationale: "No trending or community evidence found; unmaintained A3B fork with no current signal."
+  rationale: "No trending, community, or current signal found; unmaintained A3B fork with zero independent evidence."
   heat: 5
   task: generate
 matrices:
-- deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition
-  deploy.gpu_count: 2
-- deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Workstation Edition
-  deploy.gpu_count: 2
-- deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Server Edition
-  deploy.gpu_count: 2
+- deploy.gpu: NVIDIA H200 141GB
+  deploy.gpu_count: 1

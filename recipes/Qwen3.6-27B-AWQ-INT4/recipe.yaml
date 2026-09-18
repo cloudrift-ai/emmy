@@ -4,7 +4,7 @@ tags:
 model:
   huggingface: "cyankiwi/Qwen3.6-27B-AWQ-INT4"
   rationale: "Qwen3.6 variant; direct trend lacking, supported only by broad Qwen3.8 family momentum."
-  heat: 18
+  heat: 14
 engine:
   llm:
     tensor_parallel_size: 1

@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.5-397B-A17B-FP8"
-  rationale: "High speculation with minimal current downloads or community discussion."
+  rationale: "Highly speculative with minimal current downloads, community discussion, or independent source evidence."
   heat: 15
 engine:
   llm:
