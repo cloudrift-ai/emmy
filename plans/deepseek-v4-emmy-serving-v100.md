@@ -29,7 +29,9 @@ that file, strict, empty tune DB: 0.267 s per output token (3.75 tok/s), 3.7 s t
 and 29.3 s at 2,155 input tokens, health in seventeen minutes; the M=1 tier deployed for the first time since #804,
 3.4 ms per layer against the 69.8 ms the m16 twin cost a single-token step the day before. Against the pinned fork
 on the same host the repository arm is 1.8× slower per output token. One regression: the m4096 pre-attention twin
-measures 25.4 ms against 2.73 ms on the same three-kernel cut, cause not yet found. The report has the numbers.
+measured 25.4 ms against 2.73 ms on the same three-kernel cut. The cause was the residual's receipt, not the
+compiler — a cooperative reduce the binder ignored until #813 — and the receipt is re-recorded as the serial row,
+2.82 ms from `main`. The report has the numbers.
 
 Stages −1, 1 (#651), 2 (#656) and 3 (#662) are done, and Stage 0's question — whether the compiler can produce a
 schedule fast enough to serve this model — is answered yes. Gate (c) passed on the repository golden at 7e9336e6 +
@@ -80,8 +82,10 @@ reproduce a boot failure with.
 The pre family is closed. #793 took the four pre-attention targets to 28.8 µs / 1.79 ms / 8.70 ms / 5.82 ms at
 m1 / m16 / m4096 / dynamic; the boot audit read `pre.chunk.m4096` at 2.7 ms per layer through 2026-09-17 and the
 pre decode programs stay under its threshold. That is what halved time to first token at 2.3k input tokens. On
-2026-09-18 the same three-kernel cut measured 25.4 ms from `main`; the cause is not found and it is the first item
-of the kernel list below.
+2026-09-18 the same three-kernel cut measured 25.4 ms from `main`. The residual's receipt spelled a cooperative
+reduce the binder ignored when the row was recorded and honours since #813: 128 threads on a four-element reduce.
+The m16 and dynamic residuals carried the same spelling. All three are re-recorded as the serial row the old
+figures measured — 2.82 ms at m4096 — and no boot has run on that file yet.
 
 **One election is wrong before anything is recorded.** The boot audit reads `post.decode.m1` at 44.7 ms per layer
 (750× its floor) from the repository golden; the host-local golden the 2026-09-12 numbers came from elected about
@@ -170,9 +174,9 @@ set's receipts, because a cut arm is eligible only when every piece has one (#83
 M=1 division cut recorded (its piece builds since #827, 10 µs) and the `9e578e` cut recorded again at 406 µs; the
 residual refusal of #799's cut did not recur. Still refused: the expert M=1 and m256 twins, whose cut minted one
 kernel where it minted two and whose prior schedule runs about 4 s per launch — `emmy tune`, not a bench. The boot's
-roofline audit still has no time limit. Next kernel items, in order: the m4096 pre-attention twin's 25 ms (2.7 ms
-before), the nine m4096 post pieces #813 never recorded that take the prior's schedules at up to 140 ms each, and
-the dynamic post twin's `a47f22fa9713` piece at 24.7 ms; then Stage 4.
+roofline audit still has no time limit. Next kernel items, in order: the nine m4096 post pieces #813 never
+recorded that take the prior's schedules at up to 140 ms each, and the dynamic post twin's `a47f22fa9713` piece
+at 24.7 ms; then Stage 4.
 
 ## Operations handoff
 
