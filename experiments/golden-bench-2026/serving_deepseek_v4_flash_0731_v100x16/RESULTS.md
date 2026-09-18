@@ -273,8 +273,30 @@ the best this host had produced: the M=1 post twin runs in 3.4 ms per layer wher
 repository arm is now 1.8× slower, directional as before. Time to first token at the long prompt fell from 45.5 s
 to 29.3 s with the m4096 post twin barely moved, so the gain there is mostly the m16 decode steps that precede the
 first token. One program went backwards: the m4096 pre-attention twin elects the same three-kernel cut as before
-but measures 25.4 ms against 2.73 ms, and this run did not find out why; it is the next kernel item. Evidence on
-the host under `~/serve-evidence/boot24-*`, `boot25-*`, `boot26-*`, `elect826-*`, `rec826*` and `ab826-*`.
+but measures 25.4 ms against 2.73 ms. Evidence on the host under `~/serve-evidence/boot24-*`, `boot25-*`,
+`boot26-*`, `elect826-*`, `rec826*` and `ab826-*`.
+
+The cause is the cut's residual receipt, not the compiler. Its row, `WORK: t128, REDUCE: coop`, was recorded while
+the kernel binder ignored a cooperative reduce on that residual, so the time it carries is the serial kernel's: one
+thread per output cell, the four-element reduce serial inside. Before #813 that row and the all-serial row render
+the same source byte for byte. #813 made the binder honour the row, and 128 threads now share a four-element
+reduce in one block per output cell. The schedule is lowered correctly and it is a bad schedule. Strict evidence
+cannot see the change, because the spelling is still offered and only its meaning moved; the boot's roofline audit
+is what caught it. The m16 and dynamic twins' residual receipts carried the same spelling. The three receipts are
+re-recorded from `main` as the serial row, and a second plain row of the same kernel and spelling is dropped at
+m4096 and at dynamic, where it would outbid the serial row:
+
+| Residual of | Recorded row on `main` | Serial row on `main` | Figure the golden carried | Program, before → after |
+| --- | ---: | ---: | ---: | ---: |
+| `pre16` (m16) | 90.8 µs | 2.3 µs | 2.3 µs | 1.55 → 1.27 ms |
+| `pre4096` (m4096) | 22,574 µs | 224 µs | 228 µs | 25.1 → 2.82 ms |
+| `pre-sym` (dynamic) | 115 µs | 31.1 µs | 31.1 µs | 4.71 → 4.78 ms |
+
+The serial kernel reproduces the carried figure at every width, which is what says the rows measured it. The
+dynamic program does not move: its 4.2 ms first piece varies by more between runs than the residual gains. The m1
+twin is not affected: its recorded rows and their serial respelling build the same kernels on `main`. One V100,
+strict evidence, an empty tune DB per run; logs on the host under `~/serve-evidence/recpre4096-*` and `recpre3-*`.
+No boot was run on the re-recorded file.
 
 
 ### The M=1 decode tier: what broke and what now guards it
