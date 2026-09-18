@@ -9,13 +9,14 @@
 # EXL3 quantization method; the serving path under test is the Emmy plugin on the 1Cat-vLLM Volta
 # fork, where emmy owns every coded weight.
 tags:
+  - best-effort
   - compiler-qualified
   - serving-blocked
 
 model:
   huggingface: turboderp/Qwen3.8-27B-exl3
-  rationale: "Reference EXL3 trellis quantization of the dominant Qwen3.8 wave; 5.0 bpw is the largest rung that leaves KV headroom on one 32 GB Volta card."
-  heat: 0
+  rationale: "Blocked EXL3 variant on the hot Qwen3.8 breakout family."
+  heat: 25
   revision: a35e75a73baee51da709329d19294245cbeeb5d8
   task: generate
 

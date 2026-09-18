@@ -14,12 +14,12 @@
 # There is no Emmy lane here: this run qualified serving only, so Emmy eligibility is unevaluated
 # rather than established. See RESULTS.md.
 tags:
-  - best-effort
+  - maintained
 
 model:
   huggingface: Qwen/Qwen3.8-27B
-  rationale: "Undisputed breakout model of the era with maximum community attention."
-  heat: 98
+  rationale: "Dominates Hugging Face trending; overwhelming evidence of current breakout demand and downloads."
+  heat: 95
   revision: 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
   task: generate
 

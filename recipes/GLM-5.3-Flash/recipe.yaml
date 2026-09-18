@@ -1,0 +1,13 @@
+tags:
+  - onboarding
+  - untested
+model:
+  huggingface: zai-org/GLM-5.3-Flash
+  rationale: "Active GLM-5.3 wave with strong trending, servable, and download signals."
+  heat: 85
+  task: generate
+matrices:
+- deploy.gpu: AMD Instinct MI350X
+  deploy.gpu_count: 2
+- deploy.gpu: NVIDIA B200
+  deploy.gpu_count: 4

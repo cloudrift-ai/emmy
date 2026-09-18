@@ -4,8 +4,8 @@ tags:
 
 model:
   huggingface: "poolside/Laguna-S-2.1-FP8"
-  rationale: "Minimal evidence and no current adoption momentum."
-  heat: 10
+  rationale: "Niche model with no current trending, OpenRouter, or arena evidence supporting onboarding priority."
+  heat: 5
   revision: 06d71e91db70a11b08ee6a09c3c4818c85a61953
   task: generate
 

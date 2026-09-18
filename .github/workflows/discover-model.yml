@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: model-lifecycle
+  group: model-discovery
   cancel-in-progress: false
 
 jobs:
@@ -14,7 +14,7 @@ jobs:
     runs-on:
       group: agent-runners
       labels: agents
-    timeout-minutes: 60
+    timeout-minutes: 120
     permissions:
       contents: read
       pull-requests: read
@@ -24,7 +24,7 @@ jobs:
     env:
       GH_REPO: ${{ github.repository }}
       MAINTAINED_MODEL_COUNT: 10
-      AGENT_MODEL: ${{ vars.ONBOARD_AGENT_MODEL || 'Qwen/Qwen3.6-35B-A3B-FP8' }}
+      AGENT_MODEL: ${{ vars.ONBOARD_AGENT_MODEL || 'Qwen/Qwen3.8-27B-FP8' }}
       CLOUDRIFT_INFERENCE_URL: ${{ vars.CLOUDRIFT_INFERENCE_URL || 'https://inference.cloudrift.ai/v1' }}
       OPENCODE_DISABLE_AUTOUPDATE: "true"
       WORKFLOW_SOURCE: /tmp/emmy-discovery-source-${{ github.run_id }}-${{ github.run_attempt }}
@@ -33,6 +33,7 @@ jobs:
       AGENT_EVENTS: /tmp/emmy-discovery-events-${{ github.run_id }}-${{ github.run_attempt }}.jsonl
       AGENT_SELECTION: /tmp/emmy-discovery-selection-${{ github.run_id }}-${{ github.run_attempt }}.json
       AGENT_MANIFEST: /tmp/emmy-discovery-manifest-${{ github.run_id }}-${{ github.run_attempt }}.json
+      AGENT_REJECTION: /tmp/emmy-discovery-rejection-${{ github.run_id }}-${{ github.run_attempt }}.txt
       DISCOVERY_SUMMARY: /tmp/emmy-discovery-summary-${{ github.run_id }}-${{ github.run_attempt }}.md
     steps:
       - name: Generate GitHub App token
@@ -176,34 +177,72 @@ jobs:
                 --argjson batch_size 6 \
                 -f "$WORKFLOW_SOURCE/.github/workflows/scripts/discovery_task.jq" \
             > "$AGENT_TASK"
+          # One short line per agent event: the job log is the only view of a run in progress,
+          # and a rejected selection has to be readable after the fact.
+          run_agent() {
+            opencode run "$@" \
+              --agent discover-models \
+              --model cloudrift/agent \
+              --format json \
+              | tee -a "$AGENT_EVENTS" \
+              | jq -R --unbuffered -r 'fromjson? // {type: "raw", raw: .}
+                  | "agent-event: \(.type) \(.part.tool // "") \(.part.state.status // "")"
+                    + " \((.part.text // .error // .part.state.error // .raw // "") | tostring | .[0:300] | gsub("\n"; " "))"'
+            return "${PIPESTATUS[0]}"
+          }
+          build_manifest() {
+            jq -s -r '[.[] | select(.type == "text") | .part.text][-1] // empty' \
+              "$AGENT_EVENTS" > "$AGENT_SELECTION"
+            jq \
+              --rawfile selection "$AGENT_SELECTION" \
+              -f "$WORKFLOW_SOURCE/.github/workflows/scripts/discovery_manifest.jq" \
+              "$AGENT_TASK" > "$AGENT_MANIFEST" 2> "$AGENT_REJECTION"
+            # A reply carrying no JSON object matches nothing and leaves jq successful but silent.
+            if [ -s "$AGENT_MANIFEST" ]; then
+              return 0
+            fi
+            if [ ! -s "$AGENT_REJECTION" ]; then
+              echo "Your reply carried no selection JSON object." > "$AGENT_REJECTION"
+            fi
+            return 1
+          }
           set +e
-          opencode run \
-            "Complete the attached lifecycle task exactly." \
-            --agent discover-models \
-            --model cloudrift/agent \
-            --format json \
+          : > "$AGENT_EVENTS"
+          run_agent "Complete the attached lifecycle task exactly." \
             --file "$WORKFLOW_SOURCE/.agents/skills/discover-models/SKILL.md" \
             --file "$WORKFLOW_SOURCE/prompts/model-fit.md" \
             --file "$WORKFLOW_SOURCE/prompts/discover-models/lifecycle.md" \
             --file "$WORKFLOW_SOURCE/prompts/discover-models/score-recipes.md" \
             --file "$WORKFLOW_SOURCE/prompts/discover-models/size-deployments.md" \
-            --file "$AGENT_TASK" > "$AGENT_EVENTS"
+            --file "$AGENT_TASK"
           agent_status=$?
+          build_manifest
+          manifest_status=$?
+          # A rejected selection goes back to the same session, with the exact reason.
+          session_id=$(jq -R -r -s '[splits("\n") | fromjson? | .sessionID // empty][0] // empty' "$AGENT_EVENTS")
+          for correction in 1 2; do
+            if [ "$manifest_status" -eq 0 ] || [ -z "$session_id" ]; then
+              break
+            fi
+            rejection=$(sed 's/^jq: error ([^)]*): //' "$AGENT_REJECTION")
+            echo "::warning::Discovery selection rejected, asking the agent to correct it: $rejection"
+            run_agent "The workflow rejected your final selection: $rejection
+          Correct only that problem, keeping the rest of your decisions, and reply with the complete corrected selection JSON object." \
+              --session "$session_id"
+            agent_status=$?
+            build_manifest
+            manifest_status=$?
+          done
           set -e
-          jq -s -r '[.[] | select(.type == "text") | .part.text][-1] // empty' \
-            "$AGENT_EVENTS" > "$AGENT_SELECTION"
           if [ -s "$AGENT_SELECTION" ]; then
             sed 's/^/discover-models: /' "$AGENT_SELECTION"
           else
             echo "::error::Discovery agent produced no final text output"
           fi
-          if [ "$agent_status" -ne 0 ] && [ ! -s "$AGENT_SELECTION" ]; then
-            exit "$agent_status"
+          if [ "$manifest_status" -ne 0 ]; then
+            cat "$AGENT_REJECTION" >&2
+            exit 1
           fi
-          jq \
-            --rawfile selection "$AGENT_SELECTION" \
-            -f "$WORKFLOW_SOURCE/.github/workflows/scripts/discovery_manifest.jq" \
-            "$AGENT_TASK" > "$AGENT_MANIFEST"
           if [ "$agent_status" -ne 0 ]; then
             echo "Agent confirmation failed after the manifest was written; continuing to repository validation."
           fi
@@ -301,11 +340,15 @@ jobs:
           git add --all -- recipes
           git diff --cached --check
           git commit -m "recipes: refresh model lifecycle"
+          # An onboarding run may have pushed to this branch while the agent was deciding.
+          # Replay the lifecycle commit onto the branch as it stands now.
           for attempt in 1 2 3; do
-            git push origin "$branch" && break
+            git push origin "HEAD:refs/heads/$branch" && break
             if [ "$attempt" -eq 3 ]; then
               exit 1
             fi
+            git fetch origin "+refs/heads/$branch:refs/remotes/origin/$branch"
+            git rebase "origin/$branch" || { git rebase --abort; exit 1; }
             sleep "$attempt"
           done
           echo "branch=$branch" >> "$GITHUB_OUTPUT"
@@ -359,6 +402,7 @@ jobs:
             "$AGENT_TASK" \
             "$AGENT_SELECTION" \
             "$AGENT_MANIFEST" \
+            "$AGENT_REJECTION" \
             "$DISCOVERY_SUMMARY"
           case "$WORKFLOW_SOURCE" in
             /tmp/emmy-discovery-source-*) rm -rf -- "$WORKFLOW_SOURCE" ;;

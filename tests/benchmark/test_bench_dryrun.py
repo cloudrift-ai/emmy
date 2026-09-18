@@ -7,7 +7,7 @@ from pathlib import Path
 
 def test_bench_dry_run_basic(run_cli, make_bench_config, recipes_dir, tmp_path):
     config_path = make_bench_config(tmp_path)
-    recipe = os.path.join(recipes_dir, "Qwen3-Coder-30B-A3B-Instruct-AWQ")
+    recipe = os.path.join(recipes_dir, "Qwen3-Embedding-8B")
     rc, stdout, stderr = run_cli(
         "bench",
         recipe,
@@ -21,7 +21,7 @@ def test_bench_dry_run_basic(run_cli, make_bench_config, recipes_dir, tmp_path):
 
 def test_bench_dry_run_deploy_then_benchmark(run_cli, make_bench_config, recipes_dir, tmp_path):
     config_path = make_bench_config(tmp_path)
-    recipe = os.path.join(recipes_dir, "Qwen3-Coder-30B-A3B-Instruct-AWQ")
+    recipe = os.path.join(recipes_dir, "Qwen3-Embedding-8B")
     rc, stdout, stderr = run_cli(
         "bench",
         recipe,
@@ -37,8 +37,9 @@ def test_bench_dry_run_deploy_then_benchmark(run_cli, make_bench_config, recipes
 
     # Verify benchmark step appears with recipe params
     assert "bench serve" in stdout
-    assert "--random-input-len 4000" in stdout
-    assert "--random-output-len 4000" in stdout
+    assert "--random-input-len 512" in stdout
+    # An embedding recipe generates nothing, so the output-length flag is left off.
+    assert "--random-output-len" not in stdout
 
     # Verify teardown appears
     assert "docker compose down" in stdout
@@ -52,7 +53,7 @@ def test_bench_dry_run_deploy_then_benchmark(run_cli, make_bench_config, recipes
 def test_bench_dry_run_reports_timing(run_cli, make_bench_config, recipes_dir, tmp_path):
     """The end-of-run summary includes a TIMING breakdown for successful tasks."""
     config_path = make_bench_config(tmp_path)
-    recipe = os.path.join(recipes_dir, "Qwen3-Coder-30B-A3B-Instruct-AWQ")
+    recipe = os.path.join(recipes_dir, "Qwen3-Embedding-8B")
     rc, stdout, stderr = run_cli(
         "bench",
         recipe,
@@ -66,7 +67,7 @@ def test_bench_dry_run_reports_timing(run_cli, make_bench_config, recipes_dir, t
 
 def test_bench_multiple_recipes(run_cli, make_bench_config, recipes_dir, tmp_path):
     config_path = make_bench_config(tmp_path)
-    recipe1 = os.path.join(recipes_dir, "Qwen3-Coder-30B-A3B-Instruct-AWQ")
+    recipe1 = os.path.join(recipes_dir, "Qwen3-Embedding-8B")
     # GLM-5.1-FP8, not 4.6: the 4.6 recipe was removed from the repo, and the test only kept
     # passing on dev machines where the directory survives as a shell of old bench run dirs.
     recipe2 = os.path.join(recipes_dir, "GLM-5.1-FP8")
@@ -84,7 +85,7 @@ def test_bench_multiple_recipes(run_cli, make_bench_config, recipes_dir, tmp_pat
 def test_bench_network_flag_dry_run(run_cli, make_bench_config, recipes_dir, tmp_path):
     """--network propagates into the CloudRift rent payload."""
     config_path = make_bench_config(tmp_path)
-    recipe = os.path.join(recipes_dir, "Qwen3-Coder-30B-A3B-Instruct-AWQ")
+    recipe = os.path.join(recipes_dir, "Qwen3-Embedding-8B")
     rc, stdout, stderr = run_cli(
         "bench",
         recipe,
@@ -112,7 +113,7 @@ def test_bench_network_flag_with_null_cloudrift_config(run_cli, recipes_dir, tmp
     with open(config_path, "w") as f:
         yaml.dump(config, f)
 
-    recipe = os.path.join(recipes_dir, "Qwen3-Coder-30B-A3B-Instruct-AWQ")
+    recipe = os.path.join(recipes_dir, "Qwen3-Embedding-8B")
     rc, stdout, stderr = run_cli(
         "bench",
         recipe,
@@ -128,7 +129,7 @@ def test_bench_network_flag_with_null_cloudrift_config(run_cli, recipes_dir, tmp
 
 def test_bench_no_teardown_dry_run(run_cli, make_bench_config, recipes_dir, tmp_path):
     config_path = make_bench_config(tmp_path)
-    recipe = os.path.join(recipes_dir, "Qwen3-Coder-30B-A3B-Instruct-AWQ")
+    recipe = os.path.join(recipes_dir, "Qwen3-Embedding-8B")
     rc, stdout, stderr = run_cli(
         "bench",
         recipe,
@@ -148,7 +149,7 @@ def test_bench_no_teardown_dry_run(run_cli, make_bench_config, recipes_dir, tmp_
 def test_bench_reports_timestamped_run_directory(run_cli, make_bench_config, recipes_dir, tmp_path):
     """Every run targets a timestamped directory under the recipe."""
     config_path = make_bench_config(tmp_path)
-    recipe = os.path.join(recipes_dir, "Qwen3-Coder-30B-A3B-Instruct-AWQ")
+    recipe = os.path.join(recipes_dir, "Qwen3-Embedding-8B")
     rc, stdout, stderr = run_cli(
         "bench",
         recipe,
@@ -168,8 +169,8 @@ def test_bench_experiment_dry_run(run_cli, make_bench_config, project_root, tmp_
     experiment = os.path.join(
         project_root,
         "experiments",
-        "Qwen3-Coder-30B-A3B-Instruct-AWQ",
-        "optimal_mcr_rtx5090",
+        "Qwen3-Embedding-8B",
+        "serving_rtx4090",
     )
     rc, stdout, stderr = run_cli(
         "bench",

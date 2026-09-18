@@ -200,7 +200,7 @@ def test_deploy_cloud_missing_gpu_flag_fails(run_cli, recipes_dir):
         "deploy",
         "cloud",
         "--recipe",
-        os.path.join(recipes_dir, "Qwen3-Coder-30B-A3B-Instruct-AWQ"),
+        os.path.join(recipes_dir, "Qwen3-Embedding-8B"),
         "--dry-run",
     )
     assert rc != 0
