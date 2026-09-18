@@ -3,11 +3,13 @@ tags:
   - untested
 model:
   huggingface: zai-org/GLM-5.3-Flash
-  rationale: "Active GLM-5.3 wave with strong trending, servable, and download signals."
+  rationale: "Strong OpenRouter volume, high arena rank, servable current release."
   heat: 85
   task: generate
 matrices:
-- deploy.gpu: AMD Instinct MI350X
-  deploy.gpu_count: 2
+- deploy.gpu: NVIDIA H100 80GB
+  deploy.gpu_count: 8
+- deploy.gpu: NVIDIA H200 141GB
+  deploy.gpu_count: 8
 - deploy.gpu: NVIDIA B200
-  deploy.gpu_count: 4
+  deploy.gpu_count: 16

@@ -13,7 +13,7 @@ tags:
 
 model:
   huggingface: "philbert440/Qwen3.8-27B-W4A16-AWQ"
-  rationale: "Dominates HuggingFace trending with strong downloads; AWQ provides valuable consumer hardware coverage."
+  rationale: "Strong Qwen3.8 momentum, valuable consumer-hardware coverage."
   heat: 95
   revision: 7908d42a71077a5e4dc458f273682b12dfe384a0
   task: generate

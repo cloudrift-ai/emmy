@@ -6,8 +6,8 @@ tags:
 
 model:
   huggingface: "google/gemma-4-12B"
-  rationale: "Gemma 4 family cooling; base variant lacks independent current trend or breakout attention."
-  heat: 15
+  rationale: "No current trending or serving evidence found."
+  heat: 12
   revision: 023679ed352de9bb66cc873c9009ce3482585c08
   smoke_test: completion
 

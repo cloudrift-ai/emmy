@@ -4,7 +4,7 @@ tags:
 
 model:
   huggingface: "poolside/Laguna-S-2.1-FP8"
-  rationale: "Niche model with no current trending, OpenRouter, or arena evidence supporting onboarding priority."
+  rationale: "Niche model, no current trending, serving, or arena evidence."
   heat: 5
   revision: 06d71e91db70a11b08ee6a09c3c4818c85a61953
   task: generate

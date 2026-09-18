@@ -1,9 +1,9 @@
 tags:
-- onboarding
-- untested
+  - onboarding
+  - untested
 model:
   huggingface: tencent/Hy3
-  rationale: Tencent Hy4/Hy3 series top OpenRouter open volume (11.6T and 4.69T tokens); Hy3 is the public 295B open checkpoint.
+  rationale: "Strong OpenRouter volume and arena rank confirm current Hy3 attention."
   heat: 88
   task: generate
 matrices:

@@ -3,9 +3,11 @@ tags:
   - untested
 model:
   huggingface: google/gemma-3-27b-it
-  rationale: "Eclipsed by Gemma 4; little current evidence or independent community momentum remains."
-  heat: 8
+  rationale: "Eclipsed by Gemma 4, minimal current community evidence."
+  heat: 10
   task: generate
 matrices:
-- deploy.gpu: NVIDIA H200 141GB
+- deploy.gpu: NVIDIA H100 80GB
+  deploy.gpu_count: 1
+- deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Server Edition
   deploy.gpu_count: 1

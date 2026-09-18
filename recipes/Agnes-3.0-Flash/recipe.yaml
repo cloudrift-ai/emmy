@@ -1,11 +1,13 @@
 tags:
-- onboarding
-- untested
+  - onboarding
+  - untested
 model:
   huggingface: Agnes-AI/Agnes-3.0-Flash
-  rationale: 33B Flash MoE trending 210 seven days after release; strong early traction for the mid-size slot.
-  heat: 55
+  rationale: "Fresh multimodal Flash trending on Hugging Face, niche mid-size coverage."
+  heat: 45
   task: generate
 matrices:
 - deploy.gpu: NVIDIA H200 141GB
+  deploy.gpu_count: 1
+- deploy.gpu: NVIDIA B200
   deploy.gpu_count: 1

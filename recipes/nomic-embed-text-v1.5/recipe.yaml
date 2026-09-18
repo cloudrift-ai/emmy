@@ -3,9 +3,9 @@ tags:
   - untested
 model:
   huggingface: nomic-ai/nomic-embed-text-v1.5
-  rationale: "Proven Apache-2.0 RAG utility with huge historical downloads; no fresh trend."
-  heat: 55
+  rationale: "Proven Apache-2.0 embedding utility, historical downloads, no fresh trend."
+  heat: 50
   task: embed
 matrices:
-- deploy.gpu: NVIDIA A100 40GB
+- deploy.gpu: NVIDIA GeForce RTX 4080
   deploy.gpu_count: 1

@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
-  rationale: "Qwen/Qwen3-Coder-Next-FP8 supersedes this recipe: Qwen3-Coder-Next-FP8 replaces: 262K vs 114K context, 1x96GB vs 1x32GB, 32 vs 16 concurrency; no retained advantage."
+  rationale: "Superseded by Qwen/Qwen3-Coder-Next-FP8; better context, concurrency, and footprint."
   heat: 5
 engine:
   llm:

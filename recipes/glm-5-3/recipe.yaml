@@ -3,7 +3,7 @@ tags:
   - untested
 model:
   huggingface: THUDM/glm-5-3
-  rationale: "Active GLM-5.3 wave with high downloads, but exact repo unreadable."
+  rationale: "GLM-5.3 wave strong nearby, but this exact repo is gated/unreadable."
   heat: 68
   task: generate
 matrices:

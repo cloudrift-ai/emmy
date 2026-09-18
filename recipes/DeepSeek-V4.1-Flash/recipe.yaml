@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: deepseek-ai/DeepSeek-V4.1-Flash
-  rationale: "Breakout attention across OpenRouter volume, download velocity, and Hugging Face trending signals."
-  heat: 94
+  rationale: "Breakout HF trending plus rapid download velocity; top-tier current attention."
+  heat: 95
   task: generate
 matrices:
 - deploy.gpu: NVIDIA B200

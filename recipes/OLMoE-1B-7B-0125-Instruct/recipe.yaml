@@ -3,9 +3,9 @@ tags:
   - untested
 model:
   huggingface: allenai/OLMoE-1B-7B-0125-Instruct
-  rationale: "Established small MoE with no current trending or community activity."
+  rationale: "Established small MoE, no current activity or trend."
   heat: 10
   task: generate
 matrices:
-- deploy.gpu: NVIDIA L40S
+- deploy.gpu: NVIDIA GeForce RTX 4090
   deploy.gpu_count: 1

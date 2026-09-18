@@ -10,7 +10,7 @@
 # golden/ is separate: compiler evidence for decoder layer 0 on one V100 SXM3, not a measurement of
 # the SXM2 pair this recipe deploys to. See RESULTS.md.
 tags:
-  - maintained
+  - best-effort
   - compiler-qualified
 
 model:
@@ -19,8 +19,8 @@ model:
   # (quant_method="gptq", 4-bit, group_size=128, desc_act=false, sym=true) and was prepared and
   # tested by its author on a V100, which is why it is the 4-bit checkpoint this recipe serves.
   huggingface: "Max73333/Qwen3.8-27B-GPTQ-Int4-V100"
-  rationale: "Rides strong Qwen3.8 family momentum, but specific community quant lacks direct evidence; useful Volta hardware coverage."
-  heat: 35
+  rationale: "Rides hot Qwen3.8 family momentum; useful Volta hardware coverage."
+  heat: 45
   revision: d5a18cc1477e301e50d3fe4167fbf76db9337edc
   task: generate
 

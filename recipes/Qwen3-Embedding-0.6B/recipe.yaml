@@ -13,7 +13,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3-Embedding-0.6B"
-  rationale: "Stable utility on cooling Qwen3.5 momentum; no direct recent trending signals found."
+  rationale: "Stable embedding utility, no fresh trending evidence."
   heat: 40
   task: embed
 

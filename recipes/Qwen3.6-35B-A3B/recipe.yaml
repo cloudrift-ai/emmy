@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.6-35B-A3B"
-  rationale: "Qwen3.6 base cooling; MoE novelty offset by reduced current family attention."
+  rationale: "Derived variant shows trending, indicating base-architecture interest."
   heat: 45
 engine:
   llm:

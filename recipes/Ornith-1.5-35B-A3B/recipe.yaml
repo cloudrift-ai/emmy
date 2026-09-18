@@ -3,9 +3,13 @@ tags:
   - untested
 model:
   huggingface: Ornith-ai/Ornith-1.5-35B-A3B
-  rationale: "No trending, community, or current signal found; unmaintained A3B fork with zero independent evidence."
+  rationale: "No trending, community, or serving evidence; unmaintained fork."
   heat: 5
   task: generate
 matrices:
+- deploy.gpu: NVIDIA H100 80GB
+  deploy.gpu_count: 2
+- deploy.gpu: NVIDIA H100 80GB
+  deploy.gpu_count: 4
 - deploy.gpu: NVIDIA H200 141GB
-  deploy.gpu_count: 1
+  deploy.gpu_count: 2
