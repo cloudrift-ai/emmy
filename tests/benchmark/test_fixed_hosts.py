@@ -81,7 +81,7 @@ async def test_resolve_fixed_hosts_dry_run_skips_detection():
 def test_bench_fixed_host_dry_run_cli(run_cli, make_bench_config, recipes_dir, tmp_path):
     """End-to-end CLI: --ssh skips cloud provisioning but still installs Docker / NVIDIA toolkit if missing."""
     config_path = make_bench_config(tmp_path)
-    recipe = os.path.join(recipes_dir, "Qwen3-Coder-30B-A3B-Instruct-AWQ")
+    recipe = os.path.join(recipes_dir, "Qwen3-Embedding-8B")
     rc, stdout, stderr = run_cli(
         "bench",
         recipe,
@@ -109,7 +109,7 @@ def test_bench_fixed_host_dry_run_cli(run_cli, make_bench_config, recipes_dir, t
 
 def test_bench_fixed_host_no_teardown_keeps_workload(run_cli, make_bench_config, recipes_dir, tmp_path):
     config_path = make_bench_config(tmp_path)
-    recipe = os.path.join(recipes_dir, "Qwen3-Coder-30B-A3B-Instruct-AWQ")
+    recipe = os.path.join(recipes_dir, "Qwen3-Embedding-8B")
     rc, stdout, stderr = run_cli("bench", recipe, "--config", config_path, "--dry-run", "--no-teardown", "--ssh", "fakeuser@fake.host")
     assert rc == 0, f"stderr: {stderr}\nstdout: {stdout}"
     assert "Tearing down" not in stdout

@@ -3,11 +3,9 @@ tags:
   - untested
 model:
   huggingface: deepseek-ai/DeepSeek-V4-Pro
-  rationale: "Established 1.6T MoE served on OR with moderate sustained interest."
-  heat: 65
+  rationale: "Active V4.x wave; mid-wave interest trailing newer V4.1-Flash momentum without independent breakout evidence."
+  heat: 58
   task: generate
 matrices:
-- deploy.gpu: NVIDIA B200
-  deploy.gpu_count: 8
-- deploy.gpu: NVIDIA H200 141GB
-  deploy.gpu_count: 8
+- deploy.gpu: AMD Instinct MI350X
+  deploy.gpu_count: 16
