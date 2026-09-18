@@ -220,6 +220,22 @@ jobs:
           grep -qxF "$lfs_attribute" .git/info/attributes 2>/dev/null || \
             printf '%s\n' "$lfs_attribute" >> .git/info/attributes
 
+      - name: Terminate VMs left by an interrupted run
+        env:
+          CLOUDRIFT_API_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
+        run: |
+          # Runs are serialized by the concurrency group, so any VM still carrying this workflow's tag belongs to a run
+          # whose runner died before its always() cleanup could terminate it.
+          ./venv/bin/python - <<'PY'
+          import asyncio
+          import os
+
+          from emmy.provisioning.cloudrift import terminate_instances_by_tags
+
+          tags = [tag for tag in os.environ["EMMY_RENTAL_TAGS"].split(",") if tag and not tag.startswith("gh-job:")]
+          asyncio.run(terminate_instances_by_tags(os.environ["CLOUDRIFT_API_KEY"], tags))
+          PY
+
       - name: Select one available deployment
         id: selection
         env:
@@ -489,6 +505,10 @@ jobs:
           else
             echo "::error::Onboarding agent produced no final text output"
           fi
+          if [ ! -s "$ONBOARD_SUMMARY" ]; then
+            echo "::error::Onboarding agent ended without writing its summary"
+            exit 1
+          fi
           exit "$agent_status"
 
       - name: Collect onboarding failure notice
@@ -503,6 +523,9 @@ jobs:
           kind = ""
           message = ""
           summary_path = Path(os.environ["ONBOARD_SUMMARY"])
+          if not summary_path.is_file():
+              kind = "failure"
+              message = "The onboarding agent ended without writing its summary"
           try:
               summary = json.loads(summary_path.read_text())
               failure = summary.get("failure") or {}

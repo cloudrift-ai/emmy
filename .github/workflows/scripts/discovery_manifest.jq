@@ -145,10 +145,8 @@ def model_ids($items):
             task,
             rationale: $scores[.model_id].rationale,
             heat: $scores[.model_id].heat,
-            deployments: (
-              $sized[.model_id].deployments
-                // [.deployments[] | {"deploy.gpu": .gpu, "deploy.gpu_count": .gpu_count}]
-            )
+            # A shell is sized once, when it is created; re-sizing it every run only reshuffles its matrix.
+            deployments: [.deployments[] | {"deploy.gpu": .gpu, "deploy.gpu_count": .gpu_count}]
           }
       ]
       + [
