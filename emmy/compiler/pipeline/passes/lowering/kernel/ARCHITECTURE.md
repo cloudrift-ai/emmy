@@ -134,7 +134,7 @@ projection, so no wrap position encloses it): the serial fold binds the projecti
 operand and projection together, and a cooperative / ILP row — whose lanes the sweep would be distributed across —
 declines via `UnbindableProjection` (`RuleSkipped(reject=True)` at the pass boundary; the greedy retries the next
 row). The other `UnbindableProjection` — a multi-root binding of a projection whose outputs do not partition by root
-(`ops.projection_regions`) — is a term fact the schedule context reads at the offer, so no enumerated row tiles a
+(`ops.projection_regions`) — is a term fact the schedule context reads at the offer, so no enumerated row schedules a
 second root there and the decline is a bug, not a retry. The
 recursion, the binder, the reduce-axis tiling, and the shared-row staging apply live in `_factor.py`; the four tiling
 levels every tier seals through are `_tiling.py`, which knows a `Side` pair, integer counts and three callables — no

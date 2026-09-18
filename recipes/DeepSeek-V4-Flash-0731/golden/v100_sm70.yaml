@@ -30731,41 +30731,6 @@ configs:
   target:
     loop: 19
   realizations:
-  - name: post-sym.k_div_35_reduce.d39827c4b823.dynamic.8b7df770ae95
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      REDUCE@map.1/map.1/inner: ''
-      REDUCE@map.1/map.1/inner.2/map.1/reduce: ''
-      REDUCE@map.1/map.2/inner: ''
-      REDUCE@map.1/map.2/inner.1/map.1/reduce: ''
-      REDUCE@map.1/map.2/inner.2/map.1/inner: ''
-      REDUCE@map.1/map.2/inner.2/map.1/inner.2/map.1/inner: ''
-      REDUCE@map.1/map.2/inner.2/map.1/inner.2/map.1/inner.2/map.1/reduce: ''
-      REDUCE@map.2/inner: coop-t
-      REDUCE@map.2/inner.1/map.2/map.1/reduce: ''
-      REDUCE@map.2/inner.2/map.1/inner: ''
-      REDUCE@map.2/inner.2/map.1/inner.2/map.1/reduce: ''
-      REDUCE@map.3/inner: coop-t
-      REDUCE@map.3/inner.1/map.1/inner: ''
-      REDUCE@map.3/inner.1/map.1/inner.2/map.1/reduce: ''
-      REDUCE@map.3/inner.2/map.1/inner: ''
-      REDUCE@map.3/inner.2/map.1/inner.1/map.1/reduce: ''
-      REDUCE@map.3/inner.2/map.1/inner.2/map.1/inner: ''
-      REDUCE@map.3/inner.2/map.1/inner.2/map.1/inner.2/map.1/inner: ''
-      REDUCE@map.3/inner.2/map.1/inner.2/map.1/inner.2/map.1/inner.2/map.1/reduce: ''
-      WORK: t256
-      RASTER: ''
-    identity: 5d7abd1e0c7c96cd136a1d0ee028df16f42f47724656c3b261b8e49ec45b4274
-    measurements:
-      emmy_us: 3.4550790735285917
-      reference_us: 3.4785882076796364
-      reference_backend: same-input-greedy
-    latency:
-      NVIDIA Tesla V100 SXM3 32GB:
-        emmy_us: 3.11386172876418
-        eager_us: 234.55757430837124
   - name: post-sym.k_div_35_reduce.d39827c4b823.dynamic.8b7df770ae95.5d7abd1e0c7c
     bindings: {}
     pins:
@@ -32867,65 +32832,6 @@ configs:
   target:
     loop: 55
   realizations:
-  - name: post1.k_div_35_reduce.afc5d0a58fb0.m1.4fe0998b36aa
-    bindings:
-      num_tokens: 1
-    pins:
-      FAST_MATH: false
-    knobs:
-      TILE@map.1/map.1/inner: f4x6
-      TILE@map.1/map.2/inner: ''
-      TILE@map.1/map.2/inner.2/map.1/inner: ''
-      TILE@map.1/map.2/inner.2/map.1/inner.2/map.1/inner: ''
-      TILE@map.2/inner: ''
-      TILE@map.2/inner.2/map.1/inner: ''
-      TILE@map.3/inner: ''
-      TILE@map.3/inner.1/map.1/inner: ''
-      TILE@map.3/inner.2/map.1/inner: ''
-      TILE@map.3/inner.2/map.1/inner.2/map.1/inner: ''
-      TILE@map.3/inner.2/map.1/inner.2/map.1/inner.2/map.1/inner: ''
-      REDUCE@map.1/map.1/inner: ''
-      REDUCE@map.1/map.1/inner.2/map.1/reduce: ''
-      REDUCE@map.1/map.2/inner: ''
-      REDUCE@map.1/map.2/inner.1/map.1/reduce: ''
-      REDUCE@map.1/map.2/inner.2/map.1/inner: ''
-      REDUCE@map.1/map.2/inner.2/map.1/inner.2/map.1/inner: ''
-      REDUCE@map.1/map.2/inner.2/map.1/inner.2/map.1/inner.2/map.1/reduce: ''
-      REDUCE@map.2/inner: r2
-      REDUCE@map.2/inner.1/map.2/map.1/reduce: ''
-      REDUCE@map.2/inner.2/map.1/inner: ''
-      REDUCE@map.2/inner.2/map.1/inner.2/map.1/reduce: ''
-      REDUCE@map.3/inner: r2
-      REDUCE@map.3/inner.1/map.1/inner: ''
-      REDUCE@map.3/inner.1/map.1/inner.2/map.1/reduce: ''
-      REDUCE@map.3/inner.2/map.1/inner: ''
-      REDUCE@map.3/inner.2/map.1/inner.1/map.1/reduce: ''
-      REDUCE@map.3/inner.2/map.1/inner.2/map.1/inner: ''
-      REDUCE@map.3/inner.2/map.1/inner.2/map.1/inner.2/map.1/inner: ''
-      REDUCE@map.3/inner.2/map.1/inner.2/map.1/inner.2/map.1/inner.2/map.1/reduce: ''
-      STAGE@map.1/map.1/inner: ''
-      STAGE@map.1/map.2/inner: ''
-      STAGE@map.1/map.2/inner.2/map.1/inner: ''
-      STAGE@map.1/map.2/inner.2/map.1/inner.2/map.1/inner: ''
-      STAGE@map.2/inner: ''
-      STAGE@map.2/inner.2/map.1/inner: ''
-      STAGE@map.3/inner: ''
-      STAGE@map.3/inner.1/map.1/inner: ''
-      STAGE@map.3/inner.2/map.1/inner: ''
-      STAGE@map.3/inner.2/map.1/inner.2/map.1/inner: ''
-      STAGE@map.3/inner.2/map.1/inner.2/map.1/inner.2/map.1/inner: ''
-      WORK: t16x8
-      RASTER: gm8
-    identity: fddddaeaf2299dc3587d8e29ea2f680a90e77d55cfd7a6afe1d5cfb37e825c6d
-    measurements:
-      emmy_us: 19.90656018257141
-      reference_us: 19.927040338516235
-      reference_backend: same-input-greedy
-    latency:
-      NVIDIA Tesla V100 SXM3 32GB:
-        emmy_us: 17.2463153537951
-        tcompile_us: 5.901963602412831
-        eager_us: 227.83069610595703
   - name: post1.k_div_35_reduce.afc5d0a58fb0.m1.4fe0998b36aa.fddddaeaf229
     bindings:
       num_tokens: 1
@@ -35163,43 +35069,6 @@ configs:
   target:
     loop: 91
   realizations:
-  - name: post16.k_div_35_reduce.ea2f8bf969e9.m16.16dd46882ec4
-    bindings:
-      num_tokens: 16
-    pins:
-      FAST_MATH: false
-    knobs:
-      REDUCE@map.1/map.1/inner: ''
-      REDUCE@map.1/map.1/inner.2/map.1/reduce: ''
-      REDUCE@map.1/map.2/inner: ''
-      REDUCE@map.1/map.2/inner.1/map.1/reduce: ''
-      REDUCE@map.1/map.2/inner.2/map.1/inner: ''
-      REDUCE@map.1/map.2/inner.2/map.1/inner.2/map.1/inner: ''
-      REDUCE@map.1/map.2/inner.2/map.1/inner.2/map.1/inner.2/map.1/reduce: ''
-      REDUCE@map.2/inner: coop
-      REDUCE@map.2/inner.1/map.2/map.1/reduce: ''
-      REDUCE@map.2/inner.2/map.1/inner: ''
-      REDUCE@map.2/inner.2/map.1/inner.2/map.1/reduce: ''
-      REDUCE@map.3/inner: coop
-      REDUCE@map.3/inner.1/map.1/inner: ''
-      REDUCE@map.3/inner.1/map.1/inner.2/map.1/reduce: ''
-      REDUCE@map.3/inner.2/map.1/inner: ''
-      REDUCE@map.3/inner.2/map.1/inner.1/map.1/reduce: ''
-      REDUCE@map.3/inner.2/map.1/inner.2/map.1/inner: ''
-      REDUCE@map.3/inner.2/map.1/inner.2/map.1/inner.2/map.1/inner: ''
-      REDUCE@map.3/inner.2/map.1/inner.2/map.1/inner.2/map.1/inner.2/map.1/reduce: ''
-      WORK: t128
-      RASTER: ''
-    identity: 659ebc02f771a39d407e1525f69e33beb7c99445f24170fa07eff268d4e2909b
-    measurements:
-      emmy_us: 3.74783992767334
-      reference_us: 3.696881879971722
-      reference_backend: same-input-greedy
-    latency:
-      NVIDIA Tesla V100 SXM3 32GB:
-        emmy_us: 3.4002508020567146
-        tcompile_us: 5.549305902723594
-        eager_us: 229.61879350065774
   - name: post16.k_div_35_reduce.ea2f8bf969e9.m16.16dd46882ec4.659ebc02f771
     bindings:
       num_tokens: 16
@@ -36949,42 +36818,6 @@ configs:
   target:
     loop: 127
   realizations:
-  - name: post4096.k_div_35_reduce.4f5117e8a207.m4096.cafababe1ccb
-    bindings:
-      num_tokens: 4096
-    pins:
-      FAST_MATH: false
-    knobs:
-      REDUCE@map.1/map.1/inner: ''
-      REDUCE@map.1/map.1/inner.2/map.1/reduce: ''
-      REDUCE@map.1/map.2/inner: ''
-      REDUCE@map.1/map.2/inner.1/map.1/reduce: ''
-      REDUCE@map.1/map.2/inner.2/map.1/inner: ''
-      REDUCE@map.1/map.2/inner.2/map.1/inner.2/map.1/inner: ''
-      REDUCE@map.1/map.2/inner.2/map.1/inner.2/map.1/inner.2/map.1/reduce: ''
-      REDUCE@map.2/inner: coop
-      REDUCE@map.2/inner.1/map.2/map.1/reduce: ''
-      REDUCE@map.2/inner.2/map.1/inner: ''
-      REDUCE@map.2/inner.2/map.1/inner.2/map.1/reduce: ''
-      REDUCE@map.3/inner: coop
-      REDUCE@map.3/inner.1/map.1/inner: ''
-      REDUCE@map.3/inner.1/map.1/inner.2/map.1/reduce: ''
-      REDUCE@map.3/inner.2/map.1/inner: ''
-      REDUCE@map.3/inner.2/map.1/inner.1/map.1/reduce: ''
-      REDUCE@map.3/inner.2/map.1/inner.2/map.1/inner: ''
-      REDUCE@map.3/inner.2/map.1/inner.2/map.1/inner.2/map.1/inner: ''
-      REDUCE@map.3/inner.2/map.1/inner.2/map.1/inner.2/map.1/inner.2/map.1/reduce: ''
-      WORK: t128
-      RASTER: ''
-    identity: c61ff5c58a30c72b87fb7667325d1c6d13300071f3cd0f64e6fefdf77ae6f2b6
-    measurements:
-      emmy_us: 7.326117771513322
-      reference_us: 7.332152537717164
-      reference_backend: same-input-greedy
-    latency:
-      NVIDIA Tesla V100 SXM3 32GB:
-        emmy_us: 6.325468232360067
-        eager_us: 292.232774708369
   - name: post4096.k_div_35_reduce.4f5117e8a207.m4096.cafababe1ccb.c61ff5c58a30
     bindings:
       num_tokens: 4096
