@@ -8,7 +8,7 @@ from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.pipeline import Match, Pattern
 from emmy.compiler.pipeline.passes.lowering.tile._cut import _input_fragment
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op, states_as_buffers
-from emmy.compiler.pipeline.passes.lowering.tile._row import ROW_AXIS, binds_the_row, row_bound_body, row_candidates
+from emmy.compiler.pipeline.passes.lowering.tile._row import lift_kernel
 from emmy.compiler.pipeline.passes.lowering.tile._split import add_output_piece
 
 PATTERN = [Pattern("root", LoopOp)]
@@ -29,13 +29,4 @@ def rewrite(match: Match, root: Node, ctx=None):
             for name, shape in shapes.items()
         )
         return add_output_piece(match, _input_fragment(match, root), root, tile, list(root.inputs), suffix="__lifted", states=states)
-    tile = lift_loop_op(loop, name=loop.name)
-    # A contraction that owns no free axis has no row for any tier to tile. Its row is a size-one
-    # output dimension Loop-IR normalization inlined; bound back, the term keeps every per-cell
-    # choice it had and gains the fragment ones beside them.
-    for position in row_candidates(loop, tile):
-        bound = lift_loop_op(loop, name=loop.name, body=row_bound_body(loop, position, ROW_AXIS))
-        if binds_the_row(bound, ROW_AXIS):
-            tile = bound
-            break
-    return replace(tile, outputs={root.output.name: root.output})
+    return replace(lift_kernel(loop, name=loop.name), outputs={root.output.name: root.output})

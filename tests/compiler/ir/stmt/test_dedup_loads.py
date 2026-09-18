@@ -130,3 +130,40 @@ def test_dedup_loads_does_not_reuse_a_read_across_a_loop_that_writes_its_buffer(
     out = dedup_loads(body)
 
     assert out[1].body[0] == Load(name="current", input="B", index=ZERO)
+
+
+def test_normalize_body_dedups_identical_accumulations() -> None:
+    """Two consumers of one fused value carry two copies of its accumulation in one reduce loop
+    after the splice; the second is the first under another name."""
+    from emmy.compiler.ir.stmt.leaves import Accum
+
+    body = Body(
+        (
+            Loop(
+                axis=Axis("m", 4),
+                body=(
+                    Loop(
+                        axis=Axis("k", 8),
+                        body=(
+                            Load(name="x0", input="x", index=(Var("m"), Var("k"))),
+                            Load(name="w0", input="w", index=(Var("k"),)),
+                            Assign(name="p0", op="multiply", args=("x0", "w0")),
+                            Accum(name="acc0", value="p0", op="add", axes=("k",)),
+                            Load(name="x1", input="x", index=(Var("m"), Var("k"))),
+                            Load(name="w1", input="w", index=(Var("k"),)),
+                            Assign(name="p1", op="multiply", args=("x1", "w1")),
+                            Accum(name="acc1", value="p1", op="add", axes=("k",)),
+                        ),
+                    ),
+                    Assign(name="gate", op="exp", args=("acc0",)),
+                    Assign(name="up", op="exp", args=("acc1",)),
+                    Assign(name="out", op="multiply", args=("gate", "up")),
+                    Write(output="out", index=(Var("m"),), value="out"),
+                ),
+            ),
+        )
+    )
+    (loop,) = normalize_body(body)
+    (inner,) = [stmt for stmt in loop.body if isinstance(stmt, Loop)]
+    assert [type(stmt).__name__ for stmt in inner.body] == ["Load", "Load", "Assign", "Accum"]
+    assert [stmt for stmt in loop.body if isinstance(stmt, Assign)][-1].args == ("v1", "v1")

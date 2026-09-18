@@ -997,8 +997,8 @@ def test_output_owning_cut_leaves_single_output_pieces_that_promote() -> None:
         assert len(piece.op.output_specs) == 1
         assert len(piece.op.place.free) >= 2, f"{piece.id} kept a rank-1 placement"
         assert not any(spec.sweep for spec in piece.op.output_specs), f"{piece.id} still sweeps its store"
-    widths = {piece.op.place.free[-1].extent.as_static() for piece in pieces}
-    assert widths == {256, 32}, "each piece binds its OWN store's width, not the other's"
+    widths = {tuple(sorted(axis.extent.as_static() for axis in piece.op.place.free)) for piece in pieces}
+    assert widths == {(128, 256), (32, 128)}, "each piece binds its OWN store's width, not the other's"
 
 
 def test_peeling_all_but_one_output_leaves_every_piece_single_output() -> None:
@@ -1116,8 +1116,9 @@ def test_an_output_owning_piece_carries_its_epilogue_into_a_lowerable_kernel() -
     pieces = {piece.id: piece.op for piece in fragment.nodes.values() if isinstance(piece.op, TileOp)}
 
     assert sorted(pieces) == ["narrow__placed", "wide__placed"]
-    assert [axis.name for axis in pieces["wide__placed"].place.free] == ["m", "n"]
-    assert [axis.name for axis in pieces["narrow__placed"].place.free] == ["m", "n2"]
+    # Re-formed as its own kernel, a piece spells its axes canonically; the grid is read by extent.
+    assert [axis.extent.as_static() for axis in pieces["wide__placed"].place.free] == [8, 16]
+    assert [axis.extent.as_static() for axis in pieces["narrow__placed"].place.free] == [8, 4]
     for name, piece in pieces.items():
         stored = {value for spec in piece.output_specs for value in spec.write.values}
         defined = {name for stmt in piece.op.lower(axes=piece.axes) for name in stmt.defines()}
@@ -1293,7 +1294,7 @@ def test_the_cut_takes_a_row_statistic_but_leaves_a_per_cell_fold() -> None:
     assert seams["q"] not in knobs, "the per-cell fold is the piece's own work"
 
     owning = _composed_arm(graph, node)[0].materialize().nodes["wide__placed"].op
-    assert [axis.name for axis in owning.place.free] == ["m", "n"], "the piece binds its store's sweep around what it kept"
+    assert [axis.extent.as_static() for axis in owning.place.free] == [8, 16], "the piece binds its store's sweep around what it kept"
 
 
 def test_a_recorded_route_selects_the_arm_spelling_its_whole_cut_set() -> None:
