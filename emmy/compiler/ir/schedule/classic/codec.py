@@ -114,10 +114,12 @@ class ClassicScheduleCodec:
             reduce = None
             if view.axis is not None:
                 reduce = Reduce.parse(row[classic_node_key(self.tile_op, "REDUCE", site)], work)
+            # A map's strip never carries the worker inventory — the row's WORK is the kernel's
+            # sweep width — so a projection site's spelling parses bare, as its catalog spells it.
             tile = (
                 resolve_site_tile(
                     row[classic_node_key(self.tile_op, "TILE", site)],
-                    work,
+                    work if reduce is not None else None,
                     reduce.coop if reduce is not None else 1,
                 )
                 if site in self.tile_op.family_sites["TILE"]
