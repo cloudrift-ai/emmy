@@ -35,6 +35,11 @@ command:
     server_pid=$$!
     stop() {
       kill "$$server_pid" 2>/dev/null || true
+      for attempt in $$(seq 1 10); do
+        kill -0 "$$server_pid" 2>/dev/null || break
+        sleep 1
+      done
+      kill -KILL "$$server_pid" 2>/dev/null || true
       wait "$$server_pid" 2>/dev/null || true
     }
     trap stop EXIT
@@ -45,7 +50,7 @@ command:
       sleep 5
     done
     test "$$ready" = 1
-    nvidia-smi --query-gpu=name,uuid,driver_version,memory.used,memory.total --format=csv > $task_dir/memory.txt
+    nvidia-smi --query-gpu=name,driver_version,memory.used,memory.total --format=csv > $task_dir/memory.txt
     for concurrency in 1 4; do
       for input in 32 256 1024; do
         for repeat in 1 2 3; do
@@ -69,7 +74,7 @@ command:
       --ignore-eos --temperature 0 --seed 0 --save-result --save-detailed \
       --result-dir $task_dir --result-filename profile.json > $task_dir/profile.log 2>&1
   result_files: ["*.json", "*.log", "*.txt", "traces/*"]
-  timeout: 2400
+  timeout: 1200
 
 matrices:
   cross:
