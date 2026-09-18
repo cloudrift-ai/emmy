@@ -46,6 +46,14 @@ class _CutContext(ScheduleContext[DeferredFork, object, object]):
         return replace(self, _schedule=pick)
 
 
+def _cut_arm(materialize, seams) -> DeferredFork:
+    """The arm that cuts ``seams``: it spells every occurrence of each clustered value, and names
+    the seam each of those spellings stands for."""
+    knobs = {spelling: "cut" for seam in seams for spelling in (seam.spelling, *seam.aliases)}
+    aliases = {alias: seam.spelling for seam in seams for alias in seam.aliases}
+    return DeferredFork(materialize, knobs, structural=True, aliases=aliases)
+
+
 def _seam_index(seams) -> dict[int, object]:
     """Map every seam node and clustered sibling to its shared decision."""
     return {id(node): seam for seam in seams for node in (seam.node, *(sibling for sibling, *_ in seam.siblings))}
@@ -163,13 +171,7 @@ def _composed_forks(match: Match, root: Node, tile: TileOp, seams, ctx) -> list[
                 chosen.append(seam)
         if len(chosen) > 1:
             composed = tuple(chosen)
-            out.append(
-                DeferredFork(
-                    lambda composed=composed: realize(match, root, composed, placement_decided=True),
-                    {seam.spelling: "cut" for seam in composed},
-                    structural=True,
-                )
-            )
+            out.append(_cut_arm(lambda composed=composed: realize(match, root, composed, placement_decided=True), composed))
     return out
 
 
@@ -187,17 +189,13 @@ def _placement_forks(match: Match, root: Node, tile: TileOp, ctx=None):
         if value == "fuse":
             (spelling,) = chosen
             return DeferredFork(lambda: replace(tile, placement_decided=True), {spelling: "fuse"})
-        return DeferredFork(
-            lambda: realize(match, root, chosen, placement_decided=True),
-            {seam.spelling: "cut" for seam in chosen},
-            structural=True,
-        )
+        return _cut_arm(lambda: realize(match, root, chosen, placement_decided=True), chosen)
 
     options = [DeferredFork(lambda: replace(tile, placement_decided=True), {"PLACE": "fuse"})]
-    options.extend(DeferredFork(lambda seam=seam: realize(match, root, (seam,)), {seam.spelling: "cut"}, structural=True) for seam in seams)
+    options.extend(_cut_arm(lambda seam=seam: realize(match, root, (seam,)), (seam,)) for seam in seams)
     whole = full_projection_seams(tile, seams)
     if whole:
-        options.append(DeferredFork(lambda: realize(match, root, whole), {seam.spelling: "cut" for seam in whole}, structural=True))
+        options.append(_cut_arm(lambda: realize(match, root, whole), whole))
     options.extend(_composed_forks(match, root, tile, seams, ctx))
     return options
 

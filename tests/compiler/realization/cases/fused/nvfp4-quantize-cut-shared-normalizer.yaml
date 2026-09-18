@@ -784,6 +784,25 @@ configs:
       WORK: ''
       RASTER: ''
     identity: 1f1cc372340efdbab97e50f77d7d1b90f624b5d951e524a725711995d7215a94
+  - name: k_mean_e934a3.5ab3d806c685
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@map.1/map.2/reduce: ''
+      REDUCE@map.2/map.2/reduce: ''
+      WORK: ''
+      RASTER: ''
+    identity: 5ab3d806c685dff5b01598a57099dd5d707c11885909cd0000f060aeb26b3512
+  - name: k_mean_e934a3.d074fcf531fc
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: d074fcf531fc3f5e27a8a0fe1d7b168a1f96998682c93aa5e94a702e5c8ba1f3
 loops:
 - inputs: [x]
   outputs: [mul_static_fp4_scale_bits, mul_static_fp4_bits]

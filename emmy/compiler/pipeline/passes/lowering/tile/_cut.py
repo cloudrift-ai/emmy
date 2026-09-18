@@ -35,8 +35,8 @@ from emmy.compiler.dtype import F32
 from emmy.compiler.dtype import get as get_dtype
 from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure.fold import (
     Fold,
 )
@@ -83,6 +83,9 @@ class CutSite:
     #: spelled through its own axes. Object sharing is the degenerate case (identity, with the
     #: identity correspondence).
     siblings: tuple = ()
+    #: The siblings' own spellings: a row or a pin that names any occurrence of the value names
+    #: this one decision, and the arm that cuts it spells every one of them.
+    aliases: tuple[str, ...] = ()
     #: ``(tail, stores)`` when this seam's cone solely produces some of the kernel's OWN output
     #: specifications — those stores and the projection statements only they read — else ``None``.
     #: A seam with ``owned`` realizes as the output-owning cut (module docstring) and writes no
@@ -505,6 +508,7 @@ def _cluster_value_seams(seams: list[CutSite], axes: tuple) -> tuple[CutSite, ..
         if {axis.name for axis in _workspace_axes(rep, rep.node)} - set(rep_params):
             continue  # a workspace axis with no capture to map has no sibling spelling
         siblings = []
+        aliases = []
         for member_index in eligible:
             if member_index == rep_index or member_index in drop or member_index in merged:
                 continue
@@ -525,9 +529,10 @@ def _cluster_value_seams(seams: list[CutSite], axes: tuple) -> tuple[CutSite, ..
             if not aligned:
                 continue
             siblings.append((member.node, tuple(zip(rep_params, member_params, strict=True)), channels))
+            aliases.append(member.spelling)
             drop.add(member_index)
         if siblings:
-            merged[rep_index] = replace(rep, siblings=tuple(siblings))
+            merged[rep_index] = replace(rep, siblings=tuple(siblings), aliases=tuple(aliases))
     return tuple(merged.get(index, seam) for index, seam in enumerate(seams) if index not in drop)
 
 
@@ -766,7 +771,6 @@ def _read_name(name: str, token: str, ordinal: int | None = None) -> str:
     return f"{name}__ws{token}" if ordinal is None else f"{name}__ws{token}s{ordinal}"
 
 
-
 def _reformed(piece: TileOp) -> TileOp:
     """``piece`` formed as its own kernel: its tree lowered to the closed loop nest and lifted
     again, the way a kernel fusion had ended at a graph edge is formed.
@@ -793,7 +797,8 @@ def _reformed(piece: TileOp) -> TileOp:
         replace(spec, sweep=(*spec.sweep, *(axis for axis in peeled if any(axis.name in index.free_vars() for index in spec.write.index))))
         for spec in formed.output_specs
     )
-    return replace(piece, op=rewrite_twisted(formed.op, formed.axes), place=replace(formed.place, free=grid), axes=formed.axes, output_specs=specs)
+    place = replace(formed.place, free=grid)
+    return replace(piece, op=rewrite_twisted(formed.op, formed.axes), place=place, axes=formed.axes, output_specs=specs)
 
 
 def _producer_order(pieces) -> list:
@@ -915,9 +920,7 @@ def realize(
             mapping = dict(pairs)
             sibling_index = tuple(Var(mapping[axis.name]) for axis in axes)
             replacements[id(sibling)] = tuple(
-                Fold.slab(Load(name=_read_name(own, token, ordinal), input=held[channel], index=sibling_index))
-                if channel in held
-                else None
+                Fold.slab(Load(name=_read_name(own, token, ordinal), input=held[channel], index=sibling_index)) if channel in held else None
                 for own, channel in zip(sibling.exposes, channels, strict=True)
             )
             # The representative wins a shared name: a boundary store of a value both occurrences
