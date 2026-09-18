@@ -366,10 +366,7 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
                 owned=owned,
             )
         )
-    return _cluster_value_seams(
-        out,
-        {id(seam.node): seam.frontier is None and seam.owned is None and store_dtype_consumers.get(id(seam.node)) for seam in out},
-    )
+    return _cluster_value_seams(out, tile.axes)
 
 
 def _hoisted_reduces(tile: TileOp) -> set[int]:
@@ -427,28 +424,46 @@ def full_projection_seams(tile: TileOp, seams) -> tuple[CutSite, ...]:
     return chosen if len(chosen) > 1 else ()
 
 
-def _cluster_value_seams(seams: list[CutSite], operand_of: dict[int, object]) -> tuple[CutSite, ...]:
-    """Fold duplicate operand cones — alpha-equivalent up to captured axis names — into ONE seam per value.
+def _value_form(seam: CutSite, axes: tuple) -> tuple:
+    """What a seam's cone computes, spelled so two copies of one value key alike: the cone lowered
+    over its captured axes renamed by position, under the exact statement identity (SSA names,
+    commutative order and buffer declaration order do not reach it) beside the buffers that fill
+    its roles. A copy under another scope binds the same coordinates by other names — the o_proj
+    result feeds a norm's statistic inside a reduce and the residual add at the kernel's own free
+    axis — and its lambda params may sit in another order, which :meth:`Fold.canonical` reads
+    positionally; neither is a different value."""
+    from emmy.compiler.ir.stmt.identity import canonicalize_identity  # noqa: PLC0415 — identity imports the tile IR
+
+    scoped = tuple(axis.name for axis in seam.axes if axis.name in seam.node.free_axes)
+    names = {name: f"_s{position}" for position, name in enumerate(scoped)}
+    body = Body(tuple(stmt.rewrite(lambda name: names.get(name, name)) for stmt in seam.node.lower(bound=frozenset(scoped), axes=axes)))
+    identity = canonicalize_identity(body)
+    return identity.key, identity.arguments
+
+
+def _cluster_value_seams(seams: list[CutSite], axes: tuple) -> tuple[CutSite, ...]:
+    """Fold duplicate cones — alpha-equivalent up to captured axis names — into ONE seam per value.
 
     Object sharing groups occurrences of one stored node; a traced graph can also hold several
     ALPHA-EQUIVALENT copies of the same computation captured under different axis names —
-    attention's normalized K cone appears once per score contraction. Those copies are one VALUE:
-    the cluster's first seam becomes the decision for all of them, carrying each duplicate as a
-    sibling with its positional capture correspondence (:class:`CutSite`). Membership reuses the
-    closure alpha-equivalence the semiring canonicalization already trusts
-    (:meth:`~emmy.compiler.ir.pure.fold.Fold.canonical`); a member joins only when its
-    paired axes agree on extent and window, its workspace dtypes match, and every workspace axis
-    is a mapped capture — otherwise it stays its own seam."""
-    eligible = [index for index, seam in enumerate(seams) if operand_of.get(id(seam.node))]
+    attention's normalized K cone appears once per score contraction, and a fused decoder half
+    reads its o_proj result under the post-attention statistic's reduce, under the pre-FFN
+    statistic's and at the residual add. Those copies are one VALUE: the cluster's first seam
+    becomes the decision for all of them, carrying each duplicate as a sibling with its
+    positional capture correspondence (:class:`CutSite`), so one cut materializes the value once
+    and every occurrence reads the workspace. Membership is :func:`_value_form` equality; a member
+    joins only when its paired axes agree on extent and window, its workspace dtypes match, and
+    every workspace axis is a mapped capture — otherwise it stays its own seam. An output-owning
+    seam writes the kernel's outputs and a frontier seam its raw storage bits; neither is a
+    workspace another occurrence could read, so they cluster with nothing."""
+    eligible = [index for index, seam in enumerate(seams) if seam.frontier is None and seam.owned is None]
     if len(eligible) < 2:
         return tuple(seams)
     captured = {index: tuple(axis.name for axis in seams[index].axes) for index in eligible}
-    # The seam's own capture correspondence, and the alpha-quotient taken under it: an operand cone
-    # is a TERM, so it quotients as one (``Fold.canonical``) rather than as a scoped lambda.
     scoped = {index: tuple(axis for axis in captured[index] if axis in seams[index].node.free_axes) for index in eligible}
     clusters: dict[object, list[int]] = {}
     for index in eligible:
-        clusters.setdefault(seams[index].node.canonical(), []).append(index)
+        clusters.setdefault(_value_form(seams[index], axes), []).append(index)
     drop: set[int] = set()
     merged: dict[int, CutSite] = {}
     for rep_index, *rest in clusters.values():
