@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: meta-llama/Llama-4-Scout-17B-16E
-  rationale: "Cooling Llama family; MoE presence limited by gating."
-  heat: 45
+  rationale: "Cooling Llama family, limited evidence, gated MoE serving."
+  heat: 35
   task: generate
 matrices:
 - deploy.gpu: NVIDIA H200 141GB

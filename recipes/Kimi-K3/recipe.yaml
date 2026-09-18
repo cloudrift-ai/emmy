@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: moonshotai/Kimi-K3
-  rationale: "Kimi cooling per sources; hosting success does not indicate current community demand."
-  heat: 35
+  rationale: "Fresh LMArena rank 17 signals strong current model-family interest."
+  heat: 75
   task: generate
 matrices:
 - deploy.gpu: NVIDIA B200

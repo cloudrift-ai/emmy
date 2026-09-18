@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: zai-org/GLM-5.2
-  rationale: "BF16 753B repo unservable in fleet; GLM-5.3 wave shifted attention to servable checkpoints."
-  heat: 40
+  rationale: "BF16 753B unservable in fleet; attention shifted to GLM-5.3."
+  heat: 25
   task: generate
 matrices:
 - deploy.gpu: NVIDIA B200
