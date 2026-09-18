@@ -3,11 +3,9 @@ tags:
   - untested
 model:
   huggingface: Edge0/Edge0-35B-A3B-preview
-  rationale: "Highest trending score seen this run; early traction, preview stability caveat."
-  heat: 85
+  rationale: "Breakout A3B-class MoE serving with novel low-VRAM architecture, though exact model evidence is absent from sources."
+  heat: 78
   task: generate
 matrices:
-- deploy.gpu: NVIDIA GeForce RTX 4090
-  deploy.gpu_count: 1
 - deploy.gpu: NVIDIA H200 141GB
   deploy.gpu_count: 1

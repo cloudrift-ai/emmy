@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.6-35B-A3B-FP8"
-  rationale: "Secondary variant, interest derives indirectly from base model."
-  heat: 30
+  rationale: "Secondary variant in cooling family; minimal distinct current community attention."
+  heat: 25
 engine:
   llm:
     tensor_parallel_size: 1

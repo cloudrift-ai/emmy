@@ -3,7 +3,7 @@ tags:
   - untested
 model:
   huggingface: riftstack/Laguna-S-2.1-exl3
-  rationale: "Niche EXL3 variant, no current momentum or evidence."
+  rationale: "Niche EXL3 variant lacks current momentum or independent evidence."
   heat: 3
   task: generate
 matrices:

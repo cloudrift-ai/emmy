@@ -3,7 +3,7 @@ tags:
   - untested
 model:
   huggingface: Qwen/Qwen3.8-35B-A3B
-  rationale: "Strong family context, but repo unreadable; no direct trend confirmed."
+  rationale: "Strong family dominance, but overshadowed by 27B line, repo unreadable."
   heat: 72
   task: generate
 matrices:

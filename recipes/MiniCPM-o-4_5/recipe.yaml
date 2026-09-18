@@ -3,13 +3,9 @@ tags:
   - untested
 model:
   huggingface: openbmb/MiniCPM-o-4_5
-  rationale: "Older variant, no direct signal despite family momentum."
+  rationale: "Older variant with limited direct signal despite the active MiniCPM5 wave around it."
   heat: 15
   task: generate
 matrices:
-- deploy.gpu: NVIDIA H200 141GB
-  deploy.gpu_count: 2
-- deploy.gpu: NVIDIA A100 80GB
-  deploy.gpu_count: 4
-- deploy.gpu: NVIDIA B200
-  deploy.gpu_count: 2
+- deploy.gpu: NVIDIA GeForce RTX 4090
+  deploy.gpu_count: 1

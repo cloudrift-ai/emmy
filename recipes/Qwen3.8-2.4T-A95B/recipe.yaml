@@ -3,7 +3,7 @@ tags:
   - untested
 model:
   huggingface: Qwen/Qwen3.8-2.4T-A95B
-  rationale: "Rides confirmed Qwen3.8 family breakout momentum."
+  rationale: "Rides massive Qwen3.8 breakout momentum; flagship MoE status despite lack of fleet deployment."
   heat: 85
   task: generate
 matrices:

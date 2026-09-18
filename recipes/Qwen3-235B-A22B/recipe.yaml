@@ -3,11 +3,9 @@ tags:
   - untested
 model:
   huggingface: Qwen/Qwen3-235B-A22B
-  rationale: "Large-MoE coverage, though current trends favor smaller variants."
+  rationale: "Strong Qwen family momentum; large-MoE coverage, though trending favors smaller variants."
   heat: 65
   task: generate
 matrices:
 - deploy.gpu: NVIDIA B200
-  deploy.gpu_count: 8
-- deploy.gpu: NVIDIA H200 141GB
-  deploy.gpu_count: 16
+  deploy.gpu_count: 4

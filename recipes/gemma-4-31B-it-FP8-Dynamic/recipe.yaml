@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "RedHatAI/gemma-4-31B-it-FP8-Dynamic"
-  rationale: "Cooling Gemma 4 interest, eclipsed by newer focus."
+  rationale: "Gemma 4 cooling, eclipsed by Qwen3.8, minimal current momentum."
   heat: 18
 engine:
   llm:

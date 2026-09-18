@@ -8,8 +8,8 @@ tags:
 
 model:
   huggingface: "deepseek-ai/DeepSeek-V4-Flash-0731"
-  rationale: "Maintained V4 variant, solid current interest below V4.1-Flash."
-  heat: 68
+  rationale: "Active V4.x wave; trailing newer V4.1-Flash momentum but retains solid current community interest."
+  heat: 72
   revision: 7872f01b1d1fe23eabc4c98b48bffcef5a386062
   task: generate
 

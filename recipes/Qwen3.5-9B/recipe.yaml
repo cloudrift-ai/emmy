@@ -7,5 +7,5 @@ model:
   heat: 25
   task: generate
 matrices:
-- deploy.gpu: NVIDIA GeForce RTX 5090
+- deploy.gpu: NVIDIA GeForce RTX 4090
   deploy.gpu_count: 1

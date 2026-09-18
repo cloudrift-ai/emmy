@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: deepseek-ai/DeepSeek-V4-Pro
-  rationale: "Mid-wave V4 interest, no independent breakout signal."
-  heat: 55
+  rationale: "Active V4.x wave; mid-wave interest trailing newer V4.1-Flash momentum without independent breakout evidence."
+  heat: 58
   task: generate
 matrices:
 - deploy.gpu: AMD Instinct MI350X

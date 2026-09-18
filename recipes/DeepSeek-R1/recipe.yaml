@@ -3,9 +3,13 @@ tags:
   - untested
 model:
   huggingface: deepseek-ai/DeepSeek-R1
-  rationale: "Superseded older line, little current evidence remains."
-  heat: 15
+  rationale: "Older 2025 line; superseded by active V4 wave, low current trend."
+  heat: 20
   task: generate
 matrices:
-- deploy.gpu: AMD Instinct MI350X
+- deploy.gpu: NVIDIA H200 141GB
+  deploy.gpu_count: 8
+- deploy.gpu: NVIDIA B200
+  deploy.gpu_count: 8
+- deploy.gpu: NVIDIA H200 141GB
   deploy.gpu_count: 16

@@ -8,7 +8,7 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3-30B-A3B-Instruct-2507"
-  rationale: "Steady mid-size serving interest on Qwen MoE momentum."
+  rationale: "Rides strong Qwen MoE momentum; steady mid-size interest supported by serving."
   heat: 58
   revision: 0d7cf23991f47feeb3a57ecb4c9cee8ea4a17bfe
   task: generate

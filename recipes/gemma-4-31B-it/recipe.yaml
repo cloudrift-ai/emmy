@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "google/gemma-4-31B-it"
-  rationale: "Base variant has arena evidence; -it variant lacks direct trend."
-  heat: 48
+  rationale: "Established interest despite cooling family; no fresh momentum."
+  heat: 50
 engine:
   llm:
     tensor_parallel_size: 1

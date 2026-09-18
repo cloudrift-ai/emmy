@@ -3,7 +3,7 @@ tags:
   - untested
 model:
   huggingface: inclusionAI/Ling-3.0-flash
-  rationale: "No community, serving, or trending evidence found."
+  rationale: "No current community or serving evidence found."
   heat: 5
   task: generate
 matrices:

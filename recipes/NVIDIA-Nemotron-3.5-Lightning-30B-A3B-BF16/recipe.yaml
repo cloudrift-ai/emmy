@@ -3,13 +3,9 @@ tags:
   - untested
 model:
   huggingface: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
-  rationale: "No direct evidence; only larger Nemotron-3-Ultra has serving data."
+  rationale: "No trending, community, or arena evidence found in shared sources."
   heat: 10
   task: generate
 matrices:
 - deploy.gpu: NVIDIA H200 141GB
-  deploy.gpu_count: 1
-- deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Server Edition
-  deploy.gpu_count: 1
-- deploy.gpu: NVIDIA B200
   deploy.gpu_count: 1

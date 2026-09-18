@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3-Coder-Next-FP8"
-  rationale: "Current-gen FP8 coder, 262K context; no fresh direct trend this run."
-  heat: 45
+  rationale: "Current-gen vendor FP8 coder serving 262K context; active Qwen coder momentum."
+  heat: 48
 engine:
   llm:
     tensor_parallel_size: 1
