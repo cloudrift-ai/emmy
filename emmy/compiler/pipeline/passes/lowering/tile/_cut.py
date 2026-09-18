@@ -75,11 +75,13 @@ class CutSite:
     dtypes: tuple
     frontier: Frontier | None = None
     #: Duplicate cones this seam ALSO stands for — alpha-equivalent up to their captured axis
-    #: names (contraction-operand seams only): each sibling is
-    #: ``(node, ((rep axis name, sibling axis name), …))`` — the positional capture correspondence
-    #: the clustering proved. One placement decision materializes the value once; the realization
-    #: replaces every sibling with workspace loads spelled through its own axes. Object sharing is
-    #: the degenerate case (identity, with the identity correspondence).
+    #: names: each sibling is ``(node, ((rep axis name, sibling axis name), …), channels)`` — the
+    #: positional capture correspondence the clustering proved, and for each component the sibling
+    #: exposes the position of the representative's component that is the same value (a lone
+    #: contraction beside the twin that folds it with another). One placement decision
+    #: materializes the value once; the realization replaces every sibling with workspace loads
+    #: spelled through its own axes. Object sharing is the degenerate case (identity, with the
+    #: identity correspondence).
     siblings: tuple = ()
     #: ``(tail, stores)`` when this seam's cone solely produces some of the kernel's OWN output
     #: specifications — those stores and the projection statements only they read — else ``None``.
@@ -427,21 +429,46 @@ def full_projection_seams(tile: TileOp, seams) -> tuple[CutSite, ...]:
     return chosen if len(chosen) > 1 else ()
 
 
-def _value_form(seam: CutSite, axes: tuple) -> tuple:
-    """What a seam's cone computes, spelled so two copies of one value key alike: the cone lowered
-    over its captured axes renamed by position, under the exact statement identity (SSA names,
-    commutative order and buffer declaration order do not reach it) beside the buffers that fill
-    its roles. A copy under another scope binds the same coordinates by other names — the o_proj
-    result feeds a norm's statistic inside a reduce and the residual add at the kernel's own free
-    axis — and its lambda params may sit in another order, which :meth:`Fold.canonical` reads
-    positionally; neither is a different value."""
+def _pruned(body: Body, roots: frozenset[str]) -> Body:
+    """``body`` cut to what ``roots`` need — the statements a root reads through, in order, a
+    loop kept with what its own body keeps."""
+    from emmy.compiler.ir.stmt.body import free_names  # noqa: PLC0415
+
+    kept: list = []
+    needed = set(roots)
+    for stmt in reversed(tuple(body)):
+        if stmt.nested():
+            inner = tuple(_pruned(child, frozenset(needed)) for child in stmt.nested())
+            if any(inner):
+                stmt = stmt.with_bodies(inner)
+                kept.append(stmt)
+                needed |= free_names(stmt)
+        elif needed.intersection(stmt.defines()) or stmt.external_writes():
+            kept.append(stmt)
+            needed |= free_names(stmt)
+    return Body(tuple(reversed(kept)))
+
+
+def _value_forms(seam: CutSite, axes: tuple) -> tuple:
+    """What each component of a seam's cone computes, spelled so two copies of one value key
+    alike: the cone lowered over its captured axes renamed by position, cut to the component,
+    under the exact statement identity (SSA names, commutative order and buffer declaration order
+    do not reach it) beside the buffers that fill its roles. A copy under another scope binds the
+    same coordinates by other names — the o_proj result feeds a norm's statistic inside a reduce
+    and the residual add at the kernel's own free axis — and its lambda params may sit in another
+    order, which :meth:`Fold.canonical` reads positionally; neither is a different value. Per
+    component, because a value folded beside another in one twin (the k and v projections over
+    one input) is the same value as the lone contraction that feeds its norm's statistic."""
     from emmy.compiler.ir.stmt.identity import canonicalize_identity  # noqa: PLC0415 — identity imports the tile IR
 
     scoped = tuple(axis.name for axis in seam.axes if axis.name in seam.node.free_axes)
     names = {name: f"_s{position}" for position, name in enumerate(scoped)}
     body = Body(tuple(stmt.rewrite(lambda name: names.get(name, name)) for stmt in seam.node.lower(bound=frozenset(scoped), axes=axes)))
-    identity = canonicalize_identity(body)
-    return identity.key, identity.arguments
+    forms = []
+    for exposed in seam.node.exposes:
+        identity = canonicalize_identity(_pruned(body, frozenset((exposed,))))
+        forms.append((identity.key, identity.arguments))
+    return tuple(forms)
 
 
 def _cluster_value_seams(seams: list[CutSite], axes: tuple) -> tuple[CutSite, ...]:
@@ -464,13 +491,13 @@ def _cluster_value_seams(seams: list[CutSite], axes: tuple) -> tuple[CutSite, ..
         return tuple(seams)
     captured = {index: tuple(axis.name for axis in seams[index].axes) for index in eligible}
     scoped = {index: tuple(axis for axis in captured[index] if axis in seams[index].node.free_axes) for index in eligible}
-    clusters: dict[object, list[int]] = {}
-    for index in eligible:
-        clusters.setdefault(_value_form(seams[index], axes), []).append(index)
+    forms = {index: _value_forms(seams[index], axes) for index in eligible}
     drop: set[int] = set()
     merged: dict[int, CutSite] = {}
-    for rep_index, *rest in clusters.values():
-        if not rest:
+    # The representative exposes the most: a twin stands for the lone contractions that equal its
+    # channels, never the other way round.
+    for rep_index in sorted(eligible, key=lambda index: -len(forms[index])):
+        if rep_index in drop:
             continue
         rep = seams[rep_index]
         rep_params = scoped[rep_index]
@@ -478,17 +505,26 @@ def _cluster_value_seams(seams: list[CutSite], axes: tuple) -> tuple[CutSite, ..
         if {axis.name for axis in _workspace_axes(rep, rep.node)} - set(rep_params):
             continue  # a workspace axis with no capture to map has no sibling spelling
         siblings = []
-        for member_index in rest:
+        for member_index in eligible:
+            if member_index == rep_index or member_index in drop or member_index in merged:
+                continue
             member = seams[member_index]
+            if not all(form in forms[rep_index] for form in forms[member_index]):
+                continue
+            channels = tuple(forms[rep_index].index(form) for form in forms[member_index])
             member_params = scoped[member_index]
             member_axes = {axis.name: axis for axis in member.axes}
-            aligned = member.dtypes == rep.dtypes and all(
-                (a := rep_axes[rn]).extent == (b := member_axes[mn]).extent and a.window == b.window
-                for rn, mn in zip(rep_params, member_params, strict=True)
+            aligned = (
+                len(member_params) == len(rep_params)
+                and tuple(member.dtypes) == tuple(rep.dtypes[channel] for channel in channels)
+                and all(
+                    (a := rep_axes[rn]).extent == (b := member_axes[mn]).extent and a.window == b.window
+                    for rn, mn in zip(rep_params, member_params, strict=True)
+                )
             )
             if not aligned:
                 continue
-            siblings.append((member.node, tuple(zip(rep_params, member_params, strict=True))))
+            siblings.append((member.node, tuple(zip(rep_params, member_params, strict=True)), channels))
             drop.add(member_index)
         if siblings:
             merged[rep_index] = replace(rep, siblings=tuple(siblings))
@@ -825,7 +861,10 @@ def realize(
         # is not stored, so no launch is left loading a buffer nothing wrote for it.
         # One workspace serves the representative AND every clustered sibling, so a component any
         # occurrence reads is kept for all of them.
-        shared = set().union(*(taken.get(id(node), set(node.exposes)) for node in (child, *(node for node, _ in seam.siblings))))
+        shared = set(taken.get(id(child), set(child.exposes)))
+        for sibling, _, channels in seam.siblings:
+            read = taken.get(id(sibling), set(sibling.exposes))
+            shared.update(child.exposes[channel] for position, channel in enumerate(channels) if sibling.exposes[position] in read)
         wanted = tuple(name for name in child.exposes if name in shared)
         slots = tuple(name in set(wanted) for name in child.exposes)
         if front is not None:
@@ -867,22 +906,24 @@ def realize(
         # still exposes the cone's decoded results — the rename is over those.
         read_names.update({name: _read_name(name, token) for name in (names if front is None else child.lift.results)})
         replacements = {id(child): loads}
-        for ordinal, (sibling, pairs) in enumerate(seam.siblings):
+        for ordinal, (sibling, pairs, channels) in enumerate(seam.siblings):
             # A clustered duplicate reads the SAME workspace, spelled through its own captured
             # axes via the correspondence the clustering proved — and under its own read names,
-            # since it reads that workspace at a DIFFERENT address than the representative.
+            # since it reads that workspace at a DIFFERENT address than the representative. It
+            # reads the component that is its value: a lone contraction reads one channel of the
+            # twin it equals.
             mapping = dict(pairs)
             sibling_index = tuple(Var(mapping[axis.name]) for axis in axes)
             replacements[id(sibling)] = tuple(
-                Fold.slab(Load(name=_read_name(own, token, ordinal), input=held[position], index=sibling_index))
-                if position in held
+                Fold.slab(Load(name=_read_name(own, token, ordinal), input=held[channel], index=sibling_index))
+                if channel in held
                 else None
-                for position, own in enumerate(sibling.exposes)
+                for own, channel in zip(sibling.exposes, channels, strict=True)
             )
             # The representative wins a shared name: a boundary store of a value both occurrences
             # expose reads the term's own, and only the representative sits on the term's path.
-            for position, name in enumerate(sibling.exposes):
-                if position in held:
+            for name, channel in zip(sibling.exposes, channels, strict=True):
+                if channel in held:
                     read_names.setdefault(name, _read_name(name, token, ordinal))
         pieces.append((replace(seam, dtypes=dtypes), produced, axes, index, token, names, buffers, replacements))
 
