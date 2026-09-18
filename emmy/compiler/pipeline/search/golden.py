@@ -1782,10 +1782,8 @@ def evidence_rows(gpu_name: str, compute_cap: tuple[int, int]) -> list[tuple[fro
     split) is that kernel's schedule row under the target's signature. Any other record is read through its
     replay (:func:`_replay`): each kernel-set arm it spelled is a route row under the signature of
     the kernel that fork was offered on, and its schedule row is keyed under the kernel its stored
-    identity names when that kernel is one the replay resolved — an EMPTY row included: a piece the
-    pick took no knobs on is recorded as ``knobs: {}``, and that row spells the fused, unsplit arm
-    at the piece's kernel-set forks (:func:`~emmy.compiler.pipeline.search.pins.spelled_arm`), the
-    measured row strict evidence needs there. Otherwise the row speaks for the
+    identity names when that kernel is one the replay resolved — an empty row too: it spells the
+    fused, unsplit arm at that kernel's own forks (``pins.spelled_arm``). Otherwise the row speaks for the
     kernel set collectively — a row the tuner merged with the parent's split, a case authored
     behind a cut — and is keyed under every piece whose enumerated rows it vouches for
     (``evidence_row_vouches``), its ``REDUCE`` value reduced to what a piece can still stamp
