@@ -231,21 +231,31 @@ class TerminalBench:
 
 async def bench_terminal_async(cand, *, backend, db):
     """Bench every ``CudaOp`` in ``cand.graph``, persist per-kernel ``perf`` / inventory / lowering
-    rows, and return ``(stats, status, measured, per_kernel)``: ``stats`` is the per-kernel
-    ``PerfStats`` summed across the graph (the total terminal latency), ``measured`` whether a live
-    backend measurement was required, and ``per_kernel`` the ``(knobs, median_us, status)`` of each
-    kernel — the terminal's Σ decomposed into the rows that earned it. The
+    rows, and return ``(stats, status, origin, per_kernel)``: ``stats`` is the per-kernel
+    ``PerfStats`` summed across the graph (the total terminal latency), ``per_kernel`` the
+    ``(knobs, median_us, status)`` of each kernel — the terminal's Σ decomposed into the rows that
+    earned it — and ``origin`` where the verdict came from:
+
+    - ``"live"`` — the backend ran. It cost GPU time, so it spends both the measurement budget and
+      patience, whether it came back ``ok`` or failed.
+    - ``"replay"`` — a cache hit, a stub backend, or a graph with no ``CudaOp`` at all. Nothing was
+      re-measured, so it spends neither budget; a better cached result still resets patience.
+    - ``"dead_end"`` — the terminal finished the pipeline still holding an un-lowered kernel-bearing
+      node. Fresh work that can never be measured, so it spends patience but not the measurement
+      budget: a level whose terminals all land here must still stop. See :meth:`TerminalBench.prelude`.
+
+    The
     only ``await`` is the device-pinned bench, so N kernels' benches overlap on one
     event loop; cache-hit / stub / persistence semantics live in :class:`TerminalBench`."""
     b = TerminalBench(cand, backend=backend, db=db)
     kind, payload = b.prelude()
     if kind == "done":
-        return *payload, False, b.per_kernel
+        return *payload, ("dead_end" if b.unlowered else "replay"), b.per_kernel
     try:
         result = await backend.benchmark_async(b.graph, warmup=1, num_iters="auto")
     except Exception as exc:  # noqa: BLE001
-        return *b.finalize_exc(exc), True, b.per_kernel
-    return *b.finalize_result(result), True, b.per_kernel
+        return *b.finalize_exc(exc), "live", b.per_kernel
+    return *b.finalize_result(result), "live", b.per_kernel
 
 
 def point_stats(us: float) -> PerfStats:
