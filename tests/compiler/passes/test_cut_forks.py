@@ -894,6 +894,26 @@ def test_a_clustered_value_cut_once_computes_the_right_answer() -> None:
     np.testing.assert_allclose(got, expected, rtol=2e-2, atol=2e-1)
 
 
+def test_a_row_spelled_at_any_occurrence_of_a_clustered_value_names_its_cut() -> None:
+    """The arm that cuts a clustered seam spells every occurrence, and a route recorded at one of
+    them — a row from before the clustering, a pin at the copy a hand found — selects that arm."""
+    from emmy.compiler.pipeline.search.pins import spelled_arm
+
+    graph = _norm_residual_graph()
+    lowered = Pipeline.build(LOOP_PASSES).run(graph, ctx=_CTX)
+    lifted = Pipeline.build(["lowering/tile"], select={"lift", "twisted"}).run(lowered, ctx=_CTX)
+    node = next(node for node in lifted.nodes.values() if isinstance(node.op, TileOp))
+    (seam,) = [seam for seam in cuttable_seams(node.op) if seam.node.as_contraction() is not None]
+    (alias,) = seam.aliases
+    match = Match(graph=lifted, root_node_id=node.id, rule=Rule(name="test", pattern=[]))
+    options = _CUT.rewrite(match, node)
+    (arm,) = [option for option in options if option.knobs.get(seam.spelling) == "cut"]
+    assert arm.knobs[alias] == "cut" and arm.aliases == {alias: seam.spelling}
+    assert spelled_arm(options, {alias: "cut"}) == (arm, {key: str(value) for key, value in arm.knobs.items()})
+    assert spelled_arm(options, {seam.spelling: "cut"})[0] is arm
+    assert spelled_arm(options, {"WORK": "t256"})[0].knobs == {"PLACE": "fuse"}
+
+
 def _twin_norm_graph() -> Graph:
     """``k = x @ wk`` and ``v = x @ wv`` over one input, with ``k`` normed: the k/v projection pair
     of a fused pre-attention half. Lifting folds the two contractions into one twin; the norm's

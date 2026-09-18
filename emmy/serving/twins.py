@@ -37,9 +37,8 @@ changes the model's forward changes these twins — exactly as it would change s
 
 from __future__ import annotations
 
-import re
-
 import logging
+import re
 from dataclasses import replace
 from typing import TYPE_CHECKING
 

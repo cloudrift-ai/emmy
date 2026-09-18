@@ -61,19 +61,23 @@ def spelled_arm(options, row) -> tuple[object, dict[str, str]] | None:
     arms = [(option, {str(key): str(value) for key, value in leaf_knobs(option).items()}) for option in options]
     keys = {key for _, knobs in arms for key in knobs}
     if any(family_of(key) == "PLACE" for key in keys):
-        route = {str(key): str(value) for key, value in row.items() if family_of(str(key)) == "PLACE"}
+        # Every spelling of a clustered value names the seam it stands for: the row's keys and
+        # each arm's are read as those seams, so a row recorded at any occurrence spells the arm.
+        aliases = {str(alias): str(seam) for option in options for alias, seam in (getattr(option, "aliases", None) or {}).items()}
+        route = {aliases.get(str(key), str(key)): str(value) for key, value in row.items() if family_of(str(key)) == "PLACE"}
         cuts = {key for key, value in route.items() if value == "cut"}
-        ballot = cuts & keys
-        for option, knobs in arms:
-            if ballot and {key for key, value in knobs.items() if value == "cut"} == ballot:
+        seams = [(option, knobs, {aliases.get(key, key) for key, value in knobs.items() if value == "cut"}) for option, knobs in arms]
+        ballot = cuts & {key for _, _, cut in seams for key in cut}
+        for option, knobs, cut in seams:
+            if ballot and cut == ballot:
                 return option, knobs
-        wanted = {key for _, knobs in arms for key, value in knobs.items() if value == "cut" and key in cuts}
+        wanted = {key for _, _, cut in seams for key in cut if key in cuts}
         if len(wanted) > 1:
-            for option, knobs in arms:
-                if {key for key, value in knobs.items() if value == "cut"} == wanted:
+            for option, knobs, cut in seams:
+                if cut == wanted:
                     return option, knobs
-        for option, knobs in arms:
-            if any(value == "cut" and (key in cuts or "PLACE" in cuts) for key, value in knobs.items()):
+        for option, knobs, cut in seams:
+            if any(key in cuts or "PLACE" in cuts for key in cut):
                 return option, knobs
         if cuts:
             return None  # a cut this kernel does not offer: a stale spelling, or another kernel's seam

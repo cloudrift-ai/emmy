@@ -103,7 +103,9 @@ coordinate under different names and in different operand orders (the o_proj res
 inside a reduce and the residual add at the kernel's free axis). The identity is taken per exposed component, so a
 lone contraction is a CHANNEL of the twin that folds it beside another over the same input (k under the QK-norm's
 reduce, beside the k/v pair): the twin is the representative, the sibling records which component is its value,
-and reads that channel of the shared workspace. A term is closed by construction —
+and reads that channel of the shared workspace. The arm that cuts a clustered seam spells every occurrence and
+names the seam each spelling stands for, so a route recorded at any occurrence — a row from before the clustering,
+a pin at the copy a hand found — selects the one decision. A term is closed by construction —
 its values arrive through its operand edges — so every stored non-slab edge is a seam and there is no capture to
 resolve outward. A workspace load is named after its WORKSPACE — the cone's result name tagged with the seam — never
 after the cone alone: a lowered body reads producer names throughout, and the value a cut materialized can still be

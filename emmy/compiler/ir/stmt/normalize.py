@@ -869,9 +869,7 @@ def dedup_loads(stmts: Body) -> Body:
             elif isinstance(s, Assign | Accum):
                 s = rename_free(s, alias)
                 key = (
-                    ("assign", s.op, s.args, s.dtype)
-                    if isinstance(s, Assign)
-                    else ("accum", s.value, s.op, s.dtype, s.axes, repr(s.base))
+                    ("assign", s.op, s.args, s.dtype) if isinstance(s, Assign) else ("accum", s.value, s.op, s.dtype, s.axes, repr(s.base))
                 )
                 if key in local:
                     alias[s.name] = local[key][0]

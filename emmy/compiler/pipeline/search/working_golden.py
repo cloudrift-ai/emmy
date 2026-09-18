@@ -7,12 +7,11 @@ persistence. CLI commands only validate argument combinations and report errors.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-
 import contextlib
 import copy
 import fcntl
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
