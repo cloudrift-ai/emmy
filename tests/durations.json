@@ -283,6 +283,7 @@
  "tests/compiler/passes/test_cut_forks.py::test_sdpa_score_cut_is_offered_and_pinned_cut_lowers[False]": 2.57,
  "tests/compiler/passes/test_cut_forks.py::test_sdpa_score_cut_is_offered_and_pinned_cut_lowers[True]": 2.76,
  "tests/compiler/passes/test_cut_forks.py::test_unpinned_place_keeps_offering_fuse_and_recursive_cuts": 0.27,
+ "tests/compiler/passes/test_fp8_block_staged.py::test_a_chunk_body_that_computes_a_row_statistic_does_not_reload_it": 18.07,
  "tests/compiler/passes/test_fp8_block_staged.py::test_the_byte_slab_matches_the_compute_fill_bit_for_bit[bfloat16-mma_m16n8k16_bf16_f32-d2/smem-async]@cuda": 15.3,
  "tests/compiler/passes/test_fp8_block_staged.py::test_the_byte_slab_matches_the_compute_fill_bit_for_bit[bfloat16-mma_m16n8k16_bf16_f32-d2/smem-tma]@cuda": 14.37,
  "tests/compiler/passes/test_fp8_block_staged.py::test_the_byte_slab_matches_the_compute_fill_bit_for_bit[float16-mma_m16n8k16_f16_f32-d2/smem-async]@cuda": 45.59,

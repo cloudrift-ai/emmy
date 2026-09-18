@@ -130,7 +130,7 @@ def test_a_chunk_body_that_computes_a_row_statistic_does_not_reload_it(tmp_path)
     code = (
         "from transformers import Qwen3Config\n"
         "from transformers.models.qwen3.modeling_qwen3 import Qwen3MLP\n"
-        "Qwen3MLP(Qwen3Config(hidden_size=256, intermediate_size=512)).half()(torch.randn(16, 256, dtype=torch.float16))"
+        "Qwen3MLP(Qwen3Config(hidden_size=256, intermediate_size=256)).half()(torch.randn(16, 256, dtype=torch.float16))"
     )
     graph, _, bundle = graph_from_code(code)
     quantize_and_spell(graph, bundle, tmp_path / "ckpt", scheme="fp8-block")
