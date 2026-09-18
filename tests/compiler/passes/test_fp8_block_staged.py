@@ -115,6 +115,34 @@ def test_the_seam_reads_the_group_maximum_as_a_per_chunk_statistic(tmp_path):
     assert chunk_stats[0] not in {name for stmt in cell for name in stmt.defines()}, "the cell reads the statistic, it never computes it"
 
 
+def test_a_chunk_body_that_computes_a_row_statistic_does_not_reload_it(tmp_path):
+    """A fused SwiGLU reads the SiLU constant both in the row prologue and inside its gate/up chunk
+    body, which computes that value itself. The chunk refill bridges only what the body reads and
+    does not define, so each name is declared once."""
+    import re
+
+    from emmy.commands.trace import graph_from_code
+    from emmy.compiler.context import Context
+    from emmy.compiler.loader.synthesize import quantize_and_spell
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    code = (
+        "from transformers import Qwen3Config\n"
+        "from transformers.models.qwen3.modeling_qwen3 import Qwen3MLP\n"
+        "Qwen3MLP(Qwen3Config(hidden_size=256, intermediate_size=256)).half()(torch.randn(16, 256, dtype=torch.float16))"
+    )
+    graph, _, bundle = graph_from_code(code)
+    quantize_and_spell(graph, bundle, tmp_path / "ckpt", scheme="fp8-block")
+    with pinned_knobs({"PLACE": "fuse"}):
+        lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((7, 0)))
+    (src,) = [s for node in lowered.nodes.values() if (s := getattr(node.op, "kernel_source", None))]
+    chunk = src[src.index("for (int _ks") :]
+    chunk = chunk[: chunk.index("for (int a")]
+    declared = re.findall(r"^\s*(?:float|__half|int) (\w+) = ", chunk, flags=re.M)
+    assert "_a_stat_" in src and len(declared) == len(set(declared))
+
+
 def _run(graph, bundle, ckpt, pins):
     import torch
 
