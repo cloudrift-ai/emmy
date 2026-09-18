@@ -69,10 +69,11 @@ def model_ids($items):
       and ($choice.maintained_model_ids | length) == ($choice.maintained_model_ids | unique | length);
     "maintained_model_ids must contain the exact requested number of unique IDs"
   )
-| [$recipes[] | select(.runnable and ((.tags | index("onboarding")) == null)) | .model_id] as $maintainable_ids
+| [$recipes[] | select(.maintainable) | .model_id] as $maintainable_ids
+| [$choice.maintained_model_ids[] | select(. as $model_id | ($maintainable_ids | index($model_id)) == null)] as $unselectable
 | require(
-    all($choice.maintained_model_ids[]; . as $model_id | $maintainable_ids | index($model_id));
-    "Maintained selections must be runnable complete recipes"
+    $unselectable == [];
+    "Maintained selections must be recipes the task marks maintainable, unlike: " + ($unselectable | join(", "))
   )
 | require(
     ($choice.obsolete_models | type) == "array"

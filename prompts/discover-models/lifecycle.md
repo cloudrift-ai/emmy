@@ -17,8 +17,9 @@ reconstruct an existing model ID.
 
 ## Lifecycle decisions
 
-Select exactly `maintained_count` fully configured recipes for periodic testing and optimization. Existing recipes
-tagged `onboarding` are untested shells: score them, but never select them as maintained or obsolete. The workflow
+Select exactly `maintained_count` fully configured recipes for periodic testing and optimization. Every recipe in the
+task carries `maintainable`; only a recipe whose `maintainable` is true may appear in `maintained_model_ids` or in
+`obsolete_models`. The false ones are untested onboarding shells: score them, but never select them. The workflow
 will preserve their task and deployment matrix deterministically.
 
 Prefer current community demand, serving value, architecture coverage, and a useful spread of sizes in the maintained
