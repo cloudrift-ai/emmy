@@ -87,6 +87,15 @@ returns only scores, maintained IDs, obsolete proposals, new onboarding models, 
 candidates, and mechanically assembles the four-list manifest before the lifecycle validator applies policy. An
 exact-SHA recipe query against the rolling root enforces the maintained count after application.
 
+A rejected selection is not a failed run on its own: the step resumes the same OpenCode session with the exact
+rejection and accepts a corrected selection, twice, before failing. A reply carrying no JSON object counts as a
+rejection too, since it matches nothing in the filter, which would otherwise succeed having written an empty manifest
+and fail the run two steps later on a parse error. The rejection names the offending IDs and the set to choose from,
+because the agent assembles its answer from subagent reports with the batch rows long out of context; for the same
+reason the task states the selectable set once as `maintainable_model_ids` rather than only as a per-row flag. The
+step prints one line per agent event: a run in progress is visible only through the job log, and a rejected decision
+has to stay readable afterwards.
+
 The workflow checks that the agent did not modify the checkout, then validates and applies its lifecycle manifest. Its
 artifact worktree remains on the rolling lifecycle branch, while the catalog, workflow scripts, OpenCode agent and
 plugin directory, attached discovery skill, and prompt files come from the exact `github.sha` that started the run.

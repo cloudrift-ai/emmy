@@ -177,9 +177,10 @@ jobs:
                 --argjson batch_size 6 \
                 -f "$WORKFLOW_SOURCE/.github/workflows/scripts/discovery_task.jq" \
             > "$AGENT_TASK"
+          # One short line per agent event: the job log is the only view of a run in progress,
+          # and a rejected selection has to be readable after the fact.
           run_agent() {
-            # TEMPORARY DEBUG: OpenCode logs to stderr, and one short line per agent event.
-            opencode --print-logs --log-level INFO run "$@" \
+            opencode run "$@" \
               --agent discover-models \
               --model cloudrift/agent \
               --format json \
