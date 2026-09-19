@@ -30857,8 +30857,8 @@ configs:
       PLACE@map.6/map.2/inner.2/map: cut
     identity: 636261baa5e532c9187f5a8a4565706820f245479625799a279210d467a4b961
     measurements:
-      emmy_us: 40313.51735155014
-      reference_us: 40390.93407643112
+      emmy_us: 4836.147223371599
+      reference_us: 4831.555021447794
       reference_backend: same-input-greedy
     latency:
       NVIDIA Tesla V100 SXM3 32GB:
@@ -30906,8 +30906,8 @@ configs:
       RASTER: ''
     identity: 9e703bb66ebd24543229629bd3808a111ba52ae453b4f6d95ed5985e9d227e47
     measurements:
-      emmy_us: 594.9440002441406
-      reference_us: 596.992015838623
+      emmy_us: 593.9199924468994
+      reference_us: 594.9440002441406
       reference_backend: same-input-greedy
   - name: post-sym.k_linear_softmax_matmul_mean_reduce_3836f9.e906d92853d9.dynamic.52983282da5e.bb6d966275ff
     bindings: {}
@@ -30920,8 +30920,8 @@ configs:
       RASTER: ''
     identity: bb6d966275ff345fc8a0628b0a451e1cad75d708fa7c25209b1ea86dab21a7e0
     measurements:
-      emmy_us: 607.2319746017456
-      reference_us: 612.3520135879517
+      emmy_us: 610.3039979934692
+      reference_us: 609.279990196228
       reference_backend: same-input-greedy
   - name: post-sym.k_linear_softmax_matmul_mean_reduce_3836f9.e906d92853d9.dynamic.52983282da5e.e120cf2eb27c
     bindings: {}
@@ -31026,30 +31026,30 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: t256
-      TILE: ''
-      REDUCE: coop-t
-      STAGE: ''
+      WORK: w2x2
+      TILE: mma_m8n8k4_f16_f32/f4x4/k8
+      REDUCE: ''
+      STAGE: d2/smem
       RASTER: ''
     identity: 7c4918235c611e40142a313fb09a440c2b8b6782b1759f00511185f3ffe93d71
     measurements:
-      emmy_us: 9456.640243530273
-      reference_us: 9453.568458557129
+      emmy_us: 142.84799993038177
+      reference_us: 142.84799993038177
       reference_backend: same-input-greedy
   - name: post-sym.k_linear_softmax_matmul_mean_reduce_3836f9.e906d92853d9.dynamic.52983282da5e.3cb64a167eb2
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      WORK: t256
-      TILE: ''
-      REDUCE: coop-t
-      STAGE: ''
+      WORK: w2x2
+      TILE: mma_m8n8k4_f16_f32/f4x4/k8
+      REDUCE: ''
+      STAGE: d2/smem
       RASTER: ''
     identity: 3cb64a167eb27113c51fb8b8bdf621d67dbff80a200e1ad33d06c26c1b2002b4
     measurements:
-      emmy_us: 17244.159698486328
-      reference_us: 17243.135452270508
+      emmy_us: 416.25601053237915
+      reference_us: 418.8160002231598
       reference_backend: same-input-greedy
   - name: post-sym.k_linear_softmax_matmul_mean_reduce_3836f9.e906d92853d9.dynamic.52983282da5e.112088057f9c
     bindings: {}
@@ -31060,8 +31060,8 @@ configs:
       RASTER: ''
     identity: 112088057f9c3f4e5f194890c9d7580661dcc22b9e47ca687717a222a4dbeb4d
     measurements:
-      emmy_us: 384.0000033378601
-      reference_us: 387.58400082588196
+      emmy_us: 379.39199805259705
+      reference_us: 378.36799025535583
       reference_backend: same-input-greedy
   - name: post-sym.k_linear_softmax_matmul_mean_reduce_3836f9.e906d92853d9.dynamic.52983282da5e.c611511dba0e
     bindings: {}
@@ -31090,8 +31090,8 @@ configs:
       RASTER: ''
     identity: c293dca8998f6bb367683f32f76fc022e3322a8bf52e4e65bc019a54f22eff69
     measurements:
-      emmy_us: 143.5647964477539
-      reference_us: 143.9743995666504
+      emmy_us: 143.76959800720215
+      reference_us: 144.6399986743927
       reference_backend: same-input-greedy
   - name: post-sym.k_linear_softmax_matmul_mean_reduce_3836f9.e906d92853d9.dynamic.52983282da5e.6e6ba08bd6ce
     bindings: {}
@@ -31105,8 +31105,8 @@ configs:
       RASTER: ''
     identity: 6e6ba08bd6ce554bc765e3b99aa8debc7ef9351e69456263cd3d72d6abf5d0f7
     measurements:
-      emmy_us: 142.84799993038177
-      reference_us: 142.3359990119934
+      emmy_us: 142.95040369033813
+      reference_us: 143.15520524978638
       reference_backend: same-input-greedy
   - name: post-sym.k_linear_softmax_matmul_mean_reduce_3836f9.e906d92853d9.dynamic.52983282da5e.e120cf2eb27c
     bindings: {}
@@ -31120,7 +31120,7 @@ configs:
       RASTER: ''
     identity: e120cf2eb27cbaf0a9592aa3a93ac6aca1ddbecc43cb5a2caa4a33a741a274d6
     measurements:
-      emmy_us: 258.730669816335
+      emmy_us: 260.09601354599
       reference_us: 257.7066620190938
       reference_backend: same-input-greedy
   - name: post-sym.k_linear_softmax_matmul_mean_reduce_3836f9.e906d92853d9.dynamic.52983282da5e.270eab4f52d1
@@ -31139,7 +31139,7 @@ configs:
     identity: 270eab4f52d1c0e36b86849996017c2b5095c02cbd53fbafd562c5e99c27ad47
     measurements:
       emmy_us: 302.592009305954
-      reference_us: 304.1279911994934
+      reference_us: 302.0799954732259
       reference_backend: same-input-greedy
   - name: post-sym.k_linear_softmax_matmul_mean_reduce_3836f9.e906d92853d9.dynamic.52983282da5e.548fbebf6c19
     bindings: {}
@@ -31153,7 +31153,7 @@ configs:
       RASTER: ''
     identity: 548fbebf6c197760f8aa98da4fe9806c2dab0c53cc6c618c6906976b05f6063c
     measurements:
-      emmy_us: 46.82472619143399
+      emmy_us: 47.10400104522705
       reference_us: 47.00160026550293
       reference_backend: same-input-greedy
   - name: post-sym.k_linear_softmax_matmul_mean_reduce_3836f9.e906d92853d9.dynamic.52983282da5e.8d1323a357db
@@ -31171,7 +31171,7 @@ configs:
     identity: 8d1323a357dbff9946b1c214d139710cf00b13538140bd8fbf0bf4abd6dc064d
     measurements:
       emmy_us: 355.3279936313629
-      reference_us: 355.8399975299835
+      reference_us: 355.3279936313629
       reference_backend: same-input-greedy
   - name: post-sym.k_linear_softmax_matmul_mean_reduce_3836f9.e906d92853d9.dynamic.52983282da5e.6fd675ba3958
     bindings: {}
@@ -31186,8 +31186,8 @@ configs:
       RASTER: ''
     identity: 6fd675ba39585da9e7d5af9380941b5daf2e58fc345b4ad879cb44c6e7504fe3
     measurements:
-      emmy_us: 144.896000623703
-      reference_us: 146.2272047996521
+      emmy_us: 144.17920112609863
+      reference_us: 144.38400268554688
       reference_backend: same-input-greedy
   - name: post-sym.k_linear_softmax_matmul_mean_reduce_3836f9.e906d92853d9.dynamic.52983282da5e.8227f66f2f8f
     bindings: {}
@@ -31203,8 +31203,8 @@ configs:
       RASTER: ''
     identity: 8227f66f2f8f76ff97277aa46ddd5a5ae892b0a5d0b5d2c4ebd8b3ed080c7226
     measurements:
-      emmy_us: 114.94400352239609
-      reference_us: 116.73599481582642
+      emmy_us: 114.89280462265015
+      reference_us: 113.49333326021831
       reference_backend: same-input-greedy
   - name: post-sym.k_linear_softmax_matmul_mean_reduce_3836f9.e906d92853d9.dynamic.52983282da5e.c611511dba0e
     bindings: {}
@@ -31218,8 +31218,8 @@ configs:
       RASTER: ''
     identity: c611511dba0e59a3d245641545b8bb452b8b25fa5df59769d1215577f8176ff5
     measurements:
-      emmy_us: 113.86879682540894
-      reference_us: 115.7120019197464
+      emmy_us: 115.7120019197464
+      reference_us: 114.89280462265015
       reference_backend: same-input-greedy
   - name: post-sym.k_linear_softmax_matmul_mean_reduce_3836f9.e906d92853d9.dynamic.52983282da5e.a47f22fa9713
     bindings: {}
@@ -31232,8 +31232,8 @@ configs:
       RASTER: ''
     identity: a47f22fa9713e114300e624a3cd24ff99d6a80a499553cdb4628cfd9dc0792f5
     measurements:
-      emmy_us: 178.43200266361237
-      reference_us: 179.45599555969238
+      emmy_us: 180.2240014076233
+      reference_us: 178.9952039718628
       reference_backend: same-input-greedy
   - name: post-sym.k_linear_softmax_matmul_mean_reduce_3836f9.e906d92853d9.dynamic.52983282da5e.e0e8561ec0ee
     bindings: {}
@@ -31244,8 +31244,8 @@ configs:
       RASTER: ''
     identity: e0e8561ec0ee89a715f9dc3487009f0238535c3750de93331e88dee12ae589f4
     measurements:
-      emmy_us: 2.687999978661537
-      reference_us: 2.3210667073726654
+      emmy_us: 3.0720000051789813
+      reference_us: 2.9440000653266907
       reference_backend: same-input-greedy
   - name: post-sym.k_linear_softmax_matmul_mean_reduce_3836f9.e906d92853d9.dynamic.52983282da5e.00754da81817
     bindings: {}
@@ -31257,8 +31257,8 @@ configs:
       RASTER: ''
     identity: 00754da81817a669379ceb370011d055f33ef5139a7f1e68c6255220f5ba596c
     measurements:
-      emmy_us: 12.373333175977072
-      reference_us: 12.75345412167636
+      emmy_us: 12.595200538635254
+      reference_us: 13.165714485304695
       reference_backend: same-input-greedy
 - program: 4
   target:
@@ -36949,8 +36949,8 @@ configs:
       PLACE@map.6/map.2/inner.2/map: cut
     identity: ed48abe44cdf6169d81d60bac515428e2a7bc061dd13fbf4626340d74f3c3375
     measurements:
-      emmy_us: 258082.79731768582
-      reference_us: 258301.2377537787
+      emmy_us: 120596.23987335298
+      reference_us: 121695.53271324064
       reference_backend: same-input-greedy
     latency:
       NVIDIA Tesla V100 SXM3 32GB:
@@ -36972,8 +36972,8 @@ configs:
       RASTER: ''
     identity: 94dda6f32da3c78f1f9aa06878aafc70d3fea51335941d37352653833e3ec264
     measurements:
-      emmy_us: 14991.35971069336
-      reference_us: 15066.11156463623
+      emmy_us: 15024.127960205078
+      reference_us: 15071.231842041016
       reference_backend: same-input-greedy
   - name: post4096.k_linear_softmax_matmul_mean_reduce_366777.f0fc3dc05f5c.m4096.02e3b8ae01c2.7b536d18d470
     bindings:
@@ -36989,7 +36989,7 @@ configs:
     identity: 7b536d18d47035a2463f05f4975513aeecffff589840068c2a9fb2558479bae0
     measurements:
       emmy_us: 15117.31243133545
-      reference_us: 15121.408462524414
+      reference_us: 15119.359970092773
       reference_backend: same-input-greedy
   - name: post4096.k_linear_softmax_matmul_mean_reduce_366777.f0fc3dc05f5c.m4096.02e3b8ae01c2.030c7def6504
     bindings:
@@ -37004,8 +37004,8 @@ configs:
       RASTER: ''
     identity: 030c7def6504b984b08026cb95abc62ded0a0a134af498c5b654f3905633d912
     measurements:
-      emmy_us: 5935.103893280029
-      reference_us: 5941.247940063477
+      emmy_us: 5934.080123901367
+      reference_us: 5944.320201873779
       reference_backend: same-input-greedy
   - name: post4096.k_linear_softmax_matmul_mean_reduce_366777.f0fc3dc05f5c.m4096.02e3b8ae01c2.1a911d32220a
     bindings:
@@ -37023,8 +37023,8 @@ configs:
       RASTER: ''
     identity: 1a911d32220a856048c43a570dcde8d275909d7f24008b65d6e3aa05ab0b26f4
     measurements:
-      emmy_us: 4352.0002365112305
-      reference_us: 4372.4799156188965
+      emmy_us: 4364.287853240967
+      reference_us: 4365.312099456787
       reference_backend: same-input-greedy
   - name: post4096.k_linear_softmax_matmul_mean_reduce_366777.f0fc3dc05f5c.m4096.02e3b8ae01c2.c21755b972c0
     bindings:
@@ -37041,8 +37041,8 @@ configs:
       RASTER: ''
     identity: c21755b972c0e9b9d705f263d5edc0f4c792b77d7e6d2de2ae83d9df225a729d
     measurements:
-      emmy_us: 4320.256233215332
-      reference_us: 4329.472064971924
+      emmy_us: 4326.399803161621
+      reference_us: 4332.543849945068
       reference_backend: same-input-greedy
   - name: post4096.k_linear_softmax_matmul_mean_reduce_366777.f0fc3dc05f5c.m4096.02e3b8ae01c2.a28ea0c63669
     bindings:
@@ -37058,8 +37058,8 @@ configs:
       RASTER: ''
     identity: a28ea0c636694b93f89643d8837cd56c8e1049208510d975553d9f8bcf1446bf
     measurements:
-      emmy_us: 40737.79296875
-      reference_us: 40734.718322753906
+      emmy_us: 40856.57501220703
+      reference_us: 41835.52169799805
       reference_backend: same-input-greedy
   - name: post4096.k_linear_softmax_matmul_mean_reduce_366777.f0fc3dc05f5c.m4096.02e3b8ae01c2.848511b9e6e6
     bindings:
@@ -37092,8 +37092,8 @@ configs:
       RASTER: ''
     identity: a986b844ad197efec08c45041e7822814291809a41a0368096305e5dce181756
     measurements:
-      emmy_us: 888.8319730758667
-      reference_us: 889.8559808731079
+      emmy_us: 894.976019859314
+      reference_us: 896.0000276565552
       reference_backend: same-input-greedy
   - name: post4096.k_linear_softmax_matmul_mean_reduce_366777.f0fc3dc05f5c.m4096.02e3b8ae01c2.20e5861ce454
     bindings:
@@ -37105,7 +37105,7 @@ configs:
     identity: 20e5861ce4547d786750671447b2275ceff3de8c4abc036d1dc9e8acdeb23acf
     measurements:
       emmy_us: 636.9280219078064
-      reference_us: 642.0480012893677
+      reference_us: 645.1200246810913
       reference_backend: same-input-greedy
   - name: post4096.k_linear_softmax_matmul_mean_reduce_366777.f0fc3dc05f5c.m4096.02e3b8ae01c2.ef6794e8214b
     bindings:
@@ -37116,8 +37116,8 @@ configs:
       REDUCE: g2a
     identity: ef6794e8214bac916152e233d981d5c41620b3927b47e34d48d881cec890e696
     measurements:
-      emmy_us: 140438.5223388672
-      reference_us: 140479.4921875
+      emmy_us: 2754.5599937438965
+      reference_us: 2758.6560249328613
       reference_backend: same-input-greedy
   - name: post4096.k_linear_softmax_matmul_mean_reduce_366777.f0fc3dc05f5c.m4096.02e3b8ae01c2.b768c094cfd1
     bindings:
@@ -37131,8 +37131,8 @@ configs:
       RASTER: ''
     identity: b768c094cfd10d246f310b5cb4a06f429d62495d34ff24d378d913198d57b962
     measurements:
-      emmy_us: 1403.9039611816406
-      reference_us: 1405.951976776123
+      emmy_us: 1404.9279689788818
+      reference_us: 1402.8799533843994
       reference_backend: same-input-greedy
   - name: post4096.k_linear_softmax_matmul_mean_reduce_366777.f0fc3dc05f5c.m4096.02e3b8ae01c2.b9838768e8a2
     bindings:
@@ -37146,7 +37146,7 @@ configs:
       RASTER: ''
     identity: b9838768e8a2968d168fcde07860219c1c5e96b886d789394b19e43feef97e1a
     measurements:
-      emmy_us: 1088.5119438171387
+      emmy_us: 1093.6319828033447
       reference_us: 1095.6799983978271
       reference_backend: same-input-greedy
   - name: post4096.k_linear_softmax_matmul_mean_reduce_366777.f0fc3dc05f5c.m4096.02e3b8ae01c2.b1372718d626
@@ -37161,8 +37161,8 @@ configs:
       RASTER: ''
     identity: b1372718d626c018ed80ab06e3410ebfda9fc940a3f33861140f6f4e90440956
     measurements:
-      emmy_us: 1213.43994140625
-      reference_us: 1214.4639492034912
+      emmy_us: 1216.5119647979736
+      reference_us: 1215.4879570007324
       reference_backend: same-input-greedy
   - name: post4096.k_linear_softmax_matmul_mean_reduce_366777.f0fc3dc05f5c.m4096.02e3b8ae01c2.0a93cd62b4c4
     bindings:
@@ -37178,7 +37178,7 @@ configs:
     identity: 0a93cd62b4c43af74b29176e6da451fb4291f776d6f1569bfc1fdc296b8241d1
     measurements:
       emmy_us: 636.9280219078064
-      reference_us: 642.0480012893677
+      reference_us: 645.1200246810913
       reference_backend: same-input-greedy
   - name: post4096.k_linear_softmax_matmul_mean_reduce_366777.f0fc3dc05f5c.m4096.02e3b8ae01c2.a5d41bbf6969
     bindings:
@@ -37190,8 +37190,8 @@ configs:
       RASTER: ''
     identity: a5d41bbf6969f9a21994cd07694e9ccc5eec89196e9caff7ae5610008db75e09
     measurements:
-      emmy_us: 3.7888001650571823
-      reference_us: 4.198399931192398
+      emmy_us: 4.198399931192398
+      reference_us: 4.736000206321478
       reference_backend: same-input-greedy
   - name: post4096.k_linear_softmax_matmul_mean_reduce_366777.f0fc3dc05f5c.m4096.02e3b8ae01c2.3d94a08b6035
     bindings:
@@ -37206,8 +37206,8 @@ configs:
       RASTER: ''
     identity: 3d94a08b6035a8106efff1299c51beff88e179ef125de14e25a8a307d47517a0
     measurements:
-      emmy_us: 2506.7520141601562
-      reference_us: 2513.9200687408447
+      emmy_us: 2508.8000297546387
+      reference_us: 2512.8960609436035
       reference_backend: same-input-greedy
   - name: post4096.k_linear_softmax_matmul_mean_reduce_366777.f0fc3dc05f5c.m4096.02e3b8ae01c2.27f2db101e6e
     bindings:
@@ -37215,15 +37215,15 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w8x4
-      TILE: mma_m8n8k4_f16_f32/f4x4/k2
+      WORK: w2x4
+      TILE: mma_m8n8k4_f16_f32/f4x2/k8
       REDUCE: ''
       STAGE: d2/smem
       RASTER: ''
     identity: 27f2db101e6ea4a4924e50241c4b5f216e65876d26b6f86671ab3f3183a1208a
     measurements:
-      emmy_us: 140438.5223388672
-      reference_us: 140479.4921875
+      emmy_us: 2754.5599937438965
+      reference_us: 2758.6560249328613
       reference_backend: same-input-greedy
   - name: post4096.k_linear_softmax_matmul_mean_reduce_366777.f0fc3dc05f5c.m4096.02e3b8ae01c2.3f549d96a0a1
     bindings:
@@ -37235,8 +37235,8 @@ configs:
       RASTER: ''
     identity: 3f549d96a0a118cd2099e3443b98e8c9af6cd0686cf5d6696d7c1af60b808315
     measurements:
-      emmy_us: 9789.440155029297
-      reference_us: 9803.775787353516
+      emmy_us: 9795.583724975586
+      reference_us: 9814.016342163086
       reference_backend: same-input-greedy
   - name: post4096.k_linear_softmax_matmul_mean_reduce_366777.f0fc3dc05f5c.m4096.02e3b8ae01c2.e76a716261cd
     bindings:
@@ -37249,8 +37249,8 @@ configs:
       RASTER: ''
     identity: e76a716261cd3bb2958a95bfa8477b90a91169dae67b3d9f19eb052cca05687d
     measurements:
-      emmy_us: 12.58057143007006
-      reference_us: 12.492799758911133
+      emmy_us: 12.970666918489668
+      reference_us: 12.970666090647379
       reference_backend: same-input-greedy
 - program: 7
   target:
