@@ -253,6 +253,26 @@ impl Executor {
         })
     }
 
+    /// Submit a stateful program exactly once. Capture records work without a warmup execution.
+    pub fn advance(&mut self, capture: bool) -> Result<()> {
+        self.completed = false;
+        if capture && self.graph.is_none() {
+            self.stream.synchronize()?;
+            self.stream
+                .begin_capture(sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL)?;
+            let submitted = self.submit();
+            let captured = self.stream.end_capture(
+                sys::CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
+            );
+            submitted?;
+            self.graph = Some(captured?.context("empty CUDA graph")?);
+        }
+        self.step(capture)?;
+        self.stream.synchronize()?;
+        self.completed = true;
+        Ok(())
+    }
+
     fn step(&mut self, capture: bool) -> Result<()> {
         if capture {
             self.graph.as_ref().unwrap().launch()?;
