@@ -1086,6 +1086,7 @@
  "tests/compiler/trace/test_dit.py::test_dit_loader_uses_only_transformer_subfolder": 1.75,
  "tests/compiler/trace/test_dit.py::test_dit_timestep_normalization_preserves_block_output": 5.3,
  "tests/compiler/trace/test_huggingface.py::test_architecture_only_trace_does_not_load_checkpoint_weights": 0.05,
+ "tests/compiler/trace/test_huggingface.py::test_checkpoint_key_renamer_bridges_a_multimodal_prefix": 2.87,
  "tests/compiler/trace/test_huggingface.py::test_static_layer_trace_builds_multi_rope_mapping": 0.12,
  "tests/compiler/trace/test_huggingface.py::test_static_layer_trace_non_ple_block_unchanged": 0.11,
  "tests/compiler/trace/test_huggingface.py::test_static_layer_trace_omits_optional_none_attention_mask": 0.11,
