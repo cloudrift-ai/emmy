@@ -75,7 +75,7 @@ following each search, not held-out predictive performance.
 The release audit's preliminary reproduction originally used the default hardware golden even when the command
 named a model golden. That redundant diagnostic also compiled the whole program once per child receipt. The release
 audit now uses its strict offer decode and serving-matrix compile directly; the general reproduction table remains
-available in prior evaluation. The existing regression now observes every pipeline call and verifies the serving compile uses
+available in prior evaluation. The existing regression observes every pipeline call and verifies that serving uses
 only the selected records with strict evidence enabled, restoring the scope afterward.
 
 The main workflow costs were broad fused candidates that hit the kernel watchdog, expensive unmeasured prior
@@ -149,3 +149,27 @@ The archive retains the exact qualified golden, serving config, seed-one command
 replay, release audit, failed pre-fix probes, and the two search pilots' logs, records, and prior diagnostics.
 The checked-in experimental golden is the qualified input, not a recommended serving recipe. Search timings and
 old program identities are retained only as explicitly historical diagnostics, separate from the fresh replay.
+
+## Final validation
+
+After the scheduling refinements and corpus refresh, the full suite with GPU access disabled reports 4,918 passed,
+1,021 skipped, and nine expected failures. Lint and the updated recipe's dry run pass. Corpus expectations were not
+weakened. The stored identities and derived loops reflect the wider products; three cases also needed child-identity
+updates. Obsolete duplicate receipts in the two quantized projection cases were removed while preserving their
+compiled kernel sets and schedule choices.
+
+The model-golden gate reports seven passing files and four failing files. The same 67 rows fail on base `cab3b735`;
+no model golden was re-recorded or exempted to hide these failures. The full failure-name list was compared for the
+46-row EXL3 failure; the other files list every failing row in their test output.
+
+| Model golden | Failing rows on base | Failing rows on this branch |
+| --- | ---: | ---: |
+| Gemma-4-12B-it, RTX 5090 | 6 / 352 | 6 / 352 |
+| Gemma-4-12B-it, RTX 4090 | 13 / 240 | 13 / 240 |
+| Qwen3.8-27B-EXL3, V100 | 46 / 154 | 46 / 154 |
+| Qwen3.8-27B-GPTQ-Int4, V100 | 2 / 50 | 2 / 50 |
+
+The tuning archive includes the final CPU test, lint, model-golden, and base-comparison logs. GPU access stopped
+within the approved session. Final GPU revalidation, the live-GPU release audit, checkpoint generation checks, and
+the complete four-configuration serving comparison remain outstanding; the earlier GPU evidence is revision-pinned
+above. The release audit refuses a hidden GPU because it checks the actual card against the golden's target.
