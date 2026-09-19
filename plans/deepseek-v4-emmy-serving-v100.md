@@ -186,9 +186,14 @@ kernel where it minted two and whose prior schedule runs about 4 s per launch �
 roofline audit still has no time limit. A fourth gap came out of the 2026-09-19 boot: a measured row that spells a
 split or a cut whose pieces have no rows can win its fork on a retime alone, and strict then refuses at the pieces
 instead of taking the next measured arm — audit every such row for piece coverage, not only the placement routes.
-Next kernel items, in order: measure the symbolic post twin at a long prompt's width, since that and not the m4096
-twin is a single request's time to first token, starting with its `a47f22fa9713` piece at 24.7 ms; the nine m4096
-post pieces #813 never recorded (up to 140 ms each) matter once concurrent prompts fill a step; then Stage 4.
+The symbolic post twin is measured (2026-09-19): linear in width, 276 ms per layer at 2,155 tokens, 11.9 s of the
+29.3 s to first token. Seven post receipts that spelled two cooperative reduces with one block per output cell are
+re-recorded as the serial row (dynamic 64.9 → 40.3 ms at the hint, m16 9.9 → 8.8 ms, m4096 537 → 258 ms), and the
+boot on that file reads 24.9 s to first token at 2,155 tokens. To bench a dynamic row at another width, bench a
+scratch copy of the golden with its hint rewritten; the election does not change. Next kernel items, in order: the
+three `t256 coop-t` pieces that are 156 of the symbolic post twin's remaining 173 ms at 2,155 tokens — `emmy tune`,
+not a respelling; the m4096 post twin's tensor-core matmul piece at 140 ms, more than half of what that twin has
+left; the four single-block kernels that are 7 of the m16 post twin's 8.8 ms; then the experts and Stage 4.
 
 ## Operations handoff
 
