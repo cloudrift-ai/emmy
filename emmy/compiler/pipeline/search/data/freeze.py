@@ -1,23 +1,22 @@
-"""Measurement freeze — a digest-pinned snapshot of the tune DB's ``node`` table.
+"""Measurement freeze — a digest-pinned snapshot of a DB instance's ``perf`` rows.
 
-The node DB is a live store (tunes and merges write into it), so a model fit directly from
-it is not reproducible: two runs of the same fitter can see different data. A *freeze* is
-a local snapshot extracted from the DB whose digest pins exactly which measurements a fit
-saw — the fit becomes a pure function of (repo, freeze digest).
+A tune DB is a live store (tunes and imports write into it), so a model fit or evaluated directly
+from it is not reproducible: two runs of the same fitter can see different data. A *freeze* is a
+snapshot extracted from a DB instance whose digest pins exactly which measurements a fit saw — the
+fit becomes a pure function of (repo, freeze digest).
 
-Freeze v3 is a DIRECTORY of per-GPU YAML files — a
-``gpu_name`` / ``compute_cap`` header plus a ``configs`` list — beside a ``manifest.json``
-carrying provenance and content digests. Each row stores its DB ``op_sig``, current
-structural measurement features, verbatim tunable knobs, and measurement metadata.
-Device ``H_*`` features are re-derived card-faithfully at load time.
+Freeze v4 is a DIRECTORY of per-GPU YAML files — a ``gpu_name`` / ``compute_cap`` header plus a
+``configs`` list — beside a ``manifest.json`` carrying provenance and content digests. Each row is
+a ``perf`` row minus what its file header already says: the kernel's ``op_key``, its knobs
+(``S_*`` stamps + tunables, exactly as the DB stores them), the opt level, the status, the latency
+statistics, ``captured``, ``measured_at`` and a failure's ``error``. Device ``H_*`` features are
+never stored: readers derive them from the card (``data.sample.measured_features``).
 
-What freezes (see :func:`freeze_reason`): every **deployable-regime leaf** in the current
-featurizer vocabulary that passes the physical-plausibility predicates. ``bench_fail`` leaves are
-kept as durable negatives. Branch rows
-never freeze and no tree schema is stored (no ``parent_key`` / ``depth`` / ``visits``):
-prefix rows are re-synthesized at fit time under the current fork structure.
+What freezes (see :func:`freeze_reason`): every CUDA row measured in the deployable regime on a
+card the GPU registry knows, spelled in the current featurizer vocabulary, that passes the
+physical-plausibility predicates. ``bench_fail`` rows are kept as durable negatives.
 
-Determinism contract: freezing the same DB twice yields the same digests. Every row
+Determinism contract: freezing the same rows twice yields the same digests. Every row
 serializes to one canonical JSON line (sorted keys, fixed separators, ``allow_nan=False``);
 rows within a file sort by that line (total, content-derived order); the per-file
 ``sha256`` covers exactly those lines — NOT the YAML bytes, so integrity is content-level
@@ -26,27 +25,21 @@ per-file digests. ``created_at`` never enters any digest.
 
 :func:`load_freeze` hard-errors — never a silent fallback — on a missing/foreign/corrupt
 manifest, a ``freeze_ver`` mismatch, a manifest-listed file missing, or a per-file digest
-mismatch. There is deliberately
-NO load-time ``feat_ver`` gate (the v1 rule): features are re-derived by live code, so the
-stored ``feat_ver`` / ``knob_ver`` / ``encoding_ver`` are provenance, not a contract.
+mismatch. It is not a reader's entry point: ``emmy dataset import`` loads a freeze into a DB
+instance (each row's ``source`` naming the freeze's digest), and every reader reads the instance.
+
 One freeze is CHECKED IN, at ``search/freezes/``, and is what ``config.freeze_path()`` resolves
-to: the prior's evaluation corpus should be an artifact, not whatever a machine happens to hold.
-Its payload YAML is tracked in git LFS (multi-MB per card); its manifest is plain git so the
-digest and the version stamps stay diffable. It is deliberately not wheel package-data — a wheel
-install never fits or evaluates a prior.
+to — the default source of ``emmy dataset import``: the prior's evaluation corpus should be an
+artifact, not whatever a machine happens to hold. Its payload YAML is tracked in git LFS (multi-MB
+per card); its manifest is plain git so the digest and the version stamps stay diffable. It is
+deliberately not wheel package-data — a wheel install never fits or evaluates a prior.
 
-:func:`load_node_rows` is the interchange seam: it sniffs a path and yields ``NodeRow``s
-from either a live sqlite DB (file) or a freeze (directory), so the nodes-dataset
-consumers (``eval prior --dataset nodes``, ``Dataset.fold_node_rows``) accept both. Loaded rows
-carry ``parent_key=None`` / ``depth=0`` / ``visits=0``, which costs the consumers nothing: they read
-benched leaves and a freeze is leaf-only by construction. A v1 JSONL freeze is refused with a
-re-freeze pointer — freezes are regenerable from the DB.
-
-Produced by ``scripts/freeze_node_store.py``.
+Produced by ``emmy dataset freeze``.
 """
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import logging
@@ -54,50 +47,63 @@ import re
 import shutil
 import subprocess
 from collections import Counter
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import yaml
 
-if TYPE_CHECKING:
-    from emmy.compiler.pipeline.search.db import NodeRow
+from emmy.compiler.pipeline.search.db import PerfRow, PerfStats, SearchDB
+from emmy.compiler.pipeline.search.features import DEPLOYABLE_OPT, FEATURIZER_VERSION
 
 logger = logging.getLogger(__name__)
 
-FREEZE_KIND = "emmy-node-freeze"
-FREEZE_VER = 3
+FREEZE_KIND = "emmy-measurement-freeze"
+FREEZE_VER = 4
 MANIFEST_NAME = "manifest.json"
 
-_SQLITE_MAGIC = b"SQLite format 3\x00"
+
+@functools.cache
+def regime_key(gpu_name: str, cc: int, opt: int) -> str:
+    """The ``perf`` context key of the deployable-flags regime at ``opt`` on ``gpu_name`` (``cc`` in the
+    ``H_cc`` encoding) — the key a live compile on that card writes, so an imported row lands where a
+    measurement taken there would have."""
+    from emmy.compiler.context import Context  # noqa: PLC0415
+
+    ctx = Context.from_target(divmod(cc, 10), gpu_name=gpu_name)
+    return replace(ctx, compile_flags=f"-Xcicc -O{opt}").structural_key()
 
 
-def freeze_reason(row: NodeRow) -> str | None:
-    """Why ``row`` is excluded from a measurement freeze, or ``None`` to keep it.
+def freeze_reason(row: PerfRow) -> str | None:
+    """Why ``row`` is excluded from a measurement freeze and from every measured-pool reader, or
+    ``None`` to keep it.
 
-    THE freeze sanity filter, and nothing else — keep every DEPLOYABLE-regime leaf
-    spelled in the current featurizer vocabulary that passes the shared plausibility
-    predicates. ``bench_fail`` leaves reach the keep path by construction: both
-    predicates return ``None`` for non-``ok`` rows, so failures are kept as negative
-    examples without a special case.
+    THE admission filter, and nothing else — keep every row measured in the DEPLOYABLE regime, on a
+    card the GPU registry knows, spelled in the current featurizer vocabulary, that passes the shared
+    plausibility predicates. ``bench_fail`` rows reach the keep path by construction: both predicates
+    return ``None`` for non-``ok`` rows, so failures are kept as negative examples without a special case.
 
     The regime gate is what keeps a freeze a fair yardstick. A freeze is the corpus a reported
     prior number is computed over, and a measurement taken under a non-deployable opt level
     answers a question nothing asks: nothing trains on it (``Prior.add_rows``) and no deploy
     reads it. Kept, it would put half a card's pools in a lane no one runs, so half the headline
-    number would describe a regime that does not exist. Older stores hold such rows from the era
-    when sweeps ranked at ``-Xcicc -O1``; they are dropped here rather than at each reader."""
-    from emmy.compiler.pipeline.search.db import implausible_value_reason, impossible_kernel_reason  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.features import DEPLOYABLE_OPT, FEATURIZER_VERSION  # noqa: PLC0415
+    number would describe a regime that does not exist. The same goes for extra compiler flags,
+    which the context key folds but no column spells: a row whose key is not the plain-flags key of
+    its opt level was measured in some other regime."""
+    from emmy import gpu  # noqa: PLC0415
 
-    if row.is_leaf is not True:
-        return "non-leaf (branch or pre-enrichment row)"
+    if not row.gpu or row.cc is None or row.opt is None:
+        return "unkeyed (recorded before the card joined the key)"
+    if gpu.by_name(row.gpu) is None:
+        return "unknown card (not in the GPU registry)"
     if row.feat_ver != FEATURIZER_VERSION:
         return f"stale feat_ver {row.feat_ver} != current {FEATURIZER_VERSION}"
-    if "H_cc" not in row.features or "H_opt" not in row.features:
-        return "missing H_* regime stamps"
-    if float(row.features["H_opt"]) != DEPLOYABLE_OPT:
-        return f"non-deployable regime (H_opt={row.features['H_opt']:g})"
+    if row.opt != DEPLOYABLE_OPT:
+        return f"non-deployable regime (H_opt={row.opt:g})"
+    if row.context_key != regime_key(row.gpu, row.cc, row.opt):
+        return "non-default compiler flags"
+    if not any(k.startswith("S_") for k in row.knobs):
+        return "no structural stamps (a whole-slice or kernel-set row)"
     reason = implausible_value_reason(row)
     if reason is not None:
         return f"implausible value: {reason}"
@@ -107,23 +113,116 @@ def freeze_reason(row: NodeRow) -> str | None:
     return None
 
 
-def _row_payload(row: NodeRow) -> dict:
-    """One freeze row: stable DB op identity, structural measurements, tunables,
-    and measurement metadata. Device-context features are re-derived at load."""
-    from emmy.compiler.pipeline.search.data.sample import _split_by_prefix  # noqa: PLC0415
+def implausible_value_reason(row: PerfRow) -> str | None:
+    """THE physical-plausibility predicate for a ``perf`` row's median — the reason it
+    cannot be a real measurement, or ``None`` when it's plausible/ungateable. Part of
+    :func:`freeze_reason`, so a freeze and every measured-pool reader drop the same rows.
 
-    tunable, _ctx, structural = _split_by_prefix(row.features)
+    The bound is the arithmetic-intensity floor the golden A/B integrity gate uses: the
+    throughput a latency implies from the row's stamped shape must stay below the card's
+    recorded peak. ``2·free·reduce_max`` FLOPs is the true work ONLY when the reduce axes
+    are **disjoint** from the output — the iteration space is then exactly
+    ``free_prod × reduce`` (a contraction, or a pure output-shrinking reduce) — which the
+    stamps certify as ``S_loop_depth == n_free + n_reduce + n_symbolic`` (every loop of
+    the nest is either a counted free/symbolic output axis or a counted reduce axis). A
+    norm/softmax kernel fails that equality — its reduced axis is part of the full-size
+    output, so ``free_prod`` already contains it and the product overcounts by the reduce
+    extent (a cooperative norm legitimately runs ~100x its serial sibling, so a latency
+    floor there would flag honest rows); a fused multi-node kernel (attention) fails it
+    too. Both stay ungated rather than falsely flagged — the identity was verified
+    against every stamp combination in the 2026-07 sweep stores. ``reduce_max``, not
+    ``reduce_prod``, keeps the bound a lower estimate of work even off the exact case. A
+    symbolic axis is excluded from the stamped products and benched at the dynamic hint,
+    so it re-enters as one hint factor. Ungateable rows also pass on: non-``ok`` status
+    (a fail sentinel is not a measurement), no stamped shape, unknown card or unrecorded
+    peak, and rows outside the current featurizer vocabulary (their stamps aren't trusted
+    enough to judge)."""
+    if row.status != "ok" or row.stats.median <= 0 or row.feat_ver != FEATURIZER_VERSION:
+        return None
+    f = row.knobs
+    free = float(f.get("S_ext_free_prod") or 0.0)
+    red = float(f.get("S_ext_reduce_max") or 0.0)
+    if free <= 0 or red <= 0:
+        return None
+    # Work = free x red only when every loop multiplies the iteration space (disjoint axes).
+    depth = float(f.get("S_loop_depth") or 0.0)
+    n_sym = float(f.get("S_ext_n_symbolic_axis") or 0.0)
+    n_axes = float(f.get("S_ext_n_free_axis") or 0.0) + float(f.get("S_ext_n_reduce_axis") or 0.0) + n_sym
+    if depth <= 0 or depth != n_axes:
+        return None
+    from emmy import gpu  # noqa: PLC0415
+
+    spec = gpu.by_name(row.gpu) if row.gpu else None
+    if spec is None:
+        return None
+    half = any(k.startswith("S_dtype_") and "f16" in k and v for k, v in f.items())  # f16 / bf16
+    peak = spec.peak_tflops("fp16" if half else "fp32")
+    if not peak:
+        return None
+    from emmy.compiler.dim import DEFAULT_SEQ_HINT  # noqa: PLC0415
+
+    hint = DEFAULT_SEQ_HINT if n_sym > 0 else 1
+    implied = 2.0 * free * red * hint / row.stats.median / 1e6  # FLOP / µs -> TFLOP/s
+    if implied > peak:
+        return f"implies {implied:.0f} TFLOP/s > {peak:.0f} device peak"
+    return None
+
+
+def impossible_kernel_reason(row: PerfRow) -> str | None:
+    """The *validity* companion to :func:`implausible_value_reason` — the reason the row's
+    stamped kernel could never have launched, or ``None``. A ``cp.async``-staged warp tile
+    whose slab (``depth · (tile_m + tile_n) · bk_elems · elem_bytes``, the
+    warp stage sizing) exceeds the card's dynamic-smem opt-in cap cannot
+    materialize — pre-#330 code stamped such stages anyway, the materializer rejected the
+    main kernel, and the bench recorded the surviving combine kernel's cached µs as an
+    ``ok`` measurement of the whole op. On shapes too small for the latency floor to
+    notice (square.512's combine implies a legal 133 TFLOP/s), THIS check is the only one
+    that catches the class: the measurement is of a kernel set that provably didn't
+    include the stamped kernel."""
+    if row.status != "ok" or row.feat_ver != FEATURIZER_VERSION:
+        return None
+    f = row.knobs
+    tile_spec = next((str(v) for k, v in f.items() if k.startswith("TILE") and v), "")
+    stage_spec = next((str(v) for k, v in f.items() if k.startswith("STAGE") and v), "")
+    if not tile_spec or not stage_spec.startswith("d"):
+        return None
+    from emmy.compiler.ir.schedule import Stage, Tile, Work  # noqa: PLC0415
+
+    try:
+        work = Work.parse(str(f.get("WORK") or ""))  # the row's unit widths live here, not in TILE
+        tp, st = Tile.parse(tile_spec, work), Stage.parse(stage_spec)
+    except ValueError:
+        return None
+    if not tp.is_warp:
+        return None
+    if st.transport != "smem-async":
+        return None
+    from emmy import gpu  # noqa: PLC0415
+
+    spec = gpu.by_name(row.gpu) if row.gpu else None
+    if spec is None:
+        return None
+    atom = tp.atom
+    tile_m = tp.units_m * tp.reg_m * atom.atom_m
+    tile_n = tp.units_n * tp.reg_n * atom.atom_n
+    slab = st.depth * (tile_m + tile_n) * tp.bk * atom.atom_k * atom.operand_dtype("a").nbytes
+    if slab > spec.smem_optin:
+        return f"staged slab {slab} B > {spec.smem_optin} B dynamic-smem cap (kernel cannot launch)"
+    return None
+
+
+def _row_payload(row: PerfRow) -> dict:
+    """One freeze row: the ``perf`` row minus what its file header holds (card, compute capability)."""
+    s = row.stats
     return {
-        "op_sig": row.op_sig,
-        "structural_features": structural,
-        "knobs": tunable,
-        "value_us": row.value_us,
-        "opt": int(row.features["H_opt"]),
+        "op_key": row.op_key,
+        "knobs": row.knobs,
+        "opt": row.opt,
         "status": row.status,
-        "variance": row.variance,
-        "n_samples": row.n_samples,
-        "run_id": row.run_id,
+        "stats": {"median": s.median, "min": s.min, "max": s.max, "mean": s.mean, "variance": s.variance, "n_samples": s.n_samples},
+        "captured": row.captured,
         "measured_at": row.measured_at,
+        "error": row.error,
     }
 
 
@@ -159,17 +258,17 @@ def _repo_commit() -> str:
 
 
 def write_freeze(db_path: Path | str, out_dir: Path | str, *, note: str = "") -> dict:
-    """Read the node store at ``db_path`` (a live DB or an existing freeze — the
-    :func:`load_node_rows` seam) read-only, filter through :func:`freeze_reason`, and
-    atomically write the freeze DIRECTORY at ``out_dir``: one per-``(gpu, compute_cap)``
-    YAML file plus ``manifest.json``. Returns the manifest dict (so a caller reports
-    counts + digest without re-reading). Hard-errors when nothing survives the filter —
-    a zero-row freeze means the wrong DB (or an identity-less legacy store), not an
-    empty dataset. An existing ``out_dir`` is replaced only when it is itself a freeze
-    (has a manifest) — anything else is refused rather than deleted."""
-    from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION  # noqa: PLC0415
-
-    rows = load_node_rows(db_path)
+    """Read the CUDA ``perf`` rows of the DB instance at ``db_path`` read-only, filter them through
+    :func:`freeze_reason`, and atomically write the freeze DIRECTORY at ``out_dir``: one
+    per-``(gpu, compute_cap)`` YAML file plus ``manifest.json``. Returns the manifest dict (so a
+    caller reports counts + digest without re-reading). Hard-errors when nothing survives the filter —
+    a zero-row freeze means the wrong DB, not an empty dataset. An existing ``out_dir`` is replaced
+    only when it is itself a freeze (has a manifest) — anything else is refused rather than deleted."""
+    db = SearchDB.open_readonly(db_path)
+    try:
+        rows = list(db.iter_perf_rows(backend="cuda"))
+    finally:
+        db.close()
     kept = []
     dropped: Counter[str] = Counter()
     for row in rows:
@@ -182,16 +281,12 @@ def write_freeze(db_path: Path | str, out_dir: Path | str, *, note: str = "") ->
         logger.info("[freeze] dropped %d row(s): %s", n, reason)
     if not kept:
         raise RuntimeError(
-            f"no freezable leaf rows in {db_path} — wrong DB, or its rows carry no declarative identity / predate the "
-            f"current featurizer vocabulary (re-collect with the collect-node-data flow)"
+            f"no freezable rows in {db_path} — wrong DB, or its rows predate the card key or the current featurizer vocabulary"
         )
 
-    # Group per (gpu, compute_cap) — cap comes off the row's stamped H_cc (major*10+minor),
-    # the same encoding Context.features writes.
     by_card: dict[tuple[str, tuple[int, int]], list] = {}
     for row in kept:
-        cap = divmod(int(row.features["H_cc"]), 10)
-        by_card.setdefault((row.gpu, cap), []).append(row)
+        by_card.setdefault((row.gpu, divmod(row.cc, 10)), []).append(row)
 
     out = Path(out_dir)
     tmp = out.with_name(out.name + ".tmp")
@@ -210,12 +305,7 @@ def write_freeze(db_path: Path | str, out_dir: Path | str, *, note: str = "") ->
             raise RuntimeError(f"freeze file name collision: {name} (cards {files[name]['gpu_name']!r} and {gpu!r})")
         doc = {"gpu_name": gpu, "compute_cap": list(cap), "configs": payloads}
         (tmp / name).write_text(yaml.safe_dump(doc, sort_keys=True, width=120))
-        files[name] = {
-            "gpu_name": gpu,
-            "compute_cap": list(cap),
-            "rows": len(payloads),
-            "sha256": digest.hexdigest(),
-        }
+        files[name] = {"gpu_name": gpu, "compute_cap": list(cap), "rows": len(payloads), "sha256": digest.hexdigest()}
 
     top = hashlib.sha256()
     for name in sorted(files):
@@ -230,7 +320,6 @@ def write_freeze(db_path: Path | str, out_dir: Path | str, *, note: str = "") ->
         "repo_commit": _repo_commit(),
         "source_db": str(Path(db_path).resolve()),
         "policy_note": note,
-        "run_ids": sorted({r.run_id for r in kept if r.run_id}),
         "counts": {
             "rows": len(kept),
             "ok": sum(1 for r in kept if r.status == "ok"),
@@ -252,19 +341,12 @@ def write_freeze(db_path: Path | str, out_dir: Path | str, *, note: str = "") ->
     return manifest
 
 
-def load_freeze(path: Path | str) -> tuple[dict, list[NodeRow]]:
-    """Parse + verify the freeze directory at ``path`` → ``(manifest, leaf-only
-    NodeRows)`` with features RE-DERIVED by live code (see the module docstring). Hard
-    ``RuntimeError`` — never a silent fallback — on any integrity failure. Identity keys
-    of a loaded row retain the stored ``op_sig``; ``context_key`` spells
-    ``cap<maj>.<min>-O<opt>``."""
-    from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.db import NodeRow  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION  # noqa: PLC0415
-    from emmy.compiler.structural import digest as key_digest  # noqa: PLC0415
-
+def load_freeze(path: Path | str) -> tuple[dict, list[PerfRow]]:
+    """Parse + verify the freeze directory at ``path`` → ``(manifest, perf rows)``, each row keyed by its
+    file's card and the plain-flags regime of its opt level (:func:`regime_key`), and sourced
+    ``freeze:<digest>``. Hard ``RuntimeError`` — never a silent fallback — on any integrity failure."""
     p = Path(path)
-    regen = "re-freeze with scripts/freeze_node_store.py"
+    regen = "re-freeze with `emmy dataset freeze`"
     mpath = p / MANIFEST_NAME
     if not mpath.exists():
         raise RuntimeError(f"{p} is not a measurement freeze (no {MANIFEST_NAME}) — {regen}")
@@ -277,8 +359,8 @@ def load_freeze(path: Path | str) -> tuple[dict, list[NodeRow]]:
     if manifest.get("freeze_ver") != FREEZE_VER:
         raise RuntimeError(f"measurement freeze {p} has freeze_ver={manifest.get('freeze_ver')!r}, this code reads {FREEZE_VER} — {regen}")
 
-    rows: list[NodeRow] = []
-    h_cache: dict[tuple[str, tuple[int, int]], dict] = {}
+    source = f"freeze:{manifest['sha256'][:12]}"
+    rows: list[PerfRow] = []
     for name in sorted(manifest.get("files", {})):
         info = manifest["files"][name]
         fpath = p / name
@@ -297,80 +379,34 @@ def load_freeze(path: Path | str) -> tuple[dict, list[NodeRow]]:
         doc = yaml.safe_load(text)
         if not isinstance(doc, dict) or "configs" not in doc:
             raise RuntimeError(f"measurement freeze {p}: {name} is not a freeze payload document — {regen}")
-        gpu_name, cap = doc["gpu_name"], tuple(doc["compute_cap"])
+        gpu_name, (major, minor) = doc["gpu_name"], doc["compute_cap"]
         payloads = doc.get("configs") or []
         file_digest = hashlib.sha256()
         for payload in payloads:
             file_digest.update(_row_line(payload))
         if file_digest.hexdigest() != info.get("sha256"):
             raise RuntimeError(f"measurement freeze {p} is corrupt: {name} row digest != manifest — {regen}")
-
-        if (gpu_name, cap) not in h_cache:
-            # Card-faithful H_* off the gpu registry (the Sample.from_golden recipe);
-            # H_opt is overridden per row — from_target reads the ENV nvcc flags.
-            h_cache[(gpu_name, cap)] = Context.from_target(cap, gpu_name=gpu_name).features()
-        h_base = h_cache[(gpu_name, cap)]
-
+        cc = major * 10 + minor
         for payload in payloads:
-            op_sig = payload.get("op_sig")
-            structural = payload.get("structural_features")
-            if not isinstance(op_sig, str) or not op_sig or not isinstance(structural, dict):
-                raise RuntimeError(f"measurement freeze {p}: {name} row lacks op_sig/structural_features — {regen}")
-            knobs = payload["knobs"] or {}
+            if not isinstance(payload.get("op_key"), str) or not isinstance(payload.get("knobs"), dict):
+                raise RuntimeError(f"measurement freeze {p}: {name} row lacks op_key/knobs — {regen}")
             opt = int(payload["opt"])
-            features = {**h_base, "H_opt": float(opt), **structural, **knobs}
             rows.append(
-                NodeRow(
-                    node_key=key_digest("freeze3", gpu_name, op_sig, opt, tuple(sorted((k, str(v)) for k, v in knobs.items()))),
-                    parent_key=None,
-                    context_key=f"cap{cap[0]}.{cap[1]}-O{opt}",
-                    op_sig=op_sig,
-                    features=features,
-                    value_us=payload["value_us"],
-                    depth=0,
-                    gpu=gpu_name,
-                    visits=0,
-                    is_leaf=True,
-                    variance=payload["variance"],
-                    n_samples=payload["n_samples"],
+                PerfRow(
+                    context_key=regime_key(gpu_name, cc, opt),
+                    op_key=payload["op_key"],
+                    backend="cuda",
                     status=payload["status"],
-                    run_id=payload["run_id"],
+                    stats=PerfStats(**payload["stats"]),
                     measured_at=payload["measured_at"],
-                    feat_ver=FEATURIZER_VERSION,  # features were just derived by live code
+                    knobs=payload["knobs"],
+                    captured=bool(payload["captured"]),
+                    gpu=gpu_name,
+                    cc=cc,
+                    opt=opt,
+                    feat_ver=int(manifest["feat_ver"]),
+                    source=source,
+                    error=payload["error"],
                 )
             )
     return manifest, rows
-
-
-def load_node_rows(path: Path | str) -> list[NodeRow]:
-    """Node rows from ``path``, whatever it is — a live sqlite tune DB (a file, sniffed
-    by the sqlite magic bytes) or a measurement freeze (a directory). The one seam that
-    makes the two interchangeable for every ``Iterable[NodeRow]`` consumer; anything
-    else fails loudly. A v1 JSONL freeze is recognized and refused with a re-freeze
-    pointer — no v1 reader survives (freezes are regenerable from the DB)."""
-    p = Path(path)
-    if p.is_dir():
-        return load_freeze(p)[1]
-    with p.open("rb") as fh:
-        head = fh.read(max(len(_SQLITE_MAGIC), 4096))
-    # An empty file IS a valid (empty) sqlite DB — sqlite creates the file empty before
-    # the first write (an aborted tune) — so it takes the DB branch and yields no rows.
-    if head[: len(_SQLITE_MAGIC)] == _SQLITE_MAGIC or not head:
-        from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
-
-        db = SearchDB.open_readonly(p)
-        try:
-            return list(db.iter_nodes())
-        finally:
-            db.close()
-    first_line = head.partition(b"\n")[0]
-    try:
-        old = json.loads(first_line)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        old = None
-    if isinstance(old, dict) and old.get("kind") == FREEZE_KIND:
-        raise RuntimeError(
-            f"{p} is a v1 JSONL measurement freeze — superseded by the per-GPU YAML freeze directory (freeze_ver "
-            f"{FREEZE_VER}); re-freeze with scripts/freeze_node_store.py"
-        )
-    raise RuntimeError(f"{p} is neither a sqlite node DB nor a measurement freeze directory")

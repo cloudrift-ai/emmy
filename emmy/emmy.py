@@ -7,6 +7,7 @@ from importlib.metadata import PackageNotFoundError, version
 from emmy.commands.bench import register_bench_command
 from emmy.commands.compare import register_compare_command
 from emmy.commands.compile import register_compile_command
+from emmy.commands.dataset import register_dataset_command
 from emmy.commands.deploy.cloud import register_cloud_target
 from emmy.commands.deploy.local import register_local_target
 from emmy.commands.deploy.ssh import register_ssh_target
@@ -31,7 +32,7 @@ from emmy.logging_setup import setup_cli_logging
 # listing recipes, tearing down a run). Everything else is guarded. The list is
 # opt-out on purpose: a new command that forgets to name itself here fails with
 # one explanation, which beats failing with a wall of NVRTC errors.
-_NO_GPU_COMMANDS = frozenset({"bench", "compare", "deploy", "publish", "pull", "recipe", "teardown", "trace", "vm"})
+_NO_GPU_COMMANDS = frozenset({"bench", "compare", "dataset", "deploy", "publish", "pull", "recipe", "teardown", "trace", "vm"})
 
 
 def _package_version():
@@ -72,6 +73,7 @@ def main():
     register_generate_command(subparsers)
     register_inspect_command(subparsers)
     register_eval_command(subparsers)
+    register_dataset_command(subparsers)
     register_fit_command(subparsers)
     register_compare_command(subparsers)
 

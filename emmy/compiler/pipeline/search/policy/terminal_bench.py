@@ -37,7 +37,7 @@ class TerminalBench:
         self.backend = backend
         self.db = db
         self.graph = cand.graph
-        self.context_key = cand.ctx.structural_key()
+        self.ctx = cand.ctx
         order = self.graph.topological_order()
         self.cuda_nodes = [self.graph.nodes[nid] for nid in order if isinstance(self.graph.nodes[nid].op, CudaOp)]
         # Kernel-bearing nodes a rewrite left un-lowered (a validation-filtered rewrite under
@@ -70,16 +70,14 @@ class TerminalBench:
 
     def _cached_row(self, node):
         key = node.op.identity_key(with_io=True, with_knobs=True)
-        return self.db.lookup_perf(self.context_key, key, backend=self.backend_name) if key is not None else None
+        return self.db.lookup_perf(self.ctx, key, backend=self.backend_name) if key is not None else None
 
     @staticmethod
     def _stats_from_launch(lt):
         return stats_from_launch(lt)
 
     def _persist(self, cuda_op, *, stats, status: str, captured: bool = False, error: str | None = None) -> None:
-        persist_kernel_perf(
-            self.db, self.context_key, self.backend_name, cuda_op, stats=stats, status=status, captured=captured, error=error
-        )
+        persist_kernel_perf(self.db, self.ctx, self.backend_name, cuda_op, stats=stats, status=status, captured=captured, error=error)
         logger.info("[tune]   %s @ %.2f us  (%s)", getattr(cuda_op, "kernel_name", "?"), stats.median, status)
 
     def _accumulate(self, acc, s):
@@ -126,7 +124,7 @@ class TerminalBench:
         # stand in for the Σ. A verdict filed against the kernel set as a whole (an unblamed wall
         # kill, :meth:`finalize_exc`) is looked up first: it has no kernel behind it.
         if self.set_key is not None:
-            row = self.db.lookup_perf(self.context_key, self.set_key, backend=self.backend_name)
+            row = self.db.lookup_perf(self.ctx, self.set_key, backend=self.backend_name)
             if row is not None:
                 logger.info(
                     "[tune] cache hit: this %d-kernel set recorded %s as a whole — skipping bench", len(self.cuda_nodes), row.status
@@ -167,10 +165,9 @@ class TerminalBench:
 
     def finalize_exc(self, exc):
         if compile_budget_overrun(exc):
-            # Nothing was measured, so nothing is recorded (see ``CompileBudgetExceeded``). The
-            # status stays in memory: ``_collect_node_records`` emits fail rows for ``bench_fail``
-            # exactly, so this writes no node row either. Loud, because a whole tile family
-            # overrunning the budget is a finding, not noise.
+            # Nothing was measured, so nothing is recorded (see ``CompileBudgetExceeded``) — the
+            # status stays in memory. Loud, because a whole tile family overrunning the budget is
+            # a finding, not noise.
             logger.warning(
                 "[tune] COMPILE BUDGET EXCEEDED for %d kernel(s) (%s) — nothing recorded; "
                 "raise bench_compile_timeout_s if this repeats on a whole tile family",
@@ -179,7 +176,7 @@ class TerminalBench:
             )
             return point_stats(0.0), "compile_timeout"
         fail_us = float(self.backend.bench_run_timeout_s) * 1_000_000.0
-        blamed = persist_bench_failure(self.db, self.context_key, self.backend_name, self.cuda_nodes, exc, fail_us)
+        blamed = persist_bench_failure(self.db, self.ctx, self.backend_name, self.cuda_nodes, exc, fail_us)
         logger.warning(
             "[tune] backend.benchmark failed (%s) — pinning bench_fail @ %.1f us for %d of %d kernel(s)",
             exc,
@@ -195,7 +192,7 @@ class TerminalBench:
             # disqualification index (which joins on ``S_*`` signatures) and the dataset (which
             # joins on ``cuda_op``) never see it — only this cache lookup does.
             error = f"{type(exc).__name__}: {exc}"
-            self.db.record_perf(self.context_key, self.set_key, backend=self.backend_name, status="bench_fail", stats=s, error=error)
+            self.db.record_perf(self.ctx, self.set_key, backend=self.backend_name, status="bench_fail", stats=s, error=error)
         return self._fail_verdict(fail_us)
 
     def finalize_result(self, result):
@@ -298,9 +295,9 @@ def _body_json(op, dialect: str) -> str:
 
 
 def persist_kernel_perf(
-    db, context_key: str, backend_name: str, cuda_op, *, stats, status: str, captured: bool = False, error: str | None = None
+    db, ctx, backend_name: str, cuda_op, *, stats, status: str, captured: bool = False, error: str | None = None
 ) -> bool:
-    """Persist one measured kernel as deploy evidence: its ``perf`` row under ``context_key``
+    """Persist one measured kernel as deploy evidence: its ``perf`` row under ``ctx``'s card and regime
     (keep-best policy, see :meth:`SearchDB.record_perf`), the inventory rows of every op on its
     source chain, and the ``lowering`` hops between them. The ONE writer for a kernel
     measurement — the tuner's terminal bench and ``run --bench``'s pinned rows both come here, so
@@ -345,7 +342,7 @@ def persist_kernel_perf(
             measured_median_us=stats.median if status == "ok" else None,
         )
     knobs = getattr(cuda_op, "knobs", None) or {}
-    db.record_perf(context_key, cuda_key, backend=backend_name, status=status, stats=stats, knobs=knobs, captured=captured, error=error)
+    db.record_perf(ctx, cuda_key, backend=backend_name, status=status, stats=stats, knobs=knobs, captured=captured, error=error)
     return True
 
 
@@ -358,7 +355,7 @@ def persist_kernel_perf(
 _NAMED_KERNEL = re.compile(r"kernel \\?'([A-Za-z_][A-Za-z0-9_]*)")
 
 
-def persist_bench_failure(db, context_key: str, backend_name: str, cuda_nodes, exc, fail_us: float) -> list:
+def persist_bench_failure(db, ctx, backend_name: str, cuda_nodes, exc, fail_us: float) -> list:
     """Persist a failed bench as the per-kernel evidence it is: a ``bench_fail`` perf row at the
     ``fail_us`` sentinel for every node the failure is EVIDENCE ABOUT — usually not every kernel
     benched — and return those nodes. The ONE writer for a bench failure, as
@@ -383,5 +380,5 @@ def persist_bench_failure(db, context_key: str, backend_name: str, cuda_nodes, e
     stats = point_stats(fail_us)
     error = f"{type(exc).__name__}: {exc}"
     for node in blamed:
-        persist_kernel_perf(db, context_key, backend_name, node.op, stats=stats, status="bench_fail", error=error)
+        persist_kernel_perf(db, ctx, backend_name, node.op, stats=stats, status="bench_fail", error=error)
     return blamed

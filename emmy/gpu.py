@@ -365,7 +365,7 @@ def live_name() -> str | None:
     ``"NVIDIA H200 141GB"``); the raw reported name when unrecognized, ``None`` when no
     device is visible. The hardware identity that distinguishes same-die SKUs (H100 vs
     H200) — ``compute_capability`` + SM features alone can't. Canonicalizing matters so a
-    live node-store row and a golden reconstructed from the canonical name share one
+    live ``perf`` row and a golden reconstructed from the canonical name share one
     ``gpu`` string. Cached: physical, target-independent."""
     try:
         import cupy as cp  # noqa: PLC0415

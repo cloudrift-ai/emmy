@@ -20,6 +20,7 @@ the stable golden format.
 
 from __future__ import annotations
 
+import functools
 import re
 from dataclasses import dataclass, field
 
@@ -35,6 +36,23 @@ from emmy.compiler.pipeline.search.features import knob_features
 # so a bare first-``void`` match would name the helper, collapsing distinct kernels
 # into one leaderboard bucket and hiding them from ``--kernel`` filters.
 KERNEL_NAME_RE = re.compile(r"__global__\s+(?:__launch_bounds__\([^)]*\)\s+)?void\s+(\w+)\s*\(")
+
+
+@functools.cache
+def _card_features(gpu_name: str, cc: int) -> dict[str, float]:
+    """The ``H_*`` features of ``gpu_name`` at compute capability ``cc`` (``H_cc`` encoding), from the
+    registry's memorized specs — the recipe :meth:`Sample.from_golden` uses for a golden's own card."""
+    from emmy.compiler.context import Context  # noqa: PLC0415
+
+    return Context.from_target(divmod(cc, 10), gpu_name=gpu_name).features()
+
+
+def measured_features(row) -> dict:
+    """The full feature dict a measured ``perf`` row featurizes as: its card's ``H_*``, the opt level it
+    was measured under, and its stored ``S_*`` stamps + tunables. A row stores no ``H_*`` of its own —
+    they are a function of the card, derived here by live code so a stored row outlives a change to
+    the device features. Only for rows :func:`~.freeze.freeze_reason` admits (a registry card)."""
+    return {**_card_features(row.gpu, row.cc), "H_opt": float(row.opt), **row.knobs}
 
 
 def _split_by_prefix(knobs: dict) -> tuple[dict, dict, dict]:

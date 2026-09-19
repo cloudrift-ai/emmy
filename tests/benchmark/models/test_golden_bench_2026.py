@@ -136,7 +136,7 @@ def test_quantized_support_check_covers_four_formats_and_replays_block_fp8(proje
     assert 'if [ -n "$golden" ]' in run
     # Each post-fusion target is benched on its own so a committed golden's per-target evidence deploys.
     assert '--realization "$$seed"' in run
-    assert "--bench --strict --no-record-nodes" in run
+    assert "--bench --strict --no-record-evidence" in run
     assert "--bench-backends eager,emmy" in run
     assert "tcompile" not in run
     assert recipe.command.stage == [

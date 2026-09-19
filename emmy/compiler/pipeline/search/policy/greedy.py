@@ -421,8 +421,8 @@ def _priced_pick(
     return best
 
 
-# Process-wide memo for the built DB index, keyed on (db path, mtime, context key).
-# The index depends only on the DB file and cc+nvcc-flags (NOT the
+# Process-wide memo for the built DB index, keyed on (db path, mtime, context key, card).
+# The index depends only on the DB file, the card and cc+nvcc-flags (NOT the
 # op shape — ``structural_key`` folds neither), so for a serve boot it is identical
 # across all ~96 program compiles; without this the 527 MB perf scan reran each time.
 # Bounded to the current key (cleared on miss), like ``_load_prior_cached``.
@@ -431,7 +431,7 @@ _DB_INDEX_CACHE: dict = {}
 
 def _db_measured_index(db, ctx) -> _Measured:
     """Caching wrapper over :func:`_db_measured_index_build` — memoizes the built index per
-    process on ``(db path, mtime, context keys, golden scope)``, invalidated when the DB file's
+    process on ``(db path, mtime, context key, card, golden scope)``, invalidated when the DB file's
     mtime or the golden scope changes. An in-memory DB (no ``_path``) or an unstatable file
     bypasses the cache and rebuilds. Best-effort throughout: a failed key computation just
     rebuilds."""
@@ -450,7 +450,7 @@ def _db_measured_index(db, ctx) -> _Measured:
             mtime = (path.stat().st_mtime_ns, wal.stat().st_mtime_ns if wal.exists() else 0)
         else:
             mtime = None
-        key = (str(path), mtime, ctx.structural_key(), scope_token())
+        key = (str(path), mtime, ctx.structural_key(), ctx.hardware_id(), scope_token())
     except Exception:  # noqa: BLE001 — any key-build failure → just rebuild uncached
         return _db_measured_index_build(db, ctx)
     hit = _DB_INDEX_CACHE.get(key)
@@ -504,7 +504,9 @@ def _db_measured_index_build(db, ctx) -> _Measured:
     Rows are indexed by their ``S_*`` structural signature (stringified values because perf knobs
     round-trip JSON). One context key is sufficient: tune measures in the deployable regime, and
     ``Context.structural_key`` gives that regime one key however its flags are spelled. Rows from a
-    deliberately non-deployable compile key elsewhere and are not consulted.
+    deliberately non-deployable compile key elsewhere and are not consulted, and neither are rows
+    another card measured (``SearchDB.iter_perf`` reads this card's rows and the unkeyed ones
+    written before the card joined the key).
 
     A non-``ok`` row is evidence too — the bench watchdog measured that variant not finishing — but
     it is evidence a ranker cannot use, since its sentinel latency is a timeout constant rather
@@ -525,7 +527,7 @@ def _db_measured_index_build(db, ctx) -> _Measured:
     survived: set[frozenset] = set()
     failures: dict[frozenset, list[float]] = {}
     try:
-        for row in db.iter_perf(ctx.structural_key(), backend="cuda") if db is not None else ():
+        for row in db.iter_perf(ctx, backend="cuda") if db is not None else ():
             sig = frozenset((k, str(v)) for k, v in row.knobs.items() if k.startswith("S_"))
             if row.status != "ok":
                 failures.setdefault(sig, []).append(float(getattr(row.stats, "median", 0.0) or 0.0))

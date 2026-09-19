@@ -44,7 +44,7 @@ class ShapeKey:
     # (matmul / bare reduce / pointwise: ``S_loop_depth`` equals the axis count), else
     # ``"flash"`` / ``"softmax"`` / ``"rms_norm"`` / ``"fused"``, where a projection sweep
     # rides the reduction (``S_loop_depth < n_free + n_reduce + n_symbolic`` — the same
-    # stamp identity the node-store plausibility gate uses). ``"fused"`` is the computed-A
+    # stamp identity the freeze's plausibility gate uses). ``"fused"`` is the computed-A
     # contraction (the RMSNorm→linear / gate⊗up megakernel): a warp mma whose A cone carries
     # a statistic (rsqrt) prologue, so it stamps LIKE an ``rms_norm`` sweep but with a SECOND
     # reduce axis — the contraction — beside the statistic reduce (``S_ext_n_reduce_axis >= 2``).
@@ -222,7 +222,7 @@ def op_label(s: dict) -> str:
     """A human name for the op a stamped ``S_*`` histogram describes — its kind and its extents.
 
     The one spelling of "what is this measured pool", used to caption a per-op row and to match a
-    ``--kernel`` filter against the node store, whose own op identity is a digest with nothing
+    ``--kernel`` filter against measured ``perf`` rows, whose own op identity is a digest with nothing
     readable in it. Extra non-``S_*`` keys are ignored, so a full feature dict may be passed
     directly."""
     kind = "matmul" if is_matmul(s) else ("reduce" if (s.get("S_reduce_add", 0) or s.get("S_reduce_max", 0)) else "pointwise")

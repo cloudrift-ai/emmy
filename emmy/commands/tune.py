@@ -279,7 +279,7 @@ def _context_for_device(device_id: int | None, *, target: str | None = None):
     ``Context.probe`` follows the process-current device and normally describes
     ordinal 0 even when ``--devices 3`` selected another card. Explicit ordinals
     are probed directly, including the canonical SKU identity and physical
-    feature vector used by prior and node-store keys.
+    feature vector used by the prior and the ``perf`` key.
     """
     from emmy import gpu
     from emmy.compiler.context import Context
@@ -339,7 +339,6 @@ def _tune_one(
     db,
     ctx,
     dump,
-    run_id=None,
     proposals=(),
     proposal_ranking_callback=None,
 ):
@@ -383,7 +382,6 @@ def _tune_one(
             ctx=ctx,
             max_candidates=getattr(args, "max_candidates", None),
             prior=prior,
-            run_id=run_id,
         )
         # Working-file feedback is durable as soon as its measurements finish;
         # an interrupted/failed MCTS must not discard already-paid proposal data.
@@ -400,7 +398,6 @@ def _tune_one(
             dump=dump,
             progress=progress,
             prior_seed=args.seed,
-            run_id=run_id,
             max_candidates=remaining,
             prior=prior,
         )
@@ -488,7 +485,7 @@ def _select_tune_target(args, target: WorkingGoldenTarget) -> None:
         del args._golden_graph
 
 
-def _tune_working_multi(args, targets, document, *, backends, db, ctx, run_id) -> int:
+def _tune_working_multi(args, targets, document, *, backends, db, ctx) -> int:
     """Tune independent working-golden targets concurrently across GPU slots.
 
     Tracing and proposal pinning remain ordered in the parent process. Once seeds
@@ -534,7 +531,6 @@ def _tune_working_multi(args, targets, document, *, backends, db, ctx, run_id) -
                 ctx=ctx,
                 max_candidates=getattr(args, "max_candidates", None),
                 prior=prior,
-                run_id=run_id,
             )
             if target.proposals:
                 persist_proposal_rankings(args.golden, document, target, rankings)
@@ -555,7 +551,6 @@ def _tune_working_multi(args, targets, document, *, backends, db, ctx, run_id) -
                 dump=dump,
                 progress=TuneProgress(enabled=False),
                 prior_seed=args.seed + index,
-                run_id=run_id,
                 max_candidates=remaining,
                 prior=prior,
                 manage_prior=False,
@@ -676,13 +671,6 @@ def handle_tune(args):
         except ValueError as exc:
             logger.error(str(exc))
             sys.exit(2)
-    # One session id per CLI invocation (a golden sweep = one collection session) —
-    # stamped on every node row this run writes, so cross-run keep-min drift in the
-    # node store is traceable to its tune session.
-    from emmy.compiler.pipeline.search.strategy.two_level import _mint_run_id
-
-    run_id = _mint_run_id()
-
     one_pin_set = len({tuple(sorted(target.pins.items())) for target in targets}) == 1
     if working_document is not None and len(backends) > 1 and len(targets) > 1 and one_pin_set:
         sys.stderr.write(f"[tune] target-parallel working-golden sweep: {len(targets)} target(s) across {len(backends)} GPUs\n")
@@ -697,7 +685,6 @@ def handle_tune(args):
                     backends=backends,
                     db=db,
                     ctx=ctx,
-                    run_id=run_id,
                 )
         except KeyboardInterrupt:
             sys.stderr.write("\n[tune] interrupted — partial measured results are preserved in the DB\n")
@@ -731,7 +718,6 @@ def handle_tune(args):
                     db=db,
                     ctx=ctx,
                     dump=dump,
-                    run_id=run_id,
                     proposals=target.proposals,
                     proposal_ranking_callback=(
                         (lambda measured, target=target: persist_proposal_rankings(args.golden, working_document, target, measured))

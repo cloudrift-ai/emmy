@@ -1,14 +1,15 @@
-"""Shared node-row builders for the search-package tests.
+"""Shared measured-row builders for the search-package tests.
 
-The dicts here are PHYSICS-CALIBRATED against the node-store plausibility gate, which
-``test_freeze.py``'s filter composes: a row is kept or dropped by the same predicates the
-gate applies, so these spellings must track the featurizer vocabulary and the GPU registry
+The dicts here are PHYSICS-CALIBRATED against the freeze's plausibility predicates, which
+``freeze_reason`` composes: a row is kept or dropped by the same predicates every measured-pool
+reader applies, so these spellings must track the featurizer vocabulary and the GPU registry
 or the freeze suite silently stops exercising the real filter.
 """
 
 from __future__ import annotations
 
-from emmy.compiler.pipeline.search.db import NodeRow
+from emmy.compiler.pipeline.search.data.freeze import regime_key
+from emmy.compiler.pipeline.search.db import PerfRow, PerfStats
 
 GPU_5090 = "NVIDIA GeForce RTX 5090"  # registry records fp32/fp16 peaks -> the plausibility gate is active
 
@@ -44,22 +45,20 @@ def impossible_staged_feats() -> dict:
     }
 
 
-def node_row(key: str, *, value_us: float, features: dict | None = None, gpu: str = GPU_5090, **over) -> NodeRow:
-    """A leaf ``NodeRow`` on a registry-known card, ``**over`` overriding any field."""
+def perf_row(key: str, *, us: float, knobs: dict | None = None, gpu: str = GPU_5090, cc: int = 120, opt: int = 3, **over) -> PerfRow:
+    """A measured CUDA ``perf`` row keyed ``key`` on a registry-known card, in the plain-flags regime of
+    ``opt`` — the row a live bench there writes — with ``**over`` overriding any field."""
     kw = dict(
-        node_key=key,
-        parent_key=None,
-        context_key="ctx",
-        op_sig="op",
-        features=dict(F16_MATMUL_FEATS if features is None else features),
-        value_us=value_us,
-        depth=5,
-        gpu=gpu,
-        visits=1,
-        is_leaf=True,
+        context_key=over.pop("context_key") if "context_key" in over else regime_key(gpu, cc, opt),
+        op_key=key,
+        backend="cuda",
         status="ok",
-        run_id="run",
+        stats=PerfStats(median=us, min=us, max=us, mean=us, variance=0.0, n_samples=30),
         measured_at="2026-07-09T00:00:00+00:00",
+        knobs=dict(F16_MATMUL_FEATS if knobs is None else knobs),
+        gpu=gpu,
+        cc=cc,
+        opt=opt,
     )
     kw.update(over)
-    return NodeRow(**kw)
+    return PerfRow(**kw)

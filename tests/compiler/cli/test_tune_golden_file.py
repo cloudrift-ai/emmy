@@ -17,7 +17,6 @@ from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
-from emmy.compiler.pipeline.passes.identity import IdentityStrategy
 from emmy.compiler.pipeline.search.db import PerfStats, SearchDB
 from emmy.compiler.pipeline.search.golden import dump_golden_file, load_golden_file
 from emmy.compiler.pipeline.search.policy.mcts import SearchNode, SearchTree, TuningSearch
@@ -32,7 +31,6 @@ from emmy.compiler.pipeline.search.working_golden import (
     record_latency,
     validate_working_gpu,
 )
-from emmy.compiler.pipeline.strategy import discovered_strategies
 from emmy.compiler.torch_wire import intern_program
 
 
@@ -334,7 +332,7 @@ def test_structural_multi_cuda_winner_persists_its_exact_replay_row(tmp_path):
     }
 
 
-def test_structural_multi_cuda_proposal_keeps_ranking_and_nodes_without_parent_perf(tmp_path, monkeypatch):
+def test_structural_multi_cuda_proposal_keeps_ranking_without_parent_perf(tmp_path, monkeypatch):
     from emmy.compiler.pipeline.search.policy.greedy import _db_measured_index, _db_measured_pick
 
     route = {
@@ -368,8 +366,6 @@ def test_structural_multi_cuda_proposal_keeps_ranking_and_nodes_without_parent_p
     stable_graph = targets[0].program
     loop_graph = Pipeline.build(LOOP_PASSES).run(stable_graph.copy(), ctx=Context((8, 9)))
     [original_loop] = [node.op for node in loop_graph.nodes.values() if isinstance(node.op, LoopOp)]
-    identity = next(strategy for strategy in discovered_strategies() if isinstance(strategy, IdentityStrategy))
-    original_op_sig = identity.op_sig(original_loop, loop_graph)
     structural_features = {key: float(value) for key, value in original_loop.knobs.items() if key.startswith("S_")}
     live_features = {**structural_features, "S_warp_eligible": 1.0}
     active_route = route
@@ -429,9 +425,7 @@ def test_structural_multi_cuda_proposal_keeps_ranking_and_nodes_without_parent_p
     db_path = tmp_path / "proposal.db"
     db = SearchDB(db_path)
     proposals = [((0, 1), route)]
-    rankings = asyncio.run(
-        measure_proposals(stable_graph, proposals, backend=object(), db=db, ctx=ctx, max_candidates=1, run_id="proposal-run")
-    )
+    rankings = asyncio.run(measure_proposals(stable_graph, proposals, backend=object(), db=db, ctx=ctx, max_candidates=1))
     assert rankings == [
         {
             "status": "ok",
@@ -442,19 +436,11 @@ def test_structural_multi_cuda_proposal_keeps_ranking_and_nodes_without_parent_p
     ]
     db.close()
     reloaded_db = SearchDB.open_readonly(db_path)
-    measured_nodes = list(reloaded_db.iter_nodes(context_key=ctx.structural_key(), op_sig=original_op_sig))
-    assert len(measured_nodes) == 2
-    parent = next(row for row in measured_nodes if row.parent_key is None)
-    branch = next(row for row in measured_nodes if row.parent_key is not None)
-    assert branch.parent_key == parent.node_key
-    assert parent.op_sig == branch.op_sig == original_op_sig
-    assert branch.features["REDUCE"] == "g4k"
-    assert branch.value_us == pytest.approx(59.61)
     route_parent = TileOp(knobs={**live_features, **route})
     assert route_parent.identity_key(with_io=True, with_knobs=True) != original_loop.identity_key(with_io=True, with_knobs=True)
-    perf = reloaded_db.lookup_perf(ctx.structural_key(), route_parent.identity_key(with_io=True, with_knobs=True), backend="cuda")
+    perf = reloaded_db.lookup_perf(ctx, route_parent.identity_key(with_io=True, with_knobs=True), backend="cuda")
     assert perf is None
-    assert reloaded_db.lookup_perf(ctx.structural_key(), original_loop.identity_key(with_io=True, with_knobs=True), backend="cuda") is None
+    assert reloaded_db.lookup_perf(ctx, original_loop.identity_key(with_io=True, with_knobs=True), backend="cuda") is None
     reloaded_db.close()
 
     # A later ordinary search keeps its own whole-slice bookkeeping and lowering
@@ -466,7 +452,7 @@ def test_structural_multi_cuda_proposal_keeps_ranking_and_nodes_without_parent_p
     fallback = {**route, "REDUCE": ""}
     fallback_key = "monolithic-cuda"
     db.record_perf(
-        ctx.structural_key(),
+        ctx,
         original_loop.identity_key(with_io=True, with_knobs=True),
         backend="cuda",
         status="ok",
@@ -482,7 +468,7 @@ def test_structural_multi_cuda_proposal_keeps_ranking_and_nodes_without_parent_p
         measured_median_us=monolithic.median,
     )
     db.record_perf(
-        ctx.structural_key(),
+        ctx,
         fallback_key,
         backend="cuda",
         status="ok",
@@ -492,8 +478,8 @@ def test_structural_multi_cuda_proposal_keeps_ranking_and_nodes_without_parent_p
     )
     db.close()
     reloaded_db = SearchDB.open_readonly(db_path)
-    route_perf = reloaded_db.lookup_perf(ctx.structural_key(), route_parent.identity_key(with_io=True, with_knobs=True), backend="cuda")
-    loop_perf = reloaded_db.lookup_perf(ctx.structural_key(), original_loop.identity_key(with_io=True, with_knobs=True), backend="cuda")
+    route_perf = reloaded_db.lookup_perf(ctx, route_parent.identity_key(with_io=True, with_knobs=True), backend="cuda")
+    loop_perf = reloaded_db.lookup_perf(ctx, original_loop.identity_key(with_io=True, with_knobs=True), backend="cuda")
     assert route_perf is None
     assert loop_perf is not None and loop_perf.stats.median == pytest.approx(106.95)
     lowering = reloaded_db.lookup_lowering(original_loop.identity_key(with_io=True, with_knobs=True))
@@ -520,10 +506,9 @@ def test_structural_multi_cuda_proposal_keeps_ranking_and_nodes_without_parent_p
             db=negative_db,
             ctx=ctx,
             max_candidates=1,
-            run_id="proposal-run",
         )
     )
-    assert negative_db.lookup_perf(ctx.structural_key(), original_loop.identity_key(with_io=True, with_knobs=True), backend="cuda") is None
+    assert negative_db.lookup_perf(ctx, original_loop.identity_key(with_io=True, with_knobs=True), backend="cuda") is None
     negative_db.close()
     assert ambiguous["status"] == "ambiguous_multi_kernel"
     assert ambiguous["measured_knobs"] is None
@@ -714,7 +699,7 @@ def test_multi_gpu_working_sweep_shares_slots_and_prior_across_targets(monkeypat
         bench=False,
     )
 
-    assert tune._tune_working_multi(args, targets, {"configs": []}, backends=backends, db=object(), ctx=object(), run_id="r") == 2
+    assert tune._tune_working_multi(args, targets, {"configs": []}, backends=backends, db=object(), ctx=object()) == 2
     assert max_active == 2
     assert seen_prior == [prior, prior]
     assert seen_queues[0] is seen_queues[1]
@@ -730,7 +715,7 @@ def test_multi_working_prepare_failure_cleans_command_temp_dump(tmp_path, monkey
     args = SimpleNamespace(code=None, input=None, dynamic=None, dump_dir=None, bench=True)
 
     with pytest.raises(ValueError, match="trace failed"):
-        tune._tune_working_multi(args, [target], {"configs": []}, backends=[object()], db=object(), ctx=object(), run_id="r")
+        tune._tune_working_multi(args, [target], {"configs": []}, backends=[object()], db=object(), ctx=object())
 
     assert not temp_dump.exists()
 

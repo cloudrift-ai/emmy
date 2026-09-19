@@ -175,13 +175,14 @@ def register_run_command(subparsers):
         ),
     )
     parser.add_argument(
-        "--no-record-nodes",
+        "--no-record-evidence",
         action="store_true",
         help=(
-            "Skip the default bench-to-node recording. When pinned rows bench (golden / --ab) at tune-standard "
+            "Skip the default bench-to-DB recording. When pinned rows bench (golden / --ab) at tune-standard "
             "quality (warmup >= 5, iters >= 20), each clean row AND the greedy pick's isolated re-bench are recorded "
-            "as leaf rows in the tune DB's node store — the training-data feed for the offline prior. Flagged rows "
-            "(pin mismatch, wrong answer, intensity floor) and the --ir path never record."
+            "as per-kernel perf rows in the tune DB — the evidence the next compile deploys, and training data once "
+            "the tune DB is imported into a dataset. A greedy pick that fails to bench records the kernel it blames "
+            "as a bench_fail row. Flagged rows (pin mismatch, wrong answer, intensity floor) and the --ir path never record."
         ),
     )
     parser.add_argument("--dump-dir", default=None, help="Directory to dump intermediate compilation artifacts.")
@@ -231,7 +232,15 @@ def handle_run(args):
             )
         )
         incompatible = any(
-            (args.profile, args.record, args.record_greedy, args.strict_evidence, args.strict_correctness, args.no_record_nodes, args.debug)
+            (
+                args.profile,
+                args.record,
+                args.record_greedy,
+                args.strict_evidence,
+                args.strict_correctness,
+                args.no_record_evidence,
+                args.debug,
+            )
         )
         if (
             not args.bench
@@ -736,34 +745,13 @@ def _run_golden_targets(args) -> None:
         sys.exit(1)
 
 
-def _recordable_bench_leaves(golden_benches, greedy_iso) -> list:
-    """The benched rows honest enough to record into the node store: every ``ok`` row
-    with NO integrity flag (a flagged ok row measured something untrue — wrong answer,
-    intensity floor), plus ``bench_fail`` rows whose config actually realized (a
-    genuine "doesn't bench here" negative). ``pin_unmatched`` rows and compile
-    failures (``graph is None``) never record — the claimed config never ran, and
-    "not offered" is not "doesn't launch". Pure over the ``_GoldenBench`` duck type,
-    so tests drive it with stubs."""
-    from emmy.compiler.pipeline.search.bench_record import bench_leaves  # noqa: PLC0415
-
-    leaves = []
-    for gb in ([greedy_iso] if greedy_iso is not None else []) + list(golden_benches or []):
-        if gb.graph is None or gb.status == "pin_unmatched":
-            continue
-        if gb.status == "ok" and not gb.flags:
-            leaves += bench_leaves(gb.graph, gb.bench)
-        elif gb.status == "bench_fail":
-            leaves += bench_leaves(gb.graph, None, status="bench_fail")
-    return leaves
-
-
 def _record_greedy_failure(args, backend, graph, exc) -> None:
-    """A greedy pick that failed to bench is evidence too (``--no-record-nodes`` opts out): the
+    """A greedy pick that failed to bench is evidence too (``--no-record-evidence`` opts out): the
     kernel the watchdog named earns its ``bench_fail`` perf row at the run budget's fail sentinel,
     exactly as the tuner files a hung terminal, so the next ``compile`` / ``run`` / ``serve``
     disqualifies that arm instead of electing the same route and hanging again. Recorded only in
     the deployable regime, for the same reason :func:`_record_bench_evidence` gates its perf rows."""
-    if getattr(args, "no_record_nodes", False):
+    if getattr(args, "no_record_evidence", False):
         return
     from emmy.commands.compile import resolve_tune_db  # noqa: PLC0415
     from emmy.compiler.context import Context  # noqa: PLC0415
@@ -775,51 +763,44 @@ def _record_greedy_failure(args, backend, graph, exc) -> None:
     db_path = resolve_tune_db()
     blamed = record_bench_failure(db_path, ctx, graph, exc, float(backend.bench_run_timeout_s) * 1_000_000.0)
     if blamed:
-        print(f"[record-nodes] bench_fail perf row(s) for {', '.join(blamed)} recorded into {db_path} — opt out with --no-record-nodes")
+        print(f"[record-evidence] bench_fail perf row(s) for {', '.join(blamed)} recorded into {db_path} (opt out: --no-record-evidence)")
 
 
 def _record_bench_evidence(args, golden_benches, greedy_iso) -> None:
-    """Default-on bench-to-DB recording (``--no-record-nodes`` opts out): every clean pinned row
-    and the greedy isolated re-bench become (1) per-kernel ``perf`` rows in the tune DB — the
-    measured evidence the next compile's greedy pick deploys, which is how a replayed golden or a
-    hand-pinned ``--ab`` row becomes what ``compile`` / ``run`` / ``serve`` choose — and (2)
-    node-store leaves, the offline prior's training data. Records only at tune-standard
-    measurement quality; ``record_nodes``' plausibility gate and quality-aware leaf replacement
-    still judge every node row, and ``record_perf`` keeps the best measurement per kernel."""
-    if getattr(args, "no_record_nodes", False) or (greedy_iso is None and not golden_benches):
+    """Default-on bench-to-DB recording (``--no-record-evidence`` opts out): every clean pinned row
+    and the greedy isolated re-bench become per-kernel ``perf`` rows in the tune DB — the measured
+    evidence the next compile's greedy pick deploys, which is how a replayed golden or a hand-pinned
+    ``--ab`` row becomes what ``compile`` / ``run`` / ``serve`` choose. Records only at tune-standard
+    measurement quality, and only in the deployable regime; ``record_perf`` keeps the best
+    measurement per kernel. A clean row is an ``ok`` row with NO integrity flag — a flagged ok row
+    measured something untrue (wrong answer, intensity floor)."""
+    if getattr(args, "no_record_evidence", False) or (greedy_iso is None and not golden_benches):
         return
     from emmy.commands.compile import resolve_tune_db  # noqa: PLC0415
     from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.bench_record import meets_quality_bar, record_bench_leaves, record_bench_perf  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.bench_record import meets_quality_bar, record_bench_perf  # noqa: PLC0415
 
     # print, not logger.info: `emmy run` gates the root logger to WARNING at default
     # verbosity, and a default-on WRITE to the user's tune DB must announce itself
     # (the bench table around it prints too — same CLI-output surface).
     if not meets_quality_bar(args.warmup, args.iters):
         print(
-            f"[record-nodes] --warmup {args.warmup} / --iters {args.iters} below the tune bench standard — "
-            f"measurements NOT recorded into the node store (raise them or pass --no-record-nodes to silence)"
+            f"[record-evidence] --warmup {args.warmup} / --iters {args.iters} below the tune bench standard — "
+            f"measurements NOT recorded into the tune DB (raise them or pass --no-record-evidence to silence)"
         )
         return
-    leaves = _recordable_bench_leaves(golden_benches, greedy_iso)
-    if not leaves:
-        return
-    db_path = resolve_tune_db()
     ctx = Context.probe()
     # Deploy evidence is deployable-regime truth: a run compiled at another optimization level (the
-    # test suite's ``-Xcicc -O1`` lane) measures a kernel no deploy compiles, so it records node
-    # rows only — the store is censored to the -O3 lane downstream — and never a perf row.
-    n_perf = 0
-    if float(ctx.features().get("H_opt", 3.0)) == 3.0:
-        clean = [
-            gb for gb in ([greedy_iso] if greedy_iso is not None else []) + list(golden_benches or []) if gb.status == "ok" and not gb.flags
-        ]
-        n_perf = sum(record_bench_perf(db_path, ctx, gb.graph, gb.bench) for gb in clean if gb.graph is not None and gb.bench is not None)
-    n = record_bench_leaves(db_path, ctx, leaves)
-    print(
-        f"[record-nodes] {n_perf} kernel perf row(s) (deploy evidence) and {n} node row(s) recorded into {db_path} — "
-        "opt out with --no-record-nodes"
-    )
+    # test suite's ``-Xcicc -O1`` lane) measures a kernel no deploy compiles, so it records nothing.
+    if float(ctx.features().get("H_opt", 3.0)) != 3.0:
+        return
+    benched = ([greedy_iso] if greedy_iso is not None else []) + list(golden_benches or [])
+    clean = [gb for gb in benched if gb.status == "ok" and not gb.flags]
+    if not clean:
+        return
+    db_path = resolve_tune_db()
+    n_perf = sum(record_bench_perf(db_path, ctx, gb.graph, gb.bench) for gb in clean if gb.graph is not None and gb.bench is not None)
+    print(f"[record-evidence] {n_perf} kernel perf row(s) recorded into {db_path} — opt out with --no-record-evidence")
 
 
 def _reset_persisting_l2_cache() -> None:
@@ -1222,9 +1203,8 @@ def _sample_replay_knobs(sample) -> dict:
 
 def _failed_bench_status(exc: BaseException) -> str:
     """The status a raised bench earns. A compile-budget overrun measured nothing about the
-    kernel, so it gets its own status and is therefore NOT recorded into the node store
-    (:func:`_recordable_bench_leaves` records ``bench_fail`` exactly) — recording it would put a
-    false negative into the very rows the prior trains on. Anything else compiled and then failed,
+    kernel, so it gets its own status, which no recorder files as a failure — recording it would put
+    a false negative into the very rows the prior trains on. Anything else compiled and then failed,
     which IS evidence about the config, and stays the honest ``bench_fail`` it has always been."""
     from emmy.compiler.backend.cuda.program import compile_budget_overrun  # noqa: PLC0415
 
@@ -2474,7 +2454,7 @@ def pinned_reference_refusal(*, ab_ref, torch_twin: bool, greedy_fail: str | Non
 
     A row benched this way carries the :data:`UNVERIFIED_ROW` flag, and that flag is a hard barrier
     downstream, not a note. It keeps the row out of the golden (``--record`` refuses it), out of the
-    tune DB's ``perf`` rows and out of the node store, because unverified data must never become
+    tune DB's ``perf`` rows, because unverified data must never become
     deployable evidence — the whole value of the reference comparison is that it is the only thing
     standing between a tile that miscompiles silently and a recorded row that deploys it.
     """

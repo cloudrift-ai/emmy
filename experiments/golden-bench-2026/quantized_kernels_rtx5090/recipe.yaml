@@ -63,7 +63,7 @@ command:
       [ -z "$$seed" ] && continue
       if EMMY_NVCC_FLAGS= EMMY_BENCH_RUN_TIMEOUT_S=60 EMMY_KERNEL_TIMEOUT_MS=120000 \
         CUDA_VISIBLE_DEVICES="$gpu_device_ids" ./venv/bin/emmy run \
-        --golden $task_dir/working.yaml --realization "$$seed" --bench --strict --no-record-nodes \
+        --golden $task_dir/working.yaml --realization "$$seed" --bench --strict --no-record-evidence \
         --json $task_dir/verification/$$seed --warmup 5 --iters 20 \
         --bench-backends eager,emmy 2>&1 | tee $task_dir/verification/$$seed.log; then
         :

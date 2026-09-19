@@ -33,6 +33,7 @@ from pathlib import Path
 
 PREFIX = "EMMY_"
 TUNE_DB = "EMMY_TUNE_DB"
+DATASET_DB = "EMMY_DATASET_DB"
 FREEZE_DIR = "EMMY_FREEZE_DIR"
 ONLINE_FILE = "EMMY_ONLINE_FILE"
 OFFLINE_FILE = "EMMY_OFFLINE_FILE"
@@ -176,8 +177,21 @@ def tune_db_path() -> Path:
     return Path(override) if override else _CACHE_ROOT / "autotune.db"
 
 
+def dataset_db_path() -> Path:
+    """The dataset DB instance: ``EMMY_DATASET_DB`` → ``~/.cache/emmy/dataset.db``.
+
+    The same tables as the tune DB, filled by ``emmy dataset import`` rather than by tuning — the
+    measurement freeze by default, and any tune DB named on the command line. It is what the
+    measurement-data readers (``eval prior``, the fit) read, and it is never read by a compile, so an
+    import cannot change what a deploy picks. Regenerable at any time from its sources.
+
+    Advisory, like :func:`tune_db_path`: callers check it exists."""
+    override = os.environ.get(DATASET_DB)
+    return Path(override) if override else _CACHE_ROOT / "dataset.db"
+
+
 def freeze_path() -> Path:
-    """The measurement freeze the prior is evaluated against: ``EMMY_FREEZE_DIR`` → the
+    """The measurement freeze ``emmy dataset import`` reads by default: ``EMMY_FREEZE_DIR`` → the
     repo-checked ``search/freezes/``.
 
     A freeze is the only measurement store that is a durable, comparable ARTIFACT. It is
@@ -187,8 +201,8 @@ def freeze_path() -> Path:
     else can reproduce. The tune DB and the online prior's reservoir are neither: both are
     machine-local, both are rewritten as tuning continues, and the reservoir is additionally a
     bounded random SAMPLE that churns, so one model evaluated twice on one machine need not
-    score the same. They stay reachable through ``--db`` for looking at a specific machine's
-    data; they are not what a reported number should mean.
+    score the same. A report names the sources its dataset holds, so a number computed over a
+    freeze says so.
 
     Advisory, like :func:`tune_db_path`: callers check it exists."""
     override = os.environ.get(FREEZE_DIR)

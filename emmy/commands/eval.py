@@ -5,7 +5,7 @@ Five subcommands:
 - ``eval knobs``     — print the registered knob schema, then (with a tune DB)
   per-knob **regret** + a knob-interaction matrix (the analysis below).
 - ``eval prior``     — how well the prior RANKS: one report over benched pools
-  (``--dataset nodes``: Spearman + regret, what a wrong pick costs) or over the golden
+  (``--dataset db``: Spearman + regret, what a wrong pick costs) or over the golden
   corpus (``--dataset golden``: the golden-rank screen, plus the greedy pipeline pick vs
   golden). BOTH prior halves are reported, labelled — they fail for different reasons.
   The summaries are assembled by ``search/prior/report.py`` and rendered here; ``emmy fit``
@@ -44,7 +44,6 @@ is the load-bearing output here.
 
 from __future__ import annotations
 
-import json
 import logging
 import math
 import sys
@@ -93,7 +92,7 @@ def register_eval_command(subparsers) -> None:
 
     pp = sub.add_parser(
         "prior",
-        help="Report how well each prior half ranks — over benched pools (--dataset nodes) or the golden corpus",
+        help="Report how well each prior half ranks — over measured pools (--dataset db) or the golden corpus",
     )
     pp.add_argument(
         "--online-file",
@@ -230,52 +229,38 @@ def _prior_halves():
     return halves
 
 
-def _freeze_provenance(path: Path) -> dict:
-    """A freeze's ``sha256`` and the versions its rows are spelled in, for the report header.
-
-    Empty for anything that is not a freeze directory (a live tune DB), so the header shows what
-    a reader can act on rather than a placeholder. Read straight from the manifest — ``load_freeze``
-    has already verified the digest by the time a report is built, so this does not re-verify."""
-    manifest = path / "manifest.json"
-    if not manifest.is_file():
-        return {}
-    try:
-        m = json.loads(manifest.read_text())
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return {k: m[k] for k in ("sha256", "freeze_ver", "feat_ver", "knob_ver", "encoding_ver") if k in m}
-
-
 def _measured_report(args, halves):
-    """``eval prior --dataset nodes`` — the report over benched pools.
+    """``eval prior --dataset db`` — the report over measured pools.
 
-    ``--db`` takes a live tune DB or a measurement-freeze directory; ``load_node_rows`` sniffs which. The
-    grouping, its key and every admission rule are :func:`group_measured`'s, so this reads the same pools the
-    training-data work will.
+    Reads the ``perf`` rows of a DB instance — the dataset DB by default (:func:`dataset_db`), any tune DB
+    with ``--db``. The grouping, its key and every admission rule are :func:`group_measured`'s, so this
+    reads the same pools the training-data work will. The header names the sources the rows came from:
+    two reports are comparable only when they were computed over the same rows, and a freeze's digest in
+    the source name is what says so.
 
-    ``--kernel`` matches the op LABEL, since the store's own op identity is a digest with nothing readable in
-    it. The label is a function of the row's ``S_*`` features, which every node of one op shares, so a filter
-    keeps or drops a whole op atomically — a pool is never split against its own siblings."""
-    from emmy import config  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.data import load_node_rows, op_label  # noqa: PLC0415
+    ``--kernel`` matches the op LABEL, since a row's own op identity is a digest with nothing readable in
+    it. The label is a function of the row's ``S_*`` stamps, which every row of one kernel shares, so a
+    filter keeps or drops a whole pool atomically — a pool is never split against its own siblings."""
+    from emmy.commands.dataset import dataset_db  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.data import op_label  # noqa: PLC0415
     from emmy.compiler.pipeline.search.data.group import group_measured  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
     from emmy.compiler.pipeline.search.prior.report import EvalReport, measured_summaries  # noqa: PLC0415
 
-    db_path = Path(args.db) if args.db else config.freeze_path()
-    if not db_path.exists():
-        logger.error("no measurement freeze or tune DB at %s — pass --db to point at one.", db_path)
-        sys.exit(2)
-    rows = load_node_rows(db_path)
+    db_path = dataset_db(args.db)
+    db = SearchDB.open_readonly(db_path)
+    try:
+        rows = list(db.iter_perf_rows(backend="cuda"))
+        sources = db.perf_sources()
+    finally:
+        db.close()
     if args.kernel:
-        rows = [r for r in rows if args.kernel in op_label(r.features)]
+        rows = [r for r in rows if args.kernel in op_label(r.knobs)]
     groups, dropped = group_measured(rows)
     header = {
-        "dataset": "nodes",
+        "dataset": "db",
         "source": str(db_path),
-        # A freeze's identity travels with the numbers: two reports are comparable only when
-        # they were computed over the same rows, and the digest is what says so. Absent for a
-        # live DB, which has no such identity — that is the point of preferring a freeze.
-        **_freeze_provenance(db_path),
+        "sources": sources,
         "kernel": args.kernel,
         "rows": len(rows),
         "groups": len(groups),
@@ -318,13 +303,6 @@ def handle_eval_prior(args) -> None:
     resolve_online_arg(args)
     resolve_offline_arg(args)
     _check_offline_artifact()
-    require_source(
-        args,
-        {"golden", "nodes"},
-        "eval prior ranks candidate pools: use --dataset golden (recorded goldens) or --dataset nodes (a tune DB "
-        "or a measurement freeze). --dataset db reads only fully-decided leaf rows, with no op identity or compile "
-        "regime to group them by — pass the same DB with --dataset nodes.",
-    )
     halves = _prior_halves()
     golden = args.dataset == "golden"
     report = _golden_report(args, halves) if golden else _measured_report(args, halves)
@@ -351,7 +329,7 @@ def _metric(block: dict, key: str, fmt: str) -> str:
 # report keyed its summaries on — the renderer names them rather than discovering them, so a column order is a
 # decision made here and not a side effect of dict insertion.
 _REPORT_TABLES = {
-    "nodes": (
+    "db": (
         ["half", "gpu", "H_opt"],
         [
             ("rho", lambda c: _metric(c.metrics["spearman"], "median", "{:+.2f}")),
@@ -371,13 +349,13 @@ _REPORT_TABLES = {
 }
 
 _REPORT_CAPTIONS = {
-    "nodes": [
+    "db": [
         "ranking quality over benched pools (rho: +1 = the model orders them as the hardware does;",
         "regret: 1.00x = the pick IS the measured best). Each number's (n) is the pools it covers.",
     ],
     "golden": [
         "golden rank — a SCREEN, not a gate: it says where a verified config landed, never what",
-        "missing it costs. Only regret over benched pools (--dataset nodes) measures that.",
+        "missing it costs. Only regret over measured pools (--dataset db) measures that.",
     ],
 }
 
