@@ -50,6 +50,9 @@ command:
       sleep 5
     done
     test "$$ready" = 1
+    curl -fsS http://127.0.0.1:8127/v1/completions -H 'Content-Type: application/json' \
+      --data "{\"model\":\"$$model\",\"prompt\":[\"The capital of France is\",\"2 + 2 =\"],\"max_tokens\":16,\"temperature\":0,\"seed\":0}" \
+      > $task_dir/generation.json
     nvidia-smi --query-gpu=name,driver_version,memory.used,memory.total --format=csv > $task_dir/memory.txt
     for concurrency in 1 4; do
       for input in 32 256 1024; do

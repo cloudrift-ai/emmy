@@ -53,7 +53,7 @@ was produced; the failed records also report these missing results. Bounded shut
 
 After the matrix, the existing run command replayed the width-16 post-attention program against eager PyTorch
 using synthetic inputs. The default single-kernel schedule exceeded the 60-second kernel watchdog. Explicitly
-cutting the seven available placement boundaries produced eight kernels and passed the CLI's scaled numerical
+cutting seven selected reduction boundaries produced eight kernels and passed the CLI's scaled numerical
 check. This narrows the remaining investigation to executable schedule selection; it does not establish complete
 model correctness or a deployable schedule. The diagnostic command, input and raw outputs are retained separately
 under `diagnostic/` in the archive. Two fresh explicit-cut processes passed numerical checks and measured

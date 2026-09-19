@@ -31,7 +31,7 @@ but little change in captured GPU time for the tested small programs. This is no
 speedup. Before that merge, full-suite validation had failures reproduced on main; model-golden failures were only
 partly checked against main. The merged PR records those validation limits.
 
-**Selected next step:** fix the existing serving baseline before expanding. Draft
+**Selected next step:** fix the existing serving baseline before expanding. Merged
 [PR #835](https://github.com/cloudrift-ai/emmy/pull/835) rejects unsupported nested fragment epilogues and contraction
 roots the binder cannot compute together. The isolated Qwen3 pre-attention program passes GPU parity with synthetic
 weights at 1, 4, and 8 tokens. A complete four-configuration rerun held source fixed: stock passed; all three Emmy

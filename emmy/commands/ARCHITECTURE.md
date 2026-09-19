@@ -135,7 +135,10 @@ and Emmy always rebuild the same module and example inputs. Inductor compiles wi
 `fullgraph=True, mode="max-autotune-no-cudagraphs"`; the harness supplies the shared outer CUDA graph so every backend
 has identical captured timing semantics. Inductor output must match eager on the same inputs at `rtol=atol=1e-3`
 before its latency is accepted. `run --strict` makes every requested backend, captured timing, exact pin, and direct
-Emmy-vs-eager proof authoritative. `--strict-evidence` (`run`, `compile`, `serve`; `EMMY_STRICT_EVIDENCE`) is the
+Emmy-vs-eager proof authoritative. Strict comparisons disable Torch's FP16/BF16 reduced-precision reductions for
+both correctness and timing; otherwise a shape-dependent cuBLAS algorithm can round intermediate sums and reject
+a kernel that accumulates at full width. The worker restores the prior precision and split-K settings after each
+job, including failures. `--strict-evidence` (`run`, `compile`, `serve`; `EMMY_STRICT_EVIDENCE`) is the
 deploy-side strictness: a fork no measured row decides raises `EvidenceError` naming the kernel instead of deploying
 a prediction. BF16 inputs and constants bind through the compiler's raw `uint16` carrier, and
 backend output bits are decoded to numeric values before every command-layer correctness check. The command records
