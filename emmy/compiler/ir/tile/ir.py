@@ -496,6 +496,13 @@ class TileOp(Op):
         validate(self.schedule, self, place=self.place, workers=self.workers)
 
     @cached_property
+    def register_program(self):
+        """The rectangular loop whose state can be owned by independent register rows."""
+        from emmy.compiler.ir.schedule.register import RegisterProgram  # noqa: PLC0415
+
+        return RegisterProgram.from_tile(self)
+
+    @cached_property
     def grid_sched(self):
         """This kernel read on the grid — the view a legality check offers a CANDIDATE plan to.
 

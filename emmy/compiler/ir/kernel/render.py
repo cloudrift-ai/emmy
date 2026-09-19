@@ -512,6 +512,21 @@ static __device__ __forceinline__ void emmy_c_to_a_bf16(unsigned* a, const float
     asm("cvt.rn.bf16x2.f32 %0, %1, %2;\\n" : "=r"(a[3]) : "f"(c1[3]), "f"(c1[2]));
 }
 
+// A 16x8 C tile becomes a B operand through warp-local exchange of packed column pairs.
+static __device__ __forceinline__ void emmy_c_to_b_f16(unsigned* b, const float* c) {
+    unsigned lo, hi;
+    asm("cvt.rn.f16x2.f32 %0, %1, %2;\\n" : "=r"(lo) : "f"(c[1]), "f"(c[0]));
+    asm("cvt.rn.f16x2.f32 %0, %1, %2;\\n" : "=r"(hi) : "f"(c[3]), "f"(c[2]));
+    const int lane = threadIdx.x & 31, g = lane >> 2, t = lane & 3;
+    const int src = (2 * t) * 4 + (g >> 1), shift = (g & 1) * 16;
+    const unsigned l0 = (__shfl_sync(0xffffffff, lo, src) >> shift) & 0xffff;
+    const unsigned l1 = (__shfl_sync(0xffffffff, lo, src + 4) >> shift) & 0xffff;
+    const unsigned h0 = (__shfl_sync(0xffffffff, hi, src) >> shift) & 0xffff;
+    const unsigned h1 = (__shfl_sync(0xffffffff, hi, src + 4) >> shift) & 0xffff;
+    b[0] = l0 | (l1 << 16);
+    b[1] = h0 | (h1 << 16);
+}
+
 // gmem-direct fragment loads — the fallback when an mma.sync operand was NOT
 // staged into shared memory (ldmatrix is smem-only, so we read the fragment
 // straight from gmem instead, replicating the PTX m16n8k16 lane→element map).
