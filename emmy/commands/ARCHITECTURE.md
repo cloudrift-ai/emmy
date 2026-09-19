@@ -300,8 +300,7 @@ knob rows into either baseline as proposals. Canonical goldens remain the common
 
 `emmy eval golden --golden GOLDEN_YAML --serving-config PATH` is the release audit. The env must name that exact
 canonical file. The command validates the nested schema and model provenance, requires the live GPU to match both the
-config
-and YAML, proves that every structural target has every config-derived realization, reproduces the recorded rows,
+config and YAML, proves that every structural target has every config-derived realization, validates the recorded rows,
 and re-traces the exact static/symbolic precision matrix. Any missing realization, unrealized entry, or twin the
 golden rows do not decide is a non-zero release failure. Model, revision, GPU, and serving widths therefore have no
 independent audit flags.
