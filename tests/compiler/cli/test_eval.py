@@ -256,7 +256,7 @@ def test_eval_golden_fails_when_a_twin_is_not_decided_by_the_golden_rows(monkeyp
     monkeypatch.setattr(eval_cmd, "_emit_prior_golden_check", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(eval_cmd, "_emit_offer_audit", lambda _records: False)
     undecided = object()
-    monkeypatch.setattr(twins, "capture_twin_graphs", lambda source, **kwargs: {"pre1": object(), "pre2": undecided})
+    monkeypatch.setattr(twins, "capture_twin_graphs", lambda source, **kwargs: {"pre1": object(), "post1": undecided})
 
     def fake_run(self, graph, *, ctx=None, **_kwargs):
         if graph is undecided:
@@ -268,7 +268,79 @@ def test_eval_golden_fails_when_a_twin_is_not_decided_by_the_golden_rows(monkeyp
     with caplog.at_level(logging.ERROR), pytest.raises(SystemExit) as exc:
         eval_cmd.handle_eval_golden(SimpleNamespace(golden=str(golden), serving_config=str(config)))
     assert exc.value.code == 1
-    assert any("pre2" in r.message and "k_linear" in r.message for r in caplog.records)
+    assert any("post1" in r.message and "k_linear" in r.message for r in caplog.records)
+
+
+def test_eval_golden_compiles_a_static_twin_only_in_the_lanes_that_warm_its_width(monkeypatch, tmp_path):
+    """A warm shape names its lane (``64:::fm``), so a served process in a lane compiles the
+    static twins of that lane's widths and nothing wider or narrower; the audit asks the same of
+    each lane's rows — a symbolic twin in every lane, a static twin where its width is warmed."""
+    from types import SimpleNamespace
+
+    import emmy.commands.eval as eval_cmd
+    import emmy.serving.twins as twins
+    from emmy.commands.trace import trace_inline_code
+    from emmy.compiler.context import Context
+    from emmy.compiler.pipeline import Pipeline
+    from emmy.compiler.pipeline.search.golden import GoldenFileValidation, dump_golden_file
+    from emmy.compiler.torch_wire import graph_to_wire
+
+    graph = trace_inline_code("torch.relu(torch.randn(8))")["graph"]
+    target = {"origins": [graph.producer(graph.outputs[0]).id]}
+
+    def rows(*names_and_bindings):
+        return [
+            {
+                "name": name,
+                "bindings": bindings,
+                "pins": {"FAST_MATH": name.endswith(".fm")},
+                "knobs": {},
+                "measurements": {"emmy_us": 1.0, "reference_us": 1.0, "reference_backend": "torch"},
+            }
+            for name, bindings in names_and_bindings
+        ]
+
+    golden = tmp_path / "golden.yaml"
+    dump_golden_file(
+        {
+            "gpu_name": "NVIDIA GeForce RTX 4090",
+            "compute_cap": [8, 9],
+            "model": "org/model",
+            "programs": [graph_to_wire(graph)],
+            "configs": [
+                {"program": 0, "target": target, "realizations": rows(("pre8.m8", {"num_tokens": 8}))},
+                {"program": 0, "target": target, "realizations": rows(("pre64.m64.fm", {"num_tokens": 64}))},
+                {"program": 0, "target": target, "realizations": rows(("pre-sym.dynamic", {}), ("pre-sym.dynamic.fm", {}))},
+            ],
+        },
+        golden,
+        validation=GoldenFileValidation.REPOSITORY,
+    )
+    config = tmp_path / "release.env"
+    config.write_text(
+        f'SERVE_MODEL=org/model\nSERVE_GPU="NVIDIA GeForce RTX 4090"\nSERVE_GOLDEN_FILE={golden}\n'
+        "SERVE_MAX_NUM_BATCHED_TOKENS=64\nSERVE_DECODE_BUCKET=8\nSERVE_PREFILL_CAPACITY=64\nSERVE_PREFILL_BUCKET=0\n"
+        'SERVE_M1_TIER=0\nSERVE_WARM_SHAPES="64:::fm"\n'
+    )
+    ctx = Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4090")
+    monkeypatch.setattr(Context, "probe", staticmethod(lambda: ctx))
+    monkeypatch.setattr(eval_cmd, "_emit_prior_golden_check", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(eval_cmd, "_emit_offer_audit", lambda _records: False)
+    graphs = {"pre8": object(), "pre64": object(), "pre-sym": object()}
+    monkeypatch.setattr(twins, "capture_twin_graphs", lambda source, **kwargs: dict(graphs))
+    compiled = []
+
+    def fake_run(self, graph, *, ctx=None, **_kwargs):
+        from emmy import config as emmy_config
+
+        compiled.append((next(name for name, g in graphs.items() if g is graph), emmy_config.knob_raw("FAST_MATH")))
+        return graph
+
+    monkeypatch.setattr(Pipeline, "run", fake_run)
+
+    eval_cmd.handle_eval_golden(SimpleNamespace(golden=str(golden), serving_config=str(config)))
+
+    assert sorted(compiled) == [("pre-sym", "False"), ("pre-sym", "True"), ("pre64", "True"), ("pre8", "False")]
 
 
 def test_offer_audit_flags_unrealized_entries(monkeypatch, caplog):

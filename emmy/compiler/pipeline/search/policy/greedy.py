@@ -1122,7 +1122,9 @@ def greedy_decide(
         # ``tune`` explores them regardless (MCTS walks every sibling); an env
         # pin makes the Graph the rule's only option, which applies inline and
         # never reaches a decide.
-        if any(_is_structural_option(o) for o in leaves):
+        # One leaf is no comparison: a hand pin (or legality) left a single arm, so nothing is
+        # priced and strict evidence has nothing to refuse — it falls to the plain return below.
+        if len(leaves) > 1 and any(_is_structural_option(o) for o in leaves):
             if not price_structural:
                 # A nested price probe must not re-split the slice it is pricing.
                 leaves = [o for o in leaves if not _is_structural_option(o)] or leaves

@@ -576,7 +576,9 @@ wherever a measured row of the kernel names it (`pins.composed_routes`, register
 index's route rows) — else the first offered seam it marks, or the offered plan whose `g<n>` half its `REDUCE` value
 carries; a row whose cut seams are not on this ballot decides nothing). A measured arm
 outranks every arm priced by nested resolution (a Σ that may hold predictions); among measured arms the fastest wins;
-strict evidence refuses a kernel-set fork no measured arm decides. With no measured arm the arms are priced exactly as
+strict evidence refuses a kernel-set fork no measured arm decides — a fork with more than one arm left, that is: a
+hand pin that leaves one arm decides it, which is how a kernel set gets recorded under strict evidence before its
+routing row exists, and the strict check then falls on the pieces. With no measured arm the arms are priced exactly as
 Part 4 describes (`_priced_pick`, the streamed fused-vs-splice comparison, the serial-work floor). Nothing is
 installed on the kernel: a piece a cut or split mints is a brand-new kernel (`knob.consume_kernel_row` strips every
 decision family and every feature), its own forks consult the rows of its own signature, and a piece that fails to

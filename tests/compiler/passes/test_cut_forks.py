@@ -838,11 +838,126 @@ def test_alpha_equivalent_operand_cones_cluster_into_one_seam() -> None:
     carries the other as a sibling with its capture correspondence."""
     from emmy.compiler.pipeline.passes.lowering.tile._cut import _cluster_value_seams
 
-    consumer = object()
     same = [_cone_seam(), _cone_seam()]
 
-    clustered = _cluster_value_seams(same, {id(seam.node): consumer for seam in same})
+    clustered = _cluster_value_seams(same, (Axis("n", 8), Axis("k", 8)))
     assert len(clustered) == 1 and len(clustered[0].siblings) == 1
+
+
+def _norm_residual_graph() -> Graph:
+    """``y = x @ w`` read twice: under the norm's statistic reduce and at the residual add — the
+    shape of a fused decoder half, whose o_proj result feeds the post-attention norm and the
+    residual stream. Fusion keeps one definition; the lifted tree holds one cone per scope."""
+    from emmy.commands.trace import graph_from_code
+
+    code = (
+        "(lambda y: y * torch.rsqrt(y.pow(2).mean(-1, keepdim=True) + 1e-6) + y)"
+        "(torch.matmul(torch.randn(16, 64, dtype=torch.float16), torch.randn(64, 32, dtype=torch.float16)))"
+    )
+    return graph_from_code(code)[0]
+
+
+def _lifted_parent(graph: Graph) -> TileOp:
+    """The one fused kernel of ``graph`` as the cut pass first sees it."""
+    lowered = Pipeline.build(LOOP_PASSES).run(graph, ctx=_CTX)
+    lifted = Pipeline.build(["lowering/tile"], select={"lift", "twisted"}).run(lowered, ctx=_CTX)
+    (tile,) = [node.op for node in lifted.nodes.values() if isinstance(node.op, TileOp)]
+    return tile
+
+
+def test_a_value_read_under_a_reduce_and_at_the_free_axis_is_one_seam() -> None:
+    """The two copies of the contraction bind the hidden coordinate under different names (the
+    reduce's own axis, the kernel's free axis) and their slab params may sit in another order, so
+    their canonical forms differ; they are one value, and cutting it once must materialize it once
+    with every occurrence reading the workspace."""
+    parent = _lifted_parent(_norm_residual_graph())
+    contractions = [seam for seam in cuttable_seams(parent) if seam.node.as_contraction() is not None]
+    assert len(contractions) == 1 and len(contractions[0].siblings) == 1, [seam.spelling for seam in cuttable_seams(parent)]
+    cut = _lower_cut(_norm_residual_graph(), contractions[0].spelling)
+    cuda = [node for node in cut.nodes.values() if type(node.op).__name__ == "CudaOp"]
+    assert len(cuda) == 2
+
+
+@requires_cuda
+def test_a_clustered_value_cut_once_computes_the_right_answer() -> None:
+    graph = _norm_residual_graph()
+    (seam,) = [seam for seam in cuttable_seams(_lifted_parent(graph.copy())) if seam.node.as_contraction() is not None]
+    cut = _lower_cut(graph, seam.spelling)
+    rng = np.random.default_rng(0)
+    x = rng.standard_normal((16, 64)).astype(np.float16)
+    w = rng.standard_normal((64, 32)).astype(np.float16)
+    inputs = dict(zip(cut.inputs, (x, w), strict=True))
+    (out_name,) = cut.outputs
+    got = CudaBackend().run(cut, input_data=inputs)[0].outputs[out_name].astype(np.float32)
+    y = x.astype(np.float32) @ w.astype(np.float32)
+    expected = y / np.sqrt((y * y).mean(-1, keepdims=True) + 1e-6) + y
+    np.testing.assert_allclose(got, expected, rtol=2e-2, atol=2e-1)
+
+
+def test_a_row_spelled_at_any_occurrence_of_a_clustered_value_names_its_cut() -> None:
+    """The arm that cuts a clustered seam spells every occurrence, and a route recorded at one of
+    them — a row from before the clustering, a pin at the copy a hand found — selects that arm."""
+    from emmy.compiler.pipeline.search.pins import spelled_arm
+
+    graph = _norm_residual_graph()
+    lowered = Pipeline.build(LOOP_PASSES).run(graph, ctx=_CTX)
+    lifted = Pipeline.build(["lowering/tile"], select={"lift", "twisted"}).run(lowered, ctx=_CTX)
+    node = next(node for node in lifted.nodes.values() if isinstance(node.op, TileOp))
+    (seam,) = [seam for seam in cuttable_seams(node.op) if seam.node.as_contraction() is not None]
+    (alias,) = seam.aliases
+    match = Match(graph=lifted, root_node_id=node.id, rule=Rule(name="test", pattern=[]))
+    options = _CUT.rewrite(match, node)
+    (arm,) = [option for option in options if option.knobs.get(seam.spelling) == "cut"]
+    assert arm.knobs[alias] == "cut" and arm.aliases == {alias: seam.spelling}
+    assert spelled_arm(options, {alias: "cut"}) == (arm, {key: str(value) for key, value in arm.knobs.items()})
+    assert spelled_arm(options, {seam.spelling: "cut"})[0] is arm
+    assert spelled_arm(options, {"WORK": "t256"})[0].knobs == {"PLACE": "fuse"}
+
+
+def _twin_norm_graph() -> Graph:
+    """``k = x @ wk`` and ``v = x @ wv`` over one input, with ``k`` normed: the k/v projection pair
+    of a fused pre-attention half. Lifting folds the two contractions into one twin; the norm's
+    statistic recomputes ``k`` alone under its reduce."""
+    from emmy.commands.trace import graph_from_code
+
+    code = (
+        "(lambda x, wk, wv: (lambda k, v: k * torch.rsqrt(k.pow(2).mean(-1, keepdim=True) + 1e-6) + v)"
+        "(torch.matmul(x, wk), torch.matmul(x, wv)))"
+        "(torch.randn(16, 64, dtype=torch.float16), torch.randn(64, 32, dtype=torch.float16), torch.randn(64, 32, dtype=torch.float16))"
+    )
+    return graph_from_code(code)[0]
+
+
+def test_a_lone_contraction_is_a_channel_of_the_twin_it_equals() -> None:
+    """The twin exposes two values; the cone under the reduce exposes one of them. One placement
+    decision materializes the twin, and the lone copy reads the channel that is its value."""
+    parent = _lifted_parent(_twin_norm_graph())
+    contractions = [seam for seam in cuttable_seams(parent) if seam.node.as_contraction() is not None]
+    assert len(contractions) == 1, [seam.spelling for seam in cuttable_seams(parent)]
+    (twin,) = contractions
+    ((sibling, _, channels),) = twin.siblings
+    assert len(twin.node.exposes) == 2 and len(sibling.exposes) == 1 and channels == (0,)
+    cut = _lower_cut(_twin_norm_graph(), twin.spelling)
+    cuda = [node for node in cut.nodes.values() if type(node.op).__name__ == "CudaOp"]
+    assert len(cuda) == 2
+
+
+@requires_cuda
+def test_a_twin_cut_once_serves_its_lone_channel_reader() -> None:
+    graph = _twin_norm_graph()
+    (seam,) = [seam for seam in cuttable_seams(_lifted_parent(graph.copy())) if seam.node.as_contraction() is not None]
+    cut = _lower_cut(graph, seam.spelling)
+    rng = np.random.default_rng(0)
+    x = rng.standard_normal((16, 64)).astype(np.float16)
+    wk = rng.standard_normal((64, 32)).astype(np.float16)
+    wv = rng.standard_normal((64, 32)).astype(np.float16)
+    inputs = dict(zip(cut.inputs, (x, wk, wv), strict=True))
+    (out_name,) = cut.outputs
+    got = CudaBackend().run(cut, input_data=inputs)[0].outputs[out_name].astype(np.float32)
+    k = x.astype(np.float32) @ wk.astype(np.float32)
+    v = x.astype(np.float32) @ wv.astype(np.float32)
+    expected = k / np.sqrt((k * k).mean(-1, keepdims=True) + 1e-6) + v
+    np.testing.assert_allclose(got, expected, rtol=2e-2, atol=2e-1)
 
 
 def test_a_scalar_operand_is_no_seam() -> None:
@@ -948,8 +1063,8 @@ def test_output_owning_cut_leaves_single_output_pieces_that_promote() -> None:
         assert len(piece.op.output_specs) == 1
         assert len(piece.op.place.free) >= 2, f"{piece.id} kept a rank-1 placement"
         assert not any(spec.sweep for spec in piece.op.output_specs), f"{piece.id} still sweeps its store"
-    widths = {piece.op.place.free[-1].extent.as_static() for piece in pieces}
-    assert widths == {256, 32}, "each piece binds its OWN store's width, not the other's"
+    widths = {tuple(sorted(axis.extent.as_static() for axis in piece.op.place.free)) for piece in pieces}
+    assert widths == {(128, 256), (32, 128)}, "each piece binds its OWN store's width, not the other's"
 
 
 def test_peeling_all_but_one_output_leaves_every_piece_single_output() -> None:
@@ -1067,8 +1182,9 @@ def test_an_output_owning_piece_carries_its_epilogue_into_a_lowerable_kernel() -
     pieces = {piece.id: piece.op for piece in fragment.nodes.values() if isinstance(piece.op, TileOp)}
 
     assert sorted(pieces) == ["narrow__placed", "wide__placed"]
-    assert [axis.name for axis in pieces["wide__placed"].place.free] == ["m", "n"]
-    assert [axis.name for axis in pieces["narrow__placed"].place.free] == ["m", "n2"]
+    # Re-formed as its own kernel, a piece spells its axes canonically; the grid is read by extent.
+    assert [axis.extent.as_static() for axis in pieces["wide__placed"].place.free] == [8, 16]
+    assert [axis.extent.as_static() for axis in pieces["narrow__placed"].place.free] == [8, 4]
     for name, piece in pieces.items():
         stored = {value for spec in piece.output_specs for value in spec.write.values}
         defined = {name for stmt in piece.op.lower(axes=piece.axes) for name in stmt.defines()}
@@ -1244,7 +1360,7 @@ def test_the_cut_takes_a_row_statistic_but_leaves_a_per_cell_fold() -> None:
     assert seams["q"] not in knobs, "the per-cell fold is the piece's own work"
 
     owning = _composed_arm(graph, node)[0].materialize().nodes["wide__placed"].op
-    assert [axis.name for axis in owning.place.free] == ["m", "n"], "the piece binds its store's sweep around what it kept"
+    assert [axis.extent.as_static() for axis in owning.place.free] == [8, 16], "the piece binds its store's sweep around what it kept"
 
 
 def test_a_recorded_route_selects_the_arm_spelling_its_whole_cut_set() -> None:

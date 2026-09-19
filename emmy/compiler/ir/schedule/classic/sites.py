@@ -14,7 +14,7 @@ from frozendict import frozendict
 from emmy.compiler.ir.atom import ATOM_REGISTRY
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule.base import Schedule, ScheduleProblem, Site
-from emmy.compiler.ir.schedule.catalog import producer_band_moves, raster_moves, scalar_tile_moves
+from emmy.compiler.ir.schedule.catalog import map_tile_moves, producer_band_moves, raster_moves
 from emmy.compiler.ir.schedule.choices import PlacedTile, Raster, Reduce, Stage, Tile, Work, derive_inventory, resolve_site_tile
 from emmy.compiler.ir.schedule.staging import stage_target
 from emmy.compiler.ir.schedule.views import NodeId
@@ -27,7 +27,6 @@ from .refusals import (
     _contraction_reductions,
     _plan_node_refusal,
     _reduction_domain,
-    _scalar_catalog,
     _stage_candidates,
     _warp_atoms,
     _warp_plans,
@@ -137,13 +136,13 @@ class ClassicNodeSite(Site[ClassicSchedule]):
         if why := _wgmma_refusal(plan, None if stage is None else Stage.parse(stage)):
             raise ValueError(why)
 
-    def _select_plans(self, named: str | None, catalog, *, allowed) -> tuple[Tile, ...]:
+    def _select_plans(self, named: str | None, catalog, *, allowed, work: Work | None = None) -> tuple[Tile, ...]:
         if named is not None:
             self._wgmma_pin_refusal(named)
 
         def parse(spelling: str) -> Tile | None:
             try:
-                return resolve_site_tile(spelling, self.problem.work)
+                return resolve_site_tile(spelling, work)
             except ValueError:
                 return None
 
@@ -170,13 +169,11 @@ class ClassicNodeSite(Site[ClassicSchedule]):
             inner = tile.place.free[-1]
             extent = inner.extent.as_static() if inner.extent.is_static else 0
 
-            def legal(plan: Tile) -> bool:
-                return plan.units == (1, 1) and plan.reg_m == 1 and (plan.reg_n == 1 or (extent and extent % plan.reg_n == 0))
-
-            catalog = tuple(dict.fromkeys(plan for plan in scalar_tile_moves() if legal(plan)))
+            catalog = tuple(plan for plan in map_tile_moves() if plan.reg_n == 1 or (extent and extent % plan.reg_n == 0))
+            # A strip never carries the worker inventory: the row's WORK is the kernel's sweep
+            # width, so a named strip parses bare, as the catalog spells it.
             return tuple(
-                ProjectionSchedule(plan)
-                for plan in self._select_plans(self._named("TILE"), catalog, allowed=lambda p: legal(p) and p in _scalar_catalog())
+                ProjectionSchedule(plan) for plan in self._select_plans(self._named("TILE"), catalog, allowed=lambda p: p in catalog)
             )
         reductions = self._reductions()
         facts = tile.contractions.get(self.id)
@@ -188,6 +185,7 @@ class ClassicNodeSite(Site[ClassicSchedule]):
                 self._named("TILE"),
                 _contraction_plans(node, facts, self.problem.policy_atoms(self.id)),
                 allowed=lambda plan: _contraction_plan_allowed(node, facts, atoms, plan),
+                work=self.problem.work,
             )
             # A tiled plan folds serially per cell; an untiled one takes every per-cell reduction.
             choices = (

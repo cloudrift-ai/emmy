@@ -399,6 +399,44 @@ def test_recorded_route_cuts_the_selected_compile_target(run_cli, tmp_path, monk
     assert sum("__place_" in line for line in headers) == 1, stdout
 
 
+def test_a_kernel_set_name_resolves_inside_the_realization_own_precision_lane(tmp_path):
+    """Both lanes record their rows under one name; the standard seed must not replay the fast-math split."""
+    from emmy.commands.compile import resolve_golden_arg
+    from emmy.commands.run import _sample_replay_knobs
+    from emmy.compiler.torch_wire import graph_to_wire
+
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (Dim(64), Dim(64)), dtype=F16), node_id="x")
+    graph.add_node(InputOp(), [], Tensor("w", (Dim(64), Dim(64)), dtype=F16), node_id="w")
+    graph.add_node(MatmulOp(), ["x", "w"], Tensor("y", (Dim(64), Dim(64)), dtype=F16), node_id="y")
+    graph.inputs, graph.outputs = ["x", "w"], ["y"]
+    measured = {"measurements": {"emmy_us": 1.0, "reference_us": 2.0, "reference_backend": "torch"}}
+    path = tmp_path / "working-two-lanes.yaml"
+    dump_golden_file(
+        {
+            "compute_cap": [8, 9],
+            "programs": [graph_to_wire(graph)],
+            "configs": [
+                {
+                    "program": 0,
+                    "target": {"origins": ["y"]},
+                    "realizations": [
+                        {"name": "seed", "bindings": {}, "pins": {"FAST_MATH": False}, "kernel_set": ["seed.split"]},
+                        {"name": "seed.split", "bindings": {}, "pins": {"FAST_MATH": False}, "knobs": {"REDUCE": "g4k"}, **measured},
+                        {"name": "seed.split", "bindings": {}, "pins": {"FAST_MATH": True}, "knobs": {"REDUCE": "g2k"}, **measured},
+                    ],
+                }
+            ],
+        },
+        path,
+        overwrite=True,
+    )
+    args = _args(path, realization="seed")
+    resolve_golden_arg(args)
+    (sample,) = args.golden_configs
+    assert _sample_replay_knobs(sample) == {"FAST_MATH": False, "REDUCE": "g4k"}
+
+
 def test_selected_records_scope_the_tier_and_a_split_regime_publishes_nothing(monkeypatch, tmp_path):
     """The selected realization's records are the compile's whole golden scope; the input regime
     (the precision pins) reaches the environment only when every record agrees on it."""

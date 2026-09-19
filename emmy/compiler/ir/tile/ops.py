@@ -658,24 +658,29 @@ def chain_form(root: Fold) -> bool:
     )
 
 
-def cone_stat(cone, axes: tuple) -> Fold | None:
-    """The per-row STATISTIC fold of a computed-A cone — the reduce its prologue (the cone's first
-    operand, the row-invariant edge) materializes first: the fold whose carried state the first
-    reduce ``Loop`` of the prologue's lowering folds. ``None`` for a cone without one — the
-    caller's serial fallback."""
-    prologue = cone.operands[0] if isinstance(cone, Fold) and cone.axis is None and cone.operands else None
-    if prologue is None:
+def cone_stat(cone, k_name: str, axes: tuple) -> Fold | None:
+    """The per-row STATISTIC fold of a computed-A cone — the fold whose carried state the first reduce
+    ``Loop`` of the cone's prologue folds. The prologue is every row-invariant edge, lowered in operand
+    order (:func:`~emmy.compiler.ir.schedule.views.cone_seam`), and formation does not promise the
+    statistic comes first: a fused norm→linear cone is two gmem reads and then the norm. An edge that
+    varies with the contraction axis ``k_name`` is the cell's, reduce or not. ``None`` for a cone without
+    a statistic — the caller's serial fallback."""
+    if not isinstance(cone, Fold) or cone.axis is not None:
         return None
-    first = next((stmt for stmt in prologue.lower(axes=axes) if isinstance(stmt, Loop) and stmt.is_reduce), None)
-    if first is None:
+    for edge in cone.operands:
+        if k_name in edge.free_axes:
+            continue
+        first = next((stmt for stmt in edge.lower(axes=axes) if isinstance(stmt, Loop) and stmt.is_reduce), None)
+        if first is None:
+            continue
+        carried = {stmt.name for stmt in first.body if isinstance(stmt, Accum)}
+        pending = [edge]
+        while pending:
+            term = pending.pop()
+            if term.axis is not None and set(term.combine.results) <= carried:
+                return term
+            pending.extend(reversed(term.operands))
         return None
-    carried = {stmt.name for stmt in first.body if isinstance(stmt, Accum)}
-    pending = [prologue]
-    while pending:
-        term = pending.pop()
-        if term.axis is not None and set(term.combine.results) <= carried:
-            return term
-        pending.extend(reversed(term.operands))
     return None
 
 

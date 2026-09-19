@@ -336,25 +336,35 @@ def _layout_copy_inverse(graph, node, output: str) -> tuple[str, tuple[int, ...]
     destination = graph.buffer(output)
     if source is None or destination is None or source.dtype != destination.dtype:
         return None
-    source_dims = tuple(dim.as_static() for dim in source.shape if dim.is_static)
-    destination_strides = _static_strides(destination.shape)
-    if len(source_dims) != len(source.shape) or destination_strides is None:
+    # A shared leading symbolic dimension — the token axis of a serving twin — is carried through
+    # as itself: the copy reads and writes it by one coordinate, and the static dimensions behind
+    # it are the layout the proof is about.
+    leading = _shared_leading_symbolic(source.shape, destination.shape)
+    load_index, write_index = load.index, write.index
+    if leading:
+        if len(load_index) < 2 or len(write_index) < 2 or load_index[0] != write_index[0] or not isinstance(load_index[0], Var):
+            return None
+        load_index, write_index = load_index[1:], write_index[1:]
+    source_shape, destination_shape = source.shape[leading:], destination.shape[leading:]
+    source_dims = tuple(dim.as_static() for dim in source_shape if dim.is_static)
+    destination_strides = _static_strides(destination_shape)
+    if len(source_dims) != len(source_shape) or destination_strides is None:
         return None
     source_numel = math.prod(source_dims)
-    destination_numel = math.prod(dim.as_static() for dim in destination.shape)
+    destination_numel = math.prod(dim.as_static() for dim in destination_shape)
     if source_numel != destination_numel:
         return None
-    extents = _loop_extents(node.op)
+    extents = _loop_extents(node.op, leading=load.index[0].name if leading else None)
     if extents is None or math.prod(extents.values()) != destination_numel:
         return None
-    if len(load.index) != len(source_dims) or len(write.index) != len(destination_strides):
+    if len(load_index) != len(source_dims) or len(write_index) != len(destination_strides):
         return None
 
     ctx = _extent_ctx(extents)
-    destination_flat = _dense_flat_address(write.index, destination_strides, extents, ctx)
+    destination_flat = _dense_flat_address(write_index, destination_strides, extents, ctx)
     if destination_flat is None:
         return None
-    actual = tuple(expr.simplify(ctx) for expr in load.index)
+    actual = tuple(expr.simplify(ctx) for expr in load_index)
     inverse = [0] * len(source_dims)
     if any(actual[i] != Literal(0, "int") for i, dim in enumerate(source_dims) if dim == 1):
         return None
@@ -368,7 +378,19 @@ def _layout_copy_inverse(graph, node, output: str) -> tuple[str, tuple[int, ...]
         inverse[index] = stride
         stride *= source_dims[index]
         remaining.remove(index)
-    return load.input, tuple(inverse)
+    return load.input, tuple(([-1] if leading else []) + inverse)
+
+
+def _shared_leading_symbolic(source_shape, destination_shape) -> int:
+    """1 when both shapes open with one symbolic dimension and are static behind it, else 0."""
+    if not source_shape or not destination_shape:
+        return 0
+    lead, other = source_shape[0], destination_shape[0]
+    if lead.is_static or other.is_static or lead != other:
+        return 0
+    if all(dim.is_static for dim in source_shape[1:]) and all(dim.is_static for dim in destination_shape[1:]):
+        return 1
+    return 0
 
 
 def _extent_ctx(extents: dict[str, int]) -> SimplifyCtx:
@@ -428,12 +450,23 @@ def _unflatten(flat: Expr, shape, ctx: SimplifyCtx) -> tuple[Expr, ...] | None:
 def _retarget_equivalent_output(graph, op: LoopOp, cluster: _OutputEquivalenceCluster) -> LoopOp | None:
     """Retarget the source Writes through a chain of equivalent output layouts."""
     source, output = cluster.buffers[0], cluster.buffers[-1]
-    extents = _loop_extents(op)
-    if extents is None or any(isinstance(stmt, Load) and stmt.input == source for stmt in op.body.iter()):
-        return None
     source_tensor = graph.buffer(source)
     source_writes = [write for write in op.body.writes if write.output == source]
     if source_tensor is None or not source_writes:
+        return None
+    # A leading symbolic dimension the chain carries through (``_layout_copy_inverse``) is the
+    # producer's own leading coordinate at every step; the proof runs on the static rest.
+    leading = 1 if any(inverse and inverse[0] == -1 for inverse in cluster.inverse_strides) else 0
+    if leading and any(not inverse or inverse[0] != -1 for inverse in cluster.inverse_strides):
+        return None
+    lead_axis = None
+    if leading:
+        heads = {write.index[0] for write in source_writes if write.index}
+        if len(heads) != 1 or not isinstance(next(iter(heads)), Var):
+            return None
+        lead_axis = next(iter(heads)).name
+    extents = _loop_extents(op, leading=lead_axis)
+    if extents is None or any(isinstance(stmt, Load) and stmt.input == source for stmt in op.body.iter()):
         return None
     if any(not write.is_scalar or len(write.index) != len(source_tensor.shape) for write in source_writes):
         return None
@@ -443,12 +476,12 @@ def _retarget_equivalent_output(graph, op: LoopOp, cluster: _OutputEquivalenceCl
         tensor = graph.buffer(destination)
         if tensor is None:
             return None
-        steps.append((inverse, tensor.shape))
+        steps.append((inverse[leading:], tensor.shape[leading:]))
 
     ctx = _extent_ctx(extents)
     replacement: dict[int, Write] = {}
     for write in source_writes:
-        coordinates = write.index
+        coordinates = write.index[leading:]
         for inverse, shape in steps:
             if len(coordinates) != len(inverse):
                 return None
@@ -461,7 +494,7 @@ def _retarget_equivalent_output(graph, op: LoopOp, cluster: _OutputEquivalenceCl
             coordinates = _unflatten(flat.simplify(ctx), shape, ctx)
             if coordinates is None:
                 return None
-        replacement[id(write)] = replace(write, output=output, index=coordinates)
+        replacement[id(write)] = replace(write, output=output, index=(*write.index[:leading], *coordinates))
 
     return LoopOp(
         body=op.body.map(lambda stmt: replacement.get(id(stmt), stmt)),
@@ -483,13 +516,17 @@ def _static_strides(shape) -> list[int] | None:
     return list(reversed(strides))
 
 
-def _loop_extents(op: LoopOp) -> dict[str, int] | None:
-    """Return each distinct static loop-axis extent, declining conflicting reuse."""
+def _loop_extents(op: LoopOp, *, leading: str | None = None) -> dict[str, int] | None:
+    """Return each distinct static loop-axis extent, declining conflicting reuse. ``leading``
+    names the one loop axis allowed a symbolic extent, the shared leading dimension a layout
+    proof carries through; it takes no part in the static extents."""
     extents: dict[str, int] = {}
     for stmt in op.body.iter():
         if not isinstance(stmt, Loop):
             continue
         if not stmt.axis.extent.is_static:
+            if stmt.axis.name == leading:
+                continue
             return None
         extent = stmt.axis.extent.as_static()
         if stmt.axis.name in extents and extents[stmt.axis.name] != extent:

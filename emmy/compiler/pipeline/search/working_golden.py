@@ -11,6 +11,7 @@ import contextlib
 import copy
 import fcntl
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -151,7 +152,7 @@ def write_trace_inventories(
     *,
     model: str | None = None,
     ctx=None,
-    realizations: list[dict] | None = None,
+    realizations: list[dict] | Mapping[str, list[dict]] | None = None,
     model_quant_digest: str | None = None,
 ) -> TraceInventoryResult:
     """Combine named traces into one exact-Loop-IR working inventory.
@@ -161,6 +162,9 @@ def write_trace_inventories(
     promote only partially.  This writer interns all of their programs and Loop IR
     targets into one self-contained artifact.  Identical Loop programs are recorded
     once: they are the same tuning target even when several serving twins consult it.
+    ``realizations`` is the row template every target takes, or a mapping from graph name
+    to the rows that graph's targets take — a static twin its own width's, a symbolic twin
+    the dynamic ones.
     """
     destination = preflight_trace_inventory(path)
     if not graphs:
@@ -182,7 +186,7 @@ def write_trace_inventories(
             force_loop_targets=True,
             name_prefix=name,
             seen_loops=seen_loops,
-            realizations=realizations,
+            realizations=realizations.get(name) if isinstance(realizations, Mapping) else realizations,
         )
     _dump_trace_inventory(
         destination,

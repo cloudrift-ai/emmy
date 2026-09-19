@@ -46,6 +46,12 @@ class ServingConfig:
     def static_widths(self) -> tuple[int, ...]:
         return tuple(sorted({dict(row.bindings)["num_tokens"] for row in self.realizations if row.bindings}))
 
+    def realizations_for(self, width: int | None) -> tuple[ServingRealization, ...]:
+        """The rows a twin at ``width`` reaches: a static twin is compiled at its own width only,
+        so its target carries that width's rows; a symbolic twin (``None``) carries the dynamic
+        rows, the any-width compile."""
+        return tuple(row for row in self.realizations if (dict(row.bindings).get("num_tokens") if row.bindings else None) == width)
+
 
 def _read_env(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}

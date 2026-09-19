@@ -11,6 +11,7 @@ artifacts exist and an intelligent reviewer accepts them against the checklist b
 | --- | --- | --- | --- |
 | Common kernel corpus | Qwen3-0.6B layer 0, sequence lengths 1 and 512 | V100, A100, H100, RTX 4090, RTX 5090, H200, B200 | Identical, portable model-derived kernel comparison |
 | Dynamic-FP8 checkpoint layer | Qwen3-0.6B-FP8-dynamic layer 0, sequence lengths 1 and 512 | RTX 4090, RTX 5090, H200, B200 | Complete layer inventory; W8A8-only claim deferred |
+| Hybrid-precision projection kernels | Gemma 4 12B decoder-layer projections and causal attention, sequence length 512, FP32 and periodic-promotion FP16 accumulation | RTX 5090, RTX 4090 | Replay of hand-recorded goldens against eager and Inductor; backs the periodic-promotion figure |
 | Quantized checkpoint kernels | Qwen3-8B NVFP4 and Qwen3-0.6B block-scaled FP8 layer 0 at 1 and 512; Llama 3.1 AWQ and Laguna EXL3 layer 0 at 1 | RTX 5090 | Compiler support and correctness; the block-FP8 rows replay hand-tuned goldens against eager |
 | Dynamic-FP8 large-layer trace | Qwen3-32B-FP8-dynamic layer 0, sequence lengths 1 and 512 | H200 and B200 | Complete large-layer inventory; W8A8-only claim deferred |
 | Large-layer shape stress | Qwen3.6-27B layers 0 and 3, sequence lengths 1 and 512 | H200 and B200 | Unsharded BF16 large-shape stress only |
@@ -50,6 +51,23 @@ pinned checkpoint layer each, retain every distinct post-fusion target, skip sea
 `-O3` replay. NVFP4 and block-scaled FP8 cover sequence lengths 1 and 512. AWQ and Trellis/EXL3 cover the
 decode-shaped sequence length 1 only. The working YAML and cubin cache are retained so review can verify the declared
 packed checkpoint inputs survive into the compiled programs instead of becoming dense checkpoint weights.
+
+The `gemma4_kernels` recipe is the fast-math evidence this suite otherwise leaves out. Its twelve tasks per card
+(RTX 5090 and RTX 4090) replay six hand-recorded goldens (the five projections of a Gemma 4 12B decoder layer and its
+causal attention at sequence length 512) once with FP32 accumulation and once under `EMMY_FAST_MATH=1`, from an empty
+tune DB and under `--strict-evidence`, against eager and Inductor on PyTorch 2.13.0. The rows were found by
+hand-pinned sweeps on each card, not by search, and a golden is only ever replayed on the card it was recorded on.
+It uses the run command's scaled correctness check: periodic promotion trades accumulation precision by design, and
+at K = 15360 a flat `1e-3` tolerance does not hold for an FP16 output even in the FP32-accumulate lane. Report each
+lane against its own task's eager, and keep the two lanes in separate columns.
+
+The `gemma4_serving` recipe is the same article's serving table: its six points in its three vLLM lanes (stock vLLM
+0.23.0, vLLM with the Emmy plugin, and the plugin's fast-math fork), eighteen tasks on one RTX 5090 with the article's
+per-workload knobs. Every Emmy lane boots under `EMMY_STRICT_EVIDENCE=1`, so the RTX 5090 Gemma 4 serving golden's
+rows decide every kernel the server compiles and a fork no row decides fails the boot; the image is the plain
+`vllm-emmy` base built at the commit the run names, compiling its programs on first boot. It is a reproduction of the
+article's protocol on the current compiler, not the preregistered same-image A/B below, which runs the standard lane
+only from the warmed derivative image.
 
 The two block-scaled FP8 tasks trace `Qwen/Qwen3-0.6B-FP8`: 128×128 weight blocks with activations quantized per
 token and per 128-wide K group, the form of the official Qwen, DeepSeek, and GLM FP8 releases and of the datacenter
@@ -157,6 +175,7 @@ form; the separate FP8 and NVFP4 rows cover them.
 | Platform | Recipe | Purpose | Claim status |
 | --- | --- | --- | --- |
 | RTX 5090 | Gemma-4-12B-it, TP1 | Same-image stock and Emmy A/B | Primary matched-system result after semantic review |
+| RTX 5090 | Gemma-4-12B-it, TP1 (`gemma4_serving`) | The article's three-lane matrix under strict evidence | Reproduction of the article's protocol; both precision lanes |
 | 16x V100 | DeepSeek-V4-Flash-0731, TP8xPP2 | New checkpoint on the proven SM70 serving path | Portability result until a matched stock arm exists |
 | 1x A100 | Qwen3-8B BF16, TP1 | vLLM and megakernel (MPK) decode comparison | MPK harness pair and stock vLLM |
 

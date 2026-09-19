@@ -491,6 +491,56 @@ def test_rtx5090_attention_comparison_is_recorded_and_bounded(project_root) -> N
     subprocess.run([sys.executable, str(directory / "run_baselines.py"), "--smoke"], check=True)
 
 
+def test_gemma4_kernels_replay_a_hand_recorded_golden_per_lane(project_root) -> None:
+    recipe_dir = _experiment(project_root, "gemma4_kernels")
+    recipe = load_recipe(recipe_dir)
+    tasks = enumerate_tasks([recipe_dir])
+    cards = {"rtx5090": "NVIDIA GeForce RTX 5090", "rtx4090": "NVIDIA GeForce RTX 4090"}
+    assert sorted((task.variant.params["card"], task.variant.params["kernel"], task.variant.params["lane"]) for task in tasks) == sorted(
+        (card, kernel, lane)
+        for card in cards
+        for kernel in ("q_proj", "kv_proj", "o_proj", "mlp_gate_up", "mlp_down", "attention")
+        for lane in ("std", "fm")
+    )
+    assert all(task.recipe.deploy.gpu == cards[task.variant.params["card"]] for task in tasks)
+    # Every row replays a golden recorded on its own card; nothing traces, tunes or pins, so those rows alone decide.
+    for task in tasks:
+        name = f"{task.variant.params['kernel']}-s512_{task.variant.params['card']}.golden.yaml"
+        assert (Path(recipe_dir) / "golden" / name).is_file()
+    run = recipe.command.run
+    assert "emmy trace" not in run and "emmy tune" not in run and "EMMY_KNOBS" not in run
+    assert "--bench-backends eager,tcompile,emmy" in run
+    assert "--strict-evidence" in run
+    assert recipe.command.strict is True
+
+
+def test_gemma4_serving_runs_the_article_matrix_with_the_golden_deciding_every_emmy_lane(project_root) -> None:
+    """The article's six points in its three vLLM lanes; every Emmy lane boots under strict evidence, so the
+    serving golden's rows decide every kernel and a fork no row decides fails the boot rather than the prior."""
+    tasks = enumerate_tasks([_experiment(project_root, "gemma4_serving")])
+    assert len(tasks) == 18
+    points = {}
+    for task in tasks:
+        assert task.recipe.model.revision == "707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7"
+        assert task.recipe.deploy.gpu == "NVIDIA GeForce RTX 5090" and task.recipe.engine.llm.gpu_memory_utilization == 0.96
+        benchmark = task.recipe.benchmark
+        assert benchmark.seed == 0 and benchmark.temperature == 0 and benchmark.ignore_eos is True
+        assert "--no-enable-prefix-caching" in task.recipe.engine.llm.vllm.extra_args
+        vllm = task.recipe.engine.llm.vllm
+        lane = "stock" if "EmmyGenModel" not in vllm.extra_args else ("fm" if "EMMY_FAST_MATH=1" in vllm.extra_env else "std")
+        if lane != "stock":
+            assert "EMMY_STRICT_EVIDENCE=1" in vllm.extra_env and vllm.image.startswith("cloudriftai/vllm-emmy:")
+        points.setdefault((benchmark.random_input_len, benchmark.random_output_len, benchmark.max_concurrency), set()).add(lane)
+    assert points == {
+        (256, 256, 1): {"stock", "std", "fm"},
+        (256, 256, 64): {"stock", "std", "fm"},
+        (4096, 4096, 1): {"stock", "std", "fm"},
+        (4096, 4096, 4): {"stock", "std", "fm"},
+        (4096, 4096, 8): {"stock", "std", "fm"},
+        (8192, 256, 4): {"stock", "std", "fm"},
+    }
+
+
 def test_every_command_variant_renders(project_root) -> None:
     root = Path(project_root) / EXP
     rendered = 0
@@ -509,7 +559,7 @@ def test_every_command_variant_renders(project_root) -> None:
             assert "/task" in command
             subprocess.run(["bash", "-n"], input=command, text=True, check=True)
             rendered += 1
-    assert rendered == 89
+    assert rendered == 113
 
 
 def test_gemma_serving_ab_has_four_points_per_lane(project_root) -> None:

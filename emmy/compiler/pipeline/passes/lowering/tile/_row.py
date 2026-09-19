@@ -22,6 +22,7 @@ from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.stmt import Body, Load, Loop, Stmt, Write
 from emmy.compiler.ir.tile import TileOp
+from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op
 
 ROW_AXIS = "_row"
 
@@ -98,3 +99,18 @@ def row_candidates(op: LoopOp, tile: TileOp) -> tuple[int, ...]:
     if any(axis.extent.is_static and axis.extent.as_static() == 1 for axis in tile.place.free):
         return ()
     return _unit_positions(op) if rowless(tile) else ()
+
+
+def lift_kernel(loop: LoopOp, *, name: str) -> TileOp:
+    """One kernel's program lifted as the lift pass lifts it: the complete nest as one Fold tree,
+    then, for a contraction that owns no free axis, its size-one row bound back so a tier has a
+    row to tile."""
+    tile = lift_loop_op(loop, name=name)
+    # A contraction that owns no free axis has no row for any tier to tile. Its row is a size-one
+    # output dimension Loop-IR normalization inlined; bound back, the term keeps every per-cell
+    # choice it had and gains the fragment ones beside them.
+    for position in row_candidates(loop, tile):
+        bound = lift_loop_op(loop, name=name, body=row_bound_body(loop, position, ROW_AXIS))
+        if binds_the_row(bound, ROW_AXIS):
+            return bound
+    return tile

@@ -9,6 +9,7 @@ the same shape as ``scripts/bench_block.py`` but for arbitrary inline ops.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import re
@@ -401,7 +402,8 @@ def _handle_run_once(args):
                 run_result, _ = backend.run(compiled, input_data=input_data)
                 if dump and backend.last_debug_result is not None:
                     dump.dump_per_launch_values(backend.last_debug_result.per_launch)
-                err = _check_accuracy(run_result.outputs, _eager_output(module, example_args, example_kwargs))
+                with correctness_oracle():
+                    err = _check_accuracy(run_result.outputs, _eager_output(module, example_args, example_kwargs))
                 if err is not None:
                     logger.log(logging.INFO if quantized else logging.ERROR, "%s", err)
                     if not quantized:
@@ -600,6 +602,8 @@ def _record_golden_latency(args, results: dict, golden_benches) -> None:
         sys.exit(2)
     emmy_us = _bench_total_us(measured[0].bench)[0] if measured else results.get("Emmy")
     tcompile_us, eager_us = results.get("torch.compile"), results.get("Eager PyTorch")
+    if isinstance(tcompile_us, str):
+        tcompile_us = None
     if not emmy_us:
         logger.error("--record measured no Emmy timing for %s", args.realization)
         sys.exit(2)
@@ -881,11 +885,12 @@ def _dump_bench_compare(dump_dir, results: dict, warmup: int, iters: int) -> Non
     payload = {
         "warmup": warmup,
         "iters": iters,
-        "backends": {name: {"latency_us": us} for name, us in results.items()},
+        "backends": {name: {"error": us} if isinstance(us, str) else {"latency_us": us} for name, us in results.items()},
     }
     if eager_us:
         for name, us in results.items():
-            payload["backends"][name]["speedup_vs_eager"] = (eager_us / us) if us else 0.0
+            if not isinstance(us, str):
+                payload["backends"][name]["speedup_vs_eager"] = (eager_us / us) if us else 0.0
     out = _Path(dump_dir) / "60_bench_compare.json"
     out.write_text(_json.dumps(payload, indent=2, default=str))
 
@@ -1025,6 +1030,18 @@ def env_pin_refusal(kernel_knobs: list[dict], placement_knobs: list[dict] | None
 
     pins = {name: value for family in KERNEL_DECISION_FAMILIES for name, value in family_pins(family)}
     return unreproducible_pin_flag(pins, kernel_knobs, placement_knobs=placement_knobs) if pins else None
+
+
+def greedy_record_refusal(kernel_knobs: list[dict], accuracy_error: str | None) -> str | None:
+    """Why ``--record-greedy`` must not write this greedy pick, or ``None``.
+
+    A recorded row outranks every later compile, so two picks never become one. A row whose answer
+    ``--strict`` rejected: on sm_70 a wrong answer can run FASTER than the right neighbour. And a row whose
+    env pin did not realize: under ``EMMY_KNOBS`` the recorded pick IS the pin, so an unrealized pin files
+    the planner's own schedule under the pin's name and lane."""
+    if accuracy_error is not None:
+        return f"it failed the strict accuracy check: {accuracy_error}"
+    return env_pin_refusal(kernel_knobs)
 
 
 REFERENCE_SELF_DISAGREES = (
@@ -1775,11 +1792,17 @@ def _write_ab_json(
     captured = bool(getattr(bench, "captured", False))
     backend_semantics = "captured_whole_forward" if captured else "uncaptured_forward"
     backend_rows = {
-        name: {
+        name: {"status": "failed", "error": str(us)}
+        if isinstance(us, str)
+        else {
             "latency_us": us,
             "captured": captured,
             "timing_semantics": backend_semantics,
-            **({"correctness": {"status": "pass", "rtol": 1e-3, "atol": 1e-3, "fullgraph": True}} if name == "torch.compile" else {}),
+            **(
+                {"correctness": {"status": "pass", "reference": "eager", "tolerance": "scaled", "fullgraph": True}}
+                if name == "torch.compile"
+                else {}
+            ),
         }
         for name, us in (results or {}).items()
     }
@@ -1788,7 +1811,8 @@ def _write_ab_json(
     eager_us = (results or {}).get("Eager PyTorch")
     if eager_us:
         for name, us in (results or {}).items():
-            backend_rows[name]["speedup_vs_eager"] = eager_us / us if us else 0.0
+            if not isinstance(us, str):
+                backend_rows[name]["speedup_vs_eager"] = eager_us / us if us else 0.0
 
     payload = {
         "input": args.code or args.input or getattr(args, "ir", None),
@@ -2370,7 +2394,7 @@ async def bench_lowered_vs_torch(
     if frontend is not None:
         try:
             torch_fn, torch_inputs = torch_ref.build_callable(frontend, input_tensors)
-            with torch.no_grad():
+            with torch.no_grad(), correctness_oracle():
                 eager_out = torch_fn(*torch_inputs)
             if strict_accuracy:
                 correctness = _strict_correctness_proof(result_outputs, eager_out)
@@ -2857,14 +2881,14 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
         )
     if getattr(args, "record", False):
         _record_golden_latency(args, results or {}, ab_benches)
+    record_refusal = None
     if getattr(args, "record_greedy", False):
-        # A recorded row outranks every later compile, so a row whose answer --strict rejected must
-        # never become one: on sm_70 a wrong answer can run FASTER than the right neighbour, and the
-        # recording ran before the exit that reports it. Only the ANSWER is grounds to refuse — the
-        # other strict errors are about the FILE (a working inventory holds no pinned row yet), and
-        # refusing on those would leave a recording walk recording nothing at all.
-        if strict_correctness and accuracy_error is not None:
-            logger.error("not recording the greedy pick of %s — it failed the strict accuracy check: %s", args.realization, accuracy_error)
+        # The recording ran before the exit that reports a rejected answer. Only the ANSWER and the pin
+        # are grounds to refuse — the other strict errors are about the FILE (a working inventory holds
+        # no pinned row yet), and refusing on those would leave a recording walk recording nothing at all.
+        record_refusal = greedy_record_refusal(_cuda_knob_dicts(graph), accuracy_error if strict_correctness else None)
+        if record_refusal is not None:
+            logger.error("not recording the greedy pick of %s — %s", args.realization, record_refusal)
         else:
             _record_greedy_pick(args, graph, bench, greedy_iso, taken)
     for error in strict_errors or []:
@@ -2876,7 +2900,8 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
     if args.profile and greedy_fail is None:
         _run_ncu_profile(args, dump_dir=dump.dir if dump else None)
     if (
-        (strict_correctness and accuracy_error is not None)
+        record_refusal is not None
+        or (strict_correctness and accuracy_error is not None)
         or bool(strict_errors)
         or greedy_fail is not None
         or (greedy_iso is not None and greedy_iso.status != "ok")
@@ -3136,6 +3161,24 @@ def _symbolic_bench_note(sym_env: dict[str, int]) -> str | None:
     return f"benched at {dims} (symbolic hint; torch inputs tiled to match)"
 
 
+@contextlib.contextmanager
+def correctness_oracle():
+    """Torch as the CORRECTNESS reference: its GEMMs without the reduced-precision reductions it enables by
+    default. Those trade accuracy for speed inside the reference itself — at K=15360 the default FP16 GEMM
+    leaves 9.6% of its own elements outside ``rtol=atol=1e-3`` of an FP64 product, 0.1% with them off — so a
+    kernel nearer the truth than eager failed ``--strict`` for eager's error. The TIMED eager forward keeps
+    torch's defaults: that is the library a user runs."""
+    import torch
+
+    matmul = torch.backends.cuda.matmul
+    saved = (matmul.allow_fp16_reduced_precision_reduction, matmul.allow_bf16_reduced_precision_reduction)
+    matmul.allow_fp16_reduced_precision_reduction = matmul.allow_bf16_reduced_precision_reduction = False
+    try:
+        yield
+    finally:
+        matmul.allow_fp16_reduced_precision_reduction, matmul.allow_bf16_reduced_precision_reduction = saved
+
+
 def _eager_output(module, args, kwargs):
     """Eager reference forward. Returns the module's output — a Tensor, or a
     TUPLE of Tensors for a multi-output module (``_check_accuracy`` compares
@@ -3185,8 +3228,6 @@ def _check_accuracy(outputs, eager_out) -> str | None:
     treats it as informational (a sliced reproducer is fed random *boundary* inputs
     that can be out-of-domain for the op, e.g. a kernel expecting a mean-of-squares
     gets random signed data → NaN from a downstream rsqrt)."""
-    import random  # noqa: PLC0415
-
     import numpy as np  # noqa: PLC0415
 
     # Multi-output: the eager reference may be a tuple — compare each backend
@@ -3199,19 +3240,21 @@ def _check_accuracy(outputs, eager_out) -> str | None:
         eager_refs = [eager_out[name] for name in outputs]
     else:
         eager_refs = list(eager_out) if isinstance(eager_out, (tuple, list)) else [eager_out]
-    eager_flats = [t.detach().cpu().flatten().tolist() for t in eager_refs]
-    if any(e != e for flat in eager_flats for e in flat):
+    # Arrays, never Python lists: a list holds one float object per element. Measured at 2M cells the lists
+    # peaked at 13.3 f64 copies of the output against 4.3 here, which at an LM-head output (134M cells) is 14 GB.
+    eager_flats = [t.detach().cpu().double().flatten().numpy() for t in eager_refs]
+    if any(np.isnan(flat).any() for flat in eager_flats):
         return "eager reference contains NaN (reproducer inputs out of domain)"
     failures: list[str] = []
     for pos, (buf_name, arr) in enumerate(outputs.items()):
         eager_flat = eager_flats[pos] if len(eager_flats) == len(outputs) else eager_flats[0]
-        values = arr.flatten().tolist()
-        if any(v != v for v in values):
+        values = np.asarray(arr, dtype=np.float64).ravel()
+        if np.isnan(values).any():
             return f"CORRECTNESS FAIL: output {buf_name} contains NaN"
         if len(values) == len(eager_flat):
-            diffs = [abs(a - e) for a, e in zip(values, eager_flat, strict=True)]
-            max_diff = max(diffs)
-            mean_diff = sum(diffs) / len(diffs)
+            diffs = np.abs(values - eager_flat)
+            max_diff = float(diffs.max())
+            mean_diff = float(diffs.mean())
             # Scale tolerance by max|eager| and by output dtype.
             #
             # fp32: matmul reduction-order drift grows with both K and
@@ -3302,16 +3345,14 @@ def _check_accuracy(outputs, eager_out) -> str | None:
             # on correct gemma runs), and widens only when split-K gets its f32 scratch.
             rel_tol = 1.0 if is_fp16 else 0.08
             abs_tol = 1e-1 if is_fp16 else 1e-3
-            peak = max((abs(e) for e in eager_flat), default=0.0)
+            peak = float(np.abs(eager_flat).max())
             tol = max(abs_tol, rel_tol * peak)
-            perm = list(eager_flat)
-            random.Random(0).shuffle(perm)
-            perm_floor = sum(abs(a - e) for a, e in zip(perm, eager_flat, strict=True)) / max(1, len(perm))
+            perm_floor = float(np.abs(np.random.default_rng(0).permutation(eager_flat) - eager_flat).mean())
             mean_tol = max(abs_tol, min(0.03 * peak, 0.7 * perm_floor))
             escape_tol = max(abs_tol, 0.005 * peak)
-            outliers = sum(1 for d in diffs if d > tol)
+            outliers = int((diffs > tol).sum())
             budget = max(4, len(diffs) // 65536)
-            rms = (sum(e * e for e in eager_flat) / max(1, len(eager_flat))) ** 0.5
+            rms = float(np.sqrt(np.mean(np.square(eager_flat))))
             heavy_tailed = peak > 8.0 * rms
             if is_fp16:
                 # The hard 4·tol garbage ceiling bounds BOTH pass paths: the escape hatch
@@ -3378,6 +3419,11 @@ def _resolve_backends(cli_value: str | None) -> set[str]:
     return selected
 
 
+class BackendFailure(str):
+    """A requested torch backend that could not be built, in the closure dict and then in the
+    results dict under its name, where its message stands where its latency would."""
+
+
 def _build_torch_fns(module, args, kwargs, warmup, *, backends: set[str]):
     """Pre-build the per-backend ``torch_fns`` dict, including the
     ``torch.compile`` JIT step when requested. The JIT (mostly
@@ -3415,10 +3461,18 @@ def _build_torch_fns(module, args, kwargs, warmup, *, backends: set[str]):
             with torch.no_grad():
                 eager_output = module(*args, **kwargs)
                 compiled_output = compiled_torch_module(*args, **kwargs)
-            torch.testing.assert_close(compiled_output, eager_output, rtol=1e-3, atol=1e-3)
+            # The same dtype-scaled verdict the Emmy output gets: a flat 1e-3 rejected Inductor's own
+            # FP16 GEMM against cuBLAS on three of the six Gemma 4 projections on an RTX 4090.
+            outputs = compiled_output if isinstance(compiled_output, (tuple, list)) else (compiled_output,)
+            verdict = _check_accuracy({f"out{i}": t.detach().cpu().double().numpy() for i, t in enumerate(outputs)}, eager_output)
+            if verdict:
+                raise ValueError(verdict)
             torch_fns["torch.compile"] = lambda: compiled_torch_module(*args, **kwargs)
         except Exception as e:  # noqa: BLE001
+            # The column is reported failed, never silently dropped: this runs in the bench worker,
+            # whose log the parent only shows on a crash.
             logger.warning("torch.compile failed: %s", e)
+            torch_fns["torch.compile"] = BackendFailure(f"{type(e).__name__}: {e}")
     return torch_fns
 
 
@@ -3459,6 +3513,9 @@ def _capture_torch_fns(torch_fns: dict) -> dict | None:
     whole invocation back to uncaptured timing."""
     captured: dict = {}
     for name, fn in torch_fns.items():
+        if isinstance(fn, BackendFailure):
+            captured[name] = fn
+            continue
         try:
             captured[name] = _capture_torch_fn(fn)
         except Exception as exc:  # noqa: BLE001 — capture is best-effort, fallback covers
@@ -3527,6 +3584,8 @@ async def _bench_interleaved(module, args, kwargs, backend, compiled_graph, warm
     # so peer torch backends time the same number of back-to-back
     # calls emmy does per CUDA event window — both sides then
     # measure sustained per-call latency, no warm-vs-cold asymmetry.
+    failed = {name: fn for name, fn in torch_fns.items() if isinstance(fn, BackendFailure)}
+    torch_fns = {name: fn for name, fn in torch_fns.items() if name not in failed}
     torch_events: dict[str, list[tuple[torch.cuda.Event, torch.cuda.Event, int]]] = {name: [] for name in torch_fns}
 
     def on_iter(batch_size: int = 1) -> None:
@@ -3560,6 +3619,7 @@ async def _bench_interleaved(module, args, kwargs, backend, compiled_graph, warm
     # end-to-end number (no cross-kernel cache effects).
     dep_ms = bench.e2e_min_ms if bench.e2e_min_ms is not None else (bench.min_ms if bench.min_ms is not None else bench.time_ms)
     results["Emmy"] = dep_ms * 1000
+    results.update(failed)
     return results, bench
 
 
@@ -3568,9 +3628,15 @@ def _print_table(results, note: str | None = None):
 
     eager_us = results.get("Eager PyTorch", 0)
     cols = [Col("Backend"), Col("Latency (us)", "r"), Col("vs Eager", "r")]
-    rows = [[name, f"{us:.0f}", f"{eager_us / us:.2f}x" if us > 0 else "-"] for name, us in results.items()]
+    rows = [
+        [name, "failed" if isinstance(us, str) else f"{us:.0f}", f"{eager_us / us:.2f}x" if not isinstance(us, str) and us > 0 else "-"]
+        for name, us in results.items()
+    ]
     print()
     for line in render_table(cols, rows, rule=True):
         print(line)
+    for name, us in results.items():
+        if isinstance(us, str):
+            print(f"{name}: {us}")
     if note:
         print(note)

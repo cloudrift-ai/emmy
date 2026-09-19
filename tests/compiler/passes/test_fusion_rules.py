@@ -8,6 +8,7 @@ multi-output fused kernels without a GPU.
 """
 
 import numpy as np
+import pytest
 
 from emmy.compiler.backend.numpy import NumpyBackend
 from emmy.compiler.graph import Graph, Tensor
@@ -948,11 +949,15 @@ def test_shared_broadcast_chain_correctness():
     _assert_correctness(_make_shared_broadcast_chain, {"mq": mq, "mk": mk})
 
 
-def test_output_reshape_folds_into_reduce_producer():
+@pytest.mark.parametrize("rows", [4, "num_tokens"])
+def test_output_reshape_folds_into_reduce_producer(rows):
     """A graph-output flat-address identity joins its producer's output equivalence cluster.
 
     The splicer retargets the producer's ``Write`` to the output shape with clean affine indices
-    instead of reconstructing its reduction at the flatten's div/mod-indexed loads.
+    instead of reconstructing its reduction at the flatten's div/mod-indexed loads. A symbolic
+    leading dimension — a serving twin's token axis — rides through as itself: the layout the
+    proof is about is the static rest, and declining it left every per-head statistic of a
+    projection inlined once per output column.
     """
     from emmy.compiler.dim import Dim
     from emmy.compiler.ir.axis import Axis
@@ -988,7 +993,7 @@ def test_output_reshape_folds_into_reduce_producer():
             body=Body(
                 (
                     Loop(
-                        axis=Axis(name="a0", extent=Dim(4)),
+                        axis=Axis(name="a0", extent=Dim(rows)),
                         body=Body((Loop(axis=Axis(name="a1", extent=Dim(H)), body=Body((red, sweep))),)),
                     ),
                 )
@@ -1000,7 +1005,7 @@ def test_output_reshape_folds_into_reduce_producer():
             body=Body(
                 (
                     Loop(
-                        axis=Axis(name="b0", extent=Dim(4)),
+                        axis=Axis(name="b0", extent=Dim(rows)),
                         body=Body(
                             (
                                 Loop(
@@ -1023,9 +1028,9 @@ def test_output_reshape_folds_into_reduce_producer():
             )
         )
         g = Graph()
-        g.add_node(InputOp(), [], Tensor("x", (4, H, D)), node_id="x")
-        g.add_node(producer, ["x"], Tensor("y", (4, H, D)), node_id="y")
-        g.add_node(copy, ["y"], Tensor("out", (4, H * D)), node_id="out")
+        g.add_node(InputOp(), [], Tensor("x", (rows, H, D)), node_id="x")
+        g.add_node(producer, ["x"], Tensor("y", (rows, H, D)), node_id="y")
+        g.add_node(copy, ["y"], Tensor("out", (rows, H * D)), node_id="out")
         g.inputs, g.outputs = ["x"], ["out"]
         return g
 
@@ -1037,7 +1042,12 @@ def test_output_reshape_folds_into_reduce_producer():
     idx = writes[0].index
     assert len(idx) == 2, "the retargeted Write indexes the flat output shape"
     assert "/" not in idx[1].pretty() and "%" not in idx[1].pretty(), f"clean affine index expected: {idx[1].pretty()}"
+    # The producer's loops carry the kernel: no loop over the flat width, under which the reduce
+    # would run once per output column.
+    assert not any(loop.axis.extent == Dim(H * D) for loop in kernels[0].op.body.loops), "the reduce runs per column"
 
+    if rows == "num_tokens":
+        return  # the loop runner binds no symbolic extent; the static row exercises the values
     x = rng.standard_normal((4, H, D)).astype(np.float32)
     before = _run(make_graph(), {"x": x})
     after = _run(fused, {"x": x})
