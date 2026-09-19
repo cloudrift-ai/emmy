@@ -1250,5 +1250,9 @@
  "tests/compiler/passes/test_register_carry.py::test_register_state_preserves_old_reads_on_cuda[2-f32-acc]@cuda": 1.03,
  "tests/compiler/passes/test_register_carry.py::test_register_state_preserves_old_reads_on_cuda[1-f16-acc]@cuda": 1.14,
  "tests/compiler/passes/test_register_carry.py::test_register_state_preserves_old_reads_on_cuda[2-f16-acc]@cuda": 1.02,
- "tests/compiler/realization/test_realization.py::test_realization[matmul/volta-f16acc-staged.yaml-built]@cuda": 1.22
+ "tests/compiler/realization/test_realization.py::test_realization[matmul/volta-f16acc-staged.yaml-built]@cuda": 1.22,
+ "tests/compiler/passes/test_register_carry.py::test_register_operands_use_direct_loads_when_the_address_allows_it[2-volta]": 0.74,
+ "tests/compiler/passes/test_register_carry.py::test_register_operands_use_direct_loads_when_the_address_allows_it[1-volta]": 0.67,
+ "tests/compiler/passes/test_register_carry.py::test_register_operands_use_direct_loads_when_the_address_allows_it[2-modern]": 0.58,
+ "tests/compiler/passes/test_register_carry.py::test_register_operands_use_direct_loads_when_the_address_allows_it[1-modern]": 0.55
 }
