@@ -2,129 +2,103 @@
 
 ## V100 SXM2 16 GB — 2026-09-19
 
-Volta support makes the tested GDN carry update runnable, but it is slower than eager PyTorch and torch.compile
-on every completed case. FP16 partial accumulation is also slower than FP32 accumulation at the chosen promotion
-interval. The carried state and intermediate matrix results fit in registers in all completed measurements.
+Loading external operands directly into MMA fragments and shuffling packed FP16 pairs makes the register schedule
+2.37–2.87× faster than its first Volta implementation. Every completed comparison now beats eager PyTorch.
+FP32 accumulation matches torch.compile at 12 heads and 128 tokens, and beats it by 1.25× at 512 tokens.
+At 48 heads it remains 5–34% slower than torch.compile. FP16 partial accumulation remains slower than FP32.
 
-Follow-up [hardware profiles](../gdn_profile/RESULTS.md) show low tensor-pipeline activity and large instruction-fetch
-stalls. They quantify the operand preparation and FP16 promotion costs and compare them with the eager GEMMs.
+The [hardware profiles](../gdn_profile/RESULTS.md) measure the corresponding instruction and stall changes.
+This qualifies the inter-chunk state update, not full GDN prefill or model serving.
 
-### Question and protocol
+### Measurements
 
-This experiment measures the inter-chunk correction and state update introduced by the register schedule in
-[PR #853](https://github.com/cloudrift-ai/emmy/pull/853), with Volta support from
-[PR #854](https://github.com/cloudrift-ai/emmy/pull/854). It reuses the original comparison's workload definitions
-and the ordinary `emmy run --bench --strict` harness. It adds no timing implementation.
+Microseconds per complete forward, including output assembly. The 12-head, 128-token values are medians of three
+fresh processes; other entries have one process. Each new Emmy measurement has paired eager and torch.compile
+measurements in the same process. The before column comes from the earlier run on this host with identical pins.
 
-The state has 128 key and 128 value dimensions. Chunks contain 64 tokens; the tested lengths contain two, eight,
-and 32 chunks. Twelve value heads represent one TP4 rank of Qwen3.8-27B; 48 represent the whole layer. Each row
-uses GPU 0 of the supplied four-V100 host. There is no tensor-parallel communication or model serving in the test.
+| Value heads | Tokens | Accumulation | Emmy before | Emmy now | Eager PyTorch | torch.compile |
+| --- | ---: | --- | ---: | ---: | ---: | ---: |
+| 12 | 128 | FP32 | 128.26 | 52.05 | 62.43 | 52.74 |
+| 12 | 128 | FP16 + promotion | 142.85 | 60.16 | 62.62 | 52.71 |
+| 12 | 512 | FP32 | 559.10 | 213.76 | 239.79 | 267.49 |
+| 12 | 512 | FP16 + promotion | 625.15 | 217.86 | 239.13 | 267.80 |
+| 48 | 128 | FP32 | 285.70 | 116.22 | 141.98 | 86.90 |
+| 48 | 128 | FP16 + promotion | 309.25 | 127.85 | 141.96 | 86.97 |
+| 48 | 512 | FP32 | 1,209.34 | 480.77 | 542.24 | 459.41 |
+| 48 | 512 | FP16 + promotion | 1,295.36 | 515.07 | 541.58 | 459.71 |
 
-The chunk-local transforms are supplied as FP32 inputs. The operation returns corrected values and the final state,
-starting with a zero state. These are seeded synthetic inputs, with the same values supplied to each backend.
-They are not a model-level accuracy test. Full prefill is a separate two-row probe using the existing Transformers
-workload, which also includes normalization, gate accumulation, the chunk-local solve, and output calculation.
+FP32 improves by 2.46–2.62×; FP16 improves by 2.37–2.87×. FP16 is still 1.9–15.6% slower than FP32 at the selected
+promotion interval. The 1.3% difference between Emmy and torch.compile in the smallest FP32 case is comparable to
+Emmy's repeat variation, so it is best described as parity. The 512-token, 12-head gain over torch.compile is larger.
 
-Emmy pins two warps per CTA, one register slot, eight logical Volta column fragments, and a four-step K chunk.
-Each warp owns sixteen value rows and all key columns. One kernel executes the ordered chunk loop inside each CTA;
-small surrounding kernels assemble the returned tensors. Both accumulator modes convert MMA operands to FP16 and
-keep the carry in FP32. FP16 partial accumulation promotes and clears the partial sums every sixteen products.
-The explicit atom pin selects this arithmetic without enabling unrelated FAST_MATH approximations.
+The three smallest-case Emmy repeats range from 51.94 to 52.68 µs for FP32 and 59.71 to 60.54 µs for FP16.
+Their spans are 1.42% and 1.38% of their medians. Every FP16 repeat is slower than every FP32 repeat.
+
+All twelve runs pass strict eager-reference correctness at rtol=atol=0.001. Maximum absolute error is 5.01e-5 with
+FP32 accumulation and 8.18e-5 with FP16 accumulation. All record CUDA-graph capture, the requested register schedule,
+and three launches: the chunk-loop kernel and two small output-assembly kernels.
+
+The chunk-loop kernel uses 255 registers per thread, except the 512-token FP16 case, which uses 254. All twelve
+runs have zero shared memory and zero per-thread local-memory bytes. Register pressure increased from the earlier
+168–255 registers, so avoiding spills does not mean occupancy is high. Two warps per CTA produce 48 CTAs at
+12 heads and 192 CTAs at 48 heads. The schedule still carries the full key dimension in every owning warp.
+
+### Protocol and implementation
+
+The experiment reuses the original comparison's `chunk_state.py` and the ordinary `emmy run --bench --strict`
+harness. No separate timing implementation is involved. State dimensions are 128 keys by 128 values, and each
+chunk contains 64 tokens. Twelve value heads represent one TP4 rank of Qwen3.8-27B; 48 represent the whole layer.
+There is no tensor-parallel communication in this test.
+
+Chunk-local transforms are supplied as seeded synthetic FP32 inputs, shared by every backend. The operation starts
+with a zero state and returns corrected values and the final state. It does not test model-level accuracy.
+
+Pins are two warps per CTA, one register slot, eight logical Volta column fragments, and a four-step K chunk.
+Both accumulation modes convert MMA operands to FP16 and keep carry state in FP32. FP16 partial sums promote
+and clear every four MMA steps, or sixteen scalar products on Volta. The explicit atom pin selects this arithmetic
+without enabling unrelated FAST_MATH approximations. These pins are unchanged from the before measurement.
+
+The optimization reuses the ordinary direct fragment loader and its address analysis for materialized B operands.
+Computed or non-unit-stride operands retain the C-fragment gather and repacking path. Volta C→A conversion now
+packs adjacent FP16 values before shuffling them, reducing eight shuffles to four. Intermediate matrix results still
+stay in registers and are reused. The change is structural and also applies outside GDN; it adds no model dispatch.
 
 Each process requests ten warmups and 100 measured iterations. Eager PyTorch, fullgraph torch.compile with
-max-autotune, and Emmy use the same external CUDA-graph capture. The reported value is the minimum whole-program
-end-to-end latency. The 128-token, 12-head case has three fresh processes per accumulation mode; all other cases
-have one. Emmy uses O3, no repository golden, and new task-local tuning and prior files. The final recipe allows
-120 seconds per benchmark compilation and 360 seconds for the whole process, with a 375-second command limit.
+max-autotune, and Emmy use external CUDA-graph capture. Reported values are minimum whole-forward latency.
+Emmy uses O3, no repository golden, and fresh task-local tuning and prior files. The recipe allows 120 seconds
+per benchmark compilation and 360 seconds per process. Nsight-instrumented timings are excluded from this table.
 
-### Carry update measurements
+### Scope and earlier failures
 
-Microseconds per complete forward. The 12-head, 128-token entries are medians across three processes; the other
-entries are one process each. Each baseline is measured in the same process as its corresponding Emmy row.
+This optimization sweep selects the twelve carry rows at 128 and 512 tokens. All twelve succeeded. It does not
+repeat the earlier four 2,048-token timeouts or two full-prefill timeouts. In that earlier sweep all six hit the
+360-second process limit without a timing or accuracy verdict; full-prefill lowering alone took about 315 seconds.
+Those cases remain unqualified. Their records and all eighteen original rows remain in the
+[before archive](https://github.com/cloudrift-ai/emmy/blob/3b47f9f116f1e730afa63ddbc1b57a01404e720a/experiments/Qwen3.8-27B/gdn_register/results_v100x1.tar.gz).
 
-| Value heads | Tokens | Accumulation | Eager PyTorch | torch.compile | Emmy |
-| --- | ---: | --- | ---: | ---: | ---: |
-| 12 | 128 | FP32 | 62.46 | 52.67 | 128.26 |
-| 12 | 128 | FP16 + promotion | 62.36 | 52.70 | 142.85 |
-| 12 | 512 | FP32 | 241.08 | 267.43 | 559.10 |
-| 12 | 512 | FP16 + promotion | 239.45 | 267.24 | 625.15 |
-| 48 | 128 | FP32 | 142.16 | 87.08 | 285.70 |
-| 48 | 128 | FP16 + promotion | 142.24 | 87.10 | 309.25 |
-| 48 | 512 | FP32 | 547.78 | 461.65 | 1,209.34 |
-| 48 | 512 | FP16 + promotion | 548.54 | 461.07 | 1,295.36 |
-
-Emmy is 2.09–3.55× slower than torch.compile across these rows. FP16 accumulation adds 7.1–11.8% to Emmy's latency
-relative to FP32 accumulation. It requires extra warp shuffles when promoting Volta's distinct FP16 accumulator
-layout into the FP32 layout. These measurements show no performance benefit from that option at this interval.
-They cover one register layout and promotion interval, not an autotuning sweep.
-
-Across the three 12-head, 128-token repeats, Emmy ranges from 128.00 to 129.37 µs with FP32 accumulation and from
-135.61 to 142.85 µs with FP16 accumulation. The spans are 1.1% and 5.1% of their respective medians. Every FP16
-repeat is slower than every FP32 repeat. The corresponding torch.compile ranges are 52.65–52.74 µs and
-52.69–52.84 µs; eager ranges are 62.16–62.53 µs and 62.33–62.54 µs.
-
-All twelve successful carry processes pass strict eager-reference correctness at rtol=atol=0.001. Maximum
-absolute error is 5.01e-5 for FP32 accumulation and 8.18e-5 for FP16 accumulation. Every successful process records
-CUDA-graph capture, the requested register schedule, and three launches regardless of chunk count. The chunk-loop
-kernel dominates runtime; the other two kernels assemble the returned tensors.
-
-The compiled chunk-loop kernel uses the following register counts, with zero per-thread local-memory bytes and
-zero shared memory in every completed row. Counts are identical at 12 and 48 heads.
-
-| Tokens | FP32 accumulation | FP16 + promotion |
-| ---: | ---: | ---: |
-| 128 | 168 | 195 |
-| 512 | 255 | 209 |
-
-The one-warp configuration used local memory in an initial check, so the final recipe uses two warps per CTA.
-A register transport is a storage choice in the schedule; the compiled binary must still be checked for spills.
-The updated diagnostics make that check part of the ordinary benchmark log.
-
-All four 2,048-token comparisons hit the 360-second process limit after successful lowering and before producing
-a timing record. Inductor compiler workers were active during long reference preparation in this sweep. These
-failures do not supply a latency or an accuracy verdict for the large case, and are not kernel execution times.
-Both 128-token full-prefill probes also hit the process limit. Deterministic lowering alone took 314.87 seconds
-with FP32 accumulation and 315.37 seconds with FP16 accumulation; the benchmark worker then started, but neither
-probe produced a timing record. Full-prefill performance and correctness remain unqualified by this run.
-
-The complete matrix has eighteen terminal rows: twelve succeeded and six timed out with exit code 124. The failed
-row IDs below identify their system records and raw artifacts in the archive. No failed row was selectively rerun.
-
-| Workload | Heads | Tokens | Accumulation | Row ID |
-| --- | ---: | ---: | --- | --- |
-| Carry update | 12 | 2,048 | FP32 | `92ed89310d08` |
-| Carry update | 12 | 2,048 | FP16 | `9da95cf5f6c3` |
-| Carry update | 48 | 2,048 | FP32 | `26f8275a3988` |
-| Carry update | 48 | 2,048 | FP16 | `5701c9dcd7fd` |
-| Full prefill | 12 | 128 | FP32 | `4d50adc4e921` |
-| Full prefill | 12 | 128 | FP16 | `d9e982cfc814` |
-
-### Relation to other GDN implementations
-
-The [original V100 comparison](../gdn_kernels/RESULTS.md) includes FLA/Triton and FlashQLA full-prefill measurements
-from the pinned 1Cat-vLLM implementation. Those operations include work absent from this carry-only experiment and
-use uncaptured CUDA events. Dividing their times by the chunk-state times would not establish a speedup. The direct
-comparisons here are eager PyTorch and torch.compile on exactly the same chunk-state function.
+The [original comparison](../gdn_kernels/RESULTS.md) also measures FLA/Triton and FlashQLA full prefill. Their
+operation includes work absent here, and they use uncaptured CUDA events. These carry timings cannot establish
+a speedup over those implementations. No modern GPU was available for performance qualification.
 
 ### Reproduction and evidence
 
-Run `emmy bench experiments/Qwen3.8-27B/gdn_register --ssh USER@HOST` with the Python and CUDA paths in the recipe
-adjusted for the supplied host. The measured machine has four Tesla V100-SXM2-16GB GPUs and a Xeon E5-2680 v4 CPU
-with 24 exposed logical CPUs and 219.5 GB RAM. It runs Ubuntu 24.04.1, NVIDIA driver 580.178.04, CUDA toolkit 12.9.86,
-Python 3.12.3, PyTorch 2.14.0+cu126, and Transformers 5.14.1. Each row archives its package versions separately.
+Run `emmy bench experiments/Qwen3.8-27B/gdn_register --ssh USER@HOST --filter workload=chunk_state`
+with `--filter 'tokens=[15]*'`, adjusting the recipe's Python and CUDA paths for the host. This selects exactly
+the twelve rows above; omitting the filters also attempts the larger and full-prefill cases.
 
-The kernel table reads register and local-memory attributes from the same cached cubin loader used for execution.
-It does not compile a second diagnostic binary. The measured source is
-`f40488b96f110c6b447e6d03f1dda8839019f00d`, with clean staged inputs. The invocation started at 19:29:54 UTC on
-2026-09-19, with run ID `20260919T192954Z` and local directory `2026-09-19_19-29-54/`.
+The measured host has four Tesla V100-SXM2-16GB GPUs, a Xeon E5-2680 v4 with 24 exposed logical CPUs, and 219.5 GB RAM.
+Each benchmark uses GPU 0. Software is Ubuntu 24.04.1, driver 580.178.04, CUDA toolkit 12.9.86, Python 3.12.3,
+PyTorch 2.14.0+cu126, and Transformers 5.14.1. Each row archives its package versions. The source is
+`82dd222a7de99cd810852b254faa47d853430968`, with clean staged inputs; all 345 staged Python source files match locally.
 
-The final row completed at 20:27:44 UTC. The supplied host was retained; all four GPUs were idle with no device
-memory allocated after the run. The original remote checkout was not modified.
+The latest run is `20260919T211725Z`, directory `2026-09-19_21-17-25/`, completed at 21:27:52 UTC.
+Two preceding invocations stopped during staging without running kernels: one found uncommitted documentation,
+and the other found root-owned bytecode from the earlier profiler. Committing the documentation and repairing
+ownership resolved them; the profile recipe now disables bytecode writes. No failed measured row was selectively rerun.
 
-[`results_v100x1.tar.gz`](results_v100x1.tar.gz) preserves the complete raw directory under
-`2026-09-19_19-29-54/`. It contains eighteen `<variant>_<row_id>.experiment.yaml` system records and eighteen
-`<variant>_<row_id>_artifacts.tar.gz` command results, plus the run logs. Each nested archive contains
-`artifacts/measurement.log`, `artifacts/status.txt`, `artifacts/requirements.freeze.txt`, and `artifacts/versions.txt`.
-The twelve successful rows also contain `artifacts/measurement.json`, with whole-forward latencies, strict
-correctness, kernel-source hashes, and the realized schedule pins. The records and raw files are preserved exactly
-as the harness produced them, including every timeout.
+[`results_v100x1.tar.gz`](results_v100x1.tar.gz) contains the latest raw directory: twelve system-only
+`<variant>_<row_id>.experiment.yaml` records, twelve matching `_artifacts.tar.gz` files, and two logs.
+Each nested archive holds `artifacts/measurement.json`, `measurement.log`, `status.txt`, `requirements.freeze.txt`,
+and `versions.txt`. JSON preserves whole-forward timings, strict correctness, source hashes, and schedule pins.
+The ordinary log reports attributes from the same cached cubin used for execution. All 26 outer files were
+byte-verified after archiving; the raw directory is retained locally. The supplied host remains running.
