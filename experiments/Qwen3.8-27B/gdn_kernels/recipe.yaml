@@ -1,0 +1,98 @@
+# Qwen3.8-27B GDN on the supplied V100 host. Each row uses one GPU.
+# The 12-head workload represents one TP4 rank; 48 heads is the full layer.
+# Python and the pinned reference checkout are prepared outside the measured command.
+command:
+  stage:
+    - emmy
+    - pyproject.toml
+    - experiments/Qwen3.8-27B/gdn_kernels
+  strict: true
+  run: |
+    set -uo pipefail
+    export PATH=/usr/local/cuda/bin:/home/riftuser/gdn-reference-deps/bin:$$PATH
+    export LD_PRELOAD=/usr/local/cuda-12.9/lib64/libnvrtc.so.12
+    export PYTHONUNBUFFERED=1 TORCHINDUCTOR_COMPILE_THREADS=4 MAX_JOBS=4
+    devices="$gpu_device_ids"
+    export CUDA_VISIBLE_DEVICES=$${devices%%,*}
+    export GDN_HEADS="$heads" GDN_TOKENS="$tokens"
+    export EMMY_GOLDEN_FILE= EMMY_NVCC_FLAGS=
+    export EMMY_TUNE_DB=$task_dir/autotune.db EMMY_ONLINE_FILE=$task_dir/online.json
+    export PYTHONPATH=$repo_dir
+    mkdir -p $task_dir/artifacts
+    cd $repo_dir
+    if [ "$implementation" = "emmy" ]; then
+      code=$$(cat experiments/Qwen3.8-27B/gdn_kernels/$workload.py)
+      timeout -k 3s 110s "$python" -m emmy.emmy run --code "$$code" \
+        --bench --strict --bench-backends eager,tcompile,emmy --warmup 10 --iters 100 \
+        --no-record-nodes --json $task_dir/artifacts/measurement.json \
+        > $task_dir/artifacts/measurement.log 2>&1
+      status=$$?
+    else
+      export PYTHONPATH=$reference_root:/home/riftuser/gdn-reference-deps
+      git -C "$reference_root" rev-parse HEAD > $task_dir/artifacts/reference-revision.txt
+      git -C "$reference_root" diff > $task_dir/artifacts/reference.patch
+      if [ "$workload" = "prefill" ]; then
+        timeout -k 3s 110s "$python" "$reference_root/benchmarks/benchmark_sm70_gdn_prefill_compare.py" \
+          --tokens "$tokens" --q-heads $$(( $heads / 3 )) --v-heads "$heads" \
+          --warmup 10 --repeat 100 --out $task_dir/artifacts/measurement.json \
+          > $task_dir/artifacts/measurement.log 2>&1
+      else
+        timeout -k 3s 110s "$python" "$reference_root/benchmarks/benchmark_sm70_gdn_exactness.py" \
+          run-flashqla-decode --batch 1 --seqlen 1 --k-heads $$(( $heads / 3 )) --v-heads "$heads" \
+          --dtype float16 --state-dtype float32 --warmup 10 --repeat 100 \
+          --out $task_dir/artifacts/flashqla \
+          > $task_dir/artifacts/measurement.log 2>&1
+      fi
+      status=$$?
+    fi
+    printf '%s\n' "$$status" > $task_dir/artifacts/status.txt
+    "$python" -m pip freeze --all > $task_dir/artifacts/requirements.freeze.txt
+    "$python" -c 'import torch, transformers; print(torch.__version__, torch.version.cuda, transformers.__version__)' \
+      > $task_dir/artifacts/versions.txt
+    tar -C $task_dir -czf $task_dir/artifacts.tar.gz artifacts
+    exit "$$status"
+  result_files:
+    - artifacts.tar.gz
+  timeout: 120
+
+matrices:
+  - cross:
+      implementation: emmy
+      workload: decode
+      heads: [12, 48]
+      tokens: 1
+      repeat: [0, 1, 2]
+      deploy.gpu: NVIDIA Tesla V100 SXM2 16GB
+      deploy.gpu_count: 1
+      python: /home/riftuser/emmy/venv/bin/python
+      reference_root: /home/riftuser/1cat-gdn-reference
+  - cross:
+      implementation: emmy
+      workload: [chunk_state, prefill]
+      heads: 12
+      tokens: 128
+      repeat: 0
+      deploy.gpu: NVIDIA Tesla V100 SXM2 16GB
+      deploy.gpu_count: 1
+      python: /home/riftuser/emmy/venv/bin/python
+      reference_root: /home/riftuser/1cat-gdn-reference
+  - cross:
+      implementation: 1cat
+      workload: decode
+      heads: [12, 48]
+      tokens: 1
+      repeat: 0
+      deploy.gpu: NVIDIA Tesla V100 SXM2 16GB
+      deploy.gpu_count: 1
+      python: /home/riftuser/emmy/venv/bin/python
+      reference_root: /home/riftuser/1cat-gdn-reference
+  - cross:
+      implementation: 1cat
+      workload: prefill
+      heads: 12
+      tokens: 128
+      repeat: 0
+      deploy.gpu: NVIDIA Tesla V100 SXM2 16GB
+      deploy.gpu_count: 1
+      python: /home/riftuser/emmy/venv/bin/python
+      reference_root: /home/riftuser/1cat-gdn-reference
