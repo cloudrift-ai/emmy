@@ -1439,9 +1439,7 @@ def _rename_buf_in_op(op, old: str, new: str):
     from emmy.compiler.ir.tile import TileOp
     from emmy.compiler.ir.kernel import KernelOp
 
-    if isinstance(op, KernelOp):
-        return replace(op, body=op.body.rename_buffers({old: new}))
-    if not isinstance(op, (LoopOp, TileOp)):
+    if not isinstance(op, (LoopOp, TileOp, KernelOp)):
         return op
 
     def fn(s):
@@ -1464,6 +1462,8 @@ def _rename_buf_in_op(op, old: str, new: str):
             for buf, tensor in io.items()
         }
 
+    if isinstance(op, KernelOp):
+        return replace(op, body=op.body.rename_buffers({old: new}), inputs=renamed_io(op.inputs), outputs=renamed_io(op.outputs))
     if isinstance(op, LoopOp):
         # ``LoopOp.rename_buffers`` is the spelling-preserving clone: fields carried whole
         # (name / knobs / source identity preserved), io renamed, and NO ``__post_init__`` — a

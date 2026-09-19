@@ -9,30 +9,41 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from functools import cached_property
+from typing import TYPE_CHECKING
 
 from frozendict import frozendict
 
 from emmy.compiler.ir.atom import ATOM_REGISTRY
 from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.schedule.base import Schedule, ScheduleContext, ScheduleProblem, ScheduleRefused, Site
-from emmy.compiler.ir.schedule.choices import Raster, Tile, Work
+from emmy.compiler.ir.schedule.choices import Tile, Work
 from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Select
 
 
-@dataclass(frozen=True)
+if TYPE_CHECKING:
+    from emmy.compiler.context import Context
+    from emmy.compiler.ir.axis import Axis
+    from emmy.compiler.ir.pure import Fold
+    from emmy.compiler.ir.tile import OutputSpec, TileOp
+
+
+_ATOMS = ("mma_m16n8k16_f16_f32", "mma_m16n8k16_f16_f16")
+
+
+@dataclass(frozen=True, slots=True)
 class RegisterProgram:
     """The rectangular outputs and one state of a loop, derived before scheduling."""
 
-    state: object
-    outputs: tuple
-    roots: tuple
-    batch: tuple
+    state: OutputSpec
+    outputs: tuple[OutputSpec, ...]
+    roots: tuple[Fold, ...]
+    batch: tuple[Axis, ...]
     rows: int
     columns: int
 
     @classmethod
-    def from_tile(cls, tile):
-        if len(tile.place.serial) != 1:
+    def from_tile(cls, tile: TileOp) -> RegisterProgram | None:
+        if len(tile.place.serial) != 1 or any(not a.extent.is_static for a in tile.axes):
             return None
         from emmy.compiler.ir.tile.ir import loaded_buffers  # noqa: PLC0415
 
@@ -74,7 +85,7 @@ class RegisterProgram:
                 return None
             if node.axis is not None:
                 view = node.as_contraction()
-                if view is None or len(node.operands) != 2 or len(node.exposes) != 1:
+                if view is None or len(node.operands) != 2 or len(node.exposes) != 1 or node.init != (0.0,):
                     return None
                 if (view.product.name, view.plus.name) != ("multiply", "add") or not extents[node.axis].is_static:
                     return None
@@ -103,6 +114,8 @@ class RegisterProgram:
             for stmt in node.lift.body:
                 if isinstance(stmt, Let) and not isinstance(stmt.value, Literal):
                     return False
+                if isinstance(stmt, Select) and any(b.select.free_vars() - {time, row, col} - batch for b in stmt.branches):
+                    return False
                 if isinstance(stmt, Load):
                     if not stmt.is_scalar or any(e.free_vars() - {time, row, col} - batch for e in stmt.index):
                         return False
@@ -125,12 +138,11 @@ class RegisterSchedule:
 
     work: Work
     tile: Tile
-    raster: Raster = Raster()
 
 
 @dataclass(frozen=True)
 class _RegisterSite(Site):
-    problem: object
+    problem: RegisterProblem
     keys = ("WORK", "TILE", "STAGE")
 
     @cached_property
@@ -140,27 +152,32 @@ class _RegisterSite(Site):
             return ()
         if not p.allow_f16 and "TILE" not in p.row:
             return ()
-        atoms = ("mma_m16n8k16_f16_f32", "mma_m16n8k16_f16_f16")
         candidates = []
-        for name in atoms:
-            atom = ATOM_REGISTRY[name]
-            if p.target is not None and not atom.available_on(p.target):
+        works = (Work.parse(p.row["WORK"]),) if "WORK" in p.row else tuple(Work(kind="warp", units=(w, 1)) for w in (1, 2, 4))
+        for work in works:
+            if work.kind != "warp":
                 continue
-            for warps in (1, 2, 4):
-                work = Work(kind="warp", units=(warps, 1))
-                plan = Tile(atom=atom, units=work.units, regs=(1, (p.program.columns + 7) // 8), bk=4)
-                row = {"WORK": work.spell(), "TILE": plan.spell(), "STAGE": "d1/reg"}
-                if all(row.get(key) == str(value) for key, value in p.row.items()):
-                    candidates.append(Schedule(RegisterSchedule(work, plan), {}, {}))
+            plans = (Tile.parse(p.row["TILE"], work),) if "TILE" in p.row else tuple(
+                Tile(atom=ATOM_REGISTRY[name], units=work.units, regs=(1, (p.program.columns + 7) // 8), bk=4)
+                for name in _ATOMS
+            )
+            for plan in plans:
+                choice = RegisterSchedule(work, plan)
+                if p.accepts(choice):
+                    candidates.append(Schedule(choice, {}, {}))
         return tuple(candidates)
+
 
 
 @dataclass(frozen=True)
 class RegisterProblem(ScheduleProblem):
-    tile: object
-    target: object
-    row: object = field(default_factory=frozendict)
+    tile: TileOp
+    target: Context | None
+    row: frozendict[str, str] = field(default_factory=frozendict)
     allow_f16: bool = False
+
+    def __post_init__(self):
+        object.__setattr__(self, "row", frozendict(self.row))
 
     @cached_property
     def program(self):
@@ -175,11 +192,24 @@ class RegisterProblem(ScheduleProblem):
         count = len(self.sites[0].options)
         return count, count
 
+    def accepts(self, choice: RegisterSchedule) -> bool:
+        if self.program is None or not isinstance(choice, RegisterSchedule):
+            return False
+        work, plan = choice.work, choice.tile
+        return (
+            work.kind == "warp" and work.units[1] == 1 and work.count <= 32 and not work.producer
+            and plan.atom in tuple(ATOM_REGISTRY[name] for name in _ATOMS)
+            and plan.units == work.units and plan.regs == (1, (self.program.columns + 7) // 8)
+            and (self.target is None or plan.atom.available_on(self.target))
+        )
+
     def with_row(self, row, *, strict=False):
+        if set(row) - set(_RegisterSite.keys):
+            raise ValueError("register schedule accepts only WORK, TILE and STAGE")
         return replace(self, row=frozendict(row))
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RegisterContext(ScheduleContext):
     _problem: RegisterProblem
     _schedule: Schedule = field(default_factory=lambda: Schedule(None, {}, {}))
@@ -200,7 +230,8 @@ class RegisterContext(ScheduleContext):
             yield from self.problem.sites[0].options
 
     def extend(self, pick):
-        if self.schedule.kernel is not None or pick not in self.problem.sites[0].options:
+        if (self.schedule.kernel is not None or pick.nodes or pick.edges or not self.problem.accepts(pick.kernel)
+                or any(RegisterCodec(self)._encode(pick).get(k) != v for k, v in self.problem.row.items())):
             raise ScheduleRefused("register schedule is outside this loop's domain")
         return replace(self, _schedule=pick)
 
@@ -232,7 +263,7 @@ class RegisterCodec:
         return self._encode(after.schedule)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RegisterMaterialization:
     """Register storage preserves the serial axis as a loop inside the kernel."""
 
@@ -243,7 +274,7 @@ class RegisterMaterialization:
         RegisterContext(problem).extend(schedule)
 
 
-def materialize_register(tile, schedule, knobs):
+def materialize_register(tile: TileOp, schedule: Schedule, knobs: dict) -> TileOp:
     return replace(
         tile, place=tile.place.on_grid(), schedule=schedule, materialization=RegisterMaterialization(), knobs=knobs,
     )
