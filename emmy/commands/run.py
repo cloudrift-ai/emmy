@@ -1809,24 +1809,16 @@ def _write_ab_json(
 
 
 def _collect_kernel_attrs(graph) -> dict[str, dict]:
-    """Compile each kernel via ``cupy.RawKernel`` (cached by source) to
-    pull post-PTXAS hardware attributes — register count, static smem,
-    spill bytes. Returns ``{kernel_name: attrs_dict}``."""
-    from emmy.compiler.ir.cuda.ir import CudaOp
+    """Read attributes from the runtime's cached cubins, using its compile flags and target."""
+    from emmy.compiler.backend.cuda.program import _load_kernel
+    from emmy.compiler.backend.plan import plan_from_graph
 
-    try:
-        import cupy as cp
-    except Exception:
-        return {}
-
-    out: dict[str, dict] = {}
-    for _, node in graph.nodes.items():
-        if not isinstance(node.op, CudaOp):
-            continue
+    out = {}
+    for name, spec in plan_from_graph(graph).kernels.items():
         try:
-            k = cp.RawKernel(node.op.kernel_source, node.op.kernel_name, options=("--use_fast_math",))
-            out[node.op.kernel_name] = dict(k.attributes)
-        except Exception:  # pragma: no cover — environment-dependent
+            kernel = _load_kernel(name, spec)
+            out[name] = {key: getattr(kernel, key) for key in ("num_regs", "local_size_bytes", "shared_size_bytes")}
+        except Exception:  # pragma: no cover — unavailable GPU/compiler or a failed kernel
             continue
     return out
 

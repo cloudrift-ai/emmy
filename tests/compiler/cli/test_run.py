@@ -1775,6 +1775,28 @@ def test_write_ab_json_records_a_forkless_kernel_row(tmp_path):
     assert schedule_row_key(rec["greedy"]["kernels"][0]["record_knobs"]) == (("WORK", ""), ("RASTER", ""))
 
 
+def test_kernel_stats_reuse_runtime_loader(monkeypatch):
+    from types import SimpleNamespace
+
+    from emmy.commands.run import _collect_kernel_attrs
+    from emmy.compiler.backend.cuda import program
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.cuda import CudaOp
+
+    graph = Graph()
+    source = "emmy_wgmma_"
+    graph.add_node(op=CudaOp(kernel_name="k", kernel_source=source), inputs=[], output=Tensor("out", (4,)), node_id="out")
+    seen = []
+
+    def load(name, spec):
+        seen.append((name, spec.source, spec.arch_specific))
+        return SimpleNamespace(num_regs=128, local_size_bytes=0, shared_size_bytes=256)
+
+    monkeypatch.setattr(program, "_load_kernel", load)
+    assert _collect_kernel_attrs(graph) == {"k": {"num_regs": 128, "local_size_bytes": 0, "shared_size_bytes": 256}}
+    assert seen == [("k", source, True)]
+
+
 def test_print_kernel_stats_greedy_bench_fail_row(capsys):
     """Degraded kernel table: ``bench=None`` + ``greedy_fail`` prints the greedy kernels
     with ``--`` timings, a ``bench_fail`` TOTAL, the failure reason as a ``!`` line, and the
