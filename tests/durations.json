@@ -1244,7 +1244,7 @@
  "tests/compiler/passes/test_register_carry.py::test_gdn_chunk_step_matches_loop_on_cuda[f16-acc-tails]@cuda": 0.74,
  "tests/compiler/passes/test_register_carry.py::test_gdn_chunk_step_matches_loop_on_cuda[f32-acc-gdn128]@cuda": 26.84,
  "tests/compiler/passes/test_register_carry.py::test_gdn_chunk_step_matches_loop_on_cuda[f32-acc-tails]@cuda": 25.66,
- "tests/compiler/passes/test_register_carry.py::test_gdn_reuses_the_corrected_values": 11.54,
- "tests/compiler/passes/test_register_carry.py::test_register_schedule_round_trip_and_precision_gate": 23.26,
- "tests/compiler/passes/test_register_carry.py::test_register_state_preserves_old_reads_on_cuda[1-f32-acc]@cuda": 24.16
+ "tests/compiler/passes/test_register_carry.py::test_register_state_preserves_old_reads_on_cuda[1-f32-acc]@cuda": 24.16,
+ "tests/compiler/passes/test_register_carry.py::test_gdn_reuses_the_corrected_values[modern]": 10.5,
+ "tests/compiler/passes/test_register_carry.py::test_gdn_reuses_the_corrected_values[volta]": 10.43
 }

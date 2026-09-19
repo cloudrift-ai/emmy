@@ -1988,13 +1988,13 @@ class FragmentRepack(Stmt):
         return [f"{indent}FragmentRepack {self.frag} <- {self.srcs} ({self.ab_dtype}, {self.fragment_layout}, part={self.part}{role})"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
+        assert self.role in ("a", "b")
+        if self.fragment_layout == "m8n8k4":
+            assert len(self.srcs) == 1 and self.ab_dtype == "f16"
+            return [f"{_pad(ctx.indent)}emmy_c_to_{self.role}_f16_m8n8k4<{self.part}>({self.frag}, {self.srcs[0]});"]
         if self.role == "b":
             assert self.fragment_layout == "m16n8k16" and self.ab_dtype == "f16" and len(self.srcs) == 1
             return [f"{_pad(ctx.indent)}emmy_c_to_b_f16({self.frag}, {self.srcs[0]});"]
-        assert self.role == "a"
-        if self.fragment_layout == "m8n8k4":
-            assert len(self.srcs) == 1
-            return [f"{_pad(ctx.indent)}emmy_c_to_a_{self.ab_dtype}_m8n8k4<{self.part}>({self.frag}, {self.srcs[0]});"]
         assert len(self.srcs) == 2
         return [f"{_pad(ctx.indent)}emmy_c_to_a_{self.ab_dtype}({self.frag}, {self.srcs[0]}, {self.srcs[1]});"]
 

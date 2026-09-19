@@ -383,6 +383,16 @@ static __device__ __forceinline__ void emmy_mma884_load_b_congruous_pair(
     r1[1] = packed.w;
 }
 
+static __device__ __forceinline__ unsigned emmy_pack_f16(float x, float y) {
+    unsigned packed;
+    asm("{.reg .b16 lo, hi;\\n\\t"
+        "cvt.rn.f16.f32 lo, %1;\\n\\t"
+        "cvt.rn.f16.f32 hi, %2;\\n\\t"
+        "mov.b32 %0, {lo, hi};}\\n"
+        : "=r"(packed) : "f"(x), "f"(y));
+    return packed;
+}
+
 // Volta C->A register repack. One logical m8n8k4 C fragment covers 16x16 through
 // four computation groups. An A fragment needs one row's four adjacent columns;
 // those values live in two lanes of the computation group for that column quarter.
@@ -407,16 +417,30 @@ static __device__ __forceinline__ void emmy_c_to_a_f16_m8n8k4(unsigned* a, const
     float x1 = high_row ? x11 : x01;
     float y0 = high_row ? y10 : y00;
     float y1 = high_row ? y11 : y01;
-    asm("{.reg .b16 lo, hi;\\n\\t"
-        "cvt.rn.f16.f32 lo, %1;\\n\\t"
-        "cvt.rn.f16.f32 hi, %2;\\n\\t"
-        "mov.b32 %0, {lo, hi};}\\n"
-        : "=r"(a[0]) : "f"(x0), "f"(x1));
-    asm("{.reg .b16 lo, hi;\\n\\t"
-        "cvt.rn.f16.f32 lo, %1;\\n\\t"
-        "cvt.rn.f16.f32 hi, %2;\\n\\t"
-        "mov.b32 %0, {lo, hi};}\\n"
-        : "=r"(a[1]) : "f"(y0), "f"(y1));
+    a[0] = emmy_pack_f16(x0, x1);
+    a[1] = emmy_pack_f16(y0, y1);
+}
+
+// Select four rows of a logical 16x16 C fragment for a column-major B operand.
+// Shuffle packed column pairs, then select the column owned by the receiving lane.
+template <int Part>
+static __device__ __forceinline__ void emmy_c_to_b_f16_m8n8k4(unsigned* b, const float* c) {
+    int lane = threadIdx.x & 31;
+    int comp = (lane & 15) >> 2;
+    int src = ((Part & 1) << 4) | (((Part >> 1) * 2 + (comp & 1)) << 2) | (lane & 2);
+    #pragma unroll
+    for (int p = 0; p < 2; ++p) {
+        unsigned low = emmy_pack_f16(c[2 * p], c[2 * p + 1]);
+        unsigned high = emmy_pack_f16(c[2 * p + 4], c[2 * p + 5]);
+        unsigned xlo = __shfl_sync(0xffffffffu, low, src);
+        unsigned xhi = __shfl_sync(0xffffffffu, high, src);
+        unsigned ylo = __shfl_sync(0xffffffffu, low, src + 1);
+        unsigned yhi = __shfl_sync(0xffffffffu, high, src + 1);
+        unsigned x = (lane & 16) ? xhi : xlo;
+        unsigned y = (lane & 16) ? yhi : ylo;
+        int shift = (lane & 1) * 16;
+        b[p] = ((x >> shift) & 0xffffu) | ((y >> shift) << 16);
+    }
 }
 
 static __device__ __forceinline__ void emmy_mma_m8n8k4_f16_f32(

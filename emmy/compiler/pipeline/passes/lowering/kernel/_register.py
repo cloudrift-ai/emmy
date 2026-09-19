@@ -20,6 +20,7 @@ from emmy.compiler.ir.kernel.ir import (
     RegFragment,
     RegStore,
     Tile,
+    frag_layout,
 )
 from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Select, StridedLoop
 
@@ -32,12 +33,14 @@ class _Fragments:
         self.program = tile.register_program
         self.atom = tile.schedule.kernel.tile.atom
         self.period = tile.schedule.kernel.tile.bk
+        self.width = self.atom.atom_n
+        self.layout = frag_layout(self.atom.fragment_layout)
         self.row_base = row_base
         self.extents = {axis.name: axis.extent.as_static() for axis in tile.axes}
         self.body = []
         self.memo = {}
         self.cells = {}
-        self.states = tuple(f"_state{j}" for j in range((self.program.columns + 7) // 8))
+        self.states = tuple(f"_state{j}" for j in range((self.program.columns + self.width - 1) // self.width))
         self.counter = 0
 
     def name(self):
@@ -49,21 +52,21 @@ class _Fragments:
         key = (op, args, kinds, row_base, col_base)
         if key not in self.memo:
             out = self.name()
-            self.body.append(FragmentApply(out=out, op=ElementwiseImpl(op), args=args, kinds=kinds, row_base=row_base, col_base=col_base))
+            self.body.append(FragmentApply(out=out, op=ElementwiseImpl(op), args=args, kinds=kinds, layout=self.layout, row_base=row_base, col_base=col_base))
             self.memo[key] = out
         return self.memo[key]
 
     def fragment(self, value):
         return self.apply("copy", (value,), (UNIFORM,)) if isinstance(value, Literal) else value
 
-    def pack(self, role, srcs):
-        key = (role, srcs)
+    def pack(self, role, srcs, part=0):
+        key = (role, srcs, part)
         if key not in self.memo:
             out = self.name()
             self.body.extend(
                 (
-                    RegFragment(name=out, role=role, shape=self.atom.shape, dtype=self.atom.operand_dtype(role)),
-                    FragmentRepack(frag=out, srcs=srcs, role=role),
+                    RegFragment(name=out, role=role, shape=self.atom.shape, dtype=self.atom.operand_dtype(role), nregs=self.atom.fragment_nregs(role)),
+                    FragmentRepack(frag=out, srcs=srcs, role=role, fragment_layout=self.atom.fragment_layout, part=part),
                 )
             )
             self.memo[key] = out
@@ -99,7 +102,7 @@ class _Fragments:
                     if stmt.input == self.program.state.write.output:
                         if stmt.index[-2:] != (Var(col), Var(row)) or rb != self.row_base or not isinstance(cb, Literal):
                             raise ValueError("register state read crosses its owning warp rows")
-                        env[stmt.name] = self.states[cb.value // 8]
+                        env[stmt.name] = self.states[cb.value // self.width]
                     else:
                         index = tuple(e.substitute(clipped).simplify(SimplifyCtx.empty()) for e in stmt.index)
                         env[stmt.name] = self.apply("copy", ((stmt.input, index),), (GMEM,), rb, cb)
@@ -144,9 +147,15 @@ class _Fragments:
             raise ValueError("contraction does not preserve the register row ownership")
         axis = node.axis
         pairs = []
-        for k in range(0, self.extents[axis], 16):
-            a = self.pack("a", tuple(self.operand(left, row, axis, rb, Literal(k + d, "int")) for d in (0, 8)))
-            b = self.pack("b", (self.operand(right, axis, col, Literal(k, "int"), cb),))
+        for k in range(0, self.extents[axis], self.atom.atom_k):
+            ak = k // self.width * self.width
+            bk = k // self.atom.atom_m * self.atom.atom_m
+            a = self.pack(
+                "a",
+                tuple(self.operand(left, row, axis, rb, Literal(ak + d, "int")) for d in range(0, self.atom.atom_k, self.width)),
+                (k - ak) // self.atom.atom_k,
+            )
+            b = self.pack("b", (self.operand(right, axis, col, Literal(bk, "int"), cb),), (k - bk) // self.atom.atom_k)
             pairs.append((a, b))
         key = ("mma", tuple(pairs), self.atom)
         if key not in self.memo:
@@ -185,8 +194,8 @@ def factorize_register(tile):
         col, row = (expr.name for expr in spec.write.index[-2:])
         columns = emit.extents[col]
         values = []
-        for j in range((columns + 7) // 8):
-            cb = Literal(j * 8, "int")
+        for j in range((columns + emit.width - 1) // emit.width):
+            cb = Literal(j * emit.width, "int")
             (value,) = emit.cell(node, row, col, row_base, cb)
             values.append(emit.fragment(value))
         pending.append((spec, values))
@@ -194,21 +203,22 @@ def factorize_register(tile):
     # before any carried register is overwritten, including readers outside the update cone.
     for spec, values in pending:
         for j, value in enumerate(values):
-            index = (*spec.write.index[:-2], Literal(j * 8, "int"), row_base)
+            index = (*spec.write.index[:-2], Literal(j * emit.width, "int"), row_base)
             emit.body.append(
                 RegStore(
                     dst_buffer=spec.write.output,
                     dst_index=index,
                     frag=value,
                     shape=emit.atom.shape,
+                    fragment_layout=emit.atom.fragment_layout,
                     row_dim=len(index) - 1,
                     col_dim=len(index) - 2,
                     m_guard=(row_base, Literal(program.rows, "int")),
-                    n_guard=(Literal(j * 8, "int"), Literal(emit.extents[spec.write.index[-2].name], "int")),
+                    n_guard=(Literal(j * emit.width, "int"), Literal(emit.extents[spec.write.index[-2].name], "int")),
                 )
             )
     for state, value in zip(emit.states, pending[-1][1], strict=True):
-        emit.body.append(FragmentApply(out=state, op=ElementwiseImpl("copy"), args=(value,), kinds=(FRAG,), in_place=True))
+        emit.body.append(FragmentApply(out=state, op=ElementwiseImpl("copy"), args=(value,), kinds=(FRAG,), layout=emit.layout, in_place=True))
     declarations = tuple(RegFragment(name=name, role="c", shape=emit.atom.shape, dtype=F32) for name in emit.states)
     loop = StridedLoop(axis=tile.place.serial[0], start=Literal(0, "int"), step=Literal(1, "int"), body=Body(emit.body), unroll=False)
     axes = (*program.batch, Axis("_rb", (program.rows + warps * 16 - 1) // (warps * 16)), Axis("_rw", warps), Axis("_rl", 32))
