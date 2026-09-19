@@ -52,7 +52,11 @@ class _Fragments:
         key = (op, args, kinds, row_base, col_base)
         if key not in self.memo:
             out = self.name()
-            self.body.append(FragmentApply(out=out, op=ElementwiseImpl(op), args=args, kinds=kinds, layout=self.layout, row_base=row_base, col_base=col_base))
+            self.body.append(
+                FragmentApply(
+                    out=out, op=ElementwiseImpl(op), args=args, kinds=kinds, layout=self.layout, row_base=row_base, col_base=col_base
+                )
+            )
             self.memo[key] = out
         return self.memo[key]
 
@@ -63,7 +67,9 @@ class _Fragments:
         out = self.name()
         self.body.extend(
             (
-                RegFragment(name=out, role=role, shape=self.atom.shape, dtype=self.atom.operand_dtype(role), nregs=self.atom.fragment_nregs(role)),
+                RegFragment(
+                    name=out, role=role, shape=self.atom.shape, dtype=self.atom.operand_dtype(role), nregs=self.atom.fragment_nregs(role)
+                ),
                 FragmentRepack(frag=out, srcs=srcs, role=role, fragment_layout=self.atom.fragment_layout, part=part),
             )
         )
@@ -128,12 +134,16 @@ class _Fragments:
 
     def operand(self, node, row, col, rb, cb):
         (value,) = self.cell(node, row, col, rb, cb)
-        # A fragment can straddle either extent; all lanes still participate in MMA/shuffles.
-        cond = BinaryExpr(
-            "&&",
-            BinaryExpr("<", Var(FRAG_ROW), Literal(self.extents[row], "int")),
-            BinaryExpr("<", Var(FRAG_COL), Literal(self.extents[col], "int")),
-        )
+        # Only partial fragments need an element mask. A complete excess warp row is
+        # harmless: loads clamp coordinates and stores guard the output's row extent.
+        conditions = [
+            BinaryExpr("<", Var(coord), Literal(self.extents[axis], "int"))
+            for axis, coord, width in ((row, FRAG_ROW, self.atom.atom_m), (col, FRAG_COL, self.width))
+            if self.extents[axis] % width
+        ]
+        if not conditions:
+            return self.fragment(value)
+        cond = conditions[0] if len(conditions) == 1 else BinaryExpr("&&", *conditions)
         return self.apply("where", (cond, value, Literal(0.0)), (COORD, UNIFORM if isinstance(value, Literal) else FRAG, UNIFORM), rb, cb)
 
     def contract(self, node, row, col, rb, cb):
@@ -224,7 +234,9 @@ def factorize_register(tile):
                 )
             )
     for state, value in zip(emit.states, pending[-1][1], strict=True):
-        emit.body.append(FragmentApply(out=state, op=ElementwiseImpl("copy"), args=(value,), kinds=(FRAG,), layout=emit.layout, in_place=True))
+        emit.body.append(
+            FragmentApply(out=state, op=ElementwiseImpl("copy"), args=(value,), kinds=(FRAG,), layout=emit.layout, in_place=True)
+        )
     declarations = tuple(RegFragment(name=name, role="c", shape=emit.atom.shape, dtype=F32) for name in emit.states)
     loop = StridedLoop(axis=tile.place.serial[0], start=Literal(0, "int"), step=Literal(1, "int"), body=Body(emit.body), unroll=False)
     axes = (*program.batch, Axis("_rb", (program.rows + warps * height - 1) // (warps * height)), Axis("_rw", warps), Axis("_rl", 32))
