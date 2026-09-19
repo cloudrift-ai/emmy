@@ -21,6 +21,25 @@ from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 from tests.compiler.helpers import requires_cuda
 
 
+@requires_cuda
+def test_scalar_fp16_matmul_widens_products_before_accumulation():
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("a", (1, 3), dt.F16), node_id="a")
+    graph.add_node(InputOp(), [], Tensor("b", (3, 1), dt.F16), node_id="b")
+    graph.add_node(MatmulOp(), ["a", "b"], Tensor("out", (1, 1), dt.F16), node_id="out")
+    graph.inputs, graph.outputs = ["a", "b"], ["out"]
+    a = np.array([[300, 300, 1.001]], dtype=np.float16)
+    b = np.array([[300], [-300], [1.001]], dtype=np.float16)
+    backend = CudaBackend()
+    with pinned_knobs({"TILE": "", "REDUCE": "", "PLACE": ""}):
+        compiled = backend.compile(graph)
+    result, _ = backend.run(compiled, input_data={"a": a, "b": b})
+    np.testing.assert_array_equal(result.outputs["out"], a @ b)
+
+
 def test_cuda_name_int_dtypes():
     # I32/I64 must map to the C type names the kernel renderer emits in
     # parameter signatures for graphs whose placeholder inputs carry an

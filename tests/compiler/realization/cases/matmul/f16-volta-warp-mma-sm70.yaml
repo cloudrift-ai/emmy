@@ -37,4 +37,4 @@ configs:
       TILE: mma_m8n8k4_f16_f32/f2x2/k8
       STAGE: d1/smem
       REDUCE: ''
-    identity: b00e14c335ff108dcd182fcf202732761d65cb5f3b7648477edec2150593fc12
+    identity: 8667422a58fd99337f9b8f4c245be2b767b0ac2d43422e74771323e89a8bd521

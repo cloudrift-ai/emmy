@@ -31,7 +31,7 @@ configs:
       WORK: w2x2
       STAGE: d2/smem-async
       RASTER: gm8
-    identity: d50a55c07f56e9db159bfd54372c52fa3912101af55e801f9f7753164d54ff8e
+    identity: 4708fbf2303ea6059cc0e2ade5e941e26a564e0cf93ef9bef653252bc2fb3998
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 4.975598062103118

@@ -153,8 +153,8 @@ def _stamp_assign(s: Assign, ctx: _StampCtx) -> Assign:
     # Overflow guard: a square (``x * x``) or a ``pow`` of an fp16 value can
     # blow past fp16's 65504 ceiling, giving inf → a garbage reduction
     # (RMSNorm's mean-of-squares). torch computes that reduction in fp32; do
-    # the same here. Matmul — ``multiply`` of *distinct* args — keeps its fp16
-    # path; only the same-arg square / pow are promoted.
+    # the same here. Matmul products already carry an explicit compute dtype;
+    # this fallback promotes only an untyped same-arg square / pow.
     if result_dt == F16 and _is_overflow_prone(s):
         result_dt = F32
     ctx.ssa_dtypes[s.name] = result_dt
@@ -163,8 +163,7 @@ def _stamp_assign(s: Assign, ctx: _StampCtx) -> Assign:
 
 def _is_overflow_prone(s: Assign) -> bool:
     """True for elementwise ops that can overflow fp16 from in-range inputs —
-    the square ``multiply(a, a)`` and any ``pow``. Distinct-arg ``multiply``
-    (matmul) is excluded."""
+    the square ``multiply(a, a)`` and any ``pow``. Distinct-arg products are excluded."""
     if s.op.name == "pow":
         return True
     return s.op.semiring_product and len(s.args) == 2 and s.args[0] == s.args[1]

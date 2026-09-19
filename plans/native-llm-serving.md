@@ -14,9 +14,10 @@ instead of vLLM. Keep vLLM as the default. Qualify dense Qwen3-0.6B in FP16 on o
 experiments. It does not implement native LLM serving. This plan remains open until the remaining work is completed
 or its scope is explicitly revised.
 
-- **Milestone 0 — partial.** API reuse was investigated and stock vLLM was measured. The first Emmy comparison
-  timed out during compilation. The follow-up compiles successfully but still misses readiness during GPU
-  initialization, so the dispatch and shape/memory comparisons remain incomplete.
+- **Milestone 0 — partial.** API reuse was investigated. Stock and all three Emmy configurations now complete the
+  serving matrix with matching fixed-prompt completions. Profiles establish captured execution and little exposed
+  between-step CPU overhead. Smaller activation capacity recovers KV space; useful/padded rows and separate
+  activation/scratch accounting remain unmeasured. Emmy's qualified schedules remain slower than stock.
   See the [baseline report](../experiments/Qwen3-0.6B/native_baseline/RESULTS.md) and its linked investigations.
 - **Milestone 1 — mostly implemented.** Static executable packs, a Rust CUDA executor, graph replay, persistent
   worker supervision, and timeout/CUDA-error recovery are implemented. The run command compares Python and Rust
@@ -31,14 +32,22 @@ but little change in captured GPU time for the tested small programs. This is no
 speedup. Before that merge, full-suite validation had failures reproduced on main; model-golden failures were only
 partly checked against main. The merged PR records those validation limits.
 
-**Selected next step:** fix the existing serving baseline before expanding. Draft
+**Selected next step:** fix the existing serving baseline before expanding. Merged
 [PR #835](https://github.com/cloudrift-ai/emmy/pull/835) rejects unsupported nested fragment epilogues and contraction
 roots the binder cannot compute together. The isolated Qwen3 pre-attention program passes GPU parity with synthetic
 weights at 1, 4, and 8 tokens. A complete four-configuration rerun held source fixed: stock passed; all three Emmy
 configurations compiled their programs without the reproduced rejections, then missed readiness during GPU
 initialization. An isolated width-16 post-attention program exceeds its watchdog as one kernel, while explicit
 placement cuts pass numerical checks. The remaining work is to qualify serving schedules and repeat the comparison.
-Evidence gathering still precedes performance claims and runtime expansion.
+The follow-up [PR #847](https://github.com/cloudrift-ai/emmy/pull/847) fixes matrix-vector classification and
+half-precision product rounding. A fresh recorded inventory passes all 32 isolated checks and the eight-program
+strict release audit on final source `2144b15a`. The complete four-configuration comparison succeeds, and both
+fixed-prompt completions match stock in every configuration. Emmy remains slower: short single-request TPOT is
+7.935–8.378 ms versus stock's 2.273–2.281 ms. Smaller activation capacity recovers 1.14 GiB of KV space. Profiles
+show little exposed between-step CPU time, so the next performance work should improve GPU schedules within the
+existing integration before expanding native serving. See the
+[schedule report](../experiments/Qwen3-0.6B/native_baseline/SCHEDULES.md). Broader generation parity and detailed
+allocation/occupancy accounting remain open; this PR does not implement milestones 2–4.
 
 ## Evidence before implementation
 

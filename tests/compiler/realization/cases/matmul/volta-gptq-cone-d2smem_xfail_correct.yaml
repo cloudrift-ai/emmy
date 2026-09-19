@@ -3487,4 +3487,4 @@ configs:
       REDUCE: ''
       STAGE: d2/smem
       RASTER: ''
-    identity: 0bf4cc1c13ef096b8f1876aea36c1cef3396e5571763fda95cebca2508d490be
+    identity: b13f4f81a12b190d493922c7579a162f9b60708cc5e5b022bcf7ab5dd6ed4f5b
