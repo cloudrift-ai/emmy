@@ -90,9 +90,7 @@ def test_register_operands_use_direct_loads_when_the_address_allows_it(target, s
     graph.nodes["out"].op = replace(
         op,
         body=op.body.map(
-            lambda s: replace(s, index=(s.index[0], s.index[1] * Literal(stride, "int")))
-            if isinstance(s, Load) and s.input == "W"
-            else s
+            lambda s: replace(s, index=(s.index[0], s.index[1] * Literal(stride, "int"))) if isinstance(s, Load) and s.input == "W" else s
         ),
     )
     (tile,) = (n.op for n in _lift(graph).nodes.values() if isinstance(n.op, TileOp))
