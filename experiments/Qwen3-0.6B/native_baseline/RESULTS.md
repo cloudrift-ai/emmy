@@ -1,91 +1,88 @@
 # Native-serving baseline
 
-The later [schedule qualification](SCHEDULES.md) fixes three numerical issues and passes a bounded serving startup
-check. The current recipe selects that new experimental golden. The full four-configuration result below remains
-the previous run; the updated recipe has not yet been rerun as a complete matrix.
+All four configurations now start and complete the serving comparison. The corrected Emmy schedules produce the
+same two fixed-prompt completions as stock vLLM, but every measured workload remains slower than stock. Reducing
+activation capacity recovers KV-cache space within the existing integration. These results support improving
+compiled GPU execution before expanding the native serving runtime.
 
-## RTX 4080 × 1 — 2026-09-18
+## RTX 4080 × 1 — 2026-09-19
 
-Stock vLLM completed the matrix. All three Emmy configurations compiled their programs without the previous
-projection rejections, but missed the 900-second readiness deadline during GPU initialization. There are no Emmy
-serving measurements. Stock short decode is largely GPU-busy, including work between transformer graph replays;
-replacing CPU dispatch alone has little exposed time to remove in that trace.
+### Protocol
 
-Read the separate [dispatch report](DISPATCH.md), [shape/memory report](SHAPES_MEMORY.md), and
-[execution/API investigation](INVESTIGATION.md). They distinguish measurements from missing evidence.
+Run `20260919T065247Z`, directory `2026-09-19_06-52-47`, used clean revision
+`2144b15aa3f21e8325147f02d36951945c98747d` throughout all four configurations. The existing recipe ran once through
+`emmy bench --local`; there was no failure-only rerun. Each server shut down, and no task-owned GPU process remained.
 
-### Protocol and environment
+Qwen/Qwen3-0.6B is pinned to `c1899de289a04d12100db370d81485cdf75e47ca`, FP16, context 4,096, maximum four
+sequences, a 256-token batched prefill limit, Triton attention, full CUDA graphs with explicit capture sizes, and
+prefix caching disabled. The configurations are stock, width-16 decode, the single-token tier, and that tier with
+activation capacity reduced from 1,024 to 256. Emmy uses the committed experimental golden with strict measured
+evidence, an empty tune database, a fresh online-prior path, and a fresh pack directory for each configuration.
+The cubin cache is shared; startup is not a cold-cache measurement.
 
-The recipe at `0d5ac561` pins Qwen/Qwen3-0.6B revision `c1899de289a04d12100db370d81485cdf75e47ca`, FP16,
-context 4,096, maximum four sequences, a 256-token batched prefill limit, Triton attention, full CUDA graphs with
-explicit capture sizes, and prefix caching disabled. It compares stock, width-16 decode, the single-token tier, and
-that tier with activation capacity reduced from 1,024 to 256. Each fixed workload has three repeats, eight requests,
-two warmups, concurrency one or four, inputs 32/256/1,024, and exactly 64 output tokens. Mixed-length and profiled cases
-are separate. Each Emmy lane starts with an empty tune DB, online-prior path, and pack directory; the hardware golden
-digest is saved. The machine's compiled-kernel cache is shared and was not cleared. Startup is not a cold-cache measure.
+Each fixed workload has three repeats, eight requests, two warmups, concurrency one or four, inputs 32/256/1,024,
+and exactly 64 output tokens. Sampling is greedy with seed zero. The mixed-length and profiled workloads are
+separate. Fixed-prompt completions run before benchmarks with temperature zero, seed zero, and 16 output tokens.
 
-Local system: Ubuntu 24.04.5, kernel 7.0.0-31-generic, Core i9-14900K, one RTX 4080 with 16,376 MiB, driver
-595.91.07, NVCC 13.3.73, cuBLAS 13.6.0.2. Installed packages include PyTorch 2.11.0+cu130, vLLM 0.23.0, and Transformers
-5.14.1; exact packages are in each row's `requirements.txt`. The desktop shares the GPU. No cloud server was rented.
+### Results
 
-### Outcomes and retained evidence
+All four row records have `succeeded` status. Every repeated and mixed workload completed eight requests; each
+profile completed two. The short-input concurrency-one comparison is:
 
-Run ID `20260918T040005Z`; timestamped directory `2026-09-18_04-00-05`.
-[results_rtx4080x1.tar.gz](results_rtx4080x1.tar.gz) contains that complete directory, four system-only experiment
-records, raw command logs, declared results, and serving packs. Record and row-directory stems are:
+| Configuration | Median TPOT range, ms | Median TTFT range, ms | KV-cache space, GiB |
+| --- | ---: | ---: | ---: |
+| Stock | 2.273–2.281 | 7.085–7.821 | 8.12 |
+| Width 16, single-token tier off | 7.935–8.189 | 100.938–105.158 | 6.17 |
+| Single-token tier, capacity 1,024 | 8.368–8.378 | 106.579–107.671 | 6.18 |
+| Single-token tier, capacity 256 | 7.937–7.957 | 99.865–100.158 | 7.32 |
 
-| Configuration | Stem | Status |
-| --- | --- | --- |
-| Stock | `rtx4080x1_c1024_lstock_m1_f5b4395d2139` | succeeded |
-| Decode bucket 16, single-token tier off | `rtx4080x1_c1024_lbucket16_m0_242586f9983a` | failed |
-| Single-token tier, capacity 1,024 | `rtx4080x1_c1024_lm1_m1_6f930adf2e27` | failed |
-| Single-token tier, capacity 256 | `rtx4080x1_c256_lm1-s_m1_679bbdc79eb9` | failed |
+Ranges span three repeats, not confidence intervals. The full table, mixed-length result, and memory accounting
+are in [SHAPES_MEMORY.md](SHAPES_MEMORY.md). The small-capacity configuration improves KV-cache space by 1.14 GiB
+and 10,672 tokens over the larger single-token configuration. It still trails stock's cache capacity and latency.
+Short concurrency-four Emmy results vary more across repeats; do not infer a universal single-token-tier advantage.
 
-The stock short concurrency-one median TPOT spans 2.273–2.278 ms across repeats. Increasing concurrency to four gives
-1,497.4–1,511.8 output tokens/s for the same short input. The complete fixed-length table and the single mixed-length
-observation are in the shape/memory report, with their raw JSON member names. Profiler timings are not substituted
-for unprofiled request latencies.
+Both prompts produce exactly the same completion text in all configurations: “The capital of France is” begins
+“Paris. The capital of Italy is Rome.”, and “2 + 2 =” begins “4, so the sum is 4.” Full responses are in each
+`generation.json`. This is a bounded checkpoint-generation check, not broad task-quality or logit-parity evidence.
+The independent [schedule qualification](SCHEDULES.md) passes all 32 synthetic-input checks at unchanged strict
+numerical tolerances, plus all 333 schedule decodes and eight serving-program compiles on the final source.
 
-The scheduler now rejects fragment epilogues that contain nested sibling reductions or combine contraction roots
-whose outputs cannot be partitioned. Neither reproduced rejection appears in any of the three Emmy server logs.
-The bucket-16 configuration saved 168 programs; both single-token configurations saved 224. All remained unready
-afterward, with GPU work active in the initialization path containing the boot audit. No Emmy request or trace JSON
-was produced; the failed records also report these missing results. Bounded shutdown finished each row in about
-911 seconds and released its GPU process. No failure-only rerun was performed.
+The [dispatch profile](DISPATCH.md) records captured execution in every configuration. Most time is GPU work;
+observed gaps between steps without GPU work are only a few microseconds. The current slow schedules, rather than
+uncaptured per-kernel Python submission, are the principal measured limitation. This experiment does not establish
+a native-runtime speedup or justify replacing the serving frontend.
 
-### Isolated post-attention diagnostic
+### System and evidence
 
-After the matrix, the existing run command replayed the width-16 post-attention program against eager PyTorch
-using synthetic inputs. The default single-kernel schedule exceeded the 60-second kernel watchdog. Explicitly
-cutting seven selected reduction boundaries produced eight kernels and passed the CLI's scaled numerical
-check. This narrows the remaining investigation to executable schedule selection; it does not establish complete
-model correctness or a deployable schedule. The diagnostic command, input and raw outputs are retained separately
-under `diagnostic/` in the archive. Two fresh explicit-cut processes passed numerical checks and measured
-509.94/510.46 µs, versus eager at
-93.26/93.16 µs, using captured whole-forward timings. Both wrote JSON before their overall 115-second deadlines but
-failed to exit normally; neither process exit is recorded as a successful qualification. No schedule was promoted
-to the model goldens. The eight-kernel proposal is executable in isolation but substantially slower than eager.
+One RTX 4080, 16,376 MiB, `sm_89`; Core i9-14900K; Ubuntu 24.04.5, kernel 7.0.0-31-generic; driver 595.91.07;
+NVCC 13.3.73; cuBLAS 13.6.0.2; Torch 2.11.0+cu130; vLLM 0.23.0; Transformers 5.14.1. Exact packages are retained
+in each `requirements.txt`. The desktop shares the GPU. No cloud server was rented and no other task-owned GPU
+workload overlapped serving measurements. The user removed the earlier GPU time limit before this run.
 
-### Limits and next decision
+[results_rtx4080x1.tar.gz](results_rtx4080x1.tar.gz) contains the complete timestamped directory, all four system-only
+experiment records, command and server logs, generation and benchmark JSON, memory snapshots, golden digests, and
+CPU/GPU traces. Record and directory stems are:
 
-All records capture clean revision `0d5ac561a53511994a116ee83099932324e7ad13`. The live checkout stayed unchanged
-throughout the matrix. Each row has a 900-second readiness window and a 1,200-second command deadline; shutdown
-escalates after ten seconds. Stock completed before the Emmy rows, and no other task-owned GPU workload overlaps it.
-CPU-only diagnostics and clean-main golden checks overlapped some Emmy initialization. No startup-time speedup is
-claimed. All task-owned serving processes were terminated after the matrix.
+| Configuration | Stem |
+| --- | --- |
+| Stock | `rtx4080x1_c1024_lstock_m1_f5b4395d2139` |
+| Width 16 | `rtx4080x1_c1024_lbucket16_m0_242586f9983a` |
+| Single-token, capacity 1,024 | `rtx4080x1_c1024_lm1_m1_6f930adf2e27` |
+| Single-token, capacity 256 | `rtx4080x1_c256_lm1-s_m1_679bbdc79eb9` |
 
-The baseline is incomplete. It has no successful comparison of useful/padded rows, scratch/activation allocation,
-KV capacity, or Emmy-vLLM dispatch. Fix the GPU execution problem and repeat the full serving matrix before using this
-experiment to justify a new model-serving loop. The independent [runtime comparison](../native_runtime/RESULTS.md)
-qualifies small static artifacts only and does not supply the missing generation evidence.
+Hostnames, account names, home/workspace paths, private addresses, GPU identifiers, and archive owner metadata are
+removed from publication. Hardware specifications, measurements, and executable payloads remain intact. Each
+archive member is verified against its original with only those redactions. Local paths are descriptive, not
+portable inputs.
 
-Published evidence replaces the local hostname, username, home/workspace paths, LAN address, and GPU UUID with
-anonymous placeholders and clears archive owner metadata. Hardware/software specifications, measurements, and
-executable tensor/binary payloads are unchanged. Local paths in the records are descriptive, not portable inputs.
+### Previous runs and remaining work
 
-### Previous run
+The September 18 run at `0d5ac561` completed stock but timed out during initialization in every Emmy configuration.
+Its reports and archive remain in Git at `2144b15a`. The September 16 run in merged PR #820 timed out during Emmy
+compilation; that evidence remains at `27e11a30`. The current named archive replaces those runs with this complete
+comparison. The historical API/execution-contract [investigation](INVESTIGATION.md) remains separately scoped.
 
-The September 16 run in merged PR #820 completed stock and timed out in all three Emmy configurations during
-compilation. Its short stock TPOT was 2.278–2.282 ms. Those records and reports remain in Git at `27e11a30`; the
-named platform archive now holds only the latest run. The new comparison keeps source fixed and bounds shutdown,
-addressing the prior run's provenance and cleanup limitations.
+Correct serving is now demonstrated for this bounded workload. Efficient general schedules, broader generation
+parity, measured useful/padded rows, and separate activation/scratch allocation accounting remain future work.
+The native implementation remains a static runtime foundation; complete cached native generation and HTTP serving
+are not delivered by this PR.

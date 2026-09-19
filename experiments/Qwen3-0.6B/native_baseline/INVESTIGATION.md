@@ -67,8 +67,9 @@ template parity remain required before choosing text dependencies. No frontend h
 The recipe pins Qwen3-0.6B revision `c1899de289a04d12100db370d81485cdf75e47ca`, FP16, one RTX 4080, a 4,096-token
 context limit, Triton attention, and explicit full-graph capture sizes. It records the golden digest and package
 versions. Separate empty tune databases and online-prior paths prevent existing machine-local measurements from
-changing the compile decision between configurations. The recorded baseline used the hardware golden and offline prior. The next run selects the qualified experimental
-golden and requires measured evidence; see the schedule report for its validation and limits.
+changing the compile decision between configurations. The initial baseline used the hardware golden and offline
+prior. The completed September 19 run selects the qualified experimental golden and requires measured evidence;
+see the schedule report for its validation and limits.
 
 Stock, padded decode, single-token decode, and smaller activation capacity each have one server lifetime. Each
 fixed workload has three measurements after two warmup requests. The mixed-length case and profiler case are

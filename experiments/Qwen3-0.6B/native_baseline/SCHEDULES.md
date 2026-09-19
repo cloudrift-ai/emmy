@@ -117,8 +117,10 @@ the ranges show those separate measurements, not four different static shapes.
 
 Final CPU validation exposed two scheduling interactions: chunked attention must choose its multiplicand type from
 the streamed value, and a grouped-matvec refusal must reject two axes owned by the same operand without rejecting
-valid transposed or broadcast pairs. Those checks were corrected after the GPU measurements. The existing attention
-and split-reduction cases cover them, but GPU revalidation of that final source remains pending.
+valid transposed or broadcast pairs. Those checks were corrected after the initial GPU measurements. A final
+seed-zero replay at `2144b15a` passes all 32 targets at the same strict tolerance, with empty tuning state and no
+placement overrides. All 333 rows decode and all eight serving programs compile from the selected evidence alone.
+Final raw results are `final-replay/*.json`, `final-replay.log`, and `final-live-audit.log` in the tuning archive.
 
 Only static width-16 pre-attention is faster than this eager reference. Symbolic pre-attention remains especially
 slow. The explicit serial reduction choices that made the candidates executable are not an efficient general
@@ -134,16 +136,18 @@ tuning archive. No generated text was retained by this diagnostic, so it does no
 
 The diagnostic reports 8.63 ms mean time per output token. It used two requests, no explicit warmup or greedy
 sampling, and no repeats. Do not compare that number directly with the previous fixed-length, repeated stock
-baseline or treat it as the full requested comparison. The previous four-row serving result remains unchanged.
-The recipe now selects the corrected experimental golden, requires measured evidence, and retains fixed-prompt
-completion text for the next complete run. The full matrix and semantic generation checks remain pending.
+baseline or treat it as the full requested comparison. The later complete run at `2144b15a` is now reported in
+[RESULTS.md](RESULTS.md): all four configurations start and complete every workload. All produce identical greedy
+completion text for both fixed prompts. This bounded check does not establish general logit or task-quality parity.
+Emmy remains slower than stock across the measured matrix; no serving speedup is claimed.
 
 ## System and retained evidence
 
 One NVIDIA GeForce RTX 4080, 16,376 MiB, `sm_89`; Intel Core i9-14900K; Ubuntu 24.04.5; driver 595.91.07;
 NVCC 13.3.73; cuBLAS 13.6.0.2; Torch 2.11.0+cu130; vLLM 0.23.0; Transformers 5.14.1. No cloud machine was rented.
-The GPU session was bounded by the user's two-hour allowance. Hostnames, account names, private addresses, paths,
-and archive ownership are removed from the published evidence; hardware and software specifications remain.
+The initial GPU session respected the user's two-hour allowance. The user removed that limit before final
+revalidation and the complete serving run. Hostnames, account names, private addresses, paths, and archive ownership
+are removed from the published evidence; hardware and software specifications remain.
 
 The archive retains the exact qualified golden, serving config, seed-one commands and result JSON/logs, seed-zero
 replay, release audit, failed pre-fix probes, and the two search pilots' logs, records, and prior diagnostics.
@@ -169,7 +173,12 @@ no model golden was re-recorded or exempted to hide these failures. The full fai
 | Qwen3.8-27B-EXL3, V100 | 46 / 154 | 46 / 154 |
 | Qwen3.8-27B-GPTQ-Int4, V100 | 2 / 50 | 2 / 50 |
 
-The tuning archive includes the final CPU test, lint, model-golden, and base-comparison logs. GPU access stopped
-within the approved session. Final GPU revalidation, the live-GPU release audit, checkpoint generation checks, and
-the complete four-configuration serving comparison remain outstanding; the earlier GPU evidence is revision-pinned
-above. The release audit refuses a hidden GPU because it checks the actual card against the golden's target.
+The final GPU-enabled full suite reports 5,162 passed, 739 skipped, 21 expected failures, and 26 failures. The same
+26 tests fail on base `cab3b735`; a seven-file comparison reports 66 passed and one skipped alongside those failures.
+Five failures request TMA on `sm_89`, one requires a native FP4 cell unavailable on this card, and twenty lack
+measured serving-test evidence. No new failing test is introduced, and no test expectation was weakened.
+
+The tuning archive includes CPU and GPU test logs, the base comparisons, final replay and release audit, lint,
+model-golden results, and structural profile interval data. The full serving archive contains all four successful
+row records and complete workload evidence. Efficient general schedules and broader generation parity remain open;
+execution qualification and the requested bounded serving comparison are complete.

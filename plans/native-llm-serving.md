@@ -14,9 +14,10 @@ instead of vLLM. Keep vLLM as the default. Qualify dense Qwen3-0.6B in FP16 on o
 experiments. It does not implement native LLM serving. This plan remains open until the remaining work is completed
 or its scope is explicitly revised.
 
-- **Milestone 0 — partial.** API reuse was investigated and stock vLLM was measured. The first Emmy comparison
-  timed out during compilation. The follow-up compiles successfully but still misses readiness during GPU
-  initialization, so the dispatch and shape/memory comparisons remain incomplete.
+- **Milestone 0 — partial.** API reuse was investigated. Stock and all three Emmy configurations now complete the
+  serving matrix with matching fixed-prompt completions. Profiles establish captured execution and little exposed
+  between-step CPU overhead. Smaller activation capacity recovers KV space; useful/padded rows and separate
+  activation/scratch accounting remain unmeasured. Emmy's qualified schedules remain slower than stock.
   See the [baseline report](../experiments/Qwen3-0.6B/native_baseline/RESULTS.md) and its linked investigations.
 - **Milestone 1 — mostly implemented.** Static executable packs, a Rust CUDA executor, graph replay, persistent
   worker supervision, and timeout/CUDA-error recovery are implemented. The run command compares Python and Rust
@@ -40,10 +41,13 @@ initialization. An isolated width-16 post-attention program exceeds its watchdog
 placement cuts pass numerical checks. The remaining work is to qualify serving schedules and repeat the comparison.
 The follow-up [PR #847](https://github.com/cloudrift-ai/emmy/pull/847) fixes matrix-vector classification and
 half-precision product rounding. A fresh recorded inventory passes all 32 isolated checks and the eight-program
-strict release audit. A bounded small-capacity serving smoke test reaches readiness and completes two requests.
-Several isolated schedules remain slower than eager; the complete four-configuration serving comparison and
-checkpoint generation checks remain outstanding. See the [schedule report](../experiments/Qwen3-0.6B/native_baseline/SCHEDULES.md).
-Evidence gathering still precedes performance claims and runtime expansion.
+strict release audit on final source `2144b15a`. The complete four-configuration comparison succeeds, and both
+fixed-prompt completions match stock in every configuration. Emmy remains slower: short single-request TPOT is
+7.935–8.378 ms versus stock's 2.273–2.281 ms. Smaller activation capacity recovers 1.14 GiB of KV space. Profiles
+show little exposed between-step CPU time, so the next performance work should improve GPU schedules within the
+existing integration before expanding native serving. See the
+[schedule report](../experiments/Qwen3-0.6B/native_baseline/SCHEDULES.md). Broader generation parity and detailed
+allocation/occupancy accounting remain open; this PR does not implement milestones 2–4.
 
 ## Evidence before implementation
 
