@@ -15,15 +15,15 @@ command:
     devices="$gpu_device_ids"
     export CUDA_VISIBLE_DEVICES=$${devices%%,*}
     export GDN_HEADS="$heads" GDN_TOKENS="$tokens"
-    export EMMY_GOLDEN_FILE= EMMY_NVCC_FLAGS=
+    export EMMY_GOLDEN_FILE= EMMY_NVCC_FLAGS= EMMY_BENCH_COMPILE_TIMEOUT_S=120
     export EMMY_TUNE_DB=$task_dir/autotune.db EMMY_ONLINE_FILE=$task_dir/online.json
-    export EMMY_STAGE=d1/reg EMMY_WORK=w1x1 EMMY_TILE=mma_m8n8k4_f16_$acc/f1x8/k4
+    export EMMY_STAGE=d1/reg EMMY_WORK=w2x1 EMMY_TILE=mma_m8n8k4_f16_$acc/f1x8/k4
     export PYTHONPATH=$repo_dir
     mkdir -p $task_dir/artifacts
     cd $repo_dir
     code=$$(cat experiments/Qwen3.8-27B/gdn_kernels/$workload.py)
-    timeout -k 3s 110s "$python" -m emmy.emmy run --code "$$code" \
-      --bench --strict --bench-backends eager,tcompile,emmy --warmup 10 --iters 100 \
+    timeout -k 3s 360s "$python" -m emmy.emmy run --code "$$code" \
+      --verbose --bench --strict --bench-backends eager,tcompile,emmy --warmup 10 --iters 100 \
       --no-record-nodes --json $task_dir/artifacts/measurement.json \
       > $task_dir/artifacts/measurement.log 2>&1
     status=$$?
@@ -35,7 +35,7 @@ command:
     exit "$$status"
   result_files:
     - artifacts.tar.gz
-  timeout: 120
+  timeout: 375
 
 matrices:
   - cross:

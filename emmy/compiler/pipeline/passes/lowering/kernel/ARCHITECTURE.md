@@ -33,7 +33,11 @@ Each warp owns sixteen independent state rows and the full column dimension. The
 so a matrix result reused by an output and the next-state update is evaluated once. Operand tails are masked
 before MMA and all warp lanes participate in repacking. Existing `FragmentApply`, `MmaSyncPtx`,
 `FragmentPromote`, and `RegStore` nodes provide arithmetic and stores. `FragmentRepack` supplies C→A and
-warp-shuffled C→B conversion without a shared-memory round trip.
+warp-shuffled C→B conversion without a shared-memory round trip. The selected atom supplies the dimensions,
+register counts, and lane layout; Volta consumes four-column A or four-row B slices of its logical 16×16 C tile.
+Loads and operand packs are emitted beside their consuming MMA to bound their live ranges while keeping
+reusable matrix results. Only partial fragments receive element masks; clamped loads and guarded stores also
+make excess whole warp rows safe. Layout-aware FP16 promotion is shared with direct and staged classic schedules.
 
 The materializer removes the private global carry port with a graph splice, preserving the schedule and source
 attribution. A state buffer with an external reader remains a stored output. Every output is evaluated before

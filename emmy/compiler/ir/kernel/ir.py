@@ -1273,7 +1273,8 @@ class RegFragment(Stmt):
     ``unsigned a[4]`` / ``unsigned b[2]`` (f16, two halfs per 32-bit
     reg) — and the accumulator is ``float c[4]`` (f32) or, on the
     f16-accumulate atom, packed ``unsigned c[2]`` (two halfs per reg —
-    the same element map, pair-packed). ``shape`` is the cell
+    the same element map, pair-packed, on m16n8k16). Volta uses explicit
+    counts and distinct f16/f32 accumulator lane maps. ``shape`` is the cell
     ``(M, N, K)``; the count derives from ``shape`` + ``role`` (+ the C
     dtype) via :func:`_mma_sync_nregs`. The ``c`` array is
     zero-initialised at declaration, so the mma.sync path needs no
@@ -1940,11 +1941,12 @@ class FragmentPromote(Stmt):
     the full f16-accumulate HMMA rate, and every K chunk this promote-adds the packed f16 partials
     into the f32 shadow (``cvt.f32.f16`` + add per element) and re-zeros the f16 fragment, so the
     accumulation error stays bounded by one chunk's length. ``dst`` is the f32 shadow the store /
-    epilogue reads (``float[4]``); ``src`` the packed f16 mma accumulator (``unsigned[2]``) —
-    both defined here (``src`` is rezeroed), so reorderings keep the promote pinned between the
+    epilogue reads; ``src`` is the packed f16 mma accumulator. The fragment layout selects
+    their register counts and, on Volta, the warp shuffles that align their different lane maps. Both
+    are defined here (``src`` is rezeroed), so reorderings keep the promote pinned between the
     mma chain and the store."""
 
-    dst: str  # f32 shadow accumulator fragment (4 × f32) — the store-side view
+    dst: str  # f32 shadow accumulator fragment — the store-side view
     src: str  # packed f16 mma accumulator fragment — rezeroed after the fold
     fragment_layout: str = "m16n8k16"
 
@@ -1967,8 +1969,9 @@ class FragmentRepack(Stmt):
     """Convert mma **C fragments** into one 16-bit operand fragment in registers.
 
     The m16n8k16 layout takes two k-adjacent C fragments whose lanes already align with A. The
-    Volta m8n8k4 layout takes one logical 16-column C fragment and selects one of its four-column
-    slices with warp shuffles. The emitter gates on ``AtomKind.c_to_a_repack`` at schedule time.
+    Volta m8n8k4 layout takes one logical 16×16 C fragment and selects a four-column A slice
+    or four-row B slice with warp shuffles. The emitter gates on the atom's C→A/C→B repack
+    capabilities at schedule time.
     The m16n8k16 f16 B layout takes one C fragment and exchanges its packed column pairs
     between lanes. Every lane of the warp must participate in that exchange."""
 

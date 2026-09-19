@@ -139,7 +139,9 @@ so a plan loaded from disk and a freshly compiled one share one launch path. The
 grammar (`int` literal, `"name"` var, `[op, lhs, rhs]`), deliberately not the compiler's `Expr` classes — the
 on-disk format survives compiler changes; only runtime-contract changes bump `PLAN_FORMAT_VERSION`.
 CUDA-specific launch fields (TMA descriptors) nest under a `"cuda"` key so another backend can add its own
-namespace and its own `build_from_plan` equivalent.
+namespace and its own `build_from_plan` equivalent. Kernel source and architecture requirements share one
+`KernelSpec` projection with command diagnostics, which can inspect the cached binary without rebuilding the
+plan's buffers or generated constants.
 The declared output list is also the runtime return order; allocation planning may reorder buffers, but cannot reorder
 observable program results.
 

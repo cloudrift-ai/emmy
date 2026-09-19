@@ -213,6 +213,7 @@ can execute the graph. `IndexMapOp.forward` iterates in Python, so keep
 tensor sizes under ~1000 elements for fast tests.
 
 Register carry tests cover strict schedule round trips, precision gating, ownership refusals, and a chunk loop
-inside one launch. The CUDA cases compare old-state reads and GDN matrix recurrences against the Loop reference,
-including uneven dimensions and FP16 partial accumulation. They also check that the tested fragments do not spill
+inside one launch on both sm70 and modern targets. The CUDA cases compare old-state reads and GDN matrix recurrences against the Loop reference,
+including uneven dimensions and both FP32 and FP16 partial accumulation on the available GPU. They also check that the tested fragments do not spill
 to local memory. The real Qwen3.5 trace proves that the correction product is reused by its two consumers.
+Volta corpus cases exercise the shared FP16 promotion in direct and staged matrix schedules.

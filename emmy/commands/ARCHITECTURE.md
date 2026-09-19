@@ -152,7 +152,10 @@ it into the checkpoint so the number is readable rather than implied; `fp8-block
 activations are quantized dynamically, so it has nothing to calibrate. It needs a linear whose weight is a module
 parameter — `a @ b` over two tensors has none, and says so.
 For isolated frontend-graph runs, the worker returns the symbolic environment used for execution with its benchmark
-result; `run` uses that same binding when rendering dynamic per-kernel grid statistics.
+result; `run` uses that same binding when rendering dynamic per-kernel grid statistics. Register and spill
+attributes come from the runtime cubin loader, so reporting reuses the measured binary and its compiler flags
+and architecture target instead of compiling a separate diagnostic kernel. The kernel table includes per-thread
+local-memory bytes beside register counts, making spills visible in the archived benchmark log.
 For a single-layer trace, the loader derives a missing attention `layer_type` from
 `config.layer_types[self_attn.layer_idx]`. Rotary modules keyed by that attention label supply one `(cos, sin)` tuple;
 modules with independent rotary keys (for example DeepSeek V4's `main` / `compress`) supply the complete mapping.

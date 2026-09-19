@@ -382,7 +382,9 @@ def _f16acc_promotes(atom, m_reg: int, n_reg: int, n_folds: int, frag_ns: str = 
     """One :class:`FragmentPromote` per C cell × fold channel — the f16 chunk fold into the f32
     shadows (also the FINAL fold: the shadows carry the full sum only after it runs)."""
     return [
-        FragmentPromote(dst=_fold_frag(f"{frag_ns}_c{i}_{j}", f), src=_fold_frag(f"{frag_ns}_ch{i}_{j}", f), fragment_layout=atom.fragment_layout)
+        FragmentPromote(
+            dst=_fold_frag(f"{frag_ns}_c{i}_{j}", f), src=_fold_frag(f"{frag_ns}_ch{i}_{j}", f), fragment_layout=atom.fragment_layout
+        )
         for f in range(n_folds)
         for i in range(m_reg)
         for j in range(n_reg)
@@ -3244,7 +3246,8 @@ class _FlashOps(_MmaOps):
         if _f16acc(atom):
             out += [
                 FragmentPromote(dst=self.frag(f"_c{i}_{j}"), src=self.frag(f"{cell}{i}_{j}"), fragment_layout=atom.fragment_layout)
-                for i in range(m.reg) for j in range(n.reg)
+                for i in range(m.reg)
+                for j in range(n.reg)
             ]
         return out
 

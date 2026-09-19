@@ -1481,9 +1481,10 @@ def _print_kernel_stats(graph, bench, golden_benches=None, greedy_fail=None, gre
         block_threads = block_dims[0] * block_dims[1] * block_dims[2]
         grid_total = grid_dims[0] * grid_dims[1] * grid_dims[2]
         regs = (attrs.get(op.kernel_name) or {}).get("num_regs", 0)
+        local = (attrs.get(op.kernel_name) or {}).get("local_size_bytes", "--")
         occ_pct = _theoretical_occupancy(regs, op.smem_bytes, block_threads, occ_limits)
         occ_str = f"{occ_pct:>3.0f}%" if occ_pct is not None else "  --"
-        return grid_total, block_threads, op.smem_bytes / 1024, regs, occ_str
+        return grid_total, block_threads, op.smem_bytes / 1024, regs, local, occ_str
 
     def _op_sig(op):
         return ShapeKey.from_s_features(getattr(op, "knobs", {}) or {})
@@ -1536,7 +1537,7 @@ def _print_kernel_stats(graph, bench, golden_benches=None, greedy_fail=None, gre
         if gb.flags:
             label = f"! {label}"
         if gb.graph is None:
-            records.append((label, None, "--", (0, 0, 0.0, 0, "  --"), {}, ref))
+            records.append((label, None, "--", (0, 0, 0.0, 0, "--", "  --"), {}, ref))
             return
         g_times = (
             {}
@@ -1586,14 +1587,17 @@ def _print_kernel_stats(graph, bench, golden_benches=None, greedy_fail=None, gre
         Col("block", "r"),
         Col("smem", "r"),
         Col("regs", "r"),
+        Col("local B", "r"),
         Col("occ", "r"),
         *kcols,
     ]
     data = []
     for rec, kc in zip(records, kcells, strict=True):
-        name, t_us, pct_cell, (grid_total, block_threads, smem_kb, regs, occ_str) = rec[:4]
+        name, t_us, pct_cell, (grid_total, block_threads, smem_kb, regs, local, occ_str) = rec[:4]
         us_cell = "--" if t_us is None else f"{t_us:.1f}"
-        data.append([name, us_cell, pct_cell, str(grid_total), str(block_threads), f"{smem_kb:.1f}K", str(regs), occ_str.strip(), *kc])
+        data.append(
+            [name, us_cell, pct_cell, str(grid_total), str(block_threads), f"{smem_kb:.1f}K", str(regs), str(local), occ_str.strip(), *kc]
+        )
     data.append(["TOTAL", "bench_fail" if total_us is None else f"{total_us:.1f}", *[""] * (len(columns) - 2)])
     # TOTAL sums per-launch solo windows (each kernel replayed back-to-back in
     # its own event window); the whole-program row is one window around the
