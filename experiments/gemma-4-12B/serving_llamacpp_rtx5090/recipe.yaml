@@ -1,7 +1,7 @@
 # llama.cpp lane for the gemma-4-12B-it end-to-end A/B (RTX 5090) — the fourth engine in the
 # blog article's serving tables, docker-free: build llama.cpp from source with CUDA (sm_120),
 # convert the HF checkpoint to F16 GGUF (same weights, text model only), serve with
-# llama-server, and drive the SAME five workload points with the same `vllm bench serve`
+# llama-server, and drive the SAME six workload points with the same `vllm bench serve`
 # client and hygiene flags as the vLLM lanes (experiments/gemma-4-12B/serving_rtx5090).
 #
 # Per-point server configs: single-stream points on one 16384-ctx slot, matching the vLLM
@@ -9,6 +9,7 @@
 # llama.cpp preallocates the WHOLE KV up front, so 8 x 16384 = 131072 tokens would OOM,
 # and it would buy nothing: the workload is 4096 in + 4096 out = 8192 tokens, which fits
 # a 8448 slot either way. Context here is sized to the workload, not to a protocol knob.
+# The 8192/256 c=4 RAG point needs 8448 tokens too and rides the same 8-slot server.
 # The 256/256 c=64 point needs 64x640 slots, which
 # OOMs beside 23 GB of FP16 weights (llama.cpp allocates the full KV up front — no paged
 # allocator, no sliding-window exploitation), so that cell is expected to FAIL and the
@@ -78,6 +79,7 @@ command:
     serve 8 67584
     bench head_c4  4096 4096  4 32
     bench head_c8  4096 4096  8 64
+    bench rag_c4   8192  256  4 16
     serve 64 40960 && bench small_c64 256 256 64 256 || echo "c=64 point OOM (expected; the article's footnote)"
     pkill -f "[l]lama-server" 2>/dev/null || true
     echo LLAMACPP_LANE_DONE
