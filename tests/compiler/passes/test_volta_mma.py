@@ -113,7 +113,7 @@ def test_volta_atom_separates_logical_and_instruction_shapes() -> None:
     assert atom.ptx_shape == (8, 8, 4)
     assert tuple(atom.fragment_nregs(role) for role in ("a", "b", "c")) == (2, 2, 8)
     assert atom.fragment_layout == "m8n8k4"
-    assert atom.sync_copy_staging and atom.c_to_a_repack
+    assert atom.sync_copy_staging and atom.c_to_a_repack and atom.c_to_b_repack
 
     # The PTX C-fragment map covers the logical 16x16 output exactly once.
     coords = []
@@ -128,6 +128,7 @@ def test_volta_atom_separates_logical_and_instruction_shapes() -> None:
 
 def test_atom_selection_is_target_specific() -> None:
     assert atoms_for(F16, ctx=Context(compute_capability=(7, 0))) == (VOLTA,)
+    assert atoms_for(F16, acc=F16, ctx=Context(compute_capability=(7, 0))) == ("mma_m8n8k4_f16_f16",)
     assert atoms_for(F16, ctx=Context(compute_capability=(7, 5))) == (VOLTA,)
     assert atoms_for(F16, ctx=Context(compute_capability=(8, 0))) == (AMPERE,)
     assert atoms_for(F16, ctx=Context(compute_capability=(12, 0))) == (AMPERE,)

@@ -378,11 +378,13 @@ def _mma_c_base(atom, i: int, j: int) -> str:
     return f"_ch{i}_{j}" if _f16acc(atom) else f"_c{i}_{j}"
 
 
-def _f16acc_promotes(m_reg: int, n_reg: int, n_folds: int, frag_ns: str = "") -> list[Stmt]:
+def _f16acc_promotes(atom, m_reg: int, n_reg: int, n_folds: int, frag_ns: str = "") -> list[Stmt]:
     """One :class:`FragmentPromote` per C cell × fold channel — the f16 chunk fold into the f32
     shadows (also the FINAL fold: the shadows carry the full sum only after it runs)."""
     return [
-        FragmentPromote(dst=_fold_frag(f"{frag_ns}_c{i}_{j}", f), src=_fold_frag(f"{frag_ns}_ch{i}_{j}", f))
+        FragmentPromote(
+            dst=_fold_frag(f"{frag_ns}_c{i}_{j}", f), src=_fold_frag(f"{frag_ns}_ch{i}_{j}", f), fragment_layout=atom.fragment_layout
+        )
         for f in range(n_folds)
         for i in range(m_reg)
         for j in range(n_reg)
@@ -2013,7 +2015,7 @@ class _MmaOps(_AtomOps):
             scales=tuple(self._drain_scale(op) for op in operands),
         )
         if _f16acc(self.tile.atom):
-            stmts = [*stmts, *_f16acc_promotes(mn[0].reg, mn[1].reg, len(self.channels), self.frag_ns)]
+            stmts = [*stmts, *_f16acc_promotes(self.tile.atom, mn[0].reg, mn[1].reg, len(self.channels), self.frag_ns)]
         return stmts
 
     def _drain_scale(self, op):
@@ -2284,7 +2286,7 @@ class _MmaOps(_AtomOps):
                 # Promote every _F16ACC_STEPS atom-K steps (a compile-time-foldable modulo when
                 # the loop unrolls), plus the unconditional final fold after the loop — it also
                 # covers a symbolic / non-multiple K's partial last chunk.
-                promotes = _f16acc_promotes(m.reg, n.reg, 1, self.frag_ns)
+                promotes = _f16acc_promotes(self.tile.atom, m.reg, n.reg, 1, self.frag_ns)
                 period = atom.atom_k * _F16ACC_STEPS
                 fire = BinaryExpr("==", BinaryExpr("%", Var(k_axis.name), Literal(period, "int")), Literal(period - atom.atom_k, "int"))
                 stmts.append(Cond(cond=fire, body=tuple(promotes)))
@@ -3243,7 +3245,9 @@ class _FlashOps(_MmaOps):
             ]
         if _f16acc(atom):
             out += [
-                FragmentPromote(dst=self.frag(f"_c{i}_{j}"), src=self.frag(f"{cell}{i}_{j}")) for i in range(m.reg) for j in range(n.reg)
+                FragmentPromote(dst=self.frag(f"_c{i}_{j}"), src=self.frag(f"{cell}{i}_{j}"), fragment_layout=atom.fragment_layout)
+                for i in range(m.reg)
+                for j in range(n.reg)
             ]
         return out
 
