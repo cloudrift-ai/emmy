@@ -58,7 +58,7 @@ command:
     ls -sh $$GGUF
 
     serve() { # parallel total_ctx
-      pkill -f "[l]lama-server" 2>/dev/null || true; sleep 3
+      pkill -x llama-server 2>/dev/null || true; sleep 3
       $$SRC/build/bin/llama-server -m $$GGUF --alias $$MODEL -ngl 99 -fa on --no-webui \
         --parallel $$1 -c $$2 --host 0.0.0.0 --port 8010 > $task_dir/serve_p$$1.log 2>&1 &
       for i in $$(seq 1 120); do curl -sf localhost:8010/health >/dev/null && return 0; sleep 5; done
@@ -81,7 +81,7 @@ command:
     bench head_c8  4096 4096  8 64
     bench rag_c4   8192  256  4 16
     serve 64 40960 && bench small_c64 256 256 64 256 || echo "c=64 point OOM (expected; the article's footnote)"
-    pkill -f "[l]lama-server" 2>/dev/null || true
+    pkill -x llama-server 2>/dev/null || true
     echo LLAMACPP_LANE_DONE
   result_files:
     - "*.txt"
