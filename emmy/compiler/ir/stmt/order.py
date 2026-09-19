@@ -13,7 +13,7 @@ ties by spelling, structural identity colors them by type and never reads a spel
 
 from __future__ import annotations
 
-from collections import Counter, deque
+from collections import deque
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, fields
 
@@ -579,18 +579,19 @@ def _canonical_labeling(
         groups.setdefault(color, []).append(vertex)
     initial = tuple(tuple(groups[color]) for color in sorted(groups))
     generators: list[tuple[int, ...]] = []
+    #: The vertices each generator moves, parallel to ``generators``: an automorphism between two
+    #: leaves that differ in one individualized vertex moves a handful, and every use below —
+    #: does it fix a prefix, which cell members does it join — reads only those.
+    moved: list[frozenset[int]] = []
+    known: set[tuple[int, ...]] = set()
 
-    edge_counter = Counter(relations)
-
-    def automorphism(left: tuple[int, ...], right: tuple[int, ...]) -> tuple[int, ...] | None:
+    def automorphism(left: tuple[int, ...], right: tuple[int, ...]) -> tuple[int, ...]:
+        """The vertex map between two leaves of one certificate: relabeling the graph by either
+        order spells the same colored relations, so the map is an automorphism by construction."""
         permutation = [0] * count
         for source, target in zip(left, right, strict=True):
             permutation[source] = target
-        candidate = tuple(permutation)
-        if any(vertex_colors[index] != vertex_colors[candidate[index]] for index in range(count)):
-            return None
-        mapped = Counter((candidate[source], candidate[target], color) for source, target, color in relations)
-        return candidate if mapped == edge_counter else None
+        return tuple(permutation)
 
     def inverse(permutation: tuple[int, ...]) -> tuple[int, ...]:
         out = [0] * count
@@ -603,22 +604,56 @@ def _canonical_labeling(
         ordered_relations = tuple(sorted((ranks[source], ranks[target], color) for source, target, color in relations))
         return tuple(vertex_colors[vertex] for vertex in order), ordered_relations
 
-    def orbit(vertex: int, candidates: frozenset[int], prefix: tuple[int, ...]) -> frozenset[int]:
-        eligible = [generator for generator in generators if all(generator[fixed] == fixed for fixed in prefix)]
-        reached = {vertex}
-        work = [vertex]
-        while work:
-            current = work.pop()
-            for generator in eligible:
-                mapped = generator[current]
-                if mapped in candidates and mapped not in reached:
-                    reached.add(mapped)
-                    work.append(mapped)
-        return frozenset(reached)
-
     def learn(left: tuple[int, ...], right: tuple[int, ...]) -> None:
-        if (generator := automorphism(left, right)) is not None and generator not in generators:
-            generators.extend((generator, inverse(generator)))
+        generator = automorphism(left, right)
+        if generator not in known:
+            known.add(generator)
+            support = frozenset(vertex for vertex, mapped in enumerate(generator) if mapped != vertex)
+            for permutation in (generator, inverse(generator)):
+                generators.append(permutation)
+                moved.append(support)
+
+    class _Orbits:
+        """The orbits of a node's cell under the generators that fix its prefix pointwise —
+        union-find over the cell, fed every such generator learned so far and extended as the
+        node's own children learn more, so a child in the orbit of an explored one is never
+        descended. A node's eligible generators are its parent's that also fix the vertex it
+        individualized, plus whatever was learned since."""
+
+        def __init__(self, cell: tuple[int, ...], prefix: tuple[int, ...], parent: _Orbits | None) -> None:
+            self.parents = {vertex: vertex for vertex in cell}
+            self.fixed = frozenset(prefix)
+            if parent is None:
+                self.eligible: list[int] = []
+                self.seen = 0
+            else:
+                self.eligible = [index for index in parent.eligible if prefix[-1] not in moved[index]]
+                self.seen = parent.seen
+            for index in self.eligible:
+                self.join(index)
+            self.absorb()
+
+        def root(self, vertex: int) -> int:
+            parents = self.parents
+            while parents[vertex] != vertex:
+                parents[vertex] = parents[parents[vertex]]
+                vertex = parents[vertex]
+            return vertex
+
+        def join(self, index: int) -> None:
+            generator = generators[index]
+            for vertex in moved[index]:
+                if vertex in self.parents:
+                    left, right = self.root(vertex), self.root(generator[vertex])
+                    if left != right:
+                        self.parents[right] = left
+
+        def absorb(self) -> None:
+            for index in range(self.seen, len(generators)):
+                if moved[index].isdisjoint(self.fixed):
+                    self.eligible.append(index)
+                    self.join(index)
+            self.seen = len(generators)
 
     # The first leaf and the least leaf so far, by certificate: a later leaf equal to either is
     # its image under an automorphism, and so is the whole subtree that leaf hangs from, up to the
@@ -626,7 +661,11 @@ def _canonical_labeling(
     references: dict[tuple, tuple[tuple[int, ...], tuple[int, ...]]] = {}
 
     def search(
-        partition: tuple[tuple[int, ...], ...], prefix: tuple[int, ...], *, refined: bool = False
+        partition: tuple[tuple[int, ...], ...],
+        prefix: tuple[int, ...],
+        *,
+        refined: bool = False,
+        parent: _Orbits | None = None,
     ) -> tuple[tuple, tuple[int, ...], tuple[int, ...]]:
         if not refined:
             partition = _equitable_partition(partition, incoming, outgoing)
@@ -637,29 +676,32 @@ def _canonical_labeling(
 
         _, cell_index = min(choices)
         cell = partition[cell_index]
-        candidate_set = frozenset(cell)
-        covered: set[int] = set()
+        orbits = _Orbits(cell, prefix, parent) if _prune else None
+        explored: set[int] = set()
         best: tuple[tuple, tuple[int, ...], tuple[int, ...]] | None = None
         for vertex in cell:
-            if vertex in covered:
-                continue
-            covered.update(orbit(vertex, candidate_set, prefix) if _prune else {vertex})
+            if orbits is not None:
+                orbits.absorb()
+                if orbits.root(vertex) in explored:
+                    continue
+                explored.add(orbits.root(vertex))
             rest = tuple(member for member in cell if member != vertex)
             individualized = (*partition[:cell_index], (vertex,), rest, *partition[cell_index + 1 :])
-            result = search(_equitable_partition(individualized, incoming, outgoing, cell_index), (*prefix, vertex), refined=True)
+            child = _equitable_partition(individualized, incoming, outgoing, cell_index)
+            result = search(child, (*prefix, vertex), refined=True, parent=orbits)
             if best is None or result[0] < best[0]:
                 best = result
             elif result[0] == best[0]:
                 learn(best[1], result[1])
-            known = references.get(result[0])
-            if known is None:
+            reference = references.get(result[0])
+            if reference is None:
                 if _prune and (not references or result[0] < min(references)):
                     if len(references) > 1:
                         del references[max(references)]
                     references[result[0]] = (result[1], result[2])
-            elif known[1] != result[2]:
-                learn(known[0], result[1])
-                if known[1][: len(prefix)] != prefix:
+            elif reference[1] != result[2]:
+                learn(reference[0], result[1])
+                if reference[1][: len(prefix)] != prefix:
                     return best
         assert best is not None
         return best
