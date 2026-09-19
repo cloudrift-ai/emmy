@@ -86,6 +86,8 @@ def test_register_operands_use_direct_loads_when_the_address_allows_it(target, s
     from emmy.compiler.ir.stmt import Load
 
     graph = _graph()
+    weight = graph.nodes["W"].outputs[0]
+    weight.shape = (weight.shape[0], weight.shape[1] * stride)
     op = graph.nodes["out"].op
     graph.nodes["out"].op = replace(
         op,
