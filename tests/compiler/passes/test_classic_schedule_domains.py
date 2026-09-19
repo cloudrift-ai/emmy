@@ -564,11 +564,8 @@ def _cooperative_root_sets(tile: TileOp, target, monkeypatch) -> set[tuple[int, 
     return {tuple(site for site in roots if leaf.schedule.nodes[site].reduce == cooperative) for leaf in leaves}
 
 
-def test_shared_output_projection_offers_at_most_one_output_tiled_root(monkeypatch) -> None:
-    """One output reads BOTH accumulators, so the projection does not partition by root and the
-    kernel binder binds at most one output-tiled root (the other reduce lowers serially inside
-    the projection). The offer applies the binder's rule: no row tiles both roots — that row was
-    offered and then refused at materialize — while each root still reaches the tile tier alone."""
+def test_shared_output_projection_refuses_fragment_atoms(monkeypatch) -> None:
+    """One output reads both roots, so either fragment would have a serial reduction in its epilogue."""
     from emmy.compiler.ir.stmt import Write
     from emmy.compiler.ir.tile import OutputSpec
 
@@ -581,8 +578,7 @@ def test_shared_output_projection_offers_at_most_one_output_tiled_root(monkeypat
         {"out": Tensor("out", (128, 128), "f16")},
         (OutputSpec(Write(output="out", index=(Var("m"), Var("n")), value="v")),),
     )
-    roots = tuple(tile.node_id(edge) for edge in tile.op.operands)
-    assert _tiled_root_sets(tile, Context.from_target((12, 0)), monkeypatch) == {(), (roots[0],), (roots[1],)}
+    assert _tiled_root_sets(tile, Context.from_target((12, 0)), monkeypatch) == {()}
 
 
 def test_shared_output_projection_offers_at_most_one_cooperative_root(monkeypatch) -> None:
@@ -625,3 +621,32 @@ def test_partitioned_projection_still_offers_both_roots_output_tiled(monkeypatch
     roots = tuple(tile.node_id(edge) for edge in tile.op.operands)
     assert roots in _tiled_root_sets(tile, Context.from_target((12, 0)), monkeypatch)
     assert roots in _cooperative_root_sets(tile, Context.from_target((12, 0)), monkeypatch)
+
+
+def test_fragment_domain_includes_the_reduction_in_a_sibling_projection():
+    """A matmul result normalized by another reduction is not a straight-line fragment epilogue."""
+    from tests.compiler.terms import reduction
+
+    m, n, k, r = Axis("m", 32), Axis("n", 32), Axis("k", 64), Axis("r", 32)
+    matmul = contraction(
+        k,
+        Load(name="av", input="a", index=(Var("m"), Var("k"))),
+        (Load(name="bv", input="b", index=(Var("k"), Var("n"))), "acc"),
+    )
+    statistic = reduction(
+        r,
+        (Load(name="xv", input="x", index=(Var("m"), Var("r"))),),
+        (Assign("sum__v", "multiply", ("xv", "xv")),),
+        ("sum",),
+    )
+    scale = projection((statistic,), (Assign("scale", "rsqrt", ("sum",)),), ("scale",))
+    root = projection((matmul, scale), (Assign("y", "multiply", ("acc", "scale")),), ("y",))
+    tile = TileOp(
+        op=root,
+        place=Placement(free=(m, n)),
+        axes=(m, n, k, r),
+        inputs={name: Tensor(name, shape, "f16") for name, shape in {"a": (32, 64), "b": (64, 32), "x": (32, 32)}.items()},
+        outputs={"out": Tensor("out", (32, 32), "f16")},
+        output_specs=(OutputSpec(Write(output="out", index=(Var("m"), Var("n")), value="y")),),
+    )
+    assert not classic._warp_atoms(tile, Context.from_target((8, 9)), matmul)

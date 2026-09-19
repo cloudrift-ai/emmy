@@ -451,10 +451,9 @@ def _pair_terms(tmp_path):
 def _pair_refusal(tile, ctx, con, pair):
     """Why static node facts rule out every tensor-core atom, asked with ``pair`` as the reading."""
     from emmy.compiler.ir.schedule.classic import refusals as sched
-    from emmy.compiler.ir.tile.ops import projection_tail
 
-    tail = projection_tail(tile)
-    return sched._node_refusal(tile, ctx, con, sched._fragment_epilogue_ok(tail, sched._fold_states(tile.op)), (None, pair))
+    tail, states = sched._fragment_projection(tile)
+    return sched._node_refusal(tile, ctx, con, sched._fragment_epilogue_ok(tail, states), (None, pair))
 
 
 def test_the_block_scaled_cell_says_why_it_declines_a_pair_it_cannot_bind(tmp_path):

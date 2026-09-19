@@ -101,6 +101,7 @@
  "tests/compiler/cli/test_run.py::test_run_code_matmul_blockify[f16]@cuda-cli": 9.37,
  "tests/compiler/cli/test_run.py::test_run_code_matmul_blockify[f32]@cuda-cli": 4.54,
  "tests/compiler/cli/test_run.py::test_run_code_matmul_k_chunked@cuda-cli": 5.13,
+ "tests/compiler/cli/test_run.py::test_run_code_rmsnorm_accuracy[f16]@cuda-cli": 2.2,
  "tests/compiler/cli/test_run.py::test_run_code_rmsnorm_accuracy[f32]@cuda-cli": 6.5,
  "tests/compiler/cli/test_run.py::test_run_code_rmsnorm_blockify[f16]@cuda-cli": 5.8,
  "tests/compiler/cli/test_run.py::test_run_code_rmsnorm_blockify[f32]@cuda-cli": 5.2,
