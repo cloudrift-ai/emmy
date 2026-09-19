@@ -94,6 +94,8 @@ class Ctx:
     (the ``STAGE`` slice)."""
 
     grid: tuple
+    #: The placement's serial axes — runtime coordinates shared by every cell, like a lead axis.
+    serial: tuple = ()
     inputs: dict | None = None
     output: str = ""
     workers: object = None  # the resolved WarpSpec worker split (None = uniform SIMT)
@@ -168,6 +170,7 @@ def factorize(tile, root, store=None, sm_count: int = 0) -> Tile:
     op = tile.op
     ctx = Ctx(
         grid=tuple(tile.place.grid),
+        serial=tuple(tile.place.serial),
         inputs=tile.inputs,
         output=(root.output.name if root is not None else ""),
         workers=tile.workers,
@@ -501,7 +504,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
             ctx.inputs,
             ctx.workers,
             seam,
-            lead,
+            (*lead, *ctx.serial),
             frag_ns,
             k_axis=k_axis,
             axes=ctx.sched.tile.axes,
@@ -515,7 +518,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
                 c,
                 tile,
                 Body(tuple(epi)),
-                lead,
+                (*lead, *ctx.serial),
                 frag_ns,
                 stage=stage,
                 k_axis=k_axis,

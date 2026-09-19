@@ -85,7 +85,7 @@ def rewrite(root: Node) -> KernelOp | None:
     n = LOOPIFY.read_int(2 if config.readable() else 0)
     knobs = {**op.knobs, LOOPIFY.name: n}
     if n < 2:  # 0 / unset / a lone iteration → off, byte-identical
-        return KernelOp(body=op.body, name=op.name, knobs=knobs)
+        return replace(op, body=op.body, knobs=knobs)
     # (2) Fuse each pointwise fragment chain (``p <- s − m`` then ``p *= exp(p)``) into one node
     # carrying a ``post`` tail, so it renders as ``p[_e] = expf(s[_e] − m)`` instead of two loops.
     body = _fuse_chains(op.body)
@@ -98,7 +98,7 @@ def rewrite(root: Node) -> KernelOp | None:
         if new_body == body:
             break
         body = new_body
-    return KernelOp(body=body, name=op.name, knobs=knobs)
+    return replace(op, body=body, knobs=knobs)
 
 
 def _is_unary_post(s, out: str, layout) -> bool:

@@ -67,7 +67,9 @@ def compute_live_intervals(scratch_names: list[str], launches: list) -> dict[str
         reads = set(ln.arg_names)
         reads.update(d.src_buf for d in ln.tma_descriptors)
         for name in reads:
-            if name in scratch and name not in writes:
+            # A serial launch reads what its own earlier steps stored: a recurrence's state is
+            # live across the launch that writes it, whoever else reads it.
+            if name in scratch and (name not in writes or getattr(ln, "serial", ())):
                 last_read[name] = i
     intervals: dict[str, tuple[int, int]] = {}
     for name in scratch_names:

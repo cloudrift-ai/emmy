@@ -14,9 +14,11 @@ from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.leaves import (
     Accum,
     Assign,
+    Carry,
     Init,
     Let,
     Load,
+    Pre,
     Select,
     SelectBranch,
     Write,
@@ -97,6 +99,19 @@ def _(s: Accum, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
         dtype=s.dtype,
         axes=new_axes,
         base=rename(s.base) if s.base is not None else None,
+    )
+
+
+@_rewrite_kind.register
+def _(s: Carry, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
+    index = tuple(_rename_ssa_vars_in_expr(sigma.apply(e), rename) for e in s.index)
+    return Carry(name=rename(s.name), value=rename(s.value), index=index, seed=s.seed, dtype=s.dtype)
+
+
+@_rewrite_kind.register
+def _(s: Pre, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
+    return Pre(
+        name=rename(s.name), carrier=rename(s.carrier), index=tuple(_rename_ssa_vars_in_expr(sigma.apply(e), rename) for e in s.index)
     )
 
 

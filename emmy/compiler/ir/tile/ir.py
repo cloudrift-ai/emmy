@@ -346,6 +346,13 @@ def _reads_move_with(edge: Fold, coord: str, ctx: SimplifyCtx) -> bool:
     return any(coord in index.simplify(ctx).free_vars() for index in _index_reads(edge) if coord in index.free_vars())
 
 
+def loaded_buffers(term):
+    """Every ``Load`` the STORED tree reads — each lift body's loads, through the operand edges."""
+    yield from term.lift.body.loads
+    for edge in term.operands:
+        yield from loaded_buffers(edge)
+
+
 @dataclass(frozen=True)
 class TileOp(Op):
     """One scheduled map/reduce kernel (see module docstring).
@@ -446,6 +453,16 @@ class TileOp(Op):
         )
         self._own_axes()
         self._validate_schedule()
+        self._validate_lagged_reads()
+
+    def _validate_lagged_reads(self) -> None:
+        """A kernel reads its OWN output only one launch back along a serial axis: with no serial
+        axis, no launch has stored what such a read would see."""
+        if self.op is None or self.place.serial:
+            return
+        own = {spec.write.output for spec in self.output_specs}
+        if stale := sorted({load.input for load in loaded_buffers(self.op)} & own):
+            raise ValueError(f"TileOp {self.name!r}: a read of its own output {stale} needs a serial axis")
 
     def _own_axes(self) -> None:
         """The kernel owns its axis table, COMPLETE by construction: the free axes' extents are the
@@ -456,7 +473,7 @@ class TileOp(Op):
         if self.op is None:
             return
         table = {axis.name: axis for axis in self.axes}
-        for axis in self.place.free:
+        for axis in (*self.place.serial, *self.place.free):
             table.setdefault(axis.name, axis)
         needed = {site.node.axis for site in sites(self.op) if site.node.axis is not None}
         needed |= {axis.name for spec in self.output_specs for axis in spec.sweep}
@@ -663,8 +680,11 @@ class TileOp(Op):
         # evaluated over it — is the kernel's to bind: the term opens every coordinate it declares
         # and those loops wrap outside, in grid order.
         glue = tuple(axis for axis in self.place.free if axis.name not in self.op.free_axes)
-        body = self.op.lower(frozenset(axis.name for axis in glue), self.output_specs, self.axes)
-        for axis in reversed(glue):
+        serial = tuple(self.place.serial)
+        body = self.op.lower(frozenset(axis.name for axis in (*glue, *serial)), self.output_specs, self.axes)
+        # A serial axis is time: it encloses every cell, so a lagged read of this kernel's own
+        # output sees the previous step's stores from every cell.
+        for axis in reversed((*serial, *glue)):
             body = Body((Loop(axis=axis, body=body),))
         return body
 

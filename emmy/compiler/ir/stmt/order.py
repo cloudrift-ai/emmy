@@ -20,15 +20,16 @@ from dataclasses import dataclass, fields
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.leaves import Accum, Assign, Init
+from emmy.compiler.ir.stmt.leaves import Accum, Assign, Carry, Init
 from emmy.compiler.structural import form
 
 __all__ = ["Labeling", "Ordering", "bound_axes", "ordering_constraints", "relation_graph", "topological_sort"]
 
 
 def _ordered_exported_accs(body: Body) -> tuple[str, ...]:
-    """Accumulator names exported by ``body``, deduplicated in structural order."""
-    return tuple(dict.fromkeys(name for stmt in Body.coerce(body).iter() if isinstance(stmt, Accum) for name in stmt.carried_names()))
+    """Names ``body`` carries out — accumulators and carried states — deduplicated in structural order."""
+    carriers = (stmt for stmt in Body.coerce(body).iter() if isinstance(stmt, (Accum, Carry)))
+    return tuple(dict.fromkeys(name for stmt in carriers for name in stmt.carried_names()))
 
 
 def _ordered_sibling_defs(stmt: Stmt) -> tuple[str, ...]:

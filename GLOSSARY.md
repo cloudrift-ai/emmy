@@ -96,6 +96,13 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   Emmy a scan is a Fold with an **observer**: a pure per-step function over the carried state whose results only
   kernel-boundary output writes consume. An observed fold preserves its stream order, so it schedules as the serial
   fold only.
+- **Serial axis / lagged read** — A recurrence's time as a kernel's launch loop: a `Placement.serial` axis is
+  launched once per coordinate, in order, the coordinate a runtime `int` in the body, and the kernel may read its
+  own output strictly behind the step it writes (`S[c − 1]` while writing `S[c]`). The state lives in the buffer,
+  so the step is any `Fold`; a Loop IR carried state lifts to this (`lowering/tile/010_lift`).
+- **Carried state** — A recurrence's state in Loop IR: `Carry` defines the next value of one cell and names the seed,
+  a `Pre` read sees the previous step's value at any cell, and the loop that carries it sits outside the loops
+  over its cells. Not a fold: its steps are ordered and its step is any computation, so it has no op.
 - **Componentwise / twisted combine** — The two shapes a stored fold combine takes: one independent ⊕ per state (a
   planar fold — sum, max — built by `Lambda.componentwise` and read back by `Lambda.components`), or a componentwise
   monoid conjugated by a bijection (a twist) such as the exp/LSE family behind online softmax, stated by a twist
