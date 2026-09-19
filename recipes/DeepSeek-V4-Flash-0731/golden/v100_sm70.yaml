@@ -38131,18 +38131,6 @@ configs:
       reference_backend: same-input-greedy
     kernel_set:
     - pre16.k_linear_mean_reduce_03c479.8caa25e24052.m16.dc6db94ec8ea.dc6db94ec8ea
-  - name: pre16.k_linear_mean_reduce_03c479.8caa25e24052.m16.dc6db94ec8ea.dd70f818a372
-    bindings:
-      num_tokens: 16
-    pins:
-      FAST_MATH: false
-    knobs:
-      REDUCE@reduce: g4a
-    identity: 38e950b38229dd39e4d4cb29c41a55eaf904dc4d626166a006d4c8803f24102a
-    measurements:
-      emmy_us: 3.891199827194214
-      reference_us: 9.727999567985535
-      reference_backend: same-input-greedy
   - name: pre16.k_linear_mean_reduce_03c479.8caa25e24052.m16.dc6db94ec8ea.f3875e932840
     bindings:
       num_tokens: 16
