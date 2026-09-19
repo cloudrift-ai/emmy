@@ -305,8 +305,8 @@ def wide_accumulate(atom: AtomKind) -> AtomKind:
     The chunk tier runs its two mma chains at DIFFERENT accumulators: the expectation may take the
     reduced cell at the full consumer-die rate, since its chunk partial promotes into an f32
     carrier once per chunk, while the score feeds the softmax's running max and denominator, which
-    stay f32 throughout. Every other field of the two cells agrees, so the score's cell is the
-    carrier's with its accumulator put back."""
+    stay f32 throughout. The registry supplies the matching f32 cell, including its accumulator
+    register count and layout."""
     if atom.operand_dtype("c") == F32:
         return atom
     return next(

@@ -151,7 +151,7 @@ m(torch.randn(2,4,{chunk},{keys}), torch.randn(2,4,{chunk},{keys}),
     tile = node.op
     context = _context(tile, Context.probe().compute_capability)
     schedule = next(
-        s for s in context.extensions() if (s.kernel.tile.atom.operand_dtype("c").nbytes == 2) == half and s.kernel.work.units == (1, 1)
+        s for s in context.extensions() if (s.kernel.tile.atom.operand_dtype("c").nbytes == 2) == half and s.kernel.work.units == (2, 1)
     )
     graph = Graph()
     rng = np.random.default_rng(0)

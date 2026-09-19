@@ -1811,13 +1811,16 @@ def _write_ab_json(
 def _collect_kernel_attrs(graph) -> dict[str, dict]:
     """Read attributes from the runtime's cached cubins, using its compile flags and target."""
     from emmy.compiler.backend.cuda.program import _load_kernel
-    from emmy.compiler.backend.plan import plan_from_graph
+    from emmy.compiler.backend.plan import KernelSpec
 
     out = {}
-    for name, spec in plan_from_graph(graph).kernels.items():
+    for node in _launch_order_cuda_nodes(graph):
+        op = node.op
+        if op.kernel_name in out:
+            continue
         try:
-            kernel = _load_kernel(name, spec)
-            out[name] = {key: getattr(kernel, key) for key in ("num_regs", "local_size_bytes", "shared_size_bytes")}
+            kernel = _load_kernel(op.kernel_name, KernelSpec.from_op(op))
+            out[op.kernel_name] = {key: getattr(kernel, key) for key in ("num_regs", "local_size_bytes", "shared_size_bytes")}
         except Exception:  # pragma: no cover — unavailable GPU/compiler or a failed kernel
             continue
     return out
