@@ -608,14 +608,15 @@ canonicalized before validation:
   `O((vertices + relations) log vertices)` relation visits. Exact individualization is isolated to partitions that
   refinement cannot distinguish; no exact near-linear worst-case graph-canonization algorithm is known. The search
   keeps its cost near the number of leaves it must see: each node's refinement skips the turns of the cells nothing
-  has split (the parent partition is already equitable), and a leaf equal to the first or the least leaf seen is its image under
-  an automorphism, so the search stops the subtree that leaf hangs from where its path leaves the reference's —
-  everything in there was already labeled. Two leaves of one certificate prove their vertex map an automorphism, so
-  none is re-checked against the relations; each generator remembers the vertices it moves, and a node's orbits are
-  a union-find over its cell under the generators that fix its prefix — its parent's that also fix the vertex it
-  individualized, plus what was learned since. A kernel's k register fragments, which no refinement tells apart,
-  thus cost one refinement per level and arm rather than a full refinement of every node of a cubic tree (85 s to
-  0.25 s on a 16-fragment o_proj piece, 66 s to 3.7 s at 64 fragments). Canonical
+  has split (the parent partition is already equitable, and skipping keeps the queue order, so the result is a full
+  pass's), and a leaf equal to the first or the least leaf seen is its image under an automorphism, so the search
+  stops the subtree that leaf hangs from where its path leaves the reference's — everything in there was already
+  labeled. Two leaves of one certificate prove their vertex map an automorphism, so none is re-checked against the
+  relations; each generator remembers the vertices it moves, and a node's orbits are a union-find over its cell under
+  the generators that fix its prefix — its parent's that also fix the vertex it individualized, plus what was learned
+  since. A kernel's k register fragments, which no refinement tells apart, thus stop costing a full refinement of
+  every node of a cubic tree: recording one Gemma 4 piece with 16 fragments once spent 85 s per op labeling it, and
+  the Gemma 4 serving bodies label in 0.1 s or less. Canonical
   vertex ranks then serve as the optional tie-break for `Body.topological_order`, a heap-based Kahn sort. Ready nested
   scopes stay ahead of leaf epilogues so normalization does not widen schedule search or obscure contractions.
 
