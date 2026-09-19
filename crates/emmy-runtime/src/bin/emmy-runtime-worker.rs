@@ -4,6 +4,7 @@ use anyhow::{Context, Result, ensure};
 use emmy_runtime::{
     artifact::Artifact,
     cuda::{Device, Executor},
+    generation::Generator,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -35,6 +36,22 @@ enum Command {
         capture: bool,
         outputs: BTreeMap<String, PathBuf>,
     },
+    LoadGeneration {
+        root: PathBuf,
+    },
+    StartGeneration {
+        prompt: PathBuf,
+    },
+    GenerationStep {
+        capture: bool,
+        logits: Option<PathBuf>,
+    },
+    Generate {
+        prompt: PathBuf,
+        max_new_tokens: usize,
+        capture: bool,
+        output: PathBuf,
+    },
     Release,
 }
 
@@ -61,6 +78,18 @@ fn read_frame(reader: &mut impl Read) -> Result<Option<Vec<u8>>> {
     Ok(Some(bytes))
 }
 
+fn read_tokens(path: &PathBuf) -> Result<Vec<i64>> {
+    let bytes = std::fs::read(path)?;
+    ensure!(
+        bytes.len() % size_of::<i64>() == 0,
+        "invalid token payload size"
+    );
+    Ok(bytes
+        .chunks_exact(size_of::<i64>())
+        .map(|b| i64::from_le_bytes(b.try_into().unwrap()))
+        .collect())
+}
+
 fn main() -> Result<()> {
     ensure!(
         std::env::args().len() == 1,
@@ -70,6 +99,7 @@ fn main() -> Result<()> {
     let mut output = std::io::stdout().lock();
     let mut context = None;
     let mut executor: Option<Executor> = None;
+    let mut generator: Option<Generator> = None;
     while let Some(frame) = read_frame(&mut input)? {
         let response = (|| -> Result<serde_json::Value> {
             let request: Request = serde_json::from_slice(&frame)?;
@@ -83,6 +113,7 @@ fn main() -> Result<()> {
                     let artifact = Artifact::load(&root, &program)?;
                     let artifact_ms = started.elapsed().as_secs_f64() * MILLISECONDS_PER_SECOND;
                     executor = None;
+                    generator = None;
                     let started = Instant::now();
                     if context.is_none() {
                         context = Some(Device::new(GPU_ORDINAL)?);
@@ -118,7 +149,46 @@ fn main() -> Result<()> {
                         "output_ms": started.elapsed().as_secs_f64() * MILLISECONDS_PER_SECOND}),
                     )
                 }
+                Command::LoadGeneration { root } => {
+                    executor = None;
+                    generator = None;
+                    if context.is_none() {
+                        context = Some(Device::new(GPU_ORDINAL)?);
+                    }
+                    generator = Some(Generator::load(context.as_ref().unwrap(), &root)?);
+                    Ok(json!({"loaded": true}))
+                }
+                Command::StartGeneration { prompt } => {
+                    generator
+                        .as_mut()
+                        .context("no loaded generator")?
+                        .start(&read_tokens(&prompt)?)?;
+                    Ok(json!({"started": true}))
+                }
+                Command::GenerationStep { capture, logits } => {
+                    let generator = generator.as_mut().context("no loaded generator")?;
+                    let token = generator.advance(capture)?;
+                    if let Some(path) = logits {
+                        std::fs::write(path, generator.logits()?)?;
+                    }
+                    Ok(json!({"token": token}))
+                }
+                Command::Generate {
+                    prompt,
+                    max_new_tokens,
+                    capture,
+                    output,
+                } => {
+                    let tokens = generator
+                        .as_mut()
+                        .context("no loaded generator")?
+                        .generate(&read_tokens(&prompt)?, max_new_tokens, capture)?;
+                    let bytes: Vec<u8> = tokens.iter().flat_map(|t| t.to_le_bytes()).collect();
+                    std::fs::write(output, bytes)?;
+                    Ok(json!({"generated_tokens": tokens.len()}))
+                }
                 Command::Release => {
+                    generator = None;
                     executor = None;
                     Ok(json!({"released": true}))
                 }

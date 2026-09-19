@@ -62,7 +62,7 @@ impl Config {
 
 pub struct Generator {
     executor: Executor,
-    pub config: Config,
+    config: Config,
     position: usize,
     prompt_length: usize,
     stopped: bool,
@@ -143,6 +143,7 @@ impl Generator {
             .bind("position", &(self.position as i64).to_le_bytes())?;
         self.executor.advance(capture)?;
         self.position += 1;
+        self.stopped = false;
         if self.position < self.prompt_length {
             return Ok(None);
         }
@@ -173,7 +174,7 @@ impl Generator {
     ) -> Result<Vec<i64>> {
         self.config.validate_prompt(prompt)?;
         ensure!(
-            max_new_tokens <= self.config.context_length - prompt.len() + 1,
+            max_new_tokens <= self.config.context_length - prompt.len(),
             "generation exceeds context capacity"
         );
         self.start(prompt)?;
