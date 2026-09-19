@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: moonshotai/Kimi-K3
-  rationale: "Fresh LMArena rank 17 signals strong current model-family interest."
-  heat: 75
+  rationale: "High OpenRouter spend, strong arena ranks, current attention."
+  heat: 85
   task: generate
 matrices:
 - deploy.gpu: NVIDIA B200
