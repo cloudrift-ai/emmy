@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: meta-models/Muse-Glimmer-30B
-  rationale: "Limited prior mindshare persists; no current trend or serving evidence."
-  heat: 30
+  rationale: "No current HF or serving evidence."
+  heat: 15
   task: generate
 matrices:
 - deploy.gpu: NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition
