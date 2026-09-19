@@ -329,18 +329,26 @@ def _price_graph(
     db: object | None = None,
     decisions: dict | None = None,
     deadline: float | None = None,
+    bound: float = math.inf,
 ) -> float | None:
     """Σ of per-kernel best-µs prices over ``graph``'s kernel-bearing
     nodes, or ``None`` when any kernel is unpriceable (no partition fork —
-    e.g. a pre-tiled combine ``TileOp`` — or a failed nested resolve)."""
-    prices = [
-        _price_kernel(graph, nid, ctx, prior, memo, db, decisions, deadline)
-        for nid, n in graph.nodes.items()
-        if n.op.identity_key(with_io=True, with_knobs=True) is not None
-    ]
-    if not prices or any(p is None for p in prices):
-        return None
-    return sum(prices)
+    e.g. a pre-tiled combine ``TileOp`` — or a failed nested resolve).
+
+    ``bound`` is the best complete price the caller already holds. A price is never negative, so
+    a graph whose partial Σ has reached it cannot win: it prices ``inf`` and its remaining kernels
+    are never priced — each of those is a nested resolution, the whole cost of a kernel-set fork."""
+    total: float | None = None
+    for nid, n in graph.nodes.items():
+        if n.op.identity_key(with_io=True, with_knobs=True) is None:
+            continue
+        us = _price_kernel(graph, nid, ctx, prior, memo, db, decisions, deadline)
+        if us is None:
+            return None
+        total = us if total is None else total + us
+        if total >= bound:
+            return math.inf
+    return total
 
 
 def _price_op_leaf(
@@ -372,10 +380,10 @@ def _priced_pick(
     db: object | None = None,
     decisions: dict | None = None,
     deadline: float | None = None,
-) -> object | None:
-    """The priced argmin over a kernel-set fork's leaves — the structural
+) -> tuple[object, float] | None:
+    """The priced argmin over a kernel-set fork's leaves and its price — the structural
     (``Graph``-splicing) options and the keep-fused ``Op`` side alike — or
-    ``None`` when some leaf cannot be priced.
+    ``None`` when some leaf cannot be priced. The first of equally priced leaves wins.
 
     This exists because the per-op prior scores ONE kernel's knob row, so its
     score for a multi-kernel ``Graph`` option is meaningless: the leaf carries
@@ -396,21 +404,21 @@ def _priced_pick(
     ``None`` (an unpriceable leaf) hands the fork back to the ordinary leaf
     ranking with EVERY leaf still in it, structural ones included: an option
     nothing can price is just an option, and greedy is not shielded from
-    picking it."""
+    picking it. A structural option that has already lost (:func:`_price_graph`'s ``bound``) is
+    not priced further, so a kernel nothing can price no longer counts once its option is beaten."""
     from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
 
-    priced = [
-        (
-            o,
-            _price_graph(_leaf_graph(o), fp.ctx, prior, memo, db, decisions, deadline)
-            if _is_structural_option(o)
-            else _price_op_leaf(fp, o, prior, memo, db, decisions, deadline),
-        )
-        for o in leaves
-    ]
-    if any(us is None for _, us in priced):
-        return None
-    return min(priced, key=lambda op_us: op_us[1])[0]
+    best: tuple[object, float] | None = None
+    for o in leaves:
+        if _is_structural_option(o):
+            us = _price_graph(_leaf_graph(o), fp.ctx, prior, memo, db, decisions, deadline, best[1] if best else math.inf)
+        else:
+            us = _price_op_leaf(fp, o, prior, memo, db, decisions, deadline)
+        if us is None:
+            return None
+        if best is None or us < best[1]:
+            best = (o, us)
+    return best
 
 
 # Process-wide memo for the built DB index, keyed on (db path, mtime, context key).
@@ -1080,13 +1088,12 @@ def greedy_decide(
                     # row, so this is a single resolve, not one per enumerated leaf — keeping the
                     # two sides of the kernel-set comparison the same quantity (a fork-local row
                     # score would omit any further scored forks the fused resolution hits).
-                    priced = [(o, _price_graph(_leaf_graph(o), fp.ctx, the_prior, memo, db, decisions)) for o in splices]
-                    fused_us = _price_op_leaf(fp, leaf, the_prior, memo, db, decisions)
-                    if fused_us is not None and all(us is not None for _, us in priced):
-                        best_o, best_us = min(priced, key=lambda o_us: o_us[1])
-                        if best_us < fused_us:
-                            fp.score = best_us
-                            return best_o
+                    # The fused side leads, so it keeps a tie and its price bounds every splice.
+                    won = _priced_pick(fp, [leaf, *splices], the_prior, memo, db, decisions, deadline)
+                    if won is not None:
+                        if won[0] is not leaf:
+                            fp.score = won[1]
+                            return won[0]
                     else:
                         # An unpriceable side: the old contract sends EVERY leaf to the ordinary
                         # ranking, structural ones included — the flatten path below keeps that.
@@ -1121,9 +1128,9 @@ def greedy_decide(
                 leaves = [o for o in leaves if not _is_structural_option(o)] or leaves
             else:
                 _require_evidence(fp, "no measured row spells a kernel-set arm")
-                pick = _priced_pick(fp, leaves, the_prior, memo, db, decisions, deadline)
-                if pick is not None:
-                    return pick
+                won = _priced_pick(fp, leaves, the_prior, memo, db, decisions, deadline)
+                if won is not None:
+                    return won[0]
         if len(leaves) <= 1:
             if leaves:
                 return leaves[0]
