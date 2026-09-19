@@ -94,6 +94,9 @@ Thinnest backend. `compile` returns the graph; `run` is inherited from
 `Backend`. Used for correctness testing (no GPU required) and as the
 ground truth the loop and CUDA backends are triangulated against.
 
+Pointwise operations with a wider floating result widen their floating inputs before evaluation. Casting only the
+result would already have rounded or overflowed a half-precision product that the graph declares as full width.
+
 ## Loop backend (`loop/`)
 
 Runs the fusion pipeline to turn the graph into `Graph[LoopOp]`, then

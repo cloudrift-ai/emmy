@@ -411,6 +411,10 @@ that direct private copy inherits the same accumulator dtype. Actual computation
 untyped, so normalization and softmax keep their f32 state until their own public result store. Fusion and placement
 then preserve the typed `copy` as an ordinary statement rather than reconstructing a boundary from graph topology.
 
+FP16/BF16 matmul decomposition declares its product at FP32 before reduction. Widening only the accumulator loses
+precision or overflows at each half-precision multiply, even when the dot product is representable. The explicit
+product dtype survives lifting and fusion, so scalar and tensor-core schedules implement the same wide product.
+
 Loop fusion is maximal and schedule-blind: every structurally legal merge is taken to fixpoint before lowering
 considers a kernel boundary. Fusion never asks whether the merged body is recognized, schedulable by an optimized
 tier, or faster than its parts. Nested reductions and multi-statistic compounds are therefore not fusion gates. A

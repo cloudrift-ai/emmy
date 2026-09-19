@@ -31,7 +31,7 @@ configs:
       TILE: mma_m16n8k16_f16_f16/f4x8/k2
       REDUCE: g2k
       STAGE: ''
-    identity: b156cb8cc7d7008b5144cbfd3b1fcde3f23f47dbc8f0c6c1ec94d6ffc7ced38e
+    identity: 21db75fa2d56437e03ba188f401fc571ed50a2d03ac47eae985dd27c9972f61f
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 122.52400070428848

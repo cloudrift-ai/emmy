@@ -53,12 +53,35 @@ alive, so they don't pay the respawn cost.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import pickle
 import sys
 import traceback
 
 _PACK_REFERENCE = None
+
+
+@contextlib.contextmanager
+def _reference_precision(strict: bool):
+    """Use full-width reductions for strict Torch comparisons, without changing the next worker job."""
+    if not strict:
+        yield
+        return
+    import torch
+
+    matmul = torch.backends.cuda.matmul
+    # Newer Torch versions pair the precision flag with an independent split-K flag.
+    # The native getter retains both; the public getter returns only the first.
+    fp16 = torch._C._get_cublas_allow_fp16_reduced_precision_reduction()
+    bf16 = torch._C._get_cublas_allow_bf16_reduced_precision_reduction()
+    try:
+        matmul.allow_fp16_reduced_precision_reduction = (False, fp16[1]) if isinstance(fp16, tuple) else False
+        matmul.allow_bf16_reduced_precision_reduction = (False, bf16[1]) if isinstance(bf16, tuple) else False
+        yield
+    finally:
+        matmul.allow_fp16_reduced_precision_reduction = fp16
+        matmul.allow_bf16_reduced_precision_reduction = bf16
 
 
 def _read_n(fd: int, n: int) -> bytes:
@@ -126,7 +149,7 @@ async def _run_job(req: dict) -> dict:
 
     from emmy import config
 
-    with config.nvcc_flags_override(req.get("nvcc_flags")):
+    with config.nvcc_flags_override(req.get("nvcc_flags")), _reference_precision(req.get("strict_accuracy", False)):
         spec = req.get("torch_spec")
         if spec is None:
             from emmy.compiler.backend.cuda.program import benchmark_program

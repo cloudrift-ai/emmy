@@ -135,7 +135,10 @@ and Emmy always rebuild the same module and example inputs. Inductor compiles wi
 `fullgraph=True, mode="max-autotune-no-cudagraphs"`; the harness supplies the shared outer CUDA graph so every backend
 has identical captured timing semantics. Inductor output must match eager on the same inputs at `rtol=atol=1e-3`
 before its latency is accepted. `run --strict` makes every requested backend, captured timing, exact pin, and direct
-Emmy-vs-eager proof authoritative. `--strict-evidence` (`run`, `compile`, `serve`; `EMMY_STRICT_EVIDENCE`) is the
+Emmy-vs-eager proof authoritative. Strict comparisons disable Torch's FP16/BF16 reduced-precision reductions for
+both correctness and timing; otherwise a shape-dependent cuBLAS algorithm can round intermediate sums and reject
+a kernel that accumulates at full width. The worker restores the prior precision and split-K settings after each
+job, including failures. `--strict-evidence` (`run`, `compile`, `serve`; `EMMY_STRICT_EVIDENCE`) is the
 deploy-side strictness: a fork no measured row decides raises `EvidenceError` naming the kernel instead of deploying
 a prediction. BF16 inputs and constants bind through the compiler's raw `uint16` carrier, and
 backend output bits are decoded to numeric values before every command-layer correctness check. The command records
@@ -297,8 +300,7 @@ knob rows into either baseline as proposals. Canonical goldens remain the common
 
 `emmy eval golden --golden GOLDEN_YAML --serving-config PATH` is the release audit. The env must name that exact
 canonical file. The command validates the nested schema and model provenance, requires the live GPU to match both the
-config
-and YAML, proves that every structural target has every config-derived realization, reproduces the recorded rows,
+config and YAML, proves that every structural target has every config-derived realization, validates the recorded rows,
 and re-traces the exact static/symbolic precision matrix. Any missing realization, unrealized entry, or twin the
 golden rows do not decide is a non-zero release failure. Model, revision, GPU, and serving widths therefore have no
 independent audit flags.

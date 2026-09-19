@@ -240,6 +240,11 @@ whose A is a bare vector. The binding yields to it, firing only where the placem
 
 Both rules are boundary-derived and general: neither recognizes a model or operation family.
 
+The placed matrix pair must still separate the operand roles. A grouped matvec may have two free weight axes but
+no row axis on its vector. Those weight axes are not an `(m, n)` matrix pair: `contracts` leaves the node in the
+per-cell reduction domain, excluding both scalar matrix tiling and tensor-core tiles. A unit axis is harmless
+because only its zero coordinate executes.
+
 Factoring preserves the pure cone's statement order. If a scalar projection between two nested Folds feeds the later
 Fold, the earlier Fold and scalar become a nested source projection; both Folds are never flattened ahead of that
 scalar. The stored Fold tree therefore lowers to the same dependency order as the canonical Loop IR input.
