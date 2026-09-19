@@ -36,8 +36,10 @@ command:
         > $task_dir/artifacts/counters.csv
       "$ncu" --import $task_dir/artifacts/profile.ncu-rep --page details \
         > $task_dir/artifacts/details.txt
-      "$ncu" --import $task_dir/artifacts/profile.ncu-rep --page raw --csv --print-metric-instances values \
+      "$ncu" --import $task_dir/artifacts/profile.ncu-rep --page raw --csv --print-metric-instances details \
         > $task_dir/artifacts/counter_instances.csv
+      "$ncu" --import $task_dir/artifacts/profile.ncu-rep --page source --print-source sass --csv \
+        --metrics smsp__pcsamp_warps_issue_stalled_no_instructions > $task_dir/artifacts/sass.csv
     fi
     "$ncu" --version > $task_dir/artifacts/profiler_version.txt
     "$python" -m pip freeze --all > $task_dir/artifacts/requirements.freeze.txt
