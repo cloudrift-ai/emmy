@@ -30,7 +30,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f4x8/k2
       WORK: w2x2
       REDUCE: ''
-    identity: 9cb4674e3370b9197a4eab3c155f04596f6309dc2f6e10e44ae46c4c1460de98
+    identity: e93802a5bd328b0a1f69e6f98716890a27cbc1b3bf8288151b5c81749457ca97
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 8.102504218496927

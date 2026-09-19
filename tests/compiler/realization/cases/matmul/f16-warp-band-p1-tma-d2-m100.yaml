@@ -31,7 +31,7 @@ configs:
       WORK: w2x2+p1
       REDUCE: ''
       STAGE: d2/smem-tma
-    identity: be4c0ee521b506f35e87fea5352163f0c34d1207ff5712fba0426294f14c62d6
+    identity: 20c7c9798d2f624e0765b8c6c7010fa96804c06a45d8dd96b53a8bde533584fc
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 2.9079765952818577

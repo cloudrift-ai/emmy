@@ -566,8 +566,10 @@ class TileOp(Op):
         if view is None or not node.tiles_whole():
             return False
         mn = self.grid_sched._mn_for(node)
-        if mn is not None and all(not (axis.extent.is_static and axis.extent.as_static() == 1) for axis in mn) and any(
-            {axis.name for axis in mn} <= owned for owned in (view.left_axes, view.right_axes)
+        if (
+            mn is not None
+            and all(not (axis.extent.is_static and axis.extent.as_static() == 1) for axis in mn)
+            and any({axis.name for axis in mn} <= owned for owned in (view.left_axes, view.right_axes))
         ):
             return False  # both output axes of one operand are not a matrix-multiply pair
         if not view.shared_axes or (view.left_axes and view.right_axes):

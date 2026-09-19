@@ -74,8 +74,8 @@ following each search, not held-out predictive performance.
 
 The release audit's preliminary reproduction originally used the default hardware golden even when the command
 named a model golden. That redundant diagnostic also compiled the whole program once per child receipt. The release
-audit now uses its strict offer decode and serving-matrix compile directly; the general reproduction table remains available in
-prior evaluation. The existing regression now observes every pipeline call and verifies the serving compile uses
+audit now uses its strict offer decode and serving-matrix compile directly; the general reproduction table remains
+available in prior evaluation. The existing regression now observes every pipeline call and verifies the serving compile uses
 only the selected records with strict evidence enabled, restoring the scope afterward.
 
 The main workflow costs were broad fused candidates that hit the kernel watchdog, expensive unmeasured prior
@@ -114,6 +114,11 @@ the ranges show those separate measurements, not four different static shapes.
 | Pre-attention, static 1 | all four | 224.00–224.18 | 208.37–208.51 |
 | Pre-attention, static 16 | all four | 84.69–84.77 | 221.22–221.24 |
 | Pre-attention, static 256 | all four | 1,572.70–1,577.98 | 350.84–351.67 |
+
+Final CPU validation exposed two scheduling interactions: chunked attention must choose its multiplicand type from
+the streamed value, and a grouped-matvec refusal must reject two axes owned by the same operand without rejecting
+valid transposed or broadcast pairs. Those checks were corrected after the GPU measurements. The existing attention
+and split-reduction cases cover them, but GPU revalidation of that final source remains pending.
 
 Only static width-16 pre-attention is faster than this eager reference. Symbolic pre-attention remains especially
 slow. The explicit serial reduction choices that made the candidates executable are not an efficient general

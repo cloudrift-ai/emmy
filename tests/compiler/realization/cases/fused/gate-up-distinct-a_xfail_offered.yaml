@@ -71,7 +71,7 @@ configs:
       WORK: w2x2
       TILE@map.1/inner: mma_m16n8k16_f16_f32/f2x2/k2
       TILE@map.2/inner: mma_m16n8k16_f16_f32/f2x2/k2
-    identity: 52c7f0fdf0be119000f08e3720e0ca55d79992eb4ed76f78f931417e06a7b29e
+    identity: dc915ec6291693de67376b6e34f5b5a751ea5e0a8b6d1971939a44409b42c455
   - name: k_linear_reduce_775efd.06ac2b96161b
     bindings: {}
     pins:

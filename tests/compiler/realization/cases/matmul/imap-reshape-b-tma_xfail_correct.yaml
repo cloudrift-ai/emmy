@@ -54,4 +54,4 @@ configs:
       FAST_MATH: false
     knobs:
       STAGE: d2/smem-tma
-    identity: c1a8be102a75169ae6f1feb7bf8b9c96629de435f47417090324925d108c4c0e
+    identity: 609221d70d8393409dff5cf7758ac941547b0d963f78d95dddd8498259afd6b2

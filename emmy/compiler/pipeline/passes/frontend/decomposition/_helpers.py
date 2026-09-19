@@ -14,7 +14,8 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from emmy.compiler.dtype import BF16, F16, F32, get as get_dtype
+from emmy.compiler.dtype import BF16, F16, F32
+from emmy.compiler.dtype import get as get_dtype
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.expr import BinaryExpr, Literal, placeholder
