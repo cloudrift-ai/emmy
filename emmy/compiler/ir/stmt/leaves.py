@@ -491,6 +491,92 @@ class Accum(Stmt):
         return [f"{pad}{self.name} = {base} {spelling.infix} {rhs};"]
 
 
+#: The suffix of the slot a :class:`Carry` defines during a step.
+NEXT_STEP = "__next"
+
+
+@dataclass(frozen=True)
+class Carry(Stmt):
+    """The next value of one cell of a CARRIED STATE: ``name[index] <- value``.
+
+    A recurrence's state, which a fold is not: its steps run in order, its step is any computation,
+    and it holds ``seed`` before the first. So it has no op — an op would declare an algebra (a
+    reorderable sum) the state does not have — and nothing else to declare either: the loop that
+    carries it is the nearest enclosing ``Loop`` whose axis ``index`` does not read
+    (:func:`~emmy.compiler.ir.stmt.blocks.carried_cells`), and its shape is those of the loops over
+    its cells, each entry of ``index`` a bare axis. The loop over the steps therefore sits OUTSIDE
+    the loops over the cells, which is what lets a step read OTHER cells of its own state (a delta
+    rule's ``k @ S``) through :class:`Pre`; a scalar ``Accum`` lives inside the cell loops and
+    cannot. One statement defines a state; a cell it skips keeps its value.
+    """
+
+    name: str
+    value: str
+    index: tuple[Expr, ...]
+    seed: float
+    dtype: DataType | None = None
+
+    @property
+    def cells(self) -> tuple[str, ...]:
+        """The axes of the cell this statement defines. An entry that is no axis is the ``0``
+        normalization leaves where a size-one axis stood."""
+        return tuple(e.name for e in self.index if isinstance(e, Var))
+
+    def deps(self) -> tuple[str, ...]:
+        return (self.value,)
+
+    def defines(self) -> tuple[str, ...]:
+        return (self.name,)
+
+    def carried_names(self) -> tuple[str, ...]:
+        return (self.name,)
+
+    def exprs(self) -> tuple[Expr, ...]:
+        return self.index
+
+    def pretty(self, indent: str = "") -> list[str]:
+        return [f"{indent}{self.name}[{', '.join(e.pretty() for e in self.index)}] <- {self.value}  (seed {self.seed:g})"]
+
+    def render(self, ctx: RenderCtx) -> list[str]:
+        # The carrying ``Loop`` declared this slot beside the one reads see, and commits it after
+        # every step.
+        dtype = (self.dtype or F32).name
+        value = ctx.target.convert(self.value, ctx.ssa_dtypes.get(self.value, "f32"), dtype)
+        return [f"{_pad(ctx.indent)}{self.name}{NEXT_STEP}[{render_index(self.name, self.index, ctx)}] = {value};"]
+
+
+@dataclass(frozen=True)
+class Pre(Stmt):
+    """A read of one cell of a carried state: ``name = carrier[index]``.
+
+    Inside the ``Loop`` that carries it, the value the PREVIOUS step left (the seed on the first
+    step) — no read of a step sees what that step defines; after that loop closes, the last
+    step's. ``index`` is any coordinate expression, so a step may read a cell other than the one
+    it defines — under a reduce over it, a contraction over the state. See :class:`Carry`.
+    """
+
+    name: str
+    carrier: str
+    index: tuple[Expr, ...]
+
+    def deps(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys((self.carrier, *(v for e in self.index for v in e.free_vars()))))
+
+    def defines(self) -> tuple[str, ...]:
+        return (self.name,)
+
+    def exprs(self) -> tuple[Expr, ...]:
+        return self.index
+
+    def pretty(self, indent: str = "") -> list[str]:
+        return [f"{indent}{self.name} = pre {self.carrier}[{', '.join(e.pretty() for e in self.index)}]"]
+
+    def render(self, ctx: RenderCtx) -> list[str]:
+        dtype = ctx.ssa_dtypes.get(self.carrier, "f32")
+        ctx.ssa_dtypes[self.name] = dtype
+        return [f"{_pad(ctx.indent)}{ctx.type_name(dtype)} {self.name} = {self.carrier}[{render_index(self.carrier, self.index, ctx)}];"]
+
+
 @dataclass(frozen=True)
 class Init(Stmt):
     """Explicit accumulator / carried-state seed at this scope:

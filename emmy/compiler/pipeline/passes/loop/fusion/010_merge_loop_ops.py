@@ -14,8 +14,9 @@ from dataclasses import replace
 
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.loop import LoopOp, UnfusableStmt, splice_graph
+from emmy.compiler.ir.loop import LoopOp, UnfusableStmt
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
+from emmy.compiler.pipeline.passes.loop.fusion._region import build_merged_region, carries_state, live_outputs_of
 
 PATTERN = [Pattern("producer", LoopOp)]
 
@@ -88,6 +89,20 @@ def _packed_readers(graph: Graph, region: set[str]) -> set[str]:
     return dropped
 
 
+def _downstream(graph: Graph, origin: str, region: set[str]) -> set[str]:
+    """``origin`` and everything after it inside ``region``. Dropping ONLY the doomed node would
+    leave region nodes on both sides of it — the merged op would then feed it and consume it, a
+    cycle. The closure leaves with it; those nodes re-enter fusion through their own matches."""
+    dropped = {origin}
+    pending = [origin]
+    while pending:
+        for user in graph.users(pending.pop()):
+            if user in region and user not in dropped:
+                dropped.add(user)
+                pending.append(user)
+    return dropped
+
+
 def _loop_consumer_region(graph: Graph, producer: Node) -> tuple[set[str], tuple[str, ...]] | None:
     """Return the maximal downstream ``LoopOp`` region and its live buffers."""
     region: set[str] = set()
@@ -99,47 +114,14 @@ def _loop_consumer_region(graph: Graph, producer: Node) -> tuple[set[str], tuple
         region.add(nid)
         pending.extend(user for user in graph.users(nid) if isinstance(graph.nodes[user].op, LoopOp))
     region -= _packed_readers(graph, region)
+    # A kernel that carries a state is a region of its own: the splice inlines a store into its
+    # readers, and a state is stored once per step, not once.
+    for nid in [nid for nid in region if carries_state(graph.nodes[nid].op)]:
+        region -= _downstream(graph, nid, region)
     if len(region) < 2:
         return None
-    live = _live_outputs(graph, region)
+    live = live_outputs_of(graph, region)
     return (region, live) if live else None
-
-
-def _live_outputs(graph: Graph, region: set[str]) -> tuple[str, ...]:
-    """The region's buffers read outside it or exported by the graph, in topological order."""
-    graph_outputs = set(graph.outputs)
-    live: list[str] = []
-    for nid in graph.topological_order():
-        if nid not in region:
-            continue
-        for buf in graph.nodes[nid].buffer_names():
-            if buf in graph_outputs or graph.buffer_users(buf) - region:
-                live.append(buf)
-    return tuple(live)
-
-
-def _build_merged_region(graph: Graph, region: set[str], live_outputs: tuple[str, ...]) -> LoopOp | None:
-    """Splice one maximal region, sharing equal upstream demands across roots."""
-    order = [nid for nid in graph.topological_order() if nid in region]
-    sub = Graph()
-    external: list[str] = []
-    for nid in order:
-        for inp in graph.nodes[nid].inputs:
-            producer = graph.producer(inp)
-            assert producer is not None
-            if producer.id not in region and inp not in external:
-                external.append(inp)
-    for ext_id in external:
-        ext_t = graph.buffer(ext_id)
-        assert ext_t is not None
-        sub.add_node(InputOp(), [], ext_t, node_id=ext_id)
-    for nid in order:
-        node = graph.nodes[nid]
-        sub.add_node(node.op, list(node.inputs), outputs=node.outputs, node_id=nid)
-    sub.outputs = list(live_outputs)
-
-    result = splice_graph(sub, surface_unfusable=True)
-    return result[0] if result is not None else None
 
 
 def _wrap_multi_output_fragment(
@@ -177,6 +159,8 @@ def rewrite(match: Match, producer: Node) -> Graph | None:
     graph = match.graph
     if not isinstance(producer.op, LoopOp):
         raise RuleSkipped("producer is no longer a LoopOp")
+    if carries_state(producer.op):
+        raise RuleSkipped("a kernel that carries a state is a region of its own")
     found = _loop_consumer_region(graph, producer)
     if found is None:
         raise RuleSkipped("producer has no Loop consumer region")
@@ -191,24 +175,14 @@ def rewrite(match: Match, producer: Node) -> Graph | None:
     merged = None
     while merged is None:
         try:
-            merged = _build_merged_region(graph, region, live_outputs)
+            merged = build_merged_region(graph, region, live_outputs)
         except UnfusableStmt as doom:
             if doom.origin == producer.id or doom.origin not in region or len(region) <= 2:
                 raise RuleSkipped(f"region is dominated by an unfusable chain: {doom}") from doom
-            # Dropping ONLY the doomed node would leave region nodes on both sides of it — the
-            # merged op would then feed it and consume it, a cycle. Its downstream closure within
-            # the region leaves with it; those nodes re-enter fusion through their own matches.
-            dropped = {doom.origin}
-            pending = [doom.origin]
-            while pending:
-                for user in graph.users(pending.pop()):
-                    if user in region and user not in dropped:
-                        dropped.add(user)
-                        pending.append(user)
-            region = region - dropped
+            region = region - _downstream(graph, doom.origin, region)
             if producer.id not in region or len(region) < 2:
                 raise RuleSkipped(f"region shrank away from its producer: {doom}") from doom
-            live_outputs = _live_outputs(graph, region)
+            live_outputs = live_outputs_of(graph, region)
             if not live_outputs:
                 raise RuleSkipped(f"nothing fusable remains beside the chain: {doom}") from doom
             continue

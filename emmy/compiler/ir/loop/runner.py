@@ -60,6 +60,7 @@ _INTRINSICS_CPP: dict[str, str] = {
 PRELUDE = """\
 #include <cmath>
 #include <algorithm>
+#include <vector>
 static inline float rsqrtf_(float x) { return 1.0f / sqrtf(x); }
 template <typename To, typename From>
 static inline To emmy_bitcast(From value) {

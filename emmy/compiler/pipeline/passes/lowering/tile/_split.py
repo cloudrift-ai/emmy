@@ -351,14 +351,17 @@ def _piece_inputs(root: Node, body, *first: str) -> list[str]:
     return [*first, *(inp for inp in root.inputs if inp in reads)]
 
 
-def add_output_piece(match: Match, frag: Graph, root: Node, piece: TileOp, inputs: list[str], *, suffix: str = "__split") -> Graph:
+def add_output_piece(
+    match: Match, frag: Graph, root: Node, piece: TileOp, inputs: list[str], *, suffix: str = "__split", states: tuple = ()
+) -> Graph:
     """Add a fresh piece with its owned output ports and arrange their splice identities.
 
     ``root`` is the graph-node view of the ports this piece owns — :func:`output_root` narrows a
     MIMO node to a subset — so slot 0's edge key travels as the node id and every other as its own
     tensor name. ``suffix`` names the temporary those buffers travel under while the fragment is
     spliced in: the cross-CTA split mints ``__split``, the kernel-placement cut ``__placed``. ONE
-    suffix per rewrite, so a fragment's temporary names say which decision minted them."""
+    suffix per rewrite, so a fragment's temporary names say which decision minted them. ``states``
+    are buffers the piece writes that the replaced node never had — a recurrence's state."""
     buffers = root.buffer_names()
     renamed = {name: f"{name}{suffix}" for name in buffers}
     piece = replace(
@@ -372,7 +375,7 @@ def add_output_piece(match: Match, frag: Graph, root: Node, piece: TileOp, input
         replace(root.outputs[0], name=buffers[0]),
         *(replace(tensor, name=renamed[name]) for name, tensor in zip(buffers[1:], root.outputs[1:], strict=True)),
     )
-    frag.add_node(op=piece, inputs=inputs, outputs=tensors, node_id=renamed[buffers[0]])
+    frag.add_node(op=piece, inputs=inputs, outputs=(*tensors, *states), node_id=renamed[buffers[0]])
     frag.outputs.extend(renamed.values())
     output = dict(match.output) if isinstance(match.output, dict) else {}
     output.update(renamed)

@@ -55,11 +55,11 @@ These checks require no GPU. Native GPU parity and failure recovery run through 
 - A manually published GitHub release must already have a tag matching `pyproject.toml`; the workflow validates and
   publishes that version without creating another release.
 
-Both paths accept only a commit already merged into `main` through a pull request with a successful **Tests** workflow.
-Those pull-request checks own lint, the complete suite, and the release-path package dry run; publication verifies the
-result through GitHub's read-only API rather than repeating it. `make pypi-dist` installs its minimal build
-dependencies, then uses `scripts/prepare_dist.py` to stage bundled recipes and rewrite repository-relative README
-links for PyPI before building the wheel and source distribution. The release gate requires exactly one of each,
+Both paths accept any commit already on `main`, including direct commits. Publication does not require a merged pull
+request or a successful **Tests** workflow. Pull-request checks own lint, the complete suite, and the release-path
+package dry run. `make pypi-dist` installs its minimal build dependencies, then uses `scripts/prepare_dist.py` to stage
+bundled recipes and rewrite repository-relative README links for PyPI before building the wheel and source distribution.
+The release gate requires exactly one of each,
 installs the wheel into a clean environment, checks its version, and reads its bundled recipe catalog. The build
 artifact moves between jobs through GitHub artifacts. PyPI uses trusted publishing through the `pypi` environment and
 an OIDC token, so the repository stores no PyPI password. The manual path creates its GitHub release only after a

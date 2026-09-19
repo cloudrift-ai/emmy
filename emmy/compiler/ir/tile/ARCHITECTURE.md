@@ -41,6 +41,17 @@ only kernel-boundary `OutputSpec` writes consume, and the streamed store reconst
 the observer stmts (`observed_result_names` + the `observed=` reconstitution arm). An observed fold makes the stream
 order-visible, so the schedule offers exactly the serial reduce plan and the cross-CTA split fork declines it.
 
+A recurrence is spelled with the kernel's **serial axes** (`Placement.serial`) and a **lagged read**. A serial axis
+is time: the kernel is launched once per coordinate, in order, and the coordinate reaches the body as a runtime `int`
+— never a grid axis, never a loop. A kernel may then load a buffer it writes itself, one step behind the step
+being written (`S[c − 1, …]`, the seed where there is no step before the first); a kernel with no serial axis may not
+read its outputs at all. The state lives in the buffer, not in a carrier, so the step is any `Fold` at all —
+one that contracts over the previous state's other cells included — and the term stays scalar per cell. The
+ordering the lagged read needs is the launch's: every cell of step `c − 1` is stored before any cell of step `c`
+runs. This is what a Loop IR carried state lifts to (`pipeline/passes/lowering/tile/010_lift`) — a chunked
+delta rule's inter-chunk state; an in-block realization, the state as a shared-memory tile walked by one CTA, would
+be a schedule choice on the same term.
+
 ## Total lift
 
 `pipeline/passes/lowering/tile/_fromloop.py` implements the only loop conversion:

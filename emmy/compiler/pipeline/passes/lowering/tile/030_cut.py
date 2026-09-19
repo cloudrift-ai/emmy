@@ -206,6 +206,11 @@ def rewrite(match: Match, root: Node, ctx=None):
     tile: TileOp = root.op
     if tile.op is None or tile.place.is_mapped or tile.schedule is not None:
         raise RuleSkipped("TileOp already scheduled")
+    if tile.place.serial:
+        # The runner launches one kernel's steps to completion before the next kernel's first, so
+        # the pieces of a cut or a split could not interleave step by step: piece two's step c would
+        # read what piece one stored at EVERY step. A serial kernel stays one kernel.
+        raise RuleSkipped("a serial kernel is one kernel")
     choices = None if tile.placement_decided else _placement_forks(match, root, tile, ctx)
     if choices is None:
         choices = split_forks(match, root)

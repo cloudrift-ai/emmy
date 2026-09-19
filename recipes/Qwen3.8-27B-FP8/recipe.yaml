@@ -68,6 +68,7 @@ engine:
       # the JSON arrives whole.
       extra_args: >-
         --dtype half
+        --enable-prefix-caching
         --language-model-only
         --gdn-prefill-backend triton
         --max-num-batched-tokens 4096
