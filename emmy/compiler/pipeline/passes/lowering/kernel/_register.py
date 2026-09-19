@@ -49,8 +49,7 @@ class _Fragments:
         key = (op, args, kinds, row_base, col_base)
         if key not in self.memo:
             out = self.name()
-            self.body.append(FragmentApply(out=out, op=ElementwiseImpl(op), args=args, kinds=kinds,
-                                           row_base=row_base, col_base=col_base))
+            self.body.append(FragmentApply(out=out, op=ElementwiseImpl(op), args=args, kinds=kinds, row_base=row_base, col_base=col_base))
             self.memo[key] = out
         return self.memo[key]
 
@@ -61,10 +60,12 @@ class _Fragments:
         key = (role, srcs)
         if key not in self.memo:
             out = self.name()
-            self.body.extend((
-                RegFragment(name=out, role=role, shape=self.atom.shape, dtype=self.atom.operand_dtype(role)),
-                FragmentRepack(frag=out, srcs=srcs, role=role),
-            ))
+            self.body.extend(
+                (
+                    RegFragment(name=out, role=role, shape=self.atom.shape, dtype=self.atom.operand_dtype(role)),
+                    FragmentRepack(frag=out, srcs=srcs, role=role),
+                )
+            )
             self.memo[key] = out
         return self.memo[key]
 
@@ -86,8 +87,7 @@ class _Fragments:
             # Clamp memory coordinates before masking a padded fragment. The padded value
             # is zero at the operand boundary, so it contributes the reduction's identity.
             clipped = {
-                name: TernaryExpr(BinaryExpr("<", coord, Literal(self.extents[name], "int")),
-                                  coord, Literal(self.extents[name] - 1, "int"))
+                name: TernaryExpr(BinaryExpr("<", coord, Literal(self.extents[name], "int")), coord, Literal(self.extents[name] - 1, "int"))
                 for name, coord in coords.items()
             }
             for stmt in node.lift.body:
@@ -112,9 +112,13 @@ class _Fragments:
                     for branch in reversed(stmt.branches[:-1]):
                         yes = env[branch.value]
                         predicate = branch.select.substitute(coords)
-                        value = self.apply("where", (predicate, yes, value),
-                                           (COORD, UNIFORM if isinstance(yes, Literal) else FRAG,
-                                            UNIFORM if isinstance(value, Literal) else FRAG), rb, cb)
+                        value = self.apply(
+                            "where",
+                            (predicate, yes, value),
+                            (COORD, UNIFORM if isinstance(yes, Literal) else FRAG, UNIFORM if isinstance(value, Literal) else FRAG),
+                            rb,
+                            cb,
+                        )
                     env[stmt.name] = value
                 else:
                     raise ValueError(f"register map cannot emit {type(stmt).__name__}")
@@ -125,10 +129,12 @@ class _Fragments:
     def operand(self, node, row, col, rb, cb):
         (value,) = self.cell(node, row, col, rb, cb)
         # A fragment can straddle either extent; all lanes still participate in MMA/shuffles.
-        cond = BinaryExpr("&&", BinaryExpr("<", Var(FRAG_ROW), Literal(self.extents[row], "int")),
-                          BinaryExpr("<", Var(FRAG_COL), Literal(self.extents[col], "int")))
-        return self.apply("where", (cond, value, Literal(0.0)),
-                          (COORD, UNIFORM if isinstance(value, Literal) else FRAG, UNIFORM), rb, cb)
+        cond = BinaryExpr(
+            "&&",
+            BinaryExpr("<", Var(FRAG_ROW), Literal(self.extents[row], "int")),
+            BinaryExpr("<", Var(FRAG_COL), Literal(self.extents[col], "int")),
+        )
+        return self.apply("where", (cond, value, Literal(0.0)), (COORD, UNIFORM if isinstance(value, Literal) else FRAG, UNIFORM), rb, cb)
 
     def contract(self, node, row, col, rb, cb):
         left, right = node.operands
@@ -151,8 +157,16 @@ class _Fragments:
             if half:
                 self.body.append(RegFragment(name=partial, role="c", shape=self.atom.shape, dtype=self.atom.operand_dtype("c")))
             for step, (a, b) in enumerate(pairs, 1):
-                self.body.append(MmaSyncPtx(c_frag=partial, a_frag=a, b_frag=b, shape=self.atom.ptx_shape,
-                                            ab_dtype=self.atom.ab_dtype, c_dtype=self.atom.operand_dtype("c").name))
+                self.body.append(
+                    MmaSyncPtx(
+                        c_frag=partial,
+                        a_frag=a,
+                        b_frag=b,
+                        shape=self.atom.ptx_shape,
+                        ab_dtype=self.atom.ab_dtype,
+                        c_dtype=self.atom.operand_dtype("c").name,
+                    )
+                )
                 if half and (step % self.period == 0 or step == len(pairs)):
                     self.body.append(FragmentPromote(dst=out, src=partial))
             self.memo[key] = out
@@ -181,10 +195,18 @@ def factorize_register(tile):
     for spec, values in pending:
         for j, value in enumerate(values):
             index = (*spec.write.index[:-2], Literal(j * 8, "int"), row_base)
-            emit.body.append(RegStore(dst_buffer=spec.write.output, dst_index=index, frag=value, shape=emit.atom.shape,
-                                       row_dim=len(index) - 1, col_dim=len(index) - 2,
-                                       m_guard=(row_base, Literal(program.rows, "int")),
-                                       n_guard=(Literal(j * 8, "int"), Literal(emit.extents[spec.write.index[-2].name], "int"))))
+            emit.body.append(
+                RegStore(
+                    dst_buffer=spec.write.output,
+                    dst_index=index,
+                    frag=value,
+                    shape=emit.atom.shape,
+                    row_dim=len(index) - 1,
+                    col_dim=len(index) - 2,
+                    m_guard=(row_base, Literal(program.rows, "int")),
+                    n_guard=(Literal(j * 8, "int"), Literal(emit.extents[spec.write.index[-2].name], "int")),
+                )
+            )
     for state, value in zip(emit.states, pending[-1][1], strict=True):
         emit.body.append(FragmentApply(out=state, op=ElementwiseImpl("copy"), args=(value,), kinds=(FRAG,), in_place=True))
     declarations = tuple(RegFragment(name=name, role="c", shape=emit.atom.shape, dtype=F32) for name in emit.states)

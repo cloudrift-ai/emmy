@@ -27,6 +27,19 @@ a boundary store was not re-spelled for. Each of those reached nvcc as *identifi
 errors deep in a generated source and charged to whichever candidate the tuner happened to be benching. Asserting it
 here names the kernel and the value instead, in the pass that built them.
 
+For a register materialization, `factorize` emits the same Fold tree as C fragments through `_register`.
+Each warp owns sixteen independent state rows and the full column dimension. The ordered axis becomes a
+`StridedLoop` inside the CTA; FP32 state declarations enclose it. Equal fragment expressions share results,
+so a matrix result reused by an output and the next-state update is evaluated once. Operand tails are masked
+before MMA and all warp lanes participate in repacking. Existing `FragmentApply`, `MmaSyncPtx`,
+`FragmentPromote`, and `RegStore` nodes provide arithmetic and stores. `FragmentRepack` supplies C→A and
+warp-shuffled C→B conversion without a shared-memory round trip.
+
+The materializer removes the private global carry port with a graph splice, preserving the schedule and source
+attribution. A state buffer with an external reader remains a stored output. Every output is evaluated before
+any carry fragment is overwritten. The resulting kernel has no serial launch axis: each CTA executes its ordered
+steps locally. The classic path below continues to realize serial axes as ordered launches.
+
 `factorize` builds the ambient `Ctx` and dispatches `tile.op` through `_factorize`, which peels projecting zero-axis
 `Fold`s and binds each leaf via the ONE root-binding pipeline (`_factor._bind`) — its form is read off the node's
 SCHEDULE (which axes are tiled), never a kernel kind, and

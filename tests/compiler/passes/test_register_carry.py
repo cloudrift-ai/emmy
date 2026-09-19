@@ -10,9 +10,9 @@ from emmy.compiler.graph import Graph
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.kernel.ir import FragmentPromote, MmaSyncPtx, RegFragment
-from emmy.compiler.ir.schedule.register import RegisterCodec, RegisterContext, RegisterProblem, materialize_register
 from emmy.compiler.ir.schedule import Stage
 from emmy.compiler.ir.schedule.base import ScheduleRefused
+from emmy.compiler.ir.schedule.register import RegisterCodec, RegisterContext, RegisterProblem, materialize_register
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.passes.lowering.kernel._register import factorize_register
@@ -40,6 +40,7 @@ def test_register_schedule_round_trip_and_precision_gate():
     for schedule in context.extensions():
         assert codec.decode(codec.encode(schedule)) == schedule
         node.op = materialize_register(tile, schedule, {})
+        assert "STAGE=d1/reg" in node.op.pretty_body()
         restored = Graph.from_dict(graph.to_dict())
         assert restored.nodes[node.id].op.schedule == schedule
         assert restored.nodes[node.id].op.register_program == node.op.register_program
@@ -106,8 +107,9 @@ def test_register_state_preserves_old_reads_on_cuda(half, warps):
     assert not op.serial
     arrays = _inputs()
     result, _ = run_program(graph, arrays)
-    np.testing.assert_allclose(np.asarray(result.outputs["out"]).reshape(_reference(arrays).shape),
-                               _reference(arrays), rtol=2e-3, atol=2e-3)
+    np.testing.assert_allclose(
+        np.asarray(result.outputs["out"]).reshape(_reference(arrays).shape), _reference(arrays), rtol=2e-3, atol=2e-3
+    )
 
 
 @requires_cuda
@@ -120,6 +122,7 @@ def test_gdn_chunk_step_matches_loop_on_cuda(shape, half):
     from emmy.compiler.backend.gpu_lock import gpu_lock
     from emmy.compiler.ir.loop import LoopOp
     from emmy.compiler.ir.loop.runner import execute_loop_op_cpp
+
     # The inter-chunk recurrence, with the chunk-local triangular solve supplied as inputs.
     # The real model's trace is covered above; this keeps large and uneven shape checks small.
     chunk, keys, values = shape
@@ -143,8 +146,9 @@ m(torch.randn(2,4,{chunk},{keys}), torch.randn(2,4,{chunk},{keys}),
     (node,) = (n for n in lifted.nodes.values() if isinstance(n.op, TileOp) and n.op.place.serial)
     tile = node.op
     context = _context(tile)
-    schedule = next(s for s in context.extensions() if (s.kernel.tile.atom.operand_dtype("c").nbytes == 2) == half
-                    and s.kernel.work.units == (2, 1))
+    schedule = next(
+        s for s in context.extensions() if (s.kernel.tile.atom.operand_dtype("c").nbytes == 2) == half and s.kernel.work.units == (2, 1)
+    )
     graph = Graph()
     rng = np.random.default_rng(0)
     arrays = {}

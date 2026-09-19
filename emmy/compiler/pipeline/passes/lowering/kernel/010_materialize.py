@@ -28,8 +28,8 @@ from emmy.compiler.graph import Node
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.kernel.ir import ELEM_COL, ELEM_ROW, FRAG_COL, FRAG_ROW, RegStore
-from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.schedule.register import RegisterMaterialization
+from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Load, Write
 from emmy.compiler.ir.stmt.body import free_names
 from emmy.compiler.ir.tile import TileOp
@@ -69,8 +69,10 @@ def rewrite(match: Match, root: Node, ctx=None) -> KernelOp | None:
                 names = {t.name: t.name + "__register" for t in outputs}
                 fragment = _input_fragment(match, root)
                 fragment.add_node(
-                    replace(kernel, body=body.rename_buffers(names), outputs={}, source=tile, knobs=tile.knobs), list(root.inputs),
-                    outputs=(outputs[0], *(replace(t, name=names[t.name]) for t in outputs[1:])), node_id=names[outputs[0].name],
+                    replace(kernel, body=body.rename_buffers(names), outputs={}, source=tile, knobs=tile.knobs),
+                    list(root.inputs),
+                    outputs=(outputs[0], *(replace(t, name=names[t.name]) for t in outputs[1:])),
+                    node_id=names[outputs[0].name],
                 )
                 fragment.outputs = list(names.values())
                 match.output = names

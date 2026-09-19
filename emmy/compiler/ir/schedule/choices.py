@@ -728,7 +728,7 @@ class Placement:
 _TRANSPORTS = ("direct", "reg", "smem", "smem-async", "smem-tma")
 
 #: The ``STAGE`` grammar, rendered into every parse error so a bad pin names what it could have said.
-_STAGE_EXPECT = "expect d<n> / smem|smem-async|smem-tma / p<n>"
+_STAGE_EXPECT = "expect d<n> / reg|smem|smem-async|smem-tma / p<n>"
 
 
 @dataclass(frozen=True)
@@ -739,7 +739,8 @@ class Stage:
     ``010_materialize``.
 
     ``Stage.direct()`` is the register / gmem-direct baseline (no slab); every other ``Stage``
-    means staging is **on** (the reused gmem operands ride a shared-memory slab). Spelled by the
+    names stored intermediate values. ``d1/reg`` retains values in registers across ordered
+    steps; the other transports put reused gmem operands in a shared-memory slab. Spelled by the
     ``STAGE`` codec ``d<depth>/smem|smem-async|smem-tma[/p<reg_depth>]``
     (decided by the tile schedule). Eligibility and sizing produce a separate
     :class:`ResolvedStage`; this choice never stores shared-memory names or a derived K chunk.
@@ -758,12 +759,12 @@ class Stage:
     byte-identically with and without it."""
 
     depth: int = 1  # gmem→smem ring depth over the reduce loop (1 = single buffer, no prefetch)
-    transport: str = "smem"  # smem | smem-async | smem-tma (the intermediate and its fill mechanism)
+    transport: str = "smem"  # reg | smem | smem-async | smem-tma (the intermediate and its fill mechanism)
     reg_depth: int = 1  # smem→register double-buffer depth (1 = no inner ldmatrix prefetch)
 
     def __post_init__(self) -> None:
         if self.transport not in _TRANSPORTS:
-            raise ValueError(f"bad Stage transport {self.transport!r} (expect smem | smem-async | smem-tma)")
+            raise ValueError(f"bad Stage transport {self.transport!r} (expect reg | smem | smem-async | smem-tma)")
         if type(self.depth) is not int or self.depth < 1:
             raise ValueError(f"Stage depth must be a positive integer, got {self.depth!r}")
         if type(self.reg_depth) is not int or self.reg_depth < 1:
