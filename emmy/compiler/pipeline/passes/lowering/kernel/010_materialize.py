@@ -69,8 +69,8 @@ def rewrite(match: Match, root: Node, ctx=None) -> KernelOp | None:
                 names = {t.name: t.name + "__register" for t in outputs}
                 fragment = _input_fragment(match, root)
                 fragment.add_node(
-                    replace(kernel, body=body.rename_buffers(names), source=tile, knobs=tile.knobs), list(root.inputs),
-                    outputs=tuple(replace(t, name=names[t.name]) for t in outputs), node_id=names[outputs[0].name],
+                    replace(kernel, body=body.rename_buffers(names), outputs={}, source=tile, knobs=tile.knobs), list(root.inputs),
+                    outputs=(outputs[0], *(replace(t, name=names[t.name]) for t in outputs[1:])), node_id=names[outputs[0].name],
                 )
                 fragment.outputs = list(names.values())
                 match.output = names
