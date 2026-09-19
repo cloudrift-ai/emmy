@@ -1728,13 +1728,36 @@ def records_for_card(gpu_name: str, compute_cap: tuple[int, int]) -> list[Golden
         # A path scopes the evidence to that file; the empty form (``EMMY_GOLDEN_FILE=``) is no golden evidence.
         return _scoped(_records_of(Path(scope), validation=GoldenFileValidation.WORKING), gpu_name, compute_cap) if scope else []
     records: list[GoldenRecord] = []
-    with _repository_golden_paths() as paths:
+    with _card_golden_paths(gpu_name) as paths:
         for path in paths:
-            head_gpu = _file_gpu_name(path)
-            if head_gpu is not None and head_gpu != gpu_name:
-                continue
             records.extend(r for r in _records_of(path) if r.gpu_name == gpu_name and tuple(r.compute_cap) == tuple(compute_cap))
     return records
+
+
+@contextmanager
+def _card_golden_paths(gpu_name: str):
+    """The repository golden files that can hold ``gpu_name``'s rows: a file whose header names another card is skipped
+    unparsed, one whose header names none is kept for the parse to decide."""
+    with _repository_golden_paths() as paths:
+        yield [path for path in paths if (head := _file_gpu_name(path)) is None or head == gpu_name]
+
+
+def scope_digest(gpu_name: str) -> str:
+    """A digest of the golden rows :func:`records_for_card` would load for ``gpu_name`` — the installed override's, the
+    ``EMMY_GOLDEN_FILE`` file's, or the card's repository files' — taken over file bytes, so it costs no parse. A
+    serving pack keys on it: plans compiled from other rows are not what this compile would deploy."""
+    sha = hashlib.sha256()
+    if RECORDS_OVERRIDE is not None:
+        rows = (json.dumps([r.name, r.gpu_name, r.pins, r.knobs, r.measurements], sort_keys=True, default=str) for r in RECORDS_OVERRIDE)
+        sha.update("\n".join(sorted(rows)).encode())
+    elif (scope := config.golden_scope()) is not None:
+        sha.update(Path(scope).read_bytes() if scope else b"no golden evidence")
+    else:
+        with _card_golden_paths(gpu_name) as paths:
+            for path in paths:
+                data = path.read_bytes()
+                sha.update(f"{path.name}:{len(data)}:".encode() + data)
+    return sha.hexdigest()[:16]
 
 
 #: The precision-trading pin universe the regime check covers in BOTH directions — a record
