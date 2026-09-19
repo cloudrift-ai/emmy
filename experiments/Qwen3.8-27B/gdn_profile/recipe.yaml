@@ -12,7 +12,7 @@ command:
     code=$$(cat experiments/Qwen3.8-27B/gdn_kernels/chunk_state.py)
     devices="$gpu_device_ids"
     sudo -n env PATH=/usr/local/cuda/bin:/usr/bin:/bin \
-      LD_PRELOAD=/usr/local/cuda-12.9/lib64/libnvrtc.so.12 PYTHONUNBUFFERED=1 \
+      LD_PRELOAD=/usr/local/cuda-12.9/lib64/libnvrtc.so.12 PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
       CUDA_VISIBLE_DEVICES=$${devices%%,*} PYTHONPATH=$repo_dir \
       GDN_HEADS="$heads" GDN_TOKENS="$tokens" \
       EMMY_GOLDEN_FILE= EMMY_NVCC_FLAGS= EMMY_STAGE=d1/reg EMMY_WORK=w2x1 \
