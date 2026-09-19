@@ -1,138 +1,115 @@
-# Qwen3.8 GDN register-kernel profiles on V100
+# V100 GDN register-schedule profiles
 
 ## V100 SXM2 16 GB — 2026-09-19
 
-The carry kernel spends most of its instructions preparing matrix operands, while instruction delivery and low
-occupancy keep the tensor cores mostly idle. The FP16 option reduces HMMA instructions but adds more promotion and
-repacking work than it removes. These profiles explain why register storage alone did not improve the
-[unprofiled benchmark](../gdn_register/RESULTS.md).
+The optimization removes most of the shuffle and instruction-fetch overhead found in the first profile.
+At 12 heads and 128 tokens, FP32 executes 54% fewer instructions and 75% fewer shuffles. Its instruction body
+shrinks from 195 KiB to 89 KiB, while the instruction-fetch stall share falls from 44.1% to 3.5%.
+The separate [uninstrumented benchmark](../gdn_register/RESULTS.md) measures 2.37–2.87× faster execution across
+both accumulation modes. Nsight timings are not used for that comparison.
 
-### Protocol
+All seven new profiling runs succeed and pass strict correctness. They contain six Emmy carry profiles and two
+eager-reference GEMMs. Every measured Emmy source hash matches the corresponding uninstrumented benchmark.
 
-The recipe profiles the same inter-chunk correction and state update, with 64-token chunks, 128 key dimensions,
-128 value dimensions, FP32 inputs and carry, two warps per CTA, and `d1/reg`. The atom is
-`mma_m8n8k4_f16_f32/f1x8/k4` or `mma_m8n8k4_f16_f16/f1x8/k4`. FP16 partial sums promote every four MMA steps,
-covering sixteen scalar products. Inputs, seeds, and compiler source match the ordinary timing experiment.
+### Before and after
 
-Nsight Compute 2025.2.1 profiles GPU 0 on the supplied four-V100 host. The driver restricts counters to administrative
-processes, so the recipe uses an elevated profiling process without changing the driver configuration. It wraps the
-existing `emmy run --bench --strict` command; there is no separate workload or timing implementation. Eager PyTorch
-provides correctness. Nsight skips two matching launches and collects one carry-kernel launch, or two GEMM launches
-for the reference probe. Kernel replay collects nine standard analysis sections, including scheduler, warp-state,
-instruction, memory, and source counters. GPU clocks remain unchanged and caches are not deliberately flushed.
+The compiler now loads materialized B operands directly into MMA fragments through the existing global-memory
+loader. It retains C fragments for computed and non-unit-stride operands. Volta C→A repacking converts and packs
+adjacent FP16 values before shuffling them, reducing eight shuffles to four. The chunk loop, state ownership,
+intermediate-result reuse, accumulation modes, and schedule pins are unchanged.
 
-**Timings collected under Nsight are not benchmark results.** Instrumentation changes execution, particularly CUDA
-graph replay. The unprofiled experiment remains the performance comparison. The percentages below describe Nsight
-counters for the selected kernel, not a speedup estimate or a whole-model measurement.
+The following counts are for the 12-head, 128-token carry kernel. Dynamic counts are warp instructions from
+`sass__inst_executed_per_opcode`. Static counts are unique instruction addresses in the exported SASS.
+
+| Measure | FP32 before | FP32 now | FP16 before | FP16 now |
+| --- | ---: | ---: | ---: | ---: |
+| Executed instructions | 2,381,952 | 1,087,296 | 2,633,376 | 1,330,656 |
+| SHFL | 786,528 | 196,704 | 884,832 | 295,008 |
+| HMMA | 196,608 | 196,608 | 98,304 | 98,304 |
+| LDG | 104,640 | 202,944 | 104,640 | 202,944 |
+| Static instructions | 12,464 | 5,712 | 13,760 | 6,968 |
+| Instruction bytes | 199,424 | 91,392 | 220,160 | 111,488 |
+
+Tensor instructions are unchanged within each accumulation mode. The improvement comes from operand preparation,
+not less matrix work. Global-load instructions increase by 94% because the direct loader replaces the C-layout
+gather and shuffle path. This is an effective trade here, but it leaves more load pressure to address next.
+
+FP16 still executes 22% more instructions than FP32 in this case despite halving HMMA instructions. Promotion adds
+98,304 shuffles, 98,304 FP32 additions, and 98,304 half-to-float conversion instructions (`HADD2.F32`). The carry and
+shadow remain FP32; partial sums promote every four MMA steps, or sixteen scalar products. The uninstrumented
+measurements still favor FP32 accumulation by 1.9–15.6% at these pins.
 
 ### Hardware counters
 
-| Heads | Tokens | Accumulation | Achieved occupancy | Tensor activity | DRAM throughput | Instruction-fetch stalls |
-| ---: | ---: | --- | ---: | ---: | ---: | ---: |
-| 12 | 128 | FP32 | 3.41% | 0.68% | 4.37% | 44.1% |
-| 12 | 128 | FP16 + promotion | 3.12% | 0.64% | 4.22% | 46.5% |
-| 48 | 128 | FP32 | 7.48% | 1.28% | 9.07% | 61.0% |
-| 48 | 128 | FP16 + promotion | 7.48% | 1.17% | 8.47% | 64.6% |
-| 12 | 512 | FP32 | 3.12% | 0.68% | 4.82% | 59.3% |
-| 12 | 512 | FP16 + promotion | 3.12% | 0.61% | 4.29% | 42.6% |
+Percentages below use the same metrics and replay settings as the first profile. Occupancy is achieved active
+warps relative to the hardware maximum. Tensor and DRAM columns are percent of peak sustained elapsed throughput.
+Fetch is the no-instruction stall ratio divided by average warp cycles per issued instruction. It is a share of
+warp cycles, not kernel wall time. The counter includes instruction-fetch waiting and instruction-cache misses;
+it does not separate those causes.
 
-Achieved occupancy is active warps as a percentage of the hardware limit. Tensor activity is the tensor-pipeline
-active-cycle counter normalized over elapsed cycles. The instruction-fetch column divides the `no_instruction`
-warp-state cycles per issued instruction by all warp cycles per issued instruction. It is not a percentage of
-kernel wall time. Nsight's `no_instruction` category includes waiting to fetch an instruction and instruction-cache
-misses; this counter alone does not separate those causes.
+| Heads | Tokens | Accumulation | Occupancy now | Fetch before | Fetch now | Tensor now | DRAM now |
+| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 12 | 128 | FP32 | 3.12% | 44.11% | 3.54% | 1.79% | 11.70% |
+| 12 | 128 | FP16 | 3.12% | 46.45% | 5.27% | 1.56% | 10.21% |
+| 48 | 128 | FP32 | 7.44% | 60.95% | 3.50% | 3.33% | 24.21% |
+| 48 | 128 | FP16 | 7.49% | 64.62% | 2.70% | 3.05% | 21.83% |
+| 12 | 512 | FP32 | 3.12% | 59.26% | 2.44% | 1.76% | 11.77% |
+| 12 | 512 | FP16 | 3.12% | 42.60% | 5.25% | 1.62% | 11.23% |
 
-Schedulers have no eligible warp on 85–91% of active cycles. Fixed-latency dependency waits add another 10–23% of
-warp cycles per issued instruction. Register counts are 168/195 at 128 tokens and 255/209 at 512 tokens, matching
-the unprofiled measurements. The schedule avoids spills but leaves very few warps to hide these stalls.
+The smaller instruction bodies and lower fetch stalls support the original diagnosis. This measures the two
+optimizations together; it is not an ablation assigning a separate speedup to each change. Occupancy does not
+improve. Tensor utilization rises from 0.6–1.3% to 1.6–3.3%, but the kernel is still far from tensor throughput limits.
 
-The memory accesses also need improvement: Nsight attributes 64% of theoretical global sectors to uncoalesced
-accesses in every carry profile. That is not 64% extra DRAM traffic. Cache reuse keeps DRAM throughput at 4–9%,
-and the instruction-fetch stalls dominate the recorded warp-state breakdown.
+The largest remaining stall in the 48-head FP32 case is global/local memory instruction issue throttling:
+48.7% of warp cycles per issued instruction, versus 3.5% for fetching instructions. At 12 heads it is 28.9% for
+128 tokens; at 512 tokens, long-scoreboard waits rise to 30.9%. Fixed-latency dependency waits account for
+12.5–25.6% across the six carry profiles. These are latency and instruction-issue costs; DRAM throughput peaks
+at only 24.2%. The small case has nearly 100% L2 hits, and the larger cases are around 85%.
 
-### Reference GEMMs
+Nsight attributes 65% of theoretical global sectors in the smallest FP32 case to excessive sectors. This measures
+access coalescing, not a claim that 65% of actual DRAM traffic is wasted. Direct loads have reduced instructions
+substantially while increasing the number of global-load instructions. Coalescing and bounded operand reuse are
+now more promising targets than further reductions in instruction-fetch stalls.
 
-The two eager-reference launches are cuBLAS FP32 SGEMMs from the same twelve-head, 128-token workload. They each
-perform one matrix multiplication; they are not the entire chunk loop, so their times are not divided by the
-carry-kernel time to claim a speedup. They illustrate a different instruction schedule:
+Every measured carry kernel has 64 threads per CTA and 254–255 registers per thread, with zero shared memory and
+zero local-memory bytes in the ordinary benchmark. Registers cap theoretical occupancy at 12.5%. There are
+48 CTAs for 12 heads and 192 for 48 heads on an 80-SM GPU. The schedule's full state slice and intermediate results
+still require many live registers. Reducing that demand is necessary before smaller ownership tiles can reliably
+increase occupancy without spilling.
 
-| Reference kernel | Threads per CTA | Registers per thread | Achieved occupancy | Scheduler issue activity | Instruction-fetch stalls |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| NN SGEMM | 256 | 57 | 12.48% | 50.37% | 1.19% |
-| NT SGEMM | 256 | 57 | 12.48% | 45.27% | 1.36% |
+### Eager-reference GEMMs
 
-These use FP32 arithmetic rather than tensor cores. Their grids also have only 24 or 48 CTAs, so the small grid
-alone does not explain Emmy's loss. More warps per CTA, fewer registers per thread, and much lower instruction-fetch
-stalls allow substantially more frequent instruction issue. Emmy's scheduler issue activity is only 8.6–14.7%.
-Their SASS bodies contain 632 and 624 unique instruction addresses, spanning 10,112 and 9,984 bytes: about 10 KiB
-each, compared with roughly 195–215 KiB for the fused carry kernels below. The operations differ in scope, but the
-code-size and instruction-fetch contrast supports reducing the emitted instruction body before changing carry storage.
+The reference row profiles the first two matching FP32 cuBLAS GEMMs from the same eager workload. They are
+`volta_sgemm_128x32_nn` and `volta_sgemm_128x32_nt`: 24/48 CTAs, 256 threads per CTA, and 57 registers per thread.
+Their achieved occupancy is about 12.5%; scheduler issue activity is 50.6% and 45.5%, versus 12.5–19.4% for Emmy.
+Fetch shares are 1.37% and 1.30%. Their instruction bodies contain 632 and 624 unique addresses, about 10 KiB each.
 
-### Instruction and code size
+These GEMMs use FP32 FMA rather than tensor cores. Each performs one product, while Emmy's kernel performs the
+ordered chunk loop, correction, and state updates. Their kernel durations cannot be divided into Emmy's duration
+to infer a speedup. The paired whole-forward benchmark remains the performance comparison.
 
-At twelve heads and 128 tokens, the executed warp-instruction counts are:
+### Protocol and evidence
 
-| Operation | FP32 accumulation | FP16 + promotion |
-| --- | ---: | ---: |
-| All instructions | 2,381,952 | 2,633,376 |
-| HMMA | 196,608 | 98,304 |
-| Warp shuffle | 786,528 | 884,832 |
-| FP32 add | 6,144 | 104,448 |
-| HADD2, including promotion conversions | 0 | 98,304 |
+Run `emmy bench experiments/Qwen3.8-27B/gdn_profile --ssh USER@HOST`, adjusting the recipe's Nsight, CUDA, and Python
+paths. The recipe profiles six carry combinations and one reference row with two captures. It requests
+SpeedOfLight, LaunchStats, Occupancy, SchedulerStats, WarpStateStats, ComputeWorkloadAnalysis,
+MemoryWorkloadAnalysis, InstructionStats, and SourceCounters. Each kernel uses 22 replay passes. Cache and clock
+control are disabled. Two matching launches are skipped, then one carry launch or two reference launches are captured.
 
-FP16 halves the HMMA count but increases all instructions by 10.6%. Its extra shuffles and FP32 additions follow
-from the layout-aware promotion, which must redistribute the FP16 accumulator before adding it into the FP32 shadow
-layout. The instruction increase is consistent with its 7–12% slowdown in the unprofiled benchmark, although
-instruction counts are not cycle costs.
+Nsight Compute is 2025.2.1.0, build 35987062, which supports Volta. Profiling runs with sudo because the driver
+restricts counters to administrators. Bytecode writes are disabled so profiling does not change staged-source
+ownership. The wrapped CLI performs strict correctness and uses two warmups and three iterations; its instrumented
+benchmark JSON is retained for correctness and source identity, not latency comparison.
 
-The FP32 kernel has 12,464 SASS instructions spanning 199,424 bytes, about 195 KiB. FP16 has 13,760 instructions
-spanning 220,160 bytes, 215 KiB. The emitter expands the K steps and output fragments into straight-line code within
-the chunk loop. That large instruction body, together with the high `no_instruction` fraction, points toward
-instruction-cache pressure. A smaller emitted loop is the experiment needed to establish the causal speedup.
+The supplied host has four V100-SXM2-16GB GPUs; each profile uses GPU 0. Software is Ubuntu 24.04.1,
+driver 580.178.04, CUDA toolkit 12.9.86, Python 3.12.3, PyTorch 2.14.0+cu126, and Transformers 5.14.1.
+The run uses clean source `af3e1e04b2b1737e66b890833fb2b4b276b7c953`; compiler code is unchanged from the benchmark
+revision. Run ID is `20260919T212816Z`, directory `2026-09-19_21-28-16/`, completed at 21:34:24 UTC.
 
-For FP32, shuffles alone are 33.0% of executed instructions; HMMA is 8.3%. Shuffles, selects, conversions, permutes,
-shifts, and bitwise logic together account for 85.3%. This is an instruction mix, not a claim that all those
-instructions are redundant or that they consume 85.3% of runtime.
-
-### What to change first
-
-1. Reduce the emitted instruction body. Reuse packed operands across several independent accumulators and keep K
-   traversal compact instead of spelling each fragment's entire contraction separately.
-2. Load external operands directly into the Volta MMA operand layouts. The current generic register path first loads
-   FP32 C-layout fragments, then converts and shuffles them into A/B layouts. Existing direct operand loaders can
-   avoid that work for streamed inputs. Register repacking remains necessary for computed matrix results.
-3. Reduce register pressure and retile. The twelve-head grid has only 48 two-warp CTAs for 80 SMs. More tokens extend
-   each CTA's ordered loop without adding parallel work. More independent CTAs or more useful instruction-level
-   parallelism are needed after reducing the register and instruction costs.
-4. Revisit the FP16 promotion interval after those changes. The tested interval is too expensive to produce a win;
-   increasing it needs another eager-reference accuracy check on the intended inputs.
-
-The state can remain in FP32 registers during these changes. The counters do not establish that shared-memory carry
-would be faster. Input staging or prefetch is a separate choice that may improve the remaining load latency.
-
-### Reproduction and evidence
-
-Run `emmy bench experiments/Qwen3.8-27B/gdn_profile --ssh USER@HOST`, adjusting the existing Nsight, CUDA, and Python
-paths to the supplied host. The machine and Python environment are the same as the ordinary V100 benchmark:
-Tesla V100-SXM2-16GB, 80 SMs, driver 580.178.04, CUDA toolkit 12.9.86, Python 3.12.3, PyTorch 2.14.0+cu126,
-and Transformers 5.14.1. Nsight reports version 2025.2.1.0, build 35987062.
-
-The measured source is `6816a06042471b9754975e6c17e4ef588226462b`, with clean staged inputs. Its compiler source is
-unchanged from the ordinary benchmark. The run started at 20:43:22 UTC and finished at 20:54:07 UTC, with run ID
-`20260919T204322Z` and local directory `2026-09-19_20-43-22/`. All seven rows succeeded, and all seven command JSON
-records pass strict correctness. The profiles contain six carry launches and two reference GEMM launches. No selected
-row is missing or was selectively rerun. An initial twelve-head FP32 probe independently showed 43.6% instruction-fetch
-stalls and 0.69% tensor activity; the tables above use only the complete recorded run.
-
-[`results_v100x1.tar.gz`](results_v100x1.tar.gz) contains the complete raw directory under
-`2026-09-19_20-43-22/`: seven `<variant>_<row_id>.experiment.yaml` system records, seven
-`<variant>_<row_id>_artifacts.tar.gz` command results, and two run logs. Each nested archive includes
-`artifacts/profile.ncu-rep`, `counters.csv`, `counter_instances.csv`, `details.txt`, `profiler.log`,
-`measurement.json`, `measurement.log`, `status.txt`, `profiler_version.txt`, and `requirements.freeze.txt` under
-`artifacts/`. All records and declared raw results are preserved unchanged. The supplied host is retained, with all
-four GPUs idle and no device memory allocated after profiling.
-
-Opcode names and SASS code size can be recovered from the saved report with Nsight's `--import`, using
-`--page raw --csv --print-metric-instances details` for opcode counts and `--page source --print-source sass --csv`
-for instructions. Saving the binary report is necessary because the benchmark worker consumes some profiler console
-output. The recipe exports counters from that report after execution, instead of depending on console forwarding.
+[`results_v100x1.tar.gz`](results_v100x1.tar.gz) contains seven system-only records, seven command-result archives,
+and two logs under that raw directory. Each nested archive includes `profile.ncu-rep`, `counters.csv`,
+`counter_instances.csv` with named instruction counts, `sass.csv`, `details.txt`, `profiler.log`, `measurement.json`,
+`measurement.log`, `status.txt`, `profiler_version.txt`, and `requirements.freeze.txt`, all under `artifacts/`.
+All sixteen outer files are byte-verified. The original profiles remain in the
+[before archive](https://github.com/cloudrift-ai/emmy/blob/3b47f9f116f1e730afa63ddbc1b57a01404e720a/experiments/Qwen3.8-27B/gdn_profile/results_v100x1.tar.gz).
+The raw directories remain local, and the supplied host remains running.
