@@ -1700,113 +1700,7 @@ configs:
       PLACE@map.2/map: cut
       PLACE@map.2/map.2/reduce.1/inner: cut
       PLACE@map.2/map.2/reduce.2/inner: cut
-    identity: 74259cc04c7701047d9597bcc13596a1c1aa7e89f4d010142811e354599be01e
-  - name: k_linear_reduce_bbf90a.191c23aba3c5
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      TILE: ''
-      REDUCE: ''
-      STAGE: ''
-      RASTER: ''
-    identity: 191c23aba3c55fae0f2ef15c8357a6da0e1d3f7f28f9ff998405277ac03ec24b
-  - name: k_linear_reduce_bbf90a.24d068b2e305
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      TILE: ''
-      REDUCE: ''
-      STAGE: ''
-      RASTER: ''
-    identity: 24d068b2e305638130b0696c77bd7b9bde464de2d5a57818683d257c8f06b10b
-  - name: k_linear_reduce_bbf90a.2700879f1c43
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      REDUCE: ''
-      RASTER: ''
-    identity: 2700879f1c43dec483ca08cc7a51403a44a056426b073372f74a4e6ada768668
-  - name: k_linear_reduce_bbf90a.273169fccbf3
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      TILE: ''
-      REDUCE: ''
-      STAGE: ''
-      RASTER: ''
-    identity: 273169fccbf3745ffc9304b76c5768c7e7d1d4ed3e91cd6d2c74866f26c21df8
-  - name: k_linear_reduce_bbf90a.28a39a8569d9
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      TILE: ''
-      REDUCE: ''
-      STAGE: ''
-      RASTER: ''
-    identity: 28a39a8569d9fa68906a8a1ff99bf42a9364bd51a46bae4fb2c747585da5fa46
-  - name: k_linear_reduce_bbf90a.59307c35f1e5
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      TILE: ''
-      REDUCE: ''
-      STAGE: ''
-      RASTER: ''
-    identity: 59307c35f1e5e45fd73d64e86bf0daf0b8e81b5403762db6e60345929eb26a53
-  - name: k_linear_reduce_bbf90a.845ace9f55fe
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      TILE: ''
-      REDUCE: ''
-      STAGE: ''
-      RASTER: ''
-    identity: 845ace9f55fe48a9917811538232c20ca9fd58c559b1d9cce4935ca5efe92b0b
-  - name: k_linear_reduce_bbf90a.a35459223db7
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      TILE: ''
-      REDUCE: ''
-      STAGE: ''
-      RASTER: ''
-    identity: a35459223db7c1d87c07ef7c94ba6d3b22f4b9214e0625b27cf45e2a32c02ad3
-  - name: k_linear_reduce_bbf90a.c85b0ec85435
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      REDUCE: ''
-      RASTER: ''
-    identity: c85b0ec85435dbc32c32064a2b125142d3599229a119d54abf1a6af3e66cbe0c
-  - name: k_linear_reduce_bbf90a.de35395abaf3
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      TILE: ''
-      REDUCE: ''
-      STAGE: ''
-      RASTER: ''
-    identity: de35395abaf3dfd377e1a1ea5f46a8e3fb856df9d810ab3e71dceb11c5bc6ae8
+    identity: 3abb86ccb6e6f65520abd13586971939b7dbc964467b103bd20fb7dab1847c8d
   - name: k_linear_reduce_bbf90a.777016908276
     bindings: {}
     pins:
@@ -1817,18 +1711,7 @@ configs:
       REDUCE: ''
       STAGE: ''
       RASTER: ''
-    identity: 77701690827617eafed132285f6a3d56994969e6f1147e8f369089255a0e8c67
-  - name: k_linear_reduce_bbf90a.777016908276
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      TILE: ''
-      REDUCE: ''
-      STAGE: ''
-      RASTER: ''
-    identity: 77701690827617eafed132285f6a3d56994969e6f1147e8f369089255a0e8c67
+    identity: 28b6b744c68755b09f3f03f7528cd045ea6069d26f65d511ec6f29c3004fb319
   - name: k_linear_reduce_bbf90a.514d7e75a1b5
     bindings: {}
     pins:
@@ -1847,28 +1730,6 @@ configs:
       REDUCE: ''
       RASTER: ''
     identity: 367c4ee40ddfad17b1326a163592e71e2a45b130d325dad1aaaf6f03729be6e4
-  - name: k_linear_reduce_bbf90a.6134c61c27d1
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      TILE: ''
-      REDUCE: ''
-      STAGE: ''
-      RASTER: ''
-    identity: 6134c61c27d161094b2536370225dd3de9455603481bb4a3423995ebe3866b2c
-  - name: k_linear_reduce_bbf90a.7db2258796d7
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      TILE: ''
-      REDUCE: ''
-      STAGE: ''
-      RASTER: ''
-    identity: 7db2258796d79e1667f27b6ee50d2f0496a28fc5e512b136137042a94dc05ab3
   - name: k_linear_reduce_bbf90a.260adfcd93f8
     bindings: {}
     pins:
@@ -1879,40 +1740,7 @@ configs:
       REDUCE: ''
       STAGE: ''
       RASTER: ''
-    identity: 260adfcd93f89d957aae00043f804561863616e086a9e83eeb44bd7368d3bb52
-  - name: k_linear_reduce_bbf90a.a68e791f6801
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      TILE: ''
-      REDUCE: ''
-      STAGE: ''
-      RASTER: ''
-    identity: a68e791f680139a461ed2c54bca26ee8fb9ad75d848413131418a6dfbf2c5d68
-  - name: k_linear_reduce_bbf90a.260adfcd93f8
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      TILE: ''
-      REDUCE: ''
-      STAGE: ''
-      RASTER: ''
-    identity: 260adfcd93f89d957aae00043f804561863616e086a9e83eeb44bd7368d3bb52
-  - name: k_linear_reduce_bbf90a.d92a225b6b12
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      TILE: ''
-      REDUCE: ''
-      STAGE: ''
-      RASTER: ''
-    identity: d92a225b6b1212003df0aee2e8a1dfaf536880c2dfc0f7889b139139afe4f6cb
+    identity: 5c8d7b4e994789d5fd8e3f0768256ed3bb9097f5cdb5b49d91fec08ee46834a5
   - name: k_linear_reduce_bbf90a.b4d81b5ef70e
     bindings: {}
     pins:
@@ -1923,7 +1751,7 @@ configs:
       REDUCE: ''
       STAGE: ''
       RASTER: ''
-    identity: b4d81b5ef70e230fdb202be5279da6e9180d9308f8f17e2181d41aeba93914bc
+    identity: 5b4a84733078ae63d9bdd919fb388da305fb2e8d10cf4e9b96f72ff7a3a02a51
   - name: k_linear_reduce_bbf90a.f9fbafb9cc4c
     bindings: {}
     pins:
@@ -1934,7 +1762,7 @@ configs:
       REDUCE: ''
       STAGE: ''
       RASTER: ''
-    identity: f9fbafb9cc4c358a0c6f2b0f3b8dbe8930ed6169ea35d22b62ebdd8ed95cd951
+    identity: 77950b3f7095190050181b8a164fbd7ef5fd0b3ca7cb3661bf7c90ce776e430d
 loops:
 - inputs: [x]
   outputs: [x_static_fp4_scale_bits, x_static_fp4_bits]
@@ -3014,7 +2842,7 @@ loops:
                                 - class: Assign
                                   fields: {name: v15, op: {elementwise: multiply}, args: {tuple: [in12, v14]}, dtype: null}
                                 - class: Assign
-                                  fields: {name: v16, op: {elementwise: multiply}, args: {tuple: [v10, v15]}, dtype: null}
+                                  fields: {name: v16, op: {elementwise: multiply}, args: {tuple: [v10, v15]}, dtype: {dtype: f32}}
                                 - class: Accum
                                   fields: {name: acc0, value: v16, op: {elementwise: add}, dtype: null, axes: {tuple: [a3]}, base: null}
                               unroll: false
@@ -3148,7 +2976,7 @@ loops:
                                 - class: Assign
                                   fields: {name: v26, op: {elementwise: multiply}, args: {tuple: [in18, v25]}, dtype: null}
                                 - class: Assign
-                                  fields: {name: v27, op: {elementwise: multiply}, args: {tuple: [v21, v26]}, dtype: null}
+                                  fields: {name: v27, op: {elementwise: multiply}, args: {tuple: [v21, v26]}, dtype: {dtype: f32}}
                                 - class: Accum
                                   fields: {name: acc1, value: v27, op: {elementwise: add}, dtype: null, axes: {tuple: [a4]}, base: null}
                               unroll: false
@@ -3295,7 +3123,7 @@ loops:
                           - class: Assign
                             fields: {name: v47, op: {elementwise: multiply}, args: {tuple: [in24, v46]}, dtype: null}
                           - class: Assign
-                            fields: {name: v48, op: {elementwise: multiply}, args: {tuple: [v42, v47]}, dtype: null}
+                            fields: {name: v48, op: {elementwise: multiply}, args: {tuple: [v42, v47]}, dtype: {dtype: f32}}
                           - class: Accum
                             fields: {name: acc3, value: v48, op: {elementwise: add}, dtype: null, axes: {tuple: [a5]}, base: null}
                         unroll: false
@@ -3421,7 +3249,7 @@ loops:
                           - class: Assign
                             fields: {name: v58, op: {elementwise: multiply}, args: {tuple: [in30, v57]}, dtype: null}
                           - class: Assign
-                            fields: {name: v59, op: {elementwise: multiply}, args: {tuple: [v53, v58]}, dtype: null}
+                            fields: {name: v59, op: {elementwise: multiply}, args: {tuple: [v53, v58]}, dtype: {dtype: f32}}
                           - class: Accum
                             fields: {name: acc4, value: v59, op: {elementwise: add}, dtype: null, axes: {tuple: [a6]}, base: null}
                         unroll: false
@@ -3539,7 +3367,7 @@ loops:
                           - class: Assign
                             fields: {name: v69, op: {elementwise: multiply}, args: {tuple: [in36, v68]}, dtype: null}
                           - class: Assign
-                            fields: {name: v70, op: {elementwise: multiply}, args: {tuple: [v64, v69]}, dtype: null}
+                            fields: {name: v70, op: {elementwise: multiply}, args: {tuple: [v64, v69]}, dtype: {dtype: f32}}
                           - class: Accum
                             fields: {name: acc5, value: v70, op: {elementwise: add}, dtype: null, axes: {tuple: [a7]}, base: null}
                         unroll: false
@@ -3665,7 +3493,7 @@ loops:
                           - class: Assign
                             fields: {name: v80, op: {elementwise: multiply}, args: {tuple: [in42, v79]}, dtype: null}
                           - class: Assign
-                            fields: {name: v81, op: {elementwise: multiply}, args: {tuple: [v75, v80]}, dtype: null}
+                            fields: {name: v81, op: {elementwise: multiply}, args: {tuple: [v75, v80]}, dtype: {dtype: f32}}
                           - class: Accum
                             fields: {name: acc6, value: v81, op: {elementwise: add}, dtype: null, axes: {tuple: [a8]}, base: null}
                         unroll: false
@@ -3887,7 +3715,7 @@ loops:
                                 - class: Assign
                                   fields: {name: v130, op: {elementwise: multiply}, args: {tuple: [in48, v129]}, dtype: null}
                                 - class: Assign
-                                  fields: {name: v131, op: {elementwise: multiply}, args: {tuple: [v125, v130]}, dtype: null}
+                                  fields: {name: v131, op: {elementwise: multiply}, args: {tuple: [v125, v130]}, dtype: {dtype: f32}}
                                 - class: Accum
                                   fields: {name: acc7, value: v131, op: {elementwise: add}, dtype: null, axes: {tuple: [a11]}, base: null}
                               unroll: false
@@ -4013,7 +3841,7 @@ loops:
                                 - class: Assign
                                   fields: {name: v141, op: {elementwise: multiply}, args: {tuple: [in54, v140]}, dtype: null}
                                 - class: Assign
-                                  fields: {name: v142, op: {elementwise: multiply}, args: {tuple: [v136, v141]}, dtype: null}
+                                  fields: {name: v142, op: {elementwise: multiply}, args: {tuple: [v136, v141]}, dtype: {dtype: f32}}
                                 - class: Accum
                                   fields: {name: acc8, value: v142, op: {elementwise: add}, dtype: null, axes: {tuple: [a12]}, base: null}
                               unroll: false
@@ -4064,7 +3892,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_reduce_bbf90a
+      name: k_linear_reduce_699e66
     inputs: [p_gate_weight_scale_2, x_static_fp4_scale_2, p_up_weight_scale_2, silu_one, mul_static_fp4_floor, mul_static_fp4_f4_max, mul_static_fp4_scale_2,
       mul_static_fp4_shift, x_static_fp4_scale_bits, p_gate_weight_scale_bits, x_static_fp4_bits, p_gate_weight_bits, x_static_fp4_r1_f4_pairs,
       p_gate_weight_f4_pairs, p_up_weight_scale_bits, x_static_fp4_r2_f4_pairs, p_up_weight_bits, p_up_weight_f4_pairs]
@@ -4479,7 +4307,7 @@ loops:
                           - class: Assign
                             fields: {name: v9, op: {elementwise: multiply}, args: {tuple: [in3, v8]}, dtype: null}
                           - class: Assign
-                            fields: {name: v10, op: {elementwise: multiply}, args: {tuple: [v5, v9]}, dtype: null}
+                            fields: {name: v10, op: {elementwise: multiply}, args: {tuple: [v5, v9]}, dtype: {dtype: f32}}
                           - class: Accum
                             fields: {name: acc0, value: v10, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
                         unroll: false
@@ -4496,7 +4324,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_99c481
+      name: k_linear_f411b6
     inputs: [mul_static_fp4_scale_2, p_down_weight_scale_2, mul_static_fp4_bits, mul_static_fp4_scale_bits, p_down_weight_scale_bits, mul_static_fp4_r1_f4_pairs,
       p_down_weight_bits, p_down_weight_f4_pairs]
     outputs: [[linear_2, f16, [128, 512]]]

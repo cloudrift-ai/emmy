@@ -31,7 +31,7 @@ configs:
       WORK: w2x2
       STAGE: ''
       REDUCE: ''
-    identity: d09603d429d66182e2ec8588c7d0c417a217e6d6c45216b8152c55b63117da4a
+    identity: d5955a83f08a0f38b01c9fda51c197ba88036096d1e2f829cb7e3f7ca3e78f3c
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 5.161948154627351

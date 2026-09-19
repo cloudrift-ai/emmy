@@ -43,4 +43,4 @@ configs:
     knobs:
       WORK: w1x1
       TILE: mma_m16n8k16_f16_f32/f1x4/k8
-    identity: dc2bda893cf770f6650748beea1ac7f3f11d9ae4584a86a4ee9d3d08dc378190
+    identity: a65cbf7e02b1956a938e76a7c5cb92086db81d74aeebd766db26077dc3a4c92d

@@ -29,7 +29,7 @@ configs:
     knobs:
       TILE: mma_m16n8k16_f16_f16/f1x1
       WORK: w1x1
-    identity: eaad496e230f4e2d24ed6447d9f41bf7f4f0299b0bd2e10b9d9e06ff5ac1f2c5
+    identity: 0c690ddb7454e7425da19192d0e9ad64495681015ed66cccf3ed3bd0bf372e43
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 8.047741747671557

@@ -306,7 +306,8 @@ def _atom_families(tile: TileOp, target, node, tail: list, packed: tuple = (None
     # f32 carrier once per chunk — the reduced one therefore runs that chain at the full consumer-die
     # rate without moving the softmax statistics off f32 (the score keeps ``wide_accumulate``).
     if node.chunked():
-        dtype = edge_dtypes(a_edge, tile.inputs)[0]
+        # Scores accumulate at full width; the streamed value determines the repacked multiplicand width.
+        dtype = _channel_dtype(tile, node, target)
         offered = bindable((*atoms_for(dtype, ctx=target), *atoms_for(dtype, acc=dtype, ctx=target)))
         return tuple(dict.fromkeys(name for name in offered if ATOM_REGISTRY[name].c_to_a_repack))
     if (pair := packed[1]) is not None:

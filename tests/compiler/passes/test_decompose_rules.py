@@ -670,6 +670,20 @@ def test_matmul_with_bias_correctness():
     _assert_close(before, after, rtol=1e-4, atol=1e-5)
 
 
+@pytest.mark.parametrize("dtype", [F16, F32])
+def test_matmul_products_do_not_round_before_accumulation(dtype):
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("a", (1, 3), dtype), node_id="a")
+    graph.add_node(InputOp(), [], Tensor("b", (3, 1), dtype), node_id="b")
+    graph.add_node(MatmulOp(), ["a", "b"], Tensor("out", (1, 1), dtype), node_id="out")
+    graph.inputs, graph.outputs = ["a", "b"], ["out"]
+    # The large products overflow fp16 separately, but cancel in a full-width dot product.
+    inputs = {"a": np.array([[300, 300, 1.001]], dtype=dtype.np), "b": np.array([[300], [-300], [1.001]], dtype=dtype.np)}
+    before = _run(graph, inputs)
+    after = _run(_apply(graph, "070_matmul.py"), inputs)
+    _assert_close(before, after, rtol=1e-4, atol=1e-5)
+
+
 # ===================================================================
 # Unsqueeze → IndexMapOp
 # ===================================================================

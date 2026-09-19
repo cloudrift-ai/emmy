@@ -74,7 +74,7 @@ configs:
       REDUCE@map.1/twist.1/inner.1/map.3/map.1/reduce: ''
       STAGE: ''
       RASTER: ''
-    identity: 89cb49719cbfb57d17a1fd8b5490d0a37ff7c9eaf297797232ec5181a04a76b9
+    identity: 8799c8baffbf37f9da68a9c82eda4cbabfec82e4725f91ff602ec4f03431220b
   - name: k_sdpa_rms_norm_reduce_2faf1c.13e687dac206
     bindings: {}
     pins:
