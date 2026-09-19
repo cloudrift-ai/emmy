@@ -101,7 +101,7 @@ MATMUL_FEATURES = (
     "D_near_kchunks,D_near_threads,D_near_tilen,D_near_waves,D_raster_group,D_reduce_ilp,"
     "D_reduce_transposed,D_reuse,D_scalar_on_warp_eligible,D_splitk,D_splitk_deficit,D_splitk_excess,"
     "D_splitk_le2,D_splitk_roundtrip,D_square,D_stage_async,D_stage_depth,D_stage_prefetch,"
-    "D_stage_reg_depth,D_stage_tma,"
+    "D_stage_reg,D_stage_reg_depth,D_stage_tma,"
     "D_threads,D_tile_m,D_tile_n,D_tilen_clean,D_tma_aspect,D_tma_grid_m,D_tma_grid_n,D_tma_l2_splitk,"
     "D_tma_log2_area,D_w_grid_aspect,D_w_grid_m,D_w_grid_n,D_w_l2_bk,D_w_near_bk,D_wspec_warps,"
     "MMA_a_bits,MMA_acc_bits"

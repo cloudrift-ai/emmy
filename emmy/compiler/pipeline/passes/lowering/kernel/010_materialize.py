@@ -27,7 +27,8 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.kernel.ir import ELEM_COL, ELEM_ROW, FRAG_COL, FRAG_ROW
+from emmy.compiler.ir.kernel.ir import ELEM_COL, ELEM_ROW, FRAG_COL, FRAG_ROW, RegStore
+from emmy.compiler.ir.schedule.register import RegisterMaterialization
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Load, Write
 from emmy.compiler.ir.stmt.body import free_names
@@ -45,14 +46,38 @@ def rewrite(match: Match, root: Node, ctx=None) -> KernelOp | None:
     # structural ``tile/030_cut`` fork's, decided BEFORE scheduling (the walk's catalog
     # offers no ``g`` row, and its pin path strips the consumed ``g`` half). A surviving split
     # request is a bug — the materializer only lowers single-launch kernels.
-    rplan = reduce_plan(tile) if tile.op is not None else None
+    resident = isinstance(tile.materialization, RegisterMaterialization)
+    rplan = reduce_plan(tile) if tile.op is not None and not resident else None
     assert rplan is None or not rplan.needs_split, "materialize: a GRID split stage reached the kernel pass past 030_cut"
     try:
-        materialized = _pointwise_strip(tile, factorize(tile, root, sm_count=getattr(ctx, "sm_count", 0)))
+        materialized = factorize(tile, root, sm_count=getattr(ctx, "sm_count", 0))
+        if not resident:
+            materialized = _pointwise_strip(tile, materialized)
         body = _drop_repeated_declarations(Body((materialized,)))
         unbound = _unbound_names(tile, root, body)
         assert not unbound, f"materialize: kernel {tile.name!r} reads names it never binds: {sorted(unbound)}"
-        return KernelOp(body=body, name=tile.name, serial=tuple(tile.place.serial))
+        kernel = KernelOp(body=body, name=tile.name, serial=() if resident else tuple(tile.place.serial))
+        if resident:
+            state = tile.register_program.state.write.output
+            if state not in match.graph.outputs and not match.graph.buffer_users(state):
+                from emmy.compiler.pipeline.passes.lowering.tile._cut import _input_fragment  # noqa: PLC0415
+
+                # Register storage has no global state allocation. Removing that port is a
+                # graph splice; snapshots with external readers remain ordinary outputs.
+                body = body.map(lambda s: None if isinstance(s, RegStore) and s.dst_buffer == state else s)
+                outputs = tuple(t for t in root.outputs if t.name != state)
+                names = {t.name: t.name + "__register" for t in outputs}
+                fragment = _input_fragment(match, root)
+                fragment.add_node(
+                    replace(kernel, body=body.rename_buffers(names), outputs={}, source=tile, knobs=tile.knobs),
+                    list(root.inputs),
+                    outputs=(outputs[0], *(replace(t, name=names[t.name]) for t in outputs[1:])),
+                    node_id=names[outputs[0].name],
+                )
+                fragment.outputs = list(names.values())
+                match.output = names
+                return fragment
+        return kernel
     except UnbindableProjection as exc:
         # The offered row has no multi-root binding (e.g. it tiles two contraction operands of a
         # projection whose outputs do not partition by root). The row stays OFFERED — the

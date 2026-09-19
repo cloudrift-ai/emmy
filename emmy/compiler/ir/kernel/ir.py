@@ -1962,17 +1962,20 @@ class FragmentPromote(Stmt):
 
 @dataclass(frozen=True)
 class FragmentRepack(Stmt):
-    """Convert mma **C fragments** into one 16-bit **A operand fragment** in registers.
+    """Convert mma **C fragments** into one 16-bit operand fragment in registers.
 
     The m16n8k16 layout takes two k-adjacent C fragments whose lanes already align with A. The
     Volta m8n8k4 layout takes one logical 16-column C fragment and selects one of its four-column
-    slices with warp shuffles. The emitter gates on ``AtomKind.c_to_a_repack`` at schedule time."""
+    slices with warp shuffles. The emitter gates on ``AtomKind.c_to_a_repack`` at schedule time.
+    The m16n8k16 f16 B layout takes one C fragment and exchanges its packed column pairs
+    between lanes. Every lane of the warp must participate in that exchange."""
 
     frag: str
     srcs: tuple[str, ...]
     ab_dtype: str = "f16"
     fragment_layout: str = "m16n8k16"
     part: int = 0
+    role: str = "a"
 
     def deps(self) -> tuple[str, ...]:
         return self.srcs
@@ -1981,9 +1984,14 @@ class FragmentRepack(Stmt):
         return (self.frag,)
 
     def pretty(self, indent: str = "") -> list[str]:
-        return [f"{indent}FragmentRepack {self.frag} <- {self.srcs} ({self.ab_dtype}, {self.fragment_layout}, part={self.part})"]
+        role = ", role=b" if self.role == "b" else ""
+        return [f"{indent}FragmentRepack {self.frag} <- {self.srcs} ({self.ab_dtype}, {self.fragment_layout}, part={self.part}{role})"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
+        if self.role == "b":
+            assert self.fragment_layout == "m16n8k16" and self.ab_dtype == "f16" and len(self.srcs) == 1
+            return [f"{_pad(ctx.indent)}emmy_c_to_b_f16({self.frag}, {self.srcs[0]});"]
+        assert self.role == "a"
         if self.fragment_layout == "m8n8k4":
             assert len(self.srcs) == 1
             return [f"{_pad(ctx.indent)}emmy_c_to_a_{self.ab_dtype}_m8n8k4<{self.part}>({self.frag}, {self.srcs[0]});"]

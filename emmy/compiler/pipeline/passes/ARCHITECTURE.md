@@ -79,7 +79,9 @@ state becomes `Placement.serial`, the state a buffer the node owns and keeps eve
 one launch back (the seed at the first), and the `Carry` a store of its value at this step. The step's own algebra is
 untouched, so a contraction over the previous state lifts as a contraction whose B slab is that buffer. A serial
 kernel stays ONE kernel — `030_cut` offers it no cut and no split — because the runner launches one kernel's steps
-to completion before the next kernel's first, so pieces could not interleave step by step.
+to completion before the next kernel's first, so pieces could not interleave step by step. The register schedule
+can realize that same ordered axis inside a CTA when every state read stays within its warp's rows. Its schedule
+choice goes through the same lazy fork adapter; the ordinary Fold tree and precision gates remain shared.
 
 `020_twisted` first applies the general exp-family Fold rewrite described at the boundary below. The single `030_cut`
 pass runs to a fixpoint over two ordered domains. It first offers the maximal fused tree beside every semantically
