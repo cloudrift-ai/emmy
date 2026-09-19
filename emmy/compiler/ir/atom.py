@@ -126,6 +126,11 @@ class AtomKind:
         return self.shape == (16, 8, 16) or self.fragment_layout == "m8n8k4"
 
     @property
+    def c_to_b_repack(self) -> bool:
+        """Whether an FP32 C fragment can feed this atom's B operand through register shuffles."""
+        return self.ab_dtype == "f16" and self.fragment_layout in ("m16n8k16", "m8n8k4")
+
+    @property
     def is_wgmma(self) -> bool:
         """Whether this is the Hopper warp-group cell: its PTX instruction spans four warps' rows."""
         return self.fragment_layout == "wgmma"
@@ -194,16 +199,19 @@ ATOM_REGISTRY: dict[str, AtomKind] = {
     # loaders map them onto a 2x2 quadrant grid, so the scheduler tiles one logical 16x16x4 cell
     # while the inline PTX still spells m8n8k4. It is kept off sm_80+ to preserve the existing
     # m16n8k16 search space there, even though later assemblers continue accepting the old form.
-    "mma_m8n8k4_f16_f32": AtomKind(
-        "mma_m8n8k4_f16_f32",
-        (16, 16, 4),
-        (("a", F16), ("b", F16), ("c", F32)),
-        instruction_shape=(8, 8, 4),
-        fragment_registers=(("a", 2), ("b", 2), ("c", 8)),
-        fragment_layout="m8n8k4",
-        target_feature="has_volta_mma",
-        sync_copy_staging=True,
-    ),
+    **{
+        f"mma_m8n8k4_f16_{acc.name}": AtomKind(
+            f"mma_m8n8k4_f16_{acc.name}",
+            (16, 16, 4),
+            (("a", F16), ("b", F16), ("c", acc)),
+            instruction_shape=(8, 8, 4),
+            fragment_registers=(("a", 2), ("b", 2), ("c", 4 if acc == F16 else 8)),
+            fragment_layout="m8n8k4",
+            target_feature="has_volta_mma",
+            sync_copy_staging=True,
+        )
+        for acc in (F32, F16)
+    },
     "mma_m16n8k16_f16_f32": AtomKind("mma_m16n8k16_f16_f32", (16, 8, 16), (("a", F16), ("b", F16), ("c", F32))),
     "mma_m16n8k16_bf16_f32": AtomKind(
         "mma_m16n8k16_bf16_f32",

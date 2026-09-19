@@ -60,17 +60,14 @@ class _Fragments:
         return self.apply("copy", (value,), (UNIFORM,)) if isinstance(value, Literal) else value
 
     def pack(self, role, srcs, part=0):
-        key = (role, srcs, part)
-        if key not in self.memo:
-            out = self.name()
-            self.body.extend(
-                (
-                    RegFragment(name=out, role=role, shape=self.atom.shape, dtype=self.atom.operand_dtype(role), nregs=self.atom.fragment_nregs(role)),
-                    FragmentRepack(frag=out, srcs=srcs, role=role, fragment_layout=self.atom.fragment_layout, part=part),
-                )
+        out = self.name()
+        self.body.extend(
+            (
+                RegFragment(name=out, role=role, shape=self.atom.shape, dtype=self.atom.operand_dtype(role), nregs=self.atom.fragment_nregs(role)),
+                FragmentRepack(frag=out, srcs=srcs, role=role, fragment_layout=self.atom.fragment_layout, part=part),
             )
-            self.memo[key] = out
-        return self.memo[key]
+        )
+        return out
 
     def cell(self, node, row, col, rb, cb):
         key = (id(node), row, col, rb, cb)
@@ -146,17 +143,17 @@ class _Fragments:
         if row not in left.free_axes or row in right.free_axes or col in left.free_axes:
             raise ValueError("contraction does not preserve the register row ownership")
         axis = node.axis
-        pairs = []
+        pairs, preparations = [], []
+        begin = len(self.body)
         for k in range(0, self.extents[axis], self.atom.atom_k):
+            start = len(self.body)
             ak = k // self.width * self.width
             bk = k // self.atom.atom_m * self.atom.atom_m
-            a = self.pack(
-                "a",
-                tuple(self.operand(left, row, axis, rb, Literal(ak + d, "int")) for d in range(0, self.atom.atom_k, self.width)),
-                (k - ak) // self.atom.atom_k,
-            )
-            b = self.pack("b", (self.operand(right, axis, col, Literal(bk, "int"), cb),), (k - bk) // self.atom.atom_k)
-            pairs.append((a, b))
+            a = tuple(self.operand(left, row, axis, rb, Literal(ak + d, "int")) for d in range(0, self.atom.atom_k, self.width))
+            b = (self.operand(right, axis, col, Literal(bk, "int"), cb),)
+            pairs.append((a, b, (k - ak) // self.atom.atom_k, (k - bk) // self.atom.atom_k))
+            preparations.append(self.body[start:])
+        del self.body[begin:]
         key = ("mma", tuple(pairs), self.atom)
         if key not in self.memo:
             out = self.name()
@@ -165,7 +162,12 @@ class _Fragments:
             partial = self.name() if half else out
             if half:
                 self.body.append(RegFragment(name=partial, role="c", shape=self.atom.shape, dtype=self.atom.operand_dtype("c")))
-            for step, (a, b) in enumerate(pairs, 1):
+            # Keep conversions and operand loads beside their consumer. Reuse the FP32
+            # matrix values, rather than retaining every packed K slice across products.
+            for step, ((a, b, ap, bp), prepare) in enumerate(zip(pairs, preparations, strict=True), 1):
+                self.body.extend(prepare)
+                a = self.pack("a", a, ap)
+                b = self.pack("b", b, bp)
                 self.body.append(
                     MmaSyncPtx(
                         c_frag=partial,
@@ -177,8 +179,11 @@ class _Fragments:
                     )
                 )
                 if half and (step % self.period == 0 or step == len(pairs)):
-                    self.body.append(FragmentPromote(dst=out, src=partial))
+                    self.body.append(FragmentPromote(dst=out, src=partial, fragment_layout=self.atom.fragment_layout))
             self.memo[key] = out
+        else:
+            for prepare in preparations:
+                self.body.extend(prepare)
         return self.memo[key]
 
 
@@ -187,7 +192,8 @@ def factorize_register(tile):
     program = tile.register_program
     choice = tile.schedule.kernel
     warps = choice.work.units[0]
-    row_base = Literal(16, "int") * (Literal(warps, "int") * Var("_rb") + Var("_rw"))
+    height = choice.tile.atom.atom_m
+    row_base = Literal(height, "int") * (Literal(warps, "int") * Var("_rb") + Var("_rw"))
     emit = _Fragments(tile, row_base)
     pending = []
     for spec, node in zip((*program.outputs, program.state), program.roots, strict=True):
@@ -221,5 +227,5 @@ def factorize_register(tile):
         emit.body.append(FragmentApply(out=state, op=ElementwiseImpl("copy"), args=(value,), kinds=(FRAG,), layout=emit.layout, in_place=True))
     declarations = tuple(RegFragment(name=name, role="c", shape=emit.atom.shape, dtype=F32) for name in emit.states)
     loop = StridedLoop(axis=tile.place.serial[0], start=Literal(0, "int"), step=Literal(1, "int"), body=Body(emit.body), unroll=False)
-    axes = (*program.batch, Axis("_rb", (program.rows + warps * 16 - 1) // (warps * 16)), Axis("_rw", warps), Axis("_rl", 32))
+    axes = (*program.batch, Axis("_rb", (program.rows + warps * height - 1) // (warps * height)), Axis("_rw", warps), Axis("_rl", 32))
     return Tile(axes=axes, body=Body((*declarations, loop)), block_threads=warps * 32)

@@ -1945,7 +1945,8 @@ class FragmentPromote(Stmt):
     mma chain and the store."""
 
     dst: str  # f32 shadow accumulator fragment (4 × f32) — the store-side view
-    src: str  # packed f16 mma accumulator fragment (2 × u32) — rezeroed after the fold
+    src: str  # packed f16 mma accumulator fragment — rezeroed after the fold
+    fragment_layout: str = "m16n8k16"
 
     def deps(self) -> tuple[str, ...]:
         return (self.dst, self.src)
@@ -1957,7 +1958,8 @@ class FragmentPromote(Stmt):
         return [f"{indent}FragmentPromote {self.dst} += {self.src} (f16acc chunk fold, {self.src} rezeroed)"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
-        return [f"{_pad(ctx.indent)}emmy_mma_promote_f16acc({self.dst}, {self.src});"]
+        suffix = "_m8n8k4" if self.fragment_layout == "m8n8k4" else ""
+        return [f"{_pad(ctx.indent)}emmy_mma_promote_f16acc{suffix}({self.dst}, {self.src});"]
 
 
 @dataclass(frozen=True)
@@ -3103,7 +3105,7 @@ def _(s: WgmmaWait, rename, sigma, axis_fn):
 
 @_rewrite_kind.register
 def _(s: FragmentPromote, rename, sigma, axis_fn):
-    return FragmentPromote(dst=rename(s.dst), src=rename(s.src))
+    return replace(s, dst=rename(s.dst), src=rename(s.src))
 
 
 @_rewrite_kind.register

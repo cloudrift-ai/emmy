@@ -467,6 +467,47 @@ static __device__ __forceinline__ void emmy_mma_m8n8k4_f16_f32_brow(
                    "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]),
                    "f"(c[4]), "f"(c[5]), "f"(c[6]), "f"(c[7]));
 }
+
+static __device__ __forceinline__ void emmy_mma_m8n8k4_f16_f16(
+    unsigned* d, const unsigned* a, const unsigned* b, const unsigned* c) {
+    asm volatile("mma.sync.aligned.m8n8k4.row.col.f16.f16.f16.f16 "
+                 "{%0, %1, %2, %3}, {%4, %5}, {%6, %7}, {%8, %9, %10, %11};\\n"
+                 : "=r"(d[0]), "=r"(d[1]), "=r"(d[2]), "=r"(d[3])
+                 : "r"(a[0]), "r"(a[1]), "r"(b[0]), "r"(b[1]),
+                   "r"(c[0]), "r"(c[1]), "r"(c[2]), "r"(c[3]));
+}
+
+static __device__ __forceinline__ void emmy_mma_m8n8k4_f16_f16_brow(
+    unsigned* d, const unsigned* a, const unsigned* b, const unsigned* c) {
+    asm volatile("mma.sync.aligned.m8n8k4.row.row.f16.f16.f16.f16 "
+                 "{%0, %1, %2, %3}, {%4, %5}, {%6, %7}, {%8, %9, %10, %11};\\n"
+                 : "=r"(d[0]), "=r"(d[1]), "=r"(d[2]), "=r"(d[3])
+                 : "r"(a[0]), "r"(a[1]), "r"(b[0]), "r"(b[1]),
+                   "r"(c[0]), "r"(c[1]), "r"(c[2]), "r"(c[3]));
+}
+
+// Volta's f16 C fragment owns one row; its f32 counterpart owns two rows.
+// Exchange row pairs before promotion, keeping the shadow in the ordinary f32 layout.
+static __device__ __forceinline__ void emmy_mma_promote_f16acc_m8n8k4(float* c, unsigned* h) {
+    int lane = threadIdx.x & 31;
+    #pragma unroll
+    for (int p = 0; p < 4; ++p) {
+        int src = (lane & ~2) | ((p & 1) << 1);
+        unsigned low = __shfl_sync(0xffffffffu, h[p & 2], src);
+        unsigned high = __shfl_sync(0xffffffffu, h[(p & 2) + 1], src);
+        unsigned packed = (lane & 2) ? high : low;
+        float x, y;
+        asm("{.reg .b16 lo, hi;\\n\\t"
+            "mov.b32 {lo, hi}, %2;\\n\\t"
+            "cvt.f32.f16 %0, lo;\\n\\t"
+            "cvt.f32.f16 %1, hi;}\\n"
+            : "=f"(x), "=f"(y) : "r"(packed));
+        c[2 * p] += x;
+        c[2 * p + 1] += y;
+    }
+    #pragma unroll
+    for (int p = 0; p < 4; ++p) h[p] = 0;
+}
 """
 
 

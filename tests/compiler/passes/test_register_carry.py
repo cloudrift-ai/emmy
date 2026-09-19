@@ -103,12 +103,8 @@ def test_gdn_reuses_the_corrected_values(target):
 def test_register_state_preserves_old_reads_on_cuda(half, warps):
     from emmy.compiler.backend.cuda.program import run_program
 
-    from emmy.compiler.ir.atom import ATOM_REGISTRY
-
     target = Context.probe()
     atom = ("mma_m8n8k4" if target.has_volta_mma else "mma_m16n8k16") + "_f16_" + ("f16" if half else "f32")
-    if atom not in ATOM_REGISTRY:
-        pytest.skip("target has no FP16 accumulator atom")
     with pinned_knobs({"STAGE": "d1/reg", "WORK": f"w{warps}x1", "TILE": f"{atom}/f1x1/k4"}):
         graph = Pipeline.build(CUDA_PASSES).run(_graph())
     (op,) = (n.op for n in graph.nodes.values() if isinstance(n.op, CudaOp))
@@ -154,8 +150,6 @@ m(torch.randn(2,4,{chunk},{keys}), torch.randn(2,4,{chunk},{keys}),
     (node,) = (n for n in lifted.nodes.values() if isinstance(n.op, TileOp) and n.op.place.serial)
     tile = node.op
     context = _context(tile, Context.probe().compute_capability)
-    if half and not any(s.kernel.tile.atom.operand_dtype("c").nbytes == 2 for s in context.extensions()):
-        pytest.skip("target has no FP16 accumulator atom")
     schedule = next(
         s for s in context.extensions() if (s.kernel.tile.atom.operand_dtype("c").nbytes == 2) == half and s.kernel.work.units == (2, 1)
     )
@@ -178,7 +172,6 @@ m(torch.randn(2,4,{chunk},{keys}), torch.randn(2,4,{chunk},{keys}),
     assert not op.serial and tile.register_program.state.write.output not in op.arg_order
     with gpu_lock():
         program = CompiledProgram.build(lowered, arrays)
-        assert all(kernel.local_size_bytes == 0 for kernel in program.compiled.kernels.values())
         program.iter_once()
         result = program.outputs()
     for name, actual in result.items():
@@ -187,3 +180,7 @@ m(torch.randn(2,4,{chunk},{keys}), torch.randn(2,4,{chunk},{keys}),
         # both error near cancellation and the relative error over the whole recurrence.
         np.testing.assert_allclose(actual, expected[name], rtol=3e-3, atol=1e-3)
         assert np.linalg.norm(actual - expected[name]) / np.linalg.norm(expected[name]) < 2e-3
+
+    assert all(kernel.local_size_bytes == 0 for kernel in program.compiled.kernels.values()), [
+        (kernel.num_regs, kernel.local_size_bytes) for kernel in program.compiled.kernels.values()
+    ]
