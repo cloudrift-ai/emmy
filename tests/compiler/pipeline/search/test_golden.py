@@ -267,7 +267,7 @@ def test_a_sibling_sharing_the_target_identity_cannot_silence_the_lead_cut() -> 
 def test_compiler_fingerprint_ignores_mtime_so_two_checkouts_share_one_memo(tmp_path):
     """Two byte-identical trees fingerprint alike however their mtimes differ.
 
-    The identity memo is one file per machine, and every checkout of the same revision reads it:
+    The identity memo is one file per fingerprint, and every checkout of the same revision reads it:
     an agent worktree beside the main tree, the re-exported host tree a serving container mounts.
     Keyed by mtime those checkouts disagreed, so each discarded the other's derivations and the
     next process re-derived every identity from scratch.
@@ -288,6 +288,32 @@ def test_compiler_fingerprint_ignores_mtime_so_two_checkouts_share_one_memo(tmp_
     (second / "pkg" / "rule.py").write_text("VALUE = 2\n")
     os.utime(second / "pkg" / "rule.py", stamp)
     assert _tree_fingerprint(first) != _tree_fingerprint(second)
+
+
+def test_a_flush_from_another_compiler_tree_keeps_this_trees_derivations(tmp_path, monkeypatch):
+    """Two compiler revisions sharing one cache directory each keep what they derived.
+
+    The memo was one file holding one fingerprint, so a process from any other tree replaced it
+    whole. On the serving host a one-row replay from an older tree, run between two boots of the
+    same tree, cost the second boot every replay the first had derived: 851 s, then 859 s.
+    """
+    from emmy import config
+    from emmy.compiler.pipeline.search import golden
+
+    monkeypatch.setattr(config, "_CACHE_ROOT", tmp_path)
+
+    def derive(fingerprint: str, key: str) -> dict:
+        monkeypatch.setattr(golden, "_compiler_fingerprint", lambda: fingerprint)
+        monkeypatch.setattr(golden, "_IDENTITY_STORE", None)
+        kept = dict(golden._identity_store()["replays"])
+        golden._identity_store()["replays"][key] = {}
+        monkeypatch.setattr(golden, "_IDENTITY_STORE_DIRTY", True)
+        flush_identity_store()
+        return kept
+
+    derive("serving tree", "boot")
+    derive("another tree", "replay")
+    assert "boot" in derive("serving tree", "next boot")
 
 
 def test_a_red_row_says_which_of_the_three_kinds_of_churn_moved_it() -> None:

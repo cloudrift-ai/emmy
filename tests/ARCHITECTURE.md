@@ -241,8 +241,8 @@ deciding one row costs about a second, so 224 nodes scatter over the workers ins
 the widest, and a failure names the row rather than a count. The model goldens keep one case per file behind the
 marker, which `make test-goldens` runs — an inventory is hundreds of rows whose per-row nodes would cost more to
 collect than to run, and the widest file is a multi-megabyte parse. The derivation memo
-(`~/.cache/emmy/golden_identity.json`, keyed by compiler fingerprint and record content) makes a re-run cost only the
-rows that actually changed; cold, the whole hardware set is about 25 s on 16 workers.
+(`~/.cache/emmy/golden_identity.<fingerprint>.json`, one file per compiler fingerprint, keyed by record content) makes a
+re-run cost only the rows that actually changed; cold, the whole hardware set is about 25 s on 16 workers.
 
 Hardware rows that no longer decode are listed in `golden_xfails.yaml` beside the test and asked as STRICT xfails, so
 the list can only shrink: closing a row turns its node red until the line is deleted, and a line naming a row the
