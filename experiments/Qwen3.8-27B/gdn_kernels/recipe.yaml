@@ -29,8 +29,10 @@ command:
       status=$$?
     else
       export PYTHONPATH=$reference_root:/home/riftuser/gdn-reference-deps
+      export FLASH_QLA_SM70_PREBUILT_EXTENSION_PATH=$reference_root/flash_qla/ops/gated_delta_rule/chunk/sm70/flash_qla_sm70_gdn_strided.so
       git -C "$reference_root" rev-parse HEAD > $task_dir/artifacts/reference-revision.txt
       git -C "$reference_root" diff > $task_dir/artifacts/reference.patch
+      sha256sum "$$FLASH_QLA_SM70_PREBUILT_EXTENSION_PATH" > $task_dir/artifacts/reference-binary.sha256
       if [ "$workload" = "prefill" ]; then
         timeout -k 3s 110s "$python" "$reference_root/benchmarks/benchmark_sm70_gdn_prefill_compare.py" \
           --tokens "$tokens" --q-heads $$(( $heads / 3 )) --v-heads "$heads" \
