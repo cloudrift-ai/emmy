@@ -28743,22 +28743,24 @@ configs:
       PLACE@map.2/map.1/map.1/inner.2/map: cut
     identity: 58aa14195115176970691dca0621c386a080afd1992a98ec5fb97e537969484d
     measurements:
-      emmy_us: 851.0521306147566
-      reference_us: 979.6660339385628
+      emmy_us: 51.77286381366149
+      reference_us: 54.587214583014664
       reference_backend: same-input-greedy
+    kernel_set:
+    - post-sym.k_linear_softmax_mean_matmul_reduce_dba017.deb454931ca7.m1.5435f7d06742.58aa14195115
   - name: post-sym.k_linear_softmax_mean_matmul_reduce_dba017.deb454931ca7.m1.5435f7d06742.578f9ada9cce
     bindings:
       num_tokens: 1
     pins:
       FAST_MATH: false
     knobs:
-      WORK: ''
-      REDUCE: ''
+      WORK: t256
+      REDUCE: coop
       RASTER: ''
     identity: 578f9ada9cced36c0ee4f676820a5143458adb6352ec9d4bd2f5197d6fa8f66c
     measurements:
-      emmy_us: 149.5039959748586
-      reference_us: 172.54400253295898
+      emmy_us: 2.921600081026554
+      reference_us: 3.0858848054530257
       reference_backend: same-input-greedy
   - name: post-sym.k_linear_softmax_mean_matmul_reduce_dba017.deb454931ca7.m1.5435f7d06742.14876047f22d
     bindings:
@@ -28770,8 +28772,8 @@ configs:
       RASTER: ''
     identity: 14876047f22d9396e571bec381d2b87d14434d01e701a8940a5b0167d8284908
     measurements:
-      emmy_us: 1.3772103140826666
-      reference_us: 1.591947003705612
+      emmy_us: 1.3827160920625852
+      reference_us: 1.4606809813129016
       reference_backend: same-input-greedy
   - name: post-sym.k_linear_softmax_mean_matmul_reduce_dba017.deb454931ca7.m1.5435f7d06742.5e53a67a1c6a
     bindings:
@@ -28786,8 +28788,8 @@ configs:
       RASTER: ''
     identity: 5e53a67a1c6a9f5d7bbac6d6d8d83aa7f918a94acc8c4c7ceca3d0bc0d875e8d
     measurements:
-      emmy_us: 6.413837945139086
-      reference_us: 7.397253566713475
+      emmy_us: 6.441758879533051
+      reference_us: 6.785910520980607
       reference_backend: same-input-greedy
   - name: post-sym.k_linear_softmax_mean_matmul_reduce_dba017.deb454931ca7.m1.5435f7d06742.ceb01a37dd5c
     bindings:
@@ -28802,8 +28804,8 @@ configs:
       RASTER: ''
     identity: ceb01a37dd5c43b798343f426c7b83c7ede01acb2b66a863b37ee8f29b6808e6
     measurements:
-      emmy_us: 6.335146824518839
-      reference_us: 7.310014571586664
+      emmy_us: 6.363919517337876
+      reference_us: 6.693647188298843
       reference_backend: same-input-greedy
   - name: post-sym.k_linear_softmax_mean_matmul_reduce_dba017.deb454931ca7.m1.5435f7d06742.85aeb0d985de
     bindings:
@@ -28815,8 +28817,8 @@ configs:
       RASTER: ''
     identity: 85aeb0d985de04ac46d16611d198e13f09d2993d13236b8c70edbb043b2a06da
     measurements:
-      emmy_us: 1.4254456274724845
-      reference_us: 1.6542867102470205
+      emmy_us: 1.4306834981411318
+      reference_us: 1.5229165452505498
       reference_backend: same-input-greedy
   - name: post-sym.k_linear_softmax_mean_matmul_reduce_dba017.deb454931ca7.m1.5435f7d06742.df499dc6218b
     bindings:
@@ -28831,8 +28833,8 @@ configs:
       RASTER: ''
     identity: df499dc6218b9ab7e62b61987158dbf54f1a6f2898f5b65aa1e8bbbd65d15b78
     measurements:
-      emmy_us: 5.6713847719000645
-      reference_us: 6.538875741896286
+      emmy_us: 5.693686654768794
+      reference_us: 6.021120150883992
       reference_backend: same-input-greedy
   - name: post-sym.k_linear_softmax_mean_matmul_reduce_dba017.deb454931ca7.m1.5435f7d06742.65537dfe5e35
     bindings:
@@ -28843,12 +28845,12 @@ configs:
       REDUCE@map.1/map.1/map.1/twist: ''
       REDUCE@map.1/map.2/reduce: ''
       REDUCE@map.1/map.2/reduce.1/twist: ''
-      WORK: ''
+      WORK: t256
       RASTER: ''
     identity: 65537dfe5e3536c02f37803247595add5e1a3028458576f30fa627afaf60035f
     measurements:
-      emmy_us: 667.6480174064636
-      reference_us: 768.0000066757202
+      emmy_us: 14.816000126302242
+      reference_us: 15.607172045214423
       reference_backend: same-input-greedy
   - name: post-sym.k_linear_softmax_mean_matmul_reduce_dba017.deb454931ca7.m16.c8a6c12fa5e2.9690d882ab31
     bindings:
