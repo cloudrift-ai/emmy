@@ -170,7 +170,10 @@ key + environment tags + provenance + program index) and `plan/<program>.json`. 
 the *runner*, and "model" there must cover everything the compiled programs read off the CHECKPOINT — not just its
 architecture config. A compressed checkpoint is the case that makes the difference: two rungs of one conversion
 share an architecture config and differ only in the per-tensor rates, which set the coded extents, so the runner
-adds the loader's checkpoint digest (`loader.quant.checkpoint_quant_digest`) to the key.
+adds the loader's checkpoint digest (`loader.quant.checkpoint_quant_digest`) to the key. The environment tags carry,
+beside the toolchain and the precision pins, a digest of the golden rows in scope for the card
+(`golden.scope_digest`): those rows decide every fork, so a re-recorded golden must not boot plans compiled from the
+rows it replaced. Compiler version stays out; a pack keeps serving its frozen snapshot.
 Cubins are **not** copied — plans
 reference the shared `EMMY_CUBIN_CACHE` by content-addressed key, so packs dedupe kernels against each other and
 the docker bake ships pack + cubin cache + model snapshot together. `load_pack` returns `None` on *any*

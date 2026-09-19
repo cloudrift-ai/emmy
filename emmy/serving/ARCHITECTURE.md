@@ -638,7 +638,7 @@ Recorded follow-ups, in impact order:
   hash + serving shape — a hit loads binary-keyed plans (`CompiledProgram.build_from_plan`) and skips trace, pass
   pipeline, fork resolution, and codegen entirely (weights still bind from the checkpoint via the plan's
   `source_path` refs); a miss compiles in full and writes the pack for the next boot. Any mismatch — retune under
-  a different config, nvcc/toolkit change, evicted cubin — silently falls back to the full compile.
+  a different config, nvcc/toolkit change, a changed golden, evicted cubin — silently falls back to the full compile.
   The generative arm's key drops the model id (a baked image resolves the model to a snapshot *path* offline while
   the warm boot uses the hub id) and excludes only `eos_token_id` from the config digest: EOS is generation policy
   consumed after the forward and cannot change a twin program, so base/IT checkpoints with identical tensor geometry

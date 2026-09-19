@@ -14,17 +14,20 @@ magnitude more rows, and the widest of them is a multi-megabyte parse. Run those
 
 import os
 from collections import Counter
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
 import yaml
 
+from emmy.compiler.pipeline.search import golden
 from emmy.compiler.pipeline.search.golden import (
     _HARDWARE_GOLDENS_DIR,
     _records_of,
     _repository_golden_paths,
     decode_record,
     flush_identity_store,
+    scope_digest,
     siblings_of,
 )
 
@@ -95,6 +98,29 @@ def test_recorded_row_decodes(path: Path, label: str) -> None:
     assert label in labels, f"{_XFAILS_FILE.name} lists {label!r}, which {path.name} no longer records"
     record = records[labels.index(label)]
     assert (reason := _decode(record, records)) is None, reason
+
+
+def test_scope_digest_follows_the_cards_rows_only(tmp_path, monkeypatch) -> None:
+    """The digest a serving pack keys on moves with the rows this card's compile reads and with nothing else: another
+    card's file, or a file scope that names a different file."""
+    mine = tmp_path / "mine.yaml"
+    other = tmp_path / "other.yaml"
+    mine.write_text("gpu_name: NVIDIA GeForce RTX 5090\nrows: 1\n")
+    other.write_text("gpu_name: NVIDIA H100 80GB HBM3\nrows: 1\n")
+    monkeypatch.setattr(golden, "_repository_golden_paths", lambda: nullcontext([mine, other]))
+    monkeypatch.delenv("EMMY_GOLDEN_FILE", raising=False)
+    card = "NVIDIA GeForce RTX 5090"
+    base = scope_digest(card)
+    other.write_text("gpu_name: NVIDIA H100 80GB HBM3\nrows: 2\n")
+    assert scope_digest(card) == base
+    mine.write_text("gpu_name: NVIDIA GeForce RTX 5090\nrows: 2\n")
+    changed = scope_digest(card)
+    assert changed != base
+    monkeypatch.setenv("EMMY_GOLDEN_FILE", str(other))
+    scoped = scope_digest(card)
+    assert scoped not in (base, changed)
+    monkeypatch.setenv("EMMY_GOLDEN_FILE", "")
+    assert scope_digest(card) not in (base, changed, scoped)
 
 
 def test_decode_ignores_off_anchors_but_not_a_decided_value() -> None:
