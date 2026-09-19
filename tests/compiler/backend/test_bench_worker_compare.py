@@ -644,7 +644,7 @@ def test_embedded_reference_survives_later_greedy_timing_failure(monkeypatch) ->
 @pytest.mark.parametrize("strict", [False, True])
 @pytest.mark.parametrize("fails", [False, True])
 @pytest.mark.parametrize("initial", [(True, True), (False, False)])
-def test_strict_reference_precision_is_scoped_to_worker_job(monkeypatch, strict, fails, initial) -> None:
+def test_strict_reference_precision_is_scoped_to_worker_job(monkeypatch, request, strict, fails, initial) -> None:
     import torch
 
     from emmy.commands import run as run_mod
@@ -652,9 +652,13 @@ def test_strict_reference_precision_is_scoped_to_worker_job(monkeypatch, strict,
     from emmy.compiler.backend.cuda import backend as backend_mod
 
     matmul = torch.backends.cuda.matmul
+    fp16 = torch._C._get_cublas_allow_fp16_reduced_precision_reduction()
+    bf16 = torch._C._get_cublas_allow_bf16_reduced_precision_reduction()
+    request.addfinalizer(lambda: setattr(matmul, "allow_fp16_reduced_precision_reduction", fp16))
+    request.addfinalizer(lambda: setattr(matmul, "allow_bf16_reduced_precision_reduction", bf16))
     setting = initial if hasattr(matmul, "allow_fp16_reduced_precision_reduction_split_k") else initial[0]
-    monkeypatch.setattr(matmul, "allow_fp16_reduced_precision_reduction", setting)
-    monkeypatch.setattr(matmul, "allow_bf16_reduced_precision_reduction", setting)
+    matmul.allow_fp16_reduced_precision_reduction = setting
+    matmul.allow_bf16_reduced_precision_reduction = setting
 
     async def compare(*_args, **_kwargs):
         assert matmul.allow_fp16_reduced_precision_reduction == (initial[0] and not strict)
