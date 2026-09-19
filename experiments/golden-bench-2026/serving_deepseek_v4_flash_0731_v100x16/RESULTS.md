@@ -271,9 +271,10 @@ Decode is 12.4× faster than the previous boot and 3.4× faster than the 0.899 s
 the best this host had produced: the M=1 post twin runs in 3.4 ms per layer where the m16 twin it replaced ran
 69.8 ms, and #813's Sinkhorn cut is inside both. Against the pinned fork's 0.147 s per token from the same host the
 repository arm is now 1.8× slower, directional as before. Time to first token at the long prompt fell from 45.5 s
-to 29.3 s with the m4096 post twin barely moved, so the gain there is mostly the m16 decode steps that precede the
-first token. One program went backwards: the m4096 pre-attention twin elects the same three-kernel cut as before
-but measures 25.4 ms against 2.73 ms. Evidence on the host under `~/serve-evidence/boot24-*`, `boot25-*`,
+to 29.3 s with the m4096 post twin barely moved; that twin does not run for this prompt (see 2026-09-19 below), so
+the gain is most likely in the symbolic twins its prefill rides, which was not measured. One program went
+backwards: the m4096 pre-attention twin elects the same three-kernel cut as before but measures 25.4 ms against
+2.73 ms. Evidence on the host under `~/serve-evidence/boot24-*`, `boot25-*`,
 `boot26-*`, `elect826-*`, `rec826*` and `ab826-*`.
 
 The cause is the cut's residual receipt, not the compiler. Its row, `WORK: t128, REDUCE: coop`, was recorded while
@@ -296,7 +297,32 @@ The serial kernel reproduces the carried figure at every width, which is what sa
 dynamic program does not move: its 4.2 ms first piece varies by more between runs than the residual gains. The m1
 twin is not affected: its recorded rows and their serial respelling build the same kernels on `main`. One V100,
 strict evidence, an empty tune DB per run; logs on the host under `~/serve-evidence/recpre4096-*` and `recpre3-*`.
-No boot was run on the re-recorded file.
+
+**The re-recorded file did not boot, and one row was why (2026-09-19).** A strict boot of `main` at `cab3b735` with
+the golden as merged died after 24 minutes: every rank refused the m16 decode twins at a piece's cut fork, and
+without them the runner rejects the engine's 4,112-token step budget. The m16 pre-attention set carried two rows of
+one kernel, a cooperative row and a row spelling a cross-CTA split (`REDUCE@reduce: g4a`). Both carried 3.8912 µs,
+and the cooperative row won the tie. The re-record above retimed the cooperative row to 5.73 µs, so the split row
+won, and the pieces its split mints have no rows. Replayed on one card: the merged golden refuses on `main` and on
+the tree before the later merges, the previous boot's golden elects its three kernels, and the merged golden minus
+the split row elects the same three. No other kernel in the file has a split row as its fastest of several. The
+row is dropped, and the boot on that file serves:
+
+| Measure | 2026-09-19 | 2026-09-18 |
+| --- | ---: | ---: |
+| `pre.chunk.m4096` per layer | 3.10 ms | 25.4 ms |
+| `post.decode.m1` / `post.decode.m16` / `post.chunk.m4096` per layer | 3.2 – 3.9 / 13.6 / 599 ms | 3.2 – 3.6 / 13.6 / 599 ms |
+| Time per output token, 5 → 33 tokens | 0.266 s | 0.267 s |
+| Time to first token, 5 tokens (cold / repeat) | 3.74 s / 0.97 s | 3.73 s / 0.96 s |
+| Time to first token, 2,155 tokens (cold / repeat) | 29.32 s / 2.68 s | 29.32 s / 2.70 s |
+
+The long prompt's time to first token did not move although its chunk twin got 22 ms per layer faster, because
+that twin did not run: the runner takes a chunk twin only for a step of exactly 4,096 tokens, and one request under
+a 4,096-token context limit never makes one. A 2,155-token prefill rides the symbolic twins, so they, not the m4096
+pieces, are what a single request's time to first token is made of; the m4096 twins matter once concurrent prompts
+fill a step. Health took 29 minutes against 17: the first compile on each rank took 790 to 860 s in both boots of
+this tree, against 107 s in the previous boot, and a second boot did not shorten it. The cause is not found.
+Evidence on the host under `~/serve-evidence/boot27-*`, `boot28-*` and `elect27-*`.
 
 
 ### The M=1 decode tier: what broke and what now guards it

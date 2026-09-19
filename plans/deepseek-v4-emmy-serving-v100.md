@@ -33,6 +33,15 @@ measured 25.4 ms against 2.73 ms on the same three-kernel cut. The cause was the
 compiler — a cooperative reduce the binder ignored until #813 — and the receipt is re-recorded as the serial row,
 2.82 ms from `main`. The report has the numbers.
 
+**The re-recorded golden needed one more row out before it booted (2026-09-19).** `main` at `cab3b735` with the
+golden as merged died 24 minutes in: the m16 pre-attention set held a cooperative row and a cross-CTA split row of
+one kernel, tied at 3.89 µs; #843 retimed the cooperative row to 5.73 µs, the split row won, and its pieces have no
+rows, so strict refused the m16 decode twins and the runner rejected the engine's step budget. With that one row
+dropped the boot serves: 0.266 s per output token, `pre.chunk.m4096` 3.10 ms per layer, and the long prompt's time
+to first token unchanged at 29.3 s — a single request under a 4,096-token context never makes the exactly-4,096-token
+step a chunk twin takes, so its prefill rides the symbolic twins. Health took 29 minutes: the first compile on each
+rank now takes about 800 s on this tree, in two boots running, against 107 s before; cause not found.
+
 Stages −1, 1 (#651), 2 (#656) and 3 (#662) are done, and Stage 0's question — whether the compiler can produce a
 schedule fast enough to serve this model — is answered yes. Gate (c) passed on the repository golden at 7e9336e6 +
 #807: the server boots, answers, and its completions are coherent. Gate (d)'s greedy token-ID half: two of four
@@ -174,9 +183,12 @@ set's receipts, because a cut arm is eligible only when every piece has one (#83
 M=1 division cut recorded (its piece builds since #827, 10 µs) and the `9e578e` cut recorded again at 406 µs; the
 residual refusal of #799's cut did not recur. Still refused: the expert M=1 and m256 twins, whose cut minted one
 kernel where it minted two and whose prior schedule runs about 4 s per launch — `emmy tune`, not a bench. The boot's
-roofline audit still has no time limit. Next kernel items, in order: the nine m4096 post pieces #813 never
-recorded that take the prior's schedules at up to 140 ms each, and the dynamic post twin's `a47f22fa9713` piece
-at 24.7 ms; then Stage 4.
+roofline audit still has no time limit. A fourth gap came out of the 2026-09-19 boot: a measured row that spells a
+split or a cut whose pieces have no rows can win its fork on a retime alone, and strict then refuses at the pieces
+instead of taking the next measured arm — audit every such row for piece coverage, not only the placement routes.
+Next kernel items, in order: measure the symbolic post twin at a long prompt's width, since that and not the m4096
+twin is a single request's time to first token, starting with its `a47f22fa9713` piece at 24.7 ms; the nine m4096
+post pieces #813 never recorded (up to 140 ms each) matter once concurrent prompts fill a step; then Stage 4.
 
 ## Operations handoff
 
