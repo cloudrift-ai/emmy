@@ -206,6 +206,10 @@ fresh piece re-enters the same rule. `030_cut` presents its restricted structura
 
 ## Register storage across ordered steps
 
+The `reg` transport names stored register intermediates. Reuse can span consumers or loop iterations; recurrence
+is not part of the transport's meaning. `d1/reg` provides one slot without prefetch. The current implementation
+supports this transport through the ordered matrix-loop schedule below; other schedules do not yet offer it.
+
 `RegisterContext` uses the same problem, site, codec, and lazy enumeration interfaces as the classic schedule.
 It offers one kernel choice for a static ordered loop with one matrix state, pointwise operations, and additive
 matrix contractions. The structural reading proves that each warp's rows are independent through every
