@@ -497,7 +497,8 @@ def handle_eval_golden(args) -> None:
         sys.exit(1)
 
     logger.info("OK: %d verified realizations cover %s on %s.", len(records), serving.model_provenance, serving.gpu_name)
-    _emit_prior_golden_check(records, title=False)
+    with sole_evidence(records):
+        _emit_prior_golden_check(records, title=False)
     if _emit_offer_audit(records):
         sys.exit(1)
 

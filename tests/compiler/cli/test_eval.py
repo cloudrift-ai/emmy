@@ -157,7 +157,11 @@ def test_eval_golden_audits_file_scoped_static_release(monkeypatch, tmp_path):
     )
     ctx = Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4090")
     monkeypatch.setattr(Context, "probe", staticmethod(lambda: ctx))
-    monkeypatch.setattr(eval_cmd, "_emit_prior_golden_check", lambda *_args, **_kwargs: None)
+    def check_reproduction(records, **_kwargs):
+        assert golden_mod.RECORDS_OVERRIDE == records
+        assert emmy_config.strict_evidence()
+
+    monkeypatch.setattr(eval_cmd, "_emit_prior_golden_check", check_reproduction)
     monkeypatch.setattr(eval_cmd, "_emit_offer_audit", lambda _records: False)
     captured = {"compiles": []}
     twin = object()
