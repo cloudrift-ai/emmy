@@ -404,21 +404,15 @@ static __device__ __forceinline__ void emmy_c_to_a_f16_m8n8k4(unsigned* a, const
     int src0 = (lane & 16) | (src_comp << 2) | (lane & 1);
     int src1 = src0 + 2;
     constexpr int col_half = (Part & 1) << 2;
-    float x00 = __shfl_sync(0xffffffffu, c[col_half], src0);
-    float x01 = __shfl_sync(0xffffffffu, c[col_half + 1], src0);
-    float x10 = __shfl_sync(0xffffffffu, c[col_half + 2], src0);
-    float x11 = __shfl_sync(0xffffffffu, c[col_half + 3], src0);
-    float y00 = __shfl_sync(0xffffffffu, c[col_half], src1);
-    float y01 = __shfl_sync(0xffffffffu, c[col_half + 1], src1);
-    float y10 = __shfl_sync(0xffffffffu, c[col_half + 2], src1);
-    float y11 = __shfl_sync(0xffffffffu, c[col_half + 3], src1);
+    unsigned low = emmy_pack_f16(c[col_half], c[col_half + 1]);
+    unsigned high = emmy_pack_f16(c[col_half + 2], c[col_half + 3]);
+    unsigned x0 = __shfl_sync(0xffffffffu, low, src0);
+    unsigned x1 = __shfl_sync(0xffffffffu, high, src0);
+    unsigned y0 = __shfl_sync(0xffffffffu, low, src1);
+    unsigned y1 = __shfl_sync(0xffffffffu, high, src1);
     bool high_row = (lane & 2) != 0;
-    float x0 = high_row ? x10 : x00;
-    float x1 = high_row ? x11 : x01;
-    float y0 = high_row ? y10 : y00;
-    float y1 = high_row ? y11 : y01;
-    a[0] = emmy_pack_f16(x0, x1);
-    a[1] = emmy_pack_f16(y0, y1);
+    a[0] = high_row ? x1 : x0;
+    a[1] = high_row ? y1 : y0;
 }
 
 // Select four rows of a logical 16x16 C fragment for a column-major B operand.
@@ -1472,6 +1466,7 @@ def render_kernelop(
     sig_dtypes = [_dtype_for(n) for n in kernel_op.inputs if n not in literals]
     sig_dtypes.extend(_dtype_for(n) for n in kernel_op.outputs)
     sig_dtypes.extend(s.dtype for s in kernel_op.body.iter_of_type(Assign) if s.dtype is not None)
+    sig_dtypes.extend(frag_dtype(ctx, s.frag) for s in kernel_op.body.iter_of_type(LdmatrixLoad) if frag_dtype(ctx, s.frag))
     includes = "".join(f"#include {h}\n" for h in cuda_includes(sig_dtypes))
     # The mma.sync (s16816) tensor-core path is pure inline PTX — its
     # ldmatrix / mma.sync wrappers are emitted in ``_MMA_SYNC_PRELUDE``, so

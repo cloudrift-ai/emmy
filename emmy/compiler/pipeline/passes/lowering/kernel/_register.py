@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
@@ -16,6 +18,7 @@ from emmy.compiler.ir.kernel.ir import (
     FragmentApply,
     FragmentPromote,
     FragmentRepack,
+    LdmatrixLoad,
     MmaSyncPtx,
     RegFragment,
     RegStore,
@@ -23,6 +26,8 @@ from emmy.compiler.ir.kernel.ir import (
     frag_layout,
 )
 from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Select, StridedLoop
+
+from ._atom import _direct_operand
 
 
 class _Fragments:
@@ -70,10 +75,37 @@ class _Fragments:
                 RegFragment(
                     name=out, role=role, shape=self.atom.shape, dtype=self.atom.operand_dtype(role), nregs=self.atom.fragment_nregs(role)
                 ),
-                FragmentRepack(frag=out, srcs=srcs, role=role, fragment_layout=self.atom.fragment_layout, part=part),
+                replace(srcs, frag=out)
+                if isinstance(srcs, LdmatrixLoad)
+                else FragmentRepack(frag=out, srcs=srcs, role=role, fragment_layout=self.atom.fragment_layout, part=part),
             )
         )
         return out
+
+    def read_b(self, node, axis, col, k, cb):
+        """Reuse the direct fragment loader for a slab; computed operands keep their C fragments."""
+        slab = node.as_slab()
+        if slab is None or slab.load.input == self.program.state.write.output:
+            return None
+        try:
+            trans, ldm = _direct_operand(slab.load, self.tile.inputs, k_name=axis, own=col, legacy=(False, 0))
+        except ValueError:
+            return None  # The C-fragment gather also supports non-unit-stride operands.
+        if not ldm:
+            return None
+        sub = {axis: Literal(k, "int"), col: cb}
+        return LdmatrixLoad(
+            frag="",
+            src_buffer=slab.load.input,
+            src_index=tuple(e.substitute(sub) for e in slab.load.index),
+            role="b",
+            staged=False,
+            b_trans=trans,
+            ldm=ldm,
+            gmem_guard=(cb, Literal(self.extents[col], "int")) if self.extents[col] % self.width else None,
+            k_zero=(Literal(k, "int"), Literal(self.extents[axis], "int")) if self.extents[axis] % self.atom.atom_k else None,
+            fragment_layout=self.atom.fragment_layout,
+        )
 
     def cell(self, node, row, col, rb, cb):
         key = (id(node), row, col, rb, cb)
@@ -160,7 +192,9 @@ class _Fragments:
             ak = k // self.width * self.width
             bk = k // self.atom.atom_m * self.atom.atom_m
             a = tuple(self.operand(left, row, axis, rb, Literal(ak + d, "int")) for d in range(0, self.atom.atom_k, self.width))
-            b = (self.operand(right, axis, col, Literal(bk, "int"), cb),)
+            b = self.read_b(right, axis, col, k, cb)
+            if b is None:
+                b = (self.operand(right, axis, col, Literal(bk, "int"), cb),)
             pairs.append((a, b, (k - ak) // self.atom.atom_k, (k - bk) // self.atom.atom_k))
             preparations.append(self.body[start:])
         del self.body[begin:]

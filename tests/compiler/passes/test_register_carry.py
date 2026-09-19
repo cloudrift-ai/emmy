@@ -9,7 +9,7 @@ from emmy.compiler.context import Context
 from emmy.compiler.graph import Graph
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda import CudaOp
-from emmy.compiler.ir.kernel.ir import FragmentPromote, MmaSyncPtx, RegFragment
+from emmy.compiler.ir.kernel.ir import FragmentPromote, FragmentRepack, LdmatrixLoad, MmaSyncPtx, RegFragment
 from emmy.compiler.ir.schedule import Stage
 from emmy.compiler.ir.schedule.base import ScheduleRefused
 from emmy.compiler.ir.schedule.register import RegisterCodec, RegisterContext, RegisterProblem, materialize_register
@@ -76,6 +76,32 @@ def test_chunk_loop_is_inside_one_launch(target):
     assert [t.name for t in graph.nodes["out"].outputs] == ["out"]
     assert f"float _state0[{8 if target == (7, 0) else 4}]" in op.kernel_source and "for (int a0" in op.kernel_source
     assert "out__acc1[" not in op.kernel_source
+
+
+@pytest.mark.parametrize("target", [(7, 0), (12, 0)], ids=["volta", "modern"])
+@pytest.mark.parametrize("stride", [1, 2])
+def test_register_operands_use_direct_loads_when_the_address_allows_it(target, stride):
+    from emmy.compiler.ir.expr import Literal
+    from emmy.compiler.ir.stmt import Load
+
+    graph = _graph()
+    op = graph.nodes["out"].op
+    graph.nodes["out"].op = replace(
+        op,
+        body=op.body.map(
+            lambda s: replace(s, index=(s.index[0], s.index[1] * Literal(stride, "int")))
+            if isinstance(s, Load) and s.input == "W"
+            else s
+        ),
+    )
+    (tile,) = (n.op for n in _lift(graph).nodes.values() if isinstance(n.op, TileOp))
+    schedule = next(iter(_context(tile, target).extensions()))
+    statements = tuple(factorize_register(materialize_register(tile, schedule, {})).body.iter())
+    reads = [s for s in statements if isinstance(s, LdmatrixLoad)]
+    assert bool(reads) == (stride == 1)
+    assert all(s.src_buffer == "W" and s.b_trans and not s.staged and s.gmem_guard for s in reads)
+    assert any(isinstance(s, FragmentRepack) and s.role == "b" for s in statements) == (stride != 1)
+    assert any(isinstance(s, FragmentRepack) and s.role == "a" for s in statements)
 
 
 @pytest.mark.parametrize("target", [(7, 0), (12, 0)], ids=["volta", "modern"])
