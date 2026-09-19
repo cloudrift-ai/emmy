@@ -15,8 +15,8 @@ tags:
 
 model:
   huggingface: turboderp/Qwen3.8-27B-exl3
-  rationale: "Blocked EXL3 variant on the hot Qwen3.8 breakout family."
-  heat: 25
+  rationale: "Variant of the hot Qwen3.8 family, though specific niche evidence is limited."
+  heat: 35
   revision: a35e75a73baee51da709329d19294245cbeeb5d8
   task: generate
 
