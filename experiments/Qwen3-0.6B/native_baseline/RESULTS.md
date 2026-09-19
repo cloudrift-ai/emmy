@@ -1,5 +1,9 @@
 # Native-serving baseline
 
+The later [schedule qualification](SCHEDULES.md) fixes three numerical issues and passes a bounded serving startup
+check. The current recipe selects that new experimental golden. The full four-configuration result below remains
+the previous run; the updated recipe has not yet been rerun as a complete matrix.
+
 ## RTX 4080 × 1 — 2026-09-18
 
 Stock vLLM completed the matrix. All three Emmy configurations compiled their programs without the previous
@@ -12,7 +16,7 @@ Read the separate [dispatch report](DISPATCH.md), [shape/memory report](SHAPES_M
 
 ### Protocol and environment
 
-[recipe.yaml](recipe.yaml) pins Qwen/Qwen3-0.6B revision `c1899de289a04d12100db370d81485cdf75e47ca`, FP16,
+The recipe at `0d5ac561` pins Qwen/Qwen3-0.6B revision `c1899de289a04d12100db370d81485cdf75e47ca`, FP16,
 context 4,096, maximum four sequences, a 256-token batched prefill limit, Triton attention, full CUDA graphs with
 explicit capture sizes, and prefix caching disabled. It compares stock, width-16 decode, the single-token tier, and
 that tier with activation capacity reduced from 1,024 to 256. Each fixed workload has three repeats, eight requests,

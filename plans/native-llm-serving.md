@@ -38,6 +38,11 @@ weights at 1, 4, and 8 tokens. A complete four-configuration rerun held source f
 configurations compiled their programs without the reproduced rejections, then missed readiness during GPU
 initialization. An isolated width-16 post-attention program exceeds its watchdog as one kernel, while explicit
 placement cuts pass numerical checks. The remaining work is to qualify serving schedules and repeat the comparison.
+The follow-up [PR #847](https://github.com/cloudrift-ai/emmy/pull/847) fixes matrix-vector classification and
+half-precision product rounding. A fresh recorded inventory passes all 32 isolated checks and the eight-program
+strict release audit. A bounded small-capacity serving smoke test reaches readiness and completes two requests.
+Several isolated schedules remain slower than eager; the complete four-configuration serving comparison and
+checkpoint generation checks remain outstanding. See the [schedule report](../experiments/Qwen3-0.6B/native_baseline/SCHEDULES.md).
 Evidence gathering still precedes performance claims and runtime expansion.
 
 ## Evidence before implementation
