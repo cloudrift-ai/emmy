@@ -6,6 +6,9 @@ Volta support makes the tested GDN carry update runnable, but it is slower than 
 on every completed case. FP16 partial accumulation is also slower than FP32 accumulation at the chosen promotion
 interval. The carried state and intermediate matrix results fit in registers in all completed measurements.
 
+Follow-up [hardware profiles](../gdn_profile/RESULTS.md) show low tensor-pipeline activity and large instruction-fetch
+stalls. They quantify the operand preparation and FP16 promotion costs and compare them with the eager GEMMs.
+
 ### Question and protocol
 
 This experiment measures the inter-chunk correction and state update introduced by the register schedule in
