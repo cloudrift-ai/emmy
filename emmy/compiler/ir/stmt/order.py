@@ -449,17 +449,28 @@ class _PartitionCell:
     vertices: set[int]
     serial: int
     queued: bool = False
+    #: An input cell nothing has split yet, of a partition that was equitable before one of its
+    #: cells was individualized: as a splitter it can split nothing, so its turn is skipped.
+    settled: bool = False
 
 
 def _equitable_partition(
     partition: tuple[tuple[int, ...], ...],
     incoming: Sequence[Sequence[tuple[int, int]]],
     outgoing: Sequence[Sequence[tuple[int, int]]],
+    individualized: int | None = None,
 ) -> tuple[tuple[int, ...], ...]:
     """Refine vertex colors with the standard smaller-half worklist algorithm.
 
     Each directed relation color is a separate splitter.  Processing only a cell's smaller
     replacement parts bounds relation visits by ``O((vertices + edges) log vertices)``.
+
+    ``individualized`` is the index of the singleton an individualization just split off a partition
+    that was EQUITABLE: every other input cell, bar the remainder that follows it, counts uniformly
+    into every cell, so until something splits it its turn as a splitter is a no-op. Skipping those
+    turns keeps the queue order and the cell serials — hence the result — exactly what visiting them
+    produces, while a search node costs what the individualization disturbs rather than the whole
+    graph again.
     """
     owner: list[_PartitionCell | None] = [None] * sum(map(len, partition))
     cells: dict[int, _PartitionCell] = {}
@@ -471,8 +482,9 @@ def _equitable_partition(
             cell.queued = True
             work.append(cell)
 
-    for vertices in partition:
-        cell = _PartitionCell(set(vertices), next_serial)
+    for position, vertices in enumerate(partition):
+        settled = individualized is not None and position not in (individualized, individualized + 1)
+        cell = _PartitionCell(set(vertices), next_serial, settled=settled)
         cells[next_serial] = cell
         next_serial += 1
         for vertex in vertices:
@@ -483,6 +495,8 @@ def _equitable_partition(
         splitter = work.popleft()
         assert splitter.queued
         splitter.queued = False
+        if splitter.settled:
+            continue
 
         # Per directed relation color, how many of the splitter's vertices each neighbour touches.
         # Plain dicts: this is the innermost loop of every identity, and ``Counter`` pays a Python
@@ -519,6 +533,7 @@ def _equitable_partition(
                 for value, vertices in sorted(parts.items()):
                     if value == retained:
                         cell.vertices = vertices
+                        cell.settled = False
                         child = cell
                     else:
                         child = _PartitionCell(vertices, next_serial)
@@ -619,7 +634,7 @@ def _canonical_labeling(
             covered.update(orbit(vertex, candidate_set, prefix) if _prune else {vertex})
             rest = tuple(member for member in cell if member != vertex)
             individualized = (*partition[:cell_index], (vertex,), rest, *partition[cell_index + 1 :])
-            result = search(individualized, (*prefix, vertex))
+            result = search(_equitable_partition(individualized, incoming, outgoing, cell_index), (*prefix, vertex), refined=True)
             if best is None or result[0] < best[0]:
                 best = result
             elif result[0] == best[0]:
