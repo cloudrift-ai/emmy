@@ -79,7 +79,8 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
     # Buffer shapes / dtypes for the renderer come from the op's I/O Tensors
     # (snapped to the graph by the matcher's populate_io). A symbolic reduce axis adds an
     # ``int <name>`` runtime arg to the signature, threaded through to the CudaOp.
-    runtime_args = _symbolic_runtime_args(kernel)
+    # A serial axis is a runtime coordinate: one ``int`` param, one launch per value.
+    runtime_args = tuple(dict.fromkeys((*_symbolic_runtime_args(kernel), *(axis.name for axis in kernel.serial))))
     tensors = {**kernel.inputs, **kernel.outputs}
     # Indirect operands (graph-level hint, set by the caller before compile — the serving MoE
     # fixed-slot dispatch): the marked graph INPUT buffers this kernel reads swap their base
@@ -125,6 +126,7 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
         smem_bytes=kernel.smem_bytes(),
         comment=name,
         runtime_args=runtime_args,
+        serial=tuple((axis.name, axis.extent.as_static()) for axis in kernel.serial),
         # Buffers whose zero-init a predecessor carries (``005_delegate_zero_init``) drop off
         # the memset list; the prologue targets this kernel DOES carry are surfaced for the slab
         # planner (their live interval starts at THIS launch, not their own producer's).

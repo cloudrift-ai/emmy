@@ -35,6 +35,7 @@ NOTE: atomic reduce-writes must NOT vectorize (each lane needs its own
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import replace
 
 from emmy.compiler.backend.cuda.render_target import CudaRenderTarget
 from emmy.compiler.graph import Node
@@ -56,9 +57,9 @@ def rewrite(root: Node) -> KernelOp | None:
     if VECTORIZE_STORES.name in top.knobs:
         raise RuleSkipped("VECTORIZE_STORES already decided (idempotence via knob)")
     if not VECTORIZE_STORES.narrow((True,))[0]:
-        return KernelOp(body=top.body, name=top.name, knobs={**top.knobs, VECTORIZE_STORES.name: False})
+        return replace(top, body=top.body, knobs={**top.knobs, VECTORIZE_STORES.name: False})
     new_body = _vectorize_body(top, top.body)
-    return KernelOp(body=new_body, name=top.name, knobs={**top.knobs, VECTORIZE_STORES.name: True})
+    return replace(top, body=new_body, knobs={**top.knobs, VECTORIZE_STORES.name: True})
 
 
 def _buf_dtype(top: KernelOp, name: str) -> str:

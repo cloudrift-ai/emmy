@@ -12,12 +12,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.axis import Axis
+from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Select, Stmt, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Init, Let, Load, Loop, Pre, Select, SelectBranch, Stmt, Write
 from emmy.compiler.ir.tile import Placement, TileOp, extract_output_specs
 
 
@@ -503,6 +504,62 @@ def scan_from_loop(loop: Loop, axes: tuple = (), levels: tuple = ()) -> tuple[Fo
     return fold, renamed
 
 
+def states_as_buffers(body: Body, prefix: str) -> tuple[Body, tuple[Axis, ...], dict[str, tuple]]:
+    """``body`` with every carried state spelled as a STATE BUFFER — ``(body, serial axes,
+    buffer shapes)`` — the form a serial launch axis realizes (:attr:`Placement.serial`).
+
+    The loop that carries a state becomes the kernel's time: one launch per step, in order. The
+    buffer keeps every step, indexed by the step, the free axes outside the loop and the cell. A
+    ``Pre`` read is a load one step back, the seed where there is no step before the first; the
+    ``Carry`` is a store of its value at this step. Nothing of the step's own algebra changes, so the
+    rest of the nest lifts as it always did.
+    """
+    serial: list[Axis] = []
+    shapes: dict[str, tuple] = {}
+
+    def read(stmt: Pre, time: Axis, outer: tuple[Axis, ...], seeds: dict[str, float]) -> tuple[Stmt, ...]:
+        step = Var(time.name)
+        after_first = BinaryExpr(">", step, Literal(0, "int"))
+        previous = TernaryExpr(after_first, step - Literal(1, "int"), Literal(0, "int"))
+        index = (previous, *(Var(axis.name) for axis in outer), *stmt.index)
+        held, seed = f"{stmt.name}__prev", f"{stmt.name}__seed"
+        return (
+            Load(name=held, input=f"{prefix}__{stmt.carrier}", index=index),
+            Let(name=seed, value=Literal(seeds[stmt.carrier])),
+            Select(name=stmt.name, branches=(SelectBranch(held, after_first), SelectBranch(seed, Literal(True, "bool")))),
+        )
+
+    def define(stmt: Carry, time: Axis, outer: tuple[Axis, ...]) -> Stmt:
+        index = (Var(time.name), *(Var(axis.name) for axis in outer), *stmt.index)
+        return Write(output=f"{prefix}__{stmt.name}", index=index, value=stmt.value)
+
+    def walk(stmts: Body, outer: tuple[Axis, ...], time: Axis | None, seeds: dict[str, float]) -> Body:
+        out: list[Stmt] = []
+        for stmt in stmts:
+            if isinstance(stmt, Pre):
+                if stmt.carrier not in seeds:
+                    raise ValueError(f"a read of {stmt.carrier!r} outside the loop that carries it has no launch to run in")
+                out.extend(read(stmt, time, outer, seeds))
+            elif isinstance(stmt, Carry):
+                out.append(define(stmt, time, outer))
+            elif isinstance(stmt, Loop) and stmt.carries:
+                if time is not None:
+                    raise ValueError(f"loop {stmt.axis.name!r} carries a state inside loop {time.name!r}, which carries one too")
+                serial.append(stmt.axis)
+                carried = {carry.name: carry.seed for carry in stmt.body.carries if carry.name in stmt.carries}
+                shapes.update((f"{prefix}__{name}", (stmt.axis, *outer, *cells)) for name, cells in stmt.carries.items())
+                out.append(replace(stmt, body=walk(stmt.body, outer, stmt.axis, carried)))
+            elif isinstance(stmt, Loop) and time is None:
+                out.append(replace(stmt, body=walk(stmt.body, (*outer, stmt.axis), time, seeds)))
+            elif stmt.nested():
+                out.append(stmt.with_bodies(tuple(walk(child, outer, time, seeds) for child in stmt.nested())))
+            else:
+                out.append(stmt)
+        return Body(out)
+
+    return walk(Body.coerce(body), (), None, {}), tuple(serial), shapes
+
+
 def _peel(body: Body) -> tuple[list, list[Stmt]]:
     """Peel the outer parallel loop chain into placement axes."""
     axes = []
@@ -546,14 +603,17 @@ def _root_results(body: Body) -> tuple[str, ...]:
     return ()
 
 
-def lift_loop_op(op: LoopOp, *, name: str = "", body: Body | None = None) -> TileOp:
+def lift_loop_op(op: LoopOp, *, name: str = "", body: Body | None = None, serial: tuple[Axis, ...] = ()) -> TileOp:
     """Peel free axes and lift the complete remaining nest as one Fold tree.
 
     ``body`` lifts a rewritten spelling of ``op``'s program instead of the stored one. Constructing
     a ``LoopOp`` around such a spelling would not preserve it — Loop-IR normalization is what drops
     a size-one free axis, so the one caller that restores one (``_row``) hands its body here.
+    ``serial`` names the peeled axes that are the kernel's time (:func:`states_as_buffers`).
     """
     free, cell = _peel(op.body if body is None else Body.coerce(body))
+    if any(axis not in free for axis in serial):
+        raise ValueError(f"a loop that carries a state must sit outside every reduction: {[axis.name for axis in serial]}")
     edges, stmts = lift_body(cell, tuple(free))
     split = extract_output_specs(stmts)
     if split is None:
@@ -578,11 +638,11 @@ def lift_loop_op(op: LoopOp, *, name: str = "", body: Body | None = None) -> Til
     return TileOp(
         op=Fold(operands=edges, lift=lift),
         name=name,
-        place=Placement(free=tuple(free)),
+        place=Placement(free=tuple(axis for axis in free if axis not in serial), serial=serial),
         axes=tuple(axes.values()),
         inputs=dict(op.inputs),
         output_specs=output_specs,
     )
 
 
-__all__ = ["fold_from_loop", "lift_body", "lift_loop_op"]
+__all__ = ["fold_from_loop", "lift_body", "lift_loop_op", "states_as_buffers"]

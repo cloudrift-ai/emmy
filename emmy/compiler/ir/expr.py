@@ -1092,6 +1092,23 @@ def _static_cmp(op: str, la: Interval, lb: Interval) -> bool | None:
 # ``Expr``s that the kernel uses for its actual output coordinates.
 
 
+def split_anchor(expr: Expr) -> tuple[int, Expr] | None:
+    """``expr`` as ``(its integer anchor, the rest)`` — ``a + 4`` is ``(4, a)`` — or ``None`` when it
+    is not affine in its variables with a literal anchor. Two reads of one tensor at successive
+    offsets share the rest and differ in the anchor."""
+    form = affine_form(expr, expr.free_vars())
+    if form is None:
+        return None
+    try:
+        anchor = int(form[0].eval({}))
+    except (KeyError, TypeError, ValueError):
+        return None
+    rest: Expr = Literal(0, "int")
+    for name, coeff in sorted(form[1].items()):
+        rest = BinaryExpr("+", rest, Var(name) if coeff == 1 else BinaryExpr("*", Var(name), Literal(coeff, "int")))
+    return anchor, rest
+
+
 def affine_form(expr: Expr, vars: frozenset[str] | set[str]) -> tuple[Expr, dict[str, int]] | None:
     """Decompose ``expr`` as ``anchor + sum(coeffs[v] * Var(v))`` over the given var set.
 

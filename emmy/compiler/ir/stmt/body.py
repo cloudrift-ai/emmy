@@ -26,7 +26,7 @@ that slice computed-operand cones. Region transforms (``replace_at``,
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cached_property
 from heapq import heappop, heappush
 
@@ -722,6 +722,13 @@ class Body(tuple[Stmt, ...]):
         return self.iter_of_type(Write)
 
     @cached_property
+    def carries(self) -> tuple[Stmt, ...]:
+        """All ``Carry`` stmts in the body (recursive): the carried states it defines."""
+        from emmy.compiler.ir.stmt.leaves import Carry  # noqa: PLC0415
+
+        return self.iter_of_type(Carry)
+
+    @cached_property
     def accums(self) -> tuple[Stmt, ...]:
         """All ``Accum`` stmts in the body (recursive). May contain
         multiple Accums sharing a single accumulator name (matmul-shape
@@ -778,6 +785,30 @@ class Body(tuple[Stmt, ...]):
         that contains it. Clustered identity collapses semantically distinct ops to one cluster
         representative, so this path is only for structural identity, never executable IR."""
         return self.identity(structural=structural, types=types).key
+
+    @cached_property
+    def census(self) -> tuple[tuple[str, int], ...]:
+        """How many statements of each kind this body holds, nested ones included — a linear-time
+        necessary condition for two bodies to be one computation, to ask before an exact key."""
+        counts: dict[str, int] = {}
+        for stmt in self.iter():
+            kind = type(stmt).__name__
+            counts[kind] = counts.get(kind, 0) + 1
+        return tuple(sorted(counts.items()))
+
+    @cached_property
+    def unanchored_key(self) -> str:
+        """The exact identity of this body with every load index's integer anchor taken out: what
+        the copies of one computation read at successive offsets share."""
+        from emmy.compiler.ir.expr import split_anchor  # noqa: PLC0415
+        from emmy.compiler.ir.stmt.leaves import Load  # noqa: PLC0415
+
+        def unanchored(stmt):
+            if not isinstance(stmt, Load):
+                return stmt
+            return replace(stmt, index=tuple(split[1] if (split := split_anchor(expr)) is not None else expr for expr in stmt.index))
+
+        return self.map(unanchored).structural_key(structural=False)
 
 
 def refs_axis(s: Stmt, name: str) -> bool:

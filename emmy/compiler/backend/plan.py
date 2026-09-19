@@ -92,6 +92,8 @@ class LaunchSpec:
     zero_prologues: tuple[str, ...] = ()
     tma_descriptors: tuple[TmaDescMeta, ...] = ()
     runtime_args: tuple[str, ...] = ()
+    # Serial launch axes ``(name, extent)`` — see ``CudaOp.serial``.
+    serial: tuple[tuple[str, int], ...] = ()
     # Buffer names this launch produces (the node's output buffers, slot order).
     # Empty on plans stored before the field existed — readers fall back to
     # ``(node_id,)``. ``node_id`` itself stays for naming / diagnostics.
@@ -234,6 +236,7 @@ def plan_from_graph(graph: Graph) -> ExecutionPlan:
                 zero_prologues=tuple(getattr(op, "zero_prologues", ())),
                 tma_descriptors=tuple(op.tma_descriptors),
                 runtime_args=tuple(getattr(op, "runtime_args", ())),
+                serial=tuple(getattr(op, "serial", ())),
                 writes=node.buffer_names(),
                 indirect_args=tuple(getattr(op, "indirect_args", ())),
             )
@@ -489,6 +492,7 @@ def plan_to_dict(plan: ExecutionPlan) -> dict:
                 **({"writes": list(lc.writes)} if lc.writes else {}),
                 **({"indirect": [[a, t, s, sl] for a, t, s, sl in lc.indirect_args]} if lc.indirect_args else {}),
                 "runtime_args": list(lc.runtime_args),
+                **({"serial": [[name, extent] for name, extent in lc.serial]} if lc.serial else {}),
                 "cuda": {
                     "tma": [
                         {"name": t.name, "src_buf": t.src_buf, "box_extents": list(t.box_extents), "swizzle": t.swizzle}
@@ -573,6 +577,7 @@ def plan_from_dict(d: dict) -> ExecutionPlan:
                     for t in lc.get("cuda", {}).get("tma", ())
                 ),
                 runtime_args=tuple(lc.get("runtime_args", ())),
+                serial=tuple((name, int(extent)) for name, extent in lc.get("serial", ())),
             )
             for lc in d["launches"]
         ],
