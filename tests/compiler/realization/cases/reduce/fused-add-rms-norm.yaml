@@ -38,7 +38,7 @@ configs:
     knobs:
       REDUCE: coop
       WORK: t128
-    identity: 61b48ed05239592d5e2f94e4d435bb75c5f5a6669c11d1d0434a0ecd6b20258b
+    identity: fbbfbba3eb2beb5e8f901eca15a8d8133fbb8a0125f2b09f99857cbb6c916bae
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 1.6021538430299513
