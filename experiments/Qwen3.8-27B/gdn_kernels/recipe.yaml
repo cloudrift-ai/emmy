@@ -38,7 +38,7 @@ command:
           > $task_dir/artifacts/measurement.log 2>&1
       else
         timeout -k 3s 110s "$python" "$reference_root/benchmarks/benchmark_sm70_gdn_exactness.py" \
-          run-flashqla-decode --batch 1 --seqlen 1 --k-heads $$(( $heads / 3 )) --v-heads "$heads" \
+          run-flashqla-decode --batch 1 --k-heads $$(( $heads / 3 )) --v-heads "$heads" \
           --dtype float16 --state-dtype float32 --warmup 10 --repeat 100 \
           --out $task_dir/artifacts/flashqla \
           > $task_dir/artifacts/measurement.log 2>&1
