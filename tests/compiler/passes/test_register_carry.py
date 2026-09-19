@@ -76,6 +76,7 @@ def test_chunk_loop_is_inside_one_launch(target):
     assert [t.name for t in graph.nodes["out"].outputs] == ["out"]
     assert f"float _state0[{8 if target == (7, 0) else 4}]" in op.kernel_source and "for (int a0" in op.kernel_source
     assert "out__acc1[" not in op.kernel_source
+    assert "#include <cuda_fp16.h>" in op.kernel_source  # The buffers are FP32; the direct loader constructs FP16 operands.
 
 
 @pytest.mark.parametrize("target", [(7, 0), (12, 0)], ids=["volta", "modern"])
