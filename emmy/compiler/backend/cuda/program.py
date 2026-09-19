@@ -21,7 +21,7 @@ import os as _os
 import pickle
 import sys as _sys
 import time as _time_module
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -465,6 +465,13 @@ def _launch(
         args = tuple(desc_args.get(name) if name in desc_args else arrays[name] for name in launch.arg_names)
     # Symbolic axes appear as ``int`` kernel params after buffers + TMA
     # descriptors — append their resolved values to the arg pack.
+    if launch.serial:
+        # A recurrence's time: one launch per coordinate, in order, each seeing the previous
+        # step's stores.
+        (name, extent), *rest = launch.serial
+        for step in range(extent):
+            _launch(replace(launch, serial=tuple(rest)), compiled, arrays, desc_args, {**sym_values, name: step})
+        return
     if launch.runtime_args:
         args = (*args, *(sym_values[name] for name in launch.runtime_args))
     grid = tuple(resolve_dim(spec, sym_values) for spec in launch.grid)

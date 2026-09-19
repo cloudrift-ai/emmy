@@ -62,7 +62,7 @@ def rewrite(root: Node) -> KernelOp | None:
         new_body = stamped
     if new_body == op.body:
         raise RuleSkipped("every Load/Assign/Write already stamped")
-    return KernelOp(body=new_body, name=op.name, knobs=dict(op.knobs))
+    return replace(op, body=new_body, knobs=dict(op.knobs))
 
 
 def _seed_explicit_dtypes(body: Body, ctx: _StampCtx) -> None:

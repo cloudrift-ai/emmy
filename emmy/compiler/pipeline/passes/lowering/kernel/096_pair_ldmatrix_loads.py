@@ -66,11 +66,11 @@ def rewrite(root: Node) -> KernelOp | None:
     if PAIR_LDMATRIX.name in op.knobs:
         raise RuleSkipped("PAIR_LDMATRIX already decided (idempotence via knob)")
     if not PAIR_LDMATRIX.narrow((True,))[0]:
-        return KernelOp(body=op.body, name=op.name, knobs={**op.knobs, PAIR_LDMATRIX.name: False})
+        return replace(op, body=op.body, knobs={**op.knobs, PAIR_LDMATRIX.name: False})
     # Stamp the policy (True) even when nothing pairs — the realized config records that pairing
     # was enabled, keeping a uniform knob set (the 050 convention).
     new_body, _ = _walk(op.body)
-    return KernelOp(body=new_body, name=op.name, knobs={**op.knobs, PAIR_LDMATRIX.name: True})
+    return replace(op, body=new_body, knobs={**op.knobs, PAIR_LDMATRIX.name: True})
 
 
 def _walk(body: Body) -> tuple[Body, bool]:

@@ -41,6 +41,7 @@ enumerated. ``EMMY_VECTORIZE_LOADS=0`` is a manual override.
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import replace
 
 from emmy.compiler.backend.cuda.render_target import CudaRenderTarget
 from emmy.compiler.graph import Node
@@ -64,11 +65,11 @@ def rewrite(root: Node) -> KernelOp | None:
     # Only ``True`` is enumerated, so the autotuner never forks on this knob;
     # ``EMMY_VECTORIZE_LOADS=0`` still pins ``False``.
     if not VECTORIZE_LOADS.narrow((True,))[0]:
-        return KernelOp(body=top.body, name=top.name, knobs={**top.knobs, VECTORIZE_LOADS.name: False})
+        return replace(top, body=top.body, knobs={**top.knobs, VECTORIZE_LOADS.name: False})
     # Stamp the policy (True) even when no run is foldable — the realized config
     # records that vectorization was enabled, keeping a uniform knob set.
     new_body = _vectorize_body(top, top.body)
-    return KernelOp(body=new_body, name=top.name, knobs={**top.knobs, VECTORIZE_LOADS.name: True})
+    return replace(top, body=new_body, knobs={**top.knobs, VECTORIZE_LOADS.name: True})
 
 
 def _vectorize_body(top: KernelOp, body: Body) -> Body:

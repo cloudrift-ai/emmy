@@ -1231,5 +1231,13 @@
  "tests/compiler/realization/test_realization.py::test_realization[reduce/sinkhorn-nested-cut-derived-read-sm70.yaml-offered]": 2.79,
  "tests/compiler/realization/test_realization.py::test_realization[reduce/sinkhorn-nested-cut-derived-read-sm70.yaml-realized]": 1.83,
  "tests/compiler/realization/test_realization.py::test_realization[reduce/sinkhorn-nested-cut-derived-read-sm70.yaml-built]@cuda": 7.41,
- "tests/compiler/realization/test_realization.py::test_realization[reduce/sinkhorn-nested-cut-derived-read-sm70.yaml-correct]@cuda": 2.18
+ "tests/compiler/realization/test_realization.py::test_realization[reduce/sinkhorn-nested-cut-derived-read-sm70.yaml-correct]@cuda": 2.18,
+ "tests/compiler/passes/test_roll_recurrence.py::test_the_rolled_kernel_lowers_to_one_launch_per_step": 5.02,
+ "tests/compiler/passes/test_roll_recurrence.py::test_the_rolled_kernel_matches_eager_on_the_gpu@cuda": 2.69,
+ "tests/compiler/passes/test_roll_recurrence.py::test_an_unrolled_delta_rule_rolls_into_one_kernel_that_carries_its_state": 1.24,
+ "tests/compiler/passes/test_roll_recurrence.py::test_steps_that_are_not_one_body_at_a_stride_do_not_roll": 0.77,
+ "tests/compiler/passes/test_roll_recurrence.py::test_the_rolled_kernel_matches_eager[2-16-8-4]": 0.64,
+ "tests/compiler/passes/test_roll_recurrence.py::test_the_rolled_kernel_matches_eager[1-6-4-2]": 0.58,
+ "tests/compiler/passes/test_roll_recurrence.py::test_the_chunked_gated_delta_rule_of_a_real_model_rolls_and_matches_eager": 8.98,
+ "tests/compiler/cli/test_run.py::test_run_code_softmax_blockify[f32]@cuda-cli": 5.2
 }

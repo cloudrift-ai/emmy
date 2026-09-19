@@ -89,7 +89,9 @@ class BodyOp(Op):
             for w in s.external_writes():
                 if w not in decls:
                     outs.setdefault(w, None)
-        return tuple(ins), tuple(outs)
+        # A buffer the body both reads and writes is in place — a recurrence reading its own
+        # earlier steps — and is one output param, not an input too.
+        return tuple(name for name in ins if name not in outs), tuple(outs)
 
     def __iter__(self) -> Iterator[Stmt]:
         return self.body.iter()

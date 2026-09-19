@@ -40,9 +40,9 @@ def rewrite(root: Node) -> KernelOp | None:
     if FAST_EXP.name in op.knobs:
         raise RuleSkipped("FAST_EXP already decided (idempotence via knob)")
     if not precision_pin(FAST_EXP):
-        return KernelOp(body=op.body, name=op.name, knobs={**op.knobs, FAST_EXP.name: False})
+        return replace(op, body=op.body, knobs={**op.knobs, FAST_EXP.name: False})
     new_body, _ = _walk(op.body)
-    return KernelOp(body=new_body, name=op.name, knobs={**op.knobs, FAST_EXP.name: True})
+    return replace(op, body=new_body, knobs={**op.knobs, FAST_EXP.name: True})
 
 
 def _walk(body: Body) -> tuple[Body, bool]:
