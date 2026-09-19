@@ -489,7 +489,12 @@ def _deserialize_op(op_cls: type[Op], raw_fields: dict) -> Op:
 
     source = op_cls(**fields)
     if materialization_row == {"register": True}:
-        from emmy.compiler.ir.schedule.register import RegisterCodec, RegisterContext, RegisterMaterialization, RegisterProblem  # noqa: PLC0415
+        from emmy.compiler.ir.schedule.register import (  # noqa: PLC0415
+            RegisterCodec,
+            RegisterContext,
+            RegisterMaterialization,
+            RegisterProblem,
+        )
 
         codec = RegisterCodec(RegisterContext(RegisterProblem(source, None, allow_f16=True)))
         fields["schedule"] = codec.decode(_wire_mapping(schedule_row, "register schedule"))
@@ -1433,11 +1438,11 @@ def _rename_buf_in_op(op, old: str, new: str):
     the decomposition attribution link (``Candidate.apply`` stamps the
     pre-split op as each fragment kernel's ``source``; the two-level tuner's
     composed Σ rows group by it)."""
+    from emmy.compiler.ir.kernel import KernelOp
     from emmy.compiler.ir.loop import Load, LoopOp, Write
     from emmy.compiler.ir.pure.fold import Fold
     from emmy.compiler.ir.stmt import Body
     from emmy.compiler.ir.tile import TileOp
-    from emmy.compiler.ir.kernel import KernelOp
 
     if not isinstance(op, (LoopOp, TileOp, KernelOp)):
         return op

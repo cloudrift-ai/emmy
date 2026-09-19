@@ -203,3 +203,22 @@ The structural cut phase runs before any schedule is composed. The single `030_c
 ordered domains: stored-Fold-edge placement first, then cross-CTA reduction splitting. Every successful choice and
 fresh piece re-enters the same rule. `030_cut` presents its restricted structural frontier through a schedule context;
 `040_schedule` supplies a `ClassicScheduleContext`. Both passes use the same generic `schedule` traversal.
+
+## Register storage across ordered steps
+
+`RegisterContext` uses the same problem, site, codec, and lazy enumeration interfaces as the classic schedule.
+It offers one kernel choice for a static ordered loop with one matrix state, pointwise operations, and additive
+matrix contractions. The structural reading proves that each warp's rows are independent through every
+contraction, that state reads take the previous step, and that output matrices share the same batch coordinates.
+Other recurrences retain the classic schedule.
+
+`WORK=w<M>x1` assigns independent groups of sixteen value rows to warps. `TILE` names an m16n8k16 FP16 atom and
+`f1x<N>`, where `N` covers all state columns in eight-column fragments. `STAGE=d1/reg` gives the carried state
+one register slot across steps; there is no shared-memory ring or operand prefetch. Equal loads, pointwise
+operations, and products share register results within a step. All reads finish before the carried slot is updated.
+
+The catalog offers FP32 accumulation and FP16 partial accumulation under `F16_MMA_F32_ACC` (also enabled by
+`FAST_MATH`). Both convert matrix operands to FP16 and keep the carried state in FP32. For FP16 accumulation,
+`TILE`'s K chunk is the promotion interval in atom steps: `k4` promotes and clears the partial accumulator every
+64 products, including a shorter final chunk. An explicit tile row can select the arithmetic directly. Register
+pressure and numerical error still depend on the shape and inputs; a legal schedule is not a performance claim.

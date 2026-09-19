@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule.classic import CLASSIC_FAMILIES
+from emmy.compiler.ir.schedule.register import RegisterSchedule
 from emmy.compiler.ir.stmt import Body
 from emmy.compiler.ir.stmt.base import Stmt, pretty_body
 from emmy.compiler.ir.tile.ops import axis_names, sched_of
@@ -79,7 +80,7 @@ class _Ctx:
     def note(self, node) -> str:
         """The schedule annotation for ``node`` — every slice the kernel keys against it, spelled
         by the codec (``''`` = the family's decided-empty)."""
-        if self.sched is None:
+        if self.sched is None or (self.sched.schedule is not None and not self.sched.schedule.nodes):
             return ""
         bits = []
         for family in CLASSIC_FAMILIES:
@@ -274,6 +275,8 @@ def _pretty_place(tile) -> list[str]:
         out.append(f"place  free=({axes(tile.place.free)})  {grid}")
     if tile.schedule is not None and tile.schedule.kernel.work.spell():
         out.append(f"work   {tile.schedule.kernel.work.spell()}")
+    if tile.schedule is not None and isinstance(tile.schedule.kernel, RegisterSchedule):
+        out.append(f"register  TILE={tile.schedule.kernel.tile.spell()} STAGE=d1/reg")
     if tile.workers is not None:
         out.append(f"band   {tile.workers.spell()}")
     return out
