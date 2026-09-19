@@ -37,6 +37,7 @@ import numpy as np
 
 from emmy import config
 from emmy.compiler.ir.base import ConstantOp, InputOp
+from emmy.compiler.ir.tensor.ir import ElementwiseOp
 
 if TYPE_CHECKING:
     from emmy.compiler.graph import Graph
@@ -216,6 +217,8 @@ class Backend(ABC):
                 continue
 
             args = [values[inp] for inp in node.inputs]
+            if isinstance(node.op, ElementwiseOp) and dtype_np.kind == "f":
+                args = [a.astype(np.promote_types(a.dtype, dtype_np), copy=False) if a.dtype.kind == "f" else a for a in args]
             result = node.op.forward(*args)
             # A multi-output node's ``forward`` returns a tuple matched
             # positionally to ``node.outputs``; values store per BUFFER.

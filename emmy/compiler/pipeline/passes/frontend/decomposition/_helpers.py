@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+from emmy.compiler.dtype import BF16, F16, F32, get as get_dtype
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.expr import BinaryExpr, Literal, placeholder
@@ -90,11 +91,10 @@ def matmul_decompose(frag: Graph, a: Node | str, b: Node | str, *, name: str, dt
     Returns the squeezed output node.
     """
     a, b = _node(frag, a), _node(frag, b)
-    dtype = dtype or a.output.dtype
+    dtype = get_dtype(dtype or a.output.dtype)
     a_unsq, b_unsq, mul_shape, k_axis = matmul_unsqueeze(a.output.shape, b.output.shape)
-    # Layout nodes (unsqueeze, and ``broadcast_to`` below) inherit their own
-    # operand's dtype — branch-local propagation; only the computing nodes
-    # (multiply, reduce) take the result ``dtype``.
+    # Layout nodes inherit their operand's dtype. Half-precision dot products multiply at f32;
+    # widening only the accumulator would already have rounded or overflowed each product.
     a_uid = frag.add_node(op=a_unsq, inputs=[a], output=Tensor(f"{name}_a_unsq", a_unsq.out_shape, a.output.dtype))
     b_uid = frag.add_node(op=b_unsq, inputs=[b], output=Tensor(f"{name}_b_unsq", b_unsq.out_shape, b.output.dtype))
     a_bc = broadcast_to(frag, a_uid, mul_shape)
@@ -102,7 +102,7 @@ def matmul_decompose(frag: Graph, a: Node | str, b: Node | str, *, name: str, dt
     ew = frag.add_node(
         op=ElementwiseOp(op="multiply"),
         inputs=[a_bc, b_bc],
-        output=Tensor(f"{name}_ew", mul_shape, dtype),
+        output=Tensor(f"{name}_ew", mul_shape, F32 if dtype in (F16, BF16) else dtype),
     )
     red_shape = reduction_shape(mul_shape, k_axis)
     red = frag.add_node(
