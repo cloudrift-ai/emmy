@@ -49,6 +49,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from emmy.compiler.pipeline.search.data.freeze import freeze_reason
+from emmy.compiler.pipeline.search.data.sample import measured_features
 from emmy.compiler.pipeline.search.features import ROUTING_FEATURES, is_dynamic_row, knob_features
 from emmy.compiler.structural import digest
 
@@ -345,57 +346,36 @@ class GoldenGroup(Group):
 
 
 def kernel_sig(feats: dict) -> str:
-    """The op signature of the kernel a row actually measured, digested from its own ``S_*`` stamps.
-
-    Exactly what :meth:`~...passes.identity.Identity.op_sig` computes for an op, applied to the row's
-    recorded stamps instead — so this is the SAME identity, asked of the kernel that ran rather than of the
-    site it came from. On the RTX 5090 freeze the two agree for 83% of rows; the rest are where the
-    distinction matters."""
+    """The op signature of the kernel a row measured, digested from its own ``S_*`` stamps — exactly what
+    :meth:`~...passes.identity.Identity.op_sig` computes for an op, applied to the row's recorded stamps."""
     return digest(*sorted((k, float(v)) for k, v in feats.items() if k.startswith("S_")))
 
 
 def group_measured(rows) -> tuple[list[MeasuredGroup], dict[str, int]]:
-    """Benched :class:`~..db.NodeRow`s as groups labelled with measured µs, keyed
-    ``(gpu, kernel_sig, H_opt)`` — one group per set of configs that genuinely competed, plus a count of
+    """Measured ``perf`` rows (:class:`~..db.PerfRow`) as groups labelled with measured µs, keyed
+    ``(gpu, kernel_sig, opt)`` — one group per set of configs that genuinely competed, plus a count of
     what was dropped and why.
-
-    Takes ``NodeRow``s rather than :class:`Sample`s because three of the four decisions below read
-    columns a ``Sample`` does not carry. ``load_node_rows`` accepts a live tune DB or a measurement
-    freeze, so both sources reach this the same way.
 
     Each part of the key is load-bearing, and each has a plausible wrong answer:
 
-    - **The KERNEL's own signature, not the offer site's** (:func:`kernel_sig`, the digest the row's
-      recorded ``op_sig`` column holds when the two agree, which is 83% of the RTX 5090 freeze). Two kernels
-      of the same structure on the same card are ONE tuning problem whatever produced them — which is
-      already how the deploy path joins evidence (``Prior.evidence_pick`` and
-      ``policy/greedy._db_measured_pick`` both index on the ``S_*`` signature), so this makes the
-      candidate pools agree with the tier that consumes them.
-
-      Keying on the recorded ``op_sig`` instead gets it wrong in both directions, and the freeze shows
-      both. It **over-merges**: ``op_sig`` digests the PRE-DESCENT offer op, and a site realized as several
-      kernels can leave one piece filed as a rival of the whole — nine pools paired a fused
-      ``rms_norm``->linear megakernel with a row for a single kernel of the same op's unfused realization,
-      a 5.9 µs norm kernel against a 131 ms whole-op row. And it **fragments**: 73 structures were searched
-      in two separate pools, the losing pool's best landing a median 1.46x behind the winning pool's
-      (p90 3.89x, worst 14x) — the same kernel tuned twice, once badly, because the two arrived from
-      different sites.
-
-      Measured against ``op_sig``: 336 pools rather than 401, but MORE rows sitting beside a rival
-      (3778 of 3817, against 3760) and a median pool of 7 rather than 5. Pool count falls because merging
-      is the point; what a metric needs is rivals per row.
-    - **``H_opt`` from the features, never ``context_key``.** (Present and numeric by then: the
-      admission filter has already rejected a row missing its ``H_*`` stamps.) A live DB spells the regime as
-      ``digest(Context, cap, flags)`` and a freeze spells the same one ``capX.Y-OZ``, so grouping on
-      ``context_key`` would key one regime two ways depending on which side of the loader the rows
-      came from. It looks like the first-class column; that is the trap. The regimes must not pool
-      either way — ``-O1`` and ``-O3`` invert often enough that a merged group measures neither.
+    - **The kernel's own structural signature** (:func:`kernel_sig`). Two kernels of the same structure
+      on the same card are ONE tuning problem whatever produced them — which is already how the deploy
+      path joins evidence (``Prior.evidence_pick`` and ``policy/greedy._db_measured_pick`` both index on
+      the ``S_*`` signature), so this makes the candidate pools agree with the tier that consumes them.
+      Keying on where a decision was OFFERED instead gets it wrong in both directions: a site realized
+      as several kernels files a piece beside the whole (the RTX 5090 freeze once paired a 5.9 µs norm
+      kernel with a 131 ms whole-op row), and one kernel reached from two sites is tuned twice.
+    - **The opt level from its column, never ``context_key``.** The key is a digest that also folds the
+      compute capability and every other flag, so grouping on it would split one regime's pools by
+      spelling. The regimes must not pool either way — ``-O1`` and ``-O3`` invert often enough that a
+      merged group measures neither.
     - **``gpu``.** Cards never pool.
 
-    ONE rule is this function's own: **``bench_fail`` excluded.** ``freeze_reason`` deliberately keeps
-    failures, as durable negative examples; a pool being ranked by measured latency wants them gone,
-    because the watchdog sentinel is a huge positive that any model gets right for free and that
-    inflates every correlation over the pool.
+    Admission is :func:`~.freeze.freeze_reason`, the rule a freeze is written under. ONE rule is this
+    function's own: **``bench_fail`` excluded.** ``freeze_reason`` deliberately keeps failures, as durable
+    negative examples; a pool being ranked by measured latency wants them gone, because the watchdog
+    sentinel is a huge positive that any model gets right for free and that inflates every correlation
+    over the pool.
 
     The counts are returned rather than logged because a report has to publish them: "Spearman 0.6 over
     340 groups" means something different when 143 rows were dropped than when none were. Reasons are
@@ -409,13 +389,12 @@ def group_measured(rows) -> tuple[list[MeasuredGroup], dict[str, int]]:
             dropped[reason.split(":")[0]] += 1
         elif r.status != "ok":
             dropped[r.status] += 1
-        elif not r.op_sig or not r.gpu:
-            dropped["unkeyed"] += 1
         else:
-            buckets[(r.gpu, kernel_sig(r.features), r.features["H_opt"])].append(r)
+            buckets[(r.gpu, kernel_sig(r.knobs), float(r.opt))].append(r)
 
     groups = []
     for (gpu, sig, h_opt), grp in sorted(buckets.items()):
-        feats = [knob_features(r.features) for r in grp]
-        groups.append(MeasuredGroup.from_measured(f"{gpu}/{sig}@O{h_opt:g}", gpu, sig, h_opt, [r.value_us for r in grp], feats))
+        grp.sort(key=lambda r: r.op_key)  # a pool's row order is its own, not the DB's
+        feats = [knob_features(measured_features(r)) for r in grp]
+        groups.append(MeasuredGroup.from_measured(f"{gpu}/{sig}@O{h_opt:g}", gpu, sig, h_opt, [r.stats.median for r in grp], feats))
     return groups, dict(dropped)

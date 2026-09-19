@@ -186,9 +186,22 @@ kernel where it minted two and whose prior schedule runs about 4 s per launch �
 roofline audit still has no time limit. A fourth gap came out of the 2026-09-19 boot: a measured row that spells a
 split or a cut whose pieces have no rows can win its fork on a retime alone, and strict then refuses at the pieces
 instead of taking the next measured arm — audit every such row for piece coverage, not only the placement routes.
-Next kernel items, in order: measure the symbolic post twin at a long prompt's width, since that and not the m4096
-twin is a single request's time to first token, starting with its `a47f22fa9713` piece at 24.7 ms; the nine m4096
-post pieces #813 never recorded (up to 140 ms each) matter once concurrent prompts fill a step; then Stage 4.
+The symbolic post twin is measured (2026-09-19): linear in width, 276 ms per layer at 2,155 tokens, 11.9 s of the
+29.3 s to first token. Seven post receipts that spelled two cooperative reduces with one block per output cell are
+re-recorded as the serial row (dynamic 64.9 → 40.3 ms at the hint, m16 9.9 → 8.8 ms, m4096 537 → 258 ms), and the
+boot on that file reads 24.9 s to first token at 2,155 tokens. To bench a dynamic row at another width, bench a
+scratch copy of the golden with its hint rewritten; the election does not change. The three `t256 coop-t` pieces
+were the block's plain matmuls with the tile site left empty; tiled on tensor cores with staging they run 42–67×
+faster, and the m4096 twin's matmul piece 51× faster under a better tile (2026-09-19): symbolic post twin 40.3 →
+4.84 ms at the hint and 18.8 ms at 2,155 tokens, m4096 post twin 258 → 121 ms, time to first token at 2,155 tokens
+24.9 → 18.3 s. A kernel-scoped A/B is a scratch golden with one receipt respelled, benched strict; sixteen cards
+run sixteen candidates at once. The symbolic post twin is now 0.8 s of that 18.3 s, so the next prefill item is a
+measurement, not a kernel: where the other 17 s go (experts, attention, first-request warm-up). Next kernel items
+are on the decode side, where the repository arm is still 1.8× the fork per output token: the M=1 post twin at
+3.4 ms per layer is more than half of a decode step and has not been looked at piece by piece; the four
+single-block kernels that are 7 of the m16 post twin's 8.8 ms; the static m4096 post twin, 3.4× slower than the
+symbolic twin at the same width, whose three largest `r4` pieces are 72 of its 121 ms; then the experts and
+Stage 4.
 
 ## Operations handoff
 

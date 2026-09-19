@@ -327,7 +327,7 @@ def test_placement_route_total_is_not_persisted_without_a_child_schedule_receipt
     assert result.best_reward is not None
     assert result.best_reward.searched_winner() == ({"PLACE": "cut"}, 2.0)
     assert backend.measured_route is not None
-    route_rows = [row for row in db.iter_perf(ctx.structural_key(), backend="cuda") if row.knobs.get("PLACE") == "cut"]
+    route_rows = [row for row in db.iter_perf(ctx, backend="cuda") if row.knobs.get("PLACE") == "cut"]
     assert route_rows == []
     db.close()
 

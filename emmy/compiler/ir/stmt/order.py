@@ -20,15 +20,16 @@ from dataclasses import dataclass, fields
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.leaves import Accum, Assign, Init
+from emmy.compiler.ir.stmt.leaves import Accum, Assign, Carry, Init
 from emmy.compiler.structural import form
 
 __all__ = ["Labeling", "Ordering", "bound_axes", "ordering_constraints", "relation_graph", "topological_sort"]
 
 
 def _ordered_exported_accs(body: Body) -> tuple[str, ...]:
-    """Accumulator names exported by ``body``, deduplicated in structural order."""
-    return tuple(dict.fromkeys(name for stmt in Body.coerce(body).iter() if isinstance(stmt, Accum) for name in stmt.carried_names()))
+    """Names ``body`` carries out — accumulators and carried states — deduplicated in structural order."""
+    carriers = (stmt for stmt in Body.coerce(body).iter() if isinstance(stmt, (Accum, Carry)))
+    return tuple(dict.fromkeys(name for stmt in carriers for name in stmt.carried_names()))
 
 
 def _ordered_sibling_defs(stmt: Stmt) -> tuple[str, ...]:
@@ -101,11 +102,12 @@ class _AbstractNames:
         return "__name__"
 
 
-@dataclass(frozen=True)
-class _Occurrence:
-    kind: str
-    name: str
-    role: tuple[int | str, ...]
+_ABSTRACT_NAMES = _AbstractNames()
+
+#: The vertex each visible spelling is bound to.
+_Binders = dict[str, int]
+#: One name or resource a statement's shallow form mentions: ``(kind, spelling, role path)``.
+_Occurrence = tuple[str, str, tuple[int | str, ...]]
 
 
 def _statement_shape(stmt: Stmt) -> tuple[str, tuple[_Occurrence, ...]]:
@@ -136,12 +138,12 @@ def _statement_shape(stmt: Stmt) -> tuple[str, tuple[_Occurrence, ...]]:
                 members = tuple(dict.fromkeys(members))
             for member in members:
                 if isinstance(member, _Slot):
-                    occurrences.append(_Occurrence(member.kind, member.original, (*path, mode)))
+                    occurrences.append((member.kind, member.original, (*path, mode)))
                 else:
                     strip(member, (*path, mode))
             return (f"__{mode}__",)
         if isinstance(value, _Slot):
-            occurrences.append(_Occurrence(value.kind, value.original, path))
+            occurrences.append((value.kind, value.original, path))
             return "__slot__"
         if isinstance(value, tuple):
             return tuple(strip(member, (*path, index)) for index, member in enumerate(value))
@@ -150,7 +152,7 @@ def _statement_shape(stmt: Stmt) -> tuple[str, tuple[_Occurrence, ...]]:
     return repr(strip(rendered, ())), tuple(occurrences)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class _Scope:
     """One lexical scope of the relation graph: its statements' vertices, constraints and shapes,
     in the order of ``body``."""
@@ -174,13 +176,6 @@ class _Scope:
             categories=tuple(self.categories[index] for index in order),
             shapes=tuple(self.shapes[index] for index in order),
         )
-
-
-@dataclass(frozen=True)
-class _Environment:
-    ssa: dict[str, int]
-    axes: dict[str, int]
-    sources: dict[str, int]
 
 
 def _resources(stmt: Stmt) -> tuple[set[str], set[str], set[str]]:
@@ -310,15 +305,20 @@ class _Builder:
             self.fixed_names[name] = vertex
         return vertex
 
-    def scope(self, body: Body, env: _Environment, fixed: dict[str, int], *, root: bool = False) -> _Scope:
+    def scope(
+        self, body: Body, outer_ssa: _Binders, outer_axes: _Binders, outer_sources: _Binders, fixed: _Binders, *, root: bool = False
+    ) -> _Scope:
+        """Add one lexical scope under the enclosing scope's binders, which it reads and never mutates."""
         body = Body.coerce(body)
         scope_vertex = self.vertex(("scope", "root" if root else "child"))
         sibling_defs = tuple(_ordered_sibling_defs(stmt) for stmt in body)
         definition_sites: dict[str, list[tuple[int, int, int]]] = {}
         definitions_by_stmt: list[dict[str, int]] = []
+        binders_by_stmt: list[list[int]] = []  # each statement's binder vertices, in slot order
         aliases: dict[str, int] = {}
         for statement_index, names in enumerate(sibling_defs):
             own: dict[str, int] = {}
+            binders: list[int] = []
             for slot, name in enumerate(names):
                 vertex = self.vertex(("binder", "ssa"))
                 alias = aliases.get(name)
@@ -332,7 +332,9 @@ class _Builder:
                     self.relation(vertex, fixed[name], ("exports",))
                 definition_sites.setdefault(name, []).append((statement_index, slot, vertex))
                 own.setdefault(name, vertex)
+                binders.append(vertex)
             definitions_by_stmt.append(own)
+            binders_by_stmt.append(binders)
 
         def defining_vertex(name: str, consumer: int) -> int | None:
             sites = definition_sites.get(name, ())
@@ -340,9 +342,9 @@ class _Builder:
             if preceding:
                 return preceding[-1]
             local = next((vertex for index, _slot, vertex in sites if index != consumer), None)
-            return local if local is not None else env.ssa.get(name)
+            return local if local is not None else outer_ssa.get(name)
 
-        local_sources = dict(env.sources)
+        local_sources = dict(outer_sources)
         for stmt in body:
             for name in _source_names(stmt):
                 if name not in local_sources:
@@ -354,7 +356,7 @@ class _Builder:
         categories: list[int] = []
         shapes: list[str] = []
         bound: list[dict[str, int]] = []
-        for statement_index, (stmt, definitions) in enumerate(zip(body, sibling_defs, strict=True)):
+        for statement_index, stmt in enumerate(body):
             shape, occurrences = _statement_shape(stmt)
             children = stmt.nested()
             category = 2 if children and stmt.has_side_effects else int(not children)
@@ -364,7 +366,7 @@ class _Builder:
             shapes.append(shape)
             self.relation(scope_vertex, stmt_vertex, ("member",))
 
-            axes = dict(env.axes)
+            axes = dict(outer_axes)
             for name in stmt.binds_axes():
                 axis_vertex = self.vertex(("binder", "axis"))
                 axes[name] = axis_vertex
@@ -372,24 +374,22 @@ class _Builder:
             bound.append(axes)
 
             own_definitions = definitions_by_stmt[statement_index]
-            for slot, name in enumerate(definitions):
-                definition = definition_sites[name]
-                vertex = next(vertex for index, own_slot, vertex in definition if index == statement_index and own_slot == slot)
+            for slot, vertex in enumerate(binders_by_stmt[statement_index]):
                 self.relation(stmt_vertex, vertex, ("defines", "export" if children else slot))
-            for occurrence in occurrences:
-                if occurrence.kind == "resource":
-                    target = self._resource(occurrence.name)
+            for kind, name, role in occurrences:
+                if kind == "resource":
+                    target = self._resource(name)
                 else:
-                    target = axes.get(occurrence.name)
+                    target = axes.get(name)
                     if target is None:
-                        target = local_sources.get(occurrence.name)
+                        target = local_sources.get(name)
                     if target is None:
-                        target = own_definitions.get(occurrence.name)
+                        target = own_definitions.get(name)
                     if target is None:
-                        target = defining_vertex(occurrence.name, statement_index)
+                        target = defining_vertex(name, statement_index)
                     if target is None:
-                        target = self._fixed_name(occurrence.name)
-                self.relation(stmt_vertex, target, (occurrence.kind, occurrence.role))
+                        target = self._fixed_name(name)
+                self.relation(stmt_vertex, target, (kind, role))
 
             reads, writes, state = _resources(stmt)
             for mode, names in (("read", reads), ("write", writes), ("state", state)):
@@ -399,7 +399,7 @@ class _Builder:
                     else:
                         target = aliases.get(name)
                         if target is None:
-                            target = env.ssa.get(name)
+                            target = outer_ssa.get(name)
                         if target is None:
                             target = self._fixed_name(name)
                     self.relation(stmt_vertex, target, ("access", mode))
@@ -411,13 +411,16 @@ class _Builder:
         nested_scopes: list[tuple[_Scope, ...]] = []
         for index, (stmt, stmt_vertex, axes) in enumerate(zip(body, statement_vertices, bound, strict=True)):
             children = stmt.nested()
+            if not children:
+                nested_scopes.append(())
+                continue  # what follows is only what a nested scope sees; a leaf has none
             exported = {
                 name: definitions_by_stmt[index][name]
                 for child in children
                 for name in _ordered_exported_accs(child)
                 if name in definitions_by_stmt[index]
             }
-            visible_ssa = dict(env.ssa)
+            visible_ssa = dict(outer_ssa)
             for name in definition_sites:
                 target = definitions_by_stmt[index].get(name)
                 if target is None:
@@ -426,11 +429,7 @@ class _Builder:
                     visible_ssa[name] = target
             built_children = []
             for child_index, child in enumerate(children):
-                child_scope = self.scope(
-                    child,
-                    _Environment(dict(visible_ssa), dict(axes), dict(local_sources)),
-                    exported,
-                )
+                child_scope = self.scope(child, visible_ssa, axes, local_sources, exported)
                 built_children.append(child_scope)
                 self.relation(stmt_vertex, child_scope.vertex, ("body", child_index))
             nested_scopes.append(tuple(built_children))
@@ -446,22 +445,33 @@ class _Builder:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class _PartitionCell:
     vertices: set[int]
     serial: int
     queued: bool = False
+    #: An input cell nothing has split yet, of a partition that was equitable before one of its
+    #: cells was individualized: as a splitter it can split nothing, so its turn is skipped.
+    settled: bool = False
 
 
 def _equitable_partition(
     partition: tuple[tuple[int, ...], ...],
     incoming: Sequence[Sequence[tuple[int, int]]],
     outgoing: Sequence[Sequence[tuple[int, int]]],
+    individualized: int | None = None,
 ) -> tuple[tuple[int, ...], ...]:
     """Refine vertex colors with the standard smaller-half worklist algorithm.
 
     Each directed relation color is a separate splitter.  Processing only a cell's smaller
     replacement parts bounds relation visits by ``O((vertices + edges) log vertices)``.
+
+    ``individualized`` is the index of the singleton an individualization just split off a partition
+    that was EQUITABLE: every other input cell, bar the remainder that follows it, counts uniformly
+    into every cell, so until something splits it its turn as a splitter is a no-op. Skipping those
+    turns keeps the queue order and the cell serials — hence the result — exactly what visiting them
+    produces, while a search node costs what the individualization disturbs rather than the whole
+    graph again.
     """
     owner: list[_PartitionCell | None] = [None] * sum(map(len, partition))
     cells: dict[int, _PartitionCell] = {}
@@ -473,8 +483,9 @@ def _equitable_partition(
             cell.queued = True
             work.append(cell)
 
-    for vertices in partition:
-        cell = _PartitionCell(set(vertices), next_serial)
+    for position, vertices in enumerate(partition):
+        settled = individualized is not None and position not in (individualized, individualized + 1)
+        cell = _PartitionCell(set(vertices), next_serial, settled=settled)
         cells[next_serial] = cell
         next_serial += 1
         for vertex in vertices:
@@ -485,14 +496,20 @@ def _equitable_partition(
         splitter = work.popleft()
         assert splitter.queued
         splitter.queued = False
-        splitter_vertices = tuple(splitter.vertices)
+        if splitter.settled:
+            continue
 
-        buckets: dict[tuple[int, int], Counter[int]] = {}
-        for vertex in splitter_vertices:
+        # Per directed relation color, how many of the splitter's vertices each neighbour touches.
+        # Plain dicts: this is the innermost loop of every identity, and ``Counter`` pays a Python
+        # call per new key.
+        buckets: dict[tuple[int, int], dict[int, int]] = {}
+        for vertex in splitter.vertices:
             for color, target in outgoing[vertex]:
-                buckets.setdefault((0, color), Counter())[target] += 1
+                counts = buckets.setdefault((0, color), {})
+                counts[target] = counts.get(target, 0) + 1
             for color, source in incoming[vertex]:
-                buckets.setdefault((1, color), Counter())[source] += 1
+                counts = buckets.setdefault((1, color), {})
+                counts[source] = counts.get(source, 0) + 1
 
         for _relation, counts in sorted(buckets.items()):
             touched: dict[int, tuple[_PartitionCell, dict[int, set[int]]]] = {}
@@ -517,6 +534,7 @@ def _equitable_partition(
                 for value, vertices in sorted(parts.items()):
                     if value == retained:
                         cell.vertices = vertices
+                        cell.settled = False
                         child = cell
                     else:
                         child = _PartitionCell(vertices, next_serial)
@@ -526,13 +544,11 @@ def _equitable_partition(
                             owner[vertex] = child
                     children.append(child)
 
-                if was_queued:
-                    for child in children:
+                # A queued cell's parts all stay queued; otherwise the retained (largest) part is
+                # the one the smaller-half rule lets go.
+                for child in children:
+                    if was_queued or child is not cell:
                         enqueue(child)
-                else:
-                    for child in children:
-                        if child is not cell:
-                            enqueue(child)
 
     return tuple(tuple(sorted(cell.vertices)) for cell in cells.values())
 
@@ -619,7 +635,7 @@ def _canonical_labeling(
             covered.update(orbit(vertex, candidate_set, prefix) if _prune else {vertex})
             rest = tuple(member for member in cell if member != vertex)
             individualized = (*partition[:cell_index], (vertex,), rest, *partition[cell_index + 1 :])
-            result = search(individualized, (*prefix, vertex))
+            result = search(_equitable_partition(individualized, incoming, outgoing, cell_index), (*prefix, vertex), refined=True)
             if best is None or result[0] < best[0]:
                 best = result
             elif result[0] == best[0]:
@@ -727,7 +743,7 @@ class Labeling:
             rebuilt.append(stmt)
         body = Body(rebuilt)
         if spelled:
-            spellings = tuple(repr(form(stmt.rename(_AbstractNames()))) for stmt in body)
+            spellings = tuple(repr(form(stmt.rename(_ABSTRACT_NAMES))) for stmt in body)
 
             def priority(index: int, _stmt: Stmt) -> tuple:
                 vertex = scope.statements[index]
@@ -746,5 +762,5 @@ class Labeling:
 def relation_graph(stmts: Body) -> Ordering:
     """Build the complete body tree's colored relation graph."""
     builder = _Builder()
-    root = builder.scope(Body.coerce(stmts), _Environment({}, {}, {}), {}, root=True)
+    root = builder.scope(Body.coerce(stmts), {}, {}, {}, {}, root=True)
     return Ordering(tuple(builder.colors), tuple(builder.edges), root, tuple(builder.resources.items()), tuple(builder.fixed_names))

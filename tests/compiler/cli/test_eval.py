@@ -1,72 +1,9 @@
-"""Tests for ``emmy eval knobs`` / ``eval variants`` — the tune-DB analysis CLIs.
-
-Each test builds a synthetic tune-DB inline (just the two tables the
-commands read: ``cuda_op`` and ``perf``), so the suite stays hermetic
-and does not depend on a real autotune cache or GPU. The ``variants``
-CLI tests pin ``--prior`` to a nonexistent file so the pick comes from
-the cold ``OfflinePrior`` regardless of any prior checkpoint on the host.
-"""
+"""Tests for ``emmy eval golden`` — the release audit of one canonical golden against its serving
+configuration — and the offer audit the golden views share."""
 
 from __future__ import annotations
 
-import json
-import sqlite3
 from pathlib import Path
-
-
-def _make_tune_db(path: Path, variants: list[tuple[str, str, dict, float]]) -> None:
-    """Write a minimal tune DB to ``path``.
-
-    ``variants`` is a list of ``(op_key, kernel_name, knobs, latency_us)``
-    rows; one ``cuda_op`` + one ``perf`` row is written per entry. Other
-    real-DB columns (kernel_source, arg_order, grid, block, smem_bytes)
-    are filled with dummy values — ``knobs`` only reads ``cuda_op.pretty``
-    and ``perf.knobs``/``perf.latency_us_median``.
-    """
-    con = sqlite3.connect(str(path))
-    con.executescript(
-        """
-        CREATE TABLE cuda_op (
-            key           TEXT PRIMARY KEY,
-            kernel_source TEXT NOT NULL,
-            arg_order     TEXT NOT NULL,
-            grid          TEXT NOT NULL,
-            block         TEXT NOT NULL,
-            smem_bytes    INTEGER NOT NULL,
-            pretty        TEXT NOT NULL
-        );
-        CREATE TABLE perf (
-            context_key          TEXT NOT NULL,
-            op_key               TEXT NOT NULL,
-            backend              TEXT NOT NULL,
-            status               TEXT NOT NULL,
-            latency_us_median    REAL NOT NULL,
-            latency_us_min       REAL NOT NULL,
-            latency_us_max       REAL NOT NULL,
-            latency_us_mean      REAL NOT NULL,
-            latency_us_variance  REAL NOT NULL,
-            n_samples            INTEGER NOT NULL,
-            measured_at          TEXT NOT NULL,
-            knobs                TEXT NOT NULL DEFAULT '{}',
-            PRIMARY KEY (context_key, op_key, backend)
-        );
-        """
-    )
-    for op_key, kernel_name, knobs, us in variants:
-        pretty = f'extern "C" __global__\n__launch_bounds__(256) void {kernel_name}(const float* x) {{ }}\n'
-        con.execute(
-            "INSERT INTO cuda_op (key, kernel_source, arg_order, grid, block, smem_bytes, pretty) "
-            "VALUES (?, '', '[]', '[1,1,1]', '[1,1,1]', 0, ?)",
-            (op_key, pretty),
-        )
-        con.execute(
-            "INSERT INTO perf (context_key, op_key, backend, status, latency_us_median, latency_us_min, latency_us_max, "
-            "latency_us_mean, latency_us_variance, n_samples, measured_at, knobs) "
-            "VALUES ('ctx', ?, 'cuda', 'ok', ?, 0, 0, 0, 0, 1, '2026-05-24', ?)",
-            (op_key, us, json.dumps(knobs)),
-        )
-    con.commit()
-    con.close()
 
 
 def test_eval_golden_requires_exact_file_and_serving_config(run_cli, tmp_path):

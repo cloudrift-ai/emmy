@@ -75,7 +75,7 @@ class _RaisingBackend:
 
 
 def _perf_row(db: SearchDB, cand):
-    return db.lookup_perf(cand.ctx.structural_key(), cand.graph.nodes["out"].op.identity_key(with_io=True, with_knobs=True), backend="cuda")
+    return db.lookup_perf(cand.ctx, cand.graph.nodes["out"].op.identity_key(with_io=True, with_knobs=True), backend="cuda")
 
 
 async def test_compile_budget_overrun_records_nothing() -> None:
@@ -167,7 +167,7 @@ def _fail_rows(db: SearchDB, cand) -> dict[str, str]:
     out = {}
     for nid in ("mid", "out"):
         op = cand.graph.nodes[nid].op
-        row = db.lookup_perf(cand.ctx.structural_key(), op.identity_key(with_io=True, with_knobs=True), backend="cuda")
+        row = db.lookup_perf(cand.ctx, op.identity_key(with_io=True, with_knobs=True), backend="cuda")
         if row is not None:
             out[op.kernel_name] = row.status
     return out

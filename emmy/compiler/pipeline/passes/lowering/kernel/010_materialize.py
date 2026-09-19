@@ -52,7 +52,7 @@ def rewrite(match: Match, root: Node, ctx=None) -> KernelOp | None:
         body = _drop_repeated_declarations(Body((materialized,)))
         unbound = _unbound_names(tile, root, body)
         assert not unbound, f"materialize: kernel {tile.name!r} reads names it never binds: {sorted(unbound)}"
-        return KernelOp(body=body, name=tile.name)
+        return KernelOp(body=body, name=tile.name, serial=tuple(tile.place.serial))
     except UnbindableProjection as exc:
         # The offered row has no multi-root binding (e.g. it tiles two contraction operands of a
         # projection whose outputs do not partition by root). The row stays OFFERED — the
@@ -82,7 +82,7 @@ def _unbound_names(tile: TileOp, root: Node, body: Body) -> set[str]:
     undefined*, a hundred errors deep in a generated source and attributed to whichever candidate the
     tuner happened to be benching. Asking it here names the kernel and the value instead, in the pass
     that built them."""
-    bound = {*root.inputs, *root.buffer_names(), *_RENDERED_HELPERS}
+    bound = {*root.inputs, *root.buffer_names(), *_RENDERED_HELPERS, *(axis.name for axis in tile.place.serial)}
     for axis in (*tile.axes, *tile.place.free):
         bound |= set(axis.extent_expr().free_vars())
     return set().union(*(free_names(stmt) for stmt in body)) - bound

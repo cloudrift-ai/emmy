@@ -26,11 +26,12 @@ that slice computed-operand cones. Region transforms (``replace_at``,
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cached_property
 from heapq import heappop, heappush
 
 from emmy.compiler.ir.stmt.base import Stmt
+from emmy.utils import cached_method
 
 
 @dataclass(frozen=True)
@@ -721,6 +722,13 @@ class Body(tuple[Stmt, ...]):
         return self.iter_of_type(Write)
 
     @cached_property
+    def carries(self) -> tuple[Stmt, ...]:
+        """All ``Carry`` stmts in the body (recursive): the carried states it defines."""
+        from emmy.compiler.ir.stmt.leaves import Carry  # noqa: PLC0415
+
+        return self.iter_of_type(Carry)
+
+    @cached_property
     def accums(self) -> tuple[Stmt, ...]:
         """All ``Accum`` stmts in the body (recursive). May contain
         multiple Accums sharing a single accumulator name (matmul-shape
@@ -744,10 +752,16 @@ class Body(tuple[Stmt, ...]):
     def identity(self, *, structural: bool = True, types: Mapping[str, object] | None = None):
         """This body's identity material (:func:`~emmy.compiler.ir.stmt.identity.canonicalize_identity`):
         the canonical body over ``b0, b1, …``, which external buffer fills each role, and the
-        role's type. The untyped flavors are cached on the instance — Body is immutable."""
-        if types is not None:
-            return _canonicalize_identity(self, structural, types)
-        return self._identity_clustered if structural else self._identity_exact
+        role's type. Every flavor is cached on the instance — Body is immutable, and an op rebuilt
+        over this body (a lift, a cut, a schedule row) reads the identity its predecessor computed
+        instead of canonicalizing the same statements again."""
+        return self._identity(structural, None if types is None else tuple(sorted(types.items())))
+
+    @cached_method
+    def _identity(self, cluster: bool, types: tuple[tuple[str, object], ...] | None):
+        from emmy.compiler.ir.stmt.identity import canonicalize_identity  # noqa: PLC0415 — identity imports this module
+
+        return canonicalize_identity(self, cluster=cluster, types=None if types is None else dict(types))
 
     def structural_key(self, *, structural: bool = True, types: Mapping[str, object] | None = None) -> str:
         """Implements :class:`emmy.compiler.structural.Structural`.
@@ -773,18 +787,28 @@ class Body(tuple[Stmt, ...]):
         return self.identity(structural=structural, types=types).key
 
     @cached_property
-    def _identity_clustered(self):
-        return _canonicalize_identity(self, True, None)
+    def census(self) -> tuple[tuple[str, int], ...]:
+        """How many statements of each kind this body holds, nested ones included — a linear-time
+        necessary condition for two bodies to be one computation, to ask before an exact key."""
+        counts: dict[str, int] = {}
+        for stmt in self.iter():
+            kind = type(stmt).__name__
+            counts[kind] = counts.get(kind, 0) + 1
+        return tuple(sorted(counts.items()))
 
     @cached_property
-    def _identity_exact(self):
-        return _canonicalize_identity(self, False, None)
+    def unanchored_key(self) -> str:
+        """The exact identity of this body with every load index's integer anchor taken out: what
+        the copies of one computation read at successive offsets share."""
+        from emmy.compiler.ir.expr import split_anchor  # noqa: PLC0415
+        from emmy.compiler.ir.stmt.leaves import Load  # noqa: PLC0415
 
+        def unanchored(stmt):
+            if not isinstance(stmt, Load):
+                return stmt
+            return replace(stmt, index=tuple(split[1] if (split := split_anchor(expr)) is not None else expr for expr in stmt.index))
 
-def _canonicalize_identity(body: Body, cluster: bool, types: Mapping[str, object] | None):
-    from emmy.compiler.ir.stmt.identity import canonicalize_identity  # noqa: PLC0415 — identity imports this module
-
-    return canonicalize_identity(body, cluster=cluster, types=types)
+        return self.map(unanchored).structural_key(structural=False)
 
 
 def refs_axis(s: Stmt, name: str) -> bool:

@@ -308,6 +308,20 @@ stored `combine`). Commutativity
 is unused — split/reorder legality is a future cooperative-tier concern, recorded
 structurally when it returns.
 
+A recurrence's state is NOT a fold, and has its own two statements. A fold's meaning is its op: ⊕ is a monoid, so
+its steps may run in any order, its seed is the op's identity, and the carrier is one scalar inside the loops over
+the cells. A carried state is the opposite on each count: its steps run in order, its step is any computation, its
+seed is named, and it has cells — a delta rule's step reads OTHER cells of its own state (`k @ S`), which needs the
+loop over the steps OUTSIDE the cells and the state kept across them. `Carry` (`S[i, j] <- next`, with its `seed`)
+defines the NEXT value of one cell, and `Pre` (`v = pre S[k, j]`) reads what the PREVIOUS step left at any cell: the
+seed on the first step, the last step's value once the loop has closed. No read of a step sees what that step
+defines, so the reads and the definition of one step are order-free. Nothing is declared: the state is carried by the
+nearest enclosing loop whose axis the `Carry` index does not read (`carried_cells`), which is therefore a reduce loop
+the free-axis order never sorts under the cells, and its shape is the loops over its cells. The Loop IR rendering
+keeps two slots of the cell shape and commits the second after each step; how many slots survive and where they are
+stored is a schedule's question, not the statement's. The Tile lift realizes it as a serial launch axis over a state
+buffer (`lowering/tile/010_lift`).
+
 **The algebra is in the term, not a tag.** There is no stored / derived `AlgebraKind` and no op-tree node zoo. The
 stored tile IR has exactly **ONE node kind**, `Fold` — `reduce(⊕) ∘ map(f)` in the λ-foldMap spelling:
 
@@ -456,6 +470,8 @@ names it recognizes the pair by canonical form (`Fold.fuse`), never by a stored 
 | `Load`                       | Body-form external read: `name = load(input)[index...]`. `input` matches the producing graph node's id.           |
 | `Assign`                     | SSA body stmt: `name = op(args)` with `op: ElementwiseImpl`.                                                      |
 | `Accum`                      | Reduce accumulator: `name = op(name, value)` inside a reduce `Loop`. Initialized to its op's identity. ``axes`` lists the reduction axis names — propagated through Sigma renames (including σ-splits via `Expr.free_vars()`); the escape-analysis helper derives cross-thread cooperativity from ``axes ∩ enclosing ThreadTile.axes``. |
+| `Carry`                      | The next value of one cell of a carried state: `name[index...] <- value`, holding `seed` before the first step. No op: a state folds nothing. |
+| `Pre`                        | Read of one cell of a carried state: `name = pre carrier[index...]`, the previous step's value inside the loop that carries it. |
 | `Init`                       | Explicit `<dtype> name = identity;` seed at this scope (`name` + scalar `identity` + `dtype`). Used for a carried state's seed (one per component), emitted above the streaming `Loop`. Scope-bound (never hoisted); shadows a deeper same-named `Accum` init. |
 | `Let`                        | Pure binding of one `Expr` to a name: a scalar literal (the twisted carrier's injected `1`), a precomputed integer index, a `FlatIndex` offset. Scoped like an `Assign`; legal inside a stored `Lambda`. |
 | `Write`                      | Write an SSA value to output at `index`.                                                                          |

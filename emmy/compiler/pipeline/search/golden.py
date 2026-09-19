@@ -774,7 +774,7 @@ _WIRE_DIGESTS: dict[int, tuple[dict, str]] = {}
 def _tree_fingerprint(root: Path) -> str:
     """Path plus CONTENT digest of every ``*.py`` under ``root``.
 
-    Content, not mtime: the memo this keys is ONE file per machine and every checkout of the same
+    Content, not mtime: the memo this keys is one file per fingerprint and every checkout of the same
     revision reads it — an agent worktree beside the main tree, the re-exported tree a serving
     container mounts. Byte-identical sources with different mtimes fingerprinted differently, so
     each checkout discarded the other's derivations and the next process re-derived every identity
@@ -801,9 +801,8 @@ def _identity_store() -> dict:
         fingerprint = _compiler_fingerprint()
         sections: dict = {"entries": {}, "verdicts": {}, "replays": {}}
         try:
-            payload = json.loads(config.golden_identity_cache_path().read_text())
-            if payload.get("fingerprint") == fingerprint:
-                sections = {name: payload.get(name, {}) for name in sections}
+            payload = json.loads(config.golden_identity_cache_path(fingerprint).read_text())
+            sections = {name: payload.get(name, {}) for name in sections}
         except (OSError, ValueError):
             pass
         _IDENTITY_STORE = {"fingerprint": fingerprint, **sections}
@@ -822,7 +821,7 @@ def flush_identity_store() -> None:
 
     from emmy import config  # noqa: PLC0415
 
-    path = config.golden_identity_cache_path()
+    path = config.golden_identity_cache_path(_IDENTITY_STORE["fingerprint"])
     try:
         # MERGE with the on-disk state before writing: concurrent processes (xdist workers each
         # walking one golden set) flush independently, and overwrite-last-wins silently dropped
@@ -831,7 +830,7 @@ def flush_identity_store() -> None:
             on_disk = json.loads(path.read_text())
         except (OSError, ValueError):
             on_disk = None
-        if on_disk is not None and on_disk.get("fingerprint") == _IDENTITY_STORE["fingerprint"]:
+        if on_disk is not None:
             for section in ("entries", "verdicts", "replays"):
                 merged = dict(on_disk.get(section, {}))
                 merged.update(_IDENTITY_STORE.get(section, {}))

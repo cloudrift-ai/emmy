@@ -324,6 +324,79 @@ fill a step. Health took 29 minutes against 17: the first compile on each rank t
 this tree, against 107 s in the previous boot, and a second boot did not shorten it. The cause is not found.
 Evidence on the host under `~/serve-evidence/boot27-*`, `boot28-*` and `elect27-*`.
 
+**The symbolic post twin, measured at a long prompt's width, and seven receipts re-recorded (2026-09-19).** `run
+--bench` runs a dynamic row at its stored 512-token hint and has no flag for another width, so the twin was benched
+from scratch copies of the golden with the hint rewritten, strict, one V100. Every width elects the same 21 kernels
+with the same schedules, so the figures are the serving program's:
+
+| Width | 512 | 1,024 | 2,155 | 4,095 |
+| --- | ---: | ---: | ---: | ---: |
+| Symbolic post twin, per layer | 64.9 ms | 131.2 ms | 275.8 ms | 524.7 ms |
+
+It is linear, about 128 µs per token, and at 2,155 tokens it is 11.9 s of the 29.3 s to first token over 43 layers.
+The symbolic pre twin is 4.9 ms there and does not matter. Four pieces are 94% of the post twin. The largest, 104 ms
+at 2,155 tokens, spelled two cooperative reduces over 256 threads and launched one block per output cell — the
+schedule #843 removed from the pre-attention residuals, here honestly measured and simply bad. The m16 and m4096 post
+twins carried it on three pieces each. The seven receipts are re-recorded from `main` at `94c94378` as the serial
+row, strict, an empty tune DB per run, unpinned:
+
+| Twin | Pieces, before → after | Program, before → after |
+| --- | ---: | ---: |
+| `post-sym` (dynamic, at the 512 hint) | 24,729 → 178 µs | 64.9 → 40.3 ms |
+| `post16` (m16) | 3 × 358 → 4.1 – 4.5 µs | 9.88 → 8.85 ms |
+| `post4096` (m4096) | 96,960 / 92,483 / 92,466 → 1,404 / 1,213 / 1,089 µs | 536.8 → 258.1 ms |
+
+No kernel's fastest row changed hands, the file keeps its row count, and its strict decode passes. A strict boot of
+that file serves, health in 21 minutes:
+
+| Measure | This boot | Previous boot |
+| --- | ---: | ---: |
+| Time to first token, 2,155 tokens (cold / repeat) | 24.90 s / 2.48 s | 29.32 s / 2.68 s |
+| Time to first token, 5 tokens (cold / repeat) | 3.67 s / 0.92 s | 3.74 s / 0.97 s |
+| Time per output token, 5 → 33 tokens | 0.267 s | 0.266 s |
+| `post.chunk.m4096` / `post.decode.m16` per layer | 318.5 / 12.5 ms | 599 / 13.6 ms |
+
+The 4.4 s the long prompt gained is what the one symbolic piece predicted (103 ms × 43 layers). What is left of the
+symbolic post twin at 2,155 tokens is 173 ms per layer, and three pieces scheduled `WORK: t256, REDUCE: coop-t` are
+156 ms of it (72, 42 and 42 ms); they are the next thing to tune. The m4096 record run exits 1 because the pinned
+replay of its lead row no longer compiles ("direct atomic REDUCE writes each partial into f16 output storage"); the
+unmodified golden fails the same way on this tree, so it predates this change, and the election itself builds and
+runs. Evidence on the host under `~/serve-evidence/symbench-*`, `recpost7-*` and `boot29-*`.
+
+**The three matmul pieces, tiled on tensor cores (2026-09-19).** The three pieces are the block's plain linear
+layers, 4,096 → 2,048 twice and 2,048 → 4,096 once, and their rows ran them as cooperative dot products with the
+tile site left empty. Other V100 goldens tile a dynamic matmul with `WORK: w2x2, TILE: mma_m8n8k4_f16_f32/f4x4/k8,
+STAGE: d2/smem`, so that and five neighbours were benched per receipt from scratch goldens with one receipt
+respelled, strict, one V100 each. The m4096 twin's matmul piece was already tiled, with a schedule 51× off, and got
+the same treatment:
+
+| Piece | Recorded row | Best rows measured | Worst tiled row measured |
+| --- | ---: | ---: | ---: |
+| dynamic, 4,096 → 2,048 (two kernels) | 9,457 µs | 142 µs (`w2x2 f4x4/k8 d2/smem`), 148, 176 | 26,591 µs (`w8x4 f4x4/k2 d2/smem`) |
+| dynamic, 2,048 → 4,096 | 17,244 µs | 414 µs (`w2x4 f4x2/k8 d2/smem`), 415, 515 | 18,787 µs (`w8x4 f4x4/k2 d2/smem`) |
+| m4096 matmul piece | 140,438 µs (`w8x4 f4x4/k2 d2/smem`) | 2,745 µs (`w2x4 f4x2/k8 d2/smem`), 2,956, 3,135 | 131,322 µs (`w4x4 f4x4/k8 d2/smem`) |
+
+Staging is what makes the tile pay: the same tile without `STAGE` measured 895 µs against 142, and on the
+2,048 → 4,096 piece the unstaged rows are not offered. Recorded from `main` at `c7f852b5`, strict, an empty tune DB
+per run, unpinned: the symbolic post twin goes 40.3 → 4.84 ms at its 512-token hint and the m4096 post twin
+258.1 → 120.6 ms. At long widths the symbolic twin is now 18.8 ms at 2,155 tokens (was 172.6) and 35.0 ms at 4,095,
+which is 3.4× faster than the static m4096 twin at the same width. No kernel's fastest row changed hands, the row
+count is unchanged, the strict decode passes, and the boot serves, health in 22 minutes:
+
+| Measure | This boot | Previous boot |
+| --- | ---: | ---: |
+| Time to first token, 2,155 tokens (cold / repeat) | 18.34 s / 2.21 s | 24.90 s / 2.48 s |
+| Time to first token, 5 tokens (cold / repeat) | 3.69 s / 0.92 s | 3.67 s / 0.92 s |
+| Time per output token, 5 → 33 tokens | 0.267 s | 0.267 s |
+| `post.chunk.m4096` per layer | 172.8 ms | 318.5 ms |
+
+The 6.6 s gained is what the bench predicted (154 ms × 43 layers), and the long prompt's completion is unchanged
+word for word, which is the only correctness evidence this target has: it has no eager twin, so a recorded row is
+checked against the election's own output. The symbolic post twin is now 0.8 s of the 18.3 s to first token, so the
+rest of a long prompt's prefill is elsewhere: the experts, attention, and first-request warm-up, none of them
+measured here. Evidence on the host under `~/serve-evidence/ab-*`, `ab4k-*`, `recmm-*`, `symbenchmm-*` and
+`boot30-*`.
+
 
 ### The M=1 decode tier: what broke and what now guards it
 

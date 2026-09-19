@@ -2725,6 +2725,9 @@ class KernelOp(BodyOp):
     ``CudaOp.zero_outputs`` memset list."""
 
     zero_delegated: tuple[str, ...] = ()
+    #: The placement's serial axes (:attr:`Placement.serial`): one launch per coordinate, the
+    #: coordinate a runtime ``int`` param. Carried to the CUDA op, never a loop in the body.
+    serial: tuple[Axis, ...] = ()
 
     @cached_property
     def smem_buffers(self) -> dict[str, Smem]:

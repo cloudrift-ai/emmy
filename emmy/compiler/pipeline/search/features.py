@@ -741,7 +741,7 @@ def _reduce_features(knobs: dict) -> dict[str, float]:
     keeps the :data:`_REDUCE_FEATURE_KEYS` slice; the ILP register fold (``r<n>``) rides its own
     ``D_reduce_ilp`` — serial and ``r4`` differ in neither threads nor split-K. Empty when the row
     carries no ``REDUCE`` family key, so pointwise rows stay feature-free as before. Additive
-    encoding: raw knob dicts re-featurize at read time, so existing node rows / reservoirs gain
+    encoding: raw knob dicts re-featurize at read time, so existing perf rows / reservoirs gain
     these keys on the next fit — no ``FEATURIZER_VERSION`` bump."""
     if not any(family_of(k) == "REDUCE" for k in knobs):
         return {}

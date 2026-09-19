@@ -19,6 +19,28 @@ HIDDEN = 16
 PLE_DIM = 4
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _warm_transformers():
+    """Build one transformers model before the tests, so none of them is charged for the first.
+
+    Resolving a lazy ``transformers`` model module and constructing a torch module for the first
+    time in a process costs ~1.3 s here and several seconds on a CI runner; every later build is
+    free. Whichever test got there first paid it and read as a 5 s test, which trips the durations
+    gate in ``tests/conftest.py`` — and because that gate's own baseline decides the bucketing,
+    recording the test that paid moves the cost to a different one, so the gate names a new test
+    every run. Fixture setup is not the call phase, so paying it here charges nobody.
+    """
+    import torch
+    import transformers
+
+    config = transformers.Qwen3Config(
+        vocab_size=64, hidden_size=64, intermediate_size=128, num_hidden_layers=1,
+        num_attention_heads=4, num_key_value_heads=2, head_dim=16, max_position_embeddings=64,
+    )  # fmt: skip
+    with torch.device("meta"):
+        transformers.Qwen3ForCausalLM(config)
+
+
 def _fake_rotary(sample, full_pos):
     import torch
 

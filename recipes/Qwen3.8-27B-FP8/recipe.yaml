@@ -52,6 +52,8 @@ engine:
       image: "cloudriftai/1cat-vllm-deepseek-v4-flash-0731:1.2.3-d76126608"
       # --dtype half sets the compute dtype; Volta has no bfloat16. --language-model-only drops
       # the vision tower; the text path is what is qualified here.
+      # --enable-prompt-tokens-details exposes each prefix-cache hit in OpenAI usage responses so
+      # callers can meter cached input separately from uncached input.
       # --exclude-tools-when-tool-choice-none: with tool_choice "none" the tool list otherwise
       # stays in the prompt, the model still writes its <tool_call> markup, and nothing parses
       # it, so the markup comes back as the answer text (3/3 before this flag).
@@ -68,6 +70,8 @@ engine:
       # the JSON arrives whole.
       extra_args: >-
         --dtype half
+        --enable-prefix-caching
+        --enable-prompt-tokens-details
         --language-model-only
         --gdn-prefill-backend triton
         --max-num-batched-tokens 4096

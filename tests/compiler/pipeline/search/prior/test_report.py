@@ -112,13 +112,13 @@ def test_a_pool_with_several_verified_rows_is_scored_on_the_best_of_them():
 def test_the_report_serializes_to_a_diffable_schema():
     """Two runs of the same evaluation must produce byte-identical JSON — it is compared with ``diff``."""
     summaries = measured_summaries("offline", [_measured("k", [30.0, 20.0, 10.0])], _by_d_a)
-    report = EvalReport({"dataset": "nodes", "source": "freeze"}, summaries)
+    report = EvalReport({"dataset": "db", "source": "dataset.db"}, summaries)
     obj = report.to_json()
 
-    assert obj["header"] == {"dataset": "nodes", "source": "freeze"}
+    assert obj["header"] == {"dataset": "db", "source": "dataset.db"}
     assert obj["summaries"][0]["axes"] == {"half": "offline", "gpu": "card-a", "H_opt": "O3"}
     assert obj["summaries"][0]["groups"] == 1 and obj["summaries"][0]["unscored"] == 0
-    assert EvalReport({"dataset": "nodes", "source": "freeze"}, summaries).to_json() == obj
+    assert EvalReport({"dataset": "db", "source": "dataset.db"}, summaries).to_json() == obj
 
 
 def test_both_halves_are_labelled_in_one_report():

@@ -74,6 +74,13 @@ post-decomposition Python source file for known format names.
 
 ## The tile scheduler: one stored tree
 
+`010_lift` reads a Loop IR carried state as a serial kernel (`states_as_buffers`): the loop that carries the
+state becomes `Placement.serial`, the state a buffer the node owns and keeps every step of, a `Pre` read a load
+one launch back (the seed at the first), and the `Carry` a store of its value at this step. The step's own algebra is
+untouched, so a contraction over the previous state lifts as a contraction whose B slab is that buffer. A serial
+kernel stays ONE kernel — `030_cut` offers it no cut and no split — because the runner launches one kernel's steps
+to completion before the next kernel's first, so pieces could not interleave step by step.
+
 `020_twisted` first applies the general exp-family Fold rewrite described at the boundary below. The single `030_cut`
 pass runs to a fixpoint over two ordered domains. It first offers the maximal fused tree beside every semantically
 closed stored Fold-edge cut whose workspace dtypes are determined (an undeterminable seam is not offered — the offer
@@ -564,6 +571,27 @@ rewritten tree. Direct contraction children and independent roots use the same p
 when roots reverse their algebraic M/N readings. A derived contraction uses the enclosing Fold domain through the same
 parent/child interface. Materialization binds accepted choices to placed geometry and resolved transport facts;
 unsupported forms remain unmapped.
+
+### Rolling an unrolled recurrence
+
+A chunked recurrence — a gated delta rule's inter-chunk state `S_c = f_c(S_{c−1})`, read per chunk by the chunk's
+outputs — reaches the tracer as a Python loop and leaves it unrolled. Fused whole, chunk `j`'s consumer holds the
+chain `f_j(f_{j−1}(… f_1(0)))` as its own operand cone, so the state is re-derived per prefix and chunk `j` costs
+`O(j)`. No cut repairs that — a cut materializes within one target, and chunk `j+1`'s target recomputes what chunk
+`j`'s stored.
+
+`loop/fusion/005_roll_recurrence` rolls it BEFORE fusion inlines it, while the structure is still plain. The states
+are a chain of nodes of one shape — the same body once load anchors are taken out — each depending on the last. A
+step is what lies between two of them, `ancestors(S_{j+1}) − ancestors(S_j)`; the first step is what the first state
+needs beyond what every step reads, and it must start from a zero buffer, the carrier's seed. Nothing about the step
+is assumed: each step is spliced into one body by the fusion rule's own splicer under step-independent buffer names,
+the strides are read off the first two, and the first step advanced by `j` strides must NORMALIZE to step `j`'s body
+for every `j`. Only then is the chain replaced, by one kernel that carries the state (`Carry`, `ir/ARCHITECTURE.md`)
+and which stores what each step kept — the state, and any other buffer of the step read outside it — with the step as
+the leading axis, and by one slice of those stores per replaced buffer, which ordinary fusion then inlines into its
+reader. A chain that is not one step at a stride is left alone: a recurrence rolled wrongly is a wrong answer, not a
+slow kernel. A kernel that carries a state is a fusion region of its own (`carries_state`): the splice inlines a
+store into its readers, and a state is stored once per step.
 
 ## Kernel boundaries after maximal fusion
 

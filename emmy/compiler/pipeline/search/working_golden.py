@@ -401,7 +401,7 @@ class _ProposalLoopIdentity(PipelineStrategy):
     """Capture the finalized Loop target and any measured structural parent."""
 
     def __init__(self) -> None:
-        self.value: tuple[str, str, dict] | None = None
+        self.value: dict | None = None  # the finalized Loop target's ``S_*`` stamps
         self.structural_parents: list[tuple[dict[str, str], str, dict]] = []
 
     def _capture(self, graph) -> None:
@@ -409,17 +409,13 @@ class _ProposalLoopIdentity(PipelineStrategy):
             return
         from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
         from emmy.compiler.pipeline.knob import STRUCT_PREFIX  # noqa: PLC0415
-        from emmy.compiler.pipeline.passes.identity import IdentityStrategy  # noqa: PLC0415
-        from emmy.compiler.pipeline.strategy import discovered_strategies  # noqa: PLC0415
 
         loops = [node.op for node in graph.nodes.values() if isinstance(node.op, LoopOp)]
         if len(loops) != 1:
             return
-        identity = next(strategy for strategy in discovered_strategies() if isinstance(strategy, IdentityStrategy))
         stamped = {key: float(value) for key, value in loops[0].knobs.items() if key.startswith(STRUCT_PREFIX)}
-        cache_key = loops[0].identity_key(with_io=True, with_knobs=True)
-        if stamped and cache_key is not None:
-            self.value = identity.op_sig(loops[0], graph), cache_key, stamped
+        if stamped and loops[0].identity_key(with_io=True, with_knobs=True) is not None:
+            self.value = stamped
 
     def on_run_start(self, event) -> None:
         self._capture(event.graph)
@@ -457,9 +453,7 @@ class _ProposalLoopIdentity(PipelineStrategy):
         return key, dict(knob_items)
 
 
-async def measure_proposals(
-    graph, proposals, *, backend, db, ctx, max_candidates: int | None, prior=None, run_id: str | None = None
-) -> list[dict]:
+async def measure_proposals(graph, proposals, *, backend, db, ctx, max_candidates: int | None, prior=None) -> list[dict]:
     """Measure working-file candidates exactly, in file order, before MCTS."""
     from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline, TuningSearch  # noqa: PLC0415
@@ -492,7 +486,7 @@ async def measure_proposals(
             async for candidate in pipeline.tune_async(graph.copy(), search=search, ctx=ctx, backend=backend, db=db):
                 terminal = candidate
         if loop_identity.value is not None:
-            search._base_knobs.update(loop_identity.value[2])
+            search._base_knobs.update(loop_identity.value)
         raw_rows = [node.op.knobs for node in terminal.graph.nodes.values() if isinstance(node.op, CudaOp)] if terminal else []
         pin_error = unreproducible_pin_flag(pins, raw_rows) if raw_rows else "proposal produced no CUDA kernel"
         validated_route = pins if pin_error is None and loop_identity.value is not None else None
@@ -504,16 +498,6 @@ async def measure_proposals(
         if prior is not None:
             prior.add_rows(search._collect_rows())
             prior.maybe_refit()
-        if loop_identity.value is not None:
-            db.record_nodes(
-                search._collect_node_records(
-                    context_key=ctx.structural_key(),
-                    op_sig=loop_identity.value[0],
-                    gpu=ctx.hardware_id(),
-                    run_id=run_id or "",
-                    validated_input_route=validated_route,
-                )
-            )
         measured_knobs = dict(structural[0]) if structural is not None else (realized_tuning_knobs(terminal.graph) if terminal else None)
         knob_error = None
         if raw_rows and measured_knobs is None:

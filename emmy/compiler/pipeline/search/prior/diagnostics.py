@@ -201,5 +201,5 @@ def report(prior) -> str:
     lines.append(f"[prior] golden coverage: {covered}/{total} golden matmul shapes have data in the dataset")
     if covered == 0:
         lines.append("  none yet — tune a working golden file (`emmy tune --golden-file PATH`) to validate against them")
-    lines.append("[prior] ranking quality: run `emmy eval prior --dataset nodes` (this block counts coverage only)")
+    lines.append("[prior] ranking quality: run `emmy eval prior --dataset db` (this block counts coverage only)")
     return "\n".join(lines)
