@@ -60,6 +60,21 @@ def classic_forks(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
     root over the problem (a one-element list, the shape every fork builder returns), its sites
     sourced from the environment's pins where they name them."""
     from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, FP8_MMA, precision_pin  # noqa: PLC0415
+    from emmy.compiler.ir.schedule.register import RegisterCodec, RegisterContext, RegisterProblem, materialize_register  # noqa: PLC0415
+
+    row = pin_row(split_consumed=tile.split_consumed or carries_partition(tile))
+    register = []
+    if tile.register_program is not None and not any(value for key, value in row.items() if key not in ("WORK", "TILE", "STAGE")):
+        context = RegisterContext(RegisterProblem(tile, ctx, row={key: value for key, value in row.items() if key in ("WORK", "TILE", "STAGE")},
+                                                  allow_f16=precision_pin(F16_MMA_F32_ACC) is True))
+        register = fork_schedule(
+            context, codec=RegisterCodec(context), inherited_knobs=knobs, row_prefix={},
+            materialize=lambda schedule, selected: materialize_register(tile, schedule, selected),
+            pool_id=digest(tile.identity_key(with_io=True), ctx.structural_key(), "register", schedule_pin_fingerprint()),
+            sample=getattr(ctx, "pool_sample", None),
+        )
+    if row.get("STAGE") == "d1/reg" and tile.place.serial:
+        return register
 
     # A bare WORK / RASTER / REDUCE pin is published across the kernels a split minted and names the
     # partial (a warp ``WORK``, a ``coop`` band), not its finalize, which folds one partial per split
@@ -70,7 +85,7 @@ def classic_forks(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
     problem = ClassicProblem(
         tile,
         ctx,
-        row=pin_row(split_consumed=tile.split_consumed or carries_partition(tile)),
+        row=row,
         allow_f16_accumulate=precision_pin(F16_MMA_F32_ACC) is True,
         allow_fp8=precision_pin(FP8_MMA) is True,
         validate_pins=ctx.validate_pins,
@@ -87,7 +102,7 @@ def classic_forks(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
         tile.split_consumed,
     )
     prefix = dict.fromkeys(SCHEDULE_FORK_STAMPS, 1.0) if problem.warp_eligible else {}
-    return fork_schedule(
+    return register + fork_schedule(
         context,
         codec=codec,
         inherited_knobs=knobs,

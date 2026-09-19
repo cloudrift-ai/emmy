@@ -158,6 +158,12 @@ def factorize(tile, root, store=None, sm_count: int = 0) -> Tile:
     root graph node, then dispatch its ``op`` into a bound ``Tile`` via :func:`_factorize`. ``out_val``
     (the kernel's finalized output SSA name — the root node's produced :class:`Handle`) is resolved
     once here and threaded down for the store glue."""
+    from emmy.compiler.ir.schedule.register import RegisterMaterialization  # noqa: PLC0415
+
+    if isinstance(tile.materialization, RegisterMaterialization):
+        from ._register import factorize_register  # noqa: PLC0415
+
+        return factorize_register(tile)
     # Stored trees are already resolved — a computed operand is an inline node on its edge, so the
     # emitter below walks the tree as stored and every reader (``cone_seam``) reads the node
     # boundary straight off ``Fold.a``.

@@ -433,6 +433,12 @@ def _serialize_op_fields(op: Op) -> dict:
 
     if not isinstance(op, TileOp) or op.schedule is None:
         return fields
+    from emmy.compiler.ir.schedule.register import RegisterCodec, RegisterMaterialization  # noqa: PLC0415
+
+    if isinstance(op.materialization, RegisterMaterialization):
+        fields["schedule"] = RegisterCodec(None)._encode(op.schedule)
+        fields["materialization"] = {"register": True}
+        return fields
     from emmy.compiler.ir.schedule.classic import (
         # noqa: PLC0415,
         ClassicScheduleCodec,
@@ -482,6 +488,13 @@ def _deserialize_op(op_cls: type[Op], raw_fields: dict) -> Op:
     )
 
     source = op_cls(**fields)
+    if materialization_row == {"register": True}:
+        from emmy.compiler.ir.schedule.register import RegisterCodec, RegisterContext, RegisterMaterialization, RegisterProblem  # noqa: PLC0415
+
+        codec = RegisterCodec(RegisterContext(RegisterProblem(source, None, allow_f16=True)))
+        fields["schedule"] = codec.decode(_wire_mapping(schedule_row, "register schedule"))
+        fields["materialization"] = RegisterMaterialization()
+        return op_cls(**fields)
     codec = ClassicScheduleCodec(ClassicScheduleContext(source))
     schedule_wire = _wire_mapping(schedule_row, "classic schedule")
     schedule = codec._parse(schedule_wire)
@@ -1424,7 +1437,10 @@ def _rename_buf_in_op(op, old: str, new: str):
     from emmy.compiler.ir.pure.fold import Fold
     from emmy.compiler.ir.stmt import Body
     from emmy.compiler.ir.tile import TileOp
+    from emmy.compiler.ir.kernel import KernelOp
 
+    if isinstance(op, KernelOp):
+        return replace(op, body=op.body.rename_buffers({old: new}))
     if not isinstance(op, (LoopOp, TileOp)):
         return op
 

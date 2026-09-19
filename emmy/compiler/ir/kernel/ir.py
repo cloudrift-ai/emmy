@@ -1973,6 +1973,7 @@ class FragmentRepack(Stmt):
     ab_dtype: str = "f16"
     fragment_layout: str = "m16n8k16"
     part: int = 0
+    role: str = "a"
 
     def deps(self) -> tuple[str, ...]:
         return self.srcs
@@ -1984,6 +1985,9 @@ class FragmentRepack(Stmt):
         return [f"{indent}FragmentRepack {self.frag} <- {self.srcs} ({self.ab_dtype}, {self.fragment_layout}, part={self.part})"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
+        if self.role == "b":
+            assert self.fragment_layout == "m16n8k16" and self.ab_dtype == "f16" and len(self.srcs) == 1
+            return [f"{_pad(ctx.indent)}emmy_c_to_b_f16({self.frag}, {self.srcs[0]});"]
         if self.fragment_layout == "m8n8k4":
             assert len(self.srcs) == 1
             return [f"{_pad(ctx.indent)}emmy_c_to_a_{self.ab_dtype}_m8n8k4<{self.part}>({self.frag}, {self.srcs[0]});"]

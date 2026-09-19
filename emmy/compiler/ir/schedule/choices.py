@@ -725,7 +725,7 @@ class Placement:
 #: evaluating a computed edge into its slab), ``cp.async`` (``smem-async``) and TMA
 #: (``smem-tma``). An EMPTY ``STAGE`` is no intermediate at all: gmem→register on a
 #: materialized operand, register-to-register on a computed one.
-_TRANSPORTS = ("direct", "smem", "smem-async", "smem-tma")
+_TRANSPORTS = ("direct", "reg", "smem", "smem-async", "smem-tma")
 
 #: The ``STAGE`` grammar, rendered into every parse error so a bad pin names what it could have said.
 _STAGE_EXPECT = "expect d<n> / smem|smem-async|smem-tma / p<n>"
@@ -770,6 +770,8 @@ class Stage:
             raise ValueError(f"Stage reg_depth must be a positive integer, got {self.reg_depth!r}")
         if self.transport == "direct" and (self.depth != 1 or self.reg_depth != 1):
             raise ValueError("direct Stage cannot carry pipeline depths")
+        if self.transport == "reg" and (self.depth != 1 or self.reg_depth != 1):
+            raise ValueError("register storage has one live value and no operand prefetch")
 
     @classmethod
     def direct(cls) -> Stage:
