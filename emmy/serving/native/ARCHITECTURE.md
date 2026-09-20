@@ -14,6 +14,7 @@ new compiler or runtime alias format. Unsupported symbolic, indirect, and descri
 Cache buffers use the persistent output role, without joining the public logits/token output list. Custom launches
 identify their writes so Python scratch allocation preserves the same dependencies as native execution.
 
+CUDA source lives in the packaged `kernels.cu` resource, loaded by Python during artifact preparation.
 Small CUDA kernels provide embedding lookup, default full rotary embedding, contiguous cache writes, causal grouped
 query attention, and greedy sampling. Attention accumulates products in float32; score and probability storage follow
 the FP16 eager Qwen3 contract. These kernels favor a simple independent reference implementation over speed. Rotary
