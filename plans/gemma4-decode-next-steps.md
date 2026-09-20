@@ -23,15 +23,6 @@ a 139 us weight-streaming floor, down 74.1 against 69, output projection 14.2, p
 
 ## Steps, in the order their payoff justifies
 
-0. **Fix the FP8 expert regression this branch carries.** `tests/serving/generation/test_gen_runner_gpu.py::
-   test_expert_program_fp8_indirect_compose` computes wrong values on the branch (31 of 32 elements, greatest
-   absolute difference 1.25 against a 0.02 tolerance) and passes on main. Bisected to "Form each cut piece as its own
-   kernel, and fold repeated pure statements", and inside it to `_cut._reformed`: returning the piece as minted makes
-   the test pass, while disabling either half of the statement fold does not. So the lower-and-lift round trip that
-   re-forms a cut piece does not preserve this program's meaning; the statement kinds and counts match across it, so
-   the difference is in indices or order. Find it before the re-form is trusted, or gate the re-form on a check that
-   the formed piece keeps the minted one's interface.
-
 1. **Account for the 3.6 ms, then cut launches.** A decode step launches about ten kernels per layer plus the head;
    a captured graph replays a launch in ~2.05 us on this box, so the launch floor alone is ~1 ms and the rest is
    glue between the halves. Measure first: a step-level timeline (the plugin's own timing, or `nsys` around one
@@ -74,3 +65,9 @@ a 139 us weight-streaming floor, down 74.1 against 69, output projection 14.2, p
 8. **Default a serving recipe's pack directory to its image.** The shared `EMMY_PACK_DIR` served plans compiled
    from the golden rows a re-record had replaced (fixed for validity by keying the pack on the golden; the recipes
    still share one directory across images, which only wastes a recompile now).
+
+9. **Re-record the DeepSeek V4 V100 expert rows.** 77 of the 418 rows of `DeepSeek-V4-Flash-0731/v100` stop
+   decoding on this branch, every one an `expert*@mxfp4` target whose replay offers no TILE or STAGE. Bisected to
+   "Cluster every copy of a value into one seam": the clustering moves where those expert kernels are cut, and main
+   recorded the rows against the old cut in #855-858. Needs the V100 box, and a look at whether the new cut is the
+   one that half wants before any row is written.
