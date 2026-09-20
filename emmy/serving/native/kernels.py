@@ -1,6 +1,6 @@
 """CUDA operations surrounding compiler-produced dense Qwen3 pre/post programs."""
 
-SOURCE = r'''
+SOURCE = r"""
 #include <cuda_fp16.h>
 #include <math.h>
 extern "C" __global__ void native_embed(const long long* prompt, const long long* length,
@@ -63,4 +63,4 @@ extern "C" __global__ void native_greedy(const half* logits, long long* next) {
         *next = best;
     }
 }
-'''
+"""

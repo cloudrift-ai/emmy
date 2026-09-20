@@ -102,7 +102,9 @@ def handle_generate(args):
         eos = model.generation_config.eos_token_id
         eos = [eos] if isinstance(eos, int) else (eos or [])
         with gpu_lock(), config.golden_file_override(args.golden), config.strict_evidence_override(args.strict_evidence):
-            export_model(model, args.export_native, context_length=MAX_CONTEXT if args.context_length is None else args.context_length, eos_ids=eos)
+            export_model(
+                model, args.export_native, context_length=MAX_CONTEXT if args.context_length is None else args.context_length, eos_ids=eos
+            )
         logger.info("Prepared native artifact at %s", args.export_native)
         return
     try:

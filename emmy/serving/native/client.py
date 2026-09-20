@@ -21,8 +21,10 @@ async def generate_tokens(pack, prompt_ids, *, max_new_tokens, capture=False, ti
             output = Path(directory) / "tokens.bin"
             np.asarray(prompt_ids, dtype="<i8").tofile(prompt)
             await worker.run_job({"op": "load_generation", "root": str(Path(pack).resolve())}, wall_timeout_s=timeout)
-            await worker.run_job({"op": "generate", "prompt": str(prompt), "max_new_tokens": max_new_tokens,
-                                  "capture": capture, "output": str(output)}, wall_timeout_s=timeout)
+            await worker.run_job(
+                {"op": "generate", "prompt": str(prompt), "max_new_tokens": max_new_tokens, "capture": capture, "output": str(output)},
+                wall_timeout_s=timeout,
+            )
             return np.fromfile(output, dtype="<i8").tolist()
     finally:
         await worker.aclose()

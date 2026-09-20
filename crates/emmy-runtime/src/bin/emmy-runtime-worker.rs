@@ -15,6 +15,7 @@ use std::time::Instant;
 
 const PROTOCOL_VERSION: u32 = 1;
 const FRAME_HEADER_BYTES: usize = size_of::<u64>();
+const TOKEN_BYTES: usize = size_of::<i64>();
 const MAX_CONTROL_FRAME_BYTES: u64 = 1024 * 1024;
 const MILLISECONDS_PER_SECOND: f64 = 1000.0;
 const GPU_ORDINAL: usize = 0;
@@ -80,14 +81,9 @@ fn read_frame(reader: &mut impl Read) -> Result<Option<Vec<u8>>> {
 
 fn read_tokens(path: &PathBuf) -> Result<Vec<i64>> {
     let bytes = std::fs::read(path)?;
-    ensure!(
-        bytes.len() % size_of::<i64>() == 0,
-        "invalid token payload size"
-    );
-    Ok(bytes
-        .chunks_exact(size_of::<i64>())
-        .map(|b| i64::from_le_bytes(b.try_into().unwrap()))
-        .collect())
+    let (tokens, remainder) = bytes.as_chunks::<TOKEN_BYTES>();
+    ensure!(remainder.is_empty(), "invalid token payload size");
+    Ok(tokens.iter().map(|&b| i64::from_le_bytes(b)).collect())
 }
 
 fn main() -> Result<()> {

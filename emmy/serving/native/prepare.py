@@ -62,8 +62,10 @@ class _Step:
 
         graph = trace_split(wrapper, examples, None)
         plan = cache.resolve(graph, lambda g: plan_from_graph(CudaBackend(tune_db="auto").compile(g)))
-        if plan.symbolic_bindings or plan.runtime_constants or any(
-            launch.tma_descriptors or launch.indirect_args or launch.runtime_args for launch in plan.launches
+        if (
+            plan.symbolic_bindings
+            or plan.runtime_constants
+            or any(launch.tma_descriptors or launch.indirect_args or launch.runtime_args for launch in plan.launches)
         ):
             raise ValueError("native generation requires static ordinary-pointer compiled programs")
         sources = {
@@ -94,11 +96,16 @@ class _Step:
                 raise ValueError(f"conflicting compiled kernel: {name}")
             self.plan.kernels[name] = kernel
         for launch in plan.launches:
-            self.plan.launches.append(replace(
-                launch, node_id=f"{prefix}.{launch.node_id}", arg_names=tuple(names[n] for n in launch.arg_names),
-                zero_outputs=tuple(names[n] for n in launch.zero_outputs), zero_prologues=tuple(names[n] for n in launch.zero_prologues),
-                writes=tuple(names[n] for n in launch.writes),
-            ))
+            self.plan.launches.append(
+                replace(
+                    launch,
+                    node_id=f"{prefix}.{launch.node_id}",
+                    arg_names=tuple(names[n] for n in launch.arg_names),
+                    zero_outputs=tuple(names[n] for n in launch.zero_outputs),
+                    zero_prologues=tuple(names[n] for n in launch.zero_prologues),
+                    writes=tuple(names[n] for n in launch.writes),
+                )
+            )
 
 
 def export_model(model, destination, *, context_length=MAX_CONTEXT, eos_ids=(), provenance=None):
@@ -115,9 +122,21 @@ def export_model(model, destination, *, context_length=MAX_CONTEXT, eos_ids=(), 
     cache = PlanTemplateCache()
     step = _Step()
     h, heads, kv, d, vocab = cfg.hidden_size, cfg.num_attention_heads, cfg.num_key_value_heads, cfg.head_dim, cfg.vocab_size
-    source = "\n".join(f"#define {key} {value}" for key, value in {
-        "HIDDEN": h, "HEADS": heads, "KV_HEADS": kv, "HEAD_DIM": d, "VOCAB": vocab, "SCALE": f"{d**-0.5:.17g}f",
-    }.items()) + "\n" + SOURCE
+    source = (
+        "\n".join(
+            f"#define {key} {value}"
+            for key, value in {
+                "HIDDEN": h,
+                "HEADS": heads,
+                "KV_HEADS": kv,
+                "HEAD_DIM": d,
+                "VOCAB": vocab,
+                "SCALE": f"{d**-0.5:.17g}f",
+            }.items()
+        )
+        + "\n"
+        + SOURCE
+    )
     step.buffer("prompt", (context_length,), I64, "input")
     step.buffer("prompt_length", (1,), I64, "input")
     step.buffer("position", (1,), I64, "input")
@@ -129,8 +148,13 @@ def export_model(model, destination, *, context_length=MAX_CONTEXT, eos_ids=(), 
     step.buffer("cosine", (context_length, d), role="constant", data=cosine.numpy())
     step.buffer("sine", (context_length, d), role="constant", data=sine.numpy())
     hidden = step.buffer("hidden0", (1, h))
-    step.launch("native_embed", ["prompt", "prompt_length", "position", "next_token", "embedding", hidden], source,
-                writes=[hidden], blocks=(h + CUDA_THREADS - 1) // CUDA_THREADS)
+    step.launch(
+        "native_embed",
+        ["prompt", "prompt_length", "position", "next_token", "embedding", hidden],
+        source,
+        writes=[hidden],
+        blocks=(h + CUDA_THREADS - 1) // CUDA_THREADS,
+    )
     example = torch.zeros(1, h, dtype=torch.float16)
     for index, layer in enumerate(model.model.layers):
         pre, post = build_attention_split_wrapper(layer)
@@ -139,16 +163,34 @@ def export_model(model, destination, *, context_length=MAX_CONTEXT, eos_ids=(), 
         rotated = step.buffer(f"layer{index}.rotated", (heads * d,))
         keys = step.buffer(f"layer{index}.keys", (context_length, kv, d), role="output")
         values = step.buffer(f"layer{index}.values", (context_length, kv, d), role="output")
-        step.launch("native_rope_cache", [*names, "cosine", "sine", "position", rotated, keys, values], source,
-                    writes=[rotated, keys, values], blocks=(heads * d + CUDA_THREADS - 1) // CUDA_THREADS)
+        step.launch(
+            "native_rope_cache",
+            [*names, "cosine", "sine", "position", rotated, keys, values],
+            source,
+            writes=[rotated, keys, values],
+            blocks=(heads * d + CUDA_THREADS - 1) // CUDA_THREADS,
+        )
         attention = step.buffer(f"layer{index}.attention", (1, heads * d))
-        step.launch("native_attention", [rotated, keys, values, "position", attention], source, writes=[attention], blocks=heads, shared=context_length * 4)
+        step.launch(
+            "native_attention",
+            [rotated, keys, values, "position", attention],
+            source,
+            writes=[attention],
+            blocks=heads,
+            shared=context_length * 4,
+        )
         output = step.buffer(f"hidden{index + 1}", (1, h))
         step.compiled(f"post{index}", post, (torch.zeros(1, heads * d, dtype=torch.float16), example), [attention, hidden], [output], cache)
         hidden = output
     head = torch.nn.Sequential(model.model.norm, model.lm_head)
     step.compiled("head", head, (example,), [hidden], ["logits"], cache)
     step.launch("native_greedy", ["logits", "next_token"], source, writes=["next_token"], threads=1)
-    return save_executable(destination, {"decode": step.plan}, bindings={"decode": step.bindings},
-                           key={"generation": {"version": GENERATION_VERSION, "context_length": context_length,
-                                               "vocab_size": vocab, "eos_ids": list(eos_ids)}}, provenance=provenance)
+    return save_executable(
+        destination,
+        {"decode": step.plan},
+        bindings={"decode": step.bindings},
+        key={
+            "generation": {"version": GENERATION_VERSION, "context_length": context_length, "vocab_size": vocab, "eos_ids": list(eos_ids)}
+        },
+        provenance=provenance,
+    )

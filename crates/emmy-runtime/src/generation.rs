@@ -121,7 +121,12 @@ impl Generator {
     pub fn start(&mut self, prompt: &[i64]) -> Result<()> {
         self.config.validate_prompt(prompt)?;
         let mut bytes = vec![0; self.config.context_length * TOKEN_BYTES];
-        for (slot, token) in bytes.chunks_exact_mut(TOKEN_BYTES).zip(prompt) {
+        for (slot, token) in bytes
+            .as_chunks_mut::<TOKEN_BYTES>()
+            .0
+            .iter_mut()
+            .zip(prompt)
+        {
             slot.copy_from_slice(&token.to_le_bytes());
         }
         self.executor.bind("prompt", &bytes)?;
