@@ -397,6 +397,49 @@ rest of a long prompt's prefill is elsewhere: the experts, attention, and first-
 measured here. Evidence on the host under `~/serve-evidence/ab-*`, `ab4k-*`, `recmm-*`, `symbenchmm-*` and
 `boot30-*`.
 
+**Where a decode step goes, and the M=1 post twin (2026-09-19).** This model serves eager — a hyper-connection MoE
+host-syncs in its routed combine, so vLLM's decode capture is off — and each Emmy program replays its own CUDA
+graph. The boot audit times an uncaptured launch loop, so its 3.4 ms for `post.decode.m1` overstates what serving
+pays; a torch-profiler trace of eleven single-stream decode steps on all sixteen workers is the measurement. Per
+step and per pipeline stage (22 and 21 layers; the profiled step is 0.310 s against 0.267 s unprofiled):
+
+| | Stage 0 | Stage 1 |
+| --- | ---: | ---: |
+| Emmy kernels | 65 ms, 1,687 launches | 61 ms, 1,612 launches |
+| NCCL all-reduce | 45 ms, 44 calls, median 1.0 ms | 51 ms, 42 calls, median 1.2 ms |
+| Sparse attention (the fork's kernel) | 11 ms | 11 ms |
+| Everything else on the GPU | 18 ms | 18 ms |
+
+The stages run one after the other, so a token is about 126 ms of Emmy kernels, 96 ms of all-reduce, 22 ms of
+attention and 36 ms of the rest. The all-reduce belongs to the host: the cards see each other over PCIe only, vLLM
+disables its custom all-reduce there, and every call costs a millisecond whatever the arm. The largest Emmy kernels
+per layer were the M=1 post lead's residual at 680 µs and its sum-of-squares piece at 149 µs, the expert program at
+487 + 285 µs (the M=1 expert twin is refused, so a wider tier runs), the two M=1 pre-attention pieces at 202 µs
+each, `k_div_4` and `k_div_30` at 143 µs each, and the `9e578e` cut's pieces at about 0.45 ms together.
+
+The two post rows were fully serial schedules: the residual looped 4,096 and 16,384 elements inside each of four
+threads, and the other piece summed 16,384 squares in one thread. Benched per receipt from scratch goldens, strict:
+
+| Piece | Recorded row | Rows measured |
+| --- | ---: | --- |
+| residual | 667.6 µs, serial | `WORK: t32` 95.8, `t64` 52.8, `t128` 27.6, `t256` 15.5 µs |
+| sum of squares | 149.5 µs, serial | `t64 coop` 5.4, `t128 coop` 3.7, `t256 coop` 3.1 µs; `t256 coop-t` is not offered |
+
+Recorded from `main` at `c7f852b5` with the two best rows, the set goes from 851 to 52 µs per layer; no kernel's
+fastest row changed hands and the strict decode passes. The boot on that file serves, health in 14 minutes:
+
+| Measure | This boot | Previous boot |
+| --- | ---: | ---: |
+| Time per output token, 5 → 33 tokens | 0.235 s | 0.267 s |
+| Time per output token, 2,155 → 9 tokens | 0.295 s | 0.325 s |
+| Time to first token, 2,155 tokens (cold / repeat) | 18.32 s / 2.22 s | 18.34 s / 2.21 s |
+
+The 33 ms gained is 0.78 ms × 43 layers, what the bench predicted, and the completions are unchanged. Against the
+fork's 0.147 s the repository arm is now 1.6× slower per output token. The two M=1 pre-attention pieces stay open:
+each of their 128 threads recomputes the 16,384-element statistic before its share of the dot product, and the
+hand-pinned further cuts tried here were either not reproducible or fell back into the slow fused kernel. Evidence
+on the host under `~/serve-evidence/prof31/`, `abm1-*`, `recm1-*`, `pin-pre1-*` and `boot32-*`.
+
 
 ### The M=1 decode tier: what broke and what now guards it
 
