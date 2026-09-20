@@ -1254,5 +1254,6 @@
  "tests/compiler/passes/test_register_carry.py::test_register_operands_use_direct_loads_when_the_address_allows_it[2-volta]": 0.74,
  "tests/compiler/passes/test_register_carry.py::test_register_operands_use_direct_loads_when_the_address_allows_it[1-volta]": 0.67,
  "tests/compiler/passes/test_register_carry.py::test_register_operands_use_direct_loads_when_the_address_allows_it[2-modern]": 0.58,
- "tests/compiler/passes/test_register_carry.py::test_register_operands_use_direct_loads_when_the_address_allows_it[1-modern]": 0.55
+ "tests/compiler/passes/test_register_carry.py::test_register_operands_use_direct_loads_when_the_address_allows_it[1-modern]": 0.55,
+ "tests/compiler/realization/test_realization.py::test_realization[matmul/volta-f16acc-direct.yaml-built]@cuda": 5.4
 }
