@@ -17,6 +17,35 @@ from tests.serving.native.test_prepare import tiny_model
 pytestmark = [requires_cuda, pytest.mark.xdist_group("cuda")]
 
 
+def _python_reference(root):
+    from pathlib import Path
+
+    from emmy.compiler.backend.cuda.program import CompiledProgram
+    from emmy.compiler.backend.plan import plan_from_dict
+
+    root = Path(root)
+    manifest = json.loads((root / "manifest.json").read_text())
+    plan = plan_from_dict(json.loads((root / manifest["programs"]["decode"]).read_text()))
+    buffers = {buffer.name: buffer for buffer in plan.buffers}
+    data = {name: np.fromfile(root / path, dtype=buffers[name].dtype.np).reshape(buffers[name].resolve_shape({}))
+            for name, path in manifest["bindings"]["decode"].items()}
+    data.update({name: np.zeros(buffers[name].resolve_shape({}), dtype=buffers[name].dtype.np) for name in plan.inputs})
+    return CompiledProgram.build_from_plan(plan, data, cubin_dir=root / "cubin")
+
+
+def _reset_python(program, prompt):
+    ids = np.zeros(program.arrays["prompt"].shape, dtype=np.int64)
+    ids[:len(prompt)] = prompt
+    program.arrays["prompt"].set(ids)
+    program.arrays["prompt_length"].set(np.array([len(prompt)], np.int64))
+
+
+def _python_step(program, position):
+    program.arrays["position"].set(np.array([position], np.int64))
+    program.run_once()
+    return program.outputs()["logits"].reshape(-1)
+
+
 def test_cached_qwen3_logits_and_generation(tmp_path, monkeypatch):
     executable = shutil.which("emmy-runtime-worker")
     if not executable:
@@ -25,6 +54,7 @@ def test_cached_qwen3_logits_and_generation(tmp_path, monkeypatch):
     model.config._attn_implementation = "eager"
     with gpu_lock():
         root = export_model(model, tmp_path / "pack", context_length=8)
+        reference_program = _python_reference(root)
         monkeypatch.setenv("PATH", "/nonexistent")
         model.cuda()
         # Strict reference products use FP32 accumulation, including on Torch versions with split-K defaults.
@@ -36,9 +66,10 @@ def test_cached_qwen3_logits_and_generation(tmp_path, monkeypatch):
             logits_path = tmp_path / "logits.bin"
             try:
                 await worker.run_job({"op": "load_generation", "root": str(root)}, wall_timeout_s=30)
-                for capture, prompt in ((False, [1, 2, 3]), (True, [3]), (True, [4, 5, 6, 7]), (None, [8, 9])):
+                for capture, prompt in ((False, [1, 2, 3]), (None, [8, 9]), (True, [3]), (True, [4, 5, 6, 7])):
                     np.asarray(prompt, np.int64).tofile(path)
                     await worker.run_job({"op": "start_generation", "prompt": str(path)}, wall_timeout_s=30)
+                    _reset_python(reference_program, prompt)
                     prefix = []
                     next_token = None
                     selected = []
@@ -48,6 +79,7 @@ def test_cached_qwen3_logits_and_generation(tmp_path, monkeypatch):
                         with torch.no_grad(), _reference_precision(True):
                             expected = model(torch.tensor([prefix], device="cuda")).logits[0, -1].float().cpu().numpy()
                         actual = np.fromfile(logits_path, np.float16).astype(np.float32)
+                        np.testing.assert_array_equal(actual, _python_step(reference_program, position).astype(np.float32))
                         np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-3)
                         if position >= len(prompt) - 1:
                             next_token = result["token"]
@@ -91,6 +123,7 @@ def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch):
     model = AutoModelForCausalLM.from_pretrained(checkpoint, dtype=torch.float16, attn_implementation="eager", local_files_only=True).eval()
     with gpu_lock():
         model.cuda()
+        reference_program = _python_reference(artifact)
         monkeypatch.setenv("PATH", "/nonexistent")
 
         async def check():
@@ -103,8 +136,9 @@ def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch):
                     prompt = tokenizer.encode(text)
                     np.asarray(prompt, np.int64).tofile(path)
                     await worker.run_job({"op": "start_generation", "prompt": str(path)}, wall_timeout_s=30)
+                    _reset_python(reference_program, prompt)
                     prefix, next_token, past = [], None, None
-                    for position in range(len(prompt) + 15):
+                    for position in range(len(prompt) + request.config.getoption("--native-decode-steps")):
                         prefix.append(prompt[position] if position < len(prompt) else next_token)
                         result = await worker.run_job({"op": "generation_step", "capture": capture, "logits": str(logits_path)}, wall_timeout_s=30)
                         with torch.no_grad(), _reference_precision(True):
@@ -112,6 +146,7 @@ def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch):
                             past = reference.past_key_values
                             expected = reference.logits[0, -1].float().cpu().numpy()
                         actual = np.fromfile(logits_path, np.float16).astype(np.float32)
+                        np.testing.assert_array_equal(actual, _python_step(reference_program, position).astype(np.float32))
                         measurements.append({"prompt": text, "position": position, "capture": capture,
                                              "max_absolute_error": float(np.max(np.abs(actual - expected))),
                                              "relative_l2_error": float(np.linalg.norm(actual - expected) / np.linalg.norm(expected)),

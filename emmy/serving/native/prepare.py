@@ -50,10 +50,10 @@ class _Step:
             self.bindings[name] = np.ascontiguousarray(data).tobytes()
         return name
 
-    def launch(self, kernel, args, source, *, blocks=1, shared=0, threads=CUDA_THREADS):
+    def launch(self, kernel, args, source, *, writes, blocks=1, shared=0, threads=CUDA_THREADS):
         self.plan.kernels[kernel] = KernelSpec(source=source)
         self.plan.launches.append(
-            LaunchSpec(kernel, kernel, tuple(args), ((blocks,), (1,), (1,)), ((threads,), (1,), (1,)), shared, ())
+            LaunchSpec(kernel, kernel, tuple(args), ((blocks,), (1,), (1,)), ((threads,), (1,), (1,)), shared, (), writes=tuple(writes))
         )
 
     def compiled(self, prefix, wrapper, examples, inputs, outputs, cache):
@@ -130,25 +130,25 @@ def export_model(model, destination, *, context_length=MAX_CONTEXT, eos_ids=(), 
     step.buffer("sine", (context_length, d), role="constant", data=sine.numpy())
     hidden = step.buffer("hidden0", (1, h))
     step.launch("native_embed", ["prompt", "prompt_length", "position", "next_token", "embedding", hidden], source,
-                blocks=(h + CUDA_THREADS - 1) // CUDA_THREADS)
+                writes=[hidden], blocks=(h + CUDA_THREADS - 1) // CUDA_THREADS)
     example = torch.zeros(1, h, dtype=torch.float16)
     for index, layer in enumerate(model.model.layers):
         pre, post = build_attention_split_wrapper(layer)
         names = [step.buffer(f"layer{index}.{name}", (1, width * d)) for name, width in (("q", heads), ("k", kv), ("v", kv))]
         step.compiled(f"pre{index}", pre, (example,), [hidden], names, cache)
         rotated = step.buffer(f"layer{index}.rotated", (heads * d,))
-        keys = step.buffer(f"layer{index}.keys", (context_length, kv, d))
-        values = step.buffer(f"layer{index}.values", (context_length, kv, d))
+        keys = step.buffer(f"layer{index}.keys", (context_length, kv, d), role="output")
+        values = step.buffer(f"layer{index}.values", (context_length, kv, d), role="output")
         step.launch("native_rope_cache", [*names, "cosine", "sine", "position", rotated, keys, values], source,
-                    blocks=(heads * d + CUDA_THREADS - 1) // CUDA_THREADS)
+                    writes=[rotated, keys, values], blocks=(heads * d + CUDA_THREADS - 1) // CUDA_THREADS)
         attention = step.buffer(f"layer{index}.attention", (1, heads * d))
-        step.launch("native_attention", [rotated, keys, values, "position", attention], source, blocks=heads, shared=context_length * 4)
+        step.launch("native_attention", [rotated, keys, values, "position", attention], source, writes=[attention], blocks=heads, shared=context_length * 4)
         output = step.buffer(f"hidden{index + 1}", (1, h))
         step.compiled(f"post{index}", post, (torch.zeros(1, heads * d, dtype=torch.float16), example), [attention, hidden], [output], cache)
         hidden = output
     head = torch.nn.Sequential(model.model.norm, model.lm_head)
     step.compiled("head", head, (example,), [hidden], ["logits"], cache)
-    step.launch("native_greedy", ["logits", "next_token"], source, threads=1)
+    step.launch("native_greedy", ["logits", "next_token"], source, writes=["next_token"], threads=1)
     return save_executable(destination, {"decode": step.plan}, bindings={"decode": step.bindings},
                            key={"generation": {"version": GENERATION_VERSION, "context_length": context_length,
                                                "vocab_size": vocab, "eos_ids": list(eos_ids)}}, provenance=provenance)
