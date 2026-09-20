@@ -130,13 +130,9 @@ class _Fragments:
             }
             for stmt in node.lift.body:
                 if isinstance(stmt, Let):
-                    if not isinstance(stmt.value, Literal):
-                        raise ValueError("register maps require literal Let values")
                     env[stmt.name] = stmt.value
                 elif isinstance(stmt, Load):
                     if stmt.input == self.program.state.write.output:
-                        if stmt.index[-2:] != (Var(col), Var(row)) or rb != self.row_base or not isinstance(cb, Literal):
-                            raise ValueError("register state read crosses its owning warp rows")
                         env[stmt.name] = self.states[cb.value // self.width]
                     else:
                         index = tuple(e.substitute(clipped).simplify(SimplifyCtx.empty()) for e in stmt.index)
@@ -182,8 +178,6 @@ class _Fragments:
         left, right = node.operands
         if row not in left.free_axes:
             left, right = right, left
-        if row not in left.free_axes or row in right.free_axes or col in left.free_axes:
-            raise ValueError("contraction does not preserve the register row ownership")
         axis = node.axis
         pairs, preparations = [], []
         begin = len(self.body)

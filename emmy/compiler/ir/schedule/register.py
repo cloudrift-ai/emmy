@@ -150,7 +150,8 @@ class _RegisterSite(Site):
     @cached_property
     def options(self):
         p = self.problem
-        if p.program is None or p.row.get("STAGE", "d1/reg") != "d1/reg":
+        program = p.tile.register_program
+        if program is None or p.row.get("STAGE", "d1/reg") != "d1/reg":
             return ()
         if not p.allow_f16 and "TILE" not in p.row:
             return ()
@@ -163,7 +164,7 @@ class _RegisterSite(Site):
                 (Tile.parse(p.row["TILE"], work),)
                 if "TILE" in p.row
                 else tuple(
-                    Tile(atom=atom, units=work.units, regs=(1, (p.program.columns + atom.atom_n - 1) // atom.atom_n), bk=4)
+                    Tile(atom=atom, units=work.units, regs=(1, (program.columns + atom.atom_n - 1) // atom.atom_n), bk=4)
                     for atom in _ATOMS
                 )
             )
@@ -185,10 +186,6 @@ class RegisterProblem(ScheduleProblem):
         object.__setattr__(self, "row", frozendict(self.row))
 
     @cached_property
-    def program(self):
-        return self.tile.register_program
-
-    @cached_property
     def sites(self):
         return (_RegisterSite(self),)
 
@@ -198,7 +195,8 @@ class RegisterProblem(ScheduleProblem):
         return count, count
 
     def accepts(self, choice: RegisterSchedule) -> bool:
-        if self.program is None or not isinstance(choice, RegisterSchedule):
+        program = self.tile.register_program
+        if program is None or not isinstance(choice, RegisterSchedule):
             return False
         work, plan = choice.work, choice.tile
         return (
@@ -208,7 +206,7 @@ class RegisterProblem(ScheduleProblem):
             and not work.producer
             and plan.atom in _ATOMS
             and plan.units == work.units
-            and plan.regs == (1, (self.program.columns + plan.atom.atom_n - 1) // plan.atom.atom_n)
+            and plan.regs == (1, (program.columns + plan.atom.atom_n - 1) // plan.atom.atom_n)
             and (self.target is None or plan.atom.available_on(self.target))
         )
 

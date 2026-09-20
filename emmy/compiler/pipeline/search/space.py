@@ -75,7 +75,7 @@ TILE = Knob(
 STAGE = Knob(
     "STAGE",
     KnobType.STR,
-    help="Intermediate-storage codec (d1/reg for ordered carry; d<depth>/smem|smem-async|smem-tma[/p<reg_depth>]; "
+    help="Intermediate-storage codec (d1/reg; d<depth>/smem|smem-async|smem-tma[/p<reg_depth>]; "
     "empty=no intermediate). "
     "Decided in the tile schedule, materialized in lowering/kernel/010_materialize.",
     off="",
