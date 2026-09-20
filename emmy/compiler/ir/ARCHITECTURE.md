@@ -782,6 +782,13 @@ directly (no separate AST class).
 | `RegStore`         | Layout-aware per-lane epilogue store: four C elements for m16n8k16 or eight elements covering the four Volta output quadrants for m8n8k4. A paired Volta tile derives the matching interleaved 32×32 accumulator map from its cell position; it is not a schedule field. Adjacent elements leave as one packed pair when N is contiguous, including under an M-only tail guard; an N guard or strided physical orientation keeps scalar stores. Stores f32 directly or downconverts to f16. An optional epilogue is a pure `Lambda` over the projection tail's own `Load` / `Assign` / `Select` stmts, its leading params bound to the store's fragments; it is evaluated at each element's own coordinates. |
 | Shared from `tile` | `Tile` (launch geometry); from `ir/stmt/`: `Loop`, `StridedLoop`, `Load`, `Assign`, `Accum`, `Init`, `Let`, `Write`, `Select`, `Cond`, `ZeroPrologue`. |
 
+Volta direct A and transposed-B loads use the shared four-value loader when the flattened base and row stride
+are provably four-element aligned and K needs no mask. FP16 uses one 64-bit load. FP32 uses two 64-bit loads,
+each coupled to FP16 conversion in inline PTX, keeping temporary float lifetimes inside the packed load. The
+alignment proof reuses the expression-divisibility check used by swizzled addresses. M/N clamps preserve aligned
+rows; K tails, unknown alignment, other source types, and strided canonical B retain the scalar gather. No schedule
+field or model-specific choice is involved.
+
 ## `cuda/ir.py`
 
 | Symbol    | Role                                                                        |

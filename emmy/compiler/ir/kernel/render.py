@@ -230,6 +230,8 @@ static __device__ __forceinline__ int emmy_volta_b_congruous(int row, int col, i
 template <typename T>
 static __device__ __forceinline__ void emmy_mma884_load4(unsigned* r, const T* g) {
     if constexpr (sizeof(T) == 4) {
+        // Pack each loaded pair before exposing it to the surrounding code. Four live
+        // FP32 values at once can push a register-resident matrix loop into spills.
         #pragma unroll
         for (int p = 0; p < 2; ++p) {
             asm volatile("{.reg .f32 x, y; .reg .b16 lo, hi;\\n\\t"
