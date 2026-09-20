@@ -440,6 +440,37 @@ each of their 128 threads recomputes the 16,384-element statistic before its sha
 hand-pinned further cuts tried here were either not reproducible or fell back into the slow fused kernel. Evidence
 on the host under `~/serve-evidence/prof31/`, `abm1-*`, `recm1-*`, `pin-pre1-*` and `boot32-*`.
 
+**The expert program at decode (2026-09-20).** Strict evidence refuses the M=1 expert twin at every boot, and it
+cannot be tuned into shape. Its golden row is a lone placement cut with no piece rows; under that cut the target
+lowers to a 67 µs piece and a residual that runs 1.04 s per launch, and neither kernel offers a single schedule
+knob: eight tensor-core pins all came back unreproducible, the tile realized as unset. At one row the MXFP4 expert
+matmul has no tile or reduce site, so that twin needs the compiler, not a row. Single-token steps therefore ride the
+m16 expert twin, 487 + 285 µs per call in the trace, and that twin's two rows were the prior's picks. Forty-eight
+candidates over four rounds, a scratch golden with one receipt respelled each, strict, one V100 per candidate, from
+`main` at `9607133e`:
+
+| Piece | Recorded row, as it measures on this tree | Best rows measured | Worst row measured |
+| --- | ---: | --- | ---: |
+| gate / up | 554 µs (`w4x2 f1x1/k4 d2/smem`) | 265 µs (`w2x1 f2x1/k8 d2/smem`), 282, 300 | 5,163 µs (`w2x2 f4x4/k8 d2/smem`) |
+| down | 310 µs (`w1x2 f1x2/k4 d1/smem`) | 159 µs (`w2x4 f1x1/k8 d1/smem`), 165, 167 | 511 µs (`w1x2 f1x4/k8 d1/smem`) |
+
+The down piece takes `d1/smem` staging only; every `d2/smem` row, deeper `k16` tiles and asynchronous staging are
+not offered. The tile that won the post-attention matmuls, `f4x4/k8`, is the worst row here: the expert rows are
+narrow and a wide tile pads them. Recorded with the two best rows the twin goes from 864 to 430 µs in the program;
+no kernel's fastest row changed hands and the strict decode passes. The boot on that file serves, health in 25
+minutes on a tree new to the host:
+
+| Measure | This boot | Previous boot |
+| --- | ---: | ---: |
+| Time per output token, 5 → 33 tokens | 0.214 s | 0.235 s |
+| Time per output token, 2,155 → 9 tokens | 0.272 s | 0.295 s |
+| Time to first token, 2,155 tokens (cold / repeat) | 18.16 s / 1.98 s | 18.32 s / 2.22 s |
+
+The bench predicted 17 ms per token (434 µs over about 40 expert calls) and the boot gained 21; the two boots are
+also one compiler merge apart (#847), so the last few milliseconds are not attributed. Completions are unchanged.
+Against the fork's 0.147 s the repository arm is 1.46× slower per output token. Evidence on the host under
+`~/serve-evidence/pin-exp1-*`, `abm1-e16*`, `recm1-exp16*` and `boot33-*`.
+
 
 ### The M=1 decode tier: what broke and what now guards it
 

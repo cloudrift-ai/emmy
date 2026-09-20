@@ -185,29 +185,30 @@ residual refusal of #799's cut did not recur. Still refused: the expert M=1 and 
 kernel where it minted two and whose prior schedule runs about 4 s per launch — `emmy tune`, not a bench. The boot's
 roofline audit still has no time limit. A fourth gap came out of the 2026-09-19 boot: a measured row that spells a
 split or a cut whose pieces have no rows can win its fork on a retime alone, and strict then refuses at the pieces
-instead of taking the next measured arm — audit every such row for piece coverage, not only the placement routes.
-The symbolic post twin is measured (2026-09-19): linear in width, 276 ms per layer at 2,155 tokens, 11.9 s of the
-29.3 s to first token. Seven post receipts that spelled two cooperative reduces with one block per output cell are
-re-recorded as the serial row (dynamic 64.9 → 40.3 ms at the hint, m16 9.9 → 8.8 ms, m4096 537 → 258 ms), and the
-boot on that file reads 24.9 s to first token at 2,155 tokens. To bench a dynamic row at another width, bench a
-scratch copy of the golden with its hint rewritten; the election does not change. The three `t256 coop-t` pieces
-were the block's plain matmuls with the tile site left empty; tiled on tensor cores with staging they run 42–67×
-faster, and the m4096 twin's matmul piece 51× faster under a better tile (2026-09-19): symbolic post twin 40.3 →
-4.84 ms at the hint and 18.8 ms at 2,155 tokens, m4096 post twin 258 → 121 ms, time to first token at 2,155 tokens
-24.9 → 18.3 s. A kernel-scoped A/B is a scratch golden with one receipt respelled, benched strict; sixteen cards
-run sixteen candidates at once. The symbolic post twin is now 0.8 s of that 18.3 s, so the next prefill item is a
-measurement, not a kernel: where the other 17 s go (experts, attention, first-request warm-up). A decode step is
-now measured (2026-09-19, torch-profiler trace, the model serves eager): per token about 126 ms of Emmy kernels,
-96 ms of all-reduce at a millisecond per call over PCIe (the host's, not the arm's), 22 ms of attention. The boot
-audit's `post.decode.m1` figure is an uncaptured launch loop and overstates serving. The M=1 post lead's two fully
-serial pieces are re-recorded thread-parallel (851 → 52 µs per layer) and time per output token is 0.235 s, 1.6×
-the fork. Next decode items, by what the trace says they cost per token: the expert program at 487 + 285 µs per
-layer, 31 ms, which needs the refused M=1 expert twin tuned; the `9e578e` cut's pieces, 19 ms; the two M=1
-pre-attention pieces, 17 ms, whose 128 threads each recompute the 16,384-element statistic and for which no
-offered cut was found by hand; `k_div_4` and `k_div_30`, 12 ms. Then the m16 post twin's four serial single-block
-kernels, 7 of its 8.8 ms, the same serial pattern as the M=1 pieces; the static m4096 post twin, 3.4× slower than the
-symbolic twin at the same width, whose three largest `r4` pieces are 72 of its 121 ms; then the experts and
-Stage 4.
+instead of taking the next measured arm — audit every such row for piece coverage, not only the placement routes. The
+symbolic post twin is measured (2026-09-19): linear in width, 276 ms per layer at 2,155 tokens, 11.9 s of the 29.3 s
+to first token. Seven post receipts that spelled two cooperative reduces with one block per output cell are
+re-recorded as the serial row (dynamic 64.9 → 40.3 ms at the hint, m16 9.9 → 8.8 ms, m4096 537 → 258 ms), and the boot
+on that file reads 24.9 s to first token at 2,155 tokens. To bench a dynamic row at another width, bench a scratch
+copy of the golden with its hint rewritten; the election does not change. The three `t256 coop-t` pieces were the
+block's plain matmuls with the tile site left empty; tiled on tensor cores with staging they run 42–67× faster, and
+the m4096 twin's matmul piece 51× faster under a better tile (2026-09-19): symbolic post twin 40.3 → 4.84 ms at the
+hint and 18.8 ms at 2,155 tokens, m4096 post twin 258 → 121 ms, time to first token at 2,155 tokens 24.9 → 18.3 s. A
+kernel-scoped A/B is a scratch golden with one receipt respelled, benched strict; sixteen cards run sixteen candidates
+at once. The symbolic post twin is now 0.8 s of that 18.3 s, so the next prefill item is a measurement, not a kernel:
+where the other 17 s go (experts, attention, first-request warm-up). A decode step is now measured (2026-09-19,
+torch-profiler trace, the model serves eager): per token about 126 ms of Emmy kernels, 96 ms of all-reduce at a
+millisecond per call over PCIe (the host's, not the arm's), 22 ms of attention. The boot audit's `post.decode.m1`
+figure is an uncaptured launch loop and overstates serving. The M=1 post lead's two fully serial pieces are
+re-recorded thread-parallel (851 → 52 µs per layer) and time per output token is 0.235 s, 1.6× the fork. The expert
+program is done as far as rows go (2026-09-20): the M=1 expert twin offers no schedule knob under its cut and its
+residual runs 1.04 s per launch, so it needs tile or reduce sites from the compiler, not a row; single-token steps
+ride the m16 expert twin, whose two tiles are re-recorded (864 → 430 µs per call) for 0.214 s per output token, 1.46×
+the fork. Next decode items, by what the trace says they cost per token: the `9e578e` cut's pieces, 19 ms; the two M=1
+pre-attention pieces, 17 ms, whose 128 threads each recompute the 16,384-element statistic and for which no offered
+cut was found by hand; `k_div_4` and `k_div_30`, 12 ms. Then the m16 post twin's four serial single-block kernels, 7
+of its 8.8 ms, the same serial pattern as the M=1 pieces; the static m4096 post twin, 3.4× slower than the symbolic
+twin at the same width, whose three largest `r4` pieces are 72 of its 121 ms; then the experts and Stage 4.
 
 ## Operations handoff
 
