@@ -23,6 +23,15 @@ a 139 us weight-streaming floor, down 74.1 against 69, output projection 14.2, p
 
 ## Steps, in the order their payoff justifies
 
+0. **Fix the FP8 expert regression this branch carries.** `tests/serving/generation/test_gen_runner_gpu.py::
+   test_expert_program_fp8_indirect_compose` computes wrong values on the branch (31 of 32 elements, greatest
+   absolute difference 1.25 against a 0.02 tolerance) and passes on main. Bisected to "Form each cut piece as its own
+   kernel, and fold repeated pure statements", and inside it to `_cut._reformed`: returning the piece as minted makes
+   the test pass, while disabling either half of the statement fold does not. So the lower-and-lift round trip that
+   re-forms a cut piece does not preserve this program's meaning; the statement kinds and counts match across it, so
+   the difference is in indices or order. Find it before the re-form is trusted, or gate the re-form on a check that
+   the formed piece keeps the minted one's interface.
+
 1. **Account for the 3.6 ms, then cut launches.** A decode step launches about ten kernels per layer plus the head;
    a captured graph replays a launch in ~2.05 us on this box, so the launch floor alone is ~1 ms and the rest is
    glue between the halves. Measure first: a step-level timeline (the plugin's own timing, or `nsys` around one
