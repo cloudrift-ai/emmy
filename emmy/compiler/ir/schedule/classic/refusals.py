@@ -127,6 +127,26 @@ def _channel_dtype(tile: TileOp, node, target):
     return next(iter(eligible)) if len(eligible) == 1 else None
 
 
+def _fragment_rows_refusal(tile: TileOp) -> str | None:
+    """Why the M rows of a C fragment would have nowhere to land.
+
+    The grid's second-to-last free axis carries them, and each row needs its own address in the store. An axis no
+    output index mentions gives them one address between them: a plain store keeps the last row, a split's atomic
+    finalize sums all of them into that cell. One row is the exception — a matvec with a reshaped output stores
+    that way, the overhang guard predicating the rest. The case this rules out is a cross-CTA split's partition
+    axis standing in for an M that a size-one extent left without an axis of its own.
+    """
+    axis = tile.place.free[-2]
+    extent = getattr(axis.extent, "value", getattr(axis.extent, "extent", None))
+    if extent == 1 or not tile.output_specs:
+        # No specs is no statement: an authored tile carries the outputs alone, and the store this reads is the
+        # lowering's. One row needs no dimension of its own.
+        return None
+    if any(axis.name in index.free_vars() for spec in tile.output_specs for index in spec.write.index):
+        return None
+    return f"no output dimension carries the fragment's M rows ({axis.name})"
+
+
 def _node_refusal(tile: TileOp, target, node, fragment_epilogue: bool, packed: tuple = (None, None)) -> str | None:
     """Return why static node facts rule out every tensor-core atom."""
     from emmy.compiler.ir.tile.ops import edge_dtypes  # noqa: PLC0415 — tile.ops reads this package; module level would cycle
@@ -138,6 +158,8 @@ def _node_refusal(tile: TileOp, target, node, fragment_epilogue: bool, packed: t
         return "no typed inputs expose operand dtypes"
     if len(tile.place.free) < 2:
         return "the grid supplies no output-axis pair for a fragment"
+    if (why := _fragment_rows_refusal(tile)) is not None:
+        return why
     if not fragment_epilogue:
         return "the projection epilogue is not a per-fragment straight-line program"
     # The operand tuple in stored order — there is no named A/B role any more, and a nested

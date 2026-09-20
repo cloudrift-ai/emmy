@@ -793,12 +793,6 @@ def _reformed(piece: TileOp) -> TileOp:
     # sits ahead of it; the piece keeps the grid it was minted with, and an axis peeled past it
     # goes back to being the sweep of the stores that ride it.
     grid, peeled = formed.place.free[: len(piece.place.free)], formed.place.free[len(piece.place.free) :]
-    if {axis.name for axis in piece.place.free} - {axis.name for axis in grid}:
-        # A free axis the formed nest does not carry is a free axis the kernel would lose. A
-        # size-one M is the live case: lowered and lifted again it leaves no loop to peel, and a
-        # warp tile then stores its whole M fragment to one address — under an atomic epilogue
-        # that sums the fragment's rows into each cell. Such a nest keeps the piece as minted.
-        return piece
     specs = tuple(
         replace(spec, sweep=(*spec.sweep, *(axis for axis in peeled if any(axis.name in index.free_vars() for index in spec.write.index))))
         for spec in formed.output_specs
