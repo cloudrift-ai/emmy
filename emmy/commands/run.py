@@ -1461,9 +1461,10 @@ def _print_kernel_stats(graph, bench, golden_benches=None, greedy_fail=None, gre
         block_threads = block_dims[0] * block_dims[1] * block_dims[2]
         grid_total = grid_dims[0] * grid_dims[1] * grid_dims[2]
         regs = (attrs.get(op.kernel_name) or {}).get("num_regs", 0)
+        local = (attrs.get(op.kernel_name) or {}).get("local_size_bytes", "--")
         occ_pct = _theoretical_occupancy(regs, op.smem_bytes, block_threads, occ_limits)
         occ_str = f"{occ_pct:>3.0f}%" if occ_pct is not None else "  --"
-        return grid_total, block_threads, op.smem_bytes / 1024, regs, occ_str
+        return grid_total, block_threads, op.smem_bytes / 1024, regs, local, occ_str
 
     def _op_sig(op):
         return ShapeKey.from_s_features(getattr(op, "knobs", {}) or {})
@@ -1516,7 +1517,7 @@ def _print_kernel_stats(graph, bench, golden_benches=None, greedy_fail=None, gre
         if gb.flags:
             label = f"! {label}"
         if gb.graph is None:
-            records.append((label, None, "--", (0, 0, 0.0, 0, "  --"), {}, ref))
+            records.append((label, None, "--", (0, 0, 0.0, 0, "--", "  --"), {}, ref))
             return
         g_times = (
             {}
@@ -1566,14 +1567,17 @@ def _print_kernel_stats(graph, bench, golden_benches=None, greedy_fail=None, gre
         Col("block", "r"),
         Col("smem", "r"),
         Col("regs", "r"),
+        Col("local B", "r"),
         Col("occ", "r"),
         *kcols,
     ]
     data = []
     for rec, kc in zip(records, kcells, strict=True):
-        name, t_us, pct_cell, (grid_total, block_threads, smem_kb, regs, occ_str) = rec[:4]
+        name, t_us, pct_cell, (grid_total, block_threads, smem_kb, regs, local, occ_str) = rec[:4]
         us_cell = "--" if t_us is None else f"{t_us:.1f}"
-        data.append([name, us_cell, pct_cell, str(grid_total), str(block_threads), f"{smem_kb:.1f}K", str(regs), occ_str.strip(), *kc])
+        data.append(
+            [name, us_cell, pct_cell, str(grid_total), str(block_threads), f"{smem_kb:.1f}K", str(regs), str(local), occ_str.strip(), *kc]
+        )
     data.append(["TOTAL", "bench_fail" if total_us is None else f"{total_us:.1f}", *[""] * (len(columns) - 2)])
     # TOTAL sums per-launch solo windows (each kernel replayed back-to-back in
     # its own event window); the whole-program row is one window around the
@@ -1789,24 +1793,19 @@ def _write_ab_json(
 
 
 def _collect_kernel_attrs(graph) -> dict[str, dict]:
-    """Compile each kernel via ``cupy.RawKernel`` (cached by source) to
-    pull post-PTXAS hardware attributes — register count, static smem,
-    spill bytes. Returns ``{kernel_name: attrs_dict}``."""
-    from emmy.compiler.ir.cuda.ir import CudaOp
+    """Read attributes from the runtime's cached cubins, using its compile flags and target."""
+    from emmy.compiler.backend.cuda.program import _load_kernel
+    from emmy.compiler.backend.plan import KernelSpec
 
-    try:
-        import cupy as cp
-    except Exception:
-        return {}
-
-    out: dict[str, dict] = {}
-    for _, node in graph.nodes.items():
-        if not isinstance(node.op, CudaOp):
+    out = {}
+    for node in _launch_order_cuda_nodes(graph):
+        op = node.op
+        if op.kernel_name in out:
             continue
         try:
-            k = cp.RawKernel(node.op.kernel_source, node.op.kernel_name, options=("--use_fast_math",))
-            out[node.op.kernel_name] = dict(k.attributes)
-        except Exception:  # pragma: no cover — environment-dependent
+            kernel = _load_kernel(op.kernel_name, KernelSpec.from_op(op))
+            out[op.kernel_name] = {key: getattr(kernel, key) for key in ("num_regs", "local_size_bytes", "shared_size_bytes")}
+        except Exception:  # pragma: no cover — unavailable GPU/compiler or a failed kernel
             continue
     return out
 

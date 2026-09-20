@@ -27,6 +27,20 @@ a boundary store was not re-spelled for. Each of those reached nvcc as *identifi
 errors deep in a generated source and charged to whichever candidate the tuner happened to be benching. Asserting it
 here names the kernel and the value instead, in the pass that built them.
 
+For a register materialization, `factorize` emits the same Fold tree as C fragments through `_register`.
+The ordered axis becomes a `StridedLoop` inside the CTA, enclosed by FP32 state declarations. Equal fragment
+expressions share results. The schedule proves row ownership before lowering; the emitter uses the atom's
+geometry with existing `FragmentApply`, `MmaSyncPtx`, `FragmentPromote`, and `RegStore` nodes. `FragmentRepack`
+supplies C→A and C→B conversion, with every warp lane participating. Loads clamp padded coordinates, stores guard
+them, and partial operands are zero-masked before MMA. Loads and packs stay beside their consuming MMA to limit
+register lifetimes. Materialized B operands reuse `LdmatrixLoad` and its address analysis when they have unit
+stride; computed or strided operands use C-fragment gather and repack. FP16 promotion is shared with classic
+schedules, and Volta repacking shuffles packed FP16 pairs to reduce the shuffle count.
+
+The materializer removes the private global carry port with a graph splice, preserving the schedule and source
+attribution. External state readers retain a stored output. All output evaluation precedes carry updates. The
+resulting kernel has no serial launch axis; the classic path below retains ordered launches.
+
 `factorize` builds the ambient `Ctx` and dispatches `tile.op` through `_factorize`, which peels projecting zero-axis
 `Fold`s and binds each leaf via the ONE root-binding pipeline (`_factor._bind`) — its form is read off the node's
 SCHEDULE (which axes are tiled), never a kernel kind, and

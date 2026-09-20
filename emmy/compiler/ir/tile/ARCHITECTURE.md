@@ -41,16 +41,16 @@ only kernel-boundary `OutputSpec` writes consume, and the streamed store reconst
 the observer stmts (`observed_result_names` + the `observed=` reconstitution arm). An observed fold makes the stream
 order-visible, so the schedule offers exactly the serial reduce plan and the cross-CTA split fork declines it.
 
-A recurrence is spelled with the kernel's **serial axes** (`Placement.serial`) and a **lagged read**. A serial axis
-is time: the kernel is launched once per coordinate, in order, and the coordinate reaches the body as a runtime `int`
-— never a grid axis, never a loop. A kernel may then load a buffer it writes itself, one step behind the step
-being written (`S[c − 1, …]`, the seed where there is no step before the first); a kernel with no serial axis may not
-read its outputs at all. The state lives in the buffer, not in a carrier, so the step is any `Fold` at all —
-one that contracts over the previous state's other cells included — and the term stays scalar per cell. The
-ordering the lagged read needs is the launch's: every cell of step `c − 1` is stored before any cell of step `c`
-runs. This is what a Loop IR carried state lifts to (`pipeline/passes/lowering/tile/010_lift`) — a chunked
-delta rule's inter-chunk state; an in-block realization, the state as a shared-memory tile walked by one CTA, would
-be a schedule choice on the same term.
+A recurrence is spelled with the kernel's **serial axes** (`Placement.serial`) and a **lagged read**. The lift
+keeps the ordered step axis separate from the grid and represents the state with a buffer the kernel owns.
+A read takes the previous step (`S[c − 1, …]`, or the seed at the first step). A kernel without a serial axis may
+not read its own outputs. The step stays an ordinary `Fold` tree, including contractions over other state cells.
+
+The classic schedule realizes that axis as ordered launches with a global state buffer. The register schedule
+realizes it as a loop inside each CTA when the state rows are independent. Private state buffers disappear during
+materialization; externally read snapshots remain global outputs. Both schedules preserve previous-state reads
+until the step has finished evaluating its outputs. The domain and choices are described in
+[`ir/schedule/ARCHITECTURE.md`](../schedule/ARCHITECTURE.md).
 
 ## Total lift
 
@@ -353,7 +353,7 @@ while retaining exact values throughout the ordinary extent range.
 ## TileOp and scheduling
 
 `TileOp` owns facts deliberately excluded from the Fold tree: placement, an accepted `Schedule`, its separate
-classic materialization, knobs, and output specifications. The semantic schedule contains choices only;
+materialization, knobs, and output specifications. The semantic schedule contains choices only;
 site-indexed placed tile geometry and resolved transport sizes are lowering facts and cannot enter a row identity.
 `ops.Sched` is a read-only lowering view over those typed fields. There is no keyed slice map, per-node schedule
 field, compatibility adapter, alias codec, or dual reader.

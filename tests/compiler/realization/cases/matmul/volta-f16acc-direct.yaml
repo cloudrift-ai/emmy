@@ -1,0 +1,34 @@
+# Volta FP16 partials promote into the FP32 lane layout, including a short final K group.
+compute_cap:
+- 7
+- 0
+programs:
+- inputs: [a, b]
+  outputs: [o]
+  nodes:
+  - id: a
+    op: input
+    outputs: [[a, f16, [35, 36]]]
+  - id: b
+    op: input
+    outputs: [[b, f16, [36, 37]]]
+  - id: o
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [a, b]
+    outputs: [[o, f16, [35, 37]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - o
+  realizations:
+  - name: k_matmul_volta_f16acc
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      TILE: mma_m8n8k4_f16_f16/f2x2/k4
+      WORK: w1x1
+      STAGE: ''
+    identity: 09880539ff5b32f771dd2e8713356767fc282c3428e279f49b8e045a83928afe

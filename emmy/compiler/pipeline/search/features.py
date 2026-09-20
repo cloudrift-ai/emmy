@@ -157,6 +157,8 @@ def _stage_features(knobs: dict) -> dict[str, float]:
     st = _parsed_stage(str(spec))
     if st is None:
         return {}
+    if st.transport == "reg":
+        return {"D_stage_reg": 1.0}  # register storage has no shared-memory pipeline
     return {
         "D_stage_depth": float(st.depth),
         # Does the gmem→smem pipeline prefetch at all — depth 1 is a single buffer, ≥ 2 is a ring.
