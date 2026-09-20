@@ -144,7 +144,8 @@ The tier also demands the score's own contraction extent be STATIC: the chunk co
 fragment per atom-K step, so a symbolic extent there has no step count to hold them at. And the ATOM it names is the
 EXPECTATION's — the score keeps that atom's f32 sibling (`wide_accumulate`), so the reduced-accumulate cell can run
 the expectation's mma chain at the consumer-die full rate without moving the softmax's running max and denominator off
-f32; the chunk partial promotes into the f32 carrier once per chunk, which is the promote cadence.
+f32; the chunk partial promotes into the f32 carrier once per chunk, which is the promote cadence. The streamed
+value selects the multiplicand dtype; the score's wider accumulator does not select a different atom family.
 
 The tier's other refusals (`_chunk_refusal`) are the same kind of statement, and two of them are about the score's own
 PREFIX — the carrier's lift cut to its score role, which is where an SDPA mask lands. Only what reaches a fragment

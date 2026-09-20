@@ -1,44 +1,80 @@
 # Shape and memory evidence
 
-The intended comparison is padded decode width 16, a single-token decode tier, and reduced activation capacity,
-using the existing integration first. The Emmy runs did not produce usable serving measurements before their
-readiness deadlines. There is therefore no measured padding saving, recovered KV capacity, or native-runtime memory
-advantage. Preserve this as an unresolved comparison rather than infer a gain from configured widths.
+All four configurations complete the same workload matrix. The qualified Emmy schedules are slower than stock.
+Reducing activation capacity from 1,024 to 256 recovers 1.14 GiB of reported KV-cache space, but the single-token
+execution tier does not produce a consistent latency improvement with these schedules.
 
-## Completed stock baseline
+## Repeated measurements
 
-The exact matrix, environment, and outcomes are in [RESULTS.md](RESULTS.md). Raw files are in
-[results_rtx4080x1.tar.gz](results_rtx4080x1.tar.gz), under
-`2026-09-18_04-00-05/rtx4080x1_c1024_lstock_m1_f5b4395d2139/`.
-Each table row uses `c<concurrency>_i<input>_r{1,2,3}.json`; values are ranges across the three repeats.
-Every repeat completed eight requests with 64 generated tokens per request.
+The protocol, source revision, system, and row stems are in [RESULTS.md](RESULTS.md). Raw files are in
+[results_rtx4080x1.tar.gz](results_rtx4080x1.tar.gz), under `2026-09-19_06-52-47/<row>/`.
+Each row below uses `c<concurrency>_i<input>_r{1,2,3}.json`. All repeats completed eight requests with 64 generated
+tokens per request. Values are ranges across three repeats. “M1” denotes the single-token tier.
 
-| Concurrency | Input tokens | Median TPOT range, ms | Median TTFT range, ms | Output tokens/s range |
+| Configuration | Concurrency | Input | Median TPOT, ms | Median TTFT, ms | Output tokens/s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Stock | 1 | 32 | 2.273–2.281 | 7.085–7.821 | 422.1–426.3 |
+| Stock | 1 | 256 | 2.299–2.307 | 9.851–10.369 | 409.6–413.4 |
+| Stock | 1 | 1024 | 2.468–2.476 | 27.911–28.636 | 346.3–348.0 |
+| Stock | 4 | 32 | 2.489–2.500 | 9.887–12.279 | 1503.5–1512.2 |
+| Stock | 4 | 256 | 2.657–2.682 | 21.359–23.026 | 1321.4–1324.6 |
+| Stock | 4 | 1024 | 3.545–3.570 | 47.608–50.381 | 881.8–891.8 |
+| Width 16 | 1 | 32 | 7.935–8.189 | 100.938–105.158 | 102.7–106.5 |
+| Width 16 | 1 | 256 | 8.385–8.392 | 65.978–67.294 | 107.4–107.7 |
+| Width 16 | 1 | 1024 | 8.564–8.578 | 251.976–252.939 | 80.7–80.8 |
+| Width 16 | 4 | 32 | 9.224–9.265 | 157.320–157.793 | 343.1–344.7 |
+| Width 16 | 4 | 256 | 9.484–9.509 | 191.089–191.329 | 320.2–320.7 |
+| Width 16 | 4 | 1024 | 18.067–18.094 | 447.516–448.876 | 155.9–156.5 |
+| M1, capacity 1024 | 1 | 32 | 8.368–8.378 | 106.579–107.671 | 100.7–101.0 |
+| M1, capacity 1024 | 1 | 256 | 8.365–8.411 | 65.715–66.122 | 107.4–107.9 |
+| M1, capacity 1024 | 1 | 1024 | 8.567–8.587 | 251.699–252.843 | 80.6–80.9 |
+| M1, capacity 1024 | 4 | 32 | 8.419–9.281 | 158.729–221.292 | 339.9–342.8 |
+| M1, capacity 1024 | 4 | 256 | 9.461–9.494 | 190.200–190.418 | 320.8–321.7 |
+| M1, capacity 1024 | 4 | 1024 | 17.050–17.081 | 420.230–421.553 | 165.1–165.8 |
+| M1, capacity 256 | 1 | 32 | 7.937–7.957 | 99.865–100.158 | 106.3–106.5 |
+| M1, capacity 256 | 1 | 256 | 7.959–7.961 | 62.361–62.940 | 113.3–113.4 |
+| M1, capacity 256 | 1 | 1024 | 8.119–8.126 | 236.763–237.276 | 85.4–85.5 |
+| M1, capacity 256 | 4 | 32 | 8.043–9.266 | 113.548–150.423 | 361.1–384.1 |
+| M1, capacity 256 | 4 | 256 | 8.992–9.040 | 178.629–179.002 | 338.6–339.2 |
+| M1, capacity 256 | 4 | 1024 | 17.008–17.023 | 419.017–420.154 | 165.9–166.2 |
+
+The static single-token pre/post schedules total about 478–480 µs in isolated checks, versus about 237 µs for
+width 16. Less padding therefore does not imply less time with the recorded schedules. The small-capacity run has
+lower single-request latency than the larger M1 run, but profiles do not separate allocator placement, GPU clock,
+and cache effects. No universal speedup is attributed to capacity alone.
+
+## Mixed lengths
+
+Each `mixed.json` contains one eight-request trial with 3,434 total input tokens and 512 output tokens at
+concurrency four. These are single observations, not repeat ranges.
+
+| Configuration | Median TPOT, ms | Median TTFT, ms | Output tokens/s |
+| --- | ---: | ---: | ---: |
+| Stock | 2.860 | 26.802 | 1179.8 |
+| Width 16 | 12.407 | 260.087 | 236.8 |
+| M1, capacity 1024 | 11.753 | 242.887 | 250.1 |
+| M1, capacity 256 | 11.742 | 242.021 | 250.4 |
+
+Actual useful/padded rows and partial-prefill chunk occupancy were not instrumented. Request lengths alone do not
+establish internal occupancy. The source dispatch policy and configured widths are not substitutes for that measure.
+
+## Memory
+
+`server.log` reports the KV budget and token capacity; `memory.txt` records whole-device use after the generation
+probe. All runs use a 0.6 GPU-memory-utilization setting and an actual scheduler limit of four sequences.
+
+| Configuration | KV budget, GiB | KV tokens | Graph capture, GiB | Whole-device used, MiB |
 | --- | ---: | ---: | ---: | ---: |
-| 1 | 32 | 2.273–2.278 | 6.921–7.985 | 422.1–425.5 |
-| 1 | 256 | 2.294–2.312 | 9.368–11.335 | 407.6–415.6 |
-| 1 | 1024 | 2.465–2.477 | 28.257–28.338 | 347.2–348.1 |
-| 4 | 32 | 2.489–2.499 | 12.090–12.374 | 1497.4–1511.8 |
-| 4 | 256 | 2.654–2.669 | 22.142–24.098 | 1313.3–1332.3 |
-| 4 | 1024 | 3.519–3.608 | 43.988–48.834 | 879.6–897.9 |
+| Stock | 8.12 | 76,032 | 0.08 | 10,441 |
+| Width 16 | 6.17 | 57,776 | 0.05 | 10,277 |
+| M1, capacity 1024 | 6.18 | 57,856 | 0.05 | 10,345 |
+| M1, capacity 256 | 7.32 | 68,528 | 0.05 | 10,366 |
 
-The separate mixed-length case (`mixed.json`) completed eight requests with 3,434 total input tokens and 512 output
-tokens. It measured median TPOT 2.875 ms, median TTFT 28.983 ms, and 1,169.0 output tokens/s. This is one observation,
-not a repeated comparison. Partial-prefill chunk occupancy was not instrumented, so requested lengths alone do not
-establish how many useful or padded rows each internal execution processed.
+The smaller capacity recovers 10,672 KV tokens, about 18.4% over the larger M1 configuration. This recovery is
+available within the existing integration; it does not require a native scheduler. Stock still has 7,504 more
+cache tokens than the small-capacity configuration. Whole-device snapshots include desktop use and an expanded
+KV allocation, so their difference is not a direct activation-memory measurement.
 
-`server.log` reports 8.12 GiB available for KV cache, 76,032 cache tokens, and a theoretical 18.56 requests at the
-4,096-token context limit. The actual scheduler limit in the recipe is four sequences; the theoretical capacity is
-not an admission measurement. Graph capture reports 0.08 GiB. `memory.txt` records 10,463 MiB device memory used out
-of 16,376 MiB after readiness; the desktop also uses this card, so that observation is not isolated process memory.
-
-## Missing evidence
-
-No successful Emmy lane reached the post-readiness memory snapshot. Activation, scratch, and KV bytes therefore
-cannot be compared across widths or capacities. Summing pack buffer sizes would count per-layer and potentially
-shared allocations incorrectly and would not substitute for an allocation measurement. The standalone runtime's
-initial independent buffers also do not reproduce the Python dispatcher's liveness-based scratch reuse.
-
-A rerun needs a working, bounded serving initialization path and stable source for the whole matrix. It should retain
-actual scheduled useful/padded rows, allocation categories, admission outcomes, and mixed-length repeats. Only then
-can it identify which shape or memory improvement needs a new scheduler rather than the current integration.
+Activation and scratch allocation categories were not separately measured. Summing exported buffers would count
+shared storage incorrectly. The experiment also does not measure admission beyond four sequences. These limits
+prevent a native-runtime memory claim even though the KV-capacity improvement is directly observed.

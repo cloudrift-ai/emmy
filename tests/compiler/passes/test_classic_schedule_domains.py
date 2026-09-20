@@ -4,6 +4,8 @@ from dataclasses import replace as dc_replace
 from importlib import import_module
 from types import SimpleNamespace
 
+import pytest
+
 from emmy.compiler.context import Context
 from emmy.compiler.graph import Tensor
 from emmy.compiler.ir.axis import Axis, Window
@@ -650,3 +652,24 @@ def test_fragment_domain_includes_the_reduction_in_a_sibling_projection():
         output_specs=(OutputSpec(Write(output="out", index=(Var("m"), Var("n")), value="y")),),
     )
     assert not classic._warp_atoms(tile, Context.from_target((8, 9)), matmul)
+
+
+@pytest.mark.parametrize("heads", [1, 16])
+def test_grouped_matvec_does_not_tile_two_axes_of_one_operand(heads):
+    """A vector times per-head weights is not a matrix multiply across heads and channels."""
+    head, channel, k = Axis("head", heads), Axis("channel", 128), Axis("k", 64)
+    root = contraction(
+        k,
+        Load(name="xv", input="x", index=(Var("k"),)),
+        (Load(name="wv", input="w", index=(Var("head"), Var("channel"), Var("k"))), "acc"),
+    )
+    tile = TileOp(
+        op=root,
+        place=Placement(free=(head, channel)),
+        axes=(head, channel, k),
+        inputs={"x": Tensor("x", (64,), "f16"), "w": Tensor("w", (heads, 128, 64), "f16")},
+        outputs={"out": Tensor("out", (heads, 128), "f32")},
+        output_specs=(OutputSpec(Write(output="out", index=(Var("head"), Var("channel")), value="acc")),),
+    )
+    assert bool(tile.contractions) == (heads == 1)
+    assert bool(tile.family_sites["TILE"]) == (heads == 1)

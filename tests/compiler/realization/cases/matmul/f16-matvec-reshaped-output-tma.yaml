@@ -59,4 +59,4 @@ configs:
       STAGE: d1/smem-tma
       LOOPIFY: '0'
       RASTER: ''
-    identity: 1c358382ac11a105f46afcc05b6b07467ffd3c62272a6275396f7fd729e4340a
+    identity: bdb367c182132c2e09f6c2ac6568ec19aefa45f8796fda2e6e1f464379baa00f

@@ -45,7 +45,7 @@ configs:
       STAGE@map.1/twist.1/inner: ''
       LOOPIFY: '0'
       RASTER: ''
-    identity: ddcad9a26d8efe6a8e50b65b04443daecceacb0af4e1154679ed8d8316cdd3e4
+    identity: 8accfd2106236950ce3d63b80b3ae413803cf2289ac16d241baaab4c652a8121
 loops:
 - inputs: [x0, x1, x2]
   outputs: [scaled_dot_product_attention]
@@ -126,7 +126,7 @@ loops:
                                       - {expr: {var: a3}}
                                     dtype: null
                                 - class: Assign
-                                  fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in1, in2]}, dtype: null}
+                                  fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in1, in2]}, dtype: {dtype: f32}}
                                 - class: Accum
                                   fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a3]}, base: null}
                               unroll: false
@@ -176,7 +176,7 @@ loops:
                                       - {expr: {var: a5}}
                                     dtype: null
                                 - class: Assign
-                                  fields: {name: v2, op: {elementwise: multiply}, args: {tuple: [in3, in4]}, dtype: null}
+                                  fields: {name: v2, op: {elementwise: multiply}, args: {tuple: [in3, in4]}, dtype: {dtype: f32}}
                                 - class: Accum
                                   fields: {name: acc2, value: v2, op: {elementwise: add}, dtype: null, axes: {tuple: [a5]}, base: null}
                               unroll: false
@@ -230,7 +230,7 @@ loops:
                                             - {expr: {var: a8}}
                                           dtype: null
                                       - class: Assign
-                                        fields: {name: v7, op: {elementwise: multiply}, args: {tuple: [in5, in6]}, dtype: null}
+                                        fields: {name: v7, op: {elementwise: multiply}, args: {tuple: [in5, in6]}, dtype: {dtype: f32}}
                                       - class: Accum
                                         fields: {name: acc4, value: v7, op: {elementwise: add}, dtype: null, axes: {tuple: [a8]}, base: null}
                                     unroll: false
@@ -254,7 +254,7 @@ loops:
                                       - {expr: {var: a6}}
                                     dtype: null
                                 - class: Assign
-                                  fields: {name: v12, op: {elementwise: multiply}, args: {tuple: [in7, v11]}, dtype: null}
+                                  fields: {name: v12, op: {elementwise: multiply}, args: {tuple: [in7, v11]}, dtype: {dtype: f32}}
                                 - class: Accum
                                   fields: {name: acc5, value: v12, op: {elementwise: add}, dtype: null, axes: {tuple: [a7]}, base: null}
                               unroll: false
@@ -278,6 +278,6 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_sdpa_c2141f
+      name: k_sdpa_c77793
     inputs: [scaled_dot_product_attention_scale, x1, x0, x2]
     outputs: [[scaled_dot_product_attention, f16, [1, 8, 512, 128]]]

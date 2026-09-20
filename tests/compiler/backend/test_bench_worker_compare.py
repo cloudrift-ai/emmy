@@ -641,6 +641,56 @@ def test_embedded_reference_survives_later_greedy_timing_failure(monkeypatch) ->
     assert response["result"] is None and response["results"] is None
 
 
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize("fails", [False, True])
+@pytest.mark.parametrize("initial", [(True, True), (False, False)])
+def test_strict_reference_precision_is_scoped_to_worker_job(monkeypatch, request, strict, fails, initial) -> None:
+    import torch
+
+    from emmy.commands import run as run_mod
+    from emmy.compiler.backend.cuda import _bench_worker
+    from emmy.compiler.backend.cuda import backend as backend_mod
+
+    matmul = torch.backends.cuda.matmul
+    fp16 = torch._C._get_cublas_allow_fp16_reduced_precision_reduction()
+    bf16 = torch._C._get_cublas_allow_bf16_reduced_precision_reduction()
+    request.addfinalizer(lambda: setattr(matmul, "allow_fp16_reduced_precision_reduction", fp16))
+    request.addfinalizer(lambda: setattr(matmul, "allow_bf16_reduced_precision_reduction", bf16))
+    setting = initial if hasattr(matmul, "allow_fp16_reduced_precision_reduction_split_k") else initial[0]
+    matmul.allow_fp16_reduced_precision_reduction = setting
+    matmul.allow_bf16_reduced_precision_reduction = setting
+
+    async def compare(*_args, **_kwargs):
+        assert matmul.allow_fp16_reduced_precision_reduction == (initial[0] and not strict)
+        assert matmul.allow_bf16_reduced_precision_reduction == (initial[0] and not strict)
+        assert getattr(matmul, "allow_fp16_reduced_precision_reduction_split_k", initial[1]) == initial[1]
+        assert getattr(matmul, "allow_bf16_reduced_precision_reduction_split_k", initial[1]) == initial[1]
+        if fails:
+            raise RuntimeError("comparison failed")
+        return {}, None, True, True, None, None, None
+
+    monkeypatch.setattr(backend_mod, "CudaBackend", lambda **_kwargs: object())
+    monkeypatch.setattr(run_mod, "bench_lowered_vs_torch", compare)
+    request = {
+        "graph": "LOWERED",
+        "torch_spec": ("frontend_graph", "FRONTEND"),
+        "bench_backends": "eager,emmy",
+        "warmup": 1,
+        "iters": 1,
+        "seed": 0,
+        "strict_accuracy": strict,
+    }
+    if fails:
+        with pytest.raises(RuntimeError, match="comparison failed"):
+            asyncio.run(_bench_worker._run_job(request))
+    else:
+        asyncio.run(_bench_worker._run_job(request))
+    assert matmul.allow_fp16_reduced_precision_reduction == initial[0]
+    assert matmul.allow_bf16_reduced_precision_reduction == initial[0]
+    assert getattr(matmul, "allow_fp16_reduced_precision_reduction_split_k", initial[1]) == initial[1]
+    assert getattr(matmul, "allow_bf16_reduced_precision_reduction_split_k", initial[1]) == initial[1]
+
+
 def test_frontend_graph_worker_returns_execution_symbolic_environment(monkeypatch) -> None:
     from types import SimpleNamespace
 

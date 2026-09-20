@@ -302,6 +302,10 @@ concurrently (`tune --gpus`, see `pipeline/ARCHITECTURE.md` → *Per-kernel GPU 
   (`benchmark_compare_worker_async` / `benchmark_pinned_isolated_async`), closed via `aclose_async_worker` before the
   loop exits.
 
+Strict comparison jobs disable Torch's FP16/BF16 reduced-precision reductions while checking outputs and timing the
+reference. cuBLAS can otherwise change intermediate rounding with matrix shape. The precision settings and any
+independent split-K setting are restored on success or failure so a persistent worker does not change later jobs.
+
 The wall-clock cap is `asyncio.wait_for`; on overrun the child is SIGKILLed and the next bench respawns it on a clean
 device. Because the persistent worker is reused across configs, an illegal / misaligned access is a hazard: that error
 is **sticky** — it corrupts the CUDA context so every later call returns the same status until the process dies, which
