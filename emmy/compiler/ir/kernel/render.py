@@ -226,6 +226,34 @@ static __device__ __forceinline__ int emmy_volta_b_congruous(int row, int col, i
     return physical_row * ldm + physical_col;
 }
 
+// One aligned run, shared by the global and shared-memory fragment loaders.
+template <typename T>
+static __device__ __forceinline__ void emmy_mma884_load4(unsigned* r, const T* g) {
+    if constexpr (sizeof(T) == 4) {
+        #pragma unroll
+        for (int p = 0; p < 2; ++p) {
+            asm volatile("{.reg .f32 x, y; .reg .b16 lo, hi;\\n\\t"
+                         "ld.v2.f32 {x, y}, [%1];\\n\\t"
+                         "cvt.rn.f16.f32 lo, x; cvt.rn.f16.f32 hi, y;\\n\\t"
+                         "mov.b32 %0, {lo, hi};}\\n"
+                         : "=r"(r[p]) : "l"(g + p * 2) : "memory");
+        }
+    } else {
+        uint2 v = *reinterpret_cast<const uint2*>(g);
+        r[0] = v.x; r[1] = v.y;
+    }
+}
+
+// The caller proves four-element alignment and a complete K slice.
+template <typename T, bool A>
+static __device__ __forceinline__ void emmy_mma884_load_gmem4(unsigned* r, const T* g, int ldm, int left) {
+    int lane = threadIdx.x & 31;
+    int comp = (lane & 15) >> 2;
+    int row = ((A ? comp >> 1 : comp & 1) << 3) + (lane & 3) + ((lane >> 4) << 2);
+    row = min(row, max(left - 1, 0));
+    emmy_mma884_load4(r, g + row * ldm);
+}
+
 template <typename T, typename F = T>
 static __device__ __forceinline__ void emmy_mma884_load_a_impl(
     unsigned* r, const T* g, int ldm, int rows_left, int k_left) {
@@ -318,19 +346,12 @@ static __device__ __forceinline__ void emmy_mma884_load_b_gmem_trans_nclamp_kzer
 // the staged slab. Load that run as one 64-bit vector; the canonical B layout
 // still needs the strided gather below. Volta has no warp matrix-load
 // instruction.
-template <typename T>
-static __device__ __forceinline__ void emmy_mma884_load_smem4(unsigned* r, const T* s) {
-    uint2 packed = *reinterpret_cast<const uint2*>(s);
-    r[0] = packed.x;
-    r[1] = packed.y;
-}
-
 template <typename T, typename F = T>
 static __device__ __forceinline__ void emmy_mma884_load_a_smem(unsigned* r, const T* s, int ldm) {
     int lane = threadIdx.x & 31;
     int comp = (lane & 15) >> 2;
     int row = ((comp >> 1) << 3) + (lane & 3) + ((lane >> 4) << 2);
-    emmy_mma884_load_smem4(r, s + row * ldm);
+    emmy_mma884_load4(r, s + row * ldm);
 }
 template <typename T, typename F = T>
 static __device__ __forceinline__ void emmy_mma884_load_b_smem(unsigned* r, const T* s, int ldm) {
@@ -341,7 +362,7 @@ static __device__ __forceinline__ void emmy_mma884_load_b_smem_trans(unsigned* r
     int lane = threadIdx.x & 31;
     int comp = (lane & 15) >> 2;
     int col = ((comp & 1) << 3) + (lane & 3) + ((lane >> 4) << 2);
-    emmy_mma884_load_smem4(r, s + col * ldm);
+    emmy_mma884_load4(r, s + col * ldm);
 }
 
 // CUTLASS's Volta layouts turn two logical 16-row/column fragments into one

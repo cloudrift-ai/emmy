@@ -158,6 +158,35 @@ def test_sm70_source_uses_only_the_volta_mma_family(monkeypatch, trans) -> None:
         assert forbidden not in src
 
 
+@pytest.mark.parametrize("role,trans", [("a", False), ("b", True), ("b", False)])
+@pytest.mark.parametrize("dtype", ["f16", "f32"])
+@pytest.mark.parametrize(
+    "stride,offset,masked_k,aligned",
+    [(32, 4, False, True), (32, 5, False, False), (31, 4, False, False), (32, 4, True, False)],
+    ids=["aligned", "offset", "stride", "k-tail"],
+)
+def test_volta_direct_vectors_require_aligned_complete_runs(role, trans, dtype, stride, offset, masked_k, aligned):
+    from emmy.compiler.ir.expr import Literal, Var
+    from emmy.compiler.ir.kernel.ir import LdmatrixLoad
+    from emmy.compiler.ir.stmt import RenderCtx
+
+    ctx = RenderCtx(shapes={"x": (Dim(17), Dim(stride))}, buffer_dtypes={"x": dtype}, ssa_dtypes={"r": "f16"})
+    load = LdmatrixLoad(
+        frag="r",
+        src_buffer="x",
+        src_index=(Var("row"), Literal(offset, "int")),
+        role=role,
+        staged=False,
+        b_trans=trans,
+        ldm=stride,
+        fragment_layout="m8n8k4",
+        gmem_guard=(Literal(0, "int"), Literal(17, "int")),
+        k_zero=(Literal(0, "int"), Literal(3, "int")) if masked_k else None,
+    )
+    source = "\n".join(load.render(ctx))
+    assert ("load_gmem4<" in source) == (aligned and (role == "a" or trans))
+
+
 def test_sm70_m1_linear_synthesizes_a_masked_mma_row(monkeypatch) -> None:
     """A literal unit output row is still the M side of a plain m1xKxN contraction.
 
@@ -193,9 +222,9 @@ def test_sm70_contiguous_staged_fragments_use_one_wide_load(monkeypatch) -> None
     """A and N-major B fragments are contiguous in their staged slabs, so each drains as one uint2."""
     _pin(monkeypatch, VOLTA, stage="d1/smem")
     src, _ = _source(_graph(k=16, trans=True), Context(compute_capability=(7, 0)))
-    assert "uint2 packed = *reinterpret_cast<const uint2*>(s);" in src
-    assert "emmy_mma884_load_smem4(r, s + row * ldm);" in src
-    assert "emmy_mma884_load_smem4(r, s + col * ldm);" in src
+    assert "uint2 v = *reinterpret_cast<const uint2*>(g);" in src
+    assert "emmy_mma884_load4(r, s + row * ldm);" in src
+    assert "emmy_mma884_load4(r, s + col * ldm);" in src
 
 
 def test_sm70_materialized_tiles_use_paired_volta_layout_loads(monkeypatch) -> None:

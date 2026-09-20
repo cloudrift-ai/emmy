@@ -28,6 +28,7 @@ import math
 from dataclasses import dataclass, replace
 from functools import cached_property
 
+from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F32, DataType
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import _REDUCE_SPELLING, ElementwiseImpl
@@ -1660,6 +1661,23 @@ class LdmatrixLoad(Stmt):
             targs = "" if src_dt == frag_dt else f"<{ctx.type_name(src_dt)}, {ctx.type_name(frag_dt)}>"
             b8 = frag_dt in ("f8e4m3", "f8e5m2")
             if self.fragment_layout == "m8n8k4":
+                shape = tuple(Dim(d) for d in ctx.shapes.get(self.src_buffer, ()))
+                aligned = len(shape) == len(self.src_index) and all(d.is_static for d in shape)
+                if aligned:
+                    aligned = all(
+                        _multiple_of(index * Literal(math.prod(s.as_static() for s in shape[d + 1 :]), "int"), 4)
+                        for d, index in enumerate(self.src_index)
+                    )
+                vector = aligned and ldm % 4 == 0 and self.k_zero is None and src_dt in ("f16", "f32") and frag_dt == "f16"
+                if vector and (self.role == "a" or self.b_trans):
+                    left = "16"
+                    if self.gmem_guard is not None:
+                        base, bound = self.gmem_guard
+                        left = f"({bound.render(ctx)}) - ({base.render(ctx)})"
+                    args = f"<{ctx.type_name(src_dt)}, {'true' if self.role == 'a' else 'false'}>"
+                    return [
+                        f"{_pad(ctx.indent)}emmy_mma884_load_gmem4{args}({self.frag}, &{self.src_buffer}[{flat}], {ldm}, {left});"
+                    ]
                 if self.k_zero is not None:
                     kbase, kbound = self.k_zero[0].render(ctx), self.k_zero[1].render(ctx)
                     k_left = f"({kbound}) - ({kbase})"
