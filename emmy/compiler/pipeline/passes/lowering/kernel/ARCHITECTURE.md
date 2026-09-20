@@ -27,6 +27,20 @@ a boundary store was not re-spelled for. Each of those reached nvcc as *identifi
 errors deep in a generated source and charged to whichever candidate the tuner happened to be benching. Asserting it
 here names the kernel and the value instead, in the pass that built them.
 
+For a register materialization, `factorize` emits the same Fold tree as C fragments through `_register`.
+The ordered axis becomes a `StridedLoop` inside the CTA, enclosed by FP32 state declarations. Equal fragment
+expressions share results. The schedule proves row ownership before lowering; the emitter uses the atom's
+geometry with existing `FragmentApply`, `MmaSyncPtx`, `FragmentPromote`, and `RegStore` nodes. `FragmentRepack`
+supplies C→A and C→B conversion, with every warp lane participating. Loads clamp padded coordinates, stores guard
+them, and partial operands are zero-masked before MMA. Loads and packs stay beside their consuming MMA to limit
+register lifetimes. Materialized B operands reuse `LdmatrixLoad` and its address analysis when they have unit
+stride; computed or strided operands use C-fragment gather and repack. FP16 promotion is shared with classic
+schedules, and Volta repacking shuffles packed FP16 pairs to reduce the shuffle count.
+
+The materializer removes the private global carry port with a graph splice, preserving the schedule and source
+attribution. External state readers retain a stored output. All output evaluation precedes carry updates. The
+resulting kernel has no serial launch axis; the classic path below retains ordered launches.
+
 `factorize` builds the ambient `Ctx` and dispatches `tile.op` through `_factorize`, which peels projecting zero-axis
 `Fold`s and binds each leaf via the ONE root-binding pipeline (`_factor._bind`) — its form is read off the node's
 SCHEDULE (which axes are tiled), never a kernel kind, and
@@ -405,6 +419,14 @@ types an edge's results; a name whose statement kind carries no dtype keeps the 
 mask — returns as f32, and the bit operations reading it have no f32 spelling at all, so the kernel fails to render
 rather than computing something wrong.
 
+**The prologue's statistic is summed cooperatively, and its fold is found by the seam's own order.** A warp's 32
+lanes stride the statistic's reduce and close it with the fold's shuffle butterfly (`sync_stat_fill`); without the
+fold the prologue falls back to one serial row per thread. `cone_stat` finds that fold by walking the cone's
+row-invariant edges in operand order, the order the seam lowers them in, and skipping every edge that varies with the
+contraction axis. It may not read the first operand alone: formation orders a cone's edges its own way, and a fused
+norm→linear cone is two gmem reads followed by the norm. Reading position zero cost the Gemma 4 norm → gate/up →
+GeGLU prefill kernel 1.6x (7.7 to 12.6 ms at 4096 tokens on an RTX 5090) with nothing failing.
+
 **A statistic over a K group is bridged per chunk.** A reduce edge that varies with K only through one block guard
 — the maximum a grouped activation scale takes over each 128-wide K group — is neither row-invariant nor worth a
 per-cell evaluation, which would re-read the whole group for every slab cell. The seam splits it off as its `chunk`
@@ -542,7 +564,12 @@ gmem index never carries the carrier's key, so reading them inside the loop re-i
 go straight-line — a rolled loop has nowhere to keep them, and `LOOPIFY` re-rolls the run for a readable listing. The
 CARRIER is the other, and it is f32 whatever the expectation's cell accumulates in: on the reduced-accumulate cell the
 expectation's `mma.sync` targets a packed f16 fragment and one `FragmentPromote` per chunk folds it here, so the mma
-chain runs at the consumer-die full rate while the running sum stays f32. The score keeps that atom's f32 sibling
+chain runs at the consumer-die full rate while the running sum stays f32. While the row's partials fit the thread's
+registers every key step drains the whole register row and one promote sweep ends the chunk, the order that measures
+faster (14.8 us against 16.6 at head width 128 on an RTX 5090). Past the envelope the chunk drains one column pair
+through all its steps and promotes it at once, so two partials are live instead of the row; the pair is what one
+paired ldmatrix fills, so the load pairing survives. The width comes from the schedule's `chunk_partial_columns`, the
+same rule the offer's register budget counts with. The score keeps that atom's f32 sibling
 either way — its C fragments are what the pivot, the denominator and every channel's pattern are read off.
 
 A projection that reads no per-row carrier state is the ordinary sink's (a placement cut materializes the

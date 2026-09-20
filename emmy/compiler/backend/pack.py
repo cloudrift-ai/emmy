@@ -16,11 +16,13 @@ Validity: a pack loads only when its manifest matches the caller's ``key`` (mode
 serving shape — composed by the runner; "identity" has to include whatever the compiled programs
 read off the CHECKPOINT, not just the architecture config — see the serving runners' keys) AND
 the current environment (backend, device arch,
-nvcc toolkit tag + flags — the same tags the cubin cache keys on) AND every referenced cubin
+nvcc toolkit tag + flags — the same tags the cubin cache keys on — the precision pins, and a
+digest of the card's golden rows) AND every referenced cubin
 still exists. **Any mismatch or error returns ``None`` and the caller falls back to the full
 compile path** — a stale or damaged pack costs a recompile, never a wrong result. Compiler
 version is deliberately NOT part of validity (a pack keeps serving its frozen snapshot);
-``PLAN_FORMAT_VERSION`` gates the runtime contract instead.
+``PLAN_FORMAT_VERSION`` gates the runtime contract instead. The golden rows are, because a
+re-recorded golden exists precisely to change what the compile deploys.
 """
 
 from __future__ import annotations
@@ -57,8 +59,13 @@ def _environment() -> dict:
     pack-hit the std plans and silently served std kernels — the fm lane's numbers were
     the std lane's. A pack whose manifest predates the field mismatches and falls back
     to the full compile, which is the conservative reading (its lane is unrecorded).
+    And the golden rows in scope for this card (``golden.scope_digest``): they decide
+    every fork the compile takes, so plans compiled from other rows are not this compile's.
+    Found live (2026-09-19): a re-recorded Gemma 4 decode golden booted the previous
+    image's plans from a shared ``EMMY_PACK_DIR`` and measured the old kernels.
     Probes the live GPU."""
     from emmy.compiler.backend.cuda import nvcc  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import scope_digest  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import (
         # noqa: PLC0415,
         F16_MMA_F32_ACC,
@@ -66,6 +73,7 @@ def _environment() -> dict:
         FP8_MMA,
         precision_pin,
     )
+    from emmy.gpu import live_name  # noqa: PLC0415
 
     return {
         "backend": "cuda",
@@ -73,6 +81,7 @@ def _environment() -> dict:
         "toolkit": nvcc._toolkit_tag(),
         "nvcc_flags": nvcc.effective_flags(),
         "precision": {k.name: precision_pin(k) for k in (FAST_EXP, F16_MMA_F32_ACC, FP8_MMA)},
+        "golden": scope_digest(live_name() or ""),
     }
 
 

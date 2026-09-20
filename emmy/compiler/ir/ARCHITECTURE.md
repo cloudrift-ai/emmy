@@ -320,7 +320,8 @@ nearest enclosing loop whose axis the `Carry` index does not read (`carried_cell
 the free-axis order never sorts under the cells, and its shape is the loops over its cells. The Loop IR rendering
 keeps two slots of the cell shape and commits the second after each step; how many slots survive and where they are
 stored is a schedule's question, not the statement's. The Tile lift realizes it as a serial launch axis over a state
-buffer (`lowering/tile/010_lift`).
+buffer (`lowering/tile/010_lift`). A register schedule can instead retain the state inside a CTA and realize
+the same axis as a loop, while the classic schedule keeps the ordered launches.
 
 **The algebra is in the term, not a tag.** There is no stored / derived `AlgebraKind` and no op-tree node zoo. The
 stored tile IR has exactly **ONE node kind**, `Fold` — `reduce(⊕) ∘ map(f)` in the λ-foldMap spelling:
@@ -578,8 +579,12 @@ canonicalized before validation:
   linear in definitions × loop depth instead of materializing the quadratic full SSA dependency closure.
 - `dedup_loads` — after expression simplification, keep one `Load` for each identical
   `(input, index, width, dtype)` read in a scope and rewire every scalar or vector lane. A write invalidates retained
-  reads of that buffer, including around a nested scope with a write. This is canonicalization for every Loop / Tile
-  body, not a fusion profitability decision.
+  reads of that buffer, including around a nested scope with a write. The same walk keeps one `Assign` per identical
+  operation over identical arguments and one `Accum` per identical accumulation — a value the loop tree computes
+  twice (a contraction spelled on both sides of a cut seam, a repeated pure expression) folds to one definition, and
+  an accumulator alias carries out of the loop that defined it to the scope that reads the sum. This is
+  canonicalization for every Loop / Tile body, not a fusion profitability decision; the structural key inherits it,
+  so two bodies that differ by a repeated computation key alike.
 - `rename_ssa_sequential` — cosmetic: `Load` names become `in0, in1, …`, accumulator state becomes `acc0, …`, and
   every other definition becomes `v0, v1, …`, in lexical definition order. Names stay globally unique while each
   nested body tracks its own binders, so sibling scopes may reuse the same source spelling without collapsing. Axis
@@ -601,7 +606,17 @@ canonicalized before validation:
   it, so the block still depends on the enclosing definition it reads.
 - A standard smaller-half worklist computes the equitable partition in
   `O((vertices + relations) log vertices)` relation visits. Exact individualization is isolated to partitions that
-  refinement cannot distinguish; no exact near-linear worst-case graph-canonization algorithm is known. Canonical
+  refinement cannot distinguish; no exact near-linear worst-case graph-canonization algorithm is known. The search
+  keeps its cost near the number of leaves it must see: each node's refinement skips the turns of the cells nothing
+  has split (the parent partition is already equitable, and skipping keeps the queue order, so the result is a full
+  pass's), and a leaf equal to the first or the least leaf seen is its image under an automorphism, so the search
+  stops the subtree that leaf hangs from where its path leaves the reference's — everything in there was already
+  labeled. Two leaves of one certificate prove their vertex map an automorphism, so none is re-checked against the
+  relations; each generator remembers the vertices it moves, and a node's orbits are a union-find over its cell under
+  the generators that fix its prefix — its parent's that also fix the vertex it individualized, plus what was learned
+  since. A kernel's k register fragments, which no refinement tells apart, thus stop costing a full refinement of
+  every node of a cubic tree: recording one Gemma 4 piece with 16 fragments once spent 85 s per op labeling it, and
+  the Gemma 4 serving bodies label in 0.1 s or less. Canonical
   vertex ranks then serve as the optional tie-break for `Body.topological_order`, a heap-based Kahn sort. Ready nested
   scopes stay ahead of leaf epilogues so normalization does not widen schedule search or obscure contractions.
 
@@ -676,7 +691,11 @@ slices, broadcasts, and conversions remain ordinary edges. The proof compares ea
 mixed-radix digit of the destination's dense flat address, then composes those inverse layouts across the chain. The
 splicer retargets the computed source's `Write` through that inverse and removes the copy roots from reconstruction.
 This preserves the producer's loop geometry through terminal reshape/transpose chains without enumerating the output
-domain.
+domain. A leading dimension both shapes share as the same symbol (the token axis of a serving prefill program) has
+no dense flat address to digitize; the proof strips it, proves the static trailing shapes, and the retarget carries
+the source's leading index through unchanged. Without that the symbolic prefill twin kept its reshape copies as
+ordinary edges, and the fused half took a different form from its static twins — projections recomputed under
+every per-column statistic.
 
 A `Write` that observes an `Accum` inside that accumulator's own reduce scope is an ordered prefix output. The
 splicer refuses that shape whether it is the merged root or a producer edge: dependency reconstruction would freshen
@@ -768,18 +787,25 @@ directly (no separate AST class).
 | `Let` (a `stmt/` leaf) | Pure binding of one expression to an SSA name: a scalar literal, an integer index bound once outside a nested hot loop, or a flattened buffer coordinate (`FlatIndex`) reused across a copy's trips. |
 | `Sync`             | Thread barrier: CTA-wide `__syncthreads()`, warp-scope `__syncwarp()`, or a named `bar.sync` over a thread subset inside a warp-specialized branch. |
 | `TreeHalve`        | Cross-thread tree reduction over a smem buffer.                   |
-| `RegFragment`      | Per-thread `mma.sync` register array declaration, zero-initialized for C. The established m16n8k16 layout uses A/B/C counts 4/2/4 for f16/f16/f32; the Volta m8n8k4 layout carries explicit 2/2/8 counts because one instruction realizes four PTX cells arranged as one logical 16×16 tile. Carries instruction shape, dtype, and an optional explicit register count. The opaque `nvcuda::wmma` nodes remain retired. |
+| `RegFragment`      | Per-thread `mma.sync` register array declaration, zero-initialized for C. The established m16n8k16 layout uses A/B/C counts 4/2/4 for f16/f16/f32; the Volta m8n8k4 layout carries explicit A/B counts 2/2 and C counts 8 f32 or 4 packed f16 because one instruction realizes four PTX cells arranged as one logical 16×16 tile. Carries instruction shape, dtype, and an optional explicit register count. The opaque `nvcuda::wmma` nodes remain retired. |
 | `LdmatrixLoad`     | Load one operand into a `RegFragment`. The m16n8k16 layout can use `ldmatrix.sync.aligned.m8n8.x{4,trans}.b16` from shared memory or a global-memory-direct gather with the same lane map. SM70 has no `ldmatrix`, so gmem-direct and unpaired staged Volta paths use cooperative gathers. A materialized canonical-B tile with even M/N fragment counts instead derives paired crosswise-A and B-congruous shared layouts; each 128-bit load drains two logical fragments. Its four computation groups duplicate the appropriate A or B quadrant. `b_trans=True` marks a `[N, K]` weight and selects the corresponding transposed gather. Guards clamp M/N lanes and zero masked K elements in both layouts. A 1-byte staged slab (`byte_slab=True`) has no `ldmatrix` below sm_100a and drains through the cooperative gather too; when it also carries a `scale_buffer` the slab holds a weight stored as bytes with one scale per k block in that companion slab — PACKED PAIRS (an NVFP4 weight: one byte, two K elements, decoded through the value table) or fp8 bytes (one element each, converted by the hardware cvt and multiplied by an f32 scale before the round to the fragment). |
-| `MmaSyncPtx`       | Inline PTX for either `mma.sync.aligned.m8n8k4.row.{col,row}.f32.f16.f16.f32` on the Volta fragment layout or the established `mma.sync.aligned.m16n8k16.row.col.{f32,f16}.{f16,bf16}.{f16,bf16}.{f32,f16}` family. Paired B-congruous loads select row/row; the other Volta paths retain row/col. The renderer includes only the selected family's prelude, so SM70 never parses newer `ldmatrix` or m16n8k16 assembly. The BLOCK-SCALED fp4 form (`m16n8k64`, `kind::mxf4nvf4`) additionally carries `sfa_frag` / `sfb_frag`: both multiplicands are packed e2m1 pairs and the instruction applies one ue4m3 scale per 16 K elements itself, so the call passes those two scale registers where the others repeat the accumulator. Its data fragments reuse the fp8 byte loaders — the k64 4-bit lane map is the k32 8-bit one, over a row of K/2 bytes — leaving only the scale loaders new. It assembles only for the arch-suffixed consumer-Blackwell target, which the plan requests through `KernelSpec.arch_specific` (the flag TMA also sets). |
+| `MmaSyncPtx`       | Inline PTX for either `mma.sync.aligned.m8n8k4.row.{col,row}.{f32,f16}.f16.f16.{f32,f16}` on the Volta fragment layout or the established `mma.sync.aligned.m16n8k16.row.col.{f32,f16}.{f16,bf16}.{f16,bf16}.{f32,f16}` family. Paired B-congruous loads select row/row; the other Volta paths retain row/col. The renderer includes only the selected family's prelude, so SM70 never parses newer `ldmatrix` or m16n8k16 assembly. The BLOCK-SCALED fp4 form (`m16n8k64`, `kind::mxf4nvf4`) additionally carries `sfa_frag` / `sfb_frag`: both multiplicands are packed e2m1 pairs and the instruction applies one ue4m3 scale per 16 K elements itself, so the call passes those two scale registers where the others repeat the accumulator. Its data fragments reuse the fp8 byte loaders — the k64 4-bit lane map is the k32 8-bit one, over a row of K/2 bytes — leaving only the scale loaders new. It assembles only for the arch-suffixed consumer-Blackwell target, which the plan requests through `KernelSpec.arch_specific` (the flag TMA also sets). |
 | `WgmmaDescriptor`  | The 64-bit shared-memory matrix descriptor a `wgmma` operand is read through: start address, leading and stride byte offsets and the swizzle mode, built by `emmy_wgmma_desc` from the slab address the same swizzled TMA or cp.async fill deposited. |
 | `WgmmaMma`         | One `wgmma.mma_async.sync.aligned.m64nNk16` cell over N/8 of the per-warp 16×8 C fragments (instruction register d[4j+k] is fragment j, register k); A from a descriptor or a 4-register fragment, B always from a descriptor; the transpose bits are template arguments of the generated wrapper. |
 | `WgmmaFence` / `WgmmaCommit` / `WgmmaWait` | The asynchronous discipline around a chunk of `WgmmaMma` cells: fence before the first cell after the accumulators were touched, commit after the chunk, wait before any accumulator read and before the ring slot is released. |
-| `FragmentPromote`  | Fold a packed f16-accumulate C fragment into its f32 shadow fragment and rezero it (`emmy_mma_promote_f16acc`: PTX `cvt.f32.f16` + add per element) — the chunked-accumulation promote pairing the f16-acc `MmaSyncPtx`. The mma chain accumulates in f16 at full rate; each K chunk (the staged bk slab, every `_F16ACC_STEPS` gmem-direct atom steps) folds into the f32 shadow, bounding the f16 rounding to one chunk while the store/epilogue read f32. |
+| `FragmentPromote`  | Fold a packed f16-accumulate C fragment into its f32 shadow fragment and rezero it (`emmy_mma_promote_f16acc`: PTX `cvt.f32.f16` + add per element, with warp shuffles on Volta to align its distinct f16 and f32 C layouts) — the chunked-accumulation promote pairing the f16-acc `MmaSyncPtx`. The mma chain accumulates in f16 at full rate; each K chunk (the staged bk slab, every `_F16ACC_STEPS` gmem-direct atom steps) folds into the f32 shadow, bounding the f16 rounding to one chunk while the store/epilogue read f32. |
 | `FragmentApply`    | The one pointwise node over a C fragment. Each argument resides in another fragment, a per-row register pair, a cell-uniform scalar, a predicate over the element's absolute coordinates (`COORD`), or a global-memory load template at those coordinates (`GMEM`). A coordinate mask is a `where` over a `COORD` predicate — the masked branch takes the carrier's finite identity, avoiding `-inf - -inf` in an all-masked chunk, and an additive mask applies its keep op first; an additive bias is an `add` of a `GMEM` operand. The atom's fragment-layout descriptor supplies the element count and row mapping, so the same leaf serves m16n8k16 and Volta m8n8k4. |
 | `FragmentRowReduce` | Fold one warp's C fragments along the atom's N direction, per ROW: in-lane columns combine first, then the layout's `__shfl_xor` masks combine the column-group lanes. The resulting register pair is what a `FragmentApply` broadcasts as a `ROW` operand. The chunk tier's pivot and summed channel partials are exactly this, which is why the tier needs the chunk inside one warp column. |
-| `FragmentRepack`   | Convert score C fragments into one 16-bit A fragment in registers for a paired contraction. m16n8k16 consumes two adjacent fragments; Volta m8n8k4 selects one four-column slice from a logical 16-column fragment with warp shuffles. |
+| `FragmentRepack`   | Convert C fragments into a 16-bit operand in registers. The m16n8k16 f16 B form exchanges packed column pairs across the warp; the A form uses the existing lane layout. m16n8k16 consumes two adjacent fragments; Volta m8n8k4 selects a four-column A slice or four-row B slice from one logical 16×16 C fragment with warp shuffles of packed FP16 pairs. |
 | `RegStore`         | Layout-aware per-lane epilogue store: four C elements for m16n8k16 or eight elements covering the four Volta output quadrants for m8n8k4. A paired Volta tile derives the matching interleaved 32×32 accumulator map from its cell position; it is not a schedule field. Adjacent elements leave as one packed pair when N is contiguous, including under an M-only tail guard; an N guard or strided physical orientation keeps scalar stores. Stores f32 directly or downconverts to f16. An optional epilogue is a pure `Lambda` over the projection tail's own `Load` / `Assign` / `Select` stmts, its leading params bound to the store's fragments; it is evaluated at each element's own coordinates. |
 | Shared from `tile` | `Tile` (launch geometry); from `ir/stmt/`: `Loop`, `StridedLoop`, `Load`, `Assign`, `Accum`, `Init`, `Let`, `Write`, `Select`, `Cond`, `ZeroPrologue`. |
+
+Volta direct A and transposed-B loads use the shared four-value loader when the flattened base and row stride
+are provably four-element aligned and K needs no mask. FP16 uses one 64-bit load. FP32 uses two 64-bit loads,
+each coupled to FP16 conversion in inline PTX, keeping temporary float lifetimes inside the packed load. The
+alignment proof reuses the expression-divisibility check used by swizzled addresses. M/N clamps preserve aligned
+rows; K tails, unknown alignment, other source types, and strided canonical B retain the scalar gather. No schedule
+field or model-specific choice is involved.
 
 ## `cuda/ir.py`
 

@@ -3,8 +3,8 @@ scheduling fork — the second half of the Loop-IR → Tile-IR boundary.
 
 ``010_lift`` is purely structural: it reads the algebra off a ``LoopOp`` and emits an UNMAPPED
 :class:`~emmy.compiler.ir.tile.ir.TileOp` (its ``op`` set, ``place`` carrying just the free axes).
-THIS rule picks that up and decides the schedule — the free-axis → grid mapping plus the per-node
-``TILE`` / ``REDUCE`` / ``STAGE`` / ``WORK`` / ``RASTER`` families through the classic model.
+THIS rule picks that up and decides the schedule — the classic per-node choices, or register
+storage across an ordered matrix loop. Both families use the generic schedule-fork adapter.
 
 The fixed candidate-space contract is Algorithm 1(p, t, row): the problem and target, factored into sites, offer the
 candidates — the row's value where the row names a site, the site's catalog where it does not — and one immutable
@@ -55,11 +55,39 @@ def pin_row(*, split_consumed: bool) -> dict[str, str]:
     return row
 
 
-def classic_forks(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
-    """Adapt the classic semantic enumeration to the pipeline's lazy search tree: one unexpanded
-    root over the problem (a one-element list, the shape every fork builder returns), its sites
-    sourced from the environment's pins where they name them."""
+def classic_forks(tile: TileOp, name: str, knobs: dict, ctx, *, kernel_set: bool = False) -> list[Fork]:
+    """Adapt semantic enumerations to the lazy search tree, sourcing choices from the pins
+    where they name a site. Ordered matrix loops may also offer register storage.
+
+    ``kernel_set`` says the kernel is one piece of a cut kernel set. A hand pin is published to
+    every piece at once, so each takes the values it can and keeps its catalog where it cannot —
+    the reading a row published across peer kernels takes — instead of refusing a value that names
+    a sibling piece; the post-compile pin check still asks that SOME kernel realized the pin."""
+    from emmy.compiler.ir.schedule.register import RegisterCodec, RegisterContext, RegisterProblem, materialize_register  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, FP8_MMA, precision_pin  # noqa: PLC0415
+
+    row = pin_row(split_consumed=tile.split_consumed or carries_partition(tile))
+    register = []
+    if tile.register_program is not None and not any(value for key, value in row.items() if key not in ("WORK", "TILE", "STAGE")):
+        context = RegisterContext(
+            RegisterProblem(
+                tile,
+                ctx,
+                row={key: value for key, value in row.items() if key in ("WORK", "TILE", "STAGE")},
+                allow_f16=precision_pin(F16_MMA_F32_ACC) is True,
+            )
+        )
+        register = fork_schedule(
+            context,
+            codec=RegisterCodec(context),
+            inherited_knobs=knobs,
+            row_prefix={},
+            materialize=lambda schedule, selected: materialize_register(tile, schedule, selected),
+            pool_id=digest(tile.identity_key(with_io=True), ctx.structural_key(), "register", schedule_pin_fingerprint()),
+            sample=getattr(ctx, "pool_sample", None),
+        )
+    if row.get("STAGE") == "d1/reg" and tile.place.serial:
+        return register
 
     # A bare WORK / RASTER / REDUCE pin is published across the kernels a split minted and names the
     # partial (a warp ``WORK``, a ``coop`` band), not its finalize, which folds one partial per split
@@ -70,10 +98,10 @@ def classic_forks(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
     problem = ClassicProblem(
         tile,
         ctx,
-        row=pin_row(split_consumed=tile.split_consumed or carries_partition(tile)),
+        row=row,
         allow_f16_accumulate=precision_pin(F16_MMA_F32_ACC) is True,
         allow_fp8=precision_pin(FP8_MMA) is True,
-        validate_pins=ctx.validate_pins,
+        validate_pins=ctx.validate_pins and not kernel_set,
         tolerate_kernel_pins=peer,
     )
     context = ClassicScheduleContext(tile, ctx, problem)
@@ -87,7 +115,7 @@ def classic_forks(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
         tile.split_consumed,
     )
     prefix = dict.fromkeys(SCHEDULE_FORK_STAMPS, 1.0) if problem.warp_eligible else {}
-    return fork_schedule(
+    return register + fork_schedule(
         context,
         codec=codec,
         inherited_knobs=knobs,
@@ -118,7 +146,9 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[Fork]:
     assert any(k.startswith(STRUCT_PREFIX) for k in tile.knobs), (
         f"{tile.name!r}: scheduling a kernel with no structural identity — the IdentityStrategy stamps at birth"
     )
-    options = classic_forks(tile, tile.name, tile.knobs, ctx)
+    # A cut's pieces carry the seam token in their name or read a workspace named by one.
+    kernel_set = "__place_" in tile.name or any("__place_" in buffer for buffer in root.inputs)
+    options = classic_forks(tile, tile.name, tile.knobs, ctx, kernel_set=kernel_set)
     if not options:
         raise RuleSkipped("no enumerable schedule row for this term — leave it unmapped")
     return options if len(options) > 1 else options[0]

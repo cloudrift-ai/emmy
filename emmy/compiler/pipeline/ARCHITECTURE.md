@@ -576,7 +576,9 @@ wherever a measured row of the kernel names it (`pins.composed_routes`, register
 index's route rows) — else the first offered seam it marks, or the offered plan whose `g<n>` half its `REDUCE` value
 carries; a row whose cut seams are not on this ballot decides nothing). A measured arm
 outranks every arm priced by nested resolution (a Σ that may hold predictions); among measured arms the fastest wins;
-strict evidence refuses a kernel-set fork no measured arm decides. With no measured arm the arms are priced exactly as
+strict evidence refuses a kernel-set fork no measured arm decides — a fork with more than one arm left, that is: a
+hand pin that leaves one arm decides it, which is how a kernel set gets recorded under strict evidence before its
+routing row exists, and the strict check then falls on the pieces. With no measured arm the arms are priced exactly as
 Part 4 describes (`_priced_pick`, the streamed fused-vs-splice comparison, the serial-work floor). Nothing is
 installed on the kernel: a piece a cut or split mints is a brand-new kernel (`knob.consume_kernel_row` strips every
 decision family and every feature), its own forks consult the rows of its own signature, and a piece that fails to
@@ -1788,6 +1790,11 @@ smem→register double-buffer. `stage=None` (unset / unparseable) = gmem-direct.
 schedule CHOOSES — rotation and refill discipline derive at materialization from the depth alone (which is why the
 retired `ring` flag compiled byte-identically with and without it), and `smem` / `bk_elems` are resolver outputs,
 never spelled. See `lowering/kernel/ARCHITECTURE.md`.
+
+`d1/reg` selects persistent register storage for a matrix recurrence whose rows are independent across warps.
+The chunk loop runs inside each CTA, with one FP32 carry slot and reused matrix fragments. Its promotion interval
+is the `TILE` K chunk. The prior receives a register-storage indicator rather than shared-memory pipeline features;
+existing fitted artifacts have no coefficient for the new indicator until refitted.
 
 **`WSPEC`** (STR codec, RETIRED) — the warp-specialization producer band `p<np>` is INVENTORY: realized rows spell
 it as `WORK`'s `+p<np>` suffix, `SCHEDULE_FAMILIES` no longer lists it, no shipped golden carries the key, and the

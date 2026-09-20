@@ -360,6 +360,8 @@ def test_knob_features_stage_codec():
     pp = knob_features({"STAGE@map.1/inner": "d3/smem-async/p2"})
     assert pp["D_stage_depth"] == 3.0 and pp["D_stage_reg_depth"] == 2.0
     assert not any(k.startswith("D_stage_") for k in knob_features({"STAGE@map.1/inner": ""}))
+    reg = knob_features({"STAGE": "d1/reg"})
+    assert {k: v for k, v in reg.items() if k.startswith("D_stage_")} == {"D_stage_reg": 1.0}
 
 
 def test_stage_codec_reg_depth_roundtrip():

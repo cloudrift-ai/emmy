@@ -720,31 +720,30 @@ class Placement:
 # --------------------------------------------------------------------------- #
 
 
-#: The transport tokens: the shared-memory intermediate named by its fill mechanism — the
+#: The transport tokens: register storage (``reg``), or shared memory named by its fill mechanism — the
 #: synchronous thread fill (``smem``: a byte copy of materialized edges, or the compute fill
 #: evaluating a computed edge into its slab), ``cp.async`` (``smem-async``) and TMA
 #: (``smem-tma``). An EMPTY ``STAGE`` is no intermediate at all: gmem→register on a
 #: materialized operand, register-to-register on a computed one.
-_TRANSPORTS = ("direct", "smem", "smem-async", "smem-tma")
+_TRANSPORTS = ("direct", "reg", "smem", "smem-async", "smem-tma")
 
 #: The ``STAGE`` grammar, rendered into every parse error so a bad pin names what it could have said.
-_STAGE_EXPECT = "expect d<n> / smem|smem-async|smem-tma / p<n>"
+_STAGE_EXPECT = "expect d<n> / reg|smem|smem-async|smem-tma / p<n>"
 
 
 @dataclass(frozen=True)
 class Stage:
-    """One operand-transport pipeline over the serial reduce loop — one ``Stage`` per reduce
-    loop (a reduce ``Loop`` ⇒ one reduce axis ⇒ one pipeline). The schedule's
-    operand-staging knob, decided by the tile schedule and materialized in
-    ``010_materialize``.
+    """The schedule's intermediate storage and fill mechanism.
 
     ``Stage.direct()`` is the register / gmem-direct baseline (no slab); every other ``Stage``
-    means staging is **on** (the reused gmem operands ride a shared-memory slab). Spelled by the
-    ``STAGE`` codec ``d<depth>/smem|smem-async|smem-tma[/p<reg_depth>]``
-    (decided by the tile schedule). Eligibility and sizing produce a separate
-    :class:`ResolvedStage`; this choice never stores shared-memory names or a derived K chunk.
+    names stored intermediate values. ``d1/reg`` retains one slot in registers for reuse by
+    consumers or loop iterations. It does not imply recurrence: the schedule determines the
+    value's lifetime and ownership. The other transports store operands in shared memory.
+    Spelled by the ``STAGE`` codec ``d<depth>/reg|smem|smem-async|smem-tma[/p<reg_depth>]``.
+    Shared-memory eligibility and sizing produce a separate :class:`ResolvedStage`; this choice
+    never stores shared-memory names or a derived K chunk.
 
-    The pipeline has two buffering levels down the memory hierarchy, each with its own depth:
+    Shared-memory pipelines have two buffering levels, each with its own depth:
     ``depth`` is the **gmem→smem** ring (a synchronous slot fill or the cp.async / TMA prefetch
     over the serial reduce loop), ``reg_depth`` is the **smem→register** double-buffer (the
     fragment-load ping-pong over the inner atom-K steps, breaking the WAR hazard on the operand fragments). They are
@@ -758,18 +757,20 @@ class Stage:
     byte-identically with and without it."""
 
     depth: int = 1  # gmem→smem ring depth over the reduce loop (1 = single buffer, no prefetch)
-    transport: str = "smem"  # smem | smem-async | smem-tma (the intermediate and its fill mechanism)
+    transport: str = "smem"  # reg | smem | smem-async | smem-tma (the intermediate and its fill mechanism)
     reg_depth: int = 1  # smem→register double-buffer depth (1 = no inner ldmatrix prefetch)
 
     def __post_init__(self) -> None:
         if self.transport not in _TRANSPORTS:
-            raise ValueError(f"bad Stage transport {self.transport!r} (expect smem | smem-async | smem-tma)")
+            raise ValueError(f"bad Stage transport {self.transport!r} (expect reg | smem | smem-async | smem-tma)")
         if type(self.depth) is not int or self.depth < 1:
             raise ValueError(f"Stage depth must be a positive integer, got {self.depth!r}")
         if type(self.reg_depth) is not int or self.reg_depth < 1:
             raise ValueError(f"Stage reg_depth must be a positive integer, got {self.reg_depth!r}")
         if self.transport == "direct" and (self.depth != 1 or self.reg_depth != 1):
             raise ValueError("direct Stage cannot carry pipeline depths")
+        if self.transport == "reg" and (self.depth != 1 or self.reg_depth != 1):
+            raise ValueError("register storage has one live value and no operand prefetch")
 
     @classmethod
     def direct(cls) -> Stage:
@@ -784,6 +785,7 @@ class Stage:
     @classmethod
     def parse(cls, spec: str | None) -> Stage:
         """Decode the ``STAGE`` knob codec into a stage: ``/``-separated tokens —
+        ``d1/reg`` names one register slot. Shared-memory pipelines use
         ``d<depth>`` (gmem→smem ring depth), ``smem`` | ``smem-async`` | ``smem-tma`` (the
         intermediate and its fill mechanism: a synchronous thread fill — byte-copying a
         materialized edge, evaluating a computed one, converting when the dtypes differ — the

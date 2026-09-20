@@ -70,6 +70,7 @@ from emmy.compiler.ir.kernel.ir import (
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.schedule import Side, Stage, Tile
+from emmy.compiler.ir.schedule.classic.refusals import chunk_partial_columns
 from emmy.compiler.ir.schedule.packing import block_scaled_atom, packed_readings
 from emmy.compiler.ir.schedule.staging import chunk_key_stage
 from emmy.compiler.ir.sigma import Sigma
@@ -378,11 +379,13 @@ def _mma_c_base(atom, i: int, j: int) -> str:
     return f"_ch{i}_{j}" if _f16acc(atom) else f"_c{i}_{j}"
 
 
-def _f16acc_promotes(m_reg: int, n_reg: int, n_folds: int, frag_ns: str = "") -> list[Stmt]:
+def _f16acc_promotes(atom, m_reg: int, n_reg: int, n_folds: int, frag_ns: str = "") -> list[Stmt]:
     """One :class:`FragmentPromote` per C cell × fold channel — the f16 chunk fold into the f32
     shadows (also the FINAL fold: the shadows carry the full sum only after it runs)."""
     return [
-        FragmentPromote(dst=_fold_frag(f"{frag_ns}_c{i}_{j}", f), src=_fold_frag(f"{frag_ns}_ch{i}_{j}", f))
+        FragmentPromote(
+            dst=_fold_frag(f"{frag_ns}_c{i}_{j}", f), src=_fold_frag(f"{frag_ns}_ch{i}_{j}", f), fragment_layout=atom.fragment_layout
+        )
         for f in range(n_folds)
         for i in range(m_reg)
         for j in range(n_reg)
@@ -1010,7 +1013,7 @@ def _a_slab_operand(
             row_axis=row_axis,
             row_body=row_body,
             cta=cta,
-            stat=cone_stat(c.operands[0], axes),
+            stat=cone_stat(c.operands[0], k_name, axes),
             dtypes={nm: cuda_name(dt) for nm, dt in cone_stat_dtypes(pro, stats, inputs).items()},
         )
     before = None
@@ -2013,7 +2016,7 @@ class _MmaOps(_AtomOps):
             scales=tuple(self._drain_scale(op) for op in operands),
         )
         if _f16acc(self.tile.atom):
-            stmts = [*stmts, *_f16acc_promotes(mn[0].reg, mn[1].reg, len(self.channels), self.frag_ns)]
+            stmts = [*stmts, *_f16acc_promotes(self.tile.atom, mn[0].reg, mn[1].reg, len(self.channels), self.frag_ns)]
         return stmts
 
     def _drain_scale(self, op):
@@ -2284,7 +2287,7 @@ class _MmaOps(_AtomOps):
                 # Promote every _F16ACC_STEPS atom-K steps (a compile-time-foldable modulo when
                 # the loop unrolls), plus the unconditional final fold after the loop — it also
                 # covers a symbolic / non-multiple K's partial last chunk.
-                promotes = _f16acc_promotes(m.reg, n.reg, 1, self.frag_ns)
+                promotes = _f16acc_promotes(self.tile.atom, m.reg, n.reg, 1, self.frag_ns)
                 period = atom.atom_k * _F16ACC_STEPS
                 fire = BinaryExpr("==", BinaryExpr("%", Var(k_axis.name), Literal(period, "int")), Literal(period - atom.atom_k, "int"))
                 stmts.append(Cond(cond=fire, body=tuple(promotes)))
@@ -3206,9 +3209,10 @@ class _FlashOps(_MmaOps):
         out += [self._frag(f"_b{j}_{t}", "b") for j in range(n.reg) for t in range(steps)]
         if _f16acc(atom):
             out += [self._frag(f"{cell}{i}_{j}", "c") for i in range(m.reg) for j in range(n.reg)]
-        for t in range(steps):
+
+        def repack(t: int) -> list[Stmt]:
             if atom.fragment_layout == "m8n8k4":
-                out += [
+                return [
                     FragmentRepack(
                         frag=self.frag(f"_a{i}_{t}"),
                         srcs=(weights[i, t // 4],),
@@ -3218,18 +3222,14 @@ class _FlashOps(_MmaOps):
                     )
                     for i in range(m.reg)
                 ]
-            else:
-                out += [
-                    FragmentRepack(
-                        frag=self.frag(f"_a{i}_{t}"),
-                        srcs=(weights[i, 2 * t], weights[i, 2 * t + 1]),
-                        ab_dtype=atom.ab_dtype,
-                    )
-                    for i in range(m.reg)
-                ]
+            return [
+                FragmentRepack(frag=self.frag(f"_a{i}_{t}"), srcs=(weights[i, 2 * t], weights[i, 2 * t + 1]), ab_dtype=atom.ab_dtype)
+                for i in range(m.reg)
+            ]
+
+        def drain(t: int, cols: range) -> list[Stmt]:
             row = BinaryExpr("+", base, Literal(t * atom.atom_k, "int"))
-            out += [self._value_read(staged, slot, n, offset, j, t, v_load, row, bound) for j in range(n.reg)]
-            out += [
+            return [self._value_read(staged, slot, n, offset, j, t, v_load, row, bound) for j in cols] + [
                 MmaSyncPtx(
                     c_frag=self.frag(f"{cell}{i}_{j}"),
                     a_frag=self.frag(f"_a{i}_{t}"),
@@ -3239,12 +3239,26 @@ class _FlashOps(_MmaOps):
                     c_dtype=atom.operand_dtype("c").name,
                 )
                 for i in range(m.reg)
-                for j in range(n.reg)
+                for j in cols
             ]
-        if _f16acc(atom):
-            out += [
-                FragmentPromote(dst=self.frag(f"_c{i}_{j}"), src=self.frag(f"{cell}{i}_{j}")) for i in range(m.reg) for j in range(n.reg)
-            ]
+
+        # A reduced partial lives until its promote. While the row's partials fit the thread's registers every
+        # step drains the whole row; past that (head width 256: 64 registers over the envelope) the chunk drains
+        # ``width`` columns through all its steps and folds them at once — the offer's own rule.
+        producer = None if self.inner is None else self.inner[0]
+        width = chunk_partial_columns(self.c, producer, self.tile, self.stage) if _f16acc(atom) else n.reg
+        if width < n.reg:
+            out += [stmt for t in range(steps) for stmt in repack(t)]
+        for j0 in range(0, n.reg, width):
+            cols = range(j0, min(j0 + width, n.reg))
+            for t in range(steps):
+                out += (repack(t) if width == n.reg else []) + drain(t, cols)
+            if _f16acc(atom):
+                out += [
+                    FragmentPromote(dst=self.frag(f"_c{i}_{j}"), src=self.frag(f"{cell}{i}_{j}"), fragment_layout=atom.fragment_layout)
+                    for i in range(m.reg)
+                    for j in cols
+                ]
         return out
 
     def _value_read(self, value, slot, n, offset, j: int, t: int, v_load, row, bound) -> Stmt:

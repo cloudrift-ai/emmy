@@ -141,7 +141,16 @@ a kernel that accumulates at full width. The worker restores the prior precision
 job, including failures. `--strict-evidence` (`run`, `compile`, `serve`; `EMMY_STRICT_EVIDENCE`) is the
 deploy-side strictness: a fork no measured row decides raises `EvidenceError` naming the kernel instead of deploying
 a prediction. BF16 inputs and constants bind through the compiler's raw `uint16` carrier, and
-backend output bits are decoded to numeric values before every command-layer correctness check. The command records
+backend output bits are decoded to numeric values before every command-layer correctness check. The eager forward
+that serves as the correctness reference runs inside `correctness_oracle`, which turns torch's reduced-precision GEMM
+reductions off: with them on, the FP16 GEMM at K = 15360 leaves one element in ten of its own output outside
+`rtol=atol=1e-3` of an FP64 product, and a kernel nearer the truth than eager failed `--strict` for eager's error.
+The TIMED eager forward keeps torch's defaults, the library a user runs. The `torch.compile` column is admitted by the
+same dtype-scaled verdict as the Emmy output (Inductor's own FP16 GEMM is outside a flat `1e-3` of cuBLAS at these
+depths on an RTX 4090), and a backend that cannot be built travels as a failure in the results, printed `failed` in
+the table and recorded `status: failed`, because the builder runs in the bench worker, whose log the parent shows
+only on a crash. Both checks compare in arrays: a Python list
+holds one float object per cell, which for an LM-head output is gigabytes. The command records
 max/mean/relative error in `--json` and exits
 nonzero on any missing or failed evidence. Dynamic-shape parsing, quantized architecture twins and
 their in-graph storage algebra, sliding-window stamps, and the guarded `trust_remote_code` fallback therefore behave
@@ -155,7 +164,10 @@ it into the checkpoint so the number is readable rather than implied; `fp8-block
 activations are quantized dynamically, so it has nothing to calibrate. It needs a linear whose weight is a module
 parameter — `a @ b` over two tensors has none, and says so.
 For isolated frontend-graph runs, the worker returns the symbolic environment used for execution with its benchmark
-result; `run` uses that same binding when rendering dynamic per-kernel grid statistics.
+result; `run` uses that same binding when rendering dynamic per-kernel grid statistics. Register and spill
+attributes come from the runtime cubin loader, so reporting reuses the measured binary and its compiler flags
+and architecture target instead of compiling a separate diagnostic kernel. The kernel table includes per-thread
+local-memory bytes beside register counts, making spills visible in the archived benchmark log.
 For a single-layer trace, the loader derives a missing attention `layer_type` from
 `config.layer_types[self_attn.layer_idx]`. Rotary modules keyed by that attention label supply one `(cos, sin)` tuple;
 modules with independent rotary keys (for example DeepSeek V4's `main` / `compress`) supply the complete mapping.
@@ -180,7 +192,11 @@ pre/post/expert and coded rate-profile kernel into one document, and stores each
 Loop IR. The pinned env supplies the model provenance and complete realization matrix: decode, prefill, M=1, extra
 warm shapes, symbolic fallbacks, and standard/precision-trading input pin regimes. Each target receives a
 `realizations` array with those named bindings and explicit registered input pins; trace no longer accepts an
-independent serving-shape surface. A static-only release is accepted
+independent serving-shape surface. Every twin is its own structural target — serving compiles a static twin at
+its own width, and today's loop fusion gives each width its own fused kernel — so a target carries the rows its
+twin reaches (`ServingConfig.realizations_for`, keyed on the width the twin's name spells): a static twin's
+target holds that width's rows in both lanes, a symbolic twin's the dynamic rows. The audit expects the same
+split per target. A static-only release is accepted
 only when the same env proves that no wider or symbolic path is reachable. The resulting working file is consumed
 directly by `tune --golden PATH` and verified by `run --golden PATH [--realization NAME]`.
 
@@ -278,7 +294,9 @@ summed isolated launches of the kernels that decision produced, and one child-id
 its own isolated launch, both with the greedy comparison row as their `same-input-greedy` reference
 (`working_golden.record_greedy_pick`; the pipeline ARCHITECTURE's golden-record Part has the spelling and the
 pricing). That is how a pick the prior made becomes rows a strict-evidence compile of the file deploys
-from without a prior. Independently of both, every clean pinned row and the greedy isolated re-bench are written into
+from without a prior. Under `EMMY_KNOBS` the recorded pick IS the pin, so the recording refuses, and the run exits
+nonzero, when the env pin did not realize (`greedy_record_refusal`): the row would file the planner's own schedule
+under the pin's name and lane. It refuses a pick whose answer `--strict` rejected for the same reason. Independently of both, every clean pinned row and the greedy isolated re-bench are written into
 the tune DB by default at tune-standard measurement quality: per-kernel `perf` rows through the tuner's own writer —
 the deploy evidence the next `compile` / `run` / `serve` picks from, which is how a replayed golden or a hand-pinned
 `--ab` row becomes what the compiler chooses — and node-store leaves for the offline prior's training data. An
@@ -300,8 +318,12 @@ knob rows into either baseline as proposals. Canonical goldens remain the common
 
 `emmy eval golden --golden GOLDEN_YAML --serving-config PATH` is the release audit. The env must name that exact
 canonical file. The command validates the nested schema and model provenance, requires the live GPU to match both the
-config and YAML, proves that every structural target has every config-derived realization, validates the recorded rows,
-and re-traces the exact static/symbolic precision matrix. Any missing realization, unrealized entry, or twin the
+config and YAML, proves that every structural target has every config-derived realization its twin reaches (the width
+rows of a static twin, the dynamic rows of a symbolic one), validates the recorded rows, and re-traces the exact
+static/symbolic precision matrix. A warm shape names its lane (the ``:fm`` suffix), so a served process in a lane
+compiles the static twins of that lane's widths and nothing else; the serving-matrix compile asks the same of each
+lane's rows — a symbolic twin in every lane, a static twin where its width is warmed. Any missing realization,
+unrealized entry, or twin the
 golden rows do not decide is a non-zero release failure. Model, revision, GPU, and serving widths therefore have no
 independent audit flags.
 

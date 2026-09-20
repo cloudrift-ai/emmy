@@ -225,6 +225,30 @@ def test_strict_evidence_refuses_a_fork_no_measurement_decides(monkeypatch) -> N
         _require_evidence(point, "nothing measured")
 
 
+def test_strict_evidence_lets_a_hand_pin_decide_a_kernel_set_fork(monkeypatch) -> None:
+    """A pinned route leaves the placement fork one arm. Nothing is predicted or compared there, so
+    strict evidence must not refuse it: recording a kernel set under a hand pin with
+    ``--strict-evidence`` is how its pieces are proven measured before the routing row exists."""
+    from emmy.compiler.pipeline.pipeline import ForkPoint
+    from emmy.compiler.pipeline.search import golden
+    from emmy.compiler.pipeline.search.policy.greedy import greedy_decide
+
+    monkeypatch.setattr(golden, "evidence_rows", lambda _gpu, _cap: [])
+    monkeypatch.setattr(golden, "scope_explicit", lambda: True)
+    monkeypatch.setenv("EMMY_STRICT_EVIDENCE", "1")
+    cut = DeferredFork(materialize=lambda: None, knobs={"PLACE@map.1/map": "cut"}, structural=True)
+    fuse = DeferredFork(materialize=lambda: None, knobs={"PLACE": "fuse"})
+    ctx = SimpleNamespace(structural_key=lambda: "ctx", gpu_name="", compute_capability=(8, 9), features=lambda: {"H_opt": 3.0})
+    match = SimpleNamespace(root_node_id="node", rule=SimpleNamespace(name="030_cut"), graph=None)
+
+    def point(options):
+        return ForkPoint(match=match, options=options, root_op=TileOp(op=projection(), knobs={"S_shape": 128.0}), ctx=ctx)
+
+    assert greedy_decide(prior=_BarePrior())(point([cut])) is cut
+    with pytest.raises(EvidenceError, match="kernel-set arm"):
+        greedy_decide(prior=_BarePrior())(point([fuse, cut]))
+
+
 # ---------------------------------------------------------------------------
 # _stream_tiers — the streamed scan must equal the flattened scoring exactly.
 # ---------------------------------------------------------------------------

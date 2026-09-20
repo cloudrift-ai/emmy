@@ -115,11 +115,11 @@ def test_trace_serving_twins_writes_one_exact_inventory_with_explicit_provenance
     assert {record.name.split(".", 1)[0] for record in records} == {"pre1@b2", "expert512@b2"}
     assert all(record.loop_wire is not None and not record.origins for record in records)
     assert all(torch_ref.is_runnable(record.reference_program) for record in records)
-    assert {(record.bindings, record.pins) for record in records} >= {
-        ((("num_tokens", 64),), (("FAST_MATH", False),)),
-        ((("num_tokens", 1024),), (("FAST_MATH", True),)),
-        ((), (("FAST_MATH", False),)),
-        ((), (("FAST_MATH", True),)),
+    # A static twin's target carries the rows of its own width, in every lane the config reaches it.
+    assert {(record.name.split(".", 1)[0], record.bindings, record.pins) for record in records} == {
+        ("pre1@b2", (("num_tokens", 1),), (("FAST_MATH", False),)),
+        ("pre1@b2", (("num_tokens", 1),), (("FAST_MATH", True),)),
+        ("expert512@b2", (("num_tokens", 512),), (("FAST_MATH", False),)),
     }
 
 

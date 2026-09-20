@@ -117,6 +117,37 @@ def test_canonical_label_splits_regular_asymmetric_graph() -> None:
         assert tuple(permuted_ranks[positions[old]] for old in range(12)) == ranks
 
 
+def test_interchangeable_arms_label_in_quadratic_refinements(monkeypatch) -> None:
+    """k arms of one hub that no refinement tells apart — a kernel's k register fragments, each
+    loaded, multiplied and promoted on its own — individualize one at a time. A branch whose
+    first leaf equals a leaf already seen is the image of an explored subtree and stops there,
+    and every node refines from its individualized cell alone, so the search costs one
+    refinement per (level, arm) pair rather than a full refinement of every node of a cubic
+    tree: the o_proj piece of a Gemma 4 decoder half at 16 fragments took 85 s to label."""
+    from emmy.compiler.ir.stmt import order
+
+    refinements = [0]
+    refine = order._equitable_partition
+
+    def counted(*args, **kwargs):
+        refinements[0] += 1
+        return refine(*args, **kwargs)
+
+    monkeypatch.setattr(order, "_equitable_partition", counted)
+    arms = 16
+    colors: list[str] = ["hub"]
+    edges: list[tuple[int, int, str]] = []
+    for _ in range(arms):
+        base = len(colors)
+        colors += ["load", "mma", "promote"]
+        edges += [(0, base, "read"), (base, base + 1, "def"), (base + 1, base + 2, "def"), (base + 2, 0, "write")]
+    ranks = _canonical_ranks(tuple(colors), tuple(edges))
+    assert refinements[0] <= arms * (arms + 1)
+    permuted_colors, permuted_edges = _permuted(colors, edges, tuple(reversed(range(len(colors)))))
+    permuted_ranks = _canonical_ranks(permuted_colors, permuted_edges)
+    assert _certificate(permuted_colors, permuted_edges, permuted_ranks) == _certificate(colors, edges, ranks)
+
+
 def test_kahn_tie_break_is_optional() -> None:
     body = Body((Assign(name="right", op="exp", args=("x",)), Assign(name="left", op="abs", args=("x",))))
     incoming = (frozenset(), frozenset())

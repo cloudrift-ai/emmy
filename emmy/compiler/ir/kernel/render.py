@@ -226,6 +226,36 @@ static __device__ __forceinline__ int emmy_volta_b_congruous(int row, int col, i
     return physical_row * ldm + physical_col;
 }
 
+// One aligned run, shared by the global and shared-memory fragment loaders.
+template <typename T>
+static __device__ __forceinline__ void emmy_mma884_load4(unsigned* r, const T* g) {
+    if constexpr (sizeof(T) == 4) {
+        // Pack each loaded pair before exposing it to the surrounding code. Four live
+        // FP32 values at once can push a register-resident matrix loop into spills.
+        #pragma unroll
+        for (int p = 0; p < 2; ++p) {
+            asm volatile("{.reg .f32 x, y; .reg .b16 lo, hi;\\n\\t"
+                         "ld.v2.f32 {x, y}, [%1];\\n\\t"
+                         "cvt.rn.f16.f32 lo, x; cvt.rn.f16.f32 hi, y;\\n\\t"
+                         "mov.b32 %0, {lo, hi};}\\n"
+                         : "=r"(r[p]) : "l"(g + p * 2) : "memory");
+        }
+    } else {
+        uint2 v = *reinterpret_cast<const uint2*>(g);
+        r[0] = v.x; r[1] = v.y;
+    }
+}
+
+// The caller proves four-element alignment and a complete K slice.
+template <typename T, bool A>
+static __device__ __forceinline__ void emmy_mma884_load_gmem4(unsigned* r, const T* g, int ldm, int left) {
+    int lane = threadIdx.x & 31;
+    int comp = (lane & 15) >> 2;
+    int row = ((A ? comp >> 1 : comp & 1) << 3) + (lane & 3) + ((lane >> 4) << 2);
+    row = min(row, max(left - 1, 0));
+    emmy_mma884_load4(r, g + row * ldm);
+}
+
 template <typename T, typename F = T>
 static __device__ __forceinline__ void emmy_mma884_load_a_impl(
     unsigned* r, const T* g, int ldm, int rows_left, int k_left) {
@@ -318,19 +348,12 @@ static __device__ __forceinline__ void emmy_mma884_load_b_gmem_trans_nclamp_kzer
 // the staged slab. Load that run as one 64-bit vector; the canonical B layout
 // still needs the strided gather below. Volta has no warp matrix-load
 // instruction.
-template <typename T>
-static __device__ __forceinline__ void emmy_mma884_load_smem4(unsigned* r, const T* s) {
-    uint2 packed = *reinterpret_cast<const uint2*>(s);
-    r[0] = packed.x;
-    r[1] = packed.y;
-}
-
 template <typename T, typename F = T>
 static __device__ __forceinline__ void emmy_mma884_load_a_smem(unsigned* r, const T* s, int ldm) {
     int lane = threadIdx.x & 31;
     int comp = (lane & 15) >> 2;
     int row = ((comp >> 1) << 3) + (lane & 3) + ((lane >> 4) << 2);
-    emmy_mma884_load_smem4(r, s + row * ldm);
+    emmy_mma884_load4(r, s + row * ldm);
 }
 template <typename T, typename F = T>
 static __device__ __forceinline__ void emmy_mma884_load_b_smem(unsigned* r, const T* s, int ldm) {
@@ -341,7 +364,7 @@ static __device__ __forceinline__ void emmy_mma884_load_b_smem_trans(unsigned* r
     int lane = threadIdx.x & 31;
     int comp = (lane & 15) >> 2;
     int col = ((comp & 1) << 3) + (lane & 3) + ((lane >> 4) << 2);
-    emmy_mma884_load_smem4(r, s + col * ldm);
+    emmy_mma884_load4(r, s + col * ldm);
 }
 
 // CUTLASS's Volta layouts turn two logical 16-row/column fragments into one
@@ -383,6 +406,16 @@ static __device__ __forceinline__ void emmy_mma884_load_b_congruous_pair(
     r1[1] = packed.w;
 }
 
+static __device__ __forceinline__ unsigned emmy_pack_f16(float x, float y) {
+    unsigned packed;
+    asm("{.reg .b16 lo, hi;\\n\\t"
+        "cvt.rn.f16.f32 lo, %1;\\n\\t"
+        "cvt.rn.f16.f32 hi, %2;\\n\\t"
+        "mov.b32 %0, {lo, hi};}\\n"
+        : "=r"(packed) : "f"(x), "f"(y));
+    return packed;
+}
+
 // Volta C->A register repack. One logical m8n8k4 C fragment covers 16x16 through
 // four computation groups. An A fragment needs one row's four adjacent columns;
 // those values live in two lanes of the computation group for that column quarter.
@@ -394,29 +427,37 @@ static __device__ __forceinline__ void emmy_c_to_a_f16_m8n8k4(unsigned* a, const
     int src0 = (lane & 16) | (src_comp << 2) | (lane & 1);
     int src1 = src0 + 2;
     constexpr int col_half = (Part & 1) << 2;
-    float x00 = __shfl_sync(0xffffffffu, c[col_half], src0);
-    float x01 = __shfl_sync(0xffffffffu, c[col_half + 1], src0);
-    float x10 = __shfl_sync(0xffffffffu, c[col_half + 2], src0);
-    float x11 = __shfl_sync(0xffffffffu, c[col_half + 3], src0);
-    float y00 = __shfl_sync(0xffffffffu, c[col_half], src1);
-    float y01 = __shfl_sync(0xffffffffu, c[col_half + 1], src1);
-    float y10 = __shfl_sync(0xffffffffu, c[col_half + 2], src1);
-    float y11 = __shfl_sync(0xffffffffu, c[col_half + 3], src1);
+    unsigned low = emmy_pack_f16(c[col_half], c[col_half + 1]);
+    unsigned high = emmy_pack_f16(c[col_half + 2], c[col_half + 3]);
+    unsigned x0 = __shfl_sync(0xffffffffu, low, src0);
+    unsigned x1 = __shfl_sync(0xffffffffu, high, src0);
+    unsigned y0 = __shfl_sync(0xffffffffu, low, src1);
+    unsigned y1 = __shfl_sync(0xffffffffu, high, src1);
     bool high_row = (lane & 2) != 0;
-    float x0 = high_row ? x10 : x00;
-    float x1 = high_row ? x11 : x01;
-    float y0 = high_row ? y10 : y00;
-    float y1 = high_row ? y11 : y01;
-    asm("{.reg .b16 lo, hi;\\n\\t"
-        "cvt.rn.f16.f32 lo, %1;\\n\\t"
-        "cvt.rn.f16.f32 hi, %2;\\n\\t"
-        "mov.b32 %0, {lo, hi};}\\n"
-        : "=r"(a[0]) : "f"(x0), "f"(x1));
-    asm("{.reg .b16 lo, hi;\\n\\t"
-        "cvt.rn.f16.f32 lo, %1;\\n\\t"
-        "cvt.rn.f16.f32 hi, %2;\\n\\t"
-        "mov.b32 %0, {lo, hi};}\\n"
-        : "=r"(a[1]) : "f"(y0), "f"(y1));
+    a[0] = high_row ? x1 : x0;
+    a[1] = high_row ? y1 : y0;
+}
+
+// Select four rows of a logical 16x16 C fragment for a column-major B operand.
+// Shuffle packed column pairs, then select the column owned by the receiving lane.
+template <int Part>
+static __device__ __forceinline__ void emmy_c_to_b_f16_m8n8k4(unsigned* b, const float* c) {
+    int lane = threadIdx.x & 31;
+    int comp = (lane & 15) >> 2;
+    int src = ((Part & 1) << 4) | (((Part >> 1) * 2 + (comp & 1)) << 2) | (lane & 2);
+    #pragma unroll
+    for (int p = 0; p < 2; ++p) {
+        unsigned low = emmy_pack_f16(c[2 * p], c[2 * p + 1]);
+        unsigned high = emmy_pack_f16(c[2 * p + 4], c[2 * p + 5]);
+        unsigned xlo = __shfl_sync(0xffffffffu, low, src);
+        unsigned xhi = __shfl_sync(0xffffffffu, high, src);
+        unsigned ylo = __shfl_sync(0xffffffffu, low, src + 1);
+        unsigned yhi = __shfl_sync(0xffffffffu, high, src + 1);
+        unsigned x = (lane & 16) ? xhi : xlo;
+        unsigned y = (lane & 16) ? yhi : ylo;
+        int shift = (lane & 1) * 16;
+        b[p] = ((x >> shift) & 0xffffu) | ((y >> shift) << 16);
+    }
 }
 
 static __device__ __forceinline__ void emmy_mma_m8n8k4_f16_f32(
@@ -442,6 +483,47 @@ static __device__ __forceinline__ void emmy_mma_m8n8k4_f16_f32_brow(
                  : "r"(a[0]), "r"(a[1]), "r"(b[0]), "r"(b[1]),
                    "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]),
                    "f"(c[4]), "f"(c[5]), "f"(c[6]), "f"(c[7]));
+}
+
+static __device__ __forceinline__ void emmy_mma_m8n8k4_f16_f16(
+    unsigned* d, const unsigned* a, const unsigned* b, const unsigned* c) {
+    asm volatile("mma.sync.aligned.m8n8k4.row.col.f16.f16.f16.f16 "
+                 "{%0, %1, %2, %3}, {%4, %5}, {%6, %7}, {%8, %9, %10, %11};\\n"
+                 : "=r"(d[0]), "=r"(d[1]), "=r"(d[2]), "=r"(d[3])
+                 : "r"(a[0]), "r"(a[1]), "r"(b[0]), "r"(b[1]),
+                   "r"(c[0]), "r"(c[1]), "r"(c[2]), "r"(c[3]));
+}
+
+static __device__ __forceinline__ void emmy_mma_m8n8k4_f16_f16_brow(
+    unsigned* d, const unsigned* a, const unsigned* b, const unsigned* c) {
+    asm volatile("mma.sync.aligned.m8n8k4.row.row.f16.f16.f16.f16 "
+                 "{%0, %1, %2, %3}, {%4, %5}, {%6, %7}, {%8, %9, %10, %11};\\n"
+                 : "=r"(d[0]), "=r"(d[1]), "=r"(d[2]), "=r"(d[3])
+                 : "r"(a[0]), "r"(a[1]), "r"(b[0]), "r"(b[1]),
+                   "r"(c[0]), "r"(c[1]), "r"(c[2]), "r"(c[3]));
+}
+
+// Volta's f16 C fragment owns one row; its f32 counterpart owns two rows.
+// Exchange row pairs before promotion, keeping the shadow in the ordinary f32 layout.
+static __device__ __forceinline__ void emmy_mma_promote_f16acc_m8n8k4(float* c, unsigned* h) {
+    int lane = threadIdx.x & 31;
+    #pragma unroll
+    for (int p = 0; p < 4; ++p) {
+        int src = (lane & ~2) | ((p & 1) << 1);
+        unsigned low = __shfl_sync(0xffffffffu, h[p & 2], src);
+        unsigned high = __shfl_sync(0xffffffffu, h[(p & 2) + 1], src);
+        unsigned packed = (lane & 2) ? high : low;
+        float x, y;
+        asm("{.reg .b16 lo, hi;\\n\\t"
+            "mov.b32 {lo, hi}, %2;\\n\\t"
+            "cvt.f32.f16 %0, lo;\\n\\t"
+            "cvt.f32.f16 %1, hi;}\\n"
+            : "=f"(x), "=f"(y) : "r"(packed));
+        c[2 * p] += x;
+        c[2 * p + 1] += y;
+    }
+    #pragma unroll
+    for (int p = 0; p < 4; ++p) h[p] = 0;
 }
 """
 
@@ -510,6 +592,21 @@ static __device__ __forceinline__ void emmy_c_to_a_bf16(unsigned* a, const float
     asm("cvt.rn.bf16x2.f32 %0, %1, %2;\\n" : "=r"(a[1]) : "f"(c0[3]), "f"(c0[2]));
     asm("cvt.rn.bf16x2.f32 %0, %1, %2;\\n" : "=r"(a[2]) : "f"(c1[1]), "f"(c1[0]));
     asm("cvt.rn.bf16x2.f32 %0, %1, %2;\\n" : "=r"(a[3]) : "f"(c1[3]), "f"(c1[2]));
+}
+
+// A 16x8 C tile becomes a B operand through warp-local exchange of packed column pairs.
+static __device__ __forceinline__ void emmy_c_to_b_f16(unsigned* b, const float* c) {
+    unsigned lo, hi;
+    asm("cvt.rn.f16x2.f32 %0, %1, %2;\\n" : "=r"(lo) : "f"(c[1]), "f"(c[0]));
+    asm("cvt.rn.f16x2.f32 %0, %1, %2;\\n" : "=r"(hi) : "f"(c[3]), "f"(c[2]));
+    const int lane = threadIdx.x & 31, g = lane >> 2, t = lane & 3;
+    const int src = (2 * t) * 4 + (g >> 1), shift = (g & 1) * 16;
+    const unsigned l0 = (__shfl_sync(0xffffffff, lo, src) >> shift) & 0xffff;
+    const unsigned l1 = (__shfl_sync(0xffffffff, lo, src + 4) >> shift) & 0xffff;
+    const unsigned h0 = (__shfl_sync(0xffffffff, hi, src) >> shift) & 0xffff;
+    const unsigned h1 = (__shfl_sync(0xffffffff, hi, src + 4) >> shift) & 0xffff;
+    b[0] = l0 | (l1 << 16);
+    b[1] = h0 | (h1 << 16);
 }
 
 // gmem-direct fragment loads — the fallback when an mma.sync operand was NOT
@@ -1392,6 +1489,7 @@ def render_kernelop(
     sig_dtypes = [_dtype_for(n) for n in kernel_op.inputs if n not in literals]
     sig_dtypes.extend(_dtype_for(n) for n in kernel_op.outputs)
     sig_dtypes.extend(s.dtype for s in kernel_op.body.iter_of_type(Assign) if s.dtype is not None)
+    sig_dtypes.extend(frag_dtype(ctx, s.frag) for s in kernel_op.body.iter_of_type(LdmatrixLoad) if frag_dtype(ctx, s.frag))
     includes = "".join(f"#include {h}\n" for h in cuda_includes(sig_dtypes))
     # The mma.sync (s16816) tensor-core path is pure inline PTX — its
     # ldmatrix / mma.sync wrappers are emitted in ``_MMA_SYNC_PRELUDE``, so

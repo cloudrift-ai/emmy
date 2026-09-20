@@ -143,7 +143,10 @@ def test_production_enumeration_is_the_compatible_independent_product() -> None:
     leaves = _schedule_leaves(tile, "pointwise", target)
 
     assert {_signature(codec, leaf.schedule) for leaf in leaves} == reference
-    assert len(reference) == offers.bounds[0] == 3
+    # The per-cell form and every register strip dividing the 8-wide axis, ``f8`` included: a map's
+    # strip ladder runs past the scalar-contraction one.
+    assert {dict(row)["TILE"] for row in reference} == {"", "f2", "f4", "f8"}
+    assert len(reference) == offers.bounds[0] == 4
     (materialized,) = leaves[0].expand()
     assert materialized.schedule == leaves[0].schedule
     assert materialized.place == tile.place.on_grid()
@@ -167,6 +170,28 @@ def test_a_complete_row_proves_its_singleton_by_selection_alone() -> None:
     assert set(c.problem.node_site(site).nodes) <= set(offers.node_site(site).nodes)  # selects, never adds
     assert tuple(_enumerate_context(c)) == (wanted,)
     assert tuple(enumerate_classic_reference(c)) == (wanted,)
+
+
+def test_a_swept_map_row_decodes_exactly_with_its_strip_bare() -> None:
+    """A map whose store sweeps an axis offers the kernel-level worker widths beside its register
+    strips, and its rows spell both (``WORK=t256,TILE=f2``). The strip never carries that inventory
+    — it is the sweep's — so the exact decode of a complete row must parse the strip bare, as the
+    catalog spells it; folding the WORK into it made every such row equal no enumerated leaf,
+    which failed the release audit of the Gemma 4 golden on four QK-norm pieces."""
+    m, n = Axis("m", 8), Axis("n", 256)
+    root = projection((), (Load(name="x", input="x", index=(Var("m"), Var("n"))), Assign("y", "add", ("x", "x"))), ("y",))
+    spec = OutputSpec(Write(output="out", index=(Var("m"), Var("n")), value="y"), sweep=(n,))
+    tile = TileOp(op=root, place=Placement(free=(m,)), axes=(m, n), output_specs=(spec,))
+    target = Context.from_target((12, 0))
+    context = _plain(tile, target)
+    codec = ClassicScheduleCodec(context)
+    rows = {}
+    for wanted in enumerate_classic_reference(context):
+        row = codec.encode(wanted)
+        rows[(row["WORK"], row["TILE"])] = wanted
+        complete = {key: row.get(key, "") for key in codec.keys()}
+        assert ClassicScheduleCodec(context.narrowed(complete, strict=True)).decode(complete) == wanted, row
+    assert ("t256", "f2") in rows and len(rows) == 36
 
 
 def test_reduction_enumeration_filters_the_independent_product_by_compatibility() -> None:

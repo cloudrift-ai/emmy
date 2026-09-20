@@ -211,3 +211,9 @@ def test_<op>_correctness():
 Use small concrete shapes (avoid symbolic dims) so the numpy backend
 can execute the graph. `IndexMapOp.forward` iterates in Python, so keep
 tensor sizes under ~1000 elements for fast tests.
+
+Register carry tests cover strict schedule round trips, precision gating, ownership refusals, and a chunk loop
+inside one launch on both sm70 and modern targets. CUDA cases check old-state reads, uneven GDN matrices, both
+accumulation precisions, and absence of spills against the Loop reference. The real Qwen3.5 trace checks that the
+correction product is reused by its two consumers.
+Volta corpus cases exercise the shared FP16 promotion in direct and staged matrix schedules.
