@@ -62,7 +62,7 @@ matrices:
       ncu: /opt/nvidia/nsight-compute/2025.2.1/ncu
   - cross:
       acc: [f32, f16]
-      heads: 12
+      heads: [12, 48]
       tokens: 512
       kernel: k_matmul_reduce
       launches: 1
