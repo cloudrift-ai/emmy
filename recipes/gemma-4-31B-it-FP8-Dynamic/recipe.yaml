@@ -1,9 +1,9 @@
 tags:
-  - best-effort
+  - maintained
 
 model:
   huggingface: "RedHatAI/gemma-4-31B-it-FP8-Dynamic"
-  rationale: "Gemma 4 cooling, eclipsed by Qwen3.8, minimal current momentum."
+  rationale: "Gemma 4 cooling, eclipsed by Qwen3.8; minimal current momentum."
   heat: 18
 engine:
   llm:

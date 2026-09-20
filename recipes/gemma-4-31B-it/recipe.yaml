@@ -1,9 +1,9 @@
 tags:
-  - maintained
+  - best-effort
 
 model:
   huggingface: "google/gemma-4-31B-it"
-  rationale: "Established interest despite cooling family; no fresh momentum."
+  rationale: "Arena 1451/rank 68, stable serving, but no fresh current momentum."
   heat: 50
 engine:
   llm:

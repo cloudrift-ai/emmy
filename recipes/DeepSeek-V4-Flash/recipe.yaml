@@ -1,9 +1,9 @@
 tags:
-  - maintained
+  - best-effort
 
 model:
   huggingface: "deepseek-ai/DeepSeek-V4-Flash"
-  rationale: "Superseded by V4.1-Flash and V4-Flash-0731; low current serving demand relative to newer releases."
+  rationale: "Still served (OR rank 9, +13%), but superseded by V4-Flash-0731 and V4.1-Flash."
   heat: 35
 # DeepSeek-V4-Flash: 284B / 13B-active MoE, CSA+HCA hybrid attention (MLA, 1 KV head, 256 experts / 6 active),
 #   native FP4-experts + FP8-attn (deploy-ready), MIT, text-only. Native ctx 1,048,576 (YARN x16 over 65,536 base).
