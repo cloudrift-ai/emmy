@@ -43,3 +43,15 @@ def test_native_cli_modes_reject_unsupported_sampling():
     args = parser.parse_args(["generate", "unused", "--native-pack", "artifact", "--max-new-tokens", "-1"])
     with pytest.raises(ValueError, match="nonnegative"):
         handle_generate(args)
+
+
+def test_native_only_arguments_fail_before_loading_a_model():
+    import argparse
+
+    from emmy.commands.generate import handle_generate, register_generate_command
+
+    parser = argparse.ArgumentParser()
+    register_generate_command(parser.add_subparsers())
+    for options in (["--capture"], ["--context-length", "8"], ["--golden", "unused"], ["--strict-evidence"]):
+        with pytest.raises(ValueError, match="require"):
+            handle_generate(parser.parse_args(["generate", "unused", *options]))

@@ -143,8 +143,8 @@ impl Generator {
             .bind("position", &(self.position as i64).to_le_bytes())?;
         self.executor.advance(capture)?;
         self.position += 1;
-        self.stopped = false;
         if self.position < self.prompt_length {
+            self.stopped = false;
             return Ok(None);
         }
         let bytes = self.executor.output("next_token")?;

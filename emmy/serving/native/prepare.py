@@ -26,6 +26,8 @@ def validate_model(model, context_length):
         raise ValueError("native generation requires unquantized dense Qwen3")
     if not 1 <= context_length <= min(MAX_CONTEXT, cfg.max_position_embeddings):
         raise ValueError("native context length is outside supported model limits")
+    if model.training:
+        raise ValueError("native export requires evaluation mode")
     rope = cfg.rope_parameters
     if rope.get("rope_type") != "default" or rope.get("partial_rotary_factor", 1.0) != 1.0:
         raise ValueError("native generation requires default full rotary embedding")

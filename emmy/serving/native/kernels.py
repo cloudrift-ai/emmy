@@ -18,12 +18,12 @@ extern "C" __global__ void native_rope_cache(const half* q, const half* k, const
     half c = cosine[*position * HEAD_DIM + d], s = sine[*position * HEAD_DIM + d];
     if (i < HEADS * HEAD_DIM) {
         half r = d < HEAD_DIM / 2 ? __hneg(q[paired]) : q[paired];
-        rotated_q[i] = __hadd(__hmul(q[i], c), __hmul(r, s));
+        rotated_q[i] = __hadd_rn(__hmul_rn(q[i], c), __hmul_rn(r, s));
     }
     if (i < KV_HEADS * HEAD_DIM) {
         half r = d < HEAD_DIM / 2 ? __hneg(k[paired]) : k[paired];
         long long offset = *position * KV_HEADS * HEAD_DIM + i;
-        cache_k[offset] = __hadd(__hmul(k[i], c), __hmul(r, s));
+        cache_k[offset] = __hadd_rn(__hmul_rn(k[i], c), __hmul_rn(r, s));
         cache_v[offset] = v[i];
     }
 }
