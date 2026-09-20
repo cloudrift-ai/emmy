@@ -51,10 +51,10 @@ matrices:
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
     engine.llm.gpu_memory_utilization: 0.96
-    engine.llm.vllm.image: "cloudriftai/vllm-emmy:0.23.0-73b8e5377"
+    engine.llm.vllm.image: "cloudriftai/vllm-emmy:0.23.0-6328269d1"
     engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 4128 --no-enable-prefix-caching"
     cross:
-      engine.llm.vllm.extra_env: ["EMMY_STRICT_EVIDENCE=1 EMMY_CUBIN_CACHE=/hf_models/emmy-cubins EMMY_PACK_DIR=/hf_models/emmy-pack EMMY_GEN_DECODE_BUCKET=32", "EMMY_STRICT_EVIDENCE=1 EMMY_FAST_MATH=1 EMMY_CUBIN_CACHE=/hf_models/emmy-cubins EMMY_PACK_DIR=/hf_models/emmy-pack EMMY_GEN_DECODE_BUCKET=32"]
+      engine.llm.vllm.extra_env: ["EMMY_STRICT_EVIDENCE=1 EMMY_CUBIN_CACHE=/hf_models/emmy-cubins EMMY_PACK_DIR=/hf_models/emmy-pack-6328269d1 EMMY_GEN_DECODE_BUCKET=32", "EMMY_STRICT_EVIDENCE=1 EMMY_FAST_MATH=1 EMMY_CUBIN_CACHE=/hf_models/emmy-cubins EMMY_PACK_DIR=/hf_models/emmy-pack-6328269d1 EMMY_GEN_DECODE_BUCKET=32"]
       zip:
         benchmark.random_input_len: [256, 4096]
         benchmark.random_output_len: [256, 4096]
@@ -66,10 +66,10 @@ matrices:
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
     engine.llm.gpu_memory_utilization: 0.96
-    engine.llm.vllm.image: "cloudriftai/vllm-emmy:0.23.0-73b8e5377"
+    engine.llm.vllm.image: "cloudriftai/vllm-emmy:0.23.0-6328269d1"
     engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 2056 --no-enable-prefix-caching"
     cross:
-      engine.llm.vllm.extra_env: ["EMMY_STRICT_EVIDENCE=1 EMMY_CUBIN_CACHE=/hf_models/emmy-cubins EMMY_PACK_DIR=/hf_models/emmy-pack EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048", "EMMY_STRICT_EVIDENCE=1 EMMY_FAST_MATH=1 EMMY_CUBIN_CACHE=/hf_models/emmy-cubins EMMY_PACK_DIR=/hf_models/emmy-pack EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048"]
+      engine.llm.vllm.extra_env: ["EMMY_STRICT_EVIDENCE=1 EMMY_CUBIN_CACHE=/hf_models/emmy-cubins EMMY_PACK_DIR=/hf_models/emmy-pack-6328269d1 EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048", "EMMY_STRICT_EVIDENCE=1 EMMY_FAST_MATH=1 EMMY_CUBIN_CACHE=/hf_models/emmy-cubins EMMY_PACK_DIR=/hf_models/emmy-pack-6328269d1 EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048"]
       zip:
         benchmark.random_input_len: [4096, 4096]
         benchmark.random_output_len: [4096, 4096]
@@ -81,10 +81,10 @@ matrices:
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
     engine.llm.gpu_memory_utilization: 0.96
-    engine.llm.vllm.image: "cloudriftai/vllm-emmy:0.23.0-73b8e5377"
+    engine.llm.vllm.image: "cloudriftai/vllm-emmy:0.23.0-6328269d1"
     engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 4104 --no-enable-prefix-caching"
     cross:
-      engine.llm.vllm.extra_env: ["EMMY_STRICT_EVIDENCE=1 EMMY_CUBIN_CACHE=/hf_models/emmy-cubins EMMY_PACK_DIR=/hf_models/emmy-pack EMMY_GEN_DECODE_BUCKET=8", "EMMY_STRICT_EVIDENCE=1 EMMY_FAST_MATH=1 EMMY_CUBIN_CACHE=/hf_models/emmy-cubins EMMY_PACK_DIR=/hf_models/emmy-pack EMMY_GEN_DECODE_BUCKET=8"]
+      engine.llm.vllm.extra_env: ["EMMY_STRICT_EVIDENCE=1 EMMY_CUBIN_CACHE=/hf_models/emmy-cubins EMMY_PACK_DIR=/hf_models/emmy-pack-6328269d1 EMMY_GEN_DECODE_BUCKET=8", "EMMY_STRICT_EVIDENCE=1 EMMY_FAST_MATH=1 EMMY_CUBIN_CACHE=/hf_models/emmy-cubins EMMY_PACK_DIR=/hf_models/emmy-pack-6328269d1 EMMY_GEN_DECODE_BUCKET=8"]
     benchmark.random_input_len: 8192
     benchmark.random_output_len: 256
     benchmark.max_concurrency: 4
@@ -109,12 +109,12 @@ matrices:
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
     engine.llm.gpu_memory_utilization: 0.96
-    engine.llm.vllm.image: "cloudriftai/vllm-emmy:0.23.0-73b8e5377"
+    engine.llm.vllm.image: "cloudriftai/vllm-emmy:0.23.0-6328269d1"
     engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 2112 --no-enable-prefix-caching"
     cross:
       engine.llm.vllm.extra_env:
-        - "EMMY_STRICT_EVIDENCE=1 EMMY_CUBIN_CACHE=/hf_models/emmy-cubins EMMY_PACK_DIR=/hf_models/emmy-pack EMMY_GEN_DECODE_BUCKET=64 EMMY_GEN_PREFILL_BUCKET=2048"
-        - "EMMY_STRICT_EVIDENCE=1 EMMY_FAST_MATH=1 EMMY_CUBIN_CACHE=/hf_models/emmy-cubins EMMY_PACK_DIR=/hf_models/emmy-pack EMMY_GEN_DECODE_BUCKET=64 EMMY_GEN_PREFILL_BUCKET=2048"
+        - "EMMY_STRICT_EVIDENCE=1 EMMY_CUBIN_CACHE=/hf_models/emmy-cubins EMMY_PACK_DIR=/hf_models/emmy-pack-6328269d1 EMMY_GEN_DECODE_BUCKET=64 EMMY_GEN_PREFILL_BUCKET=2048"
+        - "EMMY_STRICT_EVIDENCE=1 EMMY_FAST_MATH=1 EMMY_CUBIN_CACHE=/hf_models/emmy-cubins EMMY_PACK_DIR=/hf_models/emmy-pack-6328269d1 EMMY_GEN_DECODE_BUCKET=64 EMMY_GEN_PREFILL_BUCKET=2048"
     benchmark.random_input_len: 256
     benchmark.random_output_len: 256
     benchmark.max_concurrency: 64
