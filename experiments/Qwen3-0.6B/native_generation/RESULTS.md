@@ -117,3 +117,20 @@ PyTorch documents that sliced and batched computations can differ with the same 
 low-precision intermediates can accumulate error. This motivates checking a higher-precision reference; it does
 not supply or endorse the budgets above. See the
 [PyTorch 2.11 numerical-accuracy notes](https://docs.pytorch.org/docs/2.11/notes/numerical_accuracy.html).
+
+## Revised contract before a second held-out run
+
+The first matrix failed: two cases passed and six failed. Across its 554 positions native stayed within both
+absolute budgets, and every argmax matched at least one reference. Per-position reference ratios rejected small
+errors when the reference happened to be nearly exact. The FP16 reference itself exceeded the total-variation
+budget once (0.021069), while native was closer to FP32 there (0.006573). These are failed trial results, not passes.
+
+The revised contract retains native's fixed 2% per-position budgets and the reference-supported argmax requirement.
+It compares root-mean-square error over each prompt trajectory against twice the corresponding FP16 reference RMS,
+with the same FP16-epsilon floor. The reference is a control, not an implementation required to pass native's budget.
+This tests comparable aggregate accuracy while the unchanged per-position limits bound individual outliers. It
+cannot guarantee identical free-running completions when reference precisions disagree.
+
+This revision uses the first matrix as calibration evidence. Fresh Spanish, counting, code, and 128-token context
+cases will test it with 24 further decode positions each. Their outcomes have not been inspected when this contract
+is committed. No production compiler change follows from the exploratory comparison failures.
