@@ -9,6 +9,10 @@ from tests.serving.helpers import qwen3_model
 def test_configuration_rejections():
     model = qwen3_model(2).half()
     validate_model(model, 8)
+    model.config.quantization_config = {"quant_method": "fp8"}
+    with pytest.raises(ValueError, match="unquantized"):
+        validate_model(model, 8)
+    del model.config.quantization_config
     for length in (0, 65, 4097):
         with pytest.raises(ValueError, match="context"):
             validate_model(model, length)
