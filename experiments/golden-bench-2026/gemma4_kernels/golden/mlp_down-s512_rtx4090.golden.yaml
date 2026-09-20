@@ -1,0 +1,109 @@
+compute_cap:
+- 8
+- 9
+programs:
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [512, 15360]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [15360, 3840]]]
+  - id: matmul
+    op: torch.matmul
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [512, 3840]]]
+configs:
+- program: 0
+  target:
+    origins:
+    - matmul
+  realizations:
+  - name: k_matmul_b59d9a
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    kernel_set:
+    - k_matmul_b59d9a.a36ea579052f
+  - name: k_matmul_b59d9a.a36ea579052f
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE: g2k
+    identity: a36ea579052fc3520683c6be181af436203df6a1e2a3bd1d6421cca68f019b68
+    measurements:
+      emmy_us: 416.60697930737547
+      reference_us: 444.2068789456342
+      reference_backend: same-input-greedy
+  - name: k_matmul_b59d9a.9e99ff91d578
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x8/k2
+      REDUCE: ''
+      STAGE: d2/smem-async
+      RASTER: ''
+    identity: 9e99ff91d5786b9e911a8d016799079aa806e34f1d756b04ae0c9ca9b1be3247
+    measurements:
+      emmy_us: 411.5839898586273
+      reference_us: 438.78400325775146
+      reference_backend: same-input-greedy
+  - name: k_matmul_b59d9a.7bfbb2de1729
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: 7bfbb2de1729e13ff457d395ccd505610cb320123ffd72b8a5dc415f799c8d18
+    measurements:
+      emmy_us: 5.022989448748137
+      reference_us: 5.422875687882708
+      reference_backend: same-input-greedy
+  - name: k_matmul_b59d9a.a36ea579052f
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      REDUCE: g2k
+    identity: a36ea579052fc3520683c6be181af436203df6a1e2a3bd1d6421cca68f019b68
+    measurements:
+      emmy_us: 284.55941641726
+      reference_us: 303.0517346329159
+      reference_backend: same-input-greedy
+  - name: k_matmul_b59d9a.9e99ff91d578
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k4
+      REDUCE: ''
+      STAGE: d2/smem-async
+      RASTER: gm8
+    identity: 9e99ff91d5786b9e911a8d016799079aa806e34f1d756b04ae0c9ca9b1be3247
+    measurements:
+      emmy_us: 279.5520027478536
+      reference_us: 297.64266808827716
+      reference_backend: same-input-greedy
+  - name: k_matmul_b59d9a.7bfbb2de1729
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: 7bfbb2de1729e13ff457d395ccd505610cb320123ffd72b8a5dc415f799c8d18
+    measurements:
+      emmy_us: 5.007413669406432
+      reference_us: 5.4090665446387405
+      reference_backend: same-input-greedy
+gpu_name: NVIDIA GeForce RTX 4090

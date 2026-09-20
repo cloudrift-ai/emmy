@@ -127,6 +127,26 @@ def _channel_dtype(tile: TileOp, node, target):
     return next(iter(eligible)) if len(eligible) == 1 else None
 
 
+def _fragment_rows_refusal(tile: TileOp) -> str | None:
+    """Why the M rows of a C fragment would have nowhere to land.
+
+    The grid's second-to-last free axis carries them, and each row needs its own address in the store. An axis no
+    output index mentions gives them one address between them: a plain store keeps the last row, a split's atomic
+    finalize sums all of them into that cell. One row is the exception — a matvec with a reshaped output stores
+    that way, the overhang guard predicating the rest. The case this rules out is a cross-CTA split's partition
+    axis standing in for an M that a size-one extent left without an axis of its own.
+    """
+    axis = tile.place.free[-2]
+    extent = getattr(axis.extent, "value", getattr(axis.extent, "extent", None))
+    if extent == 1 or not tile.output_specs:
+        # No specs is no statement: an authored tile carries the outputs alone, and the store this reads is the
+        # lowering's. One row needs no dimension of its own.
+        return None
+    if any(axis.name in index.free_vars() for spec in tile.output_specs for index in spec.write.index):
+        return None
+    return f"no output dimension carries the fragment's M rows ({axis.name})"
+
+
 def _node_refusal(tile: TileOp, target, node, fragment_epilogue: bool, packed: tuple = (None, None)) -> str | None:
     """Return why static node facts rule out every tensor-core atom."""
     from emmy.compiler.ir.tile.ops import edge_dtypes  # noqa: PLC0415 — tile.ops reads this package; module level would cycle
@@ -138,6 +158,8 @@ def _node_refusal(tile: TileOp, target, node, fragment_epilogue: bool, packed: t
         return "no typed inputs expose operand dtypes"
     if len(tile.place.free) < 2:
         return "the grid supplies no output-axis pair for a fragment"
+    if (why := _fragment_rows_refusal(tile)) is not None:
+        return why
     if not fragment_epilogue:
         return "the projection epilogue is not a per-fragment straight-line program"
     # The operand tuple in stored order — there is no named A/B role any more, and a nested
@@ -603,33 +625,57 @@ def _fragment_registers(atom, role: str) -> int:
     return m * n // (64 if dtype.nbytes == 2 else 32)
 
 
-def _paired_budget_refusal(node: Fold, producer: Fold | None, placed: PlacedTile, stage: ResolvedStage | None) -> str | None:
-    if not (placed.is_warp and stage is not None and producer is not None):
-        return None
-    from emmy.compiler.ir.schedule.catalog import MAX_REGISTERS_PER_CTA, MAX_REGISTERS_PER_THREAD  # noqa: PLC0415
-
+def _paired_registers(node: Fold, producer: Fold, placed: PlacedTile, stage: ResolvedStage, partial_columns: int) -> int:
+    """The live fragment registers one thread of a paired contraction needs, with ``partial_columns``
+    register columns of reduced partials live at once."""
     atom = placed.atom
-    if stage.bk_elems % atom.atom_n:
-        return None
     a_regs = _fragment_registers(atom, "a")
     b_regs = _fragment_registers(atom, "b")
-    c_regs = _fragment_registers(atom, "c")
+    cells = placed.reg_m * placed.reg_n
+    cell_regs = cells * _fragment_registers(atom, "c")
     if atom.operand_dtype("c").nbytes == 2:
-        c_regs += atom.atom_m * atom.atom_n // 32
+        # A reduced accumulator promotes into an f32 shadow per cell, beside its live partials.
+        cell_regs = cells * (atom.atom_m * atom.atom_n // 32) + placed.reg_m * partial_columns * _fragment_registers(atom, "c")
     depth = max(1, stage.reg_depth)
     # C fragment SETS the consumer holds. A fused multi-channel edge keeps one per streamed
     # operand; a TWISTED carrier keeps one — its bilinear channel — beside per-row registers for
     # the states that are no product, so counting its operands claimed fragments it never declares.
     channels = len(node.bilinear_channels()) if node.chunked() else len(node.operands) - 1
-    consumer_c = channels * placed.reg_m * placed.reg_n * c_regs
-    consumer = placed.reg_m * depth * a_regs + channels * (placed.reg_n * depth * b_regs + placed.reg_m * placed.reg_n * c_regs)
+    consumer_c = channels * cell_regs
+    consumer = placed.reg_m * depth * a_regs + channels * (placed.reg_n * depth * b_regs + cell_regs)
     producer_n = stage.bk_elems // atom.atom_n
     # The producer accumulates at ITS own cell: a chunked consumer on the reduced-accumulate cell
     # still scores in f32 (``wide_accumulate``), so its score tile is no wider for it.
     producer_c = _fragment_registers(wide_accumulate(atom), "c")
     producer_regs = placed.reg_m * a_regs + (len(producer.operands) - 1) * (producer_n * b_regs + placed.reg_m * producer_n * producer_c)
-    required = max(consumer, consumer_c + producer_regs)
-    available = min(MAX_REGISTERS_PER_THREAD, MAX_REGISTERS_PER_CTA // placed.block_threads)
+    return max(consumer, consumer_c + producer_regs)
+
+
+def _register_envelope(placed: PlacedTile) -> int:
+    from emmy.compiler.ir.schedule.catalog import MAX_REGISTERS_PER_CTA, MAX_REGISTERS_PER_THREAD  # noqa: PLC0415
+
+    return min(MAX_REGISTERS_PER_THREAD, MAX_REGISTERS_PER_CTA // placed.block_threads)
+
+
+def chunk_partial_columns(node: Fold, producer: Fold | None, placed: PlacedTile, stage: ResolvedStage | None) -> int:
+    """How many register columns of reduced chunk partials a chunked carrier keeps live — the one rule the
+    offer and the emitter share. The whole row while the thread's envelope holds it: every key step then drains
+    the row at once, which measures faster (14.8 us against 16.6 at head width 128 on an RTX 5090). Past the
+    envelope the chunk drains one column pair through all its steps and folds it at once — a pair, because that
+    is what one paired ldmatrix fills."""
+    row = placed.reg_n
+    if not node.chunked() or producer is None or stage is None or stage.bk_elems % placed.atom.atom_n:
+        return row
+    return row if _paired_registers(node, producer, placed, stage, row) <= _register_envelope(placed) else min(row, 2)
+
+
+def _paired_budget_refusal(node: Fold, producer: Fold | None, placed: PlacedTile, stage: ResolvedStage | None) -> str | None:
+    if not (placed.is_warp and stage is not None and producer is not None):
+        return None
+    if stage.bk_elems % placed.atom.atom_n:
+        return None
+    required = _paired_registers(node, producer, placed, stage, chunk_partial_columns(node, producer, placed, stage))
+    available = _register_envelope(placed)
     if required <= available:
         return None
     return (

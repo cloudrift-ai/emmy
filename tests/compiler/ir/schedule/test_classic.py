@@ -357,6 +357,31 @@ def test_an_authored_tile_bypasses_enumeration_precision_policy() -> None:
     assert schedule.nodes[site].tile == tile
 
 
+def test_a_row_narrows_within_a_pin_and_never_lifts_it() -> None:
+    """An evidence descent installs a recorded row over the problem the environment pinned. The pin is a
+    restriction the row narrows within: where the two disagree the site keeps the pin's value, so no leaf
+    equals the record and the caller re-decides. It used to take the record's — measured while
+    hand-recording a fast-math row beside a standard receipt of the same kernel, where ``EMMY_KNOBS`` named
+    the f16-accumulate tile and the compile deployed the receipt's f32-accumulate one."""
+    root = _contraction()
+    m, n = Axis("m", 8), Axis("n", 8)
+    source = TileOp(
+        op=root,
+        place=Placement(free=(m, n)),
+        axes=(m, n, Axis("k", 16)),
+        inputs={"a": Tensor("a", (8, 16), "f16"), "b": Tensor("b", (16, 8), "f16")},
+        outputs={"out": Tensor("out", (8, 8), "f16")},
+    )
+    target = Context.from_target((12, 0))
+    site = source.node_sites[0]
+    pinned = Tile(atom=ATOM_REGISTRY["mma_m16n8k16_f16_f16"], units=(1, 4), regs=(2, 2))
+    recorded = Tile(atom=ATOM_REGISTRY["mma_m16n8k16_f16_f32"], units=(1, 4), regs=(2, 2))
+
+    problem = ClassicProblem(source, target, row={"WORK": "w1x4", "TILE": pinned.spell()}, allow_f16_accumulate=True)
+    narrowed = problem.with_row({"WORK": "w1x4", "TILE": recorded.spell()})
+    assert [choice.tile for choice in narrowed.node_site(site).nodes] == [pinned]
+
+
 def test_strict_row_does_not_make_inherited_peer_pins_strict() -> None:
     problem = ClassicProblem(*_problem(_contraction()), validate_pins=False)
     tolerated = problem.with_row({"WORK": "not-a-work"})

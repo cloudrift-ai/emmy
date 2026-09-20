@@ -87,15 +87,27 @@ choice goes through the same lazy fork adapter; the ordinary Fold tree and preci
 pass runs to a fixpoint over two ordered domains. It first offers the maximal fused tree beside every semantically
 closed stored Fold-edge cut whose workspace dtypes are determined (an undeterminable seam is not offered — the offer
 and realization must agree). Once placement is consumed, it offers the unsplit tree beside every cross-CTA reduce
-split the head Fold admits. A selected cut or split replaces the kernel with fresh unmapped pieces. A bare
-`PLACE=cut` pin
-names the
-placement decision, not a site, so it resolves among the CUTTABLE seams (the root-most one) rather than through the
-codec's primary rule over every PLACE site (which can land on an edge no cut realizes — an unclosed cone, a seam
-whose workspace dtypes stay undetermined).
-A contraction-operand seam stands for a VALUE, not only an object: closed cones that are alpha-equivalent up to
-their captured axis names fold into one seam, each duplicate carried as a sibling with its capture correspondence,
-and the cut replaces every one with workspace loads spelled through its own axes. A term is closed by construction —
+split the head Fold admits. A selected cut or split replaces the kernel with fresh unmapped pieces. Each piece is
+FORMED AGAIN as a kernel of its own: its tile is lowered to a loop body, normalized like any lowered loop (which is
+where a statement repeated on both sides of the seam folds to one), and lifted through the same entry as
+`010_lift`, so its sites are the ones its own body earns rather than a slice of the parent's tree — a gate/up piece
+carved out of a fused half is one twin contraction site, not the parent's contraction beside a scalar-only leftover.
+The re-lift keeps the grid the cut minted; the store sweeps it would peel off stay sweeps. A bare `PLACE=cut` pin
+names the placement decision, not a site, so it resolves among the CUTTABLE seams (the root-most one) rather than
+through the codec's primary rule over every PLACE site (which can land on an edge no cut realizes — an unclosed cone,
+a seam whose workspace dtypes stay undetermined).
+A seam stands for a VALUE, not only an object: cones computing one value fold into one seam, each duplicate carried
+as a sibling with its capture correspondence, and the cut replaces every one with workspace loads spelled through its
+own axes. Two cones are one value when their lowered bodies share the statement identity of `ir/stmt/identity`
+under the captured axes renamed by position — the tile-node shape does not decide it, because fusion keeps one
+definition of a value while the lifted tree holds one cone per scope that reads it, and those cones bind the same
+coordinate under different names and in different operand orders (the o_proj result feeds the norm's statistic
+inside a reduce and the residual add at the kernel's free axis). The identity is taken per exposed component, so a
+lone contraction is a CHANNEL of the twin that folds it beside another over the same input (k under the QK-norm's
+reduce, beside the k/v pair): the twin is the representative, the sibling records which component is its value,
+and reads that channel of the shared workspace. The arm that cuts a clustered seam spells every occurrence and
+names the seam each spelling stands for, so a route recorded at any occurrence — a row from before the clustering,
+a pin at the copy a hand found — selects the one decision. A term is closed by construction —
 its values arrive through its operand edges — so every stored non-slab edge is a seam and there is no capture to
 resolve outward. A workspace load is named after its WORKSPACE — the cone's result name tagged with the seam — never
 after the cone alone: a lowered body reads producer names throughout, and the value a cut materialized can still be

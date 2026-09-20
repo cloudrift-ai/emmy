@@ -78,6 +78,22 @@ def test_pack_path_separates_environments(tmp_path, monkeypatch):
     assert load_pack(fm, key=_KEY) is not None
 
 
+def test_pack_keys_on_the_golden_rows(tmp_path, monkeypatch):
+    """Plans compiled from one set of golden rows must not serve a boot whose rows changed — the rows decide every
+    fork. Found 2026-09-19: a re-recorded Gemma 4 decode golden booted the previous image's plans from a shared pack
+    directory, and the serving run measured the old kernels."""
+    plan = _plan()
+    golden = tmp_path / "golden.yaml"
+    golden.write_text("rows: before\n")
+    monkeypatch.setenv("EMMY_GOLDEN_FILE", str(golden))
+    before = pack_path(tmp_path, _KEY)
+    save_pack(before, {"trunk": plan}, key=_KEY)
+    assert load_pack(before, key=_KEY) is not None
+    golden.write_text("rows: after\n")
+    assert pack_path(tmp_path, _KEY) != before, "the golden must reach the pack directory, not only the manifest"
+    assert load_pack(before, key=_KEY) is None
+
+
 def test_pack_missing_cubin_falls_back(tmp_path, monkeypatch):
     # A private cubin cache so evicting the pack's cubins can't race parallel test workers.
     monkeypatch.setenv("EMMY_CUBIN_CACHE", str(tmp_path / "cubin"))

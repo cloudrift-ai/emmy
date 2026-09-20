@@ -273,7 +273,10 @@ def test_tile_op_scalar_atom_schedule_roundtrip(monkeypatch):
     grouped_projection = copy.deepcopy(g.to_dict())
     schedule_row = grouped_projection["nodes"]["out"]["op_fields"]["schedule"]
     schedule_row.update({"WORK": "t2", "TILE": "f1x2", "RASTER": "gm8"})
-    with pytest.raises(ValueError, match="RASTER requires a tiled contraction site"):
+    # Two axes of one operand on a scalar site stay refused; which refusal speaks first is not the point. Since a
+    # map's register strip parses bare beside the kernel's worker width, the strip is read against the site before
+    # RASTER is, so the worker width is what fails to realize here.
+    with pytest.raises(ValueError, match="kernel WORK does not realize the node choices"):
         Graph.from_dict(grouped_projection)
 
 

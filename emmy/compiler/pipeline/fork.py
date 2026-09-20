@@ -143,6 +143,9 @@ class DeferredFork(Fork):
     materialize: Callable[[], Op | Graph]
     knobs: dict = field(default_factory=dict)
     structural: bool = False
+    #: Other spellings of a key of ``knobs``, each mapped to the key it names — the occurrences of
+    #: one clustered value, whose cut is one decision under any of them.
+    aliases: dict = field(default_factory=dict)
     is_leaf = True
 
     def expand(self) -> list[Op | Graph | Fork]:
