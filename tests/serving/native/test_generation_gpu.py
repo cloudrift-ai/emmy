@@ -220,18 +220,25 @@ def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch, name,
                         np.testing.assert_array_equal(actual, _python_step(reference_program, position).astype(np.float32))
                     assert np.isfinite(actual).all() and np.isfinite(expected).all() and np.isfinite(fp32).all()
                     native_error, reference_error = _logit_errors(actual, fp32), _logit_errors(expected, fp32)
-                    measurements.append({
-                        "case": name, "position": position, "capture": capture, "prompt_length": len(prompt),
-                        "native_fp32": native_error, "hf_fp32": reference_error,
-                        "native_fp16": _logit_errors(actual, expected),
-                        "python_native_equal": True if reference_program is not None else None,
-                        "native_token": int(actual.argmax()), "reference_token": int(expected.argmax()),
-                        "fp32_token": int(fp32.argmax()),
-                        "reference_margin": float(np.sort(expected)[-1] - np.sort(expected)[-2]),
-                        "fp32_margin": float(np.sort(fp32)[-1] - np.sort(fp32)[-2]),
-                        "strict_close": bool(np.allclose(actual, expected, rtol=1e-3, atol=1e-3)),
-                        "full_model_close": bool(np.allclose(actual, expected, rtol=2e-2, atol=2e-2)),
-                    })
+                    measurements.append(
+                        {
+                            "case": name,
+                            "position": position,
+                            "capture": capture,
+                            "prompt_length": len(prompt),
+                            "native_fp32": native_error,
+                            "hf_fp32": reference_error,
+                            "native_fp16": _logit_errors(actual, expected),
+                            "python_native_equal": True if reference_program is not None else None,
+                            "native_token": int(actual.argmax()),
+                            "reference_token": int(expected.argmax()),
+                            "fp32_token": int(fp32.argmax()),
+                            "reference_margin": float(np.sort(expected)[-1] - np.sort(expected)[-2]),
+                            "fp32_margin": float(np.sort(fp32)[-1] - np.sort(fp32)[-2]),
+                            "strict_close": bool(np.allclose(actual, expected, rtol=1e-3, atol=1e-3)),
+                            "full_model_close": bool(np.allclose(actual, expected, rtol=2e-2, atol=2e-2)),
+                        }
+                    )
                     (tmp_path / "measurements.json").write_text(json.dumps(measurements, indent=2))
                     if result["token"] is not None:
                         next_token = result["token"]
@@ -247,7 +254,10 @@ def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch, name,
                     native_rms = np.sqrt(np.mean([row["native_fp32"][metric] ** 2 for row in measurements]))
                     reference_rms = np.sqrt(np.mean([row["hf_fp32"][metric] ** 2 for row in measurements]))
                     assert native_rms <= max(REFERENCE_ERROR_FACTOR * reference_rms, np.finfo(np.float16).eps), (
-                        name, metric, native_rms, reference_rms
+                        name,
+                        metric,
+                        native_rms,
+                        reference_rms,
                     )
             finally:
                 await worker.aclose()
@@ -335,14 +345,30 @@ def test_attention_reads_only_the_written_cache_prefix(tmp_path):
     buffers = [BufferSpec(n, tuple(Dim(x) for x in a.shape), I64 if n == "position" else F16, "input") for n, a in data.items()]
     buffers.append(BufferSpec("attention", (Dim(4), Dim(128)), F16, "output"))
     plan = ExecutionPlan(
-        "cuda", list(data), ["attention"], buffers, {}, {},
-        [LaunchSpec("attention", "native_attention", (*data, "attention"), ((4,), (1,), (1,)),
-                    ((128,), (1,), (1,)), MAX_CONTEXT * 4, (), writes=("attention",))],
+        "cuda",
+        list(data),
+        ["attention"],
+        buffers,
+        {},
+        {},
+        [
+            LaunchSpec(
+                "attention",
+                "native_attention",
+                (*data, "attention"),
+                ((4,), (1,), (1,)),
+                ((128,), (1,), (1,)),
+                MAX_CONTEXT * 4,
+                (),
+                writes=("attention",),
+            )
+        ],
         {"native_attention": KernelSpec(source=source)},
     )
     with gpu_lock():
-        root = save_executable(tmp_path / "pack", {"attention": plan},
-                               bindings={"attention": {n: a.tobytes() for n, a in data.items()}}, key={})
+        root = save_executable(
+            tmp_path / "pack", {"attention": plan}, bindings={"attention": {n: a.tobytes() for n, a in data.items()}}, key={}
+        )
 
         async def check():
             worker = NativeWorker(executable=executable)
@@ -357,8 +383,10 @@ def test_attention_reads_only_the_written_cache_prefix(tmp_path):
                     for name, array in data.items():
                         array.tofile(tmp_path / name)
                     await worker.run_job({"op": "bind", "inputs": {n: str(tmp_path / n) for n in data}}, wall_timeout_s=30)
-                    await worker.run_job({"op": "run", "warmup": 0, "iterations": 1, "capture": True,
-                                          "outputs": {"attention": str(tmp_path / "result")}}, wall_timeout_s=30)
+                    await worker.run_job(
+                        {"op": "run", "warmup": 0, "iterations": 1, "capture": True, "outputs": {"attention": str(tmp_path / "result")}},
+                        wall_timeout_s=30,
+                    )
                     # Independent float64 reductions, with the eager FP16 storage boundaries.
                     k = keys[:count].repeat(2, axis=1).astype(np.float64)
                     v = values[:count].repeat(2, axis=1).astype(np.float64)

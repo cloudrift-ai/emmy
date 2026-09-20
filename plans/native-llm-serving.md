@@ -24,13 +24,14 @@ or its scope is explicitly revised.
   using identical artifacts with persistent and one-shot workers. GPU parity and recovery checks pass. General tune
   integration and separately isolated serialization costs remain outstanding. Unsupported dynamic shapes, indirect
   operands, TMA, and buffer aliasing remain explicit limits of the initial static subset.
-- **Milestone 2 — in progress, PR #859.** Native cached Qwen3 preparation and execution are implemented on a separate
-  branch. Tiny-model logits pass at `rtol=atol=1e-3`, including request reset and graph replay. Full-checkpoint
-  qualification remains blocked by the pointwise logit gate. A rotary-rounding fix restores all 40 checked greedy
-  tokens, but small arithmetic differences still accumulate across layers. Hugging Face also fails this gate when
-  comparing its cached and full-prefix paths. The [investigation](../experiments/Qwen3-0.6B/native_generation/RESULTS.md)
-  preserves both findings; the gate is unchanged. Prefill is sequential and sampling is greedy. General Python-dispatch
-  replacement is not included.
+- **Milestone 2 — implemented on a draft branch, PR #859.** Native cached Qwen3 preparation and execution
+  are implemented on a separate branch. Tiny-model logits pass at `rtol=atol=1e-3`, including request reset and graph
+  replay; Python/Rust logits from the same artifact are bit-identical. A rotary-rounding fix restores the original
+  greedy agreement. The explicit FP32-based contract and its failed calibration trials are recorded in the
+  [investigation](../experiments/Qwen3-0.6B/native_generation/RESULTS.md). Coverage reaches 256 checkpoint positions
+  and independently checks attention through 4,096 positions. All four fresh held-out cases pass. Full-suite
+  finalization remains blocked by 26 failures reproduced on main. Prefill is sequential and sampling is greedy.
+  General Python-dispatch replacement is not included.
 - **Milestones 3–4 — not implemented.** Native HTTP serving and serving optimizations remain future work. Existing
   Python dispatch and vLLM serving remain in place.
 

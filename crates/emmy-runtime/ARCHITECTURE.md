@@ -40,7 +40,8 @@ program; release drops it. There is no unbounded program or graph cache.
 All unsafe CUDA submission stays in `cuda`. Buffer pointers and the context are private. Executors have disjoint
 storage and synchronize before releasing it, so cudarc's cross-stream event tracking is disabled. Copies and launches
 use the owning stream. Uploads finish before borrowed host bytes can disappear; outputs synchronize before returning.
-CUDA graph capture happens after one uncaptured initialization run. Both timing events explicitly enable timing.
+Benchmark CUDA graph capture happens after one uncaptured initialization run. Both timing events explicitly enable
+timing.
 
 A synchronous library call cannot enforce a hard deadline on a hung GPU operation. The process boundary supplies that
 contract. Callers needing fault isolation must use the supervised worker rather than wait indefinitely in-process.

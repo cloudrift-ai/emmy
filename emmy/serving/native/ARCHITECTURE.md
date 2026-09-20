@@ -63,10 +63,18 @@ and returns token IDs; tokenizer packaging and native text processing belong to 
 The hermetic tiny-Qwen3 GPU test checks every logit at `rtol=atol=1e-3`, greedy tokens, request reset, context bounds,
 EOS, zero output budget, graph replay, and first capture during decode. It hides Python and NVCC from the native
 child's PATH after export. The same exported binaries also run through the Python executor; logits must be bit-identical
-at every checked step. Opt-in checkpoint qualification accepts a local `--native-checkpoint` and matching
-`--native-artifact`. It records strict errors and uses the existing FP16 full-model oracle's `rtol=atol=2e-2` criterion
-plus exact greedy-token agreement. This broader full-model tolerance does not imply the checkpoint passes the tighter
-isolated-program criterion. Performance and production concurrency are separate qualifications.
+at every checked step. Independent NumPy checks cover rotary rounding and causal attention through cache position
+4,096, including a shorter request after the largest one.
 
-Checkpoint logit qualification remains open. The [numerical investigation](../../../experiments/Qwen3-0.6B/native_generation/RESULTS.md)
-records the fixed rotary-rounding defect, the remaining reference differences, and validation limits.
+Opt-in checkpoint qualification accepts a local `--native-checkpoint` and matching `--native-artifact` with capacity
+at least 256. FP16 eager and FP32 eager references consume the same prefixes and FP16-rounded weights, with TF32
+and reduced-precision reductions disabled. Each native logit vector must stay within 2% relative L2 error and 0.02
+total variation from the FP32 distribution. Per-prompt RMS error must be at most twice the FP16 reference RMS, with
+one FP16 epsilon as a floor. Native argmax must match one reference; agreement between the two requires an exact
+match. Pointwise differences remain recorded. These experimental budgets do not establish bitwise model equivalence
+or identical future completions when the references disagree.
+
+The [numerical investigation](../../../experiments/Qwen3-0.6B/native_generation/RESULTS.md) records the fixed rotary
+rounding defect, failed exploratory criteria, held-out qualification, and limits. Checkpoint coverage reaches 256
+positions; the 4,096-position check isolates attention rather than qualifying an entire checkpoint at that length.
+Performance and production concurrency are separate qualifications.
