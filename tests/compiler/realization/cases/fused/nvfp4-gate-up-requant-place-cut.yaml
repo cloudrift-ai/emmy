@@ -1690,38 +1690,7 @@ configs:
       REDUCE: ''
       STAGE: d1/smem-async
       RASTER: ''
-    identity: c92330daf623ee5077b5b955a7babd0ef93757e064b25804eeea27d2c1442938
-  - name: k_linear_reduce_bbf90a.644854c2ff13
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      TILE@map.1/map.2/reduce.1/inner: ''
-      TILE@map.1/map.2/reduce.2/inner: ''
-      TILE@map.1/map.4/inner: ''
-      TILE@map.1/map.5/inner: ''
-      TILE@map.1/map.6/inner: ''
-      TILE@map.2/map.2/reduce.1/inner: ''
-      TILE@map.2/map.2/reduce.2/inner: ''
-      REDUCE@map.1/map.2/reduce: ''
-      REDUCE@map.1/map.2/reduce.1/inner: ''
-      REDUCE@map.1/map.2/reduce.2/inner: ''
-      REDUCE@map.1/map.4/inner: ''
-      REDUCE@map.1/map.5/inner: ''
-      REDUCE@map.1/map.6/inner: ''
-      REDUCE@map.2/map.2/reduce: ''
-      REDUCE@map.2/map.2/reduce.1/inner: ''
-      REDUCE@map.2/map.2/reduce.2/inner: ''
-      STAGE@map.1/map.2/reduce.1/inner: ''
-      STAGE@map.1/map.2/reduce.2/inner: ''
-      STAGE@map.1/map.4/inner: ''
-      STAGE@map.1/map.5/inner: ''
-      STAGE@map.1/map.6/inner: ''
-      STAGE@map.2/map.2/reduce.1/inner: ''
-      STAGE@map.2/map.2/reduce.2/inner: ''
-      WORK: ''
-      RASTER: ''
-    identity: 644854c2ff13fc8ba7f652ad011b4068a63cbbdc9902755dc7eda658372dd594
+    identity: 3cf6331ae57515b52bcd28081e6b62f4645dc2ace651adfa1382f7f01ecdd423
   - name: k_linear_reduce_bbf90a.165fbb139c44
     bindings: {}
     pins:
@@ -1752,38 +1721,7 @@ configs:
       STAGE@map.2/map.2/reduce.2/inner: ''
       WORK: ''
       RASTER: ''
-    identity: 165fbb139c4454657f533beb847bb25dc5eab7995a27701b9eab7e118420b63e
-  - name: k_linear_reduce_bbf90a.4d96461b35c6
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      TILE@map.1/map.2/reduce.1/inner: ''
-      TILE@map.1/map.2/reduce.2/inner: ''
-      TILE@map.1/map.3/inner: ''
-      TILE@map.1/map.4/inner: ''
-      TILE@map.1/map.5/inner: ''
-      TILE@map.2/map.2/reduce.1/inner: ''
-      TILE@map.2/map.2/reduce.2/inner: ''
-      REDUCE@map.1/map.2/reduce: ''
-      REDUCE@map.1/map.2/reduce.1/inner: ''
-      REDUCE@map.1/map.2/reduce.2/inner: ''
-      REDUCE@map.1/map.3/inner: ''
-      REDUCE@map.1/map.4/inner: ''
-      REDUCE@map.1/map.5/inner: ''
-      REDUCE@map.2/map.2/reduce: ''
-      REDUCE@map.2/map.2/reduce.1/inner: ''
-      REDUCE@map.2/map.2/reduce.2/inner: ''
-      STAGE@map.1/map.2/reduce.1/inner: ''
-      STAGE@map.1/map.2/reduce.2/inner: ''
-      STAGE@map.1/map.3/inner: ''
-      STAGE@map.1/map.4/inner: ''
-      STAGE@map.1/map.5/inner: ''
-      STAGE@map.2/map.2/reduce.1/inner: ''
-      STAGE@map.2/map.2/reduce.2/inner: ''
-      WORK: ''
-      RASTER: ''
-    identity: 4d96461b35c63b32b516cacb4f4b0db8c370c63ee00fbf44d86e7519bf56858f
+    identity: 56c6aa0d18bf0845640d8d34ef0ab2a2c23af893f420bd69e0878821f360a41c
 loops:
 - inputs: [x]
   outputs: [x_static_fp4_scale_bits, x_static_fp4_bits]
@@ -2825,7 +2763,7 @@ loops:
                                 - class: Assign
                                   fields: {name: v11, op: {elementwise: multiply}, args: {tuple: [in12, v10]}, dtype: null}
                                 - class: Assign
-                                  fields: {name: v12, op: {elementwise: multiply}, args: {tuple: [v11, v6]}, dtype: null}
+                                  fields: {name: v12, op: {elementwise: multiply}, args: {tuple: [v11, v6]}, dtype: {dtype: f32}}
                                 - class: Accum
                                   fields: {name: acc0, value: v12, op: {elementwise: add}, dtype: null, axes: {tuple: [a3]}, base: null}
                               unroll: false
@@ -2959,7 +2897,7 @@ loops:
                                 - class: Assign
                                   fields: {name: v22, op: {elementwise: multiply}, args: {tuple: [in18, v21]}, dtype: null}
                                 - class: Assign
-                                  fields: {name: v23, op: {elementwise: multiply}, args: {tuple: [v17, v22]}, dtype: null}
+                                  fields: {name: v23, op: {elementwise: multiply}, args: {tuple: [v17, v22]}, dtype: {dtype: f32}}
                                 - class: Accum
                                   fields: {name: acc1, value: v23, op: {elementwise: add}, dtype: null, axes: {tuple: [a4]}, base: null}
                               unroll: false
@@ -3106,7 +3044,7 @@ loops:
                           - class: Assign
                             fields: {name: v43, op: {elementwise: multiply}, args: {tuple: [in24, v42]}, dtype: null}
                           - class: Assign
-                            fields: {name: v44, op: {elementwise: multiply}, args: {tuple: [v38, v43]}, dtype: null}
+                            fields: {name: v44, op: {elementwise: multiply}, args: {tuple: [v38, v43]}, dtype: {dtype: f32}}
                           - class: Accum
                             fields: {name: acc3, value: v44, op: {elementwise: add}, dtype: null, axes: {tuple: [a5]}, base: null}
                         unroll: false
@@ -3232,7 +3170,7 @@ loops:
                           - class: Assign
                             fields: {name: v54, op: {elementwise: multiply}, args: {tuple: [in30, v53]}, dtype: null}
                           - class: Assign
-                            fields: {name: v55, op: {elementwise: multiply}, args: {tuple: [v49, v54]}, dtype: null}
+                            fields: {name: v55, op: {elementwise: multiply}, args: {tuple: [v49, v54]}, dtype: {dtype: f32}}
                           - class: Accum
                             fields: {name: acc4, value: v55, op: {elementwise: add}, dtype: null, axes: {tuple: [a6]}, base: null}
                         unroll: false
@@ -3350,7 +3288,7 @@ loops:
                           - class: Assign
                             fields: {name: v65, op: {elementwise: multiply}, args: {tuple: [in36, v64]}, dtype: null}
                           - class: Assign
-                            fields: {name: v66, op: {elementwise: multiply}, args: {tuple: [v60, v65]}, dtype: null}
+                            fields: {name: v66, op: {elementwise: multiply}, args: {tuple: [v60, v65]}, dtype: {dtype: f32}}
                           - class: Accum
                             fields: {name: acc5, value: v66, op: {elementwise: add}, dtype: null, axes: {tuple: [a7]}, base: null}
                         unroll: false
@@ -3476,7 +3414,7 @@ loops:
                           - class: Assign
                             fields: {name: v76, op: {elementwise: multiply}, args: {tuple: [in42, v75]}, dtype: null}
                           - class: Assign
-                            fields: {name: v77, op: {elementwise: multiply}, args: {tuple: [v71, v76]}, dtype: null}
+                            fields: {name: v77, op: {elementwise: multiply}, args: {tuple: [v71, v76]}, dtype: {dtype: f32}}
                           - class: Accum
                             fields: {name: acc6, value: v77, op: {elementwise: add}, dtype: null, axes: {tuple: [a8]}, base: null}
                         unroll: false
@@ -3684,7 +3622,7 @@ loops:
                                 - class: Assign
                                   fields: {name: v119, op: {elementwise: multiply}, args: {tuple: [in48, v118]}, dtype: null}
                                 - class: Assign
-                                  fields: {name: v120, op: {elementwise: multiply}, args: {tuple: [v114, v119]}, dtype: null}
+                                  fields: {name: v120, op: {elementwise: multiply}, args: {tuple: [v114, v119]}, dtype: {dtype: f32}}
                                 - class: Accum
                                   fields: {name: acc7, value: v120, op: {elementwise: add}, dtype: null, axes: {tuple: [a11]}, base: null}
                               unroll: false
@@ -3810,7 +3748,7 @@ loops:
                                 - class: Assign
                                   fields: {name: v130, op: {elementwise: multiply}, args: {tuple: [in54, v129]}, dtype: null}
                                 - class: Assign
-                                  fields: {name: v131, op: {elementwise: multiply}, args: {tuple: [v125, v130]}, dtype: null}
+                                  fields: {name: v131, op: {elementwise: multiply}, args: {tuple: [v125, v130]}, dtype: {dtype: f32}}
                                 - class: Accum
                                   fields: {name: acc8, value: v131, op: {elementwise: add}, dtype: null, axes: {tuple: [a12]}, base: null}
                               unroll: false
@@ -3861,7 +3799,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_reduce_9cb03e
+      name: k_linear_reduce_dbfd72
     inputs: [p_gate_weight_scale_2, x_static_fp4_scale_2, p_up_weight_scale_2, silu_one, mul_static_fp4_floor, mul_static_fp4_f4_max, mul_static_fp4_scale_2,
       mul_static_fp4_shift, p_gate_weight_scale_bits, x_static_fp4_scale_bits, p_gate_weight_bits, x_static_fp4_bits, p_gate_weight_f4_pairs,
       x_static_fp4_r1_f4_pairs, p_up_weight_scale_bits, x_static_fp4_r2_f4_pairs, p_up_weight_bits, p_up_weight_f4_pairs]
@@ -4276,7 +4214,7 @@ loops:
                           - class: Assign
                             fields: {name: v9, op: {elementwise: multiply}, args: {tuple: [in3, v8]}, dtype: null}
                           - class: Assign
-                            fields: {name: v10, op: {elementwise: multiply}, args: {tuple: [v5, v9]}, dtype: null}
+                            fields: {name: v10, op: {elementwise: multiply}, args: {tuple: [v5, v9]}, dtype: {dtype: f32}}
                           - class: Accum
                             fields: {name: acc0, value: v10, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
                         unroll: false
@@ -4293,7 +4231,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_99c481
+      name: k_linear_f411b6
     inputs: [mul_static_fp4_scale_2, p_down_weight_scale_2, mul_static_fp4_bits, mul_static_fp4_scale_bits, p_down_weight_scale_bits, mul_static_fp4_r1_f4_pairs,
       p_down_weight_bits, p_down_weight_f4_pairs]
     outputs: [[linear_2, f16, [128, 512]]]
