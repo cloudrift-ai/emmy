@@ -12,7 +12,7 @@ from emmy.compiler.backend.gpu_lock import gpu_lock
 from emmy.compiler.backend.native import NativeWorker
 from emmy.serving.native.prepare import export_model
 from tests.compiler.helpers import requires_cuda
-from tests.serving.native.test_prepare import tiny_model
+from tests.serving.helpers import qwen3_model
 
 pytestmark = [requires_cuda, pytest.mark.xdist_group("cuda")]
 
@@ -50,7 +50,7 @@ def test_cached_qwen3_logits_and_generation(tmp_path, monkeypatch):
     executable = shutil.which("emmy-runtime-worker")
     if not executable:
         pytest.skip("build native worker and add it to PATH")
-    model = tiny_model()
+    model = qwen3_model(2).half()
     model.config._attn_implementation = "eager"
     with gpu_lock():
         root = export_model(model, tmp_path / "pack", context_length=8)
@@ -138,18 +138,24 @@ def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch):
                     await worker.run_job({"op": "start_generation", "prompt": str(path)}, wall_timeout_s=30)
                     _reset_python(reference_program, prompt)
                     prefix, next_token, past = [], None, None
-                    for position in range(len(prompt) + request.config.getoption("--native-decode-steps")):
+                    for position in range(len(prompt) + 15):
                         prefix.append(prompt[position] if position < len(prompt) else next_token)
                         result = await worker.run_job({"op": "generation_step", "capture": capture, "logits": str(logits_path)}, wall_timeout_s=30)
                         with torch.no_grad(), _reference_precision(True):
                             reference = model(torch.tensor([[prefix[-1]]], device="cuda"), past_key_values=past, use_cache=True)
                             past = reference.past_key_values
                             expected = reference.logits[0, -1].float().cpu().numpy()
+                            full_prefix = model(torch.tensor([prefix], device="cuda"), use_cache=False).logits[0, -1].float().cpu().numpy()
                         actual = np.fromfile(logits_path, np.float16).astype(np.float32)
                         np.testing.assert_array_equal(actual, _python_step(reference_program, position).astype(np.float32))
                         measurements.append({"prompt": text, "position": position, "capture": capture,
                                              "max_absolute_error": float(np.max(np.abs(actual - expected))),
                                              "relative_l2_error": float(np.linalg.norm(actual - expected) / np.linalg.norm(expected)),
+                                             "python_native_equal": True,
+                                             "hf_prefix_max_absolute_error": float(np.max(np.abs(full_prefix - expected))),
+                                             "hf_prefix_relative_l2_error": float(np.linalg.norm(full_prefix - expected) / np.linalg.norm(expected)),
+                                             "hf_prefix_close": bool(np.allclose(full_prefix, expected, rtol=2e-2, atol=2e-2)),
+                                             "hf_prefix_argmax_match": int(full_prefix.argmax()) == int(expected.argmax()),
                                              "argmax_match": int(actual.argmax()) == int(expected.argmax()),
                                              "native_token": int(actual.argmax()), "reference_token": int(expected.argmax()),
                                              "reference_margin": float(np.sort(expected)[-1] - np.sort(expected)[-2]),

@@ -139,6 +139,7 @@ impl Generator {
             !self.stopped && self.position < self.config.context_length,
             "generation is stopped or context is full"
         );
+        self.stopped = true;
         self.executor
             .bind("position", &(self.position as i64).to_le_bytes())?;
         self.executor.advance(capture)?;

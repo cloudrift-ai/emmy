@@ -1,23 +1,15 @@
 """Native Qwen3 preparation rejects unsupported models before CUDA work."""
 
 import pytest
-import torch
-from transformers import Qwen3Config, Qwen3ForCausalLM
 
 from emmy.serving.native.prepare import validate_model
-
-
-def tiny_model():
-    torch.manual_seed(71)
-    config = Qwen3Config(vocab_size=32, hidden_size=32, intermediate_size=64, num_hidden_layers=2,
-                        num_attention_heads=4, num_key_value_heads=2, head_dim=8, max_position_embeddings=32)
-    return Qwen3ForCausalLM(config).half().eval()
+from tests.serving.helpers import qwen3_model
 
 
 def test_configuration_rejections():
-    model = tiny_model()
+    model = qwen3_model(2).half()
     validate_model(model, 8)
-    for length in (0, 33, 4097):
+    for length in (0, 65, 4097):
         with pytest.raises(ValueError, match="context"):
             validate_model(model, length)
     model.float()
