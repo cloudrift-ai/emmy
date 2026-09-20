@@ -1945,6 +1945,7 @@ _FRONTEND_BAND_ALLOWLIST = {
     "emmy/compiler/loader/safetensors.py",  # checkpoint reads (fp8 bits, scale tensors)
     "emmy/compiler/loader/synthesize.py",  # writes the checkpoint ``--quantize`` then reads back through the speller
     "emmy/compiler/trace/huggingface.py",  # quantized-twin construction + detection
+    "emmy/serving/native/prepare.py",  # checkpoint preparation: rejects quantized models before tracing
     "emmy/serving/vllm_model_gen.py",  # loader-role: routes checkpoint keys (scale siblings included) into the fork's attention
 }
 

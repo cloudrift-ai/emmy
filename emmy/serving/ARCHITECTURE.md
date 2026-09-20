@@ -843,3 +843,9 @@ list does not get the flooring treatment described above, so it can violate the 
   eager per row (the causal-independence-under-padding gate for `EMMY_SERVING_STATIC`).
 - `scripts/compare_embeddings.py` — the accuracy gate against a *server*: embeds a fixed text set through two
   OpenAI-compatible endpoints (emmy-backed and stock) and asserts pairwise cosine > 0.99.
+
+## Standalone cached generation
+
+The experimental Rust cached-generation path is documented in
+[`native/ARCHITECTURE.md`](native/ARCHITECTURE.md). It prepares dense FP16 Qwen3 artifacts and executes them without
+Python model operations. It does not change the vLLM adapter, scheduler, or serving defaults.

@@ -66,7 +66,7 @@ lint: setup
 test-native:
 	cargo test --workspace --locked
 	cargo build --release --locked --bin emmy-runtime-worker
-	PATH="$(CURDIR)/target/release:$$PATH" ./venv/bin/pytest tests/compiler/backend/test_native.py tests/compiler/backend/test_native_gpu.py
+	PATH="$(CURDIR)/target/release:$$PATH" ./venv/bin/pytest tests/compiler/backend/test_native.py tests/compiler/backend/test_native_gpu.py tests/serving/native/test_prepare.py tests/serving/native/test_generation_gpu.py
 
 lint-native:
 	cargo fmt --all --check

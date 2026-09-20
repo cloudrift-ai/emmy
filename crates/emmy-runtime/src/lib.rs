@@ -2,3 +2,4 @@
 
 pub mod artifact;
 pub mod cuda;
+pub mod generation;

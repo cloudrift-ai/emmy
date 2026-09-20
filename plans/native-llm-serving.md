@@ -24,8 +24,16 @@ or its scope is explicitly revised.
   using identical artifacts with persistent and one-shot workers. GPU parity and recovery checks pass. General tune
   integration and separately isolated serialization costs remain outstanding. Unsupported dynamic shapes, indirect
   operands, TMA, and buffer aliasing remain explicit limits of the initial static subset.
-- **Milestones 2–4 — not implemented.** Complete cached generation, native HTTP serving, and serving optimizations
-  remain future work. Existing Python dispatch and vLLM serving remain in place.
+- **Milestone 2 — implemented on a draft branch, PR #859.** Native cached Qwen3 preparation and execution
+  are implemented on a separate branch. Tiny-model logits pass at `rtol=atol=1e-3`, including request reset and graph
+  replay; Python/Rust logits from the same artifact are bit-identical. A rotary-rounding fix restores the original
+  greedy agreement. The explicit FP32-based contract and its failed calibration trials are recorded in the
+  [investigation](../experiments/Qwen3-0.6B/native_generation/RESULTS.md). Coverage reaches 256 checkpoint positions
+  and independently checks attention through 4,096 positions. All four fresh held-out cases pass. Full-suite
+  finalization remains blocked by 26 failures reproduced on main. Prefill is sequential and sampling is greedy.
+  General Python-dispatch replacement is not included.
+- **Milestones 3–4 — not implemented.** Native HTTP serving and serving optimizations remain future work. Existing
+  Python dispatch and vLLM serving remain in place.
 
 The [runtime report](../experiments/Qwen3-0.6B/native_runtime/RESULTS.md) shows reduced uncaptured submission cost,
 but little change in captured GPU time for the tested small programs. This is not evidence of a full-model serving
@@ -48,6 +56,10 @@ show little exposed between-step CPU time, so the next performance work should i
 existing integration before expanding native serving. See the
 [schedule report](../experiments/Qwen3-0.6B/native_baseline/SCHEDULES.md). Broader generation parity and detailed
 allocation/occupancy accounting remain open; this PR does not implement milestones 2–4.
+
+The user selected parallel work after #847: GPU schedule optimization continues independently, while #859 advances
+cached native generation as a correctness and reuse milestone. This does not claim a Rust serving speedup. API work
+still follows generation qualification, and dispatch replacement still requires its separate parity inventory.
 
 ## Evidence before implementation
 

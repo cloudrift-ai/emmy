@@ -246,6 +246,13 @@ emmy serve Qwen/Qwen3-Embedding-0.6B --bench --random-input-len 32
 emmy serve Qwen/Qwen3-Embedding-0.6B --bench --random-input-len 32 --stock
 ```
 
+## Experimental native generation
+
+Dense FP16 Qwen3 can be prepared as a standalone artifact and run through the Rust cached-generation loop. This
+single-request path supports greedy sampling and optional CUDA graphs. It is a correctness prototype with sequential
+prefill; vLLM remains the serving default. See the [native generation contract](emmy/serving/native/ARCHITECTURE.md)
+for preparation, commands, limitations, and qualification.
+
 ## Recipe
 
 ```bash
@@ -466,7 +473,7 @@ require CloudRift organization access.
 - [experiments/](experiments/) — Benchmark parameter sweeps, self-contained recipe + committed results —
   what `emmy bench` runs (see [ARCHITECTURE.md](experiments/ARCHITECTURE.md))
 - [kernels/](kernels/) — Standalone CUDA kernel sources
-- [crates/emmy-runtime/](crates/emmy-runtime/) — Experimental Rust executor for standalone static program packs
+- [crates/emmy-runtime/](crates/emmy-runtime/) — Experimental Rust executor for static packs and cached generation
   (build, protocol, and qualification in [ARCHITECTURE.md](crates/emmy-runtime/ARCHITECTURE.md))
 - [docs/](docs/) — Docusaurus user-docs site (getting started, benchmarking, custom configurations, deployment)
 - [tests/](tests/) — pytest tests (see [ARCHITECTURE.md](tests/ARCHITECTURE.md))

@@ -836,3 +836,10 @@ no Git operation.
 3. Register CLI in `commands/vm/__init__.py`.
 4. Add entries to `hardware.py` `GPU_INSTANCE_TYPES` table. If the provider has zone-affinity, add `GPU_<provider>_ZONES` and teach `iter_candidates` in `provisioning/candidates.py` to fan out across them.
 5. Add provider dispatch in `provisioning/cloud.py` (`_provision_candidate`) and `delete_cloud_vm()`.
+
+## Native generation preparation and execution
+
+`generate --export-native DIR` prepares a standalone dense Qwen3 artifact; `generate --native-pack DIR` invokes the
+supervised Rust generation loop. These modes are mutually exclusive. The command layer owns argument parsing and
+tokenizer I/O; model preparation and binary worker transport live in `serving/native`. Sampling is currently greedy,
+and HTTP serving remains on the existing vLLM path.
