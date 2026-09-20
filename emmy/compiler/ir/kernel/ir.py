@@ -1675,9 +1675,7 @@ class LdmatrixLoad(Stmt):
                         base, bound = self.gmem_guard
                         left = f"({bound.render(ctx)}) - ({base.render(ctx)})"
                     args = f"<{ctx.type_name(src_dt)}, {'true' if self.role == 'a' else 'false'}>"
-                    return [
-                        f"{_pad(ctx.indent)}emmy_mma884_load_gmem4{args}({self.frag}, &{self.src_buffer}[{flat}], {ldm}, {left});"
-                    ]
+                    return [f"{_pad(ctx.indent)}emmy_mma884_load_gmem4{args}({self.frag}, &{self.src_buffer}[{flat}], {ldm}, {left});"]
                 if self.k_zero is not None:
                     kbase, kbound = self.k_zero[0].render(ctx), self.k_zero[1].render(ctx)
                     k_left = f"({kbound}) - ({kbase})"
