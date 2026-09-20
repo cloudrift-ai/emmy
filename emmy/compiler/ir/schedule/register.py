@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from emmy.compiler.ir.tile import OutputSpec, TileOp
 
 
-_ATOMS = ("mma_m16n8k16_f16_f32", "mma_m16n8k16_f16_f16")
+_ATOMS = tuple(atom for atom in ATOM_REGISTRY.values() if atom.c_to_a_repack and atom.c_to_b_repack)
 
 
 @dataclass(frozen=True, slots=True)
@@ -163,7 +163,8 @@ class _RegisterSite(Site):
                 (Tile.parse(p.row["TILE"], work),)
                 if "TILE" in p.row
                 else tuple(
-                    Tile(atom=ATOM_REGISTRY[name], units=work.units, regs=(1, (p.program.columns + 7) // 8), bk=4) for name in _ATOMS
+                    Tile(atom=atom, units=work.units, regs=(1, (p.program.columns + atom.atom_n - 1) // atom.atom_n), bk=4)
+                    for atom in _ATOMS
                 )
             )
             for plan in plans:
@@ -205,9 +206,9 @@ class RegisterProblem(ScheduleProblem):
             and work.units[1] == 1
             and work.count <= 32
             and not work.producer
-            and plan.atom in tuple(ATOM_REGISTRY[name] for name in _ATOMS)
+            and plan.atom in _ATOMS
             and plan.units == work.units
-            and plan.regs == (1, (self.program.columns + 7) // 8)
+            and plan.regs == (1, (self.program.columns + plan.atom.atom_n - 1) // plan.atom.atom_n)
             and (self.target is None or plan.atom.available_on(self.target))
         )
 

@@ -1,0 +1,67 @@
+# The inter-chunk GDN update, using the workload from the original V100 comparison.
+# One V100 runs each row. Twelve value heads represent one TP4 rank.
+command:
+  stage:
+    - emmy
+    - pyproject.toml
+    - experiments/Qwen3.8-27B/gdn_kernels/chunk_state.py
+    - experiments/Qwen3.8-27B/gdn_kernels/prefill.py
+  strict: true
+  run: |
+    set -uo pipefail
+    export PATH=/usr/local/cuda/bin:$$PATH
+    export LD_PRELOAD=/usr/local/cuda-12.9/lib64/libnvrtc.so.12
+    export PYTHONUNBUFFERED=1 TORCHINDUCTOR_COMPILE_THREADS=4 MAX_JOBS=4
+    devices="$gpu_device_ids"
+    export CUDA_VISIBLE_DEVICES=$${devices%%,*}
+    export GDN_HEADS="$heads" GDN_TOKENS="$tokens"
+    export EMMY_GOLDEN_FILE= EMMY_NVCC_FLAGS= EMMY_BENCH_COMPILE_TIMEOUT_S=120
+    export EMMY_TUNE_DB=$task_dir/autotune.db EMMY_ONLINE_FILE=$task_dir/online.json
+    export EMMY_STAGE=d1/reg EMMY_WORK=w2x1 EMMY_TILE=mma_m8n8k4_f16_$acc/f1x8/k4
+    export PYTHONPATH=$repo_dir
+    mkdir -p $task_dir/artifacts
+    cd $repo_dir
+    code=$$(cat experiments/Qwen3.8-27B/gdn_kernels/$workload.py)
+    timeout -k 3s 360s "$python" -m emmy.emmy run --code "$$code" \
+      --verbose --bench --strict --bench-backends eager,tcompile,emmy --warmup 10 --iters 100 \
+      --no-record-nodes --json $task_dir/artifacts/measurement.json \
+      > $task_dir/artifacts/measurement.log 2>&1
+    status=$$?
+    printf '%s\n' "$$status" > $task_dir/artifacts/status.txt
+    "$python" -m pip freeze --all > $task_dir/artifacts/requirements.freeze.txt
+    "$python" -c 'import torch, transformers; print(torch.__version__, torch.version.cuda, transformers.__version__)' \
+      > $task_dir/artifacts/versions.txt
+    tar -C $task_dir -czf $task_dir/artifacts.tar.gz artifacts
+    exit "$$status"
+  result_files:
+    - artifacts.tar.gz
+  timeout: 375
+
+matrices:
+  - cross:
+      workload: chunk_state
+      acc: [f32, f16]
+      heads: [12, 48]
+      tokens: [128, 512, 2048]
+      repeat: 0
+      deploy.gpu: NVIDIA Tesla V100 SXM2 16GB
+      deploy.gpu_count: 1
+      python: /home/riftuser/emmy/venv/bin/python
+  - cross:
+      workload: chunk_state
+      acc: [f32, f16]
+      heads: [12, 48]
+      tokens: 128
+      repeat: [1, 2]
+      deploy.gpu: NVIDIA Tesla V100 SXM2 16GB
+      deploy.gpu_count: 1
+      python: /home/riftuser/emmy/venv/bin/python
+  - cross:
+      workload: prefill
+      acc: [f32, f16]
+      heads: 12
+      tokens: 128
+      repeat: 0
+      deploy.gpu: NVIDIA Tesla V100 SXM2 16GB
+      deploy.gpu_count: 1
+      python: /home/riftuser/emmy/venv/bin/python

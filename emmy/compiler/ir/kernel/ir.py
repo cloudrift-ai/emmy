@@ -28,6 +28,7 @@ import math
 from dataclasses import dataclass, replace
 from functools import cached_property
 
+from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F32, DataType
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import _REDUCE_SPELLING, ElementwiseImpl
@@ -1273,7 +1274,8 @@ class RegFragment(Stmt):
     ``unsigned a[4]`` / ``unsigned b[2]`` (f16, two halfs per 32-bit
     reg) — and the accumulator is ``float c[4]`` (f32) or, on the
     f16-accumulate atom, packed ``unsigned c[2]`` (two halfs per reg —
-    the same element map, pair-packed). ``shape`` is the cell
+    the same element map, pair-packed, on m16n8k16). Volta uses explicit
+    counts and distinct f16/f32 accumulator lane maps. ``shape`` is the cell
     ``(M, N, K)``; the count derives from ``shape`` + ``role`` (+ the C
     dtype) via :func:`_mma_sync_nregs`. The ``c`` array is
     zero-initialised at declaration, so the mma.sync path needs no
@@ -1659,6 +1661,21 @@ class LdmatrixLoad(Stmt):
             targs = "" if src_dt == frag_dt else f"<{ctx.type_name(src_dt)}, {ctx.type_name(frag_dt)}>"
             b8 = frag_dt in ("f8e4m3", "f8e5m2")
             if self.fragment_layout == "m8n8k4":
+                shape = tuple(Dim(d) for d in ctx.shapes.get(self.src_buffer, ()))
+                aligned = len(shape) == len(self.src_index) and all(d.is_static for d in shape)
+                if aligned:
+                    aligned = all(
+                        _multiple_of(index * Literal(math.prod(s.as_static() for s in shape[d + 1 :]), "int"), 4)
+                        for d, index in enumerate(self.src_index)
+                    )
+                vector = aligned and ldm % 4 == 0 and self.k_zero is None and src_dt in ("f16", "f32") and frag_dt == "f16"
+                if vector and (self.role == "a" or self.b_trans):
+                    left = "16"
+                    if self.gmem_guard is not None:
+                        base, bound = self.gmem_guard
+                        left = f"({bound.render(ctx)}) - ({base.render(ctx)})"
+                    args = f"<{ctx.type_name(src_dt)}, {'true' if self.role == 'a' else 'false'}>"
+                    return [f"{_pad(ctx.indent)}emmy_mma884_load_gmem4{args}({self.frag}, &{self.src_buffer}[{flat}], {ldm}, {left});"]
                 if self.k_zero is not None:
                     kbase, kbound = self.k_zero[0].render(ctx), self.k_zero[1].render(ctx)
                     k_left = f"({kbound}) - ({kbase})"
@@ -1940,12 +1957,14 @@ class FragmentPromote(Stmt):
     the full f16-accumulate HMMA rate, and every K chunk this promote-adds the packed f16 partials
     into the f32 shadow (``cvt.f32.f16`` + add per element) and re-zeros the f16 fragment, so the
     accumulation error stays bounded by one chunk's length. ``dst`` is the f32 shadow the store /
-    epilogue reads (``float[4]``); ``src`` the packed f16 mma accumulator (``unsigned[2]``) —
-    both defined here (``src`` is rezeroed), so reorderings keep the promote pinned between the
+    epilogue reads; ``src`` is the packed f16 mma accumulator. The fragment layout selects
+    their register counts and, on Volta, the warp shuffles that align their different lane maps. Both
+    are defined here (``src`` is rezeroed), so reorderings keep the promote pinned between the
     mma chain and the store."""
 
-    dst: str  # f32 shadow accumulator fragment (4 × f32) — the store-side view
-    src: str  # packed f16 mma accumulator fragment (2 × u32) — rezeroed after the fold
+    dst: str  # f32 shadow accumulator fragment — the store-side view
+    src: str  # packed f16 mma accumulator fragment — rezeroed after the fold
+    fragment_layout: str = "m16n8k16"
 
     def deps(self) -> tuple[str, ...]:
         return (self.dst, self.src)
@@ -1957,7 +1976,8 @@ class FragmentPromote(Stmt):
         return [f"{indent}FragmentPromote {self.dst} += {self.src} (f16acc chunk fold, {self.src} rezeroed)"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
-        return [f"{_pad(ctx.indent)}emmy_mma_promote_f16acc({self.dst}, {self.src});"]
+        suffix = "_m8n8k4" if self.fragment_layout == "m8n8k4" else ""
+        return [f"{_pad(ctx.indent)}emmy_mma_promote_f16acc{suffix}({self.dst}, {self.src});"]
 
 
 @dataclass(frozen=True)
@@ -1965,8 +1985,9 @@ class FragmentRepack(Stmt):
     """Convert mma **C fragments** into one 16-bit operand fragment in registers.
 
     The m16n8k16 layout takes two k-adjacent C fragments whose lanes already align with A. The
-    Volta m8n8k4 layout takes one logical 16-column C fragment and selects one of its four-column
-    slices with warp shuffles. The emitter gates on ``AtomKind.c_to_a_repack`` at schedule time.
+    Volta m8n8k4 layout takes one logical 16×16 C fragment and selects a four-column A slice
+    or four-row B slice with warp shuffles. The emitter gates on the atom's C→A/C→B repack
+    capabilities at schedule time.
     The m16n8k16 f16 B layout takes one C fragment and exchanges its packed column pairs
     between lanes. Every lane of the warp must participate in that exchange."""
 
@@ -1988,13 +2009,13 @@ class FragmentRepack(Stmt):
         return [f"{indent}FragmentRepack {self.frag} <- {self.srcs} ({self.ab_dtype}, {self.fragment_layout}, part={self.part}{role})"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
+        assert self.role in ("a", "b")
+        if self.fragment_layout == "m8n8k4":
+            assert len(self.srcs) == 1 and self.ab_dtype == "f16"
+            return [f"{_pad(ctx.indent)}emmy_c_to_{self.role}_f16_m8n8k4<{self.part}>({self.frag}, {self.srcs[0]});"]
         if self.role == "b":
             assert self.fragment_layout == "m16n8k16" and self.ab_dtype == "f16" and len(self.srcs) == 1
             return [f"{_pad(ctx.indent)}emmy_c_to_b_f16({self.frag}, {self.srcs[0]});"]
-        assert self.role == "a"
-        if self.fragment_layout == "m8n8k4":
-            assert len(self.srcs) == 1
-            return [f"{_pad(ctx.indent)}emmy_c_to_a_{self.ab_dtype}_m8n8k4<{self.part}>({self.frag}, {self.srcs[0]});"]
         assert len(self.srcs) == 2
         return [f"{_pad(ctx.indent)}emmy_c_to_a_{self.ab_dtype}({self.frag}, {self.srcs[0]}, {self.srcs[1]});"]
 
@@ -3103,7 +3124,7 @@ def _(s: WgmmaWait, rename, sigma, axis_fn):
 
 @_rewrite_kind.register
 def _(s: FragmentPromote, rename, sigma, axis_fn):
-    return FragmentPromote(dst=rename(s.dst), src=rename(s.src))
+    return replace(s, dst=rename(s.dst), src=rename(s.src))
 
 
 @_rewrite_kind.register

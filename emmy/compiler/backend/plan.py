@@ -118,6 +118,10 @@ class KernelSpec:
     # and so does the block-scaled fp4 mma, which ptxas refuses on the plain target.
     arch_specific: bool = False
 
+    @classmethod
+    def from_op(cls, op) -> KernelSpec:
+        return cls(source=op.kernel_source, arch_specific=_needs_arch_isa(op))
+
 
 @dataclass
 class WeightSpec:
@@ -218,7 +222,7 @@ def plan_from_graph(graph: Graph) -> ExecutionPlan:
             raise TypeError(f"plan_from_graph: node {nid!r} has non-CudaOp {type(op).__name__!r}; lowering must produce Graph[CudaOp].")
         spec = kernels.get(op.kernel_name)
         if spec is None:
-            kernels[op.kernel_name] = KernelSpec(source=op.kernel_source, arch_specific=_needs_arch_isa(op))
+            kernels[op.kernel_name] = KernelSpec.from_op(op)
         elif spec.source != op.kernel_source:
             # Longstanding runtime semantics: launches resolve kernels by NAME and the first
             # source wins (repeated helper names like ``__partial`` ride the first-compiled

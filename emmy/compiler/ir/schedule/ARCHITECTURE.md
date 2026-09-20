@@ -217,13 +217,15 @@ matrix contractions. The structural reading proves that each warp's rows are ind
 contraction, that state reads take the previous step, and that output matrices share the same batch coordinates.
 Other recurrences retain the classic schedule.
 
-`WORK=w<M>x1` assigns independent groups of sixteen value rows to warps. `TILE` names an m16n8k16 FP16 atom and
-`f1x<N>`, where `N` covers all state columns in eight-column fragments. `STAGE=d1/reg` gives the carried state
+`WORK=w<M>x1` assigns independent groups of sixteen value rows to warps. `TILE` names an FP16 atom with both
+C→A and C→B repacking support and `f1x<N>`, where `N` covers all state columns. The atom registry supplies
+the fragment geometry: eight columns for m16n8k16, sixteen for Volta m8n8k4. `STAGE=d1/reg` gives the carried state
 one register slot across steps; there is no shared-memory ring or operand prefetch. Equal loads, pointwise
-operations, and products share register results within a step. All reads finish before the carried slot is updated.
+operations, and products share FP32 register results within a step. Operand conversions stay beside each MMA
+to shorten their live ranges. All reads finish before the carried slot is updated.
 
 The catalog offers FP32 accumulation and FP16 partial accumulation under `F16_MMA_F32_ACC` (also enabled by
 `FAST_MATH`). Both convert matrix operands to FP16 and keep the carried state in FP32. For FP16 accumulation,
 `TILE`'s K chunk is the promotion interval in atom steps: `k4` promotes and clears the partial accumulator every
-64 products, including a shorter final chunk. An explicit tile row can select the arithmetic directly. Register
-pressure and numerical error still depend on the shape and inputs; a legal schedule is not a performance claim.
+64 products on m16n8k16 or 16 on Volta m8n8k4, including a shorter final chunk. An explicit tile row can select
+the arithmetic directly. Register pressure and numerical error still depend on the shape and inputs; a legal schedule is not a performance claim.
