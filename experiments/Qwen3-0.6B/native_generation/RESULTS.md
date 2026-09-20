@@ -86,3 +86,34 @@ are published.
 Development checks cover native Rust unit tests, Python protocol/CLI validation, tiny-model generation, and the
 rotary regression. Full-suite finalization and checkpoint qualification remain outstanding. HTTP serving,
 concurrency, and throughput optimization are outside this implementation.
+
+## Qualification contract under evaluation
+
+The following contract is fixed before evaluating the broader eight-case matrix. Its limits are engineering
+acceptance budgets for this experimental FP16 path, not a mathematical error bound or a production quality claim.
+The three exploratory prompts used to examine precision were France, a short French translation request, and an
+addition function. The six new qualification cases use explanation, different code, German translation, JSON,
+and repeated astronomy/library text at 127 and 240 prompt tokens. The original France and arithmetic cases remain
+as regressions. Every case adds 15 or 16 decode positions; the longest reaches the artifact's 256-position boundary.
+
+A second Hugging Face model evaluates the **same FP16-rounded weights** in FP32, with TF32 disabled. References see
+exactly the same prefix as native execution. Both native and Hugging Face FP16 must stay within 2% relative L2 logit
+error and 0.02 total variation distance from the FP32 next-token distribution. Total variation limits the probability
+assigned to any token set to a two-percentage-point difference. Native error must also stay below twice the FP16
+reference error, with one FP16 epsilon as the floor for nearly exact reference calculations. This comparative guard
+prevents the absolute budget alone from accepting a disproportionately inaccurate native result.
+
+Native argmax must equal one of the FP16/FP32 reference choices. If those references agree, exact agreement is
+required. If they disagree, the row records both choices and their margins; disagreement is visible evidence of a
+precision-sensitive decision, not proof of equivalent future completions. The former `2e-2` pointwise comparison
+remains recorded for every position, but is no longer the full-model acceptance rule. This is an explicit change
+of qualification contract, not a claim that its previously failing vectors now satisfy that tolerance.
+
+This contract supplements exact Python/Rust dispatcher parity, strict tiny-model logits, the independent rotary
+rounding regression, and independent attention/cache-boundary checks. Its test budgets will not be increased to
+make a failing held-out case pass. Broader tests are still pending at this revision.
+
+PyTorch documents that sliced and batched computations can differ with the same mathematical inputs, and that
+low-precision intermediates can accumulate error. This motivates checking a higher-precision reference; it does
+not supply or endorse the budgets above. See the
+[PyTorch 2.11 numerical-accuracy notes](https://docs.pytorch.org/docs/2.11/notes/numerical_accuracy.html).
