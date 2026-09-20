@@ -1763,6 +1763,15 @@ configs:
       STAGE: ''
       RASTER: ''
     identity: 77950b3f7095190050181b8a164fbd7ef5fd0b3ca7cb3661bf7c90ce776e430d
+  - name: k_linear_reduce_bbf90a.1f4f0cbfdd67
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: 1f4f0cbfdd67009ef291d626da11037a2ef8425c62bf4e85d192c2dc70731e1c
 loops:
 - inputs: [x]
   outputs: [x_static_fp4_scale_bits, x_static_fp4_bits]
