@@ -40,9 +40,7 @@ a non-primary buffer under its own tensor name (`<primary>__sq` style). Every bu
 indexes in lockstep with every mutation: `graph.producer(buf)` / `graph.buffer(buf)` resolve a buffer to its
 producing node / its `Tensor`, and `graph.buffer_users(buf)` lists the consumers of that one buffer —
 `graph.users(node_id)` stays node-granular (the union over the node's buffers). `Graph.validate()` checks the
-index/SSA invariants; tests call it directly (never production compile paths). A register carry materialization
-uses the same splice mechanism to remove its unused global state port. Kernel IR buffer renames update both
-the body and its typed I/O, just as Loop and Tile IR renames do.
+index/SSA invariants; tests call it directly (never production compile paths).
 
 `Graph.structural_key()` implements the `Structural` protocol
 (`compiler/structural.py`) — a Merkle-style hex sha256 digest used for

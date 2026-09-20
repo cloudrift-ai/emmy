@@ -47,12 +47,10 @@ A read takes the previous step (`S[c − 1, …]`, or the seed at the first step
 not read its own outputs. The step stays an ordinary `Fold` tree, including contractions over other state cells.
 
 The classic schedule realizes that axis as ordered launches with a global state buffer. The register schedule
-realizes it as a loop inside each CTA. It requires one static matrix state with independent rows: a warp owns
-sixteen rows and every column, and no contraction may read state from another warp's rows. The physical state
-coordinates are transposed to give each value channel its complete key dimension. State and reused matrix results
-stay in FP32 C fragments; MMA operands are repacked to FP16. Private state buffers disappear when materializing
-the kernel, while state snapshots read by other kernels remain global outputs. Both schedules preserve all
-previous-state reads until the step has finished evaluating its outputs.
+realizes it as a loop inside each CTA when the state rows are independent. Private state buffers disappear during
+materialization; externally read snapshots remain global outputs. Both schedules preserve previous-state reads
+until the step has finished evaluating its outputs. The domain and choices are described in
+[`ir/schedule/ARCHITECTURE.md`](../schedule/ARCHITECTURE.md).
 
 ## Total lift
 

@@ -228,4 +228,4 @@ The catalog offers FP32 accumulation and FP16 partial accumulation under `F16_MM
 `FAST_MATH`). Both convert matrix operands to FP16 and keep the carried state in FP32. For FP16 accumulation,
 `TILE`'s K chunk is the promotion interval in atom steps: `k4` promotes and clears the partial accumulator every
 64 products on m16n8k16 or 16 on Volta m8n8k4, including a shorter final chunk. An explicit tile row can select
-the arithmetic directly. Register pressure and numerical error still depend on the shape and inputs; a legal schedule is not a performance claim.
+the arithmetic directly. Register pressure and numerical error depend on the shape and inputs.

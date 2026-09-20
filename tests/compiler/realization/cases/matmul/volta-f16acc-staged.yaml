@@ -31,4 +31,4 @@ configs:
       TILE: mma_m8n8k4_f16_f16/f2x2/k4
       WORK: w1x1
       STAGE: d1/smem
-    identity: 62b1fc6cd5bda8eb07f9b3d6e016aad2c974d8db78e244c726a39c2ab9156e98
+    identity: 318f86829be93204271b7d8a2b33a9b7741f9024be5ad0517003a0ec06a488de

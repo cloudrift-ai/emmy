@@ -33,14 +33,13 @@ from ._atom import _direct_operand
 class _Fragments:
     """Emit the term once per coordinate tile, sharing equal loads, arithmetic and contractions."""
 
-    def __init__(self, tile, row_base):
+    def __init__(self, tile):
         self.tile = tile
         self.program = tile.register_program
         self.atom = tile.schedule.kernel.tile.atom
         self.period = tile.schedule.kernel.tile.bk
         self.width = self.atom.atom_n
         self.layout = frag_layout(self.atom.fragment_layout)
-        self.row_base = row_base
         self.extents = {axis.name: axis.extent.as_static() for axis in tile.axes}
         self.body = []
         self.memo = {}
@@ -232,7 +231,7 @@ def factorize_register(tile):
     warps = choice.work.units[0]
     height = choice.tile.atom.atom_m
     row_base = Literal(height, "int") * (Literal(warps, "int") * Var("_rb") + Var("_rw"))
-    emit = _Fragments(tile, row_base)
+    emit = _Fragments(tile)
     pending = []
     for spec, node in zip((*program.outputs, program.state), program.roots, strict=True):
         col, row = (expr.name for expr in spec.write.index[-2:])

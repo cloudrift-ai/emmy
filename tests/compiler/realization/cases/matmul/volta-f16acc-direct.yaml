@@ -31,4 +31,4 @@ configs:
       TILE: mma_m8n8k4_f16_f16/f2x2/k4
       WORK: w1x1
       STAGE: ''
-    identity: f7b89fa1cc36adb9ddd907772d512298d7c7554e3605de98b0e932e485ffbabf
+    identity: 09880539ff5b32f771dd2e8713356767fc282c3428e279f49b8e045a83928afe

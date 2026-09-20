@@ -164,8 +164,7 @@ class _RegisterSite(Site):
                 (Tile.parse(p.row["TILE"], work),)
                 if "TILE" in p.row
                 else tuple(
-                    Tile(atom=atom, units=work.units, regs=(1, (program.columns + atom.atom_n - 1) // atom.atom_n), bk=4)
-                    for atom in _ATOMS
+                    Tile(atom=atom, units=work.units, regs=(1, (program.columns + atom.atom_n - 1) // atom.atom_n), bk=4) for atom in _ATOMS
                 )
             )
             for plan in plans:
