@@ -468,8 +468,8 @@ def test_a_contraction_with_no_row_binds_the_size_one_output_coordinate() -> Non
     and the lift binds it back — into the OPERAND's index too, since a row an operand never reads
     leaves ``left_axes`` empty and is refused just the same.
 
-    ``_implicit_unit_row`` cannot serve this shape: it proves a row only from a leading zero prefix
-    and a dense column, which the head coordinate between the zeros denies.
+    ``_implicit_unit_row`` cannot serve this shape: A reads the shared head coordinate, so the
+    missing row must be bound into its index rather than merely announced in the placement.
     """
     tile = _tile_with_shapes(_decode_body(), (1, 8, 1, 16), {"q": (1, 8, 1, 32), "v": (1, 8, 32, 16)})
     bound = [axis for axis in tile.place.free if axis.extent == Dim(1)]

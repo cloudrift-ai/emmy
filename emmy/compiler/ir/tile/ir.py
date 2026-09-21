@@ -423,7 +423,7 @@ class TileOp(Op):
         # at all a geometry, and a matvec against a 1-D operand can only be served by the latter.
         unit_row = _implicit_unit_row(self.output_specs, self.place.free)
         if unit_row is not None and any(
-            (view := site.node.as_contraction()) is not None and not view.left_axes for site in sites(normalized)
+            (view := site.node.as_contraction()) is not None and not view.left_axes and not view.shared_axes for site in sites(normalized)
         ):
             object.__setattr__(self, "place", replace(self.place, free=(unit_row, *self.place.free)))
         if self.schedule is not None and normalized != self.op:
