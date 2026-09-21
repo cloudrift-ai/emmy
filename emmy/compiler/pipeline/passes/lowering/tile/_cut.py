@@ -30,19 +30,22 @@ rather than a sequence of them.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from math import gcd
 
 from emmy.compiler.dtype import F32
 from emmy.compiler.dtype import get as get_dtype
 from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure.fold import (
     Fold,
 )
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.schedule.packing import match_packed_pair_node
+from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Load, Write
+from emmy.compiler.ir.stmt.passes import rewrite as rewrite_stmt
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ir import promoted_sweep
 from emmy.compiler.ir.tile.ops import (
@@ -104,31 +107,22 @@ class Frontier:
     epilogue — the same ``sum_k a*(s*w) = s*sum_k a*w`` reassociation as the materialized case."""
 
     name: str  # the encoded value the workspace holds
-    producer: tuple  # the prefix stmts computing ``name`` (spliceable operand bodies inlined)
+    producer: Fold  # the encode prefix, retaining the operand edges it reads
     residue: tuple  # the decode + factor stmts the consumer keeps
     dtype: object  # the storage DataType the decode op names
-
-
-def _spliceable(edge) -> tuple | None:
-    """A zero-axis operand's flat stmt list, or ``None`` when it cannot splice inline (an
-    iterating fold, nested operands, or non-scalar members)."""
-    if not isinstance(edge, Fold) or edge.axis is not None or edge.operands:
-        return None
-    members = tuple(edge.lift.body)
-    return members if all(isinstance(stmt, (Load, Assign)) for stmt in members) else None
 
 
 def storage_frontier(node: Fold) -> Frontier | None:
     """``node``'s storage frontier, or ``None`` when it has none the cut can separate.
 
     The shape is semantic, not an op list: exactly one decode of a value DEFINED by the cone's own
-    body (a decode of a materialized load was already absorbed by normalization), whose backward
-    cone separates cleanly — only the decode reads a prefix-computed name, so the residue's value
-    is a pure function of the stored bits and its own leaves. Every operand must splice inline
-    (each side takes the operand bodies it reads), keeping both pieces free of nested edges."""
+    body (a decode of a materialized load was already absorbed by normalization). The residue
+    reads the stored bits and recomputes any pure values shared with the encode, such as its scale.
+    Each side keeps its operand edges, so a computed scale can contain a reduction and can be cut
+    separately in the same placement decision."""
     if not isinstance(node, Fold) or node.axis is not None or len(node.lift.results) != 1:
         return None
-    lift = node.applied  # the operands' spelling: what the spliced sides read
+    lift = node.applied
     body = lift.body
     if any(not isinstance(stmt, (Load, Assign)) for stmt in body):
         return None
@@ -142,31 +136,17 @@ def storage_frontier(node: Fold) -> Frontier | None:
         return None
     decode = decodes[0]
     frontier = decode.args[0]
-    spliced = [_spliceable(edge) for edge in node.operands]
-    if any(members is None for members in spliced):
-        return None
     prefix = tuple(body.backward_cone((frontier,)).members)
-    prefix_ids = {id(stmt) for stmt in prefix}
-    prefix_defs = {name for stmt in prefix for name in stmt.defines()}
-    residue = tuple(stmt for stmt in body if id(stmt) not in prefix_ids)
-    for stmt in residue:
-        crossing = Body((stmt,)).ssa_uses & prefix_defs
-        if crossing and (stmt is not decode or crossing != {frontier}):
-            return None  # a residue stmt reads past the frontier — the waypoint does not separate
-    if lift.results[0] in prefix_defs:
+    remaining = Body(stmt for stmt in body if frontier not in stmt.defines())
+    residue = tuple(remaining.backward_cone(lift.results).members)
+    if decode not in residue:
         return None
     result = get_dtype(decode.op.decodes)
 
-    def side(stmts: tuple) -> tuple:
-        reads = Body(stmts).ssa_uses
-        inlined: list = []
-        for edge, members in zip(node.operands, spliced, strict=True):
-            needed = set(edge.exposes) & reads
-            if needed:  # only the cone the side reads — a dead spliced def would decline the decode hoist
-                inlined.extend(Body(members).backward_cone(tuple(sorted(needed))).members)
-        return (*inlined, *stmts)
-
-    return Frontier(name=frontier, producer=side(prefix), residue=side(residue), dtype=result)
+    operands = tuple(edge for edge in node.operands if set(edge.exposes) & Body(prefix).ssa_uses)
+    params = tuple(name for edge in operands for name in edge.exposes)
+    producer = Fold(operands=operands, lift=Lambda.closing(params, Body(prefix), (frontier,)))
+    return Frontier(name=frontier, producer=producer, residue=residue, dtype=result)
 
 
 def _external_reads(node: Fold) -> frozenset[str]:
@@ -495,6 +475,7 @@ def _cluster_value_seams(seams: list[CutSite], axes: tuple) -> tuple[CutSite, ..
     captured = {index: tuple(axis.name for axis in seams[index].axes) for index in eligible}
     scoped = {index: tuple(axis for axis in captured[index] if axis in seams[index].node.free_axes) for index in eligible}
     forms = {index: _value_forms(seams[index], axes) for index in eligible}
+    descendants = {index: {id(site.node) for site in sites(seams[index].node)[1:]} for index in eligible}
     drop: set[int] = set()
     merged: dict[int, CutSite] = {}
     # The representative exposes the most: a twin stands for the lone contractions that equal its
@@ -513,6 +494,10 @@ def _cluster_value_seams(seams: list[CutSite], axes: tuple) -> tuple[CutSite, ..
             if member_index == rep_index or member_index in drop or member_index in merged:
                 continue
             member = seams[member_index]
+            # A multi-result cone may expose a value it also consumes below another result.
+            # Replacing that descendant by the cone's workspace would make the producer cyclic.
+            if id(member.node) in descendants[rep_index] or id(rep.node) in descendants[member_index]:
+                continue
             if not all(form in forms[rep_index] for form in forms[member_index]):
                 continue
             channels = tuple(forms[rep_index].index(form) for form in forms[member_index])
@@ -542,7 +527,9 @@ def _unchanged(pieces: tuple, members) -> bool:
 
 def _replace_member(member, targets: dict[int, tuple], renamed: dict[str, str]):
     if id(member) in targets:
-        return targets[id(member)]
+        # A storage-frontier residue retains operand edges. Apply nested cuts there too, just
+        # as in the encode producer, so both sides reuse a separately materialized scale.
+        return tuple(_replace_fold(piece, targets, renamed) if isinstance(piece, Fold) else piece for piece in targets[id(member)])
     if isinstance(member, Fold):
         return (_replace_fold(member, targets, renamed),)
     nested = member.nested()
@@ -677,6 +664,43 @@ def _workspace_axes(seam: CutSite, produced: Fold) -> tuple:
     operand indices still read it as the outer partition coordinate."""
     read = _external_reads(produced)
     return tuple(axis for axis in seam.axes if axis.name in read or (axis.extent.is_static and axis.extent.as_static() == 1))
+
+
+def _workspace_strides(produced: Fold, axes: tuple) -> dict[str, int]:
+    """A coordinate used only as ``i // d`` needs one stored value per group of ``d`` cells.
+
+    Every occurrence must be the numerator of a positive integer division. Different divisors
+    share their greatest common divisor; a direct read or a remainder keeps the full extent.
+    Read the stored terms, including coordinate predicates, before choosing a representative.
+    """
+    factors = dict.fromkeys((axis.name for axis in axes), 0)
+    pending = [produced]
+    while pending:
+        term = pending.pop()
+        pending.extend(term.operands)
+        for name in factors:
+            if name not in term.free_axes:
+                continue
+            if term.observe is not None or name in term.lift.results:
+                factors[name] = 1
+            for stmt in term.lift.body.iter():
+                if not isinstance(stmt, Load) and name in stmt.deps():
+                    factors[name] = 1
+                for expr in stmt.exprs():
+                    parts = tuple(expr.subterms())
+                    uses = sum(isinstance(part, Var) and part.name == name for part in parts)
+                    divisors = [
+                        int(part.right.value)
+                        for part in parts
+                        if isinstance(part, BinaryExpr)
+                        and part.op in ("/", "//")
+                        and part.left == Var(name)
+                        and isinstance(part.right, Literal)
+                        and part.right.dtype == "int"
+                        and part.right.value > 0
+                    ]
+                    factors[name] = gcd(factors[name], *divisors) if uses == len(divisors) else 1
+    return {name: factor for name, factor in factors.items() if factor > 1}
 
 
 def _buffer_reads(node: Fold) -> set[str]:
@@ -874,14 +898,16 @@ def realize(
         slots = tuple(name in set(wanted) for name in child.exposes)
         if front is not None:
             names = (front.name,)
-            produced = Fold(operands=(), lift=Lambda.closing((), Body.coerce(Body(front.producer)), names))
+            produced = front.producer
             dtypes = seam.dtypes
         else:
             names = wanted
             produced = child
             dtypes = tuple(dtype for dtype, keep in zip(seam.dtypes, slots, strict=True) if keep)
         axes = _workspace_axes(seam, produced)
-        index = tuple(Var(axis.name) for axis in axes)
+        strides = _workspace_strides(produced, axes)
+        axes = tuple(replace(axis, extent=axis.extent.ceil_div(strides[axis.name])) if axis.name in strides else axis for axis in axes)
+        index = tuple(Var(axis.name) / strides[axis.name] if axis.name in strides else Var(axis.name) for axis in axes)
         token = digest(tile.identity_key(structural=False) or "", seam.spelling)[:10]
         # The ordinal names the component the workspace holds, so a narrowed seam keeps the
         # spelling of the components it did keep.
@@ -904,8 +930,10 @@ def realize(
             # EXPOSES renames its defining statements in lockstep and leaves the read's own
             # internal spelling alone.
             raw = Load(name=names[0], input=buffers[0], index=index, dtype=front.dtype)
-            residue = Lambda.closing((), Body.coerce(Body((raw, *front.residue))), child.lift.results)
-            loads = (Fold(operands=(), lift=residue.rename({name: _read_name(name, token) for name in residue.results})),)
+            operands = tuple(edge for edge in child.operands if set(edge.exposes) & Body(front.residue).ssa_uses)
+            params = tuple(name for edge in operands for name in edge.exposes)
+            residue = Lambda.closing(params, Body((raw, *front.residue)), child.applied.results)
+            loads = (Fold(operands=operands, lift=residue.rename({name: _read_name(name, token) for name in residue.results})),)
         # The names the consumer reads this workspace back under. A frontier seam's workspace holds
         # the raw storage waypoint, so its piece is named after the FRONTIER while the consumer
         # still exposes the cone's decoded results — the rename is over those.
@@ -918,7 +946,7 @@ def realize(
             # reads the component that is its value: a lone contraction reads one channel of the
             # twin it equals.
             mapping = dict(pairs)
-            sibling_index = tuple(Var(mapping[axis.name]) for axis in axes)
+            sibling_index = tuple(expr.substitute({name: Var(other) for name, other in mapping.items()}) for expr in index)
             replacements[id(sibling)] = tuple(
                 Fold.slab(Load(name=_read_name(own, token, ordinal), input=held[channel], index=sibling_index)) if channel in held else None
                 for own, channel in zip(sibling.exposes, channels, strict=True)
@@ -928,7 +956,7 @@ def realize(
             for name, channel in zip(sibling.exposes, channels, strict=True):
                 if channel in held:
                     read_names.setdefault(name, _read_name(name, token, ordinal))
-        pieces.append((replace(seam, dtypes=dtypes), produced, axes, index, token, names, buffers, replacements))
+        pieces.append((replace(seam, dtypes=dtypes), produced, axes, strides, token, names, buffers, replacements))
 
     # Every replacement applies to the consumer AND to every OTHER seam's produced piece: a
     # composed decision may cut a cone nested inside another seam's value (attention's statistics
@@ -941,12 +969,15 @@ def realize(
         for store in tile.output_specs
     )
     produced_pieces = []
-    for seam, produced, axes, index, token, names, buffers, replacements in pieces:
+    for seam, produced, axes, strides, token, names, buffers, replacements in pieces:
         others = {target: loads for target, loads in everything.items() if target not in replacements}
         # A piece that reads another seam's workspace re-spells what it derives from it too, and
         # its own stores name those values.
         derived: dict[str, str] = {}
         produced = _replace_fold(produced, others, derived) if others else produced
+        if strides:
+            produced = rewrite_stmt(produced, lambda name: name, Sigma({name: Var(name) * stride for name, stride in strides.items()}))
+        index = tuple(Var(axis.name) for axis in axes)
         produced_pieces.append((seam, produced, axes, index, token, tuple(derived.get(name, name) for name in names), buffers))
 
     fragment = _input_fragment(match, root)
@@ -962,7 +993,7 @@ def realize(
             # different cut levels would launch one kernel twice.
             name=f"{tile.name}__place_{token}",
             place=Placement(free=axes),
-            axes=tile.axes,
+            axes=tuple(next((axis for axis in axes if axis.name == original.name), original) for original in tile.axes),
             output_specs=tuple(
                 OutputSpec(Write(output=buffer, index=index, value=name)) for name, buffer in zip(names, buffers, strict=True)
             ),

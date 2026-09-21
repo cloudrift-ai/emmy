@@ -420,8 +420,8 @@ rows and so drops a prologue nothing bridges. A register tile evaluates the cone
 under the edge split, symbolic-seq SDPA lowered a kernel reading twelve names it never bound.
 
 **A bridged seam value keeps its own dtype.** A computed operand's cone splits at its K seam into a row-invariant
-prologue and a per-cell body, and the prologue publishes its results through smem rows the cell reads back — so
-those rows are the only place a bridged value's dtype is declared (`cone_stat_dtypes`, typed the way `edge_dtypes`
+prologue and a per-cell body. Only external cell reads load bridged results; locally defined values are not reloaded.
+The smem rows declare each bridged value's dtype (`cone_stat_dtypes`, typed the way `edge_dtypes`
 types an edge's results; a name whose statement kind carries no dtype keeps the float default). Declaring every row
 `float` decides the CELL's arithmetic too: a value that crosses as an integer — a pack's shift amount, a nibble
 mask — returns as f32, and the bit operations reading it have no f32 spelling at all, so the kernel fails to render
@@ -661,8 +661,14 @@ pairable because their per-lane address XOR commutes with the paired lane map;
 cooperative / shared-row templates emit (body-level only — a slab `Smem` decl flags `smem_seen`, so a load-bearing
 prologue `Sync` is correctly retained; `with_bodies` preserves the cooperative tile's `block_threads`).
 
+`090_guard_reductions` propagates coordinate demand backward through pure scalar expressions and selects. A scalar
+reduction whose result is read only under an enclosing-coordinate predicate becomes a zero-trip loop elsewhere.
+Its identity seed stays outside the loop. Stores, synchronization, warp operations and predicates depending on values
+computed later cannot be guarded this way.
+
 Every codegen-policy peephole records its decision as an on-by-default BOOL policy knob on the `KernelOp`
-(`VECTORIZE_LOADS` / `VECTORIZE_STORES` / `INTERLEAVE_LOADS` / `PAIR_LDMATRIX` — the `050` pattern: idempotence via
+(`VECTORIZE_LOADS` / `VECTORIZE_STORES` / `GUARD_REDUCTIONS` / `INTERLEAVE_LOADS` / `PAIR_LDMATRIX` — the `050`
+pattern: idempotence via
 the recorded knob, `EMMY_<NAME>=0` pins it off, never a search dimension), so no rewrite that touches emitted code
 is unconditional-and-unrecorded.
 

@@ -603,7 +603,8 @@ canonicalized before validation:
   of source order and spelling, and it rides the normalized body: structural identity labels the same graph again
   under its own buffer coloring instead of building it a second time. A scope's definitions bind its reads in any
   order and shadow an enclosing binding of the same spelling; a deeper scope's definition binds nothing read above
-  it, so the block still depends on the enclosing definition it reads.
+  it, so the block still depends on the enclosing definition it reads. Identity canonicalizes integer expressions
+  again after final axis renaming: a rename across numeric suffixes must not reverse an otherwise canonical sum.
 - A standard smaller-half worklist computes the equitable partition in
   `O((vertices + relations) log vertices)` relation visits. Exact individualization is isolated to partitions that
   refinement cannot distinguish; no exact near-linear worst-case graph-canonization algorithm is known. The search

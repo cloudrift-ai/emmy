@@ -175,6 +175,14 @@ VECTORIZE_STORES = Knob(
     off=False,
 )
 
+GUARD_REDUCTIONS = Knob(
+    "GUARD_REDUCTIONS",
+    KnobType.BOOL,
+    hints=(True,),
+    help="Skip scalar reductions whose results are discarded by coordinate selects.",
+    off=False,
+)
+
 PAIR_LDMATRIX = Knob(
     "PAIR_LDMATRIX",
     KnobType.BOOL,

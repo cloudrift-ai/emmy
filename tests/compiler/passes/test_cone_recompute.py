@@ -80,6 +80,19 @@ def _norm_linear() -> tuple:
     return cone, contraction(K, cone, (slab("w", "w", "n", "k"), "acc"))
 
 
+def test_the_seam_does_not_bridge_a_statistic_the_cell_defines() -> None:
+    """A shared row statistic can also be computed inside a varying operand's cone."""
+    inner, _ = _norm_linear()
+    cone = projection(
+        operands=(inner.operands[0], inner),
+        body=(Assign(name="out", op=ElementwiseImpl("multiply"), args=("acc0", "a")),),
+        results=("out",),
+    )
+    pro, cell, stats, chunk = cone_seam(cone, K.name, axes=(M, N, K, J))
+    assert "acc0" in Body(cell).ssa_defs
+    assert pro == stats == chunk == ()
+
+
 def _register_tiled(spelling: str) -> Body:
     """The gmem-direct register tile's body for the norm→linear shape, sealed the way ``_factor._bind`` seals it."""
     cone, c = _norm_linear()

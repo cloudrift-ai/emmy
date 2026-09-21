@@ -14,7 +14,7 @@ from functools import cached_property
 
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.normalize import normalize_body, rename_ssa_sequential, sort_commutative_args
+from emmy.compiler.ir.stmt.normalize import _canonicalize_exprs, normalize_body, rename_ssa_sequential, sort_commutative_args
 from emmy.compiler.structural import digest, form
 
 __all__ = ["Identity", "canonicalize_identity"]
@@ -52,6 +52,9 @@ def canonicalize_identity(stmts: Body, *, cluster: bool = False, types: Mapping[
     resources = labeling.resources()
     rename = {name: f"b{index}" for index, name in enumerate(resources)}
     body = Body.coerce(sort_commutative_args(rename_ssa_sequential(ordered.rename_buffers(rename))))
+    # Coordinate sums sort by axis name. Canonical axis renaming can reverse that order (a9/a10
+    # becomes a0/a1), so normalize their spelling after the final rename as well.
+    body = _canonicalize_exprs(body)
     return Identity(body, resources, tuple(None if types is None else types.get(name) for name in resources))
 
 

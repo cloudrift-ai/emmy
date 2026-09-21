@@ -411,6 +411,83 @@ def test_normalization_prunes_an_operand_component_no_reader_reads() -> None:
     assert not [stmt for stmt in edge.lift.body if isinstance(stmt, Load) and stmt.input == "sdpa_scale"]
 
 
+@pytest.mark.parametrize("stored_second", [False, True])
+def test_unread_planar_state_drops_its_independent_coordinate(stored_second) -> None:
+    """A shared reduction must not give a reader the coordinates of an unused state."""
+    r = Axis("r", 4)
+    stats = reduction(
+        r,
+        (slab("xv", "x", "m", "r"), slab("yv", "y", "n", "r")),
+        (Assign(name="sx__v", op="copy", args=("xv",)), Assign(name="sy__v", op="copy", args=("yv",))),
+        ("sx", "sy"),
+        "maximum",
+    )
+    root = projection((stats,), (Assign(name="out", op="negative", args=("sx",)),), ("out",))
+    specs = [OutputSpec(Write(output="o", index=(Var("m"),), value="out"))]
+    if stored_second:
+        specs.append(OutputSpec(Write(output="tap", index=(Var("n"),), value="sy")))
+    tile = _tile(root, N16, r, free=(M8,), output_specs=tuple(specs))
+    states = {site.node.exposes: site.node for site in sites(tile.op) if site.node.axis is not None}
+    assert set(states) == ({("sx",), ("sy",)} if stored_second else {("sx",)})
+    assert states[("sx",)].free_axes == frozenset({"m"})
+    if stored_second:
+        assert states[("sy",)].free_axes == frozenset({"n"})
+    assert all(len(stat.init) == len(stat.base.results) == len(stat.lift.results) == 1 for stat in states.values())
+    assert TileOp(op=tile.op, place=tile.place, axes=tile.axes, output_specs=tile.output_specs).op is tile.op
+
+    import numpy as np
+
+    from emmy.compiler.ir.loop.runner import execute_loop_op_cpp
+
+    x = np.arange(32, dtype=np.float32).reshape(8, 4) - 17
+    y = np.arange(64, dtype=np.float32).reshape(16, 4) - 33
+    shapes = {"o": (8,), **({"tap": (16,)} if stored_second else {})}
+    loop = LoopOp(body=tile.loop_body)
+    actual = execute_loop_op_cpp(loop, {"x": x, "y": y}, shapes)
+    outputs = dict(zip(loop.outputs, actual if isinstance(actual, tuple) else (actual,), strict=True))
+    if stored_second:
+        np.testing.assert_array_equal(outputs["tap"], y.max(axis=1))
+    np.testing.assert_array_equal(outputs["o"], -x.max(axis=1))
+
+
+def test_planar_state_pruning_does_not_depend_on_operand_object_sharing() -> None:
+    from dataclasses import replace
+
+    stat = reduction(
+        K32,
+        (slab("xv", "x", "m", "k"),),
+        (Assign(name="sx__v", op="copy", args=("xv",)), Assign(name="ss__v", op="multiply", args=("xv", "xv"))),
+        ("sx", "ss"),
+    )
+
+    def normalized(second):
+        left = projection((stat,), (Assign(name="left", op="negative", args=("sx",)),), ("left",))
+        right = projection((second,), (Assign(name="right", op="negative", args=("ss",)),), ("right",))
+        root = projection((left, right), (Assign(name="out", op="add", args=("left", "right")),), ("out",))
+        return _tile(root, K32, free=(M8,)).op
+
+    assert normalized(stat) == normalized(replace(stat))
+
+
+def test_readers_of_independent_shared_statistics_keep_only_their_own_coordinates() -> None:
+    stat = reduction(
+        K32,
+        (slab("xv", "x", "m", "k"), slab("yv", "y", "n", "k")),
+        (Assign(name="sx__v", op="copy", args=("xv",)), Assign(name="sy__v", op="copy", args=("yv",))),
+        ("sx", "sy"),
+        "maximum",
+    )
+    left = projection((stat,), (Assign(name="left", op="negative", args=("sx",)),), ("left",))
+    right = projection((stat,), (Assign(name="right", op="negative", args=("sy",)),), ("right",))
+    root = projection((left, right), (Assign(name="out", op="add", args=("left", "right")),), ("out",))
+    tile = _tile(root, K32, free=(M8, N16))
+    by_result = {site.node.exposes: site.node for site in sites(tile.op)}
+    assert by_result[("left",)].free_axes == frozenset({"m"})
+    assert by_result[("right",)].free_axes == frozenset({"n"})
+    assert tile.op.free_axes == frozenset({"m", "n"})
+    assert TileOp(op=tile.op, place=tile.place, axes=tile.axes).op is tile.op
+
+
 def test_normalization_keeps_a_component_only_a_boundary_store_reads() -> None:
     """A store is a reader too: a sweep's per-cell projection reaches its ``Write`` with no lift
     binding it, so the prune keeps what the output specifications name."""

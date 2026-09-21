@@ -58,9 +58,9 @@ node ids,
 operand-edge sites, each site's projection or reduction view, and each contraction's schedule-independent
 `ContractionFacts` — its effective K axis, computed-A cone seam, nested producer, and fragment need. The seam
 (`cone_seam`) splits the cone's edges at the K axis into a row-invariant prologue, a per-chunk statistic (a reduce
-that reads K only through one block guard, such as a grouped activation scale's maximum) and a per-cell body, and
-keeps one lowering of a fold two cell edges read (attention's output and its own row sum): the tree forms that fold
-twice as equal nodes, and a fill that replicates the cell per output cell would otherwise declare its states twice.
+that reads K only through one block guard, such as a grouped activation scale's maximum) and a per-cell body. Only
+external reads cross these parts; a value defined inside the consuming body is not bridged. Equal folds shared by
+cell edges lower once, so attention's output and row sum do not redeclare the same states in a replicated fill.
 `ir/schedule/views` supplies the vocabulary (`node_view`, `Projection`, `Reduction`, `Contraction`,
 `ContractionFacts`) and the one derivation that is not a projection of the site table, `contraction_facts`; the tile
 layer reads through them. The composition context publishes the schedule-facing API (`node`, `site`, `operand`,

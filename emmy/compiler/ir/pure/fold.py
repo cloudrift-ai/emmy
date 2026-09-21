@@ -404,12 +404,12 @@ class Fold:
         """This term restricted to the results ``names`` — same operands and params, body cut to
         what those results need.
 
-        What :meth:`lower` places when a reader takes only SOME of a computed edge's components. A
-        twisted carrier's weight cone carries the score its step folds beside a weight only a
-        schedule wants, and emitting the second costs a transcendental per element for nothing.
+        What :meth:`lower` places when a reader takes only SOME of a computed edge's components.
+        Planar reduction states are independent, so their injection and identity narrow together.
+        Twisted and observed states remain whole because their components can depend on each other.
         Memoized on the term.
         """
-        if self.axis is not None or self.exposes == names:
+        if self.exposes == names or self.twist is not None or self.observe is not None:
             return self
         # ``names`` are EXPOSED names — what :attr:`applied` spells — while the body and the lift's
         # own results are in the term's private spelling. The two coincide wherever the body defines
@@ -417,9 +417,20 @@ class Fold:
         # projection over one term per carried state, once a cut renames a child's state to its
         # workspace). They stay positional, so translate before cutting: writing an exposed name
         # into the lift's results leaves a result nothing defines.
-        keep = tuple(self.lift.results[self.exposes.index(name)] for name in names)
+        positions = tuple(self.exposes.index(name) for name in names)
+        keep = tuple(self.lift.results[index] for index in positions)
         members = tuple(self.lift.body.backward_cone(keep).members)
-        return replace(self, lift=replace(self.lift, body=Body(members), results=keep))
+        lead = self.lift.params[: (self.axis is not None) + len(self.bindings)]
+        lift = Lambda.closing(lead, Body(members), keep)
+        if self.axis is None:
+            return replace(self, lift=lift)
+        ops = self.base.components()
+        return replace(
+            self,
+            lift=lift,
+            init=tuple(self.init[index] for index in positions),
+            base=Lambda.componentwise(tuple(ops[index] for index in positions), names),
+        )
 
     def binds_axes(self) -> frozenset[str]:
         """The axis this term binds — what the statement-door ``rewrite`` drops from σ for the subtree."""
@@ -737,11 +748,11 @@ class Fold:
         (:meth:`bilinear_channels`, :meth:`tiles_whole`, ``TileOp.contracts``, the atom's channels)
         stays exactly as strict as it was.
 
-        Only what refuses comes apart: a carrier that folds whole is the FUSED form the atom wants
-        (one ldmatrix'd A fragment, N mma chains off it) and stays one term, and a state that is no
-        product of its own — a sum beside a sum of squares, whose two states read one loaded value —
-        stays too, since two terms would read that value twice for nothing. A twisted or observed
-        carrier never comes apart: its states are coupled by the recipe.
+        Independent states over different coordinates also separate: combining a row statistic
+        with a column statistic otherwise makes both depend on the full pair of coordinates.
+        A carrier that folds whole stays fused (one A fragment, N mma chains). Non-product states
+        over the same coordinates stay together too: a sum beside a sum of squares shares its
+        loads. A twisted or observed carrier never comes apart: its states are coupled by the recipe.
         """
         if self.axis is None or self.twist is not None or self.observe is not None or self.base is None:
             return None
@@ -751,7 +762,7 @@ class Fold:
         children: list[Fold] = []
         for index, result in enumerate(self.lift.results):
             body = Body(tuple(self.lift.body.backward_cone((result,)).members))
-            read = body.ssa_uses
+            read = body.ssa_uses | {result}
             operands, params = [], []
             for edge in self.operands:
                 slots = [param for param, other, _ in self.bindings if other is edge]
@@ -765,9 +776,9 @@ class Fold:
                 init=(self.init[index],),
                 base=Lambda.componentwise((pluses[index],), (self.base.results[index],)),
             )
-            if not child.tiles_whole():
-                return None
             children.append(child)
+        if not all(child.tiles_whole() for child in children) and len({child.free_axes for child in children}) == 1:
+            return None
         return Fold(operands=tuple(children), lift=Lambda.closing(self.exposes, Body(()), self.exposes))
 
     @cached_method

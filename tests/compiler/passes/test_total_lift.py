@@ -25,6 +25,7 @@ from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tensor.ir import ReduceOp
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams
+from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op
 from tests.compiler.terms import contraction
 
 
@@ -295,6 +296,63 @@ def test_an_output_sweeps_epilogue_lifts_to_a_term_declaring_the_sweep_axis() ->
     (spec,) = tile.output_specs
     assert spec.write.values == epilogue.exposes and spec.sweep == ()
     assert [type(stmt).__name__ for stmt in tile.op.lower(_grid(tile), tile.output_specs, tile.axes)] == ["Loop", "Load", "Assign", "Write"]
+
+
+def test_nested_output_sweep_preserves_an_intermediate_value() -> None:
+    """A cell stores both its transformed result and an intermediate broadcast by a nested sweep."""
+    cell = Body(
+        (
+            Load(name="xv", input="x", index=(Var("m"), Var("k"))),
+            Assign(name="v", op="multiply", args=("scale", "xv")),
+            Assign(name="q", op="exp", args=("v",)),
+            Write(output="coded", index=(Var("m"), Var("k")), value="q"),
+            Loop(
+                axis=Axis("n", 4),
+                body=Body((Write(output="broadcast", index=(Var("m"), Var("k"), Var("n")), value="v"),)),
+            ),
+        )
+    )
+    body = Body(
+        (
+            Loop(
+                axis=Axis("m", 2),
+                body=Body(
+                    (
+                        Load(name="scale", input="s", index=(Var("m"),)),
+                        Loop(axis=Axis("k", 3), body=cell),
+                    )
+                ),
+            ),
+            Loop(
+                axis=Axis("r", 5),
+                body=Body(
+                    (
+                        Load(name="zv", input="z", index=(Var("r"),)),
+                        Write(output="tail", index=(Var("r"),), value="zv"),
+                    )
+                ),
+            ),
+        )
+    )
+    graph = Graph()
+    for name, shape in {"s": (2,), "x": (2, 3), "z": (5,)}.items():
+        graph.add_node(InputOp(), [], Tensor(name, shape), node_id=name)
+    outputs = [Tensor("coded", (2, 3)), Tensor("broadcast", (2, 3, 4)), Tensor("tail", (5,))]
+    loop = LoopOp(body=body, inputs={name: graph.buffer(name) for name in ["s", "x", "z"]}, outputs={t.name: t for t in outputs})
+    tile = lift_loop_op(loop)
+    graph.add_node(LoopOp(body=tile.loop_body, inputs=loop.inputs, outputs=loop.outputs), ["s", "x", "z"], outputs=outputs, node_id="coded")
+    graph.inputs, graph.outputs = ["s", "x", "z"], ["coded", "broadcast", "tail"]
+    values = {
+        "s": np.array([0.5, -0.25], dtype=np.float32),
+        "x": np.arange(6, dtype=np.float32).reshape(2, 3),
+        "z": np.arange(5, dtype=np.float32),
+    }
+    backend = NumpyBackend()
+    got = backend.run(backend.compile(graph), input_data=values)[0].outputs
+    intermediate = values["s"][:, None] * values["x"]
+    np.testing.assert_allclose(got["coded"], np.exp(intermediate), rtol=1e-6)
+    np.testing.assert_array_equal(got["broadcast"], np.broadcast_to(intermediate[..., None], (2, 3, 4)))
+    np.testing.assert_array_equal(got["tail"], values["z"])
 
 
 # ===================================================================

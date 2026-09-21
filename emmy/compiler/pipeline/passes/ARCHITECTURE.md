@@ -105,7 +105,9 @@ coordinate under different names and in different operand orders (the o_proj res
 inside a reduce and the residual add at the kernel's free axis). The identity is taken per exposed component, so a
 lone contraction is a CHANNEL of the twin that folds it beside another over the same input (k under the QK-norm's
 reduce, beside the k/v pair): the twin is the representative, the sibling records which component is its value,
-and reads that channel of the shared workspace. The arm that cuts a clustered seam spells every occurrence and
+and reads that channel of the shared workspace. An ancestor and its descendant cannot join such a cluster: a
+multi-result ancestor may consume one of the values it exposes, which would make its workspace producer cyclic.
+The arm that cuts a clustered seam spells every occurrence and
 names the seam each spelling stands for, so a route recorded at any occurrence — a row from before the clustering,
 a pin at the copy a hand found — selects the one decision. A term is closed by construction —
 its values arrive through its operand edges — so every stored non-slab edge is a seam and there is no capture to
@@ -517,8 +519,12 @@ declines the pair and the nest stands. A store that reverses the quotient/remain
 output-storage order is canonical. Split and unsplit spellings of one contraction thereby converge to ONE canonical
 nest — one kernel identity, one shape key, one golden family.
 
-It runs as its own pass between `loop/fusion` and `loop/stamp`, not inside `normalize_body` and not as a
-fusion rule. `normalize_body` is a pure body→body transform with no buffer shapes (the store-side stride
+The inverse case is normalized first: an operand pair reading one static free coordinate through both `i/H` and
+`i%H` receives separate quotient and remainder loops when H divides the extent. This recovers distinct row and head
+axes for contraction binding. Their separate operand reads prevent the fusion rule from undoing the split.
+
+It runs as its own pass between `loop/fusion` and `loop/stamp`, not inside `normalize_body` and not as a fusion
+rule. `normalize_body` is a pure body→body transform with no buffer shapes (the store-side stride
 check needs them) and fires on every Op construction — including scheduled Tile-IR bodies and cross-CTA split pieces
 minted at splice time, where re-fusing axes would fight the scheduler. Canonicalizing a producer that still awaits a
 merge could re-spell the very indices the splicer composes through, so it waits for fusion's fixpoint; running before
@@ -549,8 +555,8 @@ The Tile IR boundary is one structural operation:
 
 1. peel the outer parallel loop chain into the unmapped placement;
 2. recursively replace every remaining reduction `Loop` with a `Fold`, in the same statement position;
-3. move every `Write` to `TileOp.output_specs`, as a sweep spec over its output loop, the loop's per-cell projection
-   lifting as a zero-axis term evaluated over that axis;
+3. move every `Write`, including nested writes, to `TileOp.output_specs`; preserve the values those writes read,
+   lifting each output loop's per-cell projection as a zero-axis term evaluated over that axis;
 4. reject any raw inner loop that remains;
 5. rely on each `Lambda.__post_init__` to canonicalize its local pure body;
 6. let `TileOp.__post_init__` factor maximal pure product-operand cones into canonical contractions, orient each
@@ -629,12 +635,16 @@ that canonical input:
   cuts at the frontier instead (`_cut.storage_frontier`): the producer piece is the encode prefix, the workspace holds
   the raw storage bits (exact — the element the graph's own quantize produced), and the consumer keeps the
   decode-plus-factors residue, which normalization then re-binds as a raw storage-dtype load with the factors hoisted
-  onto the accumulator epilogue (W8A8's route to the fp8 mma tier). The frontier REPLACES the fed-store realization at
+  onto the accumulator epilogue (W8A8's route to the fp8 mma tier). Shared scale expressions remain available to both
+  the encode prefix and decode residue. Composed cuts rewrite nested operands inside that residue too, and producers
+  are topologically ordered by actual workspace reads. The frontier REPLACES the fed-store realization at
   that seam rather than joining the offer: the raw bits dominate the fed-store workspace on both precision (exact vs
   re-rounded) and footprint (storage width vs store width), so there is no trade for the evidence to decide. Every
   seam's per-component dtypes are decided at offer time and ride the seam into realization, so the two cannot
   disagree. A cut workspace retains captured axes plus static unit axes: unit extents add no storage, while preserving
-  them keeps later schedule and split axes in their original geometric roles. The new producer and consumer are fresh
+  them keeps later schedule and split axes in their original geometric roles. A coordinate read only through a common
+  integer divisor stores one value per quotient; producers and consumers apply inverse index substitutions. The new
+  producer and consumer are fresh
   unmapped TileOps, so further legal cuts and schedules use the same ordinary passes. An unpinned cut may expose more
   cut choices; any pinned cut consumes its restriction on every piece. If the parent already carries a cross-CTA
   split receipt, every placement piece inherits it, so a later cut cannot make the same split pending again. A piece
