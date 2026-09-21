@@ -399,16 +399,16 @@ def test_sm70_causal_attention_selects_the_mask_per_fragment_element(monkeypatch
     assert "emmy_c_to_a_f16_m8n8k4" in src
 
 
-@pytest.mark.parametrize("stage", ["d1/smem", "d2/smem"])
-def test_sm70_computed_a_edge_stages_through_the_smem_compute_fill(monkeypatch, stage) -> None:
+def test_sm70_computed_a_edge_stages_through_the_smem_compute_fill(monkeypatch) -> None:
     """A COMPUTED ``a`` edge reaches the Volta mma tier: the fill evaluates the norm cone into the
     A slab the Volta shared gather reads, and the materialized B peer rides the BLOCKING vector
-    copy — sm_70 has no ``cp.async`` to fly it under the fill."""
-    _pin(monkeypatch, VOLTA, tile="f1x1", stage=stage)
+    copy — sm_70 has no ``cp.async`` to fly it under the fill, which is also why the fill stages
+    at depth 1 only here."""
+    _pin(monkeypatch, VOLTA, tile="f1x1", stage="d1/smem")
     monkeypatch.setenv("EMMY_PLACE", "fuse")
     src, knobs = _source(_norm_linear_graph(), Context(compute_capability=(7, 0)))
     assert family_value(knobs, "TILE") == f"{VOLTA}/f1x1"
-    assert family_value(knobs, "STAGE") == stage
+    assert family_value(knobs, "STAGE") == "d1/smem"
     assert "emmy_mma884_load_a_smem(_a0, &_a_smem" in src
     assert "emmy_mma884_load_b_smem_trans(_b0, &_b_smem" in src
     assert "rsqrtf" in src  # the norm cone itself, evaluated into the A slab
