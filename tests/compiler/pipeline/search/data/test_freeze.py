@@ -18,13 +18,15 @@ import yaml
 from emmy.compiler.pipeline.search.data.freeze import (
     FREEZE_KIND,
     FREEZE_VER,
+    KERNEL_SETS_NAME,
+    KERNELS_NAME,
     MANIFEST_NAME,
     _row_line,
     freeze_reason,
     load_freeze,
     write_freeze,
 )
-from emmy.compiler.pipeline.search.db import SearchDB
+from emmy.compiler.pipeline.search.db import KernelRow, KernelSetRow, SearchDB
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
 from tests.compiler.pipeline.search.helpers import F16_MATMUL_FEATS, impossible_staged_feats
 from tests.compiler.pipeline.search.helpers import GPU_5090 as _GPU
@@ -109,11 +111,23 @@ def test_reason_drops_impossible_kernel() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _seed_db(path, rows) -> None:
+def _seed_db(path, rows, kernels=(), kernel_sets=()) -> None:
     db = SearchDB(path)
     db.record_perf_rows(rows)
+    db.record_kernels(kernels)
+    db.record_kernel_sets(kernel_sets)
     db.close()
 
+
+# The definitions beside the rows: the kernel row of a frozen row's kernel, a kernel set whose parent
+# and pieces have rows of their own, and one kernel nothing names.
+_KERNELS = [
+    KernelRow(identity="a3", wire={"inputs": ["x"], "outputs": ["y"], "nodes": []}, name="k_a3"),
+    KernelRow(identity="p", wire={"inputs": [], "outputs": ["p"], "nodes": []}, name="k_parent"),
+    KernelRow(identity="c1", wire={"inputs": [], "outputs": ["c1"], "nodes": []}, name="k_piece"),
+    KernelRow(identity="orphan", wire={"inputs": [], "outputs": ["o"], "nodes": []}, name="k_orphan"),
+]
+_KERNEL_SETS = [KernelSetRow(parent="p", decision={"PLACE@map.1/inner": "cut"}, children=("c1", "a3"))]
 
 _SEED = [
     _row("a3", us=500.0, knobs=_feats()),
@@ -129,25 +143,34 @@ _N_KEPT = 4
 
 def test_write_freeze_round_trip(tmp_path) -> None:
     db_path = tmp_path / "dataset.db"
-    _seed_db(db_path, _SEED)
+    _seed_db(db_path, _SEED, _KERNELS, _KERNEL_SETS)
     out = tmp_path / "freeze"
     manifest = write_freeze(db_path, out, note="unit-test policy")
 
     assert manifest["kind"] == FREEZE_KIND
     assert manifest["freeze_ver"] == FREEZE_VER
     assert manifest["feat_ver"] == manifest["knob_ver"] == manifest["encoding_ver"] == FEATURIZER_VERSION
-    assert manifest["counts"] == {"rows": _N_KEPT, "ok": 3, "bench_fail": 1, "per_gpu": {_GPU2: 1, _GPU: 3}}
+    assert manifest["counts"] == {"rows": _N_KEPT, "ok": 3, "bench_fail": 1, "per_gpu": {_GPU2: 1, _GPU: 3}, "kernels": 3, "kernel_sets": 1}
     assert manifest["policy_note"] == "unit-test policy"
     assert manifest["source_db"] == str(db_path.resolve())
-    # One YAML per (gpu, cap); H_* features are never stored — readers derive them from the card.
-    assert set(manifest["files"]) == {"nvidia_geforce_rtx_5090_sm120.yaml", "nvidia_geforce_rtx_4090_sm89.yaml"}
-    assert all(info["kind"] == "perf" for info in manifest["files"].values())
+    # One YAML per (gpu, cap), the two definition files beside them; H_* features are never stored —
+    # readers derive them from the card.
+    assert {name: info["kind"] for name, info in manifest["files"].items()} == {
+        "nvidia_geforce_rtx_5090_sm120.yaml": "perf",
+        "nvidia_geforce_rtx_4090_sm89.yaml": "perf",
+        KERNELS_NAME: "kernels",
+        KERNEL_SETS_NAME: "kernel_sets",
+    }
     doc = yaml.safe_load((out / "nvidia_geforce_rtx_5090_sm120.yaml").read_text())
     assert doc["gpu_name"] == _GPU and doc["compute_cap"] == [12, 0]
     assert all(not any(k.startswith("H_") for k in c["knobs"]) for c in doc["configs"])
 
-    loaded_manifest, rows = load_freeze(out)
+    loaded_manifest, rows, kernels, kernel_sets = load_freeze(out)
     assert loaded_manifest == manifest
+    # The kernels a frozen row or a kernel set names travel; the one nothing names does not.
+    assert {k.identity for k in kernels} == {"a3", "p", "c1"}
+    assert all(k in _KERNELS for k in kernels)
+    assert kernel_sets == _KERNEL_SETS
     by_key = {r.kernel: r for r in rows}
     assert set(by_key) == {"a3", "b", "dyn", "fail"}, "the non-deployable twin, the stale row and the Σ row do not freeze"
     seeded = {r.kernel: r for r in _SEED}
@@ -180,9 +203,10 @@ def test_freeze_digest_insertion_order_independent(tmp_path) -> None:
 def test_an_imported_freeze_refreezes_to_the_same_digest(tmp_path) -> None:
     # freeze -> import into a fresh instance -> freeze again: the digest must not drift, so a
     # dataset rebuilt from the checked-in freeze reproduces it exactly.
-    _seed_db(tmp_path / "a.db", _SEED)
+    _seed_db(tmp_path / "a.db", _SEED, _KERNELS, _KERNEL_SETS)
     m1 = write_freeze(tmp_path / "a.db", tmp_path / "f1")
-    _seed_db(tmp_path / "b.db", load_freeze(tmp_path / "f1")[1])
+    frozen = load_freeze(tmp_path / "f1")
+    _seed_db(tmp_path / "b.db", frozen.perf, frozen.kernels, frozen.kernel_sets)
     assert write_freeze(tmp_path / "b.db", tmp_path / "f2")["sha256"] == m1["sha256"]
 
 
@@ -193,7 +217,7 @@ def test_an_imported_freeze_refreezes_to_the_same_digest(tmp_path) -> None:
 
 def _frozen(tmp_path):
     db_path = tmp_path / "dataset.db"
-    _seed_db(db_path, _SEED)
+    _seed_db(db_path, _SEED, _KERNELS, _KERNEL_SETS)
     out = tmp_path / "freeze"
     write_freeze(db_path, out)
     return out
@@ -207,10 +231,27 @@ def test_load_freeze_digest_mismatch_hard_error(tmp_path) -> None:
         load_freeze(out)
 
 
-def test_load_freeze_missing_listed_file_hard_error(tmp_path) -> None:
+@pytest.mark.parametrize("name", ["nvidia_geforce_rtx_4090_sm89.yaml", KERNELS_NAME, KERNEL_SETS_NAME])
+def test_load_freeze_missing_listed_file_hard_error(tmp_path, name) -> None:
     out = _frozen(tmp_path)
-    (out / "nvidia_geforce_rtx_4090_sm89.yaml").unlink()
+    (out / name).unlink()
     with pytest.raises(RuntimeError, match="missing"):
+        load_freeze(out)
+
+
+def test_load_freeze_malformed_definition_hard_error(tmp_path) -> None:
+    out = _frozen(tmp_path)
+    doc = yaml.safe_load((out / KERNELS_NAME).read_text())
+    for k in doc["kernels"]:
+        k["wire"] = "not-a-program"
+    (out / KERNELS_NAME).write_text(yaml.safe_dump(doc, sort_keys=True, width=120))
+    manifest = json.loads((out / MANIFEST_NAME).read_text())
+    digest = hashlib.sha256()
+    for k in doc["kernels"]:
+        digest.update(_row_line(k))
+    manifest["files"][KERNELS_NAME]["sha256"] = digest.hexdigest()
+    (out / MANIFEST_NAME).write_text(json.dumps(manifest))
+    with pytest.raises(RuntimeError, match="lacks identity/wire/name"):
         load_freeze(out)
 
 
@@ -311,7 +352,7 @@ def test_the_checked_in_freeze_is_the_default_evaluation_corpus() -> None:
     assert manifest["feat_ver"] == FEATURIZER_VERSION
     assert len(manifest["sha256"]) == 64
 
-    _, rows = load_freeze(freeze)
+    rows = load_freeze(freeze).perf
     assert len(rows) == manifest["counts"]["rows"]
     # Every row passed the admission filter when it was frozen, so all of it is readable.
     assert all(freeze_reason(r) is None for r in rows)

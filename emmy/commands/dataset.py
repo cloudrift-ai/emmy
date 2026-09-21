@@ -4,9 +4,9 @@ A dataset DB is the tune DB's schema in its own file (``EMMY_DATASET_DB``): the 
 (``eval prior``) read it, and no compile ever does, so what is imported into it cannot change a deploy.
 
 - ``import`` loads sources into it: a measurement freeze directory (the checked-in one by default) or
-  a tune DB file, whose CUDA ``perf`` rows are copied over (the way a card's measurements from a rented
-  GPU reach the dataset). Rows keep the source they arrived from, and the upsert is the tune DB's own,
-  so importing the same source twice changes nothing.
+  a tune DB file, whose CUDA ``perf`` rows, ``kernel`` rows and ``kernel_set`` rows are copied over
+  (the way a card's measurements from a rented GPU reach the dataset). Rows keep the source they
+  arrived from, and the upsert is the tune DB's own, so importing the same source twice changes nothing.
 - ``freeze`` writes a DB instance's admitted rows as a digest-pinned freeze directory — the artifact
   that gets checked in, so a reported number is one anyone can reproduce.
 
@@ -65,16 +65,20 @@ def handle_dataset_import(args) -> None:
     try:
         for src in sources:
             if src.is_dir():
-                manifest, rows = load_freeze(src)
-                n = db.record_perf_rows(rows)
-                logger.info("imported %d row(s) from freeze %s (sha256 %s)", n, src, manifest["sha256"])
+                frozen = load_freeze(src)
+                k, s = db.record_kernels(frozen.kernels), db.record_kernel_sets(frozen.kernel_sets)
+                n = db.record_perf_rows(frozen.perf)
+                logger.info(
+                    "imported %d row(s), %d kernel(s), %d kernel set(s) from freeze %s (sha256 %s)", n, k, s, src, frozen.manifest["sha256"]
+                )
                 continue
             tune_db = SearchDB.open_readonly(src)
             try:
+                k, s = db.record_kernels(tune_db.iter_kernels()), db.record_kernel_sets(tune_db.iter_kernel_sets())
                 n = db.record_perf_rows(tune_db.iter_perf_rows(backend="cuda"))
             finally:
                 tune_db.close()
-            logger.info("imported %d row(s) from tune DB %s", n, src)
+            logger.info("imported %d row(s), %d kernel(s), %d kernel set(s) from tune DB %s", n, k, s, src)
     finally:
         db.close()
     logger.info("dataset DB: %s", db_path)
@@ -90,11 +94,17 @@ def handle_dataset_freeze(args) -> None:
     out = Path(args.out).expanduser()
     manifest = write_freeze(db_path, out, note=args.note)
     counts = manifest["counts"]
-    logger.info("froze %d row(s) (%d ok + %d bench_fail) from %s", counts["rows"], counts["ok"], counts["bench_fail"], db_path)
-    logger.info("  per card: %s", ", ".join(f"{gpu}: {n}" for gpu, n in counts["per_gpu"].items()))
     logger.info(
-        "  commit %s, sha256 %s over %d per-GPU file(s) -> %s/", manifest["repo_commit"], manifest["sha256"], len(manifest["files"]), out
+        "froze %d row(s) (%d ok + %d bench_fail), %d kernel(s), %d kernel set(s) from %s",
+        counts["rows"],
+        counts["ok"],
+        counts["bench_fail"],
+        counts["kernels"],
+        counts["kernel_sets"],
+        db_path,
     )
+    logger.info("  per card: %s", ", ".join(f"{gpu}: {n}" for gpu, n in counts["per_gpu"].items()))
+    logger.info("  commit %s, sha256 %s over %d file(s) -> %s/", manifest["repo_commit"], manifest["sha256"], len(manifest["files"]), out)
 
 
 def dataset_db(db_arg: str | None) -> Path:

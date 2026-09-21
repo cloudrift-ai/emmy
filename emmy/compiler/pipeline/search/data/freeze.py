@@ -10,9 +10,12 @@ Freeze v5 is a DIRECTORY of per-GPU YAML files — a ``gpu_name`` / ``compute_ca
 a ``perf`` row minus what its file header already says: the kernel it measured, the sizes its
 symbolic dims were bound to, its knobs (``S_*`` stamps + tunables, exactly as the DB stores them),
 the opt level and the residual compiler flags, the status, the latency statistics, ``captured``,
-``measured_at`` and a failure's ``error``. The manifest lists every file with its kind (``perf``
-for a per-GPU file) and its digest. Device ``H_*`` features are never stored: readers derive them
-from the card (``data.sample.measured_features``).
+``measured_at`` and a failure's ``error``. Two card-independent files ride beside them when the
+instance holds definitions: ``kernels.yaml`` (the ``kernel`` rows of every kernel a frozen row or a
+kernel set names — identity, C name, Loop IR wire) and ``kernel_sets.yaml`` (every ``kernel_set``
+row), so an import can enumerate from the freeze alone. The manifest lists every file with its
+kind (``perf``, ``kernels``, ``kernel_sets``) and its digest. Device ``H_*`` features are never
+stored: readers derive them from the card (``data.sample.measured_features``).
 
 What freezes (see :func:`freeze_reason`): every CUDA row measured in the deployable regime on a
 card the GPU registry knows, spelled in the current featurizer vocabulary, that passes the
@@ -51,10 +54,11 @@ import subprocess
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import NamedTuple
 
 import yaml
 
-from emmy.compiler.pipeline.search.db import PerfRow, PerfStats, SearchDB
+from emmy.compiler.pipeline.search.db import KernelRow, KernelSetRow, PerfRow, PerfStats, SearchDB
 from emmy.compiler.pipeline.search.features import DEPLOYABLE_OPT, FEATURIZER_VERSION
 
 logger = logging.getLogger(__name__)
@@ -62,6 +66,17 @@ logger = logging.getLogger(__name__)
 FREEZE_KIND = "emmy-measurement-freeze"
 FREEZE_VER = 5
 MANIFEST_NAME = "manifest.json"
+KERNELS_NAME = "kernels.yaml"
+KERNEL_SETS_NAME = "kernel_sets.yaml"
+
+
+class Freeze(NamedTuple):
+    """What :func:`load_freeze` read: the manifest and the three tables' rows."""
+
+    manifest: dict
+    perf: list[PerfRow]
+    kernels: list[KernelRow]
+    kernel_sets: list[KernelSetRow]
 
 
 def freeze_reason(row: PerfRow) -> str | None:
@@ -248,16 +263,31 @@ def _repo_commit() -> str:
         return "unknown"
 
 
+def _write_rows(tmp: Path, name: str, payloads: list[dict], doc: dict, key: str) -> tuple[str, int]:
+    """Write one freeze file — ``doc`` with its ``key`` holding ``payloads`` in canonical order — and
+    return its content digest and row count."""
+    payloads = sorted(payloads, key=_row_line)
+    digest = hashlib.sha256()
+    for p in payloads:
+        digest.update(_row_line(p))
+    (tmp / name).write_text(yaml.safe_dump({**doc, key: payloads}, sort_keys=True, width=120))
+    return digest.hexdigest(), len(payloads)
+
+
 def write_freeze(db_path: Path | str, out_dir: Path | str, *, note: str = "") -> dict:
-    """Read the CUDA ``perf`` rows of the DB instance at ``db_path`` read-only, filter them through
-    :func:`freeze_reason`, and atomically write the freeze DIRECTORY at ``out_dir``: one
-    per-``(gpu, compute_cap)`` YAML file plus ``manifest.json``. Returns the manifest dict (so a
-    caller reports counts + digest without re-reading). Hard-errors when nothing survives the filter —
-    a zero-row freeze means the wrong DB, not an empty dataset. An existing ``out_dir`` is replaced
-    only when it is itself a freeze (has a manifest) — anything else is refused rather than deleted."""
+    """Read the DB instance at ``db_path`` read-only — its CUDA ``perf`` rows filtered through
+    :func:`freeze_reason`, the ``kernel`` rows those rows and the kernel sets name, every
+    ``kernel_set`` row — and atomically write the freeze DIRECTORY at ``out_dir``: one
+    per-``(gpu, compute_cap)`` YAML file, the two definition files when there is anything to put in
+    them, plus ``manifest.json``. Returns the manifest dict (so a caller reports counts + digest
+    without re-reading). Hard-errors when nothing survives the filter — a zero-row freeze means the
+    wrong DB, not an empty dataset. An existing ``out_dir`` is replaced only when it is itself a
+    freeze (has a manifest) — anything else is refused rather than deleted."""
     db = SearchDB.open_readonly(db_path)
     try:
         rows = list(db.iter_perf_rows(backend="cuda"))
+        kernels = list(db.iter_kernels())
+        kernel_sets = list(db.iter_kernel_sets())
     finally:
         db.close()
     kept = []
@@ -287,16 +317,26 @@ def write_freeze(db_path: Path | str, out_dir: Path | str, *, note: str = "") ->
 
     files: dict[str, dict] = {}
     for (gpu, cap), card_rows in sorted(by_card.items(), key=lambda kv: kv[0]):
-        payloads = sorted((_row_payload(r) for r in card_rows), key=_row_line)
-        digest = hashlib.sha256()
-        for p in payloads:
-            digest.update(_row_line(p))
         name = _gpu_filename(gpu, cap)
         if name in files:
             raise RuntimeError(f"freeze file name collision: {name} (cards {files[name]['gpu_name']!r} and {gpu!r})")
-        doc = {"gpu_name": gpu, "compute_cap": list(cap), "configs": payloads}
-        (tmp / name).write_text(yaml.safe_dump(doc, sort_keys=True, width=120))
-        files[name] = {"kind": "perf", "gpu_name": gpu, "compute_cap": list(cap), "rows": len(payloads), "sha256": digest.hexdigest()}
+        digest, n = _write_rows(tmp, name, [_row_payload(r) for r in card_rows], {"gpu_name": gpu, "compute_cap": list(cap)}, "configs")
+        files[name] = {"kind": "perf", "gpu_name": gpu, "compute_cap": list(cap), "rows": n, "sha256": digest}
+    # Definitions are card-independent: the kernels the frozen rows and the kernel sets name, and
+    # every kernel set. A kernel nothing names is not part of what the freeze pins.
+    named = {r.kernel for r in kept} | {s.parent for s in kernel_sets} | {c for s in kernel_sets for c in s.children}
+    definitions = (
+        (KERNELS_NAME, "kernels", [{"identity": k.identity, "name": k.name, "wire": k.wire} for k in kernels if k.identity in named]),
+        (
+            KERNEL_SETS_NAME,
+            "kernel_sets",
+            [{"parent": s.parent, "decision": s.decision, "children": list(s.children)} for s in kernel_sets],
+        ),
+    )
+    for name, kind, payloads in definitions:
+        if payloads:
+            digest, n = _write_rows(tmp, name, payloads, {}, kind)
+            files[name] = {"kind": kind, "rows": n, "sha256": digest}
 
     top = hashlib.sha256()
     for name in sorted(files):
@@ -316,6 +356,8 @@ def write_freeze(db_path: Path | str, out_dir: Path | str, *, note: str = "") ->
             "ok": sum(1 for r in kept if r.status == "ok"),
             "bench_fail": sum(1 for r in kept if r.status == "bench_fail"),
             "per_gpu": {g: per_gpu[g] for g in sorted(per_gpu)},
+            "kernels": files.get(KERNELS_NAME, {}).get("rows", 0),
+            "kernel_sets": files.get(KERNEL_SETS_NAME, {}).get("rows", 0),
         },
         "files": files,
         "created_at": datetime.now(UTC).isoformat(),
@@ -332,10 +374,43 @@ def write_freeze(db_path: Path | str, out_dir: Path | str, *, note: str = "") ->
     return manifest
 
 
-def load_freeze(path: Path | str) -> tuple[dict, list[PerfRow]]:
-    """Parse + verify the freeze directory at ``path`` → ``(manifest, perf rows)``, each row keyed by its
-    file's card and sourced ``freeze:<digest>``. Hard ``RuntimeError`` — never a silent fallback — on
-    any integrity failure."""
+_FILE_KEYS = {"perf": "configs", "kernels": "kernels", "kernel_sets": "kernel_sets"}
+
+
+def _read_rows(p: Path, name: str, info: dict, regen: str) -> tuple[dict, list[dict]]:
+    """One freeze file, verified: its document and its rows, or a hard error naming what is wrong."""
+    key = _FILE_KEYS.get(info.get("kind"))
+    if key is None:
+        raise RuntimeError(f"measurement freeze {p}: {name} has the unknown file kind {info.get('kind')!r} — {regen}")
+    fpath = p / name
+    if not fpath.exists():
+        raise RuntimeError(f"measurement freeze {p} is missing {name} (listed in the manifest) — {regen}")
+    text = fpath.read_text()
+    if text.startswith("version https://git-lfs.github.com/spec/v1"):
+        # The payload files are LFS-tracked. A clone or CI checkout without LFS leaves a
+        # three-line pointer here, and a pointer is valid YAML — it parses to a string and the
+        # first key lookup below fails as ``TypeError: string indices must be integers``, which
+        # says nothing about the real problem. Name it instead.
+        raise RuntimeError(
+            f"measurement freeze {p}: {name} is a git-LFS pointer, not the data. Run `git lfs install && "
+            f"git lfs pull`; in CI, check out with `lfs: true`."
+        )
+    doc = yaml.safe_load(text)
+    if not isinstance(doc, dict) or key not in doc:
+        raise RuntimeError(f"measurement freeze {p}: {name} is not a freeze payload document — {regen}")
+    payloads = doc.get(key) or []
+    file_digest = hashlib.sha256()
+    for payload in payloads:
+        file_digest.update(_row_line(payload))
+    if file_digest.hexdigest() != info.get("sha256"):
+        raise RuntimeError(f"measurement freeze {p} is corrupt: {name} row digest != manifest — {regen}")
+    return doc, payloads
+
+
+def load_freeze(path: Path | str) -> Freeze:
+    """Parse + verify the freeze directory at ``path``: the manifest, the ``perf`` rows (each keyed by
+    its file's card and sourced ``freeze:<digest>``), the ``kernel`` rows and the ``kernel_set`` rows.
+    Hard ``RuntimeError`` — never a silent fallback — on any integrity failure."""
     p = Path(path)
     regen = "re-freeze with `emmy dataset freeze`"
     mpath = p / MANIFEST_NAME
@@ -351,34 +426,33 @@ def load_freeze(path: Path | str) -> tuple[dict, list[PerfRow]]:
         raise RuntimeError(f"measurement freeze {p} has freeze_ver={manifest.get('freeze_ver')!r}, this code reads {FREEZE_VER} — {regen}")
 
     source = f"freeze:{manifest['sha256'][:12]}"
-    rows: list[PerfRow] = []
+    frozen = Freeze(manifest, [], [], [])
     for name in sorted(manifest.get("files", {})):
         info = manifest["files"][name]
-        if info.get("kind") != "perf":
-            raise RuntimeError(f"measurement freeze {p}: {name} has the unknown file kind {info.get('kind')!r} — {regen}")
-        fpath = p / name
-        if not fpath.exists():
-            raise RuntimeError(f"measurement freeze {p} is missing {name} (listed in the manifest) — {regen}")
-        text = fpath.read_text()
-        if text.startswith("version https://git-lfs.github.com/spec/v1"):
-            # The payload files are LFS-tracked. A clone or CI checkout without LFS leaves a
-            # three-line pointer here, and a pointer is valid YAML — it parses to a string and the
-            # first key lookup below fails as ``TypeError: string indices must be integers``, which
-            # says nothing about the real problem. Name it instead.
-            raise RuntimeError(
-                f"measurement freeze {p}: {name} is a git-LFS pointer, not the data. Run `git lfs install && "
-                f"git lfs pull`; in CI, check out with `lfs: true`."
-            )
-        doc = yaml.safe_load(text)
-        if not isinstance(doc, dict) or "configs" not in doc:
-            raise RuntimeError(f"measurement freeze {p}: {name} is not a freeze payload document — {regen}")
+        doc, payloads = _read_rows(p, name, info, regen)
+        if info["kind"] == "kernels":
+            for payload in payloads:
+                if not (
+                    isinstance(payload.get("identity"), str)
+                    and isinstance(payload.get("wire"), dict)
+                    and isinstance(payload.get("name"), str)
+                ):
+                    raise RuntimeError(f"measurement freeze {p}: {name} row lacks identity/wire/name — {regen}")
+                frozen.kernels.append(KernelRow(identity=payload["identity"], wire=payload["wire"], name=payload["name"]))
+            continue
+        if info["kind"] == "kernel_sets":
+            for payload in payloads:
+                if not (
+                    isinstance(payload.get("parent"), str)
+                    and isinstance(payload.get("decision"), dict)
+                    and isinstance(payload.get("children"), list)
+                ):
+                    raise RuntimeError(f"measurement freeze {p}: {name} row lacks parent/decision/children — {regen}")
+                frozen.kernel_sets.append(
+                    KernelSetRow(parent=payload["parent"], decision=payload["decision"], children=tuple(payload["children"]))
+                )
+            continue
         gpu_name, (major, minor) = doc["gpu_name"], doc["compute_cap"]
-        payloads = doc.get("configs") or []
-        file_digest = hashlib.sha256()
-        for payload in payloads:
-            file_digest.update(_row_line(payload))
-        if file_digest.hexdigest() != info.get("sha256"):
-            raise RuntimeError(f"measurement freeze {p} is corrupt: {name} row digest != manifest — {regen}")
         cc = major * 10 + minor
         for payload in payloads:
             if not (
@@ -387,7 +461,7 @@ def load_freeze(path: Path | str) -> tuple[dict, list[PerfRow]]:
                 and isinstance(payload.get("knobs"), dict)
             ):
                 raise RuntimeError(f"measurement freeze {p}: {name} row lacks kernel/bindings/knobs — {regen}")
-            rows.append(
+            frozen.perf.append(
                 PerfRow(
                     gpu=gpu_name,
                     cc=cc,
@@ -406,4 +480,4 @@ def load_freeze(path: Path | str) -> tuple[dict, list[PerfRow]]:
                     source=source,
                 )
             )
-    return manifest, rows
+    return frozen
