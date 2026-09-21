@@ -1271,5 +1271,6 @@
  "tests/compiler/passes/test_register_carry.py::test_register_operands_use_direct_loads_when_the_address_allows_it[1-modern]": 0.55,
  "tests/compiler/realization/test_realization.py::test_realization[matmul/volta-f16acc-direct.yaml-built]@cuda": 5.4,
 "tests/compiler/passes/test_cut_forks.py::test_a_value_read_under_a_reduce_and_at_the_free_axis_is_one_seam": 12.0,
- "tests/compiler/passes/test_cut_forks.py::test_a_clustered_value_cut_once_computes_the_right_answer@cuda": 2.73
+ "tests/compiler/passes/test_cut_forks.py::test_a_clustered_value_cut_once_computes_the_right_answer@cuda": 2.73,
+ "tests/compiler/ir/test_kernel_wire.py::test_every_kernel_of_a_set_has_a_wire_that_re_lifts_to_its_exact_identity[reduce/sinkhorn-nested-cut-derived-read-sm70.yaml]": 0.7
 }

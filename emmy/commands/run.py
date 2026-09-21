@@ -3048,20 +3048,11 @@ def _flatten_tensors(value):
 
 
 def _collect_sym_env(graphs) -> dict[str, int]:
-    """Map every symbolic dim var appearing in ``graphs`` to its hint
-    (``DEFAULT_SEQ_HINT`` for a bare seq axis) — the size the backend resolves
-    a symbolic graph to when benching without supplied inputs."""
-    from emmy.compiler.dim import DEFAULT_SEQ_HINT, Dim
+    """Every symbolic dim var appearing in ``graphs`` bound to the size the backend resolves it to
+    when benching without supplied inputs (:func:`symbolic_bindings`, the tune DB's rule too)."""
+    from emmy.compiler.loop_wire import symbolic_bindings
 
-    sym_env: dict[str, int] = {}
-    for gph in graphs:
-        for node in gph.nodes.values():
-            for d in node.output.shape:
-                if isinstance(d, Dim) and not d.is_static:
-                    hint = d.hint or DEFAULT_SEQ_HINT
-                    for v in d.expr.free_vars():
-                        sym_env.setdefault(v, hint)
-    return sym_env
+    return symbolic_bindings(node.output for gph in graphs for node in gph.nodes.values())
 
 
 def _tile_to(tensor, axis: int, size: int):

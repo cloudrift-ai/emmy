@@ -645,7 +645,7 @@ def greedy_pick_rows(graph) -> list[tuple[str, dict[str, str]]]:
     names — and the schedule row it realized (the schedule families only; a forkless kernel's row
     is its OFF anchors, which is what its one enumerated row spells)."""
     from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
-    from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
+    from emmy.compiler.loop_wire import kernel_tile  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import schedule_row_key  # noqa: PLC0415
 
     rows: list[tuple[str, dict[str, str]]] = []
@@ -653,7 +653,7 @@ def greedy_pick_rows(graph) -> list[tuple[str, dict[str, str]]]:
         op = graph.nodes[node_id].op
         if not isinstance(op, CudaOp):
             continue
-        tile = next((ancestor for ancestor in op.source_chain() if isinstance(ancestor, TileOp)), None)
+        tile = kernel_tile(op)
         identity = tile.identity_key(with_io=True) if tile is not None else None
         if identity is None:
             raise ValueError(f"kernel {op.kernel_name} lowered from no tile kernel, so no receipt can name it")

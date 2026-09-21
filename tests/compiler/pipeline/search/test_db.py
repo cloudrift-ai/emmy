@@ -9,7 +9,7 @@ from dataclasses import replace
 import pytest
 
 from emmy.compiler.context import Context
-from emmy.compiler.pipeline.search.db import PerfStats, SearchDB
+from emmy.compiler.pipeline.search.db import PerfStats, SearchDB, knobs_json
 
 _5090 = "NVIDIA GeForce RTX 5090"
 _PRO_6000 = "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition"
@@ -39,6 +39,19 @@ def test_two_cards_sharing_a_capability_keep_their_own_rows() -> None:
     rows = {r.gpu: r for r in db.iter_perf_rows()}
     assert set(rows) == {_5090, _PRO_6000}
     assert (rows[_5090].cc, rows[_5090].opt) == (120, 3)
+
+
+def test_a_knob_row_has_one_spelling_and_no_lossy_fallback() -> None:
+    """The spelling identifies a row, so two writers must agree on it, and a value json cannot spell
+    raises rather than turning into a string that would key a second row for the same kernel. An int
+    and a float are two spellings on purpose: a row's ``S_*`` stamps are floats, and a writer that
+    passed ints would be a different vocabulary, not the same row."""
+    assert knobs_json({"b": 1.0, "a": "t16"}) == knobs_json({"a": "t16", "b": 1.0}) == '{"a":"t16","b":1.0}'
+    assert knobs_json({"S_shape": 128}) != knobs_json({"S_shape": 128.0})
+    with pytest.raises(TypeError):
+        knobs_json({"S_x": object()})
+    with pytest.raises(ValueError):
+        knobs_json({"S_x": float("nan")})
 
 
 def _write_older_emmy_file(path) -> None:

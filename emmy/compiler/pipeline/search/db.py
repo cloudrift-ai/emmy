@@ -50,6 +50,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def knobs_json(knobs) -> str:
+    """The one text spelling of a knob row — sorted keys, compact — that ``perf`` stores. Native JSON
+    values only: a value the encoder cannot spell raises instead of being stringified, because the
+    spelling identifies a row and a lossy fallback would let two writers mint two rows for one."""
+    return json.dumps(dict(knobs), sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
 def _jsonable_geometry(geometry) -> list:
     """Render a launch grid/block to a JSON-safe nested list for the inventory
     tables. Int / str pass through; nested specs recurse; composite ``Expr``
@@ -348,7 +355,7 @@ class SearchDB:
             " latency_us_mean, latency_us_variance, n_samples, measured_at, knobs, captured, error, cc, opt, feat_ver, source) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (row.gpu, row.context_key, row.op_key, row.backend, row.status, s.median, s.min, s.max, s.mean, s.variance)
-            + (s.n_samples, row.measured_at, json.dumps(row.knobs, sort_keys=True, default=str), int(row.captured), row.error)
+            + (s.n_samples, row.measured_at, knobs_json(row.knobs), int(row.captured), row.error)
             + (row.cc, row.opt, row.feat_ver, row.source),
         )
 
