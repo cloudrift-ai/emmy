@@ -70,7 +70,7 @@ from typing import TYPE_CHECKING, NamedTuple
 
 from emmy.compiler.graph import Graph
 from emmy.compiler.pipeline.fork import Fork, flatten_leaves, fork_signature, iter_leaves, leaf_for, leaf_knobs
-from emmy.compiler.pipeline.knob import schedule_pin_fingerprint
+from emmy.compiler.pipeline.knob import EVIDENCE_PREFIXES, METADATA_PREFIXES, schedule_pin_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -250,7 +250,7 @@ def _resolved_price(terminal: Graph, trace: list, ctx: Context, prior, failed: d
             continue
         knobs = getattr(node.op, "knobs", None) or {}
         if failed:
-            sig = frozenset((k, str(v)) for k, v in knobs.items() if k.startswith("S_"))
+            sig = frozenset((k, str(v)) for k, v in knobs.items() if k.startswith(EVIDENCE_PREFIXES))
             # The ONE signature rule (:func:`_sig_groups`): a stored signature describes this
             # kernel when the kernel carries every recorded fact — a candidate that only ADDS stamps
             # the featurizer has since gained is the same measured shape (the stamp derives from
@@ -528,14 +528,14 @@ def _db_measured_index_build(db, ctx) -> _Measured:
     failures: dict[frozenset, list[float]] = {}
     try:
         for row in db.iter_perf(ctx, backend="cuda") if db is not None else ():
-            sig = frozenset((k, str(v)) for k, v in row.knobs.items() if k.startswith("S_"))
+            sig = frozenset((k, str(v)) for k, v in row.knobs.items() if k.startswith(EVIDENCE_PREFIXES))
             if row.status != "ok":
                 failures.setdefault(sig, []).append(float(getattr(row.stats, "median", 0.0) or 0.0))
                 continue
             survived.add(sig)
             if row.stats.median <= 0:
                 continue
-            tun = {k: str(v) for k, v in row.knobs.items() if not k.startswith(("S_", "H_"))}
+            tun = {k: str(v) for k, v in row.knobs.items() if not k.startswith(METADATA_PREFIXES)}
             (routes if _is_route_row(tun) else index).setdefault(sig, []).append((tun, float(row.stats.median)))
         gpu_name = getattr(ctx, "gpu_name", None) or ""
         if gpu_name or scope_explicit():
@@ -598,8 +598,8 @@ def _db_measured_pick(
 
     best: tuple[int, float] | None = None
     for i, cand in enumerate(rows):
-        sig = frozenset((k, str(v)) for k, v in cand.items() if k.startswith("S_"))
-        cand_tun = {k: str(v) for k, v in cand.items() if not k.startswith(("S_", "H_"))}
+        sig = frozenset((k, str(v)) for k, v in cand.items() if k.startswith(EVIDENCE_PREFIXES))
+        cand_tun = {k: str(v) for k, v in cand.items() if not k.startswith(METADATA_PREFIXES)}
         if sig not in groups_memo:  # not ``.get`` — an empty group list is a valid, falsy hit
             groups_memo[sig] = _sig_groups(index, sig)
         for measured in groups_memo[sig]:
@@ -627,7 +627,7 @@ def _warn_disjoint_evidence(
     is expected there. ``n_rows`` reports the full candidate count when ``rows`` is a
     representative sample (the streamed scan passes one row — every candidate at one fork shares
     the offer op's ``S_*`` signature, so one row carries the whole set's signature)."""
-    sigs = {frozenset((k, str(v)) for k, v in r.items() if k.startswith("S_")) for r in rows}
+    sigs = {frozenset((k, str(v)) for k, v in r.items() if k.startswith(EVIDENCE_PREFIXES)) for r in rows}
     n_measured = sum(len(g) for sig in sigs for g in _sig_groups(index, sig))
     if n_measured:
         logger.warning(

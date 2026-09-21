@@ -531,6 +531,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
                 k_axis=k_axis,
                 axes=ctx.sched.tile.axes,
                 inner=inner,
+                outputs=ctx.sched.tile.outputs,
             )
         )
         t = unit_tile(register_tile(atomize(tile.atom.shape[:2]), tile.mn), tile.mn)

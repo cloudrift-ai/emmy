@@ -410,12 +410,12 @@ class _ProposalLoopIdentity(PipelineStrategy):
         if self.value is not None:
             return
         from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
-        from emmy.compiler.pipeline.knob import STRUCT_PREFIX  # noqa: PLC0415
+        from emmy.compiler.pipeline.knob import EVIDENCE_PREFIXES  # noqa: PLC0415
 
         loops = [node.op for node in graph.nodes.values() if isinstance(node.op, LoopOp)]
         if len(loops) != 1:
             return
-        stamped = {key: float(value) for key, value in loops[0].knobs.items() if key.startswith(STRUCT_PREFIX)}
+        stamped = {key: value for key, value in loops[0].knobs.items() if key.startswith(EVIDENCE_PREFIXES)}
         if stamped and loops[0].identity_key(with_io=True, with_knobs=True) is not None:
             self.value = stamped
 
@@ -459,6 +459,7 @@ async def measure_proposals(graph, proposals, *, backend, db, ctx, max_candidate
     """Measure working-file candidates exactly, in file order, before MCTS."""
     from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline, TuningSearch  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import EVIDENCE_PREFIXES  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import pinned_knobs, unreproducible_pin_flag  # noqa: PLC0415
 
     rankings: list[dict] = []
@@ -496,7 +497,7 @@ async def measure_proposals(graph, proposals, *, backend, db, ctx, max_candidate
         structural = searched if searched is not None and searched[3] else None
         structural_parent = loop_identity.structural_parent(structural[0]) if structural is not None else None
         if structural_parent is not None:
-            search._base_knobs.update({key: value for key, value in structural_parent[1].items() if key.startswith("S_")})
+            search._base_knobs.update({key: value for key, value in structural_parent[1].items() if key.startswith(EVIDENCE_PREFIXES)})
         if prior is not None:
             prior.add_rows(search._collect_rows())
             prior.maybe_refit()

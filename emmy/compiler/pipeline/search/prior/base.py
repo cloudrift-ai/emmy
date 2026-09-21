@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from emmy.compiler.pipeline.knob import EVIDENCE_PREFIXES, KERNEL_IDENTITY, METADATA_PREFIXES
 from emmy.compiler.pipeline.search.features import DEPLOYABLE_OPT
 from emmy.compiler.pipeline.search.metrics import spearman
 
@@ -295,7 +296,12 @@ class Prior(ABC):
         groups = []
         for row_sig, measured in index.items():
             row = dict(row_sig)
-            if row and row.keys() <= cand.keys() and all(cand[key] == value for key, value in row.items()):
+            if (
+                row
+                and row.get(KERNEL_IDENTITY) == cand.get(KERNEL_IDENTITY)
+                and row.keys() <= cand.keys()
+                and all(cand[key] == value for key, value in row.items())
+            ):
                 groups.append(measured)
         return groups
 
@@ -310,8 +316,8 @@ class Prior(ABC):
             for knobs, us in self._dataset:
                 if float(knobs.get("H_opt", 0.0)) != _O3_OPT or us <= 0:
                     continue
-                sig = frozenset((k, v) for k, v in knobs.items() if k.startswith("S_"))
-                tun = {k: v for k, v in knobs.items() if not k.startswith(("S_", "H_"))}
+                sig = frozenset((k, v) for k, v in knobs.items() if k.startswith(EVIDENCE_PREFIXES))
+                tun = {k: v for k, v in knobs.items() if not k.startswith(METADATA_PREFIXES)}
                 # Keep structural rows in the reservoir for model training, but never treat a
                 # PLACE-bearing whole-slice latency as exact deploy evidence: the row does not bind
                 # the ordered child schedules that earned it.
@@ -347,8 +353,8 @@ class Prior(ABC):
 
         best: tuple[int, float] | None = None
         for i, cand in enumerate(rows):
-            sig = frozenset((k, v) for k, v in cand.items() if k.startswith("S_"))
-            cand_tun = {k: v for k, v in cand.items() if not k.startswith(("S_", "H_"))}
+            sig = frozenset((k, v) for k, v in cand.items() if k.startswith(EVIDENCE_PREFIXES))
+            cand_tun = {k: v for k, v in cand.items() if not k.startswith(METADATA_PREFIXES)}
             for measured in self.sig_groups(index, sig):
                 for row_tun, us in measured:
                     # A row counts as evidence when it matches every knob the candidate
@@ -464,7 +470,7 @@ class Prior(ABC):
         for knobs, label in self._dataset:
             if label <= 0:
                 continue
-            sig = tuple(sorted((k, v) for k, v in knobs.items() if k.startswith("S_")))
+            sig = tuple(sorted((k, v) for k, v in knobs.items() if k.startswith(EVIDENCE_PREFIXES)))
             groups[sig].append((knobs, label))
         rhos = []
         for rows in groups.values():

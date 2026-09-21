@@ -546,6 +546,31 @@ def test_emmy_only_benchmark_returns_same_input_reference():
     assert refs[0][1] is outputs
 
 
+def test_constant_cast_fragment_has_no_whole_op_reference(tmp_path, monkeypatch):
+    """A cast's synthetic boundary cannot be compared with the original constant's value."""
+    from emmy.compiler import pipeline
+    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.tensor.ir import IndexMapOp, IndexSource
+    from emmy.compiler.pipeline.search.golden import load_golden_records
+
+    # Keep the cast boundary that a larger unfusable consumer region leaves behind.
+    monkeypatch.setattr(pipeline, "LOOP_PASSES", [p for p in pipeline.LOOP_PASSES if p != "loop/fusion"])
+    graph = Graph()
+    graph.add_node(ConstantOp(name="weight", source_path="weight"), [], Tensor("weight", (256,), "f16"), node_id="weight")
+    graph.add_node(
+        IndexMapOp(out_shape=(Dim(256),), sources=(IndexSource(0, (Var("out_coord_0"),)),)),
+        ["weight"],
+        Tensor("out", (256,), "f32"),
+        node_id="out",
+    )
+    graph.outputs = ["out"]
+    path = tmp_path / "cast.yaml"
+    write_trace_inventory(graph, path, ctx=Context.from_target((7, 0)))
+    records = load_golden_records(load_golden_file(path))
+    fragment = next(record for record in records if record.target_program.inputs == ["out_cast"])
+    assert fragment.reference_program is None
+
+
 def test_emmy_only_benchmark_does_not_duplicate_inputs_on_torch(monkeypatch):
     """A reference-free Loop target owns one device input allocation, not a redundant Torch copy."""
     import numpy as np

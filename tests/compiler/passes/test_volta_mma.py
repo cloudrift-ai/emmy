@@ -255,6 +255,17 @@ def test_sm70_pair_policy_off_retains_the_unpaired_gather(monkeypatch) -> None:
     assert knobs["PAIR_LDMATRIX"] is False
 
 
+def test_sm70_computed_tiles_use_the_same_paired_layouts(monkeypatch) -> None:
+    _pin(monkeypatch, VOLTA, tile="f2x2/k4", stage="d1/smem")
+    graph = _norm_linear_graph(m=32, n=32, k=32)
+    graph.nodes["y"].op = MatmulOp()
+    src, _ = _source(graph, Context(compute_capability=(7, 0)))
+    assert "_a_smem[emmy_volta_crosswise(" in src
+    assert "_b_smem[emmy_volta_b_congruous(" in src
+    assert "emmy_mma884_load_a_crosswise_pair(_a0, _a1" in src
+    assert "emmy_mma884_load_b_congruous_pair(_b0, _b1" in src
+
+
 def test_sm70_gmem_direct_tile_keeps_the_ordinary_accumulator_map(monkeypatch) -> None:
     """The paired accumulator map is coupled to a staged operand layout, never used alone."""
     _pin(monkeypatch, VOLTA, tile="f2x2")

@@ -690,7 +690,7 @@ def _run_golden_targets(args) -> None:
     """
     from copy import copy  # noqa: PLC0415
 
-    from emmy.compiler.pipeline.search.golden import load_golden_file, load_golden_records  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import lead_of, load_golden_file, load_golden_records  # noqa: PLC0415
 
     if args.input or args.code or args.ir:
         logger.error("--golden is mutually exclusive with positional input / --code / --ir")
@@ -705,17 +705,16 @@ def _run_golden_targets(args) -> None:
     if not names:
         logger.error("--golden contains no realizations: %s", args.golden)
         sys.exit(2)
-    # Bench each TARGET once. A row named ``<target>.<identity>`` (a routing row or a child-identity
-    # schedule receipt) is evidence for its target's walk, not a target of its own: benched as a
-    # whole-target pin it measures nothing real and multiplies the walk by the receipt count. A file
-    # that keeps no seed row benches one of the target's rows instead — the one pricing the whole
-    # target: the fastest routing row, else the fastest row.
-    targets: dict[str, list] = {}
+    # Group by the persisted target, bindings and input regime, just as golden replay does.
+    # Dots in a name do not make one target a receipt of another. Prefer the inventory row;
+    # without it, the fastest routing row prices the whole target, unlike a child receipt.
+    targets: dict[int, list] = {}
     for record in records:
-        parent = record.name.rsplit(".", 1)[0]
-        target = parent if parent in names or getattr(record, "identity", None) else record.name
-        targets.setdefault(target, []).append(record)
-    names = [target if target in names else min(rows, key=lambda r: (not r.is_routing, r.emmy_us)).name for target, rows in targets.items()]
+        targets.setdefault(id(lead_of(record, records)), []).append(record)
+    names = [
+        next((row.name for row in rows if row.identity is None), min(rows, key=lambda r: (not r.is_routing, r.emmy_us)).name)
+        for rows in targets.values()
+    ]
 
     output_dir = None
     if len(names) > 1 and args.json:
@@ -1324,11 +1323,12 @@ async def _bench_golden_variants(
         # The row's own pins AND the live env pins: a sweep publishes its route through
         # ``EMMY_KNOBS`` and varies schedules per row, so a row whose compile dropped that route
         # would otherwise bench the planner's own kernel set under the row's name.
-        flag = unreproducible_pin_flag(
-            replay_knobs,
-            _cuda_knob_dicts(g_compiled),
-            placement_knobs=_placement_knob_dicts(g_compiled),
-        ) or env_pin_refusal(_cuda_knob_dicts(g_compiled), _placement_knob_dicts(g_compiled))
+        with pinned_knobs(replay_knobs):
+            flag = unreproducible_pin_flag(
+                replay_knobs,
+                _cuda_knob_dicts(g_compiled),
+                placement_knobs=_placement_knob_dicts(g_compiled),
+            ) or env_pin_refusal(_cuda_knob_dicts(g_compiled), _placement_knob_dicts(g_compiled))
         if flag:
             flags.append(f"{flag} — row NOT benched")
             logger.error(
@@ -2263,7 +2263,7 @@ async def bench_lowered_vs_torch(
     transposed + renamed stays the same underlying tensor on both sides). The lowered
     graph runs once for a non-fatal accuracy check vs the torch eager reference; then,
     when ``do_bench``, the selected backends are timed — interleaved when a torch ref
-    exists (full ``warmup``/``iters``), else emmy-only at reduced iters.
+    exists, else emmy-only, both with the requested ``warmup``/``iters``.
 
     ``capture_graphs`` (default on — this function's callers are the per-kernel
     reproducer paths, where the torch side replays the frontend graph op-by-op and
@@ -2416,7 +2416,7 @@ async def bench_lowered_vs_torch(
         return (*base, correctness, reference) if return_reference else base
     # Emmy-only: a capture failure falls back inside ``benchmark_program``
     # (warned + reported via ``bench.captured``) — nothing to de-mix.
-    bench = await backend.benchmark_async(lowered, warmup=max(3, warmup // 5), num_iters=max(10, iters // 5), capture_graphs=capture_graphs)
+    bench = await backend.benchmark_async(lowered, warmup=warmup, num_iters=iters, capture_graphs=capture_graphs)
     base = ({"Emmy": bench.time_ms * 1000}, bench, False, bench.captured, accuracy_error)
     return (*base, correctness, reference) if return_reference else base
 

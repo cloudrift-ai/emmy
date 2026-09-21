@@ -82,6 +82,23 @@ def test_an_unstamped_row_is_not_admitted() -> None:
     assert prior._dataset == []
 
 
+def test_reservoir_measurements_require_the_same_exact_kernel() -> None:
+    from emmy.compiler.pipeline.search.features import knob_features
+
+    prior = _prior()
+    common = {"H_opt": 3.0, "S_shape": 128.0}
+    prior.add_rows(
+        [
+            ({**common, "I_kernel": "flat", "WORK": "t32"}, 17.0),
+            ({**common, "I_kernel": "strided", "WORK": "t512"}, 27.0),
+            ({**common, "WORK": "t64"}, 1.0),
+        ]
+    )
+    candidates = [{**common, "I_kernel": "strided", "WORK": work} for work in ("t32", "t64", "t512")]
+    assert prior.evidence_pick(candidates) == (2, 27.0)
+    assert knob_features({**common, "I_kernel": "strided"}) == knob_features(common)
+
+
 @pytest.mark.parametrize("route", ({"PLACE": "cut"}, {"PLACE@inner.1/map": "cut"}, {"PLACE@inner.1/map": "cut", "WORK": "t32"}))
 def test_placement_route_rows_train_but_are_not_measured_deploy_evidence(route) -> None:
     prior = _prior()

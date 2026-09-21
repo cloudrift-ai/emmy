@@ -131,7 +131,8 @@ They accept a Hugging Face model, debug Graph IR, or inline `--code`; `causal-lm
 keeps the existing Transformers path. `dit` delegates to the Diffusers block adapter in `compiler/trace/dit.py`; it
 requires `--layer`, accepts the checkpoint's layers 0-27, and rejects dynamic shapes in v1. `run --bench` and
 `tune --bench` include the adapter in the isolated worker's reconstruction payload, so eager PyTorch, `torch.compile`,
-and Emmy always rebuild the same module and example inputs. Inductor compiles with
+and Emmy always rebuild the same module and example inputs. Reference-free runs also honor `--warmup` and `--iters`.
+Inductor compiles with
 `fullgraph=True, mode="max-autotune-no-cudagraphs"`; the harness supplies the shared outer CUDA graph so every backend
 has identical captured timing semantics. Inductor output must match eager on the same inputs at `rtol=atol=1e-3`
 before its latency is accepted. `run --strict` makes every requested backend, captured timing, exact pin, and direct
@@ -209,11 +210,11 @@ spawns). `--realization NAME` (`run`, `compile`, `tune`) selects one realization
 substring — inside `--golden PATH`, or, on `run` / `compile` without it, inside the live card's repository goldens.
 There is no second spelling: no file flag beside `--golden`, no name flag beside `--realization`.
 
-`run --golden PATH` without `--realization` walks every target name in one process, benching each target's
-verified rows or its one valid direct tune winner (proposals stay the tuner's). A routing row or a
-child-identity receipt (`<target>.<identity>`) is evidence for its target's walk, not a target of its own; a file
-that dropped its seed rows (a promoted serving-twin golden) benches each target through the row pricing all of it,
-its fastest routing row, else its fastest row. A
+`run --golden PATH` without `--realization` walks every persisted target, binding and input regime in one process,
+benching each target's verified rows or its one valid direct tune winner (proposals stay the tuner's). A routing row
+or child-identity receipt is evidence for its target's walk, not a target of its own. Grouping uses the stored target,
+not dotted name prefixes. A file that dropped its seed rows (a promoted serving-twin golden) benches each target
+through the row pricing all of it, its fastest routing row, else its fastest row. A
 failing target does not stop the walk: every target reports, and the command exits non-zero at the end naming
 the failures. A receipt of a piece a route row minted (its identity is no route row's) replays under the target's
 route rows composed, plus `PLACE=fuse` when no

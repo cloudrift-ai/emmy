@@ -32,7 +32,7 @@ from functools import partial
 from emmy.compiler.backend.cuda.dtype import cuda_name
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F32
-from emmy.compiler.ir.address import BYTE_SLAB_PAD
+from emmy.compiler.ir.address import BYTE_SLAB_PAD, gmem_axis_step
 from emmy.compiler.ir.atom import AtomKind, wide_accumulate
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
@@ -1921,10 +1921,16 @@ class _AtomOps:
     inner: tuple | None = None
     # The launch fits the card in one wave: the chunk tier keeps its stream whole (see ``_factor``).
     one_wave: bool = False
+    outputs: object = None
 
     def frag(self, name: str) -> str:
         """``name`` in this emission's fragment namespace (:attr:`frag_ns`)."""
         return f"{self.frag_ns}{name}"
+
+    def store_stride(self, write: Write, axis: Axis) -> int:
+        """The fragment coordinate's physical stride, including coefficients inside a dimension."""
+        step = gmem_axis_step(Load("", write.output, write.index), axis.name, self.outputs)
+        return step[0] if step is not None else 0
 
     @property
     def channels(self) -> tuple:
@@ -2046,19 +2052,7 @@ class _MmaOps(_AtomOps):
         """Whether this staged cell can use the coupled Volta operand and accumulator layouts."""
         if self.stage is None or self.tile.atom.fragment_layout != "m8n8k4" or PAIR_LDMATRIX.narrow((True,)) != (True,):
             return False
-        a_copied = self.c.operands[0].as_slab() is not None
-
-        def copied_b(edge) -> bool:
-            slab = edge.as_slab() if isinstance(edge, Fold) else None
-            return isinstance(slab.load if slab is not None else edge, Load)
-
-        return (
-            a_copied
-            and all(copied_b(edge) for edge, _ in self.channels)
-            and not self.c.as_contraction().b_trans
-            and mn[0].reg % 2 == 0
-            and mn[1].reg % 2 == 0
-        )
+        return not self.c.as_contraction().b_trans and mn[0].reg % 2 == 0 and mn[1].reg % 2 == 0
 
     def slab_swizzles(self, mn, elem_bytes: int) -> tuple[str, ...]:  # noqa: ARG002 — per-operand widths come from slab_elems
         """The smem swizzle mode per operand slab, from each slab's inner (contiguous) row
@@ -2079,9 +2073,9 @@ class _MmaOps(_AtomOps):
         Volta tiles instead use the crosswise A and B-congruous layouts together; the existing
         ``PAIR_LDMATRIX`` policy pin can disable that lowering and retain the ordinary gather."""
         if self.tile.atom.fragment_layout == "m8n8k4":
-            # Volta has no ldmatrix. A materialized row-major A uses CUTLASS's crosswise layout;
-            # a materialized canonical row-major B uses its B-congruous layout and the row/row
-            # mma form. Each layout is enabled only when the warp tile contains complete pairs
+            # Volta has no ldmatrix. Row-major A uses CUTLASS's crosswise layout; canonical B
+            # uses its B-congruous layout and the row/row mma form. Copy and compute fills share
+            # the same swizzled Write. Each layout requires complete pairs
             # of logical 16-row/column fragments, because one ordinary LDS.128 drains each pair.
             paired = self._volta_pair_layout(mn)
             return (
@@ -2374,6 +2368,8 @@ class _MmaOps(_AtomOps):
                     fragment_index=(i, j),
                     row_dim=_axis_dim(write.index, m.axis.name),
                     col_dim=_axis_dim(write.index, n.axis.name),
+                    ldm=self.store_stride(write, m.axis),
+                    ldn=self.store_stride(write, n.axis),
                 )
             )
         return out
@@ -3425,6 +3421,8 @@ class _FlashOps(_MmaOps):
                     fragment_layout=atom.fragment_layout,
                     row_dim=_axis_dim(write.index, m.axis.name),
                     col_dim=_axis_dim(write.index, n.axis.name),
+                    ldm=self.store_stride(write, m.axis),
+                    ldn=self.store_stride(write, n.axis),
                 )
             )
         return out
@@ -3445,6 +3443,7 @@ def _atom_ops(
     axes: tuple = (),
     inner: tuple | None = None,
     one_wave: bool = False,
+    outputs=None,
 ) -> _AtomOps:
     """The **one** atom dispatch — select the codegen strategy off the atom kind. ``c`` is the
     stored algebra, ``tile`` the PLACED schedule slice (``Tile.at``) the geometry derives from."""
@@ -3472,6 +3471,7 @@ def _atom_ops(
         axes,
         inner,
         one_wave,
+        outputs,
     )
 
 
@@ -3513,6 +3513,7 @@ def store_sink(
     k_axis: Axis | None = None,
     axes: tuple = (),
     inner: tuple | None = None,
+    outputs=None,
 ):
     """The default **matmul sink** — the per-cell ``store(i, j, offset, mn)`` from the atom strategy
     (an mma ``RegStore`` / the replicated scalar ``epilogue`` tail), folding in the ``epilogue`` (the
@@ -3529,4 +3530,5 @@ def store_sink(
         k_axis=k_axis,
         axes=axes,
         inner=inner,
+        outputs=outputs,
     ).store

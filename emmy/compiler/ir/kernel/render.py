@@ -12,7 +12,7 @@ import numpy as np
 
 from emmy.compiler.backend.cuda.dtype import cuda_includes, cuda_name
 from emmy.compiler.backend.cuda.dtype import nbytes_of as _nbytes_of
-from emmy.compiler.backend.cuda.render_target import CudaRenderTarget
+from emmy.compiler.backend.cuda.render_target import F8_DECODE_PRELUDE, CudaRenderTarget
 from emmy.compiler.dtype import F4_VALUES, F32
 from emmy.compiler.ir.kernel.ir import (
     CpAsyncCopy,
@@ -1489,6 +1489,8 @@ def render_kernelop(
     sig_dtypes.extend(s.dtype for s in kernel_op.body.iter_of_type(Assign) if s.dtype is not None)
     sig_dtypes.extend(frag_dtype(ctx, s.frag) for s in kernel_op.body.iter_of_type(LdmatrixLoad) if frag_dtype(ctx, s.frag))
     includes = "".join(f"#include {h}\n" for h in cuda_includes(sig_dtypes))
+    if any(str(dtype) == "f8e4m3" for dtype in sig_dtypes):
+        includes += F8_DECODE_PRELUDE
     # The mma.sync (s16816) tensor-core path is pure inline PTX — its
     # ldmatrix / mma.sync wrappers are emitted in ``_MMA_SYNC_PRELUDE``, so
     # NVRTC needs no ``<mma.h>`` (the legacy ``nvcuda::wmma`` family is gone).

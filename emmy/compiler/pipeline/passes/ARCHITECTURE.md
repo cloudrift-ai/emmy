@@ -534,8 +534,8 @@ The consumers that had assumed "one output axis per buffer dim" were generalized
 reading — an axis's unit step moves its INNERMOST carrying dim (the `%` dim of a split pair): the lift's
 output-ordering positions an axis at that dim (under the permuted store the quotient dim sits outside another
 axis entirely, and positioning there would make the fused axis the row and the stride-`Q` axis the column);
-the mma `RegStore`'s auto row stride derives from the store template's innermost M-carrying dim (`row_dim`)
-instead of assuming the inner extent; an epilogue load's per-dim role (`_warp_roles`) moves only that dim;
+the mma `RegStore` derives physical M/N strides from unit steps in the complete output index, including coefficients
+that pack a row and head into one tensor dimension; an epilogue load's per-dim role (`_warp_roles`) moves only that dim;
 and `080_vectorize_stores` re-reads a run its per-dim matching declines by the row-major flat address when a
 div/mod residue is present, so a row-major split store keeps its vectorized transactions (the permuted one
 stores scalar on the scalar tiers — exact, unvectorized). The warp tier's fragment store evaluates the cell
@@ -645,6 +645,7 @@ that canonical input:
   them keeps later schedule and split axes in their original geometric roles. A coordinate read only through a common
   integer divisor stores one value per quotient; producers and consumers apply inverse index substitutions. The new
   producer and consumer are fresh unmapped TileOps, so further legal cuts and schedules use the same ordinary passes.
+  Cross-CTA partial workspaces order their free axes by output storage layout.
   An unpinned cut may expose more cut choices; any pinned cut consumes its restriction on every piece. If the parent
   already carries a cross-CTA split receipt, every placement piece inherits it, so a later cut cannot make the same
   split pending again. A piece minted by a structural apply stays in the ordinary pass sequence; no schedule-specific

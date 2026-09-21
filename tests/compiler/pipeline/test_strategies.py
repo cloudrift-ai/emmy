@@ -138,6 +138,7 @@ def test_every_fusion_born_kernel_is_stamped_at_the_loop_terminal() -> None:
             stamped = {k: v for k, v in node.op.knobs.items() if k.startswith(STRUCT_PREFIX)}
             assert stamped, f"{nid} must carry its structural identity at the loop terminal"
             assert stamped == structure_features(node.op.body, out), "the stamp IS structure_features of the final body"
+            assert node.op.knobs["I_kernel"] == node.op.identity_key(structural=False, with_io=True)
 
 
 def test_read_api_is_knobs_first_and_compute_equal() -> None:

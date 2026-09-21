@@ -641,9 +641,14 @@ def test_unreproducible_pin_flag(monkeypatch):
     untaken = unreproducible_pin_flag({"PLACE@map.1/inner": "cut"}, [{"TILE": "f2"}], placement_knobs=[])
     assert "PLACE@map.1/inner=cut realized (unset)" in untaken
     assert unreproducible_pin_flag({"PLACE@map.1/inner": "cut"}, [{"TILE": "f2"}]) is None, "no trace, no gate"
+    # Global fuse prohibits cuts even when the kernel offers no placement choice. A scoped pin still names a site.
+    assert unreproducible_pin_flag({"PLACE": "fuse"}, [{"TILE": "f2"}], placement_knobs=[]) is None
+    assert unreproducible_pin_flag({"PLACE@map.1/inner": "fuse"}, [{"TILE": "f2"}], placement_knobs=[])
+    assert unreproducible_pin_flag({"PLACE": "fuse"}, [{"TILE": "f2"}], placement_knobs=[{"PLACE@map.1/inner": "cut"}])
 
 
-def test_bench_golden_variants_unmatched_pin_fails_row_without_benching(monkeypatch):
+@pytest.mark.parametrize("ambient_tile", (None, "mma_m16n8k16_f16_f32/f2x4"))
+def test_bench_golden_variants_unmatched_pin_fails_row_without_benching(monkeypatch, ambient_tile):
     """End-to-end through ``_bench_golden_variants``: a pinned config whose compiled
     kernels realized different knobs FAILS its row loudly before any bench — status
     ``pin_unmatched``, no bench (benching the fallback realization would measure the

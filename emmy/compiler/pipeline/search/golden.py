@@ -358,7 +358,7 @@ class GoldenRecord:
         """The PyTorch slice the stored kernel is compared against: the traced ops it came from
         (``origins``) with the kernel's outputs in its order. ``None`` when the golden keeps no
         traced ops for it, or when they are no exact twin — the kernel writes a value the ops do not
-        compute, or the slice reads a value the kernel is not given. Comparison only: the stored
+        compute, or the slice and kernel have different boundary inputs. Comparison only: the stored
         kernel stays the identity."""
         from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
         from emmy.compiler.pipeline import CompilerDump  # noqa: PLC0415
@@ -369,7 +369,7 @@ class GoldenRecord:
         computed = {buffer for origin in self.origins for buffer in self.program.nodes[origin].buffer_names()}
         reads = CompilerDump.frontend_reproducer_from_origins(self.program, set(self.origins)).inputs
         bound = {node_id for node_id, node in kernel.nodes.items() if isinstance(node.op, InputOp)}
-        if not (set(kernel.outputs) <= computed and set(reads) <= bound):
+        if not (set(kernel.outputs) <= computed and set(reads) == bound):
             return None
         graph = self._frontend_slice(self.origins)
         graph.outputs = list(kernel.outputs)
@@ -1405,7 +1405,7 @@ def kernel_identity(record: GoldenRecord) -> str | None:
     lowers to several kernels (a schedule row decorates exactly one), or selection/lifting fails —
     best-effort here (a corpus row must never break a compile); nightly strict decoding is where
     failure is loud. Deploy never joins on this key: a record deploys as measured rows, matched by
-    ``S_*`` signature (:func:`evidence_rows`)."""
+    ``S_*`` features plus the exact ``I_kernel`` stamp (:func:`evidence_rows`)."""
     global _IDENTITY_STORE_DIRTY
     if record.identity is not None:
         return record.identity
@@ -1732,7 +1732,7 @@ def evidence_rows(gpu_name: str, compute_cap: tuple[int, int]) -> list[tuple[fro
     parent's decision. A row no kernel of the replay enumerates is stale and is no evidence.
     Best-effort per record: a record the current compiler cannot lower is skipped, since the
     strict decode is where that is loud."""
-    from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import EVIDENCE_PREFIXES, family_of  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import parse_reduce  # noqa: PLC0415
 
     rows: list[tuple[frozenset, dict, float, str]] = []
@@ -1744,7 +1744,11 @@ def evidence_rows(gpu_name: str, compute_cap: tuple[int, int]) -> list[tuple[fro
         split = any(family_of(k) == "REDUCE" and (plan := parse_reduce(v)) is not None and plan.needs_split for k, v in row.items())
         if record.identity is None and not record.route and not split and not record.kernel_set:
             try:
-                signature = frozenset((key, str(value)) for key, value in record.structural_features.items())
+                _lowered, nodes = _target_kernel_nodes(record)
+                (signature,) = {
+                    frozenset((key, str(value)) for key, value in node.op.knobs.items() if key.startswith(EVIDENCE_PREFIXES))
+                    for node in nodes
+                }
             except Exception:  # noqa: BLE001 — a stale record is no evidence, not an error
                 continue
             if row:

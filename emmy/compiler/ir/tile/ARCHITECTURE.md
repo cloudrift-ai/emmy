@@ -76,7 +76,9 @@ For a broadcast-batched product whose batch axis occurs in only one operand, the
 still supplies that geometry. If its geometric first operand reads the reduction axis non-contiguously and the other
 materialized operand reads it contiguously, the commutative product puts the contiguous operand in the shared A slot;
 placement then derives the corresponding physical M/N orientation from the operand axes. Physical M/N orientation
-remains a placement fact rather than part of the Fold algebra.
+remains a placement fact rather than part of the Fold algebra. Where an operand owns several free axes, the smallest
+known output stride chooses its tiled axis. Undetermined layouts retain the trailing placement order. Stored schedules
+retain the same input and output tensors as the unscheduled Tile so reconstruction makes the same choice.
 
 The bilinear form is CANONICAL BY CONSTRUCTION: formation (`lowering/tile/_fromloop`) turns every load of a reduce
 step over coordinates into a slab operand (a data-dependent gather, the packed-pair table read by a decoded code,
