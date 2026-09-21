@@ -209,7 +209,7 @@ def test_a_pool_that_holds_the_recorded_row_is_not_walked_whole(monkeypatch) -> 
     absent = schedule_match_key(piece_row(missing.knobs))
     assert absent not in rows(missing), "a row no leaf spells equals nothing in the pool"
     full = rows(missing)
-    miss = _replay(missing, siblings=siblings, exhaustive=True, wanted=absent)
+    miss = _replay(missing, siblings=siblings, exhaustive=True, wanted=absent, explain=True)
     keys = set().union(*(summary[0] for summary in miss.offered.values()))
     pairs = set().union(*(summary[1] for summary in miss.offered.values()))
     assert not miss.rows, "a miss retains no candidate rows"

@@ -1381,6 +1381,7 @@
  "tests/serving/generation/test_gen_capture_gpu.py::test_run_device_sym_inside_outer_capture_replays_live@cuda": 10.0,
  "tests/serving/generation/test_gen_pack_gpu.py::test_gen_pack_key_separates_quantized_rungs@cuda": 6.9,
  "tests/serving/generation/test_gen_pack_gpu.py::test_gen_pack_second_boot_hits_and_matches@cuda": 5.4,
+ "tests/serving/generation/test_gen_runner.py::test_create_keeps_storage_coded_trunks_packed[awq-True]": 5.2,
  "tests/serving/generation/test_gen_runner.py::test_create_keeps_storage_coded_trunks_packed[exl3-True]": 5.0,
  "tests/serving/generation/test_gen_runner.py::test_create_keeps_storage_coded_trunks_packed[fp8-False]": 5.0,
  "tests/serving/generation/test_gen_runner.py::test_create_keeps_storage_coded_trunks_packed[modelopt-True]": 5.1,

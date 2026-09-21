@@ -1095,21 +1095,26 @@ def decode_record(record: GoldenRecord, siblings: Sequence[GoldenRecord] = ()) -
     if record.is_routing:
         reason = f"routing key {replay.unresolved[0]!r} does not resolve to an offered cut seam" if replay.unresolved else None
         return _remember_verdict(verdict_key, reason)
-    candidates = replay.rows
-    if record.is_receipt and (tile is None or record.identity != tile.identity_key(with_io=True)):
-        child_rows = candidates.get(record.identity)
-        offered = replay.offered.get(record.identity, (frozenset(), frozenset()))
-        if record.identity not in replay.kernels:
-            reason = "stored identity equals none of the kernel identities resolved under the record's pins"
-        elif child_rows is not None and row in child_rows:
-            reason = None
-        else:
-            reason = f"no enumerated row of the identified kernel equals the recording: {_unmatched_reason(row, *offered)}"
-    else:
+
+    def verdict(replay: _Replay) -> str | None:
+        candidates = replay.rows
+        if record.is_receipt and (tile is None or record.identity != tile.identity_key(with_io=True)):
+            child_rows = candidates.get(record.identity)
+            offered = replay.offered.get(record.identity, (frozenset(), frozenset()))
+            if record.identity not in replay.kernels:
+                return "stored identity equals none of the kernel identities resolved under the record's pins"
+            if child_rows is not None and row in child_rows:
+                return None
+            return f"no enumerated row of the identified kernel equals the recording: {_unmatched_reason(row, *offered)}"
         pooled = frozenset().union(*candidates.values()) if candidates else frozenset()
         offered_keys = set().union(*(summary[0] for summary in replay.offered.values())) if replay.offered else set()
         offered_pairs = set().union(*(summary[1] for summary in replay.offered.values())) if replay.offered else set()
-        reason = None if row in pooled else f"no enumerated row equals the recording: {_unmatched_reason(row, offered_keys, offered_pairs)}"
+        return None if row in pooled else f"no enumerated row equals the recording: {_unmatched_reason(row, offered_keys, offered_pairs)}"
+
+    reason = verdict(replay)
+    if reason is not None:
+        # A miss: replay again walking every fork, so the reason names what the kernels offer.
+        reason = verdict(_replay(record, siblings=siblings, exhaustive=True, wanted=row, explain=True))
     verdicts[verdict_key] = reason
     global _IDENTITY_STORE_DIRTY
     _IDENTITY_STORE_DIRTY = True
@@ -1210,6 +1215,7 @@ def _replay(
     lead: GoldenRecord | None = None,
     exhaustive: bool = False,
     wanted: tuple[tuple[str, str], ...] | None = None,
+    explain: bool = False,
 ) -> _Replay:
     """Replay ``record``'s target through the tile passes — see :class:`_Replay`. The record's input
     pins are the regime it was measured under and go to the environment; its route (the ``PLACE``
@@ -1228,7 +1234,10 @@ def _replay(
     ``holders`` and descends. ``wanted`` names the ONE match key the caller will ask ``rows`` about.
     An unsampled schedule answers by decoding that complete row through its codec and compatibility
     context, without enumerating candidates. Other forks use lazy descent and keep only the wanted
-    keys and values needed to classify a miss, never the candidate rows."""
+    keys and values needed to classify a miss, never the candidate rows. A schedule fork that cannot
+    hold ``wanted`` is left undecided: the kernel it decides is not the one the row describes, and
+    giving it a schedule anyway walks its fork to a first leaf, the bulk of a cold decode. ``explain``
+    walks such forks instead, to name what they offer when the row is found nowhere."""
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
     from emmy.compiler.pipeline import TILE_PASSES, Pipeline  # noqa: PLC0415
@@ -1241,7 +1250,7 @@ def _replay(
         schedule_row_key,
         validate_family_value,
     )
-    from emmy.compiler.pipeline.pipeline import Run, _is_structural_option  # noqa: PLC0415
+    from emmy.compiler.pipeline.pipeline import NO_OPTION, Run, _is_structural_option  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import composed_routes, pinned_knobs, spelled_arm, unpinned_decisions  # noqa: PLC0415
 
     def _spelling(entry: GoldenRecord) -> dict[str, str]:
@@ -1321,6 +1330,7 @@ def _replay(
     signatures: dict[str, frozenset] = {}
     realized: dict[str, dict[str, str]] = {}
     arms: list[tuple[frozenset, dict[str, str]]] = []
+    declined: set[str] = set()  # the schedule forks left undecided: none of them can hold ``wanted``
 
     def _identity_of(op) -> str | None:
         return op.identity_key(with_io=True) if isinstance(op, TileOp) else None
@@ -1397,14 +1407,19 @@ def _replay(
                     buckets.setdefault(identity, set()).add(wanted)
                     _offer(identity, wanted)
                     return hit
+                if not explain and not fp.structural:
+                    declined.add(fp.node_id)
+                    return NO_OPTION
                 return next(iter_leaves(fp.options))
             hit = leaf_for(fp.options, piece, skip=lambda knobs: schedule_match_key(knobs) != wanted)
             if hit is not None and not _is_structural_option(hit[0]):
                 buckets.setdefault(identity, set()).add(wanted)
                 _offer(identity, wanted)
-                chosen = next((leaf for leaf in iter_leaves(fp.options) if not _is_structural_option(leaf)), None)
-                return chosen if chosen is not None else next(iter_leaves(fp.options))
+                return hit[0]
             proved_miss = hit is None
+            if not explain and not fp.structural:
+                declined.add(fp.node_id)
+                return NO_OPTION
         first_leaf = None
         first_op = None
         for leaf in iter_leaves(fp.options):
@@ -1439,12 +1454,12 @@ def _replay(
             composed.append((None, keys))
     with unpinned_decisions(), pinned_knobs(regime), composed_routes(composed):
         out, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(record.target_program.copy(), decide)
-    for node in out.nodes.values():
+    for node_id, node in out.nodes.items():
         if isinstance(node.op, TileOp):
             identity = _identity_of(node.op)
             knobs = dict(node.op.knobs or {})
             row = schedule_row_key(knobs)
-            if exhaustive:
+            if exhaustive and node_id not in declined:
                 row_key = schedule_match_key(knobs)
                 if wanted is None or row_key == wanted:
                     buckets.setdefault(identity, set()).add(row_key)
