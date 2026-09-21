@@ -1687,32 +1687,17 @@ def _imap_run(g: Graph) -> tuple[np.ndarray, str]:
 
 
 @requires_cuda
-@pytest.mark.parametrize("form", ["transpose_a", "reshape_b"])
-@pytest.mark.xfail(
-    run=False,
-    reason="reshape_b under cp.async hangs on a misaligned 16 B copy until the launch watchdog fires, "
-    "and the CUDA_ERROR_MISALIGNED_ADDRESS it returns sticks to the context for the rest of the process",
-)
-def test_operand_index_map_accuracy(form, monkeypatch):
-    """The two cp.async cells of the operand index-map matrix the realization corpus deliberately
-    holds no case for. ``transpose_a`` is a correct REFUSAL — a cp.async fill copies a contiguous
-    chunk per row and a transposed operand's columns are strided, so the transport has nothing to
-    express the copy with. ``reshape_b`` is the one row that FAULTS rather than returning a wrong
-    answer, which is why it must never be launched by the suite: it poisons the CUDA context for
-    every later test in the process. The other ten cells of this matrix are corpus cases, and they
-    record what the corpus found by actually running them — a silently wrong answer, not a fault."""
+def test_reshaped_b_under_cp_async_matches_reference(monkeypatch):
+    """A re-strided B staged through cp.async: each copy chunk reads the index at its own
+    coordinates, so the derived row stride is what the fill copies."""
     monkeypatch.setenv("EMMY_STAGE", "d2/smem-async")
-    g, ref = _imap_graph(form)
+    g, ref = _imap_graph("reshape_b")
     got, _, ins = _imap_run(g)
     want = ref(ins)
     diff = np.abs(got - want).max()
-    assert diff < 5e-2 * max(1.0, np.abs(want).max()), f"{form}/cp.async: max abs err {diff}"
+    assert diff < 5e-2 * max(1.0, np.abs(want).max()), f"reshape_b/cp.async: max abs err {diff}"
 
 
-@pytest.mark.xfail(
-    run=False,
-    reason="pre-existing on clean main: the reshaped-A fragment faults and can poison the CUDA context",
-)
 @requires_cuda
 def test_reshaped_a_fragment_takes_the_derived_row_stride(monkeypatch):
     """The gmem-direct mma fragment loader steps the reshaped A's rows at the DERIVED 128, not the
@@ -1724,21 +1709,40 @@ def test_reshaped_a_fragment_takes_the_derived_row_stride(monkeypatch):
     assert all(ln.endswith(", 128);") for ln in calls), f"A fragments must take ldm=128, got {calls}"
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="pre-existing on clean main: nvcc rejects the fallback kernel (undefined reshape-residue identifier)",
-)
+@pytest.mark.parametrize("form", ["reshape_a", "transpose_a"])
 @requires_cuda
-def test_reshaped_a_declines_tma_and_falls_back(monkeypatch):
+def test_an_operand_the_transports_cannot_copy_compiles_correct_unpinned(form):
+    """With no transport pinned, a re-strided or transposed A compiles to a kernel that reads it
+    correctly: the refused transports leave the loaders that can."""
+    g, ref = _imap_graph(form)
+    got, _, ins = _imap_run(g)
+    want = ref(ins)
+    diff = np.abs(got - want).max()
+    assert diff < 5e-2 * max(1.0, np.abs(want).max()), f"{form}: max abs err {diff}"
+
+
+def test_reshaped_a_tma_pin_is_refused(monkeypatch):
     """TMA's box is a rectangle in the DESCRIPTOR's coordinates, so a re-strided A has no
-    descriptor — the pin DECLINES and the row falls back to a correct transport rather than
-    copying the declared row pitch. The unmapped-falls-back half of the guardrail contract."""
+    descriptor: the pinned transport is refused rather than copying the declared row pitch."""
     monkeypatch.setenv("EMMY_STAGE", "d2/smem-tma")
-    _, imap_src, _ = _imap_run(_imap_graph("reshape_a")[0])
-    assert "cp.async.bulk.tensor" not in imap_src, "a re-strided A must not reach a TMA box copy"
+    with pytest.raises(ValueError, match="does not resolve for this contraction"):
+        _run_tile_pass(_imap_graph("reshape_a")[0])
+
+
+@requires_cuda
+def test_sliced_a_still_stages_through_tma(monkeypatch):
+    """The canonical (sliced) A keeps its TMA box, so the refusal above is not a dead pin."""
     monkeypatch.setenv("EMMY_STAGE", "d2/smem-tma")
-    _, plain_src, _ = _imap_run(_imap_graph("slice_a")[0])
-    assert "cp.async.bulk.tensor" in plain_src, "the canonical (sliced) A still stages via TMA — the pin is not dead"
+    _, src, _ = _imap_run(_imap_graph("slice_a")[0])
+    assert "cp.async.bulk.tensor" in src
+
+
+def test_transposed_a_cp_async_pin_is_refused(monkeypatch):
+    """A cp.async fill copies A's rows in chunks along K, and a transposed A strides its columns:
+    the pinned transport is refused before its misaligned copy can hang the launch."""
+    monkeypatch.setenv("EMMY_STAGE", "d2/smem-async")
+    with pytest.raises(ValueError, match="does not resolve for this contraction"):
+        _run_tile_pass(_imap_graph("transpose_a")[0])
 
 
 def test_transposed_a_warp_pin_restricts_the_schedule_to_empty(monkeypatch) -> None:

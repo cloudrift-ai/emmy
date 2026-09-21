@@ -99,3 +99,20 @@ def test_case_derived_half_is_current(path):
         "Run `make test-corpus-regen` to restamp it; that command refuses to write when a case's "
         "verdict also changed, which is a review conversation rather than a mechanical step."
     )
+
+
+def test_volta_compute_fill_offers_no_prefetch_ring():
+    """The Volta mma atom's compute fill stages at depth 1 only. Its depth-2 B prefetch ring copies
+    with blocking copies (sm_70 has no cp.async) and returned silently wrong answers on a V100, so
+    the enumeration must never offer it — asked on the one program known to offer the fill."""
+    from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    case = helpers.load_case(helpers.CASES_DIR / "matmul" / "volta-gptq-cone-d1smem.yaml")
+    (record,) = case.records
+    pins = {key: value for key, value in helpers.pin_of(record).items() if key != "STAGE"}
+    with pinned_knobs(pins):
+        rows = enumerate_graph(record.target_program.copy(), case.union_context()).rows
+    stages = {str(row.get("STAGE")) for row in rows}
+    assert "d1/smem" in stages, stages
+    assert not any(stage.startswith(("d2", "d3", "d4")) for stage in stages), stages

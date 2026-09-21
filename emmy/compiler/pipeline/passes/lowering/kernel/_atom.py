@@ -36,7 +36,7 @@ from emmy.compiler.ir.address import BYTE_SLAB_PAD
 from emmy.compiler.ir.atom import AtomKind, wide_accumulate
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, TernaryExpr, Var, affine_form
+from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, SimplifyCtx, TernaryExpr, Var, affine_form
 from emmy.compiler.ir.kernel.ir import (
     COORD,
     ELEM_COL,
@@ -214,6 +214,13 @@ def _hoist_k_invariant(body, k_name: str) -> tuple[tuple, tuple]:
     return tuple(hoisted), tuple(rest)
 
 
+def _addends(expr: Expr) -> tuple[Expr, ...]:
+    """The terms of ``expr``'s top-level sum."""
+    if isinstance(expr, BinaryExpr) and expr.op == "+":
+        return (*_addends(expr.left), *_addends(expr.right))
+    return (expr,)
+
+
 def _direct_operand(load, inputs, *, k_name: str, own: str | None, legacy: tuple) -> tuple[bool, object]:
     """``(reduction-minor, ldm)`` for one gmem-direct fragment read, off the operand's own ADDRESS.
 
@@ -226,20 +233,24 @@ def _direct_operand(load, inputs, *, k_name: str, own: str | None, legacy: tuple
     reads the wrong elements, and nothing raises. Element strides say it directly, and on an operand
     whose dims separate the two coordinates they say exactly what the dim positions said.
 
+    The strides are read off the FLAT address, not dim by dim: a reshape that splits a coordinate
+    across two dims spells it ``[m / 2, (m % 2) * 128 + k]``, which no single dim holds affinely, while
+    the address it sums to is ``128·m + k``. Each dim's addends are scaled by the dim's element stride
+    and the simplifier recomposes the split pair.
+
     Reduction-minor means the reduction coordinate is the unit-stride one — the A loader's only
-    layout, and B's transposed one. ``legacy`` is the dim-position answer, kept for an index that is
-    not affine in the coordinates and for a symbolic extent, which leaves the strides of every
+    layout, and B's transposed one. ``legacy`` is the dim-position answer, kept for an address that
+    is not affine in the coordinates and for a symbolic extent, which leaves the strides of every
     earlier dim unknown. Neither coordinate unit-stride raises: the loader has no such address."""
     coords = (k_name, *(() if own is None else (own,)))
     tensor = inputs.get(load.input) if inputs else None
-    strides = dict.fromkeys(coords, 0)
+    if tensor is None or len(tensor.shape) != len(load.index):
+        return legacy
+    address: Expr = Literal(0, "int")
     unit = 1
     for dim in reversed(range(len(load.index))):
-        form = affine_form(load.index[dim], set(coords))
-        if tensor is None or len(tensor.shape) != len(load.index) or form is None:
-            return legacy
-        for name, coeff in form[1].items():
-            strides[name] += coeff * unit
+        for addend in _addends(load.index[dim]):
+            address = BinaryExpr("+", address, addend if unit == 1 else BinaryExpr("*", addend, Literal(unit, "int")))
         if dim == 0:
             break  # nothing strides the leading dim, so its extent never enters a stride
         extent = tensor.shape[dim]
@@ -247,6 +258,10 @@ def _direct_operand(load, inputs, *, k_name: str, own: str | None, legacy: tuple
         if not isinstance(extent, int):
             return legacy
         unit *= extent
+    form = affine_form(address.simplify(SimplifyCtx.empty()), set(coords))
+    if form is None:
+        return legacy
+    strides = {name: form[1].get(name, 0) for name in coords}
     own_stride = 1 if own is None else strides[own]
     if strides[k_name] == 1:
         return True, own_stride

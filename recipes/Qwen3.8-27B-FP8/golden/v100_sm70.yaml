@@ -92637,21 +92637,6 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w1x1
-      TILE: mma_m8n8k4_f16_f32/f8x2/k2
-      REDUCE: ''
-      STAGE: d2/smem
-      RASTER: ''
-    identity: 55e32e5d6e116159ccb29e230290c9249c2a94047675b71549e228b9d59f5b01
-    measurements:
-      emmy_us: 4052.9918670654297
-      reference_us: 4038.656234741211
-      reference_backend: same-input-greedy
-  - name: k_linear_pointwise_3410af.55e32e5d6e11
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
       WORK: w8x1
       TILE: mma_m8n8k4_f16_f32/f4x4/k8
       REDUCE: ''

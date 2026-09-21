@@ -1,46 +1,13 @@
-# evidence: `STAGE=d2/smem` on `mma_m8n8k4_f16_f32` returns WRONG ANSWERS on sm_70 across a wide and
-# irregular set of warp grids and fragments. This case pins one member of that set. It compiles,
-# launches, completes, and runs at 1,153 us -- FASTER than its correct `d1/smem` neighbour at
-# 1,277 us -- so nothing about the launch or the timing distinguishes it, and only an output
-# comparison catches it. A recorded row carrying such a schedule would deploy and silently produce
-# wrong numbers.
+# A packed-int4 GPTQ decode cone compute-filled into the Volta mma atom, built from a one-layer
+# synthetic checkpoint through the real `spell_quantized_constants` (the checkpoint-backed
+# constants are what offer the staged fill here; a traced decode expression does not).
 #
-# The envelope, measured on a Tesla V100 on the Qwen3.8-27B-GPTQ-Int4 `in_proj_qkv` linear (16
-# combinations, every verdict against a greedy first confirmed eager-correct under `--strict`):
-# nine of sixteen are wrong, at rel err 0.081 to 2.507. Wrong: w4x1/f4x4/k8, w8x1/f4x4/k8,
-# w4x1/f1x8/k8, w4x1/f1x4/k8, w4x1/f4x4/k2, w4x1/f2x4/k8, w2x1/f2x2/k8, w2x2/f2x2/k8,
-# w4x1/f2x2/k8. Correct: w1x1/f4x4/k8, w2x1/f4x4/k8, w1x2/f4x4/k8, w2x2/f4x4/k8, w1x4/f4x4/k8,
-# w4x1/f1x16/k2, w8x1/f1x16/k2. Every one of those pairs is correct at `d1/smem`, including the
-# ones that are wrong at `d2/smem`, so the STAGING DEPTH is the term that flips it.
-#
-# Four readings of WHICH nine have been tested and refuted, and they are recorded here so nobody
-# re-derives them. It is not tile-shape-specific: nine combinations over five fragments fail. It is
-# not a K-depth-8 fragment: `w4x1 f4x4/k2` fails. It is not the double-buffered ALLOCATION SIZE --
-# the earlier second-buffer-offset hypothesis, now withdrawn -- because 12.0K is correct at
-# w1x1/f4x4/k8 and wrong at w2x2/f2x2/k8, 20.0K is correct at w2x1/f4x4/k8 and wrong at
-# w4x1/f2x4/k8, and the failing set spans 9K to 68K against a correct set spanning 6K to 24K. And it
-# is not the warp count: w2x2/f4x4/k8 is correct at four warps and w2x1/f2x2/k8 is wrong at two.
-# Nothing in WORK, either fragment extent, the K depth, the smem size, the grid, the block or the
-# occupancy separates the two sets; total m-tile in elements does not either, since w2x1/f4x4 and
-# w4x1/f2x4 are both 64 and land on opposite sides.
-#
-# So the risk is worse than a rule would be: a family where nine of sixteen members silently return
-# wrong answers and membership cannot be predicted from the knobs.
-#
-# Root cause NOT established: no SASS or ncu inspection has been done, and nothing here should be
-# upgraded past measurement without it.
-#
-# The cone is load-bearing, and that is the sharpest clue left. `STAGE=d2/smem` is not offered at
-# all on a plain f16 contraction of the same shape, nor on a decode cone written as a traced
-# expression -- only on one built from checkpoint-backed constants, whose buffers carry
-# `source_path` / `load_ops`. Depth-2 staging appears to require a loaded operand it has something
-# to prefetch from, which means the dangerous family and the offered family may be the same one.
-#
-# Where it came from: found while tuning Qwen3.8-27B-GPTQ-Int4 on a Tesla V100 (sm_70), on the real
-# `in_proj_qkv` linear with its packed-int4 decode cone fused in. The AWQ slot reproduced a failing
-# fragment independently on a different kernel in a different quantization (rel err 1.614), so it is
-# neither model- nor coding-specific. This case is the minimized form: a one-layer synthetic GPTQ
-# checkpoint driven through the real `spell_quantized_constants`, which is what builds the cone.
+# The fill stages at depth 1. Depth 2 is the B-only prefetch ring, and with no cp.async on sm_70
+# its B copies are blocking copies: on a Tesla V100 it returned silently wrong answers on nine of
+# sixteen warp grids and fragments of the Qwen3.8-27B-GPTQ-Int4 `in_proj_qkv` linear (rel err 0.08
+# to 2.5, faster than depth 1, so nothing but an output comparison caught it), while depth 1 was
+# correct on all sixteen. The compiler no longer offers depth 2 on this atom;
+# `test_volta_compute_fill_offers_no_prefetch_ring` holds that refusal on this program.
 compute_cap:
 - 7
 - 0
@@ -3485,6 +3452,6 @@ configs:
       WORK: w2x2
       TILE: mma_m8n8k4_f16_f32/f2x2/k8
       REDUCE: ''
-      STAGE: d2/smem
+      STAGE: d1/smem
       RASTER: ''
     identity: b13f4f81a12b190d493922c7579a162f9b60708cc5e5b022bcf7ab5dd6ed4f5b

@@ -315,9 +315,12 @@ loss against no ring at all (474 vs 468 us on a 512x4096x4096 projection) into 3
 512x4096x28672 one, whose 896 CTAs already hide the latency and whose doubled slab costs occupancy. Which deploys is
 evidence's call per shape, which is the point: before the split, `depth >= 2` was a pessimization everywhere on that
 card. `/p<n>` remains the independent smem→register fragment pipeline. The Volta m8n8k4 atom enables the synchronous
-fill for materialized and computed f16 A/B edges. For a materialized canonical-B tile with even M/N register-fragment
-counts, lowering derives CUTLASS's crosswise-A and B-congruous layouts together: one 128-bit shared load drains each
-adjacent fragment pair, the MMA uses row/row B, and the store uses the coupled interleaved 32×32 accumulator map. This
+fill for materialized and computed f16 A/B edges. Its compute fill stages at depth 1 only: the fill's depth-2 ring is a
+B prefetch that assumes cp.async, and on a V100 it returned silently wrong answers on nine of sixteen measured warp
+grids and fragments of a GPTQ decode cone, each correct at depth 1. For a materialized canonical-B tile with even M/N
+register-fragment counts, lowering derives CUTLASS's crosswise-A and B-congruous layouts together: one 128-bit shared
+load drains each adjacent fragment pair, the MMA uses row/row B, and the store uses the coupled interleaved 32×32
+accumulator map. This
 is the SM70 default lowering, not a schedule-codec choice; the existing `PAIR_LDMATRIX` policy override disables the
 whole combination. For deep K slabs, the blocking copy also binds each lane's affine global-copy bases and K stride,
 plus the paired shared-store layout bases, once outside the K loop. Shallow slabs retain inline address calculation;
@@ -396,9 +399,14 @@ say that. A frontend reshape can pack the reduction coordinate and the operand's
 `hidden[stream * 4096 + channel]`, DeepSeek-V4's hyper-connection mixing over one 16384-wide row — and the dim-position
 reading then names the tensor's trailing extent as `ldm` and calls the operand N-major because its last dim holds the
 reduction axis. Both are wrong, the fragment reads the wrong elements, and nothing raises. `_direct_operand` takes both
-from the operand's own element strides, which say exactly what the dim positions said wherever the dims separate the
-two coordinates. Neither coordinate unit-stride raises rather than emitting an address the loader cannot express; a
-symbolic extent leaves the strides of every earlier dim unknown and keeps the dim-position reading.
+from the operand's FLAT address — each dim's addends scaled by that dim's element stride and simplified — so a reshape
+that splits one coordinate across dims (`x[m / 2, (m % 2) * 128 + k]`) still reads as the `128·m + k` it sums to.
+Wherever the dims separate the two coordinates this says exactly what the dim positions said. Neither coordinate
+unit-stride raises rather than emitting an address the loader cannot express; a symbolic extent leaves the strides of
+every earlier dim unknown and keeps the dim-position reading. The staged transports have their own contracts: a TMA box
+is a rectangle in the descriptor's coordinates, so an operand whose trailing dims do not each hold one tile coordinate
+affinely declines it, and a cp.async or blocking fill copies A in chunks along K, so an A whose K is not the gmem inner
+dim declines those.
 
 **The register tile lifts a computed cone's prologue out of the K-loop.** The gmem-direct spine
 (`_contract_kloop`) takes each operand read as `(hoisted, per-step)`: the cone's row-invariant prologue is a value of
@@ -604,8 +612,7 @@ it after its first — keeps the whole stream and the per-element mask alone. Th
 every chunk: confining it to the chunks that can hold a masked element (the FA-2 guard, the mask's predicate at the
 chunk's and the block's extreme coordinates) measured no difference on an A100 40GB at 256 to 8192 keys, so it is not
 carried. Without those readings a
-masked carrier fell to the scalar tier whole, which is what `attention.hd256.dynM.pv` on the RTX 4090 recorded and
-then stopped decoding.
+masked carrier fell to the scalar tier whole.
 
 ### What may not come back
 
