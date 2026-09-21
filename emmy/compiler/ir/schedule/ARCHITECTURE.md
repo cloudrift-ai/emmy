@@ -112,6 +112,7 @@ nor filters them. `ir/schedule` may import other IR modules but never the pipeli
 knob/pin reads (folded into the row), pool identity, sampling, and the generic lazy-Fork adapter.
 
 Fragment epilogue legality checks lowered work outside roots the binder can compute together, including boundary stores.
+A grid's free axes are already bound during that check, including a unit row that only an output store reads.
 A sibling reduction or a contraction whose output cannot be partitioned remains work the epilogue must execute. Its
 loop excludes tensor-core atoms before ranking, avoiding repeated materialization refusals.
 

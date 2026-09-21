@@ -244,11 +244,12 @@ def promoted_sweep(op, output_specs: tuple[OutputSpec, ...], *, free: tuple[Axis
 
 
 def _implicit_unit_row(specs: tuple[OutputSpec, ...], free: tuple[Axis, ...]) -> Axis | None:
-    """Recover an elided matrix row when every boundary write proves ``[0..., n]``.
+    """Recover an elided matrix row when every boundary write proves leading zero coordinates.
 
     The column axis may already be free or may still be the one shared output sweep that
     contraction canonicalization will promote. The unit coordinates must be a non-empty leading
-    zero prefix, followed by the dense column coordinate directly or through a row-major reshape.
+    zero prefix, followed by dense column coordinates directly or through a row-major reshape.
+    Several free coordinates may partition the columns into groups.
     """
     if not specs:
         return None

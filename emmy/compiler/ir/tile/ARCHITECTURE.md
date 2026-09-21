@@ -233,8 +233,9 @@ the per-cell tier. A candidate is kept only when the BOUND axis is itself a cont
 whether some contraction gained one accepts a binding that handed the row to the other side, because a contraction
 reorients.
 
-Post-init ANNOUNCES it (`_implicit_unit_row`) when the stores prove a leading zero prefix and a dense column. The row
-is then unbound — no operand reads it — which gives the placement a fragment geometry without giving any contraction
+Post-init ANNOUNCES it (`_implicit_unit_row`) when the stores prove a leading zero prefix and dense columns. Several
+free coordinates may partition the columns into groups; the matrix pair remains the unit row and the last column.
+The row is then unbound — no operand reads it — which gives the placement a fragment geometry without giving any contraction
 a left axis. That is the weaker statement, and it is the only one available where there is nothing to bind: a matvec
 whose A is a bare vector. The binding yields to it, firing only where the placement carries no extent-one free axis.
 

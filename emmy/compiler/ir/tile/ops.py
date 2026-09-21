@@ -309,7 +309,7 @@ class Sched:
             # binds both, and a sibling output's sweep promoted beside them (the fused q/k/v
             # projections, N 64 beside N 32) never stands in for either. With several own axes a
             # side the trailing one is the role and the rest ride the grid; a side without one
-            # (the unit-row matvec) leaves the trailing pair to the placement.
+            # (the unit-row matvec) uses the unbound unit row the output stores proved.
             view = node.as_contraction()
             if mn is None or view is None:
                 return mn
