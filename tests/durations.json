@@ -1205,6 +1205,7 @@
  "tests/serving/native/test_generation_gpu.py::test_checkpoint_logits_and_completions[heldout_spanish]@cuda": 61.67,
  "tests/serving/native/test_generation_gpu.py::test_checkpoint_logits_and_completions[json]@cuda": 51.0,
  "tests/serving/native/test_generation_gpu.py::test_checkpoint_logits_and_completions[long]@cuda": 230.15,
+ "tests/serving/native/test_prepare.py::test_configuration_rejections": 2.03,
  "tests/serving/test_attention_split.py::test_pre_emits_2d_seam_shapes": 5.14,
  "tests/serving/test_attention_split.py::test_split_matches_eager_block[gemma3]": 1.66,
  "tests/serving/test_attention_split.py::test_split_matches_eager_block[laguna]": 5.1,
