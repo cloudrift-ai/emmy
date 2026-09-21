@@ -339,12 +339,15 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Reservoir** — The bounded sample of past measurements kept inside the online prior's checkpoint file. It is the
   data that model trains on, and the measurements in it that were taken at deployable settings are also read directly
   when compiling.
-- **Measurement freeze** — A fixed snapshot of collected measurements: a directory of per-GPU files, carrying a
-  checksum and a record of which vocabulary version its rows are written in. The tuning database and the reservoir
-  are local to one machine and are rewritten as tuning continues, so a number computed over either cannot be
-  checked by anyone else. A freeze is identical wherever it is read, which is what makes two models' scores a fair
-  comparison and a reported score something a reader can reproduce. One is kept with the repository and is what the
-  prior is evaluated against by default.
+- **Dataset DB** — A database with the tuning database's tables in a file of its own (`EMMY_DATASET_DB`), filled by
+  `emmy dataset import` from measurement freezes and tuning databases. The measurement-data readers (`emmy eval
+  prior --dataset db`) read it; no compile does, so what is imported into it can never change a deploy.
+- **Measurement freeze** — A fixed snapshot of collected measurements: a directory of per-GPU files, plus the
+  definitions of the kernels they measure, carrying a checksum and a record of which vocabulary version its rows are
+  written in. The tuning database and the reservoir are local to one machine and are rewritten as tuning continues,
+  so a number computed over either cannot be checked by anyone else. A freeze is identical wherever it is read, which
+  is what makes two models' scores a fair comparison and a reported score something a reader can reproduce. One is
+  kept with the repository and is what `emmy dataset import` loads into the dataset DB by default.
 - **Deploy evidence hierarchy** — The fixed order in which an ordinary compile answers a tuning choice: measured
   evidence first — the reservoir, then the tune database's rows and the golden rows in scope, the fastest compatible
   row winning — then the prior's prediction, and last the rule's own first option. A structural fork follows the

@@ -68,7 +68,7 @@ def test_probe_falls_back_to_memorized(monkeypatch):
 def test_by_name_canonicalizes_reported_aliases():
     """Live datacenter cards report bare ``cudaDeviceProp.name`` strings that differ from
     the capacity-suffixed registry names; the registry aliases canonicalize them (so a
-    live node-store row and a golden built from the canonical name share one gpu string).
+    live measured row and a golden built from the canonical name share one gpu string).
     Without these, ``live_name`` canonicalization was a no-op for the exact cards it
     targets."""
     assert gpu.by_name("NVIDIA H200").name == "NVIDIA H200 141GB"
