@@ -16,6 +16,7 @@ programs:
 configs:
 - program: 0
   target:
+    loop: 0
     origins:
     - relu
   realizations:
@@ -31,3 +32,46 @@ configs:
       RASTER: ''
       VECTORIZE_LOADS: 'True'
     identity: e4342b2a3987b65735daae4bfb678aa48080fd20a8b4bead4d13ecf5b2b4228e
+loops:
+- inputs: [x]
+  outputs: [relu]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [512, 4096]]]
+  - id: relu
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 2097152}, window: null}}
+            body:
+              body:
+              - class: Load
+                fields:
+                  names: {tuple: [in0]}
+                  input: x
+                  index:
+                    tuple:
+                    - {expr: {binary: {op: //, left: {var: a0}, right: {literal: {value: 4096, dtype: int}}}}}
+                    - {expr: {binary: {op: '%', left: {var: a0}, right: {literal: {value: 4096, dtype: int}}}}}
+                  dtype: null
+              - {class: Assign, fields: {name: v0, op: {elementwise: relu}, args: {tuple: [in0]}, dtype: null}}
+              - class: Write
+                fields:
+                  output: relu
+                  index:
+                    tuple:
+                    - {expr: {binary: {op: //, left: {var: a0}, right: {literal: {value: 4096, dtype: int}}}}}
+                    - {expr: {binary: {op: '%', left: {var: a0}, right: {literal: {value: 4096, dtype: int}}}}}
+                  values: {tuple: [v0]}
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+            unroll: false
+            seed: true
+      name: k_relu_pointwise
+    inputs: [x]
+    outputs: [[relu, f32, [512, 4096]]]

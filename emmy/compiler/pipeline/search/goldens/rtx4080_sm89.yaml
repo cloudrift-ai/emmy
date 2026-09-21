@@ -118,6 +118,7 @@ programs:
 configs:
 - program: 0
   target:
+    loop: 0
     origins:
     - matmul
   realizations:
@@ -137,6 +138,7 @@ configs:
       reference_backend: cublas
 - program: 1
   target:
+    loop: 1
     origins:
     - matmul
   realizations:
@@ -156,6 +158,7 @@ configs:
       reference_backend: cublas
 - program: 2
   target:
+    loop: 2
     origins:
     - matmul
   realizations:
@@ -175,6 +178,7 @@ configs:
       reference_backend: cublas
 - program: 3
   target:
+    loop: 3
     origins:
     - matmul
   realizations:
@@ -194,6 +198,7 @@ configs:
       reference_backend: cublas
 - program: 4
   target:
+    loop: 4
     origins:
     - matmul
   realizations:
@@ -213,6 +218,7 @@ configs:
       reference_backend: cublas
 - program: 5
   target:
+    loop: 5
     origins:
     - matmul
   realizations:
@@ -246,6 +252,7 @@ configs:
       reference_backend: cublas
 - program: 6
   target:
+    loop: 6
     origins:
     - matmul
   realizations:
@@ -265,6 +272,7 @@ configs:
       reference_backend: cublas
 - program: 7
   target:
+    loop: 7
     origins:
     - matmul
   realizations:
@@ -282,3 +290,500 @@ configs:
       emmy_us: 1399.8
       reference_us: 1350.0
       reference_backend: cublas
+loops:
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f32, [512, 512]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f32, [512, 512]]]
+  - id: matmul
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 512}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 512}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 512}, window: null}}
+                        body:
+                          body:
+                          - class: Load
+                            fields:
+                              names: {tuple: [in0]}
+                              input: x0
+                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
+                              dtype: null
+                          - class: Load
+                            fields:
+                              names: {tuple: [in1]}
+                              input: x1
+                              index: {tuple: [{expr: {var: a2}}, {expr: {var: a1}}]}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: null}
+                          - class: Accum
+                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
+                        unroll: false
+                        seed: true
+                    - class: Write
+                      fields:
+                        output: matmul
+                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
+                        values: {tuple: [acc0]}
+                        value_dtype: null
+                        atomic: false
+                        swizzle: NONE
+                  unroll: false
+                  seed: true
+            unroll: false
+            seed: true
+      name: k_matmul_2967be
+    inputs: [x1, x0]
+    outputs: [[matmul, f32, [512, 512]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f32, [1024, 1024]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f32, [1024, 1024]]]
+  - id: matmul
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 1024}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 1024}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 1024}, window: null}}
+                        body:
+                          body:
+                          - class: Load
+                            fields:
+                              names: {tuple: [in0]}
+                              input: x0
+                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
+                              dtype: null
+                          - class: Load
+                            fields:
+                              names: {tuple: [in1]}
+                              input: x1
+                              index: {tuple: [{expr: {var: a2}}, {expr: {var: a1}}]}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: null}
+                          - class: Accum
+                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
+                        unroll: false
+                        seed: true
+                    - class: Write
+                      fields:
+                        output: matmul
+                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
+                        values: {tuple: [acc0]}
+                        value_dtype: null
+                        atomic: false
+                        swizzle: NONE
+                  unroll: false
+                  seed: true
+            unroll: false
+            seed: true
+      name: k_matmul_3e2f2e
+    inputs: [x1, x0]
+    outputs: [[matmul, f32, [1024, 1024]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f32, [2048, 2048]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f32, [2048, 2048]]]
+  - id: matmul
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 2048}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 2048}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 2048}, window: null}}
+                        body:
+                          body:
+                          - class: Load
+                            fields:
+                              names: {tuple: [in0]}
+                              input: x0
+                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
+                              dtype: null
+                          - class: Load
+                            fields:
+                              names: {tuple: [in1]}
+                              input: x1
+                              index: {tuple: [{expr: {var: a2}}, {expr: {var: a1}}]}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: null}
+                          - class: Accum
+                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
+                        unroll: false
+                        seed: true
+                    - class: Write
+                      fields:
+                        output: matmul
+                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
+                        values: {tuple: [acc0]}
+                        value_dtype: null
+                        atomic: false
+                        swizzle: NONE
+                  unroll: false
+                  seed: true
+            unroll: false
+            seed: true
+      name: k_matmul_e45c09
+    inputs: [x1, x0]
+    outputs: [[matmul, f32, [2048, 2048]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f32, [4096, 4096]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f32, [4096, 4096]]]
+  - id: matmul
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 4096}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 4096}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 4096}, window: null}}
+                        body:
+                          body:
+                          - class: Load
+                            fields:
+                              names: {tuple: [in0]}
+                              input: x0
+                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
+                              dtype: null
+                          - class: Load
+                            fields:
+                              names: {tuple: [in1]}
+                              input: x1
+                              index: {tuple: [{expr: {var: a2}}, {expr: {var: a1}}]}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: null}
+                          - class: Accum
+                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
+                        unroll: false
+                        seed: true
+                    - class: Write
+                      fields:
+                        output: matmul
+                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
+                        values: {tuple: [acc0]}
+                        value_dtype: null
+                        atomic: false
+                        swizzle: NONE
+                  unroll: false
+                  seed: true
+            unroll: false
+            seed: true
+      name: k_matmul_5904ca
+    inputs: [x1, x0]
+    outputs: [[matmul, f32, [4096, 4096]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [512, 512]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [512, 512]]]
+  - id: matmul
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 512}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 512}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 512}, window: null}}
+                        body:
+                          body:
+                          - class: Load
+                            fields:
+                              names: {tuple: [in0]}
+                              input: x0
+                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
+                              dtype: null
+                          - class: Load
+                            fields:
+                              names: {tuple: [in1]}
+                              input: x1
+                              index: {tuple: [{expr: {var: a2}}, {expr: {var: a1}}]}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
+                          - class: Accum
+                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
+                        unroll: false
+                        seed: true
+                    - class: Write
+                      fields:
+                        output: matmul
+                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
+                        values: {tuple: [acc0]}
+                        value_dtype: null
+                        atomic: false
+                        swizzle: NONE
+                  unroll: false
+                  seed: true
+            unroll: false
+            seed: true
+      name: k_matmul_8cc2bd
+    inputs: [x1, x0]
+    outputs: [[matmul, f16, [512, 512]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1024, 1024]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [1024, 1024]]]
+  - id: matmul
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 1024}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 1024}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 1024}, window: null}}
+                        body:
+                          body:
+                          - class: Load
+                            fields:
+                              names: {tuple: [in0]}
+                              input: x0
+                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
+                              dtype: null
+                          - class: Load
+                            fields:
+                              names: {tuple: [in1]}
+                              input: x1
+                              index: {tuple: [{expr: {var: a2}}, {expr: {var: a1}}]}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
+                          - class: Accum
+                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
+                        unroll: false
+                        seed: true
+                    - class: Write
+                      fields:
+                        output: matmul
+                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
+                        values: {tuple: [acc0]}
+                        value_dtype: null
+                        atomic: false
+                        swizzle: NONE
+                  unroll: false
+                  seed: true
+            unroll: false
+            seed: true
+      name: k_matmul_c12c19
+    inputs: [x1, x0]
+    outputs: [[matmul, f16, [1024, 1024]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [2048, 2048]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [2048, 2048]]]
+  - id: matmul
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 2048}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 2048}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 2048}, window: null}}
+                        body:
+                          body:
+                          - class: Load
+                            fields:
+                              names: {tuple: [in0]}
+                              input: x0
+                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
+                              dtype: null
+                          - class: Load
+                            fields:
+                              names: {tuple: [in1]}
+                              input: x1
+                              index: {tuple: [{expr: {var: a2}}, {expr: {var: a1}}]}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
+                          - class: Accum
+                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
+                        unroll: false
+                        seed: true
+                    - class: Write
+                      fields:
+                        output: matmul
+                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
+                        values: {tuple: [acc0]}
+                        value_dtype: null
+                        atomic: false
+                        swizzle: NONE
+                  unroll: false
+                  seed: true
+            unroll: false
+            seed: true
+      name: k_matmul_e29718
+    inputs: [x1, x0]
+    outputs: [[matmul, f16, [2048, 2048]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [4096, 4096]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [4096, 4096]]]
+  - id: matmul
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 4096}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 4096}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 4096}, window: null}}
+                        body:
+                          body:
+                          - class: Load
+                            fields:
+                              names: {tuple: [in0]}
+                              input: x0
+                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
+                              dtype: null
+                          - class: Load
+                            fields:
+                              names: {tuple: [in1]}
+                              input: x1
+                              index: {tuple: [{expr: {var: a2}}, {expr: {var: a1}}]}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
+                          - class: Accum
+                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
+                        unroll: false
+                        seed: true
+                    - class: Write
+                      fields:
+                        output: matmul
+                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
+                        values: {tuple: [acc0]}
+                        value_dtype: null
+                        atomic: false
+                        swizzle: NONE
+                  unroll: false
+                  seed: true
+            unroll: false
+            seed: true
+      name: k_matmul_014310
+    inputs: [x1, x0]
+    outputs: [[matmul, f16, [4096, 4096]]]

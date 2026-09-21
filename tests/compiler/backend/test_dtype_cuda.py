@@ -9,13 +9,12 @@ match eager numpy within fp16 tolerance.
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 from emmy.compiler import dtype as dt
 from emmy.compiler.backend.cuda.dtype import canonical_from_cuda_name, cuda_name, nbytes_of
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.frontend.ir import MatmulOp, RmsNormOp, SoftmaxOp
+from emmy.compiler.ir.frontend.ir import MatmulOp, RmsNormOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 from tests.compiler.helpers import requires_cuda
@@ -249,35 +248,6 @@ def test_fp16_matmul_cuda():
     assert out.dtype == np.float16
 
     expected = (a_data.astype(np.float32) @ b_data.astype(np.float32)).astype(np.float16)
-    np.testing.assert_allclose(out, expected, rtol=5e-3, atol=5e-3)
-
-
-@requires_cuda
-@pytest.mark.xfail(strict=True, reason="fused value channel on tensor cores: not on this tree yet (PR #699)")
-def test_fp16_softmax_cuda():
-    """fp16 softmax along last dim: two reductions (max + sum) on f16
-    values with f32 accumulators, then a per-element divide."""
-    from emmy.compiler.backend.cuda.backend import CudaBackend
-
-    rows, cols = 4, 64
-    g = Graph()
-    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (rows, cols), dt.F16), node_id="x")
-    g.add_node(op=SoftmaxOp(axis=-1), inputs=["x"], output=Tensor("y", (rows, cols), dt.F16), node_id="y")
-    g.inputs = ["x"]
-    g.outputs = ["y"]
-
-    rng = np.random.default_rng(4)
-    x_data = rng.standard_normal((rows, cols)).astype(np.float16)
-
-    be = CudaBackend()
-    result, _ = be.run(be.compile(g), input_data={"x": x_data})
-    out = next(iter(result.outputs.values())).reshape(rows, cols)
-    assert out.dtype == np.float16
-
-    xf = x_data.astype(np.float32)
-    m = xf.max(axis=-1, keepdims=True)
-    e = np.exp(xf - m)
-    expected = (e / e.sum(axis=-1, keepdims=True)).astype(np.float16)
     np.testing.assert_allclose(out, expected, rtol=5e-3, atol=5e-3)
 
 

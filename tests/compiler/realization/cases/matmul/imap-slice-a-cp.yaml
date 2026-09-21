@@ -24,6 +24,7 @@ programs:
 configs:
 - program: 0
   target:
+    loop: 0
     origins:
     - o
     - xr
@@ -33,9 +34,76 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
+      WORK: t32
+      TILE: f1
+      REDUCE: ''
       STAGE: d2/smem-async
+      RASTER: ''
     identity: c3b5e79fd1b15131d8d645f2def225892ca2e30c5a1d2c1d5ed312cfb371222c
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 1.8456087781054509
         tcompile_us: 4.086399891159751
+loops:
+- inputs: [w, x]
+  outputs: [o]
+  nodes:
+  - id: w
+    op: input
+    outputs: [[w, f16, [128, 64]]]
+  - id: x
+    op: input
+    outputs: [[x, f16, [128, 256]]]
+  - id: o
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 128}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 128}, window: null}}
+                        body:
+                          body:
+                          - class: Load
+                            fields:
+                              names: {tuple: [in0]}
+                              input: w
+                              index: {tuple: [{expr: {var: a2}}, {expr: {var: a1}}]}
+                              dtype: null
+                          - class: Load
+                            fields:
+                              names: {tuple: [in1]}
+                              input: x
+                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
+                          - class: Accum
+                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
+                        unroll: false
+                        seed: true
+                    - class: Write
+                      fields:
+                        output: o
+                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
+                        values: {tuple: [acc0]}
+                        value_dtype: null
+                        atomic: false
+                        swizzle: NONE
+                  unroll: false
+                  seed: true
+            unroll: false
+            seed: true
+      name: k_matmul_442d08
+    inputs: [x, w]
+    outputs: [[o, f16, [128, 64]]]

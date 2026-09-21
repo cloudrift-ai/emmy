@@ -780,10 +780,6 @@ class _StackedLinears(torch.nn.Module):
 
 
 @requires_cuda
-@pytest.mark.xfail(
-    run=False,
-    reason="pre-existing on clean main: the wide-product form faults and poisons the CUDA context",
-)
 def test_two_linears_tinyllama_shape(_chain_tile_pins):
     """Two chained 2048×2048 Linears at TinyLlama hidden size and seq=32. Confirms basic
     matmul-chain accuracy — if this fails, every matmul is broken."""

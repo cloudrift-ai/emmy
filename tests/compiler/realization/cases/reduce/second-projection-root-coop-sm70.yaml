@@ -35,6 +35,7 @@ programs:
 configs:
 - program: 0
   target:
+    loop: 0
     origins:
     - add
     - matmul
@@ -49,3 +50,90 @@ configs:
       REDUCE@map.2/inner: coop
       WORK: t128
     identity: 668fd5a0efd898f9d02da0d4b536b856aad47d2d93ec1059a689de86870de00f
+loops:
+- inputs: [x0, x1, x2, x3]
+  outputs: [add]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f32, [4, 128]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f32, [128, 1]]]
+  - id: x2
+    op: input
+    outputs: [[x2, f32, [4, 256]]]
+  - id: x3
+    op: input
+    outputs: [[x3, f32, [256, 1]]]
+  - id: add
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 4}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 256}, window: null}}
+                  body:
+                    body:
+                    - class: Load
+                      fields:
+                        names: {tuple: [in0]}
+                        input: x3
+                        index: {tuple: [{expr: {var: a1}}, {expr: {literal: {value: 0, dtype: int}}}]}
+                        dtype: null
+                    - class: Load
+                      fields:
+                        names: {tuple: [in1]}
+                        input: x2
+                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
+                        dtype: null
+                    - class: Assign
+                      fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: null}
+                    - class: Accum
+                      fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
+                  unroll: false
+                  seed: true
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a2, extent: {dim: 128}, window: null}}
+                  body:
+                    body:
+                    - class: Load
+                      fields:
+                        names: {tuple: [in2]}
+                        input: x1
+                        index: {tuple: [{expr: {var: a2}}, {expr: {literal: {value: 0, dtype: int}}}]}
+                        dtype: null
+                    - class: Load
+                      fields:
+                        names: {tuple: [in3]}
+                        input: x0
+                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
+                        dtype: null
+                    - class: Assign
+                      fields: {name: v1, op: {elementwise: multiply}, args: {tuple: [in2, in3]}, dtype: null}
+                    - class: Accum
+                      fields: {name: acc1, value: v1, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
+                  unroll: false
+                  seed: true
+              - class: Assign
+                fields: {name: v2, op: {elementwise: add}, args: {tuple: [acc0, acc1]}, dtype: null}
+              - class: Write
+                fields:
+                  output: add
+                  index: {tuple: [{expr: {var: a0}}, {expr: {literal: {value: 0, dtype: int}}}]}
+                  values: {tuple: [v2]}
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+            unroll: false
+            seed: true
+      name: k_matmul_reduce_df1f9f
+    inputs: [x0, x1, x3, x2]
+    outputs: [[add, f32, [4, 1]]]

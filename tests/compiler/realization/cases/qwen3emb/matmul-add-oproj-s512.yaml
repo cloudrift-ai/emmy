@@ -27,6 +27,7 @@ programs:
 configs:
 - program: 0
   target:
+    loop: 0
     origins:
     - ab
     - o
@@ -46,3 +47,77 @@ configs:
       NVIDIA GeForce RTX 5090:
         emmy_us: 102.91199684143066
         tcompile_us: 57.30559825897217
+loops:
+- inputs: [a, b, r]
+  outputs: [o]
+  nodes:
+  - id: a
+    op: input
+    outputs: [[a, f32, [1, 512, 2048]]]
+  - id: b
+    op: input
+    outputs: [[b, f32, [2048, 1024]]]
+  - id: r
+    op: input
+    outputs: [[r, f32, [1, 512, 1024]]]
+  - id: o
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 512}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 1024}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 2048}, window: null}}
+                        body:
+                          body:
+                          - class: Load
+                            fields:
+                              names: {tuple: [in0]}
+                              input: a
+                              index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a0}}, {expr: {var: a2}}]}
+                              dtype: null
+                          - class: Load
+                            fields:
+                              names: {tuple: [in1]}
+                              input: b
+                              index: {tuple: [{expr: {var: a2}}, {expr: {var: a1}}]}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: null}
+                          - class: Accum
+                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
+                        unroll: false
+                        seed: true
+                    - class: Load
+                      fields:
+                        names: {tuple: [in2]}
+                        input: r
+                        index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a0}}, {expr: {var: a1}}]}
+                        dtype: null
+                    - class: Assign
+                      fields: {name: v1, op: {elementwise: add}, args: {tuple: [acc0, in2]}, dtype: null}
+                    - class: Write
+                      fields:
+                        output: o
+                        index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a0}}, {expr: {var: a1}}]}
+                        values: {tuple: [v1]}
+                        value_dtype: null
+                        atomic: false
+                        swizzle: NONE
+                  unroll: false
+                  seed: true
+            unroll: false
+            seed: true
+      name: k_matmul_28129e
+    inputs: [r, b, a]
+    outputs: [[o, f32, [1, 512, 1024]]]

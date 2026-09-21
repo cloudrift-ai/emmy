@@ -1,15 +1,11 @@
 """Strict decode of the checked-in golden corpus.
 
 A recorded row is evidence a deploy can use only while it still equals an enumerated leaf of its
-own target. The model-agnostic hardware goldens are asked that ROW BY ROW, on the default lane:
-parsing one of those files costs milliseconds and deciding one row costs about a second, so the
-nodes scatter over the workers instead of four files queueing behind the widest, and a failure
-names the row instead of a count. Rows that no longer decode are listed in ``golden_xfails.yaml``
-and asked strictly, so the list can only shrink.
-
-Recipe-local model goldens stay off the lane behind the ``goldens`` marker: they are an order of
-magnitude more rows, and the widest of them is a multi-megabyte parse. Run those with
-``make test-goldens`` after a tuning round has re-recorded a card's rows.
+own target. Every repository golden — the model-agnostic hardware goldens and each recipe's model
+golden — is asked that ROW BY ROW, on the default lane, so the nodes scatter over the workers
+instead of queueing behind the widest file, and a failure names the row instead of a count. Rows
+that no longer decode are listed in ``golden_xfails.yaml`` and asked strictly, so the list can only
+shrink.
 """
 
 import os
@@ -31,7 +27,8 @@ from emmy.compiler.pipeline.search.golden import (
     siblings_of,
 )
 
-#: The rows whose recorded schedule equals no enumerated leaf today, ``{file name: [row label]}``.
+#: The rows whose recorded schedule equals no enumerated leaf today, ``{file id: [row label]}`` (see
+#: :func:`_golden_id`).
 #: They are asked as STRICT xfails: closing one turns its node red until the line is deleted, which
 #: is what keeps the hole shrinking. Never add a line to make a red row green — a recorded row that
 #: stops decoding is a regression in the enumeration, and listing it enshrines that as the reference.
@@ -67,26 +64,33 @@ def _labels(records) -> list[str]:
     return labels
 
 
+def _golden_id(path: Path) -> str:
+    """A golden file's id: its name for a hardware golden, ``<recipe>/<name>`` for a model golden."""
+    return path.name if path.parent == _HARDWARE_GOLDENS_DIR else f"{path.parent.parent.name}/{path.name}"
+
+
 def _row_parameters():
-    """One parameter per recorded row of the hardware goldens, plus one per registry line naming a
-    row the file no longer holds. The stale line carries NO xfail: marked, its own failure would be
+    """One parameter per recorded row of every repository golden, plus one per registry line naming
+    a row the file no longer holds. The stale line carries NO xfail: marked, its own failure would be
     the expected one and the dead entry would sit there forever."""
     listed_by_file = yaml.safe_load(_XFAILS_FILE.read_text()) or {}
     parameters = []
-    for path in sorted(_HARDWARE_GOLDENS_DIR.glob("*.yaml")):
-        labels = _labels(_records_of(path))
-        listed = set(listed_by_file.get(path.name, ()))
-        for label in labels:
-            marks = [pytest.mark.xfail(strict=True, reason="row equals no enumerated leaf")] if label in listed else []
-            parameters.append(pytest.param(path, label, id=f"{path.name}/{label}", marks=marks))
-        for stale in sorted(listed - set(labels)):
-            parameters.append(pytest.param(path, stale, id=f"{path.name}/{stale}"))
+    with _repository_golden_paths() as paths:
+        for path in sorted(paths, key=_golden_id):
+            file_id = _golden_id(path)
+            labels = _labels(_records_of(path))
+            listed = set(listed_by_file.get(file_id, ()))
+            for label in labels:
+                marks = [pytest.mark.xfail(strict=True, reason="row equals no enumerated leaf")] if label in listed else []
+                parameters.append(pytest.param(path, label, id=f"{file_id}/{label}", marks=marks))
+            for stale in sorted(listed - set(labels)):
+                parameters.append(pytest.param(path, stale, id=f"{file_id}/{stale}"))
     return parameters
 
 
 @pytest.mark.parametrize(("path", "label"), _row_parameters())
 def test_recorded_row_decodes(path: Path, label: str) -> None:
-    """One row of a hardware golden must still equal an enumerated leaf of its own target.
+    """One row of a repository golden must still equal an enumerated leaf of its own target.
 
     A row that does not is no evidence a deploy can use: the compile that reads it either picks a
     schedule the enumeration no longer offers, or falls through to the prior. Decoding replays the
@@ -198,7 +202,7 @@ def test_a_pool_that_holds_the_recorded_row_is_not_walked_whole(monkeypatch) -> 
     absent = schedule_match_key(piece_row(missing.knobs))
     assert absent not in rows(missing), "a row no leaf spells equals nothing in the pool"
     full = rows(missing)
-    miss = _replay(missing, siblings=siblings, exhaustive=True, wanted=absent)
+    miss = _replay(missing, siblings=siblings, exhaustive=True, wanted=absent, explain=True)
     keys = set().union(*(summary[0] for summary in miss.offered.values()))
     pairs = set().union(*(summary[1] for summary in miss.offered.values()))
     assert not miss.rows, "a miss retains no candidate rows"
@@ -226,24 +230,6 @@ def test_a_row_with_only_an_invalid_offered_value_reports_a_semantic_miss() -> N
 
     reason = decode_record(invalid, siblings_of(invalid, records))
     assert reason is not None and "NARROWING" in reason and decided in reason
-
-
-def _recipe_paths() -> list[Path]:
-    """The recipe-local model goldens — the repository set minus the hardware files above."""
-    with _repository_golden_paths() as paths:
-        return [path for path in paths if path.parent.name == "golden"]
-
-
-@pytest.mark.goldens
-@pytest.mark.parametrize("path", _recipe_paths(), ids=lambda path: f"{path.parent.parent.name}/{path.name}")
-def test_every_recorded_row_of_a_model_golden_decodes(path: Path) -> None:
-    """Every row a model golden records must still decode — one node per file, because a model
-    inventory is hundreds of rows whose per-row nodes would cost more to collect than to run."""
-    records = _records_of(path)
-    failures = [f"  {record.name}: {' '.join(reason.split())[:120]}" for record in records if (reason := _decode(record, records))]
-    listed = "\n".join(failures[:20])
-    more = f"\n  ... and {len(failures) - 20} more" if len(failures) > 20 else ""
-    assert not failures, f"{len(failures)}/{len(records)} recorded rows equal no enumerated leaf:\n{listed}{more}"
 
 
 def test_a_row_whose_every_site_is_re_spelled_still_gets_a_verdict() -> None:

@@ -26,14 +26,6 @@ def register_trace_command(subparsers):
     add_quantize_arg(parser)
     parser.add_argument("--output", "-o", help="Output golden YAML path (default: <trace-name>.golden.yaml)")
     parser.add_argument(
-        "--loop-targets",
-        action="store_true",
-        help=(
-            "Persist every target as exact post-fusion Loop IR. Use for compiler-sensitive storage formats "
-            "whose fusion grouping is not a stable frontend-provenance selector."
-        ),
-    )
-    parser.add_argument(
         "--append",
         action="store_true",
         help=(
@@ -183,7 +175,6 @@ def handle_trace(args):
         graph,
         destination,
         model=model,
-        force_loop_targets=args.loop_targets,
         model_quant_digest=model_quant_digest,
     )
     verb = "Appended to" if writer is append_trace_inventory else "Saved"

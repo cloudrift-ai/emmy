@@ -181,24 +181,12 @@ def test_the_prescan_reads_each_computed_a_seam_once(unpinned, monkeypatch) -> N
     assert len(calls) < len(rows)
 
 
-@pytest.mark.parametrize(
-    "case, tile_sites, reduce_sites",
-    (
-        ("fused_norm_linear", 1, 2),
-        pytest.param(
-            "flash_pair",
-            2,
-            3,
-            marks=pytest.mark.xfail(strict=True, reason="fused value channel on tensor cores: not on this tree yet (PR #699)"),
-        ),
-    ),
-)
-def test_computed_fold_sites_are_keyed_schedule_sites(case, tile_sites, reduce_sites, unpinned) -> None:
-    """A computed cone's fold and a derived site (flash's synthesized PV) are real schedule sites:
-    every row spells them with stable node identities, so nothing nested is silently undecided."""
-    row = _rows(FIXTURES[case]())[0]
-    assert sum(key == "TILE" or key.startswith("TILE@") for key in row) == tile_sites
-    assert sum(key == "REDUCE" or key.startswith("REDUCE@") for key in row) == reduce_sites
+def test_computed_fold_sites_are_keyed_schedule_sites(unpinned) -> None:
+    """A computed cone's fold is a real schedule site: every row spells it with a stable node
+    identity, so nothing nested is silently undecided."""
+    row = _rows(FIXTURES["fused_norm_linear"]())[0]
+    assert sum(key == "TILE" or key.startswith("TILE@") for key in row) == 1
+    assert sum(key == "REDUCE" or key.startswith("REDUCE@") for key in row) == 2
 
 
 def test_sdpa_fold_tree_offers_a_paired_mma_row(unpinned, monkeypatch) -> None:
@@ -258,69 +246,6 @@ def test_the_split_fork_offers_atomic_and_deferred_arms(unpinned) -> None:
 
     Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target(_CC)).resolve(_matmul_graph(64, 64, 64, "f32"), decide)
     assert {"", "g2a", "g2k"} <= offered
-
-
-@pytest.mark.xfail(strict=True, reason="fused value channel on tensor cores: not on this tree yet (PR #699)")
-def test_the_twisted_carrier_split_offers_only_the_deferred_arm(unpinned, monkeypatch) -> None:
-    """The cross-CTA split composes with the paired-mma flash cell. The offer is inspected directly
-    to isolate its algebraic legality from the rest of resolution. The atomic arm is refused on the
-    carrier's ARITY (``atomicAdd`` folds one additive state; the twisted
-    carrier streams three), while the deferred workspace arm slices the multi-component carrier.
-    And the pieces re-schedule their paired sites: under the pinned deferred split the partial's
-    row still spells BOTH mma contractions."""
-    from types import SimpleNamespace
-
-    from emmy.compiler.ir.tile.ir import TileOp
-    from emmy.compiler.pipeline import TILE_PASSES, Pipeline  # noqa: PLC0415
-    from emmy.compiler.pipeline.fork import iter_leaves  # noqa: PLC0415
-    from emmy.compiler.pipeline.passes.lowering.tile._split import split_forks
-    from emmy.compiler.pipeline.pipeline import Run  # noqa: PLC0415
-
-    ctx = Context.from_target(_CC)
-    captured: list[TileOp] = []
-
-    class _Captured(Exception):
-        pass
-
-    def keep(fp):
-        op = fp.root_op
-        if isinstance(op, TileOp) and op.op is not None and not op.place.is_mapped and not captured:
-            captured.append(op)
-            raise _Captured
-        return next(iter_leaves(fp.options))
-
-    with pytest.raises(_Captured):
-        Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(_sdpa_graph(), keep)
-    assert captured, "the flash cell must reach the tile passes as one fused kernel"
-    offers = split_forks(None, SimpleNamespace(op=captured[0]))
-    assert offers is not None
-    spellings = {str(v) for offer in offers for v in offer.knobs.values()}
-    assert "g2k" in spellings, "the deferred workspace arm must slice the twisted carrier"
-    assert not any(s.startswith("g") and s.endswith("a") for s in spellings), (
-        "atomicAdd folds ONE additive state; the three-component twisted carrier has no atomic arm"
-    )
-
-    monkeypatch.setenv("EMMY_WORK", "w1x1")
-    _pin(
-        monkeypatch,
-        **{
-            "TILE@map.1/twist.1/inner": "mma_m16n8k16_f16_f32/f1x2",
-            "TILE@map.1/twist": "mma_m16n8k16_f16_f32/f1x1",
-            "REDUCE@map": "",
-            "REDUCE@map.1/twist.1/inner": "",
-            "STAGE@map.1/twist.1/inner": "",
-            "STAGE@map.1/twist": "d1/smem",
-        },
-    )
-    monkeypatch.setenv("EMMY_RASTER", "")
-    monkeypatch.setenv("EMMY_REDUCE@MAP.1/TWIST", "g2k")
-    union_ctx = dc_replace(Context.from_target(_CC), validate_pins=False)
-    out, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=union_ctx).resolve(_sdpa_graph(), lambda fp: next(iter_leaves(fp.options)))
-    partial = next(n.op for nid, n in out.nodes.items() if nid.endswith("__partial") and isinstance(n.op, TileOp))
-    assert partial.place.is_mapped, "the partial piece must decide its own row"
-    assert sum(key.startswith("TILE@") and "mma_" in str(value) for key, value in partial.knobs.items()) == 2, (
-        "the sliced piece must still spell both paired mma sites"
-    )
 
 
 def test_an_observed_fold_offers_only_the_serial_reduce(unpinned) -> None:

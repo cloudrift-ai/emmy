@@ -179,10 +179,11 @@ handlers retain only the workflow's argument validation and user-facing error/re
 
 `emmy trace MODEL -o PATH` lowers through post-fusion Loop IR and writes one self-contained golden YAML inventory.
 The YAML embeds stable frontend Torch IR programs and emits one target row for every post-fusion kernel occurrence;
-structurally identical occurrences are not collapsed and a missing cache key never drops a target. A target uses
-frontend provenance origins when that selector is non-empty and unique. Otherwise the document embeds its standalone
-Loop IR slice in `loops` and selects that fallback by index. Flash score producers absorbed into their consumer are
-stored as part of that one fused target rather than as a second kernel. Trace records neither knobs nor timings,
+structurally identical occurrences are not collapsed and a missing cache key never drops a target. Every target is its
+kernel's standalone Loop IR, stored in `loops` and selected by index, with the frontend provenance origins beside it
+(`target: {loop, origins}`) when it computes every one of them whole — the traced ops a benchmark compares it against.
+Flash score producers absorbed into their consumer are stored as part of that one fused target rather than as a second
+kernel. Trace records neither knobs nor timings,
 refuses replacement, and never writes a traced Graph JSON or provenance sidecar. Quantized traces store their
 checkpoint-declaration digest in the same YAML.
 

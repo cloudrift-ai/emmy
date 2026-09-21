@@ -26,6 +26,7 @@ from dataclasses import replace
 
 from emmy.compiler.ir.address import BYTE_SLAB_PAD
 from emmy.compiler.ir.axis import Axis
+from emmy.compiler.ir.expr import affine_form
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule import ResolvedStage, Stage, Tile
 from emmy.compiler.ir.schedule.packing import block_scaled_atom, packed_readings
@@ -77,6 +78,13 @@ def _tma_operand_box(index: tuple, tile_name: str, k_name: str, order: tuple[str
     names = {tile_name, k_name}
     if not 2 <= len(index) <= 4 or any(names & expr.free_vars() for expr in index[:-2]):
         return False
+    # A box is a rectangle in the descriptor's coordinates, one tile coordinate per dim. A reshape
+    # that splits a coordinate across dims, or packs both into one, has no such rectangle: the box
+    # would copy the declared row pitch and deposit the wrong elements.
+    for expr in index[-2:]:
+        axes = expr.free_vars() & names
+        if len(axes) > 1 or (axes and affine_form(expr, axes) is None):
+            return False
     physical = tuple(next(iter(axes)) for expr in index[-2:] if len(axes := expr.free_vars() & names) == 1)
     return order is None or len(physical) != 2 or set(physical) != names or physical == order
 
@@ -517,6 +525,10 @@ def resolve_scalar_stage(c: Fold, tile: Tile, stage: Stage, inputs, budget: int,
         return None
     if not inputs or c.operands[0].as_slab() is None or c.operands[1].as_slab() is None or c.operands[0].as_slab().load.input not in inputs:
         return None
+    # The fill copies A's rows in chunks along K, so K must be A's gmem inner dim. A transposed A
+    # strides its columns instead, and a chunk copy there issues misaligned addresses and hangs.
+    if k_axis.name not in c.operands[0].as_slab().load.index[-1].free_vars():
+        return None
     # 1-byte (fp8) elements decline: the fill's chunk-width and alignment math below is written
     # for the 2/4-byte dtypes and is unaudited at nbytes == 1 — refusing keeps the tier
     # gmem-direct (correct, converts per element) instead of risking a mis-sized slab.
@@ -680,6 +692,12 @@ def resolve_fill_stage(
     if atom.operand_dtype("a").nbytes < 2:
         # fp8 atoms: the compute fill's slab store + ldmatrix drain are 16-bit-only
         _decline(why, f"the smem compute fill is 16-bit-only, but this atom's a operand is {atom.operand_dtype('a').nbytes}-byte")
+        return None
+    if want_depth >= 2 and atom.sync_copy_staging:
+        # With no cp.async the ring's B copies are blocking copies, and on sm_70 the depth-2 ring
+        # returned silently wrong answers on nine of sixteen measured warp grids and fragments,
+        # every one of them correct at depth 1.
+        _decline(why, "the smem compute fill's B prefetch ring needs cp.async; this atom stages with blocking copies")
         return None
     bk_elems = tile.bk * atom.atom_k
     if k_axis.extent.is_static and k_axis.extent.as_static() % bk_elems:

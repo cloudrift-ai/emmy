@@ -16,6 +16,7 @@ programs:
 configs:
 - program: 0
   target:
+    loop: 0
     origins:
     - cumsum
   realizations:
@@ -27,3 +28,48 @@ configs:
       WORK: ''
       REDUCE: ''
     identity: 007729ec4fbcc7c32b4c1b3aaecf01d5653efc14069d0d7b5f96a6d4749cf29c
+loops:
+- inputs: [x]
+  outputs: [cumsum]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [64, 128]]]
+  - id: cumsum
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 64}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 128}, window: null}}
+                  body:
+                    body:
+                    - class: Load
+                      fields:
+                        names: {tuple: [in0]}
+                        input: x
+                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
+                        dtype: null
+                    - class: Accum
+                      fields: {name: acc0, value: in0, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
+                    - class: Write
+                      fields:
+                        output: cumsum
+                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
+                        values: {tuple: [acc0]}
+                        value_dtype: null
+                        atomic: false
+                        swizzle: NONE
+                  unroll: false
+                  seed: true
+            unroll: false
+            seed: true
+      name: k_cumsum_reduce
+    inputs: [x]
+    outputs: [[cumsum, f32, [64, 128]]]

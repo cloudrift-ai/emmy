@@ -32,6 +32,7 @@ from emmy.compiler.pipeline.search.working_golden import (
     validate_working_gpu,
 )
 from emmy.compiler.torch_wire import intern_program
+from tests.compiler.helpers import loop_target
 
 
 def _args(path, **over):
@@ -71,13 +72,14 @@ def _document(*entries):
     graph.add_node(MatmulOp(), ["x", "w"], Tensor("matmul", (16, 32), "f16"), node_id="matmul")
     graph.inputs, graph.outputs = ["x", "w"], ["matmul"]
     programs = []
+    loops: list[dict] = []
     program_index = intern_program(programs, graph)
     config = {
         "program": program_index,
-        "target": {"origins": ["matmul"]},
+        "target": loop_target(graph, ["matmul"], loops, (8, 9)),
         "realizations": [dict(entry) for entry in entries],
     }
-    return {"compute_cap": [8, 9], "programs": programs, "configs": [config]}
+    return {"compute_cap": [8, 9], "programs": programs, "configs": [config], "loops": loops}
 
 
 def _classic_row(*, work: str = "", tile: str = "", reduce: str = "", stage: str = "", raster: str = "") -> dict[str, str]:
@@ -100,7 +102,7 @@ def test_working_file_groups_candidate_rows_and_recovers_embedded_program(tmp_pa
     assert document["configs"][0]["realizations"][0]["name"] == "mm"
     assert len(targets) == 1
     mm = targets[0]
-    assert mm.code is None and mm.input is None and isinstance(mm.program.nodes["matmul"].op, MatmulOp)
+    assert mm.code is None and mm.input is None and isinstance(mm.program.producer(mm.program.outputs[0]).op, LoopOp)
     assert mm.entry_indexes == [(0, 0), (0, 1)]
     assert mm.proposals == [((0, 1), {"TILE": "f2x2"})]
 
@@ -128,7 +130,7 @@ def test_empty_knob_map_is_a_forkless_proposal_not_inventory(tmp_path):
 
     assert targets[0].entry_indexes == [(0, 0), (0, 1)]
     assert targets[0].proposals == [((0, 1), {})]
-    assert set(loaded_document) == {"compute_cap", "programs", "configs"}
+    assert set(loaded_document) == {"compute_cap", "programs", "configs", "loops"}
 
 
 def test_multi_cuda_realized_knobs_must_be_conflict_free():
@@ -288,7 +290,7 @@ def test_ambiguous_multi_cuda_winner_is_not_annotated(tmp_path):
     got = load_golden_file(path)
     assert len(got["configs"]) == 1
     assert got["configs"][0]["realizations"][0]["name"] == "mm"
-    assert got["configs"][0]["target"] == {"origins": ["matmul"]}
+    assert got["configs"][0]["target"] == {"loop": 0, "origins": ["matmul"]}
 
 
 def test_structural_multi_cuda_winner_persists_its_exact_replay_row(tmp_path):
@@ -391,7 +393,7 @@ def test_structural_multi_cuda_proposal_keeps_ranking_without_parent_perf(tmp_pa
             return self
 
         async def tune_async(self, graph, **kwargs):
-            assert isinstance(graph.nodes["matmul"].op, MatmulOp)
+            assert isinstance(graph.producer(graph.outputs[0]).op, LoopOp)
             event = SimpleNamespace(graph=loop_graph)
             for strategy in self.strategies:
                 strategy.on_pass_end(event)

@@ -3,9 +3,9 @@
 A data-driven regression lane for pinned schedules. Most cases are minimized reproducers of one failure class: **a
 schedule that should be realizable is not**. A small capability baseline also keeps the live GPU stages exercised where
 the corpus would otherwise have no exact-capability case. Every case has one program and one authored kernel set, and
-the lane replays it against the compiler in front of you: once as a hand pin, to ask whether each schedule can be
-offered at all, and then as the compile's only evidence, strict, to ask whether the compiler realizes, builds and runs
-the set the way a deploy would.
+the lane replays it against the compiler in front of you: once through the golden decode, to ask whether each entry
+still equals an enumerated schedule — the same question every recorded golden row answers — and then as the compile's
+only evidence, strict, to ask whether the compiler realizes, builds and runs the set the way a deploy would.
 
 This directory is kind-organized in the sense `tests/ARCHITECTURE.md` sanctions: its cases span lowering, the CUDA
 backend, the pin machinery and the golden loader, and they share one workflow.
@@ -65,19 +65,24 @@ programs:
   nodes: …
 configs:
 - program: 0
-  target: {origins: [c]}
+  target: {loop: 0, origins: [c]}
   realizations:
   - name: k_matmul_5b7645
     bindings: {}
     pins: {FAST_MATH: true}
     knobs: {WORK: w2x2, TILE: mma_m16n8k16_f16_f16/f4x8/k2, REDUCE: g2k, STAGE: ''}
     identity: 0302cbd2c129ae1851d5f529621a752756f6181d0d4cbaf57eb22f85028d11c2
+loops:
+- inputs: [a, b]
+  outputs: [c]
+  nodes: …
 ```
 
 Why each part, and why nothing else:
 
-- `programs` / `target` / `compute_cap` — the reproducer. Stable Torch IR rather than a code snippet, so a frontend
-  change cannot silently alter what the corpus tests.
+- `programs` / `loops` / `target` / `compute_cap` — the reproducer: the kernel's own Loop IR, which every stage starts
+  from, and the stable Torch IR its `origins` came from, which `correct` compares against. Not a code snippet, so a
+  frontend change cannot silently alter what the corpus tests.
 - `name` — a label, written once and never re-derived: the kernel's provenance name for the target's entry
   (`k_matmul_5b7645` — the ops it realizes, as the backend and the profiler show it), that name plus the piece's
   identity prefix for a further entry. `--realization` selects a row by it, so it has to stay put whatever the
@@ -99,10 +104,10 @@ Four spelling rules decide what a case actually asserts:
 - **On a kernel with several sites for one family, spell the family by route.** A bare `TILE` there asks for one of
   the sites — one carries the value, the rest are OFF — so a case that means "this tile at BOTH contraction roots"
   and spells it bare asserts something weaker than it reads, and passes on a schedule it was written to refuse.
-  `fused/gate-up-distinct-a` was mis-authored that way.
-- **A knob present with `''` is pinned OFF; a knob absent is free.** `''` is a decided value — the schedule declined
-  that family — while an absent key lets the fork choose. Several of the tests this corpus replaces `delenv` a family
-  rather than setting it empty, and the two are different pins.
+- **An entry is a complete row.** It spells every site its kernel decides, OFF as `''`, exactly as a golden row does,
+  because `offered` compares it against one enumerated schedule. A partial row — a key left out for the fork to choose,
+  a bare family on a kernel whose sites are routed — equals no schedule and fails. `helpers.complete` writes the rows
+  a replay realizes for the kernels no entry decides yet.
 - **A placement is an entry of its own.** `PLACE@seam: cut` in the `knobs` of an entry whose identity is the kernel
   the cut is offered on; the golden validator refuses a placement key beside a schedule row. Older cases carry the
   route in the first entry's `pins`, which the replay reads the same way.
@@ -139,12 +144,12 @@ leading comment block is prose about where the gap came from; regeneration prese
 
 | Stage | Assertion | GPU |
 | --- | --- | --- |
-| `offered` | under `pinned_knobs(pins + knobs)`, `enumerate_graph` at the declared capability returns at least one row satisfying the pin | no |
+| `offered` | every entry strictly decodes at the declared capability (`golden.decode_record`, beside the case's other entries) | no |
 | `realized` | with the case as the compile's only evidence, the graph lowers through `CUDA_PASSES` at that capability, `unreproducible_pin_flag` is `None`, every authored family is stamped, and every kernel-set decision the case spells was taken | no |
 | `built` | lower the same way on the live card, then build a `CompiledProgram` — nvcc accepts it | yes, exact capability |
 | `correct` | run against the reference within tolerance | yes, exact capability |
 
-**Only `offered` is a hand pin, asked of each entry.** The other three run under `helpers.evidence_scope`: the case's
+**Only `offered` asks each entry on its own.** The other three run under `helpers.evidence_scope`: the case's
 entries are the whole golden scope, strictly (`golden.sole_evidence`, the scope the release gate compiles under too;
 each entry standing in as a measured row — a case authors schedules rather than measuring them, and a proposal is no
 evidence), so a fork no entry decides is an `EvidenceError` naming the kernel, never a prior's guess; the machine-local
@@ -165,22 +170,18 @@ declared gap are skipped, because a schedule that never realizes has nothing to 
 GPU or not. `built` and `correct` run only when the live capability **equals** the declared one — a pinned schedule is
 a claim about one capability, never about a merely newer card.
 
-The reference for `correct` is derived from the target, the way `emmy run` derives it: a frontend program
-(`target: {origins: …}`) compares against the numpy backend; an exact Loop target has no torch twin and compares
-against the same-input greedy execution of the same program.
+The reference for `correct` is the kernel's traced ops (`target.origins`) run on the numpy backend, the slice
+`emmy run` benchmarks against (`GoldenRecord.reference_program`); a kernel with no exact frontend twin compares against
+the same-input greedy execution of the same program.
 
-`offered` asks whether the pin *can be honoured*, not whether the tier would be offered to an **unpinned** search.
-Those differ, and the difference is load-bearing: a pin narrows the candidate grid authoritatively, so a schedule the
-cold search never enumerates can still be offered here. A tier the search will not reach on its own is a search
-shortfall, and the corpus does not express it. `realized` then asks the complementary question of the same schedule:
-given as evidence rather than as a pin, is it what the compiler picks.
-
-**Pinned-enumeration membership is the primary oracle, not `unreproducible_pin_flag` alone.** The flag answers `None`
-for a registered family that nothing stamped — serialized IR can omit knob stamps — so a pin that cannot be offered at
-all would read as satisfied. Membership is asked per row *through* the flag, so the families it already reads correctly
-(a `PLACE` consumed by a splice, the structural `g<n>` half of a cross-CTA `REDUCE` split) stay correctly read;
-`realized` closes the flag's hole with an explicit stamping check over the authored knobs, and asks the splice events
-whether those two structural decisions were taken.
+`offered` is the golden decode, so a corpus case and a recorded golden row cannot disagree about whether a schedule is
+still offered: the entry's route resolves to seams the cut pass offers, and its row equals an enumerated leaf of the
+kernel its `identity` names, the set's forks decided by the entries that name their kernels. It asks whether the
+schedule is in the enumeration, not whether an **unpinned** search would reach it; a tier the search will not reach on
+its own is a search shortfall, and the corpus does not express it. `realized` then asks the complementary question of
+the same schedule: given as evidence, is it what the compiler picks. The pin gate `unreproducible_pin_flag` answers
+`None` for a registered family that nothing stamped, so `realized` closes that hole with an explicit stamping check over
+the authored knobs, and asks the splice events whether a `PLACE` cut or a cross-CTA `REDUCE` split was taken.
 
 ## Latency
 
