@@ -71,14 +71,10 @@ def handle_dataset_import(args) -> None:
                 continue
             tune_db = SearchDB.open_readonly(src)
             try:
-                rows = list(tune_db.iter_perf_rows(backend="cuda"))
+                n = db.record_perf_rows(tune_db.iter_perf_rows(backend="cuda"))
             finally:
                 tune_db.close()
-            keyed = [r for r in rows if r.gpu]
-            n = db.record_perf_rows(keyed)
             logger.info("imported %d row(s) from tune DB %s", n, src)
-            if len(rows) > len(keyed):
-                logger.info("  skipped %d row(s) recorded before the card joined the key — no dataset reads them", len(rows) - len(keyed))
     finally:
         db.close()
     logger.info("dataset DB: %s", db_path)

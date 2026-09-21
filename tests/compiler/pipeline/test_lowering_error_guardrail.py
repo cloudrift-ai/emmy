@@ -223,13 +223,18 @@ def test_unlowered_terminal_is_bench_fail_despite_cached_residual_kernel():
 
     # ``x -> y (TileOp) -> z (CudaOp)`` — the split shape: an un-lowered partial
     # feeding a lowered finalize whose perf row is already cached.
+    from emmy.compiler.loop_wire import kernel_bindings
+    from tests.compiler.helpers import case_target_tile
+
     g = _graph_with_tile()
-    cuda = CudaOp(kernel_source="__global__ void k_fin() {}", kernel_name="k_fin")
+    tile = case_target_tile("fused/norm-linear-f16-scalar-reduce.yaml")
+    cuda = CudaOp(kernel_source="__global__ void k_fin() {}", kernel_name="k_fin", source=tile)
     g.add_node(op=cuda, inputs=["y"], output=Tensor("z", (4,), "f32"), node_id="z")
     g.outputs = ["z"]
     db = SearchDB()
     b = _terminal_bench(g, backend=_StubBackend(), db=db)
-    db.record_perf(b.ctx, cuda.identity_key(with_io=True, with_knobs=True), backend="cuda", status="ok", stats=point_stats(104.0))
+    identity = tile.identity_key(structural=False, with_io=True)
+    db.record_perf(b.ctx, identity, bindings=kernel_bindings(tile), knobs={}, backend="cuda", status="ok", stats=point_stats(104.0))
     kind, (stats, status) = b.prelude()
     assert kind == "done"
     assert status == "bench_fail"

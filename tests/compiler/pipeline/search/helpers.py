@@ -8,7 +8,6 @@ or the freeze suite silently stops exercising the real filter.
 
 from __future__ import annotations
 
-from emmy.compiler.pipeline.search.data.freeze import regime_key
 from emmy.compiler.pipeline.search.db import PerfRow, PerfStats
 
 GPU_5090 = "NVIDIA GeForce RTX 5090"  # registry records fp32/fp16 peaks -> the plausibility gate is active
@@ -45,20 +44,32 @@ def impossible_staged_feats() -> dict:
     }
 
 
-def perf_row(key: str, *, us: float, knobs: dict | None = None, gpu: str = GPU_5090, cc: int = 120, opt: int = 3, **over) -> PerfRow:
-    """A measured CUDA ``perf`` row keyed ``key`` on a registry-known card, in the plain-flags regime of
-    ``opt`` — the row a live bench there writes — with ``**over`` overriding any field."""
+def perf_row(
+    kernel: str,
+    *,
+    us: float,
+    knobs: dict | None = None,
+    bindings: dict | None = None,
+    gpu: str = GPU_5090,
+    cc: int = 120,
+    opt: int = 3,
+    flags: str = "",
+    **over,
+) -> PerfRow:
+    """A measured CUDA ``perf`` row of ``kernel`` on a registry-known card, in the plain-flags regime
+    of ``opt`` — the row a live bench there writes — with ``**over`` overriding any field."""
     kw = dict(
-        context_key=over.pop("context_key") if "context_key" in over else regime_key(gpu, cc, opt),
-        op_key=key,
+        gpu=gpu,
+        cc=cc,
+        opt=opt,
+        flags=flags,
+        kernel=kernel,
+        bindings=dict(bindings or {}),
+        knobs=dict(F16_MATMUL_FEATS if knobs is None else knobs),
         backend="cuda",
         status="ok",
         stats=PerfStats(median=us, min=us, max=us, mean=us, variance=0.0, n_samples=30),
         measured_at="2026-07-09T00:00:00+00:00",
-        knobs=dict(F16_MATMUL_FEATS if knobs is None else knobs),
-        gpu=gpu,
-        cc=cc,
-        opt=opt,
     )
     kw.update(over)
     return PerfRow(**kw)

@@ -99,19 +99,6 @@ def test_alternative_schedules_of_one_kernel_stay_one_group():
     assert len(group.feats) == 2
 
 
-def test_a_row_recorded_before_the_card_joined_the_key_is_not_admitted():
-    """A ``perf`` row migrated from before the card was keyed says nothing about which card measured it —
-    and a pool is one card's by definition. The machine that measured it may still deploy it; no dataset
-    reads it."""
-    rows = [
-        _row("keyed", us=500.0, knobs=_feats()),
-        _row("unkeyed", us=200.0, knobs=_feats(TILE="f4x4"), gpu="", cc=None, opt=None, context_key="pre-card"),
-    ]
-    (group,), dropped = group_measured(rows)
-    assert dropped == {"unkeyed (recorded before the card joined the key)": 1}
-    assert group.latency_us.tolist() == [500.0]
-
-
 def test_a_failed_bench_carries_a_sentinel_not_a_latency():
     """The watchdog sentinel is a huge POSITIVE number, so nothing downstream rejects it on sign — left in a
     group it is a row every model ranks last for free, inflating every correlation computed over the pool."""
@@ -130,14 +117,14 @@ def test_every_row_is_either_grouped_or_counted():
     rows = [
         _row("a", us=500.0, knobs=_feats()),
         _row("b", us=1e9, knobs=_feats(TILE="f4x4"), status="bench_fail"),
-        _row("c", us=200.0, knobs=_feats(TILE="f8x8"), gpu="", cc=None, opt=None, context_key="pre-card"),
+        _row("c", us=200.0, knobs=_feats(TILE="f8x8"), flags="--use_fast_math"),
         _row("d", us=300.0, knobs={"TILE": "f2x8"}),  # a whole-slice / kernel-set row: no S_* of its own
     ]
     groups, dropped = group_measured(rows)
     assert sum(len(g.feats) for g in groups) + sum(dropped.values()) == len(rows)
     assert dropped == {
         "bench_fail": 1,
-        "unkeyed (recorded before the card joined the key)": 1,
+        "non-default compiler flags": 1,
         "no structural stamps (a whole-slice or kernel-set row)": 1,
     }
 

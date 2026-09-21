@@ -39,11 +39,12 @@ from typing import TYPE_CHECKING
 from emmy.compiler.context import Context
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tile import TileOp
+from emmy.compiler.loop_wire import kernel_bindings
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pass, Pipeline, TuningSearch
 from emmy.compiler.pipeline.knob import complete_kernel_row
 from emmy.compiler.pipeline.passes.identity import IdentityStrategy
 from emmy.compiler.pipeline.pipeline import Run, variant_label
-from emmy.compiler.pipeline.search.db import PerfStats, SearchDB
+from emmy.compiler.pipeline.search.db import PerfStats, SearchDB, knobs_json
 from emmy.compiler.pipeline.search.slice import single_node_graph
 from emmy.compiler.pipeline.search.strategy.base import SearchStrategy
 from emmy.compiler.pipeline.strategy import PipelineStrategy, SpliceEvent, discovered_strategies
@@ -54,10 +55,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Lowering-only passes (post-fusion): ``tile → kernel → cuda``. The inner per-op search runs
-# these on a single-node slice so the finalized LoopOp body — and thus its ``identity_key(with_io=True, with_knobs=True)`` — is
-# never re-touched by ``loop/fusion``, which is what keeps inner-tuned ``perf`` / ``lowering``
-# rows transferable to the assembled graph. Sliced as the tail of ``CUDA_PASSES`` so it tracks
-# pass-list edits automatically.
+# these on a single-node slice so the finalized LoopOp body — and thus its kernel identity — is
+# never re-touched by ``loop/fusion``, which is what keeps inner-tuned ``perf`` rows transferable
+# to the assembled graph. Sliced as the tail of ``CUDA_PASSES`` so it tracks pass-list edits
+# automatically.
 LOWERING_PASSES = CUDA_PASSES[len(LOOP_PASSES) :]
 
 
@@ -65,7 +66,7 @@ def outer_pipeline() -> Pipeline:
     """The graph-changing passes the outer search drives: ``frontend`` + ``loop`` (the fusion
     forks). An outer terminal is a post-fusion graph of finalized ``LoopOp``\\ s; the strategy's
     separable ``evaluate`` picks each up as its own slice (own patience, own progress leaf,
-    deduped by ``identity_key(with_io=True, with_knobs=True)``) and tunes it via :data:`LOWERING_PASSES`."""
+    deduped by exact kernel identity) and tunes it via :data:`LOWERING_PASSES`."""
     passes = [Pass.load(name, i) for i, name in enumerate(TwoLevelStrategy.OUTER_PASSES)]
     return Pipeline(passes=passes, strategies=discovered_strategies())
 
@@ -85,16 +86,16 @@ _FAIL_US = 1e12
 class OpResult:
     """One unique kernel's inner-search outcome, for the per-op summary.
 
-    ``multiplicity`` is the number of structurally-identical ``LoopOp`` nodes
-    in the fused graph that share this ``op_key`` — 24 for a 24-layer
-    RMSNorm, 1 for a singleton. The outer reward's ``total_us`` weights
-    ``best_us`` by ``multiplicity`` so the Σ across ``per_op`` equals the
-    whole-graph latency (every node position counts, even though dedup
-    means we only run the inner search and DB lookup once per key).
+    ``multiplicity`` is the number of ``LoopOp`` nodes in the fused graph that
+    share this kernel ``identity`` — 24 for a 24-layer RMSNorm, 1 for a
+    singleton. The outer reward's ``total_us`` weights ``best_us`` by
+    ``multiplicity`` so the Σ across ``per_op`` equals the whole-graph latency
+    (every node position counts, even though dedup means we only run the inner
+    search and DB lookup once per kernel).
     """
 
     name: str
-    op_key: str
+    identity: str
     best_us: float | None
     multiplicity: int = 1
     # Fastest directly observed terminal from this invocation. Kept separate
@@ -172,12 +173,19 @@ class _Work:
     """One inner tuning target: an outer kernel (counts toward the terminal reward) or an
     enrolled minted kernel (evidence only)."""
 
-    key: str  # ``identity_key(with_io=True, with_knobs=True)`` — the perf-row key
+    identity: str  # the kernel's exact identity — with ``bindings``, the perf-row key's kernel half
+    bindings: dict
     nid: str
     op: object
     src_graph: Graph  # what the slice is cut from: the fused graph, or the minting fragment
     count: int  # graph multiplicity (0 for enrolled — never a reward term)
     enrolled: bool
+
+
+def _kernel_key(op) -> tuple[str, dict] | None:
+    """``(exact identity, bindings)`` of a kernel-bearing op, or ``None`` for one with no identity."""
+    identity = op.identity_key(structural=False, with_io=True)
+    return None if identity is None else (identity, kernel_bindings(op))
 
 
 class _KernelInventory(PipelineStrategy):
@@ -341,19 +349,20 @@ class TwoLevelStrategy(SearchStrategy):
         db, prior, progress = self.db, self.prior, self.progress
         identity = _identity()
         backend_name = getattr(self.pool[0], "name", "cuda")
-        # Group structurally-identical kernel roots under one ``identity_key(with_io=True, with_knobs=True)`` — insertion order =
-        # first occurrence (drives the progress tail name). Ops with no cache key are
-        # unreachable through the bench path so they don't enter the dedup map at all.
-        unique: OrderedDict[str, tuple[str, object, int]] = OrderedDict()
+        # Group identical kernel roots under one exact identity (at one size) — insertion order =
+        # first occurrence (drives the progress tail name). Ops with no identity are unreachable
+        # through the bench path so they don't enter the dedup map at all.
+        unique: OrderedDict[tuple[str, str], tuple[str, object, int, tuple[str, dict]]] = OrderedDict()
         for nid, op in _kernel_nodes(fused_graph):
-            key = op.identity_key(with_io=True, with_knobs=True)
+            key = _kernel_key(op)
             if key is None:
                 continue
-            if key in unique:
-                rep_nid, rep_op, count = unique[key]
-                unique[key] = (rep_nid, rep_op, count + 1)
+            slot = (key[0], knobs_json(key[1]))
+            if slot in unique:
+                rep_nid, rep_op, count, _key = unique[slot]
+                unique[slot] = (rep_nid, rep_op, count + 1, key)
             else:
-                unique[key] = (nid, op, 1)
+                unique[slot] = (nid, op, 1, key)
         if progress is not None:
             progress.start_terminal(len(unique))
 
@@ -364,7 +373,7 @@ class TwoLevelStrategy(SearchStrategy):
         inventory = _KernelInventory(
             identity,
             lambda nid, op, frag: minted.append((nid, op, frag)),
-            seen={identity.op_sig(op) for _, op, _ in unique.values()},
+            seen={identity.op_sig(op) for _, op, _, _ in unique.values()},
         )
 
         # Slot queue: each coroutine pops a device-pinned backend, benches its op's whole inner
@@ -412,14 +421,23 @@ class TwoLevelStrategy(SearchStrategy):
                         )
                 # The inner MCTS's best reward is ``1 / min whole-slice total`` (the bench sums
                 # every CudaOp in the slice, so a split-K main + combine both count). Record
-                # that total under the LoopOp key so ``best_per_op_time`` reads the true
-                # per-op cost.
+                # that total under the kernel with no knobs so ``best_per_op_time`` reads the
+                # true per-op cost.
                 best_total = 1.0 / inner.tree.best_reward if inner.tree.best_reward > 0 else None
                 searched = inner.best_realized()
                 if best_total is not None:
                     # captured=True: the sweep benches under graph capture by default, so this
                     # Σ-best bookkeeping row derives from captured measurements.
-                    db.record_perf(ctx, work.key, backend=backend_name, status="ok", stats=_point_stats(best_total), captured=True)
+                    db.record_perf(
+                        ctx,
+                        work.identity,
+                        bindings=work.bindings,
+                        knobs={},
+                        backend=backend_name,
+                        status="ok",
+                        stats=_point_stats(best_total),
+                        captured=True,
+                    )
                 if prior is not None:
                     # In-flight refit (single-threaded → no lock): stream this op's rows into
                     # the global reservoir; refit + checkpoint once enough new rows accumulate.
@@ -432,7 +450,7 @@ class TwoLevelStrategy(SearchStrategy):
                     else:
                         logger.info("[tune] enrolled minted kernel %s: no clean measurement", name)
                     return
-                best = db.best_per_op_time(ctx, work.key, backend=backend_name)
+                best = db.best_per_op_time(ctx, work.identity, bindings=work.bindings, backend=backend_name)
                 searched_knobs = searched_us = searched_cuda_ops = None
                 searched_structural = False
                 if searched is not None:
@@ -442,7 +460,7 @@ class TwoLevelStrategy(SearchStrategy):
                     searched_cuda_ops = searched[2]
                 results[op_idx] = OpResult(
                     name=name,
-                    op_key=work.key,
+                    identity=work.identity,
                     best_us=best,
                     multiplicity=work.count,
                     searched_knobs=searched_knobs,
@@ -457,7 +475,8 @@ class TwoLevelStrategy(SearchStrategy):
 
         n_outer = len(unique)
         wave = [
-            _Work(key=key, nid=nid, op=op, src_graph=fused_graph, count=count, enrolled=False) for key, (nid, op, count) in unique.items()
+            _Work(identity=identity, bindings=bindings, nid=nid, op=op, src_graph=fused_graph, count=count, enrolled=False)
+            for nid, op, count, (identity, bindings) in unique.values()
         ]
         op_idx = 0
         try:
@@ -470,9 +489,9 @@ class TwoLevelStrategy(SearchStrategy):
                 # Enrollment wave: everything the inventory reported while this wave ran. Waves
                 # terminate because cut/split trees strictly shrink and the seen-set dedups.
                 wave = [
-                    _Work(key=key, nid=nid, op=op, src_graph=frag, count=0, enrolled=True)
+                    _Work(identity=key[0], bindings=key[1], nid=nid, op=op, src_graph=frag, count=0, enrolled=True)
                     for nid, op, frag in minted
-                    if (key := op.identity_key(with_io=True, with_knobs=True)) is not None
+                    if (key := _kernel_key(op)) is not None
                 ]
                 minted.clear()
         finally:

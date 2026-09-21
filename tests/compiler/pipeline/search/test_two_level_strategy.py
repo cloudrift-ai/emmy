@@ -154,7 +154,7 @@ def _fuse(graph: Graph) -> Graph:
 
 
 def test_searched_winner_requires_one_post_fusion_kernel_and_an_exact_replay_row() -> None:
-    one = OpResult(name="k", op_key="key", best_us=4.0, searched_knobs={"TILE@map.1/inner": "f2x2"}, searched_us=5.0, searched_cuda_ops=1)
+    one = OpResult(name="k", identity="key", best_us=4.0, searched_knobs={"TILE@map.1/inner": "f2x2"}, searched_us=5.0, searched_cuda_ops=1)
     assert InnerReward(total_us=4.0, ok=True, per_op=[one]).searched_winner() == ({"TILE@map.1/inner": "f2x2"}, 5.0)
     multi_cuda = OpResult(**{**one.__dict__, "searched_cuda_ops": 2})
     assert InnerReward(total_us=4.0, ok=True, per_op=[multi_cuda]).searched_winner() is None

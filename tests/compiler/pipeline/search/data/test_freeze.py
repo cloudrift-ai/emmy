@@ -1,4 +1,4 @@
-"""The measurement freeze (v4) — the admission filter, freeze-twice determinism over the per-GPU YAML
+"""The measurement freeze (v5) — the admission filter, freeze-twice determinism over the per-GPU YAML
 directory, the round trip through a DB instance, and the loader's hard-error contract.
 
 A fit must be a pure function of (repo, pinned data), so one command snapshots a DB instance's
@@ -22,7 +22,6 @@ from emmy.compiler.pipeline.search.data.freeze import (
     _row_line,
     freeze_reason,
     load_freeze,
-    regime_key,
     write_freeze,
 )
 from emmy.compiler.pipeline.search.db import SearchDB
@@ -66,11 +65,6 @@ def test_reason_keeps_bench_fail_row_as_negative() -> None:
     assert freeze_reason(_row("k", us=9.17, knobs=_feats(), status="bench_fail")) is None
 
 
-def test_reason_drops_a_row_recorded_before_the_card_joined_the_key() -> None:
-    row = _row("k", us=500.0, knobs=_feats(), gpu="", cc=None, opt=None, context_key="pre-card")
-    assert freeze_reason(row).startswith("unkeyed")
-
-
 def test_reason_drops_a_card_the_registry_does_not_know() -> None:
     # Its H_* features cannot be derived, so no reader could featurize it.
     row = dataclasses.replace(_row("k", us=500.0, knobs=_feats()), gpu="Mystery GPU")
@@ -89,8 +83,8 @@ def test_reason_drops_a_non_deployable_regime() -> None:
 
 
 def test_reason_drops_extra_compiler_flags() -> None:
-    # Same card, same opt level, but the key folds a flag no column spells (fast-math, say).
-    assert freeze_reason(_row("k", us=500.0, knobs=_feats(), context_key="another-regime")) == "non-default compiler flags"
+    # Same card, same opt level, but a flag beside it (fast-math, say) is another regime.
+    assert freeze_reason(_row("k", us=500.0, knobs=_feats(), flags="--use_fast_math")) == "non-default compiler flags"
 
 
 def test_reason_drops_a_row_with_no_structural_stamps() -> None:
@@ -99,8 +93,10 @@ def test_reason_drops_a_row_with_no_structural_stamps() -> None:
 
 
 def test_reason_drops_implausible_value() -> None:
-    # The shared f16 mlp_down extents at 9.17 µs imply ~6500 TFLOP/s.
+    # The shared f16 mlp_down extents at 9.17 µs imply ~6500 TFLOP/s at the default hint of its
+    # symbolic axis — and an honest 13 TFLOP/s when the row says it was benched at one token.
     assert "implausible value" in freeze_reason(_row("k", us=9.17, knobs=F16_MATMUL_FEATS))
+    assert freeze_reason(_row("k", us=9.17, knobs=F16_MATMUL_FEATS, bindings={"m": 1})) is None
 
 
 def test_reason_drops_impossible_kernel() -> None:
@@ -123,11 +119,12 @@ _SEED = [
     _row("a3", us=500.0, knobs=_feats()),
     _row("a1", us=900.0, knobs=_feats(), opt=1),  # the non-deployable twin an older store still holds
     _row("b", us=480.0, knobs=_feats(), gpu=_GPU2, cc=89),
+    _row("dyn", us=520.0, knobs=_feats(), bindings={"seq_len": 512}),  # a dynamic kernel at the size it was benched
     _row("fail", us=60000.0, knobs=_feats(TILE="f4x4"), status="bench_fail", error="kernel 'k' did not complete"),
     _row("stale", us=500.0, knobs=_feats(TILE="f8x8"), feat_ver=FEATURIZER_VERSION - 1),
     _row("sum", us=700.0, knobs={}),  # a whole-slice Σ row
 ]
-_N_KEPT = 3
+_N_KEPT = 4
 
 
 def test_write_freeze_round_trip(tmp_path) -> None:
@@ -139,26 +136,28 @@ def test_write_freeze_round_trip(tmp_path) -> None:
     assert manifest["kind"] == FREEZE_KIND
     assert manifest["freeze_ver"] == FREEZE_VER
     assert manifest["feat_ver"] == manifest["knob_ver"] == manifest["encoding_ver"] == FEATURIZER_VERSION
-    assert manifest["counts"] == {"rows": _N_KEPT, "ok": 2, "bench_fail": 1, "per_gpu": {_GPU2: 1, _GPU: 2}}
+    assert manifest["counts"] == {"rows": _N_KEPT, "ok": 3, "bench_fail": 1, "per_gpu": {_GPU2: 1, _GPU: 3}}
     assert manifest["policy_note"] == "unit-test policy"
     assert manifest["source_db"] == str(db_path.resolve())
     # One YAML per (gpu, cap); H_* features are never stored — readers derive them from the card.
     assert set(manifest["files"]) == {"nvidia_geforce_rtx_5090_sm120.yaml", "nvidia_geforce_rtx_4090_sm89.yaml"}
+    assert all(info["kind"] == "perf" for info in manifest["files"].values())
     doc = yaml.safe_load((out / "nvidia_geforce_rtx_5090_sm120.yaml").read_text())
     assert doc["gpu_name"] == _GPU and doc["compute_cap"] == [12, 0]
     assert all(not any(k.startswith("H_") for k in c["knobs"]) for c in doc["configs"])
 
     loaded_manifest, rows = load_freeze(out)
     assert loaded_manifest == manifest
-    by_key = {r.op_key: r for r in rows}
-    assert set(by_key) == {"a3", "b", "fail"}, "the non-deployable twin, the stale row and the Σ row do not freeze"
-    seeded = {r.op_key: r for r in _SEED}
+    by_key = {r.kernel: r for r in rows}
+    assert set(by_key) == {"a3", "b", "dyn", "fail"}, "the non-deployable twin, the stale row and the Σ row do not freeze"
+    seeded = {r.kernel: r for r in _SEED}
     for key, row in by_key.items():
         # Everything a live bench wrote comes back — the same key, so an import lands where the
         # measurement would have — except the source, which now names the freeze.
         assert dataclasses.replace(row, source="measured") == seeded[key]
         assert row.source == f"freeze:{manifest['sha256'][:12]}"
-    assert by_key["b"].context_key == regime_key(_GPU2, 89, 3)
+    assert (by_key["b"].gpu, by_key["b"].cc, by_key["b"].opt, by_key["b"].flags) == (_GPU2, 89, 3, "")
+    assert by_key["dyn"].bindings == {"seq_len": 512}
 
 
 def test_freeze_twice_same_digest(tmp_path) -> None:
@@ -245,7 +244,7 @@ def test_load_freeze_malformed_row_hard_error(tmp_path) -> None:
         digest.update(_row_line(c))
     manifest["files"][name]["sha256"] = digest.hexdigest()
     (out / MANIFEST_NAME).write_text(json.dumps(manifest))
-    with pytest.raises(RuntimeError, match="lacks op_key/knobs"):
+    with pytest.raises(RuntimeError, match="lacks kernel/bindings/knobs"):
         load_freeze(out)
 
 

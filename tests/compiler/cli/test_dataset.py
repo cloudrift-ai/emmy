@@ -44,15 +44,14 @@ def test_the_default_dataset_holds_the_checked_in_freeze_or_is_refused(tmp_path,
     db.close()
 
 
-def test_a_tune_db_imports_its_card_keyed_rows(tmp_path):
-    """A tune DB's CUDA rows arrive as they are, keeping the source they were written with; the rows it
-    holds from before the card joined the key cannot say which card measured them and stay behind."""
+def test_a_tune_db_imports_its_cuda_rows(tmp_path):
+    """A tune DB's CUDA rows arrive as they are, keeping the source they were written with."""
     tune = SearchDB(tmp_path / "autotune.db")
-    tune.record_perf_rows([perf_row("keyed", us=500.0), perf_row("pre-card", us=300.0, gpu="", cc=None, opt=None, context_key="old")])
+    tune.record_perf_rows([perf_row("k", us=500.0), perf_row("k", us=300.0, bindings={"seq_len": 128})])
     tune.close()
 
     handle_dataset_import(Namespace(sources=[str(tmp_path / "autotune.db")], db=str(tmp_path / "dataset.db"), fresh=False))
     db = SearchDB.open_readonly(tmp_path / "dataset.db")
-    assert [r.op_key for r in db.iter_perf_rows()] == ["keyed"]
-    assert db.perf_sources() == {"measured": 1}
+    assert sorted((r.kernel, tuple(r.bindings.items())) for r in db.iter_perf_rows()) == [("k", ()), ("k", (("seq_len", 128),))]
+    assert db.perf_sources() == {"measured": 2}
     db.close()

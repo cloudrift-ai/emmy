@@ -16,7 +16,7 @@ from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.frontend.ir import MatmulOp, ReshapeOp, RmsNormOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
-from emmy.compiler.loop_wire import loop_graph_from_wire, loop_graph_to_wire
+from emmy.compiler.loop_wire import kernel_bindings, kernel_tile, loop_graph_from_wire, loop_graph_to_wire
 from emmy.compiler.pipeline.search.golden import dump_golden_file, load_golden_file
 from emmy.compiler.pipeline.search.working_golden import write_trace_inventory
 
@@ -1143,8 +1143,13 @@ def test_run_files_a_hung_greedy_kernel_as_bench_fail_evidence(monkeypatch, tmp_
     assert len(nodes) >= 2, "the route must hold an innocent kernel beside the culprit"
     db = SearchDB(db_path)
     try:
-        keys = {n.op.kernel_name: n.op.identity_key(with_io=True, with_knobs=True) for n in nodes}
-        rows = {name: db.lookup_perf(probed, key, backend="cuda") for name, key in keys.items()}
+        tiles = {n.op.kernel_name: (kernel_tile(n.op), dict(n.op.knobs or {})) for n in nodes}
+        rows = {
+            name: db.lookup_perf(
+                probed, tile.identity_key(structural=False, with_io=True), bindings=kernel_bindings(tile), knobs=knobs, backend="cuda"
+            )
+            for name, (tile, knobs) in tiles.items()
+        }
     finally:
         db.close()
     filed = {name: row.status for name, row in rows.items() if row is not None}

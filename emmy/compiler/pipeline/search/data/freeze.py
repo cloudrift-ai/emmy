@@ -5,12 +5,14 @@ from it is not reproducible: two runs of the same fitter can see different data.
 snapshot extracted from a DB instance whose digest pins exactly which measurements a fit saw — the
 fit becomes a pure function of (repo, freeze digest).
 
-Freeze v4 is a DIRECTORY of per-GPU YAML files — a ``gpu_name`` / ``compute_cap`` header plus a
+Freeze v5 is a DIRECTORY of per-GPU YAML files — a ``gpu_name`` / ``compute_cap`` header plus a
 ``configs`` list — beside a ``manifest.json`` carrying provenance and content digests. Each row is
-a ``perf`` row minus what its file header already says: the kernel's ``op_key``, its knobs
-(``S_*`` stamps + tunables, exactly as the DB stores them), the opt level, the status, the latency
-statistics, ``captured``, ``measured_at`` and a failure's ``error``. Device ``H_*`` features are
-never stored: readers derive them from the card (``data.sample.measured_features``).
+a ``perf`` row minus what its file header already says: the kernel it measured, the sizes its
+symbolic dims were bound to, its knobs (``S_*`` stamps + tunables, exactly as the DB stores them),
+the opt level and the residual compiler flags, the status, the latency statistics, ``captured``,
+``measured_at`` and a failure's ``error``. The manifest lists every file with its kind (``perf``
+for a per-GPU file) and its digest. Device ``H_*`` features are never stored: readers derive them
+from the card (``data.sample.measured_features``).
 
 What freezes (see :func:`freeze_reason`): every CUDA row measured in the deployable regime on a
 card the GPU registry knows, spelled in the current featurizer vocabulary, that passes the
@@ -39,15 +41,14 @@ Produced by ``emmy dataset freeze``.
 
 from __future__ import annotations
 
-import functools
 import hashlib
 import json
 import logging
+import math
 import re
 import shutil
 import subprocess
 from collections import Counter
-from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -59,19 +60,8 @@ from emmy.compiler.pipeline.search.features import DEPLOYABLE_OPT, FEATURIZER_VE
 logger = logging.getLogger(__name__)
 
 FREEZE_KIND = "emmy-measurement-freeze"
-FREEZE_VER = 4
+FREEZE_VER = 5
 MANIFEST_NAME = "manifest.json"
-
-
-@functools.cache
-def regime_key(gpu_name: str, cc: int, opt: int) -> str:
-    """The ``perf`` context key of the deployable-flags regime at ``opt`` on ``gpu_name`` (``cc`` in the
-    ``H_cc`` encoding) — the key a live compile on that card writes, so an imported row lands where a
-    measurement taken there would have."""
-    from emmy.compiler.context import Context  # noqa: PLC0415
-
-    ctx = Context.from_target(divmod(cc, 10), gpu_name=gpu_name)
-    return replace(ctx, compile_flags=f"-Xcicc -O{opt}").structural_key()
 
 
 def freeze_reason(row: PerfRow) -> str | None:
@@ -87,20 +77,17 @@ def freeze_reason(row: PerfRow) -> str | None:
     prior number is computed over, and a measurement taken under a non-deployable opt level
     answers a question nothing asks: nothing trains on it (``Prior.add_rows``) and no deploy
     reads it. Kept, it would put half a card's pools in a lane no one runs, so half the headline
-    number would describe a regime that does not exist. The same goes for extra compiler flags,
-    which the context key folds but no column spells: a row whose key is not the plain-flags key of
-    its opt level was measured in some other regime."""
+    number would describe a regime that does not exist. The same goes for extra compiler flags: a
+    row measured under any was measured in some other regime."""
     from emmy import gpu  # noqa: PLC0415
 
-    if not row.gpu or row.cc is None or row.opt is None:
-        return "unkeyed (recorded before the card joined the key)"
     if gpu.by_name(row.gpu) is None:
         return "unknown card (not in the GPU registry)"
     if row.feat_ver != FEATURIZER_VERSION:
         return f"stale feat_ver {row.feat_ver} != current {FEATURIZER_VERSION}"
     if row.opt != DEPLOYABLE_OPT:
         return f"non-deployable regime (H_opt={row.opt:g})"
-    if row.context_key != regime_key(row.gpu, row.cc, row.opt):
+    if row.flags:
         return "non-default compiler flags"
     if not any(k.startswith("S_") for k in row.knobs):
         return "no structural stamps (a whole-slice or kernel-set row)"
@@ -132,8 +119,10 @@ def implausible_value_reason(row: PerfRow) -> str | None:
     too. Both stay ungated rather than falsely flagged — the identity was verified
     against every stamp combination in the 2026-07 sweep stores. ``reduce_max``, not
     ``reduce_prod``, keeps the bound a lower estimate of work even off the exact case. A
-    symbolic axis is excluded from the stamped products and benched at the dynamic hint,
-    so it re-enters as one hint factor. Ungateable rows also pass on: non-``ok`` status
+    symbolic axis is excluded from the stamped products, so the sizes the row was benched at
+    (``bindings``) re-enter as one factor, their product; a row recorded before the sizes were
+    stored (the converted freeze) is read at the default hint, the size those benches ran
+    at. Ungateable rows also pass on: non-``ok`` status
     (a fail sentinel is not a measurement), no stamped shape, unknown card or unrecorded
     peak, and rows outside the current featurizer vocabulary (their stamps aren't trusted
     enough to judge)."""
@@ -161,7 +150,7 @@ def implausible_value_reason(row: PerfRow) -> str | None:
         return None
     from emmy.compiler.dim import DEFAULT_SEQ_HINT  # noqa: PLC0415
 
-    hint = DEFAULT_SEQ_HINT if n_sym > 0 else 1
+    hint = math.prod(row.bindings.values()) if row.bindings else (DEFAULT_SEQ_HINT if n_sym > 0 else 1)
     implied = 2.0 * free * red * hint / row.stats.median / 1e6  # FLOP / µs -> TFLOP/s
     if implied > peak:
         return f"implies {implied:.0f} TFLOP/s > {peak:.0f} device peak"
@@ -215,9 +204,11 @@ def _row_payload(row: PerfRow) -> dict:
     """One freeze row: the ``perf`` row minus what its file header holds (card, compute capability)."""
     s = row.stats
     return {
-        "op_key": row.op_key,
+        "kernel": row.kernel,
+        "bindings": row.bindings,
         "knobs": row.knobs,
         "opt": row.opt,
+        "flags": row.flags,
         "status": row.status,
         "stats": {"median": s.median, "min": s.min, "max": s.max, "mean": s.mean, "variance": s.variance, "n_samples": s.n_samples},
         "captured": row.captured,
@@ -305,7 +296,7 @@ def write_freeze(db_path: Path | str, out_dir: Path | str, *, note: str = "") ->
             raise RuntimeError(f"freeze file name collision: {name} (cards {files[name]['gpu_name']!r} and {gpu!r})")
         doc = {"gpu_name": gpu, "compute_cap": list(cap), "configs": payloads}
         (tmp / name).write_text(yaml.safe_dump(doc, sort_keys=True, width=120))
-        files[name] = {"gpu_name": gpu, "compute_cap": list(cap), "rows": len(payloads), "sha256": digest.hexdigest()}
+        files[name] = {"kind": "perf", "gpu_name": gpu, "compute_cap": list(cap), "rows": len(payloads), "sha256": digest.hexdigest()}
 
     top = hashlib.sha256()
     for name in sorted(files):
@@ -343,8 +334,8 @@ def write_freeze(db_path: Path | str, out_dir: Path | str, *, note: str = "") ->
 
 def load_freeze(path: Path | str) -> tuple[dict, list[PerfRow]]:
     """Parse + verify the freeze directory at ``path`` → ``(manifest, perf rows)``, each row keyed by its
-    file's card and the plain-flags regime of its opt level (:func:`regime_key`), and sourced
-    ``freeze:<digest>``. Hard ``RuntimeError`` — never a silent fallback — on any integrity failure."""
+    file's card and sourced ``freeze:<digest>``. Hard ``RuntimeError`` — never a silent fallback — on
+    any integrity failure."""
     p = Path(path)
     regen = "re-freeze with `emmy dataset freeze`"
     mpath = p / MANIFEST_NAME
@@ -363,6 +354,8 @@ def load_freeze(path: Path | str) -> tuple[dict, list[PerfRow]]:
     rows: list[PerfRow] = []
     for name in sorted(manifest.get("files", {})):
         info = manifest["files"][name]
+        if info.get("kind") != "perf":
+            raise RuntimeError(f"measurement freeze {p}: {name} has the unknown file kind {info.get('kind')!r} — {regen}")
         fpath = p / name
         if not fpath.exists():
             raise RuntimeError(f"measurement freeze {p} is missing {name} (listed in the manifest) — {regen}")
@@ -388,25 +381,29 @@ def load_freeze(path: Path | str) -> tuple[dict, list[PerfRow]]:
             raise RuntimeError(f"measurement freeze {p} is corrupt: {name} row digest != manifest — {regen}")
         cc = major * 10 + minor
         for payload in payloads:
-            if not isinstance(payload.get("op_key"), str) or not isinstance(payload.get("knobs"), dict):
-                raise RuntimeError(f"measurement freeze {p}: {name} row lacks op_key/knobs — {regen}")
-            opt = int(payload["opt"])
+            if not (
+                isinstance(payload.get("kernel"), str)
+                and isinstance(payload.get("bindings"), dict)
+                and isinstance(payload.get("knobs"), dict)
+            ):
+                raise RuntimeError(f"measurement freeze {p}: {name} row lacks kernel/bindings/knobs — {regen}")
             rows.append(
                 PerfRow(
-                    context_key=regime_key(gpu_name, cc, opt),
-                    op_key=payload["op_key"],
+                    gpu=gpu_name,
+                    cc=cc,
+                    opt=int(payload["opt"]),
+                    flags=str(payload["flags"]),
+                    kernel=payload["kernel"],
+                    bindings=payload["bindings"],
+                    knobs=payload["knobs"],
                     backend="cuda",
                     status=payload["status"],
                     stats=PerfStats(**payload["stats"]),
                     measured_at=payload["measured_at"],
-                    knobs=payload["knobs"],
                     captured=bool(payload["captured"]),
-                    gpu=gpu_name,
-                    cc=cc,
-                    opt=opt,
+                    error=payload["error"],
                     feat_ver=int(manifest["feat_ver"]),
                     source=source,
-                    error=payload["error"],
                 )
             )
     return manifest, rows

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 from types import SimpleNamespace
 
 from emmy.compiler.backend.base import BenchmarkResult, LaunchTime
@@ -8,15 +9,38 @@ from emmy.compiler.context import Context
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda.ir import CudaOp
+from emmy.compiler.loop_wire import kernel_bindings, kernel_tile
 from emmy.compiler.pipeline.search.db import SearchDB
 from emmy.compiler.pipeline.search.policy.terminal_bench import bench_terminal_async
+from tests.compiler.helpers import case_target_tile
+
+# A perf row is filed under the tile kernel a CUDA kernel was rendered from, so every synthetic kernel
+# here stands on a real tile — two kernels that must not share a row stand on two different ones.
+_CASES = {
+    "k": "fused/norm-linear-f16-scalar-reduce.yaml",
+    "k_innocent": "fused/norm-linear-f16-scalar-reduce.yaml",
+    "k_culprit": "matmul/f16-mma-f16acc-gmem.yaml",
+}
+
+
+@functools.cache
+def _tile(name: str):
+    return case_target_tile(_CASES[name])
+
+
+def _row_for(db: SearchDB, ctx, op):
+    """The perf row ``op`` is filed under, or ``None``."""
+    tile = kernel_tile(op)
+    return db.lookup_perf(
+        ctx, tile.identity_key(structural=False, with_io=True), bindings=kernel_bindings(tile), knobs=dict(op.knobs or {}), backend="cuda"
+    )
 
 
 def _candidate():
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (1,)), node_id="x")
     graph.add_node(
-        CudaOp(kernel_source='extern "C" __global__ void k(float* out) {}', kernel_name="k", arg_order=("out",)),
+        CudaOp(kernel_source='extern "C" __global__ void k(float* out) {}', kernel_name="k", arg_order=("out",), source=_tile("k")),
         [],
         Tensor("out", (1,)),
         node_id="out",
@@ -75,7 +99,7 @@ class _RaisingBackend:
 
 
 def _perf_row(db: SearchDB, cand):
-    return db.lookup_perf(cand.ctx, cand.graph.nodes["out"].op.identity_key(with_io=True, with_knobs=True), backend="cuda")
+    return _row_for(db, cand.ctx, cand.graph.nodes["out"].op)
 
 
 async def test_compile_budget_overrun_records_nothing() -> None:
@@ -134,13 +158,16 @@ async def test_a_real_bench_failure_still_records_bench_fail() -> None:
     assert _perf_row(db, cand).status == "bench_fail"
 
 
-# The bodies must differ materially: ``CudaOp`` identity normalizes the kernel NAME away, so two
-# kernels differing only in name are one identity and would share a single perf row.
 _PAIR = {"k_innocent": "out[0] = 1.0f;", "k_culprit": "out[0] = 2.0f;"}
 
 
 def _cuda_op(name: str) -> CudaOp:
-    return CudaOp(kernel_source=f'extern "C" __global__ void {name}(float* out) {{ {_PAIR[name]} }}', kernel_name=name, arg_order=("out",))
+    return CudaOp(
+        kernel_source=f'extern "C" __global__ void {name}(float* out) {{ {_PAIR[name]} }}',
+        kernel_name=name,
+        arg_order=("out",),
+        source=_tile(name),
+    )
 
 
 def _candidate_pair():
@@ -167,7 +194,7 @@ def _fail_rows(db: SearchDB, cand) -> dict[str, str]:
     out = {}
     for nid in ("mid", "out"):
         op = cand.graph.nodes[nid].op
-        row = db.lookup_perf(cand.ctx, op.identity_key(with_io=True, with_knobs=True), backend="cuda")
+        row = _row_for(db, cand.ctx, op)
         if row is not None:
             out[op.kernel_name] = row.status
     return out
