@@ -4,81 +4,103 @@
 
 ### Question
 
-Does the stock vLLM column of the serving tables in "Outperforming vLLM and Llama.cpp on Gemma4-12B" (published
-2026-08-01) still hold on this box? This run measures the non-Emmy lane only: stock vLLM 0.23.0 at the article's
-workload points. The two Emmy lanes of the recipe (twelve rows) were not part of this run.
+Do the serving tables of "Outperforming vLLM and Llama.cpp on Gemma4-12B" (published 2026-08-01) still hold on the
+current compiler, after the post-attention halves of the serving golden were re-recorded on the gate/up operand cut?
+All three lanes of the recipe ran: stock vLLM 0.23.0, vLLM with the Emmy plugin, and the plugin's `EMMY_FAST_MATH`
+fork.
 
 ### Status
 
-All 6 selected rows succeeded in one run (`2026-09-19_06-15-04`, run ID `20260919T061504Z`), selected with
-`--filter 'engine.llm.vllm.image=vllm/vllm-openai:*'`. Every request of every repeat completed (0 failed). The
-twelve Emmy rows were filtered out and are not in the archive.
+All 18 rows succeeded in one run (`2026-09-20_23-25-14`, run ID `20260920T232514Z`). Every request of every repeat
+completed. No lane logged an `EvidenceError`: with `EMMY_STRICT_EVIDENCE=1` every fork of every kernel the servers
+compiled was decided by a golden row. The twelve Emmy rows cover eight distinct serving shapes; those eight compiled
+from scratch (about 18 minutes each) and the remaining four hit the pack those compiles had just written, so nothing
+in this run served a plan built from the rows the re-record replaced.
 
 ### Protocol
 
-`emmy bench experiments/golden-bench-2026/gemma4_serving --local --filter 'engine.llm.vllm.image=vllm/vllm-openai:*'`
-on a pre-allocated RTX 5090, one server boot per row. Image `vllm/vllm-openai:v0.23.0`, `--dtype float16
---no-enable-prefix-caching`, context 16384, `--gpu-memory-utilization 0.96`. The client is `vllm bench serve` on
-random prompts with seed 0, temperature 0 and `--ignore-eos`. The single-stream points repeat three times and the
-batched points run once. Desktop applications were closed first so the 0.96 memory setting fits beside the display
-server (185 MiB in use before the run).
+`emmy bench experiments/golden-bench-2026/gemma4_serving --local` on a pre-allocated RTX 5090, one server boot per
+row. Stock lane: `vllm/vllm-openai:v0.23.0`. Emmy lanes: `cloudriftai/vllm-emmy:0.23.0-6328269d1`, the plain plugin
+image built at the re-record commit, with a pack directory of its own. Every lane runs `--dtype float16
+--no-enable-prefix-caching`, context 16384, `--gpu-memory-utilization 0.96`; the Emmy lanes set the decode bucket to
+the concurrency and the 2048-token chunk quantum on the mixed points, as the article's recipes do. The client is
+`vllm bench serve` on random prompts with seed 0, temperature 0 and `--ignore-eos`. Single-stream points repeat three
+times, batched points run once. Desktop applications were closed first so the 0.96 memory setting fits beside the
+display server.
 
 ### Measurements
 
-Output token throughput and median latencies. The single-stream rows give the mean of three repeats.
+Output token throughput and median latencies. Single-stream rows give the mean of three repeats.
 
-| Tokens in | Tokens out | Concurrency | Prompts | Output tok/s | Median TTFT (ms) | Median TPOT (ms) |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 256 | 256 | 1 | 16 | 60.63 | 56.3 | 16.31 |
-| 4096 | 4096 | 1 | 8 | 57.23 | 565.7 | 17.34 |
-| 4096 | 4096 | 4 | 32 | 216.52 | 1085.0 | 18.22 |
-| 4096 | 4096 | 8 | 64 | 384.21 | 1098.5 | 20.53 |
-| 8192 | 256 | 4 | 16 | 112.62 | 2028.3 | 27.26 |
-| 256 | 256 | 64 | 256 | 1434.07 | 1692.9 | 27.80 |
+| Point | Lane | Output tok/s | Median TTFT (ms) | Median TPOT (ms) |
+| --- | --- | ---: | ---: | ---: |
+| 256/256 c=1 | stock | 60.9 | 56.1 | 16.3 |
+| 256/256 c=1 | emmy | 53.9 | 67.5 | 18.4 |
+| 256/256 c=1 | emmy fast-math | 54.6 | 65.3 | 18.1 |
+| 4096/4096 c=1 | stock | 57.2 | 566.0 | 17.3 |
+| 4096/4096 c=1 | emmy | 51.2 | 571.2 | 19.4 |
+| 4096/4096 c=1 | emmy fast-math | 51.8 | 549.5 | 19.2 |
+| 4096/4096 c=4 | stock | 216.4 | 1086.2 | 18.2 |
+| 4096/4096 c=4 | emmy | 199.2 | 1207.8 | 19.8 |
+| 4096/4096 c=4 | emmy fast-math | 198.8 | 1146.8 | 19.9 |
+| 4096/4096 c=8 | stock | 383.6 | 1101.7 | 20.6 |
+| 4096/4096 c=8 | emmy | 361.0 | 1260.0 | 21.9 |
+| 4096/4096 c=8 | emmy fast-math | 360.4 | 1222.8 | 21.9 |
+| 8192/256 c=4 | stock | 112.7 | 2030.0 | 27.3 |
+| 8192/256 c=4 | emmy | 105.0 | 2375.7 | 28.8 |
+| 8192/256 c=4 | emmy fast-math | 105.1 | 2791.6 | 26.4 |
+| 256/256 c=64 | stock | 1435.6 | 1688.4 | 27.7 |
+| 256/256 c=64 | emmy | 1164.1 | 2032.0 | 30.1 |
+| 256/256 c=64 | emmy fast-math | 1184.4 | 1966.6 | 29.6 |
 
 ### Comparison with the article
 
-| Point | Article tok/s | This run | Article TTFT / TPOT (ms) | This run |
+The standard Emmy lane against the article's published Emmy column, with the same lane's numbers from the run before
+the re-record (2026-09-19, the rows this change replaced) for the size of the move:
+
+| Point | Article Emmy | Before | Now | Stock now |
 | --- | ---: | ---: | ---: | ---: |
-| 4096/4096 c=1 | 57.2 | 57.23 | 566 / 17.4 | 566 / 17.3 |
-| 4096/4096 c=4 | 216.4 | 216.52 | 1088 / 18.2 | 1085 / 18.2 |
-| 4096/4096 c=8 | 383.6 | 384.21 | 1100 / 20.6 | 1099 / 20.5 |
-| 8192/256 c=4 | 112.0 | 112.62 | 2429 / 26.2 | 2028 / 27.3 |
-| 256/256 c=64 | 1425.1 | 1434.07 | 1468 / 28.0 | 1693 / 27.8 |
+| 4096/4096 c=1 | 54.8, 628 / 18.1 | 49.5, 896 / 20.0 | 51.2, 571 / 19.4 | 57.2, 566 / 17.3 |
+| 4096/4096 c=4 | 206.4, 1266 / 19.1 | 195.0, 1721 / 20.1 | 199.2, 1208 / 19.8 | 216.4, 1086 / 18.2 |
+| 4096/4096 c=8 | 375.3, 1236 / 21.0 | 350.9, 1770 / 22.4 | 361.0, 1260 / 21.9 | 383.6, 1102 / 20.6 |
+| 8192/256 c=4 | 101.7, 2655 / 29.2 | 86.8, 3330 / 32.9 | 105.0, 2376 / 28.8 | 112.7, 2030 / 27.3 |
+| 256/256 c=64 | 1138.8, 1772 / 30.0 | 951.8, 3075 / 36.3 | 1164.1, 2032 / 30.1 | 1435.6, 1688 / 27.7 |
 
 The article does not publish the 256/256 c=1 point.
 
 ### What the numbers say
 
-Stock vLLM reproduces the article. Throughput is within 0.7% at every published point, and TPOT is within 0.1 ms
-at the three 4K/4K points. The two differences are both first-token latency, and neither is a change in the engine:
+**First-token latency is where the re-record lands.** Every point improved by 26 to 34%, and four of the five now
+beat the article: 571 ms against 628 at the single-stream 4K point, where stock measures 566. The 4K point is at
+parity with stock, which is new — the previous rows trailed it by 58%. The cause is arithmetic: prefill runs the
+post-attention half at 2048 tokens per chunk, and that half went from 7223 to 3984 us per layer, which over 48 layers
+and two chunks is 311 ms of the 325 ms the point actually gained.
 
-- **256/256 c=64 TTFT is a different measurement.** The article's 1468 ms comes from one wave of 64 requests
-  (`--num-prompts 64`, its footnote 2). The recipe runs 256 prompts, so the median lands on queued second- and
-  third-wave requests. The TPOT half of that cell uses the same protocol in both and agrees (27.8 against 28.0).
-- **8192/256 c=4 TTFT moves between runs of the same image.** It measured 2028 ms here, 2382 ms in yesterday's run
-  on this box (an unfinished run whose stock rows all completed) and 2429 ms in the article. TPOT moves the other
-  way (27.3, 26.0, 26.2), and throughput stays at 112.6 to 112.7 in all three. The point runs once, with 16 prompts
-  at four at a time. The order in which four 8K prefills and their decodes share a step is what moves; the engine
-  does not. Compare this cell only within one run.
+**Throughput beats the article at two points.** The RAG point reaches 105.0 against 101.7, and the 64-stream point
+1164 against 1139 — the latter up 22% from the previous rows, because its decode width of 64 gained 25% per layer
+half and its prefill chunks gained the rest.
 
-The stock baseline is stable enough to reuse. It is the same on the local 2026-08-05 run of the article-era recipe
-(57.21, 216.48 and 383.38 tok/s at the 4K/4K points), in yesterday's run and in this one, to within 0.3%.
+**The three decode-bound points are still 4 to 6% short of the article**, and all of that is per-token latency: 19.4
+ms against 18.1 at c=1. It is no longer kernels. The layer kernels of a bucket-32 step now sum to 13.8 ms of a 19.4
+ms step, with about 1.2 ms of `lm_head` and 0.3 ms of vLLM's own attention beside them. The remaining ~3.6 ms is the
+plugin's per-step cost, unchanged by this round, and it is now the largest single item in a decode step.
 
-### Repeat variation
+**Fast-math is no longer worth a lane at most points.** It wins 0.5 to 1.7% of throughput at five of six points and
+matches the standard lane at the sixth. The one exception is the RAG point, where it takes per-token latency to 26.4
+ms — below stock's 27.3 — while paying 416 ms of first-token latency for it. At prefill widths the standard lane's
+gate/up now runs at 204 TFLOPS against the card's ~209 dense peak, so there is nothing for a lower-precision
+accumulate to recover there.
 
-Across the three repeats of each single-stream point: throughput spread 0.33% at 256/256 (60.54 to 60.74 tok/s) and
-0.09% at 4096/4096 (57.21 to 57.26 tok/s). Median TPOT spread was 0.03 ms and 0.01 ms, and median TTFT was 56.05 to
-56.47 ms and 564.7 to 566.5 ms. The batched points run once, so their variation comes from comparing runs, as above.
+**Stock reproduces itself.** Its six rows are within 0.3% of the stock-only run of 2026-09-19 on this box at every
+point, which is what makes the Emmy comparison above a comparison and not a drift measurement.
 
 ### Limitations
 
-- The Emmy lanes are not in this run, so this section makes no stock-versus-Emmy comparison. The recipe pins their
-  image to `cloudriftai/vllm-emmy:0.23.0-73b8e5377`, built at a commit that no longer exists after the branch was
-  rebased. An Emmy run needs an image rebuilt at the branch head.
-- Single run on one box. The batched points and the RAG point have one repeat each.
-- The comparison with the article is direct only where the protocol matches. The c=64 TTFT is not comparable (see
-  above).
+- Single run on one box. The batched points and the RAG point have one repeat each; compare them only within a run.
+- The 8192/256 c=4 first-token latency moves between runs of the same image (2030, 2028 and 2429 ms across three
+  stock runs while throughput held at 112.6 to 112.7). The fast-math row's 2792 ms sits inside that spread.
+- The 256/256 c=64 first-token latency is not comparable with the article's, which uses one wave of 64 requests
+  where the recipe queues 256; the per-token half of that cell uses the same protocol in both.
 
 ### System
 
@@ -87,16 +109,17 @@ Across the three repeats of each single-stream point: throughput spread 0.33% at
 | GPU | NVIDIA GeForce RTX 5090, 32607 MiB, driver 580.173.02 |
 | CPU / memory | AMD Ryzen 9 9950X3D (16 cores, 32 threads), 64.9 GB |
 | OS | Ubuntu 24.04.2 LTS, kernel 7.0.0-28-generic, Docker 29.5.0 |
-| Engine | `vllm/vllm-openai:v0.23.0` (vLLM 0.23.0) |
+| Engine | vLLM 0.23.0 (`vllm/vllm-openai:v0.23.0`, `cloudriftai/vllm-emmy:0.23.0-6328269d1`) |
 | Model | `google/gemma-4-12B-it` at `707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7`, FP16 |
-| Harness revision | `66f5c905c`, clean tree |
-| Run window | 2026-09-19 06:15 to 07:23 UTC |
+| Harness revision | `27535aba2`, clean tree |
+| Run window | 2026-09-20 23:25 to 2026-09-21 05:17 UTC |
 
 ### Archive
 
-`results_rtx5090x1.tar.gz` (Git LFS) holds `2026-09-19_06-15-04/` exactly as `emmy bench` wrote it: the run logs
-`benchmark.log` and `benchmark_rtx5090_x_1.log`, and three files per row, an `.experiment.yaml`, a
-`.benchmark.log` and a `.server.log`. Each row's files are named
-`rtx5090x1_<point>_gmu0.96_ivllm-vllm-oai-v0.23.0_<row id>`, with row IDs `c9e49861fb8c` (256/256 c=1),
-`a45c51be8eff` (4096/4096 c=1), `f53020eecbc5` (4096/4096 c=4), `127cb77a17dc` (4096/4096 c=8), `f763c1dd0350`
-(8192/256 c=4) and `c7dbaea21ffa` (256/256 c=64).
+`results_rtx5090x1.tar.gz` (Git LFS) holds `2026-09-20_23-25-14/` exactly as `emmy bench` wrote it: the run logs
+`benchmark.log` and `benchmark_rtx5090_x_1.log`, and three files per row, an `.experiment.yaml`, a `.benchmark.log`
+and a `.server.log`. Row IDs, by point and lane — 256/256 c=1: `c9e49861fb8c` stock, `cd10898a4879` emmy,
+`f1e9a385e636` fast-math; 4096/4096 c=1: `a45c51be8eff`, `0ba6ce0ffe68`, `fb1051410bd7`; 4096/4096 c=4:
+`f53020eecbc5`, `dff7612efdc1`, `2627d992b007`; 4096/4096 c=8: `127cb77a17dc`, `4834e789ee92`, `6697d4658d95`;
+8192/256 c=4: `f763c1dd0350`, `55834735532d`, `b2907048119b`; 256/256 c=64: `c7dbaea21ffa`, `e5b0ca460afc`,
+`e9f3d25c9206`.
