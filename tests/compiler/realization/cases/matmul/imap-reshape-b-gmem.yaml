@@ -47,7 +47,7 @@ configs:
       REDUCE: ''
       STAGE: ''
       RASTER: ''
-    identity: 609221d70d8393409dff5cf7758ac941547b0d963f78d95dddd8498259afd6b2
+    identity: 8b322636f70f426d67e0599788a6daec58e6f41fffa34f45f0c8173e946a5c56
 loops:
 - inputs: [w, x]
   outputs: [o]
@@ -65,56 +65,70 @@ loops:
         body:
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 64}, window: null}}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 2}, window: null}}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 128}, window: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 128}, window: null}}
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null}}
                         body:
                           body:
-                          - class: Load
+                          - class: Loop
                             fields:
-                              names: {tuple: [in0]}
-                              input: w
+                              axis: {class: Axis, fields: {name: a3, extent: {dim: 128}, window: null}}
+                              body:
+                                body:
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in0]}
+                                    input: w
+                                    index:
+                                      tuple:
+                                      - expr:
+                                          binary:
+                                            op: +
+                                            left: {var: a0}
+                                            right: {binary: {op: '*', left: {literal: {value: 2, dtype: int}}, right: {var: a3}}}
+                                      - {expr: {var: a2}}
+                                    dtype: null
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in1]}
+                                    input: x
+                                    index: {tuple: [{expr: {var: a1}}, {expr: {var: a3}}]}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
+                                - class: Accum
+                                  fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a3]}, base: null}
+                              unroll: false
+                              seed: true
+                          - class: Write
+                            fields:
+                              output: o
                               index:
                                 tuple:
+                                - {expr: {var: a1}}
                                 - expr:
                                     binary:
                                       op: +
-                                      left: {binary: {op: '*', left: {literal: {value: 2, dtype: int}}, right: {var: a2}}}
-                                      right: {binary: {op: /, left: {var: a1}, right: {literal: {value: 64, dtype: int}}}}
-                                - {expr: {binary: {op: '%', left: {var: a1}, right: {literal: {value: 64, dtype: int}}}}}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
+                                      left: {var: a2}
+                                      right: {binary: {op: '*', left: {literal: {value: 64, dtype: int}}, right: {var: a0}}}
+                              values: {tuple: [acc0]}
+                              value_dtype: null
+                              atomic: false
+                              swizzle: NONE
                         unroll: false
                         seed: true
-                    - class: Write
-                      fields:
-                        output: o
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
                   unroll: false
                   seed: true
             unroll: false
             seed: true
-      name: k_matmul_0f20c8
+      name: k_matmul_ec392d
     inputs: [x, w]
     outputs: [[o, f16, [64, 128]]]
