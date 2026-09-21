@@ -7,7 +7,6 @@ persists, or reads a policy attribute.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 import statistics
@@ -15,8 +14,6 @@ import statistics
 from emmy.compiler.backend.cuda.program import compile_budget_overrun
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.cuda.ir import CudaOp
-from emmy.compiler.ir.kernel.ir import KernelOp
-from emmy.compiler.ir.loop.ir import LoopOp
 from emmy.compiler.pipeline.search.db import PerfStats
 from emmy.compiler.structural import digest
 
@@ -26,7 +23,7 @@ logger = logging.getLogger("emmy.compiler.pipeline")
 
 class TerminalBench:
     """Shared machinery for benching one terminal candidate's ``CudaOp``s and
-    persisting per-kernel ``perf`` / inventory / lowering rows.
+    persisting per-kernel ``perf`` / ``cuda_op`` rows.
 
     :func:`bench_terminal_async` drives it: the no-cuda / cache-hit / stub
     short-circuits (:meth:`prelude`) and every DB write (:meth:`finalize_result` /
@@ -148,12 +145,11 @@ class TerminalBench:
 
         if self.backend is None:
             # No real measurement → do NOT persist. Writing the 1.0us stub
-            # to a shared DB used to clobber tuned ``best_median_us`` values
-            # (record_lowering / record_perf keep the minimum), so any plain
-            # ``emmy run`` (which routes through ``Pipeline.run`` without
-            # a backend) was overwriting real autotune rows with 1.0us stubs.
-            # Tests that need lowering edges in stub mode should pass an
-            # explicit stub backend.
+            # to a shared DB used to clobber tuned rows (record_perf keeps the
+            # minimum), so any plain ``emmy run`` (which routes through
+            # ``Pipeline.run`` without a backend) was overwriting real autotune
+            # rows with 1.0us stubs. Tests that need rows in stub mode should
+            # pass an explicit stub backend.
             agg = None
             for node in self.cuda_nodes:
                 agg = self._accumulate(agg, point_stats(1.0))
@@ -265,82 +261,26 @@ def stats_from_launch(lt) -> PerfStats:
     return point_stats(lt.time_ms * 1000.0)
 
 
-def record_op_inventory(db, op, key: str) -> None:
-    """Upsert one op's inventory row (``cuda_op`` / ``kernel_op`` / ``loop_op``) by its variant key."""
-    if isinstance(op, CudaOp):
-        db.record_cuda_op(
-            key,
-            kernel_source=op.kernel_source,
-            arg_order=list(op.arg_order),
-            grid=list(op.grid),
-            block=list(op.block),
-            smem_bytes=op.smem_bytes,
-            pretty=op.kernel_source,
-        )
-    elif isinstance(op, KernelOp):
-        db.record_kernel_op(key, _body_json(op, "kernel"), op.pretty_body())
-    elif isinstance(op, LoopOp):
-        db.record_loop_op(key, _body_json(op, "loop"), op.pretty_body())
-
-
-def _body_json(op, dialect: str) -> str:
-    return json.dumps(
-        {
-            "dialect": dialect,
-            "name": getattr(op, "name", None) or getattr(op, "kernel_name", None) or "?",
-            "body_repr": repr(op.body),
-        },
-        default=str,
-    )
-
-
 def persist_kernel_perf(
     db, ctx, backend_name: str, cuda_op, *, stats, status: str, captured: bool = False, error: str | None = None
 ) -> bool:
     """Persist one measured kernel as deploy evidence: its ``perf`` row under ``ctx``'s card and regime
-    (keep-best policy, see :meth:`SearchDB.record_perf`), the inventory rows of every op on its
-    source chain, and the ``lowering`` hops between them. The ONE writer for a kernel
-    measurement — the tuner's terminal bench and ``run --bench``'s pinned rows both come here, so
+    (keep-best policy, see :meth:`SearchDB.record_perf`) and its ``cuda_op`` row. The ONE writer for a
+    kernel measurement — the tuner's terminal bench and ``run --bench``'s pinned rows both come here, so
     a replayed golden and a searched candidate are indistinguishable to the evidence pick.
     Returns whether a row was written (a kernel with no variant key persists nothing)."""
     cuda_key = cuda_op.identity_key(with_io=True, with_knobs=True)
     if cuda_key is None:
         return False
-    chain = [op for op in cuda_op.source_chain() if op.dialect is not None]
-    keyed_chain = [(op, cuda_key if op is cuda_op else op.identity_key(with_io=True, with_knobs=True)) for op in chain]
-    for op, key in keyed_chain:
-        if key is not None:
-            record_op_inventory(db, op, key)
-    for (parent_op, p_key), (child_op, c_key) in zip(keyed_chain[1:], keyed_chain[:-1], strict=False):
-        p_dialect = parent_op.dialect
-        c_dialect = child_op.dialect
-        if p_dialect is None or c_dialect is None:
-            continue
-        if p_dialect == c_dialect == "loop":
-            # loop→loop source hops are structural/decision hops, not
-            # lowering rewrites: the splice attribution stamped by the
-            # identity strategy (a decomposition's kernels → the
-            # pre-split op), the keep-vs-split rebind, name stamps.
-            # A ``lowering`` row holds ONE best child per parent, so
-            # recording a multi-kernel decomposition's hops would let
-            # ``best_per_op_time``'s chain walk resolve the pre-split
-            # op to a single fragment kernel's median — half the work
-            # masquerading as the whole op. The decomposition's cost
-            # is a Σ, owned by the two-level tuner, never this table.
-            continue
-        if p_key is None or c_key is None:
-            continue
-        p_knobs = getattr(parent_op, "knobs", None) or {}
-        c_knobs = getattr(child_op, "knobs", None) or {}
-        knobs_delta = {k: v for k, v in c_knobs.items() if p_knobs.get(k) != v}
-        db.record_lowering(
-            p_key,
-            p_dialect,
-            c_key,
-            c_dialect,
-            knobs=knobs_delta,
-            measured_median_us=stats.median if status == "ok" else None,
-        )
+    db.record_cuda_op(
+        cuda_key,
+        kernel_source=cuda_op.kernel_source,
+        arg_order=list(cuda_op.arg_order),
+        grid=list(cuda_op.grid),
+        block=list(cuda_op.block),
+        smem_bytes=cuda_op.smem_bytes,
+        pretty=cuda_op.kernel_source,
+    )
     knobs = getattr(cuda_op, "knobs", None) or {}
     db.record_perf(ctx, cuda_key, backend=backend_name, status=status, stats=stats, knobs=knobs, captured=captured, error=error)
     return True

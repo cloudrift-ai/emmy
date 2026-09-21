@@ -1,10 +1,12 @@
-"""The ``perf`` table's card key — two cards never share a row — and the one-time migration of a table
-written before the card joined the key."""
+"""The ``perf`` table's card key — two cards never share a row — and what happens to a file another
+emmy wrote: a writer re-creates the table, a reader refuses it, nothing migrates."""
 
 from __future__ import annotations
 
 import sqlite3
 from dataclasses import replace
+
+import pytest
 
 from emmy.compiler.context import Context
 from emmy.compiler.pipeline.search.db import PerfStats, SearchDB
@@ -39,12 +41,9 @@ def test_two_cards_sharing_a_capability_keep_their_own_rows() -> None:
     assert (rows[_5090].cc, rows[_5090].opt) == (120, 3)
 
 
-def test_a_pre_card_table_migrates_and_keeps_serving_its_machine(tmp_path) -> None:
-    """An old ``perf`` table is rebuilt card-keyed on the first writer open. Its rows cannot say which
-    card measured them, so they take an empty card: the machine that owns the file still deploys them,
-    a fresh measurement of the same kernel lands beside them as the card's own row and wins the lookup,
-    and a read-only open of an unmigrated file reads them the same way."""
-    path = tmp_path / "autotune.db"
+def _write_older_emmy_file(path) -> None:
+    """A tune DB as an emmy before the card key wrote it: a ``perf`` table with other columns, beside
+    the inventory and ``lowering`` tables nothing reads any more."""
     old = sqlite3.connect(path)
     old.execute(
         "CREATE TABLE perf (context_key TEXT NOT NULL, op_key TEXT NOT NULL, backend TEXT NOT NULL, status TEXT NOT NULL, "
@@ -52,25 +51,31 @@ def test_a_pre_card_table_migrates_and_keeps_serving_its_machine(tmp_path) -> No
         "latency_us_variance REAL NOT NULL, n_samples INTEGER NOT NULL, measured_at TEXT NOT NULL, knobs TEXT NOT NULL DEFAULT '{}', "
         "captured INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (context_key, op_key, backend))"
     )
-    ctx = _ctx(_5090)
-    old.execute(
-        "INSERT INTO perf VALUES (?, 'k', 'cuda', 'ok', 50.0, 50.0, 50.0, 50.0, 0.0, 30, '2026-01-01T00:00:00+00:00', '{}', 1)",
-        (ctx.structural_key(),),
-    )
+    old.execute("INSERT INTO perf VALUES ('ctx', 'k', 'cuda', 'ok', 50.0, 50.0, 50.0, 50.0, 0.0, 30, '2026-01-01T00:00:00+00:00', '{}', 1)")
+    old.execute("CREATE TABLE lowering (parent_key TEXT PRIMARY KEY, child_key TEXT NOT NULL)")
+    old.execute("CREATE TABLE loop_op (key TEXT PRIMARY KEY, body_json TEXT NOT NULL, pretty TEXT NOT NULL)")
     old.commit()
     old.close()
 
-    ro = SearchDB.open_readonly(path)
-    [unmigrated] = ro.iter_perf_rows()
-    ro.close()
-    assert (unmigrated.gpu, unmigrated.cc, unmigrated.feat_ver) == ("", None, 1)
+
+def test_a_file_another_emmy_wrote_is_re_created_by_a_writer_and_refused_by_a_reader(tmp_path) -> None:
+    """Nothing migrates: the rows are regenerable, and a migration would be a second schema to carry.
+    A writer open re-creates ``perf`` empty and drops the tables nothing reads; a read-only open
+    cannot re-create anything, so it refuses the file and names the fix."""
+    path = tmp_path / "autotune.db"
+    _write_older_emmy_file(path)
+
+    with pytest.raises(RuntimeError, match="written by another emmy"):
+        SearchDB.open_readonly(path)
 
     db = SearchDB(path)
-    [migrated] = db.iter_perf_rows()
-    assert migrated == unmigrated
-    assert db.lookup_perf(ctx, "k", backend="cuda").stats.median == 50.0
-
+    assert list(db.iter_perf_rows()) == []
+    tables = {r[0] for r in db._conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert tables == {"perf", "cuda_op"}
+    ctx = _ctx(_5090)
     db.record_perf(ctx, "k", backend="cuda", status="ok", stats=_stats(60.0), captured=True)
-    assert db.lookup_perf(ctx, "k", backend="cuda").gpu == _5090
-    assert sorted(r.gpu for r in db.iter_perf(ctx, backend="cuda")) == ["", _5090]
     db.close()
+
+    ro = SearchDB.open_readonly(path)
+    assert [r.stats.median for r in ro.iter_perf_rows()] == [60.0]
+    ro.close()

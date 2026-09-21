@@ -443,9 +443,9 @@ def test_structural_multi_cuda_proposal_keeps_ranking_without_parent_perf(tmp_pa
     assert reloaded_db.lookup_perf(ctx, original_loop.identity_key(with_io=True, with_knobs=True), backend="cuda") is None
     reloaded_db.close()
 
-    # A later ordinary search keeps its own whole-slice bookkeeping and lowering
-    # evidence under the unpinned Loop key. Neither may fabricate deploy evidence
-    # for the structural parent captured by the proposal's node lineage.
+    # A later ordinary search keeps its own whole-slice bookkeeping under the unpinned Loop key and
+    # its kernel row under the kernel's own key. Neither may fabricate deploy evidence for the
+    # structural parent captured by the proposal's node lineage.
     db = SearchDB(db_path)
     bookkeeping = PerfStats(median=106.95, min=106.95, max=106.95, mean=106.95, variance=0.0, n_samples=1)
     monolithic = PerfStats(median=153.45, min=153.45, max=153.45, mean=153.45, variance=0.0, n_samples=1)
@@ -458,14 +458,6 @@ def test_structural_multi_cuda_proposal_keeps_ranking_without_parent_perf(tmp_pa
         status="ok",
         stats=bookkeeping,
         captured=True,
-    )
-    db.record_lowering(
-        original_loop.identity_key(with_io=True, with_knobs=True),
-        "loop",
-        fallback_key,
-        "cuda",
-        knobs=fallback,
-        measured_median_us=monolithic.median,
     )
     db.record_perf(
         ctx,
@@ -482,8 +474,6 @@ def test_structural_multi_cuda_proposal_keeps_ranking_without_parent_perf(tmp_pa
     loop_perf = reloaded_db.lookup_perf(ctx, original_loop.identity_key(with_io=True, with_knobs=True), backend="cuda")
     assert route_perf is None
     assert loop_perf is not None and loop_perf.stats.median == pytest.approx(106.95)
-    lowering = reloaded_db.lookup_lowering(original_loop.identity_key(with_io=True, with_knobs=True))
-    assert lowering is not None and lowering.child_key == fallback_key
     candidates = [{**live_features, **fallback}, {**live_features, **route}]
     assert _db_measured_pick(_db_measured_index(reloaded_db, ctx).ok, candidates) == (0, 153.45)
     reloaded_db.close()
