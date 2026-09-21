@@ -72,23 +72,16 @@ def _golden_id(path: Path) -> str:
 def _row_parameters():
     """One parameter per recorded row of every repository golden, plus one per registry line naming
     a row the file no longer holds. The stale line carries NO xfail: marked, its own failure would be
-    the expected one and the dead entry would sit there forever.
-
-    Rows of one program share an ``xdist_group``: replaying a frontend target lowers its whole
-    persisted program first, several minutes for a traced model layer, so rows scattered over every
-    worker paid that lowering once per worker instead of once per run."""
+    the expected one and the dead entry would sit there forever."""
     listed_by_file = yaml.safe_load(_XFAILS_FILE.read_text()) or {}
     parameters = []
     with _repository_golden_paths() as paths:
         for path in sorted(paths, key=_golden_id):
             file_id = _golden_id(path)
-            records = _records_of(path)
-            labels = _labels(records)
+            labels = _labels(_records_of(path))
             listed = set(listed_by_file.get(file_id, ()))
-            for record, label in zip(records, labels, strict=True):
-                marks = [pytest.mark.xdist_group(f"golden-{file_id}-{record.program_index}")]
-                if label in listed:
-                    marks.append(pytest.mark.xfail(strict=True, reason="row equals no enumerated leaf"))
+            for label in labels:
+                marks = [pytest.mark.xfail(strict=True, reason="row equals no enumerated leaf")] if label in listed else []
                 parameters.append(pytest.param(path, label, id=f"{file_id}/{label}", marks=marks))
             for stale in sorted(listed - set(labels)):
                 parameters.append(pytest.param(path, stale, id=f"{file_id}/{stale}"))

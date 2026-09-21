@@ -329,6 +329,7 @@ programs:
 configs:
 - program: 0
   target:
+    loop: 0
     origins:
     - add_1
     - add_1_bc
@@ -418,3 +419,677 @@ configs:
       STAGE: ''
       RASTER: ''
     identity: 6eda44867af8aa47bac2973d3075dc40e41623aa2ac02af6a41e6d3ed4b15884
+loops:
+- inputs: [div]
+  outputs: [div_5]
+  nodes:
+  - id: add_1_c1
+    op: constant
+    attrs:
+      name: add_1_c1
+      value: 1.0e-06
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[add_1_c1, f32, [1]]]
+  - id: add_2_c1
+    op: constant
+    attrs:
+      name: add_2_c1
+      value: 1.0e-06
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[add_2_c1, f32, [1]]]
+  - id: add_3_c1
+    op: constant
+    attrs:
+      name: add_3_c1
+      value: 1.0e-06
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[add_3_c1, f32, [1]]]
+  - id: add_4_c1
+    op: constant
+    attrs:
+      name: add_4_c1
+      value: 1.0e-06
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[add_4_c1, f32, [1]]]
+  - id: add_5_c1
+    op: constant
+    attrs:
+      name: add_5_c1
+      value: 1.0e-06
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[add_5_c1, f32, [1]]]
+  - id: div
+    op: input
+    outputs: [[div, f32, [1, 1, 4, 4]]]
+  - id: div_5
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Load
+          fields:
+            names: {tuple: [in0]}
+            input: add_1_c1
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Load
+          fields:
+            names: {tuple: [in1]}
+            input: add_2_c1
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Load
+          fields:
+            names: {tuple: [in2]}
+            input: add_3_c1
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Load
+          fields:
+            names: {tuple: [in3]}
+            input: add_4_c1
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Load
+          fields:
+            names: {tuple: [in4]}
+            input: add_5_c1
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 4}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 4}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 4}, window: null}}
+                        body:
+                          body:
+                          - class: Load
+                            fields:
+                              names: {tuple: [in5]}
+                              input: div
+                              index:
+                                tuple:
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {var: a2}}
+                                - {expr: {var: a1}}
+                              dtype: null
+                          - class: Accum
+                            fields: {name: acc0, value: in5, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
+                        unroll: false
+                        seed: true
+                    - class: Assign
+                      fields: {name: v0, op: {elementwise: add}, args: {tuple: [acc0, in0]}, dtype: null}
+                    - class: Assign
+                      fields: {name: v1, op: {elementwise: reciprocal}, args: {tuple: [v0]}, dtype: null}
+                    - class: Load
+                      fields:
+                        names: {tuple: [in6]}
+                        input: div
+                        index:
+                          tuple:
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {var: a0}}
+                          - {expr: {var: a1}}
+                        dtype: null
+                    - class: Assign
+                      fields: {name: v2, op: {elementwise: multiply}, args: {tuple: [in6, v1]}, dtype: null}
+                    - class: Accum
+                      fields: {name: acc1, value: v2, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
+                  unroll: false
+                  seed: true
+              - class: Assign
+                fields: {name: v3, op: {elementwise: add}, args: {tuple: [acc1, in1]}, dtype: null}
+              - class: Assign
+                fields: {name: v4, op: {elementwise: reciprocal}, args: {tuple: [v3]}, dtype: null}
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 4}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a4, extent: {dim: 4}, window: null}}
+                        body:
+                          body:
+                          - class: Load
+                            fields:
+                              names: {tuple: [in7]}
+                              input: div
+                              index:
+                                tuple:
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {var: a4}}
+                                - {expr: {var: a1}}
+                              dtype: null
+                          - class: Accum
+                            fields: {name: acc2, value: in7, op: {elementwise: add}, dtype: null, axes: {tuple: [a4]}, base: null}
+                        unroll: false
+                        seed: true
+                    - class: Assign
+                      fields: {name: v5, op: {elementwise: add}, args: {tuple: [acc2, in0]}, dtype: null}
+                    - class: Assign
+                      fields: {name: v6, op: {elementwise: reciprocal}, args: {tuple: [v5]}, dtype: null}
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a4, extent: {dim: 4}, window: null}}
+                        body:
+                          body:
+                          - class: Loop
+                            fields:
+                              axis: {class: Axis, fields: {name: a6, extent: {dim: 4}, window: null}}
+                              body:
+                                body:
+                                - class: Loop
+                                  fields:
+                                    axis: {class: Axis, fields: {name: a7, extent: {dim: 4}, window: null}}
+                                    body:
+                                      body:
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in8]}
+                                          input: div
+                                          index:
+                                            tuple:
+                                            - {expr: {literal: {value: 0, dtype: int}}}
+                                            - {expr: {literal: {value: 0, dtype: int}}}
+                                            - {expr: {var: a7}}
+                                            - {expr: {var: a6}}
+                                          dtype: null
+                                      - class: Accum
+                                        fields: {name: acc3, value: in8, op: {elementwise: add}, dtype: null, axes: {tuple: [a7]}, base: null}
+                                    unroll: false
+                                    seed: true
+                                - class: Assign
+                                  fields: {name: v7, op: {elementwise: add}, args: {tuple: [acc3, in0]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v8, op: {elementwise: reciprocal}, args: {tuple: [v7]}, dtype: null}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in9]}
+                                    input: div
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a4}}
+                                      - {expr: {var: a6}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v9, op: {elementwise: multiply}, args: {tuple: [in9, v8]}, dtype: null}
+                                - class: Accum
+                                  fields: {name: acc4, value: v9, op: {elementwise: add}, dtype: null, axes: {tuple: [a6]}, base: null}
+                              unroll: false
+                              seed: true
+                          - class: Assign
+                            fields: {name: v10, op: {elementwise: add}, args: {tuple: [acc4, in1]}, dtype: null}
+                          - class: Assign
+                            fields: {name: v11, op: {elementwise: reciprocal}, args: {tuple: [v10]}, dtype: null}
+                          - class: Load
+                            fields:
+                              names: {tuple: [in10]}
+                              input: div
+                              index:
+                                tuple:
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {var: a4}}
+                                - {expr: {var: a1}}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v12, op: {elementwise: multiply}, args: {tuple: [in10, v6]}, dtype: null}
+                          - class: Assign
+                            fields: {name: v13, op: {elementwise: multiply}, args: {tuple: [v11, v12]}, dtype: null}
+                          - class: Accum
+                            fields: {name: acc5, value: v13, op: {elementwise: add}, dtype: null, axes: {tuple: [a4]}, base: null}
+                        unroll: false
+                        seed: true
+                    - class: Assign
+                      fields: {name: v14, op: {elementwise: add}, args: {tuple: [acc5, in2]}, dtype: null}
+                    - class: Assign
+                      fields: {name: v15, op: {elementwise: reciprocal}, args: {tuple: [v14]}, dtype: null}
+                    - class: Load
+                      fields:
+                        names: {tuple: [in11]}
+                        input: div
+                        index:
+                          tuple:
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {var: a0}}
+                          - {expr: {var: a1}}
+                        dtype: null
+                    - class: Assign
+                      fields: {name: v16, op: {elementwise: multiply}, args: {tuple: [in11, v6]}, dtype: null}
+                    - class: Assign
+                      fields: {name: v17, op: {elementwise: multiply}, args: {tuple: [v16, v4]}, dtype: null}
+                    - class: Assign
+                      fields: {name: v18, op: {elementwise: multiply}, args: {tuple: [v15, v17]}, dtype: null}
+                    - class: Accum
+                      fields: {name: acc6, value: v18, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
+                  unroll: false
+                  seed: true
+              - class: Assign
+                fields: {name: v19, op: {elementwise: add}, args: {tuple: [acc6, in3]}, dtype: null}
+              - class: Assign
+                fields: {name: v20, op: {elementwise: reciprocal}, args: {tuple: [v19]}, dtype: null}
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a8, extent: {dim: 4}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a9, extent: {dim: 4}, window: null}}
+                        body:
+                          body:
+                          - class: Load
+                            fields:
+                              names: {tuple: [in12]}
+                              input: div
+                              index:
+                                tuple:
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {var: a9}}
+                                - {expr: {var: a8}}
+                              dtype: null
+                          - class: Accum
+                            fields: {name: acc7, value: in12, op: {elementwise: add}, dtype: null, axes: {tuple: [a9]}, base: null}
+                        unroll: false
+                        seed: true
+                    - class: Assign
+                      fields: {name: v21, op: {elementwise: add}, args: {tuple: [acc7, in0]}, dtype: null}
+                    - class: Assign
+                      fields: {name: v22, op: {elementwise: reciprocal}, args: {tuple: [v21]}, dtype: null}
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a9, extent: {dim: 4}, window: null}}
+                        body:
+                          body:
+                          - class: Loop
+                            fields:
+                              axis: {class: Axis, fields: {name: a11, extent: {dim: 4}, window: null}}
+                              body:
+                                body:
+                                - class: Loop
+                                  fields:
+                                    axis: {class: Axis, fields: {name: a12, extent: {dim: 4}, window: null}}
+                                    body:
+                                      body:
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in13]}
+                                          input: div
+                                          index:
+                                            tuple:
+                                            - {expr: {literal: {value: 0, dtype: int}}}
+                                            - {expr: {literal: {value: 0, dtype: int}}}
+                                            - {expr: {var: a12}}
+                                            - {expr: {var: a11}}
+                                          dtype: null
+                                      - class: Accum
+                                        fields: {name: acc8, value: in13, op: {elementwise: add}, dtype: null, axes: {tuple: [a12]}, base: null}
+                                    unroll: false
+                                    seed: true
+                                - class: Assign
+                                  fields: {name: v23, op: {elementwise: add}, args: {tuple: [acc8, in0]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v24, op: {elementwise: reciprocal}, args: {tuple: [v23]}, dtype: null}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in14]}
+                                    input: div
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a9}}
+                                      - {expr: {var: a11}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v25, op: {elementwise: multiply}, args: {tuple: [in14, v24]}, dtype: null}
+                                - class: Accum
+                                  fields: {name: acc9, value: v25, op: {elementwise: add}, dtype: null, axes: {tuple: [a11]}, base: null}
+                              unroll: false
+                              seed: true
+                          - class: Assign
+                            fields: {name: v26, op: {elementwise: add}, args: {tuple: [acc9, in1]}, dtype: null}
+                          - class: Assign
+                            fields: {name: v27, op: {elementwise: reciprocal}, args: {tuple: [v26]}, dtype: null}
+                          - class: Load
+                            fields:
+                              names: {tuple: [in15]}
+                              input: div
+                              index:
+                                tuple:
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {var: a9}}
+                                - {expr: {var: a8}}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v28, op: {elementwise: multiply}, args: {tuple: [in15, v22]}, dtype: null}
+                          - class: Assign
+                            fields: {name: v29, op: {elementwise: multiply}, args: {tuple: [v27, v28]}, dtype: null}
+                          - class: Accum
+                            fields: {name: acc10, value: v29, op: {elementwise: add}, dtype: null, axes: {tuple: [a9]}, base: null}
+                        unroll: false
+                        seed: true
+                    - class: Assign
+                      fields: {name: v30, op: {elementwise: add}, args: {tuple: [acc10, in2]}, dtype: null}
+                    - class: Assign
+                      fields: {name: v31, op: {elementwise: reciprocal}, args: {tuple: [v30]}, dtype: null}
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a9, extent: {dim: 4}, window: null}}
+                        body:
+                          body:
+                          - class: Loop
+                            fields:
+                              axis: {class: Axis, fields: {name: a14, extent: {dim: 4}, window: null}}
+                              body:
+                                body:
+                                - class: Loop
+                                  fields:
+                                    axis: {class: Axis, fields: {name: a15, extent: {dim: 4}, window: null}}
+                                    body:
+                                      body:
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in16]}
+                                          input: div
+                                          index:
+                                            tuple:
+                                            - {expr: {literal: {value: 0, dtype: int}}}
+                                            - {expr: {literal: {value: 0, dtype: int}}}
+                                            - {expr: {var: a15}}
+                                            - {expr: {var: a14}}
+                                          dtype: null
+                                      - class: Accum
+                                        fields:
+                                          name: acc11
+                                          value: in16
+                                          op: {elementwise: add}
+                                          dtype: null
+                                          axes: {tuple: [a15]}
+                                          base: null
+                                    unroll: false
+                                    seed: true
+                                - class: Assign
+                                  fields: {name: v32, op: {elementwise: add}, args: {tuple: [acc11, in0]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v33, op: {elementwise: reciprocal}, args: {tuple: [v32]}, dtype: null}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in17]}
+                                    input: div
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a9}}
+                                      - {expr: {var: a14}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v34, op: {elementwise: multiply}, args: {tuple: [in17, v33]}, dtype: null}
+                                - class: Accum
+                                  fields: {name: acc12, value: v34, op: {elementwise: add}, dtype: null, axes: {tuple: [a14]}, base: null}
+                              unroll: false
+                              seed: true
+                          - class: Assign
+                            fields: {name: v35, op: {elementwise: add}, args: {tuple: [acc12, in1]}, dtype: null}
+                          - class: Assign
+                            fields: {name: v36, op: {elementwise: reciprocal}, args: {tuple: [v35]}, dtype: null}
+                          - class: Loop
+                            fields:
+                              axis: {class: Axis, fields: {name: a14, extent: {dim: 4}, window: null}}
+                              body:
+                                body:
+                                - class: Loop
+                                  fields:
+                                    axis: {class: Axis, fields: {name: a17, extent: {dim: 4}, window: null}}
+                                    body:
+                                      body:
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in18]}
+                                          input: div
+                                          index:
+                                            tuple:
+                                            - {expr: {literal: {value: 0, dtype: int}}}
+                                            - {expr: {literal: {value: 0, dtype: int}}}
+                                            - {expr: {var: a17}}
+                                            - {expr: {var: a14}}
+                                          dtype: null
+                                      - class: Accum
+                                        fields:
+                                          name: acc13
+                                          value: in18
+                                          op: {elementwise: add}
+                                          dtype: null
+                                          axes: {tuple: [a17]}
+                                          base: null
+                                    unroll: false
+                                    seed: true
+                                - class: Assign
+                                  fields: {name: v37, op: {elementwise: add}, args: {tuple: [acc13, in0]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v38, op: {elementwise: reciprocal}, args: {tuple: [v37]}, dtype: null}
+                                - class: Loop
+                                  fields:
+                                    axis: {class: Axis, fields: {name: a17, extent: {dim: 4}, window: null}}
+                                    body:
+                                      body:
+                                      - class: Loop
+                                        fields:
+                                          axis: {class: Axis, fields: {name: a19, extent: {dim: 4}, window: null}}
+                                          body:
+                                            body:
+                                            - class: Loop
+                                              fields:
+                                                axis: {class: Axis, fields: {name: a20, extent: {dim: 4}, window: null}}
+                                                body:
+                                                  body:
+                                                  - class: Load
+                                                    fields:
+                                                      names: {tuple: [in19]}
+                                                      input: div
+                                                      index:
+                                                        tuple:
+                                                        - {expr: {literal: {value: 0, dtype: int}}}
+                                                        - {expr: {literal: {value: 0, dtype: int}}}
+                                                        - {expr: {var: a20}}
+                                                        - {expr: {var: a19}}
+                                                      dtype: null
+                                                  - class: Accum
+                                                    fields:
+                                                      name: acc14
+                                                      value: in19
+                                                      op: {elementwise: add}
+                                                      dtype: null
+                                                      axes: {tuple: [a20]}
+                                                      base: null
+                                                unroll: false
+                                                seed: true
+                                            - class: Assign
+                                              fields: {name: v39, op: {elementwise: add}, args: {tuple: [acc14, in0]}, dtype: null}
+                                            - class: Assign
+                                              fields: {name: v40, op: {elementwise: reciprocal}, args: {tuple: [v39]}, dtype: null}
+                                            - class: Load
+                                              fields:
+                                                names: {tuple: [in20]}
+                                                input: div
+                                                index:
+                                                  tuple:
+                                                  - {expr: {literal: {value: 0, dtype: int}}}
+                                                  - {expr: {literal: {value: 0, dtype: int}}}
+                                                  - {expr: {var: a17}}
+                                                  - {expr: {var: a19}}
+                                                dtype: null
+                                            - class: Assign
+                                              fields: {name: v41, op: {elementwise: multiply}, args: {tuple: [in20, v40]}, dtype: null}
+                                            - class: Accum
+                                              fields: {name: acc15, value: v41, op: {elementwise: add}, dtype: null, axes: {tuple: [a19]}, base: null}
+                                          unroll: false
+                                          seed: true
+                                      - class: Assign
+                                        fields: {name: v42, op: {elementwise: add}, args: {tuple: [acc15, in1]}, dtype: null}
+                                      - class: Assign
+                                        fields: {name: v43, op: {elementwise: reciprocal}, args: {tuple: [v42]}, dtype: null}
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in21]}
+                                          input: div
+                                          index:
+                                            tuple:
+                                            - {expr: {literal: {value: 0, dtype: int}}}
+                                            - {expr: {literal: {value: 0, dtype: int}}}
+                                            - {expr: {var: a17}}
+                                            - {expr: {var: a14}}
+                                          dtype: null
+                                      - class: Assign
+                                        fields: {name: v44, op: {elementwise: multiply}, args: {tuple: [in21, v38]}, dtype: null}
+                                      - class: Assign
+                                        fields: {name: v45, op: {elementwise: multiply}, args: {tuple: [v43, v44]}, dtype: null}
+                                      - class: Accum
+                                        fields: {name: acc16, value: v45, op: {elementwise: add}, dtype: null, axes: {tuple: [a17]}, base: null}
+                                    unroll: false
+                                    seed: true
+                                - class: Assign
+                                  fields: {name: v46, op: {elementwise: add}, args: {tuple: [acc16, in2]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v47, op: {elementwise: reciprocal}, args: {tuple: [v46]}, dtype: null}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in22]}
+                                    input: div
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a9}}
+                                      - {expr: {var: a14}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v48, op: {elementwise: multiply}, args: {tuple: [in22, v38]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v49, op: {elementwise: multiply}, args: {tuple: [v36, v48]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v50, op: {elementwise: multiply}, args: {tuple: [v47, v49]}, dtype: null}
+                                - class: Accum
+                                  fields: {name: acc17, value: v50, op: {elementwise: add}, dtype: null, axes: {tuple: [a14]}, base: null}
+                              unroll: false
+                              seed: true
+                          - class: Assign
+                            fields: {name: v51, op: {elementwise: add}, args: {tuple: [acc17, in3]}, dtype: null}
+                          - class: Assign
+                            fields: {name: v52, op: {elementwise: reciprocal}, args: {tuple: [v51]}, dtype: null}
+                          - class: Load
+                            fields:
+                              names: {tuple: [in23]}
+                              input: div
+                              index:
+                                tuple:
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {var: a9}}
+                                - {expr: {var: a8}}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v53, op: {elementwise: multiply}, args: {tuple: [in23, v22]}, dtype: null}
+                          - class: Assign
+                            fields: {name: v54, op: {elementwise: multiply}, args: {tuple: [v36, v53]}, dtype: null}
+                          - class: Assign
+                            fields: {name: v55, op: {elementwise: multiply}, args: {tuple: [v31, v54]}, dtype: null}
+                          - class: Assign
+                            fields: {name: v56, op: {elementwise: multiply}, args: {tuple: [v52, v55]}, dtype: null}
+                          - class: Accum
+                            fields: {name: acc18, value: v56, op: {elementwise: add}, dtype: null, axes: {tuple: [a9]}, base: null}
+                        unroll: false
+                        seed: true
+                    - class: Assign
+                      fields: {name: v57, op: {elementwise: add}, args: {tuple: [acc18, in4]}, dtype: null}
+                    - class: Assign
+                      fields: {name: v58, op: {elementwise: reciprocal}, args: {tuple: [v57]}, dtype: null}
+                    - class: Load
+                      fields:
+                        names: {tuple: [in24]}
+                        input: div
+                        index:
+                          tuple:
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {var: a0}}
+                          - {expr: {var: a8}}
+                        dtype: null
+                    - class: Assign
+                      fields: {name: v59, op: {elementwise: multiply}, args: {tuple: [in24, v22]}, dtype: null}
+                    - class: Assign
+                      fields: {name: v60, op: {elementwise: multiply}, args: {tuple: [v4, v59]}, dtype: null}
+                    - class: Assign
+                      fields: {name: v61, op: {elementwise: multiply}, args: {tuple: [v31, v60]}, dtype: null}
+                    - class: Assign
+                      fields: {name: v62, op: {elementwise: multiply}, args: {tuple: [v20, v61]}, dtype: null}
+                    - class: Assign
+                      fields: {name: v63, op: {elementwise: multiply}, args: {tuple: [v58, v62]}, dtype: null}
+                    - class: Write
+                      fields:
+                        output: div_5
+                        index:
+                          tuple:
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {var: a0}}
+                          - {expr: {var: a8}}
+                        values: {tuple: [v63]}
+                        value_dtype: null
+                        atomic: false
+                        swizzle: NONE
+                  unroll: false
+                  seed: true
+            unroll: false
+            seed: true
+      name: k_div_5_reduce
+    inputs: [add_1_c1, add_2_c1, add_3_c1, add_4_c1, add_5_c1, div]
+    outputs: [[div_5, f32, [1, 1, 4, 4]]]

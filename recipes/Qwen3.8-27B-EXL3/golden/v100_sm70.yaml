@@ -56496,6 +56496,8 @@ configs:
 - program: 0
   target:
     loop: 28
+    origins:
+    - cumsum
   realizations:
   - name: k_cumsum_reduce.0d565c5819a0.96280da4077d
     bindings: {}
@@ -56564,6 +56566,10 @@ configs:
 - program: 0
   target:
     loop: 32
+    origins:
+    - repeat_interleave_1
+    - reshape_2
+    - split_with_sizes_1
   realizations:
   - name: k_reshape_slice_pointwise_b75dea.90131d33c5f9.1c0e4821e661
     bindings: {}

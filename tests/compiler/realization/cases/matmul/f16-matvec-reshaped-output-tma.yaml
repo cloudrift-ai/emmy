@@ -43,6 +43,7 @@ programs:
 configs:
 - program: 0
   target:
+    loop: 0
     origins:
     - linear
     - reshape
@@ -60,3 +61,72 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
     identity: bdb367c182132c2e09f6c2ac6568ec19aefa45f8796fda2e6e1f464379baa00f
+loops:
+- inputs: [x0, x1]
+  outputs: [to]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 1, 1024]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [2048, 1024]]]
+  - id: to
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 2048}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 1024}, window: null}}
+                  body:
+                    body:
+                    - class: Load
+                      fields:
+                        names: {tuple: [in0]}
+                        input: x0
+                        index:
+                          tuple:
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {var: a1}}
+                        dtype: null
+                    - class: Load
+                      fields:
+                        names: {tuple: [in1]}
+                        input: x1
+                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
+                        dtype: null
+                    - class: Assign
+                      fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
+                    - class: Accum
+                      fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
+                  unroll: false
+                  seed: true
+              - class: Assign
+                fields: {name: v1, op: {elementwise: copy}, args: {tuple: [acc0]}, dtype: {dtype: f16}}
+              - class: Assign
+                fields: {name: v2, op: {elementwise: copy}, args: {tuple: [v1]}, dtype: {dtype: f32}}
+              - class: Write
+                fields:
+                  output: to
+                  index:
+                    tuple:
+                    - {expr: {literal: {value: 0, dtype: int}}}
+                    - {expr: {literal: {value: 0, dtype: int}}}
+                    - {expr: {binary: {op: //, left: {var: a0}, right: {literal: {value: 128, dtype: int}}}}}
+                    - {expr: {binary: {op: '%', left: {var: a0}, right: {literal: {value: 128, dtype: int}}}}}
+                  values: {tuple: [v2]}
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+            unroll: false
+            seed: true
+      name: k_linear_742465
+    inputs: [x1, x0]
+    outputs: [[to, f32, [1, 1, 16, 128]]]

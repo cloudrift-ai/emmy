@@ -235,13 +235,12 @@ correctness pins for a while). GPU correctness tests guard themselves with `requ
 
 `tests/compiler/pipeline/search/test_golden.py` strictly decodes every repository golden — the hardware goldens and
 each recipe's model golden — on the DEFAULT lane, one node per recorded row, so a failure names the row rather than a
-count. Rows of one program share an `xdist_group`: replaying a frontend target lowers its whole persisted program first,
-which takes minutes for a traced model layer (each Qwen3.8 V100 golden's), and rows scattered over every worker paid it
-once per worker. The derivation memo (`~/.cache/emmy/golden_identity.<fingerprint>.json`, one file per compiler
-fingerprint, keyed by record content) makes a re-run cost only the rows that actually changed. Measured on a 32-thread
-box: about 2,100 rows take 50 s warm and 260 s cold, the cold run bounded by one program's lowering; collecting them
-parses every golden in each worker, about 23 s. CI keeps no memo, so every CI run is the cold one. The realization
-corpus's `offered` stage is this same decode (see `tests/compiler/realization/ARCHITECTURE.md`).
+count. Every golden target is its kernel's stored Loop IR, so a row replays from that kernel and nothing re-lowers a
+traced program, and the replay leaves undecided every kernel of the set that cannot hold the row. The derivation memo
+(`~/.cache/emmy/golden_identity.<fingerprint>.json`, one file per compiler fingerprint, keyed by record content) makes a
+re-run cost only the rows that actually changed; CI keeps no memo, so every CI run decodes cold. Collecting the rows
+parses every golden in each worker. The realization corpus's `offered` stage is this same decode (see
+`tests/compiler/realization/ARCHITECTURE.md`).
 
 Rows that no longer decode are listed in `golden_xfails.yaml` beside the test and asked as STRICT xfails, so
 the list can only shrink: closing a row turns its node red until the line is deleted, and a line naming a row the

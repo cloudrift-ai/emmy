@@ -16,6 +16,7 @@ programs:
 configs:
 - program: 0
   target:
+    loop: 0
     origins:
     - mean
   realizations:
@@ -31,3 +32,71 @@ configs:
       NVIDIA GeForce RTX 5090:
         emmy_us: 3.209260498979084
         tcompile_us: 2.0517647704657387
+loops:
+- inputs: [x]
+  outputs: [mean]
+  nodes:
+  - id: mean_count
+    op: constant
+    attrs:
+      name: mean_count
+      value: 1024.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[mean_count, f32, [1]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [4, 1024]]]
+  - id: mean
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Load
+          fields:
+            names: {tuple: [in0]}
+            input: mean_count
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Assign
+          fields: {name: v0, op: {elementwise: reciprocal}, args: {tuple: [in0]}, dtype: null}
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 4}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 1024}, window: null}}
+                  body:
+                    body:
+                    - class: Load
+                      fields:
+                        names: {tuple: [in1]}
+                        input: x
+                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
+                        dtype: null
+                    - class: Accum
+                      fields: {name: acc0, value: in1, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
+                  unroll: false
+                  seed: true
+              - class: Assign
+                fields: {name: v1, op: {elementwise: multiply}, args: {tuple: [acc0, v0]}, dtype: null}
+              - class: Write
+                fields:
+                  output: mean
+                  index: {tuple: [{expr: {var: a0}}, {expr: {literal: {value: 0, dtype: int}}}]}
+                  values: {tuple: [v1]}
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+            unroll: false
+            seed: true
+      name: k_mean_6e1b56
+    inputs: [mean_count, x]
+    outputs: [[mean, f32, [4, 1]]]

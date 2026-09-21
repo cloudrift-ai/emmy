@@ -16,6 +16,7 @@ programs:
 configs:
 - program: 0
   target:
+    loop: 0
     origins:
     - sum_1
   realizations:
@@ -58,3 +59,48 @@ configs:
       REDUCE: ''
       RASTER: ''
     identity: b102d032c6a0bc2c093163b3612fe9b707bf5f286999ef8f92f031ed6323a9e5
+loops:
+- inputs: [x]
+  outputs: [sum_1]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [4, 1024]]]
+  - id: sum_1
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 4}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 1024}, window: null}}
+                  body:
+                    body:
+                    - class: Load
+                      fields:
+                        names: {tuple: [in0]}
+                        input: x
+                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
+                        dtype: null
+                    - class: Accum
+                      fields: {name: acc0, value: in0, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
+                  unroll: false
+                  seed: true
+              - class: Write
+                fields:
+                  output: sum_1
+                  index: {tuple: [{expr: {var: a0}}, {expr: {literal: {value: 0, dtype: int}}}]}
+                  values: {tuple: [acc0]}
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+            unroll: false
+            seed: true
+      name: k_sum_1_reduce
+    inputs: [x]
+    outputs: [[sum_1, f32, [4, 1]]]

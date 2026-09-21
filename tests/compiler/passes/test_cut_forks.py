@@ -45,7 +45,7 @@ from emmy.compiler.pipeline.search.golden import (
 )
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.torch_wire import graph_to_wire
-from tests.compiler.helpers import case_target_tile, direct_classic_leaf, requires_cuda
+from tests.compiler.helpers import case_target_tile, direct_classic_leaf, loop_record_fields, loop_target, requires_cuda
 from tests.compiler.terms import contraction, projection, reduction, slab
 
 _CTX = Context.from_target((12, 0))
@@ -277,7 +277,7 @@ def test_recorded_sdpa_cut_decodes_exactly_and_stale_path_fails_loudly() -> None
         "model": None,
         "program_index": 0,
         "program_wire": wire,
-        "origins": ("out",),
+        **loop_record_fields(_sdpa_graph(), ["out"]),
         "bindings": (),
         "pins": (),
         "measurements": None,
@@ -441,7 +441,7 @@ def _receipt_fields() -> dict:
         "model": None,
         "program_index": 0,
         "program_wire": graph_to_wire(_sdpa_graph()),
-        "origins": ("out",),
+        **loop_record_fields(_sdpa_graph(), ["out"]),
         "bindings": (),
         "pins": (("PLACE@map.1/twist.1/inner", "cut"),),
         "measurements": None,
@@ -673,13 +673,15 @@ def test_receipt_validation_requires_child_identity_and_place_pins_stay_live() -
     from emmy.compiler.pipeline.search.golden import regime_live
 
     fields = _receipt_fields()
+    loops: list[dict] = []
     document = {
         "compute_cap": [12, 0],
         "programs": [fields["program_wire"]],
+        "loops": loops,
         "configs": [
             {
                 "program": 0,
-                "target": {"origins": ["out"]},
+                "target": loop_target(_sdpa_graph(), ["out"], loops),
                 "realizations": [
                     {"name": "sdpa.child", "bindings": {}, "pins": {"PLACE@map.1/twist.1/inner": "cut"}, "knobs": {"WORK": "w4x2"}}
                 ],
@@ -706,7 +708,7 @@ def test_pool_group_fuses_node_id_respellings_and_keys_on_pins() -> None:
     twin_fields = {
         **fields,
         "program_wire": graph_to_wire(respelled),
-        "origins": tuple(f"session2_{o}" for o in fields["origins"]),
+        **loop_record_fields(respelled, [f"session2_{o}" for o in fields["origins"]]),
     }
     a = GoldenRecord(knobs={}, **fields)
     b = GoldenRecord(knobs={}, **twin_fields)
@@ -757,7 +759,7 @@ def _routing_record(knobs: dict, *, name: str = "sdpa.route") -> GoldenRecord:
         model=None,
         program_index=0,
         program_wire=graph_to_wire(_sdpa_graph()),
-        origins=("out",),
+        **loop_record_fields(_sdpa_graph(), ["out"]),
         bindings=(),
         pins=(),
         knobs=knobs,

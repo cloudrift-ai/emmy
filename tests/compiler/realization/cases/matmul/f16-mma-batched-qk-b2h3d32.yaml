@@ -24,6 +24,7 @@ programs:
 configs:
 - program: 0
   target:
+    loop: 0
     origins:
     - c
     - kt
@@ -40,3 +41,88 @@ configs:
       NVIDIA GeForce RTX 5090:
         emmy_us: 2.872253529276559
         tcompile_us: 4.091707308117936
+loops:
+- inputs: [k, q]
+  outputs: [c]
+  nodes:
+  - id: k
+    op: input
+    outputs: [[k, f16, [2, 3, 128, 32]]]
+  - id: q
+    op: input
+    outputs: [[q, f16, [2, 3, 128, 32]]]
+  - id: c
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 6}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 128}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 128}, window: null}}
+                        body:
+                          body:
+                          - class: Loop
+                            fields:
+                              axis: {class: Axis, fields: {name: a3, extent: {dim: 32}, window: null}}
+                              body:
+                                body:
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in0]}
+                                    input: k
+                                    index:
+                                      tuple:
+                                      - {expr: {binary: {op: //, left: {var: a0}, right: {literal: {value: 3, dtype: int}}}}}
+                                      - {expr: {binary: {op: '%', left: {var: a0}, right: {literal: {value: 3, dtype: int}}}}}
+                                      - {expr: {var: a2}}
+                                      - {expr: {var: a3}}
+                                    dtype: null
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in1]}
+                                    input: q
+                                    index:
+                                      tuple:
+                                      - {expr: {binary: {op: //, left: {var: a0}, right: {literal: {value: 3, dtype: int}}}}}
+                                      - {expr: {binary: {op: '%', left: {var: a0}, right: {literal: {value: 3, dtype: int}}}}}
+                                      - {expr: {var: a1}}
+                                      - {expr: {var: a3}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
+                                - class: Accum
+                                  fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a3]}, base: null}
+                              unroll: false
+                              seed: true
+                          - class: Write
+                            fields:
+                              output: c
+                              index:
+                                tuple:
+                                - {expr: {binary: {op: //, left: {var: a0}, right: {literal: {value: 3, dtype: int}}}}}
+                                - {expr: {binary: {op: '%', left: {var: a0}, right: {literal: {value: 3, dtype: int}}}}}
+                                - {expr: {var: a1}}
+                                - {expr: {var: a2}}
+                              values: {tuple: [acc0]}
+                              value_dtype: null
+                              atomic: false
+                              swizzle: NONE
+                        unroll: false
+                        seed: true
+                  unroll: false
+                  seed: true
+            unroll: false
+            seed: true
+      name: k_matmul_15d111
+    inputs: [q, k]
+    outputs: [[c, f32, [2, 3, 128, 128]]]

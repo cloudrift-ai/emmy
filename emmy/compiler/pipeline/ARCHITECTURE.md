@@ -1370,13 +1370,13 @@ training data for the offline prior, and a regression reference. This Part cover
 obligations, and the checks that keep the A/B honest.
 
 `golden.py` holds one generic `GoldenRecord` per realization. A structural config references a stable frontend Torch
-IR program by its document-local list index. The preferred target selector is a non-empty, unique set of frontend
-provenance origins.
-When lowering produces a kernel without such a selector, the record points into the document's optional `loops` pool,
-which stores that standalone post-fusion Loop IR slice. Current lowering derives the `S_*` histogram, `ShapeKey`, dtype
-classification, dynamic status, and operation kind lazily; none is serialized. Trace inventories retain the complete
-frontend program so provenance selectors re-lower in their original fusion context, while Loop IR fallbacks load
-directly. There are no kernel-kind classes or snippet generators.
+IR program by its document-local list index, and its target IS a kernel: an index into the document's `loops` pool,
+which stores that standalone post-fusion Loop IR. A replay, a strict decode and an evidence import start from the
+stored kernel and never re-lower the program. The frontend provenance origins ride beside it (`target: {loop,
+origins}`) when the kernel computes every one of them whole, so they are its exact Torch twin; they select nothing and
+serve only as the Torch reference. A kernel holding part of an op keeps none.
+Current lowering derives the `S_*` histogram, `ShapeKey`, dtype classification, dynamic status, and operation kind
+lazily; none is serialized. There are no kernel-kind classes or snippet generators.
 
 **Repository goldens are the entire compatibility boundary.** The embedded Torch IR has no independent version field.
 The golden document has no format version either. When the YAML schema or its Torch IR encoding changes, regenerate
@@ -1452,11 +1452,10 @@ again from the file's rows alone (no tune DB, no prior): that 10-kernel twin, wh
 pricing, resolves from its 19 recorded rows in seconds.
 
 The preferred reference is the runnable Torch slice (`torch-eager`) or the applicable library kernel (`cublas`). A
-stored Loop IR kernel derives its slice from the embedded program (`GoldenRecord.reference_program`): the program is
-lowered once, the kernel is found by its Loop IR wire, and its provenance origins become the slice when it computes
-every one of them whole, reads only inputs it binds, and exposes its outputs. The slice is comparison only; identity
-stays the stored kernel. A kernel holding part of an op, or recomputing a value its slice would read, has no frontend
-callable; an origin slice can also have synthetic boundaries whose
+stored kernel's slice is its stored origins cut from the embedded program (`GoldenRecord.reference_program`), taken
+when the kernel writes only values those ops compute and the slice reads only inputs the kernel binds; nothing is
+lowered to find it. The slice is comparison only; identity stays the stored kernel. A kernel with no stored origins
+has no frontend callable; an origin slice can also have synthetic boundaries whose
 post-fusion output geometry is not independently comparable to its Torch slice. Such a target may use a separately
 compiled, repeated O3 `same-input-greedy` row as its positive reference only when the candidate and reference execute on
 identical deterministic inputs, their outputs pass the normal accuracy policy, and the model report discloses that

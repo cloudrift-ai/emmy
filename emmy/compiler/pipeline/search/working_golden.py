@@ -10,7 +10,6 @@ from __future__ import annotations
 import contextlib
 import copy
 import fcntl
-from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -63,7 +62,6 @@ def write_trace_inventory(
     *,
     model: str | None = None,
     ctx=None,
-    force_loop_targets: bool = False,
     realizations: list[dict] | None = None,
     model_quant_digest: str | None = None,
 ) -> TraceInventoryResult:
@@ -81,7 +79,6 @@ def write_trace_inventory(
         programs=programs,
         loops=loops,
         entries=entries,
-        force_loop_targets=force_loop_targets,
         realizations=realizations,
     )
     _dump_trace_inventory(
@@ -102,7 +99,6 @@ def append_trace_inventory(
     *,
     model: str | None = None,
     ctx=None,
-    force_loop_targets: bool = False,
     model_quant_digest: str | None = None,
 ) -> TraceInventoryResult:
     """Add one more traced program to an existing working inventory.
@@ -122,7 +118,7 @@ def append_trace_inventory(
     programs = document["programs"]
     loops = document.setdefault("loops", [])
     entries = document["configs"]
-    seen_loops = {entry["target"]["loop"] for entry in entries if "loop" in entry["target"]}
+    seen_loops = {entry["target"]["loop"] for entry in entries}
     before = len(entries)
     _append_trace_inventory(
         graph,
@@ -130,7 +126,6 @@ def append_trace_inventory(
         programs=programs,
         loops=loops,
         entries=entries,
-        force_loop_targets=force_loop_targets,
         seen_loops=seen_loops,
     )
     _dump_trace_inventory(
@@ -183,7 +178,6 @@ def write_trace_inventories(
             programs=programs,
             loops=loops,
             entries=entries,
-            force_loop_targets=True,
             name_prefix=name,
             seen_loops=seen_loops,
             realizations=realizations.get(name) if isinstance(realizations, Mapping) else realizations,
@@ -200,6 +194,13 @@ def write_trace_inventories(
     return TraceInventoryResult(path=destination, target_count=len(entries))
 
 
+def whole_origins(coverage: Mapping, program) -> tuple[str, ...]:
+    """The traced ops a kernel computes, when it computes every one of them whole — the frontend
+    slice that is the kernel's exact Torch twin. Empty for a kernel holding part of an op."""
+    origins = tuple(sorted(origin for origin in coverage if origin in program.nodes))
+    return origins if origins and all(coverage[origin][2] for origin in origins) else ()
+
+
 def _append_trace_inventory(
     graph,
     *,
@@ -207,7 +208,6 @@ def _append_trace_inventory(
     programs: list[dict],
     loops: list[dict],
     entries: list[dict],
-    force_loop_targets: bool,
     name_prefix: str | None = None,
     seen_loops: set[int] | None = None,
     realizations: list[dict] | None = None,
@@ -253,10 +253,9 @@ def _append_trace_inventory(
     # selectors must therefore resolve against the original trace context.
     program_ref: int | None = None
     inventory = []
+    totals = provenance.totals(fused)
     for node_id, node in targets:
-        origins = tuple(sorted(origin for origin in provenance.get(node) if origin in input_graph.nodes))
-        inventory.append((node_id, node, origins))
-    origin_counts = Counter(origins for _node_id, _node, origins in inventory if origins)
+        inventory.append((node_id, node, whole_origins(provenance.coverage(provenance.get(node), totals), input_graph)))
     used_names = {
         realization["name"]
         for entry in entries
@@ -282,16 +281,15 @@ def _append_trace_inventory(
                 name = f"{base}.{duplicate}"
                 duplicate += 1
         used_names.add(name)
-        if origins and origin_counts[origins] == 1 and not force_loop_targets:
-            target = {"origins": list(origins)}
-        else:
-            loop_graph = single_node_graph(fused, node_id)
-            loop_ref = intern_loop_program(loops, loop_graph)
-            if seen_loops is not None and loop_ref in seen_loops:
-                continue
-            if seen_loops is not None:
-                seen_loops.add(loop_ref)
-            target = {"loop": loop_ref}
+        # The target IS the kernel's Loop IR: a replay starts from the stored kernel and never re-lowers
+        # the program. The traced ops it computes whole ride beside it as provenance — the frontend
+        # slice a benchmark compares the kernel against.
+        loop_ref = intern_loop_program(loops, single_node_graph(fused, node_id))
+        if seen_loops is not None and loop_ref in seen_loops:
+            continue
+        if seen_loops is not None:
+            seen_loops.add(loop_ref)
+        target = {"loop": loop_ref, **({"origins": list(origins)} if origins else {})}
         if program_ref is None:
             program_ref = intern_program(programs, input_graph)
         if realizations is None:

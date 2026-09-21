@@ -34,11 +34,6 @@ _HARDWARE_GOLDENS_DIR = Path(__file__).parent / "goldens"
 _RECIPE_GOLDEN_DIR = "golden"
 _PROGRAM_GRAPH_CACHE: dict[int, tuple[dict, object]] = {}
 _LOOP_GRAPH_CACHE: dict[int, tuple[dict, object]] = {}
-_REFERENCE_CACHE: dict[int, tuple[dict, dict]] = {}
-#: Whole persisted programs lowered through the loop passes, memoized per (payload OBJECT, card)
-#: the same way as the sibling caches above. A frontend target resolves its provenance selector
-#: against this, so one traced layer lowers once however many kernels it contains.
-_LOWERED_PROGRAM_CACHE: dict[tuple, tuple[dict, object]] = {}
 _SAFE_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 
 
@@ -322,8 +317,7 @@ class GoldenRecord:
                 )
             )
         except Exception:  # noqa: BLE001 — a stale record must never break the fit's dataset build
-            wire = self.loop_wire if self.loop_wire is not None else self.program_wire
-            kernels = (hashlib.blake2b(json.dumps(wire, sort_keys=True).encode(), digest_size=16).digest(), tuple(self.origins))
+            kernels = (hashlib.blake2b(json.dumps(self.loop_wire, sort_keys=True).encode(), digest_size=16).digest(),)
         return (self.gpu_name, tuple(self.compute_cap), kernels, self.pin_key)
 
     @cached_property
@@ -342,44 +336,43 @@ class GoldenRecord:
             return graph
         return cached[1]
 
+    @property
+    def kernel_graph(self):
+        """The stored kernel's Loop IR, unspecialized — decoded once per loop payload."""
+        key = id(self.loop_wire)
+        cached = _LOOP_GRAPH_CACHE.get(key)
+        if cached is None or cached[0] is not self.loop_wire:
+            cached = (self.loop_wire, loop_graph_from_wire(self.loop_wire))
+            _LOOP_GRAPH_CACHE[key] = cached
+        return cached[1]
+
     @cached_property
     def target_program(self):
-        """Derive the disposable standalone program selected by this record."""
+        """The stored kernel as a standalone program, specialized to this record's bindings."""
         from emmy.compiler.specialize import specialize_program  # noqa: PLC0415
 
-        if self.loop_wire is not None:
-            key = id(self.loop_wire)
-            cached = _LOOP_GRAPH_CACHE.get(key)
-            if cached is None or cached[0] is not self.loop_wire:
-                graph = loop_graph_from_wire(self.loop_wire)
-                _LOOP_GRAPH_CACHE[key] = (self.loop_wire, graph)
-            else:
-                graph = cached[1]
-            return specialize_program(graph, dict(self.bindings), loop=True)
-        return self._frontend_slice(self.origins)
+        return specialize_program(self.kernel_graph, dict(self.bindings), loop=True)
 
     @cached_property
     def reference_program(self):
-        """The PyTorch slice a stored Loop IR kernel is compared against: the embedded program's ops
-        the kernel computes, every op whole, with the kernel's outputs in its order. ``None`` for a
-        kernel holding part of an op, or one the program no longer lowers to. Comparison only — the
-        stored kernel stays the identity."""
-        if self.loop_wire is None:
-            return None
-        from emmy.compiler.context import Context  # noqa: PLC0415
+        """The PyTorch slice the stored kernel is compared against: the traced ops it came from
+        (``origins``) with the kernel's outputs in its order. ``None`` when the golden keeps no
+        traced ops for it, or when they are no exact twin — the kernel writes a value the ops do not
+        compute, or the slice reads a value the kernel is not given. Comparison only: the stored
+        kernel stays the identity."""
+        from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
+        from emmy.compiler.pipeline import CompilerDump  # noqa: PLC0415
 
-        cached = _REFERENCE_CACHE.get(id(self.program_wire))
-        if cached is None or cached[0] is not self.program_wire:
-            cached = (
-                self.program_wire,
-                _whole_op_origins(self.program, Context.from_target(self.compute_cap, gpu_name=self.gpu_name or None)),
-            )
-            _REFERENCE_CACHE[id(self.program_wire)] = cached
-        found = cached[1].get(json.dumps(self.loop_wire, sort_keys=True))
-        if found is None:
+        if not self.origins:
             return None
-        graph = self._frontend_slice(found[0])
-        graph.outputs = list(found[1])
+        kernel = self.kernel_graph
+        computed = {buffer for origin in self.origins for buffer in self.program.nodes[origin].buffer_names()}
+        reads = CompilerDump.frontend_reproducer_from_origins(self.program, set(self.origins)).inputs
+        bound = {node_id for node_id, node in kernel.nodes.items() if isinstance(node.op, InputOp)}
+        if not (set(kernel.outputs) <= computed and set(reads) <= bound):
+            return None
+        graph = self._frontend_slice(self.origins)
+        graph.outputs = list(kernel.outputs)
         return graph
 
     def _frontend_slice(self, origins):
@@ -391,7 +384,7 @@ class GoldenRecord:
     @property
     def target_key(self) -> tuple:
         """Document-local identity shared by candidate rows for one target."""
-        return ("loop", self.loop_index) if self.loop_index is not None else ("origins", *self.origins)
+        return ("loop", self.loop_index)
 
     @property
     def binding_map(self) -> dict[str, int]:
@@ -422,18 +415,12 @@ class GoldenRecord:
 
     @cached_property
     def dtype(self) -> str:
-        """Public dtype spelling derived from the selected frontend operation."""
-        if self.loop_wire is not None:
-            graph = self.target_program
-            tensor = graph.buffer(graph.outputs[0])
-            if tensor is None:
-                raise ValueError(f"{self.name}: Loop IR target has no output tensor")
-            output_dtype = tensor.dtype.name
-            return {"f16": "fp16", "f32": "fp32"}.get(output_dtype, output_dtype)
-        by_id = {node["id"]: node for node in self.program_wire["nodes"]}
-        order = {node["id"]: index for index, node in enumerate(self.program_wire["nodes"])}
-        terminal = max(self.origins, key=order.__getitem__)
-        output_dtype = by_id[terminal]["outputs"][0][1]
+        """Public dtype spelling of the stored kernel's first output."""
+        graph = self.target_program
+        tensor = graph.buffer(graph.outputs[0])
+        if tensor is None:
+            raise ValueError(f"{self.name}: Loop IR target has no output tensor")
+        output_dtype = tensor.dtype.name
         return {"f16": "fp16", "f32": "fp32"}.get(output_dtype, output_dtype)
 
     @property
@@ -511,7 +498,12 @@ def _validate_target(target: object, *, index: int, program_wire: dict, loops: l
     if not isinstance(target, Mapping):
         raise ValueError(f"{where} must be a mapping")
     _require_keys(target, {"origins", "loop"}, where)
-    if set(target) == {"origins"}:
+    if "loop" not in target:
+        raise ValueError(f"{where} must name its kernel's Loop IR (`loop`)")
+    loop_ref = target["loop"]
+    if isinstance(loop_ref, bool) or not isinstance(loop_ref, int) or not 0 <= loop_ref < len(loops):
+        raise ValueError(f"{where}.loop does not resolve in this document: {loop_ref!r}")
+    if "origins" in target:
         origins = target["origins"]
         if not isinstance(origins, list) or not origins or not all(isinstance(origin, str) and origin for origin in origins):
             raise ValueError(f"{where}.origins must be a non-empty list of node ids")
@@ -519,13 +511,6 @@ def _validate_target(target: object, *, index: int, program_wire: dict, loops: l
         missing_origins = set(origins) - node_ids
         if missing_origins:
             raise ValueError(f"{where}.origins reference unknown program node(s): {', '.join(sorted(missing_origins))}")
-        return
-    if set(target) == {"loop"}:
-        loop_ref = target["loop"]
-        if isinstance(loop_ref, bool) or not isinstance(loop_ref, int) or not 0 <= loop_ref < len(loops):
-            raise ValueError(f"{where}.loop does not resolve in this document: {loop_ref!r}")
-        return
-    raise ValueError(f"{where} must contain exactly one of origins or loop")
 
 
 def validate_golden_file(
@@ -858,7 +843,7 @@ def _record_fingerprint(record: GoldenRecord) -> str:
     payload object — one document's records share their program pool."""
     import json  # noqa: PLC0415
 
-    wire = record.loop_wire if record.loop_wire is not None else record.program_wire
+    wire = record.loop_wire
     cached = _WIRE_DIGESTS.get(id(wire))
     if cached is None or cached[0] is not wire:
         cached = (wire, digest(json.dumps(wire, sort_keys=True, default=str)))
@@ -875,114 +860,27 @@ _DECODE_CTX_CACHE: dict[tuple, object] = {}
 
 
 def _record_cache_key(record: GoldenRecord) -> tuple:
-    payload_id = id(record.loop_wire) if record.loop_wire is not None else id(record.program_wire)
-    return (payload_id, record.target_key, record.compute_cap, record.bindings)
-
-
-def _whole_op_origins(program, ctx) -> dict[str, tuple[tuple[str, ...], tuple[str, ...]]]:
-    """Each kernel ``program`` lowers to, keyed by its Loop IR wire, mapped to the frontend origins
-    it computes whole and its outputs — a PyTorch slice of those origins exposing those outputs, and
-    reading nothing the kernel does not, computes exactly the kernel. A kernel holding part of an op,
-    or recomputing a value its slice would read, has no such slice and no entry."""
-    from emmy.compiler import provenance  # noqa: PLC0415
-    from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
-    from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
-    from emmy.compiler.loop_wire import loop_graph_to_wire  # noqa: PLC0415
-    from emmy.compiler.pipeline import LOOP_PASSES, CompilerDump, Pipeline  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.slice import single_node_graph  # noqa: PLC0415
-
-    source = program.copy()
-    provenance.seed(source)
-    fused = Pipeline.build(LOOP_PASSES).run(source.copy(), ctx=ctx)
-    totals = provenance.totals(fused)
-    found = {}
-    for node_id, node in fused.nodes.items():
-        if not isinstance(node.op, LoopOp):
-            continue
-        coverage = provenance.coverage(provenance.get(node), totals)
-        origins = tuple(sorted(origin for origin in coverage if origin in source.nodes))
-        if not origins or not all(coverage[origin][2] for origin in origins):
-            continue
-        kernel = single_node_graph(fused, node_id)
-        computed = {buffer for origin in origins for buffer in source.nodes[origin].buffer_names()}
-        reads = CompilerDump.frontend_reproducer_from_origins(source, set(origins)).inputs
-        bound = {input_id for input_id, input_node in kernel.nodes.items() if isinstance(input_node.op, InputOp)}
-        if set(kernel.outputs) <= computed and set(reads) <= bound:
-            found[json.dumps(loop_graph_to_wire(kernel), sort_keys=True)] = (origins, tuple(kernel.outputs))
-    return found
-
-
-def _lowered_program(record: GoldenRecord, ctx):
-    """The record's whole persisted program, lowered once per (program, card).
-
-    Every frontend target of one program selects out of the same lowering, so the pass runs once
-    for a traced layer instead of once per kernel it contains. Callers rebind ops on the nodes
-    they select, so each gets its own copy.
-    """
-    from emmy.compiler import provenance  # noqa: PLC0415
-    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline  # noqa: PLC0415
-
-    key = (id(record.program_wire), tuple(ctx.compute_capability), ctx.gpu_name)
-    cached = _LOWERED_PROGRAM_CACHE.get(key)
-    if cached is None or cached[0] is not record.program_wire:
-        graph = record.program.copy()
-        provenance.seed(graph)
-        cached = (record.program_wire, Pipeline.build(LOOP_PASSES).run(graph, ctx=ctx))
-        _LOWERED_PROGRAM_CACHE[key] = cached
-    return cached[1].copy()
-
-
-def _lowered_slice(record: GoldenRecord, ctx):
-    """The record's own frontend slice, lowered — the fallback context for its selector."""
-    from emmy.compiler import provenance  # noqa: PLC0415
-    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline  # noqa: PLC0415
-
-    graph = record.target_program.copy()
-    provenance.seed(graph)
-    return Pipeline.build(LOOP_PASSES).run(graph, ctx=ctx)
+    return (id(record.loop_wire), record.target_key, record.compute_cap, record.bindings)
 
 
 def _target_kernel_nodes(record: GoldenRecord):
-    """The record's target kernels in the CURRENT compiler: lower the persisted program through
-    the loop passes and select the target's ``LoopOp`` node(s) — every output kernel for a Loop IR
-    target, the provenance-selected ones for a frontend target. Returns ``(lowered graph, nodes)``.
-    Raises when the selector no longer resolves — the strict tripwire's loud case."""
-    from emmy.compiler import provenance  # noqa: PLC0415
+    """The record's stored kernel through the CURRENT loop passes: ``(lowered graph, nodes)``, one
+    node per kernel the stored Loop IR lowers to. Raises when it lowers to none — the strict
+    tripwire's loud case."""
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
     from emmy.compiler.pipeline import LOOP_PASSES, Pipeline  # noqa: PLC0415
 
     ctx = Context.from_target(record.compute_cap, gpu_name=record.gpu_name or None)
-    if record.loop_wire is not None:
-        lowered = Pipeline.build(LOOP_PASSES).run(record.target_program.copy(), ctx=ctx)
-        # One kernel per PRODUCER, not per output: a multi-output kernel (an NVFP4 re-encode emits
-        # packed codes beside their block scales) produces several of the graph's outputs, and
-        # counting it once per output made a single-kernel target read as "lowers to N kernels".
-        producers = (lowered.producer(output) for output in lowered.outputs)
-        nodes = list({node.id: node for node in producers if node is not None and isinstance(node.op, LoopOp)}.values())
-        if not nodes:
-            raise ValueError(f"{record.name}: the persisted target selects no kernel after lowering")
-        return lowered, nodes
-
-    # A frontend target names its kernel by the trace's provenance, so the whole persisted program
-    # is the context the selector was recorded in and the one to resolve it in. The target's own
-    # frontend slice is the fallback, not the default: slicing re-fuses the cone in isolation, so a
-    # cone of sibling linears around one attention comes back as several kernels and none carries
-    # the recorded origin set. The slice still answers the opposite case -- a recorded cone that is
-    # a strict subset of what the current compiler fuses maximally, which the program never matches.
-    wanted = frozenset(record.origins)
-    for lowered in (_lowered_program(record, ctx), _lowered_slice(record, ctx)):
-        nodes = []
-        for node_id in lowered.topological_order():
-            node = lowered.nodes[node_id]
-            if not isinstance(node.op, LoopOp):
-                continue
-            origins = frozenset(origin for origin in provenance.get(node) if origin in record.program.nodes)
-            if origins == wanted:
-                nodes.append(node)
-        if nodes:
-            return lowered, nodes
-    raise ValueError(f"{record.name}: the persisted target selects no kernel after lowering")
+    lowered = Pipeline.build(LOOP_PASSES).run(record.target_program.copy(), ctx=ctx)
+    # One kernel per PRODUCER, not per output: a multi-output kernel (an NVFP4 re-encode emits
+    # packed codes beside their block scales) produces several of the graph's outputs, and
+    # counting it once per output made a single-kernel target read as "lowers to N kernels".
+    producers = (lowered.producer(output) for output in lowered.outputs)
+    nodes = list({node.id: node for node in producers if node is not None and isinstance(node.op, LoopOp)}.values())
+    if not nodes:
+        raise ValueError(f"{record.name}: the persisted target selects no kernel after lowering")
+    return lowered, nodes
 
 
 def _lifted_target(record: GoldenRecord):
@@ -1532,8 +1430,7 @@ def kernel_identity(record: GoldenRecord) -> str | None:
 
 def _derive_structural_features(record: GoldenRecord) -> tuple[tuple[str, float], ...]:
     """Lower the exact replay target and recover its unique ``S_*`` row."""
-    payload_id = id(record.loop_wire) if record.loop_wire is not None else id(record.program_wire)
-    key = (payload_id, record.target_key, record.compute_cap, record.bindings)
+    key = (id(record.loop_wire), record.target_key, record.compute_cap, record.bindings)
     cached = _STRUCTURAL_CACHE.get(key)
     if cached is not None:
         return cached

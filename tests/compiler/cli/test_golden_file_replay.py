@@ -19,6 +19,7 @@ from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.loop_wire import loop_graph_from_wire, loop_graph_to_wire
 from emmy.compiler.pipeline.search.golden import dump_golden_file, load_golden_file
 from emmy.compiler.pipeline.search.working_golden import write_trace_inventory
+from tests.compiler.helpers import loop_target
 
 
 def _working_loop(path, *, state="inventory", pins=None):
@@ -30,10 +31,10 @@ def _working_loop(path, *, state="inventory", pins=None):
         graph,
         path,
         ctx=Context.from_target((8, 9)),
-        force_loop_targets=True,
     )
     document = load_golden_file(path)
     entry = document["configs"][0]
+    entry["target"].pop("origins")  # an exact Loop target with no Torch twin
     realization = entry["realizations"][0]
     realization["name"] = "working.relu"
     if pins is not None:
@@ -78,7 +79,7 @@ def _working_placement_route(path):
         node_id="y",
     )
     graph.inputs, graph.outputs = ["x", "wn", "w"], ["y"]
-    write_trace_inventory(graph, path, ctx=Context.from_target((8, 9)), force_loop_targets=True)
+    write_trace_inventory(graph, path, ctx=Context.from_target((8, 9)))
     document = load_golden_file(path)
     realization = document["configs"][0]["realizations"][0]
     realization["name"] = "working.route"
@@ -136,34 +137,6 @@ def test_working_file_requires_name_and_reports_its_own_available_rows(run_cli, 
     assert "working.relu" in stdout + stderr
 
 
-def test_frontend_target_features_follow_the_replay_slice_after_maximal_fusion() -> None:
-    from emmy.compiler.pipeline.search.golden import load_golden_records
-    from emmy.compiler.torch_wire import graph_to_wire
-
-    graph = Graph()
-    graph.add_node(InputOp(), [], Tensor("x", (16,)), node_id="x")
-    graph.add_node(ElementwiseOp("relu"), ["x"], Tensor("hidden", (16,)), node_id="hidden")
-    graph.add_node(ElementwiseOp("relu"), ["hidden"], Tensor("out", (16,)), node_id="out")
-    graph.inputs, graph.outputs = ["x"], ["out"]
-    (record,) = load_golden_records(
-        {
-            "gpu_name": "NVIDIA GeForce RTX 4090",
-            "compute_cap": [8, 9],
-            "model": "org/model",
-            "programs": [graph_to_wire(graph)],
-            "configs": [
-                {
-                    "program": 0,
-                    "target": {"origins": ["hidden"]},
-                    "realizations": [{"name": "working.hidden", "bindings": {}, "pins": {"FAST_MATH": False}}],
-                }
-            ],
-        }
-    )
-
-    assert record.structural_features
-
-
 def test_working_file_golden_conflicts_with_direct_input(run_cli, tmp_path):
     path = tmp_path / "working.yaml"
     _working_loop(path)
@@ -208,7 +181,7 @@ def test_dynamic_realization_uses_its_own_reference_instead_of_the_first_sibling
     graph.inputs, graph.outputs = ["x"], ["y"]
 
     path = tmp_path / "working-dynamic.yaml"
-    write_trace_inventory(graph, path, ctx=Context.from_target((8, 9)), force_loop_targets=True)
+    write_trace_inventory(graph, path, ctx=Context.from_target((8, 9)))
     document = load_golden_file(path)
     document["configs"][0]["realizations"] = [
         {"name": "working.m1", "bindings": {"num_tokens": 1}, "pins": {"FAST_MATH": False}},
@@ -303,14 +276,16 @@ def test_named_frontend_kernel_set_child_stays_pinned_after_greedy_compile(tmp_p
     desired = {"WORK": "t16x8", "TILE": "f4x6", "REDUCE": "", "STAGE": "", "RASTER": ""}
     incumbent = {"WORK": "t32x8", "TILE": "f2x6", "REDUCE": "", "STAGE": "", "RASTER": ""}
     path = tmp_path / "working-kernel-set.yaml"
+    loops: list[dict] = []
     dump_golden_file(
         {
             "compute_cap": [8, 9],
             "programs": [graph_to_wire(graph)],
+            "loops": loops,
             "configs": [
                 {
                     "program": 0,
-                    "target": {"origins": ["y"]},
+                    "target": loop_target(graph, ["y"], loops, (8, 9)),
                     "realizations": [
                         {
                             "name": "working.parent",
@@ -412,14 +387,16 @@ def test_a_kernel_set_name_resolves_inside_the_realization_own_precision_lane(tm
     graph.inputs, graph.outputs = ["x", "w"], ["y"]
     measured = {"measurements": {"emmy_us": 1.0, "reference_us": 2.0, "reference_backend": "torch"}}
     path = tmp_path / "working-two-lanes.yaml"
+    loops: list[dict] = []
     dump_golden_file(
         {
             "compute_cap": [8, 9],
             "programs": [graph_to_wire(graph)],
+            "loops": loops,
             "configs": [
                 {
                     "program": 0,
-                    "target": {"origins": ["y"]},
+                    "target": loop_target(graph, ["y"], loops, (8, 9)),
                     "realizations": [
                         {"name": "seed", "bindings": {}, "pins": {"FAST_MATH": False}, "kernel_set": ["seed.split"]},
                         {"name": "seed.split", "bindings": {}, "pins": {"FAST_MATH": False}, "knobs": {"REDUCE": "g4k"}, **measured},

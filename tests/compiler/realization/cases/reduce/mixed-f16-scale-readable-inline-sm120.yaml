@@ -35,6 +35,7 @@ programs:
 configs:
 - program: 0
   target:
+    loop: 0
     origins:
     - mul
     - out
@@ -48,3 +49,70 @@ configs:
       REDUCE: coop
       WORK: t32
     identity: 8bdbc257be65ba44fbb0794a1593e668484cc4020d320bad35280a48444ca4b1
+loops:
+- inputs: [bias, scale, x]
+  outputs: [out]
+  nodes:
+  - id: bias
+    op: input
+    outputs: [[bias, f32, [4, 1]]]
+  - id: scale
+    op: input
+    outputs: [[scale, f16, [4, 1]]]
+  - id: x
+    op: input
+    outputs: [[x, f16, [4, 128]]]
+  - id: out
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 4}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 128}, window: null}}
+                  body:
+                    body:
+                    - class: Load
+                      fields:
+                        names: {tuple: [in0]}
+                        input: x
+                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
+                        dtype: null
+                    - class: Accum
+                      fields: {name: acc0, value: in0, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
+                  unroll: false
+                  seed: true
+              - class: Load
+                fields:
+                  names: {tuple: [in1]}
+                  input: bias
+                  index: {tuple: [{expr: {var: a0}}, {expr: {literal: {value: 0, dtype: int}}}]}
+                  dtype: null
+              - class: Load
+                fields:
+                  names: {tuple: [in2]}
+                  input: scale
+                  index: {tuple: [{expr: {var: a0}}, {expr: {literal: {value: 0, dtype: int}}}]}
+                  dtype: null
+              - class: Assign
+                fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [acc0, in2]}, dtype: null}
+              - class: Assign
+                fields: {name: v1, op: {elementwise: add}, args: {tuple: [in1, v0]}, dtype: null}
+              - class: Write
+                fields:
+                  output: out
+                  index: {tuple: [{expr: {var: a0}}, {expr: {literal: {value: 0, dtype: int}}}]}
+                  values: {tuple: [v1]}
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+            unroll: false
+            seed: true
+      name: k_out_reduce
+    inputs: [x, scale, bias]
+    outputs: [[out, f32, [4, 1]]]

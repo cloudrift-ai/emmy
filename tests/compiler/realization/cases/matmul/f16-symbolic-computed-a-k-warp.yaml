@@ -29,6 +29,7 @@ programs:
 configs:
 - program: 0
   target:
+    loop: 0
     origins:
     - o
     - probs
@@ -46,3 +47,119 @@ configs:
       NVIDIA GeForce RTX 5090:
         emmy_us: 33.37813218434651
         tcompile_us: 14.322963025834826
+loops:
+- inputs: [scores, v]
+  outputs: [o]
+  nodes:
+  - id: scores
+    op: input
+    outputs: [[scores, f16, [16, {sym: seq_len, hint: 512}, {sym: seq_len, hint: 512}]]]
+  - id: v
+    op: input
+    outputs: [[v, f16, [16, {sym: seq_len, hint: 512}, 128]]]
+  - id: o
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 16}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
+                        body:
+                          body:
+                          - class: Load
+                            fields:
+                              names: {tuple: [in0]}
+                              input: scores
+                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}, {expr: {var: a2}}]}
+                              dtype: null
+                          - class: Accum
+                            fields:
+                              name: acc0
+                              value: in0
+                              op: {elementwise: maximum}
+                              dtype: null
+                              axes: {tuple: [a2]}
+                              base: null
+                        unroll: false
+                        seed: true
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
+                        body:
+                          body:
+                          - class: Load
+                            fields:
+                              names: {tuple: [in1]}
+                              input: scores
+                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}, {expr: {var: a2}}]}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v0, op: {elementwise: subtract}, args: {tuple: [in1, acc0]}, dtype: null}
+                          - {class: Assign, fields: {name: v1, op: {elementwise: exp}, args: {tuple: [v0]}, dtype: null}}
+                          - class: Accum
+                            fields: {name: acc1, value: v1, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
+                        unroll: false
+                        seed: true
+                    - class: Assign
+                      fields: {name: v2, op: {elementwise: reciprocal}, args: {tuple: [acc1]}, dtype: null}
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a4, extent: {dim: 128}, window: null}}
+                        body:
+                          body:
+                          - class: Loop
+                            fields:
+                              axis: {class: Axis, fields: {name: a5, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
+                              body:
+                                body:
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in2]}
+                                    input: scores
+                                    index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}, {expr: {var: a5}}]}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v3, op: {elementwise: subtract}, args: {tuple: [in2, acc0]}, dtype: null}
+                                - {class: Assign, fields: {name: v4, op: {elementwise: exp}, args: {tuple: [v3]}, dtype: null}}
+                                - class: Assign
+                                  fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [v2, v4]}, dtype: null}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in3]}
+                                    input: v
+                                    index: {tuple: [{expr: {var: a0}}, {expr: {var: a5}}, {expr: {var: a4}}]}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v6, op: {elementwise: multiply}, args: {tuple: [in3, v5]}, dtype: {dtype: f32}}
+                                - class: Accum
+                                  fields: {name: acc2, value: v6, op: {elementwise: add}, dtype: null, axes: {tuple: [a5]}, base: null}
+                              unroll: false
+                              seed: true
+                          - class: Write
+                            fields:
+                              output: o
+                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}, {expr: {var: a4}}]}
+                              values: {tuple: [acc2]}
+                              value_dtype: null
+                              atomic: false
+                              swizzle: NONE
+                        unroll: false
+                        seed: true
+                  unroll: false
+                  seed: true
+            unroll: false
+            seed: true
+      name: k_matmul_softmax_reduce_2e8114
+    inputs: [scores, v]
+    outputs: [[o, f16, [16, {sym: seq_len, hint: 512}, 128]]]

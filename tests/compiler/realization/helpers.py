@@ -175,11 +175,14 @@ def regenerate(document: dict) -> dict:
     graph = graph_from_wire(document["programs"][entry["program"]])
     with tempfile.TemporaryDirectory() as directory:
         destination = Path(directory) / "regenerated.yaml"
-        write_trace_inventory(graph, destination, ctx=ctx, model=document.get("model"), force_loop_targets="loop" in entry["target"])
+        write_trace_inventory(graph, destination, ctx=ctx, model=document.get("model"))
         fresh = yaml.safe_load(destination.read_text())
 
-    matched = _matching_entry(fresh, entry)
+    matched = _matching_entry(fresh, entry, document["loops"][entry["target"]["loop"]])
     rebuilt = dict(fresh)
+    # A case keeps its own kernel only: the regenerated pool holds every kernel of the program.
+    rebuilt["loops"] = [fresh["loops"][matched["target"]["loop"]]]
+    matched["target"] = {**matched["target"], "loop": 0}
     rebuilt["configs"] = [matched]
     template = dict(matched["realizations"][0])
     rows = []
@@ -241,13 +244,16 @@ def complete(document: dict) -> dict:
     return document
 
 
-def _matching_entry(fresh: dict, entry: dict) -> dict:
-    """The regenerated config that selects the same target as the stored one."""
+def _matching_entry(fresh: dict, entry: dict, kernel: dict) -> dict:
+    """The regenerated config for the stored kernel: the one from the same traced ops, or, for a
+    kernel that keeps none, the one whose Loop IR is the stored kernel's."""
+    origins = entry["target"].get("origins")
     for candidate in fresh["configs"]:
-        if candidate["target"] == entry["target"]:
+        target = candidate["target"]
+        if (target.get("origins") == origins) if origins is not None else fresh["loops"][target["loop"]] == kernel:
             return dict(candidate)
-    targets = ", ".join(repr(candidate["target"]) for candidate in fresh["configs"])
-    raise CaseError(f"the stored target {entry['target']!r} no longer resolves; the program now offers {targets}")
+    offered = ", ".join(repr(candidate["target"].get("origins")) for candidate in fresh["configs"])
+    raise CaseError(f"no kernel of the program matches the stored one (traced ops {origins!r}); the program now forms {offered}")
 
 
 def canonical_knobs(knobs: dict) -> dict:
@@ -411,9 +417,9 @@ def built(case: Case):
 def correct(case: Case, compiled) -> None:
     """Stage 4 — the kernel the evidence picks computes the reference answer.
 
-    The reference is derived from the target, the way ``emmy run`` already derives it: a frontend
-    program (``target: {origins: …}``) has a numpy twin; an exact Loop target has none, so it
-    compares against the same-input greedy execution of the same program.
+    The reference is the kernel's traced ops run on the numpy backend
+    (:attr:`~emmy.compiler.pipeline.search.golden.GoldenRecord.reference_program`); a kernel with no
+    exact frontend twin compares against the same-input greedy execution of the same program.
     """
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
     from emmy.compiler.backend.numpy import NumpyBackend  # noqa: PLC0415
@@ -421,9 +427,11 @@ def correct(case: Case, compiled) -> None:
     program = case.record.target_program
     feed = seeded_inputs(program)
     result, _ = CudaBackend().run(compiled, input_data=dict(feed))
-    if case.record.loop_wire is None:
+    if (twin := case.record.reference_program) is not None:
         reference = NumpyBackend()
-        want, _ = reference.run(reference.compile(program.copy()), input_data=dict(feed))
+        # The twin reads the kernel's inputs, plus any checkpoint-backed weight of its own.
+        twin_feed = {**seeded_inputs(twin), **{name: value for name, value in feed.items() if name in twin.nodes}}
+        want, _ = reference.run(reference.compile(twin.copy()), input_data=twin_feed)
     else:
         greedy = CudaBackend()
         want, _ = greedy.run(greedy.compile(program.copy()), input_data=dict(feed))
@@ -459,7 +467,9 @@ def seeded_inputs(program) -> dict[str, np.ndarray]:
 
     feed: dict[str, np.ndarray] = {name: seeded(program.buffer(name).shape) for name in program.inputs}
     for node_id, node in program.nodes.items():
-        if not isinstance(node.op, ConstantOp) or node_id in feed:
+        # A constant the runtime derives from a symbolic extent (a dynamic mean's count) is the
+        # backend's to fill; seeding it would divide by noise.
+        if not isinstance(node.op, ConstantOp) or node_id in feed or node.op.context_value is not None:
             continue
         # A checkpoint-backed weight reaches a case with its shape but no value — the corpus has no
         # checkpoint to bind it from — so it is seeded exactly like an input.

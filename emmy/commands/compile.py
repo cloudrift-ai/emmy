@@ -246,12 +246,10 @@ def resolve_golden_arg(args) -> None:
     # ``--realization`` accepts an unambiguous substring; working-golden mutation is exact-name
     # only, so it cannot update a similarly named sibling.
     args.realization = distinct[0]  # the exact name from here on — what ``--record`` / ``--record-greedy`` write under
-    targets: list[tuple[dict, tuple[str, ...], dict | None]] = []
+    targets: list[dict] = []
     for match in matches:
-        if not any(
-            match.program_wire == program and match.origins == origins and match.loop_wire == loop for program, origins, loop in targets
-        ):
-            targets.append((match.program_wire, match.origins, match.loop_wire))
+        if not any(match.loop_wire == loop for loop in targets):
+            targets.append(match.loop_wire)
     if len(targets) != 1:
         logger.error("golden %r resolves to %d different embedded program targets", name, len(targets))
         sys.exit(2)
@@ -300,11 +298,10 @@ def resolve_golden_arg(args) -> None:
 
     args.golden_configs = [row(match) for match in pinned]
     logger.info(
-        "[golden] %s%s → embedded %s target %s (%d matching row%s, %d automatic pin%s)",
+        "[golden] %s%s → embedded Loop IR target %s (%d matching row%s, %d automatic pin%s)",
         name,
         f" from {golden_file}" if golden_file else "",
-        "Loop IR" if matches[0].loop_wire is not None else "program",
-        matches[0].loop_index if matches[0].loop_wire is not None else matches[0].program_index,
+        matches[0].loop_index,
         len(matches),
         "" if len(matches) == 1 else "s",
         len(pinned),

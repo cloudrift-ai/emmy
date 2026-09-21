@@ -48,6 +48,7 @@ programs:
 configs:
 - program: 0
   target:
+    loop: 0
     origins:
     - softmax
     - unsqueeze
@@ -76,3 +77,40 @@ configs:
       TILE: ''
       RASTER: ''
     identity: efd32c70547dd60e56a6c816b6cba2d3c69d88f889c00a2ca9ff671e407f7764
+loops:
+- inputs: [x]
+  outputs: [softmax]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [4]]]
+  - id: softmax
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 4}, window: null}}
+            body:
+              body:
+              - class: Load
+                fields: {names: {tuple: [in0]}, input: x, index: {tuple: [{expr: {var: a0}}]}, dtype: null}
+              - class: Assign
+                fields: {name: v0, op: {elementwise: subtract}, args: {tuple: [in0, in0]}, dtype: null}
+              - {class: Assign, fields: {name: v1, op: {elementwise: exp}, args: {tuple: [v0]}, dtype: null}}
+              - class: Assign
+                fields: {name: v2, op: {elementwise: divide}, args: {tuple: [v1, v1]}, dtype: null}
+              - class: Write
+                fields:
+                  output: softmax
+                  index: {tuple: [{expr: {var: a0}}, {expr: {literal: {value: 0, dtype: int}}}]}
+                  values: {tuple: [v2]}
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+            unroll: false
+            seed: true
+      name: k_softmax_834f63
+    inputs: [x]
+    outputs: [[softmax, f32, [4, 1]]]

@@ -29139,6 +29139,8 @@ configs:
 - program: 4
   target:
     loop: 5
+    origins:
+    - div_72
   realizations:
   - name: post-sym.k_div_pointwise.b71c40bb6826.dynamic.6dc3b5be9329
     bindings: {}
@@ -29210,6 +29212,31 @@ configs:
 - program: 4
   target:
     loop: 6
+    origins: &id007
+    - add_33
+    - add_33_bc
+    - add_33_c1_bc
+    - add_34
+    - add_34_bc
+    - add_34_c1_bc
+    - add_35
+    - add_35_bc
+    - add_35_c1_bc
+    - add_36
+    - add_36_bc
+    - add_36_c1_bc
+    - add_37
+    - add_37_bc
+    - add_37_c1_bc
+    - div_27
+    - div_28
+    - div_29
+    - div_30
+    - sum_28
+    - sum_29
+    - sum_30
+    - sum_31
+    - sum_32
   realizations:
   - name: post-sym.k_div_4_reduce.c54254fb669e.dynamic.7461bacf9c5c
     bindings: {}
@@ -29421,6 +29448,8 @@ configs:
 - program: 4
   target:
     loop: 7
+    origins: &id003
+    - div_72
   realizations:
   - name: post-sym.k_div_5_pointwise.b71c40bb6826.dynamic.7f68a4931951
     bindings: {}
@@ -29492,6 +29521,8 @@ configs:
 - program: 4
   target:
     loop: 8
+    origins:
+    - sum_61
   realizations:
   - name: post-sym.k_sum_7_reduce.813453fe986f.dynamic.8657970470d8
     bindings: {}
@@ -29570,6 +29601,40 @@ configs:
 - program: 4
   target:
     loop: 9
+    origins: &id006
+    - add_72
+    - add_72_bc
+    - add_72_c1_bc
+    - add_73
+    - add_73_bc
+    - add_73_c1_bc
+    - add_74
+    - add_74_bc
+    - add_74_c1_bc
+    - add_75
+    - add_75_bc
+    - add_75_c1_bc
+    - add_76
+    - add_76_bc
+    - add_76_c1_bc
+    - add_77
+    - add_77_bc
+    - add_77_c1_bc
+    - add_78
+    - add_78_bc
+    - add_78_c1_bc
+    - div_59
+    - div_60
+    - div_61
+    - div_62
+    - div_63
+    - div_64
+    - sum_62
+    - sum_63
+    - sum_64
+    - sum_65
+    - sum_66
+    - sum_67
   realizations:
   - name: post-sym.k_div_11_reduce.900abf212ff5.dynamic.b6fc9b9ac9a2
     bindings: {}
@@ -29739,6 +29804,7 @@ configs:
 - program: 4
   target:
     loop: 10
+    origins: *id003
   realizations:
   - name: post-sym.k_div_12_pointwise.b71c40bb6826.dynamic.7f68a4931951
     bindings: {}
@@ -29810,6 +29876,8 @@ configs:
 - program: 4
   target:
     loop: 11
+    origins: &id010
+    - sum_68
   realizations:
   - name: post-sym.k_sum_14_reduce.6dc107e70aaf.dynamic.b51271ace28f
     bindings: {}
@@ -29888,6 +29956,40 @@ configs:
 - program: 4
   target:
     loop: 12
+    origins: &id011
+    - add_79
+    - add_79_bc
+    - add_79_c1_bc
+    - add_80
+    - add_80_bc
+    - add_80_c1_bc
+    - add_81
+    - add_81_bc
+    - add_81_c1_bc
+    - add_82
+    - add_82_bc
+    - add_82_c1_bc
+    - add_83
+    - add_83_bc
+    - add_83_c1_bc
+    - add_84
+    - add_84_bc
+    - add_84_c1_bc
+    - add_85
+    - add_85_bc
+    - add_85_c1_bc
+    - div_66
+    - div_67
+    - div_68
+    - div_69
+    - div_70
+    - div_71
+    - sum_69
+    - sum_70
+    - sum_71
+    - sum_72
+    - sum_73
+    - sum_74
   realizations:
   - name: post-sym.k_div_18_reduce.e08028a9e8ff.dynamic.6bde73fe702a
     bindings: {}
@@ -30010,10 +30112,10 @@ configs:
         eager_us: 437.95609981455704
     kernel_set:
     - post-sym.k_div_18_reduce.e08028a9e8ff.m4096.58c14ac215f1.58c14ac215f1
-    knobs: &id003
+    knobs: &id004
       PLACE@map.1/inner: cut
     identity: 09b91f613233910e11fdd6ffc69262e519ebb2c38f2c632fc648a818703d014a
-    measurements: &id004
+    measurements: &id005
       emmy_us: 114.57636921160875
       reference_us: 116.1489560671732
       reference_backend: same-input-greedy
@@ -30022,9 +30124,9 @@ configs:
       num_tokens: 4096
     pins:
       FAST_MATH: false
-    knobs: *id003
+    knobs: *id004
     identity: 09b91f613233910e11fdd6ffc69262e519ebb2c38f2c632fc648a818703d014a
-    measurements: *id004
+    measurements: *id005
   - name: post-sym.k_div_18_reduce.e08028a9e8ff.m4096.58c14ac215f1.ffed470e6efd
     bindings:
       num_tokens: 4096
@@ -30099,6 +30201,7 @@ configs:
 - program: 4
   target:
     loop: 13
+    origins: *id003
   realizations:
   - name: post-sym.k_div_19_pointwise.b71c40bb6826.dynamic.7f68a4931951
     bindings: {}
@@ -30170,6 +30273,8 @@ configs:
 - program: 4
   target:
     loop: 14
+    origins:
+    - sum_61
   realizations:
   - name: post-sym.k_sum_21_reduce.813453fe986f.dynamic.8657970470d8
     bindings: {}
@@ -30248,6 +30353,7 @@ configs:
 - program: 4
   target:
     loop: 15
+    origins: *id006
   realizations:
   - name: post-sym.k_div_25_reduce.900abf212ff5.dynamic.b6fc9b9ac9a2
     bindings: {}
@@ -30306,6 +30412,7 @@ configs:
 - program: 4
   target:
     loop: 16
+    origins: *id003
   realizations:
   - name: post-sym.k_div_26_pointwise.b71c40bb6826.dynamic.7f68a4931951
     bindings: {}
@@ -30377,6 +30484,7 @@ configs:
 - program: 4
   target:
     loop: 17
+    origins: *id007
   realizations:
   - name: post-sym.k_div_30_reduce.c54254fb669e.dynamic.4a390e426c72
     bindings: {}
@@ -30521,10 +30629,10 @@ configs:
         eager_us: 290.85086254363364
     kernel_set:
     - post-sym.k_div_30_reduce.c54254fb669e.m4096.6c04fba08441.6c04fba08441
-    knobs: &id005
+    knobs: &id008
       PLACE@map.1/inner: cut
     identity: 18d164ce27bb756b3dcc98efd93b0fb5ab89f2caccde794d616fe4648b84a4bc
-    measurements: &id006
+    measurements: &id009
       emmy_us: 43.652303400148455
       reference_us: 44.07648294107288
       reference_backend: same-input-greedy
@@ -30533,9 +30641,9 @@ configs:
       num_tokens: 4096
     pins:
       FAST_MATH: false
-    knobs: *id005
+    knobs: *id008
     identity: 18d164ce27bb756b3dcc98efd93b0fb5ab89f2caccde794d616fe4648b84a4bc
-    measurements: *id006
+    measurements: *id009
   - name: post-sym.k_div_30_reduce.c54254fb669e.m4096.6c04fba08441.eed10e285c5b
     bindings:
       num_tokens: 4096
@@ -30588,6 +30696,7 @@ configs:
 - program: 4
   target:
     loop: 18
+    origins: *id003
   realizations:
   - name: post-sym.k_div_31_pointwise.b71c40bb6826.dynamic.7f68a4931951
     bindings: {}
@@ -30608,6 +30717,31 @@ configs:
 - program: 4
   target:
     loop: 19
+    origins:
+    - add_38
+    - add_38_bc
+    - add_38_c1_bc
+    - add_39
+    - add_39_bc
+    - add_39_c1_bc
+    - add_40
+    - add_40_bc
+    - add_40_c1_bc
+    - add_41
+    - add_41_bc
+    - add_41_c1_bc
+    - add_42
+    - add_42_bc
+    - add_42_c1_bc
+    - div_32
+    - div_33
+    - div_34
+    - div_35
+    - sum_33
+    - sum_34
+    - sum_35
+    - sum_36
+    - sum_37
   realizations:
   - name: post-sym.k_div_35_reduce.d39827c4b823.dynamic.8b7df770ae95.5d7abd1e0c7c
     bindings: {}
@@ -30643,6 +30777,7 @@ configs:
 - program: 4
   target:
     loop: 20
+    origins: *id003
   realizations:
   - name: post-sym.k_div_36_pointwise.b71c40bb6826.dynamic.7f68a4931951
     bindings: {}
@@ -30663,6 +30798,11 @@ configs:
 - program: 4
   target:
     loop: 21
+    origins:
+    - add_43
+    - add_43_bc
+    - add_43_c1_bc
+    - sum_38
   realizations:
   - name: post-sym.k_add_43_bc_reduce.4c62f23d61e5.dynamic.678fa9508f90
     bindings: {}
@@ -30685,6 +30825,7 @@ configs:
 - program: 4
   target:
     loop: 22
+    origins: *id003
   realizations:
   - name: post-sym.k_div_37_pointwise.b71c40bb6826.dynamic.7f68a4931951
     bindings: {}
@@ -30889,7 +31030,7 @@ configs:
       REDUCE: ''
       STAGE: d2/smem
       RASTER: ''
-    identity: 3cb64a167eb27113c51fb8b8bdf621d67dbff80a200e1ad33d06c26c1b2002b4
+    identity: 7c4918235c611e40142a313fb09a440c2b8b6782b1759f00511185f3ffe93d71
     measurements:
       emmy_us: 416.25601053237915
       reference_us: 418.8160002231598
@@ -31071,6 +31212,7 @@ configs:
 - program: 4
   target:
     loop: 24
+    origins: *id003
   realizations:
   - name: post-sym.k_softmax_pointwise_78763e.b71c40bb6826.dynamic.6dc3b5be9329
     bindings: {}
@@ -31091,6 +31233,38 @@ configs:
 - program: 4
   target:
     loop: 25
+    origins:
+    - add_51
+    - add_51_c1_bc
+    - add_52
+    - add_52_bc
+    - add_52_c1_bc
+    - add_53
+    - add_53_bc
+    - add_53_c1_bc
+    - add_54
+    - add_54_bc
+    - add_54_c1_bc
+    - add_55
+    - add_55_bc
+    - add_55_c1_bc
+    - add_56
+    - add_56_bc
+    - add_56_c1_bc
+    - add_57
+    - add_57_bc
+    - add_57_c1_bc
+    - div_39
+    - div_40
+    - div_41
+    - div_42
+    - div_43
+    - sum_41
+    - sum_42
+    - sum_43
+    - sum_44
+    - sum_45
+    - sum_46
   realizations:
   - name: post-sym.k_div_43_reduce.251456672296.dynamic.2b5a02252c23
     bindings: {}
@@ -31149,6 +31323,7 @@ configs:
 - program: 4
   target:
     loop: 26
+    origins: *id003
   realizations:
   - name: post-sym.k_div_44_pointwise.b71c40bb6826.dynamic.7f68a4931951
     bindings: {}
@@ -31169,6 +31344,8 @@ configs:
 - program: 4
   target:
     loop: 27
+    origins:
+    - sum_61
   realizations:
   - name: post-sym.k_sum_47_reduce.813453fe986f.dynamic.8657970470d8
     bindings: {}
@@ -31191,6 +31368,7 @@ configs:
 - program: 4
   target:
     loop: 28
+    origins: *id006
   realizations:
   - name: post-sym.k_div_50_reduce.900abf212ff5.dynamic.b6fc9b9ac9a2
     bindings: {}
@@ -31249,6 +31427,7 @@ configs:
 - program: 4
   target:
     loop: 29
+    origins: *id003
   realizations:
   - name: post-sym.k_div_51_pointwise.b71c40bb6826.dynamic.7f68a4931951
     bindings: {}
@@ -31269,6 +31448,7 @@ configs:
 - program: 4
   target:
     loop: 30
+    origins: *id010
   realizations:
   - name: post-sym.k_sum_54_reduce.6dc107e70aaf.dynamic.b51271ace28f
     bindings: {}
@@ -31291,6 +31471,7 @@ configs:
 - program: 4
   target:
     loop: 31
+    origins: *id011
   realizations:
   - name: post-sym.k_div_57_reduce.e08028a9e8ff.dynamic.6bde73fe702a
     bindings: {}
@@ -31349,6 +31530,7 @@ configs:
 - program: 4
   target:
     loop: 32
+    origins: *id003
   realizations:
   - name: post-sym.k_div_58_pointwise.b71c40bb6826.dynamic.7f68a4931951
     bindings: {}
@@ -31369,6 +31551,8 @@ configs:
 - program: 4
   target:
     loop: 33
+    origins:
+    - sum_61
   realizations:
   - name: post-sym.k_sum_61_reduce.813453fe986f.dynamic.8657970470d8
     bindings: {}
@@ -31391,6 +31575,7 @@ configs:
 - program: 4
   target:
     loop: 34
+    origins: *id006
   realizations:
   - name: post-sym.k_div_64_reduce.900abf212ff5.dynamic.b6fc9b9ac9a2
     bindings: {}
@@ -31449,6 +31634,7 @@ configs:
 - program: 4
   target:
     loop: 35
+    origins: *id003
   realizations:
   - name: post-sym.k_div_65_pointwise.b71c40bb6826.dynamic.7f68a4931951
     bindings: {}
@@ -31469,6 +31655,7 @@ configs:
 - program: 4
   target:
     loop: 36
+    origins: *id010
   realizations:
   - name: post-sym.k_sum_68_reduce.6dc107e70aaf.dynamic.b51271ace28f
     bindings: {}
@@ -31491,6 +31678,7 @@ configs:
 - program: 4
   target:
     loop: 37
+    origins: *id011
   realizations:
   - name: post-sym.k_div_71_reduce.e08028a9e8ff.dynamic.6bde73fe702a
     bindings: {}
@@ -31549,6 +31737,7 @@ configs:
 - program: 4
   target:
     loop: 38
+    origins: *id003
   realizations:
   - name: post-sym.k_div_72_pointwise.b71c40bb6826.dynamic.7f68a4931951
     bindings: {}
@@ -31679,6 +31868,8 @@ configs:
 - program: 5
   target:
     loop: 41
+    origins:
+    - div_72
   realizations:
   - name: post1.k_div_pointwise.30fca0b791b3.m1.22f6bd3c4220
     bindings:
@@ -31700,6 +31891,31 @@ configs:
 - program: 5
   target:
     loop: 42
+    origins: &id015
+    - add_33
+    - add_33_bc
+    - add_33_c1_bc
+    - add_34
+    - add_34_bc
+    - add_34_c1_bc
+    - add_35
+    - add_35_bc
+    - add_35_c1_bc
+    - add_36
+    - add_36_bc
+    - add_36_c1_bc
+    - add_37
+    - add_37_bc
+    - add_37_c1_bc
+    - div_27
+    - div_28
+    - div_29
+    - div_30
+    - sum_28
+    - sum_29
+    - sum_30
+    - sum_31
+    - sum_32
   realizations:
   - name: post1.k_div_4_reduce.14762da5c07a.m1.ef7eea3b7887
     bindings:
@@ -31763,6 +31979,8 @@ configs:
 - program: 5
   target:
     loop: 43
+    origins: &id012
+    - div_72
   realizations:
   - name: post1.k_div_5_pointwise.30fca0b791b3.m1.9d2bcad672a5
     bindings:
@@ -31784,6 +32002,8 @@ configs:
 - program: 5
   target:
     loop: 44
+    origins: &id013
+    - sum_61
   realizations:
   - name: post1.k_sum_7_reduce.6ceee5642fff.m1.8e8e3d02ef13
     bindings:
@@ -31820,6 +32040,40 @@ configs:
 - program: 5
   target:
     loop: 45
+    origins: &id014
+    - add_72
+    - add_72_bc
+    - add_72_c1_bc
+    - add_73
+    - add_73_bc
+    - add_73_c1_bc
+    - add_74
+    - add_74_bc
+    - add_74_c1_bc
+    - add_75
+    - add_75_bc
+    - add_75_c1_bc
+    - add_76
+    - add_76_bc
+    - add_76_c1_bc
+    - add_77
+    - add_77_bc
+    - add_77_c1_bc
+    - add_78
+    - add_78_bc
+    - add_78_c1_bc
+    - div_59
+    - div_60
+    - div_61
+    - div_62
+    - div_63
+    - div_64
+    - sum_62
+    - sum_63
+    - sum_64
+    - sum_65
+    - sum_66
+    - sum_67
   realizations:
   - bindings:
       num_tokens: 1
@@ -32078,6 +32332,7 @@ configs:
 - program: 5
   target:
     loop: 46
+    origins: *id012
   realizations:
   - name: post1.k_div_12_pointwise.30fca0b791b3.m1.9d2bcad672a5
     bindings:
@@ -32099,6 +32354,8 @@ configs:
 - program: 5
   target:
     loop: 47
+    origins: &id016
+    - sum_68
   realizations:
   - name: post1.k_sum_14_reduce.fc4ec5366bfe.m1.73144231d4d0
     bindings:
@@ -32122,6 +32379,40 @@ configs:
 - program: 5
   target:
     loop: 48
+    origins: &id017
+    - add_79
+    - add_79_bc
+    - add_79_c1_bc
+    - add_80
+    - add_80_bc
+    - add_80_c1_bc
+    - add_81
+    - add_81_bc
+    - add_81_c1_bc
+    - add_82
+    - add_82_bc
+    - add_82_c1_bc
+    - add_83
+    - add_83_bc
+    - add_83_c1_bc
+    - add_84
+    - add_84_bc
+    - add_84_c1_bc
+    - add_85
+    - add_85_bc
+    - add_85_c1_bc
+    - div_66
+    - div_67
+    - div_68
+    - div_69
+    - div_70
+    - div_71
+    - sum_69
+    - sum_70
+    - sum_71
+    - sum_72
+    - sum_73
+    - sum_74
   realizations:
   - name: post1.k_div_18_reduce.4775a192d2e2.m1
     bindings:
@@ -32310,6 +32601,7 @@ configs:
 - program: 5
   target:
     loop: 49
+    origins: *id012
   realizations:
   - name: post1.k_div_19_pointwise.30fca0b791b3.m1.9d2bcad672a5
     bindings:
@@ -32331,6 +32623,7 @@ configs:
 - program: 5
   target:
     loop: 50
+    origins: *id013
   realizations:
   - name: post1.k_sum_21_reduce.6ceee5642fff.m1.8e8e3d02ef13
     bindings:
@@ -32367,6 +32660,7 @@ configs:
 - program: 5
   target:
     loop: 51
+    origins: *id014
   realizations:
   - bindings:
       num_tokens: 1
@@ -32534,6 +32828,7 @@ configs:
 - program: 5
   target:
     loop: 52
+    origins: *id012
   realizations:
   - name: post1.k_div_26_pointwise.30fca0b791b3.m1.9d2bcad672a5
     bindings:
@@ -32555,6 +32850,7 @@ configs:
 - program: 5
   target:
     loop: 53
+    origins: *id015
   realizations:
   - name: post1.k_div_30_reduce.14762da5c07a.m1.28022ea75f82
     bindings:
@@ -32618,6 +32914,7 @@ configs:
 - program: 5
   target:
     loop: 54
+    origins: *id012
   realizations:
   - name: post1.k_div_31_pointwise.30fca0b791b3.m1.9d2bcad672a5
     bindings:
@@ -32639,6 +32936,31 @@ configs:
 - program: 5
   target:
     loop: 55
+    origins:
+    - add_38
+    - add_38_bc
+    - add_38_c1_bc
+    - add_39
+    - add_39_bc
+    - add_39_c1_bc
+    - add_40
+    - add_40_bc
+    - add_40_c1_bc
+    - add_41
+    - add_41_bc
+    - add_41_c1_bc
+    - add_42
+    - add_42_bc
+    - add_42_c1_bc
+    - div_32
+    - div_33
+    - div_34
+    - div_35
+    - sum_33
+    - sum_34
+    - sum_35
+    - sum_36
+    - sum_37
   realizations:
   - name: post1.k_div_35_reduce.afc5d0a58fb0.m1.4fe0998b36aa.fddddaeaf229
     bindings:
@@ -32697,6 +33019,7 @@ configs:
 - program: 5
   target:
     loop: 56
+    origins: *id012
   realizations:
   - name: post1.k_div_36_pointwise.30fca0b791b3.m1.9d2bcad672a5
     bindings:
@@ -32718,6 +33041,11 @@ configs:
 - program: 5
   target:
     loop: 57
+    origins:
+    - add_43
+    - add_43_bc
+    - add_43_c1_bc
+    - sum_38
   realizations:
   - name: post1.k_add_43_bc_reduce.4b211c2bb6ca.m1.901b5c8cf168
     bindings:
@@ -32741,6 +33069,7 @@ configs:
 - program: 5
   target:
     loop: 58
+    origins: *id012
   realizations:
   - name: post1.k_div_37_pointwise.30fca0b791b3.m1.9d2bcad672a5
     bindings:
@@ -33108,6 +33437,7 @@ configs:
 - program: 5
   target:
     loop: 60
+    origins: *id012
   realizations:
   - name: post1.k_softmax_pointwise_4459e7.30fca0b791b3.m1.22f6bd3c4220
     bindings:
@@ -33129,6 +33459,7 @@ configs:
 - program: 5
   target:
     loop: 62
+    origins: *id012
   realizations:
   - name: post1.k_div_44_pointwise.30fca0b791b3.m1.9d2bcad672a5
     bindings:
@@ -33150,6 +33481,7 @@ configs:
 - program: 5
   target:
     loop: 63
+    origins: *id013
   realizations:
   - name: post1.k_sum_47_reduce.6ceee5642fff.m1.8e8e3d02ef13
     bindings:
@@ -33186,6 +33518,7 @@ configs:
 - program: 5
   target:
     loop: 64
+    origins: *id014
   realizations:
   - bindings:
       num_tokens: 1
@@ -33353,6 +33686,7 @@ configs:
 - program: 5
   target:
     loop: 65
+    origins: *id012
   realizations:
   - name: post1.k_div_51_pointwise.30fca0b791b3.m1.9d2bcad672a5
     bindings:
@@ -33374,6 +33708,7 @@ configs:
 - program: 5
   target:
     loop: 66
+    origins: *id016
   realizations:
   - name: post1.k_sum_54_reduce.fc4ec5366bfe.m1.73144231d4d0
     bindings:
@@ -33397,6 +33732,7 @@ configs:
 - program: 5
   target:
     loop: 67
+    origins: *id017
   realizations:
   - name: post1.k_div_57_reduce.4775a192d2e2.m1
     bindings:
@@ -33585,6 +33921,7 @@ configs:
 - program: 5
   target:
     loop: 68
+    origins: *id012
   realizations:
   - name: post1.k_div_58_pointwise.30fca0b791b3.m1.9d2bcad672a5
     bindings:
@@ -33606,6 +33943,7 @@ configs:
 - program: 5
   target:
     loop: 69
+    origins: *id013
   realizations:
   - name: post1.k_sum_61_reduce.6ceee5642fff.m1.8e8e3d02ef13
     bindings:
@@ -33629,6 +33967,7 @@ configs:
 - program: 5
   target:
     loop: 70
+    origins: *id014
   realizations:
   - bindings:
       num_tokens: 1
@@ -33796,6 +34135,7 @@ configs:
 - program: 5
   target:
     loop: 71
+    origins: *id012
   realizations:
   - name: post1.k_div_65_pointwise.30fca0b791b3.m1.9d2bcad672a5
     bindings:
@@ -33817,6 +34157,7 @@ configs:
 - program: 5
   target:
     loop: 72
+    origins: *id016
   realizations:
   - name: post1.k_sum_68_reduce.fc4ec5366bfe.m1.73144231d4d0
     bindings:
@@ -33840,6 +34181,7 @@ configs:
 - program: 5
   target:
     loop: 73
+    origins: *id017
   realizations:
   - name: post1.k_div_71_reduce.4775a192d2e2.m1
     bindings:
@@ -34028,6 +34370,7 @@ configs:
 - program: 5
   target:
     loop: 74
+    origins: *id012
   realizations:
   - name: post1.k_div_72_pointwise.30fca0b791b3.m1.9d2bcad672a5
     bindings:
@@ -34222,6 +34565,8 @@ configs:
 - program: 6
   target:
     loop: 77
+    origins:
+    - div_72
   realizations:
   - name: post16.k_div_pointwise.a971ee646cec.m16.0e433e4d48fb
     bindings:
@@ -34243,6 +34588,31 @@ configs:
 - program: 6
   target:
     loop: 78
+    origins: &id020
+    - add_33
+    - add_33_bc
+    - add_33_c1_bc
+    - add_34
+    - add_34_bc
+    - add_34_c1_bc
+    - add_35
+    - add_35_bc
+    - add_35_c1_bc
+    - add_36
+    - add_36_bc
+    - add_36_c1_bc
+    - add_37
+    - add_37_bc
+    - add_37_c1_bc
+    - div_27
+    - div_28
+    - div_29
+    - div_30
+    - sum_28
+    - sum_29
+    - sum_30
+    - sum_31
+    - sum_32
   realizations:
   - name: post16.k_div_4_reduce.2473aabb93ca.m16.df46d46f1359
     bindings:
@@ -34284,6 +34654,8 @@ configs:
 - program: 6
   target:
     loop: 79
+    origins: &id018
+    - div_72
   realizations:
   - name: post16.k_div_5_pointwise.a971ee646cec.m16.2b7b181ebda7
     bindings:
@@ -34305,6 +34677,8 @@ configs:
 - program: 6
   target:
     loop: 80
+    origins:
+    - sum_61
   realizations:
   - name: post16.k_sum_7_reduce.acdd3f1693b9.m16.0d26c9c7dce2
     bindings:
@@ -34328,6 +34702,40 @@ configs:
 - program: 6
   target:
     loop: 81
+    origins: &id019
+    - add_72
+    - add_72_bc
+    - add_72_c1_bc
+    - add_73
+    - add_73_bc
+    - add_73_c1_bc
+    - add_74
+    - add_74_bc
+    - add_74_c1_bc
+    - add_75
+    - add_75_bc
+    - add_75_c1_bc
+    - add_76
+    - add_76_bc
+    - add_76_c1_bc
+    - add_77
+    - add_77_bc
+    - add_77_c1_bc
+    - add_78
+    - add_78_bc
+    - add_78_c1_bc
+    - div_59
+    - div_60
+    - div_61
+    - div_62
+    - div_63
+    - div_64
+    - sum_62
+    - sum_63
+    - sum_64
+    - sum_65
+    - sum_66
+    - sum_67
   realizations:
   - name: post16.k_div_11_reduce.d81043a46649.m16.4e18a355bd66
     bindings:
@@ -34388,6 +34796,7 @@ configs:
 - program: 6
   target:
     loop: 82
+    origins: *id018
   realizations:
   - name: post16.k_div_12_pointwise.a971ee646cec.m16.2b7b181ebda7
     bindings:
@@ -34409,6 +34818,8 @@ configs:
 - program: 6
   target:
     loop: 83
+    origins: &id021
+    - sum_68
   realizations:
   - name: post16.k_sum_14_reduce.fdd6c9dc9ad9.m16.010f65fac3b9
     bindings:
@@ -34432,6 +34843,40 @@ configs:
 - program: 6
   target:
     loop: 84
+    origins: &id022
+    - add_79
+    - add_79_bc
+    - add_79_c1_bc
+    - add_80
+    - add_80_bc
+    - add_80_c1_bc
+    - add_81
+    - add_81_bc
+    - add_81_c1_bc
+    - add_82
+    - add_82_bc
+    - add_82_c1_bc
+    - add_83
+    - add_83_bc
+    - add_83_c1_bc
+    - add_84
+    - add_84_bc
+    - add_84_c1_bc
+    - add_85
+    - add_85_bc
+    - add_85_c1_bc
+    - div_66
+    - div_67
+    - div_68
+    - div_69
+    - div_70
+    - div_71
+    - sum_69
+    - sum_70
+    - sum_71
+    - sum_72
+    - sum_73
+    - sum_74
   realizations:
   - name: post16.k_div_18_reduce.4076a883e1dc.m16.e0734c31fcb5
     bindings:
@@ -34492,6 +34937,7 @@ configs:
 - program: 6
   target:
     loop: 85
+    origins: *id018
   realizations:
   - name: post16.k_div_19_pointwise.a971ee646cec.m16.2b7b181ebda7
     bindings:
@@ -34513,6 +34959,8 @@ configs:
 - program: 6
   target:
     loop: 86
+    origins:
+    - sum_61
   realizations:
   - name: post16.k_sum_21_reduce.acdd3f1693b9.m16.0d26c9c7dce2
     bindings:
@@ -34536,6 +34984,7 @@ configs:
 - program: 6
   target:
     loop: 87
+    origins: *id019
   realizations:
   - name: post16.k_div_25_reduce.d81043a46649.m16.4e18a355bd66
     bindings:
@@ -34596,6 +35045,7 @@ configs:
 - program: 6
   target:
     loop: 88
+    origins: *id018
   realizations:
   - name: post16.k_div_26_pointwise.a971ee646cec.m16.2b7b181ebda7
     bindings:
@@ -34617,6 +35067,7 @@ configs:
 - program: 6
   target:
     loop: 89
+    origins: *id020
   realizations:
   - name: post16.k_div_30_reduce.2473aabb93ca.m16.4dd52085ecf5
     bindings:
@@ -34658,6 +35109,7 @@ configs:
 - program: 6
   target:
     loop: 90
+    origins: *id018
   realizations:
   - name: post16.k_div_31_pointwise.a971ee646cec.m16.2b7b181ebda7
     bindings:
@@ -34679,6 +35131,31 @@ configs:
 - program: 6
   target:
     loop: 91
+    origins:
+    - add_38
+    - add_38_bc
+    - add_38_c1_bc
+    - add_39
+    - add_39_bc
+    - add_39_c1_bc
+    - add_40
+    - add_40_bc
+    - add_40_c1_bc
+    - add_41
+    - add_41_bc
+    - add_41_c1_bc
+    - add_42
+    - add_42_bc
+    - add_42_c1_bc
+    - div_32
+    - div_33
+    - div_34
+    - div_35
+    - sum_33
+    - sum_34
+    - sum_35
+    - sum_36
+    - sum_37
   realizations:
   - name: post16.k_div_35_reduce.ea2f8bf969e9.m16.16dd46882ec4.659ebc02f771
     bindings:
@@ -34715,6 +35192,7 @@ configs:
 - program: 6
   target:
     loop: 92
+    origins: *id018
   realizations:
   - name: post16.k_div_36_pointwise.a971ee646cec.m16.2b7b181ebda7
     bindings:
@@ -34736,6 +35214,11 @@ configs:
 - program: 6
   target:
     loop: 93
+    origins:
+    - add_43
+    - add_43_bc
+    - add_43_c1_bc
+    - sum_38
   realizations:
   - name: post16.k_add_43_bc_reduce.75daa66ddbac.m16.4119919abda8
     bindings:
@@ -34759,6 +35242,7 @@ configs:
 - program: 6
   target:
     loop: 94
+    origins: *id018
   realizations:
   - name: post16.k_div_37_pointwise.a971ee646cec.m16.2b7b181ebda7
     bindings:
@@ -34992,7 +35476,7 @@ configs:
       FAST_MATH: false
     knobs:
       REDUCE@reduce: g4a
-    identity: a64df778c19dcdf24b15a3ef277bbabca4fcffb9dd31d4bb94d9a121f206b692
+    identity: bee8b74811ba590c909e879808a073a5f668f4a6f311ff910ee03a677e23ab8e
     measurements:
       emmy_us: 12.381090359254316
       reference_us: 11.946666571829054
@@ -35117,6 +35601,7 @@ configs:
 - program: 6
   target:
     loop: 96
+    origins: *id018
   realizations:
   - name: post16.k_softmax_pointwise_bc44b0.a971ee646cec.m16.0e433e4d48fb
     bindings:
@@ -35138,6 +35623,38 @@ configs:
 - program: 6
   target:
     loop: 97
+    origins:
+    - add_51
+    - add_51_c1_bc
+    - add_52
+    - add_52_bc
+    - add_52_c1_bc
+    - add_53
+    - add_53_bc
+    - add_53_c1_bc
+    - add_54
+    - add_54_bc
+    - add_54_c1_bc
+    - add_55
+    - add_55_bc
+    - add_55_c1_bc
+    - add_56
+    - add_56_bc
+    - add_56_c1_bc
+    - add_57
+    - add_57_bc
+    - add_57_c1_bc
+    - div_39
+    - div_40
+    - div_41
+    - div_42
+    - div_43
+    - sum_41
+    - sum_42
+    - sum_43
+    - sum_44
+    - sum_45
+    - sum_46
   realizations:
   - name: post16.k_div_43_reduce.4c7cceb86956.m16.ccb6c278633f
     bindings:
@@ -35198,6 +35715,7 @@ configs:
 - program: 6
   target:
     loop: 98
+    origins: *id018
   realizations:
   - name: post16.k_div_44_pointwise.a971ee646cec.m16.2b7b181ebda7
     bindings:
@@ -35219,6 +35737,8 @@ configs:
 - program: 6
   target:
     loop: 99
+    origins:
+    - sum_61
   realizations:
   - name: post16.k_sum_47_reduce.acdd3f1693b9.m16.0d26c9c7dce2
     bindings:
@@ -35242,6 +35762,7 @@ configs:
 - program: 6
   target:
     loop: 100
+    origins: *id019
   realizations:
   - name: post16.k_div_50_reduce.d81043a46649.m16.4e18a355bd66
     bindings:
@@ -35302,6 +35823,7 @@ configs:
 - program: 6
   target:
     loop: 101
+    origins: *id018
   realizations:
   - name: post16.k_div_51_pointwise.a971ee646cec.m16.2b7b181ebda7
     bindings:
@@ -35323,6 +35845,7 @@ configs:
 - program: 6
   target:
     loop: 102
+    origins: *id021
   realizations:
   - name: post16.k_sum_54_reduce.fdd6c9dc9ad9.m16.010f65fac3b9
     bindings:
@@ -35346,6 +35869,7 @@ configs:
 - program: 6
   target:
     loop: 103
+    origins: *id022
   realizations:
   - name: post16.k_div_57_reduce.4076a883e1dc.m16.e0734c31fcb5
     bindings:
@@ -35406,6 +35930,7 @@ configs:
 - program: 6
   target:
     loop: 104
+    origins: *id018
   realizations:
   - name: post16.k_div_58_pointwise.a971ee646cec.m16.2b7b181ebda7
     bindings:
@@ -35427,6 +35952,8 @@ configs:
 - program: 6
   target:
     loop: 105
+    origins:
+    - sum_61
   realizations:
   - name: post16.k_sum_61_reduce.acdd3f1693b9.m16.0d26c9c7dce2
     bindings:
@@ -35450,6 +35977,7 @@ configs:
 - program: 6
   target:
     loop: 106
+    origins: *id019
   realizations:
   - name: post16.k_div_64_reduce.d81043a46649.m16.4e18a355bd66
     bindings:
@@ -35510,6 +36038,7 @@ configs:
 - program: 6
   target:
     loop: 107
+    origins: *id018
   realizations:
   - name: post16.k_div_65_pointwise.a971ee646cec.m16.2b7b181ebda7
     bindings:
@@ -35531,6 +36060,7 @@ configs:
 - program: 6
   target:
     loop: 108
+    origins: *id021
   realizations:
   - name: post16.k_sum_68_reduce.fdd6c9dc9ad9.m16.010f65fac3b9
     bindings:
@@ -35554,6 +36084,7 @@ configs:
 - program: 6
   target:
     loop: 109
+    origins: *id022
   realizations:
   - name: post16.k_div_71_reduce.4076a883e1dc.m16.e0734c31fcb5
     bindings:
@@ -35614,6 +36145,7 @@ configs:
 - program: 6
   target:
     loop: 110
+    origins: *id018
   realizations:
   - name: post16.k_div_72_pointwise.a971ee646cec.m16.2b7b181ebda7
     bindings:
@@ -35840,6 +36372,8 @@ configs:
 - program: 7
   target:
     loop: 113
+    origins:
+    - div_72
   realizations:
   - name: post4096.k_div_pointwise.396e8f8c5dc7.m4096.10f20ad89244
     bindings:
@@ -35861,6 +36395,31 @@ configs:
 - program: 7
   target:
     loop: 114
+    origins: &id029
+    - add_33
+    - add_33_bc
+    - add_33_c1_bc
+    - add_34
+    - add_34_bc
+    - add_34_c1_bc
+    - add_35
+    - add_35_bc
+    - add_35_c1_bc
+    - add_36
+    - add_36_bc
+    - add_36_c1_bc
+    - add_37
+    - add_37_bc
+    - add_37_c1_bc
+    - div_27
+    - div_28
+    - div_29
+    - div_30
+    - sum_28
+    - sum_29
+    - sum_30
+    - sum_31
+    - sum_32
   realizations:
   - name: post4096.k_div_4_reduce.00626a8097c7.m4096.b53219ea724d
     bindings:
@@ -35873,10 +36432,10 @@ configs:
         eager_us: 289.146615677521
     kernel_set:
     - post4096.k_div_4_reduce.00626a8097c7.m4096.b53219ea724d.b53219ea724d
-    knobs: &id007
+    knobs: &id023
       PLACE@map.1/inner: cut
     identity: 18d164ce27bb756b3dcc98efd93b0fb5ab89f2caccde794d616fe4648b84a4bc
-    measurements: &id008
+    measurements: &id024
       emmy_us: 43.57793807097084
       reference_us: 44.05988123236584
       reference_backend: same-input-greedy
@@ -35885,9 +36444,9 @@ configs:
       num_tokens: 4096
     pins:
       FAST_MATH: false
-    knobs: *id007
+    knobs: *id023
     identity: 18d164ce27bb756b3dcc98efd93b0fb5ab89f2caccde794d616fe4648b84a4bc
-    measurements: *id008
+    measurements: *id024
   - name: post4096.k_div_4_reduce.00626a8097c7.m4096.b53219ea724d.eed10e285c5b
     bindings:
       num_tokens: 4096
@@ -35940,6 +36499,8 @@ configs:
 - program: 7
   target:
     loop: 115
+    origins: &id025
+    - div_72
   realizations:
   - name: post4096.k_div_5_pointwise.396e8f8c5dc7.m4096.ec89a4ce01bc
     bindings:
@@ -35961,6 +36522,8 @@ configs:
 - program: 7
   target:
     loop: 116
+    origins:
+    - sum_61
   realizations:
   - name: post4096.k_sum_7_reduce.02debe0c8491.m4096.9bc01987ed5d
     bindings:
@@ -35983,6 +36546,40 @@ configs:
 - program: 7
   target:
     loop: 117
+    origins: &id028
+    - add_72
+    - add_72_bc
+    - add_72_c1_bc
+    - add_73
+    - add_73_bc
+    - add_73_c1_bc
+    - add_74
+    - add_74_bc
+    - add_74_c1_bc
+    - add_75
+    - add_75_bc
+    - add_75_c1_bc
+    - add_76
+    - add_76_bc
+    - add_76_c1_bc
+    - add_77
+    - add_77_bc
+    - add_77_c1_bc
+    - add_78
+    - add_78_bc
+    - add_78_c1_bc
+    - div_59
+    - div_60
+    - div_61
+    - div_62
+    - div_63
+    - div_64
+    - sum_62
+    - sum_63
+    - sum_64
+    - sum_65
+    - sum_66
+    - sum_67
   realizations:
   - name: post4096.k_div_11_reduce.5d1b75557f3f.m4096.b0e481e50019
     bindings:
@@ -36042,6 +36639,7 @@ configs:
 - program: 7
   target:
     loop: 118
+    origins: *id025
   realizations:
   - name: post4096.k_div_12_pointwise.396e8f8c5dc7.m4096.ec89a4ce01bc
     bindings:
@@ -36063,6 +36661,8 @@ configs:
 - program: 7
   target:
     loop: 119
+    origins: &id034
+    - sum_68
   realizations:
   - name: post4096.k_sum_14_reduce.a55cadbe101d.m4096.d7b4a38faf89
     bindings:
@@ -36085,6 +36685,40 @@ configs:
 - program: 7
   target:
     loop: 120
+    origins: &id035
+    - add_79
+    - add_79_bc
+    - add_79_c1_bc
+    - add_80
+    - add_80_bc
+    - add_80_c1_bc
+    - add_81
+    - add_81_bc
+    - add_81_c1_bc
+    - add_82
+    - add_82_bc
+    - add_82_c1_bc
+    - add_83
+    - add_83_bc
+    - add_83_c1_bc
+    - add_84
+    - add_84_bc
+    - add_84_c1_bc
+    - add_85
+    - add_85_bc
+    - add_85_c1_bc
+    - div_66
+    - div_67
+    - div_68
+    - div_69
+    - div_70
+    - div_71
+    - sum_69
+    - sum_70
+    - sum_71
+    - sum_72
+    - sum_73
+    - sum_74
   realizations:
   - name: post4096.k_div_18_reduce.134a4c74f3b4.m4096.58c14ac215f1
     bindings:
@@ -36097,10 +36731,10 @@ configs:
         eager_us: 436.1916793020148
     kernel_set:
     - post4096.k_div_18_reduce.134a4c74f3b4.m4096.58c14ac215f1.58c14ac215f1
-    knobs: &id009
+    knobs: &id026
       PLACE@map.1/inner: cut
     identity: 09b91f613233910e11fdd6ffc69262e519ebb2c38f2c632fc648a818703d014a
-    measurements: &id010
+    measurements: &id027
       emmy_us: 114.60535000205289
       reference_us: 116.28807706442493
       reference_backend: same-input-greedy
@@ -36109,9 +36743,9 @@ configs:
       num_tokens: 4096
     pins:
       FAST_MATH: false
-    knobs: *id009
+    knobs: *id026
     identity: 09b91f613233910e11fdd6ffc69262e519ebb2c38f2c632fc648a818703d014a
-    measurements: *id010
+    measurements: *id027
   - name: post4096.k_div_18_reduce.134a4c74f3b4.m4096.58c14ac215f1.ffed470e6efd
     bindings:
       num_tokens: 4096
@@ -36186,6 +36820,7 @@ configs:
 - program: 7
   target:
     loop: 121
+    origins: *id025
   realizations:
   - name: post4096.k_div_19_pointwise.396e8f8c5dc7.m4096.ec89a4ce01bc
     bindings:
@@ -36207,6 +36842,8 @@ configs:
 - program: 7
   target:
     loop: 122
+    origins:
+    - sum_61
   realizations:
   - name: post4096.k_sum_21_reduce.02debe0c8491.m4096.9bc01987ed5d
     bindings:
@@ -36229,6 +36866,7 @@ configs:
 - program: 7
   target:
     loop: 123
+    origins: *id028
   realizations:
   - name: post4096.k_div_25_reduce.5d1b75557f3f.m4096.b0e481e50019
     bindings:
@@ -36288,6 +36926,7 @@ configs:
 - program: 7
   target:
     loop: 124
+    origins: *id025
   realizations:
   - name: post4096.k_div_26_pointwise.396e8f8c5dc7.m4096.ec89a4ce01bc
     bindings:
@@ -36309,6 +36948,7 @@ configs:
 - program: 7
   target:
     loop: 125
+    origins: *id029
   realizations:
   - name: post4096.k_div_30_reduce.00626a8097c7.m4096.6c04fba08441
     bindings:
@@ -36321,10 +36961,10 @@ configs:
         eager_us: 291.6640563158212
     kernel_set:
     - post4096.k_div_30_reduce.00626a8097c7.m4096.6c04fba08441.6c04fba08441
-    knobs: &id011
+    knobs: &id030
       PLACE@map.1/inner: cut
     identity: 18d164ce27bb756b3dcc98efd93b0fb5ab89f2caccde794d616fe4648b84a4bc
-    measurements: &id012
+    measurements: &id031
       emmy_us: 43.45731385307167
       reference_us: 44.05248819381305
       reference_backend: same-input-greedy
@@ -36333,9 +36973,9 @@ configs:
       num_tokens: 4096
     pins:
       FAST_MATH: false
-    knobs: *id011
+    knobs: *id030
     identity: 18d164ce27bb756b3dcc98efd93b0fb5ab89f2caccde794d616fe4648b84a4bc
-    measurements: *id012
+    measurements: *id031
   - name: post4096.k_div_30_reduce.00626a8097c7.m4096.6c04fba08441.eed10e285c5b
     bindings:
       num_tokens: 4096
@@ -36388,6 +37028,7 @@ configs:
 - program: 7
   target:
     loop: 126
+    origins: *id025
   realizations:
   - name: post4096.k_div_31_pointwise.396e8f8c5dc7.m4096.ec89a4ce01bc
     bindings:
@@ -36409,6 +37050,31 @@ configs:
 - program: 7
   target:
     loop: 127
+    origins:
+    - add_38
+    - add_38_bc
+    - add_38_c1_bc
+    - add_39
+    - add_39_bc
+    - add_39_c1_bc
+    - add_40
+    - add_40_bc
+    - add_40_c1_bc
+    - add_41
+    - add_41_bc
+    - add_41_c1_bc
+    - add_42
+    - add_42_bc
+    - add_42_c1_bc
+    - div_32
+    - div_33
+    - div_34
+    - div_35
+    - sum_33
+    - sum_34
+    - sum_35
+    - sum_36
+    - sum_37
   realizations:
   - name: post4096.k_div_35_reduce.4f5117e8a207.m4096.cafababe1ccb.c61ff5c58a30
     bindings:
@@ -36445,6 +37111,7 @@ configs:
 - program: 7
   target:
     loop: 128
+    origins: *id025
   realizations:
   - name: post4096.k_div_36_pointwise.396e8f8c5dc7.m4096.ec89a4ce01bc
     bindings:
@@ -36466,6 +37133,11 @@ configs:
 - program: 7
   target:
     loop: 129
+    origins:
+    - add_43
+    - add_43_bc
+    - add_43_c1_bc
+    - sum_38
   realizations:
   - name: post4096.k_add_43_bc_reduce.9f3f213bf948.m4096.63e82c3102b2
     bindings:
@@ -36489,6 +37161,7 @@ configs:
 - program: 7
   target:
     loop: 130
+    origins: *id025
   realizations:
   - name: post4096.k_div_37_pointwise.396e8f8c5dc7.m4096.ec89a4ce01bc
     bindings:
@@ -36657,7 +37330,7 @@ configs:
       FAST_MATH: false
     knobs:
       REDUCE: g4a
-    identity: 20e5861ce4547d786750671447b2275ceff3de8c4abc036d1dc9e8acdeb23acf
+    identity: a5b27df05d863fc36bcb206c6f83d2c2e17e4a8b56e390d42e2f972b10fed2cb
     measurements:
       emmy_us: 636.9280219078064
       reference_us: 645.1200246810913
@@ -36669,7 +37342,7 @@ configs:
       FAST_MATH: false
     knobs:
       REDUCE: g2a
-    identity: ef6794e8214bac916152e233d981d5c41620b3927b47e34d48d881cec890e696
+    identity: a5b27df05d863fc36bcb206c6f83d2c2e17e4a8b56e390d42e2f972b10fed2cb
     measurements:
       emmy_us: 2754.5599937438965
       reference_us: 2758.6560249328613
@@ -36730,7 +37403,7 @@ configs:
       REDUCE: ''
       STAGE: d2/smem
       RASTER: ''
-    identity: 0a93cd62b4c43af74b29176e6da451fb4291f776d6f1569bfc1fdc296b8241d1
+    identity: 3d94a08b6035a8106efff1299c51beff88e179ef125de14e25a8a307d47517a0
     measurements:
       emmy_us: 636.9280219078064
       reference_us: 645.1200246810913
@@ -36775,7 +37448,7 @@ configs:
       REDUCE: ''
       STAGE: d2/smem
       RASTER: ''
-    identity: 27f2db101e6ea4a4924e50241c4b5f216e65876d26b6f86671ab3f3183a1208a
+    identity: 3d94a08b6035a8106efff1299c51beff88e179ef125de14e25a8a307d47517a0
     measurements:
       emmy_us: 2754.5599937438965
       reference_us: 2758.6560249328613
@@ -36810,6 +37483,7 @@ configs:
 - program: 7
   target:
     loop: 132
+    origins: *id025
   realizations:
   - name: post4096.k_softmax_pointwise_5357a9.396e8f8c5dc7.m4096.10f20ad89244
     bindings:
@@ -36831,6 +37505,38 @@ configs:
 - program: 7
   target:
     loop: 133
+    origins:
+    - add_51
+    - add_51_c1_bc
+    - add_52
+    - add_52_bc
+    - add_52_c1_bc
+    - add_53
+    - add_53_bc
+    - add_53_c1_bc
+    - add_54
+    - add_54_bc
+    - add_54_c1_bc
+    - add_55
+    - add_55_bc
+    - add_55_c1_bc
+    - add_56
+    - add_56_bc
+    - add_56_c1_bc
+    - add_57
+    - add_57_bc
+    - add_57_c1_bc
+    - div_39
+    - div_40
+    - div_41
+    - div_42
+    - div_43
+    - sum_41
+    - sum_42
+    - sum_43
+    - sum_44
+    - sum_45
+    - sum_46
   realizations:
   - name: post4096.k_div_43_reduce.4558499de9cd.m4096.ba542daaf470
     bindings:
@@ -36843,10 +37549,10 @@ configs:
         eager_us: 393.97377014160156
     kernel_set:
     - post4096.k_div_43_reduce.4558499de9cd.m4096.ba542daaf470.ba542daaf470
-    knobs: &id013
+    knobs: &id032
       PLACE@map.1/inner: cut
     identity: d6c1add2a8d680e43b2385aba599319711b0848a38ce18d19470104233e3bf31
-    measurements: &id014
+    measurements: &id033
       emmy_us: 88.81462960995755
       reference_us: 89.80480134487152
       reference_backend: same-input-greedy
@@ -36855,9 +37561,9 @@ configs:
       num_tokens: 4096
     pins:
       FAST_MATH: false
-    knobs: *id013
+    knobs: *id032
     identity: d6c1add2a8d680e43b2385aba599319711b0848a38ce18d19470104233e3bf31
-    measurements: *id014
+    measurements: *id033
   - name: post4096.k_div_43_reduce.4558499de9cd.m4096.ba542daaf470.ed3644250d6d
     bindings:
       num_tokens: 4096
@@ -36896,6 +37602,7 @@ configs:
 - program: 7
   target:
     loop: 134
+    origins: *id025
   realizations:
   - name: post4096.k_div_44_pointwise.396e8f8c5dc7.m4096.ec89a4ce01bc
     bindings:
@@ -36917,6 +37624,8 @@ configs:
 - program: 7
   target:
     loop: 135
+    origins:
+    - sum_61
   realizations:
   - name: post4096.k_sum_47_reduce.02debe0c8491.m4096.9bc01987ed5d
     bindings:
@@ -36939,6 +37648,7 @@ configs:
 - program: 7
   target:
     loop: 136
+    origins: *id028
   realizations:
   - name: post4096.k_div_50_reduce.5d1b75557f3f.m4096.b0e481e50019
     bindings:
@@ -36998,6 +37708,7 @@ configs:
 - program: 7
   target:
     loop: 137
+    origins: *id025
   realizations:
   - name: post4096.k_div_51_pointwise.396e8f8c5dc7.m4096.ec89a4ce01bc
     bindings:
@@ -37019,6 +37730,7 @@ configs:
 - program: 7
   target:
     loop: 138
+    origins: *id034
   realizations:
   - name: post4096.k_sum_54_reduce.a55cadbe101d.m4096.d7b4a38faf89
     bindings:
@@ -37041,6 +37753,7 @@ configs:
 - program: 7
   target:
     loop: 139
+    origins: *id035
   realizations:
   - name: post4096.k_div_57_reduce.134a4c74f3b4.m4096.58c14ac215f1
     bindings:
@@ -37053,10 +37766,10 @@ configs:
         eager_us: 437.38812898334703
     kernel_set:
     - post4096.k_div_57_reduce.134a4c74f3b4.m4096.58c14ac215f1.58c14ac215f1
-    knobs: &id015
+    knobs: &id036
       PLACE@map.1/inner: cut
     identity: 09b91f613233910e11fdd6ffc69262e519ebb2c38f2c632fc648a818703d014a
-    measurements: &id016
+    measurements: &id037
       emmy_us: 114.59568955113552
       reference_us: 116.33119255478618
       reference_backend: same-input-greedy
@@ -37065,9 +37778,9 @@ configs:
       num_tokens: 4096
     pins:
       FAST_MATH: false
-    knobs: *id015
+    knobs: *id036
     identity: 09b91f613233910e11fdd6ffc69262e519ebb2c38f2c632fc648a818703d014a
-    measurements: *id016
+    measurements: *id037
   - name: post4096.k_div_57_reduce.134a4c74f3b4.m4096.58c14ac215f1.ffed470e6efd
     bindings:
       num_tokens: 4096
@@ -37142,6 +37855,7 @@ configs:
 - program: 7
   target:
     loop: 140
+    origins: *id025
   realizations:
   - name: post4096.k_div_58_pointwise.396e8f8c5dc7.m4096.ec89a4ce01bc
     bindings:
@@ -37163,6 +37877,8 @@ configs:
 - program: 7
   target:
     loop: 141
+    origins:
+    - sum_61
   realizations:
   - name: post4096.k_sum_61_reduce.02debe0c8491.m4096.9bc01987ed5d
     bindings:
@@ -37185,6 +37901,7 @@ configs:
 - program: 7
   target:
     loop: 142
+    origins: *id028
   realizations:
   - name: post4096.k_div_64_reduce.5d1b75557f3f.m4096.b0e481e50019
     bindings:
@@ -37244,6 +37961,7 @@ configs:
 - program: 7
   target:
     loop: 143
+    origins: *id025
   realizations:
   - name: post4096.k_div_65_pointwise.396e8f8c5dc7.m4096.ec89a4ce01bc
     bindings:
@@ -37265,6 +37983,7 @@ configs:
 - program: 7
   target:
     loop: 144
+    origins: *id034
   realizations:
   - name: post4096.k_sum_68_reduce.a55cadbe101d.m4096.d7b4a38faf89
     bindings:
@@ -37287,6 +38006,7 @@ configs:
 - program: 7
   target:
     loop: 145
+    origins: *id035
   realizations:
   - name: post4096.k_div_71_reduce.134a4c74f3b4.m4096.58c14ac215f1
     bindings:
@@ -37299,10 +38019,10 @@ configs:
         eager_us: 436.4947176527703
     kernel_set:
     - post4096.k_div_71_reduce.134a4c74f3b4.m4096.58c14ac215f1.58c14ac215f1
-    knobs: &id017
+    knobs: &id038
       PLACE@map.1/inner: cut
     identity: 09b91f613233910e11fdd6ffc69262e519ebb2c38f2c632fc648a818703d014a
-    measurements: &id018
+    measurements: &id039
       emmy_us: 114.46259056747085
       reference_us: 116.4064356821707
       reference_backend: same-input-greedy
@@ -37311,9 +38031,9 @@ configs:
       num_tokens: 4096
     pins:
       FAST_MATH: false
-    knobs: *id017
+    knobs: *id038
     identity: 09b91f613233910e11fdd6ffc69262e519ebb2c38f2c632fc648a818703d014a
-    measurements: *id018
+    measurements: *id039
   - name: post4096.k_div_71_reduce.134a4c74f3b4.m4096.58c14ac215f1.ffed470e6efd
     bindings:
       num_tokens: 4096
@@ -37388,6 +38108,7 @@ configs:
 - program: 7
   target:
     loop: 146
+    origins: *id025
   realizations:
   - name: post4096.k_div_72_pointwise.396e8f8c5dc7.m4096.ec89a4ce01bc
     bindings:
@@ -37471,6 +38192,49 @@ configs:
 - program: 8
   target:
     loop: 148
+    origins:
+    - add
+    - add_1
+    - add_2
+    - add_2_c1_bc
+    - add_45
+    - add_45_c1_bc
+    - add_c1_bc
+    - flatten
+    - linear
+    - mean
+    - mean_1
+    - mul
+    - mul_1
+    - mul_5
+    - mul_6
+    - mul_7
+    - p_input_layernorm_weight_bc
+    - pow_1
+    - rsqrt
+    - rsqrt_1
+    - rsqrt_1_bc
+    - sigmoid
+    - split_with_sizes_0
+    - split_with_sizes_1_0
+    - split_with_sizes_1_0_bc
+    - square
+    - sum_40
+    - sum_40_keepdim
+    - to
+    - to_1
+    - to_2
+    - to_2_bc
+    - to_3
+    - to_4
+    - to_5
+    - to_6
+    - unbind_0
+    - unbind_0_bc
+    - unsqueeze
+    - unsqueeze_bc
+    - view
+    - view_3
   realizations:
   - name: pre-sym.k_linear_mean_reduce_3e0f82.1aaf9cf804d0.dynamic.cf2be9cc69f7
     bindings: {}
@@ -37549,6 +38313,49 @@ configs:
 - program: 9
   target:
     loop: 149
+    origins:
+    - add
+    - add_1
+    - add_2
+    - add_2_c1_bc
+    - add_45
+    - add_45_c1_bc
+    - add_c1_bc
+    - flatten
+    - linear
+    - mean
+    - mean_1
+    - mul
+    - mul_1
+    - mul_5
+    - mul_6
+    - mul_7
+    - p_input_layernorm_weight_bc
+    - pow_1
+    - rsqrt
+    - rsqrt_1
+    - rsqrt_1_bc
+    - sigmoid
+    - split_with_sizes_0
+    - split_with_sizes_1_0
+    - split_with_sizes_1_0_bc
+    - square
+    - sum_40
+    - sum_40_keepdim
+    - to
+    - to_1
+    - to_2
+    - to_2_bc
+    - to_3
+    - to_4
+    - to_5
+    - to_6
+    - unbind_0
+    - unbind_0_bc
+    - unsqueeze
+    - unsqueeze_bc
+    - view
+    - view_3
   realizations:
   - name: pre1.k_linear_mean_reduce_7fce9f.7c4629931db7.m1.0733f2fad083.0733f2fad083
     bindings:
@@ -37634,6 +38441,49 @@ configs:
 - program: 10
   target:
     loop: 150
+    origins:
+    - add
+    - add_1
+    - add_2
+    - add_2_c1_bc
+    - add_45
+    - add_45_c1_bc
+    - add_c1_bc
+    - flatten
+    - linear
+    - mean
+    - mean_1
+    - mul
+    - mul_1
+    - mul_5
+    - mul_6
+    - mul_7
+    - p_input_layernorm_weight_bc
+    - pow_1
+    - rsqrt
+    - rsqrt_1
+    - rsqrt_1_bc
+    - sigmoid
+    - split_with_sizes_0
+    - split_with_sizes_1_0
+    - split_with_sizes_1_0_bc
+    - square
+    - sum_40
+    - sum_40_keepdim
+    - to
+    - to_1
+    - to_2
+    - to_2_bc
+    - to_3
+    - to_4
+    - to_5
+    - to_6
+    - unbind_0
+    - unbind_0_bc
+    - unsqueeze
+    - unsqueeze_bc
+    - view
+    - view_3
   realizations:
   - name: pre16.k_linear_mean_reduce_03c479.8caa25e24052.m16.dc6db94ec8ea.dc6db94ec8ea
     bindings:
@@ -37699,6 +38549,49 @@ configs:
 - program: 11
   target:
     loop: 151
+    origins:
+    - add
+    - add_1
+    - add_2
+    - add_2_c1_bc
+    - add_45
+    - add_45_c1_bc
+    - add_c1_bc
+    - flatten
+    - linear
+    - mean
+    - mean_1
+    - mul
+    - mul_1
+    - mul_5
+    - mul_6
+    - mul_7
+    - p_input_layernorm_weight_bc
+    - pow_1
+    - rsqrt
+    - rsqrt_1
+    - rsqrt_1_bc
+    - sigmoid
+    - split_with_sizes_0
+    - split_with_sizes_1_0
+    - split_with_sizes_1_0_bc
+    - square
+    - sum_40
+    - sum_40_keepdim
+    - to
+    - to_1
+    - to_2
+    - to_2_bc
+    - to_3
+    - to_4
+    - to_5
+    - to_6
+    - unbind_0
+    - unbind_0_bc
+    - unsqueeze
+    - unsqueeze_bc
+    - view
+    - view_3
   realizations:
   - name: pre4096.k_linear_mean_reduce_00af35.ab5352f7b147.m4096.940dcfd32db9
     bindings:
@@ -37726,7 +38619,7 @@ configs:
       TILE: f1
       STAGE: ''
       RASTER: ''
-    identity: 6c4d36f12779c7cdf639677c90ab7a3aaec324d19a626e6f9138e79d0c3f4fcc
+    identity: dcd05c523ed155342379214112ffa9f59b55f3d38c8caa03d4182d06c4e8395b
     measurements:
       emmy_us: 18559417.96875
       reference_us: 18559531.25
@@ -37760,7 +38653,7 @@ configs:
       TILE: f2x26
       STAGE: ''
       RASTER: ''
-    identity: 6c4d36f12779c7cdf639677c90ab7a3aaec324d19a626e6f9138e79d0c3f4fcc
+    identity: dcd05c523ed155342379214112ffa9f59b55f3d38c8caa03d4182d06c4e8395b
     measurements:
       emmy_us: 966330.3833007812
       reference_us: 965914.6118164062
@@ -37790,7 +38683,7 @@ configs:
       TILE: f1x2
       STAGE: ''
       RASTER: ''
-    identity: 6c4d36f12779c7cdf639677c90ab7a3aaec324d19a626e6f9138e79d0c3f4fcc
+    identity: dcd05c523ed155342379214112ffa9f59b55f3d38c8caa03d4182d06c4e8395b
     measurements:
       emmy_us: 2334.7198963165283
       reference_us: 2620.4159259796143

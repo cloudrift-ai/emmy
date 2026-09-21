@@ -29,6 +29,8 @@ configs:
 - program: 0
   target:
     loop: 0
+    origins:
+    - scaled_dot_product_attention
   realizations:
   - name: k_sdpa_c2141f
     bindings: {}

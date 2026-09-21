@@ -316,9 +316,8 @@ shared with CausalLM traces.
 - Working-golden inventory generation is downstream compiler/search behavior, not frontend capture behavior:
   `compiler.pipeline.search.working_golden.write_trace_inventory` lowers the captured graph through fusion, enumerates
   every fold-aware kernel occurrence, and embeds the complete stable Torch IR program once in the golden YAML. Each
-  target is selected by unique frontend origins when possible; an empty or ambiguous selector stores the standalone
-  post-fusion Loop IR slice instead. The smaller provenance tuning reproducer is derived in memory when the working
-  file is loaded. Quantized model traces also embed the digest of their exact checkpoint declaration. Frontend nodes
+  target stores its kernel's standalone post-fusion Loop IR, with the frontend origins it computes whole as
+  provenance. Quantized model traces also embed the digest of their exact checkpoint declaration. Frontend nodes
   carrying the generic `trace.materialize` hint become auxiliary outputs only in the inventory copy. Maximal fusion
   retains that storage value as a live output in one frontend target; placement then enumerates its materialized cut
   without changing an ordinary model call.
