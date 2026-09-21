@@ -30,6 +30,7 @@ from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.ir.tile import TileOp
+from emmy.compiler.loop_wire import kernel_tile
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.search.db import SearchDB
 from emmy.compiler.pipeline.search.pins import pinned_knobs
@@ -354,6 +355,32 @@ def test_pinned_placement_route_tunes_and_assembles_child_schedules(monkeypatch,
     assert sum("enrolled minted kernel" in record.message for record in caplog.records) >= 2
     assert _is_child_winner(assembled[0].knobs)
     assert assembled[1].knobs["WORK"] == "" and assembled[1].knobs.get("STAGE", "") == ""
+
+
+def test_a_pinned_cut_stores_the_kernel_set_it_minted(monkeypatch) -> None:
+    """The tuner stores each kernel-set decision as definitions: the parent's kernel row, each
+    piece's row with a wire of its own, and one ``kernel_set`` row linking them by exact identity —
+    the identities of the pieces the assembled route runs, bound as they stand in the graph."""
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    db = SearchDB()
+    with pinned_knobs({"PLACE": "cut"}):
+        result = run_two_level(
+            _placement_route_graph(),
+            ctx=Context.from_target((8, 0)),
+            db=db,
+            backend=_RouteBackend(),
+            patience=_PATIENCE,
+            prior=None,
+            manage_prior=False,
+        )
+    assembled = [node.op for node in result.assembled.nodes.values() if isinstance(node.op, CudaOp)]
+    pieces = {kernel_tile(op).identity_key(structural=False, with_io=True) for op in assembled}
+    assert len(pieces) == 2
+    [row] = list(db.iter_kernel_sets())
+    assert set(row.children) == pieces
+    assert set(row.decision.values()) == {"cut"} and row.parent not in pieces
+    names = db.kernel_names()
+    assert {row.parent, *pieces} <= set(names)
 
 
 def test_minted_kernels_are_enrolled_as_first_class_targets(monkeypatch, caplog) -> None:

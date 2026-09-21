@@ -8,6 +8,11 @@ Pure persistence layer — no MCTS state, no propagation walks. Tables:
   the same kernel reached from two parents has one definition — what its candidate pool enumerates
   from. The exact identity, not the clustered deploy identity: that one merges kernels that differ
   only in their pointwise op, and a definition cannot stand for several kernels.
+- ``kernel_set`` — one row per structural decision on one parent kernel: the parent's identity, the
+  decision (the arm's knob dict — a placement cut's ``PLACE@seam: cut`` keys, a cross-CTA split's
+  ``REDUCE`` value — as canonical JSON) and the identities of the pieces it minted. A piece with
+  forks of its own is the parent of further rows. The decision's PRICE is not here: it is the route
+  row in ``perf``, keyed on the parent with the decision in its knobs, which is how deploy reads it.
 - ``perf`` — backend-agnostic measurement store, one row per measured kernel variant per card and
   regime, keyed ``(gpu, cc, opt, flags, kernel, bindings, knobs, backend)``. ``gpu`` is the card
   (``Context.hardware_id``): two cards sharing a capability (RTX 5090 / RTX PRO 6000, H100 / H200)
@@ -113,6 +118,16 @@ class KernelRow:
     name: str
 
 
+@dataclass(frozen=True)
+class KernelSetRow:
+    """One ``kernel_set`` row: the parent kernel's identity, the decision taken on it, and the exact
+    identities of the pieces the decision minted, in the fragment's order."""
+
+    parent: str
+    decision: dict
+    children: tuple[str, ...]
+
+
 # Each table's columns, in the order its row type reads them — the SELECT list, and the column set a
 # file must have for this module to read it.
 _PERF_COLS = (
@@ -138,6 +153,7 @@ _PERF_COLS = (
     "source",
 )
 _KERNEL_COLS = ("identity", "wire", "name")
+_KERNEL_SET_COLS = ("parent", "decision", "children")
 _PERF_SEL = ", ".join(f"perf.{col}" for col in _PERF_COLS)
 _PERF_KEY = "gpu = ? AND cc = ? AND opt = ? AND flags = ? AND kernel = ? AND bindings = ? AND knobs = ? AND backend = ?"
 
@@ -160,6 +176,14 @@ class SearchDB:
             identity TEXT PRIMARY KEY,
             wire     TEXT NOT NULL,
             name     TEXT NOT NULL
+        )
+        """,
+        "kernel_set": """
+        CREATE TABLE IF NOT EXISTS kernel_set (
+            parent   TEXT NOT NULL,
+            decision TEXT NOT NULL,
+            children TEXT NOT NULL,
+            PRIMARY KEY (parent, decision)
         )
         """,
         "perf": """
@@ -188,7 +212,7 @@ class SearchDB:
         )
         """,
     }
-    _COLS = {"kernel": _KERNEL_COLS, "perf": _PERF_COLS}
+    _COLS = {"kernel": _KERNEL_COLS, "kernel_set": _KERNEL_SET_COLS, "perf": _PERF_COLS}
 
     def __init__(self, path: Path | str | None = None) -> None:
         # The backing file (``None`` for an in-memory DB) — read by the deploy-side
@@ -288,6 +312,25 @@ class SearchDB:
     def iter_kernels(self) -> Iterator[KernelRow]:
         for identity, wire, name in self._conn.execute("SELECT identity, wire, name FROM kernel ORDER BY identity"):
             yield KernelRow(identity=identity, wire=json.loads(wire), name=name)
+
+    # ------------------------------------------------------------------
+    # Kernel set
+    # ------------------------------------------------------------------
+
+    def record_kernel_set(self, row: KernelSetRow) -> None:
+        """Store what one decision on one parent minted; a later splice of the same decision (a
+        compiler that now mints other pieces) replaces the row."""
+        self._conn.execute(
+            "INSERT OR REPLACE INTO kernel_set (parent, decision, children) VALUES (?, ?, ?)",
+            (row.parent, knobs_json(row.decision), json.dumps(list(row.children))),
+        )
+
+    def record_kernel_sets(self, rows: Iterable[KernelSetRow]) -> int:
+        return self._transaction(rows, self.record_kernel_set)
+
+    def iter_kernel_sets(self) -> Iterator[KernelSetRow]:
+        for parent, decision, children in self._conn.execute("SELECT parent, decision, children FROM kernel_set ORDER BY parent, decision"):
+            yield KernelSetRow(parent=parent, decision=json.loads(decision), children=tuple(json.loads(children)))
 
     # ------------------------------------------------------------------
     # Perf — write
