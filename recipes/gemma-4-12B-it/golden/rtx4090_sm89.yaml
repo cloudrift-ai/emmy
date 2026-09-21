@@ -6541,38 +6541,6 @@ configs:
       emmy_us: 25.7
       reference_us: 40.1
       reference_backend: emmy-greedy
-- program: 142
-  target:
-    loop: 1
-  realizations:
-  - name: gemma4_12b.attention.hd256.pv
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w2x2
-      TILE: mma_m16n8k16_f16_f32/f1x8/k2
-      REDUCE: ''
-      STAGE: d1/smem
-      RASTER: ''
-    measurements:
-      emmy_us: 32.7
-      reference_us: 116.6
-      reference_backend: emmy-greedy
-  - name: gemma4_12b.attention.hd256.pv
-    bindings: {}
-    pins:
-      FAST_MATH: true
-    knobs:
-      WORK: w2x2
-      TILE: mma_m16n8k16_f16_f32/f1x8/k2
-      REDUCE: ''
-      STAGE: d1/smem
-      RASTER: ''
-    measurements:
-      emmy_us: 32.7
-      reference_us: 116.9
-      reference_backend: emmy-greedy
 - program: 143
   target:
     loop: 2
@@ -6604,38 +6572,6 @@ configs:
     measurements:
       emmy_us: 296.3
       reference_us: 7309.8
-      reference_backend: emmy-greedy
-- program: 143
-  target:
-    loop: 3
-  realizations:
-  - name: gemma4_12b.attention.hd256.s2048.pv
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w4x2
-      TILE: mma_m16n8k16_f16_f32/f1x8/k2
-      REDUCE: ''
-      STAGE: d2/smem
-      RASTER: ''
-    measurements:
-      emmy_us: 398.8
-      reference_us: 740.4
-      reference_backend: emmy-greedy
-  - name: gemma4_12b.attention.hd256.s2048.pv
-    bindings: {}
-    pins:
-      FAST_MATH: true
-    knobs:
-      WORK: w4x2
-      TILE: mma_m16n8k16_f16_f32/f1x8/k2
-      REDUCE: ''
-      STAGE: d2/smem
-      RASTER: ''
-    measurements:
-      emmy_us: 397.3
-      reference_us: 739.9
       reference_backend: emmy-greedy
 - program: 144
   target:
@@ -6669,38 +6605,6 @@ configs:
       emmy_us: 1918.0
       reference_us: 29006.2
       reference_backend: emmy-greedy
-- program: 144
-  target:
-    loop: 5
-  realizations:
-  - name: gemma4_12b.attention.hd256.s4096.pv
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w1x4
-      TILE: mma_m16n8k16_f16_f32/f4x8/k4
-      REDUCE: ''
-      STAGE: d1/smem
-      RASTER: ''
-    measurements:
-      emmy_us: 1842.2
-      reference_us: 19839.4
-      reference_backend: emmy-greedy
-  - name: gemma4_12b.attention.hd256.s4096.pv
-    bindings: {}
-    pins:
-      FAST_MATH: true
-    knobs:
-      WORK: w1x4
-      TILE: mma_m16n8k16_f16_f16/f2x8/k2
-      REDUCE: ''
-      STAGE: d1/smem
-      RASTER: ''
-    measurements:
-      emmy_us: 1694.2
-      reference_us: 19833.2
-      reference_backend: emmy-greedy
 - program: 145
   target:
     loop: 6
@@ -6732,38 +6636,6 @@ configs:
     measurements:
       emmy_us: 37.3
       reference_us: 62.5
-      reference_backend: emmy-greedy
-- program: 145
-  target:
-    loop: 7
-  realizations:
-  - name: gemma4_12b.attention.hd512.pv
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w2x2
-      TILE: mma_m16n8k16_f16_f32/f1x8
-      REDUCE: ''
-      STAGE: d1/smem
-      RASTER: ''
-    measurements:
-      emmy_us: 57.6
-      reference_us: 129.2
-      reference_backend: emmy-greedy
-  - name: gemma4_12b.attention.hd512.pv
-    bindings: {}
-    pins:
-      FAST_MATH: true
-    knobs:
-      WORK: w2x2
-      TILE: mma_m16n8k16_f16_f32/f1x8
-      REDUCE: ''
-      STAGE: d1/smem
-      RASTER: ''
-    measurements:
-      emmy_us: 57.4
-      reference_us: 129.7
       reference_backend: emmy-greedy
 - program: 146
   target:
@@ -6797,38 +6669,6 @@ configs:
       emmy_us: 75.62
       reference_us: 80.64
       reference_backend: emmy-greedy
-- program: 146
-  target:
-    loop: 9
-  realizations:
-  - name: gemma4_12b.attention.hd512.dynM.pv
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w2x4
-      TILE: mma_m16n8k16_f16_f32/f2x8/k2
-      REDUCE: ''
-      STAGE: d2/smem
-      RASTER: ''
-    measurements:
-      emmy_us: 50.35
-      reference_us: 1035.26
-      reference_backend: emmy-greedy
-  - name: gemma4_12b.attention.hd512.dynM.pv
-    bindings: {}
-    pins:
-      FAST_MATH: true
-    knobs:
-      WORK: w2x4
-      TILE: mma_m16n8k16_f16_f32/f2x8/k2
-      REDUCE: ''
-      STAGE: d2/smem
-      RASTER: ''
-    measurements:
-      emmy_us: 50.33
-      reference_us: 1035.26
-      reference_backend: emmy-greedy
 - program: 147
   target:
     loop: 10
@@ -6861,38 +6701,6 @@ configs:
       emmy_us: 380.9
       reference_us: 5025.3
       reference_backend: emmy-greedy
-- program: 147
-  target:
-    loop: 11
-  realizations:
-  - name: gemma4_12b.attention.hd512.s2048.pv
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w4x2
-      TILE: mma_m16n8k16_f16_f32/f1x8
-      REDUCE: ''
-      STAGE: d1/smem
-      RASTER: ''
-    measurements:
-      emmy_us: 769.0
-      reference_us: 9892.2
-      reference_backend: emmy-greedy
-  - name: gemma4_12b.attention.hd512.s2048.pv
-    bindings: {}
-    pins:
-      FAST_MATH: true
-    knobs:
-      WORK: w4x2
-      TILE: mma_m16n8k16_f16_f16/f1x8/k2
-      REDUCE: ''
-      STAGE: d1/smem
-      RASTER: ''
-    measurements:
-      emmy_us: 756.7
-      reference_us: 9895.4
-      reference_backend: emmy-greedy
 - program: 148
   target:
     loop: 12
@@ -6910,24 +6718,6 @@ configs:
     measurements:
       emmy_us: 3470.3
       reference_us: 19094.0
-      reference_backend: emmy-greedy
-- program: 148
-  target:
-    loop: 13
-  realizations:
-  - name: gemma4_12b.attention.hd512.s4096.pv
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w1x4
-      TILE: mma_m16n8k16_f16_f32/f4x8/k4
-      REDUCE: ''
-      STAGE: d1/smem
-      RASTER: ''
-    measurements:
-      emmy_us: 3381.2
-      reference_us: 36874.8
       reference_backend: emmy-greedy
 loops:
 - inputs: [x0, x1]

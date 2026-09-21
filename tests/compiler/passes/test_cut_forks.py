@@ -143,11 +143,11 @@ def _mimo_graph() -> Graph:
     return graph
 
 
-def _sdpa_graph(causal: bool) -> Graph:
+def _sdpa_graph() -> Graph:
     graph = Graph()
     for name in ("q", "k", "v"):
         _input(graph, name, (1, 2, 8, 16))
-    graph.add_node(SdpaOp(is_causal=causal), ["q", "k", "v"], Tensor("out", (1, 2, 8, 16), "f16"), node_id="out")
+    graph.add_node(SdpaOp(), ["q", "k", "v"], Tensor("out", (1, 2, 8, 16), "f16"), node_id="out")
     graph.inputs, graph.outputs = ["q", "k", "v"], ["out"]
     return graph
 
@@ -257,28 +257,19 @@ def test_computed_operand_offers_fused_and_cut_and_pinned_cut_lowers(side: str) 
     assert len(cuda[1].inputs) == 2 and any("__place_" in name for name in cuda[1].inputs)
 
 
-@pytest.mark.parametrize(
-    "causal",
-    (
-        False,
-        pytest.param(
-            True, marks=pytest.mark.xfail(strict=True, reason="fused value channel on tensor cores: not on this tree yet (PR #699)")
-        ),
-    ),
-)
-def test_sdpa_score_cut_is_offered_and_pinned_cut_lowers(causal: bool) -> None:
-    offered = _offered(_sdpa_graph(causal), frontend=True)
+def test_sdpa_score_cut_is_offered_and_pinned_cut_lowers() -> None:
+    offered = _offered(_sdpa_graph(), frontend=True)
     assert {"PLACE": "fuse"} in offered
     assert {"PLACE@map.1/twist.1/inner": "cut"} in offered
-    lowered = _lower_cut(_sdpa_graph(causal), "PLACE@map.1/twist.1/inner")
+    lowered = _lower_cut(_sdpa_graph(), "PLACE@map.1/twist.1/inner")
     cuda = [node for node in lowered.nodes.values() if type(node.op).__name__ == "CudaOp"]
-    assert len(cuda) == 2 + causal  # the two pieces of the cut; the causal mask is its own pointwise kernel
+    assert len(cuda) == 2  # the two pieces of the cut
     workspace = next(node.output for node in cuda if "__place_" in node.id)
     assert workspace.dtype.name == "f32"
 
 
 def test_recorded_sdpa_cut_decodes_exactly_and_stale_path_fails_loudly() -> None:
-    wire = graph_to_wire(_sdpa_graph(False))
+    wire = graph_to_wire(_sdpa_graph())
     fields = {
         "name": "sdpa.route",
         "gpu_name": "",
@@ -449,7 +440,7 @@ def _receipt_fields() -> dict:
         "compute_cap": (12, 0),
         "model": None,
         "program_index": 0,
-        "program_wire": graph_to_wire(_sdpa_graph(False)),
+        "program_wire": graph_to_wire(_sdpa_graph()),
         "origins": ("out",),
         "bindings": (),
         "pins": (("PLACE@map.1/twist.1/inner", "cut"),),
@@ -558,7 +549,7 @@ def test_post_schedule_receipt_does_not_steer_an_unowned_peer(monkeypatch) -> No
 def test_child_identity_receipt_selects_one_kernel_from_multi_kernel_loop_target() -> None:
     """A stored child identity is the selector when a regenerated target now lowers to several
     kernels; strict decoding must consult that identity's rows before requiring a one-kernel lift."""
-    graph = _sdpa_graph(False)
+    graph = _sdpa_graph()
     _input(graph, "x", (4, 32))
     graph.add_node(SoftmaxOp(axis=-1), ["x"], Tensor("softmax", (4, 32), "f16"), node_id="softmax")
     graph.inputs.append("x")
@@ -709,7 +700,7 @@ def test_pool_group_fuses_node_id_respellings_and_keys_on_pins() -> None:
     group — the wire digest this replaced split them — while a different pin regime still
     keys apart."""
     fields = _receipt_fields()
-    respelled = _sdpa_graph(False)
+    respelled = _sdpa_graph()
     for nid in [n for n in respelled.nodes if n not in respelled.inputs]:
         respelled.rename_node(nid, f"session2_{nid}")
     twin_fields = {
@@ -741,7 +732,7 @@ def _sdpa_kernel_identity() -> str:
     from emmy.compiler.pipeline.fork import flatten_leaves
 
     ctx = Context.from_target((12, 0), gpu_name=_ROUTING_CARD)
-    lowered = Pipeline.build(LOOP_PASSES).run(_sdpa_graph(False), ctx=ctx)
+    lowered = Pipeline.build(LOOP_PASSES).run(_sdpa_graph(), ctx=ctx)
     seen: list[str] = []
 
     def decide(fp):
@@ -765,7 +756,7 @@ def _routing_record(knobs: dict, *, name: str = "sdpa.route") -> GoldenRecord:
         compute_cap=(12, 0),
         model=None,
         program_index=0,
-        program_wire=graph_to_wire(_sdpa_graph(False)),
+        program_wire=graph_to_wire(_sdpa_graph()),
         origins=("out",),
         bindings=(),
         pins=(),
@@ -786,7 +777,7 @@ def _deploy_kernels(records: list) -> list[str]:
     from emmy.compiler.pipeline.search.policy.greedy import greedy_decide
 
     ctx = Context.from_target((12, 0), gpu_name=_ROUTING_CARD)
-    lowered = Pipeline.build(LOOP_PASSES).run(_sdpa_graph(False), ctx=ctx)
+    lowered = Pipeline.build(LOOP_PASSES).run(_sdpa_graph(), ctx=ctx)
     with records_override(records):
         terminal, _trace = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(lowered, greedy_decide(prior=None))
     return sorted(node.id for node in terminal.nodes.values() if isinstance(node.op, TileOp))

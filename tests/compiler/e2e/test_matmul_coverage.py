@@ -26,8 +26,6 @@ structure tests (forced sm_120) need no GPU; warp-tier accuracy needs sm_90+.
 
 from __future__ import annotations
 
-import re
-
 import numpy as np
 import pytest
 
@@ -1353,45 +1351,6 @@ def test_masked_symbolic_m_structure(transport, monkeypatch):
         assert stage.endswith("/smem-tma"), f"symbolic-M with static innermost dim must stage via TMA: {stage!r}"
         assert "cp.async.bulk.tensor" in src, "A operand must stage via TMA"
         assert "CUtensorMap" in src, "kernel must take the TMA descriptor param"
-
-
-@pytest.mark.xfail(strict=True, reason="fused value channel on tensor cores: not on this tree yet (PR #699)")
-def test_computed_a_symbolic_k_reaches_warp(monkeypatch):
-    """A COMPUTED-A contraction over a SYMBOLIC K — softmax(scores) @ V, the SDPA P@V edge under a
-    dynamic sequence — reaches the mma tier through the smem compute fill, whose K MASK covers the
-    last chunk's overhang: the cone's own reads clamp in-bounds and every slab lane past the
-    runtime extent stores the additive fold identity, so the drain still reads whole chunks. The
-    B peer clamps its overhanging slab ROW the same way (K is that slab's outer dim, so the
-    cp.async chunk stays contiguous). Without the mask the schedule refused the tier outright and
-    this shape had only the scalar rows."""
-    for k, v in {"TILE": _MASK_WARP[0], "WORK": _MASK_WARP[1], "STAGE": "d1/smem", "REDUCE": ""}.items():
-        monkeypatch.setenv(f"EMMY_{k}", v)
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
-    lowered = Pipeline.build(CUDA_PASSES).run(_pv_softmax_graph(), ctx=Context(compute_capability=(12, 0)))
-    kop = lowered.nodes["o"].op
-    assert mma_atom(kop.knobs) == "mma_m16n8k16_f16_f32", "a computed-A symbolic-K contraction must reach the warp tier"
-    src = kop.kernel_source
-    assert "mma.sync.aligned.m16n8k16" in src and "int seq_len" in src
-    assert "for (int _ks = 0; _ks < seq_len;" in src, "the staged chunk loop must run to the runtime extent"
-    lines = src.splitlines()
-    score_loads = [ln for ln in lines if "scores[" in ln and "__half2float" in ln]
-    # Every fragment score load carries TWO clamps — the masked M row AND the runtime K — so no
-    # element ever reads past the scores buffer (the seq-16 dirty-pool OOB defect).
-    assert score_loads and all(ln.count("< seq_len) ?") == 2 for ln in score_loads), "score loads must clamp both M and K"
-    # The compute-filled A slab covers the WHOLE bk=32 chunk the ldmatrix drain reads: with 8-wide
-    # fragment column cells the store offsets must reach 24 (cells at K+0/8/16/24 — sizing the
-    # cells off the output tile's n.reg left K 16..31 uninitialized smem, the dirty-pool defect).
-    fill_stores = [ln for ln in lines if "_a_smem[" in ln and "__floats2half2_rn" in ln]
-    offs = {int(m.group(1)) for ln in fill_stores for m in re.finditer(r"_ks \+ (\d+) - _ks", ln)} | {0}
-    # The count is invariant under arithmetic simplification of the offset spelling; the offsets
-    # pin the spread (pre-fix: 8 stores at [0, 8]).
-    assert len(fill_stores) == 16 and max(offs) == 24, (
-        f"the A slab fill must cover the whole 32-element chunk ({len(fill_stores)} stores, offsets {sorted(offs)})"
-    )
-    masked = [ln for ln in lines if ">= seq_len) in0__f" in ln]
-    assert masked and all("-1e+30f" in ln for ln in masked), "the overhang must use the Fold identity"
-    fill = next(ln for ln in lines if "emmy_cp_async_c" in ln and "_b_smem" in ln)
-    assert "< seq_len) ?" in fill and "seq_len - 1" in fill, f"the B slab fill must clamp its overhanging K row: {fill}"
 
 
 # (label, env, seqs, make). ``make(seq)`` builds (graph, feed, want) for one off-hint runtime
