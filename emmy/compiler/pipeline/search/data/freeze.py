@@ -12,9 +12,9 @@ symbolic dims were bound to, its knobs (``S_*`` stamps + tunables, exactly as th
 the opt level and the residual compiler flags, the status, the latency statistics, ``captured``,
 ``measured_at`` and a failure's ``error``. Two card-independent files ride beside them when the
 instance holds definitions: ``kernels.yaml`` (the ``kernel`` rows of every kernel a frozen row or a
-kernel set names — identity, C name, Loop IR wire) and ``kernel_sets.yaml`` (every ``kernel_set``
+kernel set names — identity, C name, Loop IR wire) and ``routing.yaml`` (every ``routing``
 row), so an import can enumerate from the freeze alone. The manifest lists every file with its
-kind (``perf``, ``kernels``, ``kernel_sets``) and its digest. Device ``H_*`` features are never
+kind (``perf``, ``kernels``, ``routing``) and its digest. Device ``H_*`` features are never
 stored: readers derive them from the card (``data.sample.measured_features``).
 
 What freezes (see :func:`freeze_reason`): every CUDA row measured in the deployable regime on a
@@ -58,7 +58,7 @@ from typing import NamedTuple
 
 import yaml
 
-from emmy.compiler.pipeline.search.db import KernelRow, KernelSetRow, PerfRow, PerfStats, SearchDB
+from emmy.compiler.pipeline.search.db import KernelRow, PerfRow, PerfStats, RoutingRow, SearchDB
 from emmy.compiler.pipeline.search.features import DEPLOYABLE_OPT, FEATURIZER_VERSION
 
 logger = logging.getLogger(__name__)
@@ -67,7 +67,7 @@ FREEZE_KIND = "emmy-measurement-freeze"
 FREEZE_VER = 5
 MANIFEST_NAME = "manifest.json"
 KERNELS_NAME = "kernels.yaml"
-KERNEL_SETS_NAME = "kernel_sets.yaml"
+ROUTING_NAME = "routing.yaml"
 
 
 class Freeze(NamedTuple):
@@ -76,7 +76,7 @@ class Freeze(NamedTuple):
     manifest: dict
     perf: list[PerfRow]
     kernels: list[KernelRow]
-    kernel_sets: list[KernelSetRow]
+    routing: list[RoutingRow]
 
 
 def freeze_reason(row: PerfRow) -> str | None:
@@ -277,7 +277,7 @@ def _write_rows(tmp: Path, name: str, payloads: list[dict], doc: dict, key: str)
 def write_freeze(db_path: Path | str, out_dir: Path | str, *, note: str = "") -> dict:
     """Read the DB instance at ``db_path`` read-only — its CUDA ``perf`` rows filtered through
     :func:`freeze_reason`, the ``kernel`` rows those rows and the kernel sets name, every
-    ``kernel_set`` row — and atomically write the freeze DIRECTORY at ``out_dir``: one
+    ``routing`` row — and atomically write the freeze DIRECTORY at ``out_dir``: one
     per-``(gpu, compute_cap)`` YAML file, the two definition files when there is anything to put in
     them, plus ``manifest.json``. Returns the manifest dict (so a caller reports counts + digest
     without re-reading). Hard-errors when nothing survives the filter — a zero-row freeze means the
@@ -287,7 +287,7 @@ def write_freeze(db_path: Path | str, out_dir: Path | str, *, note: str = "") ->
     try:
         rows = list(db.iter_perf_rows(backend="cuda"))
         kernels = list(db.iter_kernels())
-        kernel_sets = list(db.iter_kernel_sets())
+        routing = list(db.iter_routing_rows())
     finally:
         db.close()
     kept = []
@@ -324,13 +324,13 @@ def write_freeze(db_path: Path | str, out_dir: Path | str, *, note: str = "") ->
         files[name] = {"kind": "perf", "gpu_name": gpu, "compute_cap": list(cap), "rows": n, "sha256": digest}
     # Definitions are card-independent: the kernels the frozen rows and the kernel sets name, and
     # every kernel set. A kernel nothing names is not part of what the freeze pins.
-    named = {r.kernel for r in kept} | {s.parent for s in kernel_sets} | {c for s in kernel_sets for c in s.children}
+    named = {r.kernel for r in kept} | {s.parent for s in routing} | {c for s in routing for c in s.children}
     definitions = (
         (KERNELS_NAME, "kernels", [{"identity": k.identity, "name": k.name, "wire": k.wire} for k in kernels if k.identity in named]),
         (
-            KERNEL_SETS_NAME,
-            "kernel_sets",
-            [{"parent": s.parent, "decision": s.decision, "children": list(s.children)} for s in kernel_sets],
+            ROUTING_NAME,
+            "routing",
+            [{"parent": s.parent, "decision": s.decision, "children": list(s.children)} for s in routing],
         ),
     )
     for name, kind, payloads in definitions:
@@ -357,7 +357,7 @@ def write_freeze(db_path: Path | str, out_dir: Path | str, *, note: str = "") ->
             "bench_fail": sum(1 for r in kept if r.status == "bench_fail"),
             "per_gpu": {g: per_gpu[g] for g in sorted(per_gpu)},
             "kernels": files.get(KERNELS_NAME, {}).get("rows", 0),
-            "kernel_sets": files.get(KERNEL_SETS_NAME, {}).get("rows", 0),
+            "routing": files.get(ROUTING_NAME, {}).get("rows", 0),
         },
         "files": files,
         "created_at": datetime.now(UTC).isoformat(),
@@ -374,7 +374,7 @@ def write_freeze(db_path: Path | str, out_dir: Path | str, *, note: str = "") ->
     return manifest
 
 
-_FILE_KEYS = {"perf": "configs", "kernels": "kernels", "kernel_sets": "kernel_sets"}
+_FILE_KEYS = {"perf": "configs", "kernels": "kernels", "routing": "routing"}
 
 
 def _read_rows(p: Path, name: str, info: dict, regen: str) -> tuple[dict, list[dict]]:
@@ -409,7 +409,7 @@ def _read_rows(p: Path, name: str, info: dict, regen: str) -> tuple[dict, list[d
 
 def load_freeze(path: Path | str) -> Freeze:
     """Parse + verify the freeze directory at ``path``: the manifest, the ``perf`` rows (each keyed by
-    its file's card and sourced ``freeze:<digest>``), the ``kernel`` rows and the ``kernel_set`` rows.
+    its file's card and sourced ``freeze:<digest>``), the ``kernel`` rows and the ``routing`` rows.
     Hard ``RuntimeError`` — never a silent fallback — on any integrity failure."""
     p = Path(path)
     regen = "re-freeze with `emmy dataset freeze`"
@@ -440,7 +440,7 @@ def load_freeze(path: Path | str) -> Freeze:
                     raise RuntimeError(f"measurement freeze {p}: {name} row lacks identity/wire/name — {regen}")
                 frozen.kernels.append(KernelRow(identity=payload["identity"], wire=payload["wire"], name=payload["name"]))
             continue
-        if info["kind"] == "kernel_sets":
+        if info["kind"] == "routing":
             for payload in payloads:
                 if not (
                     isinstance(payload.get("parent"), str)
@@ -448,8 +448,8 @@ def load_freeze(path: Path | str) -> Freeze:
                     and isinstance(payload.get("children"), list)
                 ):
                     raise RuntimeError(f"measurement freeze {p}: {name} row lacks parent/decision/children — {regen}")
-                frozen.kernel_sets.append(
-                    KernelSetRow(parent=payload["parent"], decision=payload["decision"], children=tuple(payload["children"]))
+                frozen.routing.append(
+                    RoutingRow(parent=payload["parent"], decision=payload["decision"], children=tuple(payload["children"]))
                 )
             continue
         gpu_name, (major, minor) = doc["gpu_name"], doc["compute_cap"]

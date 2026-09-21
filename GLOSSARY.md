@@ -334,6 +334,8 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   cross-CTA `g<n>` half. Its latency is the measured price of applying that decision to the kernel it was recorded
   on; at that kernel's fork a compile takes the offered arm the row spells, which outranks any arm priced by
   prediction, and the pieces the arm mints are decided from rows of their own.
+- **Routing table** — The tune database table that links a parent kernel and one decision taken on it to the kernels
+  the decision minted. It says which pieces a route leads to; the route row is the measured row that prices it.
 - **Strict evidence** — A compile mode (`--strict-evidence`, `EMMY_STRICT_EVIDENCE`) in which a fork no measured row
   decides is an error naming the kernel, instead of a prediction the prior makes.
 - **Reservoir** — The bounded sample of past measurements kept inside the online prior's checkpoint file. It is the

@@ -35,7 +35,7 @@ the evaluations read — holds the same three.
 cut or a split minted is a row like any other, so the same kernel reached from two parents has one definition, and
 that definition is what its candidate pool is enumerated from.
 
-**Kernel sets.** One row per structural decision taken on one kernel: the parent, the decision (which seam was cut,
+**Routing.** One row per structural decision taken on one kernel: the parent, the decision (which seam was cut,
 how a reduction was split across blocks), and the kernels the decision minted. A minted kernel with decisions of its
 own is the parent of further rows. The price of the decision is not here; it is a measured row of the parent that
 spells the decision, which is how a compile reads it.

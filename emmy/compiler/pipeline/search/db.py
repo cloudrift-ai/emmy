@@ -8,7 +8,7 @@ Pure persistence layer — no MCTS state, no propagation walks. Tables:
   the same kernel reached from two parents has one definition — what its candidate pool enumerates
   from. The exact identity, not the clustered deploy identity: that one merges kernels that differ
   only in their pointwise op, and a definition cannot stand for several kernels.
-- ``kernel_set`` — one row per structural decision on one parent kernel: the parent's identity, the
+- ``routing`` — one row per structural decision on one parent kernel: the parent's identity, the
   decision (the arm's knob dict — a placement cut's ``PLACE@seam: cut`` keys, a cross-CTA split's
   ``REDUCE`` value — as canonical JSON) and the identities of the pieces it minted. A piece with
   forks of its own is the parent of further rows. The decision's PRICE is not here: it is the route
@@ -119,8 +119,8 @@ class KernelRow:
 
 
 @dataclass(frozen=True)
-class KernelSetRow:
-    """One ``kernel_set`` row: the parent kernel's identity, the decision taken on it, and the exact
+class RoutingRow:
+    """One ``routing`` row: the parent kernel's identity, the decision taken on it, and the exact
     identities of the pieces the decision minted, in the fragment's order."""
 
     parent: str
@@ -153,7 +153,7 @@ _PERF_COLS = (
     "source",
 )
 _KERNEL_COLS = ("identity", "wire", "name")
-_KERNEL_SET_COLS = ("parent", "decision", "children")
+_ROUTING_COLS = ("parent", "decision", "children")
 _PERF_SEL = ", ".join(f"perf.{col}" for col in _PERF_COLS)
 _PERF_KEY = "gpu = ? AND cc = ? AND opt = ? AND flags = ? AND kernel = ? AND bindings = ? AND knobs = ? AND backend = ?"
 
@@ -178,8 +178,8 @@ class SearchDB:
             name     TEXT NOT NULL
         )
         """,
-        "kernel_set": """
-        CREATE TABLE IF NOT EXISTS kernel_set (
+        "routing": """
+        CREATE TABLE IF NOT EXISTS routing (
             parent   TEXT NOT NULL,
             decision TEXT NOT NULL,
             children TEXT NOT NULL,
@@ -212,7 +212,7 @@ class SearchDB:
         )
         """,
     }
-    _COLS = {"kernel": _KERNEL_COLS, "kernel_set": _KERNEL_SET_COLS, "perf": _PERF_COLS}
+    _COLS = {"kernel": _KERNEL_COLS, "routing": _ROUTING_COLS, "perf": _PERF_COLS}
 
     def __init__(self, path: Path | str | None = None) -> None:
         # The backing file (``None`` for an in-memory DB) — read by the deploy-side
@@ -317,20 +317,20 @@ class SearchDB:
     # Kernel set
     # ------------------------------------------------------------------
 
-    def record_kernel_set(self, row: KernelSetRow) -> None:
+    def record_routing(self, row: RoutingRow) -> None:
         """Store what one decision on one parent minted; a later splice of the same decision (a
         compiler that now mints other pieces) replaces the row."""
         self._conn.execute(
-            "INSERT OR REPLACE INTO kernel_set (parent, decision, children) VALUES (?, ?, ?)",
+            "INSERT OR REPLACE INTO routing (parent, decision, children) VALUES (?, ?, ?)",
             (row.parent, knobs_json(row.decision), json.dumps(list(row.children))),
         )
 
-    def record_kernel_sets(self, rows: Iterable[KernelSetRow]) -> int:
-        return self._transaction(rows, self.record_kernel_set)
+    def record_routing_rows(self, rows: Iterable[RoutingRow]) -> int:
+        return self._transaction(rows, self.record_routing)
 
-    def iter_kernel_sets(self) -> Iterator[KernelSetRow]:
-        for parent, decision, children in self._conn.execute("SELECT parent, decision, children FROM kernel_set ORDER BY parent, decision"):
-            yield KernelSetRow(parent=parent, decision=json.loads(decision), children=tuple(json.loads(children)))
+    def iter_routing_rows(self) -> Iterator[RoutingRow]:
+        for parent, decision, children in self._conn.execute("SELECT parent, decision, children FROM routing ORDER BY parent, decision"):
+            yield RoutingRow(parent=parent, decision=json.loads(decision), children=tuple(json.loads(children)))
 
     # ------------------------------------------------------------------
     # Perf — write

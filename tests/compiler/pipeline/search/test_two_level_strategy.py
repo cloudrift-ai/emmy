@@ -357,9 +357,9 @@ def test_pinned_placement_route_tunes_and_assembles_child_schedules(monkeypatch,
     assert assembled[1].knobs["WORK"] == "" and assembled[1].knobs.get("STAGE", "") == ""
 
 
-def test_a_pinned_cut_stores_the_kernel_set_it_minted(monkeypatch) -> None:
+def test_a_pinned_cut_stores_the_routing_it_minted(monkeypatch) -> None:
     """The tuner stores each kernel-set decision as definitions: the parent's kernel row, each
-    piece's row with a wire of its own, and one ``kernel_set`` row linking them by exact identity —
+    piece's row with a wire of its own, and one ``routing`` row linking them by exact identity —
     the identities of the pieces the assembled route runs, bound as they stand in the graph."""
     monkeypatch.setenv("EMMY_REDUCE", "")
     db = SearchDB()
@@ -376,7 +376,7 @@ def test_a_pinned_cut_stores_the_kernel_set_it_minted(monkeypatch) -> None:
     assembled = [node.op for node in result.assembled.nodes.values() if isinstance(node.op, CudaOp)]
     pieces = {kernel_tile(op).identity_key(structural=False, with_io=True) for op in assembled}
     assert len(pieces) == 2
-    [row] = list(db.iter_kernel_sets())
+    [row] = list(db.iter_routing_rows())
     assert set(row.children) == pieces
     assert set(row.decision.values()) == {"cut"} and row.parent not in pieces
     names = db.kernel_names()

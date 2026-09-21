@@ -10,7 +10,7 @@ from dataclasses import replace
 import pytest
 
 from emmy.compiler.context import Context
-from emmy.compiler.pipeline.search.db import KernelRow, KernelSetRow, PerfStats, SearchDB, knobs_json
+from emmy.compiler.pipeline.search.db import KernelRow, PerfStats, RoutingRow, SearchDB, knobs_json
 
 _5090 = "NVIDIA GeForce RTX 5090"
 _PRO_6000 = "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition"
@@ -78,14 +78,14 @@ def test_a_kernel_row_is_written_once_and_names_the_kernel() -> None:
     assert [row.wire for row in db.iter_kernels()] == [{"nodes": []}]
 
 
-def test_a_kernel_set_row_is_replaced_by_a_later_splice_of_the_same_decision() -> None:
+def test_a_routing_row_is_replaced_by_a_later_splice_of_the_same_decision() -> None:
     """One decision on one parent mints one set; a compiler that mints other pieces for the same
     decision replaces the row rather than keeping a stale one beside it."""
     db = SearchDB()
-    db.record_kernel_set(KernelSetRow(parent="p", decision={"PLACE@a": "cut"}, children=("c1", "c2")))
-    db.record_kernel_set(KernelSetRow(parent="p", decision={"PLACE@a": "cut"}, children=("c3",)))
-    db.record_kernel_set(KernelSetRow(parent="p", decision={"REDUCE": "g2k"}, children=("c4", "c5")))
-    assert [(r.parent, r.decision, r.children) for r in db.iter_kernel_sets()] == [
+    db.record_routing(RoutingRow(parent="p", decision={"PLACE@a": "cut"}, children=("c1", "c2")))
+    db.record_routing(RoutingRow(parent="p", decision={"PLACE@a": "cut"}, children=("c3",)))
+    db.record_routing(RoutingRow(parent="p", decision={"REDUCE": "g2k"}, children=("c4", "c5")))
+    assert [(r.parent, r.decision, r.children) for r in db.iter_routing_rows()] == [
         ("p", {"PLACE@a": "cut"}, ("c3",)),
         ("p", {"REDUCE": "g2k"}, ("c4", "c5")),
     ]
@@ -147,7 +147,7 @@ def test_a_file_another_emmy_wrote_is_re_created_by_a_writer_and_refused_by_a_re
     db = SearchDB(path)
     assert list(db.iter_perf_rows()) == []
     tables = {r[0] for r in db._conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-    assert tables == {"perf", "kernel", "kernel_set"}
+    assert tables == {"perf", "kernel", "routing"}
     _record(db, _ctx(_5090), "k", 60.0, captured=True)
     db.close()
 

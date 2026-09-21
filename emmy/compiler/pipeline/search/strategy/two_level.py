@@ -24,8 +24,8 @@
 Results key structurally (:meth:`~emmy.compiler.ir.base.Op.identity_key`), so inner-tuned ``perf``
 rows transfer to the assembled graph unchanged AND are shared across outer terminals (a shared op
 is a DB hit). Each kernel-set decision the inner runs take is stored as definitions too — the
-parent's and the pieces' ``kernel`` rows and the ``kernel_set`` row linking them
-(:func:`record_kernel_set`). The inner search runs for **every** op on every pass — it is
+parent's and the pieces' ``kernel`` rows and the ``routing`` row linking them
+(:func:`record_routing`). The inner search runs for **every** op on every pass — it is
 never skipped on prior effort; replay is cheap (the per-variant ``perf`` cache serves
 already-measured variants without a bench).
 """
@@ -203,16 +203,16 @@ class _KernelInventory(PipelineStrategy):
     PipelineStrategy because the pipeline's strategy set is the channel the engine notifies —
     the event protocol is how a search shape hears about splices.
 
-    It also reports each kernel-set decision once, to ``on_kernel_set(parent, arm, pieces)``: the
+    It also reports each kernel-set decision once, to ``on_routing(parent, arm, pieces)``: the
     tile kernel the fork was offered on, the arm's knobs, and the pieces as they stand in the
     graph after the splice — a piece's buffers are bound only then, and its identity reads them."""
 
-    def __init__(self, identity: IdentityStrategy, on_kernel, seen: set[str] | None = None, on_kernel_set=None) -> None:
+    def __init__(self, identity: IdentityStrategy, on_kernel, seen: set[str] | None = None, on_routing=None) -> None:
         self.identity = identity
         self.on_kernel = on_kernel
-        self.on_kernel_set = on_kernel_set
+        self.on_routing = on_routing
         self.seen = seen if seen is not None else set()
-        self.seen_sets: set[tuple[str, str]] = set()
+        self.seen_routes: set[tuple[str, str]] = set()
         self._open: tuple[object, dict] | None = None
 
     def on_splice(self, e: SpliceEvent) -> None:
@@ -233,31 +233,31 @@ class _KernelInventory(PipelineStrategy):
         parent, arm = self._open
         self._open = None
         key = parent.identity_key(structural=False, with_io=True)
-        if key is None or self.on_kernel_set is None or (key, knobs_json(arm)) in self.seen_sets:
+        if key is None or self.on_routing is None or (key, knobs_json(arm)) in self.seen_routes:
             return
-        self.seen_sets.add((key, knobs_json(arm)))
+        self.seen_routes.add((key, knobs_json(arm)))
         pieces = []
         for nid in e.receipt.new_compute_ids:
             node = e.graph.nodes.get(nid)
             if node is not None and node.op.dialect is not None:
                 pieces.append(node.op.with_io(e.graph, node))
-        self.on_kernel_set(parent, arm, pieces)
+        self.on_routing(parent, arm, pieces)
 
 
-def record_kernel_set(db: SearchDB, parent, arm: dict, pieces) -> None:
+def record_routing(db: SearchDB, parent, arm: dict, pieces) -> None:
     """Store one kernel-set decision as definitions: the parent's ``kernel`` row, each piece's, and
-    the ``kernel_set`` row linking them by exact identity. A piece with no identity is not a kernel
+    the ``routing`` row linking them by exact identity. A piece with no identity is not a kernel
     the DB can name and is left out of the row."""
     from emmy.compiler.loop_wire import kernel_wire  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.db import KernelRow, KernelSetRow  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.db import KernelRow, RoutingRow  # noqa: PLC0415
 
     kernels = [(op.identity_key(structural=False, with_io=True), op) for op in (parent, *pieces)]
     for identity, op in kernels:
         if identity is not None:
             db.record_kernel(KernelRow(identity=identity, wire=kernel_wire(op), name=op.name))
     (parent_key, _), *children = kernels
-    db.record_kernel_set(
-        KernelSetRow(parent=parent_key, decision=arm, children=tuple(identity for identity, _ in children if identity is not None))
+    db.record_routing(
+        RoutingRow(parent=parent_key, decision=arm, children=tuple(identity for identity, _ in children if identity is not None))
     )
 
 
@@ -417,7 +417,7 @@ class TwoLevelStrategy(SearchStrategy):
             identity,
             lambda nid, op, frag: minted.append((nid, op, frag)),
             seen={identity.op_sig(op) for _, op, _, _ in unique.values()},
-            on_kernel_set=lambda parent, arm, pieces: record_kernel_set(db, parent, arm, pieces),
+            on_routing=lambda parent, arm, pieces: record_routing(db, parent, arm, pieces),
         )
 
         # Slot queue: each coroutine pops a device-pinned backend, benches its op's whole inner

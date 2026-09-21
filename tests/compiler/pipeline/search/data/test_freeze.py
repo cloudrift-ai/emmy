@@ -18,15 +18,15 @@ import yaml
 from emmy.compiler.pipeline.search.data.freeze import (
     FREEZE_KIND,
     FREEZE_VER,
-    KERNEL_SETS_NAME,
     KERNELS_NAME,
     MANIFEST_NAME,
+    ROUTING_NAME,
     _row_line,
     freeze_reason,
     load_freeze,
     write_freeze,
 )
-from emmy.compiler.pipeline.search.db import KernelRow, KernelSetRow, SearchDB
+from emmy.compiler.pipeline.search.db import KernelRow, RoutingRow, SearchDB
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
 from tests.compiler.pipeline.search.helpers import F16_MATMUL_FEATS, impossible_staged_feats
 from tests.compiler.pipeline.search.helpers import GPU_5090 as _GPU
@@ -111,11 +111,11 @@ def test_reason_drops_impossible_kernel() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _seed_db(path, rows, kernels=(), kernel_sets=()) -> None:
+def _seed_db(path, rows, kernels=(), routing=()) -> None:
     db = SearchDB(path)
     db.record_perf_rows(rows)
     db.record_kernels(kernels)
-    db.record_kernel_sets(kernel_sets)
+    db.record_routing_rows(routing)
     db.close()
 
 
@@ -127,7 +127,7 @@ _KERNELS = [
     KernelRow(identity="c1", wire={"inputs": [], "outputs": ["c1"], "nodes": []}, name="k_piece"),
     KernelRow(identity="orphan", wire={"inputs": [], "outputs": ["o"], "nodes": []}, name="k_orphan"),
 ]
-_KERNEL_SETS = [KernelSetRow(parent="p", decision={"PLACE@map.1/inner": "cut"}, children=("c1", "a3"))]
+_ROUTING = [RoutingRow(parent="p", decision={"PLACE@map.1/inner": "cut"}, children=("c1", "a3"))]
 
 _SEED = [
     _row("a3", us=500.0, knobs=_feats()),
@@ -143,14 +143,14 @@ _N_KEPT = 4
 
 def test_write_freeze_round_trip(tmp_path) -> None:
     db_path = tmp_path / "dataset.db"
-    _seed_db(db_path, _SEED, _KERNELS, _KERNEL_SETS)
+    _seed_db(db_path, _SEED, _KERNELS, _ROUTING)
     out = tmp_path / "freeze"
     manifest = write_freeze(db_path, out, note="unit-test policy")
 
     assert manifest["kind"] == FREEZE_KIND
     assert manifest["freeze_ver"] == FREEZE_VER
     assert manifest["feat_ver"] == manifest["knob_ver"] == manifest["encoding_ver"] == FEATURIZER_VERSION
-    assert manifest["counts"] == {"rows": _N_KEPT, "ok": 3, "bench_fail": 1, "per_gpu": {_GPU2: 1, _GPU: 3}, "kernels": 3, "kernel_sets": 1}
+    assert manifest["counts"] == {"rows": _N_KEPT, "ok": 3, "bench_fail": 1, "per_gpu": {_GPU2: 1, _GPU: 3}, "kernels": 3, "routing": 1}
     assert manifest["policy_note"] == "unit-test policy"
     assert manifest["source_db"] == str(db_path.resolve())
     # One YAML per (gpu, cap), the two definition files beside them; H_* features are never stored —
@@ -159,18 +159,18 @@ def test_write_freeze_round_trip(tmp_path) -> None:
         "nvidia_geforce_rtx_5090_sm120.yaml": "perf",
         "nvidia_geforce_rtx_4090_sm89.yaml": "perf",
         KERNELS_NAME: "kernels",
-        KERNEL_SETS_NAME: "kernel_sets",
+        ROUTING_NAME: "routing",
     }
     doc = yaml.safe_load((out / "nvidia_geforce_rtx_5090_sm120.yaml").read_text())
     assert doc["gpu_name"] == _GPU and doc["compute_cap"] == [12, 0]
     assert all(not any(k.startswith("H_") for k in c["knobs"]) for c in doc["configs"])
 
-    loaded_manifest, rows, kernels, kernel_sets = load_freeze(out)
+    loaded_manifest, rows, kernels, routing = load_freeze(out)
     assert loaded_manifest == manifest
     # The kernels a frozen row or a kernel set names travel; the one nothing names does not.
     assert {k.identity for k in kernels} == {"a3", "p", "c1"}
     assert all(k in _KERNELS for k in kernels)
-    assert kernel_sets == _KERNEL_SETS
+    assert routing == _ROUTING
     by_key = {r.kernel: r for r in rows}
     assert set(by_key) == {"a3", "b", "dyn", "fail"}, "the non-deployable twin, the stale row and the Σ row do not freeze"
     seeded = {r.kernel: r for r in _SEED}
@@ -203,10 +203,10 @@ def test_freeze_digest_insertion_order_independent(tmp_path) -> None:
 def test_an_imported_freeze_refreezes_to_the_same_digest(tmp_path) -> None:
     # freeze -> import into a fresh instance -> freeze again: the digest must not drift, so a
     # dataset rebuilt from the checked-in freeze reproduces it exactly.
-    _seed_db(tmp_path / "a.db", _SEED, _KERNELS, _KERNEL_SETS)
+    _seed_db(tmp_path / "a.db", _SEED, _KERNELS, _ROUTING)
     m1 = write_freeze(tmp_path / "a.db", tmp_path / "f1")
     frozen = load_freeze(tmp_path / "f1")
-    _seed_db(tmp_path / "b.db", frozen.perf, frozen.kernels, frozen.kernel_sets)
+    _seed_db(tmp_path / "b.db", frozen.perf, frozen.kernels, frozen.routing)
     assert write_freeze(tmp_path / "b.db", tmp_path / "f2")["sha256"] == m1["sha256"]
 
 
@@ -217,7 +217,7 @@ def test_an_imported_freeze_refreezes_to_the_same_digest(tmp_path) -> None:
 
 def _frozen(tmp_path):
     db_path = tmp_path / "dataset.db"
-    _seed_db(db_path, _SEED, _KERNELS, _KERNEL_SETS)
+    _seed_db(db_path, _SEED, _KERNELS, _ROUTING)
     out = tmp_path / "freeze"
     write_freeze(db_path, out)
     return out
@@ -231,7 +231,7 @@ def test_load_freeze_digest_mismatch_hard_error(tmp_path) -> None:
         load_freeze(out)
 
 
-@pytest.mark.parametrize("name", ["nvidia_geforce_rtx_4090_sm89.yaml", KERNELS_NAME, KERNEL_SETS_NAME])
+@pytest.mark.parametrize("name", ["nvidia_geforce_rtx_4090_sm89.yaml", KERNELS_NAME, ROUTING_NAME])
 def test_load_freeze_missing_listed_file_hard_error(tmp_path, name) -> None:
     out = _frozen(tmp_path)
     (out / name).unlink()

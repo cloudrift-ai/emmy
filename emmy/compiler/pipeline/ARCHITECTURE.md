@@ -80,7 +80,7 @@ lifetimes, and telling them apart is the single most useful thing to learn early
 |-------|----------------|------------|--------------|
 | **Golden configs** | model YAML under `recipes/<model>/golden/`; model-agnostic YAML under `search/goldens/` | promoted from deployable `run --bench` golden / `--ab` rows (Part 7) | greedy compile — measured rows in the one evidence index (the per-card files, or `--golden PATH`); `run --golden PATH --bench` measures them; `emmy fit` trains the offline prior on them; `emmy eval` datasets |
 | **Reservoir** | inside the online prior checkpoint (`~/.cache/emmy/online.json`) — the sample of past measurements the model trains on | `emmy tune` — every deployable-regime training row | greedy compile (measured evidence, consulted first); the online prior's own refits |
-| **`perf` table** | the tune DB (`~/.cache/emmy/autotune.db`), beside the `kernel` and `kernel_set` rows its rows are of | `emmy tune` — terminal kernel measurements plus derived whole-slice cost bookkeeping, at the sweep's flags; `run --bench` — every clean pinned row (golden / `--ab`) and the greedy re-bench, per kernel, through the tuner's own writer | greedy compile (measured evidence); the per-variant replay cache |
+| **`perf` table** | the tune DB (`~/.cache/emmy/autotune.db`), beside the `kernel` and `routing` rows its rows are of | `emmy tune` — terminal kernel measurements plus derived whole-slice cost bookkeeping, at the sweep's flags; `run --bench` — every clean pinned row (golden / `--ab`) and the greedy re-bench, per kernel, through the tuner's own writer | greedy compile (measured evidence); the per-variant replay cache |
 | **Dataset DB** | `~/.cache/emmy/dataset.db` — the same tables in a file of their own | `emmy dataset import`, from the checked-in measurement freeze (`search/freezes/`) and tune DB files | `emmy eval prior --dataset db` — **never** a deploy |
 
 Of the four, only the goldens travel with a clone: they are the only *measured* data a fresh machine has. The
@@ -1220,10 +1220,10 @@ deploy.
   fused kernel of a slice and a piece a cut or a split minted are rows alike, so the same kernel reached from two
   parents has one definition — what a candidate pool enumerates from. A kernel wire is a KERNEL, not a program: the
   Loop passes must not run over it (they normalize a size-one axis away and mint another kernel).
-- **`kernel_set`** — one row per structural decision on one parent: the parent's identity, the arm's knob dict (a
+- **`routing`** — one row per structural decision on one parent: the parent's identity, the arm's knob dict (a
   placement cut's `PLACE@seam: cut` keys, a cross-CTA split's `REDUCE` value) and the exact identities of the pieces
   it minted, resolved after the splice, when a piece's buffers are bound and its identity is the one the assembled
-  route runs (`two_level.record_kernel_set`, from the tuner's splice watcher). A piece with forks of its own is the
+  route runs (`two_level.record_routing`, from the tuner's splice watcher). A piece with forks of its own is the
   parent of further rows. The decision's PRICE is not here: it is the route row in `perf`, keyed on the parent with
   the decision in its knobs, which is how deploy reads it.
 - **`perf`** — one measurement per kernel variant per card and regime, keyed `(gpu, cc, opt, flags, kernel,
@@ -1249,8 +1249,8 @@ edges, `cuda_op`) are dropped on every writer open.
 **Measurement freeze** (`data/freeze.py`, written by `emmy dataset freeze`). The tune DB is a live store, so a model
 fit or evaluated straight from it is not reproducible. A *freeze* (v5) is a snapshot written into a directory: one
 YAML file per `(gpu, compute_cap)` (a `gpu_name`/`compute_cap` header plus a `configs` list of `perf` rows minus what
-the header says), `kernels.yaml` (the `kernel` rows every frozen row or kernel set names) and `kernel_sets.yaml`
-(every `kernel_set` row), beside a `manifest.json` holding the provenance header and, per file, its kind and content
+the header says), `kernels.yaml` (the `kernel` rows every frozen row or kernel set names) and `routing.yaml`
+(every `routing` row), beside a `manifest.json` holding the provenance header and, per file, its kind and content
 digest.
 
 - **Only current-vocabulary, deployable-regime rows freeze**, as filtered by `freeze_reason`: a card the GPU
@@ -1270,7 +1270,7 @@ digest.
   default dataset DB that does not hold the checked-in freeze, with the command that fixes it.
 - The checked-in RTX 5090 freeze was converted from the retired node-row store: its rows predate the `kernel` table,
   so their `kernel` is the old variant key, they carry no `bindings` (the plausibility gate reads them at the default
-  hint) and no kernel or kernel-set rows ride beside them. It is a stopgap until the card is re-collected through the
+  hint) and no kernel or routing rows ride beside them. It is a stopgap until the card is re-collected through the
   `perf` writer.
 
 **Recording benches** (`search/bench_record.py`). A `run --bench` that benched rows with hand-forced knob values

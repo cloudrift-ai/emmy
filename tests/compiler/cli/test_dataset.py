@@ -9,7 +9,7 @@ import pytest
 
 from emmy.commands.dataset import dataset_db, handle_dataset_import
 from emmy.compiler.pipeline.search.data.freeze import write_freeze
-from emmy.compiler.pipeline.search.db import KernelRow, KernelSetRow, SearchDB
+from emmy.compiler.pipeline.search.db import KernelRow, RoutingRow, SearchDB
 from tests.compiler.pipeline.search.helpers import perf_row
 
 
@@ -46,11 +46,11 @@ def test_the_default_dataset_holds_the_checked_in_freeze_or_is_refused(tmp_path,
 
 def test_a_tune_db_imports_its_rows_and_definitions(tmp_path):
     """A tune DB's CUDA rows arrive as they are, keeping the source they were written with, and so do
-    its kernel and kernel-set rows — the definitions its rows are of."""
+    its kernel and routing rows — the definitions its rows are of."""
     tune = SearchDB(tmp_path / "autotune.db")
     tune.record_perf_rows([perf_row("k", us=500.0), perf_row("k", us=300.0, bindings={"seq_len": 128})])
     tune.record_kernel(KernelRow(identity="k", wire={"nodes": []}, name="k_test"))
-    tune.record_kernel_set(KernelSetRow(parent="p", decision={"PLACE": "cut"}, children=("k",)))
+    tune.record_routing(RoutingRow(parent="p", decision={"PLACE": "cut"}, children=("k",)))
     tune.close()
 
     handle_dataset_import(Namespace(sources=[str(tmp_path / "autotune.db")], db=str(tmp_path / "dataset.db"), fresh=False))
@@ -58,5 +58,5 @@ def test_a_tune_db_imports_its_rows_and_definitions(tmp_path):
     assert sorted((r.kernel, tuple(r.bindings.items())) for r in db.iter_perf_rows()) == [("k", ()), ("k", (("seq_len", 128),))]
     assert db.perf_sources() == {"measured": 2}
     assert db.kernel_names() == {"k": "k_test"}
-    assert [(s.parent, s.children) for s in db.iter_kernel_sets()] == [("p", ("k",))]
+    assert [(s.parent, s.children) for s in db.iter_routing_rows()] == [("p", ("k",))]
     db.close()
