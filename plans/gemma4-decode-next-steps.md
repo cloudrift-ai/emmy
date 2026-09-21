@@ -34,7 +34,11 @@ single item in a decode step and nothing in this round touched it.
    launch in ~2.05 us on this box, so the launch floor alone is ~1.3 ms. Note that fusing kernels back together to
    cut that floor was tried and loses everywhere: fusing the statistic into gate/up at width 32 took the half from
    258 to 2044 us.
-   *Verify:* the timeline accounts for the 3.6 ms; then a serving run at c=1.
+   Take the same timeline off the article-era image (`cloudriftai/vllm-emmy:0.23.0-78f5364f`, 2026-08-02, still on
+   the dev box) before assuming this cost is a floor. That build reached 18.1 ms per token with kernels slower than
+   today's — it loses to this branch on first-token latency by 9% — so the per-step cost has most likely GROWN since
+   the article, which makes this a bisect against a known-good build rather than an open-ended optimization.
+   *Verify:* the timeline accounts for the 3.6 ms on both images; then a serving run at c=1.
 
 2. **Teach the schedule pricing what the cut is worth.** The compiler still ranks the fused arm first — the whole
    win came from recorded rows, so the next model, card or re-record loses it again unless someone runs the same
