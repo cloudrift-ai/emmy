@@ -316,6 +316,8 @@ class Sched:
             order = {axis.name: (position, axis) for position, axis in enumerate((*self.place.free, *self.place.grid))}
             left = max((order[name] for name in view.left_axes if name in order), default=None)
             right = max((order[name] for name in view.right_axes if name in order), default=None)
+            if left is None and not view.left_axes:
+                left = next((pair for name, pair in order.items() if name not in node.free_axes and pair[1].extent == 1), None)
             if left is not None and right is not None:
                 return (left[1], right[1])
             first, second = mn

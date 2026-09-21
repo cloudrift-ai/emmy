@@ -252,16 +252,18 @@ def _implicit_unit_row(specs: tuple[OutputSpec, ...], free: tuple[Axis, ...]) ->
     """
     if not specs:
         return None
-    if len(free) == 1 and all(not spec.sweep for spec in specs):
-        n_name = free[0].name
+    if free and all(not spec.sweep for spec in specs):
+        columns = tuple(axis.name for axis in free)
     elif not free and all(len(spec.sweep) == 1 for spec in specs) and len({spec.sweep[0].name for spec in specs}) == 1:
-        n_name = specs[0].sweep[0].name
+        columns = (specs[0].sweep[0].name,)
     else:
         return None
     for spec in specs:
         index = spec.write.index
         split = next((position for position, expr in enumerate(index) if not (isinstance(expr, Literal) and expr.value == 0)), len(index))
-        if split == 0 or not _dense_axis_suffix(index[split:], n_name):
+        suffix = tuple(expr for expr in index[split:] if not (isinstance(expr, Literal) and expr.value == 0))
+        dense = _dense_axis_suffix(suffix, columns[0]) if len(columns) == 1 else suffix == tuple(Var(name) for name in columns)
+        if split == 0 or not dense:
             return None
     return Axis("_um", Dim(1))
 
@@ -419,7 +421,9 @@ class TileOp(Op):
         # the bound row gives a contraction its missing LEFT axis, this one gives a term with no row
         # at all a geometry, and a matvec against a 1-D operand can only be served by the latter.
         unit_row = _implicit_unit_row(self.output_specs, self.place.free)
-        if unit_row is not None and any(site.node.as_contraction() is not None for site in sites(normalized)):
+        if unit_row is not None and any(
+            (view := site.node.as_contraction()) is not None and not view.left_axes for site in sites(normalized)
+        ):
             object.__setattr__(self, "place", replace(self.place, free=(unit_row, *self.place.free)))
         if self.schedule is not None and normalized != self.op:
             raise ValueError("cannot canonicalize a TileOp after a schedule has been attached")

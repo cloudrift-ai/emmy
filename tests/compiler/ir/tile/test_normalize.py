@@ -291,6 +291,23 @@ def test_matvec_recovers_an_implicit_unit_row_through_an_output_reshape() -> Non
     assert isinstance(tile.op, Fold) and tile.op.as_contraction() is not None
 
 
+def test_matvec_keeps_its_unit_row_beside_grouped_columns() -> None:
+    group, n, k = Axis("group", 8), Axis("n", 16), Axis("k", Dim(32))
+    product = _matmul(a_index=(Var("k"),), b_index=(Var("k"), Var("group") * 16 + Var("n")))
+    tile = _tile(
+        product,
+        k,
+        free=(group, n),
+        output_specs=(OutputSpec(Write(output="out", index=(Literal(0, "int"), Var("group"), Var("n")), value="acc")),),
+    )
+
+    assert tuple(axis.name for axis in tile.place.free) == ("_um", "group", "n")
+    assert tuple(axis.name for axis in tile.grid_sched._mn_for(tile.op)) == ("_um", "n")
+    assert tile.family_sites["TILE"] == (0,)
+    rebuilt = TileOp(op=tile.op, place=tile.place, axes=tile.axes, output_specs=tile.output_specs)
+    assert rebuilt.place == tile.place
+
+
 def test_promoted_attention_output_sweep_closes_the_a100_b_seam_idempotently() -> None:
     """The reduced Qwen3 target needs its promoted value-width axis to close computed B."""
     tile = case_target_tile("attention/rmsnorm-gqa-b-cut.yaml")
