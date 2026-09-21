@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: Edge0/Edge0-35B-A3B-preview
-  rationale: "Prior breakout read unconfirmed in current independent sources; niche A3B preview coverage."
-  heat: 60
+  rationale: "Strong HF momentum: 3,552 likes, rank 12; confirms prior breakout read; A3B edge coverage."
+  heat: 72
   task: generate
 matrices:
 - deploy.gpu: NVIDIA H200 141GB

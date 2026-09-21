@@ -1,0 +1,13 @@
+tags:
+- onboarding
+- untested
+model:
+  huggingface: XiaomiMiMo/MiMo-V2.5
+  rationale: Rank 6 OpenRouter open volume (7.07T/wk), 311B omnimodal MoE, MIT license, strong serving demand.
+  heat: 80
+  task: generate
+matrices:
+- deploy.gpu: NVIDIA B200
+  deploy.gpu_count: 8
+- deploy.gpu: NVIDIA B200
+  deploy.gpu_count: 16

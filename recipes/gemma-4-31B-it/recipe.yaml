@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "google/gemma-4-31B-it"
-  rationale: "Arena 1451/rank 68, stable serving, but no fresh current momentum."
-  heat: 50
+  rationale: "Cooling family, solid arena quality supports established interest, but no fresh current momentum or breakout."
+  heat: 40
 engine:
   llm:
     tensor_parallel_size: 1

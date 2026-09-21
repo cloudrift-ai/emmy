@@ -3,8 +3,8 @@ tags:
 - untested
 model:
   huggingface: XHToken/Spark-X2.5-4B
-  rationale: "No current source evidence; existing heat suggests moderate interest, but unverified by shared sources."
-  heat: 45
+  rationale: "Agent-oriented 4B, rank 13 with 1293 likes; moderate recent HF attention."
+  heat: 55
   task: generate
 matrices:
 - deploy.gpu: NVIDIA GeForce RTX 4090

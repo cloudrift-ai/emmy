@@ -4,7 +4,7 @@
 # The 16 GPUs sit behind NVSwitches: without a running nvidia-fabricmanager matching the driver, every worker
 # fails at cudaGetDeviceCount() with error 802. `emmy deploy` installs and starts it automatically.
 tags:
-  - best-effort
+  - maintained
 
 model:
   huggingface: "deepseek-ai/DeepSeek-V4-Flash-0731"

@@ -1,10 +1,10 @@
 tags:
-  - maintained
+  - best-effort
 
 model:
   huggingface: "RedHatAI/gemma-4-31B-it-FP8-Dynamic"
-  rationale: "Gemma 4 cooling, eclipsed by Qwen3.8; minimal current momentum."
-  heat: 18
+  rationale: "Cooling interest, eclipsed by Qwen3.8 and GLM waves, minimal current momentum."
+  heat: 15
 engine:
   llm:
     tensor_parallel_size: 1
