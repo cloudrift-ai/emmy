@@ -50,10 +50,15 @@ configs:
       FAST_MATH: false
       PLACE: cut
     knobs:
-      TILE: f1
+      TILE@twist: ''
+      TILE@twist.1/inner: f1
+      REDUCE@twist: ''
+      REDUCE@twist.1/inner: ''
+      REDUCE@twist.1/inner.1/map.3/map.1/reduce: ''
+      REDUCE@twist.1/inner.2/map.3/map.1/reduce: ''
+      STAGE@twist: ''
+      STAGE@twist.1/inner: ''
       WORK: t256
-      REDUCE: ''
-      STAGE: ''
       RASTER: ''
     identity: 72cddc4a0275524e2a686c30d6740285dd3315e731d0a8680239c1bf2c96c386
   - name: k_sdpa_rms_norm_reduce_64db54.c38a41867b53

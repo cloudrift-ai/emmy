@@ -35,11 +35,13 @@ configs:
     pins:
       FAST_MATH: true
     knobs:
+      TILE@map.1/twist: ''
+      TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f16/f1x4/k8
+      REDUCE@map.1/twist: ''
+      REDUCE@map.1/twist.1/inner: ''
+      STAGE@map.1/twist: ''
+      STAGE@map.1/twist.1/inner: d1/smem-async
       WORK: w2x4
-      TILE: mma_m16n8k16_f16_f16/f1x4/k8
-      REDUCE: ''
-      STAGE: d1/smem-async
-      LOOPIFY: '0'
       RASTER: ''
     identity: 8accfd2106236950ce3d63b80b3ae413803cf2289ac16d241baaab4c652a8121
 loops:

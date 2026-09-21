@@ -30,8 +30,14 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE: coop
+      TILE@map.1/twist: ''
+      TILE@map.1/twist.1/inner: ''
+      REDUCE@map.1/twist: coop
+      REDUCE@map.1/twist.1/inner: ''
+      STAGE@map.1/twist: ''
+      STAGE@map.1/twist.1/inner: ''
       WORK: t32
+      RASTER: ''
     identity: e77f61d2440948781c3d2605e8eb11161fb86396cd49b0c624e300b407db5e3c
     latency:
       NVIDIA GeForce RTX 5090:

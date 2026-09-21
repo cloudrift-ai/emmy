@@ -37,8 +37,12 @@ configs:
       FAST_MATH: false
       PLACE: fuse
     knobs:
-      TILE: ''
+      REDUCE@inner: ''
+      REDUCE@inner.1/map.3/map.1/reduce: coop
       WORK: t128
+      TILE: ''
+      STAGE: ''
+      RASTER: ''
     identity: 0922475452efba2be9d249d4afbcd94494fc6c9427bfd380993d28b09f24568c
     latency:
       NVIDIA GeForce RTX 5090:

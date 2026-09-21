@@ -51,11 +51,14 @@ configs:
       FAST_MATH: false
       PLACE: fuse
     knobs:
-      TILE: ''
-      WORK: t128
-      REDUCE: coop
+      TILE@map.1/twist: ''
+      TILE@map.1/twist.1/inner: ''
+      REDUCE@map.1/twist: coop
       REDUCE@map.1/twist.1/inner: ''
+      REDUCE@map.1/twist.1/inner.1/map.3/map.1/reduce: ''
       REDUCE@map.1/twist.1/inner.2/map.3/map.1/reduce: ''
-      STAGE: ''
+      STAGE@map.1/twist: ''
+      STAGE@map.1/twist.1/inner: ''
+      WORK: t128
       RASTER: ''
     identity: 72cddc4a0275524e2a686c30d6740285dd3315e731d0a8680239c1bf2c96c386

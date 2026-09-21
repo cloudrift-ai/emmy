@@ -52,9 +52,14 @@ configs:
       FAST_MATH: true
       PLACE: fuse
     knobs:
+      TILE@map.1/twist: ''
+      TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x1
+      REDUCE@map.1/twist: ''
+      REDUCE@map.1/twist.1/inner: ''
+      REDUCE@map.1/twist.1/inner.1/map.3/map.1/reduce: ''
+      REDUCE@map.1/twist.1/inner.2/map.3/map.1/reduce: ''
+      STAGE@map.1/twist: ''
+      STAGE@map.1/twist.1/inner: d1/smem
       WORK: w1x1
       RASTER: ''
-      TILE: mma_m16n8k16_f16_f32/f1x1
-      REDUCE: ''
-      STAGE: d1/smem
     identity: 0cc8c882812c0c5cf7b5572decba7bbda5b91bb8e1a264793bd20f00915429e4
