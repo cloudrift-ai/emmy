@@ -668,9 +668,8 @@ computed later cannot be guarded this way.
 
 Every codegen-policy peephole records its decision as an on-by-default BOOL policy knob on the `KernelOp`
 (`VECTORIZE_LOADS` / `VECTORIZE_STORES` / `GUARD_REDUCTIONS` / `INTERLEAVE_LOADS` / `PAIR_LDMATRIX` — the `050`
-pattern: idempotence via
-the recorded knob, `EMMY_<NAME>=0` pins it off, never a search dimension), so no rewrite that touches emitted code
-is unconditional-and-unrecorded.
+pattern: idempotence via the recorded knob, `EMMY_<NAME>=0` pins it off, never a search dimension), so no rewrite
+that touches emitted code is unconditional-and-unrecorded.
 
 Two of these peepholes are **pin-only policy stamps** — off by default, byte-identical, decoupled from production
 codegen (each records its knob on the `KernelOp` for idempotence, like `095`, and returns the body unchanged when off,

@@ -644,12 +644,11 @@ that canonical input:
   disagree. A cut workspace retains captured axes plus static unit axes: unit extents add no storage, while preserving
   them keeps later schedule and split axes in their original geometric roles. A coordinate read only through a common
   integer divisor stores one value per quotient; producers and consumers apply inverse index substitutions. The new
-  producer and consumer are fresh
-  unmapped TileOps, so further legal cuts and schedules use the same ordinary passes. An unpinned cut may expose more
-  cut choices; any pinned cut consumes its restriction on every piece. If the parent already carries a cross-CTA
-  split receipt, every placement piece inherits it, so a later cut cannot make the same split pending again. A piece
-  minted by a structural apply stays in the ordinary pass sequence; no schedule-specific visitor discovers or
-  realizes another placement decision.
+  producer and consumer are fresh unmapped TileOps, so further legal cuts and schedules use the same ordinary passes.
+  An unpinned cut may expose more cut choices; any pinned cut consumes its restriction on every piece. If the parent
+  already carries a cross-CTA split receipt, every placement piece inherits it, so a later cut cannot make the same
+  split pending again. A piece minted by a structural apply stays in the ordinary pass sequence; no schedule-specific
+  visitor discovers or realizes another placement decision.
 
 - **The cross-CTA reduce split is structural.** Splitting the reduce axis across CTAs into a partial and finalize
   changes which kernels exist, so `030_cut` offers it after stored-edge placement and before any schedule

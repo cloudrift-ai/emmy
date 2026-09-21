@@ -1,4 +1,7 @@
 {
+ "tests/compiler/ir/tile/test_normalize.py::test_unread_planar_state_drops_its_independent_coordinate[False]": 1.14,
+ "tests/compiler/passes/test_cut_forks.py::test_cut_stores_one_value_per_repeated_coordinate_group[2-5]": 0.50,
+ "tests/compiler/passes/test_cut_forks.py::test_cut_stores_one_value_per_repeated_coordinate_group[8-3]": 0.50,
  "tests/benchmark/models/test_gemma4_recipes_dryrun.py::test_recipe_dry_run": 0.31,
  "tests/benchmark/models/test_golden_bench_2026.py::test_every_command_variant_renders": 0.36,
  "tests/benchmark/models/test_golden_bench_2026.py::test_neptune_emmy_runner_fails_when_one_setup_is_incomplete": 0.5,

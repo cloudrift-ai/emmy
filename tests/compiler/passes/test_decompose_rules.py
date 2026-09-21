@@ -678,7 +678,8 @@ def test_matmul_products_do_not_round_before_accumulation(dtype):
     graph.add_node(MatmulOp(), ["a", "b"], Tensor("out", (1, 1), dtype), node_id="out")
     graph.inputs, graph.outputs = ["a", "b"], ["out"]
     # The large products overflow fp16 separately, but cancel in a full-width dot product.
-    inputs = {"a": np.array([[300, 300, 1.001]], dtype=dtype.np), "b": np.array([[300], [-300], [1.001]], dtype=dtype.np)}
+    # An exact final product keeps the reference independent of the BLAS accumulation order.
+    inputs = {"a": np.array([[300, 300, 1]], dtype=dtype.np), "b": np.array([[300], [-300], [1]], dtype=dtype.np)}
     before = _run(graph, inputs)
     after = _run(_apply(graph, "070_matmul.py"), inputs)
     _assert_close(before, after, rtol=1e-4, atol=1e-5)
