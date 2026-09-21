@@ -38,7 +38,7 @@ configs:
       STAGE@map.1/twist.1/inner: ''
       WORK: w4x1
       RASTER: ''
-    identity: d2da3aa72802f592f5c6ac48cbe9b74f67f29cba6b0a5f5ac864dff336550d7d
+    identity: 976dc0ca4be1893532f44af9032aa5b11406c8df15b2f4d163a001abb9b7671f
     measurements:
       emmy_us: 32104.446411132812
       reference_us: 32110.591888427734

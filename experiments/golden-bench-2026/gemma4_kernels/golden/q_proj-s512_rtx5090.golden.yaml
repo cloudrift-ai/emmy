@@ -34,7 +34,7 @@ configs:
       FAST_MATH: false
     knobs:
       REDUCE: g4k
-    identity: 1f29bfd0ac01c2b37aa7164974c6d334a5480103e64790aebe23eeb637e25ab4
+    identity: 2d691bc348bb640a622d251de89a9814cef00c5fe44274bd031e4e5ad8d5985b
     measurements:
       emmy_us: 86.76703176000616
       reference_us: 87.13848965290266
@@ -49,7 +49,7 @@ configs:
       REDUCE: ''
       STAGE: d2/smem-tma
       RASTER: ''
-    identity: 5c2a251db635650fe6049ff9f7a979b537bbc2aa72399ba33170b249c7731591
+    identity: 32ad4d5a504a8ff83657737ad8036926b8d7c72e5f4912efac632a8a6fdb0d86
     measurements:
       emmy_us: 81.30399882793427
       reference_us: 81.63466552893321
@@ -73,7 +73,7 @@ configs:
       FAST_MATH: true
     knobs:
       REDUCE: g2k
-    identity: 1f29bfd0ac01c2b37aa7164974c6d334a5480103e64790aebe23eeb637e25ab4
+    identity: 2d691bc348bb640a622d251de89a9814cef00c5fe44274bd031e4e5ad8d5985b
     measurements:
       emmy_us: 62.735205133929526
       reference_us: 62.611186682747366
@@ -88,7 +88,7 @@ configs:
       REDUCE: ''
       STAGE: d2/smem-tma
       RASTER: ''
-    identity: e752b0fb9fd0c74a927f22b7652d48b79e8426b2fe4c647feeaf8a651dee17b7
+    identity: 523eb88df55b4fd63b35e31cddaff06c983e3d9e6ebc94bff7191bdd19094931
     measurements:
       emmy_us: 58.379292488098145
       reference_us: 58.22494100121891
