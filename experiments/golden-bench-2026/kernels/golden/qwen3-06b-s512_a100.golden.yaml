@@ -1,6 +1,8 @@
 compute_cap:
 - 8
 - 0
+gpu_name: NVIDIA A100 40GB
+model: Qwen/Qwen3-0.6B@c1899de289a04d12100db370d81485cdf75e47ca
 programs:
 - inputs: [hidden_states, position_embeddings_0, position_embeddings_1, attention_mask]
   outputs: [add_7]
@@ -1205,9 +1207,2608 @@ programs:
     attrs: {op: {__elementwise__: add}}
     inputs: [add_5, linear_6]
     outputs: [[add_7, f16, [1, 512, 1024]]]
+loops:
+- inputs: [hidden_states]
+  outputs: [mul_1]
+  nodes:
+  - id: add_c1
+    op: constant
+    attrs:
+      name: add_c1
+      value: 1.0e-06
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[add_c1, f32, [1]]]
+  - id: hidden_states
+    op: input
+    outputs: [[hidden_states, f16, [1, 512, 1024]]]
+  - id: mean_count
+    op: constant
+    attrs:
+      name: mean_count
+      value: 1024.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[mean_count, f32, [1]]]
+  - id: p_input_layernorm_weight
+    op: constant
+    attrs:
+      name: p_input_layernorm_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: input_layernorm.weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [1024]}
+      source_dtype: float16
+      source_graph: null
+    outputs: [[p_input_layernorm_weight, f16, [1024]]]
+  - id: mul_1
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Load
+          fields:
+            names: {tuple: [in0]}
+            input: add_c1
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Load
+          fields:
+            names: {tuple: [in1]}
+            input: mean_count
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Assign
+          fields: {name: v0, op: {elementwise: reciprocal}, args: {tuple: [in1]}, dtype: null}
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 512}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 1024}, window: null}}
+                  body:
+                    body:
+                    - class: Load
+                      fields:
+                        names: {tuple: [in2]}
+                        input: hidden_states
+                        index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a0}}, {expr: {var: a1}}]}
+                        dtype: null
+                    - class: Assign
+                      fields: {name: v1, op: {elementwise: copy}, args: {tuple: [in2]}, dtype: {dtype: f32}}
+                    - class: Assign
+                      fields: {name: v2, op: {elementwise: multiply}, args: {tuple: [v1, v1]}, dtype: null}
+                    - class: Accum
+                      fields: {name: acc0, value: v2, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
+                  unroll: false
+                  seed: true
+              - class: Assign
+                fields: {name: v3, op: {elementwise: multiply}, args: {tuple: [acc0, v0]}, dtype: null}
+              - class: Assign
+                fields: {name: v4, op: {elementwise: add}, args: {tuple: [in0, v3]}, dtype: null}
+              - {class: Assign, fields: {name: v5, op: {elementwise: rsqrt}, args: {tuple: [v4]}, dtype: null}}
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a2, extent: {dim: 1024}, window: null}}
+                  body:
+                    body:
+                    - class: Load
+                      fields:
+                        names: {tuple: [in3]}
+                        input: hidden_states
+                        index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a0}}, {expr: {var: a2}}]}
+                        dtype: null
+                    - class: Assign
+                      fields: {name: v6, op: {elementwise: copy}, args: {tuple: [in3]}, dtype: {dtype: f32}}
+                    - class: Assign
+                      fields: {name: v7, op: {elementwise: multiply}, args: {tuple: [v5, v6]}, dtype: null}
+                    - class: Assign
+                      fields: {name: v8, op: {elementwise: copy}, args: {tuple: [v7]}, dtype: {dtype: f16}}
+                    - class: Load
+                      fields:
+                        names: {tuple: [in4]}
+                        input: p_input_layernorm_weight
+                        index: {tuple: [{expr: {var: a2}}]}
+                        dtype: null
+                    - class: Assign
+                      fields: {name: v9, op: {elementwise: multiply}, args: {tuple: [in4, v8]}, dtype: null}
+                    - class: Write
+                      fields:
+                        output: mul_1
+                        index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a0}}, {expr: {var: a2}}]}
+                        values: {tuple: [v9]}
+                        value_dtype: null
+                        atomic: false
+                        swizzle: NONE
+                  unroll: false
+                  seed: true
+            unroll: false
+            seed: true
+      name: k_mean_f13ec9
+    inputs: [mean_count, add_c1, hidden_states, p_input_layernorm_weight]
+    outputs: [[mul_1, f16, [1, 512, 1024]]]
+- inputs: [mul_1]
+  outputs: [linear_2]
+  nodes:
+  - id: linear_2_wt
+    op: constant
+    attrs:
+      name: p_attn_v_proj_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: [{__op__: {op: torch.transpose, attrs: {axes: {__tuple__: [-2, -1]}}}}]}
+      source_path: self_attn.v_proj.weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [1024, 1024]}
+      source_dtype: float16
+      source_graph: null
+    outputs: [[linear_2_wt, f16, [1024, 1024]]]
+  - id: mul_1
+    op: input
+    outputs: [[mul_1, f16, [1, 512, 1024]]]
+  - id: linear_2
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 512}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 1024}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 1024}, window: null}}
+                        body:
+                          body:
+                          - class: Load
+                            fields:
+                              names: {tuple: [in0]}
+                              input: mul_1
+                              index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a0}}, {expr: {var: a2}}]}
+                              dtype: null
+                          - class: Load
+                            fields:
+                              names: {tuple: [in1]}
+                              input: linear_2_wt
+                              index: {tuple: [{expr: {var: a2}}, {expr: {var: a1}}]}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
+                          - class: Accum
+                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
+                        unroll: false
+                        seed: true
+                    - class: Write
+                      fields:
+                        output: linear_2
+                        index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a0}}, {expr: {var: a1}}]}
+                        values: {tuple: [acc0]}
+                        value_dtype: null
+                        atomic: false
+                        swizzle: NONE
+                  unroll: false
+                  seed: true
+            unroll: false
+            seed: true
+      name: k_linear_570981
+    inputs: [mul_1, linear_2_wt]
+    outputs: [[linear_2, f16, [1, 512, 1024]]]
+- inputs: [mul_1]
+  outputs: [to_2]
+  nodes:
+  - id: linear_wt
+    op: constant
+    attrs:
+      name: p_attn_q_proj_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: [{__op__: {op: torch.transpose, attrs: {axes: {__tuple__: [-2, -1]}}}}]}
+      source_path: self_attn.q_proj.weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [2048, 1024]}
+      source_dtype: float16
+      source_graph: null
+    outputs: [[linear_wt, f16, [1024, 2048]]]
+  - id: mul_1
+    op: input
+    outputs: [[mul_1, f16, [1, 512, 1024]]]
+  - id: to_2
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 512}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 2048}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 1024}, window: null}}
+                        body:
+                          body:
+                          - class: Load
+                            fields:
+                              names: {tuple: [in0]}
+                              input: mul_1
+                              index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a0}}, {expr: {var: a2}}]}
+                              dtype: null
+                          - class: Load
+                            fields:
+                              names: {tuple: [in1]}
+                              input: linear_wt
+                              index: {tuple: [{expr: {var: a2}}, {expr: {var: a1}}]}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
+                          - class: Accum
+                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
+                        unroll: false
+                        seed: true
+                    - class: Assign
+                      fields: {name: v1, op: {elementwise: copy}, args: {tuple: [acc0]}, dtype: {dtype: f16}}
+                    - class: Assign
+                      fields: {name: v2, op: {elementwise: copy}, args: {tuple: [v1]}, dtype: {dtype: f32}}
+                    - class: Write
+                      fields:
+                        output: to_2
+                        index:
+                          tuple:
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {var: a0}}
+                          - {expr: {binary: {op: //, left: {var: a1}, right: {literal: {value: 128, dtype: int}}}}}
+                          - {expr: {binary: {op: '%', left: {var: a1}, right: {literal: {value: 128, dtype: int}}}}}
+                        values: {tuple: [v2]}
+                        value_dtype: null
+                        atomic: false
+                        swizzle: NONE
+                  unroll: false
+                  seed: true
+            unroll: false
+            seed: true
+      name: k_linear_737d61
+    inputs: [mul_1, linear_wt]
+    outputs: [[to_2, f32, [1, 512, 16, 128]]]
+- inputs: [mul_1]
+  outputs: [to_4]
+  nodes:
+  - id: linear_1_wt
+    op: constant
+    attrs:
+      name: p_attn_k_proj_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: [{__op__: {op: torch.transpose, attrs: {axes: {__tuple__: [-2, -1]}}}}]}
+      source_path: self_attn.k_proj.weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [1024, 1024]}
+      source_dtype: float16
+      source_graph: null
+    outputs: [[linear_1_wt, f16, [1024, 1024]]]
+  - id: mul_1
+    op: input
+    outputs: [[mul_1, f16, [1, 512, 1024]]]
+  - id: to_4
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 512}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 1024}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 1024}, window: null}}
+                        body:
+                          body:
+                          - class: Load
+                            fields:
+                              names: {tuple: [in0]}
+                              input: mul_1
+                              index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a0}}, {expr: {var: a2}}]}
+                              dtype: null
+                          - class: Load
+                            fields:
+                              names: {tuple: [in1]}
+                              input: linear_1_wt
+                              index: {tuple: [{expr: {var: a2}}, {expr: {var: a1}}]}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
+                          - class: Accum
+                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
+                        unroll: false
+                        seed: true
+                    - class: Assign
+                      fields: {name: v1, op: {elementwise: copy}, args: {tuple: [acc0]}, dtype: {dtype: f16}}
+                    - class: Assign
+                      fields: {name: v2, op: {elementwise: copy}, args: {tuple: [v1]}, dtype: {dtype: f32}}
+                    - class: Write
+                      fields:
+                        output: to_4
+                        index:
+                          tuple:
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {var: a0}}
+                          - {expr: {binary: {op: //, left: {var: a1}, right: {literal: {value: 128, dtype: int}}}}}
+                          - {expr: {binary: {op: '%', left: {var: a1}, right: {literal: {value: 128, dtype: int}}}}}
+                        values: {tuple: [v2]}
+                        value_dtype: null
+                        atomic: false
+                        swizzle: NONE
+                  unroll: false
+                  seed: true
+            unroll: false
+            seed: true
+      name: k_linear_301d2a
+    inputs: [mul_1, linear_1_wt]
+    outputs: [[to_4, f32, [1, 512, 8, 128]]]
+- inputs: [add_3, add_4, mul_1]
+  outputs: [scaled_dot_product_attention]
+  nodes:
+  - id: add_3
+    op: input
+    outputs: [[add_3, f16, [1, 16, 512, 128]]]
+  - id: add_4
+    op: input
+    outputs: [[add_4, f16, [1, 8, 512, 128]]]
+  - id: linear_2_wt
+    op: constant
+    attrs:
+      name: p_attn_v_proj_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: [{__op__: {op: torch.transpose, attrs: {axes: {__tuple__: [-2, -1]}}}}]}
+      source_path: self_attn.v_proj.weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [1024, 1024]}
+      source_dtype: float16
+      source_graph: null
+    outputs: [[linear_2_wt, f16, [1024, 1024]]]
+  - id: mul_1
+    op: input
+    outputs: [[mul_1, f16, [1, 512, 1024]]]
+  - id: scaled_dot_product_attention_mask_fill_c
+    op: constant
+    attrs:
+      name: scaled_dot_product_attention_mask_fill_c
+      value: -1000000000.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[scaled_dot_product_attention_mask_fill_c, f16, [1]]]
+  - id: scaled_dot_product_attention_mask_zero_c
+    op: constant
+    attrs:
+      name: scaled_dot_product_attention_mask_zero_c
+      value: 0.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[scaled_dot_product_attention_mask_zero_c, f16, [1]]]
+  - id: scaled_dot_product_attention_scale
+    op: constant
+    attrs:
+      name: scaled_dot_product_attention_scale
+      value: 0.08838834764831845
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[scaled_dot_product_attention_scale, f16, [1]]]
+  - id: scaled_dot_product_attention
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Load
+          fields:
+            names: {tuple: [in0]}
+            input: scaled_dot_product_attention_mask_fill_c
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Load
+          fields:
+            names: {tuple: [in1]}
+            input: scaled_dot_product_attention_mask_zero_c
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Load
+          fields:
+            names: {tuple: [in2]}
+            input: scaled_dot_product_attention_scale
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 16}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 512}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 512}, window: null}}
+                        body:
+                          body:
+                          - class: Loop
+                            fields:
+                              axis: {class: Axis, fields: {name: a3, extent: {dim: 128}, window: null}}
+                              body:
+                                body:
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in3]}
+                                    input: add_4
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {binary: {op: /, left: {var: a0}, right: {literal: {value: 2, dtype: int}}}}}
+                                      - {expr: {var: a2}}
+                                      - {expr: {var: a3}}
+                                    dtype: null
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in4]}
+                                    input: add_3
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a0}}
+                                      - {expr: {var: a1}}
+                                      - {expr: {var: a3}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in3, in4]}, dtype: {dtype: f32}}
+                                - class: Accum
+                                  fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a3]}, base: null}
+                              unroll: false
+                              seed: true
+                          - class: Assign
+                            fields: {name: v1, op: {elementwise: multiply}, args: {tuple: [acc0, in2]}, dtype: null}
+                          - class: Select
+                            fields:
+                              name: v2
+                              branches:
+                                tuple:
+                                - class: SelectBranch
+                                  fields: {value: in1, select: {expr: {binary: {op: <=, left: {var: a2}, right: {var: a1}}}}}
+                                - class: SelectBranch
+                                  fields: {value: in0, select: {expr: {binary: {op: <, left: {var: a1}, right: {var: a2}}}}}
+                          - class: Assign
+                            fields: {name: v3, op: {elementwise: add}, args: {tuple: [v1, v2]}, dtype: null}
+                          - class: Accum
+                            fields:
+                              name: acc1
+                              value: v3
+                              op: {elementwise: maximum}
+                              dtype: null
+                              axes: {tuple: [a2]}
+                              base: null
+                        unroll: false
+                        seed: true
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 512}, window: null}}
+                        body:
+                          body:
+                          - class: Loop
+                            fields:
+                              axis: {class: Axis, fields: {name: a5, extent: {dim: 128}, window: null}}
+                              body:
+                                body:
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in5]}
+                                    input: add_4
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {binary: {op: /, left: {var: a0}, right: {literal: {value: 2, dtype: int}}}}}
+                                      - {expr: {var: a2}}
+                                      - {expr: {var: a5}}
+                                    dtype: null
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in6]}
+                                    input: add_3
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a0}}
+                                      - {expr: {var: a1}}
+                                      - {expr: {var: a5}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v4, op: {elementwise: multiply}, args: {tuple: [in5, in6]}, dtype: {dtype: f32}}
+                                - class: Accum
+                                  fields: {name: acc2, value: v4, op: {elementwise: add}, dtype: null, axes: {tuple: [a5]}, base: null}
+                              unroll: false
+                              seed: true
+                          - class: Assign
+                            fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [acc2, in2]}, dtype: null}
+                          - class: Select
+                            fields:
+                              name: v6
+                              branches:
+                                tuple:
+                                - class: SelectBranch
+                                  fields: {value: in1, select: {expr: {binary: {op: <=, left: {var: a2}, right: {var: a1}}}}}
+                                - class: SelectBranch
+                                  fields: {value: in0, select: {expr: {binary: {op: <, left: {var: a1}, right: {var: a2}}}}}
+                          - class: Assign
+                            fields: {name: v7, op: {elementwise: add}, args: {tuple: [v5, v6]}, dtype: null}
+                          - class: Assign
+                            fields: {name: v8, op: {elementwise: subtract}, args: {tuple: [v7, acc1]}, dtype: null}
+                          - {class: Assign, fields: {name: v9, op: {elementwise: exp}, args: {tuple: [v8]}, dtype: null}}
+                          - class: Accum
+                            fields: {name: acc3, value: v9, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
+                        unroll: false
+                        seed: true
+                    - class: Assign
+                      fields: {name: v10, op: {elementwise: reciprocal}, args: {tuple: [acc3]}, dtype: null}
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a6, extent: {dim: 128}, window: null}}
+                        body:
+                          body:
+                          - class: Loop
+                            fields:
+                              axis: {class: Axis, fields: {name: a7, extent: {dim: 512}, window: null}}
+                              body:
+                                body:
+                                - class: Loop
+                                  fields:
+                                    axis: {class: Axis, fields: {name: a8, extent: {dim: 1024}, window: null}}
+                                    body:
+                                      body:
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in7]}
+                                          input: mul_1
+                                          index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a7}}, {expr: {var: a8}}]}
+                                          dtype: null
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in8]}
+                                          input: linear_2_wt
+                                          index:
+                                            tuple:
+                                            - {expr: {var: a8}}
+                                            - expr:
+                                                binary:
+                                                  op: +
+                                                  left:
+                                                    binary:
+                                                      op: '*'
+                                                      left: {binary: {op: /, left: {var: a0}, right: {literal: {value: 2, dtype: int}}}}
+                                                      right: {literal: {value: 128, dtype: int}}
+                                                  right: {var: a6}
+                                          dtype: null
+                                      - class: Assign
+                                        fields: {name: v11, op: {elementwise: multiply}, args: {tuple: [in7, in8]}, dtype: {dtype: f32}}
+                                      - class: Accum
+                                        fields: {name: acc4, value: v11, op: {elementwise: add}, dtype: null, axes: {tuple: [a8]}, base: null}
+                                    unroll: false
+                                    seed: true
+                                - class: Loop
+                                  fields:
+                                    axis: {class: Axis, fields: {name: a9, extent: {dim: 128}, window: null}}
+                                    body:
+                                      body:
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in9]}
+                                          input: add_4
+                                          index:
+                                            tuple:
+                                            - {expr: {literal: {value: 0, dtype: int}}}
+                                            - {expr: {binary: {op: /, left: {var: a0}, right: {literal: {value: 2, dtype: int}}}}}
+                                            - {expr: {var: a7}}
+                                            - {expr: {var: a9}}
+                                          dtype: null
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in10]}
+                                          input: add_3
+                                          index:
+                                            tuple:
+                                            - {expr: {literal: {value: 0, dtype: int}}}
+                                            - {expr: {var: a0}}
+                                            - {expr: {var: a1}}
+                                            - {expr: {var: a9}}
+                                          dtype: null
+                                      - class: Assign
+                                        fields: {name: v12, op: {elementwise: multiply}, args: {tuple: [in10, in9]}, dtype: {dtype: f32}}
+                                      - class: Accum
+                                        fields: {name: acc5, value: v12, op: {elementwise: add}, dtype: null, axes: {tuple: [a9]}, base: null}
+                                    unroll: false
+                                    seed: true
+                                - class: Assign
+                                  fields: {name: v13, op: {elementwise: multiply}, args: {tuple: [acc5, in2]}, dtype: null}
+                                - class: Select
+                                  fields:
+                                    name: v14
+                                    branches:
+                                      tuple:
+                                      - class: SelectBranch
+                                        fields: {value: in1, select: {expr: {binary: {op: <=, left: {var: a7}, right: {var: a1}}}}}
+                                      - class: SelectBranch
+                                        fields: {value: in0, select: {expr: {binary: {op: <, left: {var: a1}, right: {var: a7}}}}}
+                                - class: Assign
+                                  fields: {name: v15, op: {elementwise: add}, args: {tuple: [v13, v14]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v16, op: {elementwise: subtract}, args: {tuple: [v15, acc1]}, dtype: null}
+                                - {class: Assign, fields: {name: v17, op: {elementwise: exp}, args: {tuple: [v16]}, dtype: null}}
+                                - class: Assign
+                                  fields: {name: v18, op: {elementwise: multiply}, args: {tuple: [v10, v17]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v19, op: {elementwise: multiply}, args: {tuple: [acc4, v18]}, dtype: {dtype: f32}}
+                                - class: Accum
+                                  fields: {name: acc6, value: v19, op: {elementwise: add}, dtype: null, axes: {tuple: [a7]}, base: null}
+                              unroll: false
+                              seed: true
+                          - class: Write
+                            fields:
+                              output: scaled_dot_product_attention
+                              index:
+                                tuple:
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {var: a0}}
+                                - {expr: {var: a1}}
+                                - {expr: {var: a6}}
+                              values: {tuple: [acc6]}
+                              value_dtype: null
+                              atomic: false
+                              swizzle: NONE
+                        unroll: false
+                        seed: true
+                  unroll: false
+                  seed: true
+            unroll: false
+            seed: true
+      name: k_sdpa_linear_reduce_1a0593
+    inputs: [scaled_dot_product_attention_scale, scaled_dot_product_attention_mask_fill_c, scaled_dot_product_attention_mask_zero_c, add_3, add_4,
+      linear_2_wt, mul_1]
+    outputs: [[scaled_dot_product_attention, f16, [1, 16, 512, 128]]]
+- inputs: [add_3, add_4, hidden_states, transpose_2]
+  outputs: [add_5]
+  nodes:
+  - id: add_3
+    op: input
+    outputs: [[add_3, f16, [1, 16, 512, 128]]]
+  - id: add_4
+    op: input
+    outputs: [[add_4, f16, [1, 8, 512, 128]]]
+  - id: hidden_states
+    op: input
+    outputs: [[hidden_states, f16, [1, 512, 1024]]]
+  - id: linear_3_wt
+    op: constant
+    attrs:
+      name: p_attn_o_proj_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: [{__op__: {op: torch.transpose, attrs: {axes: {__tuple__: [-2, -1]}}}}]}
+      source_path: self_attn.o_proj.weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [1024, 2048]}
+      source_dtype: float16
+      source_graph: null
+    outputs: [[linear_3_wt, f16, [2048, 1024]]]
+  - id: scaled_dot_product_attention_mask_fill_c
+    op: constant
+    attrs:
+      name: scaled_dot_product_attention_mask_fill_c
+      value: -1000000000.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[scaled_dot_product_attention_mask_fill_c, f16, [1]]]
+  - id: scaled_dot_product_attention_mask_zero_c
+    op: constant
+    attrs:
+      name: scaled_dot_product_attention_mask_zero_c
+      value: 0.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[scaled_dot_product_attention_mask_zero_c, f16, [1]]]
+  - id: scaled_dot_product_attention_scale
+    op: constant
+    attrs:
+      name: scaled_dot_product_attention_scale
+      value: 0.08838834764831845
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[scaled_dot_product_attention_scale, f16, [1]]]
+  - id: transpose_2
+    op: input
+    outputs: [[transpose_2, f16, [1, 8, 512, 128]]]
+  - id: add_5
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Load
+          fields:
+            names: {tuple: [in0]}
+            input: scaled_dot_product_attention_mask_fill_c
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Load
+          fields:
+            names: {tuple: [in1]}
+            input: scaled_dot_product_attention_mask_zero_c
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Load
+          fields:
+            names: {tuple: [in2]}
+            input: scaled_dot_product_attention_scale
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 512}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 1024}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 2048}, window: null}}
+                        body:
+                          body:
+                          - class: Loop
+                            fields:
+                              axis: {class: Axis, fields: {name: a3, extent: {dim: 512}, window: null}}
+                              body:
+                                body:
+                                - class: Loop
+                                  fields:
+                                    axis: {class: Axis, fields: {name: a4, extent: {dim: 128}, window: null}}
+                                    body:
+                                      body:
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in3]}
+                                          input: add_4
+                                          index:
+                                            tuple:
+                                            - {expr: {literal: {value: 0, dtype: int}}}
+                                            - expr:
+                                                binary:
+                                                  op: /
+                                                  left: {binary: {op: /, left: {var: a2}, right: {literal: {value: 128, dtype: int}}}}
+                                                  right: {literal: {value: 2, dtype: int}}
+                                            - {expr: {var: a3}}
+                                            - {expr: {var: a4}}
+                                          dtype: null
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in4]}
+                                          input: add_3
+                                          index:
+                                            tuple:
+                                            - {expr: {literal: {value: 0, dtype: int}}}
+                                            - {expr: {binary: {op: /, left: {var: a2}, right: {literal: {value: 128, dtype: int}}}}}
+                                            - {expr: {var: a0}}
+                                            - {expr: {var: a4}}
+                                          dtype: null
+                                      - class: Assign
+                                        fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in3, in4]}, dtype: {dtype: f32}}
+                                      - class: Accum
+                                        fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a4]}, base: null}
+                                    unroll: false
+                                    seed: true
+                                - class: Assign
+                                  fields: {name: v1, op: {elementwise: multiply}, args: {tuple: [acc0, in2]}, dtype: null}
+                                - class: Select
+                                  fields:
+                                    name: v2
+                                    branches:
+                                      tuple:
+                                      - class: SelectBranch
+                                        fields: {value: in1, select: {expr: {binary: {op: <=, left: {var: a3}, right: {var: a0}}}}}
+                                      - class: SelectBranch
+                                        fields: {value: in0, select: {expr: {binary: {op: <, left: {var: a0}, right: {var: a3}}}}}
+                                - class: Assign
+                                  fields: {name: v3, op: {elementwise: add}, args: {tuple: [v1, v2]}, dtype: null}
+                                - class: Accum
+                                  fields:
+                                    name: acc1
+                                    value: v3
+                                    op: {elementwise: maximum}
+                                    dtype: null
+                                    axes: {tuple: [a3]}
+                                    base: null
+                              unroll: false
+                              seed: true
+                          - class: Loop
+                            fields:
+                              axis: {class: Axis, fields: {name: a3, extent: {dim: 512}, window: null}}
+                              body:
+                                body:
+                                - class: Loop
+                                  fields:
+                                    axis: {class: Axis, fields: {name: a6, extent: {dim: 128}, window: null}}
+                                    body:
+                                      body:
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in5]}
+                                          input: add_4
+                                          index:
+                                            tuple:
+                                            - {expr: {literal: {value: 0, dtype: int}}}
+                                            - expr:
+                                                binary:
+                                                  op: /
+                                                  left: {binary: {op: /, left: {var: a2}, right: {literal: {value: 128, dtype: int}}}}
+                                                  right: {literal: {value: 2, dtype: int}}
+                                            - {expr: {var: a3}}
+                                            - {expr: {var: a6}}
+                                          dtype: null
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in6]}
+                                          input: add_3
+                                          index:
+                                            tuple:
+                                            - {expr: {literal: {value: 0, dtype: int}}}
+                                            - {expr: {binary: {op: /, left: {var: a2}, right: {literal: {value: 128, dtype: int}}}}}
+                                            - {expr: {var: a0}}
+                                            - {expr: {var: a6}}
+                                          dtype: null
+                                      - class: Assign
+                                        fields: {name: v4, op: {elementwise: multiply}, args: {tuple: [in5, in6]}, dtype: {dtype: f32}}
+                                      - class: Accum
+                                        fields: {name: acc2, value: v4, op: {elementwise: add}, dtype: null, axes: {tuple: [a6]}, base: null}
+                                    unroll: false
+                                    seed: true
+                                - class: Assign
+                                  fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [acc2, in2]}, dtype: null}
+                                - class: Select
+                                  fields:
+                                    name: v6
+                                    branches:
+                                      tuple:
+                                      - class: SelectBranch
+                                        fields: {value: in1, select: {expr: {binary: {op: <=, left: {var: a3}, right: {var: a0}}}}}
+                                      - class: SelectBranch
+                                        fields: {value: in0, select: {expr: {binary: {op: <, left: {var: a0}, right: {var: a3}}}}}
+                                - class: Assign
+                                  fields: {name: v7, op: {elementwise: add}, args: {tuple: [v5, v6]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v8, op: {elementwise: subtract}, args: {tuple: [v7, acc1]}, dtype: null}
+                                - {class: Assign, fields: {name: v9, op: {elementwise: exp}, args: {tuple: [v8]}, dtype: null}}
+                                - class: Accum
+                                  fields: {name: acc3, value: v9, op: {elementwise: add}, dtype: null, axes: {tuple: [a3]}, base: null}
+                              unroll: false
+                              seed: true
+                          - class: Assign
+                            fields: {name: v10, op: {elementwise: reciprocal}, args: {tuple: [acc3]}, dtype: null}
+                          - class: Loop
+                            fields:
+                              axis: {class: Axis, fields: {name: a3, extent: {dim: 512}, window: null}}
+                              body:
+                                body:
+                                - class: Loop
+                                  fields:
+                                    axis: {class: Axis, fields: {name: a8, extent: {dim: 128}, window: null}}
+                                    body:
+                                      body:
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in7]}
+                                          input: add_4
+                                          index:
+                                            tuple:
+                                            - {expr: {literal: {value: 0, dtype: int}}}
+                                            - expr:
+                                                binary:
+                                                  op: /
+                                                  left: {binary: {op: /, left: {var: a2}, right: {literal: {value: 128, dtype: int}}}}
+                                                  right: {literal: {value: 2, dtype: int}}
+                                            - {expr: {var: a3}}
+                                            - {expr: {var: a8}}
+                                          dtype: null
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in8]}
+                                          input: add_3
+                                          index:
+                                            tuple:
+                                            - {expr: {literal: {value: 0, dtype: int}}}
+                                            - {expr: {binary: {op: /, left: {var: a2}, right: {literal: {value: 128, dtype: int}}}}}
+                                            - {expr: {var: a0}}
+                                            - {expr: {var: a8}}
+                                          dtype: null
+                                      - class: Assign
+                                        fields: {name: v11, op: {elementwise: multiply}, args: {tuple: [in7, in8]}, dtype: {dtype: f32}}
+                                      - class: Accum
+                                        fields: {name: acc4, value: v11, op: {elementwise: add}, dtype: null, axes: {tuple: [a8]}, base: null}
+                                    unroll: false
+                                    seed: true
+                                - class: Assign
+                                  fields: {name: v12, op: {elementwise: multiply}, args: {tuple: [acc4, in2]}, dtype: null}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in9]}
+                                    input: transpose_2
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - expr:
+                                          binary:
+                                            op: /
+                                            left: {binary: {op: /, left: {var: a2}, right: {literal: {value: 128, dtype: int}}}}
+                                            right: {literal: {value: 2, dtype: int}}
+                                      - {expr: {var: a3}}
+                                      - {expr: {binary: {op: '%', left: {var: a2}, right: {literal: {value: 128, dtype: int}}}}}
+                                    dtype: null
+                                - class: Select
+                                  fields:
+                                    name: v13
+                                    branches:
+                                      tuple:
+                                      - class: SelectBranch
+                                        fields: {value: in1, select: {expr: {binary: {op: <=, left: {var: a3}, right: {var: a0}}}}}
+                                      - class: SelectBranch
+                                        fields: {value: in0, select: {expr: {binary: {op: <, left: {var: a0}, right: {var: a3}}}}}
+                                - class: Assign
+                                  fields: {name: v14, op: {elementwise: add}, args: {tuple: [v12, v13]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v15, op: {elementwise: subtract}, args: {tuple: [v14, acc1]}, dtype: null}
+                                - {class: Assign, fields: {name: v16, op: {elementwise: exp}, args: {tuple: [v15]}, dtype: null}}
+                                - class: Assign
+                                  fields: {name: v17, op: {elementwise: multiply}, args: {tuple: [v10, v16]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v18, op: {elementwise: multiply}, args: {tuple: [in9, v17]}, dtype: {dtype: f32}}
+                                - class: Accum
+                                  fields: {name: acc5, value: v18, op: {elementwise: add}, dtype: null, axes: {tuple: [a3]}, base: null}
+                              unroll: false
+                              seed: true
+                          - class: Load
+                            fields:
+                              names: {tuple: [in10]}
+                              input: linear_3_wt
+                              index: {tuple: [{expr: {var: a2}}, {expr: {var: a1}}]}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v19, op: {elementwise: multiply}, args: {tuple: [acc5, in10]}, dtype: {dtype: f32}}
+                          - class: Accum
+                            fields: {name: acc6, value: v19, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
+                        unroll: false
+                        seed: true
+                    - class: Assign
+                      fields: {name: v20, op: {elementwise: copy}, args: {tuple: [acc6]}, dtype: {dtype: f16}}
+                    - class: Load
+                      fields:
+                        names: {tuple: [in11]}
+                        input: hidden_states
+                        index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a0}}, {expr: {var: a1}}]}
+                        dtype: null
+                    - class: Assign
+                      fields: {name: v21, op: {elementwise: add}, args: {tuple: [in11, v20]}, dtype: null}
+                    - class: Write
+                      fields:
+                        output: add_5
+                        index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a0}}, {expr: {var: a1}}]}
+                        values: {tuple: [v21]}
+                        value_dtype: null
+                        atomic: false
+                        swizzle: NONE
+                  unroll: false
+                  seed: true
+            unroll: false
+            seed: true
+      name: k_sdpa_linear_reduce_908863
+    inputs: [scaled_dot_product_attention_mask_fill_c, scaled_dot_product_attention_mask_zero_c, scaled_dot_product_attention_scale, add_3, add_4,
+      linear_3_wt, transpose_2, hidden_states]
+    outputs: [[add_5, f16, [1, 512, 1024]]]
+- inputs: [add_5]
+  outputs: [mul_12]
+  nodes:
+  - id: add_5
+    op: input
+    outputs: [[add_5, f16, [1, 512, 1024]]]
+  - id: add_6_c1
+    op: constant
+    attrs:
+      name: add_6_c1
+      value: 1.0e-06
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[add_6_c1, f32, [1]]]
+  - id: linear_4_wt
+    op: constant
+    attrs:
+      name: p_mlp_gate_proj_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: [{__op__: {op: torch.transpose, attrs: {axes: {__tuple__: [-2, -1]}}}}]}
+      source_path: mlp.gate_proj.weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [3072, 1024]}
+      source_dtype: float16
+      source_graph: null
+    outputs: [[linear_4_wt, f16, [1024, 3072]]]
+  - id: linear_5_wt
+    op: constant
+    attrs:
+      name: p_mlp_up_proj_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: [{__op__: {op: torch.transpose, attrs: {axes: {__tuple__: [-2, -1]}}}}]}
+      source_path: mlp.up_proj.weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [3072, 1024]}
+      source_dtype: float16
+      source_graph: null
+    outputs: [[linear_5_wt, f16, [1024, 3072]]]
+  - id: mean_3_count
+    op: constant
+    attrs:
+      name: mean_3_count
+      value: 1024.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[mean_3_count, f32, [1]]]
+  - id: p_post_attention_layernorm_weight
+    op: constant
+    attrs:
+      name: p_post_attention_layernorm_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: post_attention_layernorm.weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [1024]}
+      source_dtype: float16
+      source_graph: null
+    outputs: [[p_post_attention_layernorm_weight, f16, [1024]]]
+  - id: silu_one
+    op: constant
+    attrs:
+      name: silu_one
+      value: 1.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[silu_one, f32, [1]]]
+  - id: mul_12
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Load
+          fields:
+            names: {tuple: [in0]}
+            input: add_6_c1
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Load
+          fields:
+            names: {tuple: [in1]}
+            input: mean_3_count
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Assign
+          fields: {name: v0, op: {elementwise: reciprocal}, args: {tuple: [in1]}, dtype: null}
+        - class: Load
+          fields:
+            names: {tuple: [in2]}
+            input: silu_one
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 512}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 1024}, window: null}}
+                  body:
+                    body:
+                    - class: Load
+                      fields:
+                        names: {tuple: [in3]}
+                        input: add_5
+                        index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a0}}, {expr: {var: a1}}]}
+                        dtype: null
+                    - class: Assign
+                      fields: {name: v1, op: {elementwise: copy}, args: {tuple: [in3]}, dtype: {dtype: f32}}
+                    - class: Assign
+                      fields: {name: v2, op: {elementwise: multiply}, args: {tuple: [v1, v1]}, dtype: null}
+                    - class: Accum
+                      fields: {name: acc0, value: v2, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
+                  unroll: false
+                  seed: true
+              - class: Assign
+                fields: {name: v3, op: {elementwise: multiply}, args: {tuple: [acc0, v0]}, dtype: null}
+              - class: Assign
+                fields: {name: v4, op: {elementwise: add}, args: {tuple: [in0, v3]}, dtype: null}
+              - {class: Assign, fields: {name: v5, op: {elementwise: rsqrt}, args: {tuple: [v4]}, dtype: null}}
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a2, extent: {dim: 3072}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a3, extent: {dim: 1024}, window: null}}
+                        body:
+                          body:
+                          - class: Load
+                            fields:
+                              names: {tuple: [in4]}
+                              input: add_5
+                              index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a0}}, {expr: {var: a3}}]}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v6, op: {elementwise: copy}, args: {tuple: [in4]}, dtype: {dtype: f32}}
+                          - class: Assign
+                            fields: {name: v7, op: {elementwise: multiply}, args: {tuple: [v5, v6]}, dtype: null}
+                          - class: Assign
+                            fields: {name: v8, op: {elementwise: copy}, args: {tuple: [v7]}, dtype: {dtype: f16}}
+                          - class: Load
+                            fields:
+                              names: {tuple: [in5]}
+                              input: linear_4_wt
+                              index: {tuple: [{expr: {var: a3}}, {expr: {var: a2}}]}
+                              dtype: null
+                          - class: Load
+                            fields:
+                              names: {tuple: [in6]}
+                              input: linear_5_wt
+                              index: {tuple: [{expr: {var: a3}}, {expr: {var: a2}}]}
+                              dtype: null
+                          - class: Load
+                            fields:
+                              names: {tuple: [in7]}
+                              input: p_post_attention_layernorm_weight
+                              index: {tuple: [{expr: {var: a3}}]}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v9, op: {elementwise: multiply}, args: {tuple: [in7, v8]}, dtype: null}
+                          - class: Assign
+                            fields: {name: v10, op: {elementwise: multiply}, args: {tuple: [in5, v9]}, dtype: {dtype: f32}}
+                          - class: Accum
+                            fields: {name: acc1, value: v10, op: {elementwise: add}, dtype: null, axes: {tuple: [a3]}, base: null}
+                          - class: Assign
+                            fields: {name: v11, op: {elementwise: multiply}, args: {tuple: [in6, v9]}, dtype: {dtype: f32}}
+                          - class: Accum
+                            fields: {name: acc2, value: v11, op: {elementwise: add}, dtype: null, axes: {tuple: [a3]}, base: null}
+                        unroll: false
+                        seed: true
+                    - class: Assign
+                      fields: {name: v12, op: {elementwise: copy}, args: {tuple: [acc1]}, dtype: {dtype: f16}}
+                    - class: Assign
+                      fields: {name: v13, op: {elementwise: copy}, args: {tuple: [acc2]}, dtype: {dtype: f16}}
+                    - class: Assign
+                      fields: {name: v14, op: {elementwise: copy}, args: {tuple: [v12]}, dtype: {dtype: f32}}
+                    - class: Assign
+                      fields: {name: v15, op: {elementwise: negative}, args: {tuple: [v14]}, dtype: null}
+                    - {class: Assign, fields: {name: v16, op: {elementwise: exp}, args: {tuple: [v15]}, dtype: null}}
+                    - class: Assign
+                      fields: {name: v17, op: {elementwise: add}, args: {tuple: [in2, v16]}, dtype: null}
+                    - class: Assign
+                      fields: {name: v18, op: {elementwise: reciprocal}, args: {tuple: [v17]}, dtype: null}
+                    - class: Assign
+                      fields: {name: v19, op: {elementwise: multiply}, args: {tuple: [v14, v18]}, dtype: {dtype: f16}}
+                    - class: Assign
+                      fields: {name: v20, op: {elementwise: multiply}, args: {tuple: [v13, v19]}, dtype: null}
+                    - class: Write
+                      fields:
+                        output: mul_12
+                        index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a0}}, {expr: {var: a2}}]}
+                        values: {tuple: [v20]}
+                        value_dtype: null
+                        atomic: false
+                        swizzle: NONE
+                  unroll: false
+                  seed: true
+            unroll: false
+            seed: true
+      name: k_linear_mean_reduce_4debc7
+    inputs: [mean_3_count, add_6_c1, silu_one, add_5, p_post_attention_layernorm_weight, linear_4_wt, linear_5_wt]
+    outputs: [[mul_12, f16, [1, 512, 3072]]]
+- inputs: [add_5, mul_12]
+  outputs: [add_7]
+  nodes:
+  - id: add_5
+    op: input
+    outputs: [[add_5, f16, [1, 512, 1024]]]
+  - id: linear_6_wt
+    op: constant
+    attrs:
+      name: p_mlp_down_proj_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: [{__op__: {op: torch.transpose, attrs: {axes: {__tuple__: [-2, -1]}}}}]}
+      source_path: mlp.down_proj.weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [1024, 3072]}
+      source_dtype: float16
+      source_graph: null
+    outputs: [[linear_6_wt, f16, [3072, 1024]]]
+  - id: mul_12
+    op: input
+    outputs: [[mul_12, f16, [1, 512, 3072]]]
+  - id: add_7
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 512}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 1024}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 3072}, window: null}}
+                        body:
+                          body:
+                          - class: Load
+                            fields:
+                              names: {tuple: [in0]}
+                              input: mul_12
+                              index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a0}}, {expr: {var: a2}}]}
+                              dtype: null
+                          - class: Load
+                            fields:
+                              names: {tuple: [in1]}
+                              input: linear_6_wt
+                              index: {tuple: [{expr: {var: a2}}, {expr: {var: a1}}]}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
+                          - class: Accum
+                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
+                        unroll: false
+                        seed: true
+                    - class: Assign
+                      fields: {name: v1, op: {elementwise: copy}, args: {tuple: [acc0]}, dtype: {dtype: f16}}
+                    - class: Load
+                      fields:
+                        names: {tuple: [in2]}
+                        input: add_5
+                        index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a0}}, {expr: {var: a1}}]}
+                        dtype: null
+                    - class: Assign
+                      fields: {name: v2, op: {elementwise: add}, args: {tuple: [in2, v1]}, dtype: null}
+                    - class: Write
+                      fields:
+                        output: add_7
+                        index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a0}}, {expr: {var: a1}}]}
+                        values: {tuple: [v2]}
+                        value_dtype: null
+                        atomic: false
+                        swizzle: NONE
+                  unroll: false
+                  seed: true
+            unroll: false
+            seed: true
+      name: k_linear_c8231a
+    inputs: [mul_12, linear_6_wt, add_5]
+    outputs: [[add_7, f16, [1, 512, 1024]]]
+- inputs: [position_embeddings_0, position_embeddings_1, to_2, to_4, transpose_2]
+  outputs: [scaled_dot_product_attention]
+  nodes:
+  - id: add_1_c1
+    op: constant
+    attrs:
+      name: add_1_c1
+      value: 1.0e-06
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[add_1_c1, f32, [1]]]
+  - id: add_2_c1
+    op: constant
+    attrs:
+      name: add_2_c1
+      value: 1.0e-06
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[add_2_c1, f32, [1]]]
+  - id: mean_1_count
+    op: constant
+    attrs:
+      name: mean_1_count
+      value: 128.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[mean_1_count, f32, [1]]]
+  - id: mean_2_count
+    op: constant
+    attrs:
+      name: mean_2_count
+      value: 128.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[mean_2_count, f32, [1]]]
+  - id: p_attn_k_norm_weight
+    op: constant
+    attrs:
+      name: p_attn_k_norm_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: self_attn.k_norm.weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [128]}
+      source_dtype: float16
+      source_graph: null
+    outputs: [[p_attn_k_norm_weight, f16, [128]]]
+  - id: p_attn_q_norm_weight
+    op: constant
+    attrs:
+      name: p_attn_q_norm_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: self_attn.q_norm.weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [128]}
+      source_dtype: float16
+      source_graph: null
+    outputs: [[p_attn_q_norm_weight, f16, [128]]]
+  - id: position_embeddings_0
+    op: input
+    outputs: [[position_embeddings_0, f16, [1, 512, 128]]]
+  - id: position_embeddings_1
+    op: input
+    outputs: [[position_embeddings_1, f16, [1, 512, 128]]]
+  - id: scaled_dot_product_attention_mask_fill_c
+    op: constant
+    attrs:
+      name: scaled_dot_product_attention_mask_fill_c
+      value: -1000000000.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[scaled_dot_product_attention_mask_fill_c, f16, [1]]]
+  - id: scaled_dot_product_attention_mask_zero_c
+    op: constant
+    attrs:
+      name: scaled_dot_product_attention_mask_zero_c
+      value: 0.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[scaled_dot_product_attention_mask_zero_c, f16, [1]]]
+  - id: scaled_dot_product_attention_scale
+    op: constant
+    attrs:
+      name: scaled_dot_product_attention_scale
+      value: 0.08838834764831845
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[scaled_dot_product_attention_scale, f16, [1]]]
+  - id: to_2
+    op: input
+    outputs: [[to_2, f32, [1, 512, 16, 128]]]
+  - id: to_4
+    op: input
+    outputs: [[to_4, f32, [1, 512, 8, 128]]]
+  - id: transpose_2
+    op: input
+    outputs: [[transpose_2, f16, [1, 8, 512, 128]]]
+  - id: scaled_dot_product_attention
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Load
+          fields:
+            names: {tuple: [in0]}
+            input: add_1_c1
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Load
+          fields:
+            names: {tuple: [in1]}
+            input: add_2_c1
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Load
+          fields:
+            names: {tuple: [in2]}
+            input: mean_1_count
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Assign
+          fields: {name: v0, op: {elementwise: reciprocal}, args: {tuple: [in2]}, dtype: null}
+        - class: Load
+          fields:
+            names: {tuple: [in3]}
+            input: mean_2_count
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Assign
+          fields: {name: v1, op: {elementwise: reciprocal}, args: {tuple: [in3]}, dtype: null}
+        - class: Load
+          fields:
+            names: {tuple: [in4]}
+            input: scaled_dot_product_attention_mask_fill_c
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Load
+          fields:
+            names: {tuple: [in5]}
+            input: scaled_dot_product_attention_mask_zero_c
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Load
+          fields:
+            names: {tuple: [in6]}
+            input: scaled_dot_product_attention_scale
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 16}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 512}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 128}, window: null}}
+                        body:
+                          body:
+                          - class: Load
+                            fields:
+                              names: {tuple: [in7]}
+                              input: to_2
+                              index:
+                                tuple:
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {var: a1}}
+                                - {expr: {var: a0}}
+                                - {expr: {var: a2}}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v2, op: {elementwise: multiply}, args: {tuple: [in7, in7]}, dtype: null}
+                          - class: Accum
+                            fields: {name: acc0, value: v2, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
+                        unroll: false
+                        seed: true
+                    - class: Assign
+                      fields: {name: v3, op: {elementwise: multiply}, args: {tuple: [acc0, v0]}, dtype: null}
+                    - class: Assign
+                      fields: {name: v4, op: {elementwise: add}, args: {tuple: [in0, v3]}, dtype: null}
+                    - {class: Assign, fields: {name: v5, op: {elementwise: rsqrt}, args: {tuple: [v4]}, dtype: null}}
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a3, extent: {dim: 512}, window: null}}
+                        body:
+                          body:
+                          - class: Loop
+                            fields:
+                              axis: {class: Axis, fields: {name: a4, extent: {dim: 128}, window: null}}
+                              body:
+                                body:
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in8]}
+                                    input: to_4
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a3}}
+                                      - {expr: {binary: {op: /, left: {var: a0}, right: {literal: {value: 2, dtype: int}}}}}
+                                      - {expr: {var: a4}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v6, op: {elementwise: multiply}, args: {tuple: [in8, in8]}, dtype: null}
+                                - class: Accum
+                                  fields: {name: acc1, value: v6, op: {elementwise: add}, dtype: null, axes: {tuple: [a4]}, base: null}
+                              unroll: false
+                              seed: true
+                          - class: Assign
+                            fields: {name: v7, op: {elementwise: multiply}, args: {tuple: [acc1, v1]}, dtype: null}
+                          - class: Assign
+                            fields: {name: v8, op: {elementwise: add}, args: {tuple: [in1, v7]}, dtype: null}
+                          - {class: Assign, fields: {name: v9, op: {elementwise: rsqrt}, args: {tuple: [v8]}, dtype: null}}
+                          - class: Loop
+                            fields:
+                              axis: {class: Axis, fields: {name: a4, extent: {dim: 128}, window: null}}
+                              body:
+                                body:
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in9]}
+                                    input: p_attn_k_norm_weight
+                                    index:
+                                      tuple:
+                                      - expr:
+                                          binary:
+                                            op: +
+                                            left: {literal: {value: 64, dtype: int}}
+                                            right:
+                                              ternary:
+                                                cond: {binary: {op: <, left: {var: a4}, right: {literal: {value: 64, dtype: int}}}}
+                                                if_true: {var: a4}
+                                                if_false: {literal: {value: 0, dtype: int}}
+                                    dtype: null
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in10]}
+                                    input: p_attn_q_norm_weight
+                                    index:
+                                      tuple:
+                                      - expr:
+                                          binary:
+                                            op: +
+                                            left: {literal: {value: 64, dtype: int}}
+                                            right:
+                                              ternary:
+                                                cond: {binary: {op: <, left: {var: a4}, right: {literal: {value: 64, dtype: int}}}}
+                                                if_true: {var: a4}
+                                                if_false: {literal: {value: 0, dtype: int}}
+                                    dtype: null
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in11]}
+                                    input: to_4
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a3}}
+                                      - {expr: {binary: {op: /, left: {var: a0}, right: {literal: {value: 2, dtype: int}}}}}
+                                      - expr:
+                                          binary:
+                                            op: +
+                                            left: {literal: {value: 64, dtype: int}}
+                                            right:
+                                              ternary:
+                                                cond: {binary: {op: <, left: {var: a4}, right: {literal: {value: 64, dtype: int}}}}
+                                                if_true: {var: a4}
+                                                if_false: {literal: {value: 0, dtype: int}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v10, op: {elementwise: multiply}, args: {tuple: [in11, v9]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v11, op: {elementwise: copy}, args: {tuple: [v10]}, dtype: {dtype: f16}}
+                                - class: Assign
+                                  fields: {name: v12, op: {elementwise: multiply}, args: {tuple: [in9, v11]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v13, op: {elementwise: negative}, args: {tuple: [v12]}, dtype: null}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in12]}
+                                    input: to_4
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a3}}
+                                      - {expr: {binary: {op: /, left: {var: a0}, right: {literal: {value: 2, dtype: int}}}}}
+                                      - expr:
+                                          ternary:
+                                            cond: {binary: {op: <, left: {var: a4}, right: {literal: {value: 64, dtype: int}}}}
+                                            if_true: {literal: {value: 0, dtype: int}}
+                                            if_false: {binary: {op: +, left: {var: a4}, right: {literal: {value: -64, dtype: int}}}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v14, op: {elementwise: multiply}, args: {tuple: [in12, v9]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v15, op: {elementwise: copy}, args: {tuple: [v14]}, dtype: {dtype: f16}}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in13]}
+                                    input: to_4
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a3}}
+                                      - {expr: {binary: {op: /, left: {var: a0}, right: {literal: {value: 2, dtype: int}}}}}
+                                      - {expr: {var: a4}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v16, op: {elementwise: multiply}, args: {tuple: [in13, v9]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v17, op: {elementwise: copy}, args: {tuple: [v16]}, dtype: {dtype: f16}}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in14]}
+                                    input: position_embeddings_0
+                                    index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a3}}, {expr: {var: a4}}]}
+                                    dtype: null
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in15]}
+                                    input: position_embeddings_0
+                                    index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a1}}, {expr: {var: a4}}]}
+                                    dtype: null
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in16]}
+                                    input: position_embeddings_1
+                                    index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a3}}, {expr: {var: a4}}]}
+                                    dtype: null
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in17]}
+                                    input: position_embeddings_1
+                                    index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a1}}, {expr: {var: a4}}]}
+                                    dtype: null
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in18]}
+                                    input: to_2
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a1}}
+                                      - {expr: {var: a0}}
+                                      - expr:
+                                          binary:
+                                            op: +
+                                            left: {literal: {value: 64, dtype: int}}
+                                            right:
+                                              ternary:
+                                                cond: {binary: {op: <, left: {var: a4}, right: {literal: {value: 64, dtype: int}}}}
+                                                if_true: {var: a4}
+                                                if_false: {literal: {value: 0, dtype: int}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v18, op: {elementwise: multiply}, args: {tuple: [in18, v5]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v19, op: {elementwise: copy}, args: {tuple: [v18]}, dtype: {dtype: f16}}
+                                - class: Assign
+                                  fields: {name: v20, op: {elementwise: multiply}, args: {tuple: [in10, v19]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v21, op: {elementwise: negative}, args: {tuple: [v20]}, dtype: null}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in19]}
+                                    input: to_2
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a1}}
+                                      - {expr: {var: a0}}
+                                      - expr:
+                                          ternary:
+                                            cond: {binary: {op: <, left: {var: a4}, right: {literal: {value: 64, dtype: int}}}}
+                                            if_true: {literal: {value: 0, dtype: int}}
+                                            if_false: {binary: {op: +, left: {var: a4}, right: {literal: {value: -64, dtype: int}}}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v22, op: {elementwise: multiply}, args: {tuple: [in19, v5]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v23, op: {elementwise: copy}, args: {tuple: [v22]}, dtype: {dtype: f16}}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in20]}
+                                    input: to_2
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a1}}
+                                      - {expr: {var: a0}}
+                                      - {expr: {var: a4}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v24, op: {elementwise: multiply}, args: {tuple: [in20, v5]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v25, op: {elementwise: copy}, args: {tuple: [v24]}, dtype: {dtype: f16}}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in21]}
+                                    input: p_attn_k_norm_weight
+                                    index:
+                                      tuple:
+                                      - expr:
+                                          ternary:
+                                            cond: {binary: {op: <, left: {var: a4}, right: {literal: {value: 64, dtype: int}}}}
+                                            if_true: {literal: {value: 0, dtype: int}}
+                                            if_false: {binary: {op: +, left: {var: a4}, right: {literal: {value: -64, dtype: int}}}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v26, op: {elementwise: multiply}, args: {tuple: [in21, v15]}, dtype: null}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in22]}
+                                    input: p_attn_q_norm_weight
+                                    index:
+                                      tuple:
+                                      - expr:
+                                          ternary:
+                                            cond: {binary: {op: <, left: {var: a4}, right: {literal: {value: 64, dtype: int}}}}
+                                            if_true: {literal: {value: 0, dtype: int}}
+                                            if_false: {binary: {op: +, left: {var: a4}, right: {literal: {value: -64, dtype: int}}}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v27, op: {elementwise: multiply}, args: {tuple: [in22, v23]}, dtype: null}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in23]}
+                                    input: p_attn_k_norm_weight
+                                    index: {tuple: [{expr: {var: a4}}]}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v28, op: {elementwise: multiply}, args: {tuple: [in23, v17]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v29, op: {elementwise: multiply}, args: {tuple: [in14, v28]}, dtype: null}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in24]}
+                                    input: p_attn_q_norm_weight
+                                    index: {tuple: [{expr: {var: a4}}]}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v30, op: {elementwise: multiply}, args: {tuple: [in24, v25]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v31, op: {elementwise: multiply}, args: {tuple: [in15, v30]}, dtype: null}
+                                - class: Select
+                                  fields:
+                                    name: v32
+                                    branches:
+                                      tuple:
+                                      - class: SelectBranch
+                                        fields:
+                                          value: v13
+                                          select: {expr: {binary: {op: <, left: {var: a4}, right: {literal: {value: 64, dtype: int}}}}}
+                                      - {class: SelectBranch, fields: {value: v26, select: {expr: {literal: {value: true, dtype: bool}}}}}
+                                - class: Assign
+                                  fields: {name: v33, op: {elementwise: multiply}, args: {tuple: [in16, v32]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v34, op: {elementwise: add}, args: {tuple: [v29, v33]}, dtype: null}
+                                - class: Select
+                                  fields:
+                                    name: v35
+                                    branches:
+                                      tuple:
+                                      - class: SelectBranch
+                                        fields:
+                                          value: v21
+                                          select: {expr: {binary: {op: <, left: {var: a4}, right: {literal: {value: 64, dtype: int}}}}}
+                                      - {class: SelectBranch, fields: {value: v27, select: {expr: {literal: {value: true, dtype: bool}}}}}
+                                - class: Assign
+                                  fields: {name: v36, op: {elementwise: multiply}, args: {tuple: [in17, v35]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v37, op: {elementwise: add}, args: {tuple: [v31, v36]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v38, op: {elementwise: multiply}, args: {tuple: [v34, v37]}, dtype: {dtype: f32}}
+                                - class: Accum
+                                  fields: {name: acc2, value: v38, op: {elementwise: add}, dtype: null, axes: {tuple: [a4]}, base: null}
+                              unroll: false
+                              seed: true
+                          - class: Assign
+                            fields: {name: v39, op: {elementwise: multiply}, args: {tuple: [acc2, in6]}, dtype: null}
+                          - class: Select
+                            fields:
+                              name: v40
+                              branches:
+                                tuple:
+                                - class: SelectBranch
+                                  fields: {value: in5, select: {expr: {binary: {op: <=, left: {var: a3}, right: {var: a1}}}}}
+                                - class: SelectBranch
+                                  fields: {value: in4, select: {expr: {binary: {op: <, left: {var: a1}, right: {var: a3}}}}}
+                          - class: Assign
+                            fields: {name: v41, op: {elementwise: add}, args: {tuple: [v39, v40]}, dtype: null}
+                          - class: Accum
+                            fields:
+                              name: acc3
+                              value: v41
+                              op: {elementwise: maximum}
+                              dtype: null
+                              axes: {tuple: [a3]}
+                              base: null
+                        unroll: false
+                        seed: true
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a3, extent: {dim: 512}, window: null}}
+                        body:
+                          body:
+                          - class: Loop
+                            fields:
+                              axis: {class: Axis, fields: {name: a7, extent: {dim: 128}, window: null}}
+                              body:
+                                body:
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in25]}
+                                    input: to_4
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a3}}
+                                      - {expr: {binary: {op: /, left: {var: a0}, right: {literal: {value: 2, dtype: int}}}}}
+                                      - {expr: {var: a7}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v42, op: {elementwise: multiply}, args: {tuple: [in25, in25]}, dtype: null}
+                                - class: Accum
+                                  fields: {name: acc4, value: v42, op: {elementwise: add}, dtype: null, axes: {tuple: [a7]}, base: null}
+                              unroll: false
+                              seed: true
+                          - class: Assign
+                            fields: {name: v43, op: {elementwise: multiply}, args: {tuple: [acc4, v1]}, dtype: null}
+                          - class: Assign
+                            fields: {name: v44, op: {elementwise: add}, args: {tuple: [in1, v43]}, dtype: null}
+                          - class: Assign
+                            fields: {name: v45, op: {elementwise: rsqrt}, args: {tuple: [v44]}, dtype: null}
+                          - class: Loop
+                            fields:
+                              axis: {class: Axis, fields: {name: a7, extent: {dim: 128}, window: null}}
+                              body:
+                                body:
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in26]}
+                                    input: p_attn_k_norm_weight
+                                    index:
+                                      tuple:
+                                      - expr:
+                                          binary:
+                                            op: +
+                                            left: {literal: {value: 64, dtype: int}}
+                                            right:
+                                              ternary:
+                                                cond: {binary: {op: <, left: {var: a7}, right: {literal: {value: 64, dtype: int}}}}
+                                                if_true: {var: a7}
+                                                if_false: {literal: {value: 0, dtype: int}}
+                                    dtype: null
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in27]}
+                                    input: p_attn_q_norm_weight
+                                    index:
+                                      tuple:
+                                      - expr:
+                                          binary:
+                                            op: +
+                                            left: {literal: {value: 64, dtype: int}}
+                                            right:
+                                              ternary:
+                                                cond: {binary: {op: <, left: {var: a7}, right: {literal: {value: 64, dtype: int}}}}
+                                                if_true: {var: a7}
+                                                if_false: {literal: {value: 0, dtype: int}}
+                                    dtype: null
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in28]}
+                                    input: to_4
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a3}}
+                                      - {expr: {binary: {op: /, left: {var: a0}, right: {literal: {value: 2, dtype: int}}}}}
+                                      - expr:
+                                          binary:
+                                            op: +
+                                            left: {literal: {value: 64, dtype: int}}
+                                            right:
+                                              ternary:
+                                                cond: {binary: {op: <, left: {var: a7}, right: {literal: {value: 64, dtype: int}}}}
+                                                if_true: {var: a7}
+                                                if_false: {literal: {value: 0, dtype: int}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v46, op: {elementwise: multiply}, args: {tuple: [in28, v45]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v47, op: {elementwise: copy}, args: {tuple: [v46]}, dtype: {dtype: f16}}
+                                - class: Assign
+                                  fields: {name: v48, op: {elementwise: multiply}, args: {tuple: [in26, v47]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v49, op: {elementwise: negative}, args: {tuple: [v48]}, dtype: null}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in29]}
+                                    input: to_4
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a3}}
+                                      - {expr: {binary: {op: /, left: {var: a0}, right: {literal: {value: 2, dtype: int}}}}}
+                                      - expr:
+                                          ternary:
+                                            cond: {binary: {op: <, left: {var: a7}, right: {literal: {value: 64, dtype: int}}}}
+                                            if_true: {literal: {value: 0, dtype: int}}
+                                            if_false: {binary: {op: +, left: {var: a7}, right: {literal: {value: -64, dtype: int}}}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v50, op: {elementwise: multiply}, args: {tuple: [in29, v45]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v51, op: {elementwise: copy}, args: {tuple: [v50]}, dtype: {dtype: f16}}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in30]}
+                                    input: to_4
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a3}}
+                                      - {expr: {binary: {op: /, left: {var: a0}, right: {literal: {value: 2, dtype: int}}}}}
+                                      - {expr: {var: a7}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v52, op: {elementwise: multiply}, args: {tuple: [in30, v45]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v53, op: {elementwise: copy}, args: {tuple: [v52]}, dtype: {dtype: f16}}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in31]}
+                                    input: position_embeddings_0
+                                    index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a3}}, {expr: {var: a7}}]}
+                                    dtype: null
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in32]}
+                                    input: position_embeddings_0
+                                    index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a1}}, {expr: {var: a7}}]}
+                                    dtype: null
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in33]}
+                                    input: position_embeddings_1
+                                    index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a3}}, {expr: {var: a7}}]}
+                                    dtype: null
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in34]}
+                                    input: position_embeddings_1
+                                    index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a1}}, {expr: {var: a7}}]}
+                                    dtype: null
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in35]}
+                                    input: to_2
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a1}}
+                                      - {expr: {var: a0}}
+                                      - expr:
+                                          binary:
+                                            op: +
+                                            left: {literal: {value: 64, dtype: int}}
+                                            right:
+                                              ternary:
+                                                cond: {binary: {op: <, left: {var: a7}, right: {literal: {value: 64, dtype: int}}}}
+                                                if_true: {var: a7}
+                                                if_false: {literal: {value: 0, dtype: int}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v54, op: {elementwise: multiply}, args: {tuple: [in35, v5]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v55, op: {elementwise: copy}, args: {tuple: [v54]}, dtype: {dtype: f16}}
+                                - class: Assign
+                                  fields: {name: v56, op: {elementwise: multiply}, args: {tuple: [in27, v55]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v57, op: {elementwise: negative}, args: {tuple: [v56]}, dtype: null}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in36]}
+                                    input: to_2
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a1}}
+                                      - {expr: {var: a0}}
+                                      - expr:
+                                          ternary:
+                                            cond: {binary: {op: <, left: {var: a7}, right: {literal: {value: 64, dtype: int}}}}
+                                            if_true: {literal: {value: 0, dtype: int}}
+                                            if_false: {binary: {op: +, left: {var: a7}, right: {literal: {value: -64, dtype: int}}}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v58, op: {elementwise: multiply}, args: {tuple: [in36, v5]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v59, op: {elementwise: copy}, args: {tuple: [v58]}, dtype: {dtype: f16}}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in37]}
+                                    input: to_2
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a1}}
+                                      - {expr: {var: a0}}
+                                      - {expr: {var: a7}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v60, op: {elementwise: multiply}, args: {tuple: [in37, v5]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v61, op: {elementwise: copy}, args: {tuple: [v60]}, dtype: {dtype: f16}}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in38]}
+                                    input: p_attn_k_norm_weight
+                                    index:
+                                      tuple:
+                                      - expr:
+                                          ternary:
+                                            cond: {binary: {op: <, left: {var: a7}, right: {literal: {value: 64, dtype: int}}}}
+                                            if_true: {literal: {value: 0, dtype: int}}
+                                            if_false: {binary: {op: +, left: {var: a7}, right: {literal: {value: -64, dtype: int}}}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v62, op: {elementwise: multiply}, args: {tuple: [in38, v51]}, dtype: null}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in39]}
+                                    input: p_attn_q_norm_weight
+                                    index:
+                                      tuple:
+                                      - expr:
+                                          ternary:
+                                            cond: {binary: {op: <, left: {var: a7}, right: {literal: {value: 64, dtype: int}}}}
+                                            if_true: {literal: {value: 0, dtype: int}}
+                                            if_false: {binary: {op: +, left: {var: a7}, right: {literal: {value: -64, dtype: int}}}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v63, op: {elementwise: multiply}, args: {tuple: [in39, v59]}, dtype: null}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in40]}
+                                    input: p_attn_k_norm_weight
+                                    index: {tuple: [{expr: {var: a7}}]}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v64, op: {elementwise: multiply}, args: {tuple: [in40, v53]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v65, op: {elementwise: multiply}, args: {tuple: [in31, v64]}, dtype: null}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in41]}
+                                    input: p_attn_q_norm_weight
+                                    index: {tuple: [{expr: {var: a7}}]}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v66, op: {elementwise: multiply}, args: {tuple: [in41, v61]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v67, op: {elementwise: multiply}, args: {tuple: [in32, v66]}, dtype: null}
+                                - class: Select
+                                  fields:
+                                    name: v68
+                                    branches:
+                                      tuple:
+                                      - class: SelectBranch
+                                        fields:
+                                          value: v49
+                                          select: {expr: {binary: {op: <, left: {var: a7}, right: {literal: {value: 64, dtype: int}}}}}
+                                      - {class: SelectBranch, fields: {value: v62, select: {expr: {literal: {value: true, dtype: bool}}}}}
+                                - class: Assign
+                                  fields: {name: v69, op: {elementwise: multiply}, args: {tuple: [in33, v68]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v70, op: {elementwise: add}, args: {tuple: [v65, v69]}, dtype: null}
+                                - class: Select
+                                  fields:
+                                    name: v71
+                                    branches:
+                                      tuple:
+                                      - class: SelectBranch
+                                        fields:
+                                          value: v57
+                                          select: {expr: {binary: {op: <, left: {var: a7}, right: {literal: {value: 64, dtype: int}}}}}
+                                      - {class: SelectBranch, fields: {value: v63, select: {expr: {literal: {value: true, dtype: bool}}}}}
+                                - class: Assign
+                                  fields: {name: v72, op: {elementwise: multiply}, args: {tuple: [in34, v71]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v73, op: {elementwise: add}, args: {tuple: [v67, v72]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v74, op: {elementwise: multiply}, args: {tuple: [v70, v73]}, dtype: {dtype: f32}}
+                                - class: Accum
+                                  fields: {name: acc5, value: v74, op: {elementwise: add}, dtype: null, axes: {tuple: [a7]}, base: null}
+                              unroll: false
+                              seed: true
+                          - class: Assign
+                            fields: {name: v75, op: {elementwise: multiply}, args: {tuple: [acc5, in6]}, dtype: null}
+                          - class: Select
+                            fields:
+                              name: v76
+                              branches:
+                                tuple:
+                                - class: SelectBranch
+                                  fields: {value: in5, select: {expr: {binary: {op: <=, left: {var: a3}, right: {var: a1}}}}}
+                                - class: SelectBranch
+                                  fields: {value: in4, select: {expr: {binary: {op: <, left: {var: a1}, right: {var: a3}}}}}
+                          - class: Assign
+                            fields: {name: v77, op: {elementwise: add}, args: {tuple: [v75, v76]}, dtype: null}
+                          - class: Assign
+                            fields: {name: v78, op: {elementwise: subtract}, args: {tuple: [v77, acc3]}, dtype: null}
+                          - {class: Assign, fields: {name: v79, op: {elementwise: exp}, args: {tuple: [v78]}, dtype: null}}
+                          - class: Accum
+                            fields: {name: acc6, value: v79, op: {elementwise: add}, dtype: null, axes: {tuple: [a3]}, base: null}
+                        unroll: false
+                        seed: true
+                    - class: Assign
+                      fields: {name: v80, op: {elementwise: reciprocal}, args: {tuple: [acc6]}, dtype: null}
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a9, extent: {dim: 128}, window: null}}
+                        body:
+                          body:
+                          - class: Loop
+                            fields:
+                              axis: {class: Axis, fields: {name: a10, extent: {dim: 512}, window: null}}
+                              body:
+                                body:
+                                - class: Loop
+                                  fields:
+                                    axis: {class: Axis, fields: {name: a11, extent: {dim: 128}, window: null}}
+                                    body:
+                                      body:
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in42]}
+                                          input: to_4
+                                          index:
+                                            tuple:
+                                            - {expr: {literal: {value: 0, dtype: int}}}
+                                            - {expr: {var: a10}}
+                                            - {expr: {binary: {op: /, left: {var: a0}, right: {literal: {value: 2, dtype: int}}}}}
+                                            - {expr: {var: a11}}
+                                          dtype: null
+                                      - class: Assign
+                                        fields: {name: v81, op: {elementwise: multiply}, args: {tuple: [in42, in42]}, dtype: null}
+                                      - class: Accum
+                                        fields: {name: acc7, value: v81, op: {elementwise: add}, dtype: null, axes: {tuple: [a11]}, base: null}
+                                    unroll: false
+                                    seed: true
+                                - class: Assign
+                                  fields: {name: v82, op: {elementwise: multiply}, args: {tuple: [acc7, v1]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v83, op: {elementwise: add}, args: {tuple: [in1, v82]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v84, op: {elementwise: rsqrt}, args: {tuple: [v83]}, dtype: null}
+                                - class: Loop
+                                  fields:
+                                    axis: {class: Axis, fields: {name: a11, extent: {dim: 128}, window: null}}
+                                    body:
+                                      body:
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in43]}
+                                          input: p_attn_k_norm_weight
+                                          index:
+                                            tuple:
+                                            - expr:
+                                                binary:
+                                                  op: +
+                                                  left: {literal: {value: 64, dtype: int}}
+                                                  right:
+                                                    ternary:
+                                                      cond: {binary: {op: <, left: {var: a11}, right: {literal: {value: 64, dtype: int}}}}
+                                                      if_true: {var: a11}
+                                                      if_false: {literal: {value: 0, dtype: int}}
+                                          dtype: null
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in44]}
+                                          input: p_attn_q_norm_weight
+                                          index:
+                                            tuple:
+                                            - expr:
+                                                binary:
+                                                  op: +
+                                                  left: {literal: {value: 64, dtype: int}}
+                                                  right:
+                                                    ternary:
+                                                      cond: {binary: {op: <, left: {var: a11}, right: {literal: {value: 64, dtype: int}}}}
+                                                      if_true: {var: a11}
+                                                      if_false: {literal: {value: 0, dtype: int}}
+                                          dtype: null
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in45]}
+                                          input: to_4
+                                          index:
+                                            tuple:
+                                            - {expr: {literal: {value: 0, dtype: int}}}
+                                            - {expr: {var: a10}}
+                                            - {expr: {binary: {op: /, left: {var: a0}, right: {literal: {value: 2, dtype: int}}}}}
+                                            - expr:
+                                                binary:
+                                                  op: +
+                                                  left: {literal: {value: 64, dtype: int}}
+                                                  right:
+                                                    ternary:
+                                                      cond: {binary: {op: <, left: {var: a11}, right: {literal: {value: 64, dtype: int}}}}
+                                                      if_true: {var: a11}
+                                                      if_false: {literal: {value: 0, dtype: int}}
+                                          dtype: null
+                                      - class: Assign
+                                        fields: {name: v85, op: {elementwise: multiply}, args: {tuple: [in45, v84]}, dtype: null}
+                                      - class: Assign
+                                        fields: {name: v86, op: {elementwise: copy}, args: {tuple: [v85]}, dtype: {dtype: f16}}
+                                      - class: Assign
+                                        fields: {name: v87, op: {elementwise: multiply}, args: {tuple: [in43, v86]}, dtype: null}
+                                      - class: Assign
+                                        fields: {name: v88, op: {elementwise: negative}, args: {tuple: [v87]}, dtype: null}
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in46]}
+                                          input: to_4
+                                          index:
+                                            tuple:
+                                            - {expr: {literal: {value: 0, dtype: int}}}
+                                            - {expr: {var: a10}}
+                                            - {expr: {binary: {op: /, left: {var: a0}, right: {literal: {value: 2, dtype: int}}}}}
+                                            - expr:
+                                                ternary:
+                                                  cond: {binary: {op: <, left: {var: a11}, right: {literal: {value: 64, dtype: int}}}}
+                                                  if_true: {literal: {value: 0, dtype: int}}
+                                                  if_false: {binary: {op: +, left: {var: a11}, right: {literal: {value: -64, dtype: int}}}}
+                                          dtype: null
+                                      - class: Assign
+                                        fields: {name: v89, op: {elementwise: multiply}, args: {tuple: [in46, v84]}, dtype: null}
+                                      - class: Assign
+                                        fields: {name: v90, op: {elementwise: copy}, args: {tuple: [v89]}, dtype: {dtype: f16}}
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in47]}
+                                          input: to_4
+                                          index:
+                                            tuple:
+                                            - {expr: {literal: {value: 0, dtype: int}}}
+                                            - {expr: {var: a10}}
+                                            - {expr: {binary: {op: /, left: {var: a0}, right: {literal: {value: 2, dtype: int}}}}}
+                                            - {expr: {var: a11}}
+                                          dtype: null
+                                      - class: Assign
+                                        fields: {name: v91, op: {elementwise: multiply}, args: {tuple: [in47, v84]}, dtype: null}
+                                      - class: Assign
+                                        fields: {name: v92, op: {elementwise: copy}, args: {tuple: [v91]}, dtype: {dtype: f16}}
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in48]}
+                                          input: position_embeddings_0
+                                          index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a1}}, {expr: {var: a11}}]}
+                                          dtype: null
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in49]}
+                                          input: position_embeddings_0
+                                          index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a10}}, {expr: {var: a11}}]}
+                                          dtype: null
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in50]}
+                                          input: position_embeddings_1
+                                          index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a1}}, {expr: {var: a11}}]}
+                                          dtype: null
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in51]}
+                                          input: position_embeddings_1
+                                          index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a10}}, {expr: {var: a11}}]}
+                                          dtype: null
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in52]}
+                                          input: to_2
+                                          index:
+                                            tuple:
+                                            - {expr: {literal: {value: 0, dtype: int}}}
+                                            - {expr: {var: a1}}
+                                            - {expr: {var: a0}}
+                                            - expr:
+                                                binary:
+                                                  op: +
+                                                  left: {literal: {value: 64, dtype: int}}
+                                                  right:
+                                                    ternary:
+                                                      cond: {binary: {op: <, left: {var: a11}, right: {literal: {value: 64, dtype: int}}}}
+                                                      if_true: {var: a11}
+                                                      if_false: {literal: {value: 0, dtype: int}}
+                                          dtype: null
+                                      - class: Assign
+                                        fields: {name: v93, op: {elementwise: multiply}, args: {tuple: [in52, v5]}, dtype: null}
+                                      - class: Assign
+                                        fields: {name: v94, op: {elementwise: copy}, args: {tuple: [v93]}, dtype: {dtype: f16}}
+                                      - class: Assign
+                                        fields: {name: v95, op: {elementwise: multiply}, args: {tuple: [in44, v94]}, dtype: null}
+                                      - class: Assign
+                                        fields: {name: v96, op: {elementwise: negative}, args: {tuple: [v95]}, dtype: null}
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in53]}
+                                          input: to_2
+                                          index:
+                                            tuple:
+                                            - {expr: {literal: {value: 0, dtype: int}}}
+                                            - {expr: {var: a1}}
+                                            - {expr: {var: a0}}
+                                            - expr:
+                                                ternary:
+                                                  cond: {binary: {op: <, left: {var: a11}, right: {literal: {value: 64, dtype: int}}}}
+                                                  if_true: {literal: {value: 0, dtype: int}}
+                                                  if_false: {binary: {op: +, left: {var: a11}, right: {literal: {value: -64, dtype: int}}}}
+                                          dtype: null
+                                      - class: Assign
+                                        fields: {name: v97, op: {elementwise: multiply}, args: {tuple: [in53, v5]}, dtype: null}
+                                      - class: Assign
+                                        fields: {name: v98, op: {elementwise: copy}, args: {tuple: [v97]}, dtype: {dtype: f16}}
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in54]}
+                                          input: to_2
+                                          index:
+                                            tuple:
+                                            - {expr: {literal: {value: 0, dtype: int}}}
+                                            - {expr: {var: a1}}
+                                            - {expr: {var: a0}}
+                                            - {expr: {var: a11}}
+                                          dtype: null
+                                      - class: Assign
+                                        fields: {name: v99, op: {elementwise: multiply}, args: {tuple: [in54, v5]}, dtype: null}
+                                      - class: Assign
+                                        fields: {name: v100, op: {elementwise: copy}, args: {tuple: [v99]}, dtype: {dtype: f16}}
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in55]}
+                                          input: p_attn_k_norm_weight
+                                          index:
+                                            tuple:
+                                            - expr:
+                                                ternary:
+                                                  cond: {binary: {op: <, left: {var: a11}, right: {literal: {value: 64, dtype: int}}}}
+                                                  if_true: {literal: {value: 0, dtype: int}}
+                                                  if_false: {binary: {op: +, left: {var: a11}, right: {literal: {value: -64, dtype: int}}}}
+                                          dtype: null
+                                      - class: Assign
+                                        fields: {name: v101, op: {elementwise: multiply}, args: {tuple: [in55, v90]}, dtype: null}
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in56]}
+                                          input: p_attn_q_norm_weight
+                                          index:
+                                            tuple:
+                                            - expr:
+                                                ternary:
+                                                  cond: {binary: {op: <, left: {var: a11}, right: {literal: {value: 64, dtype: int}}}}
+                                                  if_true: {literal: {value: 0, dtype: int}}
+                                                  if_false: {binary: {op: +, left: {var: a11}, right: {literal: {value: -64, dtype: int}}}}
+                                          dtype: null
+                                      - class: Assign
+                                        fields: {name: v102, op: {elementwise: multiply}, args: {tuple: [in56, v98]}, dtype: null}
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in57]}
+                                          input: p_attn_k_norm_weight
+                                          index: {tuple: [{expr: {var: a11}}]}
+                                          dtype: null
+                                      - class: Assign
+                                        fields: {name: v103, op: {elementwise: multiply}, args: {tuple: [in57, v92]}, dtype: null}
+                                      - class: Assign
+                                        fields: {name: v104, op: {elementwise: multiply}, args: {tuple: [in49, v103]}, dtype: null}
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in58]}
+                                          input: p_attn_q_norm_weight
+                                          index: {tuple: [{expr: {var: a11}}]}
+                                          dtype: null
+                                      - class: Assign
+                                        fields: {name: v105, op: {elementwise: multiply}, args: {tuple: [in58, v100]}, dtype: null}
+                                      - class: Assign
+                                        fields: {name: v106, op: {elementwise: multiply}, args: {tuple: [in48, v105]}, dtype: null}
+                                      - class: Select
+                                        fields:
+                                          name: v107
+                                          branches:
+                                            tuple:
+                                            - class: SelectBranch
+                                              fields:
+                                                value: v88
+                                                select: {expr: {binary: {op: <, left: {var: a11}, right: {literal: {value: 64, dtype: int}}}}}
+                                            - class: SelectBranch
+                                              fields: {value: v101, select: {expr: {literal: {value: true, dtype: bool}}}}
+                                      - class: Assign
+                                        fields: {name: v108, op: {elementwise: multiply}, args: {tuple: [in51, v107]}, dtype: null}
+                                      - class: Assign
+                                        fields: {name: v109, op: {elementwise: add}, args: {tuple: [v104, v108]}, dtype: null}
+                                      - class: Select
+                                        fields:
+                                          name: v110
+                                          branches:
+                                            tuple:
+                                            - class: SelectBranch
+                                              fields:
+                                                value: v96
+                                                select: {expr: {binary: {op: <, left: {var: a11}, right: {literal: {value: 64, dtype: int}}}}}
+                                            - class: SelectBranch
+                                              fields: {value: v102, select: {expr: {literal: {value: true, dtype: bool}}}}
+                                      - class: Assign
+                                        fields: {name: v111, op: {elementwise: multiply}, args: {tuple: [in50, v110]}, dtype: null}
+                                      - class: Assign
+                                        fields: {name: v112, op: {elementwise: add}, args: {tuple: [v106, v111]}, dtype: null}
+                                      - class: Assign
+                                        fields: {name: v113, op: {elementwise: multiply}, args: {tuple: [v109, v112]}, dtype: {dtype: f32}}
+                                      - class: Accum
+                                        fields: {name: acc8, value: v113, op: {elementwise: add}, dtype: null, axes: {tuple: [a11]}, base: null}
+                                    unroll: false
+                                    seed: true
+                                - class: Assign
+                                  fields: {name: v114, op: {elementwise: multiply}, args: {tuple: [acc8, in6]}, dtype: null}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in59]}
+                                    input: transpose_2
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {binary: {op: /, left: {var: a0}, right: {literal: {value: 2, dtype: int}}}}}
+                                      - {expr: {var: a10}}
+                                      - {expr: {var: a9}}
+                                    dtype: null
+                                - class: Select
+                                  fields:
+                                    name: v115
+                                    branches:
+                                      tuple:
+                                      - class: SelectBranch
+                                        fields: {value: in5, select: {expr: {binary: {op: <=, left: {var: a10}, right: {var: a1}}}}}
+                                      - class: SelectBranch
+                                        fields: {value: in4, select: {expr: {binary: {op: <, left: {var: a1}, right: {var: a10}}}}}
+                                - class: Assign
+                                  fields: {name: v116, op: {elementwise: add}, args: {tuple: [v114, v115]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v117, op: {elementwise: subtract}, args: {tuple: [v116, acc3]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v118, op: {elementwise: exp}, args: {tuple: [v117]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v119, op: {elementwise: multiply}, args: {tuple: [v118, v80]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v120, op: {elementwise: multiply}, args: {tuple: [in59, v119]}, dtype: {dtype: f32}}
+                                - class: Accum
+                                  fields: {name: acc9, value: v120, op: {elementwise: add}, dtype: null, axes: {tuple: [a10]}, base: null}
+                              unroll: false
+                              seed: true
+                          - class: Write
+                            fields:
+                              output: scaled_dot_product_attention
+                              index:
+                                tuple:
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {var: a0}}
+                                - {expr: {var: a1}}
+                                - {expr: {var: a9}}
+                              values: {tuple: [acc9]}
+                              value_dtype: null
+                              atomic: false
+                              swizzle: NONE
+                        unroll: false
+                        seed: true
+                  unroll: false
+                  seed: true
+            unroll: false
+            seed: true
+      name: k_sdpa_mean_reduce_abc46a
+    inputs: [mean_1_count, mean_2_count, add_1_c1, add_2_c1, scaled_dot_product_attention_mask_fill_c, scaled_dot_product_attention_mask_zero_c,
+      scaled_dot_product_attention_scale, to_2, to_4, p_attn_q_norm_weight, p_attn_k_norm_weight, position_embeddings_1, position_embeddings_0,
+      transpose_2]
+    outputs: [[scaled_dot_product_attention, f16, [1, 16, 512, 128]]]
 configs:
 - program: 0
   target:
+    loop: 0
     origins:
     - add
     - add_c1_bc
@@ -1240,6 +3841,7 @@ configs:
       reference_backend: same-input-greedy
 - program: 0
   target:
+    loop: 1
     origins:
     - linear_2
   realizations:
@@ -1264,6 +3866,7 @@ configs:
       reference_backend: same-input-greedy
 - program: 0
   target:
+    loop: 2
     origins:
     - linear
     - to_2
@@ -1290,6 +3893,7 @@ configs:
       reference_backend: same-input-greedy
 - program: 0
   target:
+    loop: 3
     origins:
     - linear_1
     - to_4
@@ -1316,6 +3920,7 @@ configs:
       reference_backend: same-input-greedy
 - program: 0
   target:
+    loop: 4
     origins:
     - linear_2
     - scaled_dot_product_attention
@@ -1328,6 +3933,7 @@ configs:
       FAST_MATH: false
 - program: 0
   target:
+    loop: 5
     origins:
     - add_5
     - linear_3
@@ -1341,6 +3947,7 @@ configs:
       FAST_MATH: false
 - program: 0
   target:
+    loop: 6
     origins:
     - add_6
     - add_6_c1_bc
@@ -1400,6 +4007,7 @@ configs:
       reference_backend: same-input-greedy
 - program: 0
   target:
+    loop: 7
     origins:
     - add_7
     - linear_6
@@ -1425,6 +4033,7 @@ configs:
       reference_backend: same-input-greedy
 - program: 0
   target:
+    loop: 8
     origins:
     - add_1
     - add_1_c1_bc
@@ -1474,5 +4083,3 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-gpu_name: NVIDIA A100 40GB
-model: Qwen/Qwen3-0.6B@c1899de289a04d12100db370d81485cdf75e47ca

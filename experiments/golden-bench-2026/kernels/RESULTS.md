@@ -1,5 +1,103 @@
 # Golden-bench kernel corpus
 
+## Platform rtx4090x1 — layer-0 corpus re-tuned after the identity re-key (2026-09-18)
+
+### Question and scope
+
+Does the Qwen3-0.6B layer-0 kernel corpus still hold on an RTX 4090 after PR #804 re-keyed Loop IR kernel
+identity, and can its numbers be reproduced from the repository rather than from a laptop? The previous 4090
+rows date from August and describe a corpus that no longer exists. Scope: layer 0, sequence lengths 1 and 512,
+the bf16 checkpoint and the dynamic-FP8 checkpoint, deployable `-O3` throughout.
+
+### Protocol
+
+One supplied Vast.ai container, 1x NVIDIA GeForce RTX 4090 (sm_89, driver 580.159.03, 24 GB), 96 vCPU, 188 GB
+RAM, Ubuntu 24.04.4, nvcc 12.8, PyTorch 2.14.0+cu130, cupy-cuda12x 14.2.0, Python 3.12.3. The card was verified
+through `/proc/driver/nvidia/gpus/*/information` rather than `nvidia-smi` alone, after an earlier cycle was
+offered a relabelled RTX 3090.
+
+Source revision `bdc88ae0` (`fix/tune-corpus-blockers`, rebased onto `d3043283`). Budget `--max-candidates 12
+--patience 4 --seed 0`, one invocation per target sharing a tune DB and online prior. Winners were re-benched
+with `emmy run --golden ... --realization ... --bench --bench-backends eager,tcompile,emmy --record
+--record-greedy`, so each recorded row is a deployable measurement of the schedule that actually deploys.
+
+Note the toolchain mix: nvcc is 12.8 while torch installed as cu130 and pulled the CUDA 13 runtime. This is
+harmless on sm_89 — the Volta removal that broke the V100 does not apply — but it differs from the August rows.
+
+### Result summary
+
+Seventeen targets recorded, each with paired eager / Inductor / Emmy timings.
+
+| base checkpoint | eager | Inductor | Emmy | vs eager | Inductor / Emmy |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| input RMSNorm (decode) | 11.26 | 1.14 | **0.75** | 15.0 | **1.52** |
+| mean reduction (decode) | 66.24 | 1.64 | **1.35** | 49.1 | **1.22** |
+| pointwise multiply (decode) | 12.17 | 1.14 | **0.75** | 16.1 | **1.51** |
+| input RMSNorm (prefill) | 16.83 | 1.77 | **1.30** | 13.0 | **1.37** |
+| transpose (prefill) | 1.87 | 1.86 | 2.13 | 0.9 | 0.88 |
+
+| dynamic-FP8 checkpoint | eager | Inductor | Emmy | vs eager | Inductor / Emmy |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| mean reduction (decode) | 120.08 | no timing | **3.74** | 32.1 | — |
+| value quant (decode) | 4.46 | 4.60 | **0.76** | 5.9 | **6.04** |
+| transpose (decode) | 1.84 | 1.85 | **0.75** | 2.4 | **2.45** |
+| transpose_1 (decode) | 1.89 | 1.90 | **0.75** | 2.5 | **2.55** |
+| k_norm quant (prefill) | 16.97 | 1.56 | **1.12** | 15.1 | **1.39** |
+| q_proj quant (prefill) | 88.21 | 3.32 | **2.69** | 32.8 | **1.24** |
+| linear + pointwise (prefill) | 101.17 | 19.32 | **17.18** | 5.9 | **1.12** |
+| input RMSNorm (prefill) | 16.92 | 1.78 | **1.30** | 13.0 | **1.37** |
+| cast (prefill) | 26.46 | 2.18 | **1.72** | 15.4 | **1.26** |
+| unsqueeze (prefill) | 1.81 | 1.82 | **0.85** | 2.1 | **2.14** |
+| unsqueeze_1 (prefill) | 1.87 | 1.87 | **0.91** | 2.0 | **2.05** |
+
+Emmy beats Inductor on every recorded target except the base-checkpoint transpose (0.88), which also loses to
+eager. That is consistent with the previous cycle's finding that the transpose is the single loss.
+
+### What the sweep found
+
+**The corpus has changed shape, and the base checkpoint lost most of it.** Maximal fusion now produces four
+distinct targets per sequence length on the base checkpoint, against the nine the A100 and H100 sections report.
+The projections, the SDPA, the residuals and the MLP are absorbed into two fused attention kernels. The FP8
+checkpoint keeps 11 and 7 targets, because quantization operations break the fusion chain. Any future cross-card
+comparison is better built on the FP8 leg.
+
+**Two fused attention targets cannot be tuned at all.** `k_linear_sdpa_mean_reduce` and
+`k_sdpa_linear_mean_reduce` build cleanly and then hang: 24 kernels killed by the 60 s watchdog in a 30-minute
+run, with two variants completing at 8.81 s and 7.14 s per launch against 0.7-2.2 us for healthy kernels in the
+same corpus. Zero candidates were dropped — the `KeyError` class that discarded 2,603 candidates in the previous
+cycle did not fire once. The search failure recorded previously was a symptom; the cause is that the schedule
+space enumerated for this fused shape contains no usable answer. These targets carry no measurements here.
+
+**The deferral heuristic is wrong.** Three further targets failed, and they break the name-based rule (match on
+both `sdpa` and `reduce`) from both sides: two `k_linear_mean_reduce` kernels reduce without attention, and
+`k_sdpa_pointwise` has attention without a reduction. Deferral should key on a measured property — a target that
+produces no admissible row inside its budget — not on the kernel's name.
+
+**A structural winner needs to be recorded as a measurement before it deploys.** The FP8 decode mean's winner is
+a kernel-set decision (cut both reduction sites), not a schedule. Left as search feedback it does not reach the
+deploy pick, which prices the fork by prediction and keeps it fused at 14.37 us. Recorded as a measurement it
+deploys at 3.74 us — 32.1x over eager instead of 8.4x.
+
+**Patience bounds a level, not a target.** The two-level strategy enrolls each newly minted kernel as its own
+target with a fresh patience budget, so a pathological shape still runs unbounded in wall-clock terms. This
+sweep applied an external per-target timeout; the CLI should offer one natively.
+
+### Systems and provenance
+
+- GPU: NVIDIA GeForce RTX 4090, sm_89, UUID-verified single card in the container.
+- Revision `bdc88ae0`; source delivered by `git archive` (the repository is private and the host is rented, so no
+  GitHub credential was placed on it); revision stamped in the remote checkout.
+- Every latency here is deployable `-O3`, CUDA-graph captured, recorded through `emmy run --record`.
+
+### Durable files
+
+- Committed goldens: `golden/qwen3-06b-s1_rtx4090.golden.yaml`, `golden/qwen3-06b-s512_rtx4090.golden.yaml`,
+  `golden/qwen3-06b-fp8-s1_rtx4090.golden.yaml`, `golden/qwen3-06b-fp8-s512_rtx4090.golden.yaml`.
+  Working-level, matching the standard of the A100 and H100 files beside them: the deferred fused targets remain
+  as bare inventory rows with no measurements.
+- Tuning databases were left on the supplied host by design — machine-local regenerable caches.
+
+
 ## Platform a10040x1 — hand-found common corpus on the 40GB part (2026-09-11)
 
 ### Question and scope
@@ -951,9 +1049,7 @@ regression is a contraction binding rather than a placement.
 Goldens: `qwen3-06b_v100.yaml` (18/18, REPOSITORY), `qwen3-06b-fp8_v100.yaml` (27/38), `qwen3-32b-fp8_v100.yaml`
 (23/38). Archive: `results_v100x1.tar.gz`.
 
-### rtx4090x1 — full pipeline; measurements re-run after the driver fix
-Goldens: `qwen3-06b_rtx4090.yaml` (18/18, REPOSITORY), `qwen3-06b-fp8_rtx4090.yaml` (16/38),
-`qwen3-32b-fp8_rtx4090.yaml` (19/38). Archive: `results_rtx4090x1.tar.gz`.
+### rtx4090x1 — superseded by the 2026-09-18 section at the top of this file
 
 ### rtx5090x1 — full pipeline on a replacement host (first instance had unstable SSH and a failing toolchain)
 Goldens: `qwen3-06b_rtx5090.yaml` (18/18, REPOSITORY), `qwen3-06b-fp8_rtx5090.yaml` (27/38).
