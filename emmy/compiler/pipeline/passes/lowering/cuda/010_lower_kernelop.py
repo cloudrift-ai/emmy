@@ -18,7 +18,7 @@ from emmy.compiler.ir.cuda import CudaOp, TmaDescMeta
 from emmy.compiler.ir.kernel import KernelOp, Tile
 from emmy.compiler.ir.kernel.ir import TmaDescriptor
 from emmy.compiler.ir.kernel.render import _BLOCK_SIZE, render_kernelop
-from emmy.compiler.ir.stmt import ZeroPrologue
+from emmy.compiler.ir.stmt import Load, ZeroPrologue
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering.cuda._helpers import atomic_outputs as _atomic_outputs
 
@@ -95,7 +95,22 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
                 f"indirect operand(s) {staged} are staged through TMA descriptors (descriptors bake the base "
                 f"address at encode) — an indirect build requires a descriptor-free schedule for these operands"
             )
-    source = render_kernelop(kernel, tensors=tensors, runtime_args=runtime_args, indirect_inputs=indirect)
+    # Paged operands (graph-level hint, same ABI-only story as the indirect ones): the marked
+    # input buffers are a device table of equal-sized pages rather than one allocation, so each
+    # read resolves its page first. Shapes are untouched, so the schedule search never sees it.
+    paged = tuple((n, axis, page) for n, axis, page in match.graph.hints.get("cuda.paged_inputs", ()) if n in kernel.inputs)
+    if paged:
+        # A paged buffer has no base pointer to take: only ``Load`` resolves its page, so any
+        # other reader of it (a TMA descriptor, a cp.async stage) would need a base this ABI
+        # cannot give. Refuse here rather than letting the kernel fail to compile on the name.
+        names = {n for n, _, _ in paged}
+        readers = {b for s in kernel.body.iter() if not isinstance(s, Load) for b in s.external_reads() if b in names}
+        if readers:
+            raise NotImplementedError(
+                f"paged operand(s) {sorted(readers)} are staged by a stmt that takes their base address "
+                f"(a TMA descriptor or a cp.async copy) — a paged build requires a schedule that loads them directly"
+            )
+    source = render_kernelop(kernel, tensors=tensors, runtime_args=runtime_args, indirect_inputs=indirect, paged_inputs=paged)
 
     # A cooperative tile fixes the per-CTA thread count (``coop · ∏block-cells``): one CTA
     # per output-cell group, ``blockDim = block_threads``, ``gridDim = N / block_threads``
@@ -116,7 +131,10 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
     # (tail-appended in ``_launch``) — matching ``render_kernelop``'s param layout. An
     # indirect operand keeps its plain name in ``arg_order``; the launcher expands it in
     # place to (table, sel, slot) via ``indirect_args``.
-    arg_order = (*kernel.inputs, *kernel.outputs, *(d.name for d in tma_descs))
+    # A paged operand binds its page TABLE, not the buffer: the name in ``arg_order`` is what the
+    # launcher looks up in ``arrays``, so the rename is the whole runtime change.
+    paged_names = {n for n, _, _ in paged}
+    arg_order = (*(f"{n}__pages" if n in paged_names else n for n in kernel.inputs), *kernel.outputs, *(d.name for d in tma_descs))
     return CudaOp(
         kernel_source=source,
         kernel_name=name,

@@ -22,6 +22,7 @@ from emmy.compiler.ir.stmt.base import (
     dtype_promote,
     op_to_expr,
     render_index,
+    render_paged_access,
     select_to_ternary,
 )
 
@@ -228,6 +229,15 @@ class Load(Stmt):
         # fall back to ``ctx.buffer_dtypes`` so handwritten test fixtures
         # without a stamped dtype still render correctly.
         src_dt = self.dtype.name if self.dtype is not None else ctx.buffer_dtypes.get(self.input, "f32")
+        if self.input in ctx.paged:
+            # A paged buffer is a table of pages, so each element resolves its own page — a vector
+            # read would straddle a page boundary. Every lane renders as its own scalar access.
+            out: list[str] = []
+            for k, nm in enumerate(self.names):
+                idx_k = self.index if k == 0 else (*self.index[:-1], BinaryExpr("+", self.index[-1], Literal(k, "int")))
+                ctx.ssa_dtypes[nm] = src_dt
+                out.append(f"{pad}{ctx.type_name(src_dt)} {nm} = {render_paged_access(self.input, idx_k, ctx)};")
+            return out
         if self.is_scalar:
             # Scalar path. Declare the local in the source buffer's
             # element type so downstream ``Assign``s can pick native ops

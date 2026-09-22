@@ -82,6 +82,10 @@ class RenderCtx:
     # alias into the pool instead of a stand-alone ``__shared__`` array
     # — the only way to exceed the 48 KB static-smem cap.
     smem_dynamic_offsets: dict[str, int] = field(default_factory=dict)
+    # Input buffers virtualized along one axis: ``name -> (axis, page_size)``. The buffer is not
+    # one allocation but a device table of equal-sized pages, so a read resolves its page before
+    # its offset (see :func:`render_paged_access`). Empty (the default) renders every buffer flat.
+    paged: dict[str, tuple[int, int]] = field(default_factory=dict)
     # Per-buffer canonical dtype tokens (``"f32"`` / ``"f16"``) for every
     # global-buffer name (kernel inputs + outputs). ``Load`` declares its
     # SSA-name local in the source buffer's C type so values flow at
@@ -373,19 +377,22 @@ def select_to_ternary(s: Select, dtype: str = "float") -> Expr:
 _INT_MAX = 2**31 - 1
 
 
-def render_index(buf: str, indices: tuple, ctx: RenderCtx) -> str:
+def render_index(buf: str, indices: tuple, ctx: RenderCtx, shape: tuple | None = None) -> str:
     """Row-major flatten ``buf[i0][i1]...`` to a single C/CUDA expression.
 
     Builds the row-major sum as an ``Expr`` and runs ``simplify`` on it so
     constant-zero indices (typical of size-1 outer dims) drop out via the
     standard ``0 * x → 0`` / ``0 + y → y`` folds rather than emitting
     ``0 * stride`` terms in the output.
+
+    ``shape`` overrides the buffer's declared shape — a paged read flattens over ONE page,
+    whose paged axis is the page size rather than the buffer's full extent.
     """
     if len(indices) == 0:
         return "0"
     if len(indices) == 1:
         return indices[0].simplify(SimplifyCtx.empty()).render(ctx)
-    shape = ctx.shapes.get(buf)
+    shape = ctx.shapes.get(buf) if shape is None else shape
     if shape is None or len(shape) != len(indices):
         flat: Expr = indices[0]
         for i in indices[1:]:
@@ -412,6 +419,26 @@ def render_index(buf: str, indices: tuple, ctx: RenderCtx) -> str:
         return "(" + " + ".join(parts) + ")"
     assert flat is not None
     return flat.simplify(SimplifyCtx.empty()).render(ctx)
+
+
+def render_paged_access(buf: str, indices: tuple, ctx: RenderCtx) -> str:
+    """``buf__pages[page][offset]`` — one read of a buffer virtualized along ``ctx.paged[buf]``.
+
+    A paged buffer is a device table of equal-sized pages, each holding the buffer's shape with
+    the paged axis cut to the page size. So the paged index splits: its quotient picks the page,
+    its remainder addresses inside one, and every other axis flattens row-major exactly as it
+    does for a flat buffer. Both halves fold through the ordinary index simplifier, so a loop
+    tiled to a multiple of the page size hoists the page lookup on its own.
+    """
+    axis, page = ctx.paged[buf]
+    shape = ctx.shapes.get(buf)
+    if shape is None or len(shape) != len(indices):
+        raise ValueError(f"paged buffer {buf!r} needs a declared shape matching its {len(indices)} indices; got {shape}")
+    size = Literal(page, "int")
+    page_idx = BinaryExpr("//", indices[axis], size).simplify(SimplifyCtx.empty()).render(ctx)
+    within = tuple(BinaryExpr("%", idx, size) if d == axis else idx for d, idx in enumerate(indices))
+    offset = render_index(buf, within, ctx, shape=(*shape[:axis], page, *shape[axis + 1 :]))
+    return f"{buf}__pages[{page_idx}][{offset}]"
 
 
 def _exceeds_int_range(shape) -> bool:
