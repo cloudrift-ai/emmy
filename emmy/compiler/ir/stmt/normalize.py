@@ -1061,26 +1061,26 @@ def _canonical_order(stmts: Body) -> Body:
     return result
 
 
-def _canonicalize_exprs(stmts: Body) -> Body:
-    """Canonicalize equivalent integer coordinate and condition expressions."""
+def _canonicalize_exprs(stmts: Body, axes: tuple[str, ...] = ()) -> Body:
+    """Canonicalize integer expressions using lexical binding order, never axis spelling."""
     from dataclasses import fields  # noqa: PLC0415
 
     from emmy.compiler.structural import form  # noqa: PLC0415
 
     commutative = frozenset({"+", "*", "==", "!=", "&&", "||", "&", "|", "^"})
     dual = {">": "<", ">=": "<="}
-    axis_names = stmts.axis_names
+    axis_order = {name: index for index, name in enumerate(axes)}
 
     def affine(expr: Expr) -> Expr:
         variables = expr.free_vars()
         # Reassociation and coefficient folding are exact for integer coordinates. An SSA value
         # may be floating point, where changing the operation tree changes rounding and kernel work.
-        if not variables or not variables <= axis_names or (decomposed := affine_form(expr, variables)) is None:
+        if not variables or not variables <= axis_order.keys() or (decomposed := affine_form(expr, variables)) is None:
             return expr
         anchor, coefficients = decomposed
         anchor = anchor.simplify(SimplifyCtx.empty())
         terms: list[Expr] = []
-        for name, coefficient in sorted(coefficients.items()):
+        for name, coefficient in sorted(coefficients.items(), key=lambda item: axis_order[item[0]]):
             variable = Var(name)
             terms.append(variable if coefficient == 1 else BinaryExpr("*", Literal(coefficient, "int"), variable))
         if not (isinstance(anchor, Literal) and anchor.value == 0):
@@ -1121,9 +1121,11 @@ def _canonicalize_exprs(stmts: Body) -> Body:
 
     def statement(stmt: Stmt) -> Stmt:
         changes = {field.name: value(getattr(stmt, field.name)) for field in fields(stmt)}
-        return replace(stmt, **changes)
+        rewritten = replace(stmt, **changes)
+        bound = (*axes, *(axis.name for axis in bound_axes(stmt)))
+        return rewritten.with_bodies(tuple(_canonicalize_exprs(child, bound) for child in rewritten.nested()))
 
-    return Body.coerce(stmts).map(statement)
+    return Body(statement(stmt) for stmt in stmts)
 
 
 def _orders_modulo_transpositions(items: list, interchangeable: Callable[[object, object], bool]) -> Iterator[tuple]:

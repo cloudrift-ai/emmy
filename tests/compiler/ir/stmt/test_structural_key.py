@@ -1046,6 +1046,8 @@ def test_identity_coordinate_order_survives_axis_rename() -> None:
         )
         canonical = canonicalize_identity(body)
         assert canonicalize_identity(canonical.body).key == canonical.key
+        normalized = normalize_body(body)
+        assert normalize_body(Body(tuple(normalized))) == normalized
         keys.add(canonical.key)
     assert len(keys) == 1
 

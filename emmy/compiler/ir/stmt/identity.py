@@ -52,8 +52,8 @@ def canonicalize_identity(stmts: Body, *, cluster: bool = False, types: Mapping[
     resources = labeling.resources()
     rename = {name: f"b{index}" for index, name in enumerate(resources)}
     body = Body.coerce(sort_commutative_args(rename_ssa_sequential(ordered.rename_buffers(rename))))
-    # Coordinate sums sort by axis name. Canonical axis renaming can reverse that order (a9/a10
-    # becomes a0/a1), so normalize their spelling after the final rename as well.
+    # Canonical renaming can reverse lexical order in remaining commutative expressions,
+    # so normalize their spelling after the final rename as well.
     body = _canonicalize_exprs(body)
     return Identity(body, resources, tuple(None if types is None else types.get(name) for name in resources))
 
