@@ -1398,6 +1398,7 @@ def render_kernelop(
     literal_constants: dict[str, float] | None = None,
     runtime_args: tuple[str, ...] = (),
     indirect_inputs: tuple[str, ...] = (),
+    paged_inputs: tuple[tuple[str, int, int], ...] = (),
 ) -> str:
     """Render a complete ``extern "C" __global__`` CUDA function for a ``KernelOp``.
 
@@ -1429,6 +1430,14 @@ def render_kernelop(
     ``kernel_op.inputs`` are ignored. Empty (the default) renders exactly
     the historical signature — non-indirect kernel sources stay
     byte-identical.
+
+    ``paged_inputs`` names input buffers virtualized along one axis, as
+    ``(name, axis, page_size)``: instead of ``const T* <n>`` the signature
+    takes ``const T* const* <n>__pages`` and every read resolves its page
+    before its offset (see ``render_paged_access``) — the KV cache, whose
+    pages are allocated per request and are not one contiguous block. Shapes
+    are untouched, so the paged axis stays ``kv_len`` everywhere above the
+    load. Empty (the default) renders every buffer flat.
 
     Kernel signature is derived from the body: ``kernel_op.inputs``
     (distinct ``Load.input`` names) become input params,
@@ -1469,9 +1478,15 @@ def render_kernelop(
             )
 
     indirect = tuple(n for n in kernel_op.inputs if n in indirect_inputs and n not in literals)
+    paged = {n: (axis, page) for n, axis, page in paged_inputs if n in kernel_op.inputs and n not in literals}
+    if set(paged) & set(indirect):
+        raise NotImplementedError(f"buffer(s) {sorted(set(paged) & set(indirect))} are both indirect and paged")
+    ctx.paged = paged
     sig_parts = [
         f"const {cuda_name(_dtype_for(n))}* const* {n}__table, const int* {n}__sel, int {n}__slot"
         if n in indirect
+        else f"const {cuda_name(_dtype_for(n))}* const* {n}__pages"
+        if n in paged
         else f"const {cuda_name(_dtype_for(n))}* {n}"
         for n in kernel_op.inputs
         if n not in literals
