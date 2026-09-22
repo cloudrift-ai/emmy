@@ -19,7 +19,7 @@ command:
       trap - EXIT
       ./venv/bin/pip freeze --all > $task_dir/requirements.freeze.txt || final_status=1
       printf '%s\n' "$$final_status" > $task_dir/status.txt
-      tar -C $task_dir -czf $task_dir.artifacts.tar.gz . || final_status=1
+      tar -C $task_dir --exclude='./tmp' --exclude='./cubins' -czf $task_dir.artifacts.tar.gz . || final_status=1
       mv $task_dir.artifacts.tar.gz $task_dir/artifacts.tar.gz || final_status=1
       exit "$$final_status"
     }
