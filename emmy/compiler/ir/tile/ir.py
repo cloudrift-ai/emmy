@@ -422,9 +422,11 @@ class TileOp(Op):
         # the bound row gives a contraction its missing LEFT axis, this one gives a term with no row
         # at all a geometry, and a matvec against a 1-D operand can only be served by the latter.
         unit_row = _implicit_unit_row(self.output_specs, self.place.free)
-        if unit_row is not None and any(
-            (view := site.node.as_contraction()) is not None and not view.left_axes and not view.shared_axes for site in sites(normalized)
-        ):
+        if len(self.place.free) > 1:
+            view = normalized.as_contraction()
+            if view is None or view.left_axes or view.shared_axes:
+                unit_row = None
+        if unit_row is not None and any(site.node.as_contraction() is not None for site in sites(normalized)):
             object.__setattr__(self, "place", replace(self.place, free=(unit_row, *self.place.free)))
         if self.schedule is not None and normalized != self.op:
             raise ValueError("cannot canonicalize a TileOp after a schedule has been attached")
