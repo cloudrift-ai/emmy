@@ -331,6 +331,39 @@ def test_indexmap_broadcast():
     _assert_matches_numpy(g, {"in0": _rng().standard_normal((8,))})
 
 
+@pytest.mark.parametrize("layout", ["transpose", "broadcast", "diagonal", "first_row", "clipped"])
+def test_indexmap_views_preserve_noncontiguous_storage(layout):
+    x = torch.arange(100, dtype=torch.float32).reshape(10, 10)[1:5, 2:10:2]
+    row, column = placeholder(0), placeholder(1)
+    specs = {
+        "transpose": ((4, 4), (column, row), x.T),
+        "broadcast": ((3, 4, 4), (placeholder(1), placeholder(2)), x.expand(3, 4, 4)),
+        "diagonal": ((4,), (row, row), x.diagonal()),
+        "first_row": ((4,), (Literal(0, "int"), row), x[0]),
+        "clipped": ((6, 4), (row, column), torch.cat((x, x[-1:].expand(2, 4)))),
+    }
+    shape, coords, expected = specs[layout]
+    graph = _imap_graph([x.shape], shape, (IndexSource(input_idx=0, coord_map=coords),))
+    fn, inputs = torch_ref.build_callable(graph, {"in0": x})
+
+    torch.testing.assert_close(fn(*inputs), expected, rtol=0, atol=0)
+
+
+def test_indexmap_broadcast_then_rotary_slice_compiles():
+    if not torch.cuda.is_available():
+        pytest.skip("Inductor CUDA indexing regression")
+    graph = _imap_graph([(8, 128)], (1, 8, 1, 128), (IndexSource(input_idx=0, coord_map=(placeholder(1), placeholder(3))),))
+    x = torch.randn(8, 128, device="cuda")
+    fn, inputs = torch_ref.build_callable(graph, {"in0": x})
+
+    def rotated(value):
+        mapped = fn(value)
+        return torch.cat((-mapped[..., 64:], mapped[..., :64]), dim=-1)
+
+    actual = torch.compile(rotated, fullgraph=True)(*inputs)
+    torch.testing.assert_close(actual, rotated(*inputs), rtol=0, atol=0)
+
+
 def test_indexmap_cat_with_select():
     # output (4,4): a1<2 → in0[a0,a1]; a1>=2 → in1[a0,a1-2]
     s0 = IndexSource(input_idx=0, coord_map=(placeholder(0), placeholder(1)), select=placeholder(1).lt(Literal(2, "int")))
