@@ -12,7 +12,8 @@
 # Workload, knobs and points are the article's (see experiments/gemma-4-12B/serving_rtx5090, whose comments hold the
 # protocol history): every lane runs at --gpu-memory-utilization 0.96; the Emmy lanes set the decode bucket to the
 # smallest recorded width that holds the concurrency (8 at c=1, c=4 and c=8, 64 at c=64) and the 2048-token chunk
-# quantum on the mixed 4K/4K c=4, c=8 and 256/256 c=64 cells; single-stream points repeat three times, batched points
+# quantum on the mixed 4K/4K c=4, c=8 and 256/256 c=64 cells. The standard lane pins EMMY_FAST_MATH=0, since the
+# umbrella defaults to on; single-stream points repeat three times, batched points
 # once. Compare lanes only within one run on one box. The article ran its c=1 points at bucket 32; its width-8 rows
 # are faster per layer (about 12 us, 0.55 ms per token) now that they are recorded, and a single stream fits either.
 #
@@ -55,7 +56,7 @@ matrices:
     engine.llm.vllm.image: "cloudriftai/vllm-emmy:0.23.0-76ff82c21"
     engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 4104 --no-enable-prefix-caching"
     cross:
-      engine.llm.vllm.extra_env: ["EMMY_STRICT_EVIDENCE=1 EMMY_CUBIN_CACHE=/hf_models/emmy-cubins EMMY_PACK_DIR=/hf_models/emmy-pack-76ff82c21 EMMY_GEN_DECODE_BUCKET=8", "EMMY_STRICT_EVIDENCE=1 EMMY_FAST_MATH=1 EMMY_CUBIN_CACHE=/hf_models/emmy-cubins EMMY_PACK_DIR=/hf_models/emmy-pack-76ff82c21 EMMY_GEN_DECODE_BUCKET=8"]
+      engine.llm.vllm.extra_env: ["EMMY_STRICT_EVIDENCE=1 EMMY_FAST_MATH=0 EMMY_CUBIN_CACHE=/hf_models/emmy-cubins EMMY_PACK_DIR=/hf_models/emmy-pack-76ff82c21 EMMY_GEN_DECODE_BUCKET=8", "EMMY_STRICT_EVIDENCE=1 EMMY_FAST_MATH=1 EMMY_CUBIN_CACHE=/hf_models/emmy-cubins EMMY_PACK_DIR=/hf_models/emmy-pack-76ff82c21 EMMY_GEN_DECODE_BUCKET=8"]
       zip:
         benchmark.random_input_len: [256, 4096]
         benchmark.random_output_len: [256, 4096]
@@ -70,7 +71,7 @@ matrices:
     engine.llm.vllm.image: "cloudriftai/vllm-emmy:0.23.0-76ff82c21"
     engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 2056 --no-enable-prefix-caching"
     cross:
-      engine.llm.vllm.extra_env: ["EMMY_STRICT_EVIDENCE=1 EMMY_CUBIN_CACHE=/hf_models/emmy-cubins EMMY_PACK_DIR=/hf_models/emmy-pack-76ff82c21 EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048", "EMMY_STRICT_EVIDENCE=1 EMMY_FAST_MATH=1 EMMY_CUBIN_CACHE=/hf_models/emmy-cubins EMMY_PACK_DIR=/hf_models/emmy-pack-76ff82c21 EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048"]
+      engine.llm.vllm.extra_env: ["EMMY_STRICT_EVIDENCE=1 EMMY_FAST_MATH=0 EMMY_CUBIN_CACHE=/hf_models/emmy-cubins EMMY_PACK_DIR=/hf_models/emmy-pack-76ff82c21 EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048", "EMMY_STRICT_EVIDENCE=1 EMMY_FAST_MATH=1 EMMY_CUBIN_CACHE=/hf_models/emmy-cubins EMMY_PACK_DIR=/hf_models/emmy-pack-76ff82c21 EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048"]
       zip:
         benchmark.random_input_len: [4096, 4096]
         benchmark.random_output_len: [4096, 4096]
@@ -85,7 +86,7 @@ matrices:
     engine.llm.vllm.image: "cloudriftai/vllm-emmy:0.23.0-76ff82c21"
     engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 4104 --no-enable-prefix-caching"
     cross:
-      engine.llm.vllm.extra_env: ["EMMY_STRICT_EVIDENCE=1 EMMY_CUBIN_CACHE=/hf_models/emmy-cubins EMMY_PACK_DIR=/hf_models/emmy-pack-76ff82c21 EMMY_GEN_DECODE_BUCKET=8", "EMMY_STRICT_EVIDENCE=1 EMMY_FAST_MATH=1 EMMY_CUBIN_CACHE=/hf_models/emmy-cubins EMMY_PACK_DIR=/hf_models/emmy-pack-76ff82c21 EMMY_GEN_DECODE_BUCKET=8"]
+      engine.llm.vllm.extra_env: ["EMMY_STRICT_EVIDENCE=1 EMMY_FAST_MATH=0 EMMY_CUBIN_CACHE=/hf_models/emmy-cubins EMMY_PACK_DIR=/hf_models/emmy-pack-76ff82c21 EMMY_GEN_DECODE_BUCKET=8", "EMMY_STRICT_EVIDENCE=1 EMMY_FAST_MATH=1 EMMY_CUBIN_CACHE=/hf_models/emmy-cubins EMMY_PACK_DIR=/hf_models/emmy-pack-76ff82c21 EMMY_GEN_DECODE_BUCKET=8"]
     benchmark.random_input_len: 8192
     benchmark.random_output_len: 256
     benchmark.max_concurrency: 4
@@ -114,7 +115,7 @@ matrices:
     engine.llm.vllm.extra_args: "--runner generate --dtype float16 --hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}' --max-num-batched-tokens 2112 --no-enable-prefix-caching"
     cross:
       engine.llm.vllm.extra_env:
-        - "EMMY_STRICT_EVIDENCE=1 EMMY_CUBIN_CACHE=/hf_models/emmy-cubins EMMY_PACK_DIR=/hf_models/emmy-pack-76ff82c21 EMMY_GEN_DECODE_BUCKET=64 EMMY_GEN_PREFILL_BUCKET=2048"
+        - "EMMY_STRICT_EVIDENCE=1 EMMY_FAST_MATH=0 EMMY_CUBIN_CACHE=/hf_models/emmy-cubins EMMY_PACK_DIR=/hf_models/emmy-pack-76ff82c21 EMMY_GEN_DECODE_BUCKET=64 EMMY_GEN_PREFILL_BUCKET=2048"
         - "EMMY_STRICT_EVIDENCE=1 EMMY_FAST_MATH=1 EMMY_CUBIN_CACHE=/hf_models/emmy-cubins EMMY_PACK_DIR=/hf_models/emmy-pack-76ff82c21 EMMY_GEN_DECODE_BUCKET=64 EMMY_GEN_PREFILL_BUCKET=2048"
     benchmark.random_input_len: 256
     benchmark.random_output_len: 256
