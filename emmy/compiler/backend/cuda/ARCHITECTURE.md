@@ -56,11 +56,14 @@ codegen, no nvcc), and both paths share every line downstream. The projection:
   deployable regime, and `--nvcc-flags` overrides. **Tuning measures in the regime it deploys into**, so a tuned
   latency is the deployed one.
 
-  The base flag is `--use_fast_math`, including implicit multiply-add contraction. For an intermediate-rounding
-  diagnostic, pass `--nvcc-flags=--fmad=false`; extra flags follow the base flag and override contraction for that
-  invocation. This leaves the other fast-math transformations enabled. Explicit tensor-core instructions retain
-  their own accumulation semantics. Accuracy and latency evidence must name the compile flags used; a passing
-  diagnostic with contraction disabled does not qualify the default fast-math kernel.
+  `FAST_MATH` defaults to true and adds `--use_fast_math`; `EMMY_FAST_MATH=0` omits that flag and disables the
+  umbrella's compiler rewrites. Individual precision pins still override the umbrella. For an intermediate-rounding
+  diagnostic, pass `--nvcc-flags=--fmad=false`; custom flags follow the policy flag. Disabling contraction alone leaves
+  other fast-math transformations enabled. Combine it with `EMMY_FAST_MATH=0` for precise arithmetic checks.
+  Explicit tensor-core instructions retain their own accumulation semantics. Accuracy and latency evidence must name
+  the effective flags; a precise diagnostic does not qualify the default fast-math kernel. Persistent benchmark
+  workers receive the effective `FAST_MATH` value with every request and restore their prior value afterward, so a
+  previous request's arithmetic mode cannot leak into the next measurement.
 
   `tune` used to rank at `-Xcicc -O1` to dodge a cicc front-end blowup on big unrolled register-tile kernels. That
   rationale was measured against the WMMA codegen deleted in #189 four days later; on current codegen (fragment work

@@ -125,8 +125,8 @@ rule matches a `LoopOp` and returns several tile options.
    lazy tree — legal complete rows, every level covered) instead of walked at full length: the cold pick needs a
    reasonable kernel, and the optimal one comes from measured evidence, which descends directly whatever the pool
    size. The seed is the pool's schedule-space stamp, which spells the precision gates by effect (Part 6's pool
-   identity), so a compile under a golden's published `FAST_MATH: false` regime draws the subset the unpinned
-   deploy draws and makes the same cold pick. Drawing has a hard option-check budget while one descent fits
+   identity), so equivalent effective precision gates draw the same subset, while precise and fast defaults can
+   draw different subsets. Drawing has a hard option-check budget while one descent fits
    inside it. If one complete descent's declared bound is already larger, exactly one descent attempt is the
    soft-cap exception; an empty sample fails rather than walking the full pool or substituting a partial
    branch. Under strict evidence this step is never reached: the
@@ -1832,13 +1832,14 @@ Not tunable — identity facts that make a knob dict a complete variant identity
 Skipped by `format_tuning_knobs`.
 
 **`FAST_MATH` / `F16_MMA_F32_ACC` / `FP8_MMA` / `FAST_EXP`** (BOOL, pin-only precision restrictions /
-`lowering/kernel/085_fast_exp`) — the **precision-trading family**, never silently on. Precedence per knob: its own pin
-> the `FAST_MATH` umbrella > off (`space.precision_pin`). `FAST_EXP` swaps libm `expf` for `__expf`;
+`lowering/kernel/085_fast_exp`) — the **precision-trading family**. Precedence per knob: its own pin > the
+`FAST_MATH` umbrella > true (`space.precision_pin`). `FAST_EXP` swaps libm `expf` for `__expf`;
 `F16_MMA_F32_ACC` admits the fixed domain's f16-accumulate atom choices (`mma_m16n8k16_f16_f16` — chunked f32
 register promote), while `FP8_MMA` admits its native fp8 atoms. Without the effective gate, Algorithm 1's immutable
 context excludes those choices while composing its lazy frontier.
-`FAST_MATH` is a meta gate over the others — `unfeatured`, never stamped/enumerated/featurized (the realized fork is
-identified by what it enables: `FAST_EXP`'s stamped BOOL, the `TILE` atom token).
+`FAST_MATH` also controls NVCC `--use_fast_math` and the typed invariant-divide rewrite. It remains `unfeatured`:
+schedule choices keep their concrete knob identity, and effective compiler flags separate measurement contexts.
+New golden inventories and measurements record the effective umbrella explicitly, so replay preserves that regime.
 
 ### Classic schedule keys
 

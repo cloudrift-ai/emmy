@@ -534,11 +534,9 @@ def schedule_pin_fingerprint() -> tuple[tuple[str, str], ...]:
     the scheduler's catalog arm reads them: the :data:`SCHEDULE_FAMILIES` pins (bare and ``@``-keyed) as
     set, each restricting a domain, and the precision gates by effect — one ``"1"`` entry per gate
     ``space.precision_pin`` resolves ON (``F16_MMA_F32_ACC`` / ``FP8_MMA``, under their ``FAST_MATH``
-    umbrella), nothing for a gate OFF or unset, since neither offers the f16-accumulate / native-fp8 rows.
-    The scheduler folds this into its schedule-space stamp, which also seeds a budgeted pool's draw: a pin
-    that changes which rows enumerate must change the stamp, and one that does not must not — an OFF gate
-    spelled out (a standard-lane golden's ``FAST_MATH: false``, what ``pinned_knobs`` publishes for a replay
-    or the release gate) would otherwise re-seed every budgeted draw away from the unpinned deploy's cold pick.
+    umbrella), nothing for a gate OFF. Unset precision gates follow the enabled FAST_MATH default.
+    The scheduler folds this into its schedule-space stamp, which also seeds a budgeted pool's draw:
+    equivalent effective gates share a stamp regardless of how the pins spell them.
     The environ scan is this module's to make — the ``EMMY_<KNOB>`` namespace is knob.py-owned (the one
     exception to ``config.py``'s env ownership), and the ``@``-keyed pins land there via the ``EMMY_KNOBS`` splat."""
     import os  # noqa: PLC0415 — the one environ read outside ``config``, per the ownership note above

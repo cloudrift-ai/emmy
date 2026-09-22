@@ -17,12 +17,21 @@ rule = import_module("emmy.compiler.pipeline.passes.lowering.kernel.040_split_in
 
 
 def _body(dtype=F32, *, varying=False):
-    return Body((Loop(Axis("i", 4), Body((
-        Load("recip_0", "x", (Var("i"),), dtype=dtype),
-        Load("denominator", "scale", (Var("i"),) if varying else (), dtype=dtype),
-        Assign("out", "divide", ("recip_0", "denominator"), dtype=dtype),
-        Write("y", (Var("i"),), value="out", value_dtype=dtype),
-    ))),))
+    return Body(
+        (
+            Loop(
+                Axis("i", 4),
+                Body(
+                    (
+                        Load("recip_0", "x", (Var("i"),), dtype=dtype),
+                        Load("denominator", "scale", (Var("i"),) if varying else (), dtype=dtype),
+                        Assign("out", "divide", ("recip_0", "denominator"), dtype=dtype),
+                        Write("y", (Var("i"),), value="out", value_dtype=dtype),
+                    )
+                ),
+            ),
+        )
+    )
 
 
 @pytest.mark.parametrize("dtype", [F16, BF16, F32, F64])

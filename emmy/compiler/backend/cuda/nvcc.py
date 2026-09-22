@@ -38,6 +38,7 @@ from emmy import config
 
 logger = logging.getLogger(__name__)
 
+
 def effective_flags() -> list[str]:
     """The full nvcc flag list: the base flags plus any extra flags from the
     ``EMMY_NVCC_FLAGS`` env var (space-separated), which the CLI commands

@@ -44,7 +44,7 @@ command:
     for repeat in 0 1 2 3 4; do
       export EMMY_TUNE_DB=$task_dir/repeat-$$repeat.db
       if timeout -k 5 180 ./venv/bin/emmy run --golden $task_dir/working.yaml \
-        --bench --strict --strict-evidence --no-record-evidence \
+        --bench --strict --strict-evidence --no-record-evidence --nvcc-flags=--fmad=false \
         --seed "$$repeat" --warmup 10 --iters 100 --bench-backends eager,tcompile,emmy \
         --json $task_dir/verification/repeat-$$repeat > $task_dir/repeat-$$repeat.log 2>&1; then
         repeat_status=0

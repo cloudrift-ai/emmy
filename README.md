@@ -71,6 +71,10 @@ emmy eval golden --golden recipes/gemma-4-12B-it/golden/rtx5090_sm120.yaml \
   --serving-config docker/vllm-emmy-serve/models/gemma-4-12b-it.env
 ```
 
+Fast math is enabled by default. `EMMY_FAST_MATH=0` disables NVCC fast math and the compiler's precision-trading
+optimizations; individual precision pins override that umbrella. For a separate-rounding accuracy diagnostic, add
+`--nvcc-flags=--fmad=false`. That custom flag disables multiply-add contraction without changing the other policies.
+
 Layer-norm-style reduction (two reductions, broadcast subtract, elementwise chain) fused into single kernel:
 
 ```bash

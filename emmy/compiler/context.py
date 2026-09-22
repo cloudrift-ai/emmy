@@ -47,9 +47,9 @@ DEFAULT_SM_COUNT = gpu.DEFAULT_GPU.sm_count
 
 
 def _env_compile_flags() -> str:
-    """Extra nvcc flags for this compile (``EMMY_NVCC_FLAGS``). Set by the
-    CLI commands (via :func:`emmy.config.set_nvcc_flags`); folded into
-    :meth:`Context.structural_key` so the perf cache is partitioned by opt level."""
+    """Effective nvcc flags, including the FAST_MATH policy and custom overrides.
+
+    Folded into Context.structural_key so timing evidence cannot cross arithmetic regimes."""
     from emmy.compiler.backend.cuda.nvcc import effective_flags  # noqa: PLC0415
 
     return " ".join(effective_flags())
@@ -62,7 +62,7 @@ _OPT_TOKEN = re.compile(r"(?:-Xcicc\s+)?-O(\d)")
 
 
 def split_opt_level(compile_flags: str) -> tuple[int, str]:
-    """Split extra nvcc flags into ``(cicc opt level, everything else)``.
+    """Split effective nvcc flags into ``(cicc opt level, everything else)``.
 
     ONE parse, shared by the two places the opt level matters: the ``H_opt`` feature
     (:meth:`Context.features`) and the identity a measurement is stored under
@@ -160,12 +160,9 @@ class Context:
     # ``"cuda"`` — the canonical autotune target. ``run_autotune`` replaces
     # this when a live :class:`Backend` is supplied.
     backend_name: str = "cuda"
-    # Extra nvcc flags this compile uses (from ``EMMY_NVCC_FLAGS`` — e.g.
-    # normally empty — tune, compile and run all measure in the deployable regime).
-    # Folded into ``structural_key`` (split, see :func:`split_opt_level`) so the autotune
-    # ``perf`` cache is partitioned by opt level: a measurement taken under a deliberately
-    # non-deployable ``--nvcc-flags`` never answers for a deploy. Populated from the env by :meth:`probe` /
-    # :meth:`from_target`.
+    # Effective nvcc flags, from FAST_MATH plus EMMY_NVCC_FLAGS. Folded into structural_key
+    # so timings under different arithmetic or optimization flags cannot rank one another.
+    # Populated from the environment by probe / from_target.
     compile_flags: str = ""
     # Whether the strict knob-pin validator (``lowering/tile/_validate``)
     # is active. ``True`` on the deterministic greedy compile (``compile`` / ``run``),

@@ -4,11 +4,11 @@ This experiment qualifies manually chosen schedules for the same 18 frozen Qwen3
 V100, A100, and H100. It does not reproduce the paper's historical kernel boundaries or automatic-search claim.
 It measures neither whole-layer latency nor model output quality nor serving performance.
 
-After these measurements, the compiler default was restored to `--use_fast_math`. The results below retain their
-recorded precise settings: `--fmad=false`, precise division and square root, and no global fast math. They do not
-qualify the restored fast-math default. Use the archived measured revisions for reproduction. A custom
-`--nvcc-flags=--fmad=false` now disables contraction for diagnostics but leaves other fast-math transformations enabled;
-it does not recreate the complete arithmetic settings of these archived runs.
+After these measurements, `FAST_MATH` became enabled by default and now controls NVCC `--use_fast_math` as well as
+compiler precision policies. The results below retain their recorded precise settings and do not qualify that new
+default. These goldens explicitly pin `FAST_MATH: false`; the recipe now supplies `--nvcc-flags=--fmad=false` as a
+custom flag to preserve the measured arithmetic settings. Use the archived measured revisions for exact reproduction.
+Disabling contraction alone leaves other fast-math transformations enabled when the umbrella is true.
 
 The second pass qualifies 49/54 operator/GPU pairs: 15 on V100, 17 on A100, and 17 on H100. All 49 now have complete
 three-backend measurements, up from 36 in the first pass. Thirteen schedules change. A100 prefill attention improves
@@ -115,8 +115,8 @@ split-reduction residual projections still failed strict correctness. No failed 
 
 The branch was rebased onto main through `f57df1295000df1337370546cf8181cdcd49b8d0`, preserving the tested first-pass
 tree. The measured compiler retains the first-pass corrections: FP16 selection and SiLU rounding, precise CUDA
-arithmetic, correct invariant division, GPU alias matching, split-root selection, predicate closure, and distinct partial
-accumulator names. Their regressions, numerical diagnostics, original measurements, and report remain in the
+arithmetic, correct invariant division, GPU alias matching, split-root selection, predicate closure, and distinct
+partial accumulator names. Their regressions, numerical diagnostics, original measurements, and report remain in the
 first-pass archive included with each platform.
 
 Two additional corrections were needed. The Torch reference uses a strided view when an index map is exactly a

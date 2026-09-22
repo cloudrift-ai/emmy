@@ -378,9 +378,9 @@ one immutable `c`, then evaluates Algorithm 1(c, p, t). `Fork.pool_id` stamps th
 free-axis extents, exact codec vocabulary, schedule-parameter fingerprint, and split receipt; it keys the greedy
 decision memo without weakening any enumeration input, and it seeds a budgeted pool's draw. The fingerprint
 (`knob.schedule_pin_fingerprint`) spells the pins as the enumeration reads them: the schedule-family pins as set,
-and the precision gates by effect — a gate `precision_pin` resolves ON, nothing for one OFF or unset — so a regime
-spelled out (a standard-lane golden's `FAST_MATH: false`, published for a replay or the release gate) and an unset
-environment enumerate the same rows, share one stamp, and draw the same subset. Sampled lazy enumeration remains
+and the precision gates by effect — a gate `precision_pin` resolves ON, nothing for one OFF. Unset gates follow the
+enabled `FAST_MATH` default. Equivalent effective gates enumerate the same rows, share one stamp, and draw the same
+subset regardless of how their pins are spelled. Sampled lazy enumeration remains
 behind the explicit classic reconstruction boundary.
 
 **Cost is per kernel; a kernel SET is a sum.** A schedule fork picks one alternative and its cost is that
@@ -704,7 +704,7 @@ the consumer GeForce dies (sm_86/89/120)
 f32-accumulate HMMA runs at HALF the f16-accumulate rate, so this atom keeps the whole mma chain on the full-rate f16
 accumulator and the lowering promote-folds the packed f16 partials into f32 shadow fragments per K chunk
 (`FragmentPromote` — the staged bk slab is the cadence; gmem-direct promotes every `_atom._F16ACC_STEPS` steps plus a
-final fold). Precision-gated enumeration, off by default — the precise `EMMY_F16_MMA_F32_ACC` parameter admits it on
+final fold). Precision-gated enumeration — an explicit `EMMY_F16_MMA_F32_ACC=1` admits it on
 any target where the atom is statically available, while the `EMMY_FAST_MATH` umbrella admits it on the consumer-die
 ccs only (`_F16ACC_CCS`). The policy filters the catalog; an authored `TILE` row bypasses it.
 The realized fork is identified by the `TILE`

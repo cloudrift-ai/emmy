@@ -224,8 +224,7 @@ def composed_cuts_for(signature: frozenset) -> list[tuple[str, ...]]:
 
 
 def measured_precision_pins() -> dict[str, bool]:
-    """The precision gates this process ENUMERATES under, read off the environment as golden
-    ``pins``.
+    """The effective precision gates, including the default umbrella, recorded as golden input pins.
 
     A recorded row's ``pins`` is the regime a replay republishes (:func:`pinned_knobs`), so a row
     measured under one of these has to carry it: the reduced-accumulate and native-fp8 cells are

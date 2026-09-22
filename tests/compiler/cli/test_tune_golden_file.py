@@ -702,7 +702,12 @@ def test_multi_gpu_working_sweep_shares_slots_and_prior_across_targets(monkeypat
         bench=False,
     )
 
-    assert tune._tune_working_multi(args, targets, {"configs": []}, backends=backends, db=object(), ctx=SimpleNamespace(compile_flags="--use_fast_math")) == 2
+    assert (
+        tune._tune_working_multi(
+            args, targets, {"configs": []}, backends=backends, db=object(), ctx=SimpleNamespace(compile_flags="--use_fast_math")
+        )
+        == 2
+    )
     assert max_active == 2
     assert seen_prior == [prior, prior]
     assert seen_queues[0] is seen_queues[1]
