@@ -4,6 +4,8 @@ from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
+
 from tests.compiler.realization import helpers
 
 
@@ -37,3 +39,12 @@ def test_bench_command_replays_the_named_realization_through_the_golden_flags() 
     assert command[command.index("--golden") + 1] == "case.yaml"
     assert command[command.index("--realization") + 1] == "k_example"
     assert "--ab" not in command and "--bench" in command
+
+
+def test_reference_and_lowered_weights_share_the_source_before_transpose() -> None:
+    case = helpers.load_case(helpers.CASES_DIR / "matmul" / "f16-mma-splitk-unit-output.yaml")
+    sources = {}
+    feed = helpers.seeded_inputs(case.record.target_program, sources=sources)
+    reference = helpers.seeded_inputs(case.record.reference_program, sources=sources)
+
+    np.testing.assert_array_equal(feed["linear_6_wt"], reference["p_mlp_down_proj_weight"].T)

@@ -425,12 +425,13 @@ def correct(case: Case, compiled) -> None:
     from emmy.compiler.backend.numpy import NumpyBackend  # noqa: PLC0415
 
     program = case.record.target_program
-    feed = seeded_inputs(program)
+    sources = {}
+    feed = seeded_inputs(program, sources=sources)
     result, _ = CudaBackend().run(compiled, input_data=dict(feed))
     if (twin := case.record.reference_program) is not None:
         reference = NumpyBackend()
         # The twin reads the kernel's inputs, plus any checkpoint-backed weight of its own.
-        twin_feed = {**seeded_inputs(twin), **{name: value for name, value in feed.items() if name in twin.nodes}}
+        twin_feed = {**seeded_inputs(twin, sources=sources), **{name: feed[name] for name in twin.inputs}}
         want, _ = reference.run(reference.compile(twin.copy()), input_data=twin_feed)
     else:
         greedy = CudaBackend()
@@ -443,7 +444,7 @@ def correct(case: Case, compiled) -> None:
         )
 
 
-def seeded_inputs(program) -> dict[str, np.ndarray]:
+def seeded_inputs(program, *, sources: dict[str, np.ndarray] | None = None) -> dict[str, np.ndarray]:
     """Deterministic inputs for the target's declared shapes, scaled so an fp16 reduction of a
     model-sized K does not saturate.
 
@@ -456,12 +457,15 @@ def seeded_inputs(program) -> dict[str, np.ndarray]:
     the producer it stands in for, and a multi-buffer producer (an NVFP4 encode, which emits packed
     codes beside their block scales) names its second buffer after the tensor rather than the node.
     """
-    from emmy.compiler.dim import DEFAULT_SEQ_HINT  # noqa: PLC0415
+    from emmy.compiler.dim import DEFAULT_SEQ_HINT, Dim  # noqa: PLC0415
     from emmy.compiler.ir.base import ConstantOp  # noqa: PLC0415
+    from emmy.compiler.loader.binder import bind_constants  # noqa: PLC0415
 
     rng = np.random.default_rng(0)
+    sources = {} if sources is None else sources
 
     def seeded(dims) -> np.ndarray:  # noqa: ANN001
+        dims = tuple(Dim(dim) for dim in dims)
         shape = tuple(dim.as_static() if dim.is_static else (dim.hint or DEFAULT_SEQ_HINT) for dim in dims)
         return (rng.standard_normal(shape) * 0.05).astype(np.float32)
 
@@ -471,9 +475,15 @@ def seeded_inputs(program) -> dict[str, np.ndarray]:
         # backend's to fill; seeding it would divide by noise.
         if not isinstance(node.op, ConstantOp) or node_id in feed or node.op.context_value is not None:
             continue
-        # A checkpoint-backed weight reaches a case with its shape but no value — the corpus has no
-        # checkpoint to bind it from — so it is seeded exactly like an input.
-        feed[node_id] = np.array([node.op.value], dtype=np.float32) if node.op.value is not None else seeded(node.output.shape)
+        op = node.op
+        parts = op.source_parts or (((op.source_path, op.source_shape or node.output.shape),) if op.source_path else ())
+        for path, shape in parts:
+            if path not in sources:
+                sources[path] = seeded(shape)
+        if not parts:
+            feed[node_id] = np.array([op.value], dtype=np.float32) if op.value is not None else seeded(node.output.shape)
+    # Both graphs bind the same source weights through their own transpose / reshape chains.
+    feed.update(bind_constants(program, sources))
     return feed
 
 

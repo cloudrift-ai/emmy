@@ -501,6 +501,11 @@ elected thread and waited on by parity, which no compute fill folds into — so 
 groups over one drain segment (`pipelined_kloop` already schedules a list of them): the box copies ring at the
 stage's depth, the compute-filled scale slab stays single-buffer.
 
+Uniform TMA fills cross from generic shared-memory accesses to the asynchronous proxy. Before arming the transaction,
+`mbarrier_arrive_expect_tx` emits `fence.proxy.async.shared::cta`, making barrier initialization visible and ordering
+prior shared-memory accesses before the copy. The CTA barriers at each slab's last reader still order the readers
+before the elected thread refills it; a CTA barrier alone does not cross the proxy boundary.
+
 **Warp specialization (the producer band → `TileOp.workers`; rows spell it as `WORK`'s `+p<n>` suffix, which is also
 how it is pinned — the `WSPEC` key is retired).** A resolved `WarpSpec` splits the SAME staged phases across two
 warp bands instead of software-pipelining them in-warp (`_stage._wspec_kloop` — the workers arm of `staged_kloop`,

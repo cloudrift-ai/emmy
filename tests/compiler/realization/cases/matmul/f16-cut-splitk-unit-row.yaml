@@ -85,6 +85,24 @@ configs:
       WORK: ''
       RASTER: ''
     identity: 6cd782b173ded5d06043205c46d1f0d46f922f7ef9d40e574a8af49be737231b
+  - name: k_linear_85ba40.0d50704129f8
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: ''
+      RASTER: ''
+    identity: 0d50704129f8cfef0bb021fcb927150eb69b3329c81351bacd5d5a8d72ffe77a
+  - name: k_linear_85ba40.5e4aef382673
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: 5e4aef38267310d8249623d7a07e2d7d32a693d46c952ba04576ae9b3102bea5
 loops:
 - inputs: [x0, x1, x2]
   outputs: [add]

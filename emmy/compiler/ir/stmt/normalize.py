@@ -837,15 +837,12 @@ def dedup_loads(stmts: Body) -> Body:
             return alias.get(n, n)
 
         def descend(inner: Body, clobbered: frozenset[str], coordinates: frozenset[str]) -> Body:
-            """Enter ``inner``'s scope, dropping every alias / kept name whose spelling ``inner``
-            re-binds. SSA names bound inside a Loop / Cond body are scoped to it, so such a name is
-            a DIFFERENT variable — following it out would rewire the inner arithmetic to the outer
-            value and redeclare the survivor. An accumulator the inner loop aliased is visible out
-            here once the loop closes, so that alias comes back up."""
+            """Keep cached values only while their definitions and dependencies retain their bindings.
+            Rebound coordinates change a read even when its index has the same spelling. Accumulator
+            aliases carry out of the inner loop to the scope that reads the sum."""
             shadowed = Body.coerce(inner).ssa_defs | coordinates
             env = {k: v for k, v in local.items() if k[0] not in clobbered and not shadowed.intersection((*v, *k[-1]))}
-            out = walk(inner, env, alias)
-            return out
+            return walk(inner, env, alias)
 
         def invalidate(buffers: frozenset[str]) -> None:
             for key in tuple(local):

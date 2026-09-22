@@ -341,9 +341,13 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
             if dtypes is None:
                 continue
         seen.add(id(node))
-        # A seam is evaluated over the coordinates its term READS, not the whole ambient scope: an
-        # output sweep the grid carries for a sibling's sake is not one of this workspace's axes.
-        axes = tuple(tile.axis_of(name) for name in dict.fromkeys(name for scope in scopes for name in scope) if name in node.free_axes)
+        # Keep the term's read coordinates and unit axes that supply its matrix geometry.
+        axes = tuple(
+            axis
+            for name in dict.fromkeys(name for scope in scopes for name in scope)
+            if name in node.free_axes or tile.axis_of(name).extent == 1
+            for axis in (tile.axis_of(name),)
+        )
         out.append(
             CutSite(
                 node=node,

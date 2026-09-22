@@ -16,15 +16,29 @@ def test_dedup_loads_preserves_loads_under_a_rebound_coordinate() -> None:
     from emmy.compiler.ir.loop.runner import execute_loop_op_cpp
     from emmy.compiler.ir.stmt import Accum
 
-    body = Body((Loop(axis=Axis("k", 4), body=Body((
-        Load(name="outer", input="x", index=(Var("k"),)),
-        Loop(axis=Axis("k", 4), body=Body((
-            Load(name="inner", input="x", index=(Var("k"),)),
-            Accum(name="total", value="inner", op="add", axes=("k",)),
-        ))),
-        Assign(name="value", op="divide", args=("outer", "total")),
-        Write(output="out", index=(Var("k"),), value="value"),
-    ))),))
+    body = Body(
+        (
+            Loop(
+                axis=Axis("k", 4),
+                body=Body(
+                    (
+                        Load(name="outer", input="x", index=(Var("k"),)),
+                        Loop(
+                            axis=Axis("k", 4),
+                            body=Body(
+                                (
+                                    Load(name="inner", input="x", index=(Var("k"),)),
+                                    Accum(name="total", value="inner", op="add", axes=("k",)),
+                                )
+                            ),
+                        ),
+                        Assign(name="value", op="divide", args=("outer", "total")),
+                        Write(output="out", index=(Var("k"),), value="value"),
+                    )
+                ),
+            ),
+        )
+    )
     values = np.array([1, 2, 4, 8], dtype=np.float32)
     actual = execute_loop_op_cpp(LoopOp(body=dedup_loads(body)), {"x": values}, {"out": (4,)})
 
