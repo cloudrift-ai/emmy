@@ -157,7 +157,7 @@ def test_the_block_scaled_atom_matches_the_decoded_oracle():
     sa_bits = (0x30 + rng.integers(0, 0x19, size=(16, 4))).astype(np.uint8)
     sb_bits = (0x30 + rng.integers(0, 0x19, size=(8, 4))).astype(np.uint8)
 
-    fn = nvcc.load_function(_MMA_F8_PRELUDE + _MMA_F4_BLOCK_PRELUDE + _DRIVER, "k_f4_block_scaled", (), arch_specific=True)
+    fn = nvcc.load_function(_MMA_F8_PRELUDE + _MMA_F4_BLOCK_PRELUDE + _DRIVER, "k_f4_block_scaled", arch_specific=True)
     out = cp.zeros((16, 8), dtype=cp.float32)
     args = (out, cp.asarray(a_bits), cp.asarray(b_bits), cp.asarray(sa_bits), cp.asarray(sb_bits))
     fn((1, 1, 1), (32, 1, 1), args)

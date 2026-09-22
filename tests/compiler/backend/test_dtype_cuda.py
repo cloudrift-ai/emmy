@@ -22,6 +22,25 @@ from tests.compiler.helpers import requires_cuda
 
 
 @requires_cuda
+@pytest.mark.parametrize(("dtype", "delta"), [(dt.F16, 2**-10), (dt.F32, 2**-13)])
+def test_separate_multiply_and_add_preserve_rounding(dtype, delta):
+    """Contraction would retain the product's lost low bits and turn an exact zero into -delta**2."""
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+
+    graph = Graph()
+    for name in ("a", "b", "c"):
+        graph.add_node(InputOp(), [], Tensor(name, (32,), dtype), node_id=name)
+    graph.add_node(ElementwiseOp("multiply"), ["a", "b"], Tensor("product", (32,), dtype), node_id="product")
+    graph.add_node(ElementwiseOp("add"), ["product", "c"], Tensor("out", (32,), dtype), node_id="out")
+    graph.inputs, graph.outputs = ["a", "b", "c"], ["out"]
+    inputs = {name: np.full(32, value, dtype=dtype.np) for name, value in (("a", 1 + delta), ("b", 1 - delta), ("c", -1))}
+    backend = CudaBackend()
+    compiled = backend.compile(graph)
+    result, _ = backend.run(compiled, input_data=inputs)
+    np.testing.assert_array_equal(result.outputs["out"], inputs["a"] * inputs["b"] + inputs["c"])
+
+
+@requires_cuda
 def test_scalar_fp16_matmul_widens_products_before_accumulation():
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.pipeline.search.pins import pinned_knobs

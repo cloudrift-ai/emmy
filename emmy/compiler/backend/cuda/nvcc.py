@@ -169,7 +169,7 @@ def compile_to_cubin(source: str, name: str, *, arch: str) -> Path:
     return out
 
 
-def load_function(source: str, name: str, options, *, arch_specific: bool):  # noqa: ARG001 — options kept for call-site compat
+def load_function(source: str, name: str, *, arch_specific: bool):
     """Compile (via nvcc, cached) + ``RawModule``-load ``name``, returning a
     cupy ``Function`` usable exactly like a ``RawKernel`` at launch (callable,
     and ``max_dynamic_shared_size_bytes`` is settable for the >48KB smem path).
