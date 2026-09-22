@@ -91,22 +91,22 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: k_matmul_897467.318f8f6aca0c
+  - name: k_matmul_897467.eb3f2c9932d1
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w4x2
-      TILE: mma_m16n8k16_f16_f32/f4x8/k4
+      WORK: w4x4
+      TILE: mma_m16n8k16_f16_f32/f4x4/k4
       REDUCE: ''
-      STAGE: d2/smem-tma
-      RASTER: ''
-    identity: bb55bbff41e00c4e928b4b2ed7927ac10451f5e6b2636caabcda2fff0c6498aa
+      STAGE: d2/smem-tma/p2
+      RASTER: gm8
+    identity: eb3f2c9932d1e87fd442283862a75f3cf3423eba36a16485e33cec420bcd90b1
     measurements:
-      emmy_us: 562.2559785842896
-      reference_us: 557.3920011520386
+      emmy_us: 555.5520057678223
+      reference_us: 552.2400140762329
       reference_backend: same-input-greedy
-  - name: k_matmul_897467.318f8f6aca0c
+  - name: k_matmul_897467.eb3f2c9932d1
     bindings: {}
     pins:
       FAST_MATH: true
@@ -114,10 +114,10 @@ configs:
       WORK: w4x2
       TILE: mma_m16n8k16_f16_f16/f4x8/k4
       REDUCE: ''
-      STAGE: d2/smem-tma
-      RASTER: ''
-    identity: bb55bbff41e00c4e928b4b2ed7927ac10451f5e6b2636caabcda2fff0c6498aa
+      STAGE: d2/smem-tma/p2
+      RASTER: gm8
+    identity: eb3f2c9932d1e87fd442283862a75f3cf3423eba36a16485e33cec420bcd90b1
     measurements:
-      emmy_us: 419.47200894355774
-      reference_us: 401.2320041656494
+      emmy_us: 361.30134264628094
+      reference_us: 354.85867659250897
       reference_backend: same-input-greedy

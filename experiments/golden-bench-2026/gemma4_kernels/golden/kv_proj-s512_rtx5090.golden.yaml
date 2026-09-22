@@ -91,83 +91,33 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-    kernel_set:
-    - k_matmul_6599c1.b0a2fa75fc47
-  - name: k_matmul_6599c1.b0a2fa75fc47
+  - name: k_matmul_6599c1.c88aca3742f0
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE: g8k
-    identity: c88aca3742f0e3767c5cce5125f56de87a4be00c98520bfbe07660d55730b99d
-    measurements:
-      emmy_us: 47.83513313454831
-      reference_us: 47.72143229707941
-      reference_backend: same-input-greedy
-  - name: k_matmul_6599c1.7ce8f3128f1c
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w4x2
-      TILE: mma_m16n8k16_f16_f32/f2x4/k2
+      WORK: w2x4
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
       REDUCE: ''
       STAGE: d2/smem-tma
-      RASTER: ''
-    identity: e3288214027d74097fa601201cd29b0f41fa5c2156c0753c59a6ab86457c6452
-    measurements:
-      emmy_us: 42.427824891131856
-      reference_us: 42.31066505114237
-      reference_backend: same-input-greedy
-  - name: k_matmul_6599c1.763d1e585578
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      REDUCE: ''
-      RASTER: ''
-    identity: 763d1e585578d5b8edf19a737566cc548a3abebdf783a8a52a6e4722417edfac
-    measurements:
-      emmy_us: 5.407308243416452
-      reference_us: 5.410767245937039
-      reference_backend: same-input-greedy
-  - name: k_matmul_6599c1.b0a2fa75fc47
-    bindings: {}
-    pins:
-      FAST_MATH: true
-    knobs:
-      REDUCE: g4k
+      RASTER: gm8
     identity: c88aca3742f0e3767c5cce5125f56de87a4be00c98520bfbe07660d55730b99d
     measurements:
-      emmy_us: 35.14795833947779
-      reference_us: 35.08971374081594
+      emmy_us: 49.20159876346588
+      reference_us: 48.927998542785645
       reference_backend: same-input-greedy
-  - name: k_matmul_6599c1.296614317e56
+  - name: k_matmul_6599c1.c88aca3742f0
     bindings: {}
     pins:
       FAST_MATH: true
     knobs:
-      WORK: w4x2
-      TILE: mma_m16n8k16_f16_f16/f4x8/k4
+      WORK: w2x8
+      TILE: mma_m16n8k16_f16_f16/f2x2/k4
       REDUCE: ''
-      STAGE: d2/smem-tma
-      RASTER: ''
-    identity: 73c4741a92d875a8c73b8810dd7f60bcfc521723817c3640bf59c828308c226f
+      STAGE: d2/smem-tma/p2
+      RASTER: gm8
+    identity: c88aca3742f0e3767c5cce5125f56de87a4be00c98520bfbe07660d55730b99d
     measurements:
-      emmy_us: 32.10012951204853
-      reference_us: 32.028903884272424
-      reference_backend: same-input-greedy
-  - name: k_matmul_6599c1.9ab6efeed9ec
-    bindings: {}
-    pins:
-      FAST_MATH: true
-    knobs:
-      WORK: ''
-      REDUCE: ''
-      RASTER: ''
-    identity: 9ab6efeed9ec7705d9d1ed568af6f2d111e07822c96df81baafe5023fdd1391a
-    measurements:
-      emmy_us: 3.0478288274292553
-      reference_us: 3.0608098565435116
+      emmy_us: 34.65048198042245
+      reference_us: 34.237793807325694
       reference_backend: same-input-greedy

@@ -214,3 +214,121 @@ so the whole scoreboard is 4 us behind: the distance is the base kernel, as on t
 - The old 4090 golden rows were recorded on a compiler four months older, against cuBLAS; the comparison column is
   indicative only.
 
+
+## Re-tune on RTX 4090 and RTX 5090 (`rtx4090x1`, `rtx5090x1`, 2026-09-22/23)
+
+### Question
+
+Are the twelve committed schedules still the best the current compiler offers on each card, and by how much do the
+re-found schedules move each kernel against eager? The tuner was not used: it is known to be broken, so the
+schedules were found by hand-pinned sweeps, the way the goldens were first recorded.
+
+### Status
+
+All 12 goldens swept on both cards, 24 lanes, about 4,600 hand-pinned rows benched against eager, every kept row
+clean under the run's integrity flags (realized-vs-pinned knobs, arithmetic-intensity floor, wrong-answer check).
+21 lanes were written back through `--record-greedy` with the recorded greedy equal to the sweep winner; the three
+5090 lanes whose winner is a cross-CTA split keep their previous rows (see Findings). Each golden was measured whole
+on one box.
+
+### Protocol
+
+For every target and lane the compiler's own fork tree was enumerated (`enumerate_graph`; ~17k rows for a
+projection in the standard lane, ~32k under fast-math, ~130k / ~410k for the two-site attention) and swept in three
+passes of `emmy run --golden FILE --realization SEED --bench --bench-backends eager,emmy --ab KNOBS` at deployable
+`-O3`: tile fragment x K step x worker split (144 pins: the previously recorded rows first, then a grid over 12 CTA
+layouts and every mma atom the lane offers, wide tiles also at each cross-CTA split `g2k`/`g4k`/`g8k`), then staging
+ring x reduce partition around the top three (48 pins), then rasterization x deeper K step (24 pins). Pass 1 ranked
+at 5 warm-ups / 30 iterations; passes 2 and 3 and the write-back at 10 / 100. The write-back ran each lane against a
+working copy holding only that lane's seed and a fresh per-lane tune DB seeded by one bench of the winner, because
+the measured-evidence pick is regime-blind (below). Boxes: vast.ai RTX 4090 (driver 595.71.05, 32 cores) and RTX
+5090 (driver 580.105.08, 16 cores), both CUDA 13.0.88 (the version the previous rows were recorded with) and
+PyTorch 2.14.0+cu130 in a fresh venv; source revision `1159502e`. The raw pins and A/B records of every pass are in
+`sweeps_rtx4090x1_2026-09-22.tar.gz` and `sweeps_rtx5090x1_2026-09-22.tar.gz`.
+
+### Measurements
+
+Whole-program latency in microseconds. "previous" is the golden's recorded deploy at its whole-set price (the
+routing row when it deploys a split); "vs previous" compares the sweep's best with that deploy, both measured on the
+same box, so it isolates the schedule from the box.
+
+RTX 5090:
+
+| golden | lane | eager | previous | re-measured best | vs eager | vs previous | best schedule |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `q_proj` | std | 88.8 | 86.8 | 89.9 | 0.99x | 0.97x | the previous row (`f2x4/k2 g4k`) |
+| `q_proj` | fm | 88.7 | 62.7 | **62.4** | 1.42x | 1.01x | `w4x2 f16_f16/f2x8/k4 d2/smem-tma` |
+| `kv_proj` | std | 46.6 | 47.8 | 49.1 | 0.95x | 0.97x | `w2x4 f16_f32/f2x2/k4 d2/smem-tma gm8` |
+| `kv_proj` | fm | 46.6 | 35.2 | **34.6** | 1.35x | 1.02x | `w2x8 f16_f16/f2x2/k4 d2/smem-tma/p2 gm8` |
+| `o_proj` | std | 94.7 | 81.1 | 81.6 | 1.16x | 0.99x | `w2x4 f16_f32/f2x2/k4 d2/smem-async/p2 gm8` |
+| `o_proj` | fm | 94.8 | 73.8 | **65.4** | 1.45x | **1.13x** | `w4x2 f16_f16/f2x8/k4 d2/smem-tma` |
+| `mlp_gate_up` | std | 577.2 | 562.3 | **553.6** | 1.04x | 1.02x | `w4x4 f16_f32/f4x4/k4 d2/smem-tma/p2 gm8` |
+| `mlp_gate_up` | fm | 575.6 | 419.5 | **360.0** | 1.60x | **1.17x** | `w4x2 f16_f16/f4x8/k4 d2/smem-tma/p2 gm8` |
+| `mlp_down` | std | 294.2 | 287.1 | 287.0 | 1.03x | 1.00x | tie with the previous row (`f2x4/k2 g4k`) |
+| `mlp_down` | fm | 298.3 | 221.1 | **210.0** | 1.42x | 1.05x | `w4x2 f16_f16/f4x8/k4 g8k d2/smem-tma` (candidate, not written) |
+| `attention` | std | 30.8 | 38.1 | **32.1** | 0.96x | **1.19x** | value site `d2/smem-async`, score site `d3/smem-tma` |
+| `attention` | fm | 30.8 | 38.0 | **29.1** | **1.06x** | **1.31x** | same transport, score tile `f16_f16/f1x4/k2` |
+
+RTX 4090:
+
+| golden | lane | eager | previous | re-measured best | vs eager | vs previous | best schedule |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `q_proj` | std | 133.4 | 105.7 | 127.6 | 1.05x | 0.83x | `w1x4 f16_f32/f4x4/k4 d2/smem-async/p2 gm8` |
+| `q_proj` | fm | 133.4 | 71.8 | 88.6 | 1.51x | 0.81x | the previous row |
+| `kv_proj` | std | 64.0 | 59.3 | 70.2 | 0.91x | 0.84x | `w2x2 f16_f32/f2x4/k2 d4/smem-async/p2 gm8` |
+| `kv_proj` | fm | 64.0 | 43.7 | 50.5 | 1.27x | 0.87x | `w1x4 f16_f16/f4x4/k4 d4/smem-async gm8` |
+| `o_proj` | std | 142.0 | 111.1 | 135.9 | 1.05x | 0.82x | `w1x4 f16_f32/f4x4/k4 d2/smem-async/p2` |
+| `o_proj` | fm | 146.4 | 77.0 | 95.9 | 1.53x | 0.80x | `w4x2 f16_f16/f2x8/k4 d2/smem-async/p2` |
+| `mlp_gate_up` | std | 967.7 | 800.5 | 944.1 | 1.02x | 0.85x | the previous row |
+| `mlp_gate_up` | fm | 968.7 | 542.7 | 607.7 | 1.59x | 0.89x | `w2x2 f16_f16/f4x8/k2 d2/smem-async/p2 gm8` |
+| `mlp_down` | std | 474.1 | 416.6 | 492.5 | 0.96x | 0.85x | `w1x4 f16_f32/f4x4/k4 d2/smem-async/p2 gm8` |
+| `mlp_down` | fm | 475.1 | 284.6 | 320.5 | 1.48x | 0.89x | `w2x2 f16_f16/f4x8/k4 d2/smem-async/p2` |
+| `attention` | std | 53.2 | 41.0 | 50.5 | 1.05x | 0.81x | the previous row |
+| `attention` | fm | 54.4 | 37.9 | 50.0 | 1.09x | 0.76x | the previous row |
+
+### What the numbers say
+
+On the 5090 the fast-math lane — the one the article's claim rests on — is better than the previous deploy in four
+of six goldens (2–17%, geometric mean 1.11x) and ties the other two; the standard lane is a wash (1.02x). The wins come
+from two families the hand passes had not reached: the register-staged ring with rasterization (`/p2`, `gm8`) on the
+projections, and a mixed transport on attention (value site on the asynchronous ring, score site on the three-slot
+TMA ring) that puts this kernel at or above eager for the first time. `mlp_down` fast-math has a 5% better split
+(`g8k` over `g2k`) that could not be written back (Finding 3) and is left as a candidate.
+
+On the 4090 every lane trails the previous *number* by 10–25%, but so does every previous schedule re-measured on
+this box, and so does eager (x1.18–1.45; the attention kernel x1.45): that is the box, not the schedules. Against
+the previous schedules re-measured here, the picks are better in six lanes (`kv_proj` both, `o_proj` std, `q_proj`
+std, `mlp_down` std, `mlp_gate_up` fm; 3–13%) and tie in the other six, so the 4090 goldens carry the better row
+where one was found and the previous row otherwise. Fast-math against eager on this stack: 1.37x geometric mean on
+the 5090, 1.40x on the 4090.
+
+### Findings
+
+- **The measured-evidence pick is regime-blind.** In every standard-lane run the greedy deployed the fast-math
+  `f16_f16` kernel once the tune DB held fast-math rows (the run tags that greedy `lane=fm` although
+  `EMMY_FAST_MATH` was unset), on both cards. A perf row's `knobs` record the regime but the `context_key` the pick
+  joins on is the same for both regimes of one kernel. Correctness still passes at the scaled tolerance, so nothing
+  flags it. Hand pins are unaffected; the write-back isolates regimes as described in Protocol.
+- **A hand-pinned cross-CTA split cannot be written back.** `--ab "…REDUCE=g4k…"` records the piece and the finalize
+  receipts but no row that spells the kernel-set arm, so `--record-greedy --strict-evidence` fails on the cut fork
+  (`EvidenceError: … no measured row spells a kernel-set arm`) and without strict evidence lands on a prior-driven
+  unsplit kernel. Unsplit winners write back exactly. The three affected 5090 lanes keep their previous rows.
+- **The prior's own pick for fused attention hangs at 8k context** (`HungKernelError` after the 60 s watchdog on
+  `prefill_gqa-b1-s8192` of the sibling attention experiment), and a hung greedy takes every A/B row of that run
+  down with it. Pinning the run's greedy to a known row with `EMMY_KNOBS` is the workaround; a compile of that
+  shape with an empty tune DB deploys a kernel that hangs.
+- The recorded rows' `identity` did not steer a greedy on `1159502e` when the canonical golden was passed as
+  `--golden`: the run still deployed the prior's pick. Worth a check against the recipe's `--strict-evidence`
+  replay before the next reproduction.
+
+### Limitations
+
+Eager is PyTorch 2.14.0, not the 2.13.0 the recipe pins, so the ratios are read against this stack only; the recipe
+itself was not re-run. The boxes are rented and differ from the hosts of the previous sections, which is why
+absolute numbers are not compared across them. Pass 1 ranked at 30 iterations; every winner carries a 100-iteration
+measurement from passes 2–3 and a second one from the write-back.
+
+### Archive
+
+`sweeps_rtx4090x1_2026-09-22.tar.gz`, `sweeps_rtx5090x1_2026-09-22.tar.gz`: per golden and pass, the pin list, the
+`--json` A/B record and the run log; the recorded per-lane goldens and their record logs; the per-golden summaries.

@@ -99,7 +99,7 @@ configs:
       FAST_MATH: false
     knobs:
       REDUCE: g4k
-    identity: 2d691bc348bb640a622d251de89a9814cef00c5fe44274bd031e4e5ad8d5985b
+    identity: 1f29bfd0ac01c2b37aa7164974c6d334a5480103e64790aebe23eeb637e25ab4
     measurements:
       emmy_us: 86.76703176000616
       reference_us: 87.13848965290266
@@ -114,7 +114,7 @@ configs:
       REDUCE: ''
       STAGE: d2/smem-tma
       RASTER: ''
-    identity: 32ad4d5a504a8ff83657737ad8036926b8d7c72e5f4912efac632a8a6fdb0d86
+    identity: 5c2a251db635650fe6049ff9f7a979b537bbc2aa72399ba33170b249c7731591
     measurements:
       emmy_us: 81.30399882793427
       reference_us: 81.63466552893321
@@ -132,42 +132,18 @@ configs:
       emmy_us: 5.463032932071895
       reference_us: 5.503824123969445
       reference_backend: same-input-greedy
-  - name: k_matmul_843d4a.1f29bfd0ac01
-    bindings: {}
-    pins:
-      FAST_MATH: true
-    knobs:
-      REDUCE: g2k
-    identity: 2d691bc348bb640a622d251de89a9814cef00c5fe44274bd031e4e5ad8d5985b
-    measurements:
-      emmy_us: 62.735205133929526
-      reference_us: 62.611186682747366
-      reference_backend: same-input-greedy
-  - name: k_matmul_843d4a.e752b0fb9fd0
+  - name: k_matmul_843d4a.2d691bc348bb
     bindings: {}
     pins:
       FAST_MATH: true
     knobs:
       WORK: w4x2
-      TILE: mma_m16n8k16_f16_f16/f4x8/k4
+      TILE: mma_m16n8k16_f16_f16/f2x8/k4
       REDUCE: ''
       STAGE: d2/smem-tma
       RASTER: ''
-    identity: 523eb88df55b4fd63b35e31cddaff06c983e3d9e6ebc94bff7191bdd19094931
+    identity: 2d691bc348bb640a622d251de89a9814cef00c5fe44274bd031e4e5ad8d5985b
     measurements:
-      emmy_us: 58.379292488098145
-      reference_us: 58.22494100121891
-      reference_backend: same-input-greedy
-  - name: k_matmul_843d4a.7713def97920
-    bindings: {}
-    pins:
-      FAST_MATH: true
-    knobs:
-      WORK: ''
-      REDUCE: ''
-      RASTER: ''
-    identity: 7713def979205273146c0126cd19b0ae74e56fad30e9a494647fbb5554a4099e
-    measurements:
-      emmy_us: 4.355912645831379
-      reference_us: 4.386245681528459
+      emmy_us: 62.519997358322144
+      reference_us: 62.059998512268066
       reference_backend: same-input-greedy

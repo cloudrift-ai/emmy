@@ -350,30 +350,12 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: k_sdpa_f386fe.7a49232ef454
+  - name: k_sdpa_f386fe.99f93d427be1
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
       TILE@map.1/twist: mma_m16n8k16_f16_f32/f1x32/k2
-      TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x4/k4
-      REDUCE@map.1/twist: ''
-      REDUCE@map.1/twist.1/inner: ''
-      STAGE@map.1/twist: d2/smem-async
-      STAGE@map.1/twist.1/inner: d2/smem-async
-      WORK: w4x1
-      RASTER: ''
-    identity: a78dcd5c36f888fa79e31016aa2f53362e12e7ef2f23e57ca012c677c32848e6
-    measurements:
-      emmy_us: 41.002665956815086
-      reference_us: 41.04904247366864
-      reference_backend: same-input-greedy
-  - name: k_sdpa_f386fe.7a49232ef454
-    bindings: {}
-    pins:
-      FAST_MATH: true
-    knobs:
-      TILE@map.1/twist: mma_m16n8k16_f16_f16/f1x32/k2
       TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x4/k2
       REDUCE@map.1/twist: ''
       REDUCE@map.1/twist.1/inner: ''
@@ -381,8 +363,26 @@ configs:
       STAGE@map.1/twist.1/inner: d2/smem-async
       WORK: w4x1
       RASTER: ''
-    identity: a78dcd5c36f888fa79e31016aa2f53362e12e7ef2f23e57ca012c677c32848e6
+    identity: 99f93d427be1ab5a5169d5ea068364c04832b106d72c20989241b9db63180bde
     measurements:
-      emmy_us: 37.88799964464628
-      reference_us: 39.64927911758423
+      emmy_us: 50.79039931297302
+      reference_us: 50.55326223373413
+      reference_backend: same-input-greedy
+  - name: k_sdpa_f386fe.99f93d427be1
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      TILE@map.1/twist: mma_m16n8k16_f16_f16/f1x32/k2
+      TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f16/f1x4/k2
+      REDUCE@map.1/twist: ''
+      REDUCE@map.1/twist.1/inner: ''
+      STAGE@map.1/twist: d2/smem-async
+      STAGE@map.1/twist.1/inner: d3/smem-async
+      WORK: w4x1
+      RASTER: ''
+    identity: 99f93d427be1ab5a5169d5ea068364c04832b106d72c20989241b9db63180bde
+    measurements:
+      emmy_us: 50.12210419303492
+      reference_us: 49.91999864578247
       reference_backend: same-input-greedy
