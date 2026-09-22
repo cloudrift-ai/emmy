@@ -108,14 +108,21 @@ class _Step:
             )
 
 
-def export_model(model, destination, *, context_length=MAX_CONTEXT, eos_ids=(), provenance=None):
-    """Compile and bundle a dense Qwen3 checkpoint; no Python operation is needed after export."""
+def export_model(model, destination, *, context_length=MAX_CONTEXT, page_tokens=None, eos_ids=(), provenance=None):
+    """Compile and bundle a dense Qwen3 checkpoint; no Python operation is needed after export.
+
+    ``page_tokens`` is how many tokens of the KV cache one page holds. The cache is always a table
+    of pages the runtime owns; the default — one page spanning the whole context — addresses
+    exactly like the single contiguous array it replaces."""
     import torch
 
     from emmy.compiler.backend.plan_cache import PlanTemplateCache
     from emmy.compiler.trace.huggingface import build_attention_split_wrapper
 
     validate_model(model, context_length)
+    page_tokens = context_length if page_tokens is None else page_tokens
+    if not 0 < page_tokens <= context_length or context_length % page_tokens:
+        raise ValueError(f"page_tokens={page_tokens} must divide the context capacity {context_length}")
     cfg = model.config
     if any(not 0 <= token < cfg.vocab_size for token in eos_ids):
         raise ValueError("EOS token outside vocabulary")
@@ -132,6 +139,7 @@ def export_model(model, destination, *, context_length=MAX_CONTEXT, eos_ids=(), 
                 "HEAD_DIM": d,
                 "VOCAB": vocab,
                 "SCALE": f"{d**-0.5:.17g}f",
+                "PAGE_TOKENS": page_tokens,
             }.items()
         )
         + "\n"
@@ -163,9 +171,13 @@ def export_model(model, destination, *, context_length=MAX_CONTEXT, eos_ids=(), 
         rotated = step.buffer(f"layer{index}.rotated", (heads * d,))
         keys = step.buffer(f"layer{index}.keys", (context_length, kv, d), role="output")
         values = step.buffer(f"layer{index}.values", (context_length, kv, d), role="output")
+        # The cache is paged: the launches pass page tables, and the runtime owns the pages.
+        for name in (keys, values):
+            step.plan.paged[name] = (0, page_tokens, None)
+        tables = [f"{name}__pages" for name in (keys, values)]
         step.launch(
             "native_rope_cache",
-            [*names, "cosine", "sine", "position", rotated, keys, values],
+            [*names, "cosine", "sine", "position", rotated, *tables],
             source,
             writes=[rotated, keys, values],
             blocks=(heads * d + CUDA_THREADS - 1) // CUDA_THREADS,
@@ -173,7 +185,7 @@ def export_model(model, destination, *, context_length=MAX_CONTEXT, eos_ids=(), 
         attention = step.buffer(f"layer{index}.attention", (1, heads * d))
         step.launch(
             "native_attention",
-            [rotated, keys, values, "position", attention],
+            [rotated, *tables, "position", attention],
             source,
             writes=[attention],
             blocks=heads,

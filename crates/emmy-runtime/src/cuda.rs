@@ -261,6 +261,24 @@ impl Executor {
         self.upload(name, bytes)
     }
 
+    /// Every paged buffer, with one page's byte size and how many pages its declared shape spans.
+    /// A cache-shaped buffer means that span literally; a step's chunk-shaped one does not, and
+    /// its caller sizes the cache itself.
+    pub fn paged_buffers(&self) -> Result<Vec<(String, usize, usize)>> {
+        let mut out = Vec::new();
+        for name in self.plan.paged.keys() {
+            let page = self.page_bytes(name)?;
+            let buffer = self
+                .plan
+                .buffers
+                .iter()
+                .find(|b| &b.name == name)
+                .context("unknown buffer")?;
+            out.push((name.clone(), page, buffer.byte_len()?.div_ceil(page)));
+        }
+        Ok(out)
+    }
+
     /// One page's byte size for a paged buffer, so the caller can size its pool.
     pub fn page_bytes(&self, name: &str) -> Result<usize> {
         let paging = self.plan.paged.get(name).context("buffer is not paged")?;
