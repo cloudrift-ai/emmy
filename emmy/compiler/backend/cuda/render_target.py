@@ -56,26 +56,6 @@ _INTEGER_NATIVE_OPS = frozenset(
 # and the encode conversion into it, both spelled below in ``convert``.
 _F8_DTYPES = ("f8e4m3", "f8e5m2")
 
-# E4M3's finite values are half bit patterns shifted seven places, times 2**8.
-# This also normalizes subnormals without the SDK emulation's data-dependent loop.
-F8_DECODE_PRELUDE = """\
-static __device__ __forceinline__ __half emmy_from_f8e4m3(__nv_fp8_e4m3 value) {
-#if __CUDA_ARCH__ >= 890
-    return __half(value);
-#else
-    unsigned int bits = value.__x;
-    unsigned short half_bits = ((bits & 0x7fu) << 7) | ((bits & 0x80u) << 8);
-    __half scaled = __hmul(__ushort_as_half(half_bits), __ushort_as_half(0x5c00u));
-    return (bits & 0x7fu) == 0x7fu ? __ushort_as_half(0x7fffu) : scaled;
-#endif
-}
-
-static __device__ __forceinline__ float emmy_from_f8e4m3_f32(__nv_fp8_e4m3 value) {
-    return __half2float(emmy_from_f8e4m3(value));
-}
-
-"""
-
 # Intrinsic spellings — per dtype.  Keys are abstract op names emitted
 # by ``op_to_expr`` (``"exp"``, ``"fmax"``, ``"fabs"``, ...).
 _INTRINSIC_F32: dict[str, str] = {
