@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.6-27B-FP8"
-  rationale: "Cooling family; no direct trend or strong community attention detected here."
-  heat: 30
+  rationale: "Cooling family; overshadowed by dominant Qwen3.8 launch."
+  heat: 20
 engine:
   llm:
     tensor_parallel_size: 1

@@ -1,9 +1,9 @@
 tags:
-  - best-effort
+  - maintained
 
 model:
   huggingface: "google/gemma-4-31B-it"
-  rationale: "Cooling family, solid arena quality supports established interest, but no fresh current momentum or breakout."
+  rationale: "Cooling family with solid arena quality supporting established interest, but no fresh momentum."
   heat: 40
 engine:
   llm:
