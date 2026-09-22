@@ -11,6 +11,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from emmy import config
 from emmy.compiler import dtype as dt
 from emmy.compiler.backend.cuda.dtype import canonical_from_cuda_name, cuda_name, nbytes_of
 from emmy.compiler.graph import Graph, Tensor
@@ -24,7 +25,7 @@ from tests.compiler.helpers import requires_cuda
 @requires_cuda
 @pytest.mark.parametrize(("dtype", "delta"), [(dt.F16, 2**-10), (dt.F32, 2**-13)])
 def test_separate_multiply_and_add_preserve_rounding(dtype, delta):
-    """Contraction would retain the product's lost low bits and turn an exact zero into -delta**2."""
+    """The custom flag preserves separate rounding; default fast math contracts to -delta**2."""
     from emmy.compiler.backend.cuda.backend import CudaBackend
 
     graph = Graph()
@@ -35,9 +36,11 @@ def test_separate_multiply_and_add_preserve_rounding(dtype, delta):
     graph.inputs, graph.outputs = ["a", "b", "c"], ["out"]
     inputs = {name: np.full(32, value, dtype=dtype.np) for name, value in (("a", 1 + delta), ("b", 1 - delta), ("c", -1))}
     backend = CudaBackend()
-    compiled = backend.compile(graph)
-    result, _ = backend.run(compiled, input_data=inputs)
-    np.testing.assert_array_equal(result.outputs["out"], inputs["a"] * inputs["b"] + inputs["c"])
+    for flags, expected in (("", np.full(32, -delta**2, dtype=dtype.np)), ("--fmad=false", inputs["a"] * inputs["b"] + inputs["c"])):
+        with config.nvcc_flags_override(f"{config.nvcc_flags()} {flags}"):
+            compiled = backend.compile(graph)
+            result, _ = backend.run(compiled, input_data=inputs)
+        np.testing.assert_array_equal(result.outputs["out"], expected)
 
 
 @requires_cuda

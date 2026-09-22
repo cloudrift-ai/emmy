@@ -17,9 +17,11 @@ from emmy.compiler.context import Context, split_opt_level
 
 def test_effective_flags_reads_env(monkeypatch) -> None:
     monkeypatch.delenv("EMMY_NVCC_FLAGS", raising=False)
-    assert nvcc.effective_flags() == ["--fmad=false"]
+    assert nvcc.effective_flags() == ["--use_fast_math"]
     monkeypatch.setenv("EMMY_NVCC_FLAGS", "-Xcicc -O1")
-    assert nvcc.effective_flags() == ["--fmad=false", "-Xcicc", "-O1"]
+    assert nvcc.effective_flags() == ["--use_fast_math", "-Xcicc", "-O1"]
+    monkeypatch.setenv("EMMY_NVCC_FLAGS", "--fmad=false")
+    assert nvcc.effective_flags() == ["--use_fast_math", "--fmad=false"]
 
 
 def test_cubin_cache_key_partitions_by_flags(monkeypatch) -> None:
@@ -31,6 +33,8 @@ def test_cubin_cache_key_partitions_by_flags(monkeypatch) -> None:
     monkeypatch.setenv("EMMY_NVCC_FLAGS", "-Xcicc -O1")
     k_o1 = nvcc._cubin_key("src", "k", "sm_80")
     assert k_o3 != k_o1
+    monkeypatch.setenv("EMMY_NVCC_FLAGS", "--fmad=false")
+    assert nvcc._cubin_key("src", "k", "sm_80") not in (k_o3, k_o1)
 
 
 def test_context_key_reads_one_regime_however_it_is_spelled(monkeypatch) -> None:
@@ -48,9 +52,9 @@ def test_context_key_reads_one_regime_however_it_is_spelled(monkeypatch) -> None
     # A ranking-only regime still keys apart — it must never answer for a deployable measurement.
     assert key_for("-Xcicc -O1") != key_for("")
     # Any other flag genuinely changes codegen and keeps its own partition.
-    assert key_for("--use_fast_math") != key_for("")
-    assert key_for("--use_fast_math -Xcicc -O3") == key_for("--use_fast_math")
-    assert key_for("--use_fast_math -Xcicc -O1") != key_for("--use_fast_math")
+    assert key_for("--fmad=false") != key_for("")
+    assert key_for("--fmad=false -Xcicc -O3") == key_for("--fmad=false")
+    assert key_for("--fmad=false -Xcicc -O1") != key_for("--fmad=false")
 
 
 def test_h_opt_and_context_key_agree_on_the_regime(monkeypatch) -> None:

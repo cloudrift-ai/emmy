@@ -38,8 +38,8 @@ from emmy import config
 
 logger = logging.getLogger(__name__)
 
-# Preserve the rounding of separate frontend operations, including half multiply followed by add.
-_BASE_FLAGS = ["--fmad=false"]
+# Deployment uses fast math; extra flags can disable contraction for rounding diagnostics.
+_BASE_FLAGS = ["--use_fast_math"]
 
 
 def effective_flags() -> list[str]:
