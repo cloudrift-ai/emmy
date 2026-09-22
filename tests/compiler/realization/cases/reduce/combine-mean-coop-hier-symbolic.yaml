@@ -27,7 +27,7 @@ configs:
     knobs:
       REDUCE: coop
       WORK: t128
-    identity: e10da0a96f3efc6e4ba984cadb43042dc48a5d2c5e972d992253e61080f881e2
+    identity: 6af98fb40714adf2d7286d4d35591dfb88b7f7f293ea5fa19ac2b139ccb1aefb
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 1.2071390682437257
@@ -63,8 +63,6 @@ loops:
             input: mean_count
             index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
             dtype: null
-        - class: Assign
-          fields: {name: v0, op: {elementwise: reciprocal}, args: {tuple: [in0]}, dtype: null}
         - class: Loop
           fields:
             axis: {class: Axis, fields: {name: a0, extent: {dim: 4}, window: null}}
@@ -86,17 +84,17 @@ loops:
                   unroll: false
                   seed: true
               - class: Assign
-                fields: {name: v1, op: {elementwise: multiply}, args: {tuple: [acc0, v0]}, dtype: null}
+                fields: {name: v0, op: {elementwise: divide}, args: {tuple: [acc0, in0]}, dtype: null}
               - class: Write
                 fields:
                   output: mean
                   index: {tuple: [{expr: {var: a0}}, {expr: {literal: {value: 0, dtype: int}}}]}
-                  values: {tuple: [v1]}
+                  values: {tuple: [v0]}
                   value_dtype: null
                   atomic: false
                   swizzle: NONE
             unroll: false
             seed: true
-      name: k_mean_dbbfa8
+      name: k_mean_fb89d8
     inputs: [mean_count, x]
     outputs: [[mean, f32, [4, 1]]]

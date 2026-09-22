@@ -62,7 +62,7 @@ configs:
       STAGE@map.1/twist.1/inner: ''
       LOOPIFY: '0'
       RASTER: ''
-    identity: e60f838d57b526cb060b9df70b188313b0dc1810c00fa5f62421ecff81dd8caf
+    identity: d5a4693cfeb89f2bd9f9fadfa4b83acd75a10386f96058858fbf9efc1941bfea
 loops:
 - inputs: [x0, x1, x2]
   outputs: [scaled_dot_product_attention]
@@ -267,8 +267,6 @@ loops:
                             fields: {name: acc3, value: v9, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
                         unroll: false
                         seed: true
-                    - class: Assign
-                      fields: {name: v10, op: {elementwise: reciprocal}, args: {tuple: [acc3]}, dtype: null}
                     - class: Loop
                       fields:
                         axis: {class: Axis, fields: {name: a6, extent: {dim: 128}, window: null}}
@@ -307,13 +305,13 @@ loops:
                                             - {expr: {var: a8}}
                                           dtype: null
                                       - class: Assign
-                                        fields: {name: v11, op: {elementwise: multiply}, args: {tuple: [in7, in8]}, dtype: {dtype: f32}}
+                                        fields: {name: v10, op: {elementwise: multiply}, args: {tuple: [in7, in8]}, dtype: {dtype: f32}}
                                       - class: Accum
-                                        fields: {name: acc4, value: v11, op: {elementwise: add}, dtype: null, axes: {tuple: [a8]}, base: null}
+                                        fields: {name: acc4, value: v10, op: {elementwise: add}, dtype: null, axes: {tuple: [a8]}, base: null}
                                     unroll: false
                                     seed: true
                                 - class: Assign
-                                  fields: {name: v12, op: {elementwise: multiply}, args: {tuple: [acc4, in2]}, dtype: null}
+                                  fields: {name: v11, op: {elementwise: multiply}, args: {tuple: [acc4, in2]}, dtype: null}
                                 - class: Load
                                   fields:
                                     names: {tuple: [in9]}
@@ -327,7 +325,7 @@ loops:
                                     dtype: null
                                 - class: Select
                                   fields:
-                                    name: v13
+                                    name: v12
                                     branches:
                                       tuple:
                                       - class: SelectBranch
@@ -335,16 +333,16 @@ loops:
                                       - class: SelectBranch
                                         fields: {value: in0, select: {expr: {binary: {op: <, left: {var: a1}, right: {var: a7}}}}}
                                 - class: Assign
-                                  fields: {name: v14, op: {elementwise: add}, args: {tuple: [v12, v13]}, dtype: null}
+                                  fields: {name: v13, op: {elementwise: add}, args: {tuple: [v11, v12]}, dtype: null}
                                 - class: Assign
-                                  fields: {name: v15, op: {elementwise: subtract}, args: {tuple: [v14, acc1]}, dtype: null}
-                                - {class: Assign, fields: {name: v16, op: {elementwise: exp}, args: {tuple: [v15]}, dtype: null}}
+                                  fields: {name: v14, op: {elementwise: subtract}, args: {tuple: [v13, acc1]}, dtype: null}
+                                - {class: Assign, fields: {name: v15, op: {elementwise: exp}, args: {tuple: [v14]}, dtype: null}}
                                 - class: Assign
-                                  fields: {name: v17, op: {elementwise: multiply}, args: {tuple: [v10, v16]}, dtype: null}
+                                  fields: {name: v16, op: {elementwise: divide}, args: {tuple: [v15, acc3]}, dtype: null}
                                 - class: Assign
-                                  fields: {name: v18, op: {elementwise: multiply}, args: {tuple: [in9, v17]}, dtype: {dtype: f32}}
+                                  fields: {name: v17, op: {elementwise: multiply}, args: {tuple: [in9, v16]}, dtype: {dtype: f32}}
                                 - class: Accum
-                                  fields: {name: acc5, value: v18, op: {elementwise: add}, dtype: null, axes: {tuple: [a7]}, base: null}
+                                  fields: {name: acc5, value: v17, op: {elementwise: add}, dtype: null, axes: {tuple: [a7]}, base: null}
                               unroll: false
                               seed: true
                           - class: Write
@@ -366,6 +364,6 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_sdpa_9ff789
+      name: k_sdpa_9cc7d2
     inputs: [scaled_dot_product_attention_mask_fill_c, scaled_dot_product_attention_mask_zero_c, scaled_dot_product_attention_scale, x1, x0, x2]
     outputs: [[scaled_dot_product_attention, f16, [1, 8, 512, 128]]]

@@ -42,7 +42,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x2/k2
       WORK: w2x2
       REDUCE: ''
-    identity: 40807d8f51da50cc87e8b46c38fc405fdea693e653e79ae9e9ac221b6de9070f
+    identity: b0b0f54167418a44fb1d5aea29a3220f812b4f1767ff5cfd1bc166151f221b3e
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 33.37813218434651
@@ -111,8 +111,6 @@ loops:
                             fields: {name: acc1, value: v1, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
                         unroll: false
                         seed: true
-                    - class: Assign
-                      fields: {name: v2, op: {elementwise: reciprocal}, args: {tuple: [acc1]}, dtype: null}
                     - class: Loop
                       fields:
                         axis: {class: Axis, fields: {name: a4, extent: {dim: 128}, window: null}}
@@ -130,10 +128,10 @@ loops:
                                     index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}, {expr: {var: a5}}]}
                                     dtype: null
                                 - class: Assign
-                                  fields: {name: v3, op: {elementwise: subtract}, args: {tuple: [in2, acc0]}, dtype: null}
-                                - {class: Assign, fields: {name: v4, op: {elementwise: exp}, args: {tuple: [v3]}, dtype: null}}
+                                  fields: {name: v2, op: {elementwise: subtract}, args: {tuple: [in2, acc0]}, dtype: null}
+                                - {class: Assign, fields: {name: v3, op: {elementwise: exp}, args: {tuple: [v2]}, dtype: null}}
                                 - class: Assign
-                                  fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [v2, v4]}, dtype: null}
+                                  fields: {name: v4, op: {elementwise: divide}, args: {tuple: [v3, acc1]}, dtype: null}
                                 - class: Load
                                   fields:
                                     names: {tuple: [in3]}
@@ -141,9 +139,9 @@ loops:
                                     index: {tuple: [{expr: {var: a0}}, {expr: {var: a5}}, {expr: {var: a4}}]}
                                     dtype: null
                                 - class: Assign
-                                  fields: {name: v6, op: {elementwise: multiply}, args: {tuple: [in3, v5]}, dtype: {dtype: f32}}
+                                  fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [in3, v4]}, dtype: {dtype: f32}}
                                 - class: Accum
-                                  fields: {name: acc2, value: v6, op: {elementwise: add}, dtype: null, axes: {tuple: [a5]}, base: null}
+                                  fields: {name: acc2, value: v5, op: {elementwise: add}, dtype: null, axes: {tuple: [a5]}, base: null}
                               unroll: false
                               seed: true
                           - class: Write
@@ -160,6 +158,6 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_matmul_softmax_reduce_2e8114
+      name: k_matmul_softmax_reduce_4ad394
     inputs: [scores, v]
     outputs: [[o, f16, [16, {sym: seq_len, hint: 512}, 128]]]

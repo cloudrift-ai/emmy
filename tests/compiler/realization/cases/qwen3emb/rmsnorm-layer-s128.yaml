@@ -31,7 +31,7 @@ configs:
       REDUCE: coop
       RASTER: ''
       WORK: t128
-    identity: 58540327c132a38083248de419508e8366a630e3b4a3d6cff7e09b43f77b7b3c
+    identity: 6eb5adf63678015db022a3cc561e4c68598161fedb1fa51794c88450c5c9a074
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 3.6028302963890324
@@ -89,8 +89,6 @@ loops:
             input: o_mean_count
             index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
             dtype: null
-        - class: Assign
-          fields: {name: v0, op: {elementwise: reciprocal}, args: {tuple: [in1]}, dtype: null}
         - class: Loop
           fields:
             axis: {class: Axis, fields: {name: a0, extent: {dim: 128}, window: null}}
@@ -108,16 +106,16 @@ loops:
                         index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a0}}, {expr: {var: a1}}]}
                         dtype: null
                     - class: Assign
-                      fields: {name: v1, op: {elementwise: multiply}, args: {tuple: [in2, in2]}, dtype: null}
+                      fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in2, in2]}, dtype: null}
                     - class: Accum
-                      fields: {name: acc0, value: v1, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
+                      fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
                   unroll: false
                   seed: true
               - class: Assign
-                fields: {name: v2, op: {elementwise: multiply}, args: {tuple: [acc0, v0]}, dtype: null}
+                fields: {name: v1, op: {elementwise: divide}, args: {tuple: [acc0, in1]}, dtype: null}
               - class: Assign
-                fields: {name: v3, op: {elementwise: add}, args: {tuple: [in0, v2]}, dtype: null}
-              - {class: Assign, fields: {name: v4, op: {elementwise: rsqrt}, args: {tuple: [v3]}, dtype: null}}
+                fields: {name: v2, op: {elementwise: add}, args: {tuple: [in0, v1]}, dtype: null}
+              - {class: Assign, fields: {name: v3, op: {elementwise: rsqrt}, args: {tuple: [v2]}, dtype: null}}
               - class: Loop
                 fields:
                   axis: {class: Axis, fields: {name: a2, extent: {dim: 1024}, window: null}}
@@ -130,16 +128,16 @@ loops:
                         index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a0}}, {expr: {var: a2}}]}
                         dtype: null
                     - class: Assign
-                      fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [in3, v4]}, dtype: null}
+                      fields: {name: v4, op: {elementwise: multiply}, args: {tuple: [in3, v3]}, dtype: null}
                     - class: Load
                       fields: {names: {tuple: [in4]}, input: w, index: {tuple: [{expr: {var: a2}}]}, dtype: null}
                     - class: Assign
-                      fields: {name: v6, op: {elementwise: multiply}, args: {tuple: [in4, v5]}, dtype: null}
+                      fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [in4, v4]}, dtype: null}
                     - class: Write
                       fields:
                         output: o
                         index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a0}}, {expr: {var: a2}}]}
-                        values: {tuple: [v6]}
+                        values: {tuple: [v5]}
                         value_dtype: null
                         atomic: false
                         swizzle: NONE
@@ -147,6 +145,6 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_rms_norm_4faac8
+      name: k_rms_norm_93a72d
     inputs: [o_mean_count, o_eps, x, w]
     outputs: [[o, f32, [1, 128, 1024]]]

@@ -39,7 +39,7 @@ configs:
     knobs:
       REDUCE: coop
       WORK: t128
-    identity: 15aac96d9446219ed50ef89503b2746d4874edb9c76f09beac710e7ad38766c6
+    identity: 41fd51a1e59b41047aff43e37a2e7126fb07462b999e92c06cad0ec97e0473dc
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 1.6018490921436879
@@ -100,8 +100,6 @@ loops:
             input: n_mean_count
             index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
             dtype: null
-        - class: Assign
-          fields: {name: v0, op: {elementwise: reciprocal}, args: {tuple: [in1]}, dtype: null}
         - class: Loop
           fields:
             axis: {class: Axis, fields: {name: a0, extent: {dim: 8}, window: null}}
@@ -125,18 +123,18 @@ loops:
                         index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
                         dtype: null
                     - class: Assign
-                      fields: {name: v1, op: {elementwise: add}, args: {tuple: [in2, in3]}, dtype: null}
+                      fields: {name: v0, op: {elementwise: add}, args: {tuple: [in2, in3]}, dtype: null}
                     - class: Assign
-                      fields: {name: v2, op: {elementwise: multiply}, args: {tuple: [v1, v1]}, dtype: null}
+                      fields: {name: v1, op: {elementwise: multiply}, args: {tuple: [v0, v0]}, dtype: null}
                     - class: Accum
-                      fields: {name: acc0, value: v2, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
+                      fields: {name: acc0, value: v1, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
                   unroll: false
                   seed: true
               - class: Assign
-                fields: {name: v3, op: {elementwise: multiply}, args: {tuple: [acc0, v0]}, dtype: null}
+                fields: {name: v2, op: {elementwise: divide}, args: {tuple: [acc0, in1]}, dtype: null}
               - class: Assign
-                fields: {name: v4, op: {elementwise: add}, args: {tuple: [in0, v3]}, dtype: null}
-              - {class: Assign, fields: {name: v5, op: {elementwise: rsqrt}, args: {tuple: [v4]}, dtype: null}}
+                fields: {name: v3, op: {elementwise: add}, args: {tuple: [in0, v2]}, dtype: null}
+              - {class: Assign, fields: {name: v4, op: {elementwise: rsqrt}, args: {tuple: [v3]}, dtype: null}}
               - class: Loop
                 fields:
                   axis: {class: Axis, fields: {name: a2, extent: {dim: 256}, window: null}}
@@ -155,18 +153,18 @@ loops:
                         index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
                         dtype: null
                     - class: Assign
-                      fields: {name: v6, op: {elementwise: add}, args: {tuple: [in4, in5]}, dtype: null}
+                      fields: {name: v5, op: {elementwise: add}, args: {tuple: [in4, in5]}, dtype: null}
                     - class: Assign
-                      fields: {name: v7, op: {elementwise: multiply}, args: {tuple: [v5, v6]}, dtype: null}
+                      fields: {name: v6, op: {elementwise: multiply}, args: {tuple: [v4, v5]}, dtype: null}
                     - class: Load
                       fields: {names: {tuple: [in6]}, input: w, index: {tuple: [{expr: {var: a2}}]}, dtype: null}
                     - class: Assign
-                      fields: {name: v8, op: {elementwise: multiply}, args: {tuple: [in6, v7]}, dtype: null}
+                      fields: {name: v7, op: {elementwise: multiply}, args: {tuple: [in6, v6]}, dtype: null}
                     - class: Write
                       fields:
                         output: h
                         index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                        values: {tuple: [v6]}
+                        values: {tuple: [v5]}
                         value_dtype: null
                         atomic: false
                         swizzle: NONE
@@ -174,7 +172,7 @@ loops:
                       fields:
                         output: n
                         index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                        values: {tuple: [v8]}
+                        values: {tuple: [v7]}
                         value_dtype: null
                         atomic: false
                         swizzle: NONE
@@ -182,6 +180,6 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_rms_norm_041e02
+      name: k_rms_norm_c541be
     inputs: [n_mean_count, n_eps, x, r, w]
     outputs: [[h, f32, [8, 256]], [n, f32, [8, 256]]]
