@@ -364,12 +364,12 @@ def _w8a8_graph(m, n, k):
 def test_w8a8_needs_the_gate_to_enumerate_cuda(monkeypatch):
     """Without ``FP8_MMA`` / ``FAST_MATH`` (and no TILE pin) the same graph compiles OFF the
     native fp8 tier — no k32 mma anywhere — and still matches the quantized reference through the
-    scalar tier's per-element decode (the conservative default)."""
+    scalar tier's per-element decode."""
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.loader.binder import bind_constants
 
     monkeypatch.delenv("EMMY_FP8_MMA", raising=False)
-    monkeypatch.delenv("EMMY_FAST_MATH", raising=False)
+    monkeypatch.setenv("EMMY_FAST_MATH", "0")
     m, n, k = 32, 512, 512
     rng = np.random.default_rng(7)
     bits = rng.integers(0, 256, (n, k)).astype(np.uint8)

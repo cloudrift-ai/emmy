@@ -404,6 +404,7 @@ def test_trace_inventory_stores_the_kernel_and_its_traced_ops(tmp_path) -> None:
     (record,) = load_golden_records(load_golden_file(path))
 
     assert record.origins == ("y",)
+    assert record.pin_map == {"FAST_MATH": True}
     assert record.loop_wire is not None
     # The stored kernel stays the identity; its traced ops give the PyTorch slice it is compared against.
     assert torch_ref.is_runnable(record.reference_program)

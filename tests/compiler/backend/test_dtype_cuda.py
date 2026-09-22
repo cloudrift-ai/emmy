@@ -156,9 +156,11 @@ def _fp16_chain_graph() -> Graph:
 
 
 @requires_cuda
-def test_fp16_elementwise_chain_cuda():
+@pytest.mark.parametrize("fast_math", [False, True])
+def test_fp16_elementwise_chain_cuda(monkeypatch, fast_math):
     from emmy.compiler.backend.cuda.backend import CudaBackend
 
+    monkeypatch.setenv("EMMY_FAST_MATH", str(int(fast_math)))
     graph = _fp16_chain_graph()
     compiled = CudaBackend().compile(Pipeline.build(LOOP_PASSES).run(graph))
     # Verify the rendered CUDA source picked up fp16 signature + include
@@ -170,11 +172,11 @@ def test_fp16_elementwise_chain_cuda():
     sources = "\n".join(n.op.kernel_source for n in cuda_nodes)
     assert "__half" in sources, f"expected __half in kernel sources, got:\n{sources}"
     assert "cuda_fp16.h" in sources, f"expected cuda_fp16.h include, got:\n{sources}"
-    # Native fp16 chain — no boundary conversions on the data path.
-    # ``hexp`` (fp16 exp) + ``__float2half(0.0f)`` for the negation literal,
-    # native ``operator-`` on __half. No ``__half2float`` anywhere.
-    assert "hexp" in sources, f"expected native hexp, got:\n{sources}"
-    assert "__half2float" not in sources, f"native fp16 chain should not promote to float, got:\n{sources}"
+    if fast_math:
+        assert "__expf" in sources and "__float2half" in sources and "__half2float" in sources
+    else:
+        assert "hexp" in sources, f"expected native hexp, got:\n{sources}"
+        assert "__half2float" not in sources, f"native fp16 chain should not promote to float, got:\n{sources}"
 
     rng = np.random.default_rng(0)
     x_data = (rng.standard_normal(1024) * 0.5).astype(np.float16)
