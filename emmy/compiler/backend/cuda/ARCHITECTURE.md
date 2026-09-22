@@ -92,6 +92,10 @@ codegen, no nvcc), and both paths share every line downstream. The projection:
    outputs remain raw `uint16` bits at this backend boundary;
    command-layer correctness checks decode them.
 
+On targets without native FP8 conversion, E4M3 decode constructs the exact FP16 bit pattern, then widens when the
+consumer wants FP32. Subnormals, signed zero and the NaN code follow the dtype contract; exhaustive byte tests cover
+both result widths. This removes per-element exponent arithmetic without changing the stored representation.
+
 **Scratch-buffer reuse (`_planner.py`).** Step 1 does *not* give every node its
 own permanently-live buffer — that holds all 28 layers' `[heads, S, S]` attention scratch resident at once (~29 GB for
 Qwen3-Embedding at S=4096 → cupy OOM). A scratch buffer is live only from the launch that writes it to the last launch
@@ -283,8 +287,8 @@ availability, and capture state. `tune --bench` persists that verdict per proven
 successful timing response as proof of correctness.
 
 **One async transport — `_AsyncBenchWorker`.** It drives the `_bench_worker.py` subprocess protocol (`<8-byte LE
-length><pickle>`, both directions) over `asyncio` streams, so one event loop can keep N device-pinned workers benching
-concurrently (`tune --gpus`, see `pipeline/ARCHITECTURE.md` → *Per-kernel GPU parallelism*). Two entry shapes:
+length><pickle>`, both directions) over `asyncio` streams. The child completes short writes of both header and payload.
+One event loop keeps N device-pinned workers benching concurrently (`tune --gpus`). Two entry shapes:
 
 - **Autotune sweep** awaits `benchmark_program_isolated_async(graph, worker=…)`. `CudaBackend(device_id=i)` lazily owns
   one **persistent** worker (reused across configs — pay the ~0.2 s Python spawn once) and exposes `benchmark_async`,

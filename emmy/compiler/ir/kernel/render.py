@@ -39,6 +39,26 @@ from emmy.compiler.tensor import Tensor
 # single dynamic pool with per-buffer offsets.
 STATIC_SMEM_CAP = 48 * 1024
 
+# E4M3's finite values are half bit patterns shifted seven places, times 2**8.
+# This also normalizes subnormals without the SDK emulation's data-dependent loop.
+_F8_DECODE_PRELUDE = """\
+static __device__ __forceinline__ __half emmy_from_f8e4m3(__nv_fp8_e4m3 value) {
+#if __CUDA_ARCH__ >= 890
+    return __half(value);
+#else
+    unsigned int bits = value.__x;
+    unsigned short half_bits = ((bits & 0x7fu) << 7) | ((bits & 0x80u) << 8);
+    __half scaled = __hmul(__ushort_as_half(half_bits), __ushort_as_half(0x5c00u));
+    return (bits & 0x7fu) == 0x7fu ? __ushort_as_half(0x7fffu) : scaled;
+#endif
+}
+
+static __device__ __forceinline__ float emmy_from_f8e4m3_f32(__nv_fp8_e4m3 value) {
+    return __half2float(emmy_from_f8e4m3(value));
+}
+
+"""
+
 # e2m1 encode. The fp8 encodes construct a <cuda_fp8.h> type and inherit its rounding; there is no
 # fp4 type to construct, and the result here is an ordinary integer carrier, so leaving the cast to
 # the target would TRUNCATE the value (1.5 storing 1) instead of encoding it. Hence an explicit
@@ -1489,6 +1509,8 @@ def render_kernelop(
     sig_dtypes.extend(s.dtype for s in kernel_op.body.iter_of_type(Assign) if s.dtype is not None)
     sig_dtypes.extend(frag_dtype(ctx, s.frag) for s in kernel_op.body.iter_of_type(LdmatrixLoad) if frag_dtype(ctx, s.frag))
     includes = "".join(f"#include {h}\n" for h in cuda_includes(sig_dtypes))
+    if any(str(dtype) == "f8e4m3" for dtype in sig_dtypes):
+        includes += _F8_DECODE_PRELUDE
     # The mma.sync (s16816) tensor-core path is pure inline PTX — its
     # ldmatrix / mma.sync wrappers are emitted in ``_MMA_SYNC_PRELUDE``, so
     # NVRTC needs no ``<mma.h>`` (the legacy ``nvcuda::wmma`` family is gone).

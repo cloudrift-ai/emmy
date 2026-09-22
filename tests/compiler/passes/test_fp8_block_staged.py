@@ -19,7 +19,7 @@ from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.schedule.packing import match_packed_kblock_b
 from emmy.compiler.ir.schedule.views import cone_seam
 from emmy.compiler.ir.stmt import Assign, Load
-from tests.compiler.helpers import requires_cuda
+from tests.compiler.helpers import requires_cuda, requires_sm
 
 pytest.importorskip("torch")
 
@@ -163,9 +163,14 @@ def _run(graph, bundle, ckpt, pins):
 @requires_cuda
 @pytest.mark.parametrize(
     ("dtype", "atom", "stage"),
-    [("bfloat16", K16_BF16, "d2/smem-async"), ("float16", K16, "d2/smem-async"), ("bfloat16", K16_BF16, "d2/smem-tma")],
+    [
+        ("bfloat16", K16_BF16, "d2/smem-async"),
+        ("float16", K16, "d2/smem-async"),
+        pytest.param("bfloat16", K16_BF16, "d2/smem-tma", marks=requires_sm(9)),
+    ],
 )
 @pytest.mark.xdist_group("cuda")
+@requires_sm(8)
 def test_the_byte_slab_matches_the_compute_fill_bit_for_bit(tmp_path, dtype, atom, stage):
     """The staged fp8 drain and the compute fill hand the tensor cores the same 16-bit values, so
     the matmul agrees to the bit on either copy transport and either fragment dtype."""
@@ -177,6 +182,7 @@ def test_the_byte_slab_matches_the_compute_fill_bit_for_bit(tmp_path, dtype, ato
 
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
+@requires_sm(8)
 def test_the_fused_quantize_matches_the_cut_one_bit_for_bit(tmp_path):
     """The per-chunk group statistic computes the activation the quantize kernel writes, value for
     value, so fusing it into the matmul's fill changes nothing the tensor cores see."""

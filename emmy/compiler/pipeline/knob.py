@@ -50,6 +50,12 @@ STRUCT_PREFIX = "S_"
 # measured in, letting one global prior span every GPU / opt level.
 CTX_PREFIX = "H_"
 
+# Exact kernel identity travels with measurements, but is neither a tuning decision nor a numeric feature.
+IDENTITY_PREFIX = "I_"
+KERNEL_IDENTITY = "I_kernel"
+METADATA_PREFIXES = (STRUCT_PREFIX, CTX_PREFIX, IDENTITY_PREFIX)
+EVIDENCE_PREFIXES = (STRUCT_PREFIX, IDENTITY_PREFIX)
+
 
 class _Unset:
     """Sentinel for ``Knob.off`` meaning "no OFF value declared" — the knob is
@@ -255,7 +261,7 @@ def decision_view(knobs: dict) -> dict:
 
     This module owns the reserved prefixes, which is why the split lives here — a caller comparing
     two kernels' decisions asks for the view rather than re-deriving what counts as one."""
-    return {k: v for k, v in knobs.items() if not k.startswith((STRUCT_PREFIX, CTX_PREFIX))}
+    return {k: v for k, v in knobs.items() if not k.startswith(METADATA_PREFIXES)}
 
 
 def context_view(knobs: dict) -> dict:
@@ -520,9 +526,7 @@ def consume_kernel_row(knobs: dict) -> dict:
     neither — it is stamped and scheduled on its own, from its own body.
 
     It leaves any knob outside those families that the rewrite computed for the piece itself."""
-    return {
-        k: v for k, v in knobs.items() if family_of(k) not in KERNEL_DECISION_FAMILIES and not k.startswith((STRUCT_PREFIX, CTX_PREFIX))
-    }
+    return {k: v for k, v in knobs.items() if family_of(k) not in KERNEL_DECISION_FAMILIES and not k.startswith(METADATA_PREFIXES)}
 
 
 def schedule_pin_fingerprint() -> tuple[tuple[str, str], ...]:
@@ -584,7 +588,7 @@ def tuning_knob_items(knobs: dict) -> list[tuple[str, str]]:
     suffix, so this view performs no aliasing or scope collapse."""
     rendered: list[tuple[str, str]] = []
     for k, v in knobs.items():
-        if k.startswith(STRUCT_PREFIX) or k.startswith(CTX_PREFIX):
+        if k.startswith(METADATA_PREFIXES):
             continue
         knob = get(k)
         if knob is not None and knob.type is KnobType.BOOL:

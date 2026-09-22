@@ -18,22 +18,29 @@ knob rows are asserted without a device. Numerics for every carrier and both arm
 
 from __future__ import annotations
 
+from itertools import permutations
+
 import pytest
 
 from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import BF16, F16, F32
 from emmy.compiler.graph import Graph, Tensor
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
+from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.ir.pure.fold import Fold
-from emmy.compiler.ir.stmt import Loop
+from emmy.compiler.ir.stmt import Load, Loop, Write
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
+from emmy.compiler.ir.tile import OutputSpec, Placement
 from emmy.compiler.ir.tile.ir import TileOp
+from emmy.compiler.ir.tile.ops import sched_of
 from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import iter_leaves
 from emmy.compiler.pipeline.knob import STRUCT_PREFIX, decision_view, family_of
 from emmy.compiler.pipeline.pipeline import Run
+from tests.compiler.terms import contraction
 
 _CTX = Context.from_target((12, 0))
 
@@ -116,6 +123,39 @@ def test_split_preserves_every_fused_output(monkeypatch) -> None:
     assert set(owner.buffer_names()) == {"o", "o_neg"}
     assert f"{owner.id}__partial" in out.nodes
     out.validate()
+
+
+@pytest.mark.parametrize("free_order", list(permutations(("head", "row", "channel"))))
+def test_split_workspace_preserves_output_axis_order(monkeypatch, free_order) -> None:
+    """A split must not turn a channel tile into a padded tile across four heads."""
+    axes = {name: Axis(name, extent) for name, extent in (("head", 4), ("row", 64), ("channel", 256))}
+    k = Axis("k", 512)
+    root = contraction(
+        k,
+        Load("a", "a", (Var("row"), Var("k"))),
+        (Load("b", "b", (Var("head"), Var("channel"), Var("k"))), "acc"),
+    )
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("a", (64, 512), F16), node_id="a")
+    graph.add_node(InputOp(), [], Tensor("b", (4, 256, 512), F16), node_id="b")
+    graph.add_node(
+        TileOp(
+            op=root,
+            place=Placement(free=tuple(axes[name] for name in free_order)),
+            axes=(*axes.values(), k),
+            output_specs=(OutputSpec(Write("out", (Var("head"), Var("row"), Var("channel")), "acc")),),
+        ),
+        ["a", "b"],
+        Tensor("out", (4, 64, 256), F32),
+        node_id="out",
+    )
+    graph.inputs, graph.outputs = ["a", "b"], ["out"]
+    monkeypatch.setenv("EMMY_REDUCE", "g2k")
+    result, _ = _resolve(["lowering/tile"], graph)
+    partial = result.nodes["out__partial"]
+    assert tuple(dim.as_static() for dim in partial.output.shape) == (2, 4, 64, 256)
+    assert {axis.name for axis in sched_of(partial.op)._mn_for(partial.op.op)} == {"row", "channel"}
+    result.validate()
 
 
 @pytest.mark.parametrize("dtype", [F16, BF16])

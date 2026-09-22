@@ -239,7 +239,8 @@ Five rules make it load-bearing:
 
 1. **Regenerate through the library, not a CLI.** `emmy trace --target sm_89` still stamps `gpu_name` from the live
    card; the library path with an explicit context emits none. That is what makes the check machine-independent, so it
-   fires and its fix works on any box.
+   fires and its fix works on any box. A target without traced origins matches by its exact typed Loop identity;
+   changes to coordinate spelling or the derived kernel name do not lose the match.
 2. **Validate authored knobs strictly.** `validate_family_value` requires every classic value to use its sole wire
    spelling. Regeneration fails loudly on `STAGE=d2/ring`, `WORK=zzz9x9`, `TILE=mma_m64n64k64_…` or `REDUCE=g2z`,
    while a canonical but unreachable pin (`WORK=w7x13`, `TILE=…/f99x99/k8`) parses cleanly and falls through to

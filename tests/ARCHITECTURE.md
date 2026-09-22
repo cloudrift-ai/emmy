@@ -258,7 +258,11 @@ Optional adapter tests use `pytest.importorskip` for their own dependency extras
 trace runs when the `image` extra is installed; the real checkpoint/CUDA comparison is additionally `perf`-marked and
 requires `EMMY_RUN_DIT_PRETRAINED=1`, so normal CI never downloads the multi-gigabyte checkpoint.
 
-`tests/compiler/helpers.py` exposes `device_compute_capability()` and the `requires_sm90` skip marker. The
+`tests/compiler/helpers.py` exposes `device_compute_capability()`, the `requires_sm(major, minor)` marker, and
+`requires_sm90`. Tests pinning a particular instruction must name its minimum capability: sm_80 for cp.async and
+m16n8k16, sm_89 for FP8 mma, and sm_90 for TMA. Native block-scaled FP4 tests require sm_12x. Scalar and Volta schedules
+remain covered on V100. The serving fixture's authored scalar schedules are scoped to the live card; their original
+tracing card does not restrict these unmeasured correctness cases, and strict evidence remains required. The
 mma.sync warp tier (swizzled `ldmatrix` + `mma.sync`, TMA transport) auto-enumerates and is validated on **sm_90+**;
 on sm_80-89 it is pin-only and currently non-functional for two independent reasons — the `sm_NNa` arch-accelerated
 target the TMA path emits is rejected by nvcc (`Unsupported gpu architecture 'sm_89a'`), and `ldmatrix` itself faults

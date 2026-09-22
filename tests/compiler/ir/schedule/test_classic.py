@@ -99,6 +99,48 @@ def _reduce_sites(tile: TileOp) -> tuple[int, ...]:
     return tuple(site for site, view in enumerate(tile.views) if view.axis is not None)
 
 
+@pytest.mark.parametrize("free_order", list(permutations(("head", "row", "channel"))))
+def test_contraction_tiles_the_contiguous_output_axis_across_grid_orders(free_order):
+    from emmy.compiler.ir.schedule.classic.materialize import materialize_classic
+    from emmy.compiler.ir.tile.ops import sched_of
+
+    axes = {name: Axis(name, extent) for name, extent in (("head", 4), ("row", 64), ("channel", 256))}
+    root = contraction(
+        _K,
+        Load("a", "a", (Var("row"), Var("k"))),
+        (Load("b", "b", (Var("head"), Var("channel"), Var("k"))), "acc"),
+    )
+    tile = TileOp(
+        op=root,
+        place=Placement(free=tuple(axes[name] for name in free_order), grid=tuple(axes[name] for name in free_order), mapped=True),
+        axes=(*axes.values(), _K),
+        output_specs=(OutputSpec(Write("out", (Var("head"), Var("row"), Var("channel")), "acc")),),
+        outputs={"out": Tensor("out", (4, 64, 256))},
+    )
+    assert {axis.name for axis in sched_of(tile)._mn_for(tile.op)} == {"row", "channel"}
+    target = Context.from_target((7, 0))
+    context = ClassicScheduleContext(tile, target)
+    direct = _direct(context)
+    site = context.tile_op.node_sites[0]
+    schedule = Schedule(
+        KernelSchedule(Work.parse("t8x8"), Raster()),
+        {**direct.nodes, site: ReductionSchedule(Tile(units=(8, 8)), Reduce())},
+        direct.edges,
+    )
+    result = materialize_classic(
+        tile, name="layout", knobs=ClassicScheduleCodec(context).encode(schedule), target=target, schedule=schedule
+    )
+    assert result.outputs == tile.outputs
+    assert {axis.name for axis in result.materialization.tiles[site].axes} == {"row", "channel"}
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("a", (64, 8)), node_id="a")
+    graph.add_node(InputOp(), [], Tensor("b", (4, 256, 8)), node_id="b")
+    graph.add_node(result, ["a", "b"], tile.outputs["out"], node_id="out")
+    restored = Graph.from_dict(json.loads(json.dumps(graph.to_dict(), default=str))).nodes["out"].op
+    assert restored.outputs == result.outputs
+    assert restored.materialization == result.materialization
+
+
 def test_shared_node_has_one_site_and_each_use_has_an_edge() -> None:
     shared = _sum()
     left = projection((shared,), (Assign("left", "add", ("sum", "sum")),), ("left",))

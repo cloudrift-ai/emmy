@@ -728,7 +728,7 @@ class Fold:
                 continue  # a planar fold seeds the ⊕ itself; a recipe's base is a monoid by construction
             if not product.op.distributes_over(plus):
                 continue
-            left = [arg for arg in product.args if _over_a(arg, cone, a_names, uniform)]
+            left = [arg for arg in product.args if _over_a(arg, cone, a_names, uniform | a_edge.free_axes)]
             right = [arg for arg in product.args if (edge := by_name.get(arg)) is not None and edge is not a_edge and edge.free_axes]
             if len(left) != 1 or len(right) != 1 or left[0] == right[0]:
                 continue  # a square, or a product that does not multiply A by exactly one other edge
@@ -1140,6 +1140,28 @@ class Fold:
             observe=None if self.observe is None else self.observe.rename(mapping),
         )
 
+    def read_components(self, stored: frozenset[str] = frozenset()) -> dict[int, tuple[str, ...]]:
+        """The components each term in this tree supplies to all its readers and boundary stores.
+
+        Propagate demand through narrowed lifts. Shared terms keep the union of their readers'
+        requests, so lowering never emits overlapping carriers with duplicate accumulator names.
+        """
+        taken: dict[int, tuple[str, ...]] = {}
+        pending = [(self, self.exposes)]
+        while pending:
+            term, asked = pending.pop()
+            wanted = set(taken.get(id(term), ())) | set(asked)
+            names = tuple(name for name in term.exposes if name in wanted)
+            if taken.get(id(term)) == names:
+                continue
+            taken[id(term)] = names
+            narrowed = term.exposing(names) if names else None
+            read = narrowed.step().ssa_uses | set(narrowed.exposes) if narrowed is not None else set()
+            for edge in term.operands:
+                keep = edge.exposes if _writes_under(edge, stored) else tuple(name for name in edge.exposes if name in read)
+                pending.append((edge, keep))
+        return taken
+
     @cached_method
     def lower(self, bound: frozenset[str] | None = None, stores: tuple[OutputSpec, ...] = (), axes: tuple[Axis, ...] = ()) -> Body:
         """Flatten this term to the Loop IR nest the materializer expands, the kernel's boundary
@@ -1209,22 +1231,10 @@ class Fold:
                     origin.update((name, (id(term), "observed")) for name in term.observe.results)
             pending.extend(reversed(term.operands))
         owned: dict[tuple[int, str], list[OutputSpec]] = {}
+        taken = self.read_components(frozenset(name for spec in stores for name in spec.write.values))
 
         def placed(term: Fold) -> tuple[Fold, ...]:
-            # An operand is placed for the COMPONENTS the term reads, or whole when the tree below
-            # it defines a value the kernel STORES — a nested output sweep is materialized for its
-            # own store, not for its reader, and narrowing it would lose that store's owner. An
-            # edge no component of which is read is a site the schedule may take and the nest has
-            # no use for; one only partly read costs only the part.
-            seen = set(term.step().ssa_uses) | set(term.exposes)
-            out = []
-            for edge in term.operands:
-                kept = tuple(name for name in edge.exposes if name in seen)
-                if _writes_under(edge, writing):
-                    out.append(edge)
-                elif kept:
-                    out.append(edge.exposing(kept))
-            return tuple(out)
+            return tuple(edge.exposing(taken[id(edge)]) for edge in term.operands if taken[id(edge)])
 
         for spec in stores:
             key = origin.get(spec.write.values[0])
@@ -1307,7 +1317,6 @@ class Fold:
                     body.append(Loop(axis=coordinates[name], body=assemble((*path, name))))
             return _scope(body)
 
-        writing = {term for term, _ in owned}
         place(self, [], None)
         return assemble(())
 
@@ -1391,25 +1400,24 @@ def _channel_product(lift: Lambda, result: str) -> tuple[Lambda, Assign | None]:
     return cone, stmt if isinstance(stmt, Assign) else None
 
 
-def _over_a(name: str, cone: Lambda, a_names: set[str], uniform: set[str]) -> bool:
+def _over_a(name: str, cone: Lambda, a_names: set[str], available: set[str]) -> bool:
     """Whether ``name`` is the A factor of ``cone``'s product — a component ``operands[0]`` binds,
-    or a value the cone computes from those components and kernel-UNIFORM ones alone.
+    or a value the cone computes from those components, A's coordinates and uniform values.
 
     The second reading is what lets a carrier read bilinear before its weight is reified. It walks
     the cone, which is this lift's own body, and never an operand's internals: a name bound to any
     other edge closes back as itself and fails the test.
 
-    ``uniform`` are the components of operands with no free coordinates — attention's scale, an rms
-    epsilon. One contributes no variation, so a factor reading it varies exactly as A does and the
-    channel is bilinear all the same. Without them the weight ``exp(a·scale)`` reads as a product
-    of A with a second varying value and no mma is offered at all."""
+    ``available`` includes A's free coordinates and components of coordinate-free operands. A mask
+    over A's coordinates or a uniform scale adds no dependence outside A; a coordinate exclusive
+    to B does, and must refuse the contraction."""
     if name in a_names:
         return True
     reads = set(cone.cone(name).params)
-    return bool(reads & a_names) and reads <= a_names | uniform
+    return bool(reads & a_names) and reads <= a_names | available
 
 
-def _writes_under(term: Fold, writing: set[int]) -> bool:
+def _writes_under(term: Fold, stored: frozenset[str]) -> bool:
     """Whether any term of ``term``'s subtree defines a value the kernel's boundary stores."""
     pending, seen = [term], set()
     while pending:
@@ -1417,7 +1425,7 @@ def _writes_under(term: Fold, writing: set[int]) -> bool:
         if id(node) in seen:
             continue
         seen.add(id(node))
-        if id(node) in writing:
+        if (set(node.exposes) | node.step().ssa_defs) & stored:
             return True
         pending.extend(node.operands)
     return False

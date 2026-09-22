@@ -39,7 +39,7 @@ from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.knob import family_value
 from emmy.compiler.pipeline.search.features import mma_atom
-from tests.compiler.helpers import dyn_M, requires_cuda, requires_sm90
+from tests.compiler.helpers import dyn_M, requires_cuda, requires_sm, requires_sm90
 
 
 def _has_cuda() -> bool:
@@ -326,6 +326,7 @@ def test_tma_stage_pin_refuses_below_sm90(monkeypatch) -> None:
 
 @requires_cuda
 @pytest.mark.parametrize("stage", ["d2/smem-async", "d3/smem-async"])
+@requires_sm(8)
 def test_scalar_ring_matches_gmem_direct_bit_for_bit(monkeypatch, stage):
     """The SCALAR gmem→smem prefetch ring (``STAGE=d<depth>/cp``, depth ≥ 2) runs the same
     ``staged_kloop`` phases as the warp ring — the atom contributes only the slab drain — and is a
@@ -1687,6 +1688,7 @@ def _imap_run(g: Graph) -> tuple[np.ndarray, str]:
 
 
 @requires_cuda
+@requires_sm(8)
 def test_reshaped_b_under_cp_async_matches_reference(monkeypatch):
     """A re-strided B staged through cp.async: each copy chunk reads the index at its own
     coordinates, so the derived row stride is what the fill copies."""
@@ -1699,6 +1701,7 @@ def test_reshaped_b_under_cp_async_matches_reference(monkeypatch):
 
 
 @requires_cuda
+@requires_sm(8)
 def test_reshaped_a_fragment_takes_the_derived_row_stride(monkeypatch):
     """The gmem-direct mma fragment loader steps the reshaped A's rows at the DERIVED 128, not the
     buffer's declared trailing extent 256 — the ``ldm`` argument IS the bug, visible in the source."""
@@ -1730,6 +1733,7 @@ def test_reshaped_a_tma_pin_is_refused(monkeypatch):
 
 
 @requires_cuda
+@requires_sm(9)
 def test_sliced_a_still_stages_through_tma(monkeypatch):
     """The canonical (sliced) A keeps its TMA box, so the refusal above is not a dead pin."""
     monkeypatch.setenv("EMMY_STAGE", "d2/smem-tma")

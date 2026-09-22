@@ -9,6 +9,7 @@ match eager numpy within fp16 tolerance.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from emmy.compiler import dtype as dt
 from emmy.compiler.backend.cuda.dtype import canonical_from_cuda_name, cuda_name, nbytes_of
@@ -100,6 +101,27 @@ def test_fp8_cuda_traits():
     assert cuda_includes([dt.F8E4M3, dt.F8E5M2]) == ["<cuda_fp8.h>"]
     for spelling in (dt.F8E4M3, "f8e4m3", "float8_e4m3fn", "__nv_fp8_e4m3", "__nv_fp8_e5m2"):
         assert nbytes_of(spelling) == 1
+
+
+@requires_cuda
+@pytest.mark.parametrize("output_dtype", [dt.F16, dt.F32])
+def test_e4m3_decode_exhaustive_cuda(output_dtype):
+    """Every code, including subnormals, signed zero and both NaNs, matches the storage oracle."""
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("bits", (256,), dt.F8E4M3), node_id="bits")
+    graph.add_node(ElementwiseOp("from_f8e4m3"), ["bits"], Tensor("decoded", (256,), output_dtype), node_id="decoded")
+    graph.inputs, graph.outputs = ["bits"], ["decoded"]
+    bits = np.arange(256, dtype=np.uint8)
+    backend = CudaBackend()
+    result, _ = backend.run(backend.compile(graph), input_data={"bits": bits})
+    got = result.outputs["decoded"]
+    expected = dt.decode_f8(bits, "f8e4m3").astype(got.dtype)
+    finite = np.isfinite(expected)
+    np.testing.assert_array_equal(np.isnan(got), np.isnan(expected))
+    np.testing.assert_array_equal(got[finite], expected[finite])
+    np.testing.assert_array_equal(np.signbit(got[finite]), np.signbit(expected[finite]))
 
 
 def _fp16_chain_graph() -> Graph:

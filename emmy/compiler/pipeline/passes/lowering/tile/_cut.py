@@ -610,20 +610,6 @@ def _replace_fold(node: Fold, targets: dict[int, tuple], renamed: dict[str, str]
     return _follow_reads(node, replace(node, operands=operands, lift=lift), renamed)
 
 
-def _stores_under(term: Fold, stored: set[str]) -> bool:
-    """Whether the kernel's boundary stores read a value ``term``'s subtree exposes."""
-    pending, seen = [term], set()
-    while pending:
-        node = pending.pop()
-        if id(node) in seen:
-            continue
-        seen.add(id(node))
-        if set(node.exposes) & stored:
-            return True
-        pending.extend(node.operands)
-    return False
-
-
 def _kept_components(tile: TileOp) -> dict[int, tuple[str, ...]]:
     """Per stored edge, the result components its READERS take — what :meth:`Fold.lower` places.
 
@@ -640,23 +626,7 @@ def _kept_components(tile: TileOp) -> dict[int, tuple[str, ...]]:
     # same spelling or a store of an operand's own result reads as a name no edge exposes.
     spelled = dict(zip(tile.op.lift.params, tile.op.applied.params, strict=True))
     stored = {spelled.get(name, name) for store in tile.output_specs for name in store.write.values}
-    taken_by: dict[int, set[str]] = {}
-    edges: dict[int, Fold] = {}
-    pending, seen = [tile.op], set()
-    while pending:
-        term = pending.pop()
-        if id(term) in seen:
-            continue
-        seen.add(id(term))
-        taken = set(term.step().ssa_uses) | set(term.exposes)
-        for edge in term.operands:
-            edges[id(edge)] = edge
-            taken_by.setdefault(id(edge), set()).update(name for name in edge.exposes if name in taken)
-            pending.append(edge)
-    return {
-        key: edge.exposes if _stores_under(edge, stored) else tuple(name for name in edge.exposes if name in taken_by[key])
-        for key, edge in edges.items()
-    }
+    return tile.op.read_components(frozenset(stored))
 
 
 def _workspace_axes(seam: CutSite, produced: Fold) -> tuple:

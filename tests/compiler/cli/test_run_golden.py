@@ -44,11 +44,32 @@ def _args(tmp_path, **updates):
     return SimpleNamespace(**values)
 
 
+def _records(names):
+    program = {}
+    return [
+        SimpleNamespace(
+            name=name,
+            identity=None,
+            loop_wire=None,
+            program_wire=program,
+            target_key=name,
+            compute_cap=(7, 0),
+            bindings=(),
+            pin_map={},
+            is_routing=False,
+            emmy_us=0.0,
+        )
+        for name in names
+    ]
+
+
 def _patch_records(monkeypatch, names):
     from emmy.compiler.pipeline.search import golden
 
+    rows = _records(names)
     monkeypatch.setattr(golden, "load_golden_file", lambda _path: {})
-    monkeypatch.setattr(golden, "load_golden_records", lambda _document: [SimpleNamespace(name=name) for name in names])
+    monkeypatch.setattr(golden, "load_golden_records", lambda _document: rows)
+    return rows
 
 
 def test_golden_runs_every_distinct_target_in_process(monkeypatch, tmp_path):
@@ -65,7 +86,12 @@ def test_golden_runs_every_distinct_target_in_process(monkeypatch, tmp_path):
 def test_golden_walk_benches_each_target_once_not_its_receipts(monkeypatch, tmp_path):
     """Routing rows and child-identity receipts (``<target>.<identity>``) are evidence for their target's
     walk, not targets: the walk names the target once and leaves the rows to the evidence pick."""
-    _patch_records(monkeypatch, ["k_mean.aaaa", "k_mean.aaaa.c5cd", "k_lin.bbbb", "k_lin.bbbb.8270", "k_lin.bbbb.4d7f", "orphan.cccc.dddd"])
+    rows = _patch_records(
+        monkeypatch, ["k_mean.aaaa", "k_mean.aaaa.c5cd", "k_lin.bbbb", "k_lin.bbbb.8270", "k_lin.bbbb.4d7f", "orphan.cccc.dddd"]
+    )
+    for index, parent in ((1, 0), (3, 2), (4, 2)):
+        rows[index].target_key = rows[parent].target_key
+        rows[index].identity = "receipt"
     calls = []
     monkeypatch.setattr(run_mod, "_handle_run_once", calls.append)
 
@@ -79,8 +105,13 @@ def test_golden_walk_without_seeds_benches_the_row_pricing_the_whole_target(monk
     fastest routing row, an unsplit one through its fastest row — never a piece's receipt."""
     from emmy.compiler.pipeline.search import golden
 
+    program = {}
+
     def row(name, routing, emmy_us):
-        return SimpleNamespace(name=name, identity=name[-4:] * 16, is_routing=routing, emmy_us=emmy_us)
+        record = _records([name])[0]
+        record.identity, record.is_routing, record.emmy_us = name[-4:] * 16, routing, emmy_us
+        record.program_wire, record.target_key = program, name.rsplit(".", 1)[0]
+        return record
 
     rows = [
         row("post16.k_a.1111.m16.aaaa", False, 4.0),
@@ -96,6 +127,20 @@ def test_golden_walk_without_seeds_benches_the_row_pricing_the_whole_target(monk
     run_mod._run_golden_targets(_args(tmp_path))
 
     assert [args.realization for args in calls] == ["post16.k_a.1111.m16.cccc", "pre1.k_b.2222.m1.eeee"]
+
+
+def test_golden_walk_keeps_dotted_names_bindings_and_pin_regimes(monkeypatch, tmp_path):
+    rows = _patch_records(monkeypatch, ["k_mean", "k_mean.type_as", "dynamic.m16", "dynamic.m32", "exact", "fast"])
+    rows[2].target_key = rows[3].target_key = "dynamic"
+    rows[2].bindings, rows[3].bindings = (("m", 16),), (("m", 32),)
+    rows[4].target_key = rows[5].target_key = "precision"
+    rows[4].pin_map, rows[5].pin_map = {"FAST_MATH": False}, {"FAST_MATH": True}
+    calls = []
+    monkeypatch.setattr(run_mod, "_handle_run_once", calls.append)
+
+    run_mod._run_golden_targets(_args(tmp_path))
+
+    assert [args.realization for args in calls] == [row.name for row in rows]
 
 
 def test_golden_walk_reports_every_target_before_failing(monkeypatch, tmp_path):
@@ -228,7 +273,7 @@ def test_golden_document_is_parsed_once_for_every_target(monkeypatch, tmp_path):
     loads = []
     document = {"configs": []}
     monkeypatch.setattr(golden, "load_golden_file", lambda _path: loads.append(_path) or document)
-    monkeypatch.setattr(golden, "load_golden_records", lambda _document: [SimpleNamespace(name=name) for name in ("a", "b", "c")])
+    monkeypatch.setattr(golden, "load_golden_records", lambda _document: _records(("a", "b", "c")))
     calls = []
     monkeypatch.setattr(run_mod, "_handle_run_once", calls.append)
 

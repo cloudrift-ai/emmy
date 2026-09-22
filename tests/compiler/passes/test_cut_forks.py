@@ -637,7 +637,9 @@ def test_evidence_rows_key_each_row_by_the_kernel_it_decides() -> None:
     replay = _replay(parent, exhaustive=True)
     child, rows = next((identity, rows) for identity, rows in replay.rows.items() if identity is not None and identity != lift_identity)
     receipt = GoldenRecord(knobs=dict(next(iter(rows))), identity=child, **fields)
-    parent_signature = frozenset((key, str(value)) for key, value in parent.structural_features.items())
+    parent_signature = frozenset(
+        (key, str(value)) for key, value in _target_kernel_nodes(parent)[1][0].op.knobs.items() if key.startswith(("S_", "I_"))
+    )
 
     assert _replay(routing).arms == ((parent_signature, route),)
     with records_override([routing, receipt]):
@@ -677,7 +679,9 @@ def test_evidence_rows_replay_an_identityless_kernel_set_lead() -> None:
     route = {"PLACE@map.1/twist.1/inner": "cut"}
     routing = GoldenRecord(name="sdpa.route", knobs=route, identity="0" * 64, **{k: v for k, v in fields.items() if k != "name"})
     lead = GoldenRecord(name="sdpa.lead", knobs={}, kernel_set=(routing.name,), **{k: v for k, v in fields.items() if k != "name"})
-    parent_signature = frozenset((key, str(value)) for key, value in lead.structural_features.items())
+    parent_signature = frozenset(
+        (key, str(value)) for key, value in _target_kernel_nodes(lead)[1][0].op.knobs.items() if key.startswith(("S_", "I_"))
+    )
 
     with records_override([lead, routing]):
         got = evidence_rows("", (12, 0))

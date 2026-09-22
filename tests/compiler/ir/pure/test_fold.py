@@ -23,7 +23,7 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.pure.twist import SOFTMAX, Twist
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Let, Loop, OutputSpec, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Let, Load, Loop, OutputSpec, Write
 from tests.compiler.terms import contraction, projection, reduction, slab
 
 M_AXIS, N_AXIS, K_AXIS = Axis("m", Dim(8)), Axis("n", Dim(4)), Axis("k", Dim(16))
@@ -290,6 +290,23 @@ def _twisted(states: tuple[str, str] = ("m", "l")) -> Fold:
 def test_twisted_components_cannot_be_pruned_independently() -> None:
     fold = _twisted()
     assert fold.exposing(("l",)) is fold
+
+
+def test_shared_channels_are_lowered_once_across_partial_readers() -> None:
+    shared = contraction(
+        K_AXIS,
+        slab("x", "x", "m", "k"),
+        *((slab(name, name, "k", "n"), f"acc_{name}") for name in ("a", "b", "c", "unused")),
+    )
+    left = projection((shared,), (Assign(name="left", op="add", args=("acc_a", "acc_b")),))
+    right = projection((shared,), (Assign(name="right", op="multiply", args=("acc_b", "acc_c")),))
+    dead = _reduce((slab("dead_value", "unused", "m", "k"),), (Assign(name="dead__v", op="copy", args=("dead_value",)),), "dead")
+    root = projection((left, right, dead), results=("left", "right"))
+
+    body = root.lower(axes=SCOPE)
+    accumulators = [stmt.name for stmt in body.iter() if isinstance(stmt, Accum)]
+    assert sorted(accumulators) == ["acc_a", "acc_b", "acc_c"]
+    assert "unused" not in {stmt.input for stmt in body.iter() if isinstance(stmt, Load)}
 
 
 def test_a_twisted_state_spelling_never_reaches_the_canonical_form() -> None:

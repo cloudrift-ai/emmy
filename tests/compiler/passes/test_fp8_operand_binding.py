@@ -33,7 +33,7 @@ from emmy.compiler.ir.schedule.staging import resolve_warp_stage
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.tile import Placement, TileOp
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import _stamp_axes, fold_from_loop
-from tests.compiler.helpers import requires_cuda
+from tests.compiler.helpers import requires_cuda, requires_sm
 from tests.compiler.terms import contraction, projection
 
 # ===================================================================
@@ -287,6 +287,7 @@ def _fp8_linear_graph(m=32, n=512, k=512):
 
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
+@requires_sm(8)
 def test_fp8_b_matmul_reaches_warp_tier_cuda():
     """The fragment-convert path (M2b priority 3): under a warp ``TILE`` pin the fp8-B linear
     lands on the mma tier — the gmem-direct B fragment load converts fp8 bytes to f16 per element

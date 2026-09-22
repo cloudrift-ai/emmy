@@ -10,6 +10,7 @@ slow kernel, and no numerics assert downstream would attribute the wrong answer 
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 
 import pytest
 
@@ -65,6 +66,21 @@ def test_a_weight_derived_from_the_streamed_value_is_no_contraction() -> None:
     offering an mma for it would be a wrong answer, not a slow kernel."""
     assert _carrier("v").bilinear_channels() == ()
     assert _carrier("v").as_contraction() is None
+
+
+@pytest.mark.parametrize(("coordinate", "contracts"), [("i", True), ("j", True), ("n", False)])
+def test_a_weight_may_read_only_its_own_operand_coordinates(coordinate, contracts) -> None:
+    carrier = _carrier("r")
+    body = Body(
+        (
+            Let("offset", Var(coordinate)),
+            Assign("shifted", "add", ("r", "offset")),
+            replace(carrier.lift.body[0], args=("shifted",)),
+            carrier.lift.body[1],
+        )
+    )
+    carrier = replace(carrier, lift=Lambda.closing(carrier.lift.params, body, carrier.lift.results))
+    assert (carrier.as_contraction() is not None) == contracts
 
 
 def _folds(root: Fold):
@@ -144,6 +160,7 @@ def test_causal_sdpa_uses_the_same_twisted_rewrite() -> None:
     )
 
     assert len(fold.init) == 3
+    assert fold.as_contraction() is not None
 
 
 def test_a_cat_in_the_query_cone_still_twists() -> None:

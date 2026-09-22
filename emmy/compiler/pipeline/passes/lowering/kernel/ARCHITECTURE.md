@@ -106,7 +106,8 @@ dynamic-grid tier ceil-divides the launch and threads the runtime extent as an `
 ### The one factorizer
 
 `_factor.factorize(tile, root)` is the **entry** every `TileOp` root lowers through: it builds the ambient `Ctx` and
-dispatches `tile.op` into the recursion `_factorize(op, ctx, tail, out_val)`. `_factorize` walks the node tree — a
+binds a wholly serial tree directly, so shared carriers are lowered together. A schedule that tiles an output or
+partitions a reduction dispatches into `_factorize(op, ctx, tail, out_val)`. `_factorize` walks the node tree — a
 zero-axis `Fold` with an operand recurses (its projection body and sibling operands lower into the `tail`), and each
 leaf binds to the grid via the **ONE** root-binding pipeline, `_bind` — a single pipeline that reads WHICH AXES the
 schedule tiles off the node
@@ -187,7 +188,8 @@ sink so a paired Volta operand layout and its accumulator map remain one coupled
 
 - **mma** (`_MmaOps`) — atom `(16, 8, 16)`, `lanes == 32`. The UNIT is a **warp**; its leaves emit `RegFragment` /
   `LdmatrixLoad` / `MmaSyncPtx` / `RegStore` and decode the atom-lane offset at render. `RegStore` derives both
-  algebraic M/N strides from the output index: contiguous N keeps packed stores, while a reversed physical orientation
+  algebraic M/N strides from the full physical output address, including composite coordinate coefficients:
+  contiguous N keeps packed stores, while a reversed physical orientation
   uses scalar strided stores. On Volta, each adjacent accumulator pair stays packed under an M-only tail guard; an N
   guard still splits the pair. Complete paired Volta tiles derive the interleaved 32×32 accumulator map that matches
   their operand layouts. A multi-channel root partitions its projection by output dependence and emits one store sink
@@ -660,6 +662,7 @@ stale float stamp that a structurally cloned, previously untyped body can carry.
 `095_interleave_loads` pack/reorder memory ops; `096_pair_ldmatrix_loads` fuses adjacent staged fragment loads. On
 modern atoms, two B `x2` loads become one `x4` (plain for N-adjacent transposed B, transposed for col-adjacent canonical
 B). On Volta, adjacent A or B fragments under the derived crosswise/congruous layouts become one 128-bit shared load.
+Copy fills and computed operand fills use these same coupled layouts and accumulator mapping.
 The transform halves the staged drain's LSU instructions and is bit-identical; equal modern swizzle modes remain
 pairable because their per-lane address XOR commutes with the paired lane map;
 `110_drop_redundant_syncs` collapses the defensive `Sync`s the

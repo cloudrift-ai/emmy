@@ -168,6 +168,25 @@ def _golden_row(sig: frozenset, tun: dict, us: float, name: str):
     return (sig, tun, us, name)
 
 
+def test_measured_rows_do_not_cross_exact_kernel_identities(monkeypatch) -> None:
+    from emmy.compiler.pipeline.search import golden
+
+    monkeypatch.setattr(golden, "evidence_rows", lambda _gpu, _cap: [])
+    common = {"S_shape": 128, "H_opt": 3}
+    rows = [
+        SimpleNamespace(status="ok", stats=SimpleNamespace(median=17.0), knobs={**common, "I_kernel": "flat", "WORK": "t32"}),
+        SimpleNamespace(status="ok", stats=SimpleNamespace(median=27.0), knobs={**common, "I_kernel": "strided", "WORK": "t512"}),
+        SimpleNamespace(status="ok", stats=SimpleNamespace(median=1.0), knobs={**common, "WORK": "t64"}),
+    ]
+    db = SimpleNamespace(iter_perf=lambda *_args, **_kwargs: rows)
+    ctx = SimpleNamespace(gpu_name="card", compute_capability=(7, 0))
+    index = _db_measured_index_build(db, ctx)
+    candidates = [{**common, "I_kernel": "strided", "WORK": work} for work in ("t32", "t64", "t512")]
+
+    assert greedy._db_measured_pick(index.ok, candidates) == (2, 27.0)
+    assert greedy._sig_groups(index.ok, frozenset({("S_shape", "128"), ("I_kernel", "unmeasured")})) == []
+
+
 def test_measured_index_folds_golden_rows_beside_the_tune_db(monkeypatch) -> None:
     """Golden rows enter the ONE evidence index the greedy pick reads, in the tune DB rows' shape: a
     schedule row ranks under its signature (and is remembered by name for the audit), a row that

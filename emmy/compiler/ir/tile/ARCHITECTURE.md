@@ -76,7 +76,9 @@ For a broadcast-batched product whose batch axis occurs in only one operand, the
 still supplies that geometry. If its geometric first operand reads the reduction axis non-contiguously and the other
 materialized operand reads it contiguously, the commutative product puts the contiguous operand in the shared A slot;
 placement then derives the corresponding physical M/N orientation from the operand axes. Physical M/N orientation
-remains a placement fact rather than part of the Fold algebra.
+remains a placement fact rather than part of the Fold algebra. Where an operand owns several free axes, the smallest
+known output stride chooses its tiled axis. Undetermined layouts retain the trailing placement order. Stored schedules
+retain the same input and output tensors as the unscheduled Tile so reconstruction makes the same choice.
 
 The bilinear form is CANONICAL BY CONSTRUCTION: formation (`lowering/tile/_fromloop`) turns every load of a reduce
 step over coordinates into a slab operand (a data-dependent gather, the packed-pair table read by a decoded code,
@@ -102,8 +104,10 @@ even though no lift binds it. The dead components are rewrite residue: the twist
 and mints `_unread<i>` for a slot its reader stopped binding, and an epilogue cone beside it keeps exposing a scale that
 was live when it was formed and went dead when the folds fused. Independent planar states narrow their injection,
 identity and componentwise combine together. Twisted and observed states remain whole because their components may
-be coupled. The rule unions all readers after restoring object sharing, so a JSON round trip prunes the same states.
-Operands that no retained result or boundary store reads disappear as well.
+be coupled. `Fold.read_components` propagates demand through narrowed lifts and unions every shared term's readers.
+Both lowering and placement cuts use that result. Narrowing separately for each reader would emit overlapping
+carriers that declare the same accumulator twice. Operands that no retained result or boundary store reads disappear
+as well.
 
 An identity projection dissolves into its operand, or flattens its operand list into a consuming projection. A
 pass-through can make two occurrences of the same computation compare unequal, and the placement fork's value
@@ -288,8 +292,8 @@ recipe's full carrier and is restricted to the channels a term actually holds, s
 ordinary case during the rewrite's own fixpoint.
 
 Nothing is minted to make that reading work. A is what `operands[0]` SUPPLIES, not what it exposes: the left factor
-may be a component of that edge or a value the reading derives from those components and kernel-uniform ones (a scale,
-an epsilon — one contributes no variation, so the factor varies exactly as A does).
+may be a component of that edge or a value derived from those components, A's free coordinates, and kernel-uniform
+values. A coordinate mask over A preserves the contraction; dependence on a coordinate exclusive to B does not.
 
 ### One reading for "a tier folds this whole"
 

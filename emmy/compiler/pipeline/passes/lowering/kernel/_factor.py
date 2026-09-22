@@ -191,7 +191,10 @@ def factorize(tile, root, store=None, sm_count: int = 0) -> Tile:
         sm_count=sm_count,
     )
     out_val = _wire(op).name if op is not None else ""
-    return _factorize(op, ctx, tail=(), out_val=out_val, store=store, output_specs=tuple(tile.output_specs))
+    # A serial tree needs no projection peel: lower it whole so shared carriers keep one scope.
+    schedule = ctx.sched.schedule
+    bind = _factorize if schedule is not None and any(binds_root(choice) for choice in schedule.nodes.values()) else _bind
+    return bind(op, ctx, tail=(), out_val=out_val, store=store, output_specs=tuple(tile.output_specs))
 
 
 def _root_is_scheduled(root: Fold, ctx: Ctx) -> bool:
@@ -531,6 +534,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
                 k_axis=k_axis,
                 axes=ctx.sched.tile.axes,
                 inner=inner,
+                outputs=ctx.sched.tile.outputs,
             )
         )
         t = unit_tile(register_tile(atomize(tile.atom.shape[:2]), tile.mn), tile.mn)

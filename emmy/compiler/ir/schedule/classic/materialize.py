@@ -117,13 +117,11 @@ def materialize_classic(
                 raise ValueError(f"accepted STAGE at {edge_site_spelling(edge)} did not resolve")
             resolved[edge] = stage
     return scheduled(
-        tile.op,
+        tile,
         name=name,
         place=tile.place.on_grid(),
         knobs=knobs,
-        output_specs=tile.output_specs,
         schedule=schedule,
-        axes=tile.axes,
         materialization=ClassicMaterialization(placed, resolved),
         workers=WarpSpec(schedule.kernel.work.producer) if schedule.kernel.work.producer else None,
     )

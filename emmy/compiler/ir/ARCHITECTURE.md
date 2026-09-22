@@ -68,6 +68,12 @@ member, and the existing tables are to be converted to one.
 schedule, materialization, output specifications, and knobs belong to `TileOp`, not the term. So `Fold` lives in
 `ir/pure/fold.py` and is not a `Stmt`.
 
+**Lambda construction binds every read and orders definitions before uses.** Both checks use the scope-aware
+`free_names` analysis, including coordinates in predicates and indices. `Lambda.closing` appends unbound reads as
+parameters; direct construction rejects them. Canonical ordering uses the same dependencies, so a predicate cannot
+move before its definition. The narrower `Body.ssa_uses` query follows statement `deps()` and does not include every
+expression read.
+
 ## Classic schedule model
 
 The [schedule package](schedule/ARCHITECTURE.md) separates schedule-wide interfaces and reusable choices from concrete
@@ -605,8 +611,9 @@ canonicalized before validation:
   of source order and spelling, and it rides the normalized body: structural identity labels the same graph again
   under its own buffer coloring instead of building it a second time. A scope's definitions bind its reads in any
   order and shadow an enclosing binding of the same spelling; a deeper scope's definition binds nothing read above
-  it, so the block still depends on the enclosing definition it reads. Identity canonicalizes integer expressions
-  again after final axis renaming: a rename across numeric suffixes must not reverse an otherwise canonical sum.
+  it, so the block still depends on the enclosing definition it reads. Affine coordinates sort by lexical binding
+  order, so renaming axes or loading a saved body preserves their normal form and exact identity. Identity normalizes
+  remaining commutative expressions again after its final rename.
 - A standard smaller-half worklist computes the equitable partition in
   `O((vertices + relations) log vertices)` relation visits. Exact individualization is isolated to partitions that
   refinement cannot distinguish; no exact near-linear worst-case graph-canonization algorithm is known. The search

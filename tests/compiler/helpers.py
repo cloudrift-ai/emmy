@@ -164,6 +164,14 @@ def device_compute_capability() -> tuple[int, int] | None:
     return (int(cap[:-1]), int(cap[-1]))
 
 
+def requires_sm(major: int, minor: int = 0):
+    """Skip an instruction-specific CUDA test below its minimum compute capability."""
+    return pytest.mark.skipif(
+        (device_compute_capability() or (0, 0)) < (major, minor),
+        reason=f"requires sm_{major}{minor} or newer",
+    )
+
+
 # Skip the mma.sync warp-tier tests below sm_90. On sm_80-89 the pin-only path is currently non-functional because
 # nvcc rejects the ``sm_NNa`` target and ``ldmatrix`` faults at runtime on at least Ada (sm_89).
 requires_sm90 = pytest.mark.skipif(

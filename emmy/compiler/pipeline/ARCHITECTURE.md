@@ -54,7 +54,7 @@ spot from knowledge recorded earlier, in a fixed order — measured first:
    prior's checkpoint (its **reservoir**) that were taken at deployable flags, the tune database's `perf` rows for
    this compile's context, and the **golden rows** in scope — the repository's per-card golden files, or the file
    `--golden PATH` names (Part 3). A golden row is a measurement like any other: it joins a candidate by the kernel's
-   `S_*` signature and value-of-position agreement, and it competes with local rows on µs alone.
+   `S_*` features, exact `I_kernel` identity and value-of-position agreement. It competes with local rows on µs alone.
 2. **The prior** — the online model when trained and calibrated, the offline model otherwise (Part 3).
 3. **Option-0** — the first option in the order the rule emitted them. This is only the no-evidence fallback;
    enumeration order carries no performance meaning. Under **strict evidence** (`--strict-evidence`,
@@ -554,7 +554,8 @@ At a **schedule fork** (one kernel's row):
    compile's context key (one lane, because a sweep measures in the regime a deploy compiles in; rows from a
    deliberately non-deployable `--nvcc-flags` run key elsewhere and are simply never consulted) and the **golden rows**
    in scope (`golden.evidence_rows`): every MEASURED record in the live input regime (`golden.regime_live`), keyed by
-   its fork-time `S_*` signature — a record that decorates one kernel under the kernel its target lifts to; any other
+   its fork-time `S_*` features and exact `I_kernel` identity. A record decorating one kernel is keyed by the kernel
+   its target lifts to; any other
    record through its replay (`golden._replay`), which files each kernel-set arm the record spelled under the kernel
    that fork was offered on and its schedule row under the kernel its stored identity names (an empty row too: a
    piece the pick took no knobs on is recorded as `knobs: {}`, and that row spells its fused, unsplit arm), or, for a
@@ -604,9 +605,11 @@ Three definitions the list leans on:
   index): a measured row counts as evidence for a candidate when every tuning knob the candidate has decided so far
   has the same value in that row. Knobs the candidate has not decided yet are free — a later pass will decide them.
   That is what lets one fully-decided measured row settle a fork whose candidates are still only partly decided.
-  Rows are matched to a candidate by its `S_*` signature through `Prior.sig_groups`: a row describes the candidate
-  when the candidate carries every key the row has, with the same value (a stamp the row predates is free; a
-  recorded key the candidate lacks is a different kernel); there is no identity join at deploy.
+  Rows first require the same exact `I_kernel` identity. `Prior.sig_groups` then matches their `S_*` features:
+  the candidate must carry every feature the row has with the same value; a newer feature may remain unspecified.
+  `I_kernel` hashes the typed, schedule-free Loop body at kernel birth. Equal feature histograms alone cannot make
+  two kernels share measurements. Legacy rows without this identity remain training data but cannot decide a current
+  kernel's measured pick. Golden imports derive the stamp from the current target or its cut replay.
 - **The reservoir** is the online prior's own training dataset: a bounded uniform sample (Algorithm R, capped at
   `MAX_ROWS` = 100k) of every training row ever streamed in across runs, stored INSIDE the online checkpoint
   (`online.json`, Part 5). Its rows are all `H_opt=3` — `Prior.add_rows` admits no other regime — and they double as
@@ -615,8 +618,8 @@ Three definitions the list leans on:
   per-kernel rows do not. One consequence: anything that discards the checkpoint — a `FEATURIZER_VERSION` bump
   discards it WHOLE, see "Featurizer versioning" — deletes that evidence along with the model, and the machine's
   deploys drop to the index → the offline prior. The SQLite `perf` rows and the golden rows survive such a bump: the
-  DB is keyed by content, and the join that matches rows to candidates tolerates feature-set changes, so old rows
-  stay usable.
+  DB is keyed by content. Rows retaining the same exact identity tolerate added structural features; rows that
+  predate the exact identity need a fresh measurement before serving as deploy evidence.
 - **Which compile flags evidence applies under**: the deployable regime, and that is the only regime anything is
   measured in. `H_opt` is read from the `-O<n>` in the compile flags; flags with no `-O<n>` at all — the default
   everywhere — count as 3, so an ordinary compile is always deployable. The identity a measurement is *stored* under
@@ -1136,7 +1139,8 @@ reverse), so old rows upgrade in place.
 
 There is ONE global `OnlinePrior` across every kernel, GPU, and nvcc setting — not per-op, not partitioned by
 regime. Op structure (`S_*`) and the host/hardware regime (`H_*` — GPU compute capability + nvcc opt level, from
-`Context.features`) are **features in every row**, not a cache key.
+`Context.features`) are numeric features in every row. The exact `I_kernel` stamp travels beside them for evidence
+matching; it is excluded from the learned feature vector.
 
 **A partly-decided config is labeled with the best result reachable from it.** Real benches exist only at leaves, but
 the prior ranks partly-decided siblings at every fork level, so the label for any node is the best (minimum) median
@@ -1353,7 +1357,8 @@ the worker pipe, and with the quote `repr` escapes when the message also holds a
 kernel in a multi-kernel terminal — a wall kill — blames none of them, but what IS known, that this kernel set
 failed at that budget, is filed as a `bench_fail` under the set's own key (`TerminalBench.set_key`, the digest of
 its kernels' variant keys) and replays for that exact set; the row carries no knobs and no kernel stands behind it,
-so the greedy's disqualification index (joined on `S_*` signatures) and the dataset (joined on `cuda_op`) never see
+so the greedy's disqualification index (joined on `S_*` features and `I_kernel`) and the dataset (joined on
+`cuda_op`) never see
 it, and a kernel of the set enrolled on its own still benches. An `ok` replay needs every `CudaOp`'s row for the current
 `(context_key, backend)`: the bench runs the whole graph, so a partial cache cannot stand in for the Σ. Otherwise it
 does one `await backend.benchmark_async(...)`, walks `Op.source` once to record op inventory + lowering edges + the
@@ -1453,7 +1458,7 @@ pricing, resolves from its 19 recorded rows in seconds.
 
 The preferred reference is the runnable Torch slice (`torch-eager`) or the applicable library kernel (`cublas`). A
 stored kernel's slice is its stored origins cut from the embedded program (`GoldenRecord.reference_program`), taken
-when the kernel writes only values those ops compute and the slice reads only inputs the kernel binds; nothing is
+when the kernel writes only values those ops compute and the slice reads exactly the inputs the kernel binds; nothing is
 lowered to find it. The slice is comparison only; identity stays the stored kernel. A kernel with no stored origins
 has no frontend callable; an origin slice can also have synthetic boundaries whose
 post-fusion output geometry is not independently comparable to its Torch slice. Such a target may use a separately
@@ -1507,7 +1512,8 @@ explicit working file whose GPU header is checked against the selected tune devi
    alarm. A pin satisfied by ANY kernel counts as honored, which is what makes split main+finalize pairs
    work, but it does mean that a pin dropped on its intended kernel goes undetected if a sibling kernel happens to
    match it. `PLACE` is consumed before CUDA emission, so the final greedy resolution's placement receipts ride the
-   compiled graph as attribution and supply its realized side. The `g<n>` cross-CTA stage of a `REDUCE` value is
+   compiled graph as attribution and supply its realized side. Bare `PLACE=fuse` accepts an empty placement trace;
+   a site-scoped pin still requires its site. The `g<n>` cross-CTA stage of a `REDUCE` value is
    structural and cannot be read off a knob stamp, so the check skips it. A split replaces the kernel it splits, and
    `knob.consume_kernel_row` strips the schedule row from the pieces it mints — no piece may carry the `g<n>` it came
    from — so the receipt is the piece's sliced reduce axis, not a stamp. Only that stage is exempt: the rest of the
@@ -1584,9 +1590,9 @@ would be reporting mostly arithmetic.
 
 **A measured pool is keyed on the KERNEL, not on the site that offered it.** The key digests the row's own `S_*`
 stamps — the same digest `Identity.op_sig` computes for an op, asked of the kernel that ran. Two kernels of one
-structure on one card are ONE tuning problem whatever produced them, which is already how the deploy path joins
-evidence: `Prior.evidence_pick` and `policy/greedy._db_measured_pick` both index on the `S_*` signature. It is safe
-because the identity strategy stamps a kernel **at birth**, at the fusion boundary or lowering splice, before
+feature structure on one card share a training pool whatever produced them. Deploy evidence is stricter: it also
+requires the exact `I_kernel` stamp, so distinct bodies with equal histograms never exchange measured schedules.
+The identity strategy stamps a kernel at birth, at the fusion boundary or lowering splice, before
 `040_schedule` offers the first fork — so nothing a schedule fork decides can move an `S_*` value, and sibling
 schedules cannot be split apart.
 

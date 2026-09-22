@@ -362,8 +362,10 @@ def main() -> None:
                 "_retire_worker": dirty,
             }
         payload = pickle.dumps(resp, protocol=pickle.HIGHEST_PROTOCOL)
-        os.write(out_fd, len(payload).to_bytes(8, "little"))
-        os.write(out_fd, payload)
+        for part in (len(payload).to_bytes(8, "little"), payload):
+            pending = memoryview(part)
+            while pending:
+                pending = pending[os.write(out_fd, pending) :]
         if dirty:
             # Corrupted context — don't serve more requests from it. Exit so the
             # parent respawns a fresh context on its next bench (program.py

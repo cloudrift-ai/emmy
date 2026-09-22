@@ -103,9 +103,9 @@ def free_names(s: Stmt) -> frozenset[str]:
     The WIDE reading, for callers that must resolve a statement against everything around it: a
     dependence cone needs the axis vars as much as the value names, since both have to be
     available where the cone lands. Callers asking a narrower question — is this VALUE read? —
-    want :attr:`Body.ssa_uses`, which never reports a coordinate. Mixing the two is what let an
-    index ``Var`` be mistaken for a value read; keeping both spellings is what lets each caller
-    say which it meant.
+    want :attr:`Body.ssa_uses`, which follows ``deps()`` without adding expression reads or
+    subtracting local bindings. Load indices can occur in both: a coordinate and a gathered
+    value use the same ``Var`` representation.
     """
     reads: set[str] = set()
     defs: set[str] = set()
@@ -403,8 +403,8 @@ class Body(tuple[Stmt, ...]):
     def ssa_uses(self) -> frozenset[str]:
         """Every name a statement of this immutable subtree reads — a ``Load`` index's ``Var`` names
         among them, since a coordinate is the same ``Var`` a gathered value read would be. The
-        immediate reads only (:attr:`deps_closure` reports the transitive ones); what
-        :meth:`Lambda.closing` binds as params, coordinates included.
+        immediate ``deps()`` reads only (:attr:`deps_closure` reports the transitive ones).
+        Expression-only reads, such as a Select predicate, require :func:`free_names` instead.
         """
         out: set[str] = set()
         for stmt in self:

@@ -2252,6 +2252,7 @@ class RegStore(Stmt):
     frag: str
     shape: tuple[int, int, int]
     ldm: int = 0
+    ldn: int = 0
     epilogue: Lambda | None = None
     extra_frags: tuple[str, ...] = ()
     m_guard: tuple[Expr, Expr] | None = None
@@ -2456,7 +2457,7 @@ class RegStore(Stmt):
 
         flat = render_index(self.dst_buffer, self.dst_index, ctx)
         ldm = self.ldm if self.ldm else _resolve_ldm(self.dst_buffer, ctx, self.row_dim)
-        ldn = _dim_stride(self.dst_buffer, self.col_dim, ctx) if self.col_dim is not None else 1
+        ldn = self.ldn or (_dim_stride(self.dst_buffer, self.col_dim, ctx) if self.col_dim is not None else 1)
         dst_dt = ctx.buffer_dtypes.get(self.dst_buffer, "f32")
         pad = _pad(ctx.indent)
         lane = "(threadIdx.x & 31)"
