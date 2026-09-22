@@ -816,6 +816,16 @@ class Write(Stmt):
         # Prefer the stamped ``self.value_dtype`` (set by ``030_stamp_types``);
         # fall back to ``ctx.ssa_dtypes`` for legacy/handwritten paths.
         stamped_value_dt = self.value_dtype.name if self.value_dtype is not None else None
+        if self.output in ctx.paged:
+            # A paged buffer is a table of pages, so each element resolves its own page — a vector
+            # store would straddle a page boundary. Every value stores as its own scalar write.
+            lines = []
+            for k, nm in enumerate(self.values):
+                idx_k = self.index if k == 0 else (*self.index[:-1], BinaryExpr("+", self.index[-1], Literal(k, "int")))
+                src_dt = stamped_value_dt or ctx.ssa_dtypes.get(nm, "f32")
+                rhs = ctx.target.convert(_resolve_value(nm, ctx), src_dt, out_dt)
+                lines.append(f"{pad}{render_paged_access(self.output, idx_k, ctx)} = {rhs};")
+            return lines
         if self.is_scalar:
             # Scalar path. Convert at the store boundary only when the
             # value's SSA dtype disagrees with the destination buffer's

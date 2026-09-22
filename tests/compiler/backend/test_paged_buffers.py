@@ -1,9 +1,13 @@
 """Paged input buffers: a read resolves its page before its offset.
 
 A paged buffer is not one allocation but a device table of equal-sized pages — the shape a KV
-cache has once it is allocated per request instead of contiguously. The ``cuda.paged_inputs``
+cache has once it is allocated per request instead of contiguously. The ``cuda.paged_buffers``
 hint names the buffer, its paged axis and the page size; nothing above the load changes, so the
 axis stays its ordinary symbolic extent and the schedule search never sees the paging.
+
+The hint only reaches a buffer that survives to a kernel boundary — an intermediate the fusion
+policy absorbs is not a buffer at all — so every test here asserts the page table reached the
+signature rather than trusting the hint.
 """
 
 from __future__ import annotations
@@ -51,7 +55,30 @@ def _compile(paged: bool):
 
     graph = trace_module(_attention(), _inputs())
     if paged:
-        graph.hints.set("cuda.paged_inputs", (("k", 2, PAGE), ("v", 2, PAGE)))
+        graph.hints.set("cuda.paged_buffers", (("k", 2, PAGE), ("v", 2, PAGE)))
+    return CudaBackend().compile(graph)
+
+
+def _cache_write():
+    """A producer of the cache's contents — ``tanh`` standing in for the K projection."""
+    import torch
+    import torch.nn as nn
+
+    class CacheWrite(nn.Module):
+        def forward(self, kin):
+            return torch.tanh(kin)
+
+    return CacheWrite()
+
+
+def _compile_write(paged: bool):
+    """Compile the producer, optionally writing its output through a page table."""
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.trace.torch import trace_module
+
+    graph = trace_module(_cache_write(), (_inputs()[1],))
+    if paged:
+        graph.hints.set("cuda.paged_buffers", ((graph.outputs[0], 2, PAGE),))
     return CudaBackend().compile(graph)
 
 
@@ -82,6 +109,20 @@ def test_unpaged_build_is_byte_identical_to_before():
     assert "__pages" not in kernel.kernel_source
     assert kernel.arg_order == tuple(dict.fromkeys(kernel.arg_order))
     assert "k" in kernel.arg_order and "v" in kernel.arg_order
+
+
+def test_paged_output_writes_through_the_table():
+    """The write side of the same ABI: a paged OUTPUT takes a (non-const element) page table and
+    every store resolves its page, so a producer and a consumer address the cache identically."""
+    pytest.importorskip("torch")
+    compiled = _compile_write(paged=True)
+    (kernel,) = _kernels(compiled)
+    name = compiled.outputs[0]
+
+    signature = re.search(r'extern "C" __global__[^{]*', kernel.kernel_source).group(0)
+    assert f"float* const* {name}__pages" in signature, signature
+    assert f"{name}__pages[" in kernel.kernel_source
+    assert f"{name}__pages" in kernel.arg_order and name not in kernel.arg_order
 
 
 @requires_cuda
@@ -115,3 +156,51 @@ def test_paged_read_matches_the_contiguous_read():
         got = program.outputs()[out_name]
 
     assert np.array_equal(got, reference), f"max|Δ| = {np.max(np.abs(got - reference))}"
+
+
+@requires_cuda
+def test_paged_write_then_read_round_trips():
+    """The two halves agree on the layout. One program writes the cache into a table of pages;
+    a second program reads those same pages as K. The result must equal the same pipeline run
+    entirely on contiguous buffers — which is what a cache filled in one step and attended to
+    in the next actually does."""
+    pytest.importorskip("cupy")
+    import cupy as cp
+    import torch
+
+    from emmy.compiler.backend.cuda.program import CompiledProgram
+    from emmy.compiler.backend.gpu_lock import gpu_lock
+
+    q, kin, v, mask = _inputs()
+    feed = {"q": q.numpy(), "kin": kin.numpy(), "v": v.numpy(), "mask": mask.numpy()}
+    with torch.no_grad():
+        contiguous_k = _cache_write()(kin)
+        reference = _attention()(q, contiguous_k, v, mask).numpy()
+
+    writer, reader = _compile_write(paged=True), _compile(paged=True)
+    written = writer.outputs[0]
+
+    with gpu_lock():
+        pages = [cp.zeros((1, KV_HEADS, PAGE, HEAD_DIM), dtype=cp.float32) for _ in range(SEQ // PAGE)]
+        table = cp.asarray(np.array([page.data.ptr for page in pages], dtype=np.uint64))
+
+        fill = CompiledProgram.build(writer, {"kin": feed["kin"]})
+        fill.arrays[f"{written}__pages"] = table
+        fill.run_once()
+
+        attend = CompiledProgram.build(reader, {"q": feed["q"], "k": feed["kin"], "v": feed["v"], "mask": feed["mask"]})
+        attend.arrays["k__pages"] = table  # the pages the writer just filled
+        attend.arrays["v__pages"] = _page_table(cp, feed["v"], pages)
+        attend.run_once()
+        got = attend.outputs()[reader.outputs[0]]
+
+    np.testing.assert_allclose(got, reference, rtol=1e-5, atol=1e-5)
+
+
+def _page_table(cp, array, keep):
+    """A page table over ``array``'s key axis; pages are appended to ``keep`` so the device
+    memory the table points at outlives the call."""
+    start = len(keep)
+    for offset in range(0, SEQ, PAGE):
+        keep.append(cp.ascontiguousarray(cp.asarray(array[:, :, offset : offset + PAGE, :])))
+    return cp.asarray(np.array([page.data.ptr for page in keep[start:]], dtype=np.uint64))
