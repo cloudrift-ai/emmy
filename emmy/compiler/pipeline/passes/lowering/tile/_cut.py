@@ -345,8 +345,8 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
         axes = tuple(
             axis
             for name in dict.fromkeys(name for scope in scopes for name in scope)
-            if name in node.free_axes or tile.axis_of(name).extent == 1
             for axis in (tile.axis_of(name),)
+            if name in node.free_axes or axis.extent == 1
         )
         out.append(
             CutSite(
