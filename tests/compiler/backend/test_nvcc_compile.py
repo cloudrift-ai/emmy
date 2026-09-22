@@ -17,9 +17,9 @@ from emmy.compiler.context import Context, split_opt_level
 
 def test_effective_flags_reads_env(monkeypatch) -> None:
     monkeypatch.delenv("EMMY_NVCC_FLAGS", raising=False)
-    assert nvcc.effective_flags() == ["--use_fast_math"]
+    assert nvcc.effective_flags() == ["--fmad=false"]
     monkeypatch.setenv("EMMY_NVCC_FLAGS", "-Xcicc -O1")
-    assert nvcc.effective_flags() == ["--use_fast_math", "-Xcicc", "-O1"]
+    assert nvcc.effective_flags() == ["--fmad=false", "-Xcicc", "-O1"]
 
 
 def test_cubin_cache_key_partitions_by_flags(monkeypatch) -> None:

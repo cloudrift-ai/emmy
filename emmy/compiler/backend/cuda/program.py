@@ -170,7 +170,7 @@ def _nvrtc_options(*, arch_specific: bool) -> tuple[str, ...]:
     """NVRTC compile options. Kernels needing the arch-specific ISA need ``sm_<major><minor>a``
     — the ``a`` arch is what unlocks ``cp.async.bulk.tensor`` and the block-scaled fp4 mma. The
     rest keep the cupy default (capability inferred at runtime)."""
-    base = ("--use_fast_math",)
+    base = ("--fmad=false",)
     if not arch_specific:
         return base
     from emmy.compiler.target import compute_capability  # noqa: PLC0415

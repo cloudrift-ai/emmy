@@ -38,8 +38,8 @@ from emmy import config
 
 logger = logging.getLogger(__name__)
 
-# Base nvcc flags emmy always compiles with (matches ``program._nvrtc_options``).
-_BASE_FLAGS = ["--use_fast_math"]
+# Preserve the rounding of separate frontend operations, including half multiply followed by add.
+_BASE_FLAGS = ["--fmad=false"]
 
 
 def effective_flags() -> list[str]:

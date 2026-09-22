@@ -1,4 +1,4 @@
-"""Decompose silu(x) into x * recip(1 + exp(-x)) to enable SiLU+Mul fusion."""
+"""Decompose silu(x) into x / (1 + exp(-x)) with one final output rounding."""
 
 from emmy.compiler.dtype import BF16, F16, F32
 from emmy.compiler.graph import Graph, Node, Tensor
@@ -11,7 +11,6 @@ PATTERN = [Pattern("root", ElementwiseOp, {"fn": "silu"})]
 
 def rewrite(match: Match, inp_x: Node, out: Tensor) -> Graph | None:
     graph = match.graph
-    """Replace silu(x) with x * recip(1 + exp(-x))."""
     frag = open_fragment(graph, [inp_x])
     opmath_dtype = F32 if inp_x.output.dtype in (F16, BF16) else out.dtype
 
@@ -32,16 +31,11 @@ def rewrite(match: Match, inp_x: Node, out: Tensor) -> Graph | None:
         inputs=[one_bc, exp_id],
         output=Tensor(f"{out.name}_denom", out.shape, opmath_dtype),
     )
-    recip_id = frag.add_node(
-        op=ElementwiseOp(op="reciprocal"),
-        inputs=[add_id],
-        output=Tensor(f"{out.name}_sigmoid", out.shape, opmath_dtype),
-    )
-    mul_id = frag.add_node(
-        op=ElementwiseOp(op="multiply"),
-        inputs=[work_x, recip_id],
+    result_id = frag.add_node(
+        op=ElementwiseOp(op="divide"),
+        inputs=[work_x, add_id],
         output=Tensor(out.name, out.shape, out.dtype),
     )
 
-    frag.outputs = [mul_id]
+    frag.outputs = [result_id]
     return frag
