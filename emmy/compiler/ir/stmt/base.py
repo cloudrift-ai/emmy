@@ -360,20 +360,12 @@ def render_merge_program(program, state_names, ctx: RenderCtx, pad: str | None =
     return out
 
 
-def select_to_ternary(s: Select) -> Expr:
-    """Build a chained ternary from a ``Select``'s branch list.
-
-    Each branch value is cast to ``float`` to match the ``float`` result
-    ``Select.render`` declares. Without it, a branch list mixing ``__half``
-    SSA values (a raw smem/gmem load) with ``float`` ones (a computed value)
-    makes the C++ conditional operator's common type ambiguous
-    (``cond ? float : __half`` — each converts to the other), which nvcc
-    rejects. The casts are no-ops when a value is already ``float``.
-    """
+def select_to_ternary(s: Select, dtype: str = "float") -> Expr:
+    """Cast branches to their common result type, avoiding ambiguous half/float C++ conditionals."""
     branches = list(s.branches)
-    result: Expr = CastExpr("float", Var(branches[-1].value))
+    result: Expr = CastExpr(dtype, Var(branches[-1].value))
     for b in reversed(branches[:-1]):
-        result = TernaryExpr(cond=b.select, if_true=CastExpr("float", Var(b.value)), if_false=result)
+        result = TernaryExpr(cond=b.select, if_true=CastExpr(dtype, Var(b.value)), if_false=result)
     return result
 
 
