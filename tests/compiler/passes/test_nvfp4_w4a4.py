@@ -277,9 +277,12 @@ def test_the_block_scaled_cell_runs_and_holds_its_declared_tolerance(tmp_path):
     shapes decline the stage and keep the generic reading."""
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.context import Context
     from emmy.compiler.loader.safetensors import load_constants_from_safetensors
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
+    if not Context.probe().has_block_scaled_f4_mma:
+        pytest.skip("block-scaled FP4 mma.sync requires consumer Blackwell")
     m, n, k = 16, 128, 512
     g = _w4a4_shared_linears(tmp_path, ("q", "kp", "v"), m=m, n=n, k=k, norm=False)
     feed = {"x": (np.random.default_rng(11).standard_normal((m, k)) * 0.5).astype(np.float16)}

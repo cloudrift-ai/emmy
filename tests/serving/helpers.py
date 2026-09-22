@@ -269,7 +269,13 @@ def build(runner_id: str, *, model=None, plan_cache=None, **overrides):
 @contextmanager
 def evidence_scope():
     """The lane's golden as the compile's only evidence, strictly (:func:`golden.sole_evidence`)."""
-    from emmy.compiler.pipeline.search.golden import sole_evidence
+    import pytest
+
+    from emmy.compiler.context import Context
+    from emmy.compiler.pipeline.search.golden import records_for_card, sole_evidence
 
     with sole_evidence(golden_records()):
+        ctx = Context.probe()
+        if ctx.gpu_name and not records_for_card(ctx.gpu_name, ctx.compute_capability):
+            pytest.skip(f"serving golden has no schedules for {ctx.gpu_name} at {ctx.compute_capability}")
         yield
