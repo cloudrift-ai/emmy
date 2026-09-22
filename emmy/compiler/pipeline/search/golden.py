@@ -1122,7 +1122,7 @@ def _replay(
     its signature.
 
     ``siblings`` are the other entries of the same target (:func:`siblings_of`) and ``lead`` the
-    set's leading entry (:func:`lead_of`; the record itself when absent). A fork offered on a kernel
+    set's leading entry (:func:`lead_of`; its explicit kernel-set entry, or the record itself, when absent). A fork offered on a kernel
     one entry names by ``identity`` is decided by THAT entry's spelling; every other fork by the
     lead's — never by an entry that does not own it, whose row would say "fused" or "unsplit" of a
     kernel it never described. So a set of per-kernel entries — the parent's cut, each piece's

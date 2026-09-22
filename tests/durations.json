@@ -2121,5 +2121,6 @@
  "tests/compiler/backend/test_dtype_cuda.py::test_separate_multiply_and_add_preserve_rounding[dtype0-0.0009765625]@cuda": 1.02,
  "tests/compiler/backend/test_dtype_cuda.py::test_separate_multiply_and_add_preserve_rounding[dtype1-0.0001220703125]@cuda": 0.83,
  "tests/compiler/cli/test_golden_file_replay.py::test_recorded_greedy_pick_is_picked_again_under_strict_evidence[NVIDIA GeForce RTX 4090-cap0]": 7.82,
- "tests/compiler/cli/test_golden_file_replay.py::test_recorded_greedy_pick_is_picked_again_under_strict_evidence[NVIDIA A100-SXM4-40GB-cap1]": 7.79
+ "tests/compiler/cli/test_golden_file_replay.py::test_recorded_greedy_pick_is_picked_again_under_strict_evidence[NVIDIA A100-SXM4-40GB-cap1]": 7.79,
+ "tests/compiler/backend/test_torch_ref.py::test_indexmap_broadcast_then_rotary_slice_compiles@cuda": 2.26
 }

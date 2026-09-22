@@ -349,9 +349,8 @@ def test_indexmap_views_preserve_noncontiguous_storage(layout):
     torch.testing.assert_close(fn(*inputs), expected, rtol=0, atol=0)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_indexmap_broadcast_then_rotary_slice_compiles():
-    if not torch.cuda.is_available():
-        pytest.skip("Inductor CUDA indexing regression")
     graph = _imap_graph([(8, 128)], (1, 8, 1, 128), (IndexSource(input_idx=0, coord_map=(placeholder(1), placeholder(3))),))
     x = torch.randn(8, 128, device="cuda")
     fn, inputs = torch_ref.build_callable(graph, {"in0": x})
