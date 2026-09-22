@@ -53,3 +53,14 @@ tier's early stop), which is what puts the causal rows ahead of eager at 1024 ke
 picked a row by `--ab` only work while the greedy baseline — the unscheduled loop a shape without evidence deploys —
 finishes inside the bench watchdog; past 4096 keys and at batch 8 it does not, so those goldens were recorded
 directly under the winning pin (`EMMY_KNOBS`), which makes the pinned kernel the greedy pick.
+
+## Re-tune (2026-09-22)
+
+The 16 prefill goldens up to 8192 keys were re-swept by hand pin on a rented RTX 5090 at revision `1159502e` (the
+compiler's fork tree enumerated per target, a 40-pin neighbourhood of the committed row plus staging and
+rasterization passes, then each winner written back with `--record-greedy` from a fresh per-lane tune DB) and now
+carry that box's numbers; no schedule beat the committed one by more than 3%, and where a row changed it is the
+transport (`smem-async` rings or `gm8`) inside the same geometry. `prefill_gqa` at 8192 keys and `prefill_causal` at
+16384 keys could not be measured (the run's greedy pick hangs) and the `decode_gqa` goldens keep their split-KV rows,
+which a `TILE@twist`-spelled pin cannot reproduce on this revision. Per-golden tables and the protocol are in
+`../RESULTS.md`; the sweep records are in `../sweeps_rtx5090x1_2026-09-22.tar.gz`.

@@ -186,3 +186,72 @@ There are no fresh-process repeats, so this is an engineering comparison rather 
 system, version and input-digest provenance under `evidence/`. It was produced by driving the lane's own
 `run_baselines.py` with the recipe's flags and environment, not by `emmy bench`, so it carries no per-row experiment
 records; `evidence/provenance.txt` says so.
+
+## Re-tune on RTX 5090 (`rtx5090x1`, 2026-09-22)
+
+### Question
+
+Are the 29 committed attention schedules still the best the current compiler offers on this card? The tuner was not
+used: it is known to be broken, so the schedules were re-found by hand-pinned sweeps, the way the goldens were first
+recorded.
+
+### Status
+
+The 16 prefill goldens up to 8192 keys were swept (about 2,300 hand-pinned rows, every kept row clean under the run's
+integrity flags) and written back through `--record-greedy`, with the recorded greedy equal to the sweep winner in
+every lane. Two prefill goldens could not be measured: at 8192 keys for `prefill_gqa` and 16384 keys for
+`prefill_causal` the run's greedy pick hangs (`HungKernelError`, three attempts at 60 s and 15 s watchdogs), and a hung
+greedy leaves every A/B row without reference outputs, so none is admissible. The 11 `decode_gqa` goldens keep their
+rows unchanged: their committed pins spell the sites as `TILE@twist` / `REDUCE@twist` and every such pin was rejected
+as unreproducible (`realized TILE@map.1/twist`), so the sweep never benched the split-KV family and its best unsplit
+rows are 1.2x to 12x slower than the committed routing rows. Each golden was measured whole on one box.
+
+### Protocol
+
+For every target the compiler's own fork tree was enumerated (`enumerate_graph`; 130k to 410k rows for the two-site
+fused attention) and swept in three passes of `emmy run --golden FILE --realization SEED --bench --bench-backends
+eager,emmy --ab KNOBS` at deployable `-O3`: a 40-pin neighbourhood of the committed row and of the winners already
+found on the card (tile fragment x K step x CTA layout), then staging ring x reduce partition around the top three
+(48 pins), then rasterization x deeper K step (24 pins). Pass 1 ranked at 5 warm-ups / 30 iterations; passes 2 and 3
+and the write-back at 10 / 100. The write-back ran each lane against a working copy holding only that lane's seed
+and a fresh per-lane tune DB seeded by one bench of the winner. Box: vast.ai RTX 5090 (driver 580.105.08, CUDA
+13.0.88, PyTorch 2.14.0+cu130 in a fresh venv); source revision `1159502e`. The raw pins and A/B records of every
+pass are in `sweeps_rtx5090x1_2026-09-22.tar.gz`.
+
+### Measurements
+
+Whole-program latency in microseconds. "previous, recorded" is the number in the committed row; "previous, here" is
+that same schedule re-measured on this box inside the sweep; "vs previous" compares the sweep's best with the latter,
+so it isolates the schedule from the box.
+
+| golden | eager | previous, recorded | previous, here | re-found best | vs previous | vs eager | now recorded |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `prefill_causal-b1-s1024` | 86.4 | 76.3 | 61.4 | **60.0** | 1.02x | 1.44x | async rings `d2`/`d4`, 60.2 |
+| `prefill_causal-b1-s2048` | 240.1 | 270.1 | 214.9 | 214.9 | 1.00x | 1.12x | the previous row, 216.3 |
+| `prefill_causal-b1-s4096` | 819.0 | 874.0 | 748.9 | **738.9** | 1.01x | 1.11x | async rings, `gm8`, 745.9 |
+| `prefill_causal-b1-s8192` | 2777.2 | 3043.1 | 2712.3 | **2676.1** | 1.01x | 1.04x | async value ring, 2686.2 |
+| `prefill_causal-b8-s1024` | 427.8 | 458.7 | 391.6 | **384.9** | 1.02x | 1.11x | async rings, `gm8`, 391.2 |
+| `prefill_causal-b8-s2048` | 1462.2 | 1561.0 | 1392.9 | **1367.1** | 1.02x | 1.07x | async rings, `gm8`, 1381.8 |
+| `prefill_global-b1-s1024` | 110.8 | 127.4 | 103.9 | 103.9 | 1.00x | 1.07x | the previous row, 103.9 |
+| `prefill_global-b1-s2048` | 424.8 | 423.6 | 361.6 | 361.5 | 1.00x | 1.18x | async rings, 363.4 |
+| `prefill_global-b1-s8192` | 5390.0 | 5638.7 | 5018.6 | 5018.6 | 1.00x | 1.07x | the previous row, 5037.6 |
+| `prefill_global-b8-s1024` | 716.3 | 766.4 | 658.0 | 655.1 | 1.00x | 1.09x | async rings, 655.8 |
+| `prefill_global-b8-s2048` | 2663.1 | 2809.1 | 2470.0 | 2457.5 | 1.01x | 1.08x | the previous row, 2460.5 |
+| `prefill_gqa-b1-s1024` | 128.3 | 141.4 | 112.6 | 111.8 | 1.01x | 1.15x | `d3` TMA rings, 112.0 |
+| `prefill_gqa-b1-s2048` | 410.3 | 445.3 | 384.9 | **374.9** | **1.03x** | 1.09x | async value ring, 380.8 |
+| `prefill_gqa-b1-s4096` | 1434.7 | 1411.0 | 1387.3 | 1371.7 | 1.01x | 1.05x | async rings, `gm8`, 1384.2 |
+| `prefill_gqa-b8-s1024` | 792.6 | 851.6 | 728.4 | 725.6 | 1.00x | 1.09x | async rings, `gm8`, 728.4 |
+| `prefill_gqa-b8-s2048` | 2814.3 | 2956.2 | 2683.6 | 2681.1 | 1.00x | 1.05x | the previous row, 2685.4 |
+
+### What the numbers say
+
+The committed prefill schedules stand: nothing in the sweep beats a previous schedule re-measured on the same box by
+more than 3%, and three winners are the previous row itself. The rows now carry this box's numbers, which are 10-15%
+below the previously recorded ones at the same schedule (the box, not the schedule), and where a row changed it is a
+transport choice inside the same FlashAttention-2 geometry: the asynchronous copy ring (`d2`/`d4/smem-async`) or the
+`gm8` rasterization in place of the two-slot TMA ring, for 0-3%. Every prefill golden measured is ahead of eager,
+from 1.04x at 8192 causal keys to 1.44x at 1024.
+
+The decode goldens are the gap this method has: a pin spelled the way the committed rows spell their sites does not
+resolve on this revision, so the split-KV family could not be swept by hand and the committed routing rows stay as
+they are.

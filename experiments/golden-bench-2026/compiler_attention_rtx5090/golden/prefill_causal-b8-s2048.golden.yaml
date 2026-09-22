@@ -350,7 +350,7 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: k_sdpa_0d1af1.06c8209342fb.b8c492506f05
+  - name: k_sdpa_0d1af1.06c8209342fb.bb176cce4877
     bindings: {}
     pins:
       FAST_MATH: false
@@ -359,12 +359,12 @@ configs:
       TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x4/k4
       REDUCE@map.1/twist: ''
       REDUCE@map.1/twist.1/inner: ''
-      STAGE@map.1/twist: d2/smem-tma
-      STAGE@map.1/twist.1/inner: d2/smem-tma
+      STAGE@map.1/twist: d2/smem-async
+      STAGE@map.1/twist.1/inner: d4/smem-async
       WORK: w4x1
       RASTER: gm8
-    identity: dd89f7d506a6f5a2d3b682f9c520beb4c1244a456b99f9a1120fd421e622a8fa
+    identity: bb176cce48770accdf28ce3964f5982f45cf9aac6590d61dc48008b44fe3f16a
     measurements:
-      emmy_us: 1560.9920024871826
-      reference_us: 1532.5759649276733
+      emmy_us: 1381.7600011825562
+      reference_us: 1371.0399866104126
       reference_backend: same-input-greedy

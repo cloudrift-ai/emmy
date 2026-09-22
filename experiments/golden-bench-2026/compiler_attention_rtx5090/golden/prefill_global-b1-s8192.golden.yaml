@@ -266,7 +266,7 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: k_sdpa_bf0cd3.7fd72e5ed9d9.6a39581f4a29
+  - name: k_sdpa_bf0cd3.7fd72e5ed9d9.2e381a8f0220
     bindings: {}
     pins:
       FAST_MATH: false
@@ -279,8 +279,8 @@ configs:
       STAGE@map.1/twist.1/inner: d2/smem-tma
       WORK: w4x1
       RASTER: ''
-    identity: fca851a932917a66ddfcf3f0db2eeaf63076563f018b9b72bd9e700da25d8c79
+    identity: 2e381a8f0220e5410dca0a29d4afaa8c3999f3b2c422a13469bfb9b2fa0b7a78
     measurements:
-      emmy_us: 5638.656139373779
-      reference_us: 5642.111778259277
+      emmy_us: 5037.631988525391
+      reference_us: 5026.688098907471
       reference_backend: same-input-greedy
