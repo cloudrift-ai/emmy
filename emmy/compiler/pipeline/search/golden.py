@@ -1697,7 +1697,7 @@ def regime_live(record: GoldenRecord) -> bool:
         kn = knobs.get(str(name))
         raw = kn.raw() if kn is not None else config.knob_raw(str(name))
         if kn is not None and kn.type is KnobType.BOOL:
-            live = kn.parse(raw) if raw is not None else False
+            live = precision_pin(kn) if name in _PRECISION_PINS else kn.parse(raw) if raw is not None else False
             if bool(value) != live:
                 return False
         elif (raw or "") != str(value):

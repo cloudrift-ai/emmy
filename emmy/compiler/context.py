@@ -50,7 +50,9 @@ def _env_compile_flags() -> str:
     """Extra nvcc flags for this compile (``EMMY_NVCC_FLAGS``). Set by the
     CLI commands (via :func:`emmy.config.set_nvcc_flags`); folded into
     :meth:`Context.structural_key` so the perf cache is partitioned by opt level."""
-    return config.nvcc_flags()
+    from emmy.compiler.backend.cuda.nvcc import effective_flags  # noqa: PLC0415
+
+    return " ".join(effective_flags())
 
 
 # The cicc optimization level as it is spelled on the nvcc command line, with the ``-Xcicc``

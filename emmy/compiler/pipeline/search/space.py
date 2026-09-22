@@ -229,9 +229,9 @@ FAST_EXP = Knob(
 FAST_MATH = Knob(
     "FAST_MATH",
     KnobType.BOOL,
-    hints=(False,),
-    help="Umbrella pin for the precision-trading knobs (FAST_EXP, F16_MMA_F32_ACC, FP8_MMA): "
-    "EMMY_FAST_MATH=1 enables each one not individually pinned; individual pins win.",
+    hints=(True,),
+    help="Fast math is enabled by default: NVCC fast math, invariant reciprocal division, and the "
+    "precision-trading knobs (FAST_EXP, F16_MMA_F32_ACC, FP8_MMA). Pin 0 to disable; individual pins win.",
     unfeatured=True,  # a meta gate over other knobs — must never enter the feature vector
 )
 
@@ -261,17 +261,16 @@ FP8_MMA = Knob(
 )
 
 
-def precision_pin(knob: Knob) -> bool | None:
+def precision_pin(knob: Knob) -> bool:
     """The effective pin for a precision-trading BOOL ``knob``: its own ``EMMY_<NAME>`` pin when
-    set, else the ``FAST_MATH`` umbrella pin, else ``None`` (neither set — the caller applies its
-    conservative default, and may keep target gates that an *individual* pin overrides)."""
+    set, else the ``FAST_MATH`` umbrella pin, else its enabled default."""
     raw = knob.raw()
     if raw is not None:
         return knob.parse(raw)
     raw = FAST_MATH.raw()
     if raw is not None:
         return FAST_MATH.parse(raw)
-    return None
+    return FAST_MATH.hints[0]
 
 
 LOOPIFY = Knob(

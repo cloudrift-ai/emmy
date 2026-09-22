@@ -38,10 +38,6 @@ from emmy import config
 
 logger = logging.getLogger(__name__)
 
-# Deployment uses fast math; extra flags can disable contraction for rounding diagnostics.
-_BASE_FLAGS = ["--use_fast_math"]
-
-
 def effective_flags() -> list[str]:
     """The full nvcc flag list: the base flags plus any extra flags from the
     ``EMMY_NVCC_FLAGS`` env var (space-separated), which the CLI commands
@@ -49,7 +45,9 @@ def effective_flags() -> list[str]:
     Read fresh each call so a per-invocation override / the bench-worker
     subprocess (which inherits the env) both see the same value, and so the
     flags fold into the cache key."""
-    return [*_BASE_FLAGS, *config.nvcc_flags().split()]
+    from emmy.compiler.pipeline.search.space import FAST_MATH, precision_pin  # noqa: PLC0415
+
+    return [*(["--use_fast_math"] if precision_pin(FAST_MATH) else []), *config.nvcc_flags().split()]
 
 
 def cubin_cache_dir() -> Path:
