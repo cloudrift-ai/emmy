@@ -140,9 +140,9 @@ def fast_math_knobs(knobs: Mapping) -> bool:
 
 
 def precision_trading_pins(pins: Mapping) -> bool:
-    """Whether input pins enable any precision-trading enumeration path."""
+    """Whether recorded pins enable a precision-trading compiler or NVCC policy."""
     umbrella = bool(pins.get("FAST_MATH", False))
-    return any(bool(pins.get(name, umbrella)) for name in ("FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA"))
+    return umbrella or any(bool(pins.get(name, False)) for name in ("FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA"))
 
 
 def pins_freeze_cut(pins: Mapping) -> bool:
@@ -1680,7 +1680,7 @@ _PRECISION_PINS = ("FAST_MATH", "FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA")
 
 def regime_live(record: GoldenRecord) -> bool:
     """Whether the record's input-pin regime IS the live one — exact per pin: a BOOL pin compares
-    against the live env pin (unset = the knob's off state), anything else against the raw env
+    against its effective precision policy (other BOOLs default off), anything else against the raw env
     string. Strict BOTH ways: a record measured under FAST_MATH is no evidence for a standard
     deploy, and a standard record none under a live precision-trading pin — the precision universe
     (:data:`_PRECISION_PINS`, umbrella semantics per ``space.precision_pin``) is compared even for

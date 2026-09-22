@@ -702,7 +702,7 @@ def test_multi_gpu_working_sweep_shares_slots_and_prior_across_targets(monkeypat
         bench=False,
     )
 
-    assert tune._tune_working_multi(args, targets, {"configs": []}, backends=backends, db=object(), ctx=object()) == 2
+    assert tune._tune_working_multi(args, targets, {"configs": []}, backends=backends, db=object(), ctx=SimpleNamespace(compile_flags="--use_fast_math")) == 2
     assert max_active == 2
     assert seen_prior == [prior, prior]
     assert seen_queues[0] is seen_queues[1]
@@ -766,7 +766,7 @@ def test_record_greedy_pick_appends_routing_rows_and_receipts_once(tmp_path, mon
         record_greedy_pick(path, "mm", decisions=decisions, kernels=kernels, reference_backend="same-input-greedy")
 
 
-def test_record_greedy_pick_names_the_row_a_decision_lands_on(tmp_path):
+def test_record_greedy_pick_names_the_row_a_decision_lands_on(tmp_path, monkeypatch):
     """A route whose seam the seed already records is the SAME row: same bindings, pins, identity
     and knobs. The decision then lands on the seed instead of appending, and the kernel set has to
     name the row that carries the measurement — the seed. Naming the row the recorder would have
@@ -776,6 +776,7 @@ def test_record_greedy_pick_names_the_row_a_decision_lands_on(tmp_path):
 
     path = tmp_path / "working.yaml"
     root = "1" * 64
+    monkeypatch.setenv("EMMY_FAST_MATH", "0")
     seed = _matmul("mm", pins={"FAST_MATH": False}, knobs={"PLACE@map.1/map": "cut"})
     seed["identity"] = root
     dump_golden_file(_document(seed), path)
@@ -795,7 +796,7 @@ def test_record_greedy_pick_names_the_row_a_decision_lands_on(tmp_path):
     assert realizations[0]["measurements"]["emmy_us"] == 30.0
 
 
-def test_record_greedy_pick_does_not_alias_rows_between_input_regimes(tmp_path):
+def test_record_greedy_pick_does_not_alias_rows_between_input_regimes(tmp_path, monkeypatch):
     """Rows with the same route and schedule remain distinct when their pins differ."""
     from emmy.compiler.pipeline.search.working_golden import record_greedy_pick
 
@@ -809,7 +810,9 @@ def test_record_greedy_pick_does_not_alias_rows_between_input_regimes(tmp_path):
     )
     identity = "1" * 64
     decisions = [(identity, {"PLACE@map.1/map": "cut"}, 30.0, 33.0)]
+    monkeypatch.setenv("EMMY_FAST_MATH", "0")
     strict_names = record_greedy_pick(path, "mm.strict", decisions=decisions, kernels=[], reference_backend="same-input-greedy")
+    monkeypatch.setenv("EMMY_FAST_MATH", "1")
     fast_names = record_greedy_pick(path, "mm.fast", decisions=decisions, kernels=[], reference_backend="same-input-greedy")
 
     realizations = load_golden_file(path)["configs"][0]["realizations"]

@@ -740,3 +740,22 @@ def test_worker_hang_is_sigkilled_not_wedged() -> None:
     elapsed = time.time() - t0
     assert elapsed < 30.0, f"run_job took {elapsed:.1f}s — the wall-timeout SIGKILL did not fire promptly"
     assert worker.proc is None, "the hung worker must be killed and its handle released"
+
+
+async def test_worker_applies_each_requested_fast_math_policy(monkeypatch):
+    from emmy.compiler.backend import BenchmarkResult
+    from emmy.compiler.backend.cuda import _bench_worker, nvcc, program
+
+    monkeypatch.setenv("EMMY_FAST_MATH", "1")
+    monkeypatch.setenv("EMMY_NVCC_FLAGS", "--fmad=false")
+    seen = []
+
+    def benchmark(*args, **kwargs):
+        seen.append(nvcc.effective_flags())
+        return BenchmarkResult(time_ms=1, min_ms=1, num_launches=1, per_launch=[])
+
+    monkeypatch.setattr(program, "benchmark_program", benchmark)
+    for enabled in (False, True, False):
+        await _bench_worker._run_job({"graph": None, "kwargs": {}, "fast_math": enabled})
+        assert nvcc.effective_flags() == ["--use_fast_math", "--fmad=false"]
+    assert seen == [["--fmad=false"], ["--use_fast_math", "--fmad=false"], ["--fmad=false"]]

@@ -342,13 +342,13 @@ def _handle_run_once(args):
         logger.error("CUDA GPU required")
         sys.exit(1)
 
-    if ir_path is not None:
-        args.ir = ir_path
-        _handle_run_ir(args, CudaBackend, CompilerDump)
-        return
+    if ir_path is not None or hasattr(args, "_golden_graph"):
+        from emmy.compiler.pipeline.search.golden import shared_regime_pins
 
-    if hasattr(args, "_golden_graph"):
-        _handle_run_ir(args, CudaBackend, CompilerDump)
+        if ir_path is not None:
+            args.ir = ir_path
+        with pinned_knobs(shared_regime_pins(getattr(args, "_golden_records", None) or [])):
+            _handle_run_ir(args, CudaBackend, CompilerDump)
         return
 
     if args.input is None and args.code is None:
@@ -802,7 +802,11 @@ def _record_bench_evidence(args, golden_benches, greedy_iso) -> None:
     if not clean:
         return
     db_path = resolve_tune_db()
-    n_perf = sum(record_bench_perf(db_path, ctx, gb.graph, gb.bench) for gb in clean if gb.graph is not None and gb.bench is not None)
+    n_perf = 0
+    for gb in clean:
+        if gb.graph is not None and gb.bench is not None:
+            with pinned_knobs(_sample_replay_knobs(gb.sample) if gb is not greedy_iso else {}):
+                n_perf += record_bench_perf(db_path, Context.probe(), gb.graph, gb.bench)
     print(f"[record-evidence] {n_perf} kernel perf row(s) recorded into {db_path} — opt out with --no-record-evidence")
 
 
@@ -1340,9 +1344,10 @@ async def _bench_golden_variants(
             out.append(_GoldenBench(sample, g_compiled, None, flags, "pin_unmatched"))
             continue
         try:
-            g_bench, run_outputs = await backend.bench_pinned_async(
-                g_compiled, run_inputs=ref_inputs, run_inputs_key=ref_key, warmup=warmup, num_iters=iters
-            )
+            with pinned_knobs(replay_knobs):
+                g_bench, run_outputs = await backend.bench_pinned_async(
+                    g_compiled, run_inputs=ref_inputs, run_inputs_key=ref_key, warmup=warmup, num_iters=iters
+                )
         except Exception as exc:  # noqa: BLE001 — a bad pin must not abort the run's own bench table
             st = _failed_bench_status(exc)
             logger.warning("[golden] %s: bench of the pinned config failed (%s) — row kept as %s", sample.name, exc, st)
@@ -2629,14 +2634,13 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
         # golden evidence and their shared input regime published, as ``compile`` does, so the
         # greedy row deploys from the file it is measured against. Recording the pick composes the
         # capture of its kernel-set decisions into the same compile.
-        from emmy.compiler.pipeline.search.golden import records_override, shared_regime_pins  # noqa: PLC0415
-        from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
+        from emmy.compiler.pipeline.search.golden import records_override  # noqa: PLC0415
 
         scope = getattr(args, "_golden_records", None) or None
         pipeline = Pipeline.build(tail)
         if getattr(args, "record_greedy", False):
             pipeline = pipeline.with_strategies(taken)
-        with pinned_knobs(shared_regime_pins(scope or [])), records_override(scope):
+        with records_override(scope):
             graph = pipeline.run(graph, db=db, dump=dump)
 
     if not args.bench:
@@ -2925,7 +2929,8 @@ async def _bench_ab_variants_ir(backend, ir_path, tail, specs, *, warmup, iters,
             out.append(_GoldenBench(sample, g, None, [f"{flag} — row NOT benched"], "pin_unmatched"))
             continue
         try:
-            g_bench, _ = await backend.bench_pinned_async(g, warmup=warmup, num_iters=iters)
+            with pinned_knobs(replay_knobs):
+                g_bench, _ = await backend.bench_pinned_async(g, warmup=warmup, num_iters=iters)
         except Exception as exc:  # noqa: BLE001 — a bad pin must not abort the run's own table
             st = _failed_bench_status(exc)
             logger.warning("[ab] %s: bench of the pinned config failed (%s) — row kept as %s", sample.name, exc, st)

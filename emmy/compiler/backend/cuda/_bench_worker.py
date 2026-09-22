@@ -148,8 +148,13 @@ async def _run_job(req: dict) -> dict:
         return {"warmed": True}
 
     from emmy import config
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
 
-    with config.nvcc_flags_override(req.get("nvcc_flags")), _reference_precision(req.get("strict_accuracy", False)):
+    with (
+        pinned_knobs({"FAST_MATH": req["fast_math"]} if "fast_math" in req else {}),
+        config.nvcc_flags_override(req.get("nvcc_flags")),
+        _reference_precision(req.get("strict_accuracy", False)),
+    ):
         spec = req.get("torch_spec")
         if spec is None:
             from emmy.compiler.backend.cuda.program import benchmark_program
