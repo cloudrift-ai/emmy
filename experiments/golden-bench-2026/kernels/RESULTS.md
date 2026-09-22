@@ -1,5 +1,124 @@
 # Golden-bench kernel corpus
 
+## Platform rtx5090x1 and rtx4090x1 — hand-pinned re-tune (2026-09-22)
+
+### Question
+
+Are the committed RTX 5090 and RTX 4090 layer goldens (`goldens/qwen3-06b_*.yaml`, `qwen3-06b-fp8_*.yaml`,
+`qwen3-32b-fp8_rtx4090.yaml`) still the best the current compiler offers on each card? The tuner was not used: it
+is known to be broken, so the schedules were re-found by hand-pinned sweeps.
+
+### Status
+
+RTX 5090: both goldens swept (60 lanes, about 7,000 hand-pinned rows, every kept row clean under the run's integrity
+flags) and written back through `--record-greedy`, with the recorded greedy equal to the sweep winner. 47 lanes carry
+a new row, 11 of them targets the FP8 golden had never recorded (seq-1 quantize and reduce kernels); 13 lanes keep
+their previous row: 4 with no clean sweep row (the fused attention-plus-projection targets, where the hand pins were
+rejected as unreproducible), 4 where the sweep's best is far slower than the committed row (the committed pin does
+not resolve on this revision, so the schedule could not be re-benched), and 3 whose recorded row does not decode on
+main (the reduce-fusion changes since `1159502e` re-shaped their fork tree). The RTX 4090 section follows when its
+write-back finishes.
+
+### Protocol
+
+For every target and lane the compiler's own fork tree was enumerated (`enumerate_graph`) and swept in three passes
+of `emmy run --golden FILE --realization SEED --bench --bench-backends eager,emmy --ab KNOBS` at deployable `-O3`:
+tensor-core matmuls as tile fragment x K step x CTA layout (144 pins: the committed row first, then 12 layouts times
+every mma atom the lane offers, wide tiles also at each cross-CTA split `g2k`/`g4k`/`g8k`), then staging ring x
+reduce partition around the top three (48), then rasterization x deeper K step (24); pointwise and reduce targets
+as worker split x tile fragment x cross-CTA split, capped at 48 pins per pass. Pass 1 ranked at 5 warm-ups / 30
+iterations; passes 2 and 3 and the write-back at 10 / 100. The write-back ran each lane against a working copy
+holding only that lane's seed and a fresh per-lane tune DB seeded by one bench of the winner. Box: vast.ai RTX 5090
+(driver 590.48.01, CUDA 13.0.88, PyTorch 2.14.0+cu130 in a fresh venv); source revision `1159502e`. The raw pins
+and A/B records of every pass are in `sweeps_rtx5090x1_2026-09-22.tar.gz`.
+
+### Measurements, RTX 5090
+
+Whole-program latency in microseconds. "previous" is the number in the committed row, recorded on another host and
+revision, so "vs previous" mixes the schedule with the box; the ratios above 1.3x are schedule changes (a wider CTA
+layout with a two-stage TMA or asynchronous ring on the projections, a cooperative reduce where the committed row was
+the unscheduled fallback), the ratios within 0.9-1.1x are the same schedule at this box's numbers. A previous of
+0.0 is a target the golden had not recorded.
+
+`qwen3-06b_rtx5090`:
+
+| target | lane | previous | re-found best | vs previous | outcome |
+| --- | --- | ---: | ---: | ---: | --- |
+| `k_mean_20f978.s512` | std | 2.65 | 2.67 | 0.99x | re-recorded |
+| `k_linear_reduce_06a42b.s512` | std | 11.9 | 8.25 | 1.44x | re-recorded |
+| `k_linear_1fd3d5.s512` | std | 19.19 | 14.49 | 1.32x | re-recorded |
+| `k_linear_1fd3d5.s512` | fm | 16.77 | 11.75 | 1.43x | re-recorded |
+| `k_linear_a09c5a.s512` | std | 14.3 | 8.36 | 1.71x | re-recorded |
+| `k_sdpa_mean_reduce_29d3df.s512` | std | 14254.5 | 96270.81 | 0.15x | kept (sweep slower than the committed row) |
+| `k_sdpa_linear_reduce_c0a378.s512` | std | 6223.9 | — | — | kept (no clean row) |
+| `k_linear_sdpa_reduce_e24efe.s512` | std | 6528.4 | — | — | kept (no clean row) |
+| `k_linear_mean_reduce_dc067d.s512` | std | 78.0 | 50.82 | 1.53x | re-recorded |
+| `k_linear_mean_reduce_dc067d.s512` | fm | 61.2 | 41.59 | 1.47x | re-recorded |
+| `k_linear_6b4b5f.s512` | std | 40.2 | 22.25 | 1.81x | re-recorded |
+| `k_mean_b8e46d.s1` | std | 1.6 | 1.72 | 0.93x | re-recorded |
+| `k_linear_reduce_7ef15d.s1` | std | 3.1 | 4.93 | 0.63x | kept (sweep slower than the committed row) |
+| `k_linear_49a16b.s1` | std | 8.0 | 4.10 | 1.95x | re-recorded |
+| `k_linear_49a16b.s1` | fm | 6.7 | 3.87 | 1.73x | re-recorded |
+| `k_linear_dfb21f.s1` | std | 11.0 | 5.49 | 2.00x | re-recorded |
+| `k_sdpa_mean_reduce_0a2624.s1` | std | 11.3 | 1.73 | 6.53x | re-recorded |
+| `k_sdpa_linear_reduce_d0f5c0.s1` | std | 24.1 | 6.79 | 3.55x | kept (row does not decode on main) |
+| `k_linear_sdpa_reduce_14c8c7.s1` | std | 26.58 | 465.23 | 0.06x | kept (sweep slower than the committed row) |
+| `k_linear_mean_reduce_549927.s1` | std | 19.0 | 16.39 | 1.16x | kept (row does not decode on main) |
+| `k_linear_mean_reduce_549927.s1` | fm | 16.3 | 13.90 | 1.17x | kept (row does not decode on main) |
+| `k_linear_2dcd0c.s1` | std | 19.6 | 6.14 | 3.19x | re-recorded |
+
+`qwen3-06b-fp8_rtx5090`:
+
+| target | lane | previous | re-found best | vs previous | outcome |
+| --- | --- | ---: | ---: | ---: | --- |
+| `k_mean_20f978.s512` | std | 452.4 | 6.14 | 73.63x | re-recorded |
+| `k_mul_1_dynamic_fp8_scale_reduce.s512` | std | 2.4 | 1.56 | 1.53x | re-recorded |
+| `k_mul_1_dynamic_fp8_bits_pointwise.s512` | std | 1.1 | 1.09 | 1.01x | re-recorded |
+| `k_mul_1_dynamic_fp8_value_pointwise.s512` | std | 1.0 | 1.06 | 0.94x | re-recorded |
+| `k_linear_reduce_fca85d.s512` | std | 18.2 | 9.46 | 1.92x | re-recorded |
+| `k_linear_7edead.s512` | std | 19.5 | 15.39 | 1.27x | re-recorded |
+| `k_linear_9a2f39.s512` | std | 18.6 | 9.55 | 1.95x | re-recorded |
+| `k_sdpa_mean_reduce_29d3df.s512` | std | 14275.6 | 96343.20 | 0.15x | kept (sweep slower than the committed row) |
+| `k_sdpa_linear_reduce_616dc9.s512` | std | 484.8 | — | — | kept (no clean row) |
+| `k_reshape_dynamic_fp8_scale_reduce.s512` | std | 6.7 | 2.15 | 3.12x | re-recorded |
+| `k_reshape_dynamic_fp8_bits_pointwise.s512` | std | 1.4 | 1.42 | 0.98x | re-recorded |
+| `k_linear_aa889a.s512` | std | 460.6 | 322.79 | 1.43x | re-recorded |
+| `k_mean_20f978.mul_11.s512` | std | 453.5 | 6.14 | 73.83x | re-recorded |
+| `k_mul_11_dynamic_fp8_scale_reduce.s512` | std | 2.3 | 1.60 | 1.44x | re-recorded |
+| `k_mul_11_dynamic_fp8_bits_pointwise.s512` | std | 1.1 | 1.09 | 1.01x | re-recorded |
+| `k_linear_reduce_b17b94.s512` | std | 1180.6 | 1134.53 | 1.04x | re-recorded |
+| `k_mul_12_dynamic_fp8_scale_reduce.s512` | std | 9.6 | 1.53 | 6.29x | re-recorded |
+| `k_mul_12_dynamic_fp8_bits_pointwise.s512` | std | 1.8 | 1.84 | 0.98x | re-recorded |
+| `k_linear_0edae7.s512` | std | 451.4 | 442.53 | 1.02x | re-recorded |
+| `k_mean_b8e46d.s1` | std | 37.4 | 2.32 | 16.12x | re-recorded |
+| `k_mul_1_dynamic_fp8_scale_reduce.s1` | std | 3.5 | 1.12 | 3.12x | re-recorded |
+| `k_mul_1_dynamic_fp8_bits_pointwise.s1` | std | 0.7 | 0.78 | 0.90x | re-recorded |
+| `k_mul_1_dynamic_fp8_value_pointwise.s1` | std | 0.8 | 0.78 | 1.02x | re-recorded |
+| `k_linear_reduce_1d5287.s1` | std | 2.3 | 2.31 | 0.99x | re-recorded |
+| `k_linear_12b580.s1` | std | 2.8 | 2.64 | 1.06x | re-recorded |
+| `k_linear_15b7c4.s1` | std | 2.3 | 2.44 | 0.94x | re-recorded |
+| `k_sdpa_mean_reduce_0a2624.s1` | std | 63.4 | 1.76 | 36.07x | re-recorded |
+| `k_sdpa_linear_reduce_5adc5a.s1` | std | — | — | — | kept (no clean row) |
+| `k_reshape_dynamic_fp8_scale_reduce.s1` | std | 0.0 | 1.14 | — | re-recorded |
+| `k_reshape_dynamic_fp8_bits_pointwise.s1` | std | 0.0 | 0.80 | — | re-recorded |
+| `k_linear_68727f.s1` | std | 0.0 | 6.17 | — | re-recorded |
+| `k_mean_b8e46d.mul_11.s1` | std | 0.0 | 2.27 | — | re-recorded |
+| `k_mul_11_dynamic_fp8_scale_reduce.s1` | std | 0.0 | 1.12 | — | re-recorded |
+| `k_mul_11_dynamic_fp8_bits_pointwise.s1` | std | 0.0 | 0.78 | — | re-recorded |
+| `k_linear_reduce_fb7c04.s1` | std | 0.0 | 8.20 | — | re-recorded |
+| `k_mul_12_dynamic_fp8_scale_reduce.s1` | std | 0.0 | 1.34 | — | re-recorded |
+| `k_mul_12_dynamic_fp8_bits_pointwise.s1` | std | 0.0 | 0.80 | — | re-recorded |
+| `k_linear_fda778.s1` | std | 0.0 | 6.14 | — | re-recorded |
+
+### What the numbers say
+
+The projections of the 0.6B layer move the most: 1.3x-2.0x from `w2x4`/`w1x4` layouts over `f2x2/k4` fragments with
+a two- or four-slot ring, against the committed `w2x2 f4x4/k2` rows, and up to 3.2x with a `g8k` split at seq 1.
+Reduce targets whose committed row was the unscheduled fallback (the FP8 norms and group maxima at 450 us) now run
+as cooperative reductions at 2-6 us. The fused attention-plus-projection targets are the gap: their committed pins
+(`REDUCE@a1`, `TILE@twist`-style spellings) do not resolve on this revision, the hand grid never reached their
+family, and they keep their rows.
+
 ## Platform a10040x1 — hand-found common corpus on the 40GB part (2026-09-11)
 
 ### Question and scope
