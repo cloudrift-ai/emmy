@@ -4,6 +4,12 @@ This experiment qualifies manually chosen schedules for the same 18 frozen Qwen3
 V100, A100, and H100. It does not reproduce the paper's historical kernel boundaries or automatic-search claim.
 It measures neither whole-layer latency nor model output quality nor serving performance.
 
+After these measurements, the compiler default was restored to `--use_fast_math`. The results below retain their
+recorded precise settings: `--fmad=false`, precise division and square root, and no global fast math. They do not
+qualify the restored fast-math default. Use the archived measured revisions for reproduction. A custom
+`--nvcc-flags=--fmad=false` now disables contraction for diagnostics but leaves other fast-math transformations enabled;
+it does not recreate the complete arithmetic settings of these archived runs.
+
 The second pass qualifies 49/54 operator/GPU pairs: 15 on V100, 17 on A100, and 17 on H100. All 49 now have complete
 three-backend measurements, up from 36 in the first pass. Thirteen schedules change. A100 prefill attention improves
 from 153.60 to 32.77 µs, and V100 attention from 215.04 to 135.68 µs. H100 decode down projection gains five-seed
@@ -54,7 +60,7 @@ database, no online prior, and strict evidence. It has a 180-second external lim
 a two-second kernel watchdog, and ten seconds for the first iteration. A command row has an 1800-second limit.
 
 Timings are the CLI's captured, interleaved whole-program measurements of eager PyTorch, Inductor, and Emmy.
-Compilation is outside the timing window. Deployable compilation uses the default NVCC optimization level with
+Compilation is outside the timing window. The measured compilation used the default NVCC optimization level with
 `--fmad=false` and precise division and square root. The full correctness suite uses its separate `-Xcicc -O1` lane
 and supplies no performance numbers. No application clocks were fixed.
 
@@ -108,8 +114,8 @@ split-reduction residual projections still failed strict correctness. No failed 
 ## Compiler changes and validation
 
 The branch was rebased onto main through `f57df1295000df1337370546cf8181cdcd49b8d0`, preserving the tested first-pass
-tree. The first-pass compiler corrections remain: FP16 selection and SiLU rounding, precise CUDA arithmetic,
-correct invariant division, GPU alias matching, split-root selection, predicate closure, and distinct partial
+tree. The measured compiler retains the first-pass corrections: FP16 selection and SiLU rounding, precise CUDA
+arithmetic, correct invariant division, GPU alias matching, split-root selection, predicate closure, and distinct partial
 accumulator names. Their regressions, numerical diagnostics, original measurements, and report remain in the
 first-pass archive included with each platform.
 
@@ -128,12 +134,12 @@ and corpus tests pass, as do the selected Qwen and DeepSeek model rows.
 The final H100 `make test` at `3271b623` passes: 7299 passed, 701 skipped, and 58 warnings in 1190.42 seconds.
 `make lint` passes, including formatting of 831 files. The default suite includes strict model- and hardware-golden
 decoding. All 62 measured rows in the paper goldens also pass a separate strict decode at the final golden revision.
-The only subsequent source change is the V100 schedule input; compiler and test code remain identical.
+Between the measured revisions, only the V100 schedule input changes; compiler and test code remain identical.
 
 The final suite closes the first pass's 16 Qwen model-golden failures. An intermediate run was stopped after a
 routing-row ownership failure was reproduced; the final regression checks both the child and the route owner.
 Failed and interrupted validation logs remain diagnostic evidence. No result from those runs is substituted for
-the final gate. The complete core diff against main is 105 added and 174 removed lines, a net reduction of 69.
+the final gate. At the measured revision, the core diff against main is 105 added and 174 removed lines, net −69.
 
 The frozen paper Loop IR retains its existing reciprocal expressions. Replaying a golden does not retrace it
 through the revised normalization. A newly traced operator may differ; the embedded programs define this experiment.

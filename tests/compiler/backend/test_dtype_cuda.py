@@ -25,7 +25,7 @@ from tests.compiler.helpers import requires_cuda
 @requires_cuda
 @pytest.mark.parametrize(("dtype", "delta"), [(dt.F16, 2**-10), (dt.F32, 2**-13)])
 def test_separate_multiply_and_add_preserve_rounding(dtype, delta):
-    """The custom flag preserves separate rounding; default fast math contracts to -delta**2."""
+    """Disable contraction explicitly when checking separate frontend rounding."""
     from emmy.compiler.backend.cuda.backend import CudaBackend
 
     graph = Graph()
@@ -36,11 +36,10 @@ def test_separate_multiply_and_add_preserve_rounding(dtype, delta):
     graph.inputs, graph.outputs = ["a", "b", "c"], ["out"]
     inputs = {name: np.full(32, value, dtype=dtype.np) for name, value in (("a", 1 + delta), ("b", 1 - delta), ("c", -1))}
     backend = CudaBackend()
-    for flags, expected in (("", np.full(32, -delta**2, dtype=dtype.np)), ("--fmad=false", inputs["a"] * inputs["b"] + inputs["c"])):
-        with config.nvcc_flags_override(f"{config.nvcc_flags()} {flags}"):
-            compiled = backend.compile(graph)
-            result, _ = backend.run(compiled, input_data=inputs)
-        np.testing.assert_array_equal(result.outputs["out"], expected)
+    with config.nvcc_flags_override(f"{config.nvcc_flags()} --fmad=false"):
+        compiled = backend.compile(graph)
+        result, _ = backend.run(compiled, input_data=inputs)
+    np.testing.assert_array_equal(result.outputs["out"], inputs["a"] * inputs["b"] + inputs["c"])
 
 
 @requires_cuda

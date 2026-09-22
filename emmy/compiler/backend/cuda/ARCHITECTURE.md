@@ -56,10 +56,11 @@ codegen, no nvcc), and both paths share every line downstream. The projection:
   deployable regime, and `--nvcc-flags` overrides. **Tuning measures in the regime it deploys into**, so a tuned
   latency is the deployed one.
 
-  The base flags disable implicit multiply-add contraction (`--fmad=false`) and retain CUDA's precise division,
-  square root, and denormal defaults. Separate frontend operations must keep their intermediate rounding, especially
-  for FP16 products followed by addition. Explicit tensor-core instructions retain their own accumulation semantics.
-  Approximate exponentiation remains an explicit schedule choice; global fast math is no longer implicit.
+  The base flag is `--use_fast_math`, including implicit multiply-add contraction. For an intermediate-rounding
+  diagnostic, pass `--nvcc-flags=--fmad=false`; extra flags follow the base flag and override contraction for that
+  invocation. This leaves the other fast-math transformations enabled. Explicit tensor-core instructions retain
+  their own accumulation semantics. Accuracy and latency evidence must name the compile flags used; a passing
+  diagnostic with contraction disabled does not qualify the default fast-math kernel.
 
   `tune` used to rank at `-Xcicc -O1` to dodge a cicc front-end blowup on big unrolled register-tile kernels. That
   rationale was measured against the WMMA codegen deleted in #189 four days later; on current codegen (fragment work
