@@ -160,6 +160,8 @@ binds. Stating the rule once keeps all three answers one rule rather than copies
 Root ownership is asked twice, in two shapes, and the answers differ. `refused_roots` names the contraction roots the
 binder will not bind together, and the schedule projection refuses a prefix that schedules a second of them (an
 output tile, or a cooperative or ILP reduce).
+Both the split scheduler's `head` and `kernel_roots` skip slab providers while peeling a projection, as the kernel
+binder does. A captured scalar can be the first operand without becoming the kernel's reducing root.
 `owns_outputs_it_cannot_bind` asks what the full-projection cut is offered on: every output has one producing branch,
 and some branch is not about a single reduce — it reads several, or none. Both are needed. A projection whose outputs
 do not partition at all still refuses roots, and a projection the binder found one root in refuses none here yet is
