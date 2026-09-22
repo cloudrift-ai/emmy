@@ -728,7 +728,7 @@ class Fold:
                 continue  # a planar fold seeds the ⊕ itself; a recipe's base is a monoid by construction
             if not product.op.distributes_over(plus):
                 continue
-            left = [arg for arg in product.args if _over_a(arg, cone, a_names, uniform)]
+            left = [arg for arg in product.args if _over_a(arg, cone, a_names, uniform | a_edge.free_axes)]
             right = [arg for arg in product.args if (edge := by_name.get(arg)) is not None and edge is not a_edge and edge.free_axes]
             if len(left) != 1 or len(right) != 1 or left[0] == right[0]:
                 continue  # a square, or a product that does not multiply A by exactly one other edge
@@ -1391,22 +1391,21 @@ def _channel_product(lift: Lambda, result: str) -> tuple[Lambda, Assign | None]:
     return cone, stmt if isinstance(stmt, Assign) else None
 
 
-def _over_a(name: str, cone: Lambda, a_names: set[str], uniform: set[str]) -> bool:
+def _over_a(name: str, cone: Lambda, a_names: set[str], available: set[str]) -> bool:
     """Whether ``name`` is the A factor of ``cone``'s product — a component ``operands[0]`` binds,
-    or a value the cone computes from those components and kernel-UNIFORM ones alone.
+    or a value the cone computes from those components, A's coordinates and uniform values.
 
     The second reading is what lets a carrier read bilinear before its weight is reified. It walks
     the cone, which is this lift's own body, and never an operand's internals: a name bound to any
     other edge closes back as itself and fails the test.
 
-    ``uniform`` are the components of operands with no free coordinates — attention's scale, an rms
-    epsilon. One contributes no variation, so a factor reading it varies exactly as A does and the
-    channel is bilinear all the same. Without them the weight ``exp(a·scale)`` reads as a product
-    of A with a second varying value and no mma is offered at all."""
+    ``available`` includes A's free coordinates and components of coordinate-free operands. A mask
+    over A's coordinates or a uniform scale adds no dependence outside A; a coordinate exclusive
+    to B does, and must refuse the contraction."""
     if name in a_names:
         return True
     reads = set(cone.cone(name).params)
-    return bool(reads & a_names) and reads <= a_names | uniform
+    return bool(reads & a_names) and reads <= a_names | available
 
 
 def _writes_under(term: Fold, writing: set[int]) -> bool:
