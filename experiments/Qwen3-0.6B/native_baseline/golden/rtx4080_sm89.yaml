@@ -2765,7 +2765,7 @@ configs:
       PLACE@map.2/inner.2/map.1/map.1/inner.2/map.4/map.1/reduce.1/inner: cut
       PLACE@map.2/inner.2/map.1/map.2/inner: cut
       PLACE@map.2/inner.2/map.1/map.2/inner.2/map: cut
-    identity: cca86852a83e3156ea4e01fe3278ec1f880105d422df0a183ce47d020748b85e
+    identity: 5c4cd8ab7d732d6b812f0741d9cc35424a1d7d5d331d79882e4f39d02c15be98
     measurements:
       emmy_us: 282.989411268334
       reference_us: 254.3315978499554
@@ -2797,7 +2797,7 @@ configs:
       REDUCE: ''
       STAGE: ''
       RASTER: ''
-    identity: 9d442d0061b3b9a881f28d8538ca14c84da40532701e0ca4c7b122ebbc49c17f
+    identity: aa50e1a96518dc4ec88fc9f9d29a5d900654d37c8d08fc9f083b27b0e091f744
     measurements:
       emmy_us: 45.61454599553889
       reference_us: 40.941092101010405
@@ -2889,7 +2889,7 @@ configs:
       PLACE@map.2/inner.1/map.1/map.1/inner.2/map.4/map.1/reduce.1/inner: cut
       PLACE@map.2/inner.1/map.1/map.2/inner: cut
       PLACE@map.2/inner.1/map.1/map.2/inner.2/map: cut
-    identity: 62359369e4fda3ba9773782a5f718981cfba4cacee02730657e0d44469a17b43
+    identity: ea77db2bb9e427907e50884d631eb4e02fdcef82da64e382b6d556d723dd873a
     measurements:
       emmy_us: 172.7753359621785
       reference_us: 154.7389466253627
@@ -2905,7 +2905,7 @@ configs:
       REDUCE: ''
       STAGE: d2/smem
       RASTER: ''
-    identity: 2579ce46fb6468fa92066563dfc3aa2b7296cec9b3cb0b8f26a22cd3dbe8bd6a
+    identity: 0a544f5a33d62cf6992d11ce06f4354fd3bf5da2b383f7f8b04584943bdac00a
     measurements:
       emmy_us: 17.250460844773514
       reference_us: 15.412965725208151
@@ -3029,7 +3029,7 @@ configs:
       PLACE@map.2/inner.1/map.1/map.1/inner.2/map.4/map.1/reduce.1/inner: cut
       PLACE@map.2/inner.1/map.1/map.2/inner: cut
       PLACE@map.2/inner.1/map.1/map.2/inner.2/map: cut
-    identity: 327f482320673be8e21d7320f7cb607e626ba5c054e768ce63e695316eb16b04
+    identity: 62f32554571f3cc51c3c9db33af4560245dd6713a85b5957abaf6c4ece5e622e
     measurements:
       emmy_us: 429.8667477476601
       reference_us: 386.78170347675706
@@ -3045,7 +3045,7 @@ configs:
       REDUCE: ''
       STAGE: d2/smem
       RASTER: ''
-    identity: 39f1687489d7f18d7951466cdd494a91d9e7ebfb6d734aabee5bb6820fb8c130
+    identity: 5436cfd6bb89f1107ba59feb2f8d8efd3b8062d27a32b6eee5c0dee87f9b9c10
     measurements:
       emmy_us: 33.31413269042969
       reference_us: 29.832533995310463
@@ -3152,7 +3152,7 @@ configs:
       PLACE@map.2/inner.1/map.1/map.1/inner.2/map.4/map.1/reduce.1/inner: cut
       PLACE@map.2/inner.1/map.1/map.2/inner: cut
       PLACE@map.2/inner.1/map.1/map.2/inner.2/map: cut
-    identity: 8ca2b4add6bfa49ebaa2452a406a648e41ad923dbb4186c827478118e8713788
+    identity: 052e9e8901104ee98c074ecfbea2688ba37334aa6bd756e328bbf3d8d3b0caee
     measurements:
       emmy_us: 777.7106478521797
       reference_us: 699.7722193441643
@@ -3182,7 +3182,7 @@ configs:
       REDUCE: ''
       STAGE: d2/smem
       RASTER: ''
-    identity: 66325d177a1a98dc7de3516893516710bd3100d43446e68d7b257a499ffd45ec
+    identity: ef481d2e17b2e89cf9e392a6ad78adff4f3085afe020067efd3abc4f8f3e30b7
     measurements:
       emmy_us: 76.24861368766197
       reference_us: 68.45046006716214
@@ -3300,7 +3300,7 @@ configs:
       PLACE@map.2/inner.2/map.1/map.1/inner.2/map.4/map.1/reduce.1/inner: cut
       PLACE@map.2/inner.2/map.1/map.2/inner: cut
       PLACE@map.2/inner.2/map.1/map.2/inner.2/map: cut
-    identity: 18f27a7c35f254b04a88ad5118229dc887bff98619051c2854b59d34b0423d68
+    identity: 69bb27d4fbe63e3cb7f9f2ba90d85ca03ac4d6260dc79cad34a55bd183020bcf
     measurements:
       emmy_us: 283.1537283895676
       reference_us: 253.40665447804744
@@ -3332,7 +3332,7 @@ configs:
       REDUCE: ''
       STAGE: ''
       RASTER: ''
-    identity: 9d442d0061b3b9a881f28d8538ca14c84da40532701e0ca4c7b122ebbc49c17f
+    identity: aa50e1a96518dc4ec88fc9f9d29a5d900654d37c8d08fc9f083b27b0e091f744
     measurements:
       emmy_us: 45.64800045707009
       reference_us: 40.86690870198337
@@ -3424,7 +3424,7 @@ configs:
       PLACE@map.2/inner.2/map.1/map.1/inner.2/map.4/map.1/reduce.1/inner: cut
       PLACE@map.2/inner.2/map.1/map.2/inner: cut
       PLACE@map.2/inner.2/map.1/map.2/inner.2/map: cut
-    identity: 18f27a7c35f254b04a88ad5118229dc887bff98619051c2854b59d34b0423d68
+    identity: 69bb27d4fbe63e3cb7f9f2ba90d85ca03ac4d6260dc79cad34a55bd183020bcf
     measurements:
       emmy_us: 283.4148054806961
       reference_us: 254.21409762515037
@@ -3456,7 +3456,7 @@ configs:
       REDUCE: ''
       STAGE: ''
       RASTER: ''
-    identity: 9d442d0061b3b9a881f28d8538ca14c84da40532701e0ca4c7b122ebbc49c17f
+    identity: aa50e1a96518dc4ec88fc9f9d29a5d900654d37c8d08fc9f083b27b0e091f744
     measurements:
       emmy_us: 45.661091804504395
       reference_us: 40.94399918209423
@@ -3548,7 +3548,7 @@ configs:
       PLACE@map.2/inner.2/map.1/map.1/inner.2/map.4/map.1/reduce.1/inner: cut
       PLACE@map.2/inner.2/map.1/map.2/inner: cut
       PLACE@map.2/inner.2/map.1/map.2/inner.2/map: cut
-    identity: 18f27a7c35f254b04a88ad5118229dc887bff98619051c2854b59d34b0423d68
+    identity: 69bb27d4fbe63e3cb7f9f2ba90d85ca03ac4d6260dc79cad34a55bd183020bcf
     measurements:
       emmy_us: 265.12338347794827
       reference_us: 254.18879723064424
@@ -3580,7 +3580,7 @@ configs:
       REDUCE: ''
       STAGE: ''
       RASTER: ''
-    identity: 9d442d0061b3b9a881f28d8538ca14c84da40532701e0ca4c7b122ebbc49c17f
+    identity: aa50e1a96518dc4ec88fc9f9d29a5d900654d37c8d08fc9f083b27b0e091f744
     measurements:
       emmy_us: 42.607304842575736
       reference_us: 40.960000319914386
@@ -3671,7 +3671,7 @@ configs:
       PLACE@map.2/inner.2/map.1/map.1/inner.2/map.4/map.1/reduce.1/inner: cut
       PLACE@map.2/inner.2/map.1/map.2/inner: cut
       PLACE@map.2/inner.2/map.1/map.2/inner.2/map: cut
-    identity: 18f27a7c35f254b04a88ad5118229dc887bff98619051c2854b59d34b0423d68
+    identity: 69bb27d4fbe63e3cb7f9f2ba90d85ca03ac4d6260dc79cad34a55bd183020bcf
     measurements:
       emmy_us: 284.30061074739814
       reference_us: 254.77279453763853
@@ -3701,7 +3701,7 @@ configs:
       REDUCE: ''
       STAGE: ''
       RASTER: ''
-    identity: 9d442d0061b3b9a881f28d8538ca14c84da40532701e0ca4c7b122ebbc49c17f
+    identity: aa50e1a96518dc4ec88fc9f9d29a5d900654d37c8d08fc9f083b27b0e091f744
     measurements:
       emmy_us: 45.89382084933194
       reference_us: 41.1927266554399
@@ -3819,7 +3819,7 @@ configs:
       PLACE@map.2/inner.1/map.1/map.1/inner.2/map.4/map.1/reduce.1/inner: cut
       PLACE@map.2/inner.1/map.1/map.2/inner: cut
       PLACE@map.2/inner.1/map.1/map.2/inner.2/map: cut
-    identity: 62359369e4fda3ba9773782a5f718981cfba4cacee02730657e0d44469a17b43
+    identity: ea77db2bb9e427907e50884d631eb4e02fdcef82da64e382b6d556d723dd873a
     measurements:
       emmy_us: 172.5957330876987
       reference_us: 154.72809763065618
@@ -3835,7 +3835,7 @@ configs:
       REDUCE: ''
       STAGE: d2/smem
       RASTER: ''
-    identity: 2579ce46fb6468fa92066563dfc3aa2b7296cec9b3cb0b8f26a22cd3dbe8bd6a
+    identity: 0a544f5a33d62cf6992d11ce06f4354fd3bf5da2b383f7f8b04584943bdac00a
     measurements:
       emmy_us: 17.26428040286951
       reference_us: 15.412965725208151
@@ -3959,7 +3959,7 @@ configs:
       PLACE@map.2/inner.1/map.1/map.1/inner.2/map.4/map.1/reduce.1/inner: cut
       PLACE@map.2/inner.1/map.1/map.2/inner: cut
       PLACE@map.2/inner.1/map.1/map.2/inner.2/map: cut
-    identity: 62359369e4fda3ba9773782a5f718981cfba4cacee02730657e0d44469a17b43
+    identity: ea77db2bb9e427907e50884d631eb4e02fdcef82da64e382b6d556d723dd873a
     measurements:
       emmy_us: 170.17579745868397
       reference_us: 152.58370826717268
@@ -3975,7 +3975,7 @@ configs:
       REDUCE: ''
       STAGE: d2/smem
       RASTER: ''
-    identity: 2579ce46fb6468fa92066563dfc3aa2b7296cec9b3cb0b8f26a22cd3dbe8bd6a
+    identity: 0a544f5a33d62cf6992d11ce06f4354fd3bf5da2b383f7f8b04584943bdac00a
     measurements:
       emmy_us: 17.249103250174688
       reference_us: 15.412965725208151
@@ -4083,7 +4083,7 @@ configs:
       PLACE@map.2/inner.1/map.1/map.1/inner.2/map.4/map.1/reduce.1/inner: cut
       PLACE@map.2/inner.1/map.1/map.2/inner: cut
       PLACE@map.2/inner.1/map.1/map.2/inner.2/map: cut
-    identity: 62359369e4fda3ba9773782a5f718981cfba4cacee02730657e0d44469a17b43
+    identity: ea77db2bb9e427907e50884d631eb4e02fdcef82da64e382b6d556d723dd873a
     measurements:
       emmy_us: 164.91916827914085
       reference_us: 152.30930664007704
@@ -4099,7 +4099,7 @@ configs:
       REDUCE: ''
       STAGE: d2/smem
       RASTER: ''
-    identity: 2579ce46fb6468fa92066563dfc3aa2b7296cec9b3cb0b8f26a22cd3dbe8bd6a
+    identity: 0a544f5a33d62cf6992d11ce06f4354fd3bf5da2b383f7f8b04584943bdac00a
     measurements:
       emmy_us: 17.12551712989807
       reference_us: 15.377655111510178
@@ -4206,7 +4206,7 @@ configs:
       PLACE@map.2/inner.1/map.1/map.1/inner.2/map.4/map.1/reduce.1/inner: cut
       PLACE@map.2/inner.1/map.1/map.2/inner: cut
       PLACE@map.2/inner.1/map.1/map.2/inner.2/map: cut
-    identity: 62359369e4fda3ba9773782a5f718981cfba4cacee02730657e0d44469a17b43
+    identity: ea77db2bb9e427907e50884d631eb4e02fdcef82da64e382b6d556d723dd873a
     measurements:
       emmy_us: 155.3035909158902
       reference_us: 152.28881596802333
@@ -4221,7 +4221,7 @@ configs:
       REDUCE: ''
       STAGE: d2/smem
       RASTER: ''
-    identity: 2579ce46fb6468fa92066563dfc3aa2b7296cec9b3cb0b8f26a22cd3dbe8bd6a
+    identity: 0a544f5a33d62cf6992d11ce06f4354fd3bf5da2b383f7f8b04584943bdac00a
     measurements:
       emmy_us: 15.423015447763296
       reference_us: 15.377655111510178
@@ -4354,7 +4354,7 @@ configs:
       PLACE@map.2/inner.1/map.1/map.1/inner.2/map.4/map.1/reduce.1/inner: cut
       PLACE@map.2/inner.1/map.1/map.2/inner: cut
       PLACE@map.2/inner.1/map.1/map.2/inner.2/map: cut
-    identity: 327f482320673be8e21d7320f7cb607e626ba5c054e768ce63e695316eb16b04
+    identity: 62f32554571f3cc51c3c9db33af4560245dd6713a85b5957abaf6c4ece5e622e
     measurements:
       emmy_us: 430.15963820850857
       reference_us: 386.6079149507419
@@ -4370,7 +4370,7 @@ configs:
       REDUCE: ''
       STAGE: d2/smem
       RASTER: ''
-    identity: 39f1687489d7f18d7951466cdd494a91d9e7ebfb6d734aabee5bb6820fb8c130
+    identity: 5436cfd6bb89f1107ba59feb2f8d8efd3b8062d27a32b6eee5c0dee87f9b9c10
     measurements:
       emmy_us: 33.342933654785156
       reference_us: 29.730133215586342
@@ -4478,7 +4478,7 @@ configs:
       PLACE@map.2/inner.1/map.1/map.1/inner.2/map.4/map.1/reduce.1/inner: cut
       PLACE@map.2/inner.1/map.1/map.2/inner: cut
       PLACE@map.2/inner.1/map.1/map.2/inner.2/map: cut
-    identity: 327f482320673be8e21d7320f7cb607e626ba5c054e768ce63e695316eb16b04
+    identity: 62f32554571f3cc51c3c9db33af4560245dd6713a85b5957abaf6c4ece5e622e
     measurements:
       emmy_us: 429.7499754629811
       reference_us: 386.20618207493266
@@ -4494,7 +4494,7 @@ configs:
       REDUCE: ''
       STAGE: d2/smem
       RASTER: ''
-    identity: 39f1687489d7f18d7951466cdd494a91d9e7ebfb6d734aabee5bb6820fb8c130
+    identity: 5436cfd6bb89f1107ba59feb2f8d8efd3b8062d27a32b6eee5c0dee87f9b9c10
     measurements:
       emmy_us: 33.31413269042969
       reference_us: 29.832533995310463
@@ -4602,7 +4602,7 @@ configs:
       PLACE@map.2/inner.1/map.1/map.1/inner.2/map.4/map.1/reduce.1/inner: cut
       PLACE@map.2/inner.1/map.1/map.2/inner: cut
       PLACE@map.2/inner.1/map.1/map.2/inner.2/map: cut
-    identity: 327f482320673be8e21d7320f7cb607e626ba5c054e768ce63e695316eb16b04
+    identity: 62f32554571f3cc51c3c9db33af4560245dd6713a85b5957abaf6c4ece5e622e
     measurements:
       emmy_us: 429.9629198652538
       reference_us: 385.8876289682604
@@ -4618,7 +4618,7 @@ configs:
       REDUCE: ''
       STAGE: d2/smem
       RASTER: ''
-    identity: 39f1687489d7f18d7951466cdd494a91d9e7ebfb6d734aabee5bb6820fb8c130
+    identity: 5436cfd6bb89f1107ba59feb2f8d8efd3b8062d27a32b6eee5c0dee87f9b9c10
     measurements:
       emmy_us: 33.31413269042969
       reference_us: 29.866667588551838
@@ -4725,7 +4725,7 @@ configs:
       PLACE@map.2/inner.1/map.1/map.1/inner.2/map.4/map.1/reduce.1/inner: cut
       PLACE@map.2/inner.1/map.1/map.2/inner: cut
       PLACE@map.2/inner.1/map.1/map.2/inner.2/map: cut
-    identity: 327f482320673be8e21d7320f7cb607e626ba5c054e768ce63e695316eb16b04
+    identity: 62f32554571f3cc51c3c9db33af4560245dd6713a85b5957abaf6c4ece5e622e
     measurements:
       emmy_us: 389.1116978498747
       reference_us: 386.9306670137203
@@ -4740,7 +4740,7 @@ configs:
       REDUCE: ''
       STAGE: d2/smem
       RASTER: ''
-    identity: 39f1687489d7f18d7951466cdd494a91d9e7ebfb6d734aabee5bb6820fb8c130
+    identity: 5436cfd6bb89f1107ba59feb2f8d8efd3b8062d27a32b6eee5c0dee87f9b9c10
     measurements:
       emmy_us: 30.037332664836537
       reference_us: 29.866667588551838
@@ -4917,7 +4917,7 @@ configs:
       REDUCE: ''
       STAGE: d2/smem
       RASTER: ''
-    identity: f901b79a48ef85aa28f4b40c48f12884c002201ee531350ce95c7235f6d5168c
+    identity: bfb72c323a9ef696d8717bff8a773466992d4ff150a5d4e8c1b6147e12853511
     measurements:
       emmy_us: 16.321939049345072
       reference_us: 16.233410905389224
@@ -4993,7 +4993,7 @@ configs:
       REDUCE: ''
       STAGE: d2/smem
       RASTER: ''
-    identity: fe6e593a0405bbd2881393594fc03a23042750abb2984da7b1b36d8277fa6eff
+    identity: 754b371dc2c421dd0696bbf0608a9a0bebeda9fa193e6fc2b7a61293d181d3c4
     measurements:
       emmy_us: 19.152592729639125
       reference_us: 19.138206695688183
@@ -5086,7 +5086,7 @@ configs:
       REDUCE: ''
       STAGE: d2/smem
       RASTER: ''
-    identity: 07b65c01d2f533cc743d535aa189bc6faf49a94181de67d09aac83e510adebaa
+    identity: d698abaf3f22c6ea8578c8463498e3c8a84c2b69b77b9817e68184d632c69320
     measurements:
       emmy_us: 42.60977771547106
       reference_us: 42.5261188955868
@@ -5148,7 +5148,7 @@ configs:
       REDUCE: ''
       STAGE: d2/smem
       RASTER: ''
-    identity: 0470c3f67a35e4948ca96a6abca6e6d899fe6a1a9ce5f1e11e07148f84205142
+    identity: 102044f29948f0cd920d1111318606a44a73e1ad3dc0ef70557df8ec03483dfe
     measurements:
       emmy_us: 7.435130684272102
       reference_us: 7.473021111589797
@@ -5255,7 +5255,7 @@ configs:
       REDUCE: ''
       STAGE: d2/smem
       RASTER: ''
-    identity: 0a12392ee72786b77b938f9ba2a6d446d1a6704ffb0ba6b6bcbb2d940d5cb4a6
+    identity: e1e31152f58ec4471054e7a0bb04236d242d7c5e394f53dcd17b8f2a32e2f6db
     measurements:
       emmy_us: 18.398967481428578
       reference_us: 18.42133402824402
@@ -5333,7 +5333,7 @@ configs:
       REDUCE: ''
       STAGE: d2/smem
       RASTER: ''
-    identity: 2bf4529f00515ad0fcefb83ddd88539539f61714a6659c90bdd6d333e80b8cf5
+    identity: b7a05da53cea38bfff80422b61ac04058910a45d3c1f058b063acfee4e666ea3
     measurements:
       emmy_us: 70.99345597353849
       reference_us: 70.83520293235779
@@ -5420,7 +5420,7 @@ configs:
       REDUCE: ''
       STAGE: d2/smem
       RASTER: ''
-    identity: 3ff09d1bcb239ba084b7d52f315f023cae6663bd2b50c4589f4786d33829f68e
+    identity: e7434e1e87f7e50df4f8835db8555b5406d2e87cd9e954c628d4f7f069098b6d
     measurements:
       emmy_us: 31.86447129530065
       reference_us: 31.86447129530065
@@ -5493,7 +5493,7 @@ configs:
       REDUCE: ''
       STAGE: d2/smem
       RASTER: ''
-    identity: d7cb1898a8b71fca190ccfc3ba639dc3c4930678515e10a5641b6f93799669b6
+    identity: 71af6672f73f78d743883863d30a9fa9a84a22fb150bb0d168d62474c65a743d
     measurements:
       emmy_us: 43.39840014775594
       reference_us: 43.51999859015147
@@ -5569,7 +5569,7 @@ configs:
       PLACE@map.3/map.1/map.1/reduce: cut
       PLACE@map.3/map.1/map.1/reduce.1/inner: cut
       PLACE@map.3/map.2/inner: cut
-    identity: 953d186210ef6812e8dee0ef00e72cbc22780dd36b1e72c48d5b6546448e4be9
+    identity: 7fa59952bf3e2772ea0cf3c6d32252d3dc69cc0577b9f3409da99aba49010e73
     measurements:
       emmy_us: 251.05028774174778
       reference_us: 224.99511284020946
@@ -5682,7 +5682,7 @@ configs:
       WORK: ''
       REDUCE: ''
       RASTER: ''
-    identity: 26b3fd569ffe3333d9a755140d69f61671703d6941486b9511a7b2e72565a863
+    identity: 858bf3dfc3a33228c4a023275a4bc2b2cbb5b57907474b3e5893ad12aac4d439
     measurements:
       emmy_us: 20.693333198626835
       reference_us: 18.538666268189747
@@ -5695,7 +5695,7 @@ configs:
     knobs:
       WORK: ''
       RASTER: ''
-    identity: d2ee732d62da57b69d232765ed91f57fb23199d6536151eac3f3a9e09d763906
+    identity: 90650cc390994f7b051ff650d8eadbf6f4b6ebc65f1e5b416f5fa11f7991bce6
     measurements:
       emmy_us: 123.49200248718262
       reference_us: 110.72000116109848
@@ -5715,7 +5715,7 @@ configs:
       PLACE@map.3/map.1/map.1/reduce: cut
       PLACE@map.3/map.1/map.1/reduce.1/inner: cut
       PLACE@map.3/map.2/inner: cut
-    identity: 953d186210ef6812e8dee0ef00e72cbc22780dd36b1e72c48d5b6546448e4be9
+    identity: 7fa59952bf3e2772ea0cf3c6d32252d3dc69cc0577b9f3409da99aba49010e73
     measurements:
       emmy_us: 250.68244007283198
       reference_us: 225.06934760702924
@@ -5828,7 +5828,7 @@ configs:
       WORK: ''
       REDUCE: ''
       RASTER: ''
-    identity: 26b3fd569ffe3333d9a755140d69f61671703d6941486b9511a7b2e72565a863
+    identity: 858bf3dfc3a33228c4a023275a4bc2b2cbb5b57907474b3e5893ad12aac4d439
     measurements:
       emmy_us: 20.608000457286835
       reference_us: 18.51168683930939
@@ -5841,7 +5841,7 @@ configs:
     knobs:
       WORK: ''
       RASTER: ''
-    identity: d2ee732d62da57b69d232765ed91f57fb23199d6536151eac3f3a9e09d763906
+    identity: 90650cc390994f7b051ff650d8eadbf6f4b6ebc65f1e5b416f5fa11f7991bce6
     measurements:
       emmy_us: 123.35199862718582
       reference_us: 110.68399995565414
@@ -5861,7 +5861,7 @@ configs:
       PLACE@map.3/map.1/map.1/reduce: cut
       PLACE@map.3/map.1/map.1/reduce.1/inner: cut
       PLACE@map.3/map.2/inner: cut
-    identity: 953d186210ef6812e8dee0ef00e72cbc22780dd36b1e72c48d5b6546448e4be9
+    identity: 7fa59952bf3e2772ea0cf3c6d32252d3dc69cc0577b9f3409da99aba49010e73
     measurements:
       emmy_us: 251.04039370309826
       reference_us: 224.7394590732124
@@ -5974,7 +5974,7 @@ configs:
       WORK: ''
       REDUCE: ''
       RASTER: ''
-    identity: 26b3fd569ffe3333d9a755140d69f61671703d6941486b9511a7b2e72565a863
+    identity: 858bf3dfc3a33228c4a023275a4bc2b2cbb5b57907474b3e5893ad12aac4d439
     measurements:
       emmy_us: 20.70933332045873
       reference_us: 18.43200050867521
@@ -5987,7 +5987,7 @@ configs:
     knobs:
       WORK: ''
       RASTER: ''
-    identity: d2ee732d62da57b69d232765ed91f57fb23199d6536151eac3f3a9e09d763906
+    identity: 90650cc390994f7b051ff650d8eadbf6f4b6ebc65f1e5b416f5fa11f7991bce6
     measurements:
       emmy_us: 123.50799888372421
       reference_us: 110.59200101428563
@@ -6006,7 +6006,7 @@ configs:
       PLACE@map.3/map.1/map.1/reduce: cut
       PLACE@map.3/map.1/map.1/reduce.1/inner: cut
       PLACE@map.3/map.2/inner: cut
-    identity: 953d186210ef6812e8dee0ef00e72cbc22780dd36b1e72c48d5b6546448e4be9
+    identity: 7fa59952bf3e2772ea0cf3c6d32252d3dc69cc0577b9f3409da99aba49010e73
     measurements:
       emmy_us: 244.82883722999222
       reference_us: 225.19752515818564
@@ -6111,7 +6111,7 @@ configs:
       WORK: ''
       REDUCE: ''
       RASTER: ''
-    identity: 26b3fd569ffe3333d9a755140d69f61671703d6941486b9511a7b2e72565a863
+    identity: 858bf3dfc3a33228c4a023275a4bc2b2cbb5b57907474b3e5893ad12aac4d439
     measurements:
       emmy_us: 19.804160594940186
       reference_us: 18.490000317494076
@@ -6123,7 +6123,7 @@ configs:
     knobs:
       WORK: ''
       RASTER: ''
-    identity: d2ee732d62da57b69d232765ed91f57fb23199d6536151eac3f3a9e09d763906
+    identity: 90650cc390994f7b051ff650d8eadbf6f4b6ebc65f1e5b416f5fa11f7991bce6
     measurements:
       emmy_us: 121.60000205039978
       reference_us: 110.68800091743469
@@ -6178,7 +6178,7 @@ configs:
       PLACE@map.3/map.1/map.1/reduce.1/inner: cut
       PLACE@map.3/map.1/map.1/reduce.1/inner.2/map.3/map.1/reduce: cut
       PLACE@map.3/map.2/inner: cut
-    identity: 3fc804e6d9e070acb550e611189d4ee40d6c369f7950cb10bbc1d915a782f8f4
+    identity: 619d4a15ca860ad8e92b5b2927b651141cf09c2dc31be1b036692351e587da46
     measurements:
       emmy_us: 152.83657823290145
       reference_us: 136.33828503744942
@@ -6363,7 +6363,7 @@ configs:
       PLACE@map.3/map.1/map.1/reduce.1/inner: cut
       PLACE@map.3/map.1/map.1/reduce.1/inner.2/map.3/map.1/reduce: cut
       PLACE@map.3/map.2/inner: cut
-    identity: 3fc804e6d9e070acb550e611189d4ee40d6c369f7950cb10bbc1d915a782f8f4
+    identity: 619d4a15ca860ad8e92b5b2927b651141cf09c2dc31be1b036692351e587da46
     measurements:
       emmy_us: 94.8596325787631
       reference_us: 84.99200235713613
@@ -6516,7 +6516,7 @@ configs:
       PLACE@map.3/map.1/map.1/reduce.1/inner: cut
       PLACE@map.3/map.1/map.1/reduce.1/inner.2/map.3/map.1/reduce: cut
       PLACE@map.3/map.2/inner: cut
-    identity: 3fc804e6d9e070acb550e611189d4ee40d6c369f7950cb10bbc1d915a782f8f4
+    identity: 619d4a15ca860ad8e92b5b2927b651141cf09c2dc31be1b036692351e587da46
     measurements:
       emmy_us: 95.04581581462514
       reference_us: 84.99200235713613
@@ -6668,7 +6668,7 @@ configs:
       PLACE@map.3/map.1/map.1/reduce.1/inner: cut
       PLACE@map.3/map.1/map.1/reduce.1/inner.2/map.3/map.1/reduce: cut
       PLACE@map.3/map.2/inner: cut
-    identity: 3fc804e6d9e070acb550e611189d4ee40d6c369f7950cb10bbc1d915a782f8f4
+    identity: 619d4a15ca860ad8e92b5b2927b651141cf09c2dc31be1b036692351e587da46
     measurements:
       emmy_us: 94.92363713004372
       reference_us: 84.96581966226752
@@ -6843,7 +6843,7 @@ configs:
       PLACE@map.3/map.1/map.1/reduce.1/inner: cut
       PLACE@map.3/map.1/map.1/reduce.1/inner.2/map.3/map.1/reduce: cut
       PLACE@map.3/map.2/inner: cut
-    identity: 41186cff5bf95120230b078eaf196b17e4c8ddd8b2da56d430aab38169011016
+    identity: 7e669e2ef183ac2dec38cf6e995fe9d24c7889bd4315c7258946b4fbb470d012
     measurements:
       emmy_us: 1765.0879621505737
       reference_us: 1627.135992050171
@@ -7028,7 +7028,7 @@ configs:
       PLACE@map.3/map.1/map.1/reduce.1/inner: cut
       PLACE@map.3/map.1/map.1/reduce.1/inner.2/map.3/map.1/reduce: cut
       PLACE@map.3/map.2/inner: cut
-    identity: 41186cff5bf95120230b078eaf196b17e4c8ddd8b2da56d430aab38169011016
+    identity: 7e669e2ef183ac2dec38cf6e995fe9d24c7889bd4315c7258946b4fbb470d012
     measurements:
       emmy_us: 1687.1999502182007
       reference_us: 1579.0079832077026
@@ -7197,7 +7197,7 @@ configs:
       PLACE@map.3/map.1/map.1/reduce.1/inner: cut
       PLACE@map.3/map.1/map.1/reduce.1/inner.2/map.3/map.1/reduce: cut
       PLACE@map.3/map.2/inner: cut
-    identity: 41186cff5bf95120230b078eaf196b17e4c8ddd8b2da56d430aab38169011016
+    identity: 7e669e2ef183ac2dec38cf6e995fe9d24c7889bd4315c7258946b4fbb470d012
     measurements:
       emmy_us: 1568.6399936676025
       reference_us: 1582.0800065994263
@@ -7365,7 +7365,7 @@ configs:
       PLACE@map.3/map.1/map.1/reduce.1/inner: cut
       PLACE@map.3/map.1/map.1/reduce.1/inner.2/map.3/map.1/reduce: cut
       PLACE@map.3/map.2/inner: cut
-    identity: 41186cff5bf95120230b078eaf196b17e4c8ddd8b2da56d430aab38169011016
+    identity: 7e669e2ef183ac2dec38cf6e995fe9d24c7889bd4315c7258946b4fbb470d012
     measurements:
       emmy_us: 1689.4400119781494
       reference_us: 1584.1280221939087
