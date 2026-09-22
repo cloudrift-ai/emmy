@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 import torch  # used by test_bind_inputs_preserves_int_dtype
 
-from tests.compiler.helpers import requires_cuda
+from tests.compiler.helpers import requires_cuda, requires_sm
 
 
 def _classic_row(*, work: str = "", tile: str = "", reduce: str = "", stage: str = "", raster: str = "") -> dict[str, str]:
@@ -1099,6 +1099,7 @@ def test_run_code_matmul_accuracy(run_cli, dtype):
 
 
 @requires_cuda
+@requires_sm(8)
 def test_run_code_target_override(run_cli):
     """``--gpu-arch sm_80`` gates lowering to the cp.async path (no TMA); the kernel still runs
     on the live device and must match eager, so ``rc == 0`` is the accuracy assertion."""

@@ -36,7 +36,7 @@ from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to
-from tests.compiler.helpers import requires_cuda
+from tests.compiler.helpers import requires_cuda, requires_sm
 from tests.compiler.terms import contraction, projection
 
 K32 = "mma_m16n8k32_e4m3_f32"
@@ -284,6 +284,7 @@ def _bare_f8_linear_graph(m, n, k, out_dtype="f32"):
 
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
+@requires_sm(8, 9)
 def test_k32_mma_matches_lut_reference_cuda():
     """The fragment-ABI anchor: fixed fp8 bits through the pinned k32 kernel vs the LUT-decode
     numpy reference. Two bit regimes: an EXACT one (A in {0, ±1}, B in one exponent band — every

@@ -20,7 +20,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from tests.compiler.helpers import requires_cuda
+from tests.compiler.helpers import requires_cuda, requires_sm
 
 
 def _run_with_knobs(graph, inputs: dict[str, np.ndarray], out_name: str, knobs: dict, monkeypatch) -> np.ndarray:
@@ -243,6 +243,7 @@ def test_unrealizable_warp_pin_falls_back_to_a_bound_scalar_grid(a_dtype, monkey
 
 
 @requires_cuda
+@requires_sm(8)
 def test_unstaged_atom_lowers_gmem_direct(monkeypatch):
     """When the greedy compile picks the tensor-core atom variant but its operands
     aren't staged for ``ldmatrix`` (``TMA=0`` + a deliberately-large warp register
@@ -306,6 +307,7 @@ _ODD_STRIDE_CPASYNC_KNOBS = {"TILE": "f2x4", "WORK": "t16x8", "STAGE": "d2/smem-
 
 
 @requires_cuda
+@requires_sm(8)
 def test_scalar_cpasync_pin_refuses_odd_stride(monkeypatch):
     """fp32 matmul with a 12 B B-row stride pinned to a cp.async ring — the alignment gate must
     refuse instead of issuing misaligned ``cp.async`` copies or selecting gmem-direct."""

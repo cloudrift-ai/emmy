@@ -21,7 +21,7 @@ from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.frontend.ir import LinearOp
 from emmy.compiler.loader.quant import spell_quantized_constants, spell_static_fp4_activations
 from emmy.compiler.tensor import Tensor
-from tests.compiler.helpers import requires_cuda
+from tests.compiler.helpers import device_compute_capability, requires_cuda
 from tests.compiler.loader.test_quant import _w4a4_checkpoint
 
 pytest.importorskip("torch")
@@ -255,6 +255,7 @@ def test_the_marked_matmul_binds_its_activation_edge_as_a_packed_decode_chain(tm
 
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
+@pytest.mark.skipif((device_compute_capability() or (0, 0))[0] != 12, reason="block-scaled FP4 mma requires sm_12x")
 def test_the_block_scaled_cell_runs_and_holds_its_declared_tolerance(tmp_path):
     """The native fp4 path end to end: both operands packed, the block-scaled cell spelled, and
     the result within the gap PR decision 18 accepts.

@@ -25,7 +25,7 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import LinearOp, MatmulOp, ReshapeOp, RmsNormOp, SdpaOp, TransposeOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
-from tests.compiler.helpers import requires_cuda, requires_sm90
+from tests.compiler.helpers import requires_cuda, requires_sm, requires_sm90
 
 F16 = _dt.get("f16")
 _M, _K, _N = 32, 64, 32  # M != K so the row / col broadcasts are unambiguous
@@ -127,7 +127,7 @@ def test_fused_map_matmul(tier, producer, monkeypatch):
 
 
 @requires_cuda
-@pytest.mark.parametrize("tier", ["scalar", "warp"])
+@pytest.mark.parametrize("tier", ["scalar", pytest.param("warp", marks=requires_sm(8))])
 def test_fused_rmsnorm_linear(tier, monkeypatch):
     """The **MONOID** producer fuses: ``rmsnorm(x)·nw @ wg`` computes in one kernel matching a
     numpy reference (whether the linear's N axis rides the grid or a tail sweep is the schedule's
@@ -208,6 +208,7 @@ def _rmsnorm_linear_check(g: Graph, S: int, H: int, inter: int, *, want_mma: boo
         ("mma_m16n8k16_f16_f32/f2x2/k2", "w2x2"),  # bk 32 elems + tile_n 32 → both slabs B64
     ],
 )
+@requires_sm(8)
 def test_fused_sync_fill_slab_swizzle(tile, work, monkeypatch):
     """The sync compute-fill's slab swizzle round-trips — fill-side ``Write`` XOR = drain-side
     ``ldmatrix`` XOR, at both derived modes (B64 / B128). Regression for the silent fill-side
@@ -333,7 +334,7 @@ def test_fused_gate_up_swiglu_symbolic_m(runtime_s, monkeypatch):
 
 
 @requires_cuda
-@pytest.mark.parametrize("tier", ["scalar", "warp"])
+@pytest.mark.parametrize("tier", ["scalar", pytest.param("warp", marks=requires_sm(8))])
 def test_mixed_dtype_matmul_demotes_a_to_mma(tier, monkeypatch):
     """An **f32-A × f16-B** matmul — the erased-downcast signature (torch cannot execute a mixed
     matmul, so the model itself rounded A; the tracer maps ``to``/``type_as`` to pass-throughs,
@@ -406,6 +407,7 @@ def test_sdpa_consumer_projection_reaches_mma(monkeypatch):
 
 @requires_cuda
 @pytest.mark.parametrize("stage", ["d1/smem", "d2/smem"])
+@requires_sm(8)
 def test_fused_cone_splitk_matches_reference(stage, monkeypatch):
     """Redundant-statistic split-K on a computed-A (norm→linear) cone: the contraction K is
     sliced across CTAs (``REDUCE=g4k``) while the k-invariant stat prologue stays FULL-ROW in
