@@ -27,7 +27,7 @@ from emmy.compiler.ir.kernel.ir import (
     swizzle_fn,
     swizzle_xor,
 )
-from emmy.compiler.ir.stmt import RenderCtx, render_body
+from emmy.compiler.ir.stmt import Paged, RenderCtx, render_body
 from emmy.compiler.ir.stmt.leaves import Assign, Write
 from emmy.compiler.tensor import Tensor
 
@@ -1482,13 +1482,13 @@ def render_kernelop(
 
     indirect = tuple(n for n in kernel_op.inputs if n in indirect_inputs and n not in literals)
     paged = {
-        n: (axis, page, start)
+        n: Paged(n, axis, page, start)
         for n, axis, page, start in paged_buffers
         if n not in literals and (n in kernel_op.inputs or n in kernel_op.outputs)
     }
     if set(paged) & set(indirect):
         raise NotImplementedError(f"buffer(s) {sorted(set(paged) & set(indirect))} are both indirect and paged")
-    ctx.paged = paged
+    ctx.memory = dict(paged)
     sig_parts = [
         f"const {cuda_name(_dtype_for(n))}* const* {n}__table, const int* {n}__sel, int {n}__slot"
         if n in indirect
