@@ -3430,7 +3430,7 @@ configs:
       REDUCE: ''
       STAGE: d1/smem
       RASTER: ''
-    identity: b13f4f81a12b190d493922c7579a162f9b60708cc5e5b022bcf7ab5dd6ed4f5b
+    identity: b17f792f3b270a47432e0d5145370156511a2c676021a721f376610ef02c03be
 loops:
 - inputs: [mul_1]
   outputs: [linear_reduce]
@@ -3804,110 +3804,129 @@ loops:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 5120}, window: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 640}, window: null}}
                   body:
                     body:
-                    - class: Load
-                      fields:
-                        names: {tuple: [in3]}
-                        input: p_attn_q_proj_weight_zeros_grouped_shift_view
-                        index:
-                          tuple:
-                          - {expr: {literal: {value: 0, dtype: int}}}
-                          - {expr: {literal: {value: 0, dtype: int}}}
-                          - {expr: {binary: {op: '%', left: {var: a1}, right: {literal: {value: 8, dtype: int}}}}}
-                        dtype: null
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 5120}, window: null}}
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 8}, window: null}}
                         body:
                           body:
                           - class: Load
                             fields:
-                              names: {tuple: [in4]}
-                              input: p_attn_q_proj_weight_zeros_grouped_view
-                              index:
-                                tuple:
-                                - {expr: {binary: {op: /, left: {var: a2}, right: {literal: {value: 128, dtype: int}}}}}
-                                - {expr: {binary: {op: /, left: {var: a1}, right: {literal: {value: 8, dtype: int}}}}}
-                                - {expr: {literal: {value: 0, dtype: int}}}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: right_shift}, args: {tuple: [in4, in3]}, dtype: null}
-                          - class: Assign
-                            fields: {name: v1, op: {elementwise: bitwise_and}, args: {tuple: [v0, in2]}, dtype: null}
-                          - class: Assign
-                            fields: {name: v2, op: {elementwise: add}, args: {tuple: [in1, v1]}, dtype: null}
-                          - class: Load
-                            fields:
-                              names: {tuple: [in5]}
-                              input: p_attn_q_proj_weight_scales_view
-                              index:
-                                tuple:
-                                - {expr: {binary: {op: /, left: {var: a2}, right: {literal: {value: 128, dtype: int}}}}}
-                                - {expr: {literal: {value: 0, dtype: int}}}
-                                - {expr: {var: a1}}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in6]}
-                              input: p_attn_q_proj_weight_integers_view
-                              index:
-                                tuple:
-                                - {expr: {binary: {op: /, left: {var: a2}, right: {literal: {value: 8, dtype: int}}}}}
-                                - {expr: {literal: {value: 0, dtype: int}}}
-                                - {expr: {var: a1}}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in7]}
-                              input: p_attn_q_proj_weight_integers_shift_view
+                              names: {tuple: [in3]}
+                              input: p_attn_q_proj_weight_zeros_grouped_shift_view
                               index:
                                 tuple:
                                 - {expr: {literal: {value: 0, dtype: int}}}
-                                - {expr: {binary: {op: '%', left: {var: a2}, right: {literal: {value: 8, dtype: int}}}}}
                                 - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {var: a2}}
                               dtype: null
-                          - class: Assign
-                            fields: {name: v3, op: {elementwise: right_shift}, args: {tuple: [in6, in7]}, dtype: null}
-                          - class: Assign
-                            fields: {name: v4, op: {elementwise: bitwise_and}, args: {tuple: [v3, in0]}, dtype: null}
-                          - class: Assign
-                            fields: {name: v5, op: {elementwise: subtract}, args: {tuple: [v4, v2]}, dtype: null}
-                          - class: Assign
-                            fields: {name: v6, op: {elementwise: copy}, args: {tuple: [v5]}, dtype: {dtype: f16}}
-                          - class: Assign
-                            fields: {name: v7, op: {elementwise: multiply}, args: {tuple: [in5, v6]}, dtype: null}
-                          - class: Load
+                          - class: Loop
                             fields:
-                              names: {tuple: [in8]}
-                              input: mul_1
-                              index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v8, op: {elementwise: multiply}, args: {tuple: [in8, v7]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v8, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
+                              axis: {class: Axis, fields: {name: a3, extent: {dim: 5120}, window: null}}
+                              body:
+                                body:
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in4]}
+                                    input: p_attn_q_proj_weight_scales_view
+                                    index:
+                                      tuple:
+                                      - {expr: {binary: {op: /, left: {var: a3}, right: {literal: {value: 128, dtype: int}}}}}
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - expr:
+                                          binary:
+                                            op: +
+                                            left: {var: a2}
+                                            right: {binary: {op: '*', left: {literal: {value: 8, dtype: int}}, right: {var: a1}}}
+                                    dtype: null
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in5]}
+                                    input: p_attn_q_proj_weight_zeros_grouped_view
+                                    index:
+                                      tuple:
+                                      - {expr: {binary: {op: /, left: {var: a3}, right: {literal: {value: 128, dtype: int}}}}}
+                                      - {expr: {var: a1}}
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v0, op: {elementwise: right_shift}, args: {tuple: [in5, in3]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v1, op: {elementwise: bitwise_and}, args: {tuple: [v0, in2]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v2, op: {elementwise: add}, args: {tuple: [in1, v1]}, dtype: null}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in6]}
+                                    input: p_attn_q_proj_weight_integers_view
+                                    index:
+                                      tuple:
+                                      - {expr: {binary: {op: /, left: {var: a3}, right: {literal: {value: 8, dtype: int}}}}}
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - expr:
+                                          binary:
+                                            op: +
+                                            left: {var: a2}
+                                            right: {binary: {op: '*', left: {literal: {value: 8, dtype: int}}, right: {var: a1}}}
+                                    dtype: null
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in7]}
+                                    input: p_attn_q_proj_weight_integers_shift_view
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {binary: {op: '%', left: {var: a3}, right: {literal: {value: 8, dtype: int}}}}}
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v3, op: {elementwise: right_shift}, args: {tuple: [in6, in7]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v4, op: {elementwise: bitwise_and}, args: {tuple: [v3, in0]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v5, op: {elementwise: subtract}, args: {tuple: [v4, v2]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v6, op: {elementwise: copy}, args: {tuple: [v5]}, dtype: {dtype: f16}}
+                                - class: Assign
+                                  fields: {name: v7, op: {elementwise: multiply}, args: {tuple: [in4, v6]}, dtype: null}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in8]}
+                                    input: mul_1
+                                    index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a0}}, {expr: {var: a3}}]}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v8, op: {elementwise: multiply}, args: {tuple: [in8, v7]}, dtype: {dtype: f32}}
+                                - class: Accum
+                                  fields: {name: acc0, value: v8, op: {elementwise: add}, dtype: null, axes: {tuple: [a3]}, base: null}
+                              unroll: false
+                              seed: true
+                          - class: Write
+                            fields:
+                              output: linear_reduce
+                              index:
+                                tuple:
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {var: a0}}
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - expr:
+                                    binary:
+                                      op: +
+                                      left: {var: a2}
+                                      right: {binary: {op: '*', left: {literal: {value: 8, dtype: int}}, right: {var: a1}}}
+                              values: {tuple: [acc0]}
+                              value_dtype: null
+                              atomic: false
+                              swizzle: NONE
                         unroll: false
                         seed: true
-                    - class: Write
-                      fields:
-                        output: linear_reduce
-                        index:
-                          tuple:
-                          - {expr: {literal: {value: 0, dtype: int}}}
-                          - {expr: {var: a0}}
-                          - {expr: {literal: {value: 0, dtype: int}}}
-                          - {expr: {var: a1}}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
                   unroll: false
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_reduce_2dee73
+      name: k_linear_reduce_f10627
     inputs: [p_attn_q_proj_weight_zeros_grouped_mask, p_attn_q_proj_weight_zero_bias, p_attn_q_proj_weight_integers_mask, p_attn_q_proj_weight_zeros_grouped_shift_view,
       p_attn_q_proj_weight_zeros_grouped_view, p_attn_q_proj_weight_integers_shift_view, p_attn_q_proj_weight_integers_view, p_attn_q_proj_weight_scales_view,
       mul_1]

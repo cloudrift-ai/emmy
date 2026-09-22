@@ -95,8 +95,9 @@ def _fragment_projection(tile: TileOp) -> tuple[list, frozenset[str]]:
     from emmy.compiler.ir.tile.ops import kernel_roots, refused_roots  # noqa: PLC0415 — tile.ops reads this package
 
     roots = () if refused_roots(tile.op, tuple(tile.output_specs)) else kernel_roots(tile.op)
-    computed = {stmt for root in roots for stmt in root.lower(axes=tile.axes)}
-    tail = [stmt for stmt in tile.op.lower(stores=tuple(tile.output_specs), axes=tile.axes) if stmt not in computed]
+    bound = frozenset(axis.name for axis in tile.place.free)
+    computed = {stmt for root in roots for stmt in root.lower(bound, axes=tile.axes)}
+    tail = [stmt for stmt in tile.op.lower(bound, tuple(tile.output_specs), tile.axes) if stmt not in computed]
     return tail, frozenset(name for root in roots for name in root.exposes)
 
 

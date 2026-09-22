@@ -30,6 +30,10 @@ quiescent — canonicalizing a producer that still awaits a merge could re-spell
 splicer composes through — and before ``loop/stamp``, so kernel identity and everything downstream
 (classification's trailing pair, shape keys, goldens) see one canonical spelling. Split and unsplit
 spellings of the same contraction thereby converge to one kernel identity.
+
+Before fusion, restore separate free coordinates when operands read a flattened axis through
+its quotient and remainder. Neither operand owns the mixed coordinate; restoring its factors
+makes each matrix role explicit. The fusion gate above cannot undo these separate operand reads.
 """
 
 from __future__ import annotations
@@ -152,15 +156,60 @@ def _fuse_once(body: Body, shapes: dict) -> Body | None:
     return None
 
 
+def _split_once(body: Body, names: frozenset[str]) -> Body | None:
+    """Expose a free coordinate's quotient and remainder as separate operand axes.
+
+    A flattened row/head coordinate reads A through ``i / H`` and B through ``i % H``.
+    Neither operand owns that mixed axis. The exact inverse of the fusion above restores both
+    coordinates; fusion cannot undo it because those separate operand reads do not fold clean.
+    """
+    for i, stmt in enumerate(body):
+        if not isinstance(stmt, Loop) or stmt.is_reduce:
+            continue
+        axis = stmt.axis
+        if axis.extent.is_static and axis.window is None and not stmt.body.carries:
+            divisors: dict[int, set[str]] = {}
+            for load in stmt.body.iter_of_type(Load):
+                for index in load.index:
+                    for expr in index.subterms():
+                        if (
+                            isinstance(expr, BinaryExpr)
+                            and expr.op in ("/", "//", "%")
+                            and expr.left == Var(axis.name)
+                            and isinstance(expr.right, Literal)
+                            and isinstance(expr.right.value, int)
+                            and expr.right.value > 1
+                        ):
+                            divisors.setdefault(expr.right.value, set()).add("%" if expr.op == "%" else "/")
+            extent = axis.extent.as_static()
+            for factor, uses in sorted(divisors.items()):
+                if uses != {"/", "%"} or factor >= extent or extent % factor:
+                    continue
+                outer = axis.name + "_quotient"
+                while outer in names:
+                    outer += "_"
+                sigma = Sigma({axis.name: Var(outer) * Literal(factor, "int") + Var(axis.name)})
+                inner = replace(stmt, axis=Axis(axis.name, factor), body=Body(s.substitute(sigma) for s in stmt.body))
+                split = Loop(Axis(outer, extent // factor), Body((inner,)), unroll=stmt.unroll, seed=stmt.seed)
+                split = _simplify_stmt(split, SimplifyCtx.empty())
+                return Body((*body[:i], split, *body[i + 1 :]))
+        inner = _split_once(stmt.body, names)
+        if inner is not None:
+            return Body((*body[:i], replace(stmt, body=inner), *body[i + 1 :]))
+    return None
+
+
 def rewrite(match: Match, root: Node, ctx=None) -> LoopOp:
     op = root.op
     if not isinstance(op, LoopOp):
         raise RuleSkipped("root is no longer a LoopOp")
     shapes = {name: t.shape for name, t in {**op.inputs, **op.outputs}.items()}
     body = op.body
-    fused_any = False
+    changed = False
+    while (step := _split_once(body, body.axis_names)) is not None:
+        body, changed = step, True
     while (step := _fuse_once(body, shapes)) is not None:
-        body, fused_any = step, True
-    if not fused_any:
-        raise RuleSkipped("no adjacent free-axis pair fuses")
+        body, changed = step, True
+    if not changed:
+        raise RuleSkipped("free coordinates already canonical")
     return replace(op, body=body)

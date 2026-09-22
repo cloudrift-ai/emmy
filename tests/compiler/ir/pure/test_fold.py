@@ -267,6 +267,7 @@ def test_an_observed_store_rides_the_reduce_loop_after_the_observer() -> None:
     observe = Lambda(params=("k", "acc"), body=Body((Assign(name="acc__obs", op="copy", args=("acc",)),)), results=("acc__obs",))
     lift = Lambda.closing(("k", "y"), Body((Assign(name="acc__v", op="copy", args=("y",)),)), ("acc__v",))
     scan = Fold(operands=(slab("y", "y", "m", "k"),), lift=lift, init=init, base=combine, observe=observe)
+    assert scan.exposing(("acc__obs",)) is scan
     store = OutputSpec(write=Write(output="o", index=(Var("m"), Var("k")), value="acc__obs"))
     (loop,) = scan.lower(scan.free_axes, (store,), axes=SCOPE)
     assert [type(stmt).__name__ for stmt in loop.body] == ["Load", "Assign", "Accum", "Assign", "Write"]
@@ -284,6 +285,11 @@ def _twisted(states: tuple[str, str] = ("m", "l")) -> Fold:
     base = Lambda.componentwise(SOFTMAX.base[:2], states)
     twist = Twist(recipe=SOFTMAX, channels=(0,))
     return Fold(operands=(slab("y", "y", "m", "k"),), lift=lift, init=(-1e30, 0.0), base=base, twist=twist)
+
+
+def test_twisted_components_cannot_be_pruned_independently() -> None:
+    fold = _twisted()
+    assert fold.exposing(("l",)) is fold
 
 
 def test_a_twisted_state_spelling_never_reaches_the_canonical_form() -> None:
@@ -405,3 +411,19 @@ def test_exposing_restricts_a_projection_whose_results_are_its_bound_params() ->
     restricted = wrapper.exposing(("acc_r__ws",))
     assert restricted.exposes == ("acc_r__ws",)
     assert restricted.lift.results == ("acc_r",), "the lift keeps its own spelling of the result it now exposes"
+
+
+def test_per_state_keeps_operands_passed_directly_to_the_combine():
+    """A sum over a loaded value has no lift statements; its result still reads the operand."""
+    left, right = slab("left", "x", "m", "k"), slab("right", "y", "n", "k")
+    fold = Fold(
+        operands=(left, right),
+        lift=Lambda.closing(("k", "in0", "in1"), Body(()), ("in0", "in1")),
+        init=(0.0, 0.0),
+        base=Lambda.componentwise(("add", "add"), ("row", "column")),
+    )
+    split = fold.per_state()
+    assert split is not None
+    assert tuple(child.free_axes for child in split.operands) == (frozenset({"m"}), frozenset({"n"}))
+    assert split.free_axes == fold.free_axes
+    split.lower(frozenset(), axes=SCOPE)

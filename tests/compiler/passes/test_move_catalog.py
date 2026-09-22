@@ -85,7 +85,7 @@ def test_coop_reduce_moves_equals_hand_product():
     """The normal cooperative and ILP stages form one fixed product; parameters do not add rows."""
     expected = {
         *(Reduce.of(coop=coop, reg=reg) for coop in (1, 4, 8, 16, 32, 64, 128, 256, 512) for reg in (1, 2, 4) if coop > 1 or reg > 1),
-        *(Reduce.of(coop=coop, coop_transposed=True) for coop in (32, 64, 128, 256)),
+        *(Reduce.of(coop=coop, coop_transposed=True) for coop in (32, 64, 128, 256, 512)),
     }
     assert set(coop_reduce_moves()) == expected
     assert len(coop_reduce_moves()) == len(expected)

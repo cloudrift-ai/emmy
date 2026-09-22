@@ -66,9 +66,11 @@ def test_an_unfusable_chain_does_not_shatter_the_rest_of_the_region():
     still merge everything else, rather than abandoning the whole region. Abandoning it is what
     shattered DeepSeek-V4's post block into 433 kernels where pre-maximal fusion produced 92.
     """
+    from dataclasses import replace
     from importlib import import_module
 
-    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.ir.expr import Literal, Var
     from emmy.compiler.ir.loop import Assign, Axis, Load, Write
     from emmy.compiler.pipeline import Match, Rule
     from tests.compiler.ir.loop.test_splicer import _affine_recurrence_chain
@@ -92,10 +94,34 @@ def test_an_unfusable_chain_does_not_shatter_the_rest_of_the_region():
         ),
     )
     graph.add_node(producer, ["b0"], Tensor("root", (8,)), node_id="root")
+    broadcast = LoopOp(
+        body=(
+            Loop(
+                axis=axis,
+                body=(
+                    Loop(
+                        axis=Axis("j", 32),
+                        body=(
+                            Load(name="v", input="root", index=(Var("i"),)),
+                            Write(output="broadcast", index=(Var("i"), Var("j")), value="v"),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+    graph.add_node(broadcast, ["root"], Tensor("broadcast", (8, 32)), node_id="broadcast")
     chain_loops, _edges, _roots = _affine_recurrence_chain(12)
-    upstream = "root"
+    upstream = "broadcast"
     for tag, op in chain_loops.items():
-        rebound = op.rename_buffers({"b0": upstream}) if upstream != "b0" else op
+        # Keep the affine recurrence's exponentially distinct bindings inside the input.
+        def bound_load(stmt):
+            if not isinstance(stmt, Load):
+                return stmt
+            index = (stmt.index[0] % Literal(8, "int"),)
+            return replace(stmt, index=(*index, Literal(0, "int")) if stmt.input == "b0" else index)
+
+        rebound = replace(op, body=op.body.map(bound_load)).rename_buffers({"b0": "broadcast"})
         graph.add_node(rebound, [upstream], Tensor(tag, (8,)), node_id=tag)
         upstream = tag
     sibling = LoopOp(
@@ -120,3 +146,12 @@ def test_an_unfusable_chain_does_not_shatter_the_rest_of_the_region():
     fused = set(match.consumed)
     assert {"root", "easy"} <= fused, "the plain sibling consumer fused with the producer"
     assert not any(nid.startswith("s") and nid[1:].isdigit() for nid in fused), "no stage of the doomed chain was pulled into the merge"
+    assert "broadcast" not in fused, "the broadcast must stay beside its excluded readers, not become a materialized output"
+
+    backend = NumpyBackend()
+    inputs = {"b0": np.linspace(-1, 1, 9, dtype=np.float32)}
+    before = backend.run(backend.compile(graph), input_data=inputs)[0].outputs
+    rewritten = Pipeline.build(["loop/fusion"]).run(graph)
+    after = backend.run(backend.compile(rewritten), input_data=inputs)[0].outputs
+    for got, want in zip(after.values(), before.values(), strict=True):
+        np.testing.assert_allclose(got, want)

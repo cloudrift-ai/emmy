@@ -77,6 +77,64 @@ def _run(g: Graph) -> LoopOp:
     return Pipeline.build(["loop/canonicalize"]).run(g).nodes["out"].op
 
 
+def _mixed_row_head_graph(extent: int) -> Graph:
+    row = BinaryExpr("//", Var("i"), Literal(H, "int"))
+    head = BinaryExpr("%", Var("i"), Literal(H, "int"))
+    reduction = Loop(
+        Axis("k", K),
+        Body(
+            (
+                Load(name="xv", input="x", index=(Literal(0, "int"), row, Var("k"))),
+                Load(name="wv", input="w", index=(head * Literal(D, "int") + Var("d"), Var("k"))),
+                Assign(name="prod", op="multiply", args=("xv", "wv")),
+                Accum(name="acc", value="prod", op="add", axes=("k",)),
+            )
+        ),
+    )
+    body = Body(
+        (
+            Loop(
+                Axis("i", extent),
+                Body(
+                    (
+                        Loop(
+                            Axis("d", D),
+                            Body(
+                                (
+                                    reduction,
+                                    Write(output="out", index=(Var("i"), Var("d")), value="acc"),
+                                )
+                            ),
+                        ),
+                    )
+                ),
+            ),
+        )
+    )
+    return _graph(body, (extent, D))
+
+
+def test_flattened_row_head_restores_separate_operand_axes():
+    graph = _mixed_row_head_graph(M * H)
+    op = _run(graph)
+    loads = {load.input: load for load in op.loads}
+    assert not any(
+        isinstance(expr, BinaryExpr) and expr.op in ("/", "//", "%")
+        for load in op.loads
+        for index in load.index
+        for expr in index.subterms()
+    )
+    assert len(loads["x"].index[1].free_vars()) == 1
+    assert not loads["x"].index[1].free_vars() & loads["w"].index[0].free_vars()
+    assert _run(graph).body == op.body
+
+
+def test_flattened_row_head_with_partial_last_head_stays_flat():
+    graph = _mixed_row_head_graph(M * H - 1)
+    before = graph.nodes["out"].op
+    assert _run(graph).body == before.body
+
+
 def _lift(op: LoopOp, shape=(1,)) -> TileOp:
     graph = Graph()
     graph.add_node(op, [], Tensor("out", shape), node_id="out")

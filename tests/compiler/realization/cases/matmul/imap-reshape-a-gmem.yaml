@@ -47,7 +47,7 @@ configs:
       REDUCE: ''
       STAGE: ''
       RASTER: ''
-    identity: b2ba71b48b9b850b813b87f19e95b69eefa4a49300e82b779abc500a48738c02
+    identity: 469fca02357acb0dad02401b18b20ec243896cc65e7f9240c64202cc86f1d178
 loops:
 - inputs: [w, x]
   outputs: [o]
@@ -84,7 +84,7 @@ loops:
                               input: x
                               index:
                                 tuple:
-                                - {expr: {binary: {op: /, left: {var: a0}, right: {literal: {value: 2, dtype: int}}}}}
+                                - {expr: {binary: {op: //, left: {var: a0}, right: {literal: {value: 2, dtype: int}}}}}
                                 - expr:
                                     binary:
                                       op: +
@@ -119,6 +119,6 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_matmul_3c6f85
+      name: k_matmul_7d81a2
     inputs: [x, w]
     outputs: [[o, f16, [256, 64]]]

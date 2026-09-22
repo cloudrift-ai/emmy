@@ -1807,133 +1807,9 @@ programs:
     attrs: {op: {__elementwise__: add}}
     inputs: [add_5, linear_6]
     outputs: [[add_7, f16, [1, 512, 1024]]]
-configs:
-- program: 0
-  target:
-    loop: 0
-  realizations:
-  - name: k_p_attn_k_norm_weight_bc_pointwise.c7d0f14e249d
-    bindings: {}
-    pins:
-      FAST_MATH: false
-  - name: k_p_attn_k_norm_weight_bc_pointwise.c7d0f14e249d.fc8dd8227387
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      TILE: f4
-      RASTER: ''
-    identity: 6f7e6e45b0891a977f06262005a488ba23b20335d34c33d017359fca107c2933
-    measurements:
-      emmy_us: 1.0361287700300523
-      reference_us: 1.0372471138135735
-      reference_backend: same-input-greedy
-- program: 0
-  target:
-    loop: 1
-  realizations:
-  - name: k_p_input_layernorm_weight_bc_pointwise.591b8ed6e2e9
-    bindings: {}
-    pins:
-      FAST_MATH: false
-  - name: k_p_input_layernorm_weight_bc_pointwise.591b8ed6e2e9.c4645aed7f10
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      TILE: f4
-      RASTER: ''
-    identity: b6c4eae0f56ff8cb84669c114a310438892a3a4f8dae9a393492f86f95619a33
-    measurements:
-      emmy_us: 1.276480800965253
-      reference_us: 1.2768531363281406
-      reference_backend: same-input-greedy
-- program: 0
-  target:
-    loop: 2
-  realizations:
-  - name: k_p_post_attention_layernorm_weight_bc_pointwise.591b8ed6e2e9
-    bindings: {}
-    pins:
-      FAST_MATH: false
-  - name: k_p_post_attention_layernorm_weight_bc_pointwise.591b8ed6e2e9.c4645aed7f10
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      TILE: f4
-      RASTER: ''
-    identity: b6c4eae0f56ff8cb84669c114a310438892a3a4f8dae9a393492f86f95619a33
-    measurements:
-      emmy_us: 1.276107588437089
-      reference_us: 1.2760716478538023
-      reference_backend: same-input-greedy
-- program: 0
-  target:
-    loop: 4
-  realizations:
-  - name: k_mean_ce52ae.de27fd959f0e
-    bindings: {}
-    pins:
-      FAST_MATH: false
-  - name: k_mean_ce52ae.de27fd959f0e.90256efa05f9
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: t128
-      REDUCE: coop
-      RASTER: ''
-    identity: 79adc4449ab79c98cfdd48766ebf8b2269f88fdb4bea596d80ee02858e1c6368
-    measurements:
-      emmy_us: 2.2323400915602445
-      reference_us: 2.2329286273036684
-      reference_backend: same-input-greedy
-- program: 0
-  target:
-    loop: 5
-  realizations:
-  - name: k_mul_1_pointwise.cc03d23722ad
-    bindings: {}
-    pins:
-      FAST_MATH: false
-  - name: k_mul_1_pointwise.cc03d23722ad.1a096b593896
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      TILE: f4
-      RASTER: ''
-    identity: 7b7d73cedcd4157514d6c50cc87ec2d6ee6f9845ecf779f5af6bc0c6f6f013b4
-    measurements:
-      emmy_us: 1.0170264666532063
-      reference_us: 1.016635455327704
-      reference_backend: same-input-greedy
-- program: 0
-  target:
-    loop: 9
-  realizations:
-  - name: k_mul_11_pointwise.cc03d23722ad
-    bindings: {}
-    pins:
-      FAST_MATH: false
-  - name: k_mul_11_pointwise.cc03d23722ad.1a096b593896
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      TILE: f4
-      RASTER: ''
-    identity: 7b7d73cedcd4157514d6c50cc87ec2d6ee6f9845ecf779f5af6bc0c6f6f013b4
-    measurements:
-      emmy_us: 0.9872838486313937
-      reference_us: 0.9879842106061489
-      reference_backend: same-input-greedy
+gpu_name: NVIDIA GeForce RTX 5090
+model_quant_digest: ab358aac11892fee
+model: Qwen/Qwen3-0.6B-FP8@e5be08033360965ceca7b0ffd72d521a51331ce0
 loops:
 - inputs: []
   outputs: [p_attn_k_norm_weight_bc]
@@ -6490,6 +6366,130 @@ loops:
       p_mlp_down_proj_weight_scale, add_5]
     outputs: [[mul_11_dynamic_fp8_scale, f32, [1, 512, 8, 1]], [mul_11_dynamic_fp8_bits, f8e4m3, [1, 512, 1024]], [mul_12_dynamic_fp8_scale, f32,
         [1, 512, 24, 1]], [mul_12_dynamic_fp8_bits, f8e4m3, [1, 512, 3072]], [add_7, f16, [1, 512, 1024]]]
-gpu_name: NVIDIA GeForce RTX 5090
-model_quant_digest: ab358aac11892fee
-model: Qwen/Qwen3-0.6B-FP8@e5be08033360965ceca7b0ffd72d521a51331ce0
+configs:
+- program: 0
+  target:
+    loop: 0
+  realizations:
+  - name: k_p_attn_k_norm_weight_bc_pointwise.c7d0f14e249d
+    bindings: {}
+    pins:
+      FAST_MATH: false
+  - name: k_p_attn_k_norm_weight_bc_pointwise.c7d0f14e249d.fc8dd8227387
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      RASTER: ''
+    identity: 57f2843e47ddda88a71fed65e4a2788096df65dd201a1fc2b2f90153b9b54d0e
+    measurements:
+      emmy_us: 1.0361287700300523
+      reference_us: 1.0372471138135735
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    loop: 1
+  realizations:
+  - name: k_p_input_layernorm_weight_bc_pointwise.591b8ed6e2e9
+    bindings: {}
+    pins:
+      FAST_MATH: false
+  - name: k_p_input_layernorm_weight_bc_pointwise.591b8ed6e2e9.c4645aed7f10
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      RASTER: ''
+    identity: 8b8379974b99ee39ae4bc25f5aa7d6e7ffd8dad9527d6c997110fcce9af9f784
+    measurements:
+      emmy_us: 1.276480800965253
+      reference_us: 1.2768531363281406
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    loop: 2
+  realizations:
+  - name: k_p_post_attention_layernorm_weight_bc_pointwise.591b8ed6e2e9
+    bindings: {}
+    pins:
+      FAST_MATH: false
+  - name: k_p_post_attention_layernorm_weight_bc_pointwise.591b8ed6e2e9.c4645aed7f10
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      RASTER: ''
+    identity: 8b8379974b99ee39ae4bc25f5aa7d6e7ffd8dad9527d6c997110fcce9af9f784
+    measurements:
+      emmy_us: 1.276107588437089
+      reference_us: 1.2760716478538023
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    loop: 4
+  realizations:
+  - name: k_mean_ce52ae.de27fd959f0e
+    bindings: {}
+    pins:
+      FAST_MATH: false
+  - name: k_mean_ce52ae.de27fd959f0e.90256efa05f9
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      REDUCE: coop
+      RASTER: ''
+    identity: bf610c3e1d7f29e3a96ea133ae5d7d0222c504fae40742a6835a51c9e1a6073c
+    measurements:
+      emmy_us: 2.2323400915602445
+      reference_us: 2.2329286273036684
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    loop: 5
+  realizations:
+  - name: k_mul_1_pointwise.cc03d23722ad
+    bindings: {}
+    pins:
+      FAST_MATH: false
+  - name: k_mul_1_pointwise.cc03d23722ad.1a096b593896
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      RASTER: ''
+    identity: 32e92d2f53c674b1c5a739b64537d71e80812baf4d9b98871ff056c448d13efd
+    measurements:
+      emmy_us: 1.0170264666532063
+      reference_us: 1.016635455327704
+      reference_backend: same-input-greedy
+- program: 0
+  target:
+    loop: 9
+  realizations:
+  - name: k_mul_11_pointwise.cc03d23722ad
+    bindings: {}
+    pins:
+      FAST_MATH: false
+  - name: k_mul_11_pointwise.cc03d23722ad.1a096b593896
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      RASTER: ''
+    identity: 32e92d2f53c674b1c5a739b64537d71e80812baf4d9b98871ff056c448d13efd
+    measurements:
+      emmy_us: 0.9872838486313937
+      reference_us: 0.9879842106061489
+      reference_backend: same-input-greedy

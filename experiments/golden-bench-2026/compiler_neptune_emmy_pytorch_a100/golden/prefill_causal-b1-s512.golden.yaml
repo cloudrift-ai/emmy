@@ -32,9 +32,317 @@ programs:
     attrs: {is_causal: true, sliding_window: null, scale: null}
     inputs: [x0, x1, x2]
     outputs: [[scaled_dot_product_attention, f16, [1, 32, 512, 128]]]
+gpu_name: NVIDIA A100 40GB
+loops:
+- inputs: [x0, x1, x2]
+  outputs: [scaled_dot_product_attention]
+  nodes:
+  - id: scaled_dot_product_attention_mask_fill_c
+    op: constant
+    attrs:
+      name: scaled_dot_product_attention_mask_fill_c
+      value: -1000000000.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[scaled_dot_product_attention_mask_fill_c, f16, [1]]]
+  - id: scaled_dot_product_attention_mask_zero_c
+    op: constant
+    attrs:
+      name: scaled_dot_product_attention_mask_zero_c
+      value: 0.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[scaled_dot_product_attention_mask_zero_c, f16, [1]]]
+  - id: scaled_dot_product_attention_scale
+    op: constant
+    attrs:
+      name: scaled_dot_product_attention_scale
+      value: 0.08838834764831843
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[scaled_dot_product_attention_scale, f16, [1]]]
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 32, 512, 128]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [1, 32, 512, 128]]]
+  - id: x2
+    op: input
+    outputs: [[x2, f16, [1, 32, 512, 128]]]
+  - id: scaled_dot_product_attention
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Load
+          fields:
+            names: {tuple: [in0]}
+            input: scaled_dot_product_attention_mask_fill_c
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Load
+          fields:
+            names: {tuple: [in1]}
+            input: scaled_dot_product_attention_mask_zero_c
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Load
+          fields:
+            names: {tuple: [in2]}
+            input: scaled_dot_product_attention_scale
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 32}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 512}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 512}, window: null}}
+                        body:
+                          body:
+                          - class: Loop
+                            fields:
+                              axis: {class: Axis, fields: {name: a3, extent: {dim: 128}, window: null}}
+                              body:
+                                body:
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in3]}
+                                    input: x0
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a0}}
+                                      - {expr: {var: a1}}
+                                      - {expr: {var: a3}}
+                                    dtype: null
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in4]}
+                                    input: x1
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a0}}
+                                      - {expr: {var: a2}}
+                                      - {expr: {var: a3}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in3, in4]}, dtype: {dtype: f32}}
+                                - class: Accum
+                                  fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a3]}, base: null}
+                              unroll: false
+                              seed: true
+                          - class: Assign
+                            fields: {name: v1, op: {elementwise: multiply}, args: {tuple: [acc0, in2]}, dtype: null}
+                          - class: Select
+                            fields:
+                              name: v2
+                              branches:
+                                tuple:
+                                - class: SelectBranch
+                                  fields: {value: in1, select: {expr: {binary: {op: <=, left: {var: a2}, right: {var: a1}}}}}
+                                - class: SelectBranch
+                                  fields: {value: in0, select: {expr: {binary: {op: <, left: {var: a1}, right: {var: a2}}}}}
+                          - class: Assign
+                            fields: {name: v3, op: {elementwise: add}, args: {tuple: [v1, v2]}, dtype: null}
+                          - class: Accum
+                            fields:
+                              name: acc1
+                              value: v3
+                              op: {elementwise: maximum}
+                              dtype: null
+                              axes: {tuple: [a2]}
+                              base: null
+                        unroll: false
+                        seed: true
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 512}, window: null}}
+                        body:
+                          body:
+                          - class: Loop
+                            fields:
+                              axis: {class: Axis, fields: {name: a5, extent: {dim: 128}, window: null}}
+                              body:
+                                body:
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in5]}
+                                    input: x0
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a0}}
+                                      - {expr: {var: a1}}
+                                      - {expr: {var: a5}}
+                                    dtype: null
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in6]}
+                                    input: x1
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a0}}
+                                      - {expr: {var: a2}}
+                                      - {expr: {var: a5}}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v4, op: {elementwise: multiply}, args: {tuple: [in5, in6]}, dtype: {dtype: f32}}
+                                - class: Accum
+                                  fields: {name: acc2, value: v4, op: {elementwise: add}, dtype: null, axes: {tuple: [a5]}, base: null}
+                              unroll: false
+                              seed: true
+                          - class: Assign
+                            fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [acc2, in2]}, dtype: null}
+                          - class: Select
+                            fields:
+                              name: v6
+                              branches:
+                                tuple:
+                                - class: SelectBranch
+                                  fields: {value: in1, select: {expr: {binary: {op: <=, left: {var: a2}, right: {var: a1}}}}}
+                                - class: SelectBranch
+                                  fields: {value: in0, select: {expr: {binary: {op: <, left: {var: a1}, right: {var: a2}}}}}
+                          - class: Assign
+                            fields: {name: v7, op: {elementwise: add}, args: {tuple: [v5, v6]}, dtype: null}
+                          - class: Assign
+                            fields: {name: v8, op: {elementwise: subtract}, args: {tuple: [v7, acc1]}, dtype: null}
+                          - {class: Assign, fields: {name: v9, op: {elementwise: exp}, args: {tuple: [v8]}, dtype: null}}
+                          - class: Accum
+                            fields: {name: acc3, value: v9, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
+                        unroll: false
+                        seed: true
+                    - class: Assign
+                      fields: {name: v10, op: {elementwise: reciprocal}, args: {tuple: [acc3]}, dtype: null}
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a6, extent: {dim: 128}, window: null}}
+                        body:
+                          body:
+                          - class: Loop
+                            fields:
+                              axis: {class: Axis, fields: {name: a7, extent: {dim: 512}, window: null}}
+                              body:
+                                body:
+                                - class: Loop
+                                  fields:
+                                    axis: {class: Axis, fields: {name: a8, extent: {dim: 128}, window: null}}
+                                    body:
+                                      body:
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in7]}
+                                          input: x0
+                                          index:
+                                            tuple:
+                                            - {expr: {literal: {value: 0, dtype: int}}}
+                                            - {expr: {var: a0}}
+                                            - {expr: {var: a1}}
+                                            - {expr: {var: a8}}
+                                          dtype: null
+                                      - class: Load
+                                        fields:
+                                          names: {tuple: [in8]}
+                                          input: x1
+                                          index:
+                                            tuple:
+                                            - {expr: {literal: {value: 0, dtype: int}}}
+                                            - {expr: {var: a0}}
+                                            - {expr: {var: a7}}
+                                            - {expr: {var: a8}}
+                                          dtype: null
+                                      - class: Assign
+                                        fields: {name: v11, op: {elementwise: multiply}, args: {tuple: [in7, in8]}, dtype: {dtype: f32}}
+                                      - class: Accum
+                                        fields: {name: acc4, value: v11, op: {elementwise: add}, dtype: null, axes: {tuple: [a8]}, base: null}
+                                    unroll: false
+                                    seed: true
+                                - class: Assign
+                                  fields: {name: v12, op: {elementwise: multiply}, args: {tuple: [acc4, in2]}, dtype: null}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in9]}
+                                    input: x2
+                                    index:
+                                      tuple:
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a0}}
+                                      - {expr: {var: a7}}
+                                      - {expr: {var: a6}}
+                                    dtype: null
+                                - class: Select
+                                  fields:
+                                    name: v13
+                                    branches:
+                                      tuple:
+                                      - class: SelectBranch
+                                        fields: {value: in1, select: {expr: {binary: {op: <=, left: {var: a7}, right: {var: a1}}}}}
+                                      - class: SelectBranch
+                                        fields: {value: in0, select: {expr: {binary: {op: <, left: {var: a1}, right: {var: a7}}}}}
+                                - class: Assign
+                                  fields: {name: v14, op: {elementwise: add}, args: {tuple: [v12, v13]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v15, op: {elementwise: subtract}, args: {tuple: [v14, acc1]}, dtype: null}
+                                - {class: Assign, fields: {name: v16, op: {elementwise: exp}, args: {tuple: [v15]}, dtype: null}}
+                                - class: Assign
+                                  fields: {name: v17, op: {elementwise: multiply}, args: {tuple: [v10, v16]}, dtype: null}
+                                - class: Assign
+                                  fields: {name: v18, op: {elementwise: multiply}, args: {tuple: [in9, v17]}, dtype: {dtype: f32}}
+                                - class: Accum
+                                  fields: {name: acc5, value: v18, op: {elementwise: add}, dtype: null, axes: {tuple: [a7]}, base: null}
+                              unroll: false
+                              seed: true
+                          - class: Write
+                            fields:
+                              output: scaled_dot_product_attention
+                              index:
+                                tuple:
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - {expr: {var: a0}}
+                                - {expr: {var: a1}}
+                                - {expr: {var: a6}}
+                              values: {tuple: [acc5]}
+                              value_dtype: null
+                              atomic: false
+                              swizzle: NONE
+                        unroll: false
+                        seed: true
+                  unroll: false
+                  seed: true
+            unroll: false
+            seed: true
+      name: k_sdpa_f4ffeb
+    inputs: [scaled_dot_product_attention_mask_fill_c, scaled_dot_product_attention_mask_zero_c, scaled_dot_product_attention_scale, x1, x0, x2]
+    outputs: [[scaled_dot_product_attention, f16, [1, 32, 512, 128]]]
 configs:
 - program: 0
   target:
+    loop: 0
     origins:
     - scaled_dot_product_attention
   realizations:
@@ -51,9 +359,8 @@ configs:
       STAGE@map.1/twist.1/inner: d1/smem-async
       WORK: w4x1
       RASTER: ''
-    identity: a7f49b0682f73de9f0c8bcd3378a04aae53bd1c6e48040cba384d515bded3a51
+    identity: 86bba1850367a0c5c4a9fc98fa553499eed4b197d854062afebc0b110f2d1061
     measurements:
       emmy_us: 66.69653256734212
       reference_us: 67.2426700592041
       reference_backend: same-input-greedy
-gpu_name: NVIDIA A100 40GB

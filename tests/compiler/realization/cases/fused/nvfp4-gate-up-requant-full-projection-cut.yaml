@@ -1813,7 +1813,7 @@ configs:
       REDUCE: ''
       STAGE: ''
       RASTER: ''
-    identity: 5c8d7b4e994789d5fd8e3f0768256ed3bb9097f5cdb5b49d91fec08ee46834a5
+    identity: 2d2d5d5109495d4b22af7ecee1f215592c70aee6e167eed5b2f8df9ba80f516d
   - name: k_linear_reduce_bbf90a.b4d81b5ef70e
     bindings: {}
     pins:
@@ -1844,7 +1844,7 @@ configs:
       WORK: ''
       REDUCE: ''
       RASTER: ''
-    identity: 1f4f0cbfdd67009ef291d626da11037a2ef8425c62bf4e85d192c2dc70731e1c
+    identity: 466a0a78f6886c46d6fcb6958170eb52a680c89cae42eaf0b070bb53d928e44a
 loops:
 - inputs: [x_static_fp4_scale_bits, x_static_fp4_bits]
   outputs: [mul_static_fp4_scale_bits, mul_static_fp4_bits]

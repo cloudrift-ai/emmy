@@ -309,13 +309,15 @@ class Sched:
             # binds both, and a sibling output's sweep promoted beside them (the fused q/k/v
             # projections, N 64 beside N 32) never stands in for either. With several own axes a
             # side the trailing one is the role and the rest ride the grid; a side without one
-            # (the unit-row matvec) leaves the trailing pair to the placement.
+            # (the unit-row matvec) uses the unbound unit row the output stores proved.
             view = node.as_contraction()
             if mn is None or view is None:
                 return mn
             order = {axis.name: (position, axis) for position, axis in enumerate((*self.place.free, *self.place.grid))}
             left = max((order[name] for name in view.left_axes if name in order), default=None)
             right = max((order[name] for name in view.right_axes if name in order), default=None)
+            if left is None and not view.left_axes:
+                left = next((pair for name, pair in order.items() if name not in node.free_axes and pair[1].extent == 1), None)
             if left is not None and right is not None:
                 return (left[1], right[1])
             first, second = mn

@@ -16,9 +16,74 @@ programs:
     attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[matmul, f16, [512, 30720]]]
+gpu_name: NVIDIA GeForce RTX 5090
+loops:
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [512, 3840]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [3840, 30720]]]
+  - id: matmul
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 512}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 30720}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 3840}, window: null}}
+                        body:
+                          body:
+                          - class: Load
+                            fields:
+                              names: {tuple: [in0]}
+                              input: x0
+                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
+                              dtype: null
+                          - class: Load
+                            fields:
+                              names: {tuple: [in1]}
+                              input: x1
+                              index: {tuple: [{expr: {var: a2}}, {expr: {var: a1}}]}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
+                          - class: Accum
+                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
+                        unroll: false
+                        seed: true
+                    - class: Write
+                      fields:
+                        output: matmul
+                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
+                        values: {tuple: [acc0]}
+                        value_dtype: null
+                        atomic: false
+                        swizzle: NONE
+                  unroll: false
+                  seed: true
+            unroll: false
+            seed: true
+      name: k_matmul_c5989c
+    inputs: [x1, x0]
+    outputs: [[matmul, f16, [512, 30720]]]
 configs:
 - program: 0
   target:
+    loop: 0
     origins:
     - matmul
   realizations:
@@ -36,7 +101,7 @@ configs:
       REDUCE: ''
       STAGE: d2/smem-tma
       RASTER: ''
-    identity: 318f8f6aca0c74bc5d73d9f89f556a775f88dfd4f68d7865611835692e485884
+    identity: bb55bbff41e00c4e928b4b2ed7927ac10451f5e6b2636caabcda2fff0c6498aa
     measurements:
       emmy_us: 562.2559785842896
       reference_us: 557.3920011520386
@@ -51,9 +116,8 @@ configs:
       REDUCE: ''
       STAGE: d2/smem-tma
       RASTER: ''
-    identity: 318f8f6aca0c74bc5d73d9f89f556a775f88dfd4f68d7865611835692e485884
+    identity: bb55bbff41e00c4e928b4b2ed7927ac10451f5e6b2636caabcda2fff0c6498aa
     measurements:
       emmy_us: 419.47200894355774
       reference_us: 401.2320041656494
       reference_backend: same-input-greedy
-gpu_name: NVIDIA GeForce RTX 5090

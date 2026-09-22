@@ -19,47 +19,7 @@ programs:
     attrs: {is_causal: false, sliding_window: null, scale: null}
     inputs: [q, k, v]
     outputs: [[scaled_dot_product_attention, f16, [1, 32, 1, 128]]]
-configs:
-- program: 0
-  target:
-    loop: 0
-  realizations:
-  - name: k_sdpa_f24911.64445ffa0068.6e9ed65e9b3c
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      TILE@map.1/twist: mma_m16n8k16_f16_f32/f1x8/k8
-      TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x16/k8
-      REDUCE@map.1/twist: ''
-      REDUCE@map.1/twist.1/inner: ''
-      STAGE@map.1/twist: d1/smem-async
-      STAGE@map.1/twist.1/inner: d1/smem-async
-      WORK: w4x1
-      RASTER: gm8
-    identity: 18164a56eeaa66d8ed9aa077eb7067239dfb98b45d73e4f025e8c2e32dee1aa9
-    measurements:
-      emmy_us: 9.273420427447167
-      reference_us: 9.2728888546979
-      reference_backend: same-input-greedy
-  - name: k_sdpa_f24911.64445ffa0068.6e9ed65e9b3c
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      TILE@map.1/twist: mma_m16n8k16_f16_f32/f1x16/k4
-      TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x8/k4
-      REDUCE@map.1/twist: ''
-      REDUCE@map.1/twist.1/inner: ''
-      STAGE@map.1/twist: d1/smem-async
-      STAGE@map.1/twist.1/inner: d1/smem-async
-      WORK: w4x1
-      RASTER: gm8
-    identity: 18164a56eeaa66d8ed9aa077eb7067239dfb98b45d73e4f025e8c2e32dee1aa9
-    measurements:
-      emmy_us: 8.817274486069131
-      reference_us: 8.853522022213557
-      reference_backend: same-input-greedy
+gpu_name: NVIDIA A100 40GB
 loops:
 - inputs: [k, q, v]
   outputs: [scaled_dot_product_attention]
@@ -294,4 +254,44 @@ loops:
       name: k_sdpa_f24911
     inputs: [scaled_dot_product_attention_scale, k, q, v]
     outputs: [[scaled_dot_product_attention, f16, [1, 32, 1, 128]]]
-gpu_name: NVIDIA A100 40GB
+configs:
+- program: 0
+  target:
+    loop: 0
+  realizations:
+  - name: k_sdpa_f24911.64445ffa0068.6e9ed65e9b3c
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE@map.1/twist: mma_m16n8k16_f16_f32/f1x8/k8
+      TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x16/k8
+      REDUCE@map.1/twist: ''
+      REDUCE@map.1/twist.1/inner: ''
+      STAGE@map.1/twist: d1/smem-async
+      STAGE@map.1/twist.1/inner: d1/smem-async
+      WORK: w4x1
+      RASTER: gm8
+    identity: 442115a9a06a2e001c424b1016418a8cc0c80262773080e32a8b61e1cf80ad2f
+    measurements:
+      emmy_us: 9.273420427447167
+      reference_us: 9.2728888546979
+      reference_backend: same-input-greedy
+  - name: k_sdpa_f24911.64445ffa0068.6e9ed65e9b3c
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE@map.1/twist: mma_m16n8k16_f16_f32/f1x16/k4
+      TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x8/k4
+      REDUCE@map.1/twist: ''
+      REDUCE@map.1/twist.1/inner: ''
+      STAGE@map.1/twist: d1/smem-async
+      STAGE@map.1/twist.1/inner: d1/smem-async
+      WORK: w4x1
+      RASTER: gm8
+    identity: 442115a9a06a2e001c424b1016418a8cc0c80262773080e32a8b61e1cf80ad2f
+    measurements:
+      emmy_us: 8.817274486069131
+      reference_us: 8.853522022213557
+      reference_backend: same-input-greedy

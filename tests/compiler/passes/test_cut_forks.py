@@ -227,6 +227,57 @@ def test_cut_workspace_retains_static_unit_axes() -> None:
     assert _workspace_axes(seam, produced) == (unit, column)
 
 
+@pytest.mark.parametrize("second_divisor,expected_rows", [(8, 3), (2, 5), (1, 10)])
+def test_cut_stores_one_value_per_repeated_coordinate_group(second_divisor, expected_rows):
+    """A partial final group and mixed divisors preserve the full consumer's outputs."""
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.ir.loop import LoopOp
+
+    m, n, k = Axis("m", 10), Axis("n", 3), Axis("k", 7)
+    computed = projection(
+        (),
+        (
+            Load(name="x_value", input="x", index=(Var("m") / 4, Var("k"))),
+            Load(name="y_value", input="y", index=(Var("m") / second_divisor, Var("k"))),
+            Assign(name="scaled", op="multiply", args=("x_value", "y_value")),
+        ),
+    )
+    fold = contraction(k, computed, (Load(name="weight", input="w", index=(Var("k"), Var("n"))), "acc"))
+    tile = TileOp(
+        op=fold,
+        place=Placement(free=(m, n)),
+        axes=(m, n, k),
+        output_specs=(OutputSpec(Write(output="out", index=(Var("m"), Var("n")), value="acc")),),
+    )
+    graph = Graph()
+    for name, shape in (("x", (3, 7)), ("y", (10, 7)), ("w", (7, 3))):
+        _input(graph, name, shape, "f32")
+    graph.add_node(tile, ["x", "y", "w"], Tensor("out", (10, 3)), node_id="out")
+    graph.inputs, graph.outputs = ["x", "y", "w"], ["out"]
+    tile = tile.with_io(graph, graph.nodes["out"])
+    graph.nodes["out"].op = tile
+    match = Match(graph=graph, root_node_id="out", rule=Rule(name="test", pattern=[]))
+    fragment = realize(match, match.root, cuttable_seams(tile), placement_decided=True)
+    fragment.inputs = list(graph.inputs)
+    workspace = next(node for node in fragment.nodes.values() if isinstance(node.op, TileOp) and node.id.startswith("out__place_"))
+    assert tuple(d.as_static() for d in workspace.outputs[0].shape) == (expected_rows, 7)
+
+    rng = np.random.default_rng(1)
+    inputs = {name: rng.standard_normal(tuple(d.as_static() for d in graph.buffer(name).shape)).astype(np.float32) for name in graph.inputs}
+
+    def run(g):
+        g = g.copy()
+        for node in g.nodes.values():
+            if isinstance(node.op, TileOp):
+                op = node.op
+                node.op = LoopOp(body=op.op.lower(bound=frozenset(), stores=op.output_specs, axes=op.axes))
+        backend = NumpyBackend()
+        return backend.run(backend.compile(g), input_data=inputs)[0].outputs
+
+    for got, want in zip(run(fragment).values(), run(graph).values(), strict=True):
+        np.testing.assert_allclose(got, want, rtol=1e-6, atol=1e-6)
+
+
 def test_composed_cut_topologically_orders_equal_degree_workspace_chain() -> None:
     """Counting direct workspace reads cannot order A->C->B when A and C each read one."""
 
@@ -837,6 +888,21 @@ def test_alpha_equivalent_operand_cones_cluster_into_one_seam() -> None:
     assert len(clustered) == 1 and len(clustered[0].siblings) == 1
 
 
+def test_a_multi_result_cone_does_not_materialize_its_own_dependency() -> None:
+    from emmy.compiler.pipeline.passes.lowering.tile._cut import _cluster_value_seams
+
+    norm = projection(body=(Load("x", "x", (Var("m"),)), Assign("norm", "rsqrt", ("x",))))
+    maximum = reduction("k", (norm, slab("y", "y", "m", "k")), (Assign("amax__v", "multiply", ("norm", "y")),), ("amax",), "maximum")
+    combined = projection((norm, maximum), results=("norm", "amax"))
+    axes = (Axis("m", 8), Axis("k", 16))
+    seams = [CutSite(combined, "PLACE@map.1/map", axes[:1], (F16, F16)), CutSite(norm, "PLACE@map.1/map.2/reduce.1/map", axes[:1], (F16,))]
+
+    clustered = _cluster_value_seams(seams, axes)
+
+    assert len(clustered) == 2
+    assert not any(seam.siblings for seam in clustered)
+
+
 def _norm_residual_graph() -> Graph:
     """``y = x @ w`` read twice: under the norm's statistic reduce and at the residual add — the
     shape of a fused decoder half, whose o_proj result feeds the post-attention norm and the
@@ -1373,3 +1439,61 @@ def test_a_recorded_route_selects_the_arm_spelling_its_whole_cut_set() -> None:
     one = next(iter(sorted(whole)))
     single = spelled_arm(options, {one: "cut"})
     assert single is not None and list(single[1]) == [one]
+
+
+@pytest.mark.parametrize("computed_scale", [False, True])
+def test_storage_frontier_recomputes_the_encode_scale_in_the_consumer(computed_scale):
+    """A scale computed before the encode can also feed the decode without fusing the encode."""
+    from emmy.compiler.dtype import F8E4M3, F32
+
+    m, n, k = Axis("m", 2), Axis("n", 3), Axis("k", 16)
+    scale = Load(name="scale_value", input="scale", index=(Var("m"), Var("k") / 8), dtype=F32)
+    operands = ()
+    if computed_scale:
+        scale = reduction(
+            "r",
+            (Load(name="sample", input="scale", index=(Var("m"), Var("k") / 8, Var("r")), dtype=F32),),
+            (Assign(name="scale_value__v", op="copy", args=("sample",)),),
+            ("scale_value",),
+        )
+        operands = (scale,)
+    quantized = projection(
+        operands,
+        (
+            Load(name="x_value", input="x", index=(Var("m"), Var("k")), dtype=F16),
+            *((scale,) if not computed_scale else ()),
+            Assign(name="scale_squared", op="multiply", args=("scale_value", "scale_value"), dtype=F32),
+            Assign(name="scaled", op="divide", args=("x_value", "scale_squared"), dtype=F32),
+            Assign(name="encoded", op="to_f8e4m3", args=("scaled",), dtype=F8E4M3),
+            Assign(name="decoded", op="from_f8e4m3", args=("encoded",), dtype=F16),
+            Assign(name="quantized", op="multiply", args=("decoded", "scale_squared"), dtype=F16),
+        ),
+    )
+    tile = TileOp(
+        op=contraction(k, quantized, (Load(name="weight", input="w", index=(Var("k"), Var("n"))), "acc")),
+        place=Placement(free=(m, n)),
+        axes=(m, n, k, Axis("r", 3)),
+        output_specs=(OutputSpec(Write(output="out", index=(Var("m"), Var("n")), value="acc")),),
+    )
+    graph = Graph()
+    for name, shape in (("x", (2, 16)), ("scale", (2, 2, 3) if computed_scale else (2, 2)), ("w", (16, 3))):
+        _input(graph, name, shape, "f32")
+    graph.add_node(tile, ["x", "scale", "w"], Tensor("out", (2, 3)), node_id="out")
+    graph.inputs, graph.outputs = ["x", "scale", "w"], ["out"]
+    graph.nodes["out"].op = tile.with_io(graph, graph.nodes["out"])
+    match = Match(graph=graph, root_node_id="out", rule=Rule(name="test", pattern=[]))
+    seam = next(seam for seam in cuttable_seams(match.root.op) if seam.node.exposes == ("quantized",))
+    assert seam.frontier is not None
+    assert seam.dtypes == (F8E4M3,)
+    assert any("scale_squared" in stmt.defines() for stmt in seam.frontier.residue)
+    assert not any("encoded" in stmt.defines() for stmt in seam.frontier.residue)
+    cuts = tuple(s for s in cuttable_seams(match.root.op) if s is seam or s.spelling == seam.spelling or s.node.axis == "r")
+    fragment = realize(match, match.root, cuts, placement_decided=True)
+    fragment.inputs = list(graph.inputs)
+    pieces = [node for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
+    assert len(pieces) == (3 if computed_scale else 2)
+    assert sum(tensor.dtype == F8E4M3 for node in pieces for tensor in node.outputs) == 1
+    if computed_scale:
+        assert sum("scale" in node.inputs for node in pieces) == 1, "both encode and decode reuse the separately computed scale"
+    for node in pieces:
+        node.op.op.lower(bound=frozenset(), stores=node.op.output_specs, axes=node.op.axes)

@@ -100,15 +100,15 @@ An operand result component NO READER READS is dropped, and the edge's body cut 
 A reader is a consuming lift or a kernel-boundary store, so a sweep's per-cell projection keeps what its `Write` names
 even though no lift binds it. The dead components are rewrite residue: the twisted fusion re-seats a carrier's channels
 and mints `_unread<i>` for a slot its reader stopped binding, and an epilogue cone beside it keeps exposing a scale that
-was live when it was formed and went dead when the folds fused. Only a zero-axis operand is restricted — a reducing
-one's components ARE its carried states, and dropping one changes the monoid, which is why attention's running maximum
-stays spelled as the `_unread` it honestly is. The rule is tree-wide and unions over readers, because restricting per
-occurrence would sever the object sharing the next paragraph restores.
+was live when it was formed and went dead when the folds fused. Independent planar states narrow their injection,
+identity and componentwise combine together. Twisted and observed states remain whole because their components may
+be coupled. The rule unions all readers after restoring object sharing, so a JSON round trip prunes the same states.
+Operands that no retained result or boundary store reads disappear as well.
 
-An identity pass-through — a projection that only re-exposes its single operand's results — dissolves wherever a
-projection is formed or revisited. That is not cosmetic: a pass-through is what makes two occurrences of the same
-computation compare unequal, and the placement fork's value clustering (`lowering/tile/_cut.py`) relies on
-alpha-equivalent cones converging to one canonical shape.
+An identity projection dissolves into its operand, or flattens its operand list into a consuming projection. A
+pass-through can make two occurrences of the same computation compare unequal, and the placement fork's value
+clustering (`lowering/tile/_cut.py`) relies on alpha-equivalent cones converging to one canonical shape. Independent
+states over different free coordinates separate; statistics sharing the same coordinates remain together.
 
 Normalization ends by restoring OBJECT SHARING: same-value cones — alpha-equal with identical captures and exposed
 result names, so a copy differing only in internal binder spelling still qualifies — collapse onto one Fold object
@@ -233,8 +233,9 @@ the per-cell tier. A candidate is kept only when the BOUND axis is itself a cont
 whether some contraction gained one accepts a binding that handed the row to the other side, because a contraction
 reorients.
 
-Post-init ANNOUNCES it (`_implicit_unit_row`) when the stores prove a leading zero prefix and a dense column. The row
-is then unbound — no operand reads it — which gives the placement a fragment geometry without giving any contraction
+Post-init ANNOUNCES it (`_implicit_unit_row`) when the stores prove a leading zero prefix and dense columns. Several
+free coordinates may partition the columns into groups; the matrix pair remains the unit row and the last column.
+The row is then unbound — no operand reads it — which gives the placement a fragment geometry without giving any contraction
 a left axis. That is the weaker statement, and it is the only one available where there is nothing to bind: a matvec
 whose A is a bare vector. The binding yields to it, firing only where the placement carries no extent-one free axis.
 
