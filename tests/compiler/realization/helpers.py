@@ -246,11 +246,23 @@ def complete(document: dict) -> dict:
 
 def _matching_entry(fresh: dict, entry: dict, kernel: dict) -> dict:
     """The regenerated config for the stored kernel: the one from the same traced ops, or, for a
-    kernel that keeps none, the one whose Loop IR is the stored kernel's."""
+    kernel that keeps none, the one with the same exact typed Loop identity."""
+    from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
+    from emmy.compiler.loop_wire import loop_graph_from_wire  # noqa: PLC0415
+
+    def identity(wire):
+        graph = loop_graph_from_wire(wire)
+        return tuple(
+            node.op.with_io(graph, node).identity_key(structural=False, with_io=True)
+            for node in graph.nodes.values()
+            if isinstance(node.op, LoopOp)
+        )
+
     origins = entry["target"].get("origins")
+    key = identity(kernel) if origins is None else None
     for candidate in fresh["configs"]:
         target = candidate["target"]
-        if (target.get("origins") == origins) if origins is not None else fresh["loops"][target["loop"]] == kernel:
+        if (target.get("origins") == origins) if origins is not None else identity(fresh["loops"][target["loop"]]) == key:
             return dict(candidate)
     offered = ", ".join(repr(candidate["target"].get("origins")) for candidate in fresh["configs"])
     raise CaseError(f"no kernel of the program matches the stored one (traced ops {origins!r}); the program now forms {offered}")

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from tests.compiler.realization import helpers
 
@@ -48,3 +50,18 @@ def test_reference_and_lowered_weights_share_the_source_before_transpose() -> No
     reference = helpers.seeded_inputs(case.record.reference_program, sources=sources)
 
     np.testing.assert_array_equal(feed["linear_6_wt"], reference["p_mlp_down_proj_weight"].T)
+
+
+def test_regeneration_matches_typed_compute_without_a_provenance_name() -> None:
+    case = helpers.load_case(helpers.CASES_DIR / "pointwise/relu-vectorized-interleaved-sm89.yaml")
+    kernel = case.document["loops"][0]
+    renamed = deepcopy(kernel)
+    compute = next(node for node in renamed["nodes"] if node["op"] == "loop")
+    compute["attrs"]["name"] = "renamed_kernel"
+    entry = {"target": {"loop": 0}}
+    fresh = {"configs": [entry], "loops": [renamed]}
+    assert helpers._matching_entry(fresh, entry, kernel) == entry
+
+    compute["outputs"][0][1] = "f16"
+    with pytest.raises(helpers.CaseError, match="no kernel"):
+        helpers._matching_entry(fresh, entry, kernel)

@@ -117,8 +117,8 @@ loops:
                                 - expr:
                                     binary:
                                       op: +
-                                      left: {var: a2}
-                                      right: {binary: {op: '*', left: {literal: {value: 64, dtype: int}}, right: {var: a0}}}
+                                      left: {binary: {op: '*', left: {literal: {value: 64, dtype: int}}, right: {var: a0}}}
+                                      right: {var: a2}
                               values: {tuple: [acc0]}
                               value_dtype: null
                               atomic: false

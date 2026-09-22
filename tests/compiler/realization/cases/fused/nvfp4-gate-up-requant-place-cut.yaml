@@ -1763,7 +1763,7 @@ configs:
       REDUCE: ''
       STAGE: d1/smem-async
       RASTER: ''
-    identity: 9896f6bb6eb93eb9e1a2fdddc1fd62a837797679fc5ccc30fa9ced5445dffa81
+    identity: 9b9a979112807ff63d99bf163b0649381e76e45c49d220700fcbccab217707e1
   - name: k_linear_reduce_bbf90a.165fbb139c44
     bindings: {}
     pins:
@@ -3510,8 +3510,8 @@ loops:
                                       - expr:
                                           binary:
                                             op: +
-                                            left: {var: a10}
-                                            right: {binary: {op: '*', left: {literal: {value: 16, dtype: int}}, right: {var: a9}}}
+                                            left: {binary: {op: '*', left: {literal: {value: 16, dtype: int}}, right: {var: a9}}}
+                                            right: {var: a10}
                                       - expr:
                                           binary:
                                             op: +
@@ -3537,8 +3537,8 @@ loops:
                                       - expr:
                                           binary:
                                             op: +
-                                            left: {var: a10}
-                                            right: {binary: {op: '*', left: {literal: {value: 16, dtype: int}}, right: {var: a9}}}
+                                            left: {binary: {op: '*', left: {literal: {value: 16, dtype: int}}, right: {var: a9}}}
+                                            right: {var: a10}
                                       - {expr: {binary: {op: /, left: {var: a11}, right: {literal: {value: 16, dtype: int}}}}}
                                     dtype: null
                                 - class: Assign
@@ -3660,8 +3660,8 @@ loops:
                                       - expr:
                                           binary:
                                             op: +
-                                            left: {var: a10}
-                                            right: {binary: {op: '*', left: {literal: {value: 16, dtype: int}}, right: {var: a9}}}
+                                            left: {binary: {op: '*', left: {literal: {value: 16, dtype: int}}, right: {var: a9}}}
+                                            right: {var: a10}
                                       - expr:
                                           binary:
                                             op: +
@@ -3687,8 +3687,8 @@ loops:
                                       - expr:
                                           binary:
                                             op: +
-                                            left: {var: a10}
-                                            right: {binary: {op: '*', left: {literal: {value: 16, dtype: int}}, right: {var: a9}}}
+                                            left: {binary: {op: '*', left: {literal: {value: 16, dtype: int}}, right: {var: a9}}}
+                                            right: {var: a10}
                                       - {expr: {binary: {op: /, left: {var: a12}, right: {literal: {value: 16, dtype: int}}}}}
                                     dtype: null
                                 - class: Assign
@@ -3842,7 +3842,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_reduce_77c891
+      name: k_linear_reduce_c56242
     inputs: [p_gate_weight_scale_2, x_static_fp4_scale_2, p_up_weight_scale_2, silu_one, mul_static_fp4_floor, mul_static_fp4_f4_max, mul_static_fp4_scale_2,
       mul_static_fp4_shift, p_gate_weight_scale_bits, x_static_fp4_scale_bits, p_gate_weight_bits, x_static_fp4_bits, p_gate_weight_f4_pairs,
       x_static_fp4_r1_f4_pairs, p_up_weight_scale_bits, x_static_fp4_r2_f4_pairs, p_up_weight_bits, p_up_weight_f4_pairs]
