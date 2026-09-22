@@ -460,8 +460,8 @@ def test_working_verified_row_is_automatically_pinned(tmp_path):
 
     assert len(args.golden_configs) == 1
     assert args.golden_configs[0].knobs == {"WORK": "w1x1"}
-    assert args.golden_configs[0].pins == {"FAST_MATH": False}
-    assert _sample_replay_knobs(args.golden_configs[0]) == {"FAST_MATH": False, "WORK": "w1x1"}
+    assert args.golden_configs[0].pins == {"FAST_MATH": True}
+    assert _sample_replay_knobs(args.golden_configs[0]) == {"FAST_MATH": True, "WORK": "w1x1"}
 
 
 def test_working_direct_tune_winner_is_automatically_pinned(tmp_path):
@@ -852,13 +852,14 @@ def test_replay_keys_its_cache_by_the_entry_identity(tmp_path):
 
 
 @pytest.mark.parametrize("card,cap", [("NVIDIA GeForce RTX 4090", (8, 9)), ("NVIDIA A100-SXM4-40GB", (8, 0))])
-def test_recorded_greedy_pick_is_picked_again_under_strict_evidence(tmp_path, card, cap):
+def test_recorded_greedy_pick_is_picked_again_under_strict_evidence(tmp_path, card, cap, monkeypatch):
     """The kernel set a compile picked, recorded as measured rows — one routing row per kernel-set
     decision it took and one child-identity schedule receipt per kernel — is evidence enough: those
     rows alone yield the same kernels with the same rows under strict evidence, with no prior and
     no tune DB. A receipt carries the input regime and no route: seam spellings are
     kernel-local, so a cut key copied onto every receipt would re-cut any piece that offers a
     same-spelled seam."""
+    monkeypatch.setenv("EMMY_FAST_MATH", "0")
     from emmy import config
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
     from emmy.compiler.pipeline.search.golden import (
@@ -906,13 +907,14 @@ def test_recorded_greedy_pick_is_picked_again_under_strict_evidence(tmp_path, ca
     assert greedy_pick_rows(again) == rows
 
 
-def test_recorded_composed_pick_is_picked_again_under_strict_evidence(tmp_path):
+def test_recorded_composed_pick_is_picked_again_under_strict_evidence(tmp_path, monkeypatch):
     """A pinned compile consumes every scoped PLACE pin that resolves on one kernel as ONE composed
     decision, and ``--record-greedy`` records it as one routing row naming every seam. Those rows
     are evidence enough for the same composed cut under strict evidence — the cut pass offers the
     composed arm the row spells beside its single seams, on the replay that keys the rows and on
     the deploy that reads them — rather than the first offered seam the row marks with the rest
     left unresolved and every receipt keyed under a kernel that replay never minted."""
+    monkeypatch.setenv("EMMY_FAST_MATH", "0")
     from emmy import config
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
     from emmy.compiler.pipeline.search.golden import golden_record_from_entry, records_override, sole_evidence
@@ -956,6 +958,7 @@ def test_run_records_the_greedy_pick_of_an_embedded_golden(monkeypatch, tmp_path
     with its isolated launch timing, the greedy comparison row as every reference — while the
     per-kernel perf rows and node leaves every embedded-golden bench records by default are
     recorded too."""
+    monkeypatch.setenv("EMMY_FAST_MATH", "0")
     from emmy.commands import run as run_module
     from emmy.commands.compile import resolve_golden_arg
     from emmy.compiler import target as target_mod
@@ -1080,6 +1083,7 @@ def test_run_files_a_hung_greedy_kernel_as_bench_fail_evidence(monkeypatch, tmp_
     instead of electing the identical route and hanging again. Before, a hung greedy on an
     embedded golden recorded nothing (the run exited on the missing same-input reference before
     any recording ran), so ``run --bench`` could never advance an election on its own."""
+    monkeypatch.setenv("EMMY_FAST_MATH", "0")
     from emmy.commands import run as run_module
     from emmy.commands.compile import resolve_golden_arg
     from emmy.compiler import target as target_mod

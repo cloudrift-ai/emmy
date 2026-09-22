@@ -297,6 +297,7 @@ def test_multi_channel_contraction_domain_contains_per_cell_and_warp_compute_fil
 
 
 def test_tensor_core_enumeration_is_the_compatible_independent_product(monkeypatch) -> None:
+    monkeypatch.setenv("EMMY_FAST_MATH", "0")
     m, n, k = Axis("m", 128), Axis("n", 128), Axis("k", 132)
     tile = _matmul(
         m,
@@ -515,6 +516,7 @@ def test_staged_edges_are_independent_product_factors(monkeypatch) -> None:
 
 
 def test_compute_fill_edges_remain_independent_product_factors(monkeypatch) -> None:
+    monkeypatch.setenv("EMMY_FAST_MATH", "0")
     m, n, k = Axis("m", 64), Axis("n", 64), Axis("k", 64)
     computed_a = projection(
         (), (Load(name="score", input="scores", index=(Var("m"), Var("k"))), Assign(name="prob", op="exp", args=("score",)))
