@@ -384,7 +384,9 @@ def _one_value_per_name(stmts) -> list:
 
     The sweep is positional, which is what makes it right in one C scope: a use before the second
     binding means the first value and a use after it means the second, exactly as the redeclaration
-    nvcc refuses would have read. Nothing moves while the two agree.
+    nvcc refuses would have read. Exported accumulators count as bindings too: a partial copy of
+    a reduction is a different loop even when some outputs retain their original names.
+    Nothing moves while the two agree.
     """
     bound: dict[str, object] = {}
     rename: dict[str, str] = {}

@@ -18,6 +18,10 @@ memory-effect reading neither has: a `Write` or an async fill between two identi
 second a different value. A same-name repeat cannot hide such a reload, since a rebind in one C scope is already
 illegal. A name re-bound to a DIFFERENT address is left alone: that is an SSA fault and must surface as one.
 
+When a projection recomputes only some outputs of an already bound reduction, its smaller loop is a distinct
+statement. Its exported accumulators receive distinct names through the same positional renaming used for other
+rebound values. Whole-loop equality alone cannot detect this partial overlap.
+
 The finished body then answers the complementary question, `_unbound_names`: does it read anything its launch never
 supplies? A well-formed kernel reads its own buffers, the symbolic extents passed beside them and the renderer's CTA
 helpers (`lane` / `warp`), and nothing else — every other name is bound by a statement or an enclosing axis, which is
