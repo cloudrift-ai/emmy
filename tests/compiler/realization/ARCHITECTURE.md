@@ -172,7 +172,8 @@ a claim about one capability, never about a merely newer card.
 
 The reference for `correct` is the kernel's traced ops (`target.origins`) run on the numpy backend, the slice
 `emmy run` benchmarks against (`GoldenRecord.reference_program`); a kernel with no exact frontend twin compares against
-the same-input greedy execution of the same program.
+the same-input greedy execution of the same program. Both sides share random weights by source path and bind them
+through their own load transformations, so a lowered transpose still reads the reference's weight.
 
 `offered` is the golden decode, so a corpus case and a recorded golden row cannot disagree about whether a schedule is
 still offered: the entry's route resolves to seams the cut pass offers, and its row equals an enumerated leaf of the

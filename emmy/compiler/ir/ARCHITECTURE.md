@@ -579,7 +579,9 @@ canonicalized before validation:
   linear in definitions × loop depth instead of materializing the quadratic full SSA dependency closure.
 - `dedup_loads` — after expression simplification, keep one `Load` for each identical
   `(input, index, width, dtype)` read in a scope and rewire every scalar or vector lane. A write invalidates retained
-  reads of that buffer, including around a nested scope with a write. The same walk keeps one `Assign` per identical
+  reads of that buffer, including around a nested scope with a write. Entering a scope also drops cached values whose
+  definitions or dependencies are rebound there; an identical index spelling can name a different loop coordinate.
+  The same walk keeps one `Assign` per identical
   operation over identical arguments and one `Accum` per identical accumulation — a value the loop tree computes
   twice (a contraction spelled on both sides of a cut seam, a repeated pure expression) folds to one definition, and
   an accumulator alias carries out of the loop that defined it to the scope that reads the sum. This is

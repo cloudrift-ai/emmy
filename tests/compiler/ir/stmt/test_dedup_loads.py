@@ -8,6 +8,43 @@ from emmy.compiler.ir.stmt.leaves import Assign, Load, Write
 from emmy.compiler.ir.stmt.normalize import dedup_loads, normalize_body
 
 
+def test_dedup_loads_preserves_loads_under_a_rebound_coordinate() -> None:
+    """A normalization sum must read every channel when its index shadows the output index."""
+    import numpy as np
+
+    from emmy.compiler.ir.loop import LoopOp
+    from emmy.compiler.ir.loop.runner import execute_loop_op_cpp
+    from emmy.compiler.ir.stmt import Accum
+
+    body = Body(
+        (
+            Loop(
+                axis=Axis("k", 4),
+                body=Body(
+                    (
+                        Load(name="outer", input="x", index=(Var("k"),)),
+                        Loop(
+                            axis=Axis("k", 4),
+                            body=Body(
+                                (
+                                    Load(name="inner", input="x", index=(Var("k"),)),
+                                    Accum(name="total", value="inner", op="add", axes=("k",)),
+                                )
+                            ),
+                        ),
+                        Assign(name="value", op="divide", args=("outer", "total")),
+                        Write(output="out", index=(Var("k"),), value="value"),
+                    )
+                ),
+            ),
+        )
+    )
+    values = np.array([1, 2, 4, 8], dtype=np.float32)
+    actual = execute_loop_op_cpp(LoopOp(body=dedup_loads(body)), {"x": values}, {"out": (4,)})
+
+    np.testing.assert_allclose(actual, values / values.sum(), rtol=1e-6)
+
+
 def test_normalize_body_dedups_loads_and_rewires_gather_indices() -> None:
     body = Body(
         (

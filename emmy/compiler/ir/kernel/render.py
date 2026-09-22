@@ -86,8 +86,10 @@ static __device__ __forceinline__ void mbarrier_init(unsigned long long* mbar, i
 }
 
 static __device__ __forceinline__ void mbarrier_arrive_expect_tx(unsigned long long* mbar, int bytes) {
+    // Publish barrier initialization and order prior shared-memory accesses before the TMA fill.
     unsigned int addr = __cvta_generic_to_shared(mbar);
     unsigned long long state;
+    asm volatile("fence.proxy.async.shared::cta;\\n" ::: "memory");
     asm volatile("mbarrier.arrive.expect_tx.shared.b64 %0, [%1], %2;\\n"
                  : "=l"(state) : "r"(addr), "r"(bytes) : "memory");
 }
@@ -117,12 +119,8 @@ static __device__ __forceinline__ void mbarrier_wait_parity(unsigned long long* 
     // hot-spinning across all 256 CTA threads (~3-4× kernel speedup on
     // small matmuls where the wait-vs-compute ratio is high).
     //
-    // The ``"memory"`` clobber prevents the compiler from reordering
-    // smem loads across this asm. The primary correctness anchor is
-    // the trailing ``__syncthreads()`` materialize emits after each
-    // MbarrierWait (see ``100_materialize_tile.py``); the clobber is
-    // defensive belt-and-braces so the asm itself reads as a fence
-    // even if a future caller forgets the surrounding Sync.
+    // Completion makes the TMA writes visible to this thread's shared-memory reads.
+    // The memory clobber also prevents the compiler from moving those reads before the wait.
     unsigned int addr = __cvta_generic_to_shared(mbar);
     asm volatile("{.reg .pred P; bw: mbarrier.try_wait.parity.shared.b64 P, [%0], %1; @!P bra bw;}\\n"
                  :: "r"(addr), "r"(phase) : "memory");

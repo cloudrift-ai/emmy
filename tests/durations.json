@@ -1,4 +1,6 @@
 {
+ "tests/compiler/passes/test_chunk_staging_groups.py::test_tma_refills_preserve_causal_attention[d1/smem-tma]@cuda": 12.76,
+ "tests/compiler/passes/test_chunk_staging_groups.py::test_tma_refills_preserve_causal_attention[d2/smem-tma]@cuda": 11.62,
  "tests/compiler/passes/test_total_lift.py::test_nested_output_sweep_preserves_an_intermediate_value": 0.6,
  "tests/compiler/ir/tile/test_normalize.py::test_unread_planar_state_drops_its_independent_coordinate[False]": 1.14,
  "tests/compiler/passes/test_cut_forks.py::test_cut_stores_one_value_per_repeated_coordinate_group[2-5]": 0.50,
