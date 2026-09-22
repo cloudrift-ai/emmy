@@ -59,6 +59,7 @@ from emmy.compiler.ir.schedule.classic.schedule import binds_root
 from emmy.compiler.ir.schedule.views import cone_seam
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
+from emmy.compiler.ir.stmt.body import _exposed_defines
 from emmy.compiler.ir.tile import FoldMove, Level, Reduce, ReduceStage
 from emmy.compiler.ir.tile.ir import apply_output_specs, observed_result_names
 from emmy.compiler.ir.tile.ops import UnbindableProjection, chain_form, chain_members, projection_regions, sched_of, tiled_edges
@@ -240,8 +241,9 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
         # serial arm does, and a second copy of the whole fold beside the tier's is dead code that
         # redeclares the carrier.
         if reducing is None or reducing.as_contraction() is None or ctx.sched.tile_of(reducing) is None or reducing.chunked():
-            placed = set(root.lower(axes=axes))
+            placed = list(root.lower(axes=axes))
             siblings = [stmt for edge in op.operands if edge is not root for stmt in edge.lower(axes=axes) if stmt not in placed]
+            siblings = _one_value_per_name([*placed, *siblings])[len(placed) :]
         else:
             # The root's results keep their names (the cell's own accumulators, the values its step
             # defines per cell); everything else its lowering defines — the cone's statistic a
@@ -389,12 +391,12 @@ def _one_value_per_name(stmts) -> list:
     out: list = []
     for stmt in stmts:
         spelled = stmt.rename(lambda name: rename.get(name, name)) if rename else stmt
-        for original in stmt.defines():
+        for original in sorted(_exposed_defines(stmt)):
             name = rename.get(original, original)
             if bound.get(name, spelled) != spelled:
                 rename[original] = f"{original}__s{len(rename)}"
                 spelled = stmt.rename(lambda name: rename.get(name, name))
-        for name in spelled.defines():
+        for name in _exposed_defines(spelled):
             bound[name] = spelled
         out.append(spelled)
     return out

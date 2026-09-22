@@ -58,8 +58,8 @@ point: a replay costs a rebind instead of ~1M `schedule()` calls per model, and 
 machine-local tune DB and online prior a cold pick resolves through. Strict evidence keeps the golden honest — a fork no
 row decides raises `EvidenceError` naming the kernel, so a stale or partial golden fails loudly instead of quietly
 restoring the search. Regenerate with `python -m tests.serving.regen` when a shape changes or a new one joins a table.
-Execution skips on a GPU the serving golden does not cover. This is a hardware limitation, not permission to skip
-missing or stale schedules on a card the file covers; those still fail strict evidence.
+These unmeasured scalar schedules are scoped to the live card. Missing or stale schedules still fail strict evidence;
+they must be refreshed when compiler changes alter the traced kernels.
 
 ## Test Layers
 
