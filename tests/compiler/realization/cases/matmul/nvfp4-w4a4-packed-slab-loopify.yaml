@@ -687,7 +687,7 @@ configs:
       REDUCE: ''
       STAGE: d3/smem-async
       RASTER: ''
-    identity: 080558504449b5f786062eb6226ed01787da57d924c3d11e15975c8ce6833218
+    identity: 9a3df823a03df343fb34433abba58cc72041b4b7ac30e2ce0c7db8441273d877
 loops:
 - inputs: [input_static_fp4_scale_bits, input_static_fp4_bits]
   outputs: [linear]
@@ -1010,7 +1010,19 @@ loops:
                               input: input_static_fp4_r1_f4_pairs
                               index:
                                 tuple:
-                                - {expr: {cast: {dtype: int, expr: {var: v0}}}}
+                                - expr:
+                                    ternary:
+                                      cond:
+                                        binary:
+                                          op: <
+                                          left: {cast: {dtype: int, expr: {var: v0}}}
+                                          right: {literal: {value: 0, dtype: int}}
+                                      if_true:
+                                        binary:
+                                          op: +
+                                          left: {cast: {dtype: int, expr: {var: v0}}}
+                                          right: {literal: {value: 256, dtype: int}}
+                                      if_false: {cast: {dtype: int, expr: {var: v0}}}
                                 - expr:
                                     binary:
                                       op: '%'
@@ -1046,7 +1058,19 @@ loops:
                               input: p_weight_f4_pairs
                               index:
                                 tuple:
-                                - {expr: {cast: {dtype: int, expr: {var: v1}}}}
+                                - expr:
+                                    ternary:
+                                      cond:
+                                        binary:
+                                          op: <
+                                          left: {cast: {dtype: int, expr: {var: v1}}}
+                                          right: {literal: {value: 0, dtype: int}}
+                                      if_true:
+                                        binary:
+                                          op: +
+                                          left: {cast: {dtype: int, expr: {var: v1}}}
+                                          right: {literal: {value: 256, dtype: int}}
+                                      if_false: {cast: {dtype: int, expr: {var: v1}}}
                                 - expr:
                                     binary:
                                       op: '%'
@@ -1110,7 +1134,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_feddc1
+      name: k_linear_fcc6b9
     inputs: [p_weight_scale_2, input_static_fp4_scale_2, p_weight_scale_bits, input_static_fp4_scale_bits, p_weight_bits, input_static_fp4_bits,
       p_weight_f4_pairs, input_static_fp4_r1_f4_pairs]
     outputs: [[linear, f32, [128, 256]]]

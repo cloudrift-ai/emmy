@@ -9,6 +9,7 @@ match eager numpy within fp16 tolerance.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from emmy.compiler import dtype as dt
 from emmy.compiler.backend.cuda.dtype import canonical_from_cuda_name, cuda_name, nbytes_of

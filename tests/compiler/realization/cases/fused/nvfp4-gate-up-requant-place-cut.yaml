@@ -1763,7 +1763,7 @@ configs:
       REDUCE: ''
       STAGE: d1/smem-async
       RASTER: ''
-    identity: 3cf6331ae57515b52bcd28081e6b62f4645dc2ace651adfa1382f7f01ecdd423
+    identity: 9896f6bb6eb93eb9e1a2fdddc1fd62a837797679fc5ccc30fa9ced5445dffa81
   - name: k_linear_reduce_bbf90a.165fbb139c44
     bindings: {}
     pins:
@@ -1825,7 +1825,7 @@ configs:
       STAGE@map.2/map.2/reduce.2/inner: ''
       WORK: ''
       RASTER: ''
-    identity: 598b68a7d36bb0a495738d808ec1e5dbfca5ebfa02c79c246b53c217f5d5a4f2
+    identity: 25c01f33094c844a159b924d06bfa5960bdbe8ba8b2e88e081d3118b27f19d5b
 loops:
 - inputs: [x_static_fp4_scale_bits, x_static_fp4_bits]
   outputs: [mul_static_fp4_scale_bits, mul_static_fp4_bits]
@@ -2550,7 +2550,19 @@ loops:
                                     input: p_gate_weight_f4_pairs
                                     index:
                                       tuple:
-                                      - {expr: {cast: {dtype: int, expr: {var: v2}}}}
+                                      - expr:
+                                          ternary:
+                                            cond:
+                                              binary:
+                                                op: <
+                                                left: {cast: {dtype: int, expr: {var: v2}}}
+                                                right: {literal: {value: 0, dtype: int}}
+                                            if_true:
+                                              binary:
+                                                op: +
+                                                left: {cast: {dtype: int, expr: {var: v2}}}
+                                                right: {literal: {value: 256, dtype: int}}
+                                            if_false: {cast: {dtype: int, expr: {var: v2}}}
                                       - expr:
                                           binary:
                                             op: '%'
@@ -2588,7 +2600,19 @@ loops:
                                     input: x_static_fp4_r1_f4_pairs
                                     index:
                                       tuple:
-                                      - {expr: {cast: {dtype: int, expr: {var: v7}}}}
+                                      - expr:
+                                          ternary:
+                                            cond:
+                                              binary:
+                                                op: <
+                                                left: {cast: {dtype: int, expr: {var: v7}}}
+                                                right: {literal: {value: 0, dtype: int}}
+                                            if_true:
+                                              binary:
+                                                op: +
+                                                left: {cast: {dtype: int, expr: {var: v7}}}
+                                                right: {literal: {value: 256, dtype: int}}
+                                            if_false: {cast: {dtype: int, expr: {var: v7}}}
                                       - expr:
                                           binary:
                                             op: '%'
@@ -2684,7 +2708,19 @@ loops:
                                     input: p_up_weight_f4_pairs
                                     index:
                                       tuple:
-                                      - {expr: {cast: {dtype: int, expr: {var: v13}}}}
+                                      - expr:
+                                          ternary:
+                                            cond:
+                                              binary:
+                                                op: <
+                                                left: {cast: {dtype: int, expr: {var: v13}}}
+                                                right: {literal: {value: 0, dtype: int}}
+                                            if_true:
+                                              binary:
+                                                op: +
+                                                left: {cast: {dtype: int, expr: {var: v13}}}
+                                                right: {literal: {value: 256, dtype: int}}
+                                            if_false: {cast: {dtype: int, expr: {var: v13}}}
                                       - expr:
                                           binary:
                                             op: '%'
@@ -2722,7 +2758,19 @@ loops:
                                     input: x_static_fp4_r2_f4_pairs
                                     index:
                                       tuple:
-                                      - {expr: {cast: {dtype: int, expr: {var: v18}}}}
+                                      - expr:
+                                          ternary:
+                                            cond:
+                                              binary:
+                                                op: <
+                                                left: {cast: {dtype: int, expr: {var: v18}}}
+                                                right: {literal: {value: 0, dtype: int}}
+                                            if_true:
+                                              binary:
+                                                op: +
+                                                left: {cast: {dtype: int, expr: {var: v18}}}
+                                                right: {literal: {value: 256, dtype: int}}
+                                            if_false: {cast: {dtype: int, expr: {var: v18}}}
                                       - expr:
                                           binary:
                                             op: '%'
@@ -2831,7 +2879,19 @@ loops:
                               input: p_gate_weight_f4_pairs
                               index:
                                 tuple:
-                                - {expr: {cast: {dtype: int, expr: {var: v34}}}}
+                                - expr:
+                                    ternary:
+                                      cond:
+                                        binary:
+                                          op: <
+                                          left: {cast: {dtype: int, expr: {var: v34}}}
+                                          right: {literal: {value: 0, dtype: int}}
+                                      if_true:
+                                        binary:
+                                          op: +
+                                          left: {cast: {dtype: int, expr: {var: v34}}}
+                                          right: {literal: {value: 256, dtype: int}}
+                                      if_false: {cast: {dtype: int, expr: {var: v34}}}
                                 - expr:
                                     binary:
                                       op: '%'
@@ -2869,7 +2929,19 @@ loops:
                               input: x_static_fp4_r1_f4_pairs
                               index:
                                 tuple:
-                                - {expr: {cast: {dtype: int, expr: {var: v39}}}}
+                                - expr:
+                                    ternary:
+                                      cond:
+                                        binary:
+                                          op: <
+                                          left: {cast: {dtype: int, expr: {var: v39}}}
+                                          right: {literal: {value: 0, dtype: int}}
+                                      if_true:
+                                        binary:
+                                          op: +
+                                          left: {cast: {dtype: int, expr: {var: v39}}}
+                                          right: {literal: {value: 256, dtype: int}}
+                                      if_false: {cast: {dtype: int, expr: {var: v39}}}
                                 - expr:
                                     binary:
                                       op: '%'
@@ -2957,7 +3029,19 @@ loops:
                               input: p_gate_weight_f4_pairs
                               index:
                                 tuple:
-                                - {expr: {cast: {dtype: int, expr: {var: v45}}}}
+                                - expr:
+                                    ternary:
+                                      cond:
+                                        binary:
+                                          op: <
+                                          left: {cast: {dtype: int, expr: {var: v45}}}
+                                          right: {literal: {value: 0, dtype: int}}
+                                      if_true:
+                                        binary:
+                                          op: +
+                                          left: {cast: {dtype: int, expr: {var: v45}}}
+                                          right: {literal: {value: 256, dtype: int}}
+                                      if_false: {cast: {dtype: int, expr: {var: v45}}}
                                 - expr:
                                     binary:
                                       op: '%'
@@ -2995,7 +3079,19 @@ loops:
                               input: x_static_fp4_r1_f4_pairs
                               index:
                                 tuple:
-                                - {expr: {cast: {dtype: int, expr: {var: v50}}}}
+                                - expr:
+                                    ternary:
+                                      cond:
+                                        binary:
+                                          op: <
+                                          left: {cast: {dtype: int, expr: {var: v50}}}
+                                          right: {literal: {value: 0, dtype: int}}
+                                      if_true:
+                                        binary:
+                                          op: +
+                                          left: {cast: {dtype: int, expr: {var: v50}}}
+                                          right: {literal: {value: 256, dtype: int}}
+                                      if_false: {cast: {dtype: int, expr: {var: v50}}}
                                 - expr:
                                     binary:
                                       op: '%'
@@ -3075,7 +3171,19 @@ loops:
                               input: p_up_weight_f4_pairs
                               index:
                                 tuple:
-                                - {expr: {cast: {dtype: int, expr: {var: v56}}}}
+                                - expr:
+                                    ternary:
+                                      cond:
+                                        binary:
+                                          op: <
+                                          left: {cast: {dtype: int, expr: {var: v56}}}
+                                          right: {literal: {value: 0, dtype: int}}
+                                      if_true:
+                                        binary:
+                                          op: +
+                                          left: {cast: {dtype: int, expr: {var: v56}}}
+                                          right: {literal: {value: 256, dtype: int}}
+                                      if_false: {cast: {dtype: int, expr: {var: v56}}}
                                 - expr:
                                     binary:
                                       op: '%'
@@ -3113,7 +3221,19 @@ loops:
                               input: x_static_fp4_r2_f4_pairs
                               index:
                                 tuple:
-                                - {expr: {cast: {dtype: int, expr: {var: v61}}}}
+                                - expr:
+                                    ternary:
+                                      cond:
+                                        binary:
+                                          op: <
+                                          left: {cast: {dtype: int, expr: {var: v61}}}
+                                          right: {literal: {value: 0, dtype: int}}
+                                      if_true:
+                                        binary:
+                                          op: +
+                                          left: {cast: {dtype: int, expr: {var: v61}}}
+                                          right: {literal: {value: 256, dtype: int}}
+                                      if_false: {cast: {dtype: int, expr: {var: v61}}}
                                 - expr:
                                     binary:
                                       op: '%'
@@ -3201,7 +3321,19 @@ loops:
                               input: p_up_weight_f4_pairs
                               index:
                                 tuple:
-                                - {expr: {cast: {dtype: int, expr: {var: v67}}}}
+                                - expr:
+                                    ternary:
+                                      cond:
+                                        binary:
+                                          op: <
+                                          left: {cast: {dtype: int, expr: {var: v67}}}
+                                          right: {literal: {value: 0, dtype: int}}
+                                      if_true:
+                                        binary:
+                                          op: +
+                                          left: {cast: {dtype: int, expr: {var: v67}}}
+                                          right: {literal: {value: 256, dtype: int}}
+                                      if_false: {cast: {dtype: int, expr: {var: v67}}}
                                 - expr:
                                     binary:
                                       op: '%'
@@ -3239,7 +3371,19 @@ loops:
                               input: x_static_fp4_r2_f4_pairs
                               index:
                                 tuple:
-                                - {expr: {cast: {dtype: int, expr: {var: v72}}}}
+                                - expr:
+                                    ternary:
+                                      cond:
+                                        binary:
+                                          op: <
+                                          left: {cast: {dtype: int, expr: {var: v72}}}
+                                          right: {literal: {value: 0, dtype: int}}
+                                      if_true:
+                                        binary:
+                                          op: +
+                                          left: {cast: {dtype: int, expr: {var: v72}}}
+                                          right: {literal: {value: 256, dtype: int}}
+                                      if_false: {cast: {dtype: int, expr: {var: v72}}}
                                 - expr:
                                     binary:
                                       op: '%'
@@ -3409,7 +3553,19 @@ loops:
                                     input: p_gate_weight_f4_pairs
                                     index:
                                       tuple:
-                                      - {expr: {cast: {dtype: int, expr: {var: v110}}}}
+                                      - expr:
+                                          ternary:
+                                            cond:
+                                              binary:
+                                                op: <
+                                                left: {cast: {dtype: int, expr: {var: v110}}}
+                                                right: {literal: {value: 0, dtype: int}}
+                                            if_true:
+                                              binary:
+                                                op: +
+                                                left: {cast: {dtype: int, expr: {var: v110}}}
+                                                right: {literal: {value: 256, dtype: int}}
+                                            if_false: {cast: {dtype: int, expr: {var: v110}}}
                                       - expr:
                                           binary:
                                             op: '%'
@@ -3447,7 +3603,19 @@ loops:
                                     input: x_static_fp4_r1_f4_pairs
                                     index:
                                       tuple:
-                                      - {expr: {cast: {dtype: int, expr: {var: v115}}}}
+                                      - expr:
+                                          ternary:
+                                            cond:
+                                              binary:
+                                                op: <
+                                                left: {cast: {dtype: int, expr: {var: v115}}}
+                                                right: {literal: {value: 0, dtype: int}}
+                                            if_true:
+                                              binary:
+                                                op: +
+                                                left: {cast: {dtype: int, expr: {var: v115}}}
+                                                right: {literal: {value: 256, dtype: int}}
+                                            if_false: {cast: {dtype: int, expr: {var: v115}}}
                                       - expr:
                                           binary:
                                             op: '%'
@@ -3535,7 +3703,19 @@ loops:
                                     input: p_up_weight_f4_pairs
                                     index:
                                       tuple:
-                                      - {expr: {cast: {dtype: int, expr: {var: v121}}}}
+                                      - expr:
+                                          ternary:
+                                            cond:
+                                              binary:
+                                                op: <
+                                                left: {cast: {dtype: int, expr: {var: v121}}}
+                                                right: {literal: {value: 0, dtype: int}}
+                                            if_true:
+                                              binary:
+                                                op: +
+                                                left: {cast: {dtype: int, expr: {var: v121}}}
+                                                right: {literal: {value: 256, dtype: int}}
+                                            if_false: {cast: {dtype: int, expr: {var: v121}}}
                                       - expr:
                                           binary:
                                             op: '%'
@@ -3573,7 +3753,19 @@ loops:
                                     input: x_static_fp4_r2_f4_pairs
                                     index:
                                       tuple:
-                                      - {expr: {cast: {dtype: int, expr: {var: v126}}}}
+                                      - expr:
+                                          ternary:
+                                            cond:
+                                              binary:
+                                                op: <
+                                                left: {cast: {dtype: int, expr: {var: v126}}}
+                                                right: {literal: {value: 0, dtype: int}}
+                                            if_true:
+                                              binary:
+                                                op: +
+                                                left: {cast: {dtype: int, expr: {var: v126}}}
+                                                right: {literal: {value: 256, dtype: int}}
+                                            if_false: {cast: {dtype: int, expr: {var: v126}}}
                                       - expr:
                                           binary:
                                             op: '%'
@@ -3650,7 +3842,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_reduce_dbfd72
+      name: k_linear_reduce_77c891
     inputs: [p_gate_weight_scale_2, x_static_fp4_scale_2, p_up_weight_scale_2, silu_one, mul_static_fp4_floor, mul_static_fp4_f4_max, mul_static_fp4_scale_2,
       mul_static_fp4_shift, p_gate_weight_scale_bits, x_static_fp4_scale_bits, p_gate_weight_bits, x_static_fp4_bits, p_gate_weight_f4_pairs,
       x_static_fp4_r1_f4_pairs, p_up_weight_scale_bits, x_static_fp4_r2_f4_pairs, p_up_weight_bits, p_up_weight_f4_pairs]
