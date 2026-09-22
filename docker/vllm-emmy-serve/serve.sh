@@ -6,9 +6,9 @@
 #
 # The compilation-config mirrors emmy/commands/serve.py's generate path: FULL_DECODE_ONLY
 # whole-step decode cudagraphs (capture sizes = the power-of-two ladder to max-num-seqs,
-# with the decode bucket riding the list) and the forced fused rotary_embedding CustomOp
-# (vLLM's dispatch otherwise hands the eager-inside-graph plugin forward_native — a
-# ~0.9 ms/step per-layer torch-op soup). --no-enable-prefix-caching matches the
+# with the decode bucket riding the list) and the fused rotary_embedding CustomOp (redundant
+# since the plugin dispatches its RoPEs itself; kept because this rendered invocation is a
+# cache-key input of every released image). --no-enable-prefix-caching matches the
 # benchmark protocol (every request does full prefill work). Keep in sync with
 # _gen_graph_args / build_serve_cmd in emmy/commands/serve.py.
 #
