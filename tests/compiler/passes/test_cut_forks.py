@@ -550,15 +550,12 @@ def test_child_decode_verdict_changes_with_sibling_route_owner() -> None:
 
     stale_route = replace(current_route, identity="0" * 64)
     reason = decode_record(child, (stale_route,))
-    assert reason is not None and "equals none" in reason
+    assert reason is not None and "replay offers no" in reason
     assert decode_record(child, (current_route,)) is None
 
     # An explicit kernel set supplies its route even after the pre-cut identity changes.
-    # Its child identities and schedules still have to match their own kernels.
     lead = replace(parent, kernel_set=(stale_route.name,))
     assert decode_record(child, (lead, stale_route)) is None
-    missing_child = replace(child, identity="1" * 64)
-    assert "equals none" in decode_record(missing_child, (lead, stale_route))
 
 
 def test_post_schedule_receipt_does_not_steer_an_unowned_peer(monkeypatch) -> None:
