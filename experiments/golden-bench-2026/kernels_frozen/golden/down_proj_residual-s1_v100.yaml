@@ -36,46 +36,20 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-    kernel_set:
-    - down_proj_residual-s1.11bba2a43e37
   - name: down_proj_residual-s1.11bba2a43e37
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE: g8k
+      WORK: t64
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      RASTER: ''
     identity: 11bba2a43e37cc686cf98e5caeb85c57937886fbe6f955466ad7bcf4843ac78f
     measurements:
-      emmy_us: 13.464409094961626
-      reference_us: 13.433347548450435
-      reference_backend: same-input-greedy
-  - name: down_proj_residual-s1.c27a4712d3bc
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w1x1
-      TILE: mma_m8n8k4_f16_f32/f2x2/k8
-      REDUCE: ''
-      STAGE: d2/smem
-      RASTER: ''
-    identity: c27a4712d3bcc4e6d7e524ab37f96ca1aa3ae86ede713d80532a7883b22bd7ca
-    measurements:
-      emmy_us: 11.621209078056866
-      reference_us: 11.582270667359635
-      reference_backend: same-input-greedy
-  - name: down_proj_residual-s1.288342513cfa
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      REDUCE: ''
-      RASTER: ''
-    identity: 288342513cfa7d9e95bc2100ae830d2d203241acd9418058a73f6f6b3fb676f6
-    measurements:
-      emmy_us: 1.8432000169047602
-      reference_us: 1.8510768810908
+      emmy_us: 6.981817992417129
+      reference_us: 6.984845409548379
       reference_backend: same-input-greedy
 loops:
 - inputs: [x0, x1, x2]
