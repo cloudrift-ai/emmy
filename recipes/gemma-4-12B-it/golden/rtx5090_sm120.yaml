@@ -1,3 +1,39 @@
+# RTX 5090 gemma-4-12b-it serving goldens — full re-record of 2026-09-18 on a live 5090 in today's format: one
+# target per serving twin (every static decode and prefill width of the release config in the lanes that warm it,
+# plus the symbolic programs), each carrying the placement route its fused decoder half was cut on and one schedule
+# receipt per piece. Every row was recorded by hand — one pinned `emmy run --bench` per candidate schedule (the
+# August rows of that half at that width and lane, plus the scalar forms), then `--record-greedy --strict-evidence`
+# under the route alone, then a strict replay of the file with an empty tune DB and prior — and `emmy eval golden
+# --serving-config` deploys every twin of both lanes from these rows alone. Replaces the 2026-08-23 record, whose
+# five loop targets per half predate the placement fork and no longer decided a strict compile.
+# 2026-09-19: the decode twins at widths 8 and 64 (pre and post halves, sliding and global, both lanes) are
+# re-recorded from a hand sweep of pinned tensor-core schedules per piece (warp layout, fragments, K step, staging,
+# raster), each lane from its own empty tune DB, then replayed strictly: the standard-lane post half drops from 553 to
+# 250 us at width 8 and from 494 to 321 us at width 64. The width-64 global standard-lane rows this replaces carried
+# FP16-accumulate schedules measured in the fast-math lane.
+# 2026-09-19, second pass: the same sweep at widths 32 and 1. Width 32 (the decode width of the article's
+# single-stream points) drops its post half from 308 to 265 us and its pre half from 48 to 42; width 1 halves its
+# post half, 1084 to 522, on a cooperative reduce the earlier candidate set never offered. The width-1 pre-attention
+# rows stay as they were: the warp tiers the sweep found fastest there compute wrong values (max_diff 5.07 against a
+# 3.44 tolerance), so only its thread tiers are admissible and they do not beat the recorded rows.
+# 2026-09-19, after the rebase onto main: #847 changed what a width-1 projection offers, and the width-1
+# pre-attention rows recorded before it stopped decoding (6 of 478; the same rows are red in main's own copy of this
+# file). Re-recorded on that tree from a fresh sweep: the pre half 102.6 -> 53.3 us, its global twin 50.5 -> 41.9,
+# all on thread tiers. The eager reference does not run for these twins here, so the replay could not check them.
+# 2026-09-20: every post-attention half is re-recorded on one more cut. The recorded route left the gate/up
+# projection's first operand a computed cone — it applies both norms inline and carries a full 3840-wide statistic
+# that every thread block of the (row, N-tile) grid recomputes — and that cone is what held the kernel to 100
+# TFLOPS at prefill widths. Cutting the cone (PLACE@map.1/map.2/reduce.1/inner.1/map.1/inner.1/map) makes gate/up a
+# plain three-operand GEMM over a materialized operand, at the cost of one elementwise kernel that writes it.
+# Per layer half, standard lane: 12713 -> 7968 us at 4096 tokens, 7223 -> 3984 at 2048, 343 -> 258 at width 64,
+# 257 -> 242 at width 32. gate/up itself reaches 204 TFLOPS at 4096 tokens against the card's ~209 peak, so the
+# standard lane has nothing left there. All 30 twin-lanes the release config warms are re-recorded and replay
+# strictly from an empty tune DB; the four width-1 lanes keep their rows, because the seam spells differently on a
+# tree whose row axis is one and no serving point of the release config decodes at that width.
+# 2026-09-22: every target is re-lifted from its own stored program. Measured evidence now matches on the exact typed
+# kernel identity, and the targets stored before a linear's product was typed f32 matched no freshly traced twin, so
+# a strict serving boot found no row at all. Route rows take the new target key and piece rows the new replay kernel
+# with the same structural features; no schedule or measurement changed.
 compute_cap:
 - 12
 - 0
