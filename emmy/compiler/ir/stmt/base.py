@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from functools import cached_property
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar, Protocol
 
 from emmy.compiler.dim import DYNAMIC_DIM_MAX, Dim
 from emmy.compiler.ir.axis import Axis
@@ -41,6 +41,22 @@ INDENT = "    "
 # ---------------------------------------------------------------------------
 # RenderCtx — target-tuned tables + walk state for ``Stmt.render`` / ``Expr.render``
 # ---------------------------------------------------------------------------
+
+
+class Memory(Protocol):
+    """How a buffer's bytes are reached — the only thing a transport asks of one.
+
+    ``base`` is the pointer to address from and ``flat`` the index to use with it, so a
+    transport renders ``f"{base}[{flat}]"`` without knowing whether the buffer is one
+    allocation or many. ``vectorizable`` says whether consecutive elements are guaranteed
+    contiguous, which is what a vector access needs.
+    """
+
+    vectorizable: ClassVar[bool]
+
+    def base(self, index: tuple, ctx: RenderCtx) -> str: ...
+
+    def flat(self, index: tuple, ctx: RenderCtx) -> str: ...
 
 
 @dataclass
@@ -82,12 +98,10 @@ class RenderCtx:
     # alias into the pool instead of a stand-alone ``__shared__`` array
     # — the only way to exceed the 48 KB static-smem cap.
     smem_dynamic_offsets: dict[str, int] = field(default_factory=dict)
-    # Buffers virtualized along one axis: ``name -> (axis, page_size, start)``. The buffer is not
-    # one allocation but a device table of equal-sized pages, so a read or write resolves its page
-    # before its offset (see :func:`render_paged_access`). ``start`` names a runtime ``int`` added
-    # to the paged index — the absolute position a cache write lands at, ``None`` for a read that
-    # starts at page 0. Empty (the default) renders every buffer flat.
-    paged: dict[str, tuple[int, int, str | None]] = field(default_factory=dict)
+    # How each buffer's bytes are reached, for the buffers that are not one allocation — see
+    # :class:`Memory`. Absent names are :class:`Flat`, so an empty map renders every buffer
+    # exactly as it always was.
+    memory: dict[str, Memory] = field(default_factory=dict)
     # Per-buffer canonical dtype tokens (``"f32"`` / ``"f16"``) for every
     # global-buffer name (kernel inputs + outputs). ``Load`` declares its
     # SSA-name local in the source buffer's C type so values flow at
@@ -127,6 +141,10 @@ class RenderCtx:
     # render methods read ``ctx.type_name(dt)`` instead of pulling the
     # target out by hand; they also default ``None`` dtype to F32 so the
     # call sites don't repeat that boilerplate.
+
+    def memory_for(self, buf: str) -> Memory:
+        """How ``buf`` is reached. Every buffer is :class:`Flat` unless declared otherwise."""
+        return self.memory.get(buf) or Flat(buf)
 
     def type_name(self, dtype) -> str:
         """C type spelling for a local declaration. Accepts a
@@ -423,31 +441,60 @@ def render_index(buf: str, indices: tuple, ctx: RenderCtx, shape: tuple | None =
     return flat.simplify(SimplifyCtx.empty()).render(ctx)
 
 
-def render_paged_access(buf: str, indices: tuple, ctx: RenderCtx) -> str:
-    """``buf__pages[page][offset]`` — one read of a buffer virtualized along ``ctx.paged[buf]``.
+@dataclass(frozen=True)
+class Flat:
+    """One contiguous allocation — every buffer, unless it says otherwise."""
 
-    A paged buffer is a device table of equal-sized pages, each holding the buffer's shape with
-    the paged axis cut to the page size. So the paged index splits: its quotient picks the page,
-    its remainder addresses inside one, and every other axis flattens row-major exactly as it
-    does for a flat buffer. Both halves fold through the ordinary index simplifier, so a loop
-    tiled to a multiple of the page size hoists the page lookup on its own.
+    name: str
+    vectorizable: ClassVar[bool] = True
 
-    A ``start`` offset makes the buffer's coordinate absolute first, which is the whole of a
-    cache write: the kernel's output holds only the step's new rows, and ``start`` decides which
-    pages of the cache they land in.
+    def base(self, index: tuple, ctx: RenderCtx) -> str:
+        del index, ctx
+        return self.name
+
+    def flat(self, index: tuple, ctx: RenderCtx) -> str:
+        return render_index(self.name, index, ctx)
+
+
+@dataclass(frozen=True)
+class Paged:
+    """A device table of equal-sized pages, each holding the buffer's shape with the paged axis
+    cut to ``page`` — the shape a KV cache has once it is allocated per request.
+
+    The paged index splits: its quotient picks the page (:meth:`base`), its remainder addresses
+    inside one (:meth:`flat`), and every other axis flattens row-major exactly as it does for a
+    flat buffer. Both halves fold through the ordinary index simplifier, so a loop tiled to a
+    multiple of the page size resolves the page once per tile rather than once per element.
+
+    ``start`` names a runtime ``int`` that makes the buffer's own coordinate absolute before the
+    split, which is the whole of a cache write: the kernel's output holds only the step's new
+    rows and ``start`` decides which pages of the cache they land in.
+
+    Not vectorizable: a vector access spans consecutive elements, which may cross a page.
     """
-    axis, page, start = ctx.paged[buf]
-    shape = ctx.shapes.get(buf)
-    if shape is None or len(shape) != len(indices):
-        raise ValueError(f"paged buffer {buf!r} needs a declared shape matching its {len(indices)} indices; got {shape}")
-    size = Literal(page, "int")
-    # ``start`` shifts the buffer's own coordinate to an absolute one: a step computing q_len new
-    # rows writes them at positions ``start .. start + q_len - 1`` of a cache it never spans.
-    position = indices[axis] if start is None else BinaryExpr("+", Var(start), indices[axis])
-    page_idx = BinaryExpr("//", position, size).simplify(SimplifyCtx.empty()).render(ctx)
-    within = tuple(BinaryExpr("%", position, size) if d == axis else idx for d, idx in enumerate(indices))
-    offset = render_index(buf, within, ctx, shape=(*shape[:axis], page, *shape[axis + 1 :]))
-    return f"{buf}__pages[{page_idx}][{offset}]"
+
+    name: str
+    axis: int
+    page: int
+    start: str | None = None
+    vectorizable: ClassVar[bool] = False
+
+    def base(self, index: tuple, ctx: RenderCtx) -> str:
+        page = BinaryExpr("//", self._position(index), Literal(self.page, "int"))
+        return f"{self.name}__pages[{page.simplify(SimplifyCtx.empty()).render(ctx)}]"
+
+    def flat(self, index: tuple, ctx: RenderCtx) -> str:
+        shape = ctx.shapes.get(self.name)
+        if shape is None or len(shape) != len(index):
+            raise ValueError(f"paged buffer {self.name!r} needs a declared shape matching its {len(index)} indices; got {shape}")
+        within = BinaryExpr("%", self._position(index), Literal(self.page, "int"))
+        inside = tuple(within if d == self.axis else idx for d, idx in enumerate(index))
+        return render_index(self.name, inside, ctx, shape=(*shape[: self.axis], self.page, *shape[self.axis + 1 :]))
+
+    def _position(self, index: tuple) -> Expr:
+        """The coordinate on the paged axis, shifted to the cache's own by ``start``."""
+        own = index[self.axis]
+        return own if self.start is None else BinaryExpr("+", Var(self.start), own)
 
 
 def _exceeds_int_range(shape) -> bool:

@@ -22,7 +22,6 @@ from emmy.compiler.ir.stmt.base import (
     dtype_promote,
     op_to_expr,
     render_index,
-    render_paged_access,
     select_to_ternary,
 )
 
@@ -229,39 +228,31 @@ class Load(Stmt):
         # fall back to ``ctx.buffer_dtypes`` so handwritten test fixtures
         # without a stamped dtype still render correctly.
         src_dt = self.dtype.name if self.dtype is not None else ctx.buffer_dtypes.get(self.input, "f32")
-        if self.input in ctx.paged:
-            # A paged buffer is a table of pages, so each element resolves its own page — a vector
-            # read would straddle a page boundary. Every lane renders as its own scalar access.
-            out: list[str] = []
-            for k, nm in enumerate(self.names):
-                idx_k = self.index if k == 0 else (*self.index[:-1], BinaryExpr("+", self.index[-1], Literal(k, "int")))
-                ctx.ssa_dtypes[nm] = src_dt
-                out.append(f"{pad}{ctx.type_name(src_dt)} {nm} = {render_paged_access(self.input, idx_k, ctx)};")
-            return out
+        mem = ctx.memory_for(self.input)
         if self.is_scalar:
             # Scalar path. Declare the local in the source buffer's
             # element type so downstream ``Assign``s can pick native ops
             # without an immediate promote.
-            flat = render_index(self.input, self.index, ctx)
             ctx.ssa_dtypes[self.names[0]] = src_dt
-            return [f"{pad}{ctx.type_name(src_dt)} {self.names[0]} = {self.input}[{flat}];"]
+            return [f"{pad}{ctx.type_name(src_dt)} {self.names[0]} = {mem.base(self.index, ctx)}[{mem.flat(self.index, ctx)}];"]
         # Vector path: one ``<vec_type>`` reinterpret-cast read + N
         # ``.x/.y/.z/.w`` (or indexed) unpacks.
         n = self.width
         vec_pair = ctx.target.vector_type(src_dt, n)
-        if vec_pair is None:
-            # Target doesn't support this width — fall back to scalar
+        if vec_pair is None or not mem.vectorizable:
+            # Target doesn't support this width, or the buffer does not guarantee consecutive
+            # elements are contiguous (a paged read may cross a page) — fall back to scalar
             # Loads. The vectorize pass should have avoided this, but
             # render's job is to always produce valid code.
             out: list[str] = []
             for k, nm in enumerate(self.names):
                 idx_k = tuple(self.index[:-1]) + (BinaryExpr("+", self.index[-1], Literal(k, "int")),)
-                flat = render_index(self.input, idx_k, ctx)
+                flat = f"{mem.base(idx_k, ctx)}[{mem.flat(idx_k, ctx)}]"
                 ctx.ssa_dtypes[nm] = src_dt
-                out.append(f"{pad}{ctx.type_name(src_dt)} {nm} = {self.input}[{flat}];")
+                out.append(f"{pad}{ctx.type_name(src_dt)} {nm} = {flat};")
             return out
         vec_type, elem_type = vec_pair
-        flat = render_index(self.input, self.index, ctx)
+        flat = render_index(self.input, self.index, ctx)  # vectorizable ⇒ Flat, so the plain index
         vname = f"_v_{self.names[0]}"
         # ``.x/.y/.z/.w`` accessors only work when ``vec_type``'s native
         # components match ``elem_type`` 1:1 (``float2``→``float``,
@@ -816,28 +807,19 @@ class Write(Stmt):
         # Prefer the stamped ``self.value_dtype`` (set by ``030_stamp_types``);
         # fall back to ``ctx.ssa_dtypes`` for legacy/handwritten paths.
         stamped_value_dt = self.value_dtype.name if self.value_dtype is not None else None
-        if self.output in ctx.paged:
-            # A paged buffer is a table of pages, so each element resolves its own page — a vector
-            # store would straddle a page boundary. Every value stores as its own scalar write.
-            lines = []
-            for k, nm in enumerate(self.values):
-                idx_k = self.index if k == 0 else (*self.index[:-1], BinaryExpr("+", self.index[-1], Literal(k, "int")))
-                src_dt = stamped_value_dt or ctx.ssa_dtypes.get(nm, "f32")
-                rhs = ctx.target.convert(_resolve_value(nm, ctx), src_dt, out_dt)
-                lines.append(f"{pad}{render_paged_access(self.output, idx_k, ctx)} = {rhs};")
-            return lines
+        mem = ctx.memory_for(self.output)
         if self.is_scalar:
             # Scalar path. Convert at the store boundary only when the
             # value's SSA dtype disagrees with the destination buffer's
             # dtype — native chains write through with no conversion.
-            flat = self._swizzled(render_index(self.output, self.index, ctx), ctx)
+            flat = self._swizzled(mem.flat(self.index, ctx), ctx)
             value_dt = stamped_value_dt or ctx.ssa_dtypes.get(self.value, "f32")
             rhs = ctx.target.convert(_resolve_value(self.value, ctx), value_dt, out_dt)
             if self.atomic:
                 # Cross-CTA additive finalize: every contributing CTA accumulates into the
                 # same cell (the output is zero-init'd per launch — ``CudaOp.zero_outputs``).
-                return [f"{pad}atomicAdd(&{self.output}[{flat}], {rhs});"]
-            return [f"{pad}{self.output}[{flat}] = {rhs};"]
+                return [f"{pad}atomicAdd(&{mem.base(self.index, ctx)}[{flat}], {rhs});"]
+            return [f"{pad}{mem.base(self.index, ctx)}[{flat}] = {rhs};"]
         # Vectorized path. Per-value dtype conversion: every SSA arg
         # must be at ``out_dt`` before packing.
         n = self.width
@@ -847,15 +829,16 @@ class Write(Stmt):
             resolved = _resolve_value(nm, ctx)
             converted.append(resolved if src_dt == out_dt else ctx.target.convert(resolved, src_dt, out_dt))
         vec_pair = ctx.target.vector_type(out_dt, n)
-        if vec_pair is None:
-            # Target doesn't support this width — fall back to scalar
+        if vec_pair is None or not mem.vectorizable:
+            # Target doesn't support this width, or the buffer does not guarantee consecutive
+            # elements are contiguous (a paged store may cross a page) — fall back to scalar
             # writes. The vectorize pass should have avoided this, but
             # render's job is to always produce valid code.
             lines: list[str] = []
             for k in range(n):
                 idx_k = tuple(self.index[:-1]) + (BinaryExpr("+", self.index[-1], Literal(k, "int")),)
-                flat = self._swizzled(render_index(self.output, idx_k, ctx), ctx, idx_k)
-                lines.append(f"{pad}{self.output}[{flat}] = {converted[k]};")
+                flat = self._swizzled(mem.flat(idx_k, ctx), ctx, idx_k)
+                lines.append(f"{pad}{mem.base(idx_k, ctx)}[{flat}] = {converted[k]};")
             return lines
         vec_type, _elem_type = vec_pair
         logical_flat = render_index(self.output, self.index, ctx)
