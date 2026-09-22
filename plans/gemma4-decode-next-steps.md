@@ -35,6 +35,12 @@ Two findings that change the next step's premise:
 4. **The width-1 post twins.** Re-lifted, the width-1 post half cuts into eleven kernels (the o_proj piece five
    times): the seam clustering no longer merges the copies. The serving audit fails on these two twins; the tier is
    dropped at boot as slower than the bucket twins, so serving is unaffected.
+
+   The cause is known: a seam's scoped captures are its cone's free axes, so a unit axis is in none of them while
+   sitting on every workspace, and the rule that a workspace axis needs a capture to map refuses every representative
+   wherever a row axis is one. Exempting unit axes fixes the width-1 half (eleven kernels at 5392 us back to five at
+   1704, and the twins re-record at 492-546 us per layer). What it needs is those four recordings, so it lands with
+   them or not at all. Until then the release config keeps the M=1 tier off.
 5. **Stale targets in other goldens.** A stored target that no longer equals a fresh lift of its program misses
    every freshly traced kernel under exact identity. Scan found DeepSeek-V4-Flash-0731 V100 148/151 configs, the
    Qwen3.8 V100 goldens 88-113 each, Laguna exl3 8/8, the hardware goldens 8-10 each. Re-lift and restamp per file

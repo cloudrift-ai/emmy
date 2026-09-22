@@ -42,8 +42,11 @@
 # post-sym-global) are re-recorded on FP32 accumulation, the standard lane's precision; those twins are slower for it
 # (4096 global 7135 -> 8420 us, the symbolic global twin 959 -> 1311). A replayed row now obeys the precision policy, so
 # an FP16-accumulate row can no longer deploy in the standard lane. Every re-recorded lane replays strictly from an
-# empty tune DB. The width-1 post twins keep their rows: re-recorded on this compiler they cut into eleven kernels,
-# the o_proj piece five times, and their tier is dropped at boot as slower than the bucket twins anyway.
+# empty tune DB. The width-1 post twins keep their rows, which no longer describe what this compiler offers: re-lifted,
+# that half cuts into eleven kernels instead of five — the o_proj cone once per copy — at 3.2x the per-layer cost. The
+# rows stay as the record of the better cut rather than being re-recorded on the worse one, and the release config
+# turns the M=1 tier off (SERVE_M1_TIER=0), which the runner's own boot measurement did anyway. Both come back
+# together once the seam clustering merges those copies again.
 compute_cap:
 - 12
 - 0
