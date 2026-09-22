@@ -447,8 +447,6 @@ isinstance whitelist), with results-defined checked there too and α-invariance 
 arrive through operand edges, and only the enclosing iteration axes are read from outside — so `Fold.canonical`
 (and `Lambda.canonical` for a lambda) is the one cross-scope equivalence the Tile canonical forms and the lowering
 passes (cone sharing, twisted-pair recognition, seam value clustering) all consult.
-Closure includes names in predicate expressions as well as value dependencies. Inlining keeps operand parameters
-before free coordinates, and contraction recognition permits a score to read its own coordinates for a causal mask.
 `Lambda.__post_init__` installs a
 dependency-safe body order and commutative argument order, so these context-independent storage invariants do not
 belong to `Fold`, `TileOp`, or the structural-key path. Contraction operand roles live on Fold edges, so sorting a

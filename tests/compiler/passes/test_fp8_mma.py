@@ -290,9 +290,6 @@ def test_k32_mma_matches_lut_reference_cuda():
     numpy reference. Two bit regimes: an EXACT one (A in {0, ±1}, B in one exponent band — every
     partial sum exactly representable, so even sm_89's reduced-precision accumulate and the f16
     store round nothing) and a random-bits one under the loose arch-covering gate."""
-    if not Context.probe().has_fp8_mma:
-        pytest.skip("Native FP8 MMA requires sm_89+")
-
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 

@@ -1736,9 +1736,6 @@ def test_reshaped_a_tma_pin_is_refused(monkeypatch):
 @requires_sm(9)
 def test_sliced_a_still_stages_through_tma(monkeypatch):
     """The canonical (sliced) A keeps its TMA box, so the refusal above is not a dead pin."""
-    if not Context.probe().has_tma:
-        pytest.skip("TMA requires sm_90+")
-
     monkeypatch.setenv("EMMY_STAGE", "d2/smem-tma")
     _, src, _ = _imap_run(_imap_graph("slice_a")[0])
     assert "cp.async.bulk.tensor" in src
