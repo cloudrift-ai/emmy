@@ -100,12 +100,15 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
     # and write resolves its page first — the KV cache, whose pages belong to a request rather
     # than to one contiguous slab. Shapes are untouched, so the schedule search never sees it.
     scope = {*kernel.inputs, *kernel.outputs}
-    paged = tuple((n, axis, page) for n, axis, page in match.graph.hints.get("cuda.paged_buffers", ()) if n in scope)
+    paged = tuple(entry for entry in match.graph.hints.get("cuda.paged_buffers", ()) if entry[0] in scope)
+    # A page start is a runtime ``int`` the caller supplies per step (``past``): it names no axis,
+    # so no shape carries it and the signature has to take it on the paged buffer's behalf.
+    runtime_args = tuple(dict.fromkeys((*runtime_args, *(start for *_, start in paged if start is not None))))
     if paged:
         # A paged buffer has no base pointer to take: only ``Load`` / ``Write`` resolve a page,
         # so any other stmt touching it (a TMA descriptor, a cp.async stage) would need a base
         # this ABI cannot give, and a zero-init would have to memset a slab that does not exist.
-        names = {n for n, _, _ in paged}
+        names = {entry[0] for entry in paged}
         staging = [s for s in kernel.body.iter() if not isinstance(s, (Load, Write))]
         touched = {b for s in staging for b in (*s.external_reads(), *s.external_writes()) if b in names}
         if touched:
@@ -139,7 +142,7 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
     # place to (table, sel, slot) via ``indirect_args``.
     # A paged operand binds its page TABLE, not the buffer: the name in ``arg_order`` is what the
     # launcher looks up in ``arrays``, so the rename is the whole runtime change.
-    paged_names = {n for n, _, _ in paged}
+    paged_names = {entry[0] for entry in paged}
 
     def _bound(n: str) -> str:
         return f"{n}__pages" if n in paged_names else n

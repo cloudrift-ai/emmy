@@ -1432,13 +1432,15 @@ def render_kernelop(
     byte-identical.
 
     ``paged_buffers`` names buffers virtualized along one axis, as
-    ``(name, axis, page_size)``: instead of a plain pointer the signature
+    ``(name, axis, page_size, start)``: instead of a plain pointer the signature
     takes ``<n>__pages``, a table of equal-sized pages, and every read or
     write resolves its page before its offset (see ``render_paged_access``)
     — the KV cache, whose pages are allocated per request and are not one
     contiguous block. Shapes are untouched, so the paged axis stays
-    ``kv_len`` everywhere above the load. Empty (the default) renders every
-    buffer flat.
+    ``kv_len`` everywhere above the load. ``start`` names a runtime ``int``
+    added to the paged index before the split — the absolute position a
+    cache write lands at — or ``None`` to address from page 0. Empty (the
+    default) renders every buffer flat.
 
     Kernel signature is derived from the body: ``kernel_op.inputs``
     (distinct ``Load.input`` names) become input params,
@@ -1479,7 +1481,11 @@ def render_kernelop(
             )
 
     indirect = tuple(n for n in kernel_op.inputs if n in indirect_inputs and n not in literals)
-    paged = {n: (axis, page) for n, axis, page in paged_buffers if n not in literals and (n in kernel_op.inputs or n in kernel_op.outputs)}
+    paged = {
+        n: (axis, page, start)
+        for n, axis, page, start in paged_buffers
+        if n not in literals and (n in kernel_op.inputs or n in kernel_op.outputs)
+    }
     if set(paged) & set(indirect):
         raise NotImplementedError(f"buffer(s) {sorted(set(paged) & set(indirect))} are both indirect and paged")
     ctx.paged = paged

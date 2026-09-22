@@ -82,10 +82,12 @@ class RenderCtx:
     # alias into the pool instead of a stand-alone ``__shared__`` array
     # — the only way to exceed the 48 KB static-smem cap.
     smem_dynamic_offsets: dict[str, int] = field(default_factory=dict)
-    # Input buffers virtualized along one axis: ``name -> (axis, page_size)``. The buffer is not
-    # one allocation but a device table of equal-sized pages, so a read resolves its page before
-    # its offset (see :func:`render_paged_access`). Empty (the default) renders every buffer flat.
-    paged: dict[str, tuple[int, int]] = field(default_factory=dict)
+    # Buffers virtualized along one axis: ``name -> (axis, page_size, start)``. The buffer is not
+    # one allocation but a device table of equal-sized pages, so a read or write resolves its page
+    # before its offset (see :func:`render_paged_access`). ``start`` names a runtime ``int`` added
+    # to the paged index — the absolute position a cache write lands at, ``None`` for a read that
+    # starts at page 0. Empty (the default) renders every buffer flat.
+    paged: dict[str, tuple[int, int, str | None]] = field(default_factory=dict)
     # Per-buffer canonical dtype tokens (``"f32"`` / ``"f16"``) for every
     # global-buffer name (kernel inputs + outputs). ``Load`` declares its
     # SSA-name local in the source buffer's C type so values flow at
@@ -429,14 +431,21 @@ def render_paged_access(buf: str, indices: tuple, ctx: RenderCtx) -> str:
     its remainder addresses inside one, and every other axis flattens row-major exactly as it
     does for a flat buffer. Both halves fold through the ordinary index simplifier, so a loop
     tiled to a multiple of the page size hoists the page lookup on its own.
+
+    A ``start`` offset makes the buffer's coordinate absolute first, which is the whole of a
+    cache write: the kernel's output holds only the step's new rows, and ``start`` decides which
+    pages of the cache they land in.
     """
-    axis, page = ctx.paged[buf]
+    axis, page, start = ctx.paged[buf]
     shape = ctx.shapes.get(buf)
     if shape is None or len(shape) != len(indices):
         raise ValueError(f"paged buffer {buf!r} needs a declared shape matching its {len(indices)} indices; got {shape}")
     size = Literal(page, "int")
-    page_idx = BinaryExpr("//", indices[axis], size).simplify(SimplifyCtx.empty()).render(ctx)
-    within = tuple(BinaryExpr("%", idx, size) if d == axis else idx for d, idx in enumerate(indices))
+    # ``start`` shifts the buffer's own coordinate to an absolute one: a step computing q_len new
+    # rows writes them at positions ``start .. start + q_len - 1`` of a cache it never spans.
+    position = indices[axis] if start is None else BinaryExpr("+", Var(start), indices[axis])
+    page_idx = BinaryExpr("//", position, size).simplify(SimplifyCtx.empty()).render(ctx)
+    within = tuple(BinaryExpr("%", position, size) if d == axis else idx for d, idx in enumerate(indices))
     offset = render_index(buf, within, ctx, shape=(*shape[:axis], page, *shape[axis + 1 :]))
     return f"{buf}__pages[{page_idx}][{offset}]"
 
