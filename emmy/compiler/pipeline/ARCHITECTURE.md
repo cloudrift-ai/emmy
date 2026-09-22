@@ -1486,7 +1486,7 @@ still differ per layout (different slab geometry and gmem walk), which is why a 
 linear fork must be TUNED on the `F.linear` snippet, and why a canonical entry (the harness/eval truth) and a
 `trans_b` entry (the serving truth) both stay current. The same rule applies to fused computed-A programs: their
 stored `torch.linear` edge is the served layout, and the smem compute fill stages every B fold channel via cp.async
-on either layout.
+on either layout; once the computed A is cut away, the copy transports stage every channel on their own.
 
 **Provenance validation.** `emmy eval golden --golden GOLDEN_YAML --serving-config PATH` derives model, revision,
 GPU, canonical file, precision regimes, and reachable static/symbolic widths from one pinned env, requires that exact
