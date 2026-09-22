@@ -11,11 +11,18 @@ promotion into FP32)?
 
 ### Status
 
-All 12 rows succeeded (6 kernels x 2 lanes), one run ID (`2026-09-17_23-41-07`), every Emmy row passed the run
-command's scaled correctness check against eager, and every row replayed under `--strict-evidence`: the golden's rows
-decided every fork, nothing fell to the prior. Fast-math reproduces the last committed run of the article's recipe
-on every projection. The standard lane is at or above it. Attention does not reproduce: 0.92x and 0.92x eager
-against 0.97x and 1.03x.
+All 12 rows succeeded (6 kernels x 2 lanes), one run ID (`20260922T132209Z`, directory `2026-09-22_13-22-09`), every
+Emmy row passed the run command's scaled correctness check against eager, and every row replayed under
+`--strict-evidence`: the golden's rows decided every fork, nothing fell to the prior. Fast-math reproduces the last
+committed run of the article's recipe on every projection. The standard lane is at or above it. Attention does not
+reproduce: 0.90x and 0.93x eager against 0.97x and 1.03x.
+
+This run re-measures the same rows as the 2026-09-17 run on a newer compiler. On `main` at `f57df1295` four of the
+twelve rows no longer replayed: `mlp_gate_up` and `attention` failed `--strict-evidence` in both lanes, because their
+single-kernel receipts named a kernel identity the replay no longer resolved after measured evidence started matching
+on the exact typed identity. Each receipt now names its one replay kernel (identity lines only; no schedule or
+measurement changed), and the recipe spells the evidence switch `--no-record-evidence`, the run command's name for it
+since the node table was retired (the old spelling failed every row).
 
 ### Protocol
 
@@ -40,30 +47,29 @@ Whole-program latency in microseconds; ratios are eager / Emmy within the same t
 
 | Kernel | Eager | torch.compile | Emmy standard | Emmy fast-math | Standard | Fast-math |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `q_proj` 512x3840 @ 3840x4096 | 90.1 | 90.1 | 89.8 | 64.7 | 1.00x | 1.39x |
-| `kv_proj` 512x3840 @ 3840x2048 | 47.1 | 47.1 | 50.1 | 36.9 | 0.94x | 1.28x |
-| `o_proj` 512x4096 @ 4096x3840 | 96.1 | 82.0 | 84.0 | 68.2 | 1.14x | 1.41x |
-| `mlp_gate_up` 512x3840 @ 3840x30720 | 633.2 / 628.0 | 603.0 / 608.1 | 628.6 | 402.2 | 1.01x | 1.56x |
-| `mlp_down` 512x15360 @ 15360x3840 | 307.9 / 310.0 | 309.1 / 306.2 | 310.6 | 231.8 | 0.99x | 1.34x |
-| `attention` causal (1, 16, 512, 256) | 35.0 / 34.9 | 35.0 / 34.8 | 38.1 | 38.0 | 0.92x | 0.92x |
+| `q_proj` 512x3840 @ 3840x4096 | 90.1 / 90.1 | 90.1 / 90.1 | 88.8 | 65.6 | 1.01x | 1.37x |
+| `kv_proj` 512x3840 @ 3840x2048 | 51.2 / 47.1 | 51.2 / 47.1 | 53.3 | 37.0 | 0.96x | 1.27x |
+| `o_proj` 512x4096 @ 4096x3840 | 94.9 / 96.2 | 82.4 / 82.6 | 84.0 | 68.6 | 1.13x | 1.40x |
+| `mlp_gate_up` 512x3840 @ 3840x30720 | 635.5 / 630.5 | 606.0 / 606.5 | 630.6 | 402.3 | 1.01x | 1.57x |
+| `mlp_down` 512x15360 @ 15360x3840 | 307.0 / 306.8 | 305.6 / 307.4 | 310.2 | 231.3 | 0.99x | 1.33x |
+| `attention` causal (1, 16, 512, 256) | 35.0 / 34.9 | 35.0 / 34.9 | 39.1 | 37.6 | 0.90x | 0.93x |
 
-Where two baseline values appear they are the standard-lane and the fast-math task's own measurements; each ratio
-uses its own task's eager.
+Baselines are the standard-lane and the fast-math task's own measurements; each ratio uses its own task's eager.
 
-Per-kernel device time of the split projections, partial then finalize: `q_proj` 81.7 + 5.5 (standard), 58.5 + 4.4
-(fast-math); `kv_proj` 42.6 + 5.5, 32.2 + 3.1; `o_proj` 77.9 + 4.2, 62.2 + 4.2; `mlp_down` 303.3 + 5.2, 226.7 + 4.2.
+Per-kernel device time of the split projections, partial then finalize: `q_proj` 81.2 + 5.4 (standard), 58.8 + 4.4
+(fast-math); `kv_proj` 45.9 + 5.5, 32.1 + 3.1; `o_proj` 77.7 + 4.1, 62.4 + 4.1; `mlp_down` 304.7 + 5.2 (standard).
 `mlp_gate_up` and `attention` are single kernels.
 
 ### Comparison with the article and with its last committed run
 
 | Kernel | Article standard | Article fast-math | 2026-08-06 run standard | 2026-08-06 run fast-math | This run |
 | --- | ---: | ---: | ---: | ---: | --- |
-| `q_proj` | 1.16x | 1.59x | 0.91x (99 us) | 1.38x (65) | 1.00x, 1.39x |
-| `kv_proj` | 1.08x | 1.34x | 0.94x (50) | 1.21x (39) | 0.94x, 1.28x |
-| `o_proj` | 1.26x | 1.61x | 1.10x (87) | 1.41x (68) | 1.14x, 1.41x |
-| `mlp_gate_up` | 1.02x | 1.58x | 1.00x (631) | 1.58x (400) | 1.01x, 1.56x |
-| `mlp_down` | 1.00x | 1.34x | 1.00x (309) | 1.33x (232) | 0.99x, 1.34x |
-| `attention` | 0.97x | 1.03x | 0.97x (36) | 1.03x (34) | 0.92x, 0.92x |
+| `q_proj` | 1.16x | 1.59x | 0.91x (99 us) | 1.38x (65) | 1.01x, 1.37x |
+| `kv_proj` | 1.08x | 1.34x | 0.94x (50) | 1.21x (39) | 0.96x, 1.27x |
+| `o_proj` | 1.26x | 1.61x | 1.10x (87) | 1.41x (68) | 1.13x, 1.40x |
+| `mlp_gate_up` | 1.02x | 1.58x | 1.00x (631) | 1.58x (400) | 1.01x, 1.57x |
+| `mlp_down` | 1.00x | 1.34x | 1.00x (309) | 1.33x (232) | 0.99x, 1.33x |
+| `attention` | 0.97x | 1.03x | 0.97x (36) | 1.03x (34) | 0.90x, 0.93x |
 
 The 2026-08-06 column is the committed run of the article's own recipe
 (`experiments/gemma-4-12B/kernels_rtx5090/2026-08-06_02-08-56_6d16017e`), which shares this run's harness: captured
@@ -86,8 +92,8 @@ compiler (88 us against 106 us in one sweep); the other winners are the article'
 torch.compile picks a faster GEMM than eager for `o_proj` and `mlp_gate_up`; Emmy's standard lane trails it by 3% and
 4% there.
 
-Attention regressed. The committed run measured 36 us and 34 us against eager's 35; this run measures 38.1 and
-38.0.
+Attention regressed. The committed run measured 36 us and 34 us against eager's 35; this run measures 39.1 and
+37.6 (38.1 and 38.0 on 2026-09-17).
 The article's schedule was FlashAttention-2's single-slab form with 64-key chunks, which today measures 41.2 us; the
 best current rows are the two- and three-slot TMA rings over 32-key chunks. The FP16-accumulate value product the
 article's fast-math row used was refused outright at head width 256 until this change; it is offered again and is the
@@ -100,10 +106,12 @@ than eager) and 246 us for attention.
 
 ### Repeat variation
 
-The projections were measured in six `emmy bench` runs over seven hours (`2026-09-17_17-13-13` before the
-attention row existed, `17-56-52`, `18-32-59`, `21-02-23`, `23-23-36` and this one) and once by hand. Emmy's
-whole-program latency agrees within 1.5% across all of them on every row except `kv_proj` (standard 50.1 to 53.7 us,
-fast-math 36.9 to 38.4). Eager moves more: `kv_proj` reads between 47.1 and 51.2 us depending on the task.
+The projections were measured in six `emmy bench` runs over seven hours on 2026-09-17 (`17-13-13` before the
+attention row existed, `17-56-52`, `18-32-59`, `21-02-23`, `23-23-36`, `23-41-07`) and once more in this run five days
+and several compiler changes later. Emmy's whole-program latency agrees within 1.5% across all of them on every
+projection except `kv_proj` (standard 50.1 to 53.7 us, fast-math 36.9 to 38.4); this run's attention is 1 us slower
+in the standard lane (39.1 against 38.1 to 38.3 us) and level in fast-math. Eager moves more: `kv_proj` reads
+between 47.1 and 51.2 us depending on the task.
 Attention has five bench runs (38.1 to 38.3 us standard; 38.0 to 38.3 fast-math) and its two recording runs (38.2
 and 38.0). The archived run is the last one, the first replayed under `--strict-evidence`; the earlier runs did not
 carry the flag and measured the same rows.
@@ -126,16 +134,16 @@ than the harness defaults do, so only ratios within one task compare.
 
 | Item | Value |
 | --- | --- |
-| Run | `2026-09-17_21-02-23`, 12 rows, all `succeeded` |
-| Source revision | `b79ac6707bbc65174070beed019bdcdef52a1bac`, clean tree |
+| Run | `2026-09-22_13-22-09` (run ID `20260922T132209Z`), 12 rows, all `succeeded` |
+| Source revision | `21fcb94a44d5d771b389ead75fd932fc01cf7ceb`, clean tree |
 | Host | `kenshin`, Ubuntu 24.04.2 LTS, kernel 7.0.0-28, AMD Ryzen 9 9950X3D |
 | GPU | NVIDIA GeForce RTX 5090, 32607 MiB, driver 580.173.02, display attached |
-| Toolchain | CUDA 13.0 (nvcc V13.0.88), PyTorch 2.13.0, Triton 3.7.1, cupy-cuda12x 14.2.0 |
+| Toolchain | CUDA 13.0 (nvcc V13.0.88), PyTorch 2.13.0 |
 | Article stack | driver 580.159.03, CUDA 13.0, PyTorch 2.13.0+cu130 |
 
 ### Archive
 
-`results_rtx5090x1.tar.gz` (Git LFS), root member `2026-09-17_21-02-23/`: `benchmark.log`,
+`results_rtx5090x1.tar.gz` (Git LFS), root member `2026-09-22_13-22-09/`: `benchmark.log`,
 `benchmark_rtx5090_x_1.log`, and per row `<variant>_<row id>.experiment.yaml` plus `<variant>_<row id>_artifacts.tar.gz`
 holding the bench JSON and log, `status.txt`, `golden.sha256`, `requirements.freeze.txt`, `nvidia-smi.txt` and the
 cubin cache. Variants: `rtx5090x1_crtx5090_k{q-p,kv-p,o-p,m-g-u,m-d,attention}_l{std,fm}`.
