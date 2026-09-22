@@ -414,6 +414,23 @@ def _contraction_plan_allowed(node, facts: ContractionFacts, atoms: tuple[str, .
     return warp_tile_in_catalog(plan) or (plan.regs == (26, 4) and plan.bk == 2)
 
 
+def fill_stage_moves() -> tuple[Stage, ...]:
+    """The depths the smem fill tier names: single-buffer, and the peer prefetch ring.
+
+    Stated once because it is asked twice — the edge catalog offers these, and the local support
+    join re-checks that the stage it resolves is one of them. The two must agree: when they did
+    not, the catalog's value was silently overruled by the join's and a widened ladder read as no
+    change at all.
+
+    Deeper rings are deliberately absent. The peers already fly asynchronously at depth 2
+    (``resolve_fill_stage`` puts every gmem-read operand on ``cp.async``), so a third and fourth
+    slot buy no overlap and cost the occupancy their smem takes: measured on the frozen Qwen3
+    gate/up contraction, depth 3 and 4 run 1.38x and 2.22x slower than depth 2 on an A100 and
+    monotonically slower on an H100. The ladder is what the shape can use, not what the codec can
+    spell."""
+    return (Stage(depth=1), Stage(depth=2))
+
+
 def _stage_candidates(tile: TileOp, target, node, choice: NodeSchedule) -> tuple[Stage, ...]:
     """The transports one node choice can be fed by — the independent edge catalog."""
     direct = Stage.direct()
@@ -423,7 +440,7 @@ def _stage_candidates(tile: TileOp, target, node, choice: NodeSchedule) -> tuple
         # there would name a fill nothing performs.
         return (direct,)
     if _needs_fill(tile, node, choice.tile):
-        candidates: tuple[Stage, ...] = (Stage(depth=1), Stage(depth=2))
+        candidates: tuple[Stage, ...] = fill_stage_moves()
         if tile.packed_reading(node)[0] is not None:
             candidates = (*candidates, *stage_moves(warp=True, ctx=target))
     else:

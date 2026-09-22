@@ -26,6 +26,7 @@ from .refusals import (
     _plan_node_refusal,
     _resolve_stage,
     _wgmma_refusal,
+    fill_stage_moves,
 )
 from .schedule import (
     ClassicSchedule,
@@ -393,7 +394,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             resolved_stage = next(iter(resolved)) if len(resolved) == 1 else None
         elif _needs_fill(tile_op, fold, node.tile):
             packed_copy = tile_op.packed_reading(fold)[0] is not None and stage.transport in ("smem-async", "smem-tma")
-            if not packed_copy and stage not in (Stage(depth=1), Stage(depth=2)):
+            if not packed_copy and stage not in fill_stage_moves():
                 cache[key] = None
                 return None
             resolved_stage = _resolve_stage(tile_op, self.target, fold, node.tile, geometry, stage, facts)
