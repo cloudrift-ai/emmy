@@ -63,8 +63,9 @@ lane against its own task's eager, and keep the two lanes in separate columns.
 
 The `gemma4_serving` recipe is the same article's serving table: its six points in its three vLLM lanes (stock vLLM
 0.23.0, vLLM with the Emmy plugin, and the plugin's fast-math fork), eighteen tasks on one RTX 5090 with the article's
-per-workload knobs. Every Emmy lane boots under `EMMY_STRICT_EVIDENCE=1`, so the RTX 5090 Gemma 4 serving golden's
-rows decide every kernel the server compiles and a fork no row decides fails the boot; the image is the plain
+per-workload knobs, except that the single-stream points take the recorded width-8 decode twins where the article
+took width 32. Every Emmy lane boots under `EMMY_STRICT_EVIDENCE=1`, so the RTX 5090 Gemma 4 serving golden's rows
+decide every kernel the server compiles and a fork no row decides fails the boot; the image is the plain
 `vllm-emmy` base built at the commit the run names, compiling its programs on first boot. It is a reproduction of the
 article's protocol on the current compiler, not the preregistered same-image A/B below, which runs the standard lane
 only from the warmed derivative image.
