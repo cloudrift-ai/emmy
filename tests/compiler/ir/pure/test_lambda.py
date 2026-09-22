@@ -38,6 +38,17 @@ def test_lambda_post_init_canonicalizes_body_order() -> None:
     assert first == second
 
 
+def test_lambda_orders_the_definition_read_by_a_predicate_first() -> None:
+    predicate = Select("predicate", (SelectBranch("x", Var("column")), SelectBranch("y", Literal(True, "bool"))))
+    value = Select("value", (SelectBranch("x", Var("predicate")), SelectBranch("y", Literal(True, "bool"))))
+
+    forward = Lambda.closing((), Body((predicate, value)), ("value",))
+    reversed_body = Lambda.closing((), Body((value, predicate)), ("value",))
+
+    assert forward == reversed_body
+    assert forward.body == (predicate, value)
+
+
 @pytest.mark.parametrize(
     "stmt",
     [

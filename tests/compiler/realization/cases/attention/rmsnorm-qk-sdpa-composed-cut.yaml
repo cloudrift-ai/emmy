@@ -66,7 +66,7 @@ configs:
       REDUCE: coop
       STAGE: ''
       RASTER: ''
-    identity: 72cddc4a0275524e2a686c30d6740285dd3315e731d0a8680239c1bf2c96c386
+    identity: 1ba499db5c30ae9ca06b803f85974c9764bdcd5eb94a52363a31630f2fb667fc
   - name: k_sdpa_rms_norm_reduce_64db54.2fbc1cd51ebc
     bindings: {}
     pins:

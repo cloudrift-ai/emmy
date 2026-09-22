@@ -68,6 +68,12 @@ member, and the existing tables are to be converted to one.
 schedule, materialization, output specifications, and knobs belong to `TileOp`, not the term. So `Fold` lives in
 `ir/pure/fold.py` and is not a `Stmt`.
 
+**Lambda construction binds every read and orders definitions before uses.** Both checks use the scope-aware
+`free_names` analysis, including coordinates in predicates and indices. `Lambda.closing` appends unbound reads as
+parameters; direct construction rejects them. Canonical ordering uses the same dependencies, so a predicate cannot
+move before its definition. The narrower `Body.ssa_uses` query follows statement `deps()` and does not include every
+expression read.
+
 ## Classic schedule model
 
 The [schedule package](schedule/ARCHITECTURE.md) separates schedule-wide interfaces and reusable choices from concrete

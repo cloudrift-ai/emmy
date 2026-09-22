@@ -32,17 +32,8 @@ def _canonical_body_order(body: Body) -> Body:
             len(getattr(stmt, "args", ()) or ()),
         )
 
-    def reads(stmt) -> set[str]:
-        out = set(stmt.deps())
-        for nested in stmt.nested():
-            for child in nested:
-                out |= reads(child)
-        return out
-
-    definitions = [
-        set(stmt.defines()) | {name for nested in stmt.nested() for child in nested for name in child.defines()} for stmt in stmts
-    ]
-    dependencies = [reads(stmt) for stmt in stmts]
+    definitions = [_exposed_defines(stmt) for stmt in stmts]
+    dependencies = [free_names(stmt) for stmt in stmts]
     placed = []
     remaining = list(range(len(stmts)))
     while remaining:
@@ -78,9 +69,8 @@ class Lambda:
     :attr:`Stmt.pure` trait (declared on the interface, conservative ``False`` default —
     ``Load`` / ``Assign`` and the structural nodes opt in; ``Accum`` / ``Write`` / ``Init`` /
     ``Loop`` never do; no isinstance whitelist, so a new stmt kind is excluded until it declares
-    itself) and every result is defined. The CONTEXTUAL half — free names ⊆ params ∪ enclosing
-    iteration vars — is the consuming Fold's check, since a bare Lambda
-    cannot know its scope.
+    itself), every result is defined, and every value or coordinate read is bound. Scope-aware
+    ``free_names`` supplies both the construction check and canonical statement ordering.
 
     α-invariance is CANONICAL RENUMBERING (the existing rename machinery), not de Bruijn:
     :meth:`canonical` renumbers params (``_p0…``) and internal defs (``_v0…``) in walk order,
