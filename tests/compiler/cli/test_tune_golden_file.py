@@ -562,6 +562,7 @@ def test_working_gpu_guard_allows_portable_trace_and_rejects_mismatch():
     ctx = SimpleNamespace(compute_capability=(9, 0), gpu_name="NVIDIA H100 80GB HBM3")
     validate_working_gpu({"compute_cap": [0, 0]}, ctx)
     validate_working_gpu({"compute_cap": [9, 0], "gpu_name": "NVIDIA H100 80GB HBM3"}, ctx)
+    validate_working_gpu({"compute_cap": [9, 0], "gpu_name": "NVIDIA H100 80GB"}, ctx)
 
     with pytest.raises(ValueError, match="compute capability"):
         validate_working_gpu({"compute_cap": [8, 0]}, ctx)

@@ -14,6 +14,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from emmy import gpu
 from emmy.compiler.pipeline.search.golden import (
     GoldenEntryState,
     dump_golden_file,
@@ -378,7 +379,7 @@ def validate_working_gpu(document: dict, ctx) -> None:
         raise ValueError(
             f"working golden targets compute capability {tuple(file_cap)}, but the live GPU is {tuple(ctx.compute_capability)}"
         )
-    if file_gpu and ctx.gpu_name and file_gpu != ctx.gpu_name:
+    if file_gpu and ctx.gpu_name and gpu.canonical_name(file_gpu) != gpu.canonical_name(ctx.gpu_name):
         raise ValueError(f"working golden targets {file_gpu}, but the live GPU is {ctx.gpu_name}")
 
 

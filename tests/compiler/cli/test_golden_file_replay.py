@@ -851,7 +851,8 @@ def test_replay_keys_its_cache_by_the_entry_identity(tmp_path):
     assert _replay(other, siblings=(owner,), lead=owner).arms == ()
 
 
-def test_recorded_greedy_pick_is_picked_again_under_strict_evidence(tmp_path):
+@pytest.mark.parametrize("card,cap", [("NVIDIA GeForce RTX 4090", (8, 9)), ("NVIDIA A100-SXM4-40GB", (8, 0))])
+def test_recorded_greedy_pick_is_picked_again_under_strict_evidence(tmp_path, card, cap):
     """The kernel set a compile picked, recorded as measured rows — one routing row per kernel-set
     decision it took and one child-identity schedule receipt per kernel — is evidence enough: those
     rows alone yield the same kernels with the same rows under strict evidence, with no prior and
@@ -872,9 +873,11 @@ def test_recorded_greedy_pick_is_picked_again_under_strict_evidence(tmp_path):
 
     path = tmp_path / "working-route.yaml"
     document = _working_placement_route(path)
+    document.update(gpu_name=card, compute_cap=list(cap))
+    dump_golden_file(document, path, overwrite=True)
     entry = document["configs"][0]
     seed = golden_record_from_entry(document, entry, entry["realizations"][0])
-    ctx = Context.from_target((8, 9))
+    ctx = Context.from_target(cap, gpu_name=card)
     taken = KernelSetDecisions()
     # The pick to record: the routing row decides the cut, the prior decides the pieces' schedules.
     with records_override([seed]), pinned_knobs({"FAST_MATH": False}):

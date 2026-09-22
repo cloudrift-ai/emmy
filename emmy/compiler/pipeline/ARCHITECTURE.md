@@ -1497,7 +1497,8 @@ A/B integrity checks below).
 (`goldens_for_live_gpu`) — names repeat across per-GPU golden files with diverging shapes/dtypes, so a flat union can
 select another card's spelling. They keep the union fallback on an uncovered card (the seed / transfer flow — the
 pinned config re-benches live), and off-GPU the full union is returned (pure-logic tests). Tuning instead consumes an
-explicit working file whose GPU header is checked against the selected tune device.
+explicit working file whose GPU header is checked against the selected tune device. Registered device aliases are
+resolved through the GPU registry when loading records and filtering files, just as they are for the live context.
 
 **The A/B carries three integrity gates:**
 

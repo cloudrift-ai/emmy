@@ -109,15 +109,15 @@ def test_scope_digest_follows_the_cards_rows_only(tmp_path, monkeypatch) -> None
     card's file, or a file scope that names a different file."""
     mine = tmp_path / "mine.yaml"
     other = tmp_path / "other.yaml"
-    mine.write_text("gpu_name: NVIDIA GeForce RTX 5090\nrows: 1\n")
-    other.write_text("gpu_name: NVIDIA H100 80GB HBM3\nrows: 1\n")
+    mine.write_text("gpu_name: NVIDIA H100 80GB HBM3\nrows: 1\n")
+    other.write_text("gpu_name: NVIDIA GeForce RTX 5090\nrows: 1\n")
     monkeypatch.setattr(golden, "_repository_golden_paths", lambda: nullcontext([mine, other]))
     monkeypatch.delenv("EMMY_GOLDEN_FILE", raising=False)
-    card = "NVIDIA GeForce RTX 5090"
+    card = "NVIDIA H100 80GB"
     base = scope_digest(card)
-    other.write_text("gpu_name: NVIDIA H100 80GB HBM3\nrows: 2\n")
+    other.write_text("gpu_name: NVIDIA GeForce RTX 5090\nrows: 2\n")
     assert scope_digest(card) == base
-    mine.write_text("gpu_name: NVIDIA GeForce RTX 5090\nrows: 2\n")
+    mine.write_text("gpu_name: NVIDIA H100 80GB HBM3\nrows: 2\n")
     changed = scope_digest(card)
     assert changed != base
     monkeypatch.setenv("EMMY_GOLDEN_FILE", str(other))

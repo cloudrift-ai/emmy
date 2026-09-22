@@ -23,7 +23,7 @@ from typing import NamedTuple
 
 import yaml
 
-from emmy import config
+from emmy import config, gpu
 from emmy.compiler.loop_wire import loop_graph_from_wire, validate_loop_program_pool
 from emmy.compiler.pipeline.search.data.shape import ShapeKey
 from emmy.compiler.structural import digest
@@ -681,7 +681,7 @@ def golden_record_from_entry(document: Mapping, entry: Mapping, realization: Map
     loop_index = target.get("loop")
     return GoldenRecord(
         name=realization["name"],
-        gpu_name=document.get("gpu_name") or "",
+        gpu_name=gpu.canonical_name(document.get("gpu_name") or ""),
         compute_cap=tuple(document["compute_cap"]),
         model=entry.get("model", document.get("model")),
         program_index=entry["program"],
@@ -1554,7 +1554,7 @@ def _file_gpu_name(path: Path) -> str | None:
         return None
     for line in head.splitlines():
         if line.startswith("gpu_name:"):
-            return str(yaml.load(line, Loader=_SAFE_LOADER)["gpu_name"])
+            return gpu.canonical_name(str(yaml.load(line, Loader=_SAFE_LOADER)["gpu_name"]))
     return None
 
 
@@ -1633,6 +1633,7 @@ def records_for_card(gpu_name: str, compute_cap: tuple[int, int]) -> list[Golden
     (:data:`RECORDS_OVERRIDE`, else ``EMMY_GOLDEN_FILE`` — a file, or none when set empty), otherwise
     the repository files, loading only that card's (header sniff). ``GOLDEN_RECORDS`` stays the full corpus for the eval / fit
     consumers; both share the per-path document memo so nothing parses twice."""
+    gpu_name = gpu.canonical_name(gpu_name)
     if RECORDS_OVERRIDE is not None:
         return _scoped(RECORDS_OVERRIDE, gpu_name, compute_cap)
     if (scope := config.golden_scope()) is not None:
@@ -1839,10 +1840,7 @@ def _live_gpu_key() -> tuple[str, tuple[int, int]] | None:
         if not torch.cuda.is_available():
             return None
         name = torch.cuda.get_device_name(0)
-        from emmy.gpu import by_name  # noqa: PLC0415
-
-        gpu = by_name(name)
-        return (gpu.name if gpu is not None else name), tuple(torch.cuda.get_device_capability(0))
+        return gpu.canonical_name(name), tuple(torch.cuda.get_device_capability(0))
     except Exception:  # noqa: BLE001
         return None
 
