@@ -204,8 +204,9 @@ it unsatisfiable on exactly the kernels that need it most: attention spells `TIL
 its chunked value channel, and no schedule carries one mma tile at both.
 
 The precision policy (`allow_f16_accumulate`, `allow_fp8`) filters the CATALOG: an f16-accumulate or FP8 atom is
-offered unpinned only where the compile allowed it. A row naming such a tile is an authored, legal choice and
-bypasses the policy. Likewise a transposed raster (`gn4`, `gn8`) is never the catalog's own offer and is taken only
+offered unpinned only where the compile allowed it. A hand pin naming such a tile is an authored, legal choice and
+bypasses the policy; a row a descent follows (`with_row` — measured evidence) does not, so an FP16-accumulate row
+recorded or measured in the standard lane cannot deploy there. Likewise a transposed raster (`gn4`, `gn8`) is never the catalog's own offer and is taken only
 where a row names it.
 
 `ClassicScheduleCodec` is the concrete strict wire boundary. Its public encode and decode operations validate through
