@@ -814,7 +814,9 @@ class TreeHalve(Stmt):
             for buf, st in zip(self.bufs, self.state, strict=True):
                 out.append(f"{in1}{ty} {st} = {buf}[lane & {self.length - 1}];")
                 ctx.ssa_dtypes[st] = self.dtype.name
-            butterfly = WarpShuffle(state=self.state, state_b=self.state_b, combine_states=self.combine_states, length=self.length, dtype=self.dtype)
+            butterfly = WarpShuffle(
+                state=self.state, state_b=self.state_b, combine_states=self.combine_states, length=self.length, dtype=self.dtype
+            )
             out.extend(butterfly.render(ctx.child()))
             out.append(f"{in1}if (lane == 0) {{")
             out.extend(f"{in2}{buf}[0] = {st};" for buf, st in zip(self.bufs, self.state, strict=True))
