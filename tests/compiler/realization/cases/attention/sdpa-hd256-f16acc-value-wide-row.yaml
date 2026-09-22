@@ -59,7 +59,7 @@ configs:
       STAGE@map.1/twist.1/inner: d2/smem-tma
       WORK: w4x1
       RASTER: ''
-    identity: e472df4be0ff9d26c8588c0dba1c49de5983f411bd895e001ac9dc3f5670c3be
+    identity: 99f93d427be1ab5a5169d5ea068364c04832b106d72c20989241b9db63180bde
 loops:
 - inputs: [x0, x1, x2]
   outputs: [scaled_dot_product_attention]

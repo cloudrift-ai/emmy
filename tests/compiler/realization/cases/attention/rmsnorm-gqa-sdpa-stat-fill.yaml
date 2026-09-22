@@ -63,7 +63,7 @@ configs:
       STAGE@map.1/twist.1/inner: d1/smem
       WORK: w1x1
       RASTER: ''
-    identity: 3525e2b0ebb58ad5d0db2ba8acd88896de760f635c9ba90e47d03e1c5230f989
+    identity: 0cc8c882812c0c5cf7b5572decba7bbda5b91bb8e1a264793bd20f00915429e4
 loops:
 - inputs: [k, kw, q, qw, v]
   outputs: [out]
