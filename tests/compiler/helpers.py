@@ -361,3 +361,28 @@ def loop_record_fields(graph, origins, compute_cap=(12, 0)) -> dict:
     loops: list[dict] = []
     target = loop_target(graph, origins, loops, compute_cap)
     return {"origins": tuple(origins), "loop_index": target["loop"], "loop_wire": loops[target["loop"]]}
+
+
+QWEN3_EMBEDDING = "Qwen/Qwen3-Embedding-0.6B"
+
+
+def qwen3_embedding_config(*, num_hidden_layers: int = 1):
+    """The Qwen3-Embedding-0.6B config, trimmed to ``num_hidden_layers``.
+
+    Config only — no checkpoint — so the head geometry (16 query heads over 8 KV heads, head_dim 128) is
+    readable without downloading weights."""
+    from transformers import AutoConfig  # noqa: PLC0415
+
+    config = from_pretrained_or_skip(AutoConfig.from_pretrained, QWEN3_EMBEDDING)
+    config.num_hidden_layers = num_hidden_layers
+    return config
+
+
+def qwen3_embedding_model(config=None, auto_class=None):
+    """A random-weight fp32 model built from :func:`qwen3_embedding_config` — the shared trunk of the
+    dynamic-shape tests. Seeded, so two calls build the same weights."""
+    import torch  # noqa: PLC0415
+    from transformers import AutoModel  # noqa: PLC0415
+
+    torch.manual_seed(0)
+    return (auto_class or AutoModel).from_config(config if config is not None else qwen3_embedding_config()).float().eval()

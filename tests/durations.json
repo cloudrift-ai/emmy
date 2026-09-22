@@ -42,6 +42,8 @@
  "tests/compiler/ir/schedule/test_classic.py::test_site_factors_do_not_depend_on_the_prefix": 1.31,
  "tests/compiler/ir/test_dynamic_shapes.py::test_capture_replay_device_io_matches_eager@cuda": 1.84,
  "tests/compiler/ir/test_dynamic_shapes.py::test_reshape_negative_one_infers_through_symbolic_dim": 1.77,
+ "tests/compiler/ir/test_dynamic_shapes.py::test_split_seq_len_chunked_prefill_matches_one_shot": 2.13,
+ "tests/compiler/ir/test_dynamic_shapes.py::test_split_seq_len_reaches_the_cuda_kernel_signature": 2.53,
  "tests/compiler/ir/test_indexmap.py::test_index_map_coords_stay_in_bounds_where_selected": 2.02,
  "tests/compiler/ir/test_wgmma_ir.py::test_every_wrapper_form_builds_at_sm_90a": 1.99,
  "tests/compiler/passes/test_conv1d_einsum_rules.py::test_dense_conv1d_im2col_matches_eager[cuda]@cuda": 3.37,
