@@ -264,8 +264,9 @@ requires `EMMY_RUN_DIT_PRETRAINED=1`, so normal CI never downloads the multi-gig
 `requires_sm90`. Tests pinning a particular instruction must name its minimum capability: sm_80 for cp.async and
 m16n8k16, sm_89 for FP8 mma, and sm_90 for TMA. Native block-scaled FP4 tests require sm_12x. Scalar and Volta schedules
 remain covered on V100. The serving fixture's authored scalar schedules are scoped to the live card; their original
-tracing card does not restrict these unmeasured correctness cases, and strict evidence remains required. The
-mma.sync warp tier (swizzled `ldmatrix` + `mma.sync`, TMA transport) auto-enumerates and is validated on **sm_90+**;
+tracing card does not restrict these unmeasured correctness cases, and strict evidence remains required. The fixture
+publishes the golden's shared precision pins while building the runner, so its precise schedules remain valid when
+the compiler default is fast math. The mma.sync warp tier (swizzled `ldmatrix` + `mma.sync`, TMA transport) auto-enumerates and is validated on **sm_90+**;
 on sm_80-89 it is pin-only and currently non-functional for two independent reasons — the `sm_NNa` arch-accelerated
 target the TMA path emits is rejected by nvcc (`Unsupported gpu architecture 'sm_89a'`), and `ldmatrix` itself faults
 at runtime on at least Ada (sm_89). Tests that **force** the warp tier via a warp `TILE` codec (`<atom>/…`) + `STAGE`
