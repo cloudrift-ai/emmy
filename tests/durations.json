@@ -1,4 +1,11 @@
 {
+ "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[gemma-4-12B-it/rtx5090_sm120.yaml/post1.k_linear_mean_reduce_97b2ad.m1.e0724c29b469]": 1.02,
+ "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[gemma-4-12B-it/rtx5090_sm120.yaml/post1-global.k_linear_mean_reduce_9c8af6.m1.fm.b4640069a50f#2]": 0.95,
+ "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[gemma-4-12B-it/rtx5090_sm120.yaml/post1-global.k_linear_mean_reduce_9c8af6.m1.b4640069a50f]": 0.8,
+ "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[gemma-4-12B-it/rtx5090_sm120.yaml/post1-global.k_linear_mean_reduce_9c8af6.m1.fm.b4640069a50f#1]": 0.79,
+ "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[gemma-4-12B-it/rtx5090_sm120.yaml/post1.k_linear_mean_reduce_97b2ad.m1.b4640069a50f]": 5.2,
+ "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[gemma-4-12B-it/rtx5090_sm120.yaml/post1.k_linear_mean_reduce_97b2ad.m1.fm.e0724c29b469]": 5.1,
+ "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[gemma-4-12B-it/rtx5090_sm120.yaml/post2048-global.k_linear_mean_reduce_7ffa03.m2048.a37549ddda66]": 5.0,
  "tests/compiler/passes/test_chunk_staging_groups.py::test_tma_refills_preserve_causal_attention[d1/smem-tma]@cuda": 12.76,
  "tests/compiler/passes/test_chunk_staging_groups.py::test_tma_refills_preserve_causal_attention[d2/smem-tma]@cuda": 11.62,
  "tests/serving/generation/test_gen_runner_gpu.py::test_gen_runner_moe_stitch_matches_eager@cuda": 90.23,
