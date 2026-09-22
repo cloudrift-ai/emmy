@@ -17,6 +17,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import BF16, F8E4M3, F16, F32, F4E2M1x2
 from emmy.compiler.graph import Tensor
@@ -471,6 +472,9 @@ def test_the_packed_drain_matches_the_decoded_oracle(tmp_path, dtype, m, n, k, t
     dense where cp.async pads, so the two drains read different row strides. Each bound is roughly 3x the measured error
     on a 4090 (f16 2.5e-4, bf16 2.1e-3); bf16's is the looser one because bf16 carries 8 mantissa
     bits against f16's 11 — the format's own precision, not the drain's."""
+    if stage.endswith("/smem-tma") and not Context.probe().has_tma:
+        pytest.skip("TMA requires sm_90+")
+
     import torch
 
     from emmy.compiler.backend.cuda.backend import CudaBackend
@@ -522,6 +526,9 @@ def test_the_packed_drain_stages_a_batched_activation_over_tma(tmp_path):
     thread (UTMALDG.4D over a rank-3 map, found by the layer-0 W4A4 parity run). The staged
     matmul tests were all 2-D, and the cp.async transport indexes flat rather than boxing,
     which is why only TMA faulted."""
+    if not Context.probe().has_tma:
+        pytest.skip("TMA requires sm_90+")
+
     import torch
 
     from emmy.compiler.backend.cuda.backend import CudaBackend
@@ -643,6 +650,9 @@ def test_the_packed_drain_addresses_its_own_split_k_slice(tmp_path, stage):
     Found on an 8B serving compile, where the down projection is the one the scheduler splits;
     every unsplit shape passes, which is why the isolated drain tests missed it.
     """
+    if stage.endswith("/smem-tma") and not Context.probe().has_tma:
+        pytest.skip("TMA requires sm_90+")
+
     import torch  # noqa: F401  — the CUDA backend needs it loaded
 
     from emmy.compiler.backend.cuda.backend import CudaBackend

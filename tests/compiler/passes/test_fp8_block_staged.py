@@ -13,6 +13,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from emmy.compiler.context import Context
 from emmy.compiler.dtype import F8E4M3, F32
 from emmy.compiler.graph import Tensor
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
@@ -174,6 +175,9 @@ def _run(graph, bundle, ckpt, pins):
 def test_the_byte_slab_matches_the_compute_fill_bit_for_bit(tmp_path, dtype, atom, stage):
     """The staged fp8 drain and the compute fill hand the tensor cores the same 16-bit values, so
     the matmul agrees to the bit on either copy transport and either fragment dtype."""
+    if stage.endswith("/smem-tma") and not Context.probe().has_tma:
+        pytest.skip("TMA requires sm_90+")
+
     graph, bundle, ckpt = _linear(tmp_path, k=512, n=512, dtype=dtype)
     staged = _run(graph.copy(), bundle, ckpt, _pins("cut", stage, atom=atom))
     filled = _run(graph.copy(), bundle, ckpt, _pins("cut", "d1/smem", atom=atom))

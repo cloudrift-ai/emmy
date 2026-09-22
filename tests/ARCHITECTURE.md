@@ -276,8 +276,10 @@ masked-symbolic sweep (symbolic M/N/K at off-hint sizes), the static-vs-dynamic 
 `d2/smem-tma` transports, and the operand-pipelining transforms — the gmem→smem ring (`d<depth>/smem-async`) and the smem→register
 double-buffer (`/p<n>`), each asserted **bit-identical** to the single-buffer / gmem-direct baseline (a pure perf
 transform) — gating its GPU cases on `requires_sm90` / `_supports_tma()` (≥ sm_90); its GPU-less render / structure cases
-run anywhere. The TMA accuracy path additionally exercises the host descriptor encoder (`backend/cuda/_tma.py`). The same
-gate applies to TMA-transport `STAGE` pins (`…/tma…`) anywhere: below sm_90 the pin refuses rather than selecting a
+run anywhere. The TMA accuracy path additionally exercises the host descriptor encoder (`backend/cuda/_tma.py`).
+Live capability checks also guard TMA variants in quantized-weight tests. Native FP8 MMA tests require sm_89+, while
+their FP16/BF16 decode-and-compute counterparts remain eligible on older cards. The same TMA gate applies to
+TMA-transport `STAGE` pins (`…/tma…`) anywhere: below sm_90 the pin refuses rather than selecting a
 different transport, so `test_attention_coverage.py`'s TMA-staged flash cases carry `requires_sm90` (their `cp`
 siblings run on sm_80+). Golden-scoped CLI tests are the other environment trap: `--realization` without `--golden
 PATH` and

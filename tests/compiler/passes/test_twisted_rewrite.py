@@ -161,12 +161,13 @@ def test_causal_sdpa_uses_the_same_twisted_rewrite() -> None:
 
     assert len(fold.init) == 3
     assert fold.as_contraction() is not None
+    assert fold.chunked(), "predicate coordinates must preserve the tensor-core attention channel"
 
 
 def test_a_cat_in_the_query_cone_still_twists() -> None:
     """``rotate_half`` is a ``torch.cat``, so every rotary attention hands the score a query whose
     cone carries a coord-predicated ``Select`` — a multi-source ``IndexMapOp`` lowers to one, and
-    its predicate reads the enclosing contraction's axis without declaring it a lift param.
+    its predicate reads the enclosing contraction's axis as a free coordinate.
 
     That capture is what the match has to see past: ``canonical`` abstracts a term's bound axis in
     its own lift and leaves it FREE where an operand captures it, so two alpha-equal score cones
@@ -184,6 +185,7 @@ def test_a_cat_in_the_query_cone_still_twists() -> None:
     )
 
     assert len(fold.init) == 3
+    assert fold.chunked(), "the rotary predicate must preserve the tensor-core attention channel"
 
 
 def test_a_score_on_its_own_slab_still_injects_the_streamed_value() -> None:

@@ -15,6 +15,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from emmy.compiler.context import Context
 from emmy.compiler.diagnostics.bank_conflicts import lane_bank_distribution
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F8E4M3, F16, F32, DataType
@@ -292,6 +293,9 @@ def test_canonical_byte_b_and_splitk_compose_cuda():
 def test_k32_staged_bit_identical_to_gmem_direct_cuda():
     """Staged W8A8 (the k32 byte repack — raw bytes both slabs) is BIT-identical to the
     gmem-direct ``_b8`` gathers, and the contiguous-K drains ride the vector (u32) loaders."""
+    if not Context.probe().has_fp8_mma:
+        pytest.skip("Native FP8 MMA requires sm_89+")
+
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
