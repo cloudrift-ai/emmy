@@ -27,46 +27,20 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-    kernel_set:
-    - q_proj-s1.ad9de1084843
   - name: q_proj-s1.ad9de1084843
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      REDUCE: g8k
-    identity: ad9de10848438c6afbb92e5f506e1594ffd6eadec4621c072d24b565022ad008
-    measurements:
-      emmy_us: 4.734764026759367
-      reference_us: 4.7279952842341935
-      reference_backend: same-input-greedy
-  - name: q_proj-s1.e50e592a4016
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w1x1
-      TILE: mma_m16n8k16_f16_f32/f1x4/k4
-      REDUCE: ''
+      WORK: t128
+      TILE: ''
+      REDUCE: coop
       STAGE: ''
       RASTER: ''
-    identity: e50e592a401645255a254a987b42f6c813143a738eadc8ad4df11868b7f84c42
+    identity: ad9de10848438c6afbb92e5f506e1594ffd6eadec4621c072d24b565022ad008
     measurements:
-      emmy_us: 3.7045780243529114
-      reference_us: 3.6976425819977154
-      reference_backend: same-input-greedy
-  - name: q_proj-s1.40add2c03ed7
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      REDUCE: ''
-      RASTER: ''
-    identity: 40add2c03ed78bf85d7693b27baefa9b0ce7bbd2a3c1926d294cddddc393ff01
-    measurements:
-      emmy_us: 1.0301860024064562
-      reference_us: 1.0303527022364778
+      emmy_us: 3.0127371185855925
+      reference_us: 3.017944556016188
       reference_backend: same-input-greedy
 loops:
 - inputs: [x0, x1]

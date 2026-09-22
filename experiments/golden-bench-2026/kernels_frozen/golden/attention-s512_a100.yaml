@@ -52,14 +52,14 @@ configs:
       TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x8/k4
       REDUCE@map.1/twist: ''
       REDUCE@map.1/twist.1/inner: ''
-      STAGE@map.1/twist: ''
+      STAGE@map.1/twist: d2/smem-async
       STAGE@map.1/twist.1/inner: ''
       WORK: w2x1
       RASTER: ''
     identity: bf2c07559bb1b63ff682e8211884f1623f222ce545636b44fc2952f63b5d2f21
     measurements:
-      emmy_us: 155.81867098808289
-      reference_us: 157.35466281572977
+      emmy_us: 34.59657090050833
+      reference_us: 32.32426643371582
       reference_backend: same-input-greedy
 loops:
 - inputs: [x0, x1, x2]

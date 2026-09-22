@@ -48,18 +48,18 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE@map.1/twist: mma_m8n8k4_f16_f32/f2x2/k8
-      TILE@map.1/twist.1/inner: mma_m8n8k4_f16_f32/f2x2/k8
+      TILE@map.1/twist: mma_m8n8k4_f16_f32/f1x8/k8
+      TILE@map.1/twist.1/inner: mma_m8n8k4_f16_f32/f1x2/k8
       REDUCE@map.1/twist: ''
       REDUCE@map.1/twist.1/inner: ''
       STAGE@map.1/twist: ''
       STAGE@map.1/twist.1/inner: ''
-      WORK: w1x1
+      WORK: w2x1
       RASTER: ''
     identity: bf2c07559bb1b63ff682e8211884f1623f222ce545636b44fc2952f63b5d2f21
     measurements:
-      emmy_us: 212.37759590148926
-      reference_us: 214.52799439430237
+      emmy_us: 134.58286012922014
+      reference_us: 134.82667009035745
       reference_backend: same-input-greedy
 loops:
 - inputs: [x0, x1, x2]
