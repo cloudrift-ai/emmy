@@ -19,7 +19,7 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from emmy import config, gpu
+from emmy import gpu
 
 if TYPE_CHECKING:
     from emmy.compiler.pipeline.search.pool import PoolSample
