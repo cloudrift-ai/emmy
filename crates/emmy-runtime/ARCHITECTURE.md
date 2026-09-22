@@ -47,6 +47,10 @@ equal-sized pages; `PagePool::table` publishes a set of them, in cache order, as
 under `<name>__pages`; `Executor::set_symbol` supplies the start a step writes at. A paged buffer is never allocated as
 a slab, never bound with bytes, and cannot be read back as one — its pages are the caller's to read.
 
+`scripts/export_paged_pack.py` exports a pack whose one program is a step of a cache fill;
+`crates/emmy-runtime/tests/paged.rs` runs it against a real device when `EMMY_PAGED_PACK` points
+at the result, and skips otherwise, because the pack needs a compiler this crate does not have.
+
 Residency is deliberately absent. Whether a page lives in device or host memory would be a property of a page inside
 the pool, and nothing above the pool would change; which processor runs a launch is a separate axis again, and belongs
 on the launch, not on the buffer. Neither exists yet, and a host-resident page read by a CUDA kernel crosses PCIe per

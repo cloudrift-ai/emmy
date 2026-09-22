@@ -45,20 +45,24 @@ impl Device {
 /// Device memory handed out one page at a time.
 ///
 /// A paged buffer's pages are the runtime's to own, not the plan's: the plan says what shape a
-/// page has, the pool decides where each one lives. Residency — whether a page sits in device or
-/// host memory — would be a property of a page here, and nothing above this type would change.
+/// page has, the pool decides where each one lives. The pool holds its own stream and
+/// synchronizes, so one cache can be written by one program and read by another. Residency —
+/// whether a page sits in device or host memory — would be a property of a page here, and
+/// nothing above this type would change.
 pub struct PagePool {
     bytes: usize,
+    stream: Arc<CudaStream>,
     pages: Vec<CudaSlice<u8>>,
 }
 
 impl PagePool {
     /// A pool of pages of `bytes` each, sized for one buffer's page shape.
-    pub fn new(bytes: usize) -> Self {
-        Self {
+    pub fn new(device: &Device, bytes: usize) -> Result<Self> {
+        Ok(Self {
             bytes: bytes.max(1),
+            stream: device.0.new_stream()?,
             pages: Vec::new(),
-        }
+        })
     }
 
     pub fn page_bytes(&self) -> usize {
@@ -74,23 +78,32 @@ impl PagePool {
     }
 
     /// Add `count` zeroed pages and return their indices, in order.
-    pub fn grow(&mut self, stream: &Arc<CudaStream>, count: usize) -> Result<Vec<usize>> {
+    pub fn grow(&mut self, count: usize) -> Result<Vec<usize>> {
         let first = self.pages.len();
         for _ in 0..count {
-            self.pages.push(stream.alloc_zeros::<u8>(self.bytes)?);
+            self.pages.push(self.stream.alloc_zeros::<u8>(self.bytes)?);
         }
+        self.stream.synchronize()?;
         Ok((first..self.pages.len()).collect())
     }
 
+    /// Copy one page back to the host. The pages are the caller's, so reading them is too.
+    pub fn read(&self, page: usize) -> Result<Vec<u8>> {
+        let slice = self.pages.get(page).context("page index out of range")?;
+        Ok(self.stream.clone_dtoh(slice)?)
+    }
+
     /// The device table one buffer addresses through: its pages' pointers, in cache order.
-    pub fn table(&self, stream: &Arc<CudaStream>, pages: &[usize]) -> Result<PageTable> {
+    pub fn table(&self, pages: &[usize]) -> Result<PageTable> {
         let mut addresses = Vec::with_capacity(pages.len());
         for index in pages {
             let page = self.pages.get(*index).context("page index out of range")?;
-            addresses.push(page.device_ptr(stream).0);
+            addresses.push(page.device_ptr(&self.stream).0);
         }
+        let device = self.stream.clone_htod(&addresses)?;
+        self.stream.synchronize()?;
         Ok(PageTable {
-            device: stream.clone_htod(&addresses)?,
+            device,
             len: pages.len(),
         })
     }
@@ -263,19 +276,13 @@ impl Executor {
     /// Give a paged buffer the pages it addresses through. The table replaces what would
     /// otherwise be the buffer's pointer, and the caller owns the pages for as long as it is bound.
     pub fn bind_pages(&mut self, name: &str, table: PageTable) -> Result<()> {
-        let paging = self.plan.paged.get(name).context("buffer is not paged")?;
-        let buffer = self
-            .plan
-            .buffers
-            .iter()
-            .find(|b| b.name == name)
-            .context("unknown buffer")?;
         ensure!(
-            table.len() == paging.page_count(buffer)?,
-            "buffer {name} spans {} pages, table has {}",
-            paging.page_count(buffer)?,
-            table.len()
+            self.plan.paged.contains_key(name),
+            "buffer {name} is not paged"
         );
+        // How many pages a cache has is the caller's to decide — the plan knows only the shape of
+        // one page, since a step's buffer spans its chunk while the cache spans a request.
+        ensure!(!table.is_empty(), "page table for {name} is empty");
         self.tables.insert(Paging::table(name), table);
         self.bound.insert(name.into());
         self.completed = false;

@@ -60,30 +60,20 @@ impl Paging {
     }
 
     /// One page's byte size: the buffer's shape with the paged axis cut to `page`.
+    ///
+    /// How MANY pages exist is not the plan's business. A step writes a chunk of the cache, so
+    /// its buffer spans the chunk while the cache spans a request; only the page's own shape —
+    /// the other axes, at their declared extents — is shared between them, and that is what the
+    /// pool needs to size a page.
     pub fn page_bytes(&self, buffer: &Buffer) -> Result<usize> {
-        let extent = self.extent(buffer)?;
-        ensure!(extent > 0 && self.page > 0, "empty paged axis");
-        Ok(buffer.byte_len()? / usize::try_from(extent)? * usize::try_from(self.page)?)
-    }
-
-    /// How many pages the buffer spans.
-    pub fn page_count(&self, buffer: &Buffer) -> Result<usize> {
-        Ok(usize::try_from(self.extent(buffer)? / self.page)?)
-    }
-
-    fn extent(&self, buffer: &Buffer) -> Result<u64> {
-        let dim = buffer
+        let extent = buffer
             .shape
             .get(self.axis)
             .context("paged axis is out of range")?
             .as_u64()
             .context("only static nonnegative shapes are supported")?;
-        ensure!(
-            self.page > 0 && dim % self.page == 0,
-            "paged axis {dim} is not a whole number of {} pages",
-            self.page
-        );
-        Ok(dim)
+        ensure!(extent > 0 && self.page > 0, "empty paged axis");
+        Ok(buffer.byte_len()? / usize::try_from(extent)? * usize::try_from(self.page)?)
     }
 }
 
@@ -292,10 +282,20 @@ impl Plan {
                     names.contains(name.as_str()) || tables.contains(name.as_str()),
                     "unknown launch buffer {name}"
                 );
+            }
+            // ``writes`` and the zero lists name buffers; only ``args`` passes pointers, and a
+            // paged buffer has none. Zeroing one would have to memset a slab that does not exist.
+            for name in &launch.args {
                 ensure!(
                     !self.paged.contains_key(name.as_str()),
                     "paged buffer {name} has no pointer to pass; its launch must name {}",
                     Paging::table(name)
+                );
+            }
+            for name in launch.zero_outputs.iter().chain(&launch.zero_prologues) {
+                ensure!(
+                    !self.paged.contains_key(name.as_str()),
+                    "paged buffer {name} cannot be zero-initialized per launch"
                 );
             }
         }
@@ -426,14 +426,14 @@ mod tests {
         assert!(serde_json::from_value::<Plan>(unknown).is_err());
     }
 
-    /// A cache the runtime owns as pages: `k` is written by a step that produces four of its
-    /// thirty-two keys and lands them at `past`.
+    /// One step of a cache fill: `k` holds the four keys this step produces, and `past` says which
+    /// pages of the cache — pages the runtime owns, not the plan — they land in.
     fn paged_example() -> Value {
         json!({
             "format": 1, "backend": "cuda", "inputs": ["x"], "outputs": ["k"],
             "buffers": [
                 {"name":"x", "shape":[1,2,4,8], "dtype":"f32", "role":"input"},
-                {"name":"k", "shape":[1,2,32,8], "dtype":"f32", "role":"output"}
+                {"name":"k", "shape":[1,2,4,8], "dtype":"f32", "role":"output"}
             ],
             "constants": {}, "runtime_constants": {}, "weights": {},
             "paged": {"k": {"axis": 2, "page": 8, "start": "past"}},
@@ -453,8 +453,8 @@ mod tests {
         let buffer = plan.buffers.iter().find(|b| b.name == "k").unwrap();
         let paging = &plan.paged["k"];
         assert_eq!(Paging::table("k"), "k__pages");
-        assert_eq!(paging.page_count(buffer).unwrap(), 4);
-        // One page is the buffer's shape with the paged axis cut to the page size.
+        // One page is the buffer's shape with the paged axis cut to the page size — so a step
+        // whose own buffer spans four keys still sizes the cache's eight-key pages correctly.
         assert_eq!(paging.page_bytes(buffer).unwrap(), 2 * 8 * 8 * 4);
 
         // A paged buffer carries no bytes: there is no slab to upload into.
@@ -469,9 +469,8 @@ mod tests {
             ("/launches/0/args/1", json!("k")),
             // A runtime argument that is not a paging start still has nothing to resolve it.
             ("/launches/0/runtime_args", json!(["seq_len"])),
-            // The axis must exist and divide into whole pages.
+            // The axis must exist and a page must hold something.
             ("/paged/k/axis", json!(9)),
-            ("/paged/k/page", json!(7)),
             ("/paged/k/page", json!(0)),
             // Only what a kernel reads or writes can be paged.
             ("/paged", json!({"missing": {"axis": 0, "page": 1}})),
