@@ -5,6 +5,11 @@ same two fixed-prompt completions as stock vLLM, but every measured workload rem
 activation capacity recovers KV-cache space within the existing integration. These results support improving
 compiled GPU execution before expanding the native serving runtime.
 
+The results below describe revision `2144b15a`. The current golden retains 139 compatible records for the three
+fixed-shape pre-attention programs. Compiler normalization changed the other kernel sets; their 194 records were
+removed because identity updates cannot preserve their measured computation. The retained records strictly decode,
+but complete serving qualification now requires fresh RTX 4080 measurements. Historical results remain unchanged.
+
 ## RTX 4080 × 1 — 2026-09-19
 
 ### Protocol
