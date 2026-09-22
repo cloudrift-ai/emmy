@@ -1,9 +1,10 @@
 //! CUDA ownership and submission. Only trusted compiler-produced cubins may be loaded.
 
-use crate::artifact::{Artifact, Plan, dimensions};
+use crate::artifact::{Artifact, Paging, Plan, dimensions};
 use anyhow::{Context, Result, ensure};
 use cudarc::driver::{
-    CudaContext, CudaFunction, CudaGraph, CudaSlice, CudaStream, LaunchConfig, PushKernelArg, sys,
+    CudaContext, CudaFunction, CudaGraph, CudaSlice, CudaStream, DevicePtr, LaunchConfig,
+    PushKernelArg, sys,
 };
 use cudarc::nvrtc::Ptx;
 use serde::Serialize;
@@ -41,12 +42,84 @@ impl Device {
     }
 }
 
+/// Device memory handed out one page at a time.
+///
+/// A paged buffer's pages are the runtime's to own, not the plan's: the plan says what shape a
+/// page has, the pool decides where each one lives. Residency — whether a page sits in device or
+/// host memory — would be a property of a page here, and nothing above this type would change.
+pub struct PagePool {
+    bytes: usize,
+    pages: Vec<CudaSlice<u8>>,
+}
+
+impl PagePool {
+    /// A pool of pages of `bytes` each, sized for one buffer's page shape.
+    pub fn new(bytes: usize) -> Self {
+        Self {
+            bytes: bytes.max(1),
+            pages: Vec::new(),
+        }
+    }
+
+    pub fn page_bytes(&self) -> usize {
+        self.bytes
+    }
+
+    pub fn len(&self) -> usize {
+        self.pages.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pages.is_empty()
+    }
+
+    /// Add `count` zeroed pages and return their indices, in order.
+    pub fn grow(&mut self, stream: &Arc<CudaStream>, count: usize) -> Result<Vec<usize>> {
+        let first = self.pages.len();
+        for _ in 0..count {
+            self.pages.push(stream.alloc_zeros::<u8>(self.bytes)?);
+        }
+        Ok((first..self.pages.len()).collect())
+    }
+
+    /// The device table one buffer addresses through: its pages' pointers, in cache order.
+    pub fn table(&self, stream: &Arc<CudaStream>, pages: &[usize]) -> Result<PageTable> {
+        let mut addresses = Vec::with_capacity(pages.len());
+        for index in pages {
+            let page = self.pages.get(*index).context("page index out of range")?;
+            addresses.push(page.device_ptr(stream).0);
+        }
+        Ok(PageTable {
+            device: stream.clone_htod(&addresses)?,
+            len: pages.len(),
+        })
+    }
+}
+
+/// One buffer's page pointers, as the kernel receives them.
+pub struct PageTable {
+    device: CudaSlice<u64>,
+    len: usize,
+}
+
+impl PageTable {
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
 pub struct Executor {
     pub load_times_ms: BTreeMap<&'static str, f64>,
     plan: Plan,
     graph: Option<CudaGraph>,
     stream: Arc<CudaStream>,
     arrays: BTreeMap<String, CudaSlice<u8>>,
+    tables: BTreeMap<String, PageTable>,
+    symbols: BTreeMap<String, i32>,
     functions: BTreeMap<String, CudaFunction>,
     bound: BTreeSet<String>,
     completed: bool,
@@ -106,6 +179,10 @@ impl Executor {
         let started = Instant::now();
         let mut arrays = BTreeMap::new();
         for buffer in &artifact.plan.buffers {
+            // A paged buffer is a table of pages the caller owns; there is no slab to allocate.
+            if artifact.plan.paged.contains_key(&buffer.name) {
+                continue;
+            }
             arrays.insert(
                 buffer.name.clone(),
                 stream.alloc_zeros::<u8>(buffer.byte_len()?.max(1))?,
@@ -116,6 +193,8 @@ impl Executor {
         let mut executor = Self {
             load_times_ms: BTreeMap::new(),
             plan: artifact.plan,
+            tables: BTreeMap::new(),
+            symbols: BTreeMap::new(),
             graph: None,
             stream,
             arrays,
@@ -169,11 +248,65 @@ impl Executor {
         self.upload(name, bytes)
     }
 
+    /// One page's byte size for a paged buffer, so the caller can size its pool.
+    pub fn page_bytes(&self, name: &str) -> Result<usize> {
+        let paging = self.plan.paged.get(name).context("buffer is not paged")?;
+        let buffer = self
+            .plan
+            .buffers
+            .iter()
+            .find(|b| b.name == name)
+            .context("unknown buffer")?;
+        paging.page_bytes(buffer)
+    }
+
+    /// Give a paged buffer the pages it addresses through. The table replaces what would
+    /// otherwise be the buffer's pointer, and the caller owns the pages for as long as it is bound.
+    pub fn bind_pages(&mut self, name: &str, table: PageTable) -> Result<()> {
+        let paging = self.plan.paged.get(name).context("buffer is not paged")?;
+        let buffer = self
+            .plan
+            .buffers
+            .iter()
+            .find(|b| b.name == name)
+            .context("unknown buffer")?;
+        ensure!(
+            table.len() == paging.page_count(buffer)?,
+            "buffer {name} spans {} pages, table has {}",
+            paging.page_count(buffer)?,
+            table.len()
+        );
+        self.tables.insert(Paging::table(name), table);
+        self.bound.insert(name.into());
+        self.completed = false;
+        Ok(())
+    }
+
+    /// Set a runtime argument — the absolute position a paged write lands at.
+    pub fn set_symbol(&mut self, name: &str, value: i32) -> Result<()> {
+        ensure!(
+            self.plan
+                .paged
+                .values()
+                .any(|p| p.start.as_deref() == Some(name)),
+            "unknown runtime symbol {name}"
+        );
+        self.symbols.insert(name.into(), value);
+        self.completed = false;
+        Ok(())
+    }
+
     fn submit(&mut self) -> Result<()> {
         ensure!(
             self.plan.inputs.iter().all(|n| self.bound.contains(n)),
             "all program inputs must be bound"
         );
+        for name in self.plan.paged.keys() {
+            ensure!(
+                self.tables.contains_key(&Paging::table(name)),
+                "paged buffer {name} has no page table bound"
+            );
+        }
         for launch in &self.plan.launches {
             for name in &launch.zero_outputs {
                 self.stream
@@ -186,7 +319,19 @@ impl Executor {
             };
             let mut args = self.stream.launch_builder(&self.functions[&launch.kernel]);
             for name in &launch.args {
-                args.arg(&self.arrays[name]);
+                match self.tables.get(name) {
+                    Some(table) => args.arg(&table.device),
+                    None => args.arg(&self.arrays[name]),
+                };
+            }
+            // Runtime arguments are tail-appended as ``int``, matching the rendered signature.
+            let values: Vec<i32> = launch
+                .runtime_args
+                .iter()
+                .map(|n| self.symbols.get(n).copied().context("unset runtime symbol"))
+                .collect::<Result<_>>()?;
+            for value in &values {
+                args.arg(value);
             }
             // The compiler defines the ABI and access bounds. Validation resolves every pointer
             // and launch dimension; arrays stay alive and exclusively owned through completion.
@@ -290,6 +435,10 @@ impl Executor {
         ensure!(
             self.plan.outputs.iter().any(|n| n == name),
             "unknown program output"
+        );
+        ensure!(
+            !self.plan.paged.contains_key(name),
+            "paged output {name} has no single allocation to read; read its pages"
         );
         let buffer = self.plan.buffers.iter().find(|b| b.name == name).unwrap();
         let mut bytes = self.stream.clone_dtoh(&self.arrays[name])?;
