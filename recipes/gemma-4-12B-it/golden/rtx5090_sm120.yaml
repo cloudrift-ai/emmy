@@ -40,7 +40,10 @@
 # the fast-math pre halves at the same widths (2048: 615 -> 554 us). In the standard lane the post halves at 2048 and
 # 4096 gain 2%, and the three global twins that carried FP16-accumulate rows (post2048-global, post4096-global,
 # post-sym-global) are re-recorded on FP32 accumulation, the standard lane's precision; those twins are slower for it
-# (4096 global 7135 -> 8420 us). Every re-recorded lane replays strictly from an empty tune DB.
+# (4096 global 7135 -> 8420 us, the symbolic global twin 959 -> 1311). A replayed row now obeys the precision policy, so
+# an FP16-accumulate row can no longer deploy in the standard lane. Every re-recorded lane replays strictly from an
+# empty tune DB. The width-1 post twins keep their rows: re-recorded on this compiler they cut into eleven kernels,
+# the o_proj piece five times, and their tier is dropped at boot as slower than the bucket twins anyway.
 compute_cap:
 - 12
 - 0
@@ -54185,112 +54188,6 @@ configs:
   target:
     loop: 1
   realizations:
-  - name: post-sym-global.k_linear_mean_reduce_8162d3.dynamic.6e56cb20ef76
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      PLACE@map.1/map.1/reduce: cut
-      PLACE@map.1/map.1/reduce.1/inner: cut
-      PLACE@map.1/map.2/reduce.1/inner.1/map.1/inner.1/map.1/inner: cut
-      PLACE@map.1/map.2/reduce.1/inner.1/map.1/inner.1/map.5/map.2/reduce.1/inner: cut
-      PLACE@map.2/inner.1/map.1/inner.1/map.1/inner: cut
-      PLACE@map.3/inner: cut
-      PLACE@map.1/map.2/reduce.1/inner: cut
-      PLACE@map.2/inner: cut
-      PLACE@map.1/map.2/reduce.1/inner.1/map: cut
-      PLACE@map.2/inner.1/map: cut
-      PLACE@map.1/map.2/reduce.1/inner.1/map.1/inner.1/map: cut
-      PLACE@map.2/inner.1/map.1/inner.1/map: cut
-    identity: 6e56cb20ef768af4d00a030ef555b9fbad69e030252d287bcd5f299b7c047aaf
-    measurements:
-      emmy_us: 1139.4840975777697
-      reference_us: 1137.9517076483469
-      reference_backend: same-input-greedy
-  - name: post-sym-global.k_linear_mean_reduce_8162d3.dynamic.8cb274d4303a
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w4x2
-      TILE: mma_m16n8k16_f16_f32/f2x4/k4
-      REDUCE: ''
-      STAGE: d2/smem-tma
-      RASTER: ''
-    identity: 8cb274d4303ad0bfa3dd7d48756814c1af1d55e8f3b5553f20d5c11731824753
-    measurements:
-      emmy_us: 229.2799949645996
-      reference_us: 228.71200740337372
-      reference_backend: same-input-greedy
-  - name: post-sym-global.k_linear_mean_reduce_8162d3.dynamic.c5059ce24a59
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: t512
-      REDUCE: coop
-      RASTER: ''
-    identity: c5059ce24a5993b750b8e74a1f3cb89f2dd2fb04b94faa1d560b00717188c5a5
-    measurements:
-      emmy_us: 2.209432756722863
-      reference_us: 2.2103605700320887
-      reference_backend: same-input-greedy
-  - name: post-sym-global.k_linear_mean_reduce_8162d3.dynamic.996af784f963
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: t256
-      REDUCE: coop
-      RASTER: ''
-    identity: 996af784f963ec924c60f6faec12d1447093b7b5fc2c13a7222b32beda1dc583
-    measurements:
-      emmy_us: 6.306807200113933
-      reference_us: 6.295724161740007
-      reference_backend: same-input-greedy
-  - name: post-sym-global.k_linear_mean_reduce_8162d3.dynamic.c49825c9c395
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w2x8
-      TILE: mma_m16n8k16_f16_f16/f4x2/k2
-      REDUCE: ''
-      STAGE: d2/smem
-      RASTER: ''
-    identity: c49825c9c395a1b8d5cebf04113b8ba61b2bbf599ab82da7ebf9b6e29770299a
-    measurements:
-      emmy_us: 472.27200865745544
-      reference_us: 471.43998742103577
-      reference_backend: same-input-greedy
-  - name: post-sym-global.k_linear_mean_reduce_8162d3.dynamic.58027e725be1
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w4x2
-      TILE: mma_m16n8k16_f16_f32/f2x4/k4
-      REDUCE: ''
-      STAGE: d2/smem-tma
-      RASTER: ''
-    identity: 58027e725be155ee04b07473390d740d3f257c26fcd48dc662bf311856b760a4
-    measurements:
-      emmy_us: 423.15199971199036
-      reference_us: 423.0239987373352
-      reference_backend: same-input-greedy
-  - name: post-sym-global.k_linear_mean_reduce_8162d3.dynamic.9b38ee91209a
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: t256
-      REDUCE: coop
-      RASTER: ''
-    identity: 9b38ee91209a9697ed73e7c66c73cbdc8e984d2392aba47939887cbbdf2184b0
-    measurements:
-      emmy_us: 6.263854286887429
-      reference_us: 6.269629354830141
-      reference_backend: same-input-greedy
   - name: post-sym-global.k_linear_mean_reduce_8162d3.dynamic.fm.6e56cb20ef76
     bindings: {}
     pins:
@@ -54396,6 +54293,112 @@ configs:
     measurements:
       emmy_us: 6.158177233949493
       reference_us: 6.158893213332075
+      reference_backend: same-input-greedy
+  - name: post-sym-global.k_linear_mean_reduce_8162d3.dynamic.6e56cb20ef76
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      PLACE@map.1/map.1/reduce: cut
+      PLACE@map.1/map.1/reduce.1/inner: cut
+      PLACE@map.1/map.2/reduce.1/inner.1/map.1/inner.1/map.1/inner: cut
+      PLACE@map.1/map.2/reduce.1/inner.1/map.1/inner.1/map.5/map.2/reduce.1/inner: cut
+      PLACE@map.2/inner.1/map.1/inner.1/map.1/inner: cut
+      PLACE@map.3/inner: cut
+      PLACE@map.1/map.2/reduce.1/inner: cut
+      PLACE@map.2/inner: cut
+      PLACE@map.1/map.2/reduce.1/inner.1/map: cut
+      PLACE@map.2/inner.1/map: cut
+      PLACE@map.1/map.2/reduce.1/inner.1/map.1/inner.1/map: cut
+      PLACE@map.2/inner.1/map.1/inner.1/map: cut
+    identity: 6e56cb20ef768af4d00a030ef555b9fbad69e030252d287bcd5f299b7c047aaf
+    measurements:
+      emmy_us: 1312.8869819191634
+      reference_us: 1312.2132658391154
+      reference_backend: same-input-greedy
+  - name: post-sym-global.k_linear_mean_reduce_8162d3.dynamic.8cb274d4303a
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k4
+      REDUCE: ''
+      STAGE: d2/smem-tma
+      RASTER: ''
+    identity: 8cb274d4303ad0bfa3dd7d48756814c1af1d55e8f3b5553f20d5c11731824753
+    measurements:
+      emmy_us: 227.34400629997253
+      reference_us: 228.37600111961365
+      reference_backend: same-input-greedy
+  - name: post-sym-global.k_linear_mean_reduce_8162d3.dynamic.c5059ce24a59
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t512
+      REDUCE: coop
+      RASTER: ''
+    identity: c5059ce24a5993b750b8e74a1f3cb89f2dd2fb04b94faa1d560b00717188c5a5
+    measurements:
+      emmy_us: 2.2140000946819782
+      reference_us: 2.210512387851053
+      reference_backend: same-input-greedy
+  - name: post-sym-global.k_linear_mean_reduce_8162d3.dynamic.996af784f963
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+      RASTER: ''
+    identity: 996af784f963ec924c60f6faec12d1447093b7b5fc2c13a7222b32beda1dc583
+    measurements:
+      emmy_us: 6.312827611791676
+      reference_us: 6.3135440935168345
+      reference_backend: same-input-greedy
+  - name: post-sym-global.k_linear_mean_reduce_8162d3.dynamic.c49825c9c395
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x8
+      TILE: mma_m16n8k16_f16_f32/f4x2/k2
+      REDUCE: ''
+      STAGE: d2/smem
+      RASTER: ''
+    identity: c49825c9c395a1b8d5cebf04113b8ba61b2bbf599ab82da7ebf9b6e29770299a
+    measurements:
+      emmy_us: 645.583987236023
+      reference_us: 645.7920074462891
+      reference_backend: same-input-greedy
+  - name: post-sym-global.k_linear_mean_reduce_8162d3.dynamic.58027e725be1
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k4
+      REDUCE: ''
+      STAGE: d2/smem-tma
+      RASTER: ''
+    identity: 58027e725be155ee04b07473390d740d3f257c26fcd48dc662bf311856b760a4
+    measurements:
+      emmy_us: 425.1520037651062
+      reference_us: 423.2479929924011
+      reference_backend: same-input-greedy
+  - name: post-sym-global.k_linear_mean_reduce_8162d3.dynamic.9b38ee91209a
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+      RASTER: ''
+    identity: 9b38ee91209a9697ed73e7c66c73cbdc8e984d2392aba47939887cbbdf2184b0
+    measurements:
+      emmy_us: 6.280156911588183
+      reference_us: 6.273207799443659
       reference_backend: same-input-greedy
 - program: 2
   target:
