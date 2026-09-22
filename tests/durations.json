@@ -39,6 +39,7 @@
  "tests/compiler/e2e/test_reduce_coverage.py::test_online_softmax_pairing_reaches_the_kernel[shape1]@cuda": 0.82,
  "tests/compiler/e2e/test_reduce_coverage.py::test_online_softmax_pairing_reaches_the_kernel[shape2]@cuda": 0.87,
  "tests/compiler/e2e/test_reduce_coverage.py::test_online_softmax_pairing_reaches_the_kernel[shape3]@cuda": 0.84,
+ "tests/compiler/e2e/test_reduce_coverage.py::test_a_short_lane_loop_unrolls_and_one_warp_folds_the_warp_partials@cuda": 0.78,
  "tests/compiler/ir/schedule/test_classic.py::test_site_factors_do_not_depend_on_the_prefix": 1.31,
  "tests/compiler/ir/test_dynamic_shapes.py::test_capture_replay_device_io_matches_eager@cuda": 1.84,
  "tests/compiler/ir/test_dynamic_shapes.py::test_reshape_negative_one_infers_through_symbolic_dim": 1.77,
