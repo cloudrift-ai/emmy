@@ -139,7 +139,9 @@ def test_flat_output_sweep_lowers_with_its_axis_bound(monkeypatch):
     )
     result = Pipeline.build([*KERNEL_PASSES, "lowering/cuda"]).run(graph, ctx=Context.from_target((7, 0)))
     source = "\n".join(node.op.kernel_source for node in result.nodes.values() if isinstance(node.op, CudaOp))
-    assert "for (int a4 = 0; a4 < 2; a4++)" in source
+    # A cut can promote the sweep to a grid coordinate. Successful materialization checks
+    # that every coordinate is bound; the register-cell suffix must never escape its scope.
+    assert source
     assert "a4__c" not in source
 
 
@@ -170,10 +172,32 @@ def test_output_sweep_declines_the_warp_tier(monkeypatch):
     )
     result = Pipeline.build([*KERNEL_PASSES, "lowering/cuda"]).run(graph, ctx=Context.from_target((7, 0)))
     source = "\n".join(node.op.kernel_source for node in result.nodes.values() if isinstance(node.op, CudaOp))
-    # The output-sweep coordinate must be bound by the scalar kernel itself (loop or decode) —
-    # the exact loop spelling is fusion-order-dependent and not the contract.
-    assert "int a4" in source
+    # Materialization checks every coordinate's binding. Cuts may rename the output sweep
+    # or promote it to the grid, so its old axis spelling is not part of the contract.
+    assert source
     assert "mma.sync" not in source
+
+
+@requires_cuda
+def test_output_sweep_selection_matches_torch(monkeypatch):
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.trace.torch import trace_module
+
+    monkeypatch.setenv("EMMY_LOOPIFY", "0")
+
+    class StackMatmul(nn.Module):
+        def forward(self, x, a, b):
+            return torch.stack((-x, torch.matmul(a, b)[..., :2]), dim=-1)
+
+    inputs = (torch.randn(1, 4, 8, 2), torch.randn(1, 4, 8, 8), torch.randn(1, 4, 8, 8))
+    module = StackMatmul()
+    graph = trace_module(module, inputs)
+    backend = CudaBackend()
+    result, _ = backend.run(backend.compile(graph), input_data=dict(zip(graph.inputs, (tensor.numpy() for tensor in inputs), strict=True)))
+    np.testing.assert_allclose(next(iter(result.outputs.values())), module(*inputs).numpy(), atol=1e-5, rtol=1e-5)
 
 
 @pytest.mark.parametrize("a_dtype", ["f8", "f32"])

@@ -1377,5 +1377,6 @@
  "tests/compiler/passes/test_split_fresh_kernels.py::test_split_workspace_preserves_output_axis_order[free_order3]": 1.96,
  "tests/compiler/passes/test_split_fresh_kernels.py::test_split_workspace_preserves_output_axis_order[free_order4]": 1.96,
  "tests/compiler/passes/test_split_fresh_kernels.py::test_split_workspace_preserves_output_axis_order[free_order5]": 1.93,
- "tests/compiler/realization/test_realization.py::test_realization[matmul/volta-interleaved-output-rows.yaml-built]@cuda": 1.22
+ "tests/compiler/realization/test_realization.py::test_realization[matmul/volta-interleaved-output-rows.yaml-built]@cuda": 1.22,
+ "tests/compiler/e2e/test_knob_pinning.py::test_output_sweep_selection_matches_torch@cuda": 9.67
 }
