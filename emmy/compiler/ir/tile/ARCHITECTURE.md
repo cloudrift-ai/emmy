@@ -104,8 +104,10 @@ even though no lift binds it. The dead components are rewrite residue: the twist
 and mints `_unread<i>` for a slot its reader stopped binding, and an epilogue cone beside it keeps exposing a scale that
 was live when it was formed and went dead when the folds fused. Independent planar states narrow their injection,
 identity and componentwise combine together. Twisted and observed states remain whole because their components may
-be coupled. The rule unions all readers after restoring object sharing, so a JSON round trip prunes the same states.
-Operands that no retained result or boundary store reads disappear as well.
+be coupled. `Fold.read_components` propagates demand through narrowed lifts and unions every shared term's readers.
+Both lowering and placement cuts use that result. Narrowing separately for each reader would emit overlapping
+carriers that declare the same accumulator twice. Operands that no retained result or boundary store reads disappear
+as well.
 
 An identity projection dissolves into its operand, or flattens its operand list into a consuming projection. A
 pass-through can make two occurrences of the same computation compare unequal, and the placement fork's value
