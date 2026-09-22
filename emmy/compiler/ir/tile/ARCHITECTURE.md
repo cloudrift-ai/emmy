@@ -290,8 +290,8 @@ recipe's full carrier and is restricted to the channels a term actually holds, s
 ordinary case during the rewrite's own fixpoint.
 
 Nothing is minted to make that reading work. A is what `operands[0]` SUPPLIES, not what it exposes: the left factor
-may be a component of that edge or a value the reading derives from those components and kernel-uniform ones (a scale,
-an epsilon — one contributes no variation, so the factor varies exactly as A does).
+may be a component of that edge or a value derived from those components, A's free coordinates, and kernel-uniform
+values. A coordinate mask over A preserves the contraction; dependence on a coordinate exclusive to B does not.
 
 ### One reading for "a tier folds this whole"
 
