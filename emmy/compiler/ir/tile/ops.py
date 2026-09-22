@@ -542,10 +542,9 @@ def head(op):
     node-level fact the scheduler dispatches on — the views, the
     reduce ``Axis``, the operand edges — is a STORED param on what this returns."""
     node = op
-    # A term composes through operands, so a projection's node is its first edge — through every
-    # zero-axis wrapper on the way (an output sweep's projection over its reduce).
+    # Skip slab providers just as the kernel binder does: a captured scalar can precede the reduce.
     while isinstance(node, Fold) and node.axis is None and node.operands:
-        node = node.operands[0]
+        node = next((edge for edge in node.operands if edge.as_slab() is None), None)
     return node if isinstance(node, Fold) and node.axis is not None else None
 
 
@@ -553,7 +552,7 @@ def kernel_roots(op) -> tuple[Fold, ...]:
     """The reduce nodes the kernel binder builds the kernel AROUND — the ones whose ``REDUCE``
     partition it realizes. The binder peels each zero-axis projection to one operand: the
     contraction root of a tiled edge (every such root at once for a multi-output kernel), else the
-    first operand; every other reduce in the tree lowers serially inside its reader, so a partition
+    first non-slab operand; every other reduce in the tree lowers serially inside its reader, so a partition
     offered on it would price a kernel the binder never builds. This is that peel, read off the
     term alone, so the schedule projection offers the partition catalog only where it is realized."""
     node = op
@@ -561,7 +560,7 @@ def kernel_roots(op) -> tuple[Fold, ...]:
         tiled = tuple(projection_root(edge) for edge in tiled_edges(node.operands))
         if len(tiled) > 1:
             return tiled
-        node = tiled[0] if tiled else node.operands[0]
+        node = tiled[0] if tiled else next((edge for edge in node.operands if edge.as_slab() is None), None)
     return (node,) if isinstance(node, Fold) else ()
 
 

@@ -468,19 +468,20 @@ def test_a_composed_route_skips_a_bare_key_and_still_fails_on_a_broken_one() -> 
     and a route key off the grammar is still a broken stored row that raises."""
     from emmy.compiler.pipeline.search.pins import composed_routes  # noqa: PLC0415
 
-    match, graph = _case_match("attention/rmsnorm-qk-sdpa-composed-cut.yaml")
+    graph = _mimo_graph()
+    match = Match(graph=graph, root_node_id="out0", rule=Rule(name="test", pattern=[]))
     root = graph.nodes[match.root_node_id]
     with pytest.raises(ValueError, match="PLACE is ambiguous"):
         resolve(root.op.op, "PLACE")
 
-    with composed_routes([(None, ("PLACE", "PLACE@map.1/twist.1/inner.2/map"))]):
+    with composed_routes([(None, ("PLACE", "PLACE@map.1/inner"))]):
         options = _CUT.rewrite(match, root, _CTX)
 
     options = options if isinstance(options, list) else [options]
     assert options, "the ordinary fuse and single-seam arms still stand"
     assert all(option.knobs.get("PLACE") != "cut" for option in options), "no arm cuts under the unattributable bare key"
 
-    with composed_routes([(None, ("PLACE@map.1/twist.1/inner.2/map", "PLACE@map.1/not-a-kind"))]), pytest.raises(ValueError):
+    with composed_routes([(None, ("PLACE@map.1/inner", "PLACE@map.1/not-a-kind"))]), pytest.raises(ValueError):
         _CUT.rewrite(match, root, _CTX)
 
 

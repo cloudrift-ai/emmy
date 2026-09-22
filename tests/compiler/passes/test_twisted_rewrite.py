@@ -133,7 +133,7 @@ def test_sdpa_rewrites_to_twisted_expectation() -> None:
     """Attention's value channel joins the same carrier, stored in STABLE coordinates: the score
     contraction leads, the value slab is the streamed operand, and the expectation channel injects
     that value unchanged. The bilinear reading comes back through ψ⁻¹ (:meth:`Fold.based`), so no
-    cone is minted to hold ``exp(s)``. The ``1/l`` factor hoists into the epilogue above."""
+    cone is minted to hold ``exp(s)``. The epilogue divides by the denominator once."""
     tile = _tile(
         "F.scaled_dot_product_attention("
         "torch.randn(1, 1, 4, 2, dtype=torch.float16), "
@@ -148,7 +148,7 @@ def test_sdpa_rewrites_to_twisted_expectation() -> None:
     assert streamed.as_slab() is not None and streamed.free_axes, "the value slab is B"
     assert fold.as_contraction() is not None
     assert not [s for s in fold.lift.body if isinstance(s, Assign) and s.op.name == "exp"], "the weight is not in the term"
-    assert tile.op.axis is None and any(stmt.op.name == "multiply" for stmt in tile.op.lift.body), "the epilogue applies 1/l once"
+    assert tile.op.axis is None and any(stmt.op.name == "divide" for stmt in tile.op.lift.body), "the epilogue divides by l once"
 
 
 def test_causal_sdpa_uses_the_same_twisted_rewrite() -> None:
