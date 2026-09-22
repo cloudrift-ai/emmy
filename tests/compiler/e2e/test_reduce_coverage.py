@@ -116,3 +116,28 @@ def test_transposed_coop_band_is_offered_on_a_non_divisible_sweep(n_out, monkeyp
     rows = enumerate_graph(graph_from_code(_matvec_code(n_out))[0], Context.from_target((12, 0))).rows
     offered = {str(v) for r in rows for k, v in r.items() if k.startswith("REDUCE")}
     assert any(s.endswith("coop-t") for s in offered), offered
+
+
+# --------------------------------------------------------------------------- #
+# Cooperative lane loops — the latency shape of a wide row statistic.
+# --------------------------------------------------------------------------- #
+
+
+@requires_cuda
+def test_a_short_lane_loop_unrolls_and_one_warp_folds_the_warp_partials(monkeypatch) -> None:
+    """A 3840-wide row statistic at 512 lanes gives each lane 8 trips. Rolled, each trip waited on its
+    own global load, and the 16 warp partials folded through a barrier per halving step: a Gemma 4
+    decode-width norm measured 4.2 us warm and 10.2 us cold that way. The lane loops must unroll, and
+    warp 0 must fold the partials with its butterfly behind a single barrier. Both are emitted-source
+    shapes no knob names."""
+    from emmy.commands.trace import graph_from_code
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
+    monkeypatch.setenv("EMMY_WORK", "t512")
+    monkeypatch.setenv("EMMY_REDUCE", "coop")
+    code = "torch.nn.RMSNorm(3840, dtype=torch.float16)(torch.randn(32, 3840, dtype=torch.float16))"
+    compiled = CudaBackend().compile(graph_from_code(code)[0])
+    (src,) = [s for s in (getattr(node.op, "kernel_source", "") for node in compiled.nodes.values()) if s]
+    assert src.count("#pragma unroll\n") >= 2, src
+    assert "if (warp == 0) {" in src and "for (int s = " not in src, src
