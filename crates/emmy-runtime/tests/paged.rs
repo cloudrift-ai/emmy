@@ -5,7 +5,7 @@
 //! it the test skips, because the pack needs a compiler and this crate has none.
 
 use emmy_runtime::artifact::Artifact;
-use emmy_runtime::cuda::{Device, Executor, PagePool};
+use emmy_runtime::cuda::{Device, Executor};
 use std::path::PathBuf;
 
 /// Mirrors the exporter: a (1, 2, 32, 8) f32 cache of four 8-key pages, filled four keys at a
@@ -29,8 +29,9 @@ fn a_step_writes_its_chunk_into_the_pages_it_is_given() {
     // The runtime owns the cache: four pages, sized by what the plan says a page holds.
     let page_bytes = executor.page_bytes("cache").expect("cache is paged");
     assert_eq!(page_bytes, KV_HEADS * PAGE * ROW * size_of::<f32>());
-    let mut pool = PagePool::new(&device, page_bytes).expect("page pool");
-    let pages = pool.grow(KEYS / PAGE).expect("allocate pages");
+    executor
+        .alloc_pages("cache", KEYS / PAGE)
+        .expect("allocate pages");
 
     // Every step reads the same input buffer and lands its rows at a different position.
     let mut expected = vec![0f32; KV_HEADS * KEYS * ROW];
@@ -47,8 +48,6 @@ fn a_step_writes_its_chunk_into_the_pages_it_is_given() {
                 }
             }
         }
-        let table = pool.table(&pages).expect("page table");
-        executor.bind_pages("cache", table).expect("bind pages");
         executor
             .set_symbol("past", i32::try_from(past).unwrap())
             .expect("set past");
@@ -60,8 +59,8 @@ fn a_step_writes_its_chunk_into_the_pages_it_is_given() {
 
     // Read the cache back page by page and compare against the same fill done on the host.
     let mut cache = Vec::with_capacity(expected.len());
-    for page in &pages {
-        let bytes = pool.read(*page).expect("read page");
+    for page in 0..KEYS / PAGE {
+        let bytes = executor.read_page("cache", page).expect("read page");
         cache.extend(
             bytes
                 .chunks_exact(4)

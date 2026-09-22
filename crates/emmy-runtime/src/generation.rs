@@ -2,7 +2,7 @@
 
 use crate::{
     artifact::Artifact,
-    cuda::{Device, Executor, PagePool},
+    cuda::{Device, Executor},
 };
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
@@ -60,31 +60,19 @@ impl Config {
     }
 }
 
-/// Give every paged buffer the pages its declared shape spans, and keep the pools alive.
+/// Give every paged buffer the pages its declared shape spans.
 ///
-/// This is where the runtime, not the plan, decides what the cache costs: one pool per buffer,
-/// enough pages to cover the context, allocated once and held for the generator's life.
-fn bind_cache_pages(device: &Device, executor: &mut Executor) -> Result<Vec<PagePool>> {
-    let mut pools = Vec::new();
-    for (name, page_bytes, pages) in executor.paged_buffers()? {
-        let mut pool = PagePool::new(device, page_bytes)?;
-        let allocated = pool.grow(pages)?;
-        executor.bind_pages(&name, pool.table(&allocated)?)?;
-        pools.push(pool);
+/// This is where the runtime, not the plan, decides what the cache costs: enough pages to cover
+/// the context, allocated once and held for the generator's life.
+fn allocate_cache(executor: &mut Executor) -> Result<()> {
+    for (name, _page_bytes, pages) in executor.paged_buffers()? {
+        executor.alloc_pages(&name, pages)?;
     }
-    Ok(pools)
+    Ok(())
 }
 
 pub struct Generator {
     executor: Executor,
-    // The KV cache: one pool of pages per paged buffer, held for the generator's life because the
-    // bound tables address them. A request keeps its pages from prompt to EOS, so nothing is
-    // returned or reused yet.
-    #[allow(
-        dead_code,
-        reason = "owning the pools is what keeps the bound page tables valid"
-    )]
-    pools: Vec<PagePool>,
     config: Config,
     position: usize,
     prompt_length: usize,
@@ -132,10 +120,11 @@ impl Generator {
             "invalid generation outputs"
         );
         let mut executor = Executor::load(device, artifact)?;
-        let pools = bind_cache_pages(device, &mut executor)?;
+        // The KV cache: enough pages per paged buffer to cover the context, held for the
+        // generator's life. A request keeps its pages from prompt to EOS, so nothing is returned.
+        allocate_cache(&mut executor)?;
         Ok(Self {
             executor,
-            pools,
             config,
             position: 0,
             prompt_length: 0,
