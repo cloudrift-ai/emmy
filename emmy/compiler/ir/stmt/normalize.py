@@ -836,14 +836,15 @@ def dedup_loads(stmts: Body) -> Body:
         def rename(n: str) -> str:
             return alias.get(n, n)
 
-        def descend(inner: Body, clobbered: frozenset[str]) -> Body:
+        def descend(inner: Body, clobbered: frozenset[str], coordinates: frozenset[str]) -> Body:
             """Enter ``inner``'s scope, dropping every alias / kept name whose spelling ``inner``
             re-binds. SSA names bound inside a Loop / Cond body are scoped to it, so such a name is
             a DIFFERENT variable — following it out would rewire the inner arithmetic to the outer
             value and redeclare the survivor. An accumulator the inner loop aliased is visible out
             here once the loop closes, so that alias comes back up."""
-            shadowed = Body.coerce(inner).ssa_defs
-            out = walk(inner, {k: v for k, v in local.items() if k[0] not in clobbered and not shadowed.intersection(v)}, alias)
+            shadowed = Body.coerce(inner).ssa_defs | coordinates
+            env = {k: v for k, v in local.items() if k[0] not in clobbered and not shadowed.intersection((*v, *k[-1]))}
+            out = walk(inner, env, alias)
             return out
 
         def invalidate(buffers: frozenset[str]) -> None:
@@ -860,7 +861,7 @@ def dedup_loads(stmts: Body) -> Body:
                 # kept name, or the index dangles after the duplicate is
                 # dropped. (No-op for plain axis indices: axes aren't aliased.)
                 s = s.rewrite(rename)
-                key = (s.input, tuple(e.pretty() for e in s.index), s.width, s.dtype)
+                key = (s.input, tuple(e.pretty() for e in s.index), s.width, s.dtype, s.deps())
                 if key in local:
                     alias.update(dict(zip(s.names, local[key], strict=True)))
                     continue
@@ -870,7 +871,7 @@ def dedup_loads(stmts: Body) -> Body:
                 s = rename_free(s, alias)
                 key = (
                     ("assign", s.op, s.args, s.dtype) if isinstance(s, Assign) else ("accum", s.value, s.op, s.dtype, s.axes, repr(s.base))
-                )
+                ) + (s.deps(),)
                 if key in local:
                     alias[s.name] = local[key][0]
                     if isinstance(s, Accum):
@@ -881,7 +882,7 @@ def dedup_loads(stmts: Body) -> Body:
             elif s.nested():
                 clobbered = written_buffers(s)
                 renamed = rename_free(s, alias)
-                out.append(renamed.with_bodies(tuple(descend(child, clobbered) for child in renamed.nested())))
+                out.append(renamed.with_bodies(tuple(descend(child, clobbered, renamed.binds_axes()) for child in renamed.nested())))
                 invalidate(clobbered)
             else:
                 out.append(rename_free(s, alias))

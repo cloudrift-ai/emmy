@@ -88,6 +88,7 @@ static __device__ __forceinline__ void mbarrier_init(unsigned long long* mbar, i
 static __device__ __forceinline__ void mbarrier_arrive_expect_tx(unsigned long long* mbar, int bytes) {
     unsigned int addr = __cvta_generic_to_shared(mbar);
     unsigned long long state;
+    asm volatile("fence.proxy.async.shared::cta;\\n" ::: "memory");
     asm volatile("mbarrier.arrive.expect_tx.shared.b64 %0, [%1], %2;\\n"
                  : "=l"(state) : "r"(addr), "r"(bytes) : "memory");
 }
