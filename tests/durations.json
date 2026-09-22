@@ -740,6 +740,7 @@
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[Qwen3.8-27B-FP8/v100_sm70.yaml/k_linear_matmul_mean_reduce_4b396c.630644b1103f]": 5.2,
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[Qwen3.8-27B-FP8/v100_sm70.yaml/k_linear_matmul_mean_reduce_4b396c.38dc7cd5ed0d]": 5.1,
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[Qwen3.8-27B-FP8/v100_sm70.yaml/k_linear_matmul_mean_reduce_4b396c.12c37a496203]": 5.0,
+ "tests/serving/generation/test_gen_rope.py::test_rope_takes_the_fused_path_under_inductor_default_custom_ops": 3.15,
  "tests/compiler/passes/test_total_lift.py::test_nested_output_sweep_preserves_an_intermediate_value": 0.6,
  "tests/compiler/ir/tile/test_normalize.py::test_unread_planar_state_drops_its_independent_coordinate[False]": 1.14,
  "tests/compiler/passes/test_cut_forks.py::test_cut_stores_one_value_per_repeated_coordinate_group[2-5]": 0.50,

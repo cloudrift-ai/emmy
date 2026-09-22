@@ -81,9 +81,15 @@ and two chunks is 311 ms of the 325 ms the point actually gained.
 half and its prefill chunks gained the rest.
 
 **The three decode-bound points are still 4 to 6% short of the article**, and all of that is per-token latency: 19.4
-ms against 18.1 at c=1. It is no longer kernels. The layer kernels of a bucket-32 step now sum to 13.8 ms of a 19.4
-ms step, with about 1.2 ms of `lm_head` and 0.3 ms of vLLM's own attention beside them. The remaining ~3.6 ms is the
-plugin's per-step cost, unchanged by this round, and it is now the largest single item in a decode step.
+ms against 18.1 at c=1. An `nsys` trace of this image on this box (2026-09-22, 256/256 c=1, where the lane measures
+18.4 ms) shows the decode step is GPU-bound: the host adds about 0.4 ms per step, as it does for stock. Of the Emmy
+lane's 18.1 ms of kernel time, 0.9 ms is vLLM's native rotary path. The recipe starts the plain image with bare `vllm
+serve`, so the plugin got that path where the article's image forced the fused kernel through its launch config; the
+plugin now takes the fused kernel on its own, which brings the same lane to 17.6 ms. What remains against stock's
+15.9 ms of kernel time is about 1 ms of small layer kernels (norm statistics and the cut's elementwise kernel, 5 to 8
+us each, where stock's fused norms take 1 to 3) and 0.3 ms of projections. An earlier version of this paragraph
+called the gap ~3.6 ms of plugin cost per step. That figure came from summing golden rows, which are timed with the
+cache warm: the width-32 output projection is recorded at 14.2 us and runs at 22.3 in serving.
 
 **Fast-math is no longer worth a lane at most points.** It wins 0.5 to 1.7% of throughput at five of six points and
 matches the standard lane at the sixth. The one exception is the RAG point, where it takes per-token latency to 26.4
@@ -101,6 +107,8 @@ point, which is what makes the Emmy comparison above a comparison and not a drif
   stock runs while throughput held at 112.6 to 112.7). The fast-math row's 2792 ms sits inside that spread.
 - The 256/256 c=64 first-token latency is not comparable with the article's, which uses one wave of 64 requests
   where the recipe queues 256; the per-token half of that cell uses the same protocol in both.
+- The Emmy lanes of this run ran vLLM's native rotary path (see above), about 4% of throughput at the single-stream
+  points. The table has not been re-measured with the plugin fix.
 
 ### System
 
