@@ -147,7 +147,7 @@ def precision_trading_pins(pins: Mapping) -> bool:
 
 def pins_freeze_cut(pins: Mapping) -> bool:
     """Whether the input pins freeze any placement cut (a ``PLACE…=cut`` pin) — the ONE spelling
-    of the predicate behind both the loader's receipt validation and :attr:`GoldenRecord.is_receipt`."""
+    of the predicate behind the loader's receipt validation."""
     from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
 
     return any(family_of(str(name)) == "PLACE" and str(value) == "cut" for name, value in pins.items())
@@ -257,9 +257,8 @@ class GoldenRecord:
 
     @property
     def is_receipt(self) -> bool:
-        """Whether this row is a child-identity schedule receipt: a schedule row recorded behind
-        pinned cut(s), whose stored ``identity`` names the child kernel the row decorates."""
-        return self.identity is not None and not self.is_routing and pins_freeze_cut(dict(self.pins))
+        """Whether a schedule row names its kernel by identity, with any route supplied by pins or its set."""
+        return self.identity is not None and not self.is_routing
 
     @property
     def route(self) -> dict[str, str]:
@@ -1158,7 +1157,8 @@ def _replay(
         referenced = kernel_set_pins(entry, (record, *siblings))
         return {**referenced, **entry.route, **{str(key): str(value) for key, value in entry.knobs.items()}}
 
-    lead = record if lead is None else lead
+    if lead is None:
+        lead = next((entry for entry in (record, *siblings) if entry.kernel_set), record)
     # Entries can share an identity — a routing row and a plain row of one target. The one that
     # spells a route decides the cut fork (it sorts last, and last wins); a row spelling none would
     # read the kernel as fused.
