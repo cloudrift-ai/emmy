@@ -556,6 +556,7 @@ def test_child_decode_verdict_changes_with_sibling_route_owner() -> None:
     # An explicit kernel set supplies its route even after the pre-cut identity changes.
     lead = replace(parent, kernel_set=(stale_route.name,))
     assert decode_record(child, (lead, stale_route)) is None
+    assert decode_record(stale_route, (lead, child)) is None
 
 
 def test_post_schedule_receipt_does_not_steer_an_unowned_peer(monkeypatch) -> None:

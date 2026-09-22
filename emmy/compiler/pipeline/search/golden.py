@@ -1159,7 +1159,7 @@ def _replay(
         return {**referenced, **entry.route, **{str(key): str(value) for key, value in entry.knobs.items()}}
 
     if lead is None:
-        lead = next((entry for entry in (record, *siblings) if entry.kernel_set), record)
+        lead = record if record.is_routing else next((entry for entry in (record, *siblings) if entry.kernel_set), record)
     # Entries can share an identity — a routing row and a plain row of one target. The one that
     # spells a route decides the cut fork (it sorts last, and last wins); a row spelling none would
     # read the kernel as fused.
