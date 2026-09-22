@@ -158,6 +158,11 @@ model does not fit beside a KV cache) and gives one number to reproduce directly
 
 ### Status
 
+This section is the 2026-09-17 snapshot; the card was not available for the 2026-09-22 run and its rows were not
+re-measured. Four of its six goldens (`q_proj`, `kv_proj`, `o_proj`, `attention`, and both `mlp_gate_up` files) had
+their single-kernel receipt restamped on 2026-09-22 — identity lines only, derived off-card at the declared
+capability, no schedule or measurement touched. Whether those rows still replay on the card is unverified.
+
 All 12 rows succeeded, one run ID (`2026-09-17_23-41-08`), every Emmy row passed the scaled correctness check and
 replayed under `--strict-evidence`. Fast-math is 1.12x to 1.55x eager on every kernel. The standard lane is ahead of
 eager on four kernels and behind on the two whose split or narrow output the card handles worse (`kv_proj` 0.88x,
