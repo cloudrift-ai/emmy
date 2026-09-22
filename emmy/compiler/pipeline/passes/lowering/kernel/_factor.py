@@ -68,6 +68,7 @@ from emmy.compiler.pipeline.passes.lowering.kernel._atom import (
     copy_cell,
     reduce_codegen,
     store_sink,
+    unroll_ok_n,
 )
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import sync_row_fill
 from emmy.compiler.pipeline.passes.lowering.kernel._tiling import atomize, grid_tile, register_tile, unit_tile
@@ -886,7 +887,7 @@ def _tile_reduce_axis_transposed(
     copies: list[Stmt] = []
     for r in range(reg):
         copies.extend(_replicate(rloop.body, r, k_ways, axis, masked, protected, stream_identity))
-    strided = StridedLoop(axis=axis, start=start, step=Literal(stride, "int"), body=Body(tuple(copies)), unroll=rloop.unroll)
+    strided = StridedLoop(axis=axis, start=start, step=Literal(stride, "int"), body=Body(tuple(copies)), unroll=_lane_unroll(axis, stride))
     strided = strided.substitute(subst)
 
     merge: list[Stmt] = [st for r in range(1, reg) for st in merge_stmts(op, tuple(f"{n}__r{r}" for n in view.states))]
@@ -902,6 +903,12 @@ def _tile_reduce_axis_transposed(
 
     lanes_axes = ((k_co,) if k_co is not None else ()) + (n_lane,)
     return [], [*(s.substitute(subst) for s in hoisted), strided, *merge], tail_stmts, lanes_axes
+
+
+def _lane_unroll(axis: Axis, stride: int) -> bool:
+    """Whether a loop that strides a static ``axis`` by ``stride`` lanes unrolls: each lane runs only
+    ``ceil(extent / stride)`` trips, so a short one unrolls and its loads are all in flight at once."""
+    return axis.extent.is_static and unroll_ok_n(-(-axis.extent.as_static() // stride), 16)
 
 
 def _strided_fold(op: Fold, rloop, plan, ctx: Ctx, lane: Axis | None) -> list[Stmt]:
@@ -950,7 +957,7 @@ def _strided_fold(op: Fold, rloop, plan, ctx: Ctx, lane: Axis | None) -> list[St
     copies: list[Stmt] = []
     for r in range(reg):
         copies.extend(_replicate(rloop.body, r, coop, axis, masked, protected, stream_identity))
-    strided = StridedLoop(axis=axis, start=start, step=Literal(stride, "int"), body=Body(tuple(copies)), unroll=rloop.unroll)
+    strided = StridedLoop(axis=axis, start=start, step=Literal(stride, "int"), body=Body(tuple(copies)), unroll=_lane_unroll(axis, stride))
 
     # The carrier-driven partial merge: the REG-tree fold of the ``reg`` ILP copies into the survivor
     # (copy 0's names) + (when threads cooperate) the cross-thread combine, reassigning the carried
@@ -1002,7 +1009,7 @@ def _lane_close(tail: list[Stmt], lane: Axis | None, coop: int, ctx: Ctx, out_va
         body_tail = with_store(tail, ctx.output, ctx.grid, out_val)
     elif any(isinstance(s, Loop) and not s.is_reduce for s in tail):
         body_tail = [
-            StridedLoop(axis=s.axis, start=Var(lane.name), step=Literal(coop, "int"), body=s.body, unroll=s.unroll)
+            StridedLoop(axis=s.axis, start=Var(lane.name), step=Literal(coop, "int"), body=s.body, unroll=_lane_unroll(s.axis, coop))
             if isinstance(s, Loop) and not s.is_reduce
             else s
             for s in tail
