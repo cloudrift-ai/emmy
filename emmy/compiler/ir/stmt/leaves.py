@@ -927,7 +927,7 @@ class Select(Stmt):
             raise ValueError("Select.branches must be non-empty")
 
     def deps(self) -> tuple[str, ...]:
-        return tuple(dict.fromkeys(name for branch in self.branches for name in (branch.value, *sorted(branch.select.free_vars()))))
+        return tuple(b.value for b in self.branches)
 
     def defines(self) -> tuple[str, ...]:
         return (self.name,)

@@ -13,7 +13,7 @@ from dataclasses import dataclass, replace
 
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.stmt.base import pretty_body
-from emmy.compiler.ir.stmt.body import Body, _exposed_defines
+from emmy.compiler.ir.stmt.body import Body, _exposed_defines, free_names
 from emmy.compiler.ir.stmt.leaves import Assign, Load
 
 
@@ -112,7 +112,7 @@ class Lambda:
         # are coordinates is the binder's knowledge (a ``Fold`` reads them as its free coordinates
         # past the operand binding); a bare lambda cannot tell. :meth:`closing` FORMS a closed
         # lambda; this only refuses.
-        free = self.body.ssa_uses - defined
+        free = set().union(*(free_names(stmt) for stmt in self.body)) - defined
         if free:
             raise ValueError(
                 f"Lambda body reads {sorted(free)} it does not bind. Pass them as params — "
@@ -141,7 +141,7 @@ class Lambda:
         # Reads the body does not define, plus any RESULT it does not define either: a write may
         # pass an enclosing value straight through (``o[j] = acc`` over an already-reduced
         # accumulator), and that result has no def to name, so it binds as a param like any read.
-        residual = set(body.ssa_uses)
+        residual = set().union(*(free_names(stmt) for stmt in body))
         residual |= set(results)
         return cls(params=(*params, *sorted(residual - bound)), body=body, results=tuple(results))
 
