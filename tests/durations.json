@@ -1,4 +1,5 @@
 {
+ "tests/serving/generation/test_gen_runner_gpu.py::test_moe_expert_program_takes_the_widest_admitted_step@cuda": 9.25,
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[gemma-4-12B-it/rtx5090_sm120.yaml/post1.k_linear_mean_reduce_97b2ad.m1.e0724c29b469]": 1.02,
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[gemma-4-12B-it/rtx5090_sm120.yaml/post1-global.k_linear_mean_reduce_9c8af6.m1.fm.b4640069a50f#2]": 0.95,
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[gemma-4-12B-it/rtx5090_sm120.yaml/post1-global.k_linear_mean_reduce_9c8af6.m1.b4640069a50f]": 0.8,
