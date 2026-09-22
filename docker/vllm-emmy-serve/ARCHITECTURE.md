@@ -152,7 +152,7 @@ not regress, so that selected shape must converge and pass pack-HIT plus zero-re
   warm-shape override outside that same envelope. Without it the audit derives every warm width plus symbolic.
 - `serve.sh` — the frozen generative serve invocation (the arg set `emmy serve --generate` builds: `--runner
   generate --dtype float16 --hf-overrides EmmyGenModel`, the `FULL_DECODE_ONLY` whole-step decode-cudagraph
-  compilation-config with the forced fused `rotary_embedding` CustomOp, `--no-enable-prefix-caching`, + the
+  compilation-config (its fused `rotary_embedding` CustomOp is now redundant), `--no-enable-prefix-caching`, + the
   `SERVE_*` config; keep in sync with `_gen_graph_args` / `build_serve_cmd` in `emmy/commands/serve.py`). What the
   CLI decides by probing the checkpoint, this script reads from the config, because the config is what the bake
   seals: `SERVE_QUANT=exl3` adds `"quantization_config": null` beside the architectures override (vLLM has no EXL3

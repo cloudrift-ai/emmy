@@ -39,6 +39,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from vllm.distributed import get_pp_group, get_tp_group
 from vllm.distributed.utils import get_pp_indices
+from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.attention import (
     _encode_layer_name,
@@ -109,16 +110,31 @@ class _BoundedYaRNScalingRotaryEmbedding(YaRNScalingRotaryEmbedding):
         return torch.cat((cos, sin), dim=-1)
 
 
+def _eager_dispatch(rope):
+    """Dispatch ``rope`` the way vLLM does when nothing compiles the model, whatever
+    ``--compilation-config`` says. The plugin runs its forward eagerly inside the cudagraph, but
+    under vLLM's default inductor mode ``custom_ops`` is ``none``, so CustomOp hands out
+    ``forward_native`` for inductor to fuse — and nothing ever does: on Gemma 4 decode that is 17
+    small kernels per layer, 0.8 ms per step. ``enforce_enable`` is vLLM's own per-instance
+    override; re-running the dispatch with it set selects the fused in-place kernel."""
+    if isinstance(rope, CustomOp):
+        rope._enforce_enable = True
+        rope._forward_method = rope.dispatch_forward(compile_native=False)
+    return rope
+
+
 def _get_rope(head_dim, max_position, rope_parameters, dtype):
     """Build one dtype-correct RoPE whose cache is bounded by the served context length."""
     rope_parameters = rope_parameters or {}
     if rope_parameters.get("rope_type", "default") != "yarn" or "mrope_section" in rope_parameters:
-        return get_rope(
-            head_dim,
-            max_position=max_position,
-            rope_parameters=rope_parameters,
-            is_neox_style=True,
-            dtype=dtype,
+        return _eager_dispatch(
+            get_rope(
+                head_dim,
+                max_position=max_position,
+                rope_parameters=rope_parameters,
+                is_neox_style=True,
+                dtype=dtype,
+            )
         )
 
     partial_rotary_factor = rope_parameters.get("partial_rotary_factor", 1.0)
@@ -130,16 +146,18 @@ def _get_rope(head_dim, max_position, rope_parameters, dtype):
         for key, value in rope_parameters.items()
         if key in ("extrapolation_factor", "attn_factor", "beta_fast", "beta_slow", "apply_yarn_scaling", "truncate")
     }
-    return _BoundedYaRNScalingRotaryEmbedding(
-        head_dim,
-        rotary_dim,
-        rope_parameters["original_max_position_embeddings"],
-        rope_parameters.get("rope_theta", 10000),
-        True,
-        rope_parameters["factor"],
-        dtype,
-        cache_max_position=max_position,
-        **extra_kwargs,
+    return _eager_dispatch(
+        _BoundedYaRNScalingRotaryEmbedding(
+            head_dim,
+            rotary_dim,
+            rope_parameters["original_max_position_embeddings"],
+            rope_parameters.get("rope_theta", 10000),
+            True,
+            rope_parameters["factor"],
+            dtype,
+            cache_max_position=max_position,
+            **extra_kwargs,
+        )
     )
 
 
