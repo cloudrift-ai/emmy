@@ -32,13 +32,13 @@ LD_PRELOAD=/usr/local/cuda-12.9/lib64/libnvrtc.so.12 emmy tune ...
 
 The torch wheel itself is a second, separate pre-Turing trap: the default `+cu130` build carries no `sm_70` kernels at
 all, so the reference side of every accuracy check and every `--bench-backends eager,tcompile` comparison dies with
-`no kernel image is available for execution on the device`. The newest build that still ships Volta is `2.9.1+cu126`:
+`no kernel image is available for execution on the device`. The `2.13.0+cu126` build includes Volta kernels:
 
 ```bash
-pip install --force-reinstall "torch==2.9.1+cu126" --index-url https://download.pytorch.org/whl/cu126
+pip install --force-reinstall "torch==2.13.0+cu126" --index-url https://download.pytorch.org/whl/cu126
 ```
 
-Ask for the `+cu126` local version explicitly — a bare `torch==2.9.1` matches the already-installed `+cu130` wheel and
+Ask for the `+cu126` local version explicitly — a bare `torch==2.13.0` matches the already-installed `+cu130` wheel and
 pip reports the requirement satisfied without changing anything.
 
 Commands that compile or launch kernels locally check this at startup and abort with that remedy rather than letting

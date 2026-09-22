@@ -1,72 +1,102 @@
 compute_cap:
-- 12
+- 9
 - 0
 programs:
-- inputs: [x, wg, wu]
-  outputs: [o]
+- inputs: [x0, x1, x2]
+  outputs: [mul]
   nodes:
-  - id: wg
+  - id: x0
     op: input
-    outputs: [[wg, f16, [512, 512]]]
-  - id: wu
+    outputs: [[x0, f16, [1, 512, 1024]]]
+  - id: x1
     op: input
-    outputs: [[wu, f16, [512, 512]]]
-  - id: x
-    op: input
-    outputs: [[x, f16, [128, 512]]]
-  - id: gate
+    outputs: [[x1, f16, [3072, 1024]]]
+  - id: linear
     op: torch.linear
     attrs: {has_bias: false}
-    inputs: [x, wg]
-    outputs: [[gate, f16, [128, 512]]]
-  - id: sg
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [1, 512, 3072]]]
+  - id: silu
     op: tensor.elementwise
     attrs: {op: {__elementwise__: silu}}
-    inputs: [gate]
-    outputs: [[sg, f16, [128, 512]]]
-  - id: up
+    inputs: [linear]
+    outputs: [[silu, f16, [1, 512, 3072]]]
+  - id: x2
+    op: input
+    outputs: [[x2, f16, [3072, 1024]]]
+  - id: linear_1
     op: torch.linear
     attrs: {has_bias: false}
-    inputs: [x, wu]
-    outputs: [[up, f16, [128, 512]]]
-  - id: o
+    inputs: [x0, x2]
+    outputs: [[linear_1, f16, [1, 512, 3072]]]
+  - id: mul
     op: tensor.elementwise
     attrs: {op: {__elementwise__: multiply}}
-    inputs: [sg, up]
-    outputs: [[o, f16, [128, 512]]]
+    inputs: [silu, linear_1]
+    outputs: [[mul, f16, [1, 512, 3072]]]
 configs:
 - program: 0
   target:
     loop: 0
     origins:
-    - gate
-    - o
-    - sg
-    - up
+    - linear
+    - linear_1
+    - mul
+    - silu
   realizations:
-  - name: k_linear_reduce_10fc11
+  - name: gate_up_silu-s512
     bindings: {}
     pins:
       FAST_MATH: false
-      PLACE: fuse
+    kernel_set:
+    - gate_up_silu-s512.aa2f50509a28
+  - name: gate_up_silu-s512.aa2f50509a28
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      PLACE: cut
+    identity: aa2f50509a28db2f6d627e81699762413fd04b8d151458547b223fafd5e2b365
+    measurements:
+      emmy_us: 27.34324595965186
+      reference_us: 26.489717503261634
+      reference_backend: same-input-greedy
+  - name: gate_up_silu-s512.3d38ad01de77
+    bindings: {}
+    pins:
+      FAST_MATH: false
     knobs:
       WORK: w2x2
-      TILE: mma_m16n8k16_f16_f32/f2x2/k2
+      TILE: mma_m16n8k16_f16_f32/f2x4/k4
       REDUCE: ''
-      STAGE: d1/smem
+      STAGE: d2/smem
       RASTER: ''
-    identity: 870cfb8028650430359d1b563334582e7bae8caf7738a30b66803a18ce552229
-    latency:
-      NVIDIA GeForce RTX 5090:
-        emmy_us: 9.945600032806396
+    identity: 3d38ad01de778014023be9c1823dc9d21b5ea0533d0e14fb3d139593feb24a68
+    measurements:
+      emmy_us: 23.612189860571
+      reference_us: 22.848762217022124
+      reference_backend: same-input-greedy
+  - name: gate_up_silu-s512.b02a70856d86
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      RASTER: ''
+    identity: b02a70856d860305811d2d0d8dc428b578ba2bdd4803abcb022e7618d6d87aec
+    measurements:
+      emmy_us: 3.7310560990808606
+      reference_us: 3.6409552862395103
+      reference_backend: same-input-greedy
 loops:
-- inputs: [wg, wu, x]
-  outputs: [o]
+- inputs: [x0, x1, x2]
+  outputs: [mul]
   nodes:
-  - id: sg_one
+  - id: silu_one
     op: constant
     attrs:
-      name: sg_one
+      name: silu_one
       value: 1.0
       context_value: null
       load_ops: {__tuple__: []}
@@ -75,17 +105,17 @@ loops:
       source_shape: null
       source_dtype: null
       source_graph: null
-    outputs: [[sg_one, f32, [1]]]
-  - id: wg
+    outputs: [[silu_one, f32, [1]]]
+  - id: x0
     op: input
-    outputs: [[wg, f16, [512, 512]]]
-  - id: wu
+    outputs: [[x0, f16, [1, 512, 1024]]]
+  - id: x1
     op: input
-    outputs: [[wu, f16, [512, 512]]]
-  - id: x
+    outputs: [[x1, f16, [3072, 1024]]]
+  - id: x2
     op: input
-    outputs: [[x, f16, [128, 512]]]
-  - id: o
+    outputs: [[x2, f16, [3072, 1024]]]
+  - id: mul
     op: loop
     attrs:
       body:
@@ -93,48 +123,48 @@ loops:
         - class: Load
           fields:
             names: {tuple: [in0]}
-            input: sg_one
+            input: silu_one
             index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
             dtype: null
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 128}, window: null}}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 512}, window: null}}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 512}, window: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 3072}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 512}, window: null}}
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 1024}, window: null}}
                         body:
                           body:
                           - class: Load
                             fields:
                               names: {tuple: [in1]}
-                              input: wg
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
+                              input: x0
+                              index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a0}}, {expr: {var: a2}}]}
                               dtype: null
                           - class: Load
                             fields:
                               names: {tuple: [in2]}
-                              input: wu
+                              input: x1
                               index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
                               dtype: null
+                          - class: Assign
+                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in1, in2]}, dtype: {dtype: f32}}
+                          - class: Accum
+                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
                           - class: Load
                             fields:
                               names: {tuple: [in3]}
-                              input: x
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
+                              input: x2
+                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
                               dtype: null
                           - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in1, in3]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                          - class: Assign
-                            fields: {name: v1, op: {elementwise: multiply}, args: {tuple: [in2, in3]}, dtype: {dtype: f32}}
+                            fields: {name: v1, op: {elementwise: multiply}, args: {tuple: [in1, in3]}, dtype: {dtype: f32}}
                           - class: Accum
                             fields: {name: acc1, value: v1, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
                         unroll: false
@@ -156,8 +186,8 @@ loops:
                       fields: {name: v9, op: {elementwise: multiply}, args: {tuple: [v3, v8]}, dtype: null}
                     - class: Write
                       fields:
-                        output: o
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
+                        output: mul
+                        index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a0}}, {expr: {var: a1}}]}
                         values: {tuple: [v9]}
                         value_dtype: null
                         atomic: false
@@ -166,6 +196,8 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_reduce_79fc56
-    inputs: [sg_one, x, wg, wu]
-    outputs: [[o, f16, [128, 512]]]
+      name: k_linear_reduce_e90f3f
+    inputs: [silu_one, x1, x0, x2]
+    outputs: [[mul, f16, [1, 512, 3072]]]
+gpu_name: NVIDIA H100 80GB HBM3
+model: Qwen/Qwen3-0.6B@c1899de289a04d12100db370d81485cdf75e47ca

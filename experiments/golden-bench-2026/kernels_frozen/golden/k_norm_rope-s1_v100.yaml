@@ -1,0 +1,633 @@
+compute_cap:
+- 7
+- 0
+programs:
+- inputs: [x0, x1, x2, x3]
+  outputs: [add_1]
+  nodes:
+  - id: add_c1
+    op: constant
+    attrs:
+      name: add_c1
+      value: 1.0e-06
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[add_c1, f32, [1]]]
+  - id: add_c1_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 1}, {__dim__: 8}, {__dim__: 1}]}
+      sources: {__tuple__: [{__index_source__: {input_idx: 0, coord_map: [{var: out_coord_3}], select: null}}]}
+    inputs: [add_c1]
+    outputs: [[add_c1_bc, f32, [1, 1, 8, 1]]]
+  - id: cat_c2
+    op: constant
+    attrs:
+      name: cat_c2
+      value: -1.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[cat_c2, f16, [1]]]
+  - id: slice_1_c1
+    op: constant
+    attrs:
+      name: slice_1_c1
+      value: 3.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_1_c1, f16, [1]]]
+  - id: slice_1_c2
+    op: constant
+    attrs:
+      name: slice_1_c2
+      value: 64.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_1_c2, f16, [1]]]
+  - id: slice_1_c3
+    op: constant
+    attrs:
+      name: slice_1_c3
+      value: 9.223372036854776e+18
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_1_c3, f16, [1]]]
+  - id: slice_2_c1
+    op: constant
+    attrs:
+      name: slice_2_c1
+      value: 3.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_2_c1, f16, [1]]]
+  - id: slice_2_c2
+    op: constant
+    attrs:
+      name: slice_2_c2
+      value: 0.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_2_c2, f16, [1]]]
+  - id: slice_2_c3
+    op: constant
+    attrs:
+      name: slice_2_c3
+      value: 64.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[slice_2_c3, f16, [1]]]
+  - id: transpose_c1
+    op: constant
+    attrs:
+      name: transpose_c1
+      value: 1.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[transpose_c1, f16, [1]]]
+  - id: transpose_c2
+    op: constant
+    attrs:
+      name: transpose_c2
+      value: 2.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[transpose_c2, f16, [1]]]
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 1, 8, 128]]]
+  - id: to
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 1}, {__dim__: 8}, {__dim__: 128}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {var: out_coord_1}
+            - {var: out_coord_2}
+            - {var: out_coord_3}
+            select: null
+    inputs: [x0]
+    outputs: [[to, f32, [1, 1, 8, 128]]]
+  - id: to_1
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 1}, {__dim__: 8}, {__dim__: 128}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {var: out_coord_1}
+            - {var: out_coord_2}
+            - {var: out_coord_3}
+            select: null
+    inputs: [x0]
+    outputs: [[to_1, f32, [1, 1, 8, 128]]]
+  - id: square
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: square}}
+    inputs: [to_1]
+    outputs: [[square, f32, [1, 1, 8, 128]]]
+  - id: mean
+    op: torch.mean
+    attrs: {axis: -1}
+    inputs: [square]
+    outputs: [[mean, f32, [1, 1, 8, 1]]]
+  - id: add
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [mean, add_c1_bc]
+    outputs: [[add, f32, [1, 1, 8, 1]]]
+  - id: rsqrt
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: rsqrt}}
+    inputs: [add]
+    outputs: [[rsqrt, f32, [1, 1, 8, 1]]]
+  - id: rsqrt_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 1}, {__dim__: 8}, {__dim__: 128}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {var: out_coord_1}
+            - {var: out_coord_2}
+            - {literal: {value: 0, dtype: int}}
+            select: null
+    inputs: [rsqrt]
+    outputs: [[rsqrt_bc, f32, [1, 1, 8, 128]]]
+  - id: mul
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [to, rsqrt_bc]
+    outputs: [[mul, f32, [1, 1, 8, 128]]]
+  - id: to_2
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 1}, {__dim__: 8}, {__dim__: 128}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {var: out_coord_1}
+            - {var: out_coord_2}
+            - {var: out_coord_3}
+            select: null
+    inputs: [mul]
+    outputs: [[to_2, f16, [1, 1, 8, 128]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [128]]]
+  - id: x1_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 1}, {__dim__: 8}, {__dim__: 128}]}
+      sources: {__tuple__: [{__index_source__: {input_idx: 0, coord_map: [{var: out_coord_3}], select: null}}]}
+    inputs: [x1]
+    outputs: [[x1_bc, f16, [1, 1, 8, 128]]]
+  - id: mul_1
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [to_2, x1_bc]
+    outputs: [[mul_1, f16, [1, 1, 8, 128]]]
+  - id: transpose
+    op: torch.transpose
+    attrs: {axes: {__tuple__: [1, 2]}}
+    inputs: [mul_1]
+    outputs: [[transpose, f16, [1, 8, 1, 128]]]
+  - id: slice_1
+    op: torch.slice
+    attrs: {shape: {__tuple__: [1, 8, 1, 64]}, dim: 3, start: 64}
+    inputs: [transpose, slice_1_c1, slice_1_c2, slice_1_c3]
+    outputs: [[slice_1, f16, [1, 8, 1, 64]]]
+  - id: neg
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: negative}}
+    inputs: [slice_1]
+    outputs: [[neg, f16, [1, 8, 1, 64]]]
+  - id: slice_2
+    op: torch.slice
+    attrs: {shape: {__tuple__: [1, 8, 1, 64]}, dim: 3, start: 0}
+    inputs: [transpose, slice_2_c1, slice_2_c2, slice_2_c3]
+    outputs: [[slice_2, f16, [1, 8, 1, 64]]]
+  - id: cat
+    op: torch.cat
+    inputs: [neg, slice_2, cat_c2]
+    outputs: [[cat, f16, [1, 8, 1, 128]]]
+  - id: x2
+    op: input
+    outputs: [[x2, f16, [1, 1, 1, 128]]]
+  - id: x2_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 8}, {__dim__: 1}, {__dim__: 128}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_2}
+            - {var: out_coord_3}
+            select: null
+    inputs: [x2]
+    outputs: [[x2_bc, f16, [1, 8, 1, 128]]]
+  - id: mul_2
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [transpose, x2_bc]
+    outputs: [[mul_2, f16, [1, 8, 1, 128]]]
+  - id: x3
+    op: input
+    outputs: [[x3, f16, [1, 1, 1, 128]]]
+  - id: x3_bc
+    op: tensor.index_map
+    attrs:
+      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 8}, {__dim__: 1}, {__dim__: 128}]}
+      sources:
+        __tuple__:
+        - __index_source__:
+            input_idx: 0
+            coord_map:
+            - {var: out_coord_0}
+            - {literal: {value: 0, dtype: int}}
+            - {var: out_coord_2}
+            - {var: out_coord_3}
+            select: null
+    inputs: [x3]
+    outputs: [[x3_bc, f16, [1, 8, 1, 128]]]
+  - id: mul_3
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [cat, x3_bc]
+    outputs: [[mul_3, f16, [1, 8, 1, 128]]]
+  - id: add_1
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [mul_2, mul_3]
+    outputs: [[add_1, f16, [1, 8, 1, 128]]]
+configs:
+- program: 0
+  target:
+    loop: 0
+    origins:
+    - add
+    - add_1
+    - add_c1_bc
+    - cat
+    - mean
+    - mul
+    - mul_1
+    - mul_2
+    - mul_3
+    - neg
+    - rsqrt
+    - rsqrt_bc
+    - slice_1
+    - slice_2
+    - square
+    - to
+    - to_1
+    - to_2
+    - transpose
+    - x1_bc
+    - x2_bc
+    - x3_bc
+  realizations:
+  - name: k_norm_rope-s1
+    bindings: {}
+    pins:
+      FAST_MATH: false
+  - name: k_norm_rope-s1.b74b271c401c
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t32
+      REDUCE: coop
+      RASTER: ''
+    identity: b74b271c401c03fb212cee9e69beae46a728f31ad029b75385cb6f144a45e752
+    measurements:
+      emmy_us: 2.7922027547594523
+      reference_us: 2.8044943059428356
+      reference_backend: same-input-greedy
+loops:
+- inputs: [x0, x1, x2, x3]
+  outputs: [add_1]
+  nodes:
+  - id: add_c1
+    op: constant
+    attrs:
+      name: add_c1
+      value: 1.0e-06
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[add_c1, f32, [1]]]
+  - id: mean_count
+    op: constant
+    attrs:
+      name: mean_count
+      value: 128.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[mean_count, f32, [1]]]
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 1, 8, 128]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [128]]]
+  - id: x2
+    op: input
+    outputs: [[x2, f16, [1, 1, 1, 128]]]
+  - id: x3
+    op: input
+    outputs: [[x3, f16, [1, 1, 1, 128]]]
+  - id: add_1
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Load
+          fields:
+            names: {tuple: [in0]}
+            input: add_c1
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Load
+          fields:
+            names: {tuple: [in1]}
+            input: mean_count
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Assign
+          fields: {name: v0, op: {elementwise: reciprocal}, args: {tuple: [in1]}, dtype: null}
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 8}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 128}, window: null}}
+                  body:
+                    body:
+                    - class: Load
+                      fields:
+                        names: {tuple: [in2]}
+                        input: x0
+                        index:
+                          tuple:
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {var: a0}}
+                          - {expr: {var: a1}}
+                        dtype: null
+                    - class: Assign
+                      fields: {name: v1, op: {elementwise: copy}, args: {tuple: [in2]}, dtype: {dtype: f32}}
+                    - {class: Assign, fields: {name: v2, op: {elementwise: square}, args: {tuple: [v1]}, dtype: null}}
+                    - class: Accum
+                      fields: {name: acc0, value: v2, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
+                  unroll: false
+                  seed: true
+              - class: Assign
+                fields: {name: v3, op: {elementwise: multiply}, args: {tuple: [acc0, v0]}, dtype: null}
+              - class: Assign
+                fields: {name: v4, op: {elementwise: add}, args: {tuple: [in0, v3]}, dtype: null}
+              - {class: Assign, fields: {name: v5, op: {elementwise: rsqrt}, args: {tuple: [v4]}, dtype: null}}
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a2, extent: {dim: 128}, window: null}}
+                  body:
+                    body:
+                    - class: Load
+                      fields:
+                        names: {tuple: [in3]}
+                        input: x1
+                        index:
+                          tuple:
+                          - expr:
+                              binary:
+                                op: +
+                                left: {literal: {value: 64, dtype: int}}
+                                right:
+                                  ternary:
+                                    cond: {binary: {op: <, left: {var: a2}, right: {literal: {value: 64, dtype: int}}}}
+                                    if_true: {var: a2}
+                                    if_false: {literal: {value: 0, dtype: int}}
+                        dtype: null
+                    - class: Load
+                      fields:
+                        names: {tuple: [in4]}
+                        input: x2
+                        index:
+                          tuple:
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {var: a2}}
+                        dtype: null
+                    - class: Load
+                      fields:
+                        names: {tuple: [in5]}
+                        input: x3
+                        index:
+                          tuple:
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {var: a2}}
+                        dtype: null
+                    - class: Load
+                      fields:
+                        names: {tuple: [in6]}
+                        input: x0
+                        index:
+                          tuple:
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {var: a0}}
+                          - expr:
+                              binary:
+                                op: +
+                                left: {literal: {value: 64, dtype: int}}
+                                right:
+                                  ternary:
+                                    cond: {binary: {op: <, left: {var: a2}, right: {literal: {value: 64, dtype: int}}}}
+                                    if_true: {var: a2}
+                                    if_false: {literal: {value: 0, dtype: int}}
+                        dtype: null
+                    - class: Assign
+                      fields: {name: v6, op: {elementwise: copy}, args: {tuple: [in6]}, dtype: {dtype: f32}}
+                    - class: Assign
+                      fields: {name: v7, op: {elementwise: multiply}, args: {tuple: [v5, v6]}, dtype: null}
+                    - class: Assign
+                      fields: {name: v8, op: {elementwise: copy}, args: {tuple: [v7]}, dtype: {dtype: f16}}
+                    - class: Assign
+                      fields: {name: v9, op: {elementwise: multiply}, args: {tuple: [in3, v8]}, dtype: null}
+                    - class: Assign
+                      fields: {name: v10, op: {elementwise: negative}, args: {tuple: [v9]}, dtype: null}
+                    - class: Load
+                      fields:
+                        names: {tuple: [in7]}
+                        input: x0
+                        index:
+                          tuple:
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {var: a0}}
+                          - expr:
+                              ternary:
+                                cond: {binary: {op: <, left: {var: a2}, right: {literal: {value: 64, dtype: int}}}}
+                                if_true: {literal: {value: 0, dtype: int}}
+                                if_false: {binary: {op: +, left: {var: a2}, right: {literal: {value: -64, dtype: int}}}}
+                        dtype: null
+                    - class: Assign
+                      fields: {name: v11, op: {elementwise: copy}, args: {tuple: [in7]}, dtype: {dtype: f32}}
+                    - class: Assign
+                      fields: {name: v12, op: {elementwise: multiply}, args: {tuple: [v11, v5]}, dtype: null}
+                    - class: Assign
+                      fields: {name: v13, op: {elementwise: copy}, args: {tuple: [v12]}, dtype: {dtype: f16}}
+                    - class: Load
+                      fields:
+                        names: {tuple: [in8]}
+                        input: x0
+                        index:
+                          tuple:
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {var: a0}}
+                          - {expr: {var: a2}}
+                        dtype: null
+                    - class: Assign
+                      fields: {name: v14, op: {elementwise: copy}, args: {tuple: [in8]}, dtype: {dtype: f32}}
+                    - class: Assign
+                      fields: {name: v15, op: {elementwise: multiply}, args: {tuple: [v14, v5]}, dtype: null}
+                    - class: Assign
+                      fields: {name: v16, op: {elementwise: copy}, args: {tuple: [v15]}, dtype: {dtype: f16}}
+                    - class: Load
+                      fields:
+                        names: {tuple: [in9]}
+                        input: x1
+                        index:
+                          tuple:
+                          - expr:
+                              ternary:
+                                cond: {binary: {op: <, left: {var: a2}, right: {literal: {value: 64, dtype: int}}}}
+                                if_true: {literal: {value: 0, dtype: int}}
+                                if_false: {binary: {op: +, left: {var: a2}, right: {literal: {value: -64, dtype: int}}}}
+                        dtype: null
+                    - class: Assign
+                      fields: {name: v17, op: {elementwise: multiply}, args: {tuple: [in9, v13]}, dtype: null}
+                    - class: Load
+                      fields: {names: {tuple: [in10]}, input: x1, index: {tuple: [{expr: {var: a2}}]}, dtype: null}
+                    - class: Assign
+                      fields: {name: v18, op: {elementwise: multiply}, args: {tuple: [in10, v16]}, dtype: null}
+                    - class: Assign
+                      fields: {name: v19, op: {elementwise: multiply}, args: {tuple: [in4, v18]}, dtype: null}
+                    - class: Select
+                      fields:
+                        name: v20
+                        branches:
+                          tuple:
+                          - class: SelectBranch
+                            fields:
+                              value: v10
+                              select: {expr: {binary: {op: <, left: {var: a2}, right: {literal: {value: 64, dtype: int}}}}}
+                          - {class: SelectBranch, fields: {value: v17, select: {expr: {literal: {value: true, dtype: bool}}}}}
+                    - class: Assign
+                      fields: {name: v21, op: {elementwise: multiply}, args: {tuple: [in5, v20]}, dtype: null}
+                    - class: Assign
+                      fields: {name: v22, op: {elementwise: add}, args: {tuple: [v19, v21]}, dtype: null}
+                    - class: Write
+                      fields:
+                        output: add_1
+                        index:
+                          tuple:
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {var: a0}}
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {var: a2}}
+                        values: {tuple: [v22]}
+                        value_dtype: null
+                        atomic: false
+                        swizzle: NONE
+                  unroll: false
+                  seed: true
+            unroll: false
+            seed: true
+      name: k_mean_28a53a
+    inputs: [mean_count, add_c1, x0, x1, x3, x2]
+    outputs: [[add_1, f16, [1, 8, 1, 128]]]
+gpu_name: Tesla V100-SXM2-16GB
+model: Qwen/Qwen3-0.6B@c1899de289a04d12100db370d81485cdf75e47ca

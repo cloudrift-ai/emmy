@@ -501,6 +501,10 @@ The optional readable-source fold keeps a single-use `Assign` named when any arg
 the result dtype, so the target-aware `Assign.render` path remains responsible for conversions such as
 `__half2float`.
 
+`Select` uses the common dtype of its branch values, and type propagation gives its consumers that same dtype.
+Selecting between two FP16 values must preserve the rounding of a subsequent FP16 product; promoting the selection
+to FP32 would silently change the computation.
+
 Dependence cones (`ir/stmt/body.py`): `Body.backward_cone(roots)` builds a `Cone` —
 the subset of the body's immediate stmts closed under SSA dependence (a wrapper joins as a unit; internally-bound
 axes excluded), plus `external_reads`, the names read from outside (axis vars and enclosing/sibling scopes alike).

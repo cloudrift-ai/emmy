@@ -14,12 +14,12 @@ from emmy.compiler.dtype import F16, F32, U32
 from emmy.compiler.graph import Node, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var
+from emmy.compiler.ir.kernel import KernelOp
+from emmy.compiler.ir.stmt import RenderCtx
 from emmy.compiler.ir.stmt.blocks import Loop
 from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.leaves import Assign, Load, Select, SelectBranch, Write
 from emmy.compiler.ir.stmt.normalize import simplify_body
-from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import RenderCtx
 
 ELSE = Literal(True, "bool")
 
@@ -62,7 +62,9 @@ def test_an_undecided_branch_is_kept_whole() -> None:
     assert [branch.value for branch in select.branches] == ["cone", "far"]
 
 
-@pytest.mark.parametrize(("left", "right", "result", "ctype"), [(F16, F16, F16, "__half"), (F16, F32, F32, "float"), (U32, U32, U32, "unsigned int")])
+@pytest.mark.parametrize(
+    ("left", "right", "result", "ctype"), [(F16, F16, F16, "__half"), (F16, F32, F32, "float"), (U32, U32, U32, "unsigned int")]
+)
 def test_select_preserves_the_common_type_in_its_consumers(left, right, result, ctype):
     """A half concatenation must not promote a following product and drop its half rounding."""
     index = (Literal(0, "int"),)
@@ -72,8 +74,15 @@ def test_select_preserves_the_common_type_in_its_consumers(left, right, result, 
         name="selected_product",
         inputs={"lhs": Tensor("lhs", (1,), left), "rhs": Tensor("rhs", (1,), right)},
         outputs={"out": output},
-        body=Body((Load(name="a", input="lhs", index=index), Load(name="b", input="rhs", index=index), selection,
-                   Assign(name="product", op="multiply", args=("chosen", "a")), Write(output="out", index=index, value="product"))),
+        body=Body(
+            (
+                Load(name="a", input="lhs", index=index),
+                Load(name="b", input="rhs", index=index),
+                selection,
+                Assign(name="product", op="multiply", args=("chosen", "a")),
+                Write(output="out", index=index, value="product"),
+            )
+        ),
     )
     stamped = import_module("emmy.compiler.pipeline.passes.lowering.kernel.030_stamp_types").rewrite(
         Node(id="out", op=op, inputs=["lhs", "rhs"], outputs=(output,))

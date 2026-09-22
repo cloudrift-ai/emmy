@@ -431,6 +431,9 @@ FP16/BF16 matmul decomposition declares its product at FP32 before reduction. Wi
 precision or overflows at each half-precision multiply, even when the dot product is representable. The explicit
 product dtype survives lifting and fusion, so scalar and tensor-core schedules implement the same wide product.
 
+SiLU widens FP16/BF16 inputs to FP32, computes `x / (1 + exp(-x))`, and narrows once to the output dtype. Replacing
+division with multiplication by a separately rounded reciprocal can change the final FP16 result.
+
 Loop fusion is maximal and schedule-blind: every structurally legal merge is taken to fixpoint before lowering
 considers a kernel boundary. Fusion never asks whether the merged body is recognized, schedulable by an optimized
 tier, or faster than its parts. Nested reductions and multi-statistic compounds are therefore not fusion gates. A

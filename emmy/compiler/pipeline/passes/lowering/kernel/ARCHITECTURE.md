@@ -656,7 +656,8 @@ the two apply paths stay distinct on a coop-K contraction.
 
 ## Kernel-IR peepholes
 
-`030_stamp_types` resolves element dtypes. Integer algebra is always restamped from its typed operands, repairing a
+`030_stamp_types` resolves element dtypes, including the common branch type of a `Select` used by later statements.
+Integer algebra is always restamped from its typed operands, repairing a
 stale float stamp that a structurally cloned, previously untyped body can carry. `050_vectorize_loads` /
 `080_vectorize_stores` /
 `095_interleave_loads` pack/reorder memory ops; `096_pair_ldmatrix_loads` fuses adjacent staged fragment loads. On
