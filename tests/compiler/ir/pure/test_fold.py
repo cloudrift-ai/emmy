@@ -300,7 +300,8 @@ def test_shared_channels_are_lowered_once_across_partial_readers() -> None:
     )
     left = projection((shared,), (Assign(name="left", op="add", args=("acc_a", "acc_b")),))
     right = projection((shared,), (Assign(name="right", op="multiply", args=("acc_b", "acc_c")),))
-    root = projection((left, right), results=("left", "right"))
+    dead = _reduce((slab("dead_value", "unused", "m", "k"),), (Assign(name="dead__v", op="copy", args=("dead_value",)),), "dead")
+    root = projection((left, right, dead), results=("left", "right"))
 
     body = root.lower(axes=SCOPE)
     accumulators = [stmt.name for stmt in body.iter() if isinstance(stmt, Accum)]

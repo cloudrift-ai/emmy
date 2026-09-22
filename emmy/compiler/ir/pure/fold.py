@@ -1155,8 +1155,8 @@ class Fold:
             if taken.get(id(term)) == names:
                 continue
             taken[id(term)] = names
-            narrowed = term.exposing(names)
-            read = narrowed.step().ssa_uses | set(narrowed.exposes)
+            narrowed = term.exposing(names) if names else None
+            read = narrowed.step().ssa_uses | set(narrowed.exposes) if narrowed is not None else set()
             for edge in term.operands:
                 keep = edge.exposes if _writes_under(edge, stored) else tuple(name for name in edge.exposes if name in read)
                 pending.append((edge, keep))
