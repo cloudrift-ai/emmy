@@ -1,0 +1,69 @@
+# Manual schedules for identical complete Qwen3-0.6B operator computations on three exact GPUs.
+command:
+  stage:
+    - emmy
+    - pyproject.toml
+    - Makefile
+    - experiments/golden-bench-2026/kernels_frozen/recipe.yaml
+    - experiments/golden-bench-2026/kernels_frozen/operators.sh
+    - experiments/golden-bench-2026/kernels_frozen/golden
+  strict: true
+  run: |
+    set -euo pipefail
+    cd $repo_dir
+    export PATH=$repo_dir/venv/bin:/usr/local/cuda/bin:$$PATH
+    mkdir -p $task_dir/verification $task_dir/tmp
+    export TMPDIR=$task_dir/tmp
+    finalize() {
+      final_status=$$?
+      trap - EXIT
+      ./venv/bin/pip freeze --all > $task_dir/requirements.freeze.txt || final_status=1
+      printf '%s\n' "$$final_status" > $task_dir/status.txt
+      tar -C $task_dir --exclude='./tmp' --exclude='./cubins' -czf $task_dir.artifacts.tar.gz . || final_status=1
+      mv $task_dir.artifacts.tar.gz $task_dir/artifacts.tar.gz || final_status=1
+      exit "$$final_status"
+    }
+    trap finalize EXIT
+
+    [ -x ./venv/bin/python ] || python3.12 -m venv venv
+    ./venv/bin/pip install "torch==2.13.0+$cuda_build" --index-url https://download.pytorch.org/whl/$cuda_build
+    printf '%s\n' "torch==2.13.0+$cuda_build" > $task_dir/constraints.txt
+    PIP_CONSTRAINT=$task_dir/constraints.txt make setup
+    if [ "$card" = v100 ]; then
+      export LD_PRELOAD=/usr/local/cuda-12.9/lib64/libnvrtc.so.12
+    fi
+    export CUDA_VISIBLE_DEVICES=$gpu_device_ids
+    export EMMY_NVCC_FLAGS= EMMY_KNOBS= EMMY_GOLDEN_FILE=
+    export EMMY_ONLINE_FILE=$task_dir/absent-online.json
+    export EMMY_CUBIN_CACHE=$task_dir/cubins
+    export EMMY_BENCH_COMPILE_TIMEOUT_S=60 EMMY_KERNEL_TIMEOUT_MS=2000 EMMY_FIRST_ITER_TIMEOUT_MS=10000
+    cp $repo_dir/experiments/golden-bench-2026/kernels_frozen/golden/${operator}-s${seq_len}_${card}.yaml $task_dir/working.yaml
+    $repo_dir/experiments/golden-bench-2026/kernels_frozen/operators.sh "$operator" "$seq_len" > $task_dir/operator.txt
+
+    verification_status=0
+    for repeat in 0 1 2 3 4; do
+      export EMMY_TUNE_DB=$task_dir/repeat-$$repeat.db
+      if timeout -k 5 180 ./venv/bin/emmy run --golden $task_dir/working.yaml \
+        --bench --strict --strict-evidence --no-record-evidence --nvcc-flags=--fmad=false \
+        --seed "$$repeat" --warmup 10 --iters 100 --bench-backends eager,tcompile,emmy \
+        --json $task_dir/verification/repeat-$$repeat > $task_dir/repeat-$$repeat.log 2>&1; then
+        repeat_status=0
+      else
+        repeat_status=$$?
+        verification_status=$$repeat_status
+      fi
+      printf '%s\n' "$$repeat_status" > $task_dir/verification/repeat-$$repeat.status
+    done
+    exit "$$verification_status"
+  result_files: [artifacts.tar.gz]
+  timeout: 1800
+
+matrices:
+  cross:
+    seq_len: [1, 512]
+    operator: [rms_norm, q_proj, kv_proj, q_norm_rope, k_norm_rope, attention, o_proj_residual, gate_up_silu, down_proj_residual]
+    deploy.gpu_count: 1
+    zip:
+      card: [v100, a100, h100]
+      cuda_build: [cu126, cu130, cu130]
+      deploy.gpu: ["NVIDIA Tesla V100 SXM2 16GB", "NVIDIA A100 40GB", "NVIDIA H100 80GB"]

@@ -32,13 +32,13 @@ LD_PRELOAD=/usr/local/cuda-12.9/lib64/libnvrtc.so.12 emmy tune ...
 
 The torch wheel itself is a second, separate pre-Turing trap: the default `+cu130` build carries no `sm_70` kernels at
 all, so the reference side of every accuracy check and every `--bench-backends eager,tcompile` comparison dies with
-`no kernel image is available for execution on the device`. The newest build that still ships Volta is `2.9.1+cu126`:
+`no kernel image is available for execution on the device`. The `2.13.0+cu126` build includes Volta kernels:
 
 ```bash
-pip install --force-reinstall "torch==2.9.1+cu126" --index-url https://download.pytorch.org/whl/cu126
+pip install --force-reinstall "torch==2.13.0+cu126" --index-url https://download.pytorch.org/whl/cu126
 ```
 
-Ask for the `+cu126` local version explicitly — a bare `torch==2.9.1` matches the already-installed `+cu130` wheel and
+Ask for the `+cu126` local version explicitly — a bare `torch==2.13.0` matches the already-installed `+cu130` wheel and
 pip reports the requirement satisfied without changing anything.
 
 Commands that compile or launch kernels locally check this at startup and abort with that remedy rather than letting
@@ -70,6 +70,10 @@ emmy trace /models/gemma --serving-twins --serving-config docker/vllm-emmy-serve
 emmy eval golden --golden recipes/gemma-4-12B-it/golden/rtx5090_sm120.yaml \
   --serving-config docker/vllm-emmy-serve/models/gemma-4-12b-it.env
 ```
+
+Fast math is enabled by default. `EMMY_FAST_MATH=0` disables NVCC fast math and the compiler's precision-trading
+optimizations; individual precision pins override that umbrella. For a separate-rounding accuracy diagnostic, add
+`--nvcc-flags=--fmad=false`. That custom flag disables multiply-add contraction without changing the other policies.
 
 Layer-norm-style reduction (two reductions, broadcast subtract, elementwise chain) fused into single kernel:
 

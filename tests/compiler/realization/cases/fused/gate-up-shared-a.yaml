@@ -55,7 +55,7 @@ configs:
       REDUCE: ''
       STAGE: d1/smem
       RASTER: ''
-    identity: 4cee507fb189190ba222b0be1661b84daadac4a3c95516fdbcda4d92c19aa1ec
+    identity: 870cfb8028650430359d1b563334582e7bae8caf7738a30b66803a18ce552229
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 9.945600032806396
@@ -151,16 +151,14 @@ loops:
                     - class: Assign
                       fields: {name: v7, op: {elementwise: add}, args: {tuple: [in0, v6]}, dtype: null}
                     - class: Assign
-                      fields: {name: v8, op: {elementwise: reciprocal}, args: {tuple: [v7]}, dtype: null}
+                      fields: {name: v8, op: {elementwise: divide}, args: {tuple: [v4, v7]}, dtype: {dtype: f16}}
                     - class: Assign
-                      fields: {name: v9, op: {elementwise: multiply}, args: {tuple: [v4, v8]}, dtype: {dtype: f16}}
-                    - class: Assign
-                      fields: {name: v10, op: {elementwise: multiply}, args: {tuple: [v3, v9]}, dtype: null}
+                      fields: {name: v9, op: {elementwise: multiply}, args: {tuple: [v3, v8]}, dtype: null}
                     - class: Write
                       fields:
                         output: o
                         index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [v10]}
+                        values: {tuple: [v9]}
                         value_dtype: null
                         atomic: false
                         swizzle: NONE
@@ -168,6 +166,6 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_reduce_c7f9b7
+      name: k_linear_reduce_79fc56
     inputs: [sg_one, x, wg, wu]
     outputs: [[o, f16, [128, 512]]]

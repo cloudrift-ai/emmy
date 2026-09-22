@@ -69,6 +69,7 @@ def test_pack_path_separates_environments(tmp_path, monkeypatch):
     boot then mismatched its own pack)."""
     from emmy.compiler.pipeline.search.space import FAST_MATH
 
+    monkeypatch.setenv(f"EMMY_{FAST_MATH.name}", "0")
     std = pack_path(tmp_path, _KEY)
     monkeypatch.setenv(f"EMMY_{FAST_MATH.name}", "1")
     fm = pack_path(tmp_path, _KEY)

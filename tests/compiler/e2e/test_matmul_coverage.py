@@ -817,7 +817,8 @@ def test_f16acc_enumeration_policy(monkeypatch):
             monkeypatch.setenv(var, val)
         return bool(precision_pin(F16_MMA_F32_ACC))
 
-    assert not allowed(), "policy unset: no f16acc forks"
+    assert allowed(), "fast math is enabled by default"
+    assert not allowed(EMMY_FAST_MATH="0"), "the precise mode excludes f16acc forks"
     assert allowed(EMMY_FAST_MATH="1"), "FAST_MATH offers the forks — on every target, evidence ranks them"
     assert allowed(EMMY_F16_MMA_F32_ACC="1"), "the precise pin offers everywhere"
     assert not allowed(EMMY_FAST_MATH="1", EMMY_F16_MMA_F32_ACC="0"), "the precise pin wins over the umbrella"

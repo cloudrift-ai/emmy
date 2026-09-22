@@ -49,7 +49,7 @@ configs:
     pins:
       FAST_MATH: false
     knobs: {}
-    identity: d37fdea048fdc7487ef980f24d1ea10713f4293c6325dcacb502b191c6f1e958
+    identity: 66f6210a3802f2a1234773d7ca9e4090a86939956d66144b7045b12fca55913f
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 1716.70401096344
@@ -161,16 +161,14 @@ loops:
                     - class: Assign
                       fields: {name: v4, op: {elementwise: add}, args: {tuple: [in0, v3]}, dtype: null}
                     - class: Assign
-                      fields: {name: v5, op: {elementwise: reciprocal}, args: {tuple: [v4]}, dtype: null}
+                      fields: {name: v5, op: {elementwise: divide}, args: {tuple: [acc0, v4]}, dtype: null}
                     - class: Assign
-                      fields: {name: v6, op: {elementwise: multiply}, args: {tuple: [acc0, v5]}, dtype: null}
-                    - class: Assign
-                      fields: {name: v7, op: {elementwise: multiply}, args: {tuple: [acc1, v6]}, dtype: null}
+                      fields: {name: v6, op: {elementwise: multiply}, args: {tuple: [acc1, v5]}, dtype: null}
                     - class: Write
                       fields:
                         output: o
                         index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [v7]}
+                        values: {tuple: [v6]}
                         value_dtype: null
                         atomic: false
                         swizzle: NONE
@@ -178,6 +176,6 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_matmul_reduce_64a7c8
+      name: k_matmul_reduce_17f7d4
     inputs: [sg_one, wg, x, wu]
     outputs: [[o, f32, [1, 512, 3072]]]

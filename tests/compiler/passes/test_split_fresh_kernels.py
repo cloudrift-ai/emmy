@@ -314,9 +314,8 @@ def test_the_split_node_is_priced_as_the_sum_of_its_pieces(monkeypatch) -> None:
 
 
 def _softmax_scale_chain() -> Graph:
-    """``softmax(x · c)`` with a broadcast scalar — the CHAIN form: the head fold is a BODY member
-    of its projection wrapper (``head``'s sweep case is the same family), and its lift CAPTURES
-    ``in0``, the scalar the projection loads once per cell."""
+    """``softmax(x · c)`` with a broadcast scalar provider before the reducing operand.
+    The split must find the reduction and keep the scalar its lift reads."""
     from emmy.compiler.ir.frontend.ir import SoftmaxOp
 
     g = Graph()
@@ -329,7 +328,7 @@ def _softmax_scale_chain() -> Graph:
 
 
 def test_chain_split_carries_the_captured_prologue_and_strips_the_finalize(monkeypatch) -> None:
-    """The body-resident (chain-form) head fold splits WHOLE: the partial carries the prologue
+    """The head fold behind a captured scalar splits WHOLE: the partial carries the prologue
     cone its slice still captures (the ``c`` load — a bare sliced fold would leave ``in0``
     dangling, the ``k_softmax__partial`` nvcc miscompile), and the finalize's epilogue DROPS the
     original fold (keeping it would re-run the whole reduction per cell and shadow the workspace

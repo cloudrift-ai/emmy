@@ -1,3 +1,4 @@
+# The input spells reciprocal then multiply explicitly to retain this regression after division normalization was removed.
 # Three Sinkhorn rounds; the big fused kernel recomputes a row statistic under its reduces, and that nested cone
 # passes an epsilon constant through beside what it computes. Cutting it makes the reader, which sits under a
 # reduce, take the epsilon from the workspace while a sibling still reads the constant in place. Both derive the
@@ -166,10 +167,15 @@ programs:
             select: null
     inputs: [add]
     outputs: [[add_bc, f32, [1, 1, 4, 4]]]
+  - id: div_denom_recip
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: reciprocal}}
+    inputs: [add_bc]
+    outputs: [[div_denom_recip, f32, [1, 1, 4, 4]]]
   - id: div
     op: tensor.elementwise
-    attrs: {op: {__elementwise__: divide}}
-    inputs: [x, add_bc]
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [x, div_denom_recip]
     outputs: [[div, f32, [1, 1, 4, 4]]]
   - id: sum_2
     op: tensor.reduce
@@ -197,10 +203,15 @@ programs:
             select: null
     inputs: [add_1]
     outputs: [[add_1_bc, f32, [1, 1, 4, 4]]]
+  - id: div_1_denom_recip
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: reciprocal}}
+    inputs: [add_1_bc]
+    outputs: [[div_1_denom_recip, f32, [1, 1, 4, 4]]]
   - id: div_1
     op: tensor.elementwise
-    attrs: {op: {__elementwise__: divide}}
-    inputs: [div, add_1_bc]
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [div, div_1_denom_recip]
     outputs: [[div_1, f32, [1, 1, 4, 4]]]
   - id: sum_3
     op: tensor.reduce
@@ -228,10 +239,15 @@ programs:
             select: null
     inputs: [add_2]
     outputs: [[add_2_bc, f32, [1, 1, 4, 4]]]
+  - id: div_2_denom_recip
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: reciprocal}}
+    inputs: [add_2_bc]
+    outputs: [[div_2_denom_recip, f32, [1, 1, 4, 4]]]
   - id: div_2
     op: tensor.elementwise
-    attrs: {op: {__elementwise__: divide}}
-    inputs: [div_1, add_2_bc]
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [div_1, div_2_denom_recip]
     outputs: [[div_2, f32, [1, 1, 4, 4]]]
   - id: sum_4
     op: tensor.reduce
@@ -259,10 +275,15 @@ programs:
             select: null
     inputs: [add_3]
     outputs: [[add_3_bc, f32, [1, 1, 4, 4]]]
+  - id: div_3_denom_recip
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: reciprocal}}
+    inputs: [add_3_bc]
+    outputs: [[div_3_denom_recip, f32, [1, 1, 4, 4]]]
   - id: div_3
     op: tensor.elementwise
-    attrs: {op: {__elementwise__: divide}}
-    inputs: [div_2, add_3_bc]
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [div_2, div_3_denom_recip]
     outputs: [[div_3, f32, [1, 1, 4, 4]]]
   - id: sum_5
     op: tensor.reduce
@@ -290,10 +311,15 @@ programs:
             select: null
     inputs: [add_4]
     outputs: [[add_4_bc, f32, [1, 1, 4, 4]]]
+  - id: div_4_denom_recip
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: reciprocal}}
+    inputs: [add_4_bc]
+    outputs: [[div_4_denom_recip, f32, [1, 1, 4, 4]]]
   - id: div_4
     op: tensor.elementwise
-    attrs: {op: {__elementwise__: divide}}
-    inputs: [div_3, add_4_bc]
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [div_3, div_4_denom_recip]
     outputs: [[div_4, f32, [1, 1, 4, 4]]]
   - id: sum_6
     op: tensor.reduce
@@ -321,10 +347,15 @@ programs:
             select: null
     inputs: [add_5]
     outputs: [[add_5_bc, f32, [1, 1, 4, 4]]]
+  - id: div_5_denom_recip
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: reciprocal}}
+    inputs: [add_5_bc]
+    outputs: [[div_5_denom_recip, f32, [1, 1, 4, 4]]]
   - id: div_5
     op: tensor.elementwise
-    attrs: {op: {__elementwise__: divide}}
-    inputs: [div_4, add_5_bc]
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [div_4, div_5_denom_recip]
     outputs: [[div_5, f32, [1, 1, 4, 4]]]
 configs:
 - program: 0
@@ -347,10 +378,15 @@ configs:
     - add_5_bc
     - add_5_c1_bc
     - div_1
+    - div_1_denom_recip
     - div_2
+    - div_2_denom_recip
     - div_3
+    - div_3_denom_recip
     - div_4
+    - div_4_denom_recip
     - div_5
+    - div_5_denom_recip
     - sum_2
     - sum_3
     - sum_4

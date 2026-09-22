@@ -36,6 +36,10 @@ commands/publish ─► publish (image naming, metadata, collision and digest ga
 - `emmy/redact.py` — `redact_secrets()`, `SecretRedactingFilter`, `install_redaction()` (attach the filter to a handler — must be a handler, not a logger, so child-logger records that propagate up are still redacted), `register_secret()` (call after resolving any secret from a CLI flag — `--hf-token`, `--api-key` — or env var so its value is added to the redaction set)
 - `emmy/benchmark/` — config, logging, workload, tasks, execution, and YAML experiment records
 
+Golden replay keeps the selected input precision pins active through lowering, NVCC compilation, measurement, and
+recording. Tuning creates its measurement context inside each target's precision scope. `FAST_MATH` defaults to true
+and controls NVCC `--use_fast_math`; `--nvcc-flags=--fmad=false` remains a custom contraction diagnostic.
+
 ## Layers
 
 ### `emmy/recipe/` — Recipe Library

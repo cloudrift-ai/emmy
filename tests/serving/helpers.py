@@ -269,7 +269,9 @@ def build(runner_id: str, *, model=None, plan_cache=None, **overrides):
 @contextmanager
 def evidence_scope():
     """The lane's golden as the compile's only evidence, strictly (:func:`golden.sole_evidence`)."""
-    from emmy.compiler.pipeline.search.golden import sole_evidence
+    from emmy.compiler.pipeline.search.golden import shared_regime_pins, sole_evidence
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
 
-    with sole_evidence(golden_records()):
+    records = golden_records()
+    with pinned_knobs(shared_regime_pins(records)), sole_evidence(records):
         yield

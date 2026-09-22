@@ -163,7 +163,7 @@ def test_pow_neg_half_correctness():
 
 
 # ===================================================================
-# SiLU decomposition: silu(x) → x * recip(1 + exp(-x))
+# SiLU decomposition: silu(x) → x / (1 + exp(-x))
 # ===================================================================
 
 
@@ -192,9 +192,9 @@ def test_silu_uses_the_input_opmath_dtype(dtype, opmath_dtype):
     by_name = {n.op.name: n for n in elementwise}
 
     assert [n.op.name for n in elementwise].count("copy") == (dtype != opmath_dtype)
-    assert all(by_name[name].output.dtype == opmath_dtype for name in ("negative", "exp", "add", "reciprocal"))
-    assert by_name["multiply"].output.dtype == dtype
-    assert all(result.nodes[inp].output.dtype == opmath_dtype for inp in by_name["multiply"].inputs)
+    assert all(by_name[name].output.dtype == opmath_dtype for name in ("negative", "exp", "add"))
+    assert by_name["divide"].output.dtype == dtype
+    assert all(result.nodes[inp].output.dtype == opmath_dtype for inp in by_name["divide"].inputs)
 
 
 def test_silu_f16_lifting_keeps_one_widening_and_one_final_narrowing():
@@ -207,8 +207,7 @@ def test_silu_f16_lifting_keeps_one_widening_and_one_final_narrowing():
         ("negative", None),
         ("exp", None),
         ("add", None),
-        ("reciprocal", None),
-        ("multiply", F16),
+        ("divide", F16),
     ]
 
 

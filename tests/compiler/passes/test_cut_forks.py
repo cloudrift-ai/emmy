@@ -350,10 +350,9 @@ def test_recorded_sdpa_cut_decodes_exactly_and_stale_path_fails_loudly() -> None
 @requires_cuda
 def test_softmax_state_cut_is_offered_and_pinned_cut_lowers() -> None:
     offered = _offered(_softmax_graph(), frontend=True)
-    # Two cuttable seams, each spelled by its route: the carrier itself, and the epilogue map that
-    # reciprocates its denominator (whose workspace dtype the base contribution's ``exp`` settles).
-    assert {"PLACE": "fuse"} in offered and {"PLACE@map.1/map.1/twist": "cut"} in offered
-    lowered = _lower_cut(_softmax_graph(), "PLACE@map.1/map.1/twist")
+    # Direct division leaves one cuttable seam: the maximum and denominator carrier.
+    assert {"PLACE": "fuse"} in offered and {"PLACE": "cut"} in offered
+    lowered = _lower_cut(_softmax_graph(), "PLACE")
     cuda = [node for node in lowered.nodes.values() if type(node.op).__name__ == "CudaOp"]
     assert len(cuda) == 2
     assert len(next(node for node in cuda if "__place_" in node.id).outputs) == 2  # maximum + denominator state
@@ -468,19 +467,20 @@ def test_a_composed_route_skips_a_bare_key_and_still_fails_on_a_broken_one() -> 
     and a route key off the grammar is still a broken stored row that raises."""
     from emmy.compiler.pipeline.search.pins import composed_routes  # noqa: PLC0415
 
-    match, graph = _case_match("attention/rmsnorm-qk-sdpa-composed-cut.yaml")
+    graph = _mimo_graph()
+    match = Match(graph=graph, root_node_id="out0", rule=Rule(name="test", pattern=[]))
     root = graph.nodes[match.root_node_id]
     with pytest.raises(ValueError, match="PLACE is ambiguous"):
         resolve(root.op.op, "PLACE")
 
-    with composed_routes([(None, ("PLACE", "PLACE@map.1/twist.1/inner.2/map"))]):
+    with composed_routes([(None, ("PLACE", "PLACE@map.1/inner"))]):
         options = _CUT.rewrite(match, root, _CTX)
 
     options = options if isinstance(options, list) else [options]
     assert options, "the ordinary fuse and single-seam arms still stand"
     assert all(option.knobs.get("PLACE") != "cut" for option in options), "no arm cuts under the unattributable bare key"
 
-    with composed_routes([(None, ("PLACE@map.1/twist.1/inner.2/map", "PLACE@map.1/not-a-kind"))]), pytest.raises(ValueError):
+    with composed_routes([(None, ("PLACE@map.1/inner", "PLACE@map.1/not-a-kind"))]), pytest.raises(ValueError):
         _CUT.rewrite(match, root, _CTX)
 
 
@@ -553,6 +553,11 @@ def test_child_decode_verdict_changes_with_sibling_route_owner() -> None:
     assert reason is not None and "replay offers no" in reason
     assert decode_record(child, (current_route,)) is None
 
+    # An explicit kernel set supplies its route even after the pre-cut identity changes.
+    lead = replace(parent, kernel_set=(stale_route.name,))
+    assert decode_record(child, (lead, stale_route)) is None
+    assert decode_record(stale_route, (lead, child)) is None
+
 
 def test_post_schedule_receipt_does_not_steer_an_unowned_peer(monkeypatch) -> None:
     """A receipt identity that appears after scheduling selects only that materialized kernel.
@@ -621,12 +626,13 @@ def test_child_identity_receipt_selects_one_kernel_from_multi_kernel_loop_target
     assert decode_record(receipt) is None
 
 
-def test_evidence_rows_key_each_row_by_the_kernel_it_decides() -> None:
+def test_evidence_rows_key_each_row_by_the_kernel_it_decides(monkeypatch) -> None:
     """Golden evidence is per kernel. A target's entries walk one path: the leading entry (the
     routing record here) decides the parent's placement fork and is its route row under the
     signature of the kernel the cut was offered on; the child-identity receipt decides only the
     forks of the kernel it names, and its schedule row is keyed under that child's signature — a
     piece inherits nothing from the kernel it replaced."""
+    monkeypatch.setenv("EMMY_FAST_MATH", "0")
     from emmy.compiler.pipeline.search.golden import evidence_rows, records_override
 
     fields = {**_receipt_fields(), "measurements": {"emmy_us": 1.0, "reference_us": 2.0, "reference_backend": "torch"}}
@@ -650,12 +656,13 @@ def test_evidence_rows_key_each_row_by_the_kernel_it_decides() -> None:
     ]
 
 
-def test_evidence_rows_keep_an_empty_receipt_as_its_kernel_fused_arm_evidence() -> None:
+def test_evidence_rows_keep_an_empty_receipt_as_its_kernel_fused_arm_evidence(monkeypatch) -> None:
     """A child-identity receipt whose schedule row is empty is still that kernel's measured row.
     ``run --record-greedy`` writes ``knobs: {}`` for a piece the pick took no knobs on — the
     OFF fill skips an op that never carried one — and an empty row spells the fused, unsplit arm
     at the piece's kernel-set forks (``pins.spelled_arm``). Dropping it left the piece with no
     measured row at its placement fork, which strict evidence refuses."""
+    monkeypatch.setenv("EMMY_FAST_MATH", "0")
     from emmy.compiler.pipeline.search.golden import evidence_rows, records_override
 
     fields = {**_receipt_fields(), "measurements": {"emmy_us": 1.0, "reference_us": 2.0, "reference_backend": "torch"}}
@@ -671,8 +678,9 @@ def test_evidence_rows_keep_an_empty_receipt_as_its_kernel_fused_arm_evidence() 
     assert (replay.signatures[child], {}, 1.0, receipt.name) in got
 
 
-def test_evidence_rows_replay_an_identityless_kernel_set_lead() -> None:
+def test_evidence_rows_replay_an_identityless_kernel_set_lead(monkeypatch) -> None:
     """A seed with no row of its own still contributes the routes listed by ``kernel_set``."""
+    monkeypatch.setenv("EMMY_FAST_MATH", "0")
     from emmy.compiler.pipeline.search.golden import evidence_rows, records_override
 
     fields = {**_receipt_fields(), "measurements": {"emmy_us": 1.0, "reference_us": 2.0, "reference_backend": "torch"}}
@@ -722,7 +730,8 @@ def test_multi_output_kernel_record_derives_the_identity_its_live_fork_carries()
     assert decode_record(GoldenRecord(knobs=dict(next(iter(rows[identity]))), **fields)) is None
 
 
-def test_receipt_validation_requires_child_identity_and_place_pins_stay_live() -> None:
+def test_receipt_validation_requires_child_identity_and_place_pins_stay_live(monkeypatch) -> None:
+    monkeypatch.setenv("EMMY_FAST_MATH", "0")
     from types import SimpleNamespace
 
     from emmy.compiler.pipeline.search.golden import regime_live
@@ -845,13 +854,14 @@ def _deploy_kernels(records: list) -> list[str]:
 _SDPA_ROUTE = "PLACE@map.1/twist"
 
 
-def test_a_recorded_kernel_set_deploys_the_cut_every_entry_spells() -> None:
+def test_a_recorded_kernel_set_deploys_the_cut_every_entry_spells(monkeypatch) -> None:
     """A cut mints brand-new kernels, so a kernel set cut twice over is recorded per kernel and not
     as one row spelling both seams: the leading entry spells the seam offered on the target's own
     kernel, and an entry naming a piece by its stored identity spells the seam that piece offers on
     its own tree. Each entry's route is a row under the signature of the kernel whose fork it
     decided, so the deploy composes the whole recorded set — the parent's entry alone deploys only
     the parent's seam."""
+    monkeypatch.setenv("EMMY_FAST_MATH", "0")
     fused = _deploy_kernels([])
     assert len(fused) == 1, f"with no recorded route the fork falls to emission order (fuse): {fused}"
 

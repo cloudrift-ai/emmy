@@ -125,8 +125,8 @@ rule matches a `LoopOp` and returns several tile options.
    lazy tree — legal complete rows, every level covered) instead of walked at full length: the cold pick needs a
    reasonable kernel, and the optimal one comes from measured evidence, which descends directly whatever the pool
    size. The seed is the pool's schedule-space stamp, which spells the precision gates by effect (Part 6's pool
-   identity), so a compile under a golden's published `FAST_MATH: false` regime draws the subset the unpinned
-   deploy draws and makes the same cold pick. Drawing has a hard option-check budget while one descent fits
+   identity), so equivalent effective precision gates draw the same subset, while precise and fast defaults can
+   draw different subsets. Drawing has a hard option-check budget while one descent fits
    inside it. If one complete descent's declared bound is already larger, exactly one descent attempt is the
    soft-cap exception; an empty sample fails rather than walking the full pool or substituting a partial
    branch. Under strict evidence this step is never reached: the
@@ -699,7 +699,9 @@ offers, or a schedule row no kernel of the replay enumerates, is stale and is no
 realizes is the question the nightly `onboard-model` workflow asks with the strict decode (`golden.decode_record`),
 over the same replay: the persisted program must select exactly one kernel (a receipt selects its child by stored
 identity), a routing record's every cut key must name a seam the cut pass offers, and a schedule row must equal one
-enumerated leaf under the record's own pins. Equality there is blind to the two sides' OFF anchors. A resolved kernel
+enumerated leaf under the record's own pins. An explicit kernel-set entry supplies the replay's route even when its
+parent identity changes; each receipt still has to match its own stored child identity and schedule. Equality there is
+blind to the two sides' OFF anchors. A resolved kernel
 carries every declared OFF value, because the pipeline stamps them at the pass boundary, and that is the row a
 recording is taken from; a fork offers its leaves carrying only the families the kernel's own sites give it. Both
 spell the same schedule, so which anchors appear says where a spelling came from, not what it decided. The default
@@ -1497,7 +1499,8 @@ A/B integrity checks below).
 (`goldens_for_live_gpu`) — names repeat across per-GPU golden files with diverging shapes/dtypes, so a flat union can
 select another card's spelling. They keep the union fallback on an uncovered card (the seed / transfer flow — the
 pinned config re-benches live), and off-GPU the full union is returned (pure-logic tests). Tuning instead consumes an
-explicit working file whose GPU header is checked against the selected tune device.
+explicit working file whose GPU header is checked against the selected tune device. Registered device aliases are
+resolved through the GPU registry when loading records and filtering files, just as they are for the live context.
 
 **The A/B carries three integrity gates:**
 
@@ -1829,13 +1832,14 @@ Not tunable — identity facts that make a knob dict a complete variant identity
 Skipped by `format_tuning_knobs`.
 
 **`FAST_MATH` / `F16_MMA_F32_ACC` / `FP8_MMA` / `FAST_EXP`** (BOOL, pin-only precision restrictions /
-`lowering/kernel/085_fast_exp`) — the **precision-trading family**, never silently on. Precedence per knob: its own pin
-> the `FAST_MATH` umbrella > off (`space.precision_pin`). `FAST_EXP` swaps libm `expf` for `__expf`;
+`lowering/kernel/085_fast_exp`) — the **precision-trading family**. Precedence per knob: its own pin > the
+`FAST_MATH` umbrella > true (`space.precision_pin`). `FAST_EXP` swaps libm `expf` for `__expf`;
 `F16_MMA_F32_ACC` admits the fixed domain's f16-accumulate atom choices (`mma_m16n8k16_f16_f16` — chunked f32
 register promote), while `FP8_MMA` admits its native fp8 atoms. Without the effective gate, Algorithm 1's immutable
 context excludes those choices while composing its lazy frontier.
-`FAST_MATH` is a meta gate over the others — `unfeatured`, never stamped/enumerated/featurized (the realized fork is
-identified by what it enables: `FAST_EXP`'s stamped BOOL, the `TILE` atom token).
+`FAST_MATH` also controls NVCC `--use_fast_math` and the typed invariant-divide rewrite. It remains `unfeatured`:
+schedule choices keep their concrete knob identity, and effective compiler flags separate measurement contexts.
+New golden inventories and measurements record the effective umbrella explicitly, so replay preserves that regime.
 
 ### Classic schedule keys
 

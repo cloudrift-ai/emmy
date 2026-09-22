@@ -40,7 +40,7 @@ configs:
     knobs:
       REDUCE: coop
       WORK: t128
-    identity: 98bcdc990d895e568a3c9a7c123bab9d8d92c653159fe970e0c3a5424e17ea10
+    identity: 799e7b10f8a3d068269338b22498c36de5872018590db0956f3a73efbf8116e3
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 1.2080581367160161
@@ -101,8 +101,6 @@ loops:
                       fields: {name: acc1, value: v1, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
                   unroll: false
                   seed: true
-              - class: Assign
-                fields: {name: v2, op: {elementwise: reciprocal}, args: {tuple: [acc1]}, dtype: null}
               - class: Loop
                 fields:
                   axis: {class: Axis, fields: {name: a3, extent: {dim: 256}, window: null}}
@@ -115,15 +113,15 @@ loops:
                         index: {tuple: [{expr: {var: a0}}, {expr: {var: a3}}]}
                         dtype: null
                     - class: Assign
-                      fields: {name: v3, op: {elementwise: subtract}, args: {tuple: [in2, acc0]}, dtype: null}
-                    - {class: Assign, fields: {name: v4, op: {elementwise: exp}, args: {tuple: [v3]}, dtype: null}}
+                      fields: {name: v2, op: {elementwise: subtract}, args: {tuple: [in2, acc0]}, dtype: null}
+                    - {class: Assign, fields: {name: v3, op: {elementwise: exp}, args: {tuple: [v2]}, dtype: null}}
                     - class: Assign
-                      fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [v2, v4]}, dtype: null}
+                      fields: {name: v4, op: {elementwise: divide}, args: {tuple: [v3, acc1]}, dtype: null}
                     - class: Write
                       fields:
                         output: softmax
                         index: {tuple: [{expr: {var: a0}}, {expr: {var: a3}}]}
-                        values: {tuple: [v5]}
+                        values: {tuple: [v4]}
                         value_dtype: null
                         atomic: false
                         swizzle: NONE
@@ -131,6 +129,6 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_softmax_5085a0
+      name: k_softmax_886806
     inputs: [x]
     outputs: [[softmax, f32, [8, 256]]]

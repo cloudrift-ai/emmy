@@ -591,7 +591,7 @@ def _tune_working_multi(args, targets, document, *, backends, db, ctx) -> int:
                         device_id=backends[0].device_id,
                     )
             winner = result.best_reward.searched_winner() if result.best_reward is not None else None
-            persist_tune_winner(args.golden, document, target, winner, compile_flags=config.nvcc_flags())
+            persist_tune_winner(args.golden, document, target, winner, compile_flags=ctx.compile_flags)
         for block in results[0].prior_summaries if results else []:
             sys.stderr.write(block + "\n")
         sys.stderr.write(f"\n[tune] done: {len(results)}/{len(targets)} working-golden target(s)\n")
@@ -678,6 +678,7 @@ def handle_tune(args):
             from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
 
             with pinned_knobs(targets[0].pins):
+                ctx = _context_for_device(devices[0], target=getattr(args, "target", None))
                 _tune_working_multi(
                     args,
                     targets,
@@ -712,6 +713,7 @@ def handle_tune(args):
 
             regime = pinned_knobs(target.pins) if working_document is not None else nullcontext()
             with regime:
+                ctx = _context_for_device(devices[0], target=getattr(args, "target", None))
                 result, bench_bundle = _tune_one(
                     args,
                     backends=backends,
@@ -755,14 +757,15 @@ def handle_tune(args):
                     Path(args.output).write_text(format_stage(result.assembled, "cuda"))
                     logger.info("Saved cuda IR: %s", args.output)
                 if args.bench and result.assembled is not None:
-                    _run_bench(
-                        args,
-                        bench_bundle,
-                        result.assembled,
-                        dump,
-                        html_dir=(dump.dir if dump and tmp_dump is None else None),
-                        device_id=backends[0].device_id,
-                    )
+                    with pinned_knobs(target.pins):
+                        _run_bench(
+                            args,
+                            bench_bundle,
+                            result.assembled,
+                            dump,
+                            html_dir=(dump.dir if dump and tmp_dump is None else None),
+                            device_id=backends[0].device_id,
+                        )
             if working_document is not None:
                 winner = result.best_reward.searched_winner() if result.best_reward is not None else None
                 persist_tune_winner(
@@ -770,7 +773,7 @@ def handle_tune(args):
                     working_document,
                     target,
                     winner,
-                    compile_flags=config.nvcc_flags(),
+                    compile_flags=ctx.compile_flags,
                 )
                 sys.stderr.write(f"[tune] updated working golden rankings: {args.golden}\n")
             done += 1

@@ -42,9 +42,8 @@ codegen, no nvcc), and both paths share every line downstream. The projection:
   compiles in two subprocesses and asserts identical sources. This avoids the driver PTX→SASS JIT cupy's NVRTC path
   pays on a cold compile — ~3× faster on the complex tile-search kernels that
   dominate autotune, and the compile step is GPU-free so the cubin cache can be
-  warmed by a parallel pool (planned). Falls back to `cupy.RawKernel` (NVRTC)
-  when `nvcc` is absent or a compile fails (`EMMY_NO_NVCC=1` forces the
-  fallback). Kernels are emitted with `extern "C" __global__` so neither
+  warmed by a parallel pool (planned). A missing or failing `nvcc` is an error; the NVRTC fallback is retired.
+  Kernels are emitted with `extern "C" __global__` so neither
   toolchain name-mangles them (and the cubin symbol loads by `kernel_name`).
   Compile vs load is split (`compile_to_cubin` / `load_function`) so the
   GPU-free compile can run off-process; the loaded `Function` is launch- and
@@ -56,6 +55,15 @@ codegen, no nvcc), and both paths share every line downstream. The projection:
   (override logic, no longer in the command layer) — `tune`, `compile` and `run` all default to nvcc's own -O3, the
   deployable regime, and `--nvcc-flags` overrides. **Tuning measures in the regime it deploys into**, so a tuned
   latency is the deployed one.
+
+  `FAST_MATH` defaults to true and adds `--use_fast_math`; `EMMY_FAST_MATH=0` omits that flag and disables the
+  umbrella's compiler rewrites. Individual precision pins still override the umbrella. For an intermediate-rounding
+  diagnostic, pass `--nvcc-flags=--fmad=false`; custom flags follow the policy flag. Disabling contraction alone leaves
+  other fast-math transformations enabled. Combine it with `EMMY_FAST_MATH=0` for precise arithmetic checks.
+  Explicit tensor-core instructions retain their own accumulation semantics. Accuracy and latency evidence must name
+  the effective flags; a precise diagnostic does not qualify the default fast-math kernel. Persistent benchmark
+  workers receive the effective `FAST_MATH` value with every request and restore their prior value afterward, so a
+  previous request's arithmetic mode cannot leak into the next measurement.
 
   `tune` used to rank at `-Xcicc -O1` to dodge a cicc front-end blowup on big unrolled register-tile kernels. That
   rationale was measured against the WMMA codegen deleted in #189 four days later; on current codegen (fragment work

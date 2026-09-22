@@ -40,7 +40,7 @@ configs:
     knobs:
       REDUCE: coop
       WORK: t128
-    identity: f0e56de80ccf827e20b86df4963de104d68b8d2e6279c04f1d8d701550417a97
+    identity: b7348e26fc424656c23ba98cb40058858da28f9b84b3c6140d6c3e1425041251
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 1.082112585311328
@@ -109,8 +109,6 @@ loops:
                       fields: {name: acc1, value: v1, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
                   unroll: false
                   seed: true
-              - class: Assign
-                fields: {name: v2, op: {elementwise: reciprocal}, args: {tuple: [acc1]}, dtype: null}
               - class: Loop
                 fields:
                   axis: {class: Axis, fields: {name: a3, extent: {dim: 128}, window: null}}
@@ -127,10 +125,10 @@ loops:
                           - {expr: {var: a3}}
                         dtype: null
                     - class: Assign
-                      fields: {name: v3, op: {elementwise: subtract}, args: {tuple: [in2, acc0]}, dtype: null}
-                    - {class: Assign, fields: {name: v4, op: {elementwise: exp}, args: {tuple: [v3]}, dtype: null}}
+                      fields: {name: v2, op: {elementwise: subtract}, args: {tuple: [in2, acc0]}, dtype: null}
+                    - {class: Assign, fields: {name: v3, op: {elementwise: exp}, args: {tuple: [v2]}, dtype: null}}
                     - class: Assign
-                      fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [v2, v4]}, dtype: null}
+                      fields: {name: v4, op: {elementwise: divide}, args: {tuple: [v3, acc1]}, dtype: null}
                     - class: Write
                       fields:
                         output: softmax
@@ -139,7 +137,7 @@ loops:
                           - {expr: {binary: {op: //, left: {var: a0}, right: {literal: {value: 4, dtype: int}}}}}
                           - {expr: {binary: {op: '%', left: {var: a0}, right: {literal: {value: 4, dtype: int}}}}}
                           - {expr: {var: a3}}
-                        values: {tuple: [v5]}
+                        values: {tuple: [v4]}
                         value_dtype: null
                         atomic: false
                         swizzle: NONE
@@ -147,6 +145,6 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_softmax_2a444e
+      name: k_softmax_af3899
     inputs: [x]
     outputs: [[softmax, f32, [2, 4, 128]]]

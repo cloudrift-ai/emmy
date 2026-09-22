@@ -501,6 +501,10 @@ The optional readable-source fold keeps a single-use `Assign` named when any arg
 the result dtype, so the target-aware `Assign.render` path remains responsible for conversions such as
 `__half2float`.
 
+`Select` uses the common dtype of its branch values, and type propagation gives its consumers that same dtype.
+Selecting between two FP16 values must preserve the rounding of a subsequent FP16 product; promoting the selection
+to FP32 would silently change the computation.
+
 Dependence cones (`ir/stmt/body.py`): `Body.backward_cone(roots)` builds a `Cone` —
 the subset of the body's immediate stmts closed under SSA dependence (a wrapper joins as a unit; internally-bound
 axes excluded), plus `external_reads`, the names read from outside (axis vars and enclosing/sibling scopes alike).
@@ -572,17 +576,14 @@ canonicalized before validation:
   duplicate K traversal in patterns like `silu(x@Wg) * (x@Wu)`, and the duplicate score pass between the channels of a
   blocked twisted carrier; subsequent normalization collapses the duplicate loads, and the lowering passes stage both
   weight tensors symmetrically.
-- `split_invariant_divides` — rewrite `divide(x, y)` into
-  `reciprocal(y) + multiply(x, recip)` when `y` is loop-invariant
-  w.r.t. some axis `x` depends on, so the rcp can hoist out of the
-  inner loop and the per-iter cost drops from XU divide to FMA
-  multiply.
 - `hoist_loop_invariants` — pull loop-invariant Assigns out of reduce
   Loops. The hoisted set is closed under the scope's ordering constraints, the same ones the sibling order respects:
   the consumer of an accumulator a pinned reduction exports, a read of a buffer the loop writes, and anything behind
   a barrier or a declaration stay in the loop. Effect summaries are cached on immutable statements, and
   `Body.axis_dependencies` retains only the axes reachable from each definition. Long SSA chains therefore remain
   linear in definitions × loop depth instead of materializing the quadratic full SSA dependency closure.
+  Division retains its own rounding even when its denominator is invariant; reciprocal multiplication can change
+  quantization at a rounding boundary and is not a normalization.
 - `dedup_loads` — after expression simplification, keep one `Load` for each identical
   `(input, index, width, dtype)` read in a scope and rewire every scalar or vector lane. A write invalidates retained
   reads of that buffer, including around a nested scope with a write. Entering a scope also drops cached values whose

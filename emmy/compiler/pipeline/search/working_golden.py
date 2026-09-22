@@ -14,6 +14,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from emmy import gpu
 from emmy.compiler.pipeline.search.golden import (
     GoldenEntryState,
     dump_golden_file,
@@ -217,6 +218,7 @@ def _append_trace_inventory(
     from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
     from emmy.compiler.loop_wire import intern_loop_program  # noqa: PLC0415
     from emmy.compiler.pipeline import LOOP_PASSES, Pipeline  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import measured_precision_pins  # noqa: PLC0415
     from emmy.compiler.pipeline.search.slice import single_node_graph  # noqa: PLC0415
     from emmy.compiler.torch_wire import intern_program  # noqa: PLC0415
 
@@ -293,7 +295,7 @@ def _append_trace_inventory(
         if program_ref is None:
             program_ref = intern_program(programs, input_graph)
         if realizations is None:
-            rows = [{"name": name, "bindings": {}, "pins": {"FAST_MATH": False}}]
+            rows = [{"name": name, "bindings": {}, "pins": measured_precision_pins()}]
         else:
             rows = []
             for template in realizations:
@@ -378,7 +380,7 @@ def validate_working_gpu(document: dict, ctx) -> None:
         raise ValueError(
             f"working golden targets compute capability {tuple(file_cap)}, but the live GPU is {tuple(ctx.compute_capability)}"
         )
-    if file_gpu and ctx.gpu_name and file_gpu != ctx.gpu_name:
+    if file_gpu and ctx.gpu_name and gpu.canonical_name(file_gpu) != gpu.canonical_name(ctx.gpu_name):
         raise ValueError(f"working golden targets {file_gpu}, but the live GPU is {ctx.gpu_name}")
 
 

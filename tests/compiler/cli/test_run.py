@@ -390,17 +390,21 @@ def test_ir_ab_replay_retains_boolean_input_pins(tmp_path, monkeypatch):
 
     from emmy.commands import run as run_mod
     from emmy.compiler.graph import Graph
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+    from emmy.compiler.pipeline.search.space import FAST_MATH, precision_pin
 
     seen = []
 
     @contextlib.contextmanager
     def capture_pins(knobs):
         seen.append(knobs)
-        yield
+        with pinned_knobs(knobs):
+            yield
 
     class Backend:
         async def bench_pinned_async(self, _graph, *, warmup, num_iters):
             assert (warmup, num_iters) == (1, 2)
+            assert precision_pin(FAST_MATH) is False
             return SimpleNamespace(min_ms=0.1, time_ms=0.1), None
 
     source = tmp_path / "loop.json"
@@ -412,7 +416,7 @@ def test_ir_ab_replay_retains_boolean_input_pins(tmp_path, monkeypatch):
 
     rows = asyncio.run(run_mod._bench_ab_variants_ir(Backend(), source, (), ["FAST_MATH=False,TILE=f2x4"], warmup=1, iters=2))
 
-    assert seen == [{"FAST_MATH": "False", "TILE": "f2x4"}]
+    assert seen == [{"FAST_MATH": "False", "TILE": "f2x4"}] * 2
     assert len(rows) == 1 and rows[0].status == "ok"
 
 
@@ -931,7 +935,7 @@ def test_pinned_lane_uses_realized_boolean_policy(monkeypatch):
         ({"FP8_MMA": True}, "fm"),
         (
             {"FAST_MATH": True, "FAST_EXP": False, "F16_MMA_F32_ACC": False, "FP8_MMA": False},
-            "std",
+            "fm",
         ),
     ],
 )

@@ -318,6 +318,12 @@ def by_name(name: str) -> GpuSpec | None:
     return _BY_NAME.get(name)
 
 
+def canonical_name(name: str) -> str:
+    """Resolve a registered device alias without conflating unknown GPU names."""
+    spec = by_name(name)
+    return spec.name if spec else name
+
+
 def by_pci_device_id(device_id: str) -> GpuSpec | None:
     """The :class:`GpuSpec` for a PCI device id (hex, lowercase, no ``0x``), or ``None``."""
     return _BY_PCI.get(device_id.lower().removeprefix("0x"))
@@ -374,5 +380,4 @@ def live_name() -> str | None:
     except Exception:  # noqa: BLE001 — no live device
         return None
     name = raw.decode() if isinstance(raw, (bytes, bytearray)) else str(raw)
-    spec = by_name(name)
-    return spec.name if spec else name
+    return canonical_name(name)

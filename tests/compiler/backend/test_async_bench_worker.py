@@ -58,6 +58,15 @@ async def test_worker_warmup_uses_separate_readiness_request() -> None:
     worker.run_job.assert_awaited_once_with({"worker_warmup": True}, wall_timeout_s=45.0)
 
 
+async def test_each_worker_request_carries_its_fast_math_policy(monkeypatch):
+    worker = _AsyncBenchWorker()
+    worker._run_job = AsyncMock(return_value={})
+    for value in ("0", "1", "0"):
+        monkeypatch.setenv("EMMY_FAST_MATH", value)
+        await worker.run_job({"graph": None}, wall_timeout_s=1)
+        assert worker._run_job.call_args.args[0]["fast_math"] is (value == "1")
+
+
 @requires_cuda
 def test_async_worker_real_roundtrip_single_gpu() -> None:
     """Smoke the real transport: the async inner-reward pool benches a tiny matmul

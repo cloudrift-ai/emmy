@@ -943,8 +943,11 @@ class Select(Stmt):
         return lines
 
     def render(self, ctx: RenderCtx) -> list[str]:
-        expr = select_to_ternary(self)
-        return [f"{_pad(ctx.indent)}float {self.name} = {expr.render(ctx)};"]
+        dtype = dtype_promote("add", [ctx.ssa_dtypes.get(b.value, "f32") for b in self.branches])
+        ctx.ssa_dtypes[self.name] = dtype
+        ty = ctx.type_name(dtype)
+        expr = select_to_ternary(self, ty)
+        return [f"{_pad(ctx.indent)}{ty} {self.name} = {expr.render(ctx)};"]
 
 
 def mask_select_predicate(select: Select) -> Expr | None:

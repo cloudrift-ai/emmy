@@ -48,7 +48,7 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f1x4/k8
       STAGE: d1/smem
       RASTER: ''
-    identity: a65cbf7e02b1956a938e76a7c5cb92086db81d74aeebd766db26077dc3a4c92d
+    identity: 2447229786c2593977bfe18c06344f5cf09ab8c90cbb2d0a6896483d1fe05ec5
 loops:
 - inputs: [x0, x1, x2]
   outputs: [linear]
@@ -105,8 +105,6 @@ loops:
             input: rms_norm_mean_count
             index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
             dtype: null
-        - class: Assign
-          fields: {name: v0, op: {elementwise: reciprocal}, args: {tuple: [in1]}, dtype: null}
         - class: Loop
           fields:
             axis: {class: Axis, fields: {name: a0, extent: {dim: 64}, window: null}}
@@ -129,16 +127,16 @@ loops:
                               index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
                               dtype: null
                           - class: Assign
-                            fields: {name: v1, op: {elementwise: multiply}, args: {tuple: [in2, in2]}, dtype: null}
+                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in2, in2]}, dtype: null}
                           - class: Accum
-                            fields: {name: acc0, value: v1, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
+                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
                         unroll: false
                         seed: true
                     - class: Assign
-                      fields: {name: v2, op: {elementwise: multiply}, args: {tuple: [acc0, v0]}, dtype: null}
+                      fields: {name: v1, op: {elementwise: divide}, args: {tuple: [acc0, in1]}, dtype: null}
                     - class: Assign
-                      fields: {name: v3, op: {elementwise: add}, args: {tuple: [in0, v2]}, dtype: null}
-                    - {class: Assign, fields: {name: v4, op: {elementwise: rsqrt}, args: {tuple: [v3]}, dtype: null}}
+                      fields: {name: v2, op: {elementwise: add}, args: {tuple: [in0, v1]}, dtype: null}
+                    - {class: Assign, fields: {name: v3, op: {elementwise: rsqrt}, args: {tuple: [v2]}, dtype: null}}
                     - class: Loop
                       fields:
                         axis: {class: Axis, fields: {name: a2, extent: {dim: 128}, window: null}}
@@ -157,15 +155,15 @@ loops:
                               index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
                               dtype: null
                           - class: Assign
-                            fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [in4, v4]}, dtype: null}
+                            fields: {name: v4, op: {elementwise: multiply}, args: {tuple: [in4, v3]}, dtype: null}
                           - class: Load
                             fields: {names: {tuple: [in5]}, input: x2, index: {tuple: [{expr: {var: a2}}]}, dtype: null}
                           - class: Assign
-                            fields: {name: v6, op: {elementwise: multiply}, args: {tuple: [in5, v5]}, dtype: null}
+                            fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [in5, v4]}, dtype: null}
                           - class: Assign
-                            fields: {name: v7, op: {elementwise: multiply}, args: {tuple: [in3, v6]}, dtype: {dtype: f32}}
+                            fields: {name: v6, op: {elementwise: multiply}, args: {tuple: [in3, v5]}, dtype: {dtype: f32}}
                           - class: Accum
-                            fields: {name: acc1, value: v7, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
+                            fields: {name: acc1, value: v6, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
                         unroll: false
                         seed: true
                     - class: Write
@@ -180,6 +178,6 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_rms_norm_linear_reduce_9b78d5
+      name: k_rms_norm_linear_reduce_1969c1
     inputs: [rms_norm_mean_count, rms_norm_eps, x1, x2, x0]
     outputs: [[linear, f16, [64, 64]]]

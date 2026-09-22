@@ -261,7 +261,8 @@ def test_serial_root_and_projection_tail_re_spell_distinct_values_in_one_scope()
     assert reciprocal.args == (additions[1].name,)
 
 
-def test_serial_projection_lowers_overlapping_carriers_together() -> None:
+@pytest.mark.parametrize("coop", [1, 32, 64])
+def test_projection_lowers_overlapping_carriers_together(coop) -> None:
     free, reduce_axis = Axis("m", 4), Axis("k", 8)
     shared = reduction(
         reduce_axis,
@@ -272,6 +273,18 @@ def test_serial_projection_lowers_overlapping_carriers_together() -> None:
     left = projection((shared,), (Assign(name="left", op="add", args=("a", "b")),))
     root = projection((shared, left), (Assign(name="out", op="multiply", args=("c", "left")),))
 
-    bound = factor.factorize(_serial_tile(root, free, reduce_axis), root=None)
+    tile = _serial_tile(root, free, reduce_axis)
+    tile = replace(
+        tile,
+        schedule=replace(
+            tile.schedule,
+            kernel=KernelSchedule(derive_inventory((Tile(),), coop=coop) or Work(), Raster.parse("")),
+            nodes={
+                site: replace(choice, reduce=Reduce.of(coop=coop)) if isinstance(choice, ReductionSchedule) else choice
+                for site, choice in tile.schedule.nodes.items()
+            },
+        ),
+    )
+    bound = factor.factorize(tile, root=None)
     accumulators = [stmt.name for stmt in bound.body.iter() if isinstance(stmt, Accum)]
     assert len(accumulators) == len(set(accumulators))

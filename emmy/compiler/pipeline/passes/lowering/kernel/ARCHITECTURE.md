@@ -18,6 +18,10 @@ memory-effect reading neither has: a `Write` or an async fill between two identi
 second a different value. A same-name repeat cannot hide such a reload, since a rebind in one C scope is already
 illegal. A name re-bound to a DIFFERENT address is left alone: that is an SSA fault and must surface as one.
 
+When a projection recomputes only some outputs of an already bound reduction, its smaller loop is a distinct
+statement. Its exported accumulators receive distinct names through the same positional renaming used for other
+rebound values. Whole-loop equality alone cannot detect this partial overlap.
+
 The finished body then answers the complementary question, `_unbound_names`: does it read anything its launch never
 supplies? A well-formed kernel reads its own buffers, the symbolic extents passed beside them and the renderer's CTA
 helpers (`lane` / `warp`), and nothing else — every other name is bound by a statement or an enclosing axis, which is
@@ -656,7 +660,8 @@ the two apply paths stay distinct on a coop-K contraction.
 
 ## Kernel-IR peepholes
 
-`030_stamp_types` resolves element dtypes. Integer algebra is always restamped from its typed operands, repairing a
+`030_stamp_types` resolves element dtypes, including the common branch type of a `Select` used by later statements.
+Integer algebra is always restamped from its typed operands, repairing a
 stale float stamp that a structurally cloned, previously untyped body can carry. `050_vectorize_loads` /
 `080_vectorize_stores` /
 `095_interleave_loads` pack/reorder memory ops; `096_pair_ldmatrix_loads` fuses adjacent staged fragment loads. On
@@ -674,16 +679,18 @@ reduction whose result is read only under an enclosing-coordinate predicate beco
 Its identity seed stays outside the loop. Stores, synchronization, warp operations and predicates depending on values
 computed later cannot be guarded this way.
 
-Every codegen-policy peephole records its decision as an on-by-default BOOL policy knob on the `KernelOp`
+Memory and reduction peepholes record their decisions as on-by-default BOOL policy knobs on the `KernelOp`
 (`VECTORIZE_LOADS` / `VECTORIZE_STORES` / `GUARD_REDUCTIONS` / `INTERLEAVE_LOADS` / `PAIR_LDMATRIX` — the `050`
-pattern: idempotence via the recorded knob, `EMMY_<NAME>=0` pins it off, never a search dimension), so no rewrite
-that touches emitted code is unconditional-and-unrecorded.
+pattern: idempotence via the recorded knob, `EMMY_<NAME>=0` pins it off, never a search dimension).
 
-Two of these peepholes are **pin-only policy stamps** — off by default, byte-identical, decoupled from production
-codegen (each records its knob on the `KernelOp` for idempotence, like `095`, and returns the body unchanged when off,
-so the whole default pipeline is unaffected and there is no golden / snapshot churn): `085_fast_exp` (`EMMY_FAST_EXP=1`
-lowers f32 `exp` through the SFU `__expf`, the one non-bit-exact policy) and `100_loopify` (`EMMY_LOOPIFY=N`, a generic
-**loop re-roller** iterated to a fixpoint). Loopify folds a maximal run of ≥ `N` congruent per-fragment statements —
+`040_split_invariant_divides` replaces floating division by an axis-invariant divisor with a hoisted reciprocal and
+multiply when `FAST_MATH` is enabled. It runs after dtype stamping, preserves floating dtypes, and leaves integer or
+varying division alone. Structural body normalization stays independent of arithmetic policy.
+
+`085_fast_exp` follows the enabled `FAST_MATH` default, unless an explicit `FAST_EXP` pin overrides it. It lowers
+`exp` through `__expf`, promoting half inputs and rounding back afterward, and records the policy for idempotence.
+`100_loopify` remains off by default (`EMMY_LOOPIFY=N`), a generic **loop re-roller** iterated to a fixpoint.
+Loopify folds a maximal run of ≥ `N` congruent per-fragment statements —
 an mma body's per-fragment epilogue (`FragmentApply`), its load+mma pairs, the fragment `RegStore`s, the A-fragment
 loads, a nested contraction's K-chunks × N-atoms — into
 `#pragma unroll` `StridedLoop`s over `_r{depth}`. The matcher (`_reroll`) is node-type-agnostic: a recursive structural

@@ -23,7 +23,7 @@ from typing import NamedTuple
 
 import yaml
 
-from emmy import config
+from emmy import config, gpu
 from emmy.compiler.loop_wire import loop_graph_from_wire, validate_loop_program_pool
 from emmy.compiler.pipeline.search.data.shape import ShapeKey
 from emmy.compiler.structural import digest
@@ -140,9 +140,9 @@ def fast_math_knobs(knobs: Mapping) -> bool:
 
 
 def precision_trading_pins(pins: Mapping) -> bool:
-    """Whether input pins enable any precision-trading enumeration path."""
+    """Whether recorded pins enable a precision-trading compiler or NVCC policy."""
     umbrella = bool(pins.get("FAST_MATH", False))
-    return any(bool(pins.get(name, umbrella)) for name in ("FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA"))
+    return umbrella or any(bool(pins.get(name, False)) for name in ("FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA"))
 
 
 def pins_freeze_cut(pins: Mapping) -> bool:
@@ -681,7 +681,7 @@ def golden_record_from_entry(document: Mapping, entry: Mapping, realization: Map
     loop_index = target.get("loop")
     return GoldenRecord(
         name=realization["name"],
-        gpu_name=document.get("gpu_name") or "",
+        gpu_name=gpu.canonical_name(document.get("gpu_name") or ""),
         compute_cap=tuple(document["compute_cap"]),
         model=entry.get("model", document.get("model")),
         program_index=entry["program"],
@@ -1123,7 +1123,7 @@ def _replay(
     its signature.
 
     ``siblings`` are the other entries of the same target (:func:`siblings_of`) and ``lead`` the
-    set's leading entry (:func:`lead_of`; the record itself when absent). A fork offered on a kernel
+    set's leading entry (:func:`lead_of`; its explicit kernel-set entry, or the record itself, when absent). A fork offered on a kernel
     one entry names by ``identity`` is decided by THAT entry's spelling; every other fork by the
     lead's — never by an entry that does not own it, whose row would say "fused" or "unsplit" of a
     kernel it never described. So a set of per-kernel entries — the parent's cut, each piece's
@@ -1158,7 +1158,8 @@ def _replay(
         referenced = kernel_set_pins(entry, (record, *siblings))
         return {**referenced, **entry.route, **{str(key): str(value) for key, value in entry.knobs.items()}}
 
-    lead = record if lead is None else lead
+    if lead is None:
+        lead = record if record.is_routing else next((entry for entry in (record, *siblings) if entry.kernel_set), record)
     # Entries can share an identity — a routing row and a plain row of one target. The one that
     # spells a route decides the cut fork (it sorts last, and last wins); a row spelling none would
     # read the kernel as fused.
@@ -1554,7 +1555,7 @@ def _file_gpu_name(path: Path) -> str | None:
         return None
     for line in head.splitlines():
         if line.startswith("gpu_name:"):
-            return str(yaml.load(line, Loader=_SAFE_LOADER)["gpu_name"])
+            return gpu.canonical_name(str(yaml.load(line, Loader=_SAFE_LOADER)["gpu_name"]))
     return None
 
 
@@ -1633,6 +1634,7 @@ def records_for_card(gpu_name: str, compute_cap: tuple[int, int]) -> list[Golden
     (:data:`RECORDS_OVERRIDE`, else ``EMMY_GOLDEN_FILE`` — a file, or none when set empty), otherwise
     the repository files, loading only that card's (header sniff). ``GOLDEN_RECORDS`` stays the full corpus for the eval / fit
     consumers; both share the per-path document memo so nothing parses twice."""
+    gpu_name = gpu.canonical_name(gpu_name)
     if RECORDS_OVERRIDE is not None:
         return _scoped(RECORDS_OVERRIDE, gpu_name, compute_cap)
     if (scope := config.golden_scope()) is not None:
@@ -1678,7 +1680,7 @@ _PRECISION_PINS = ("FAST_MATH", "FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA")
 
 def regime_live(record: GoldenRecord) -> bool:
     """Whether the record's input-pin regime IS the live one — exact per pin: a BOOL pin compares
-    against the live env pin (unset = the knob's off state), anything else against the raw env
+    against its effective precision policy (other BOOLs default off), anything else against the raw env
     string. Strict BOTH ways: a record measured under FAST_MATH is no evidence for a standard
     deploy, and a standard record none under a live precision-trading pin — the precision universe
     (:data:`_PRECISION_PINS`, umbrella semantics per ``space.precision_pin``) is compared even for
@@ -1695,7 +1697,7 @@ def regime_live(record: GoldenRecord) -> bool:
         kn = knobs.get(str(name))
         raw = kn.raw() if kn is not None else config.knob_raw(str(name))
         if kn is not None and kn.type is KnobType.BOOL:
-            live = kn.parse(raw) if raw is not None else False
+            live = precision_pin(kn) if name in _PRECISION_PINS else kn.parse(raw) if raw is not None else False
             if bool(value) != live:
                 return False
         elif (raw or "") != str(value):
@@ -1839,10 +1841,7 @@ def _live_gpu_key() -> tuple[str, tuple[int, int]] | None:
         if not torch.cuda.is_available():
             return None
         name = torch.cuda.get_device_name(0)
-        from emmy.gpu import by_name  # noqa: PLC0415
-
-        gpu = by_name(name)
-        return (gpu.name if gpu is not None else name), tuple(torch.cuda.get_device_capability(0))
+        return gpu.canonical_name(name), tuple(torch.cuda.get_device_capability(0))
     except Exception:  # noqa: BLE001
         return None
 
