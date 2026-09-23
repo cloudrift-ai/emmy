@@ -26,7 +26,7 @@ benchmark:
   ignore_eos: true
 
 matrices:
-  # Short high-concurrency point. Order by process repeat: S/E, E/S, S/E, E/S, S/E.
+  # Short high-concurrency point. Order by process repeat: S/E, E/S, S/E.
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
     benchmark.random_input_len: 256
@@ -35,10 +35,6 @@ matrices:
     benchmark.num_prompts: 256
     zip:
       engine.llm.vllm.entrypoint: &balanced_entrypoints
-        - "python3 -m vllm.entrypoints.openai.api_server"
-        - null
-        - null
-        - "python3 -m vllm.entrypoints.openai.api_server"
         - "python3 -m vllm.entrypoints.openai.api_server"
         - null
         - null
@@ -56,10 +52,6 @@ matrices:
         - *stock_short
         - *stock_short
         - *emmy_short
-        - *emmy_short
-        - *stock_short
-        - *stock_short
-        - *emmy_short
       engine.llm.vllm.extra_env:
         - ""
         - "EMMY_GEN_DECODE_BUCKET=64 EMMY_GEN_PREFILL_BUCKET=2048"
@@ -67,12 +59,8 @@ matrices:
         - ""
         - ""
         - "EMMY_GEN_DECODE_BUCKET=64 EMMY_GEN_PREFILL_BUCKET=2048"
-        - "EMMY_GEN_DECODE_BUCKET=64 EMMY_GEN_PREFILL_BUCKET=2048"
-        - ""
-        - ""
-        - "EMMY_GEN_DECODE_BUCKET=64 EMMY_GEN_PREFILL_BUCKET=2048"
-      arm: &balanced_arms [stock, emmy, emmy, stock, stock, emmy, emmy, stock, stock, emmy]
-      repeat: &balanced_repeats [0, 0, 1, 1, 2, 2, 3, 3, 4, 4]
+      arm: &balanced_arms [stock, emmy, emmy, stock, stock, emmy]
+      repeat: &balanced_repeats [0, 0, 1, 1, 2, 2]
 
   # Interactive point.
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
@@ -94,15 +82,7 @@ matrices:
         - *stock_interactive
         - *stock_interactive
         - *emmy_interactive
-        - *emmy_interactive
-        - *stock_interactive
-        - *stock_interactive
-        - *emmy_interactive
       engine.llm.vllm.extra_env:
-        - ""
-        - "EMMY_GEN_DECODE_BUCKET=32"
-        - "EMMY_GEN_DECODE_BUCKET=32"
-        - ""
         - ""
         - "EMMY_GEN_DECODE_BUCKET=32"
         - "EMMY_GEN_DECODE_BUCKET=32"
@@ -132,15 +112,7 @@ matrices:
         - *stock_batch
         - *stock_batch
         - *emmy_batch
-        - *emmy_batch
-        - *stock_batch
-        - *stock_batch
-        - *emmy_batch
       engine.llm.vllm.extra_env:
-        - ""
-        - "EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048"
-        - "EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048"
-        - ""
         - ""
         - "EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048"
         - "EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048"
@@ -170,15 +142,7 @@ matrices:
         - *stock_long
         - *stock_long
         - *emmy_long
-        - *emmy_long
-        - *stock_long
-        - *stock_long
-        - *emmy_long
       engine.llm.vllm.extra_env:
-        - ""
-        - "EMMY_GEN_DECODE_BUCKET=8"
-        - "EMMY_GEN_DECODE_BUCKET=8"
-        - ""
         - ""
         - "EMMY_GEN_DECODE_BUCKET=8"
         - "EMMY_GEN_DECODE_BUCKET=8"
