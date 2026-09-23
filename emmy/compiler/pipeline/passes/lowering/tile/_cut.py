@@ -706,6 +706,50 @@ def _substitute_and_fold(produced: Fold, name: str, sigma: Sigma, ctx: SimplifyC
     return replace(produced, operands=operands, lift=lift)
 
 
+def _divmod_in_edge(edge: Fold, name: str, factor: int) -> tuple[bool, bool]:
+    """``(the edge reads name / factor, the edge reads name % factor)`` anywhere under it."""
+    div = mod = False
+    pending = [edge]
+    while pending:
+        term = pending.pop()
+        pending.extend(term.operands)
+        for stmt in term.lift.body.iter():
+            for expr in stmt.exprs():
+                for part in expr.subterms():
+                    if (
+                        isinstance(part, BinaryExpr)
+                        and part.left == Var(name)
+                        and isinstance(part.right, Literal)
+                        and part.right.value == factor
+                    ):
+                        div = div or part.op in ("/", "//")
+                        mod = mod or part.op == "%"
+    return div, mod
+
+
+def _straddles_a_contraction(produced: Fold, name: str, factor: int) -> bool:
+    """Whether the pair straddles ONE contraction's operands — the div feeding a DIFFERENT edge
+    from the mod.
+
+    That straddle IS the pathology, and nothing weaker is. It says the contraction's A operand is
+    indexed by ``name / factor`` while its B operand contracts into ``name % factor``, so A depends
+    on the axis B reduces over and the term is not a matmul the warp tier can tile. A coordinate
+    that merely happens to carry a divmod somewhere — a flat index a reduce walks, a strided read —
+    is an ordinary coordinate, and splitting it only re-spells a kernel that was already scheduled.
+    """
+    pending = [produced]
+    while pending:
+        term = pending.pop()
+        pending.extend(term.operands)
+        if term.axis is None:
+            continue
+        divs = {position for position, edge in enumerate(term.operands) if _divmod_in_edge(edge, name, factor)[0]}
+        mods = {position for position, edge in enumerate(term.operands) if _divmod_in_edge(edge, name, factor)[1]}
+        if divs and mods and (divs - mods or mods - divs):
+            return True
+    return False
+
+
 def _fused_pair_factor(produced: Fold, axes: tuple) -> tuple[str, int] | None:
     """A grid coordinate read ONLY as ``i / c`` beside ``i % c`` is TWO coordinates wearing one
     name — ``(the axis, c)``, or ``None``.
@@ -755,7 +799,7 @@ def _fused_pair_factor(produced: Fold, axes: tuple) -> tuple[str, int] | None:
                                 covered += 1
         if len(divisors) == 1 and divisors == remainders and uses == covered and uses:
             (factor,) = divisors
-            if 1 < factor < extent and extent % factor == 0:
+            if 1 < factor < extent and extent % factor == 0 and _straddles_a_contraction(produced, name, factor):
                 return name, factor
     return None
 
