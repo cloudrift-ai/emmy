@@ -34,12 +34,12 @@ the cold greedy at its best route. Inductor is the torch.compile lane of the sam
 
 | target | eager | Inductor | before | after | Inductor / after |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| V100 prefill (512) | 221 | 130 | 329 | **106.1** | **1.23** |
+| V100 prefill (512) | 221 | 130 | 328.7 | **106.1** | **1.23** |
 | V100 decode (1) | 77 | 19 | 34.2 | 34.2 | 0.56 |
-| A100 prefill (512) | 125 | 53 | 952 | **50.1** | **1.06** |
-| A100 decode (1) | 63 | 13 | 33.2 | 19.5 | 0.67 |
-| H100 prefill (512) | 79 | 23 | 45 | **18.5** | **1.24** |
-| H100 decode (1) | 50 | 9 | 16.8 | 10.2 | 0.88 |
+| A100 prefill (512) | 125 | 53 | 950.7 | **50.1** | **1.06** |
+| A100 decode (1) | 63 | 13 | 31.9 | 19.5 | 0.67 |
+| H100 prefill (512) | 79 | 23 | 44.1 | **18.5** | **1.24** |
+| H100 decode (1) | 50 | 9 | 15.7 | 10.2 | 0.88 |
 
 Both kernels of the cut, after:
 
