@@ -323,10 +323,15 @@ evidence's call per shape, which is the point: before the split, `depth >= 2` wa
 card. `/p<n>` remains the independent smem→register fragment pipeline. The Volta m8n8k4 atom enables the synchronous
 fill for materialized and computed f16 A/B edges. Its compute fill stages at depth 1 only: the fill's depth-2 ring is a
 B prefetch that assumes cp.async, and on a V100 it returned silently wrong answers on nine of sixteen measured warp
-grids and fragments of a GPTQ decode cone, each correct at depth 1. For a materialized canonical-B tile with even M/N
-register-fragment counts, lowering derives CUTLASS's crosswise-A and B-congruous layouts together: one 128-bit shared
-load drains each adjacent fragment pair, the MMA uses row/row B, and the store uses the coupled interleaved 32×32
-accumulator map. This
+grids and fragments of a GPTQ decode cone, each correct at depth 1. For a materialized tile with even M/N
+register-fragment counts, lowering derives CUTLASS's own layouts together: crosswise for A, and for B the congruous
+layout when it is N-contiguous (the MMA then using row/row B) or crosswise again when it is TRANSPOSED, whose slab is
+K-contiguous exactly like A's — it reads that same storage back through a lane map taking its column half from lane
+bit 3 where A takes its row half from bit 2, which is the column role the accumulator map already assumes. Either way
+one 128-bit shared load drains each adjacent fragment pair and the store uses the coupled interleaved 32×32
+accumulator map. Before the transposed B joined, it fell back to a plain row-major slab whose 64-byte row put sixteen
+rows on two bank pairs: on a V100 prefill query projection that was 2.1M conflict replays out of 3.1M shared-load
+wavefronts, about 21 µs of a 35 µs gap to Inductor. This
 is the SM70 default lowering, not a schedule-codec choice; the existing `PAIR_LDMATRIX` policy override disables the
 whole combination. For deep K slabs, the blocking copy also binds each lane's affine global-copy bases and K stride,
 plus the paired shared-store layout bases, once outside the K loop. Shallow slabs retain inline address calculation;
