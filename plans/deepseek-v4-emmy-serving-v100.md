@@ -221,8 +221,11 @@ big softmax-matmul kernels every round tuned, to 45 with them split apart by #86
 coordinate normalization. Stored Loop IR replays (the decode gate, `emmy run --golden`) cannot see that; `emmy trace
 --serving-twins` on the tree, diffed against the golden's kernel families, can, and must precede any record.
 Cooperative reductions also run 2–30× slower on `main` for the same spelling. The re-recorded file is kept on the host
-and not committed. Next is a decision, not a row: restore the fusion for this model, or re-tune the new kernel set
-from a fresh capture.
+and not committed. The follow-up found two causes (2026-09-23): the merge rule's copy-drop from #863, reverted on
+draft PR #875, which restores this model's kernel set but moves Qwen3.8's the other way (#861 recorded on the
+post-#863 sets), and #863's Loop IR normalization, for which this golden's stored loops were never re-lowered. Next:
+the author settles the rule, then the golden's programs are re-lowered and every row re-keyed; only if the rule stays
+as it is does a re-tune from the fresh capture follow.
 
 ## Operations handoff
 

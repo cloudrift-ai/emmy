@@ -504,10 +504,18 @@ linear-mean reduce, a softmax, two matmuls, twelve broadcast adds and three sums
 the change at #863 (`f6bd311b`, the reduction-dependency and coordinate normalization), not at #862 as its title
 suggested. The decode gate and `emmy run --golden` replay stored Loop IR and cannot see this, and the runner builds
 the expert group before a layer's pre and post twins, so the boot's first refusal names an expert kernel while every
-post row is just as unreachable. No row of this golden deploys on `main`: the re-recorded file is kept on the host as
-evidence and not committed, and the choice between restoring the fusion for this model and re-tuning the new kernel
-set from a fresh capture is a compiler decision. Evidence on the host under `~/serve-evidence/elect34-*`,
-`elect34b-*`, `rec34-*`, `ab34*`, `boot34-*`, `twins33.yaml`, `twins34.yaml` and `twins-<sha>.yaml`.
+post row is just as unreachable. No row of this golden deploys on `main`, and the re-recorded file is kept on the host
+as evidence, not committed. The follow-up (2026-09-23) found two causes. The fusion moved because #863's merge rule
+leaves a copy beside the consumers departing with an unfusable chain instead of materializing it in the region; on
+this model that output is what later merges grow around, and restoring the pre-#863 region gives every serving twin
+the golden's kernel set again (draft PR #875). The same hunk moves Qwen3.8's kernel sets the other way (the AWQ layer
+42 → 40 kernels, EXL3 42 → 38, GPTQ 42 → 40), and #861 recorded on the 42-kernel sets, so the rule needs a condition
+or one of the two goldens a re-record. And the boot from the fixed tree still refuses at the symbolic expert twin:
+#863 also normalized the Loop IR of every kernel, this golden's stored loops were never re-lowered for it, and the
+decode gate cannot tell because it replays the stored loop. Deploying on `main` therefore needs the rule settled and
+the golden's programs re-lowered with every row re-keyed onto the new identities. Evidence on the host under
+`~/serve-evidence/elect34-*`, `elect34b-*`, `rec34-*`, `ab34*`, `boot34-*`, `twins33.yaml`, `twins34.yaml` and
+`twins-<sha>.yaml`.
 
 
 ### The M=1 decode tier: what broke and what now guards it
