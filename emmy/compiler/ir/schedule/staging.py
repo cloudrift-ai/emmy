@@ -463,6 +463,12 @@ def resolve_warp_stage(
     # single-channel form is the one-element case of the same walk.
     b_edges = tuple(edge for _, edge in c.bilinear_channels())
     if inputs:
+        # Every channel shares ONE slab geometry and one ``b`` element width, so channels whose
+        # weights are stored at different widths have no single slot size and decline here rather
+        # than sizing the slab off whichever edge the walk reached first.
+        widths = {t.dtype for b in b_edges if (t := inputs.get(b.as_slab().load.input) if b.as_slab() is not None else None) is not None}
+        if len(widths) > 1:
+            return None
         for edge, role in ((c.operands[0], "a"), *((b, "b") for b in b_edges)):
             t = inputs.get(edge.as_slab().load.input) if edge.as_slab() is not None else None
             if t is None or t.dtype == atom.operand_dtype(role):
