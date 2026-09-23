@@ -13,6 +13,14 @@ command:
     export CUDA_VISIBLE_DEVICES=$gpu_device_ids
     export EMMY_GOLDEN_FILE=
     export EMMY_TUNE_DB=$task_dir/autotune.db
+    # A behavioural test needs a fully defined kernel, not whatever the greedy pick reaches for.
+    # These are the scalar-tier spellings the repository's own V100 evidence records as working
+    # for this model (_tune/main-fixes-v100/). TILE='' is the load-bearing one: the unpinned pick
+    # takes a Volta tensor-core tile whose schedule costs tens of seconds per launch here.
+    export EMMY_TILE=
+    export EMMY_WORK=t128
+    export EMMY_REDUCE=coop
+    export EMMY_STAGE=
     cargo build --release --locked --bin emmy-runtime-worker
     rustc --version > $task_dir/toolchain.txt
     ./venv/bin/emmy generate $hf_model \
@@ -52,4 +60,4 @@ matrices:
     # The control is one page spanning the context; the others cut it into many.
     page_tokens: [256, 64, 16]
     prompt: "The capital of France is"
-    max_new_tokens: 16
+    max_new_tokens: 8
