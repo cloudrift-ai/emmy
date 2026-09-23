@@ -146,7 +146,12 @@ def test_an_unfusable_chain_does_not_shatter_the_rest_of_the_region():
     fused = set(match.consumed)
     assert {"root", "easy"} <= fused, "the plain sibling consumer fused with the producer"
     assert not any(nid.startswith("s") and nid[1:].isdigit() for nid in fused), "no stage of the doomed chain was pulled into the merge"
-    assert "broadcast" not in fused, "the broadcast must stay beside its excluded readers, not become a materialized output"
+    # The copy that only the doomed chain reads stays in the region and is stored as one of its outputs.
+    # Leaving it beside the departed readers looked cheaper, but a copy of its own never fuses into a
+    # chain fusion already declined, and the materialized output is what later merges grow around: with
+    # the copy excluded, DeepSeek-V4's post block lowers to 45 kernels per twin instead of 36, its two
+    # large softmax-matmul kernels split apart.
+    assert "broadcast" in fused, "the copy the doomed chain reads is materialized by the region that computes its source"
 
     backend = NumpyBackend()
     inputs = {"b0": np.linspace(-1, 1, 9, dtype=np.float32)}
