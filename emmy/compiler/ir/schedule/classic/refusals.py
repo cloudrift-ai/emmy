@@ -22,6 +22,7 @@ from emmy.compiler.ir.schedule.catalog import (
     warp_tile_moves,
 )
 from emmy.compiler.ir.schedule.choices import PlacedTile, Reduce, ResolvedStage, Stage, Tile
+from emmy.compiler.ir.schedule.packing import block_scaled_atom
 from emmy.compiler.ir.schedule.views import ContractionFacts, NodeId
 from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Select, Write, mask_select_predicate
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
@@ -439,6 +440,13 @@ def _stage_candidates(tile: TileOp, target, node, choice: NodeSchedule) -> tuple
         # Its per-cell fallback folds the recipe in registers and reads no slab, so a stage
         # there would name a fill nothing performs.
         return (direct,)
+    if _multi_channel_cell(tile, node, choice.tile):
+        # The cell's one transport: cp.async copies every stored slab, one codes and one scale slab
+        # per channel, and fills the one computed slab (an activation's own codes) inside that
+        # stage (``staging._block_scaled_warp_stage``). The channel filter below is about the
+        # one-slab-per-fold transports, which this cell is not; the sync compute fill and the
+        # gmem-direct path have no per-channel spelling of the pair either.
+        return tuple(stage for stage in stage_moves(warp=True, ctx=target) if stage.transport == "smem-async")
     if _needs_fill(tile, node, choice.tile):
         candidates: tuple[Stage, ...] = fill_stage_moves()
         if tile.packed_reading(node)[0] is not None:
@@ -464,9 +472,27 @@ def _computed_edge(node: Fold) -> bool:
     return any(edge.as_slab() is None for edge in node.operands)
 
 
+def _multi_channel_cell(tile_op, node: Fold, plan: Tile) -> bool:
+    """Whether ``plan`` lowers ``node`` as the block-scaled cell over SEVERAL channels: a warp plan
+    whose atom multiplies packed pairs, on a node that reads as one pair with more than one weight
+    channel (:func:`~emmy.compiler.ir.schedule.packing.match_packed_pair_node` — a fused gate/up
+    edge over one quantized activation). The reading is asked per plan because a 16-bit atom on
+    the same node keeps the single-sided shape and its compute fill; only the pair-multiplying
+    atom stages the pair. A single-channel pair keeps the general path, which offers it the same
+    cell beside the compute fill."""
+    return (
+        plan.is_warp and len(node.bilinear_channels()) > 1 and tile_op.packed_reading(node)[1] is not None and block_scaled_atom(plan.atom)
+    )
+
+
 def _needs_fill(tile_op, node: Fold, plan: Tile) -> bool:
     from emmy.compiler.ir.schedule import staging  # noqa: PLC0415
 
+    if _multi_channel_cell(tile_op, node, plan):
+        # The cell's stage sizes and fills its slabs itself (``staging._block_scaled_warp_stage``),
+        # one codes slab and one scale slab per channel over the shared A pair; a channel count
+        # above one is its ordinary shape, not a fold count the copy transports cannot deposit.
+        return False
     if node.chunked():
         # The chunk tier's A is the WEIGHT, which never leaves registers: it is what the chunk's
         # own score fragments repack into. There is no operand to fill and no slab to fill it from.
