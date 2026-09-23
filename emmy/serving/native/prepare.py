@@ -162,7 +162,7 @@ def export_model(model, destination, *, context_length=MAX_CONTEXT, eos_ids=(), 
         cosine, sine = model.model.rotary_emb(torch.zeros(1, 1, h, dtype=torch.float32), torch.arange(context_length).reshape(1, -1))
     step.buffer("cosine", (context_length, d), F32, role="constant", data=cosine.numpy())
     step.buffer("sine", (context_length, d), F32, role="constant", data=sine.numpy())
-    hidden = step.buffer("hidden0", (1, h))
+    hidden = step.buffer("hidden0", (1, h), F32)
     step.launch(
         "native_embed",
         ["prompt", "prompt_length", "position", "next_token", "embedding", hidden],
@@ -170,9 +170,9 @@ def export_model(model, destination, *, context_length=MAX_CONTEXT, eos_ids=(), 
         writes=[hidden],
         blocks=(h + CUDA_THREADS - 1) // CUDA_THREADS,
     )
-    example = torch.zeros(1, h, dtype=torch.float16)
+    example = torch.zeros(1, h, dtype=torch.float32)
     for index, layer in enumerate(model.model.layers):
-        pre, post = build_attention_split_wrapper(layer)
+        pre, post = build_attention_split_wrapper(layer, float32_residual=True)
         names = [step.buffer(f"layer{index}.{name}", (1, width * d)) for name, width in (("q", heads), ("k", kv), ("v", kv))]
         step.compiled(f"pre{index}", pre, (example,), [hidden], names, cache)
         rotated = step.buffer(f"layer{index}.rotated", (heads * d,))
@@ -194,10 +194,15 @@ def export_model(model, destination, *, context_length=MAX_CONTEXT, eos_ids=(), 
             blocks=heads,
             shared=context_length * 4,
         )
-        output = step.buffer(f"hidden{index + 1}", (1, h))
+        output = step.buffer(f"hidden{index + 1}", (1, h), F32)
         step.compiled(f"post{index}", post, (torch.zeros(1, heads * d, dtype=torch.float16), example), [attention, hidden], [output], cache)
         hidden = output
-    head = torch.nn.Sequential(model.model.norm, model.lm_head)
+
+    class Head(torch.nn.Sequential):
+        def forward(self, hidden):
+            return self[1](self[0](hidden).to(self[1].weight.dtype))
+
+    head = Head(model.model.norm, model.lm_head)
     step.compiled("head", head, (example,), [hidden], ["logits"], cache)
     step.launch(
         "native_histogram",

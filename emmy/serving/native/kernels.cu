@@ -2,10 +2,10 @@
 #include <cuda_fp16.h>
 #include <math.h>
 extern "C" __global__ void native_embed(const long long* prompt, const long long* length,
-    const long long* position, const long long* next, const half* weight, half* hidden) {
+    const long long* position, const long long* next, const half* weight, float* hidden) {
     int d = blockIdx.x * blockDim.x + threadIdx.x;
     long long token = *position < *length ? prompt[*position] : *next;
-    if (d < HIDDEN) hidden[d] = weight[token * HIDDEN + d];
+    if (d < HIDDEN) hidden[d] = __half2float(weight[token * HIDDEN + d]);
 }
 extern "C" __global__ void native_rope_cache(const half* q, const half* k, const half* v,
     const float* cosine, const float* sine, const long long* position,

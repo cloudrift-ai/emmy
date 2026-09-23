@@ -51,8 +51,8 @@ _STATIC_SMEM_CAP = 48 * 1024
 def _ensure_dynamic_smem_attr(kernel: cp.RawKernel, smem_bytes: int) -> None:
     """Opt this kernel into the device's max dynamic-smem allowance.
 
-    Required when ``smem_bytes`` exceeds the 48 KB static cap. cupy's
-    ``RawKernel.max_dynamic_shared_size_bytes`` setter calls
+    Required when total static plus dynamic storage exceeds 48 KB; ``smem_bytes``
+    is the dynamic request. cupy's ``RawKernel.max_dynamic_shared_size_bytes`` setter calls
     ``cuFuncSetAttribute(MaxDynamicSharedMemorySize)``; the driver
     clamps to the device's per-block dynamic max (e.g. ~99 KB on
     sm_120). Already-set kernels are skipped.

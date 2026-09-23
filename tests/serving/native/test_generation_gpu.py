@@ -167,6 +167,8 @@ CHECKPOINT_CASES = (
     # Held out until the FP32 attention-intermediate fix and its independent regression were committed.
     ("heldout_attention", "Why does an ice cube float in water? Give a brief explanation.", None, 24, True),
     ("heldout_context_4096", "The coastal survey records tides, winds, water temperatures, and seabird sightings. ", 4080, 16, False),
+    # Selected after the rotary precision fix; also qualifies Python dispatch beyond its old shared-memory limit.
+    ("heldout_rotary_context", "The field notebook lists soil samples, rainfall, seed counts, and flowering dates. ", 496, 16, True),
 )
 
 
@@ -207,9 +209,8 @@ def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch, name,
     with gpu_lock():
         model.cuda()
         precise.cuda()
-        # Check full-checkpoint dispatcher identity on the original two cases. Other
-        # cases independently check the model, including the longer cache histories.
-        reference_program = _python_reference(artifact) if name in ("france", "arithmetic") else None
+        # Include a longer cache history in exact dispatcher parity, exercising dynamic shared memory.
+        reference_program = _python_reference(artifact) if name in ("france", "arithmetic", "heldout_rotary_context") else None
         monkeypatch.setenv("PATH", "/nonexistent")
         monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", False)
 
