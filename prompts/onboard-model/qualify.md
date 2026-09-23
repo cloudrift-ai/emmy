@@ -35,8 +35,18 @@ preserve its `expected_lifecycle` tag and `model.heat`.
 
 ## Boundaries
 
-Do not select a model or GPU, provision or delete the VM, commit, push, or open or update a pull request. The caller
-owns those steps. Tear down every deployed workload before returning.
+Do not select a model or GPU, rent or delete the VM, commit, push, or open or update a pull request. The caller owns
+those steps. Tear down every deployed workload before returning.
+
+The caller owns the VM's lifetime, not its contents. The supplied host is a bare node rented for this run alone, and
+`ssh_user` has passwordless sudo on it: installing packages, starting daemons, and fixing group membership are your
+work. A host that lacks something the run needs is a node to finish provisioning, never a gate failure.
+
+`emmy deploy ssh` provisions the node before it deploys: it installs Docker when absent and adds `ssh_user` to the
+docker group. Reach the host through Emmy's own commands rather than probing it by hand, and never conclude from a
+bare-shell probe that a tool is unusable before the command that installs it has run. A fresh `usermod -aG docker`
+takes effect only in a new login session, so reconnect before retrying. Report a host gate failure only after
+provisioning ran and the specific step failed, and quote that step's output in the summary.
 
 For a missing image or an unfamiliar launch failure, investigate current official registries, release notes, engine
 documentation, and upstream issues. Test an evidence-backed current repository or tag when the configured image moved

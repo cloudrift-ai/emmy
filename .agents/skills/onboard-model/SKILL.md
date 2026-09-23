@@ -36,9 +36,16 @@ platform archive and report section. Remove legacy top-level records only for th
 they are retained inside its archive. Reuse the existing serving experiment root when it already represents the
 protocol; otherwise create `experiments/<model>/serving/`.
 
-Use only the supplied SSH server. The caller owns VM creation and deletion; this skill owns deployed workloads and
-must tear them down before returning. Never switch GPU type, count, provider, model quantization, or model checkpoint
-to rescue a failed run.
+Use only the supplied SSH server. The caller owns VM creation and deletion; this skill owns everything installed on
+the node and every deployed workload, and must tear the workloads down before returning. Never switch GPU type,
+count, provider, model quantization, or model checkpoint to rescue a failed run.
+
+The supplied host is a bare node rented for this run alone, and its SSH user has passwordless sudo. Finishing its
+provisioning is this skill's work: `emmy deploy ssh` installs Docker when absent and adds the user to the docker
+group before it deploys anything. Reach the host through Emmy's own commands rather than probing it by hand, and
+never conclude from a bare-shell probe that a tool is unusable before the command that installs it has run. A fresh
+`usermod -aG docker` takes effect only in a new login session, so reconnect before retrying. A missing package,
+a stopped daemon, or a group the user is not yet in is a node to finish provisioning, never a gate failure.
 
 ## Step 0 — Choose the run mode
 
