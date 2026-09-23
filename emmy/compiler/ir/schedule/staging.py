@@ -268,9 +268,11 @@ def _packed_warp_stage(c: Fold, tile: Tile, stage: Stage, budget: int, packed, i
     ``per_byte`` K elements, so the bits row is ``bk_elems / per_byte`` BYTES plus the cp.async
     row pad, and it must be 16-divisible for the same reason the fp8 one is: the fill copies 16 B
     chunks and a chunk never straddles a row. The gmem rows those chunks stride are ``K /
-    per_byte`` bytes, so that span is 16-divisible too. On top of the ring the budget carries ONE
-    scale slab, ``tile_n`` rows of one scale per block the chunk touches — single-buffer, because
-    it is compute-filled and ringing a compute fill buys no overlap. A packed pair's scale slab
+    per_byte`` bytes, so that span is 16-divisible too. On top of the ring the budget carries one
+    scale slab per channel, ``tile_n`` rows of one scale per block the chunk touches — single-buffer,
+    because it is compute-filled and ringing a compute fill buys no overlap. A node folding several
+    channels over one A (a gate/up edge over two packed weights) stages one bits slab and one
+    scale slab per channel, and every rule below is asked of each channel. A packed pair's scale slab
     holds the atom's element width; an fp8 byte's holds f32, the dtype its scale multiplies
     the decoded value in before the round to the fragment.
     """
@@ -287,9 +289,18 @@ def _packed_warp_stage(c: Fold, tile: Tile, stage: Stage, budget: int, packed, i
     a_dtype, b_dtype = atom.operand_dtype("a"), atom.operand_dtype("b")
     if a_dtype != b_dtype or a_dtype.name not in _PACKED_FRAGMENT_DTYPES:
         return None  # the drain has one value table and one scale multiply, both at the operand dtype
-    bits = inputs.get(packed.bits.input)
-    if bits is None:
-        return None
+    # One bits slab and one scale slab PER CHANNEL: a gate/up edge stages two weights beside its
+    # one A. Every channel is asked the same layout questions, since all ride one slab geometry.
+    channels = packed.channels
+    per_byte = packed.per_byte
+    for channel in channels:
+        bits = inputs.get(channel.bits.input) if channel.bits is not None else None
+        if bits is None:
+            return None
+        if bits.dtype.nbytes != 1 or bits.dtype.logical_elems != per_byte or len(bits.shape) != 2 or len(channel.bits.index) != 2:
+            return None
+        if k_axis.name not in channel.bits.index[-1].free_vars():
+            return None  # a K-strided packed weight is not the N-major layout the drain reads
     if c.operands[0].as_slab() is not None:
         a_tensor = inputs.get(c.operands[0].as_slab().load.input)
         if a_tensor is None or a_tensor.dtype != a_dtype:
@@ -297,11 +308,6 @@ def _packed_warp_stage(c: Fold, tile: Tile, stage: Stage, budget: int, packed, i
     # A COMPUTED A has no gmem tensor to match: it evaluates into its slab at the atom's operand
     # dtype, converting on the store, which is the compute fill's own contract.
 
-    per_byte = packed.per_byte
-    if bits.dtype.nbytes != 1 or bits.dtype.logical_elems != per_byte or len(bits.shape) != 2 or len(packed.bits.index) != 2:
-        return None
-    if k_axis.name not in packed.bits.index[-1].free_vars():
-        return None  # a K-strided packed weight is not the N-major layout the drain reads
     if not k_axis.extent.is_static:
         return None
     k = k_axis.extent.as_static()
@@ -317,8 +323,8 @@ def _packed_warp_stage(c: Fold, tile: Tile, stage: Stage, budget: int, packed, i
             return None
         if (bk_elems * a_dtype.nbytes) % _TMA_ALIGN or (k * a_dtype.nbytes) % _TMA_ALIGN:
             return None
-    slot_bytes = tile.m.tile * bk_elems * a_dtype.nbytes + tile.n.tile * (bk_elems // per_byte + pad)
-    scale_bytes = tile.n.tile * packed.scale_cols(bk_elems) * (b_dtype.nbytes if per_byte == 2 else 4)
+    slot_bytes = tile.m.tile * bk_elems * a_dtype.nbytes + len(channels) * tile.n.tile * (bk_elems // per_byte + pad)
+    scale_bytes = len(channels) * tile.n.tile * packed.scale_cols(bk_elems) * (b_dtype.nbytes if per_byte == 2 else 4)
     if scale_bytes + slot_bytes > budget:
         return None
     depth = _clamp_depth(stage.depth, slot_bytes, budget - scale_bytes)

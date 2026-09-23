@@ -1204,8 +1204,9 @@ def _packed_operands(
     """The staged operands of a byte-slab B contraction — the NVFP4 weight's byte-slab form, and the
     block-scaled fp8 weight's.
 
-    Three slabs where the ordinary matmul has two, because the weight arrives as two tensors that
-    are cheapest to move apart and combine at the fragment: the BITS copy verbatim (one byte per
+    Three slabs where the ordinary matmul has two — one A, then one bits slab and one scale slab
+    PER weight channel (a gate/up edge over two packed weights stages five) — because the weight
+    arrives as two tensors that are cheapest to move apart and combine at the fragment: the BITS copy verbatim (one byte per
     ``per_byte`` K elements, so the slab is a half or a quarter of a 16-bit one's width and the
     copy moves that much less traffic), and the block SCALES are decoded once per k block into
     their own small slab — at the fragment dtype for a packed pair, whose fused scale the declared
@@ -1265,67 +1266,86 @@ def _packed_operands(
         axes=axes,
     )
 
-    # Just the scale factor's own stmts, not the whole decode cone: the bits copy verbatim, so the
-    # compute fill evaluates only what feeds the factor.
-    factor_cone = list(Body(tuple(c.operands[1].lower(axes=axes))).backward_cone([packed.factor]).members)
-
-    def scale_value(k0, row, col):
-        k = BinaryExpr("+", k0, BinaryExpr("*", col, Literal(block, "int")))
-        # The slab is CTA-shared across the m rows, so the factor cone's VALUE is m-invariant — but
-        # m can still appear SYNTACTICALLY, by the second route :func:`_sibling_sigma` describes: a
-        # placement cut materializes the weight's per-tensor scale into a workspace indexed by the
-        # kernel's outer free axes, and the cone reads it back as ``ws[m]``. Leaving m free emits an
-        # undefined identifier (nvfp4 Qwen3-8B's M=1 v_proj: ``identifier "_um" is undefined``, the
-        # elided unit row being the tiled m side).
-        # The substitution is hygienic like the compute fill's own above: nothing in a block-scale
-        # factor cone re-binds these names today, but the safe spelling costs nothing and the cone
-        # is whatever the speller wrote.
-        sigma = Sigma({n.axis.name: n_coord(row), k_axis.name: k, **_sibling_sigma(m)})
-        return [s.substitute(sigma) for s in factor_cone], packed.factor
-
     # A packed pair's scale slab rides the transport's fragment dtype; an fp8 byte's keeps the f32
     # its scale multiplies in, so the drain's product rounds once, exactly where the fill's does.
     f32_scale = dict(dtype="float", elem_bytes=4) if per_byte == 1 else {}
-    scale_op = SyncOperand(tag="bs", shape=(n.tile, packed.scale_cols(bk_elems)), value=scale_value, **f32_scale)
 
-    # The bits address through the ORIGINAL ``Load``'s own index, σ-evaluated — never a fresh
-    # spelling built from the chunk offset. That index carries whatever BASE the contraction axis
-    # picked up: a split-K partition shrinks the axis and hangs the slice's absolute base on it
-    # (``ksplit·(K/w) + k``), so a hand-built ``k0 / 2`` drops the base and every partition re-reads
-    # the FIRST slice's bytes. The block scales never had the bug because they are evaluated by
-    # rewriting the decode cone's own body, which carries the same index — this puts the bits on
-    # that footing too, which is also what ``_box_origin`` / ``_slab_index`` do for every other
-    # staged operand.
-    #
-    # One column of this slab is one BYTE, so a column step is ``per_byte`` logical k: the σ
-    # substitutes ``k0 + per_byte·col`` and a packed index's own ``k / 2`` turns that back into the
-    # byte offset.
-    def _bits_at(k_expr: Expr, n_expr: Expr) -> tuple:
-        sig = Sigma({n.axis.name: n_expr, k_axis.name: k_expr, **_sibling_sigma(m)})
-        return tuple(sig.apply(e) for e in packed.bits.index)
+    def channel_operands(channel, edge, tag: str) -> tuple[SyncOperand, Operand]:
+        """One channel's ``(scale slab, bits slab)``: the scale compute-filled off ITS decode cone's
+        factor, the bits copied verbatim off ITS stored bytes. A gate/up edge builds two such pairs
+        over the one A; channel 0 keeps the bare ``b`` / ``bs`` tags, so a single-channel node
+        stages byte-identical slabs to before."""
+        # Just the scale factor's own stmts, not the whole decode cone: the bits copy verbatim, so
+        # the compute fill evaluates only what feeds the factor.
+        factor_cone = list(Body(tuple(edge.lower(axes=axes))).backward_cone([channel.factor]).members)
 
-    def bits_index(k0):
-        def gmem(row, col):
-            return _bits_at(BinaryExpr("+", k0, BinaryExpr("*", col, Literal(per_byte, "int"))), n_coord(row))
+        def scale_value(k0, row, col):
+            k = BinaryExpr("+", k0, BinaryExpr("*", col, Literal(block, "int")))
+            # The slab is CTA-shared across the m rows, so the factor cone's VALUE is m-invariant —
+            # but m can still appear SYNTACTICALLY, by the second route :func:`_sibling_sigma`
+            # describes: a placement cut materializes the weight's per-tensor scale into a
+            # workspace indexed by the kernel's outer free axes, and the cone reads it back as
+            # ``ws[m]``. Leaving m free emits an undefined identifier (nvfp4 Qwen3-8B's M=1
+            # v_proj: ``identifier "_um" is undefined``, the elided unit row being the tiled m
+            # side). The substitution is hygienic like the compute fill's own above: nothing in a
+            # block-scale factor cone re-binds these names today, but the safe spelling costs
+            # nothing and the cone is whatever the speller wrote.
+            sigma = Sigma({n.axis.name: n_coord(row), k_axis.name: k, **_sibling_sigma(m)})
+            return [s.substitute(sigma) for s in factor_cone], channel.factor
 
-        return gmem
+        scale_op = SyncOperand(tag=f"{tag}s", shape=(n.tile, channel.scale_cols(bk_elems)), value=scale_value, **f32_scale)
 
-    bits_op = Operand(
-        tag="b",
-        buf=packed.bits.input,
-        shape=(n.tile, bk_elems // per_byte),
-        coords=lambda k0: _bits_at(k0, col_base),
-        index=bits_index,
-        trans=True,
-        pad_cols=pad,
-        dtype=cuda_name(bits_dtype),
-        elem_bytes=bits_dtype.nbytes,
-        scale=(scale_op.slab, block, per_byte),
-    )
-    # The scale slab is always compute-filled; A joins it there when it is a cone.
-    filled = (scale_op,) if a_copied else (a_op, scale_op)
-    copied = (a_op, bits_op) if a_copied else (bits_op,)
-    return (a_op, bits_op), filled, copied, a_prologue
+        # The bits address through the ORIGINAL ``Load``'s own index, σ-evaluated — never a fresh
+        # spelling built from the chunk offset. That index carries whatever BASE the contraction
+        # axis picked up: a split-K partition shrinks the axis and hangs the slice's absolute base
+        # on it (``ksplit·(K/w) + k``), so a hand-built ``k0 / 2`` drops the base and every
+        # partition re-reads the FIRST slice's bytes. The block scales never had the bug because
+        # they are evaluated by rewriting the decode cone's own body, which carries the same index
+        # — this puts the bits on that footing too, which is also what ``_box_origin`` /
+        # ``_slab_index`` do for every other staged operand.
+        #
+        # One column of this slab is one BYTE, so a column step is ``per_byte`` logical k: the σ
+        # substitutes ``k0 + per_byte·col`` and a packed index's own ``k / 2`` turns that back into
+        # the byte offset.
+        def bits_at(k_expr: Expr, n_expr: Expr) -> tuple:
+            sig = Sigma({n.axis.name: n_expr, k_axis.name: k_expr, **_sibling_sigma(m)})
+            return tuple(sig.apply(e) for e in channel.bits.index)
+
+        def bits_index(k0):
+            def gmem(row, col):
+                return bits_at(BinaryExpr("+", k0, BinaryExpr("*", col, Literal(per_byte, "int"))), n_coord(row))
+
+            return gmem
+
+        bits_op = Operand(
+            tag=tag,
+            buf=channel.bits.input,
+            shape=(n.tile, bk_elems // per_byte),
+            coords=lambda k0: bits_at(k0, col_base),
+            index=bits_index,
+            trans=True,
+            pad_cols=pad,
+            dtype=cuda_name(bits_dtype),
+            elem_bytes=bits_dtype.nbytes,
+            scale=(scale_op.slab, block, per_byte),
+        )
+        return scale_op, bits_op
+
+    # One bits slab and one scale slab PER CHANNEL, in channel order — the same ``(A, B0, B1, …)``
+    # drain order the compute fill builds (:func:`_sync_operands`) and the copy transports deposit.
+    # The recognizer's channels and the fold's bilinear channels are the same edges in the same
+    # order: the reading was matched off them.
+    edges = tuple(edge for _index, edge in c.bilinear_channels())
+    pairs = [
+        channel_operands(channel, edge, "b" if f == 0 else f"b_x{f}")
+        for f, (channel, edge) in enumerate(zip(packed.channels, edges, strict=True))
+    ]
+    scale_ops = tuple(scale for scale, _bits in pairs)
+    bits_ops = tuple(bits for _scale, bits in pairs)
+    # The scale slabs are always compute-filled; A joins them there when it is a cone.
+    filled = scale_ops if a_copied else (a_op, *scale_ops)
+    copied = (a_op, *bits_ops) if a_copied else bits_ops
+    return (a_op, *bits_ops), filled, copied, a_prologue
 
 
 def _block_scaled_operands(
