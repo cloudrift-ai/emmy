@@ -178,5 +178,5 @@ loops:
             unroll: false
             seed: true
       name: k_matmul_reduce_069055
-    inputs: [sg_one, wg, x, wu]
+    inputs: [sg_one, x, wg, wu]
     outputs: [[o, f32, [1, 32, 3072]]]

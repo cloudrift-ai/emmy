@@ -608,10 +608,10 @@ def merge_sibling_free_loops(stmts: Body) -> Body:
 
     A free loop's iterations are independent, so two free loops over one extent walk one
     iteration space twice. One walk is the canonical spelling: a kernel then writes every
-    output of that space in one sweep, and :func:`dedup_loads` collapses whatever the two
-    bodies computed alike. The splicer lands a merged region's output stores in loops named
-    after their own axes, so the same region spelled in two merge orders can arrive with its
-    stores in two equal loops or in one; this pass makes both orders one body.
+    output of that space in one loop, and :func:`dedup_loads` collapses whatever the two
+    bodies computed alike. The splicer names a merged region's output loops after their own
+    axes, so one region spliced in two merge orders can arrive with its stores in two equal
+    loops or in one. This pass makes both orders one body.
 
     A merge takes the reduce merge's conditions (:func:`merge_sibling_reduce_loops`): the
     incoming loop reads no SSA name the surviving loop's body defines, no statement between
