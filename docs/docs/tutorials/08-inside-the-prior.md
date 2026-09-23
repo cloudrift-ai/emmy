@@ -181,7 +181,7 @@ neighbouring ranks in a large pool can be a fraction of a percent apart or three
 cannot answer is asked over configurations that were actually measured, which is the next page's dataset:
 
 ```bash
-emmy dataset import
+emmy dataset import ~/.cache/emmy/autotune.db
 emmy eval prior --dataset db
 ```
 

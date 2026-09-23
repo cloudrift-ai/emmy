@@ -497,8 +497,8 @@ def test_a_stored_cut_is_priced_from_its_pieces_at_the_fork() -> None:
     priced as the sum of its pieces' fastest rows on this card — every piece, or the arm is off the
     ballot. The parent is matched by exact identity, so another kernel's cut never prices this one."""
     from emmy.compiler.context import Context
-    from emmy.compiler.pipeline.search.db import RoutingRow, SearchDB
-    from tests.compiler.pipeline.search.helpers import GPU_5090, kernel_row, perf_row
+    from emmy.compiler.pipeline.search.db import PerfStats, RoutingRow, SearchDB
+    from tests.compiler.pipeline.search.helpers import GPU_5090, kernel_row
 
     ctx = Context.from_target((12, 0), gpu_name=GPU_5090)
     point, tile, _fuse, cut = _cut_fork(ctx)
@@ -506,10 +506,16 @@ def test_a_stored_cut_is_priced_from_its_pieces_at_the_fork() -> None:
     db = SearchDB()
     db.record_kernels([kernel_row(parent), kernel_row("c1"), kernel_row("c2")])
     db.record_routing(RoutingRow(parent=parent, arm={"PLACE@map.1/map": "cut"}, children=("c1", "c2")))
-    db.record_perf_rows([perf_row("c1", us=30.0)])
 
+    def measured(kernel: str, us: float, work: str = "w1x8") -> None:
+        # Through the live context, so the row lands in the regime this compile reads (the suite's flags included).
+        stats = PerfStats(median=us, min=us, max=us, mean=us, variance=0.0, n_samples=30)
+        db.record_perf(ctx, kernel, bindings={}, knobs={"WORK": work}, backend="cuda", status="ok", stats=stats)
+
+    measured("c1", 30.0)
     assert _route_candidates(point, greedy._EMPTY_MEASURED, db) == [], "a piece without a row leaves the cut unpriced"
-    db.record_perf_rows([perf_row("c2", us=50.0), perf_row("c2", us=70.0, knobs={"WORK": "t8"})])
+    measured("c2", 50.0)
+    measured("c2", 70.0, work="t8")
     assert _route_candidates(point, greedy._EMPTY_MEASURED, db) == [(cut, 80.0)]
     assert _route_candidates(point, greedy._EMPTY_MEASURED, None) == []
     other = Context.from_target((12, 0), gpu_name="NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition")

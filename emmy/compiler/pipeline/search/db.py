@@ -4,7 +4,7 @@ Pure persistence layer — no MCTS state, no propagation walks. One schema, seve
 DB (``EMMY_TUNE_DB``) is what compile reads and tune writes; a dataset instance (``EMMY_DATASET_DB``)
 holds the same tables filled by ``emmy dataset import``, and is what the measurement-data readers read.
 
-Tables (the DDL is the reference; ``plans/db-schema-target.sql`` was its working note):
+Tables (the DDL is the reference):
 
 - ``kernel`` — one row per compilable kernel, keyed by its EXACT identity (``identity_key(structural=False,
   with_io=True)``: the digest of the normalized body's form plus each buffer's dtype and hint-free shape).

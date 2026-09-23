@@ -414,8 +414,6 @@
  "tests/compiler/pipeline/search/data/test_freeze.py::test_freeze_twice_same_digest": 0.1,
  "tests/compiler/pipeline/search/data/test_freeze.py::test_load_freeze_digest_mismatch_hard_error": 0.05,
  "tests/compiler/pipeline/search/data/test_freeze.py::test_load_freeze_missing_listed_file_hard_error": 0.05,
- "tests/compiler/pipeline/search/data/test_freeze.py::test_load_freeze_ver_mismatch_hard_error": 0.05,
- "tests/compiler/pipeline/search/data/test_freeze.py::test_the_checked_in_freeze_is_the_default_evaluation_corpus": 2.35,
  "tests/compiler/pipeline/search/data/test_freeze.py::test_write_freeze_refuses_to_replace_non_freeze_dir": 0.05,
  "tests/compiler/pipeline/search/data/test_freeze.py::test_write_freeze_round_trip": 0.06,
  "tests/compiler/pipeline/search/policy/test_greedy.py::test_price_memo_keys_on_exact_identity_not_the_term_hash": 18.27,
@@ -669,7 +667,6 @@
  "tests/compiler/pipeline/search/test_two_level_strategy.py::test_minted_kernels_are_enrolled_as_first_class_targets": 2.15,
  "tests/compiler/pipeline/search/test_two_level_strategy.py::test_persisted_unscheduled_tile_child_tunes_and_replays_in_parent_cut": 0.74,
  "tests/compiler/pipeline/search/test_two_level_strategy.py::test_pinned_placement_route_tunes_and_assembles_child_schedules": 0.51,
- "tests/compiler/pipeline/search/test_two_level_strategy.py::test_placement_route_total_is_not_persisted_without_a_child_schedule_receipt": 0.91,
  "tests/compiler/pipeline/search/test_two_level_strategy.py::test_run_drives_outer_scores_separably_and_assembles": 2.2,
  "tests/compiler/pipeline/search/test_two_level_strategy.py::test_scheduled_tile_child_is_not_reenrolled_or_rescheduled": 0.17,
  "tests/compiler/pipeline/search/test_two_level_strategy.py::test_scoring_is_separable_over_unique_kernels": 9.66,
@@ -1272,5 +1269,6 @@
  "tests/compiler/realization/test_realization.py::test_realization[matmul/volta-f16acc-direct.yaml-built]@cuda": 5.4,
 "tests/compiler/passes/test_cut_forks.py::test_a_value_read_under_a_reduce_and_at_the_free_axis_is_one_seam": 12.0,
  "tests/compiler/passes/test_cut_forks.py::test_a_clustered_value_cut_once_computes_the_right_answer@cuda": 2.73,
- "tests/compiler/ir/test_kernel_wire.py::test_every_kernel_of_a_set_has_a_wire_that_re_lifts_to_its_exact_identity[reduce/sinkhorn-nested-cut-derived-read-sm70.yaml]": 0.7
+ "tests/compiler/ir/test_kernel_wire.py::test_every_kernel_of_a_set_has_wires_that_re_lift_to_its_exact_identity[reduce/sinkhorn-nested-cut-derived-read-sm70.yaml]": 1.96,
+ "tests/compiler/ir/test_kernel_wire.py::test_every_kernel_of_a_set_has_wires_that_re_lift_to_its_exact_identity[reduce/cross-cta-matmul-kernel.yaml]": 0.68
 }

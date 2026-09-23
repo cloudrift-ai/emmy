@@ -139,7 +139,8 @@ def test_structural_replay_is_scoped_to_the_cut_domain() -> None:
     decisions = []
     _remember_structural_decision(decisions, root, ("PLACE",), {"PLACE": "cut"})
 
-    assert _replay_structural_decision(decisions, root, placement) is placement_cut
+    # The replay hands back the OFFERED fork, so its alias map reaches the splice event with the option.
+    assert _replay_structural_decision(decisions, root, placement) is placement[1]
     assert _replay_structural_decision(decisions, root, reduction) is None
 
 

@@ -34,7 +34,7 @@ because they have different writers, different readers and different lifetimes.
 | **Golden configurations** | model files under `recipes/<model>/golden/`, one per exact GPU; model-agnostic files under compiler search | promoted from measured comparisons | an ordinary compile, first of all; also the training data for the offline prior |
 | **Reservoir** | inside the online prior's checkpoint, `~/.cache/emmy/online.json` | `emmy tune`, every training row | the online prior's own training; and an ordinary compile, for the rows measured at deployable settings |
 | **Measurements table** | the tuning database, `~/.cache/emmy/autotune.db` | `emmy tune`, one row per benchmarked kernel; also `emmy run --bench` for hand-forced measurements | an ordinary compile, after the two above; and as a cache, so a configuration already measured is never re-run |
-| **Dataset database** | `~/.cache/emmy/dataset.db`, the same tables in a file of their own | `emmy dataset import`, from the checked-in measurement freeze and from tuning databases | the `emmy eval` measured view only — **never** consulted when compiling |
+| **Dataset database** | `~/.cache/emmy/dataset.db`, the same tables in a file of their own | `emmy dataset import`, from measurement freezes and from tuning databases | the `emmy eval` measured view only — **never** consulted when compiling |
 
 The last row surprises people. The dataset database holds the same kind of rows as the tuning database — every
 benchmarked configuration, failures included — but it is filled from a pinned snapshot rather than from this
@@ -49,7 +49,7 @@ emmy tune ─┬─ each benchmark ─────────────▶ me
 
 emmy run --bench, hand-forced rows ───────▶ measurements table
 
-emmy dataset import, from the snapshot ───▶ dataset database ──────────────────▶ emmy eval only
+emmy dataset import, snapshots/tune DBs ──▶ dataset database ──────────────────▶ emmy eval only
 
 recorded by hand from those rows ─────────▶ golden configuration files ────────▶ ordinary compile
                                                         └── emmy fit ─────────▶ offline prior weights ──▶ ordinary compile

@@ -28,34 +28,43 @@ take — so the sizes a measurement ran at are part of the key, and one kernel b
 
 ## The measurement tables
 
-The database holds three tables, and every instance of it — the tuning database a compile reads, the dataset database
-the evaluations read — holds the same three.
+The database holds kernels, the decisions that minted them, and measurements of them, and every instance of it — the
+tuning database a compile reads, the dataset database the evaluations read — holds the same tables.
 
-**Kernels.** One row per kernel: its exact identity, the loop program that defines it, and its C name. A kernel that a
-cut or a split minted is a row like any other, so the same kernel reached from two parents has one definition, and
-that definition is what its candidate pool is enumerated from.
+**Kernels.** One row per kernel: its exact identity, the loop program that defines it before and after normalization,
+its structural features and its C name. A kernel that a cut or a split minted is a row like any other, so the same
+kernel reached from two parents has one definition, and that definition is what its candidate pool is enumerated
+from.
 
-**Routing.** One row per structural decision taken on one kernel: the parent, the decision (which seam was cut,
-how a reduction was split across blocks), and the kernels the decision minted. A minted kernel with decisions of its
-own is the parent of further rows. The price of the decision is not here; it is a measured row of the parent that
-spells the decision, which is how a compile reads it.
+**Routing.** One row per kernel a structural decision minted: the parent, the decision (which seam was cut, how a
+reduction was split across blocks), and the piece. A minted kernel with decisions of its own is the parent of further
+rows. The decision has no measurement of its own; its price on a card is the sum of its pieces' fastest measurements
+there, which is how a compile reads it.
 
-**Measurements.** One row per measured kernel variant per card and compile setting. The GPU's name is part of the key:
-compute capability alone cannot separate two cards built on the same die — an H100 and an H200 share it, and their SM
-counts — so without the name their rows would merge and one card's data would silently overwrite the other's. A better
-measurement of the same variant replaces a worse one. **Failures are kept**, with the watchdog's placeholder time,
-because a search model needs negative examples; a working row is never downgraded by a later failure.
+**Measurements.** One row per measured kernel variant per card and compile setting, the schedule it ran with stored
+once and shared between rows. The GPU's name is part of the key: compute capability alone cannot separate two cards
+built on the same die — an H100 and an H200 share it, and their SM counts — so without the name their rows would
+merge and one card's data would silently overwrite the other's. A better measurement of the same variant replaces a
+worse one. **Failures are kept**, with the watchdog's placeholder time, because a search model needs negative
+examples; a working row is never downgraded by a later failure. A row that spells a cut or a split is refused: that
+is a decision, not a measurement of one kernel.
 
 **Nothing migrates.** A database file written by an older version of the compiler is re-created empty on the next
 write, since every row in it can be measured again, and refused by a reader.
+
+**Drift is counted, not hidden.** `emmy dataset check` re-derives what an instance stores — the normalized program,
+both identities, the features, the sizes a row was measured at — and counts the rows that no longer agree with the
+current code, so a change to normalization, identity or featurization shows up as a number rather than as a model
+that quietly trains on rows that mean something else.
 
 **A frozen snapshot makes a fit reproducible.** The tuning database is a live store — tuning runs keep writing into it
 — so a model fitted straight from it cannot be reproduced later. A freeze is a snapshot written as a directory of YAML
 files, one per card plus the kernel and kernel-set definitions, beside a manifest of content digests. Nothing is
 stored in feature form: the hardware description is rebuilt for the recorded card. Loading is strict — a missing
 file, a foreign manifest or a digest mismatch is an error — and freezing the same database twice produces
-byte-identical digests. The repository checks one freeze in, and `emmy dataset import` loads it into the dataset
-database, which is what every evaluation reads; a tuning database from a rented card can be imported the same way.
+byte-identical digests. A freeze checked into the repository is what `emmy dataset import` loads into the dataset
+database by default, which is what every evaluation reads; none is checked in at the moment, so a tuning database —
+from this machine or a rented card — is named on the command line instead.
 
 **Hand-run measurements are recorded too.** A `run --bench` that measured configurations with knob values forced by
 hand records each clean result through the tuner's own writer, so that manually found optima are not lost when the
@@ -145,10 +154,10 @@ Gathered in one place, honestly.
 
 ## See it yourself
 
-The measured view reads the dataset database, filled from the checked-in freeze:
+The measured view reads the dataset database, filled from a freeze or from a tuning database:
 
 ```bash
-emmy dataset import
+emmy dataset import ~/.cache/emmy/autotune.db
 emmy eval prior --dataset db
 ```
 
