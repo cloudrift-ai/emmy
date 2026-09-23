@@ -14,9 +14,10 @@ command:
     export EMMY_GOLDEN_FILE=
     export EMMY_TUNE_DB=$task_dir/autotune.db
     # A behavioural test needs a fully defined kernel, not whatever the greedy pick reaches for.
-    # These are the scalar-tier spellings the repository's own V100 evidence records as working
-    # for this model (_tune/main-fixes-v100/). TILE='' is the load-bearing one: the unpinned pick
-    # takes a Volta tensor-core tile whose schedule costs tens of seconds per launch here.
+    # The pins are what actually force the schedule: they collapse the search space, while the
+    # golden only ranks candidates inside it (an export from the golden alone does not reproduce
+    # this schedule — see RESULTS.md). The golden is passed too, so the recorded rows are the
+    # evidence behind the same pick, and so re-recording it is how the pins would be retired.
     export EMMY_TILE=
     export EMMY_WORK=t128
     export EMMY_REDUCE=coop
@@ -27,6 +28,7 @@ command:
       --export-native $task_dir/pack \
       --context-length $context_length \
       --page-tokens $page_tokens \
+      --golden $repo_dir/emmy/recipes/Qwen3-0.6B/golden/$golden \
       2>&1 | tee $task_dir/export.log
     ./venv/bin/emmy generate $hf_model \
       --native-pack $task_dir/pack \
@@ -56,6 +58,7 @@ matrices:
     deploy.gpu:
       - "Tesla V100-SXM2-16GB"
     hf_model: "Qwen/Qwen3-0.6B"
+    golden: v100_sm70.yaml
     context_length: 256
     # The control is one page spanning the context; the others cut it into many.
     page_tokens: [256, 64, 16]

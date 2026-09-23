@@ -50,7 +50,7 @@ blocker is a schedule that costs tens of seconds per launch on sm_70.
 | `EMMY_PLACE=cut` | does not complete |
 | `UNROLL`, `VECTORIZE_*`, `LOOPIFY` pins | do not complete, and leave the kernel identity unchanged — these knobs do not reach this schedule |
 
-## The pin
+## The pin, and what a golden does and does not do
 
 The repository's own V100 evidence carries working rows for this model — `_tune/main-fixes-v100/`
 records Qwen3-0.6B schedules measured on a Tesla V100 — and they are all scalar tier. Pinning that
@@ -64,23 +64,43 @@ EMMY_STAGE=
 ```
 
 `TILE=''` is the load-bearing one. Unpinned, the greedy pick reaches for a Volta tensor-core tile
-whose schedule costs tens of seconds per launch here. The recipe exports these, so the behavioural
-test runs a fully defined kernel rather than whatever the search happens to pick.
+whose schedule does not complete a launch here. With the pins the export drops from 10.3s to 0.8s
+and the pack generates.
 
-| | unpinned | pinned scalar tier |
-| --- | --- | --- |
-| export | 10.3 s | 0.8 s |
-| first token step | never completes | completes |
-| 8-step generation | — | 3 tokens after a 5-token prompt |
+The same schedule is recorded as a golden — `emmy/recipes/Qwen3-0.6B/golden/v100_sm70.yaml`, ten
+realizations over the three sub-blocks the native export compiles, written by
+`emmy run --golden ... --record-greedy` with the pins active. **It does not replace the pins.** An
+export from the golden alone takes the slow schedule again: the pins collapse the search space,
+while a golden ranks candidates inside it. `--strict-evidence` says exactly what is missing:
 
-It is correct, not fast: those seven steps took roughly twenty minutes of wall clock. The scalar
-tier is the right choice for a behavioural test and the wrong one for a perf claim.
+```
+strict evidence: kernel 'k_linear_mean_reduce_83fb98' has no measured evidence for its 030_cut
+fork (no measured row spells a kernel-set arm)
+```
+
+So the golden covers the schedules but not the kernel-set decision above them. Retiring the pins
+means recording those cut arms too; until then the recipe passes both, and the pins are what
+actually decide.
+
+## What it costs
+
+Recording the golden measured the scalar tier at a single row:
+
+| sub-block | scalar tier, one row, V100 |
+| --- | ---: |
+| `pre` (q/k/v projections) | 69 ms |
+| `post` (o_proj + residual + MLP) | 249 ms |
+
+Those are milliseconds where microseconds belong. The reason is visible in the bench rows: one of
+the two `pre` kernels launches at **grid 1** — a single CTA on an 80-SM card. At one row there is
+no M to spread, so the scalar tier serializes what a tensor-core tile would parallelize. That is
+the whole of the twenty-minute generation, and it is a property of the tier, not of paging.
 
 ## Next
 
-1. **Retry unpinned after the Volta work.** `feature/volta-trans-b-crosswise` and #872 rework
-   exactly the tensor-core path the greedy pick was taking here, so the pin may stop being
-   necessary — and if it is still necessary, that is worth knowing.
-2. **Qualify on a 4080 or 5090** to measure what paging costs against schedules that are fast as
-   well as correct. 139 golden records already exist for this model there
-   (`../native_baseline/golden/rtx4080_sm89.yaml`).
+1. **Record the cut-fork rows** so the golden alone pins the build and the env pins can be
+   dropped. `--strict-evidence` names each missing one, so this is mechanical, not a search.
+2. **Retry unpinned after the Volta work.** `#874` reworks exactly the tensor-core path the greedy
+   pick was taking here, so the pin may stop being necessary.
+3. **Qualify on a 4080 or 5090** to measure what paging costs against a schedule that is fast as
+   well as correct. The scalar tier answers "is it correct"; it cannot answer "what does it cost".
