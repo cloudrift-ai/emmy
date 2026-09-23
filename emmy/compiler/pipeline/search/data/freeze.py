@@ -5,21 +5,24 @@ from it is not reproducible: two runs of the same fitter can see different data.
 snapshot extracted from a DB instance whose digest pins exactly which measurements a fit saw — the
 fit becomes a pure function of (repo, freeze digest).
 
-Freeze v5 is a DIRECTORY of per-GPU YAML files — a ``gpu_name`` / ``compute_cap`` header plus a
-``configs`` list — beside a ``manifest.json`` carrying provenance and content digests. Each row is
-a ``perf`` row minus what its file header already says: the kernel it measured, the sizes its
-symbolic dims were bound to, its knobs (``S_*`` stamps + tunables, exactly as the DB stores them),
-the opt level and the residual compiler flags, the status, the latency statistics, ``captured``,
-``measured_at`` and a failure's ``error``. Two card-independent files ride beside them when the
-instance holds definitions: ``kernels.yaml`` (the ``kernel`` rows of every kernel a frozen row or a
-kernel set names — identity, C name, Loop IR wire) and ``routing.yaml`` (every ``routing``
-row), so an import can enumerate from the freeze alone. The manifest lists every file with its
-kind (``perf``, ``kernels``, ``routing``) and its digest. Device ``H_*`` features are never
-stored: readers derive them from the card (``data.sample.measured_features``).
+Freeze v6 is a DIRECTORY of per-GPU YAML files — a ``gpu_name`` / ``compute_cap`` header plus a
+``configs`` list — beside a ``manifest.json`` carrying provenance and content digests. It stores the
+DB's natural keys and none of its ids. Each row is a ``perf`` row minus what its file header already
+says: the kernel it measured (exact identity), the sizes its symbolic dims were bound to, its schedule
+row (the in-kernel knobs, never a stamp), the opt level and the residual compiler flags, the status,
+the latency statistics, ``captured``, ``measured_at`` and a failure's ``error``. Two card-independent
+files ride beside them: ``kernels.yaml`` (the ``kernel`` row of every kernel a frozen row or a routing
+row names — both identities, both Loop IR wires, the C name and its ``S_*`` stamps) and
+``routing.yaml`` (every ``routing`` row: parent, arm, pieces in order), so an import can enumerate
+from the freeze alone. The manifest lists every file with its kind (``perf``, ``kernels``,
+``routing``) and its digest. Device ``H_*`` features are never stored: readers derive them from the
+card (``data.sample.measured_features``).
 
 What freezes (see :func:`freeze_reason`): every CUDA row measured in the deployable regime on a
-card the GPU registry knows, spelled in the current featurizer vocabulary, that passes the
-physical-plausibility predicates. ``bench_fail`` rows are kept as durable negatives.
+card the GPU registry knows that passes the physical-plausibility predicates. ``bench_fail`` rows
+are kept as durable negatives. The featurizer version the stamps are spelled in is the manifest's,
+not a row's: a freeze from another featurizer generation refuses to load rather than being re-read
+under today's vocabulary.
 
 Determinism contract: freezing the same rows twice yields the same digests. Every row
 serializes to one canonical JSON line (sorted keys, fixed separators, ``allow_nan=False``);
@@ -29,15 +32,17 @@ and immune to YAML style — and the manifest's top-level ``sha256`` folds the s
 per-file digests. ``created_at`` never enters any digest.
 
 :func:`load_freeze` hard-errors — never a silent fallback — on a missing/foreign/corrupt
-manifest, a ``freeze_ver`` mismatch, a manifest-listed file missing, or a per-file digest
-mismatch. It is not a reader's entry point: ``emmy dataset import`` loads a freeze into a DB
+manifest, a ``freeze_ver`` or ``feat_ver`` mismatch, a manifest-listed file missing, or a per-file
+digest mismatch. It is not a reader's entry point: ``emmy dataset import`` loads a freeze into a DB
 instance (each row's ``source`` naming the freeze's digest), and every reader reads the instance.
 
-One freeze is CHECKED IN, at ``search/freezes/``, and is what ``config.freeze_path()`` resolves
+A checked-in freeze lives at ``search/freezes/``, which is what ``config.freeze_path()`` resolves
 to — the default source of ``emmy dataset import``: the prior's evaluation corpus should be an
 artifact, not whatever a machine happens to hold. Its payload YAML is tracked in git LFS (multi-MB
 per card); its manifest is plain git so the digest and the version stamps stay diffable. It is
-deliberately not wheel package-data — a wheel install never fits or evaluates a prior.
+deliberately not wheel package-data — a wheel install never fits or evaluates a prior. None is
+checked in at the moment: the RTX 5090 rows predate the kernel table and are re-collected through
+the ``perf`` writer.
 
 Produced by ``emmy dataset freeze``.
 """
@@ -58,13 +63,14 @@ from typing import NamedTuple
 
 import yaml
 
+from emmy.compiler.pipeline.knob import CTX_PREFIX, STRUCT_PREFIX
 from emmy.compiler.pipeline.search.db import KernelRow, PerfRow, PerfStats, RoutingRow, SearchDB
 from emmy.compiler.pipeline.search.features import DEPLOYABLE_OPT, FEATURIZER_VERSION
 
 logger = logging.getLogger(__name__)
 
 FREEZE_KIND = "emmy-measurement-freeze"
-FREEZE_VER = 5
+FREEZE_VER = 6
 MANIFEST_NAME = "manifest.json"
 KERNELS_NAME = "kernels.yaml"
 ROUTING_NAME = "routing.yaml"
@@ -84,9 +90,9 @@ def freeze_reason(row: PerfRow) -> str | None:
     ``None`` to keep it.
 
     THE admission filter, and nothing else — keep every row measured in the DEPLOYABLE regime, on a
-    card the GPU registry knows, spelled in the current featurizer vocabulary, that passes the shared
-    plausibility predicates. ``bench_fail`` rows reach the keep path by construction: both predicates
-    return ``None`` for non-``ok`` rows, so failures are kept as negative examples without a special case.
+    card the GPU registry knows, that passes the shared plausibility predicates. ``bench_fail`` rows
+    reach the keep path by construction: both predicates return ``None`` for non-``ok`` rows, so
+    failures are kept as negative examples without a special case.
 
     The regime gate is what keeps a freeze a fair yardstick. A freeze is the corpus a reported
     prior number is computed over, and a measurement taken under a non-deployable opt level
@@ -98,14 +104,10 @@ def freeze_reason(row: PerfRow) -> str | None:
 
     if gpu.by_name(row.gpu) is None:
         return "unknown card (not in the GPU registry)"
-    if row.feat_ver != FEATURIZER_VERSION:
-        return f"stale feat_ver {row.feat_ver} != current {FEATURIZER_VERSION}"
     if row.opt != DEPLOYABLE_OPT:
         return f"non-deployable regime (H_opt={row.opt:g})"
     if row.flags:
         return "non-default compiler flags"
-    if not any(k.startswith("S_") for k in row.knobs):
-        return "no structural stamps (a whole-slice or kernel-set row)"
     reason = implausible_value_reason(row)
     if reason is not None:
         return f"implausible value: {reason}"
@@ -135,13 +137,11 @@ def implausible_value_reason(row: PerfRow) -> str | None:
     against every stamp combination in the 2026-07 sweep stores. ``reduce_max``, not
     ``reduce_prod``, keeps the bound a lower estimate of work even off the exact case. A
     symbolic axis is excluded from the stamped products, so the sizes the row was benched at
-    (``bindings``) re-enter as one factor, their product; a row recorded before the sizes were
-    stored (the converted freeze) is read at the default hint, the size those benches ran
-    at. Ungateable rows also pass on: non-``ok`` status
-    (a fail sentinel is not a measurement), no stamped shape, unknown card or unrecorded
-    peak, and rows outside the current featurizer vocabulary (their stamps aren't trusted
-    enough to judge)."""
-    if row.status != "ok" or row.stats.median <= 0 or row.feat_ver != FEATURIZER_VERSION:
+    (``bindings``) re-enter as one factor, their product; a static kernel binds nothing and a
+    symbolic one with no sizes stored is read at the default hint. Ungateable rows also pass on:
+    non-``ok`` status (a fail sentinel is not a measurement), no stamped shape, unknown card or
+    unrecorded peak."""
+    if row.status != "ok" or row.stats.median <= 0:
         return None
     f = row.knobs
     free = float(f.get("S_ext_free_prod") or 0.0)
@@ -183,7 +183,7 @@ def impossible_kernel_reason(row: PerfRow) -> str | None:
     notice (square.512's combine implies a legal 133 TFLOP/s), THIS check is the only one
     that catches the class: the measurement is of a kernel set that provably didn't
     include the stamped kernel."""
-    if row.status != "ok" or row.feat_ver != FEATURIZER_VERSION:
+    if row.status != "ok":
         return None
     f = row.knobs
     tile_spec = next((str(v) for k, v in f.items() if k.startswith("TILE") and v), "")
@@ -216,12 +216,13 @@ def impossible_kernel_reason(row: PerfRow) -> str | None:
 
 
 def _row_payload(row: PerfRow) -> dict:
-    """One freeze row: the ``perf`` row minus what its file header holds (card, compute capability)."""
+    """One freeze row: the ``perf`` row minus what its file header holds (card, compute capability) and
+    minus the kernel's stamps, which its ``kernel`` row carries."""
     s = row.stats
     return {
         "kernel": row.kernel,
         "bindings": row.bindings,
-        "knobs": row.knobs,
+        "knobs": {k: v for k, v in row.knobs.items() if not k.startswith((STRUCT_PREFIX, CTX_PREFIX))},
         "opt": row.opt,
         "flags": row.flags,
         "status": row.status,
@@ -230,6 +231,14 @@ def _row_payload(row: PerfRow) -> dict:
         "measured_at": row.measured_at,
         "error": row.error,
     }
+
+
+_KERNEL_FIELDS = ("exact_identity", "structural_identity", "loop_ir", "normalized_loop_ir", "name", "stamps")
+
+
+def _kernel_payload(k: KernelRow) -> dict:
+    """One ``kernels.yaml`` row: the kernel row's columns by name, its stamps as the float dict they are."""
+    return {field: getattr(k, field) for field in _KERNEL_FIELDS}
 
 
 def _row_line(payload: dict) -> bytes:
@@ -276,7 +285,7 @@ def _write_rows(tmp: Path, name: str, payloads: list[dict], doc: dict, key: str)
 
 def write_freeze(db_path: Path | str, out_dir: Path | str, *, note: str = "") -> dict:
     """Read the DB instance at ``db_path`` read-only — its CUDA ``perf`` rows filtered through
-    :func:`freeze_reason`, the ``kernel`` rows those rows and the kernel sets name, every
+    :func:`freeze_reason`, the ``kernel`` rows those rows and the routing rows name, every
     ``routing`` row — and atomically write the freeze DIRECTORY at ``out_dir``: one
     per-``(gpu, compute_cap)`` YAML file, the two definition files when there is anything to put in
     them, plus ``manifest.json``. Returns the manifest dict (so a caller reports counts + digest
@@ -287,7 +296,7 @@ def write_freeze(db_path: Path | str, out_dir: Path | str, *, note: str = "") ->
     try:
         rows = list(db.iter_perf_rows(backend="cuda"))
         kernels = list(db.iter_kernels())
-        routing = list(db.iter_routing_rows())
+        routing = list(db.iter_routing())
     finally:
         db.close()
     kept = []
@@ -322,16 +331,12 @@ def write_freeze(db_path: Path | str, out_dir: Path | str, *, note: str = "") ->
             raise RuntimeError(f"freeze file name collision: {name} (cards {files[name]['gpu_name']!r} and {gpu!r})")
         digest, n = _write_rows(tmp, name, [_row_payload(r) for r in card_rows], {"gpu_name": gpu, "compute_cap": list(cap)}, "configs")
         files[name] = {"kind": "perf", "gpu_name": gpu, "compute_cap": list(cap), "rows": n, "sha256": digest}
-    # Definitions are card-independent: the kernels the frozen rows and the kernel sets name, and
-    # every kernel set. A kernel nothing names is not part of what the freeze pins.
+    # Definitions are card-independent: the kernels the frozen rows and the routing rows name, and
+    # every routing row. A kernel nothing names is not part of what the freeze pins.
     named = {r.kernel for r in kept} | {s.parent for s in routing} | {c for s in routing for c in s.children}
     definitions = (
-        (KERNELS_NAME, "kernels", [{"identity": k.identity, "name": k.name, "wire": k.wire} for k in kernels if k.identity in named]),
-        (
-            ROUTING_NAME,
-            "routing",
-            [{"parent": s.parent, "decision": s.decision, "children": list(s.children)} for s in routing],
-        ),
+        (KERNELS_NAME, "kernels", [_kernel_payload(k) for k in kernels if k.exact_identity in named]),
+        (ROUTING_NAME, "routing", [{"parent": s.parent, "arm": s.arm, "children": list(s.children)} for s in routing]),
     )
     for name, kind, payloads in definitions:
         if payloads:
@@ -408,9 +413,10 @@ def _read_rows(p: Path, name: str, info: dict, regen: str) -> tuple[dict, list[d
 
 
 def load_freeze(path: Path | str) -> Freeze:
-    """Parse + verify the freeze directory at ``path``: the manifest, the ``perf`` rows (each keyed by
-    its file's card and sourced ``freeze:<digest>``), the ``kernel`` rows and the ``routing`` rows.
-    Hard ``RuntimeError`` — never a silent fallback — on any integrity failure."""
+    """Parse + verify the freeze directory at ``path``: the manifest, the ``kernel`` rows, the ``routing``
+    rows and the ``perf`` rows (each keyed by its file's card, its ``knobs`` the kernel's stamps plus its
+    schedule row — the flat row a DB reader gives — and sourced ``freeze:<digest>``). Hard
+    ``RuntimeError`` — never a silent fallback — on any integrity failure."""
     p = Path(path)
     regen = "re-freeze with `emmy dataset freeze`"
     mpath = p / MANIFEST_NAME
@@ -424,34 +430,38 @@ def load_freeze(path: Path | str) -> Freeze:
         raise RuntimeError(f"{p} is not a measurement freeze (manifest kind != {FREEZE_KIND!r}) — {regen}")
     if manifest.get("freeze_ver") != FREEZE_VER:
         raise RuntimeError(f"measurement freeze {p} has freeze_ver={manifest.get('freeze_ver')!r}, this code reads {FREEZE_VER} — {regen}")
+    if manifest.get("feat_ver") != FEATURIZER_VERSION:
+        raise RuntimeError(
+            f"measurement freeze {p} has feat_ver={manifest.get('feat_ver')!r}, this featurizer is {FEATURIZER_VERSION} — {regen}"
+        )
 
     source = f"freeze:{manifest['sha256'][:12]}"
     frozen = Freeze(manifest, [], [], [])
-    for name in sorted(manifest.get("files", {})):
-        info = manifest["files"][name]
-        doc, payloads = _read_rows(p, name, info, regen)
-        if info["kind"] == "kernels":
-            for payload in payloads:
-                if not (
-                    isinstance(payload.get("identity"), str)
-                    and isinstance(payload.get("wire"), dict)
-                    and isinstance(payload.get("name"), str)
-                ):
-                    raise RuntimeError(f"measurement freeze {p}: {name} row lacks identity/wire/name — {regen}")
-                frozen.kernels.append(KernelRow(identity=payload["identity"], wire=payload["wire"], name=payload["name"]))
-            continue
-        if info["kind"] == "routing":
-            for payload in payloads:
-                if not (
-                    isinstance(payload.get("parent"), str)
-                    and isinstance(payload.get("decision"), dict)
-                    and isinstance(payload.get("children"), list)
-                ):
-                    raise RuntimeError(f"measurement freeze {p}: {name} row lacks parent/decision/children — {regen}")
-                frozen.routing.append(
-                    RoutingRow(parent=payload["parent"], decision=payload["decision"], children=tuple(payload["children"]))
-                )
-            continue
+    files = manifest.get("files", {})
+    # Definitions first: a perf row's stamps are read off its kernel row.
+    by_kind: dict[str, list[tuple[str, dict, list[dict]]]] = {}
+    for name in sorted(files):
+        doc, payloads = _read_rows(p, name, files[name], regen)
+        by_kind.setdefault(files[name]["kind"], []).append((name, doc, payloads))
+    for name, _doc, payloads in by_kind.get("kernels", ()):
+        for payload in payloads:
+            if not (
+                all(isinstance(payload.get(f), str) for f in ("exact_identity", "structural_identity", "name"))
+                and all(isinstance(payload.get(f), dict) for f in ("loop_ir", "normalized_loop_ir", "stamps"))
+            ):
+                raise RuntimeError(f"measurement freeze {p}: {name} row lacks a kernel definition — {regen}")
+            frozen.kernels.append(KernelRow(**{f: payload[f] for f in _KERNEL_FIELDS}))
+    stamps = {k.exact_identity: k.stamps for k in frozen.kernels}
+    for name, _doc, payloads in by_kind.get("routing", ()):
+        for payload in payloads:
+            if not (
+                isinstance(payload.get("parent"), str)
+                and isinstance(payload.get("arm"), dict)
+                and isinstance(payload.get("children"), list)
+            ):
+                raise RuntimeError(f"measurement freeze {p}: {name} row lacks parent/arm/children — {regen}")
+            frozen.routing.append(RoutingRow(parent=payload["parent"], arm=payload["arm"], children=tuple(payload["children"])))
+    for name, doc, payloads in by_kind.get("perf", ()):
         gpu_name, (major, minor) = doc["gpu_name"], doc["compute_cap"]
         cc = major * 10 + minor
         for payload in payloads:
@@ -461,6 +471,10 @@ def load_freeze(path: Path | str) -> Freeze:
                 and isinstance(payload.get("knobs"), dict)
             ):
                 raise RuntimeError(f"measurement freeze {p}: {name} row lacks kernel/bindings/knobs — {regen}")
+            if payload["kernel"] not in stamps:
+                raise RuntimeError(
+                    f"measurement freeze {p}: {name} names kernel {payload['kernel']!r}, which {KERNELS_NAME} lacks — {regen}"
+                )
             frozen.perf.append(
                 PerfRow(
                     gpu=gpu_name,
@@ -469,14 +483,13 @@ def load_freeze(path: Path | str) -> Freeze:
                     flags=str(payload["flags"]),
                     kernel=payload["kernel"],
                     bindings=payload["bindings"],
-                    knobs=payload["knobs"],
+                    knobs={**stamps[payload["kernel"]], **payload["knobs"]},
                     backend="cuda",
                     status=payload["status"],
                     stats=PerfStats(**payload["stats"]),
                     measured_at=payload["measured_at"],
                     captured=bool(payload["captured"]),
                     error=payload["error"],
-                    feat_ver=int(manifest["feat_ver"]),
                     source=source,
                 )
             )

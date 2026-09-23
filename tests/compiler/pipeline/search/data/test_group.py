@@ -118,15 +118,10 @@ def test_every_row_is_either_grouped_or_counted():
         _row("a", us=500.0, knobs=_feats()),
         _row("b", us=1e9, knobs=_feats(TILE="f4x4"), status="bench_fail"),
         _row("c", us=200.0, knobs=_feats(TILE="f8x8"), flags="--use_fast_math"),
-        _row("d", us=300.0, knobs={"TILE": "f2x8"}),  # a whole-slice / kernel-set row: no S_* of its own
     ]
     groups, dropped = group_measured(rows)
     assert sum(len(g.feats) for g in groups) + sum(dropped.values()) == len(rows)
-    assert dropped == {
-        "bench_fail": 1,
-        "non-default compiler flags": 1,
-        "no structural stamps (a whole-slice or kernel-set row)": 1,
-    }
+    assert dropped == {"bench_fail": 1, "non-default compiler flags": 1}
 
 
 # --- the two label kinds -----------------------------------------------------------
@@ -170,18 +165,16 @@ def test_goldens_go_in_as_row_indices_and_come_back_as_row_indices():
 
 
 def test_a_row_the_freeze_would_refuse_is_refused_here_too():
-    """Admission is ``freeze_reason``, not a second list of rules — which matters most for the two it adds.
+    """Admission is ``freeze_reason``, not a second list of rules — which matters most for the row it adds.
 
-    A row in a retired featurizer vocabulary means something different from what its numbers say, and an
-    implausibly fast one is far worse than the ``bench_fail`` sentinel this module excludes by hand: the
+    An implausibly fast row is far worse than the ``bench_fail`` sentinel this module excludes by hand: the
     sentinel makes ONE row rank last, while a phantom optimum becomes the group's ``min`` and makes every
-    other row in the pool look bad. Both are invisible on freeze input — a freeze passed this filter at
-    write time — so only an imported tune DB can produce them, and only a test like this one can show it."""
+    other row in the pool look bad. It is invisible on freeze input — a freeze passed this filter at write
+    time — so only an imported tune DB can produce it, and only a test like this one can show it."""
     rows = [
         _row("honest", us=500.0, knobs=_feats()),
-        _row("stale", us=100.0, knobs=_feats(TILE="f4x4"), feat_ver=1),
         _row("phantom", us=0.05, knobs=_feats(TILE="f8x8")),
     ]
     groups, dropped = group_measured(rows)
     assert [g.latency_us.tolist() for g in groups] == [[500.0]]
-    assert sorted(dropped) == ["implausible value", "stale feat_ver 1 != current 4"]
+    assert sorted(dropped) == ["implausible value"]

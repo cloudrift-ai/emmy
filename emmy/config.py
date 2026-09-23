@@ -192,7 +192,7 @@ def dataset_db_path() -> Path:
 
 def freeze_path() -> Path:
     """The measurement freeze ``emmy dataset import`` reads by default: ``EMMY_FREEZE_DIR`` → the
-    repo-checked ``search/freezes/``.
+    repo's ``search/freezes/`` (empty until a card is re-collected through the ``perf`` writer).
 
     A freeze is the only measurement store that is a durable, comparable ARTIFACT. It is
     digest-pinned (``manifest.sha256``), stamped with the featurizer / knob / encoding versions

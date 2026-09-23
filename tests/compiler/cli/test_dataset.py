@@ -9,12 +9,13 @@ import pytest
 
 from emmy.commands.dataset import dataset_db, handle_dataset_import
 from emmy.compiler.pipeline.search.data.freeze import write_freeze
-from emmy.compiler.pipeline.search.db import KernelRow, RoutingRow, SearchDB
-from tests.compiler.pipeline.search.helpers import perf_row
+from emmy.compiler.pipeline.search.db import RoutingRow, SearchDB
+from tests.compiler.pipeline.search.helpers import kernel_row, perf_row
 
 
 def _freeze(tmp_path, name: str, us: float):
     db = SearchDB(tmp_path / f"{name}.db")
+    db.record_kernel(kernel_row(name))
     db.record_perf_rows([perf_row(name, us=us)])
     db.close()
     return write_freeze(tmp_path / f"{name}.db", tmp_path / name)
@@ -48,15 +49,15 @@ def test_a_tune_db_imports_its_rows_and_definitions(tmp_path):
     """A tune DB's CUDA rows arrive as they are, keeping the source they were written with, and so do
     its kernel and routing rows — the definitions its rows are of."""
     tune = SearchDB(tmp_path / "autotune.db")
+    tune.record_kernels([kernel_row("k", name="k_test", symbolic=("seq_len",)), kernel_row("p")])
     tune.record_perf_rows([perf_row("k", us=500.0), perf_row("k", us=300.0, bindings={"seq_len": 128})])
-    tune.record_kernel(KernelRow(identity="k", wire={"nodes": []}, name="k_test"))
-    tune.record_routing(RoutingRow(parent="p", decision={"PLACE": "cut"}, children=("k",)))
+    tune.record_routing(RoutingRow(parent="p", arm={"PLACE": "cut"}, children=("k",)))
     tune.close()
 
     handle_dataset_import(Namespace(sources=[str(tmp_path / "autotune.db")], db=str(tmp_path / "dataset.db"), fresh=False))
     db = SearchDB.open_readonly(tmp_path / "dataset.db")
     assert sorted((r.kernel, tuple(r.bindings.items())) for r in db.iter_perf_rows()) == [("k", ()), ("k", (("seq_len", 128),))]
     assert db.perf_sources() == {"measured": 2}
-    assert db.kernel_names() == {"k": "k_test"}
-    assert [(s.parent, s.children) for s in db.iter_routing_rows()] == [("p", ("k",))]
+    assert db.kernel_names() == {"k": "k_test", "p": "k_p"}
+    assert [(s.parent, s.arm, s.children) for s in db.iter_routing()] == [("p", {"PLACE": "cut"}, ("k",))]
     db.close()
