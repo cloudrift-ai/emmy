@@ -13,8 +13,9 @@ pip install emmy-ml          # the CLI, with the recommended recipes bundled
 emmy --version
 ```
 
-The compiler needs its own extra (`pip install "emmy-ml[compile]"` — torch, transformers, cppyy). To hack on emmy
-itself, clone instead:
+The compiler needs its own extra (`pip install "emmy-ml[compile]"` — torch, transformers, cppyy) and the runtime
+extension that launches its kernels (`pip install emmy-runtime`, the wheel built from `crates/emmy-runtime-py`). To
+hack on emmy itself, clone instead:
 
 ```bash
 git clone https://github.com/cloudrift-ai/emmy.git
@@ -383,7 +384,8 @@ make test      # run the whole pytest suite — takes many minutes, run it once 
 make lint      # ruff check + format check
 make format    # auto-fix
 make wheel     # build the wheel into dist/
-make pypi-dist # dry-run the exact PyPI sdist + wheel build into dist/
+make runtime-wheel # build the runtime extension's wheel into dist/
+make pypi-dist # dry-run the exact PyPI sdist + wheel build of both distributions into dist/
 ```
 
 ### Release
@@ -395,7 +397,9 @@ so a failed upload leaves nothing behind. Publishing a GitHub release by hand wo
 `pyproject.toml`. Lint and the full test suite run in pull-request checks, independently of publication.
 
 Pull requests run `make pypi-dist` in a bare Python 3.13 job. The same target installs the minimal release-build
-dependencies, stages the distribution tree, and builds both artifacts used by the publishing workflow.
+dependencies, stages the distribution tree, and builds every artifact the publishing workflow uploads: the pure-Python
+`emmy-ml` sdist and wheel, and the `emmy-runtime` sdist plus one wheel per platform (a compiled extension, so a
+platform is a separate build). `emmy-ml` pins the runtime version exactly: the plan format couples them.
 
 `scripts/prepare_dist.py` stages the tree for a distribution build: `--recipes` copies runnable recipe YAML plus all
 recipe-local model goldens into the package (`make wheel` runs this), and `--readme` rewrites this file's repo-relative

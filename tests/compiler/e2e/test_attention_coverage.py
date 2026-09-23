@@ -584,7 +584,8 @@ __device__ __forceinline__ void load_b_native(unsigned* r, const __half* sm, int
   r[0]=*reinterpret_cast<unsigned*>(&h0); r[1]=*reinterpret_cast<unsigned*>(&h1);
 }
 
-extern "C" __global__ void fa2(const __half* Q,const __half* K,const __half* V,float* O,int S,float scale){
+extern "C" __global__ void fa2(const __half* Q,const __half* K,const __half* V,float* O,const float* scale_p,int S){
+  float scale = *scale_p;
   int qb = blockIdx.x; int lane=threadIdx.x&31; const int D=16;
   __shared__ __half qs[16*16], ks[16*16], vs[16*16], ps[16*16];
   for(int i=lane;i<16*D;i+=32){ qs[i]=Q[(qb*16)*D + i]; }
@@ -647,18 +648,36 @@ def test_fused_tensorcore_flash_reference_matches_torch(S):
     """The hand-written fused tensor-core flash matches torch SDPA across the KV stream (1–8 tiles).
     The validated spec for the warp-chain codegen — every lane layout (A/B fragments, the
     C-fragment row reduction, the C→A handoff) is exercised here."""
-    import cupy as cp  # noqa: PLC0415
+    from emmy.compiler.backend.cuda.program import CompiledProgram  # noqa: PLC0415
+    from emmy.compiler.backend.gpu_lock import gpu_lock  # noqa: PLC0415
+    from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan, KernelSpec, LaunchSpec  # noqa: PLC0415
+    from emmy.compiler.dim import Dim  # noqa: PLC0415
+    from emmy.compiler.dtype import F16, F32  # noqa: PLC0415
 
-    from emmy.compiler.backend.cuda import nvcc  # noqa: PLC0415
-
-    fn = nvcc.load_function(_KERNEL, "fa2", arch_specific=False)
     torch.manual_seed(S)
     D = 16
     q, k, v = (torch.randn(S, D, dtype=torch.float16) for _ in range(3))
-    dq, dk, dv = (cp.asarray(t.numpy()) for t in (q, k, v))
-    d_out = cp.zeros((S, D), cp.float32)
-    fn((S // 16,), (32,), (dq, dk, dv, d_out, np.int32(S), np.float32(1.0 / np.sqrt(D))))
-    got = torch.from_numpy(cp.asnumpy(d_out))
+    # The reference kernel takes its sequence length by value: a runtime argument bound from
+    # the plan's symbol hints.
+    plan = ExecutionPlan(
+        "cuda",
+        ["Q", "K", "V"],
+        ["O"],
+        [
+            *(BufferSpec(name, (Dim(S), Dim(D)), F16, "input") for name in ("Q", "K", "V")),
+            BufferSpec("scale", (Dim(1),), F32, "constant"),
+            BufferSpec("O", (Dim(S), Dim(D)), F32, "output"),
+        ],
+        {"scale": float(1.0 / np.sqrt(D))},
+        {},
+        [LaunchSpec("O", "fa2", ("Q", "K", "V", "O", "scale"), ((S // 16,), (1,), (1,)), ((32,), (1,), (1,)), 0, (), runtime_args=("S",))],
+        {"fa2": KernelSpec(source=_KERNEL)},
+        symbolic_hints={"S": S},
+    )
+    with gpu_lock():
+        prog = CompiledProgram.build_from_plan(plan, {name: t.numpy() for name, t in zip("QKV", (q, k, v), strict=True)})
+        prog.run_once()
+        got = torch.from_numpy(prog.outputs()["O"])
     ref = torch.nn.functional.scaled_dot_product_attention(q.cuda().float(), k.cuda().float(), v.cuda().float()).cpu()
     max_diff = float((got - ref).abs().max())
     assert max_diff < 2e-3, f"fused TC flash S={S} max_diff={max_diff:.2e}"

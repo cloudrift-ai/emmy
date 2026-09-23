@@ -140,13 +140,15 @@ def test_the_block_scaled_atom_matches_the_decoded_oracle():
     rather than a tolerance: e2m1 values and ue4m3 scales are small integers times powers of two,
     and their products fit f32 exactly.
     """
-    import cupy as cp
-
-    from emmy.compiler.backend.cuda import nvcc
-    from emmy.compiler.dtype import decode_f4x2
+    from emmy.compiler.backend.cuda.device import compute_capability
+    from emmy.compiler.backend.cuda.program import CompiledProgram
+    from emmy.compiler.backend.gpu_lock import gpu_lock
+    from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan, KernelSpec, LaunchSpec
+    from emmy.compiler.dim import Dim
+    from emmy.compiler.dtype import F32, U8, decode_f4x2
     from emmy.compiler.ir.kernel.render import _MMA_F4_BLOCK_PRELUDE, _MMA_F8_PRELUDE
 
-    if cp.cuda.Device().compute_capability[:2] != "12":
+    if (compute_capability() or (0, 0))[0] != 12:
         pytest.skip("the block-scaled fp4 mma assembles only for the consumer Blackwell family")
 
     rng = np.random.default_rng(23)
@@ -157,11 +159,24 @@ def test_the_block_scaled_atom_matches_the_decoded_oracle():
     sa_bits = (0x30 + rng.integers(0, 0x19, size=(16, 4))).astype(np.uint8)
     sb_bits = (0x30 + rng.integers(0, 0x19, size=(8, 4))).astype(np.uint8)
 
-    fn = nvcc.load_function(_MMA_F8_PRELUDE + _MMA_F4_BLOCK_PRELUDE + _DRIVER, "k_f4_block_scaled", arch_specific=True)
-    out = cp.zeros((16, 8), dtype=cp.float32)
-    args = (out, cp.asarray(a_bits), cp.asarray(b_bits), cp.asarray(sa_bits), cp.asarray(sb_bits))
-    fn((1, 1, 1), (32, 1, 1), args)
-    got = cp.asnumpy(out)
+    inputs = {"a": a_bits, "b": b_bits, "sa": sa_bits, "sb": sb_bits}
+    plan = ExecutionPlan(
+        "cuda",
+        list(inputs),
+        ["out"],
+        [
+            BufferSpec("out", (Dim(16), Dim(8)), F32, "output"),
+            *(BufferSpec(n, tuple(Dim(d) for d in v.shape), U8, "input") for n, v in inputs.items()),
+        ],
+        {},
+        {},
+        [LaunchSpec("out", "k_f4_block_scaled", ("out", "a", "b", "sa", "sb"), ((1,), (1,), (1,)), ((32,), (1,), (1,)), 0, ())],
+        {"k_f4_block_scaled": KernelSpec(source=_MMA_F8_PRELUDE + _MMA_F4_BLOCK_PRELUDE + _DRIVER, arch_specific=True)},
+    )
+    with gpu_lock():
+        prog = CompiledProgram.build_from_plan(plan, inputs)
+        prog.run_once()
+        got = prog.outputs()["out"]
 
     a = decode_f4x2(a_bits).astype(np.float32)
     b = decode_f4x2(b_bits).astype(np.float32)
