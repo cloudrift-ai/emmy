@@ -188,7 +188,7 @@ math is outside this preregistered suite; the exact `FP8_MMA` pin is confined to
 traces and does not establish a W8A8-only result without the deferred target filter.
 
 The Gemma stock and Emmy arms use identical per-workload `--max-num-batched-tokens` settings and the same immutable
-`cloudriftai/vllm-emmy-gemma-4-12b-it@sha256:5add12d3b7f4673790b435b76635082433538e3615fbc40227fa1c0db64c9ff3`
+`cloudriftai/vllm-emmy-gemma-4-12b-it@sha256:3a690e9f7859d46b969dd9eaaed36f52f92c25c5595dc112aee2adb781d26e28`
 image, which records vLLM source revision `91df0fad4dc98a67c7659d9dbd915245d5c43d96`. The stock arm overrides the
 image entrypoint with `python3 -m vllm.entrypoints.openai.api_server`; the Emmy arm selects `EmmyGenModel`. An
 intelligent reviewer rejects the A/B if the final evidence shows different scheduler settings, runtime revisions,

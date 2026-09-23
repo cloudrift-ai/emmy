@@ -13,7 +13,7 @@ engine:
     context_length: 16384
     max_concurrent_requests: 64
     vllm:
-      image: "cloudriftai/vllm-emmy-gemma-4-12b-it@sha256:5add12d3b7f4673790b435b76635082433538e3615fbc40227fa1c0db64c9ff3"
+      image: "cloudriftai/vllm-emmy-gemma-4-12b-it@sha256:3a690e9f7859d46b969dd9eaaed36f52f92c25c5595dc112aee2adb781d26e28"
 
 benchmark:
   seed: 0
