@@ -1,11 +1,5 @@
-tags:
-  - best-effort
-
 model:
   huggingface: "zai-org/GLM-5.3-Flash"
-  rationale: "Onboarded and qualified on 2x AMD Instinct MI350X: vLLM ROCm native FP8, 65536 context, TP2, single-stream decode at 60 tok/s and moderate-batch throughput at 894 out tok/s, 0 failures."
-  heat: 85
-  task: generate
 
 engine:
   llm:
@@ -24,8 +18,28 @@ engine:
         --enable-auto-tool-choice --tool-call-parser glm47 --reasoning-parser glm47
         --chat-template-content-format=string
 
+benchmark:
+  max_concurrency: 1
+  num_prompts: 8
+  random_input_len: 4096
+  random_output_len: 4096
+
 matrices:
   - deploy.gpu: "AMD Instinct MI350X"
     deploy.gpu_count: 2
-  - deploy.gpu: "NVIDIA B200"
-    deploy.gpu_count: 4
+    benchmark.max_concurrency: 1
+    benchmark.num_prompts: 8
+    benchmark.random_input_len: 4096
+    benchmark.random_output_len: 4096
+  - deploy.gpu: "AMD Instinct MI350X"
+    deploy.gpu_count: 2
+    benchmark.max_concurrency: 32
+    benchmark.num_prompts: 64
+    benchmark.random_input_len: 4096
+    benchmark.random_output_len: 4096
+  - deploy.gpu: "AMD Instinct MI350X"
+    deploy.gpu_count: 2
+    benchmark.max_concurrency: 1
+    benchmark.num_prompts: 20
+    benchmark.random_input_len: 8192
+    benchmark.random_output_len: 256
