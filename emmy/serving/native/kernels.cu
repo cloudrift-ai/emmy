@@ -33,15 +33,15 @@ extern "C" __global__ void native_attention(const half* q, const half* k, const 
         float dot = 0.0f;
         for (int d = 0; d < HEAD_DIM; ++d)
             dot += __half2float(q[head * HEAD_DIM + d]) * __half2float(k[(t * KV_HEADS + kv) * HEAD_DIM + d]);
-        // HF eager stores QK and the scaled scores in the activation dtype before float softmax.
-        scores[t] = __half2float(__float2half(__half2float(__float2half(dot)) * SCALE));
+        // Keep attention intermediates in FP32; only the output rounds to the activation dtype.
+        scores[t] = dot * SCALE;
     }
     __syncthreads();
     if (threadIdx.x == 0) {
         float peak = -INFINITY, total = 0.0f;
         for (int t = 0; t < count; ++t) peak = fmaxf(peak, scores[t]);
         for (int t = 0; t < count; ++t) { scores[t] = expf(scores[t] - peak); total += scores[t]; }
-        for (int t = 0; t < count; ++t) scores[t] = __half2float(__float2half(scores[t] / total));
+        for (int t = 0; t < count; ++t) scores[t] /= total;
     }
     __syncthreads();
     for (int d = threadIdx.x; d < HEAD_DIM; d += blockDim.x) {

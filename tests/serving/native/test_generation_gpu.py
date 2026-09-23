@@ -349,7 +349,8 @@ def test_rotary_preserves_half_precision_operation_boundaries(tmp_path):
         np.testing.assert_array_equal(np.fromfile(tmp_path / "values", np.float16).reshape(v.shape), v)
 
 
-def test_attention_reads_only_the_written_cache_prefix(tmp_path):
+@pytest.mark.parametrize("near_tie", [False, True], ids=["random", "near_tie"])
+def test_attention_reads_only_the_written_cache_prefix(tmp_path, near_tie):
     from emmy.compiler.backend.pack import save_executable
     from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan, KernelSpec, LaunchSpec
     from emmy.compiler.dim import Dim
@@ -364,6 +365,13 @@ def test_attention_reads_only_the_written_cache_prefix(tmp_path):
     query = rng.normal(size=(4, 128)).astype(np.float16)
     keys = rng.normal(size=(MAX_CONTEXT, 2, 128)).astype(np.float16)
     values = rng.normal(size=keys.shape).astype(np.float16)
+    if near_tie:
+        # QK is about 1024: FP16 score storage erases a real 0.125 difference.
+        query.fill(1)
+        keys.fill(8)
+        keys[0, :, 0] += 0.125
+        values.fill(-1)
+        values[0] = 1
     source = (
         "#define HIDDEN 32\n#define HEADS 4\n#define KV_HEADS 2\n#define HEAD_DIM 128\n"
         "#define VOCAB 32\n#define SCALE 0.08838834764831845f\n" + SOURCE
@@ -414,13 +422,12 @@ def test_attention_reads_only_the_written_cache_prefix(tmp_path):
                         {"op": "run", "warmup": 0, "iterations": 1, "capture": True, "outputs": {"attention": str(tmp_path / "result")}},
                         wall_timeout_s=30,
                     )
-                    # Independent float64 reductions, with the eager FP16 storage boundaries.
+                    # Independent float64 attention; only inputs and the final output use FP16.
                     k = keys[:count].repeat(2, axis=1).astype(np.float64)
                     v = values[:count].repeat(2, axis=1).astype(np.float64)
-                    scores = np.einsum("hd,thd->ht", query.astype(np.float64), k).astype(np.float16)
-                    scores = (scores.astype(np.float32) * np.float32(128**-0.5)).astype(np.float16).astype(np.float64)
+                    scores = np.einsum("hd,thd->ht", query.astype(np.float64), k) * 128**-0.5
                     probabilities = np.exp(scores - scores.max(axis=-1, keepdims=True))
-                    probabilities = (probabilities / probabilities.sum(axis=-1, keepdims=True)).astype(np.float16)
+                    probabilities /= probabilities.sum(axis=-1, keepdims=True)
                     expected = np.einsum("ht,thd->hd", probabilities.astype(np.float64), v).astype(np.float16)
                     actual = np.fromfile(tmp_path / "result", np.float16).reshape(query.shape)
                     np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-3)
