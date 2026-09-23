@@ -148,3 +148,63 @@ def test_native_gpu_failure_restarts_cleanly(tmp_path, monkeypatch, fault):
                 await worker.aclose()
 
         asyncio.run(check())
+
+
+@pytest.mark.parametrize("static_count,dynamic_count", [(8192, 0), (0, 4096), (8192, 4096)], ids=["static", "dynamic", "mixed"])
+def test_shared_memory_uses_cubin_static_and_plan_dynamic_storage(tmp_path, static_count, dynamic_count):
+    import cupy as cp
+
+    executable = shutil.which("emmy-runtime-worker")
+    if not executable:
+        pytest.skip("build emmy-runtime-worker and add it to PATH")
+    declarations, writes, reads = [], [], []
+    for name, count, declaration in (
+        ("fixed", static_count, f"__shared__ float fixed[{static_count}];"),
+        ("extra", dynamic_count, "extern __shared__ float extra[];"),
+    ):
+        if count:
+            declarations.append(declaration)
+            writes.append(f"for (int i=threadIdx.x; i<{count}; i+=blockDim.x) {name}[i]=x[i%128];")
+            reads.append(f"{name}[{count}-1-threadIdx.x]")
+    source = 'extern "C" __global__ void shared(const float* x, float* y) {'
+    source += "".join(declarations + writes) + "__syncthreads(); y[threadIdx.x]=" + "+".join(reads) + ";}"
+    plan = ExecutionPlan(
+        "cuda",
+        ["x"],
+        ["y"],
+        [BufferSpec("x", (Dim(128),), F32, "input"), BufferSpec("y", (Dim(128),), F32, "output")],
+        {},
+        {},
+        [LaunchSpec("shared", "shared", ("x", "y"), ((1,), (1,), (1,)), ((128,), (1,), (1,)), (static_count + dynamic_count) * 4, ())],
+        {"shared": KernelSpec(source=source)},
+    )
+    values = np.arange(128, dtype=np.float32)
+    expected = values[::-1] * len(reads)
+    with gpu_lock():
+        program = CompiledProgram.build_from_plan(plan, {"x": values})
+        program.run_once()
+        np.testing.assert_array_equal(program.outputs()["y"], expected)
+        stream = cp.cuda.Stream(non_blocking=True)
+        with stream:
+            stream.begin_capture()
+            program.run_once()
+            graph = stream.end_capture()
+            graph.launch(stream)
+        stream.synchronize()
+        np.testing.assert_array_equal(program.outputs()["y"], expected)
+        root = save_executable(tmp_path / "pack", {"shared": plan}, bindings={"shared": {"x": values.tobytes()}}, key={})
+
+        async def check():
+            worker = NativeWorker(executable=executable)
+            try:
+                await worker.run_job({"op": "load", "root": str(root), "program": "shared"}, wall_timeout_s=30)
+                for capture in (False, True):
+                    await worker.run_job(
+                        {"op": "run", "warmup": 0, "iterations": 1, "capture": capture, "outputs": {"y": str(tmp_path / "out")}},
+                        wall_timeout_s=30,
+                    )
+                    np.testing.assert_array_equal(np.fromfile(tmp_path / "out", np.float32), expected)
+            finally:
+                await worker.aclose()
+
+        asyncio.run(check())
