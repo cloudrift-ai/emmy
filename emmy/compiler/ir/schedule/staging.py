@@ -458,8 +458,12 @@ def resolve_warp_stage(
     bk_elems = tile.bk * atom.atom_k
     m, n = tile.m, tile.n
     a_nbytes, b_nbytes = atom.operand_dtype("a").nbytes, atom.operand_dtype("b").nbytes
+    # The node's B edges — one per fold channel. A gate/up node shares its A across two weights,
+    # so every rule below is asked of EACH B and the slot is sized for all of them; the
+    # single-channel form is the one-element case of the same walk.
+    b_edges = tuple(edge for _, edge in c.bilinear_channels())
     if inputs:
-        for edge, role in ((c.operands[0], "a"), (c.operands[1], "b")):
+        for edge, role in ((c.operands[0], "a"), *((b, "b") for b in b_edges)):
             t = inputs.get(edge.as_slab().load.input) if edge.as_slab() is not None else None
             if t is None or t.dtype == atom.operand_dtype(role):
                 continue
@@ -483,9 +487,9 @@ def resolve_warp_stage(
             return None  # canonical byte B: the 16 B gmem chunks stride rows of N bytes
     rank_ok = (
         c.operands[0].as_slab() is not None
-        and c.operands[1].as_slab() is not None  # a descriptor needs a gmem address on BOTH edges
+        and all(b.as_slab() is not None for b in b_edges)  # a descriptor needs a gmem address on EVERY edge
         and _tma_operand_box(c.operands[0].as_slab().load.index, m.axis.name, k_axis.name)
-        and _tma_operand_box(c.operands[1].as_slab().load.index, n.axis.name, k_axis.name)
+        and all(_tma_operand_box(b.as_slab().load.index, n.axis.name, k_axis.name) for b in b_edges)
     )
     box_ok = max(m.tile, n.tile, bk_elems) <= _TMA_MAX_BOX
     tma_ok = (
@@ -501,7 +505,7 @@ def resolve_warp_stage(
         return None
     pad_a, pad_b = (BYTE_SLAB_PAD if eb == 1 and cp_ok else 0 for eb in (a_nbytes, b_nbytes))
     b_rows, b_cols = (n.tile, bk_elems + pad_b) if c.as_contraction().b_trans else (bk_elems, n.tile + pad_b)
-    slot_bytes = m.tile * (bk_elems + pad_a) * a_nbytes + b_rows * b_cols * b_nbytes
+    slot_bytes = m.tile * (bk_elems + pad_a) * a_nbytes + len(b_edges) * b_rows * b_cols * b_nbytes
     if slot_bytes > budget:
         return None
     depth = _clamp_depth(stage.depth, slot_bytes, budget)

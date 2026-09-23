@@ -443,15 +443,30 @@ def _stage_candidates(tile: TileOp, target, node, choice: NodeSchedule) -> tuple
         candidates: tuple[Stage, ...] = fill_stage_moves()
         if tile.packed_reading(node)[0] is not None:
             candidates = (*candidates, *stage_moves(warp=True, ctx=target))
+    elif choice.tile.is_warp and len(node.bilinear_channels()) > 1:
+        # A term folding several channels has no gmem-DIRECT form: that leaf folds a single B out
+        # of registers. Staged it is ordinary — one A slab beside one B per channel, the operand
+        # list the compute fill already builds and the copy transports now build too, read by the
+        # one drain. So both staging tiers are offered and only ``direct`` is withheld.
+        candidates = (*fill_stage_moves(), *stage_moves(warp=True, ctx=target))
     else:
         candidates = (direct, *stage_moves(warp=choice.tile.is_warp, ctx=target))
-    # The prefetching transports deposit ONE slab per fold, so a term folding several channels has
-    # no spelling there whatever tier carries it — the materializer emits a single deposit and then
-    # refuses the channel count it was handed. The warp tier states this as "needs the compute
-    # fill"; the per-cell tier has no fill to fall back to, so the refusal belongs on the transport.
-    if len(node.bilinear_channels()) > 1:
+    # The per-cell tier has neither a multi-slab drain nor a fill to fall back to, so a prefetching
+    # transport there would name a deposit its materializer cannot emit.
+    if len(node.bilinear_channels()) > 1 and not choice.tile.is_warp:
         candidates = tuple(stage for stage in candidates if stage.transport not in ("smem-async", "smem-tma"))
     return candidates
+
+
+def _compute_filled(tile_op, node: Fold, plan: Tile) -> bool:
+    """Whether this node's ``smem`` transport is the COMPUTE fill rather than a blocking byte copy.
+
+    The fill is the only tier that evaluates a producer cone into its slab, and the only one that
+    deposits through the drain's own threads — so a computed operand has no other spelling. A
+    multi-channel fold reaches it too, beside the copy transports: both build the same operand list
+    (one A slab, one B per channel), and only the fill can also compute one of them.
+    :func:`_staged` materializes every ``smem`` stage through that fill, so the two agree."""
+    return _needs_fill(tile_op, node, plan) or (plan.is_warp and len(node.bilinear_channels()) > 1)
 
 
 def _computed_edge(node: Fold) -> bool:
@@ -471,14 +486,11 @@ def _needs_fill(tile_op, node: Fold, plan: Tile) -> bool:
         # The chunk tier's A is the WEIGHT, which never leaves registers: it is what the chunk's
         # own score fragments repack into. There is no operand to fill and no slab to fill it from.
         return False
-    # CHANNELS, not operand slots. The staged transports fill one slab per fold, so a fold count
-    # above one belongs on the smem compute fill — and a B slab reused by several channels occupies
-    # ONE operand slot, so counting operands reads a two-channel node as single-fold, offers it
-    # cp.async, and the materializer then asserts on the channel count it actually emits (Qwen3-8B
-    # decode on sm_80, channels=2 operands=2). The channel count subsumes the operand one.
-    return plan.is_warp and (
-        _computed_edge(node) or len(node.bilinear_channels()) > 1 or staging.converting_a(node, plan.atom, tile_op.inputs)
-    )
+    # Only a COMPUTED operand forces the fill: a copy transport moves bytes and cannot evaluate a
+    # producer cone. A multi-channel node whose weights are all materialized is not that — it
+    # stages one A slab beside one B per channel, which is the same operand list the fill builds
+    # and the same order the drain reads (the gate/up pair on sm_80 and sm_90).
+    return plan.is_warp and (_computed_edge(node) or staging.converting_a(node, plan.atom, tile_op.inputs))
 
 
 def _kstep_refusal(k_axis, plan: Tile) -> str | None:
@@ -539,7 +551,7 @@ def _resolve_stage(
         return None  # the chunked carrier's per-cell fallback reads no slab (``_edge_domain``)
     packed = tile_op.packed_reading(node)
     packed_copy = packed[0] is not None and choice.transport in ("smem-async", "smem-tma")
-    if _needs_fill(tile_op, node, plan) and not packed_copy:
+    if choice.transport == "smem" and _compute_filled(tile_op, node, plan) and not packed_copy:
         return staging.resolve_fill_stage(
             node,
             placed,
