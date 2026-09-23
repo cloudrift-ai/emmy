@@ -248,17 +248,15 @@ def record_routing(db: SearchDB, parent, arm: dict, pieces) -> None:
     """Store one kernel-set decision as definitions: the parent's ``kernel`` row, each piece's, and
     the ``routing`` row linking them by exact identity. A piece with no identity is not a kernel
     the DB can name and is left out of the row."""
-    from emmy.compiler.loop_wire import kernel_wire  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.db import KernelRow, RoutingRow  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.db import RoutingRow  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.policy.terminal_bench import kernel_row  # noqa: PLC0415
 
     kernels = [(op.identity_key(structural=False, with_io=True), op) for op in (parent, *pieces)]
     for identity, op in kernels:
         if identity is not None:
-            db.record_kernel(KernelRow(identity=identity, wire=kernel_wire(op), name=op.name))
+            db.record_kernel(kernel_row(op, op.name))
     (parent_key, _), *children = kernels
-    db.record_routing(
-        RoutingRow(parent=parent_key, decision=arm, children=tuple(identity for identity, _ in children if identity is not None))
-    )
+    db.record_routing(RoutingRow(parent=parent_key, arm=arm, children=tuple(identity for identity, _ in children if identity is not None)))
 
 
 class TwoLevelStrategy(SearchStrategy):

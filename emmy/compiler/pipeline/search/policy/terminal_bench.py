@@ -278,6 +278,20 @@ def kernel_key(cuda_op) -> tuple | None:
     return None if identity is None else (tile, identity, kernel_bindings(tile))
 
 
+def kernel_row(tile, name: str) -> KernelRow:
+    """The ``kernel`` row of a tile kernel: both identities, both wires, the C name it was rendered
+    under, and the ``S_*`` stamps the identity strategy wrote onto it."""
+    loop_ir, normalized = kernel_wire(tile)
+    return KernelRow(
+        exact_identity=tile.identity_key(structural=False, with_io=True),
+        structural_identity=tile.identity_key(with_io=True),
+        loop_ir=loop_ir,
+        normalized_loop_ir=normalized,
+        name=name,
+        stamps={k: v for k, v in (tile.knobs or {}).items() if str(k).startswith("S_")},
+    )
+
+
 def persist_kernel_perf(
     db, ctx, backend_name: str, cuda_op, *, stats, status: str, captured: bool = False, error: str | None = None
 ) -> bool:
@@ -291,7 +305,7 @@ def persist_kernel_perf(
     if key is None:
         return False
     tile, identity, bindings = key
-    db.record_kernel(KernelRow(identity=identity, wire=kernel_wire(tile), name=cuda_op.kernel_name))
+    db.record_kernel(kernel_row(tile, cuda_op.kernel_name))
     knobs = getattr(cuda_op, "knobs", None) or {}
     db.record_perf(
         ctx, identity, bindings=bindings, knobs=knobs, backend=backend_name, status=status, stats=stats, captured=captured, error=error
