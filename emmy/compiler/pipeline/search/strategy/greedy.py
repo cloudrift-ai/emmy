@@ -118,15 +118,18 @@ class GreedyStrategy(SearchStrategy):
 
 
 def _measured_composed_routes(db, ctx) -> list[tuple[frozenset, tuple[str, ...]]]:
-    """Every measured route row in this compile's evidence that marks several seams ``cut`` — a
-    composed decision, keyed by the signature of the kernel it was recorded on (less the stamps a
-    schedule fork mints, as the evidence pick matches route rows) — for the cut pass to offer."""
+    """Every measured route row in this compile's evidence, and every routing row the tune DB stores,
+    that marks several seams ``cut`` — a composed decision, keyed by the signature of the kernel it was
+    recorded on (less the stamps a schedule fork mints, as the evidence pick matches route rows) — for
+    the cut pass to offer."""
+    stamps = db.kernel_stamps() if db is not None else {}
+    rows = [(signature, tun) for signature, group in _db_measured_index(db, ctx).routes.items() for tun, _us in group]
+    rows += [(frozenset((k, str(v)) for k, v in stamps.get(row.parent, {}).items()), row.arm) for row in db.iter_routing()] if db else []
     out: list[tuple[frozenset, tuple[str, ...]]] = []
-    for signature, rows in _db_measured_index(db, ctx).routes.items():
-        for tun, _us in rows:
-            keys = tuple(sorted(key for key, value in tun.items() if family_of(key) == "PLACE" and value == "cut"))
-            if len(keys) > 1 and (entry := (_strip_fork_stamps(signature), keys)) not in out:
-                out.append(entry)
+    for signature, tun in rows:
+        keys = tuple(sorted(key for key, value in tun.items() if family_of(key) == "PLACE" and value == "cut"))
+        if len(keys) > 1 and (entry := (_strip_fork_stamps(signature), keys)) not in out:
+            out.append(entry)
     return out
 
 

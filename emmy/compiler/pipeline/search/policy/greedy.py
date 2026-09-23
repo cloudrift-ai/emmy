@@ -467,9 +467,11 @@ class _Measured(NamedTuple):
 
     ``ok`` RANKS — the measured schedule rows a pick argmins over, by ``S_*`` signature. ``failed``
     DISQUALIFIES — the signatures whose every measured variant failed, a different kind of answer
-    that cannot be expressed as a latency. ``routes`` PRICES A KERNEL SET — rows whose keys spell a
-    placement (``PLACE@…``) or a cross-CTA split, each a measured µs for applying that decision to
-    the kernel of its signature."""
+    that cannot be expressed as a latency. ``routes`` PRICES A KERNEL SET — golden rows whose keys
+    spell a placement (``PLACE@…``) or a cross-CTA split, each a measured µs for applying that
+    decision to the kernel of its signature. The tune DB stores no such row: its kernel-set
+    decisions are routing rows, priced per kernel from the pieces' own measurements
+    (:meth:`SearchDB.priced_arms`) when the fork is decided."""
 
     ok: dict[frozenset, list[tuple[dict, float]]]
     failed: dict[frozenset, list[float]]
@@ -512,9 +514,9 @@ def _db_measured_index_build(db, ctx) -> _Measured:
     than a speed. It lands in ``failed`` instead, and only where NO variant of that signature was
     measured ``ok``: one surviving row means the shape is realizable and merely has bad rows.
 
-    A row spelling a placement or a cross-CTA split (:func:`_is_route_row`) is the measured price
-    of applying that decision to the kernel it was recorded on, and lands in ``routes``: at that
-    kernel's fork it names one offered arm (:func:`_route_candidates`); the pieces the arm mints
+    A golden row spelling a placement or a cross-CTA split (:func:`_is_route_row`) is the measured
+    price of applying that decision to the kernel it was recorded on, and lands in ``routes``: at
+    that kernel's fork it names one offered arm (:func:`_route_candidates`); the pieces the arm mints
     are brand-new kernels, decided by rows of their own signatures.
 
     Best-effort: any failure returns an empty index so deploy falls back to the prior.
@@ -683,14 +685,17 @@ def _strip_fork_stamps_index(source: dict[frozenset, list]) -> dict[frozenset, l
     return out
 
 
-def _route_candidates(fp: ForkPoint, index: _Measured) -> list[tuple[object, float]]:
+def _route_candidates(fp: ForkPoint, index: _Measured, db=None) -> list[tuple[object, float]]:
     """The measured arms at this kernel-set fork: one ``(option, µs)`` per measured row of
     the kernel's signature that spells an arm on the ballot
     (:func:`~emmy.compiler.pipeline.search.pins.spelled_arm`) — a schedule row the fused /
     unsplit arm (the kernel it decorates ran that way), a ``PLACE`` row its cut, a split-carrying
-    ``REDUCE`` row its split. The option is the cut pass's own offer; the pieces it mints are
-    brand-new kernels whose own forks consult their own rows. A schedule fork has none."""
+    ``REDUCE`` row its split — and one per kernel-set decision the tune DB stores on this exact
+    kernel that its pieces' rows price at the fork's bindings (:meth:`SearchDB.priced_arms`). The
+    option is the cut pass's own offer; the pieces it mints are brand-new kernels whose own forks
+    consult their own rows. A schedule fork has none."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
+    from emmy.compiler.loop_wire import kernel_bindings  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import _structural_domain  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import spelled_arm  # noqa: PLC0415
 
@@ -706,6 +711,9 @@ def _route_candidates(fp: ForkPoint, index: _Measured) -> list[tuple[object, flo
     measured = [
         entry for source in (index.ok, index.routes) for group in _sig_groups(_strip_fork_stamps_index(source), sig) for entry in group
     ]
+    kernel = root.identity_key(structural=False, with_io=True) if db is not None else None
+    if kernel is not None:
+        measured.extend(db.priced_arms(fp.ctx, kernel, bindings=kernel_bindings(root)))
     out: list[tuple[object, float]] = []
     for row, us in measured:
         arm = spelled_arm(fp.options, row)
@@ -1028,7 +1036,7 @@ def greedy_decide(
         # A kernel-set fork: every measured row of this kernel spells one offered arm, and a
         # measured arm outranks anything priced by nested resolution (a Σ that may hold
         # predictions). Among measured arms the fastest wins.
-        arms = _route_candidates(fp, index) if price_structural else []
+        arms = _route_candidates(fp, index, db) if price_structural else []
         if arms:
             # Fastest first; a tie breaks by the arm's content, never by emission order.
             best_o, best_us = min(arms, key=lambda c: (c[1], canonical_row_key(leaf_knobs(c[0]))))

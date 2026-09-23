@@ -480,3 +480,57 @@ def test_price_memo_keys_on_exact_identity_not_the_term_hash(monkeypatch) -> Non
     assert identity_keys, "the chain must offer structural forks whose pricing probes fire"
     assert len(identity_keys) < len(calls), "mirror cut pieces must unify under the exact identity"
     assert memo_keys == identity_keys, "the memo must key on the exact identity"
+
+
+def _cut_fork(db_ctx):
+    """A placement fork on a real tile kernel: the fuse arm and one cut, the shape the cut pass offers."""
+    from tests.compiler.helpers import case_target_tile
+
+    tile = case_target_tile("fused/norm-linear-f16-scalar-reduce.yaml")
+    fuse = DeferredFork(materialize=lambda: None, knobs={"PLACE": "fuse"})
+    cut = DeferredFork(materialize=lambda: None, knobs={"PLACE@map.1/map": "cut"}, structural=True)
+    return SimpleNamespace(options=[fuse, cut], node_id="node", root_op=tile, ctx=db_ctx), tile, fuse, cut
+
+
+def test_a_stored_cut_is_priced_from_its_pieces_at_the_fork() -> None:
+    """The tune DB holds no row spelling a cut: the decision is a routing row, and at the fork it is
+    priced as the sum of its pieces' fastest rows on this card — every piece, or the arm is off the
+    ballot. The parent is matched by exact identity, so another kernel's cut never prices this one."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.pipeline.search.db import RoutingRow, SearchDB
+    from tests.compiler.pipeline.search.helpers import GPU_5090, kernel_row, perf_row
+
+    ctx = Context.from_target((12, 0), gpu_name=GPU_5090)
+    point, tile, _fuse, cut = _cut_fork(ctx)
+    parent = tile.identity_key(structural=False, with_io=True)
+    db = SearchDB()
+    db.record_kernels([kernel_row(parent), kernel_row("c1"), kernel_row("c2")])
+    db.record_routing(RoutingRow(parent=parent, arm={"PLACE@map.1/map": "cut"}, children=("c1", "c2")))
+    db.record_perf_rows([perf_row("c1", us=30.0)])
+
+    assert _route_candidates(point, greedy._EMPTY_MEASURED, db) == [], "a piece without a row leaves the cut unpriced"
+    db.record_perf_rows([perf_row("c2", us=50.0), perf_row("c2", us=70.0, knobs={"WORK": "t8"})])
+    assert _route_candidates(point, greedy._EMPTY_MEASURED, db) == [(cut, 80.0)]
+    assert _route_candidates(point, greedy._EMPTY_MEASURED, None) == []
+    other = Context.from_target((12, 0), gpu_name="NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition")
+    assert _route_candidates(SimpleNamespace(**{**vars(point), "ctx": other}), greedy._EMPTY_MEASURED, db) == []
+
+
+def test_a_stored_composed_cut_is_offered_to_the_cut_pass(monkeypatch) -> None:
+    """A routing row that cuts several seams is the composed arm a later compile must offer beside the
+    single seams, keyed by the parent's stamps the way a golden route row is."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.pipeline.search import golden
+    from emmy.compiler.pipeline.search.db import RoutingRow, SearchDB
+    from emmy.compiler.pipeline.search.strategy.greedy import _measured_composed_routes
+    from tests.compiler.pipeline.search.helpers import GPU_5090, kernel_row
+
+    monkeypatch.setattr(golden, "evidence_rows", lambda _gpu, _cap: [])
+    ctx = Context.from_target((12, 0), gpu_name=GPU_5090)
+    db = SearchDB()
+    db.record_kernels([kernel_row("p", stamps={"S_x": 1.0}), kernel_row("c1"), kernel_row("c2"), kernel_row("c3")])
+    db.record_routing(RoutingRow(parent="p", arm={"PLACE@a": "cut", "PLACE@b": "cut"}, children=("c1", "c2", "c3")))
+    db.record_routing(RoutingRow(parent="p", arm={"PLACE@a": "cut"}, children=("c1", "c2")))
+
+    assert _measured_composed_routes(db, ctx) == [(frozenset({("S_x", "1.0")}), ("PLACE@a", "PLACE@b"))]
+    assert _measured_composed_routes(None, ctx) == []

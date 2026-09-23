@@ -628,27 +628,27 @@ class SearchDB:
         for row in self._conn.execute(sql, params).fetchall():
             yield self._row_to_perf(row)
 
-    def best_per_op_time(self, ctx: Context, kernel: str, *, bindings: dict, backend: str = "cuda") -> float | None:
-        """The best measured median (us) of ``kernel`` at ``bindings`` under ``ctx``, or ``None`` when it has
-        no clean measurement: its fastest ``ok`` row as a leaf, or — where it is the parent of a routing
-        row — the sum of its pieces' fastest rows, each piece at its own projection of ``bindings`` onto
-        the symbolic dims it kept, all-or-nothing (a piece with no row leaves that decision unpriced);
-        the smaller of what exists."""
+    def _best_leaf(self, context: int | None, kernel: str, bindings: dict) -> float | None:
+        """The fastest ``ok`` median of ``kernel`` at ``bindings`` under one context row, or ``None``."""
+        if context is None:
+            return None
+        [us] = self._conn.execute(
+            "SELECT MIN(latency_us_median) FROM perf WHERE context = ? AND kernel = ? AND bindings = ? AND status = 'ok'",
+            (context, kernel, knobs_json(bindings)),
+        ).fetchone()
+        return us
+
+    def priced_arms(self, ctx: Context, kernel: str, *, bindings: dict, backend: str = "cuda") -> list[tuple[dict, float]]:
+        """Every kernel-set decision stored on ``kernel`` that ``ctx`` can price, as ``(arm, us)``: the sum
+        of its pieces' fastest ``ok`` rows there, each piece at its own projection of ``bindings`` onto the
+        symbolic dims it kept, all-or-nothing — a piece with no row leaves that decision out. A decision has
+        no measurement of its own; this is its price wherever one is read (the tuner's reward, the deploy
+        pick's ballot)."""
         from emmy.compiler.loop_wire import symbolic_vars  # noqa: PLC0415
 
         gpu, arch, opt, flags = self._regime(ctx)
         context = self._context_id(backend, gpu, arch, opt, flags, create=False)
-        if context is None:
-            return None
-
-        def best(kernel: str, bindings: dict) -> float | None:
-            [us] = self._conn.execute(
-                "SELECT MIN(latency_us_median) FROM perf WHERE context = ? AND kernel = ? AND bindings = ? AND status = 'ok'",
-                (context, kernel, knobs_json(bindings)),
-            ).fetchone()
-            return us
-
-        candidates = [us for us in (best(kernel, bindings),) if us is not None]
+        out: list[tuple[dict, float]] = []
         for row in self.iter_routing():
             if row.parent != kernel:
                 continue
@@ -656,14 +656,34 @@ class SearchDB:
             for child in row.children:
                 [wire] = self._conn.execute("SELECT normalized_loop_ir FROM kernel WHERE exact_identity = ?", (child,)).fetchone()
                 projected = {v: bindings[v] for v in sorted(symbolic_vars(json.loads(wire))) if v in bindings}
-                us = best(child, projected)
+                us = self._best_leaf(context, child, projected)
                 if us is None:
                     total = None
                     break
                 total += us
             if total is not None:
-                candidates.append(total)
+                out.append((row.arm, total))
+        return out
+
+    def best_per_op_time(self, ctx: Context, kernel: str, *, bindings: dict, backend: str = "cuda") -> float | None:
+        """The best measured median (us) of ``kernel`` at ``bindings`` under ``ctx``, or ``None`` when it has
+        no clean measurement: its fastest ``ok`` row as a leaf, or the cheapest of its priced kernel-set
+        decisions (:meth:`priced_arms`), whichever is smaller."""
+        gpu, arch, opt, flags = self._regime(ctx)
+        context = self._context_id(backend, gpu, arch, opt, flags, create=False)
+        leaf = self._best_leaf(context, kernel, bindings)
+        candidates = [
+            us for us in (leaf, *(us for _arm, us in self.priced_arms(ctx, kernel, bindings=bindings, backend=backend))) if us is not None
+        ]
         return min(candidates) if candidates else None
+
+    def kernel_stamps(self) -> dict[str, dict]:
+        """Every stored kernel's ``S_*`` stamps by exact identity — the signature its evidence joins on,
+        without decoding its wires."""
+        out: dict[str, dict] = {}
+        for kernel, name, value in self._conn.execute("SELECT kernel, name, value FROM kernel_feature"):
+            out.setdefault(kernel, {})[name] = value
+        return out
 
     def _row_to_perf(self, row) -> PerfRow:
         """A row selected as :data:`_PERF_SEL`, its ``knobs`` reassembled from the kernel's stamps and the
