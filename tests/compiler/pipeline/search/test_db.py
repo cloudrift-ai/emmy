@@ -153,6 +153,23 @@ def test_best_per_op_time_prices_a_leaf_or_the_sum_of_its_pieces() -> None:
     assert db.best_per_op_time(ctx, "c1", bindings=at) == 30.0
 
 
+def test_a_nested_cut_prices_through_its_pieces_and_the_cut_piece_needs_no_row() -> None:
+    """Only a compiled kernel has a perf row. A piece that was cut again is priced from its own pieces,
+    exactly as its parent is, so the outer decision prices as the sum down the tree — all-or-nothing at
+    every level."""
+    db, ctx = _db("p", "c1", "c2", "d1", "d2"), _ctx(_5090)
+    db.record_routing(RoutingRow(parent="p", arm={"PLACE@map.1/inner": "cut"}, children=("c1", "c2")))
+    db.record_routing(RoutingRow(parent="c2", arm={"PLACE@map.1/twist": "cut"}, children=("d1", "d2")))
+    _record(db, ctx, "c1", 30.0)
+    _record(db, ctx, "d1", 10.0)
+    assert db.best_per_op_time(ctx, "p", bindings={}) is None, "d2 has no row: c2 is unpriced, so p's cut is"
+    _record(db, ctx, "d2", 5.0)
+    assert db.best_per_op_time(ctx, "c2", bindings={}) == 15.0
+    assert db.best_per_op_time(ctx, "p", bindings={}) == 45.0
+    assert db.priced_arms(ctx, "p", bindings={}) == [({"PLACE@map.1/inner": "cut"}, 45.0)]
+    assert db.lookup_perf(ctx, "c2", bindings={}, knobs=_ROW, backend="cuda") is None, "the cut piece has no row of its own"
+
+
 def test_a_knob_row_has_one_spelling_and_no_lossy_fallback() -> None:
     """The spelling identifies a row, so two writers must agree on it, and a value json cannot spell
     raises rather than turning into a string that would key a second row for the same kernel. An int
@@ -184,6 +201,25 @@ def _write_older_emmy_file(path) -> None:
     old.execute("CREATE TABLE cuda_op (key TEXT PRIMARY KEY, kernel_source TEXT NOT NULL)")
     old.commit()
     old.close()
+
+
+def test_a_file_missing_one_table_is_re_created_by_a_writer_and_refused_by_a_reader(tmp_path) -> None:
+    """A file holding some of the tables and not the rest — an interrupted creation, an emmy one table
+    older — is not this schema either: accepted, it would fail on the first read of what is missing."""
+    path = tmp_path / "autotune.db"
+    db = SearchDB(path)
+    db.record_kernel(kernel_row("k"))
+    db.record_perf_rows([perf_row("k", us=60.0)])
+    db._conn.execute("PRAGMA foreign_keys = OFF")
+    db._conn.execute("DROP TABLE routing")
+    db.close()
+
+    with pytest.raises(RuntimeError, match="written by another emmy"):
+        SearchDB.open_readonly(path)
+    db = SearchDB(path)
+    tables = {r[0] for r in db._conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert "routing" in tables and list(db.iter_perf_rows()) == [] and list(db.iter_kernels()) == []
+    db.close()
 
 
 def test_a_file_another_emmy_wrote_is_re_created_whole_by_a_writer_and_refused_by_a_reader(tmp_path) -> None:

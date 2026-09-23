@@ -340,8 +340,13 @@ class SearchDB:
         return {r[1] for r in self._conn.execute(f"PRAGMA table_info({table})")}
 
     def _mismatched(self) -> bool:
-        """Whether any table exists with other columns than the DDL — a file another emmy wrote."""
-        return any(self._columns(table) not in (set(), set(cols)) for table, cols in _COLS.items())
+        """Whether the file's tables are not exactly this DDL's: a table with other columns (a file another
+        emmy wrote), or some of the tables without the rest (a creation that was interrupted, or an emmy one
+        table older) — either would fail on the first read of what is missing."""
+        present = {table: self._columns(table) for table in _COLS}
+        if any(cols and cols != set(_COLS[table]) for table, cols in present.items()):
+            return True
+        return 0 < sum(bool(cols) for cols in present.values()) < len(present)
 
     @classmethod
     def open_readonly(cls, path: Path | str) -> SearchDB:
@@ -640,14 +645,14 @@ class SearchDB:
 
     def priced_arms(self, ctx: Context, kernel: str, *, bindings: dict, backend: str = "cuda") -> list[tuple[dict, float]]:
         """Every kernel-set decision stored on ``kernel`` that ``ctx`` can price, as ``(arm, us)``: the sum
-        of its pieces' fastest ``ok`` rows there, each piece at its own projection of ``bindings`` onto the
-        symbolic dims it kept, all-or-nothing — a piece with no row leaves that decision out. A decision has
-        no measurement of its own; this is its price wherever one is read (the tuner's reward, the deploy
-        pick's ballot)."""
+        of its pieces' best times there, each piece at its own projection of ``bindings`` onto the symbolic
+        dims it kept, all-or-nothing — a piece with no price leaves that decision out. A piece is priced the
+        way its parent is (:meth:`best_per_op_time`): from its own rows when it compiled, from its own pieces
+        when it was cut again, so a nested cut prices through and no cut piece needs a row. A decision has no
+        measurement of its own; this is its price wherever one is read (the tuner's reward, the deploy pick's
+        ballot)."""
         from emmy.compiler.loop_wire import symbolic_vars  # noqa: PLC0415
 
-        gpu, arch, opt, flags = self._regime(ctx)
-        context = self._context_id(backend, gpu, arch, opt, flags, create=False)
         pieces: dict[int, list[tuple[str, str]]] = {}
         for pid, child, wire in self._conn.execute(
             "SELECT r.placement, r.child, k.loop_ir FROM routing r JOIN kernel k ON k.exact_identity = r.child "
@@ -660,7 +665,7 @@ class SearchDB:
             total: float | None = 0.0
             for child, wire in children:
                 projected = {v: bindings[v] for v in symbolic_vars(json.loads(wire)) if v in bindings}
-                us = self._best_leaf(context, child, projected)
+                us = self.best_per_op_time(ctx, child, bindings=projected, backend=backend)
                 if us is None:
                     total = None
                     break
