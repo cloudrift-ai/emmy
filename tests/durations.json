@@ -2129,5 +2129,19 @@
  "tests/serving/native/test_generation_gpu.py::test_checkpoint_logits_and_completions[heldout_context_4096]@cuda": 307.39,
  "tests/serving/native/test_generation_gpu.py::test_checkpoint_logits_and_completions[heldout_rotary_context]@cuda": 56.23,
  "tests/compiler/ir/test_kernel_wire.py::test_every_kernel_of_a_set_has_wires_that_decode_to_its_identities[reduce/sinkhorn-nested-cut-derived-read-sm70.yaml]": 1.96,
- "tests/compiler/ir/test_kernel_wire.py::test_every_kernel_of_a_set_has_wires_that_decode_to_its_identities[reduce/cross-cta-matmul-kernel.yaml]": 0.68
+ "tests/compiler/ir/test_kernel_wire.py::test_every_kernel_of_a_set_has_wires_that_decode_to_its_identities[reduce/cross-cta-matmul-kernel.yaml]": 0.68,
+ "tests/compiler/pipeline/search/test_golden.py::test_stored_targets_are_the_fresh_lowering[Qwen3.8-27B-FP8/v100_sm70.yaml]": 122.69,
+ "tests/compiler/pipeline/search/test_golden.py::test_stored_targets_are_the_fresh_lowering[Qwen3.8-27B-EXL3/v100_sm70.yaml]": 115.49,
+ "tests/compiler/pipeline/search/test_golden.py::test_stored_targets_are_the_fresh_lowering[DeepSeek-V4-Flash-0731/v100_sm70.yaml]": 110.21,
+ "tests/compiler/pipeline/search/test_golden.py::test_stored_targets_are_the_fresh_lowering[Qwen3.8-27B-AWQ-INT4/v100_sm70.yaml]": 83.16,
+ "tests/compiler/pipeline/search/test_golden.py::test_stored_targets_are_the_fresh_lowering[Qwen3.8-27B-GPTQ-Int4/v100_sm70.yaml]": 75.18,
+ "tests/compiler/pipeline/search/test_golden.py::test_stored_targets_are_the_fresh_lowering[Laguna-S-2.1-exl3/rtx5090_sm120.yaml]": 67.07,
+ "tests/compiler/pipeline/search/test_golden.py::test_stored_targets_are_the_fresh_lowering[gemma-4-12B-it/rtx5090_sm120.yaml]": 31.74,
+ "tests/compiler/pipeline/search/test_golden.py::test_stored_targets_are_the_fresh_lowering[gemma-4-12B-it/rtx4090_sm89.yaml]": 4.54,
+ "tests/compiler/pipeline/search/test_golden.py::test_stored_targets_are_the_fresh_lowering[gemma-4-12B/rtx5090_sm120.yaml]": 4.05,
+ "tests/compiler/pipeline/search/test_golden.py::test_stored_targets_are_the_fresh_lowering[rtx5090_sm120.yaml]": 1.4,
+ "tests/compiler/pipeline/search/test_golden.py::test_stored_targets_are_the_fresh_lowering[h100_sm90.yaml]": 1.38,
+ "tests/compiler/pipeline/search/test_golden.py::test_stored_targets_are_the_fresh_lowering[v100_sm70.yaml]": 1.31,
+ "tests/compiler/pipeline/search/test_golden.py::test_stored_targets_are_the_fresh_lowering[rtx4090_sm89.yaml]": 1.3,
+ "tests/compiler/pipeline/search/test_golden.py::test_stored_targets_are_the_fresh_lowering[Qwen3.5-122B-A10B/v100_sm70.yaml]": 0.95
 }
