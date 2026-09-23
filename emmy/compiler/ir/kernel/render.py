@@ -389,9 +389,8 @@ static __device__ __forceinline__ void emmy_mma884_load_b_smem_trans(unsigned* r
 // conflict-free LDS.128. A's k-group 2 bit swaps the loaded 64-bit halves;
 // B's congruous layout feeds the row-major-B mma form directly.
 template <typename T>
-static __device__ __forceinline__ void emmy_mma884_load_a_crosswise_pair(
-    unsigned* r0, unsigned* r1, const T* s, int row, int k, int rows) {
-    int lane = threadIdx.x & 31;
+static __device__ __forceinline__ void emmy_mma884_crosswise_pair(
+    unsigned* r0, unsigned* r1, const T* s, int lane, int row, int k, int rows) {
     int quad = lane >> 2;
     int lane_in_quad = lane & 3;
     int access = ((quad & 4) << 1) + (lane_in_quad << 1) + ((quad & 1) ^ ((quad & 4) >> 2));
@@ -409,6 +408,24 @@ static __device__ __forceinline__ void emmy_mma884_load_a_crosswise_pair(
     r0[1] = packed.y;
     r1[0] = packed.z;
     r1[1] = packed.w;
+}
+
+template <typename T>
+static __device__ __forceinline__ void emmy_mma884_load_a_crosswise_pair(
+    unsigned* r0, unsigned* r1, const T* s, int row, int k, int rows) {
+    emmy_mma884_crosswise_pair(r0, r1, s, threadIdx.x & 31, row, k, rows);
+}
+
+// A transposed B slab is K-contiguous like A's, so it takes the same crosswise
+// storage and the same conflict-free LDS.128. Only the lane map differs: A's
+// fragment half comes from lane bit 2, a transposed B's column half from lane
+// bit 3 -- which is the column role the interleaved accumulator map already
+// assumes. Swapping those two lane bits is the whole difference.
+template <typename T>
+static __device__ __forceinline__ void emmy_mma884_load_b_crosswise_pair(
+    unsigned* r0, unsigned* r1, const T* s, int col, int k, int cols) {
+    int lane = threadIdx.x & 31;
+    emmy_mma884_crosswise_pair(r0, r1, s, (lane & ~0xC) | ((lane & 4) << 1) | ((lane & 8) >> 1), col, k, cols);
 }
 
 template <typename T>

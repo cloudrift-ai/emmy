@@ -2052,7 +2052,7 @@ class _MmaOps(_AtomOps):
         """Whether this staged cell can use the coupled Volta operand and accumulator layouts."""
         if self.stage is None or self.tile.atom.fragment_layout != "m8n8k4" or PAIR_LDMATRIX.narrow((True,)) != (True,):
             return False
-        return not self.c.as_contraction().b_trans and mn[0].reg % 2 == 0 and mn[1].reg % 2 == 0
+        return mn[0].reg % 2 == 0 and mn[1].reg % 2 == 0
 
     def slab_swizzles(self, mn, elem_bytes: int) -> tuple[str, ...]:  # noqa: ARG002 — per-operand widths come from slab_elems
         """The smem swizzle mode per operand slab, from each slab's inner (contiguous) row
@@ -2070,17 +2070,24 @@ class _MmaOps(_AtomOps):
         so its inner row span is the K chunk (``bk_elems``) like A's. A 1-byte (fp8) slab stays
         ``NONE`` — its cooperative byte-gather drain applies no address XOR (the ldmatrix XOR is
         b16-indexed); the cp.async byte slab's bank spread is the row pad instead. Complete paired
-        Volta tiles instead use the crosswise A and B-congruous layouts together; the existing
-        ``PAIR_LDMATRIX`` policy pin can disable that lowering and retain the ordinary gather."""
+        Volta tiles instead use CUTLASS's own layouts: crosswise for A, and for B the congruous
+        layout when it is N-contiguous or crosswise again when it is TRANSPOSED, whose slab is
+        K-contiguous exactly like A's. The existing ``PAIR_LDMATRIX`` policy pin can disable that
+        lowering and retain the ordinary gather."""
         if self.tile.atom.fragment_layout == "m8n8k4":
             # Volta has no ldmatrix. Row-major A uses CUTLASS's crosswise layout; canonical B
-            # uses its B-congruous layout and the row/row mma form. Copy and compute fills share
+            # uses its B-congruous layout and the row/row mma form, and a transposed B — staged
+            # K-contiguous like A — reads A's crosswise layout back through a lane map whose
+            # column half comes from lane bit 3 instead of bit 2. Copy and compute fills share
             # the same swizzled Write. Each layout requires complete pairs
             # of logical 16-row/column fragments, because one ordinary LDS.128 drains each pair.
             paired = self._volta_pair_layout(mn)
+            # A transposed B stages K-contiguous like A, so it takes A's crosswise layout rather
+            # than the congruous one, which is for the N-contiguous canonical B.
+            b_mode = VOLTA_CROSSWISE if self.c.as_contraction().b_trans else VOLTA_B_CONGRUOUS
             return (
                 VOLTA_CROSSWISE if paired else "NONE",
-                *((VOLTA_B_CONGRUOUS if paired else "NONE") for _ in self.channels),
+                *((b_mode if paired else "NONE") for _ in self.channels),
             )
         b_inner = self.stage.bk_elems if self.c.as_contraction().b_trans else mn[1].tile // self.b_atoms(mn)
         return tuple(self.slab_swizzle(inner, e.nbytes) for e, inner in zip(self.slab_elems(), (self.stage.bk_elems, b_inner), strict=True))

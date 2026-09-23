@@ -127,7 +127,8 @@ def _candidate(s: Stmt) -> bool:
     if not isinstance(s, LdmatrixLoad) or not s.staged or s.byte_slab or s.pair_frag is not None or len(s.src_index) != 2:
         return False
     if s.fragment_layout == "m8n8k4":
-        return (s.role == "a" and s.swizzle == VOLTA_CROSSWISE) or (s.role == "b" and s.swizzle == VOLTA_B_CONGRUOUS)
+        # A and a transposed B both drain the crosswise layout; only a canonical B is congruous.
+        return s.swizzle == VOLTA_CROSSWISE if s.role == "a" or s.b_trans else s.swizzle == VOLTA_B_CONGRUOUS
     return s.role == "b"
 
 
@@ -147,9 +148,9 @@ def _pairs_with(a: LdmatrixLoad, b: LdmatrixLoad) -> bool:
     if a.fragment_layout == "m8n8k4":
         if b.fragment_index != a.fragment_index + 1:
             return False
-        if a.role == "a":
-            return a.swizzle == VOLTA_CROSSWISE and col_d == 0
-        return a.swizzle == VOLTA_B_CONGRUOUS and row_d == 0
+        # Crosswise pairs along the slab's ROW axis (A's M, a transposed B's N) at one K
+        # column; the congruous canonical B pairs along its columns at one row.
+        return col_d == 0 if a.swizzle == VOLTA_CROSSWISE else row_d == 0
     if a.b_trans:  # N-major slab: N rows adjacent, same K col
         return row_d == _ATOM8 and col_d == 0
     return row_d == 0 and col_d == _ATOM8  # K-major slab: same K row, cols adjacent
