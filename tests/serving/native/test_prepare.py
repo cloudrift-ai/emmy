@@ -48,7 +48,7 @@ def test_native_only_arguments_fail_before_loading_a_model():
 
     parser = argparse.ArgumentParser()
     register_generate_command(parser.add_subparsers())
-    for options in (["--capture"], ["--context-length", "8"], ["--golden", "unused"], ["--strict-evidence"]):
+    for options in (["--capture"], ["--timeout", "60"], ["--context-length", "8"], ["--golden", "unused"], ["--strict-evidence"]):
         with pytest.raises(ValueError, match="require"):
             handle_generate(parser.parse_args(["generate", "unused", *options]))
 
@@ -61,3 +61,16 @@ def test_invalid_sampling_controls(temperature, top_p, seed):
 
     with pytest.raises(ValueError):
         validate_sampling(temperature, top_p, seed)
+
+
+@pytest.mark.parametrize("timeout", ["0", "-1", "nan", "inf"])
+def test_native_cli_rejects_invalid_deadlines(timeout):
+    import argparse
+
+    from emmy.commands.generate import handle_generate, register_generate_command
+
+    parser = argparse.ArgumentParser()
+    register_generate_command(parser.add_subparsers())
+    args = parser.parse_args(["generate", "unused", "--native-pack", "artifact", "--timeout", timeout])
+    with pytest.raises(ValueError, match="finite and positive"):
+        handle_generate(args)

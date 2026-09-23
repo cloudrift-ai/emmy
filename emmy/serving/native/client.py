@@ -28,6 +28,8 @@ async def generate_tokens(
 ):
     """Run the complete cached loop in Rust; retire the process on failure or timeout."""
     validate_sampling(temperature, top_p, seed)
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("timeout must be finite and positive")
     worker = NativeWorker()
     try:
         with tempfile.TemporaryDirectory(prefix="emmy-generation-") as directory:

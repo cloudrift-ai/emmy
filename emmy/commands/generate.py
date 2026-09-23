@@ -36,6 +36,7 @@ def register_generate_command(subparsers):
     native.add_argument("--native-pack", metavar="DIR", help="Generate with a prepared Rust artifact")
     parser.add_argument("--context-length", type=int, default=None, help="Native export context capacity (default: 4096)")
     parser.add_argument("--capture", action="store_true", help="Replay native token steps as a CUDA graph")
+    parser.add_argument("--timeout", type=float, help="Native worker operation deadline in seconds (default: 120)")
     parser.add_argument("--revision", help="Checkpoint and tokenizer revision")
     parser.add_argument("--golden", help="Measured compiler evidence for native export")
     parser.add_argument("--strict-evidence", action="store_true", help="Reject unmeasured choices during native export")
@@ -90,6 +91,13 @@ def handle_generate(args):
         validate_sampling(args.temperature, args.top_p, args.seed)
         if args.top_k != 0:
             raise ValueError("native generation does not support top-k")
+    if args.timeout is not None:
+        import math
+
+        if not args.native_pack:
+            raise ValueError("timeout requires --native-pack")
+        if not math.isfinite(args.timeout) or args.timeout <= 0:
+            raise ValueError("timeout must be finite and positive")
     if args.capture and not args.native_pack:
         raise ValueError("capture requires --native-pack")
     if (args.golden or args.strict_evidence or args.context_length is not None) and not args.export_native:
@@ -128,7 +136,7 @@ def handle_generate(args):
         sys.exit(1)
     if args.native_pack:
         from emmy.compiler.backend.gpu_lock import gpu_lock
-        from emmy.serving.native.client import generate_tokens
+        from emmy.serving.native.client import DEFAULT_TIMEOUT_SECONDS, generate_tokens
 
         with gpu_lock():
             generated = asyncio.run(
@@ -140,6 +148,7 @@ def handle_generate(args):
                     temperature=args.temperature,
                     top_p=args.top_p,
                     seed=args.seed,
+                    timeout=DEFAULT_TIMEOUT_SECONDS if args.timeout is None else args.timeout,
                 )
             )
         logger.info("%s", tokenizer.decode(generated, skip_special_tokens=True))

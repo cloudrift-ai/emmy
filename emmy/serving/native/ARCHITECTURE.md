@@ -41,9 +41,11 @@ between layers or deduplicate the embedding and tied output-head weight copies.
 Graph capture records one step without executing a warmup. Replaying the graph advances the model exactly once,
 including when capture is first enabled during decode. All addresses remain stable across positions and requests.
 Each step synchronizes at the CPU observation boundary. EOS or the output budget stops further submissions. A
-request whose prompt plus output budget exceeds capacity is rejected. Greedy decoding is the default; requests may select temperature, top-p, and an unsigned 64-bit seed.
+request whose prompt plus output budget exceeds capacity is rejected. Greedy decoding is the default; requests may
+select temperature, top-p, and an unsigned 64-bit seed.
 
-The existing supervised native worker supplies hard deadlines and process retirement. It never retries a failed
+The existing supervised native worker supplies hard deadlines and process retirement. Each worker operation has a
+120-second default deadline; `generate --timeout SECONDS` can extend it for long sequential prefills. It never retries a failed
 request. `client.generate_tokens` sends binary token files to that worker; the complete generation loop runs in Rust.
 The low-level start/step operations expose logits for parity checks and do not change the ordinary generation path.
 
