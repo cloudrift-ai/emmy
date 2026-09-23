@@ -7,7 +7,6 @@
 - Laguna-S-2.1-exl3/rtx5090_sm120.yaml
 - OLMoE-1B-7B-0125-Instruct/rtx5090_sm120.yaml
 - gemma-4-12B-it/rtx4090_sm89.yaml
-- gemma-4-12B-it/rtx5090_sm120.yaml
 - gemma-4-12B/rtx5090_sm120.yaml
 - h100_sm90.yaml
 - rtx4090_sm89.yaml
