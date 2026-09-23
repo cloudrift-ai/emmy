@@ -45,8 +45,9 @@ request whose prompt plus output budget exceeds capacity is rejected. Greedy dec
 select temperature, top-p, and an unsigned 64-bit seed.
 
 The existing supervised native worker supplies hard deadlines and process retirement. Each worker operation has a
-120-second default deadline; `generate --timeout SECONDS` can extend it for long sequential prefills. It never retries a failed
-request. `client.generate_tokens` sends binary token files to that worker; the complete generation loop runs in Rust.
+120-second default deadline; `generate --timeout SECONDS` can extend it for long sequential prefills. It never retries
+a failed request. `client.generate_tokens` sends binary token files to that worker; the complete generation loop
+runs in Rust.
 The low-level start/step operations expose logits for parity checks and do not change the ordinary generation path.
 
 ## Sampling contract
@@ -96,6 +97,8 @@ match. Pointwise differences remain recorded. These experimental budgets do not 
 or identical future completions when the references disagree.
 
 The [numerical investigation](../../../experiments/Qwen3-0.6B/native_generation/RESULTS.md) records the fixed rotary
-rounding defect, failed exploratory criteria, held-out qualification, and limits. Checkpoint coverage reaches 256
-positions; the 4,096-position check isolates attention rather than qualifying an entire checkpoint at that length.
+rounding defect, failed exploratory criteria, held-out qualification, and limits. The original artifact passed
+through 256 checkpoint positions. The [follow-up](../../../experiments/Qwen3-0.6B/native_generation/SAMPLING_CONTEXT.md) executes
+the complete checkpoint through 4,096 positions, but three cases fail the unchanged error budgets. Its 1,024-position
+case passes. Independent attention qualification still covers the full 4,096-position capacity.
 Performance and production concurrency are separate qualifications.

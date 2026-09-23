@@ -61,8 +61,11 @@ The user selected parallel work after #847: GPU schedule optimization continues 
 cached native generation as a correctness and reuse milestone. This does not claim a Rust serving speedup. API work
 still follows generation qualification, and dispatch replacement still requires its separate parity inventory.
 
-**Selected next step — PR #876:** add seeded GPU temperature/top-p sampling and qualify full-model contexts through
-4,096 tokens using the existing FP32 acceptance criteria. Then implement milestone 3 against that qualified runtime.
+**Current work — PR #876:** seeded GPU temperature/top-p sampling is implemented and passes independent checks.
+The full-checkpoint matrix executes 5,939 positions, including a 4,096-position case, but three of fourteen cases
+fail the unchanged FP32 error budgets. The 1,024-position case passes. The
+[follow-up report](../experiments/Qwen3-0.6B/native_generation/SAMPLING_CONTEXT.md) retains those failures and the
+current deterministic working schedules. Resolve numerical qualification before advancing to milestone 3.
 General dispatch migration remains a separate obligation; the native serving subset cannot replace all run/tune uses.
 
 ## Evidence before implementation

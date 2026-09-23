@@ -65,8 +65,8 @@ they must be refreshed when compiler changes alter the traced kernels.
 
 The standalone Rust runtime keeps unit tests beside its modules. `make test-native` builds the worker and runs the
 Python parity and process-recovery tests against it; GPU cases skip when CUDA or the worker binary is unavailable.
-The native generation tests additionally exercise cached tiny-Qwen3 logits, EOS, seeded request reset, and exact-once graph
-replay, independent rotary rounding, and attention/cache boundaries. Local checkpoint qualification compares FP16
+The native generation tests additionally exercise cached tiny-Qwen3 logits, EOS, seeded request reset, and exact-once
+graph replay, independent rotary rounding, and attention/cache boundaries. Local checkpoint qualification compares FP16
 and FP32 references using the same rounded weights; it is opt-in. The normal suite still exercises export, protocol, and
 command validation. Sampling tests compare GPU frequencies with an independently sorted NumPy nucleus distribution,
 including tied/extreme logits, invalid values, and captured replay. Long checkpoint cases check a short request after

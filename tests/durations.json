@@ -2124,5 +2124,7 @@
  "tests/compiler/cli/test_golden_file_replay.py::test_recorded_greedy_pick_is_picked_again_under_strict_evidence[NVIDIA GeForce RTX 4090-cap0]": 7.82,
  "tests/compiler/cli/test_golden_file_replay.py::test_recorded_greedy_pick_is_picked_again_under_strict_evidence[NVIDIA A100-SXM4-40GB-cap1]": 7.79,
  "tests/compiler/backend/test_torch_ref.py::test_indexmap_broadcast_then_rotary_slice_compiles@cuda": 2.26,
-  "tests/serving/native/test_generation_gpu.py::test_gpu_sampling_matches_independent_nucleus_distribution@cuda": 33.66
+  "tests/serving/native/test_generation_gpu.py::test_gpu_sampling_matches_independent_nucleus_distribution@cuda": 33.66,
+  "tests/serving/native/test_generation_gpu.py::test_checkpoint_logits_and_completions[context_1024]@cuda": 70.82,
+  "tests/serving/native/test_generation_gpu.py::test_checkpoint_logits_and_completions[context_4096]@cuda": 304.27
 }
