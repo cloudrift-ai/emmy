@@ -1,13 +1,13 @@
 # Native cached-generation qualification
 
 The [sampling and longer-context follow-up](SAMPLING_CONTEXT.md) records current-compiler checks through 4,096
-positions. Sampling passes, but three checkpoint cases fail the unchanged accuracy contract; full qualification
-remains open. The results below describe the earlier artifact and compiler revision.
+positions. Sampling and all seventeen checkpoint cases pass the unchanged accuracy contract after precision and
+executor repairs. The results below describe the earlier artifact and compiler revision.
 
 Dense FP16 Qwen3 now runs cached generation through Rust using the same compiled programs as Python. A rotary
 rounding defect is fixed. Broader checks use an explicit FP32-based accuracy contract; the original pointwise gate
 and an exploratory per-position reference comparison failed and remain recorded below. All four fresh held-out
-cases pass the revised contract. Repository checks found 26 failures reproduced on main; the PR remains draft.
+cases pass the revised contract. Repository checks found 26 failures reproduced on main at that stage; PR #859 subsequently merged.
 This is not a performance or production-serving qualification.
 
 ## Scope and acceptance contract

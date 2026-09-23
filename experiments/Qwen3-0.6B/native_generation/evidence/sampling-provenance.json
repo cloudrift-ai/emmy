@@ -16,5 +16,17 @@
     "cupy-cuda12x": "14.1.1",
     "transformers": "5.14.1"
   },
-  "gpu": "NVIDIA GeForce RTX 4080, 595.91.07, 16376"
+  "gpu": "NVIDIA GeForce RTX 4080, 595.91.07, 16376",
+  "final_implementation_revision": "10d35c83",
+  "final_precision": {
+    "weights": "f16",
+    "projections": "f16",
+    "logits": "f16",
+    "kv_cache": "f16",
+    "residuals": "f32",
+    "rotary_tables": "f32",
+    "rotary_intermediates": "f32",
+    "attention_intermediates": "f32"
+  },
+  "final_golden": "sampling-residual-golden.yaml.gz"
 }

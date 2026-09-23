@@ -41,7 +41,8 @@ All unsafe CUDA submission stays in `cuda`. Buffer pointers and the context are 
 storage and synchronize before releasing it, so cudarc's cross-stream event tracking is disabled. Copies and launches
 use the owning stream. Uploads finish before borrowed host bytes can disappear; outputs synchronize before returning.
 Benchmark CUDA graph capture happens after one uncaptured initialization run. Both timing events explicitly enable
-timing.
+timing. Shared-memory requirements are resolved at load time: the cubin reserves its static storage, and each
+launch supplies the remaining dynamic bytes. The same rule applies below and above the default 48 KiB limit.
 
 A synchronous library call cannot enforce a hard deadline on a hung GPU operation. The process boundary supplies that
 contract. Callers needing fault isolation must use the supervised worker rather than wait indefinitely in-process.

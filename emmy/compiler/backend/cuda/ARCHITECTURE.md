@@ -84,7 +84,8 @@ codegen, no nvcc), and both paths share every line downstream. The projection:
   change the emitted-C listing size (the register-tile fragment grid is straight-line regardless).
   Unset → each site's built-in cap; `0` → keep every loop rolled.
 - Builds a static launch plan: per launch, a tuple of
-  `(kernel, arg_names, grid, block, smem_bytes, zero_outputs)`.
+  `(kernel, arg_names, grid, block, smem_bytes, zero_outputs)`. Loading resolves total shared storage against
+  the cubin's static allocation once; each launch then supplies only the dynamic remainder.
 
 `run_program(graph, input_data) → RunResult`:
 

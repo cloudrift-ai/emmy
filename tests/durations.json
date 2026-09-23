@@ -2053,7 +2053,7 @@
  "tests/serving/generation/test_gen_runner_gpu.py::test_gen_runner_stitch_matches_eager@cuda": 4.09,
  "tests/serving/generation/test_gen_runner_gpu.py::test_serving_split_computes_the_declared_w4a4_program@cuda": 5.4,
  "tests/serving/generation/test_generate_loop.py::test_slice_last_logits_wrapper_matches_full_logits": 5.5,
- "tests/serving/native/test_generation_gpu.py::test_cached_qwen3_logits_and_generation@cuda": 28.33,
+ "tests/serving/native/test_generation_gpu.py::test_cached_qwen3_logits_and_generation@cuda": 98.37,
  "tests/serving/native/test_generation_gpu.py::test_checkpoint_logits_and_completions[arithmetic]@cuda": 64.8,
  "tests/serving/native/test_generation_gpu.py::test_checkpoint_logits_and_completions[boundary]@cuda": 411.06,
  "tests/serving/native/test_generation_gpu.py::test_checkpoint_logits_and_completions[code]@cuda": 46.24,
@@ -2128,5 +2128,6 @@
  "tests/serving/native/test_generation_gpu.py::test_checkpoint_logits_and_completions[context_1024]@cuda": 70.82,
  "tests/serving/native/test_generation_gpu.py::test_checkpoint_logits_and_completions[context_4096]@cuda": 304.27,
  "tests/serving/native/test_generation_gpu.py::test_checkpoint_logits_and_completions[heldout_attention]@cuda": 4.17,
- "tests/serving/native/test_generation_gpu.py::test_checkpoint_logits_and_completions[heldout_context_4096]@cuda": 307.39
+ "tests/serving/native/test_generation_gpu.py::test_checkpoint_logits_and_completions[heldout_context_4096]@cuda": 307.39,
+ "tests/serving/native/test_generation_gpu.py::test_checkpoint_logits_and_completions[heldout_rotary_context]@cuda": 56.23
 }

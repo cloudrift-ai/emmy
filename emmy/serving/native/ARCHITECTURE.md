@@ -1,7 +1,8 @@
 # Native cached generation
 
-Python prepares a standalone dense FP16 Qwen3 token-step artifact. The Rust runtime owns inference: it submits the
-exported launches, retains the KV cache, and chooses each next token on the GPU. No Python model operation runs after
+Python prepares a standalone dense Qwen3 token-step artifact with FP16 weights, projections, logits, and KV cache.
+The Rust runtime submits the exported launches, retains the KV cache, and chooses each next token on the GPU.
+No Python model operation runs after
 preparation. This is a single-request correctness implementation, not an HTTP server or a performance replacement for
 vLLM. The existing serving integration remains the default.
 
@@ -16,10 +17,12 @@ identify their writes so Python scratch allocation preserves the same dependenci
 
 CUDA source lives in the packaged `kernels.cu` resource, loaded by Python during artifact preparation.
 Small CUDA kernels provide embedding lookup, default full rotary embedding, contiguous cache writes, causal grouped
-query attention, and GPU sampling. Attention accumulates products in float32; score and probability storage follow
-the FP16 eager Qwen3 contract. These kernels favor a simple independent reference implementation over speed. Rotary
-constants are prepared from the checkpoint's own rotary module. The artifact bundles all binaries and weight bytes
-through the existing standalone exporter. Its generation metadata lives in the pack key and has its own version.
+query attention, and GPU sampling. Attention keeps dot products, scores, probabilities, and value accumulation in
+FP32, rounding only its output to FP16. This avoids losing near-tied scores at large magnitudes. These kernels favor
+accuracy over speed. Residual sums stay in FP32 through the existing attention-split wrappers; normalization casts
+back to FP16 before each projection. Rotary constants come from the checkpoint's own module in FP32. Rotation also
+uses FP32 intermediates and rounds only the query/key outputs to FP16. The existing standalone exporter bundles all
+binaries and weight bytes. Generation metadata lives in the pack key and has its own version.
 
 Preparation rejects other model families, quantization, sliding attention, non-default rotary schemes, training mode,
 and non-FP16 or non-CPU parameters. Context capacity must fit both the model and the current 4,096-token limit.
@@ -98,7 +101,9 @@ or identical future completions when the references disagree.
 
 The [numerical investigation](../../../experiments/Qwen3-0.6B/native_generation/RESULTS.md) records the fixed rotary
 rounding defect, failed exploratory criteria, held-out qualification, and limits. The original artifact passed
-through 256 checkpoint positions. The [follow-up](../../../experiments/Qwen3-0.6B/native_generation/SAMPLING_CONTEXT.md) executes
-the complete checkpoint through 4,096 positions, but three cases fail the unchanged error budgets. Its 1,024-position
-case passes. Independent attention qualification still covers the full 4,096-position capacity.
+through 256 checkpoint positions. The
+[follow-up](../../../experiments/Qwen3-0.6B/native_generation/SAMPLING_CONTEXT.md) executes
+seventeen cases across 10,585 positions, including two 4,096-position prompts, within the unchanged error budgets.
+FP32 attention, rotary intermediates, and residual accumulation close the earlier numerical failures. Independent
+attention qualification also covers the full 4,096-position capacity.
 Performance and production concurrency are separate qualifications.

@@ -62,10 +62,10 @@ cached native generation as a correctness and reuse milestone. This does not cla
 still follows generation qualification, and dispatch replacement still requires its separate parity inventory.
 
 **Current work — PR #876:** seeded GPU temperature/top-p sampling is implemented and passes independent checks.
-The full-checkpoint matrix executes 5,939 positions, including a 4,096-position case, but three of fourteen cases
-fail the unchanged FP32 error budgets. The 1,024-position case passes. The
-[follow-up report](../experiments/Qwen3-0.6B/native_generation/SAMPLING_CONTEXT.md) retains those failures and the
-current deterministic working schedules. Resolve numerical qualification before advancing to milestone 3.
+The full-checkpoint matrix passes all seventeen cases across 10,585 positions, including two 4,096-position prompts.
+FP32 attention, rotary intermediates, and residual accumulation close the failures without changing error budgets. The
+[follow-up report](../experiments/Qwen3-0.6B/native_generation/SAMPLING_CONTEXT.md) retains failures, repairs, and
+deterministic working schedules. Next is milestone 3: native text processing and the selected HTTP API adapter.
 General dispatch migration remains a separate obligation; the native serving subset cannot replace all run/tune uses.
 
 ## Evidence before implementation

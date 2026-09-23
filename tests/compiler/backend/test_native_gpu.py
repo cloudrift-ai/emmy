@@ -182,6 +182,7 @@ def test_shared_memory_uses_cubin_static_and_plan_dynamic_storage(tmp_path, stat
     expected = values[::-1] * len(reads)
     with gpu_lock():
         program = CompiledProgram.build_from_plan(plan, {"x": values})
+        assert program.compiled.kernels["shared"].shared_size_bytes == static_count * 4
         program.run_once()
         np.testing.assert_array_equal(program.outputs()["y"], expected)
         stream = cp.cuda.Stream(non_blocking=True)

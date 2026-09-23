@@ -103,7 +103,12 @@ impl Executor {
                 )?;
             }
             // The plan records total storage; static bytes are already reserved by the cubin.
-            for launch in artifact.plan.launches.iter_mut().filter(|l| l.kernel == name) {
+            for launch in artifact
+                .plan
+                .launches
+                .iter_mut()
+                .filter(|l| l.kernel == name)
+            {
                 launch.smem = launch.smem.saturating_sub(static_smem);
             }
             functions.insert(name, function);
