@@ -1636,7 +1636,9 @@ class _AsyncBenchWorker:
 
     @staticmethod
     def _encode(request: dict) -> bytes:
-        return pickle.dumps(request, protocol=pickle.HIGHEST_PROTOCOL)
+        from emmy.compiler.pipeline.search.space import FAST_MATH, precision_pin  # noqa: PLC0415
+
+        return pickle.dumps({**request, "fast_math": precision_pin(FAST_MATH)}, protocol=pickle.HIGHEST_PROTOCOL)
 
     @staticmethod
     def _decode(body: bytes) -> dict:
@@ -1765,9 +1767,6 @@ class _AsyncBenchWorker:
         return self._stderr_tail
 
     async def run_job(self, request_obj: dict, *, wall_timeout_s: float) -> dict:
-        from emmy.compiler.pipeline.search.space import FAST_MATH, precision_pin  # noqa: PLC0415
-
-        request_obj = {**request_obj, "fast_math": precision_pin(FAST_MATH)}
         try:
             return await self._run_job(request_obj, wall_timeout_s=wall_timeout_s)
         except BenchWorkerJobError:
