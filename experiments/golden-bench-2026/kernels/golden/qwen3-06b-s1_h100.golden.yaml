@@ -3176,20 +3176,18 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-    kernel_set:
-    - k_linear_mean_reduce_549927.f3a20e07e940.63e76be34df0
-  - name: k_linear_mean_reduce_549927.f3a20e07e940.63e76be34df0
+  - name: k_linear_mean_reduce_549927.f3a20e07e940.55b405811625
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      PLACE@map.2/inner.1/map.3/map: cut
+      PLACE@map.2/inner.1/map: cut
     identity: 55b40581162510aa1072208b8b56cb206c8472d1ea834f0dfda7a2c5d3a3e1d8
     measurements:
-      emmy_us: 22.26648900243971
-      reference_us: 22.62365564450368
+      emmy_us: 10.137781481183723
+      reference_us: 10.196106212959803
       reference_backend: same-input-greedy
-  - name: k_linear_mean_reduce_549927.f3a20e07e940.5eb8c39a7621
+  - name: k_linear_mean_reduce_549927.f3a20e07e940.f52823101ef9
     bindings: {}
     pins:
       FAST_MATH: false
@@ -3197,25 +3195,25 @@ configs:
       WORK: t128
       REDUCE: coop
       RASTER: ''
-    identity: 30eb6a314861990f9e48e8ef8cbdaed873f86dacf48f83565804c3518ba6a283
+    identity: f52823101ef9dc68a0e6610a14b94044e3fbb353975dcb1d1bab4087f17487f7
     measurements:
-      emmy_us: 1.5958082942536083
-      reference_us: 1.6066965203696546
+      emmy_us: 2.9823030486251367
+      reference_us: 3.015444177875346
       reference_backend: same-input-greedy
-  - name: k_linear_mean_reduce_549927.f3a20e07e940.372436f61a41
+  - name: k_linear_mean_reduce_549927.f3a20e07e940.b43b79869168
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      WORK: w2x1
+      WORK: w1x1
       TILE: mma_m16n8k16_f16_f32/f1x2/k4
       REDUCE: ''
-      STAGE: d2/smem
+      STAGE: d2/smem-tma
       RASTER: ''
-    identity: 5566f0256c99f4995e2995b65c8d0367b58e46d5df4c601d9d8fba4ecf78cadf
+    identity: b43b79869168a2b0899566ce1aca2264e4cd3c2fbad94896f61a332185697d15
     measurements:
-      emmy_us: 13.294933636983234
-      reference_us: 13.425729564718297
+      emmy_us: 7.155478432558585
+      reference_us: 7.180662035084457
       reference_backend: same-input-greedy
 - program: 0
   target:
