@@ -55,13 +55,15 @@ def _normalize_body(stmts: Body) -> Body:
     stmts = eliminate_copy_aliases(stmts)
     stmts = unify_sibling_reduce_axes(stmts)
     stmts = merge_sibling_reduce_loops(stmts)
+    stmts = merge_sibling_free_loops(stmts)
     stmts = hoist_loop_invariants(stmts)
     stmts = simplify_body(stmts)
     stmts = dedup_loads(stmts)
-    # Hoisting, simplification, and a parent merge can expose sibling reductions after the first
-    # merge. Close that dependency here: unifying their axes may enable a merge, which may then
-    # expose duplicate loads and require one new canonical order. Every changed round removes a
-    # loop or a load, so this reaches a fixed point without a fixed iteration bound.
+    # Hoisting, simplification, and a parent merge can expose sibling reductions and sibling
+    # free loops after the first merge. Close that dependency here: unifying reduce axes may
+    # enable a merge, which may then expose duplicate loads and require one new canonical order.
+    # Every changed round removes a loop or a load, so this reaches a fixed point without a fixed
+    # iteration bound.
     stmts = _canonical_order(stmts)
     while True:
         # Unification renames sibling reduce axes in place: an order-preserving alpha-rename the
@@ -71,7 +73,7 @@ def _normalize_body(stmts: Body) -> Body:
             unified = stmts
         else:
             unified.__dict__["_ordering"] = stmts._ordering
-        reduced = dedup_loads(merge_sibling_reduce_loops(unified))
+        reduced = dedup_loads(merge_sibling_free_loops(merge_sibling_reduce_loops(unified)))
         if reduced == unified:
             return unified
         stmts = _canonical_order(reduced)
@@ -586,6 +588,118 @@ def _merge_sibling_reduce_loops(body: Body) -> Body:
             merged = Loop(
                 axis=merged.axis,
                 body=Body(tuple(merged.body) + tuple(_rename_apart(incoming, clashing, merged_defs))),
+                unroll=merged.unroll,
+                seed=merged.seed,
+            )
+            consumed.add(j)
+        out.append(merged)
+
+    return Body(out)
+
+
+# ---------------------------------------------------------------------------
+# Pass 4c: merge sibling free Loops of one extent into one Loop.
+# ---------------------------------------------------------------------------
+
+
+def merge_sibling_free_loops(stmts: Body) -> Body:
+    """Merge sibling free ``Loop``s of one static extent into one Loop whose body is the
+    concatenation, the incoming body renamed onto the surviving loop's axis.
+
+    A free loop's iterations are independent, so two free loops over one extent walk one
+    iteration space twice. One walk is the canonical spelling: a kernel then writes every
+    output of that space in one loop, and :func:`dedup_loads` collapses whatever the two
+    bodies computed alike. The splicer names a merged region's output loops after their own
+    axes, so one region spliced in two merge orders can arrive with its stores in two equal
+    loops or in one. This pass makes both orders one body.
+
+    A merge takes the reduce merge's conditions (:func:`merge_sibling_reduce_loops`): the
+    incoming loop reads no SSA name the surviving loop's body defines, no statement between
+    them defines a name it reads, and colliding local names rename apart. Free loops add
+    two of their own, because they are where a kernel's stores live:
+
+    1. No memory dependence between the bodies, or through the statements between them:
+       a buffer one side writes is neither loaded nor written by the other. One walk
+       interleaves the two bodies per iteration, and a load of a buffer the other body
+       writes would then see a different prefix of it.
+    2. The surviving axis name is not bound anywhere inside the incoming body, since the
+       rename passes through binders.
+
+    Recurses through every block-structured Stmt to find nested scopes.
+    """
+    stmts = Body.coerce(stmts)
+
+    def walk(body: Body) -> Body:
+        recursed: list[Stmt] = []
+        for s in body:
+            nested = s.nested()
+            if nested:
+                recursed.append(s.with_bodies(tuple(walk(b) for b in nested)))
+            else:
+                recursed.append(s)
+        return _merge_sibling_free_loops(Body(recursed))
+
+    return walk(stmts)
+
+
+def _buffers_touched(body: Body) -> tuple[frozenset[str], frozenset[str]]:
+    """``(loaded, written)`` buffer names over the whole subtree."""
+    loaded = frozenset(s.input for s in body.iter() if isinstance(s, Load))
+    written = frozenset(name for s in body.iter() for name in s.external_writes())
+    return loaded, written
+
+
+def _mergeable_free_loop(s: Stmt) -> bool:
+    return isinstance(s, Loop) and not s.is_reduce and s.axis.window is None and s.axis.extent.is_static
+
+
+def _merge_sibling_free_loops(body: Body) -> Body:
+    items = list(body)
+    if len(items) < 2:
+        return body
+
+    out: list[Stmt] = []
+    consumed: set[int] = set()
+    for i, s in enumerate(items):
+        if i in consumed:
+            continue
+        if not _mergeable_free_loop(s):
+            out.append(s)
+            continue
+        merged = s
+        for j in range(i + 1, len(items)):
+            if j in consumed:
+                continue
+            t = items[j]
+            if not (
+                _mergeable_free_loop(t) and t.axis.extent == merged.axis.extent and t.unroll == merged.unroll and t.seed == merged.seed
+            ):
+                continue
+            incoming_raw = Body.coerce(t.body)
+            if t.axis.name != merged.axis.name:
+                if merged.axis.name in incoming_raw.axis_names:
+                    continue
+                incoming_raw = Body(tuple(st.rename({t.axis.name: merged.axis.name}) for st in incoming_raw))
+            incoming_loop = Loop(axis=merged.axis, body=incoming_raw, unroll=t.unroll, seed=t.seed)
+            reads = free_names(incoming_loop)
+            merged_body = Body.coerce(merged.body)
+            merged_defs = merged_body.ssa_defs
+            if merged_defs & reads:
+                continue
+            clashing = merged_defs & incoming_raw.ssa_defs
+            if clashing & _carried_out(incoming_raw):
+                continue
+            merged_loaded, merged_written = _buffers_touched(merged_body)
+            incoming_loaded, incoming_written = _buffers_touched(incoming_raw)
+            if merged_written & (incoming_loaded | incoming_written) or incoming_written & merged_loaded:
+                continue
+            between = Body(tuple(items[k] for k in range(i + 1, j) if k not in consumed))
+            between_loaded, between_written = _buffers_touched(between)
+            if between.ssa_defs & reads or between_written & incoming_loaded or between_loaded & incoming_written:
+                continue
+            merged = Loop(
+                axis=merged.axis,
+                body=Body(tuple(merged.body) + tuple(_rename_apart(incoming_raw, clashing, merged_defs))),
                 unroll=merged.unroll,
                 seed=merged.seed,
             )
