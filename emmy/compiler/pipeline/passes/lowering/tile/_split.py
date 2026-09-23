@@ -320,10 +320,21 @@ def _sliced_contraction(node: Fold, k_axis: Axis, w: int) -> tuple[Axis, Axis, F
     accumulator names, so the finalize folds the workspace states through the same monoid."""
     ksplit, kslice, sigma = _factor_k(k_axis, w)
     # Rebuilt DIRECTLY over the σ-reindexed operands, in stored order: the slice is the same term
-    # with a narrower axis, so its lift, monoid and seeds are the node's own — there is nothing for
-    # a former to re-derive, and no role to re-name.
+    # with a narrower axis, so its monoid and seeds are the node's own — there is nothing for a
+    # former to re-derive, and no role to re-name.
     operands = tuple(_sliced_edge(edge, sigma, node.axis, kslice, ksplit) for edge in node.operands)
-    return ksplit, kslice, replace(node, operands=operands)
+    # The LIFT takes σ too, per statement so the binder is not shadowed away — the same rule
+    # :func:`_slice_fold` applies on the generic side. A lift that only weighs its operands reads
+    # no k and this changes nothing; one that reads the contraction coordinate DIRECTLY is
+    # comparing against a partition-local index while its operands already reach absolute k.
+    # Causal attention is exactly that lift: its mask is ``row < key``, and left unreindexed every
+    # partition above the first admits keys far above the diagonal.
+    # Re-CLOSED, not re-spelled: the head's first param is its iteration binder, which must keep
+    # its position, so the partition coordinate the substituted body now reads joins as a TRAILING
+    # param — where a coordinate already sits, and past the operand correspondence.
+    body = Body(tuple(stmt.substitute(sigma) for stmt in node.lift.body))
+    lift = Lambda.closing(node.lift.params, body, node.lift.results)
+    return ksplit, kslice, replace(node, operands=operands, lift=lift)
 
 
 # ---- the piece / fragment builders ------------------------------------------------------------ #
