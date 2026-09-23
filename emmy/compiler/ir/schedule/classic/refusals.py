@@ -443,11 +443,10 @@ def _stage_candidates(tile: TileOp, target, node, choice: NodeSchedule) -> tuple
         candidates: tuple[Stage, ...] = fill_stage_moves()
         if tile.packed_reading(node)[0] is not None:
             candidates = (*candidates, *stage_moves(warp=True, ctx=target))
-    elif choice.tile.is_warp and len(node.bilinear_channels()) > 1:
-        # A term folding several channels has no gmem-DIRECT form: that leaf folds a single B out
-        # of registers. Staged it is ordinary — one A slab beside one B per channel, the operand
-        # list the compute fill already builds and the copy transports now build too, read by the
-        # one drain. So both staging tiers are offered and only ``direct`` is withheld.
+    elif _multi_fold_direct_refusal(node, choice.tile, direct) is not None:
+        # Staged, a multi-channel fold is ordinary — one A slab beside one B per channel, the
+        # operand list the compute fill already builds and the copy transports now build too, read
+        # by the one drain. So both staging tiers are offered and only ``direct`` is withheld.
         candidates = (*fill_stage_moves(), *stage_moves(warp=True, ctx=target))
     else:
         candidates = (direct, *stage_moves(warp=choice.tile.is_warp, ctx=target))
@@ -456,6 +455,18 @@ def _stage_candidates(tile: TileOp, target, node, choice: NodeSchedule) -> tuple
     if len(node.bilinear_channels()) > 1 and not choice.tile.is_warp:
         candidates = tuple(stage for stage in candidates if stage.transport not in ("smem-async", "smem-tma"))
     return candidates
+
+
+def _multi_fold_direct_refusal(node: Fold, plan: Tile, stage: Stage) -> str | None:
+    """Why a term folding several channels cannot run gmem-direct under ``plan`` — or ``None``.
+
+    The mma leaf folds ONE B straight out of registers, so a node folding several channels has no
+    direct form; staged it is ordinary, one A slab beside one B per channel. Stated once because
+    it is asked twice: the edge catalog withholds ``direct`` and the local-support join re-checks
+    the stage it was handed."""
+    if plan.is_warp and stage.is_direct and len(node.bilinear_channels()) > 1:
+        return "the gmem-direct mma leaf folds a single B; a multi-channel fold has to stage"
+    return None
 
 
 def _compute_filled(tile_op, node: Fold, plan: Tile) -> bool:
