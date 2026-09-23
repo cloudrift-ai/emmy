@@ -1,0 +1,326 @@
+name: Review agent prompts
+
+# Runs before the nightly discovery and onboarding jobs so a merged correction reaches them the same day.
+on:
+  schedule:
+    - cron: "0 5 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: model-discovery
+  cancel-in-progress: false
+
+jobs:
+  review:
+    runs-on:
+      group: agent-runners
+      labels: agents
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      pull-requests: read
+    env:
+      GH_REPO: ${{ github.repository }}
+      AGENT_MODEL: ${{ vars.ONBOARD_AGENT_MODEL || 'Qwen/Qwen3.8-27B-FP8' }}
+      CLOUDRIFT_INFERENCE_URL: ${{ vars.CLOUDRIFT_INFERENCE_URL || 'https://inference.cloudrift.ai/v1' }}
+      OPENCODE_DISABLE_AUTOUPDATE: "true"
+      REVIEWED_WORKFLOWS: "Discover model,Verify or onboard model"
+      WORKFLOW_SOURCE: /tmp/emmy-review-source-${{ github.run_id }}-${{ github.run_attempt }}
+      OPENCODE_CONFIG_DIR: /tmp/emmy-review-source-${{ github.run_id }}-${{ github.run_attempt }}/.opencode
+      AGENT_TASK: /tmp/emmy-review-task-${{ github.run_id }}-${{ github.run_attempt }}.json
+      AGENT_EVENTS: /tmp/emmy-review-events-${{ github.run_id }}-${{ github.run_attempt }}.jsonl
+      AGENT_VERDICT: /tmp/emmy-review-verdict-${{ github.run_id }}-${{ github.run_attempt }}.json
+      REVIEW_COMMENT: /tmp/emmy-review-comment-${{ github.run_id }}-${{ github.run_attempt }}.md
+      REVIEW_MESSAGE: /tmp/emmy-review-message-${{ github.run_id }}-${{ github.run_attempt }}.txt
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.EXPERIMENT_APP_ID }}
+          private-key: ${{ secrets.EXPERIMENT_APP_PRIVATE_KEY }}
+          repositories: ${{ github.event.repository.name }}
+
+      - name: Load the shared rolling-branch helpers
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/workflows/scripts
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Find rolling discovery pull request
+        id: rolling
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          source .github/workflows/scripts/rolling_pr.sh
+          find_rolling_pr
+
+      - name: Collect the last run of every reviewed workflow
+        id: evidence
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          # Only a failure or a warning is worth an agent's time. A clean pair of runs ends the job here,
+          # which is the common case and keeps the nightly cost near zero.
+          runs='[]'
+          worth_reviewing=false
+          IFS=',' read -r -a workflows <<< "$REVIEWED_WORKFLOWS"
+          for workflow in "${workflows[@]}"; do
+            latest=$(gh run list --workflow "$workflow" --status completed --limit 1 \
+              --json databaseId,conclusion,url,createdAt \
+              --jq '.[0] // empty')
+            if [ -z "$latest" ]; then
+              echo "No completed run found for $workflow"
+              continue
+            fi
+            run_id=$(jq -r .databaseId <<< "$latest")
+            conclusion=$(jq -r .conclusion <<< "$latest")
+            # Annotations carry every ::warning:: and ::error:: the run emitted, without downloading its log.
+            annotations=$(gh api --paginate "repos/$GH_REPO/actions/runs/$run_id/jobs" \
+              --jq '.jobs[].check_run_url' \
+              | while read -r check_run_url; do
+                  gh api "$check_run_url/annotations" \
+                    --jq '.[] | select(.annotation_level != "notice") | "\(.annotation_level): \(.message)"' || true
+                done | head -c 8000)
+            failing_log=""
+            if [ "$conclusion" != "success" ]; then
+              failing_log=$(gh run view "$run_id" --log-failed 2>/dev/null | tail -c 40000 || true)
+            fi
+            if [ "$conclusion" != "success" ] || [ -n "$annotations" ]; then
+              worth_reviewing=true
+            fi
+            runs=$(jq \
+              --argjson run "$latest" \
+              --arg workflow "$workflow" \
+              --arg annotations "$annotations" \
+              --arg failing_log "$failing_log" \
+              '. + [{
+                 workflow: $workflow,
+                 conclusion: $run.conclusion,
+                 run_url: $run.url,
+                 created_at: $run.createdAt,
+                 annotations: $annotations,
+                 failing_log: $failing_log
+               }]' <<< "$runs")
+          done
+          jq -n --argjson runs "$runs" \
+            '{schema_version: 1, runs: $runs}' > "$AGENT_TASK"
+          echo "worth_reviewing=$worth_reviewing" >> "$GITHUB_OUTPUT"
+          jq -r '.runs[] | "\(.workflow): \(.conclusion) \(.run_url)"' "$AGENT_TASK"
+
+      - name: Checkout the rolling branch
+        if: steps.evidence.outputs.worth_reviewing == 'true'
+        uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          ref: ${{ steps.rolling.outputs.branch || github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Rebase the rolling branch on latest main
+        if: steps.evidence.outputs.worth_reviewing == 'true' && steps.rolling.outputs.branch != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+          EXISTING_BRANCH: ${{ steps.rolling.outputs.branch }}
+        run: |
+          source .github/workflows/scripts/rolling_pr.sh
+          rebase_rolling_branch
+
+      - name: Load exact workflow source
+        if: steps.evidence.outputs.worth_reviewing == 'true'
+        env:
+          WORKFLOW_SHA: ${{ github.sha }}
+          GIT_LFS_SKIP_SMUDGE: "1"
+        run: |
+          if ! git cat-file -e "$WORKFLOW_SHA^{commit}"; then
+            git fetch --depth=1 origin "$WORKFLOW_SHA"
+          fi
+          mkdir -p "$WORKFLOW_SOURCE"
+          git archive "$WORKFLOW_SHA" | tar -x -C "$WORKFLOW_SOURCE"
+
+      - name: Run the prompt review agent
+        if: steps.evidence.outputs.worth_reviewing == 'true'
+        env:
+          CLOUDRIFT_API_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
+        run: |
+          set -euo pipefail
+          : > "$AGENT_EVENTS"
+          opencode run "Complete the attached prompt review exactly." \
+            --agent review-prompts \
+            --model cloudrift/agent \
+            --format json \
+            --file "$WORKFLOW_SOURCE/prompts/review-agent-prompts.md" \
+            --file "$AGENT_TASK" \
+            | tee -a "$AGENT_EVENTS" \
+            | jq -R --unbuffered -r 'fromjson? // {type: "raw", raw: .}
+                | "agent-event: \(.type) \(.part.tool // "") \(.part.state.status // "")"
+                  + " \((.part.text // .error // .part.state.error // .raw // "") | tostring | .[0:300] | gsub("\n"; " "))"'
+
+      - name: Validate the review verdict and diff
+        id: verdict
+        if: steps.evidence.outputs.worth_reviewing == 'true'
+        run: |
+          set -euo pipefail
+          jq -s -r '[.[] | select(.type == "text") | .part.text][-1] // empty' "$AGENT_EVENTS" \
+            | jq -e '
+                def text(field): (field | type) == "string" and (field | length) > 0;
+                if (type == "object" and (.changed | type) == "boolean" and text(.finding)
+                    and ((.changed | not)
+                         or (text(.workflow) and text(.run_url) and text(.fix))))
+                then . else error("Review verdict has an invalid shape") end' > "$AGENT_VERDICT"
+
+          changed_files=$(git status --porcelain)
+          # The agent's own claim is not evidence: the working tree decides whether anything changed.
+          if [ -z "$changed_files" ]; then
+            if [ "$(jq -r .changed "$AGENT_VERDICT")" = "true" ]; then
+              echo "The agent reported a prompt fix but changed no file" >&2
+              exit 1
+            fi
+            echo "No prompt change proposed: $(jq -r .finding "$AGENT_VERDICT")"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$(jq -r .changed "$AGENT_VERDICT")" != "true" ]; then
+            echo "The agent edited files while reporting no prompt fix" >&2
+            printf '%s\n' "$changed_files" >&2
+            exit 1
+          fi
+          # Conservative by construction: one problem, a couple of files, a handful of lines.
+          while IFS= read -r entry; do
+            path="${entry:3}"
+            case "$path" in
+              prompts/*|.agents/skills/*) ;;
+              *) echo "Review edited a file outside the allowed directories: $path" >&2; exit 1 ;;
+            esac
+            case "$entry" in
+              ' M '*) ;;
+              *) echo "Review may only modify tracked prompt files, not add or remove them: $entry" >&2; exit 1 ;;
+            esac
+          done <<< "$changed_files"
+          file_count=$(git diff --name-only | wc -l)
+          line_count=$(git diff --numstat | awk '{total += $1 + $2} END {print total + 0}')
+          if [ "$file_count" -gt 2 ] || [ "$line_count" -gt 15 ]; then
+            echo "Review diff is too broad for one night: $file_count files, $line_count lines" >&2
+            git diff --stat >&2
+            exit 1
+          fi
+          awk 'length > 120 {print FILENAME": line "FNR" is "length" characters"; found = 1} END {exit found}' \
+            $(git diff --name-only) || { echo "Review left a Markdown line over 120 characters" >&2; exit 1; }
+          git diff --check
+          git diff
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Refresh GitHub App token
+        if: steps.verdict.outputs.changed == 'true'
+        id: app-token-refresh
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.EXPERIMENT_APP_ID }}
+          private-key: ${{ secrets.EXPERIMENT_APP_PRIVATE_KEY }}
+          repositories: ${{ github.event.repository.name }}
+
+      - name: Commit the prompt correction to the rolling branch
+        id: branch
+        if: steps.verdict.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token-refresh.outputs.token }}
+          EXISTING_BRANCH: ${{ steps.rolling.outputs.branch }}
+        run: |
+          set -euo pipefail
+          git config user.name "emmy-onboarding-bot"
+          git config user.email "emmy-onboarding-bot[bot]@users.noreply.github.com"
+          gh auth setup-git
+          branch="$EXISTING_BRANCH"
+          if [ -n "$branch" ]; then
+            git switch -C "$branch"
+          else
+            # The rolling pull request was merged since the last run; start the next one.
+            branch="agents/model-discovery-${GITHUB_RUN_ID}"
+            git switch -c "$branch"
+          fi
+          git add --all -- prompts .agents/skills
+          git diff --cached --check
+          jq -r '"prompts: correct the instruction behind a nightly agent failure",
+                 "", .finding, "", .fix, "",
+                 "Reviewed \(.workflow): \(.run_url)"' "$AGENT_VERDICT" > "$REVIEW_MESSAGE"
+          git commit -F "$REVIEW_MESSAGE"
+          # A discovery or onboarding run may have pushed to this branch while the agent was reading.
+          for attempt in 1 2 3; do
+            git push origin "HEAD:refs/heads/$branch" && break
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            git fetch origin "+refs/heads/$branch:refs/remotes/origin/$branch"
+            git rebase "origin/$branch" || { git rebase --abort; exit 1; }
+            sleep "$attempt"
+          done
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+      - name: Report the correction on the rolling pull request
+        if: steps.verdict.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token-refresh.outputs.token }}
+          PR_NUMBER: ${{ steps.rolling.outputs.number }}
+          REVIEW_BRANCH: ${{ steps.branch.outputs.branch }}
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          retry_gh() {
+            for attempt in 1 2 3; do
+              "$@" && return 0
+              if [ "$attempt" -eq 3 ]; then
+                return 1
+              fi
+              sleep "$attempt"
+            done
+          }
+          {
+            echo "## Nightly prompt review"
+            echo
+            echo "Corrected a prompt after reviewing [$(jq -r .workflow "$AGENT_VERDICT")]($(jq -r .run_url "$AGENT_VERDICT"))."
+            echo
+            echo "**Finding.** $(jq -r .finding "$AGENT_VERDICT")"
+            echo
+            echo "**Fix.** $(jq -r .fix "$AGENT_VERDICT")"
+            echo
+            echo "A prompt correction only reaches the nightly agents once this pull request merges."
+          } > "$REVIEW_COMMENT"
+          if [ -z "$PR_NUMBER" ]; then
+            retry_gh gh label create model-discovery \
+              --description "Automated model recipe lifecycle" \
+              --color 5319E7 --force
+            retry_gh gh label create model-onboarding \
+              --description "Automated model discovery and onboarding" \
+              --color 1D76DB --force
+            PR_NUMBER=$(retry_gh gh api --method POST "repos/$GH_REPO/pulls" \
+              -f head="$REVIEW_BRANCH" \
+              -f base="$BASE_BRANCH" \
+              -f title="Refresh model lifecycle and onboarding" \
+              -F body=@"$REVIEW_COMMENT" \
+              -F draft=true \
+              --jq .number)
+            retry_gh gh api --method POST "repos/$GH_REPO/issues/$PR_NUMBER/labels" \
+              -f 'labels[]=model-discovery' \
+              -f 'labels[]=model-onboarding' >/dev/null
+          fi
+          retry_gh gh api --method POST "repos/$GH_REPO/issues/$PR_NUMBER/comments" \
+            -F body=@"$REVIEW_COMMENT" >/dev/null
+          cat "$REVIEW_COMMENT" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Cleanup review credentials and output
+        if: always()
+        run: |
+          rm -f \
+            "$AGENT_EVENTS" \
+            "$AGENT_TASK" \
+            "$AGENT_VERDICT" \
+            "$REVIEW_COMMENT" \
+            "$REVIEW_MESSAGE"
+          case "$WORKFLOW_SOURCE" in
+            /tmp/emmy-review-source-*) rm -rf -- "$WORKFLOW_SOURCE" ;;
+            *) echo "Refusing to remove unexpected workflow source path: $WORKFLOW_SOURCE" >&2; exit 1 ;;
+          esac
+          git config --unset-all credential.helper || true
