@@ -127,7 +127,6 @@ tune-kernels: setup
 # --- vLLM + emmy serving image (emmy/serving, docker/vllm-emmy) ---
 VLLM_VERSION ?= v0.23.0
 VLLM_BASE_IMAGE ?= vllm/vllm-openai:$(VLLM_VERSION)
-VLLM_EMMY_CUPY_PACKAGE ?= cupy-cuda13x
 VLLM_EMMY_TAG ?= cloudriftai/vllm-emmy:$(patsubst v%,%,$(VLLM_VERSION))-$(shell git rev-parse --short HEAD)
 
 wheel: setup
@@ -135,14 +134,20 @@ wheel: setup
 	./venv/bin/python scripts/prepare_dist.py --recipes
 	rm -rf dist build && ./venv/bin/python -m build --wheel -o dist/ .
 
+# The runtime ships as its own distribution (a compiled extension, one wheel per platform);
+# ``emmy-ml`` pins it exactly because the plan format couples them.
+runtime-wheel: setup
+	./venv/bin/maturin build --release -m crates/emmy-runtime-py/Cargo.toml -o dist/
+
 # The release runner starts with a bare Python. Keep its complete build contract in one
 # target so pull-request CI can exercise the exact same dependency install and staging path.
 EMMY_PYPI_PYTHON ?= python3
 pypi-dist:
-	$(EMMY_PYPI_PYTHON) -m pip install --disable-pip-version-check build PyYAML
+	$(EMMY_PYPI_PYTHON) -m pip install --disable-pip-version-check build PyYAML "maturin>=1.5,<2"
 	$(EMMY_PYPI_PYTHON) scripts/prepare_dist.py --recipes --readme
 	rm -rf dist build
 	$(EMMY_PYPI_PYTHON) -m build
+	$(EMMY_PYPI_PYTHON) -m maturin build --release --sdist -m crates/emmy-runtime-py/Cargo.toml -o dist/
 
 # Image tags embed the short sha; an empty rev-parse (e.g. root over a synced tree without
 # git safe.directory) would silently tag "...:0.23.0-" — fail loudly instead.
@@ -153,7 +158,6 @@ git-sha-guard:
 
 vllm-emmy-image: wheel git-sha-guard
 	docker build -f docker/vllm-emmy/Dockerfile --build-arg VLLM_VERSION=$(VLLM_VERSION) --build-arg BASE_IMAGE=$(VLLM_BASE_IMAGE) \
-		--build-arg CUPY_PACKAGE=$(VLLM_EMMY_CUPY_PACKAGE) \
 		-t $(VLLM_EMMY_TAG) .
 
 vllm-emmy-push: vllm-emmy-image

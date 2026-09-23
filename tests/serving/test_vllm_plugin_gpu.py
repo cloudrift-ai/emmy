@@ -17,7 +17,6 @@ MODEL = "Qwen/Qwen3-Embedding-0.6B"
 
 
 def test_vllm_plugin_embed_matches_hf_eager(monkeypatch):
-    pytest.importorskip("cupy")
     vllm = pytest.importorskip("vllm")
     import torch
 

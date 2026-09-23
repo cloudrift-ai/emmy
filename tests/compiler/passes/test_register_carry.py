@@ -150,7 +150,7 @@ def test_register_state_preserves_old_reads_on_cuda(half, warps):
 def test_gdn_chunk_step_matches_loop_on_cuda(shape, half):
     from emmy import config
     from emmy.commands.trace import graph_from_code
-    from emmy.compiler.backend.cuda.program import CompiledProgram
+    from emmy.compiler.backend.cuda.program import CompiledProgram, kernel_attributes
     from emmy.compiler.backend.gpu_lock import gpu_lock
     from emmy.compiler.ir.loop import LoopOp
     from emmy.compiler.ir.loop.runner import execute_loop_op_cpp
@@ -204,6 +204,7 @@ m(torch.randn(2,4,{chunk},{keys}), torch.randn(2,4,{chunk},{keys}),
         program = CompiledProgram.build(lowered, arrays)
         program.iter_once()
         result = program.outputs()
+        attributes = {name: kernel_attributes(name, spec) for name, spec in program.plan.kernels.items()}
     for name, actual in result.items():
         actual = np.asarray(actual).reshape(expected[name].shape)
         # FAST_MATH rounds matrix operands at every step, even with f32 accumulators. Bound
@@ -211,6 +212,5 @@ m(torch.randn(2,4,{chunk},{keys}), torch.randn(2,4,{chunk},{keys}),
         np.testing.assert_allclose(actual, expected[name], rtol=3e-3, atol=1e-3)
         assert np.linalg.norm(actual - expected[name]) / np.linalg.norm(expected[name]) < 2e-3
 
-    assert all(kernel.local_size_bytes == 0 for kernel in program.compiled.kernels.values()), [
-        (kernel.num_regs, kernel.local_size_bytes) for kernel in program.compiled.kernels.values()
-    ]
+    spills = [(a["num_regs"], a["local_size_bytes"]) for a in attributes.values()]
+    assert all(local == 0 for _, local in spills), spills

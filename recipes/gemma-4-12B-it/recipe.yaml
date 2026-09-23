@@ -29,10 +29,10 @@ model:
 engine:
   llm:
     tensor_parallel_size: 1
-    # 0.97 (not stock's 0.9): the emmy generative arm's embed table + norm residents live
-    # in cupy and are claimed BEFORE vLLM's torch-only memory profiler runs, so they must
-    # sit INSIDE the utilization budget or the KV-cache min-fit check fails at boot
-    # (serve.py _GENERATE_GPU_MEMORY_UTILIZATION).
+    # 0.97 (not stock's 0.9): the emmy generative arm's embed table + norm residents are
+    # claimed BEFORE vLLM's memory profiler runs, so they must sit INSIDE the utilization
+    # budget or the KV-cache min-fit check fails at boot (serve.py
+    # _GENERATE_GPU_MEMORY_UTILIZATION).
     context_length: 16384
     gpu_memory_utilization: 0.97
     vllm:

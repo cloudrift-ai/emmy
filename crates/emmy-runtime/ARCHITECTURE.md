@@ -7,12 +7,15 @@ The crate has no HTTP, tokenizer, model framework, compiler, or Python dependenc
 ## Two hosts, one library
 
 - **In-process** through `crates/emmy-runtime-py`, the `emmy_runtime` extension (PyO3, `abi3`) that
-  `emmy/compiler/backend/cuda/program.py` imports. It exposes `Device` (one context per process, its properties,
-  a context synchronize that surfaces a sticky error, kernel resource attributes read off a cubin) and `Executor`
-  (load, bind, run once, time one launch's batch, capture per-launch and whole-program graphs, replay, time a
-  whole-program window, read any buffer). Every method that touches the device releases the interpreter lock. The
-  runtime's hung-launch error surfaces as `emmy_runtime.HungKernelError`, a `RuntimeError` subclass. This is the
-  host behind `emmy run`, the accuracy check, the realization corpus and the bench worker's jobs.
+  `emmy/compiler/backend/cuda/program.py` imports. It exposes `Device` (one context and one stream per process, its
+  properties, a context synchronize that surfaces a sticky error, kernel resource attributes read off a cubin, pointer
+  attributes), `Program` (a parsed plan and its layout per environment) and `Executor` (load with lent or owned
+  memory, bind by bytes or device address, rebind at a new environment, set the environment, adopt a host stream,
+  run once, time one launch's batch, capture per-launch and whole-program graphs, replay, time a whole-program
+  window, read any buffer), plus a DLPack capsule that lets torch address mapped host memory. Every method that
+  touches the device releases the interpreter lock. The runtime's hung-launch error surfaces as
+  `emmy_runtime.HungKernelError`, a `RuntimeError` subclass. This is the host behind `emmy run`, the accuracy check,
+  the realization corpus, the bench worker's jobs and the vLLM plugin's runners.
 - **As a process**, `emmy-runtime-worker`, for the Python-free cached-generation path (below).
 
 Process isolation is still the caller's contract: a synchronous call cannot end a hung kernel, only report it. The
@@ -24,19 +27,24 @@ hosts it is what gets SIGKILLed.
 An in-process program arrives as the plan's JSON form (`plan_to_dict`), the bound input and constant bytes by
 buffer name, and one cubin path per kernel (`Artifact::new`): nothing is read from disk but the cubins, and the
 plan's `source` field is ignored — the host compiled it. A standalone pack (below) is the same plan read from a
-directory.
+directory. The whole plan grammar is read: an `int` literal, a `"name"` variable, or `[op, lhs, rhs]` with `op` in
+`+ - * / // %` (Python's integer semantics), for buffer shapes, grid and block factors and runtime constants.
 
-The supported subset is deliberately explicit:
-
-- CUDA plan formats 1 and 3, with static nonnegative shapes and ordinary pointer arguments. Format 2, symbolic shapes,
-  runtime constants/arguments, indirect operands, serial launches, and TMA descriptors are rejected before submission.
-  The host refuses such a plan before it reaches the runtime.
+- CUDA plan formats 1, 2 and 3. Every shape and launch factor resolves under a **symbol environment**: the plan's
+  hints, overridden by what the host binds (`rebind`, `set_env`). Runtime arguments append the environment's values
+  as `int` parameters; a runtime constant fills its buffer with its expression's value in the buffer's dtype; a
+  serial launch runs once per coordinate of its axes, in order, each step overriding that axis.
 - Contiguous little-endian f16, bf16, f32, f64, signed/unsigned integer storage, one-byte booleans, the one-byte fp8
   and packed fp4 carriers, and the packed f16 pair. bf16 payloads contain encoded uint16 bits.
-- One allocation per named buffer, retained for the loaded program's lifetime. There are no external pointer aliases,
-  cross-program shared arrays, or liveness-based scratch reuse. Empty buffers have an address but return zero bytes.
-- Ordered launch arguments follow `args`. Grid/block axes multiply their integer factors. `zero_outputs` clears a
-  buffer before its launch; `zero_prologues` records zeroing performed inside the kernel and adds no extra memset.
+- Memory is a **layout** the runtime derives per environment (`Program::layout`): one region per input, constant and
+  output buffer (`role:name`), and every scratch buffer packed by liveness into one `scratch` slab, 256-byte aligned,
+  largest first, deterministically. The host lends memory for every region or the runtime allocates and zeroes its
+  own; a region that survives a rebind keeps its contents. Empty buffers have an address but return zero bytes.
+- Ordered launch arguments follow `args`. An indirect operand expands in place to its table pointer, selector pointer
+  and slot — operands the host binds by address, which the plan never declares as buffers. A TMA descriptor is
+  encoded per environment at the source buffer's resolved shape (a prefix-packed symbolic source has the resolved
+  strides, not the allocation's) and passed as a pointer to its 128 bytes. `zero_outputs` clears a buffer before its
+  launch; `zero_prologues` records zeroing performed inside the kernel and adds no extra memset.
 - Cubins must load on the live device. A pack's recorded architecture must equal the device's exact
   `sm_<major><minor>`; an in-process program was compiled for the live device by the host.
 - A timed launch whose completion event misses its deadline raises `HungKernel`; a launch that reports zero elapsed
@@ -58,10 +66,15 @@ compiler scheduling without changing those semantics does not require a new arti
 
 ## CUDA ownership
 
-`Device` retains a context; `Executor` owns one stream, its modules, allocations, its timing events, and its captured
-graphs — one per launch position holding that launch's batch, and one holding the whole program. Inputs update
-existing addresses, so a graph stays valid across input updates. A load replaces the previous program; release drops
-it. There is no unbounded program or graph cache.
+`Device` retains a context and one stream that every executor on it launches on and that is never destroyed: a host
+allocator that tracked lent memory against it may still record events on it while the process shuts down. `Executor`
+owns its modules, the regions it allocated, its timing events, its descriptors and its captured graphs — one per
+launch position holding that launch's batch, and one whole-program graph per symbol environment, least recently used
+out. Inputs update existing addresses, so a graph stays valid across input updates; a rebind, a lent region or a
+released one drops every graph and descriptor. A host may adopt its own stream for a call (`set_stream`): launches,
+device copies and memsets then go there, so a stream that is recording a graph records them, while host uploads and
+descriptor encodes always use the device's stream and complete before returning. Graph capture always happens on the
+device's stream. A load replaces the previous program; release drops it.
 
 All unsafe CUDA submission stays in `cuda`. Buffer pointers and the context are private. Executors have disjoint
 storage and synchronize before releasing it, so cudarc's cross-stream event tracking is disabled. Copies and launches

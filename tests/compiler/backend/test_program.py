@@ -126,6 +126,9 @@ def _fake_benchmark_program(monkeypatch, iter_ms: float):
             self.calls += 1
             return [iter_ms]
 
+        def on_torch_stream(self):
+            return nullcontext()
+
     fake = _FakeProgram()
     monkeypatch.setattr(program_mod.CompiledProgram, "build", classmethod(lambda _cls, *_args, **_kwargs: fake))
     monkeypatch.setattr(lock_mod, "gpu_lock", nullcontext)

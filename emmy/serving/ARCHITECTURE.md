@@ -13,7 +13,8 @@ vllm serve Qwen/Qwen3-Embedding-0.6B --runner pooling --enforce-eager \
 `--stock` for the raw-vLLM baseline at the same max-model-len, and `--bench` for a one-shot start → `/health` →
 `vllm bench serve --backend openai-embeddings` → results → shutdown cycle.
 
-Requires the `serving` extra (`pip install -e ".[compile,serving]"` + cupy). vLLM discovers the plugin through the
+Requires the `serving` extra (`pip install -e ".[compile,serving]"`) and the runtime extension `make setup` builds.
+vLLM discovers the plugin through the
 `vllm.general_plugins` entry point (`emmy.serving:register` in pyproject.toml), which registers
 `EmmyEmbedModel` by lazy string path; `--hf-overrides` swaps the served repo's `architectures` to it, so the
 checkpoint, tokenizer, and sentence-transformers pooling config still come from the original HF repo.
@@ -42,15 +43,14 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   constants (`named_parameters` + `named_buffers`, `remove_duplicate=False`, in the traced dtype), and build ONE
   `CompiledProgram` over a buffer set sized at **`max_seq_len`** (`--max-model-len`). Per
   sequence (`forward_hidden_states`) it takes a **1-D int torch CUDA tensor** and returns an `(S, hidden)` **torch CUDA
-  tensor** — no host round-trip. It enters a cupy external stream bound to torch's current stream
-  (`cp.cuda.Stream.from_external`), then: bridge the
-  torch ids to cupy (`cp.from_dlpack`, zero-copy), size the launch grids to S (`set_sym_values`), copy ids /
-  **device-built** causal mask / position_ids into the buffers' contiguous **prefix** device-to-device
-  (`upload_prefix_device`), **capture-or-reuse** the whole-program CUDA graph for this S, **replay** it — one host launch
-  instead of the ~hundreds the uncaptured loop issues — and wrap the output buffer's real-S prefix back as a torch
-  tensor (`output_prefix_device` + `torch.from_dlpack`, cloned because the shared buffer is reused next request). The
-  causal mask is built once per S as a cupy array (the device twin of `_causal_mask_np`) and reused. Captured graphs are
-  cached per seq_len (bounded LRU);
+  tensor** — no host round-trip. It binds the program to torch's current stream (`on_stream`), then: size the
+  launch grids to S (`set_sym_values`), copy ids / **device-built** causal mask / position_ids into the buffers'
+  contiguous **prefix** device-to-device (`upload_prefix_device`, torch tensors in), **capture-or-reuse** the
+  whole-program CUDA graph for this S, **replay** it — one host launch instead of the ~hundreds the uncaptured loop
+  issues — and hand the output buffer's real-S prefix back as a torch view (`output_prefix_device`, cloned because the
+  shared buffer is reused next request; the program's memory IS torch tensors the runtime borrows). The causal mask is
+  built once per S as a device tensor (the device twin of `_causal_mask_np`) and reused. Captured graphs are cached per
+  seq_len (bounded LRU);
   each is captured at its EXACT S so every kernel runs at its exact grid — no oversized-grid masking (a single
   capacity-baked graph for all S is **not** viable: several symbolic-M kernels do illegal reads at an oversized grid,
   the swizzle decode + staged loads among them). See `compiler/backend/cuda/ARCHITECTURE.md`
@@ -169,7 +169,7 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   caller stitches between `pre` and `post` (a reference torch SDPA in the Phase-2 host stitch; vLLM paged `Attention`
   in Phase 3). **I/O:**
   the plugin runs **device-resident at every width**: the **decode hot path** (`num_tokens ≤ bucket`) rides the
-  captured static twins (`run_device` — captured-replay, torch↔cupy DLPack zero-copy), a **FULL chunked-prefill
+  captured static twins (`run_device` — captured-replay, torch tensors in and out, zero-copy), a **FULL chunked-prefill
   step** rides the static **prefill-chunk twin** (`num_tokens == prefill_bucket` EXACTLY — default = the dynamic-dim
   cap, `EMMY_GEN_PREFILL_BUCKET` overrides / `0` disables; exact grids on the hot chunk width. The boundary is
   equality, not a range: the twin always computes `prefill_bucket` rows, so an over-bucket decode batch or a partial
@@ -196,7 +196,7 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   M=1; falls back to symbolic above the bucket or if a static compile fails. So
   up to 4 capacity programs/layer — a real memory-budget risk for the activation buffers, though the twin's
   **weights are shared**: `_compile_split` binds constants through a per-wrapper device cache
-  (`_bind_device_constants` — one upload per `(source_path, load_ops)`, the same cupy array fed to both builds), so
+  (`_bind_device_constants` — one upload per `(source_path, load_ops)`, the same device tensor lent to both builds), so
   the decode twin adds no weight copy. **`EMMY_GEN_DECODE_BUCKET=0`** (`config.gen_decode_bucket`) still disables the
   twin entirely at the cost of decode speed. A further static **M=1** twin pair (`EMMY_GEN_M1_TIER`, default on)
   routes true single-token decode onto gemv-class matvec programs, and `EMMY_GEN_ALIAS_ATTN` lets
@@ -269,10 +269,10 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   (`moe.expert.m256` — the prefill twin at the mean per-expert chunk width T·k/E, serving routed row sets in
   (bucket, 256]), and the symbolic fallback for anything wider — routed per HIT expert by its routed row count.
   Per-launch framing, not weight bytes, was the measured decode wall (~0.23 ms/launch through the per-call symbolic
-  path), so `_moe_combine` hoists the GPU lock + the cupy stream bind around the whole per-expert loop and
-  `_launch_expert` issues bare `upload_prefix_device` + `run_once` calls; the per-expert cupy weight views are
-  minted once at `_ensure_device`. A tier whose schedule stages no operand through a TMA descriptor (descriptors
-  bake pointers at build) takes the weight slices by POINTER SWAP into `program.arrays` — no D2D weight copy;
+  path), so `_moe_combine` hoists the GPU lock around the whole per-expert loop and
+  `_launch_expert` issues bare `upload_prefix_device` + `run_once` calls on torch's stream; the per-expert weight
+  views are minted once at `_ensure_device`. A tier whose schedule stages no operand through a TMA descriptor
+  (descriptors bake pointers at build) takes the weight slices by POINTER SWAP (`alias_buffer`) — no D2D weight copy;
   descriptor-bearing tiers upload the slices normally. The M=256 twin instead replays its captured whole-program
   graph per expert (`capture_program_graph` — one host call instead of per-kernel Python framing; prefill FFN was
   launch-bound at ~3×), which bakes the twin's own buffer pointers — so its weights always arrive by UPLOAD, never
@@ -427,8 +427,9 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   >    share one device buffer per weight via the per-wrapper constant cache (see decode bucket above);
   > 2. ~~every layer's program retains its own capacity-sized activation buffers~~ (~350 MB/layer ⇒ ~17 GB across
   >    48 layers at `max_num_batched_tokens=4096`) **fixed** — every program the runner builds shares one
-  >    `BufferArena` (`backend/cuda/program.py`): input/output buffers and the scratch slab are views into per-key
-  >    grow-only backings, so all layers hold ~one layer's worth. Safe because layers run sequentially and each
+  >    `BufferArena` (`backend/cuda/program.py`): input/output regions and the scratch slab are per-key grow-only
+  >    torch backings the runtime borrows, so all layers hold ~one layer's worth. Safe because layers run
+  >    sequentially and each
   >    program's outputs are host-copied/cloned before the next program runs; a backing that grows (e.g. gemma-4's
   >    wider global layers, or a bigger prefill `T`) leaves earlier generations alive so captured graphs / TMA
   >    descriptors never dangle. The re-validation of the 12B footprint on a real 5090 is pending (Phase-A exit run).
@@ -466,8 +467,8 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   (the gemma embed-scale re-applies at gather in fp32 — the head must read the table unscaled). An **untied**
   checkpoint has no table to share, and `EMMY_GEN_EMBED_HOST` is the reclaim for that case — see "The vocab table"
   under the device-footprint section. Either way it ends by
-  releasing both allocators' free blocks to the driver (`reclaim_device_memory` — torch's `empty_cache` plus cupy's
-  `free_all_blocks`) **before vLLM's KV-cache profiling**: vLLM budgets `util × total − currently-used` off the
+  releasing the allocator's free blocks to the driver (`reclaim_device_memory` — torch's `empty_cache`)
+  **before vLLM's KV-cache profiling**: vLLM budgets `util × total − currently-used` off the
   driver's accounting and cannot see that a cached block is free. The reclaimed memory becomes KV blocks
   (gemma-4-12B on a 5090: 17.7k → 27.5k KV tokens, the difference between admission-queueing and beating stock TTFT
   on the 4K/4K c=8 workload). `forward` brackets each `self.attn[L](q,k,v)` with two emmy replays (pre/post), applying that
@@ -598,7 +599,7 @@ against eager, and the batch {2, 4, 32} × seq matrix in `tests/compiler/ir/test
 
 Each sequence runs **individually** through the compiled dynamic-seq_len program (batch axis is compile-time fixed at
 1), as a captured whole-program CUDA graph (one host launch) replayed over a single capacity-sized buffer set, with the
-request's torch inputs bridged to the buffers' prefix device-to-device (dlpack, no host hop) and the output handed back
+request's torch inputs copied into the buffers' prefix device-to-device (no host hop) and the output handed back
 as a torch view of the output buffer. One captured graph is cached per
 distinct seq_len (bounded LRU); a new length pays one capture (~one forward) on first sight, then replays. The captured
 graph removes the per-launch dispatch overhead and the ~hundreds of host calls the uncaptured loop made — the
@@ -615,11 +616,12 @@ Recorded follow-ups, in impact order:
    **done** (`EMMY_SERVING_BATCHED`, see the batched-modes section above); remaining is (b) cu_seqlens varlen tiles so
    one launch handles mixed lengths with no padding at all (its own session — the ragged row→sequence mapping in the
    attention schedule + the mask derivation from `cu_seqlens`).
-2. **dlpack zero-copy I/O** — **done**: `forward_hidden_states` takes/returns torch CUDA tensors, bridged to the cupy
-   buffers via `cp.from_dlpack` / `torch.from_dlpack` on torch's stream — no GPU↔host round-trip (`upload_prefix_device`
-   / `output_prefix_device`). The only residual host touch is `positions.cpu()` for span boundaries.
-3. **Device-side causal mask** — host build + upload **removed**: the `(1,1,S,S)` mask is now built once per S as a cupy
-   array on the GPU (`runner._mask`) and copied into the prefix device-to-device. Still open: an in-kernel `j <= i`
+2. **Zero-copy device I/O** — **done**: `forward_hidden_states` takes/returns torch CUDA tensors; the buffers are torch
+   tensors the runtime borrows, filled device-to-device on torch's stream — no GPU↔host round-trip
+   (`upload_prefix_device` / `output_prefix_device`). The only residual host touch is `positions.cpu()` for span
+   boundaries.
+3. **Device-side causal mask** — host build + upload **removed**: the `(1,1,S,S)` mask is now built once per S as a
+   device tensor (`runner._mask`) and copied into the prefix device-to-device. Still open: an in-kernel `j <= i`
    predicate would drop the mask input + its per-request D2D copy entirely.
 4. **Single capacity-baked graph** — would collapse the per-S cache to one graph, but needs every symbolic-M kernel to
    be correct at an oversized (capacity) grid; today several aren't (swizzle decode + staged loads read OOB). Future
@@ -671,9 +673,9 @@ Recorded follow-ups, in impact order:
 - The shared buffer set is allocated at `max_seq_len` (`--max-model-len`); every accepted request (S ≤ `max_seq_len`)
   uses the captured-graph path. The S²-attention scratch dominates that allocation (0.6B at 4096 ≈ 15 GB), so lower
   `--max-model-len` for bigger models / smaller cards.
-- vLLM's memory profiler only sees torch allocations; the runner's cupy-held weights/activations are invisible to it.
-  Leave `--gpu-memory-utilization` headroom accordingly (the attention-free model needs no KV cache, so vLLM's own
-  budget is tiny). The GENERATIVE arm has the opposite problem — it needs a real KV cache, and vLLM budgets
+- The runner's weights and activations are torch tensors the runtime borrows, so vLLM's memory profiler counts them
+  inside `--gpu-memory-utilization` (the attention-free model needs no KV cache, so vLLM's own budget is
+  tiny). The GENERATIVE arm has the opposite problem — it needs a real KV cache, and vLLM budgets
   `util × total − currently-used`, so the default 0.90 line can fall below the emmy residents and fail the
   min-KV fit at long `--max-model-len` (gemma-4-12B at mml 8448: 1.37 GiB left of the 1.7 needed). `emmy serve
   --generate` therefore defaults the emmy arm to `--gpu-memory-utilization 0.97` (stock keeps 0.90; an explicit
@@ -725,10 +727,10 @@ vLLM's free-memory check. Nothing to do with fp8 — but an fp8-KV deployment si
 The generative arm's throughput on long-request batched workloads is set by how many sequences vLLM can
 admit, and that is decided by emmy's device footprint rather than by kernel speed.
 
-**Mechanism.** The runner holds its trunk weights, activation arenas and scratch slabs in **cupy**
-buffers. vLLM's memory profiler only measures torch allocations, so it never attributes any of them; it
-budgets the KV cache as `util × total − currently-used`, i.e. out of whatever is left after emmy has
-already claimed its residents. Every byte of emmy's non-KV footprint therefore comes straight out of the
+**Mechanism.** The runner holds its trunk weights, activation arenas and scratch slabs in torch tensors
+the runtime borrows, claimed before vLLM's memory profiler runs; vLLM budgets the KV cache as
+`util × total − currently-used`, i.e. out of whatever is left after emmy has already claimed its
+residents. Every byte of emmy's non-KV footprint therefore comes straight out of the
 KV cache, and the KV cache is what caps concurrency: a request needing `input + output` tokens of KV
 consumes that much of a fixed pool, so a smaller pool admits proportionally fewer streams and queues or
 **preempts** the rest (a preempted request recomputes its prefill — wasted work that yields no token).
@@ -837,8 +839,8 @@ list does not get the flooring treatment described above, so it can violate the 
 - `tests/compiler/ir/test_dynamic_shapes.py` — the captured-replay primitives directly (RMSNorm + a 1-layer Qwen3
   trunk through `set_sym_values` + `upload_prefix` + `capture_program_graph` + `replay_program_graph` +
   `outputs(sym_values)`); run under `compute-sanitizer` in dev to confirm zero illegal accesses. Plus
-  `test_capture_replay_device_io_matches_eager` — the zero-copy device path (`upload_prefix_device` + cupy-in,
-  `output_prefix_device` + `torch.from_dlpack`-out) matches eager, the primitive behind the runner's torch I/O.
+  `test_capture_replay_device_io_matches_eager` — the zero-copy device path (`upload_prefix_device` with torch
+  tensors in, `output_prefix_device` views out) matches eager, the primitive behind the runner's torch I/O.
 - `tests/serving/generation/test_runner_batched_gpu.py` — `perf`-marked: a 1-layer static `(batch, S)` trunk wrapped
   in a runner;
   `forward_hidden_states_batched` runs several different-length sequences in one padded batched forward and matches

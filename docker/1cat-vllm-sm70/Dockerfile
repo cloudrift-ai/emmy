@@ -63,6 +63,13 @@ RUN cd /src/flash-attention-v100 \
     && cd /src \
     && CMAKE_BUILD_TYPE=Release python -m build --wheel --no-isolation --outdir /wheels
 
+# The emmy runtime extension, built against this image's own Python and libc.
+COPY Cargo.toml Cargo.lock /emmy/
+COPY crates /emmy/crates
+RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable \
+    && pip install --no-cache-dir "maturin>=1.5,<2" \
+    && PATH=/root/.cargo/bin:$PATH maturin build --release --locked -m /emmy/crates/emmy-runtime-py/Cargo.toml -o /wheels
+
 FROM ${CUDA_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -95,9 +102,9 @@ RUN --mount=from=builder,source=/wheels,target=/tmp/wheels,ro \
         --prefer-binary \
         --extra-index-url https://download.pytorch.org/whl/cu128 \
         /tmp/wheels/*.whl \
+    && pip install --no-cache-dir --no-deps /tmp/wheels/emmy_runtime-*.whl \
     && pip install --no-cache-dir \
         catboost==1.2.10 \
-        cupy-cuda12x==14.1.1 \
     && find /opt/venv/lib/python3.12/site-packages/vllm -type f -name '*.so' \
         -exec strip --strip-unneeded {} + \
     && find /opt/venv/lib/python3.12/site-packages -maxdepth 1 -type f \

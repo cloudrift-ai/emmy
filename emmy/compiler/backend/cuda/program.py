@@ -3,18 +3,20 @@
 Python compiles — nvcc into the content-addressed cubin cache, the execution plan, the host
 bytes every input and constant starts from — and hands the runtime (``crates/emmy-runtime``,
 hosted in-process through the ``emmy_runtime`` extension) the plan's JSON form, one cubin path
-per kernel and those bytes. The runtime owns the device: it allocates every buffer, launches
-every kernel, captures graphs, times events and polls a hung launch against a deadline.
-Nothing in this module holds a device pointer.
+per kernel, those bytes, and the memory every region of the program's layout lives in. The
+runtime owns the launches: it resolves symbolic geometry, encodes TMA descriptors, captures
+graphs, times events and polls a hung launch against a deadline. Nothing in this module holds
+a device pointer for longer than it takes to hand one over.
+
+Memory is allocated here, through torch, so the vLLM plugin's profiler sees every byte a program
+holds and the serving runners hand tensors in and out with no copy. The runtime derives the
+layout — one region per input / constant / output buffer, every scratch buffer packed by
+liveness into one slab — and this side allocates a tensor per region (pooled across programs by
+a :class:`BufferArena`). Without torch the runtime allocates for itself.
 
 Buffer roles come from the graph: ``graph.inputs`` → input, ``ConstantOp`` → constant,
 ``graph.outputs`` → output, everything else → scratch. Launch order is
 ``graph.topological_order()``.
-
-The runtime executes static ordinary-pointer programs. Symbolic shapes, runtime constants and
-arguments, TMA descriptors, indirect operands, serial launches, cross-program buffer sharing and
-device-resident bindings are refused at build time with ``NotImplementedError`` until the
-runtime grows them.
 """
 
 from __future__ import annotations
@@ -111,6 +113,11 @@ def kernel_attributes(name: str, spec: KernelSpec) -> dict[str, int]:
 # ---------------------------------------------------------------------------
 
 
+def _is_device_tensor(value) -> bool:
+    """A torch CUDA tensor — bound by address, never copied through the host."""
+    return hasattr(value, "data_ptr") and hasattr(value, "is_cuda") and bool(value.is_cuda)
+
+
 def _numpy_storage(src, dtype) -> np.ndarray:
     """Return a contiguous host array in one buffer's physical storage dtype."""
     arr = np.asarray(src)
@@ -150,19 +157,25 @@ def _host_bytes(buf: _Buffer, shape: tuple[int, ...], src, constants: dict[str, 
     return np.zeros(shape, dtype=np_dtype).tobytes()
 
 
-def _host_bindings(plan: ExecutionPlan, input_data: dict[str, np.ndarray]) -> dict[str, bytes]:
-    """Every input and constant buffer's starting bytes. Output and scratch buffers start zeroed
-    inside the runtime. Saturating casts here are intended, not bugs: an SDPA mask-fill constant
-    (``-1e9``) is meant to become ``-inf`` in fp16 (masked → 0 after softmax)."""
+def _host_bindings(plan: ExecutionPlan, input_data: dict, sym_values: dict[str, int], *, only=None) -> dict[str, bytes]:
+    """Starting bytes for input and constant buffers (``only`` narrows the set). A buffer bound
+    to a device tensor is skipped: its memory is lent to the runtime instead. Output and scratch
+    buffers start zeroed inside the runtime. Saturating casts here are intended, not bugs: an
+    SDPA mask-fill constant (``-1e9``) is meant to become ``-inf`` in fp16 (masked → 0 after
+    softmax)."""
     out: dict[str, bytes] = {}
     with np.errstate(over="ignore", invalid="ignore"):
         for buf in plan.buffers:
-            if buf.role in ("input", "constant"):
-                out[buf.name] = _host_bytes(buf, buf.resolve_shape({}) or (1,), input_data.get(buf.name), plan.constants)
+            if buf.role not in ("input", "constant") or (only is not None and buf.name not in only):
+                continue
+            src = input_data.get(buf.name)
+            if _is_device_tensor(src):
+                continue
+            out[buf.name] = _host_bytes(buf, buf.resolve_shape(sym_values) or (1,), src, plan.constants)
     return out
 
 
-def _with_generated_constants(plan: ExecutionPlan, input_data: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+def _with_generated_constants(plan: ExecutionPlan, input_data: dict) -> dict:
     """Add the plan's SELF-CONTAINED constants that ``input_data`` does not already carry.
 
     A deterministic source-free bind record is evaluated once while the graph is projected and
@@ -183,16 +196,109 @@ def _with_generated_constants(plan: ExecutionPlan, input_data: dict[str, np.ndar
     return feed
 
 
-def _reject_unsupported(plan: ExecutionPlan) -> None:
-    """The runtime's current subset: static shapes and ordinary pointer arguments."""
-    if plan.symbolic_bindings or plan.runtime_constants:
-        raise NotImplementedError("the runtime executes static programs only; symbolic shapes and runtime constants are not supported yet")
-    for lc in plan.launches:
-        if lc.tma_descriptors or lc.indirect_args or lc.runtime_args or lc.serial:
-            raise NotImplementedError(
-                f"launch {lc.node_id!r}: TMA descriptors, indirect operands, runtime arguments and serial launches "
-                "are not supported by the runtime yet"
+def _resolve_symbolic(plan: ExecutionPlan, input_data: dict) -> dict[str, int]:
+    """Bind every symbolic axis name to a concrete ``int``. Reads the runtime value from the
+    supplied input array shape (``plan.symbolic_bindings`` says which input + dim each name
+    reads from). When no array is supplied for that input — the autotuner benches without real
+    inputs — falls back to the ``Dim`` hint so the graph runs at its expected (tuned) size. A
+    capacity-capped kernel bakes its smem slab at the hint and is only correct up to that cap,
+    so a larger supplied extent is an error rather than an out-of-bounds read."""
+    env: dict[str, int] = {}
+    for name, (buf, dim_idx) in plan.symbolic_bindings.items():
+        arr = input_data.get(buf)
+        if arr is not None:
+            env[name] = int(arr.shape[dim_idx])
+            cap = plan.symbolic_caps.get(name)
+            if cap is not None and env[name] > cap:
+                raise ValueError(
+                    f"symbolic dim {name!r} = {env[name]} exceeds the capacity-capped kernel's hint ({cap}); "
+                    f"this build bakes its smem slab at {cap} and cannot run a larger extent — "
+                    f"re-trace with a larger --seq-len hint or use the ceil-div (uncapped) lowering"
+                )
+        elif name in plan.symbolic_hints:
+            env[name] = plan.symbolic_hints[name]
+        else:
+            raise ValueError(
+                f"symbolic dim {name!r} reads from input {buf!r}.shape[{dim_idx}] but no array was supplied and the dim carries no hint"
             )
+    return env
+
+
+# ---------------------------------------------------------------------------
+# Memory: torch tensors lent to the runtime, pooled across programs
+# ---------------------------------------------------------------------------
+
+
+def _torch():
+    """torch, or ``None`` when it is missing or sees no device — the runtime then allocates."""
+    try:
+        import torch  # noqa: PLC0415
+
+        return torch if torch.cuda.is_available() else None
+    except ImportError:
+        return None
+
+
+def _torch_dtype(np_dtype):
+    import torch  # noqa: PLC0415
+
+    return torch.from_numpy(np.zeros(0, dtype=np_dtype)).dtype
+
+
+def _new_backing(nbytes: int):
+    """One zeroed device tensor for a region."""
+    import torch  # noqa: PLC0415
+
+    return torch.zeros(max(1, int(nbytes)), dtype=torch.uint8, device="cuda")
+
+
+def _flat_bytes(tensor):
+    """The same memory as a flat byte tensor — how every lent region is kept, whatever the
+    caller's shape and dtype."""
+    import torch  # noqa: PLC0415
+
+    return tensor.contiguous().view(-1).view(torch.uint8)
+
+
+_DLPACK_CODES = {"f": 2, "i": 0, "u": 1}
+
+
+def device_view(pinned):
+    """Address a pinned (page-locked) host tensor as a CUDA tensor of the same shape and dtype:
+    under unified addressing a mapped host allocation is reachable from the device at its own
+    address, so a kernel gathers from it over PCIe with no copy. ``pinned`` must stay alive as
+    long as the view; the view owns nothing."""
+    import torch  # noqa: PLC0415
+
+    if not pinned.is_pinned() or not pinned.is_contiguous():
+        raise ValueError("device_view needs a contiguous pinned host tensor")
+    host, device_ptr = device().pointer_attributes(pinned.data_ptr())
+    if not host or device_ptr != pinned.data_ptr():
+        raise RuntimeError("this platform does not map host allocations into the device address space")
+    np_dtype = np.dtype(str(pinned.dtype).removeprefix("torch."))
+    capsule = emmy_runtime.device_tensor_capsule(
+        pinned.data_ptr(), list(pinned.shape), _DLPACK_CODES[np_dtype.kind], np_dtype.itemsize * 8, 0
+    )
+    return torch.from_dlpack(capsule)
+
+
+class BufferArena:
+    """Cross-program pooling of a program's regions. Programs that run sequentially share one
+    backing per region name (``role:name`` for activations, ``scratch`` for the slab), sized to
+    the largest request so far; constants are never pooled. Growth allocates a fresh backing and
+    keeps the older generations alive under the programs that still view them, so captured
+    graphs never dangle. Safety is the caller's contract: programs sharing an arena never run
+    concurrently, and each program's outputs are consumed before the next program runs."""
+
+    def __init__(self) -> None:
+        self._backings: dict[str, list] = {}
+
+    def backing(self, key: str, nbytes: int):
+        generations = self._backings.setdefault(key, [])
+        if generations and generations[-1].numel() >= max(1, nbytes):
+            return generations[-1]
+        generations.append(_new_backing(nbytes))
+        return generations[-1]
 
 
 # ---------------------------------------------------------------------------
@@ -287,10 +393,16 @@ class CompiledProgram:
     optional callbacks they pass."""
 
     plan: ExecutionPlan
+    program: Any
     executor: Any
     load_times_ms: dict[str, float] = field(default_factory=dict)
-    # Static programs only for now: the resolved symbolic environment is always empty.
+    # The symbolic environment the program is currently bound at (``{}`` for a static graph).
     sym_values: dict[str, int] = field(default_factory=dict)
+    # Cross-program pooling for the regions this program's memory came from (``None`` → the
+    # program's own tensors, or the runtime's allocations when torch is absent).
+    arena: BufferArena | None = None
+    # Region name → the tensor lent to the runtime (empty when the runtime allocates).
+    _tensors: dict[str, Any] = field(default_factory=dict, repr=False)
     # Number of completed ``iter_once`` calls — iter 0 runs under the first-iteration watchdog
     # deadline (first-launch lazy-load / carveout stalls are not hangs; see ``_launch_deadline_ms``).
     _iters_done: int = field(default=0, repr=False)
@@ -306,40 +418,52 @@ class CompiledProgram:
     def build(
         cls,
         graph: Graph,
-        input_data: dict[str, np.ndarray] | None = None,
+        input_data: dict | None = None,
         *,
         compile_timeout_s: float | None = None,
+        arena: BufferArena | None = None,
     ) -> CompiledProgram:
         """Compile ``graph`` and build — ``plan_from_graph`` + :meth:`build_from_plan`; the
         graph is never consulted after the projection (one runtime path whether the plan came
         from a fresh compile or from a stored pack)."""
-        return cls.build_from_plan(plan_from_graph(graph), input_data, compile_timeout_s=compile_timeout_s)
+        return cls.build_from_plan(plan_from_graph(graph), input_data, compile_timeout_s=compile_timeout_s, arena=arena)
 
     @classmethod
     def build_from_plan(
         cls,
         plan: ExecutionPlan,
-        input_data: dict[str, np.ndarray] | None = None,
+        input_data: dict | None = None,
         *,
         compile_timeout_s: float | None = None,
+        arena: BufferArena | None = None,
         cubin_dir: Path | None = None,
     ) -> CompiledProgram:
-        """Compile every kernel (cubin-by-key or source-via-cache), then load the program into
-        the runtime, which allocates every buffer and uploads the input and constant bytes (the
-        plan's generated constants fill themselves — see :func:`_with_generated_constants`).
+        """Compile every kernel (cubin-by-key or source-via-cache), resolve the symbolic
+        environment from the supplied input shapes, allocate every region of the runtime's
+        layout, then load the program: the runtime uploads the input and constant bytes (the
+        plan's generated constants fill themselves — see :func:`_with_generated_constants`) and
+        fills the runtime constants. A constant supplied as a device tensor is lent to the
+        runtime as it is — the serving path's weights, uploaded once and shared across twins.
+
         ``compile_timeout_s`` bounds the setup phase at a C-call boundary: the kernel compile
         checks it between kernels and the load is checked when it returns, so an overrun raises
         :class:`CompileBudgetExceeded` before the caller proceeds to launches, leaving no
-        in-flight kernels queued.
+        in-flight kernels queued. ``arena`` pools this program's regions with every other
+        program built on it (see :class:`BufferArena`).
 
         Caller is expected to hold ``gpu_lock()`` around this call and every subsequent method
         on the returned program."""
-        _reject_unsupported(plan)
         t0 = _time_module.monotonic()
         binaries = _compile_kernels(plan, deadline=None if compile_timeout_s is None else t0 + compile_timeout_s, cubin_dir=cubin_dir)
         compiled = _time_module.monotonic()
-        bindings = _host_bindings(plan, _with_generated_constants(plan, input_data or {}))
-        executor = emmy_runtime.Executor(device(), json.dumps(plan_to_dict(plan)), bindings, binaries)
+        input_data = _with_generated_constants(plan, input_data or {})
+        sym_values = _resolve_symbolic(plan, input_data)
+        program = emmy_runtime.Program(json.dumps(plan_to_dict(plan)))
+        self = cls(plan=plan, program=program, executor=None, sym_values=sym_values, arena=arena)
+        regions = self._provision(sym_values, input_data)
+        bindings = _host_bindings(plan, input_data, sym_values)
+        self.executor = emmy_runtime.Executor(device(), program, binaries, bindings, sym_values, regions)
+        self._track()
         elapsed = _time_module.monotonic() - t0
         if compile_timeout_s is not None and elapsed > compile_timeout_s:
             raise CompileBudgetExceeded(f"compile stage exceeded {compile_timeout_s:.1f}s budget ({elapsed:.2f}s) — nothing measured")
@@ -349,24 +473,100 @@ class CompiledProgram:
             elapsed,
             ", ".join(f"{li}:{lc.kernel_name}" for li, lc in enumerate(plan.launches)),
         )
-        return cls(
-            plan=plan,
-            executor=executor,
-            load_times_ms={"compile_ms": (compiled - t0) * 1000, **executor.load_times_ms()},
-        )
+        self.load_times_ms = {"compile_ms": (compiled - t0) * 1000, **self.executor.load_times_ms()}
+        return self
 
-    def rebind(self, input_data: dict[str, np.ndarray]) -> None:
-        """Re-upload the supplied program inputs in place. Static programs only: a buffer whose
-        shape would change, and a supplied constant, are not supported by the runtime yet."""
-        for name, src in input_data.items():
-            buf = self._buffer(name)
-            if buf.role != "input":
-                raise NotImplementedError(f"rebind of {buf.role} buffer {name!r} is not supported by the runtime yet")
-            shape = buf.resolve_shape({}) or (1,)
-            self.executor.bind(name, _host_bytes(buf, shape, src, self.plan.constants))
+    def _provision(self, sym_values: dict[str, int], input_data: dict) -> dict[str, tuple[int, int]] | None:
+        """The memory every region of the layout at ``sym_values`` lives in, as ``{region:
+        (address, bytes)}`` — ``None`` when torch is absent and the runtime allocates. A region
+        already backed by a large enough tensor is kept (a rebind that grows nothing keeps every
+        address); the arena pools everything but constants; a constant bound to a device tensor
+        is that tensor."""
+        if _torch() is None:
+            return None
+        layout = self.program.layout(sym_values)
+        regions: dict[str, tuple[int, int]] = {}
+        for name, nbytes in layout["regions"].items():
+            role, _, buffer = name.partition(":")
+            src = input_data.get(buffer) if buffer else None
+            if _is_device_tensor(src):
+                if not src.is_contiguous() or src.numel() * src.element_size() < nbytes:
+                    raise ValueError(f"buffer {buffer!r}: device tensor must be contiguous and hold {nbytes} bytes")
+                tensor = _flat_bytes(src)
+            elif self.arena is not None and role != "constant":
+                tensor = self.arena.backing(name, nbytes)
+            else:
+                tensor = self._tensors.get(name)
+                if tensor is None or tensor.numel() < max(1, nbytes):
+                    tensor = _new_backing(nbytes)
+            self._tensors[name] = tensor
+            regions[name] = (tensor.data_ptr(), tensor.numel() * tensor.element_size())
+        return regions
+
+    def _track(self) -> None:
+        """Record every lent tensor on the runtime's stream, so torch's caching allocator waits
+        for the launches that read a block before handing it to another tensor."""
+        if not self._tensors:
+            return
+        import torch  # noqa: PLC0415
+
+        stream = torch.cuda.ExternalStream(int(self.executor.stream()))
+        for tensor in self._tensors.values():
+            tensor.record_stream(stream)
+
+    def rebind(self, input_data: dict) -> None:
+        """Re-bind ``input_data`` on an already-built program, re-sizing symbolic-shaped buffers
+        to the new runtime dims — the serving path, where one compiled dynamic-seq_len program
+        runs request after request.
+
+        Supplied buffers are re-uploaded; un-supplied buffers whose shape carries a symbolic dim
+        (scratch/outputs sized by seq_len) re-materialize at the new shape under the same fill
+        policy as ``build``; static-shaped un-supplied buffers — the weights — keep their device
+        memory untouched. Regions grow when the new layout needs more bytes (the arena keeps the
+        older generation alive); captured graphs and descriptors are dropped by the runtime,
+        since they bake addresses. Caller must hold ``gpu_lock()``."""
+        new_sym = _resolve_symbolic(self.plan, input_data)
+        touched = {name for name, value in input_data.items() if not _is_device_tensor(value)}
+        touched |= {b.name for b in self.plan.buffers if b.role in ("input", "constant") and b.is_symbolic}
+        bindings = _host_bindings(self.plan, input_data, new_sym, only=touched)
+        regions = self._provision(new_sym, input_data)
+        self.executor.rebind(new_sym, bindings, regions)
+        self._track()
+        self.sym_values = new_sym
 
     def set_sym_values(self, values: dict[str, int]) -> None:
-        raise NotImplementedError("symbolic launch geometry is not supported by the runtime yet")
+        """Set the host symbolic values that resolve launch grids + by-value kernel args,
+        WITHOUT re-allocating buffers — they stay at the build (capacity) shape. The serving
+        capture path: buffers sized once at capacity, grids + frozen seq_len baked per request
+        via :meth:`capture_program_graph`, results sliced to the real shape by
+        ``outputs(sym_values=…)``. Errors if any value exceeds the allocated capacity (the caller
+        falls back to ``rebind`` above capacity)."""
+        self.executor.set_env(dict(values))
+        self.sym_values = self.executor.env()
+
+    @contextlib.contextmanager
+    def on_torch_stream(self):
+        """:meth:`on_stream` for torch's current stream when torch sees the device, else a
+        no-op — the bench and run paths, where peer torch work (the eager reference, the
+        interleaved torch benches) must stay ordered with the program's launches."""
+        torch = _torch()
+        if torch is None:
+            yield
+            return
+        with self.on_stream(torch.cuda.current_stream()):
+            yield
+
+    @contextlib.contextmanager
+    def on_stream(self, stream):
+        """Issue every launch and copy inside the block on ``stream`` (a torch CUDA stream) —
+        the serving path, where inputs arrive and outputs leave on torch's current stream and
+        the work must stay ordered with it. Under torch's own graph capture, :meth:`run_once`
+        is the recordable form; the program's own graphs are not."""
+        self.executor.set_stream(int(stream.cuda_stream))
+        try:
+            yield
+        finally:
+            self.executor.set_stream(None)
 
     def run_once(self) -> None:
         """Launch every kernel once in program order with no per-launch event record / sync /
@@ -386,9 +586,12 @@ class CompiledProgram:
             raise GraphCaptureError(f"per-launch CUDA graph capture failed: {exc}") from exc
 
     def capture_program_graph(self) -> None:
-        """Capture EVERY launch in program order into one CUDA graph for the whole-program (e2e)
-        timing window — the emmy analogue of timing a captured torch forward. A no-op when one
-        exists; a failure raises :class:`GraphCaptureError`."""
+        """Capture EVERY launch in program order into one CUDA graph at the current symbolic
+        environment — the emmy analogue of timing a captured torch forward, and the serving
+        replay unit. The runtime keeps one graph per environment (a graph baked at seq_len S
+        only replays at S: every kernel's grid and by-value seq_len are frozen by capture),
+        least recently used out; a repeated environment is a no-op. A failure raises
+        :class:`GraphCaptureError`."""
         try:
             self.executor.capture_program_graph()
         except HungKernelError:
@@ -399,11 +602,22 @@ class CompiledProgram:
     def replay_program_graph(self) -> None:
         self.executor.replay_program_graph()
 
-    def upload_prefix(self, input_data: dict[str, np.ndarray]) -> None:
-        raise NotImplementedError("capacity-buffer prefix uploads are not supported by the runtime yet")
+    def upload_prefix(self, input_data: dict) -> None:
+        """H2D each supplied input into the contiguous prefix of its capacity buffer: a
+        logically ``(1, S, …)`` tensor occupies the first ``S·…`` elements."""
+        bindings = _host_bindings(self.plan, input_data, self.sym_values, only=set(input_data))
+        for name, data in bindings.items():
+            self.executor.bind(name, data)
 
     def upload_prefix_device(self, input_data: dict) -> None:
-        raise NotImplementedError("device-resident bindings are not supported by the runtime yet")
+        """Device twin of :meth:`upload_prefix`: copy each supplied CUDA tensor into its buffer's
+        prefix device-to-device on the current stream — no host hop. A tensor that already IS
+        the buffer (a producer's output chained onto this input) is skipped."""
+        for name, tensor in input_data.items():
+            if not _is_device_tensor(tensor):
+                raise TypeError(f"buffer {name!r}: expected a CUDA tensor, got {type(tensor).__name__}")
+            tensor = tensor.contiguous()
+            self.executor.bind_device(name, tensor.data_ptr(), tensor.numel() * tensor.element_size())
 
     def time_program_window(self, replays: int) -> float:
         """Per-replay ms of ``replays`` back-to-back whole-program graph replays in one event
@@ -452,27 +666,87 @@ class CompiledProgram:
         self._iters_done += 1
         return dts
 
-    def _read(self, name: str, data: bytes) -> np.ndarray:
+    def _shape(self, name: str, sym_values: dict[str, int] | None = None) -> tuple[int, ...]:
+        return self._buffer(name).resolve_shape({**self.sym_values, **(sym_values or {})})
+
+    def _read(self, name: str, sym_values: dict[str, int] | None = None) -> np.ndarray:
         buf = self._buffer(name)
-        shape = buf.resolve_shape({})
+        shape = self._shape(name, sym_values)
         n = math.prod(shape) if shape else 1
-        return np.frombuffer(data, dtype=buf.dtype.np)[:n].reshape(shape).copy()
+        return np.frombuffer(self.executor.read(name), dtype=buf.dtype.np)[:n].reshape(shape).copy()
 
     def outputs(self, sym_values: dict[str, int] | None = None) -> dict[str, np.ndarray]:
         """Copy every output buffer back to host after every queued launch has completed.
-        Caller must hold the GPU lock so peer workers' kernels never interleave with the copy."""
-        if sym_values:
-            raise NotImplementedError("symbolic output slicing is not supported by the runtime yet")
-        return {name: self._read(name, self.executor.output(name)) for name in self.plan.outputs}
+        Caller must hold the GPU lock so peer workers' kernels never interleave with the copy.
+
+        ``sym_values`` (serving's capture path) slices each output to its real-S shape — the
+        buffer is allocated at capacity but only the ``resolve_shape(sym_values)`` prefix holds
+        the request's result; the rest is unmasked garbage from the oversized allocation."""
+        return {name: self._read(name, sym_values) for name in self.plan.outputs}
+
+    def buffer_view(self, name: str, sym_values: dict[str, int] | None = None):
+        """A torch view of one buffer's real-shape prefix in its lent memory — no copy. The
+        shared buffer is overwritten by the next request's replay, so a caller that keeps the
+        result clones it. Requires the program's memory to be torch's (it is whenever torch sees
+        the device)."""
+        buf = self._buffer(name)
+        placement = self.program.layout(self.sym_values)["buffers"][name]
+        backing = self._tensors.get(placement["region"])
+        if backing is None:
+            raise RuntimeError(f"buffer {name!r} lives in runtime-owned memory; device views need torch")
+        shape = self._shape(name, sym_values)
+        n = math.prod(shape) if shape else 1
+        start = placement["offset"]
+        flat = backing[start : start + placement["bytes"]].view(_torch_dtype(buf.dtype.np))
+        return flat[:n].reshape(shape)
 
     def output_prefix_device(self, sym_values: dict[str, int] | None = None) -> dict:
-        raise NotImplementedError("device-resident outputs are not supported by the runtime yet")
+        """Device twin of :meth:`outputs`: each output buffer's real-S prefix as a torch view
+        with NO host copy — the serving zero-copy path. ``sym_values`` slices to the real shape
+        exactly like :meth:`outputs`; without it the whole buffer view is returned."""
+        return {name: self.buffer_view(name, sym_values) for name in self.plan.outputs}
+
+    def alias_buffer(self, name: str, tensor) -> None:
+        """Point one operand at ``tensor``'s memory: a buffer chained onto another program's (a
+        producer's output onto a consumer's input, so the consumer's device upload becomes a
+        self-copy skip), or an operand the plan never declares as a buffer — an indirect
+        operand's pointer table or selector, which only the caller can supply. A buffer's
+        tensor must be contiguous and at least as large as its region; the runtime drops any
+        captured graph, since it baked the old address."""
+        if not _is_device_tensor(tensor) or not tensor.is_contiguous():
+            raise TypeError(f"operand {name!r}: expected a contiguous CUDA tensor")
+        flat = _flat_bytes(tensor)
+        placement = self.program.layout(self.sym_values)["buffers"].get(name)
+        if placement is None:
+            self.executor.set_external(name, flat.data_ptr(), flat.numel())
+            self._tensors[f"external:{name}"] = flat
+        else:
+            self.executor.set_region(placement["region"], flat.data_ptr(), flat.numel())
+            self._tensors[placement["region"]] = flat
+        self._track()
+
+    def release_buffer(self, name: str) -> None:
+        """Give a buffer's memory back: an operand the kernels resolve through an indirect table
+        and never read directly. The buffer keeps a valid one-byte address."""
+        region = self.program.layout(self.sym_values)["buffers"][name]["region"]
+        self.executor.release_region(region)
+        self._tensors.pop(region, None)
+
+    def regions(self) -> dict[str, tuple[int, int]]:
+        """Every region's ``(address, bytes)`` as lent to the runtime (empty when the runtime
+        allocates for itself)."""
+        return {name: (t.data_ptr(), t.numel() * t.element_size()) for name, t in self._tensors.items()}
+
+    def buffer_nbytes(self, name: str) -> int:
+        """The bytes a buffer holds at its allocated capacity."""
+        return int(self.executor.buffer(name)[1])
 
     def snapshot(self) -> dict[str, np.ndarray]:
         """Copy every non-input buffer (scratch + constants + outputs) to host. Used by
         :func:`run_program_debug` to capture every intermediate state for per-launch comparison
-        against a reference backend."""
-        return {b.name: self._read(b.name, self.executor.read(b.name)) for b in self.plan.buffers if b.role != "input"}
+        against a reference backend. A scratch buffer read after its last use reflects the
+        slab slot's new tenant; each kernel's own output is valid at its launch."""
+        return {b.name: self._read(b.name) for b in self.plan.buffers if b.role != "input"}
 
 
 # ---------------------------------------------------------------------------
@@ -482,7 +756,7 @@ class CompiledProgram:
 
 def run_program(
     graph: Graph,
-    input_data: dict[str, np.ndarray] | None = None,
+    input_data: dict | None = None,
     *,
     pre_run=None,
 ) -> tuple[RunResult, Any]:
@@ -499,8 +773,9 @@ def run_program(
     with gpu_lock():
         pre_result = pre_run() if pre_run is not None else None
         prog = CompiledProgram.build(graph, input_data)
-        dts = prog.iter_once()
-        outputs = prog.outputs()
+        with prog.on_torch_stream():
+            dts = prog.iter_once()
+            outputs = prog.outputs()
     return RunResult(outputs=outputs, time_ms=sum(dts)), pre_result
 
 
@@ -512,7 +787,7 @@ class DebugResult:
 
 def run_program_debug(
     graph: Graph,
-    input_data: dict[str, np.ndarray] | None = None,
+    input_data: dict | None = None,
     *,
     pre_run=None,
 ) -> tuple[DebugResult, Any]:
@@ -525,8 +800,9 @@ def run_program_debug(
     with gpu_lock():
         pre_result = pre_run() if pre_run is not None else None
         prog = CompiledProgram.build(graph, input_data)
-        prog.iter_once(per_launch_hook=lambda li, _lc: per_launch.__setitem__(li, prog.snapshot()))
-        outputs = prog.outputs()
+        with prog.on_torch_stream():
+            prog.iter_once(per_launch_hook=lambda li, _lc: per_launch.__setitem__(li, prog.snapshot()))
+            outputs = prog.outputs()
     return DebugResult(outputs=outputs, per_launch=per_launch), pre_result
 
 
@@ -608,8 +884,9 @@ def benchmark_program(
 
     target_total_ms, max_measured, auto = _resolve_iter_budget(num_iters)
 
-    with gpu_lock():
+    with gpu_lock(), contextlib.ExitStack() as stack:
         prog = CompiledProgram.build(graph, input_data, compile_timeout_s=compile_timeout_s)
+        stack.enter_context(prog.on_torch_stream())
         n = len(prog.plan.launches)
         batch_sizes = [1] * n
         # Per-launch sample list — kept around to compute the median

@@ -51,22 +51,33 @@ MAX_ABS_US = 100_000.0
 WARN_RATIO = 10.0
 
 
-def measure_copy_bw() -> float:
-    """Device-to-device copy bandwidth in bytes/s (read + write both count)."""
-    import cupy as cp
+def _time_ms(work) -> float:
+    """Milliseconds between two CUDA events around ``work()`` on torch's current stream."""
+    import torch
 
-    n = 64 * 1024 * 1024
-    a = cp.zeros(n, dtype=cp.uint8)
-    b = cp.zeros(n, dtype=cp.uint8)
-    cp.copyto(b, a)  # warm: allocator + module load out of the window
-    start, stop = cp.cuda.Event(), cp.cuda.Event()
-    reps = 4
+    start, stop = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
     start.record()
-    for _ in range(reps):
-        cp.copyto(b, a)
+    work()
     stop.record()
     stop.synchronize()
-    ms = cp.cuda.get_elapsed_time(start, stop)
+    return start.elapsed_time(stop)
+
+
+def measure_copy_bw() -> float:
+    """Device-to-device copy bandwidth in bytes/s (read + write both count)."""
+    import torch
+
+    n = 64 * 1024 * 1024
+    a = torch.zeros(n, dtype=torch.uint8, device="cuda")
+    b = torch.zeros(n, dtype=torch.uint8, device="cuda")
+    b.copy_(a)  # warm: allocator + module load out of the window
+    reps = 4
+
+    def copies():
+        for _ in range(reps):
+            b.copy_(a)
+
+    ms = _time_ms(copies)
     return (2.0 * n * reps) / (ms / 1e3)
 
 
@@ -74,7 +85,7 @@ def measure_matmul_flops() -> float:
     """Achieved dense-matmul throughput in FLOP/s — the compute-floor twin of :func:`measure_copy_bw`.
 
     Times a square f16 cublas GEMM through torch: torch bundles its own cublas and is always present
-    at serving boot, while emmy's nvrtc-compiled kernels never need a cupy-visible cublas — so a
+    at serving boot, while emmy's own kernels never need a cublas — so a
     working deployment may not have one. Measures the f32-accumulate dense lane (see the module
     docstring for the FAST_MATH caveat)."""
     import torch
@@ -108,23 +119,10 @@ def time_program_us(program, *, reps: int = 3, budget_us: float | None = None) -
     program near the budget can bail on an inflated number. That is the deliberate direction: the
     threshold is 10x a conservative floor, the warning is advisory and says to tune the twins, and
     a boot that never finishes tells the operator nothing at all."""
-    import cupy as cp
-
-    start, stop = cp.cuda.Event(), cp.cuda.Event()
-    start.record()
-    program.run_once()
-    stop.record()
-    stop.synchronize()
-    warmup_us = cp.cuda.get_elapsed_time(start, stop) * 1e3
+    warmup_us = _time_ms(program.run_once) * 1e3
     if budget_us is not None and warmup_us > budget_us:
         return warmup_us
-    times = []
-    for _ in range(reps):
-        start.record()
-        program.run_once()
-        stop.record()
-        stop.synchronize()
-        times.append(cp.cuda.get_elapsed_time(start, stop) * 1e3)
+    times = [_time_ms(program.run_once) * 1e3 for _ in range(reps)]
     return sorted(times)[len(times) // 2]
 
 

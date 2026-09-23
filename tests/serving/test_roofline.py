@@ -2,7 +2,6 @@
 Pure CPU: the CUDA-touching measurement helpers are stubbed."""
 
 import logging
-import sys
 import types
 
 import pytest
@@ -178,26 +177,22 @@ def test_audit_never_raises(monkeypatch, caplog):
     assert not caplog.records  # swallowed to debug level — a boot warning is never a boot blocker
 
 
-class _FakeEvent:
-    def record(self):
-        pass
-
-    def synchronize(self):
-        pass
-
-
-def _fake_cupy(elapsed_ms):
-    """A cupy stand-in whose event timer yields these millisecond readings, one per call."""
+def _fake_timer(monkeypatch, elapsed_ms):
+    """An event timer that runs the work and yields these millisecond readings, one per call."""
     readings = iter(elapsed_ms)
-    cuda = types.SimpleNamespace(Event=_FakeEvent, get_elapsed_time=lambda a, b: next(readings))
-    return types.SimpleNamespace(cuda=cuda)
+
+    def time_ms(work):
+        work()
+        return next(readings)
+
+    monkeypatch.setattr(roofline, "_time_ms", time_ms)
 
 
 def test_time_program_us_stops_after_a_warmup_that_blows_the_budget(monkeypatch):
     """The mispick this audit exists to report is also the most expensive thing to measure. Once
     the warmup alone is past the budget the verdict is settled, so the timed runs are skipped —
     the V100 incident ran one such program four times and held the boot for six hours."""
-    monkeypatch.setitem(sys.modules, "cupy", _fake_cupy([2.0]))
+    _fake_timer(monkeypatch, [2.0])
     runs = []
     program = types.SimpleNamespace(run_once=lambda: runs.append(1))
     assert roofline.time_program_us(program, budget_us=1000.0) == pytest.approx(2000.0)
@@ -205,7 +200,7 @@ def test_time_program_us_stops_after_a_warmup_that_blows_the_budget(monkeypatch)
 
 
 def test_time_program_us_medians_the_timed_runs_inside_the_budget(monkeypatch):
-    monkeypatch.setitem(sys.modules, "cupy", _fake_cupy([0.1, 0.3, 0.2, 0.4]))
+    _fake_timer(monkeypatch, [0.1, 0.3, 0.2, 0.4])
     runs = []
     program = types.SimpleNamespace(run_once=lambda: runs.append(1))
     assert roofline.time_program_us(program, budget_us=1000.0) == pytest.approx(300.0)

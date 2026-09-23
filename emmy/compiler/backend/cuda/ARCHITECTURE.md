@@ -17,8 +17,9 @@ cuda/
 ```
 
 Execution itself lives in the Rust runtime (`crates/emmy-runtime`, hosted in-process through the `emmy_runtime`
-extension built from `crates/emmy-runtime-py`): buffers, launches, graphs, events and the hung-launch deadline. Nothing
-in this package holds a device pointer.
+extension built from `crates/emmy-runtime-py`): the memory layout, launches, symbolic geometry, TMA descriptors,
+graphs, events and the hung-launch deadline. This package allocates the memory — torch tensors the runtime borrows —
+and turns host arrays into the bytes a buffer starts from.
 
 ## Compile
 
@@ -32,14 +33,14 @@ arg_order).
 
 The graph is first projected to an **execution plan** (`plan_from_graph`, `../plan.py` — buffer specs, constants,
 launch list, symbolic plumbing, kernel + weight refs; see `../ARCHITECTURE.md`). `CompiledProgram.build_from_plan`
-then compiles every kernel to a cubin path, turns every input and constant into host bytes, and hands the runtime
-the plan's JSON form (`plan_to_dict`), those paths and those bytes; the runtime validates the plan, allocates one
-device buffer per named buffer, loads the cubins and uploads the bytes. `CompiledProgram.build(graph)` is exactly
-`build_from_plan(plan_from_graph(graph))` — the pack path (`../pack.py`) enters at `build_from_plan` with a plan
-read from disk whose kernels reference cubins by content-addressed cache key (no codegen, no nvcc), and both paths
-share every line downstream. The runtime executes **static ordinary-pointer programs**: a plan with symbolic shapes,
-runtime constants or arguments, TMA descriptors, indirect operands or serial launches is refused at build time with
-`NotImplementedError` until the runtime grows the feature. The projection:
+then compiles every kernel to a cubin path, resolves the symbolic environment from the supplied input shapes
+(`_resolve_symbolic`: a bound axis reads its extent off the input array, an unbound one takes its `Dim` hint, a
+capacity-capped one refuses a larger extent), asks the runtime for the **layout** at that environment, allocates every
+region of it, turns every input and constant into host bytes, and loads the program: the runtime validates the plan,
+adopts the regions, loads the cubins, uploads the bytes and fills the runtime constants. `CompiledProgram.build(graph)`
+is exactly `build_from_plan(plan_from_graph(graph))` — the pack path (`../pack.py`) enters at `build_from_plan` with a
+plan read from disk whose kernels reference cubins by content-addressed cache key (no codegen, no nvcc), and both paths
+share every line downstream. The projection:
 
 - Classifies each node as `input` / `constant` / `output` / `scratch`
   from `graph.inputs` / `ConstantOp` membership / `graph.outputs`.
@@ -113,21 +114,68 @@ On targets without native FP8 conversion, E4M3 decode constructs the exact FP16 
 consumer wants FP32. Subnormals, signed zero and the NaN code follow the dtype contract; exhaustive byte tests cover
 both result widths. This removes per-element exponent arithmetic without changing the stored representation.
 
-**One allocation per buffer.** The runtime gives every named buffer its own allocation for the program's
-lifetime; scratch buffers are not yet packed into a liveness-planned slab, so a program holds every intermediate at
-once (the Python executor packed them, which is what kept all 28 layers' `[heads, S, S]` attention scratch of
-Qwen3-Embedding at S=4096 under the card's memory). The lowering contract the packing rested on still holds
-(`lowering/cuda/010_lower_kernelop.py`: only atomic-reduction outputs need zeroing and are in `zero_outputs`; every
-other kernel fully overwrites its output), so re-adding the planner inside the runtime changes no kernel.
+**Memory: regions the runtime derives, tensors this side lends.** The runtime's layout gives every input,
+constant and output buffer its own region (`role:name`) and packs every scratch buffer into one `scratch` slab by
+liveness: a scratch buffer is live from the launch that first writes it (its producer, a per-launch memset, or a
+delegated zero prologue) to the last launch that reads it (as an argument or a TMA source; a serial launch also reads
+its own earlier steps), and buffers whose intervals do not overlap share bytes, largest first, deterministically. The
+half-open interval is load-bearing: a launch's output overlaps its inputs, so an output never aliases its own input.
+Correctness rests on the lowering contract (`lowering/cuda/010_lower_kernelop.py`): only atomic-reduction outputs need
+zeroing and are in `zero_outputs`; every other kernel fully overwrites its output, so a reused slot's stale contents
+are never read. This is what keeps all 28 layers' `[heads, S, S]` attention scratch of Qwen3-Embedding at S=4096 under
+the card's memory. `build_from_plan` allocates one torch tensor per region — so vLLM's memory profiler counts every
+byte a program holds — and records each on the runtime's stream, so torch's caching allocator never recycles a block a
+launch still reads. A constant supplied as a CUDA tensor is lent as it is: the serving path uploads each weight once
+and shares it across twins. Without torch the runtime allocates for itself (the worker binary always does).
 
-**Repeated execution (`CompiledProgram.rebind` / `run_once`).** `rebind(input_data)` re-uploads supplied program
-inputs in place — static shapes only, a supplied constant is refused — and `run_once()` launches every kernel in
-program order with none of `iter_once`'s per-launch event record / sync / deadline; the caller's `outputs()`
-synchronizes. Both expect the caller to hold `gpu_lock()`. The serving fast path — one program built at a capacity
-seq_len, `set_sym_values` / `upload_prefix_device` / `capture_program_graph` per request, `output_prefix_device`
-handing the runner a device view — needs symbolic launch geometry, cross-program buffer sharing and device-resident
-bindings, none of which the runtime has yet; those methods raise `NotImplementedError`, and the vLLM plugin's runners
-do not run on this executor until the runtime grows them.
+**Cross-program pooling (`BufferArena`).** The slab kills scratch duplication *within* a program; `BufferArena` kills
+it *across* programs that run sequentially (the serving runner builds 2–4 programs × `num_layers`, and without pooling
+each holds its own capacity-sized activation set — ~350 MB × 48 layers for gemma-4-12B). `CompiledProgram.build(...,
+arena=…)` takes every region but the constants from the arena's grow-only per-key backings. Growth allocates a fresh
+backing and leaves older generations alive under the programs that still view them, so captured graphs / TMA
+descriptors never dangle. Safety is the caller's contract: programs sharing an arena must never run concurrently, and
+each program's outputs must be consumed before the next program runs (the runner host-copies / clones them
+immediately). No arena (the default) keeps standalone tensors for tune / bench / one-off runs.
+
+**Repeated execution (`CompiledProgram.rebind` / `run_once`).** One built program can serve request after request —
+the serving path (the vLLM plugin runs one compiled dynamic-seq_len program per sequence). `rebind(input_data)`
+re-binds fresh inputs on the existing program: the environment is re-resolved from the supplied shapes, supplied
+buffers re-upload, un-supplied buffers whose shape carries a symbolic dim (seq_len-sized scratch/outputs)
+re-materialize under the same fill policy as `build`, static-shaped un-supplied buffers — the weights — keep their
+memory untouched, regions grow when the new layout needs more bytes, and the runtime drops captured graphs and
+re-encodes TMA descriptors, since both bake addresses. `run_once()` launches every kernel in program order with none
+of `iter_once`'s per-launch event record/sync/deadline; the caller's `outputs()` synchronizes. Both expect the caller to
+hold `gpu_lock()`. See `tests/compiler/e2e/test_program_rebind.py`.
+
+**Captured-graph replay over a capacity buffer set (`set_sym_values` / `upload_prefix` / `upload_prefix_device` /
+`capture_program_graph` / `replay_program_graph` / `outputs(sym_values)` / `output_prefix_device`).** The serving fast
+path: instead of `rebind` re-sizing buffers and `run_once` issuing ~hundreds of host launches per request, build the
+program once at a **capacity** seq_len, then per request (1) `set_sym_values({"seq_len": S})` sizes the launch grids,
+by-value runtime arguments and runtime constants to the real S without re-allocating (errors if S exceeds capacity),
+(2) `upload_prefix` / `upload_prefix_device` copies each input into the contiguous prefix of its capacity buffer (a
+logically `(1, S, …)` tensor occupies the first `S·…` elements; a CUDA tensor that already IS the buffer is skipped —
+a producer's output chained onto this input by `alias_buffer`), (3) `capture_program_graph()` captures the whole
+program at the current S into ONE CUDA graph — the runtime keeps one per environment (bounded LRU), so a repeated
+length replays with no re-capture — and (4) `replay_program_graph()` is one host launch; `outputs({"seq_len": S})`
+slices each capacity buffer to its real-S prefix and `output_prefix_device` hands the same prefix back as a torch view
+of the lent tensor. TMA descriptors follow the same per-environment discipline: a symbolic-src descriptor's global
+strides depend on the RESOLVED shape (the prefix-packed data layout), not the capacity allocation — a capacity-baked
+stride reads correctly only at leading index 0, which is how batch>1 miscomputed through every TMA-staged kernel while
+batch-1 serving never noticed — so the runtime encodes descriptors once per environment, beside the graph. Each graph
+is captured at its EXACT S, so every kernel runs at its exact grid: no oversized-grid masking is needed (and a single
+capacity-baked graph for ALL S is not viable — several symbolic-M kernels read OOB at an oversized grid). Validate
+multi-S correctness under `compute-sanitizer` (`tests/compiler/ir/test_dynamic_shapes.py`).
+
+**Streams.** The runtime launches on one stream per device unless a host stream is adopted: `on_stream(torch_stream)`
+binds every launch and copy inside the block to torch's current stream, which is how the serving runners keep their
+work ordered with vLLM's, and how a program's raw launches are recorded into vLLM's whole-step graph capture
+(`run_once` under `torch.cuda.is_current_stream_capturing()`; the program's own graphs are not capturable there).
+`run_program` and `benchmark_program` bind to torch's stream the same way, so the eager reference and the interleaved
+torch benches stay ordered with the program's launches. Host uploads and descriptor encodes always go through the
+runtime's own stream and complete before they return, so an adopted stream mid-capture never sees a pageable copy or
+a synchronize. Operands a plan names but never declares as buffers — an indirect operand's pointer table and selector
+(the serving MoE fixed-slot dispatch) — are bound by address with `alias_buffer` too; a buffer nobody reads
+(the direct per-expert input those tables replace) is handed back with `release_buffer`.
 
 `benchmark_program(graph, input_data, warmup, num_iters)` adds a warmup loop + timed loop over the runtime's
 per-launch event windows (`Executor.time_launch`, one pair of events per launch index, reused across iterations) for

@@ -34,6 +34,9 @@ jobs:
         with:
           python-version: "3.13"
 
+      # ``make pypi-dist`` also builds the runtime extension's wheel and sdist.
+      - uses: dtolnay/rust-toolchain@stable
+
       - name: Resolve the version to publish
         id: version
         run: |
@@ -64,13 +67,19 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          test "$(find dist -maxdepth 1 -name '*.whl' | wc -l)" -eq 1
-          test "$(find dist -maxdepth 1 -name '*.tar.gz' | wc -l)" -eq 1
-          WHEEL=$(find dist -maxdepth 1 -name '*.whl' -print -quit)
+          # Two distributions: the pure-Python ``emmy-ml`` and the runtime extension
+          # ``emmy-runtime`` (one wheel for this runner's platform, plus its sdist).
+          test "$(find dist -maxdepth 1 -name 'emmy_ml-*.whl' | wc -l)" -eq 1
+          test "$(find dist -maxdepth 1 -name 'emmy_ml-*.tar.gz' | wc -l)" -eq 1
+          test "$(find dist -maxdepth 1 -name 'emmy_runtime-*.whl' | wc -l)" -eq 1
+          test "$(find dist -maxdepth 1 -name 'emmy_runtime-*.tar.gz' | wc -l)" -eq 1
+          WHEEL=$(find dist -maxdepth 1 -name 'emmy_ml-*.whl' -print -quit)
+          RUNTIME=$(find dist -maxdepth 1 -name 'emmy_runtime-*.whl' -print -quit)
           SMOKE_ENV="$RUNNER_TEMP/emmy-release-smoke"
           CATALOG="$RUNNER_TEMP/emmy-recipes.json"
           python -m venv "$SMOKE_ENV"
-          "$SMOKE_ENV/bin/pip" install --disable-pip-version-check "$WHEEL"
+          "$SMOKE_ENV/bin/pip" install --disable-pip-version-check "$WHEEL" "$RUNTIME"
+          "$SMOKE_ENV/bin/python" -c 'import emmy_runtime'  # loads without a GPU; the driver is opened lazily
           test "$("$SMOKE_ENV/bin/emmy" --version)" = "emmy $VERSION"
           "$SMOKE_ENV/bin/emmy" recipe list --json > "$CATALOG"
           "$SMOKE_ENV/bin/python" -c \

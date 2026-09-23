@@ -10,21 +10,31 @@
 #     --max-model-len 4096 --hf-overrides '{"architectures":["EmmyEmbedModel"]}'
 ARG VLLM_VERSION=v0.23.0
 ARG BASE_IMAGE=vllm/vllm-openai:${VLLM_VERSION}
+
+# The runtime extension is built against the image's own Python and libc, so the wheel
+# needs no manylinux story: a Rust toolchain in a throwaway stage, maturin, one build.
+FROM ${BASE_IMAGE} AS runtime-builder
+RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+ENV PATH=/root/.cargo/bin:$PATH
+COPY Cargo.toml Cargo.lock /src/
+COPY crates /src/crates
+RUN pip install --no-cache-dir "maturin>=1.5,<2" \
+    && maturin build --release --locked -m /src/crates/emmy-runtime-py/Cargo.toml -o /wheels
+
 FROM ${BASE_IMAGE}
 
 # The emmy wheel installs --no-deps so the image's pinned torch /
 # transformers / numpy (vLLM's own dependency set) are never touched; the
 # runtime deps the serving path actually uses are added explicitly. cppyy is
-# deliberately absent — the CUDA serving path compiles via nvcc/NVRTC only.
-# The cupy wheel must match the image's CUDA major (vllm-openai:v0.23.0
-# ships CUDA 13.0 + nvcc; transformers 5.10.2 satisfies the compile pin).
-# frozendict is imported by the tensor IR itself, so every serving boot needs
-# it; only the stock image happened to carry it transitively, and a fork base
-# (1Cat-vLLM on Volta) fails at model construction without it.
-ARG CUPY_PACKAGE=cupy-cuda13x
+# deliberately absent — the CUDA serving path compiles via nvcc only.
+# (vllm-openai:v0.23.0 ships CUDA 13.0 + nvcc; transformers 5.10.2 satisfies
+# the compile pin.) frozendict is imported by the tensor IR itself, so every
+# serving boot needs it; only the stock image happened to carry it transitively,
+# and a fork base (1Cat-vLLM on Volta) fails at model construction without it.
 COPY dist/emmy_ml-*.whl /tmp/wheels/
-RUN pip install --no-cache-dir --no-deps /tmp/wheels/emmy_ml-*.whl \
-    && pip install --no-cache-dir "${CUPY_PACKAGE}" catboost pyyaml httpx "huggingface_hub[hf_transfer]" safetensors frozendict \
+COPY --from=runtime-builder /wheels/emmy_runtime-*.whl /tmp/wheels/
+RUN pip install --no-cache-dir --no-deps /tmp/wheels/emmy_ml-*.whl /tmp/wheels/emmy_runtime-*.whl \
+    && pip install --no-cache-dir catboost pyyaml httpx "huggingface_hub[hf_transfer]" safetensors frozendict \
     && rm -rf /tmp/wheels
 
 # Compiled-cubin cache under the HF cache mount (compose mounts the model dir
