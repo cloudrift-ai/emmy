@@ -1,4 +1,5 @@
-"""``emmy dataset {import,freeze}`` — fill a dataset DB instance, and snapshot one into a measurement freeze.
+"""``emmy dataset {import,freeze,check}`` — fill a dataset DB instance, snapshot one into a measurement
+freeze, and check one for drift.
 
 A dataset DB is the tune DB's schema in its own file (``EMMY_DATASET_DB``): the measurement-data readers
 (``eval prior``) read it, and no compile ever does, so what is imported into it cannot change a deploy.
@@ -9,6 +10,8 @@ A dataset DB is the tune DB's schema in its own file (``EMMY_DATASET_DB``): the 
   arrived from, and the upsert is the tune DB's own, so importing the same source twice changes nothing.
 - ``freeze`` writes a DB instance's admitted rows as a digest-pinned freeze directory — the artifact
   that gets checked in, so a reported number is one anyone can reproduce.
+- ``check`` re-derives what an instance stores (normalization, identities, stamps, bindings, digests,
+  foreign keys, cards, knob vocabularies) and counts the rows that no longer agree with the current code.
 
 :func:`dataset_db` is the readers' way in: it resolves the instance and refuses a missing one, or a
 default one that does not hold the checked-in freeze, with the command that fixes it.
@@ -46,6 +49,10 @@ def register_dataset_command(subparsers) -> None:
     pf.add_argument("--out", required=True, help="Freeze directory to write (an existing freeze there is replaced).")
     pf.add_argument("--note", default="", help="Freeform collection-policy note stamped into the manifest.")
     pf.set_defaults(func=handle_dataset_freeze)
+
+    pc = sub.add_parser("check", help="Count the rows of a DB instance that no longer re-derive under the current code")
+    pc.add_argument("--db", help="DB instance to check (default: EMMY_DATASET_DB or ~/.cache/emmy/dataset.db).")
+    pc.set_defaults(func=handle_dataset_check)
 
 
 def handle_dataset_import(args) -> None:
@@ -110,6 +117,21 @@ def handle_dataset_freeze(args) -> None:
     )
     logger.info("  per card: %s", ", ".join(f"{gpu}: {n}" for gpu, n in counts["per_gpu"].items()))
     logger.info("  commit %s, sha256 %s over %d file(s) -> %s/", manifest["repo_commit"], manifest["sha256"], len(manifest["files"]), out)
+
+
+def handle_dataset_check(args) -> None:
+    from emmy.compiler.pipeline.search.data.check import drift  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
+
+    db = SearchDB.open_readonly(dataset_db(args.db))
+    try:
+        counts = drift(db)
+    finally:
+        db.close()
+    for name, n in counts.items():
+        logger.info("%s: %d row(s) fail", name, n)
+    if any(counts.values()):
+        sys.exit(1)
 
 
 def dataset_db(db_arg: str | None) -> Path:

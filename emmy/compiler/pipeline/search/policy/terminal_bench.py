@@ -14,7 +14,7 @@ import statistics
 from emmy.compiler.backend.cuda.program import compile_budget_overrun
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.cuda.ir import CudaOp
-from emmy.compiler.loop_wire import kernel_bindings, kernel_tile, kernel_wire
+from emmy.compiler.loop_wire import kernel_bindings, kernel_stamps, kernel_tile, kernel_wire
 from emmy.compiler.pipeline.search.db import KernelRow, PerfStats
 
 # The engine logger keeps the existing ``[tune]`` log channel and verbosity toggles.
@@ -257,7 +257,8 @@ def kernel_key(cuda_op) -> tuple | None:
 
 def kernel_row(tile, name: str) -> KernelRow:
     """The ``kernel`` row of a tile kernel: both identities, both wires, the C name it was rendered
-    under, and the ``S_*`` stamps the identity strategy wrote onto it."""
+    under, and the ``S_*`` stamps of its body (:func:`kernel_stamps` — what the identity strategy
+    stamped onto it, re-derived from the definition the row stores)."""
     loop_ir, normalized = kernel_wire(tile)
     return KernelRow(
         exact_identity=tile.identity_key(structural=False, with_io=True),
@@ -265,7 +266,7 @@ def kernel_row(tile, name: str) -> KernelRow:
         loop_ir=loop_ir,
         normalized_loop_ir=normalized,
         name=name,
-        stamps={k: v for k, v in (tile.knobs or {}).items() if str(k).startswith("S_")},
+        stamps=kernel_stamps(normalized),
     )
 
 

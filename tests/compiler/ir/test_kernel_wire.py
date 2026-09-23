@@ -10,13 +10,18 @@ kernel, the pieces of a placement cut, a cross-CTA split's pieces, a nested cut.
 
 from __future__ import annotations
 
-from dataclasses import replace
-
 import pytest
 
 from emmy.compiler.ir.cuda.ir import CudaOp
-from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.loop_wire import kernel_bindings, kernel_tile, kernel_wire, loop_graph_from_wire, loop_graph_to_wire, symbolic_vars
+from emmy.compiler.loop_wire import (
+    kernel_bindings,
+    kernel_from_wire,
+    kernel_tile,
+    kernel_wire,
+    loop_graph_from_wire,
+    loop_graph_to_wire,
+    symbolic_vars,
+)
 from emmy.compiler.pipeline.search.golden import _replay, kernel_identity, lead_of, siblings_of
 from tests.compiler.realization import helpers as corpus
 
@@ -26,21 +31,6 @@ CASES = (
     "reduce/cross-cta-matmul-kernel.yaml",
     "reduce/sinkhorn-nested-cut-derived-read-sm70.yaml",
 )
-
-
-def _lift(wire: dict):
-    """The decoded kernel lifted the way ``golden._lifted_target`` lifts a target's kernel node: the
-    matcher's io refresh, the lift, the twist rewrite. No Loop passes: a kernel wire is post-fusion,
-    and the passes would normalize a size-one axis away and mint another kernel."""
-    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op
-    from emmy.compiler.pipeline.passes.lowering.tile._twist import rewrite_twisted
-
-    graph = loop_graph_from_wire(wire)
-    [node] = [node for node in graph.nodes.values() if isinstance(node.op, LoopOp)]
-    node.op = node.op.with_io(graph, node)
-    tile = lift_loop_op(node.op, name=node.id)
-    tile = replace(tile, op=rewrite_twisted(tile.op, tile.axes))
-    return tile.with_io(graph, node)
 
 
 @pytest.mark.parametrize("case_path", CASES)
@@ -57,11 +47,11 @@ def test_every_kernel_of_a_set_has_wires_that_re_lift_to_its_exact_identity(case
         exact = tile.identity_key(structural=False, with_io=True)
         assert exact is not None
         raw, normalized = kernel_wire(tile)
-        assert _lift(normalized).identity_key(structural=False, with_io=True) == exact, cuda.kernel_name
+        assert kernel_from_wire(normalized).identity_key(structural=False, with_io=True) == exact, cuda.kernel_name
         # Decoding normalizes: the raw wire re-normalized IS the stored one (drift check 1), and it
         # lifts to the same kernel.
         assert loop_graph_to_wire(loop_graph_from_wire(raw)) == normalized, cuda.kernel_name
-        assert _lift(raw).identity_key(structural=False, with_io=True) == exact, cuda.kernel_name
+        assert kernel_from_wire(raw).identity_key(structural=False, with_io=True) == exact, cuda.kernel_name
         assert symbolic_vars(normalized) == set(kernel_bindings(tile)), cuda.kernel_name
         deploy.add(tile.identity_key(with_io=True))
     # The clustered flavour read off the same tile is the deploy identity the golden side mints for

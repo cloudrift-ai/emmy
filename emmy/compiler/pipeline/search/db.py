@@ -411,7 +411,9 @@ class SearchDB:
 
     def _row_id(self, table: str, knobs: dict, *, create: bool) -> int | None:
         """The id of the ``schedule`` / ``placement`` row spelling ``knobs``, minted when absent: the row
-        keyed by ``digest(knobs_json(knobs))``, its knobs one per row in the ``<table>_knob`` table."""
+        keyed by ``digest(knobs_json(knobs))`` over the knobs as strings — a knob's value is its spelling,
+        so ``4`` and ``"4"`` are one row — its knobs one per row in the ``<table>_knob`` table."""
+        knobs = {str(name): str(value) for name, value in knobs.items()}
         key = digest(knobs_json(knobs))
         row = self._conn.execute(f"SELECT id FROM {table} WHERE digest = ?", (key,)).fetchone()  # noqa: S608
         if row is not None:
@@ -421,7 +423,7 @@ class SearchDB:
         rid = self._conn.execute(f"INSERT INTO {table} (digest) VALUES (?)", (key,)).lastrowid  # noqa: S608
         self._conn.executemany(
             f"INSERT INTO {table}_knob ({table}, name, value) VALUES (?, ?, ?)",  # noqa: S608
-            [(rid, str(name), str(value)) for name, value in knobs.items()],
+            [(rid, name, value) for name, value in knobs.items()],
         )
         return rid
 
@@ -676,6 +678,29 @@ class SearchDB:
             us for us in (leaf, *(us for _arm, us in self.priced_arms(ctx, kernel, bindings=bindings, backend=backend))) if us is not None
         ]
         return min(candidates) if candidates else None
+
+    def drift(self) -> dict[str, int]:
+        """The table-level drift checks, each the count of rows that fail it: a schedule or placement row
+        whose digest is not its knob rows'; a routing child or perf row naming no kernel row (the foreign
+        keys, which a file written with them off can break); a context naming a card the GPU registry
+        lost; a schedule knob that is a placement knob, or a placement knob that is not. The checks that
+        need the compiler are :func:`emmy.compiler.pipeline.search.data.check.drift`."""
+        from emmy import gpu  # noqa: PLC0415
+
+        digests = 0
+        for table in ("schedule", "placement"):
+            for rid, stored in self._conn.execute(f"SELECT id, digest FROM {table}").fetchall():  # noqa: S608
+                digests += stored != digest(knobs_json(self._knobs_of(table, rid)))
+        apart = sum(is_placement_knob(n, v) for n, v in self._conn.execute("SELECT name, value FROM schedule_knob"))
+        apart += sum(not is_placement_knob(n, v) for n, v in self._conn.execute("SELECT name, value FROM placement_knob"))
+        return {
+            "schedule and placement digests match their knob rows": digests,
+            "every routing child and perf row names a kernel row": len(self._conn.execute("PRAGMA foreign_key_check").fetchall()),
+            "every context names a registry card": sum(
+                gpu.by_name(n) is None for [n] in self._conn.execute("SELECT gpu_name FROM context")
+            ),
+            "schedule knobs and placement knobs stay apart": apart,
+        }
 
     def kernel_stamps(self) -> dict[str, dict]:
         """Every stored kernel's ``S_*`` stamps by exact identity — the signature its evidence joins on,
