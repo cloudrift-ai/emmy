@@ -227,6 +227,24 @@ post-#863 sets), and #863's Loop IR normalization, for which this golden's store
 the author settles the rule, then the golden's programs are re-lowered and every row re-keyed; only if the rule stays
 as it is does a re-tune from the fresh capture follow.
 
+**Restamped onto the fresh lowering (2026-09-23).** Each stored target was replaced by the kernel a fresh lowering of
+its own program writes on `main` plus #875 (byte-identical to the serving inventory), every row re-keyed, 105 rows
+re-spelled onto the closest site of the re-associated trees or re-measured, 14 dropped. The deploy's evidence index
+and a per-twin kernel-coverage audit are the acceptance tests now, not the pooled decode gate, and a new gate keeps
+every golden's stored targets equal to a fresh lowering (every other golden but Qwen3.5-122B and two hardware files is
+stale and listed as a strict xfail). 465 measured rows, 448 live in the evidence index (365 before), 324 of 335 twin
+kernels covered (283 of 330 before), nine of nine twins elect strict. Boot36b serves strict: TTFT 0.73 s warm at 5
+tokens and 5.5 s at 2,155, TPOT 0.56 s (0.215 on boot33); the width-16 post twin runs 8 ms per layer, the width-4,096
+one 104 ms; the probe's text degraded and the m16 expert twin's reproducer check reports 9,931 outliers over a budget
+of 4 — a correctness audit of the m16 expert and post twins on this tree comes before any tuning. Third cause of the
+boot deaths since 2026-09-22: #868 made fast math the default and serving publishes no precision pin, so rows recorded
+under `FAST_MATH: False` are off-regime in every worker and the index is empty — boot with `EMMY_FAST_MATH=0` (now in
+the boot script), or re-record under fast math. Open compiler findings: cooperative reduction on the fresh divide
+kernels does not compile (a duplicate declaration, GPU-free repro in the report) and serial is 36-250× slower than the
+old cooperative rows; the transposed cooperative reduce is gone from this model; the prior's cooperative picks cost
+10-100× until a register split at the top reduce is pinned by hand. Next: the compiler defect, then the Qwen3.8
+goldens and the other stale goldens each need the same restamp on their card.
+
 ## Operations handoff
 
 The host's address is deliberately absent from this repo; it lives in the operator's notes and is used only inside

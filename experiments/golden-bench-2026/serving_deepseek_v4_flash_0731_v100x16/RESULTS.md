@@ -517,6 +517,59 @@ the golden's programs re-lowered with every row re-keyed onto the new identities
 `~/serve-evidence/elect34-*`, `elect34b-*`, `rec34-*`, `ab34*`, `boot34-*`, `twins33.yaml`, `twins34.yaml` and
 `twins-<sha>.yaml`.
 
+**The golden restamped onto the fresh lowering (2026-09-23).** With #875's fix in the tree, every stored program was
+lowered again and each stored target replaced by the fresh kernel that writes the same outputs: 151 of 151 targets
+matched, 135 loops changed, and the pool is byte-identical to the serving inventory `emmy trace --serving-twins`
+writes on the host, so the golden now describes what serving builds. Rows were re-keyed to the kernels they name (the
+root by its lift, the pieces of a cut by an unchanged identity, an equal structural signature, or mint order), and
+#863's re-associated trees left 105 rows spelling site paths that no longer exist — an old `map.1/inner` contraction
+is a `map.1/reduce` with its multiplier hoisted to the root, deep map/inner nests are reduce chains — so their keys
+were moved to the closest site of the fresh tree (same extent, the cone's reads and size, depth), and a row whose
+value the fresh kernel does not offer at any site became a proposal the host re-measured. Fourteen rows could not be
+carried at all and were dropped: the tensor-core tiles of four single-token divide kernels (the fresh kernels offer no
+tile) and ten cut receipts whose three cooperative sites the fresh pieces never offer together; 59 rows the recorder
+had written from its isolated re-bench with identities no replay mints were already dead and are gone too. The pooled
+decode gate is blind to all of this — the input file decoded row by row while 74 of its rows were no evidence — so two
+audits decided instead: the deploy's own evidence index (`evidence_rows`, under the recorded precision regime) and per
+twin the kernels the route mints against the rows that vouch for them. Of the input's 435 rows, 330 carried over
+unchanged, 11 kept their measurement under a re-spelled key, 23 became proposals the host re-measured, 14 were
+dropped, and the host record runs added the rest: the committed file holds 465 measured rows over 149 targets, every
+one of the 152 stored loops the fresh lowering's. The deploy's evidence index reads 448 of them as live evidence (365
+of the input's 424), and of the 335 kernels the nine serving twins mint, 324 have a measured row (283 of 330 before);
+the 11 without are the single-token expert and pre twins' pieces, which the runner treats as warnings. Eight of the
+nine twins elected strict from the file on the first pass; the single-token post twin needed its cut sets recorded
+once more and then elected too. Booted strict from this file with `EMMY_FAST_MATH=0` (boot36b), the server reached its
+serving state in 25 minutes and answered the probe: at 5 prompt tokens TTFT 3.50 s cold and 0.73 s warm, at 2,155
+prompt tokens 68.7 s cold and 5.53 s warm (18.2 and 2.0 s on boot33), TPOT 0.56 s per token at both widths (0.215 on
+boot33). The roofline audit puts the width-16 post twin at 8.06 ms per layer (136× its floor), the width-4,096 post
+twin at 104 ms (53×) and the pre twin at 3.1 ms (104×): decode pays the serial divide kernels and the forkless pieces
+this tree lowers, prefill the cut reductions no cooperative schedule survives on. The probe's text is worse than
+boot33's: the 5-token completion is number-and-slash noise where boot33 continued into a JSON fragment, the
+2,155-token one repeats the passage's phrases where boot33 continued it verbatim. The width-16 expert twin's election
+reports its random-input reproducer 9,931 outliers over a budget of 4 (mean difference 132 on outputs whose mean is
+−143; the symbolic expert twin 140 within a tolerance of 578); no earlier log on the host prints that check for the
+expert twins, so whether it is new cannot be shown from the records. The width-4,096 post twin's reproducer returns
+NaN as it did on 2026-09-17. Both are the compiler's kernels under rows a strict election accepted, and the next
+tuning round has to start from a correctness audit of the m16 expert and the post twins on this tree. The boot itself
+then found a third cause, older than any row: #868 made fast math the default, `emmy serve` publishes no precision pin
+to its workers, and every row of this golden is recorded under `FAST_MATH: False`, so since 2026-09-22 a serving
+worker's evidence index has been empty and a strict boot refused at the first kernel it compiled — boot34, boot35 and
+boot36 all died there, whatever the rows said, while `emmy run --realization` kept passing because it replays under
+the row's own pins. Pinning `EMMY_FAST_MATH=0` in the serving container restores the regime the rows were measured in;
+the rows' regime and the deploy's must agree, and today nothing checks it. Three compiler findings fell out, none
+fixed here. The fresh divide kernels offer one reduce site with a schedule, and cooperative reduction at it does not
+compile — `float v125` is declared once per half of the split accumulator — while the serial schedule runs 272 µs at
+width 16 where the old cooperative row ran 7.6 µs and 7.9 ms at width 4,096 where it ran 32 µs; the GPU-free repro is
+`emmy compile --golden … --realization post16.k_div_50_reduce… --target sm_70 --ir cuda` under
+`EMMY_KNOBS=REDUCE@map.1/map.1/reduce=coop,WORK=t128`. The transposed cooperative reduce is not offered on any fresh
+kernel of this model. And the prior picks cooperative reduces everywhere: on the symbolic post twin's two residual
+pieces they cost 28 and 14 ms until a register split at the top reduce with the nested sites off
+(`REDUCE@map.1/inner=r2`) brought them to 189 and 177 µs and the twin's election to 3.5 ms per layer at the 512 hint,
+under the 4.8 ms of the old file. Every other repository golden except Qwen3.5-122B and two hardware files is stale
+the same way — #863 kept the old stored loops everywhere — and a new gate,
+`test_stored_targets_are_the_fresh_lowering`, decodes each golden's stored targets against a fresh lowering of its own
+programs, with those files as strict xfails until each is restamped on its card.
+
 
 ### The M=1 decode tier: what broke and what now guards it
 
