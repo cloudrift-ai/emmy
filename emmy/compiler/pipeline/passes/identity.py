@@ -134,6 +134,18 @@ def _identity_body(op) -> Body | None:
     return op.loop_body
 
 
+def kernel_stamps(wire: dict) -> dict[str, float]:
+    """The ``S_*`` features of the kernel a ``loop_wire.kernel_wire`` wire defines: :func:`structure_features`
+    of its body, the dtype half read off the wire's own buffers. What a ``kernel`` row stores for a tile
+    nothing stamped; a stamped tile's row carries the strategy's own stamps, which for a twisted kernel
+    are features of the fused body before the twist, not of the derived one the wire holds."""
+    from emmy.compiler.loop_wire import loop_graph_from_wire  # noqa: PLC0415
+
+    graph = loop_graph_from_wire(wire)
+    [node] = [node for node in graph.nodes.values() if isinstance(node.op, LoopOp)]
+    return structure_features(node.op.body, graph)
+
+
 def structure_features(body: Body, graph: Graph | None = None) -> dict[str, float]:
     """Flat ``S_``-prefixed structural feature dict for a LoopOp ``body``:
     the extent-free skeleton merged with the ``S_ext_*`` loop extents.

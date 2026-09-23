@@ -330,21 +330,30 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   reads.
 - **Evidence** — A compatible recorded measurement used to select between candidates: a reservoir row, a tune
   database row, or a measured golden row. All three enter one index and are read by one rule.
-- **Route row** (*routing row*, in `pipeline/ARCHITECTURE.md`) — A measured row that spells a kernel-set decision — a `PLACE` key, or a `REDUCE` value carrying a
-  cross-CTA `g<n>` half. Its latency is the measured price of applying that decision to the kernel it was recorded
-  on; at that kernel's fork a compile takes the offered arm the row spells, which outranks any arm priced by
-  prediction, and the pieces the arm mints are decided from rows of their own.
+- **Route row** (*routing row*, in `pipeline/ARCHITECTURE.md`) — A measured golden row that spells a kernel-set
+  decision — a `PLACE` key, or a `REDUCE` value carrying a cross-CTA `g<n>` half. Its latency is the measured price of
+  applying that decision to the kernel it was recorded on; at that kernel's fork a compile takes the offered arm the
+  row spells, which outranks any arm priced by prediction, and the pieces the arm mints are decided from rows of
+  their own. The tuning database holds no such row: a decision it stores is priced from its pieces (see *Routing
+  table*).
+- **Routing table** — The tune database table that links a parent kernel and one decision taken on it to the kernels
+  the decision minted, one row per piece. It says which pieces a route leads to, and the decision's price on a card
+  is the sum of the pieces' fastest measurements there — every piece measured, or the decision is unpriced.
 - **Strict evidence** — A compile mode (`--strict-evidence`, `EMMY_STRICT_EVIDENCE`) in which a fork no measured row
   decides is an error naming the kernel, instead of a prediction the prior makes.
 - **Reservoir** — The bounded sample of past measurements kept inside the online prior's checkpoint file. It is the
   data that model trains on, and the measurements in it that were taken at deployable settings are also read directly
   when compiling.
-- **Measurement freeze** — A fixed snapshot of collected measurements: a directory of per-GPU files, carrying a
-  checksum and a record of which vocabulary version its rows are written in. The tuning database and the reservoir
-  are local to one machine and are rewritten as tuning continues, so a number computed over either cannot be
-  checked by anyone else. A freeze is identical wherever it is read, which is what makes two models' scores a fair
-  comparison and a reported score something a reader can reproduce. One is kept with the repository and is what the
-  prior is evaluated against by default.
+- **Dataset DB** — A database with the tuning database's tables in a file of its own (`EMMY_DATASET_DB`), filled by
+  `emmy dataset import` from measurement freezes and tuning databases. The measurement-data readers (`emmy eval
+  prior --dataset db`) read it; no compile does, so what is imported into it can never change a deploy.
+- **Measurement freeze** — A fixed snapshot of collected measurements: a directory of per-GPU files, plus the
+  definitions of the kernels they measure, carrying a checksum and a record of which vocabulary version its rows are
+  written in. The tuning database and the reservoir are local to one machine and are rewritten as tuning continues,
+  so a number computed over either cannot be checked by anyone else. A freeze is identical wherever it is read, which
+  is what makes two models' scores a fair comparison and a reported score something a reader can reproduce. When one
+  is kept with the repository it is what `emmy dataset import` loads into the dataset DB by default; none is at the
+  moment.
 - **Deploy evidence hierarchy** — The fixed order in which an ordinary compile answers a tuning choice: measured
   evidence first — the reservoir, then the tune database's rows and the golden rows in scope, the fastest compatible
   row winning — then the prior's prediction, and last the rule's own first option. A structural fork follows the

@@ -9,9 +9,9 @@ The two groupings are deliberately distinct and do **not** collapse:
   It is deliberately NOT a comparison key: it carries no card and no ``H_opt``, so rows
   measured on different hardware or under different nvcc settings land in one group.
   Anything ranking measured latencies wants ``data/group.group_measured`` instead.
-- :meth:`group_by_kernel_name` keys on the kernel C identifier (parsed from
-  ``cuda_op.pretty``) — which *merges* shapes of the same kernel, by design, so the
-  per-knob regret analysis measures relative knob impact across shapes.
+- :meth:`group_by_kernel_name` keys on the kernel C identifier (the ``kernel`` row's
+  name) — which *merges* shapes of the same kernel, by design, so the per-knob regret
+  analysis measures relative knob impact across shapes.
 """
 
 from __future__ import annotations
@@ -44,15 +44,18 @@ class Dataset:
         """Every measured ``ok`` variant in a DB instance's ``perf`` rows, opened
         read-only so a concurrent ``tune`` writer isn't blocked. ``backend=None``
         spans every backend (matching the legacy ``eval knobs`` query); ``kernel``
-        filters on the parsed C identifier. ``status`` selects the row status
+        filters on the kernel row's C identifier. ``status`` selects the row status
         (``bench_fail`` rows carry the watchdog-timeout sentinel latency, so the
         default ``min_latency`` admits them)."""
         from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
 
         db = SearchDB.open_readonly(path)
         try:
+            names = db.kernel_names()
             samples = [
-                Sample.from_perf_sample(ps) for ps in db.iter_perf_samples(backend=backend, status=status, min_latency_us=min_latency)
+                Sample.from_perf_row(row, names.get(row.kernel))
+                for row in db.iter_perf_rows(backend=backend)
+                if row.status == status and row.stats.median > min_latency
             ]
         finally:
             db.close()
@@ -78,8 +81,8 @@ class Dataset:
         return dict(g)
 
     def group_by_kernel_name(self, *, min_variants: int = 1, kernel: str | None = None) -> dict[str, list[Sample]]:
-        """Group by kernel C identifier (``cuda_op.pretty``), dropping samples with
-        no identity (golden / prior rows) and groups below ``min_variants``."""
+        """Group by kernel C identifier (the ``kernel`` row's name), dropping samples with
+        no name (golden / prior rows) and groups below ``min_variants``."""
         g: dict[str, list[Sample]] = defaultdict(list)
         for s in self.samples:
             if s.name is None or (kernel and kernel not in s.name):

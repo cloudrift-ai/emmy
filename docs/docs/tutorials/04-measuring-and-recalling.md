@@ -33,22 +33,23 @@ because they have different writers, different readers and different lifetimes.
 | --- | --- | --- | --- |
 | **Golden configurations** | model files under `recipes/<model>/golden/`, one per exact GPU; model-agnostic files under compiler search | promoted from measured comparisons | an ordinary compile, first of all; also the training data for the offline prior |
 | **Reservoir** | inside the online prior's checkpoint, `~/.cache/emmy/online.json` | `emmy tune`, every training row | the online prior's own training; and an ordinary compile, for the rows measured at deployable settings |
-| **Measurements table** | the tuning database, `~/.cache/emmy/autotune.db` | `emmy tune`, one row per benchmarked kernel | an ordinary compile, after the two above; and as a cache, so a configuration already measured is never re-run |
-| **Search-tree table** | the same database | `emmy tune`, one row per point in its search; also `emmy run --bench` for hand-forced measurements | the `emmy eval` diagnostics only — **never** consulted when compiling |
+| **Measurements table** | the tuning database, `~/.cache/emmy/autotune.db` | `emmy tune`, one row per benchmarked kernel; also `emmy run --bench` for hand-forced measurements | an ordinary compile, after the two above; and as a cache, so a configuration already measured is never re-run |
+| **Dataset database** | `~/.cache/emmy/dataset.db`, the same tables in a file of their own | `emmy dataset import`, from measurement freezes and from tuning databases | the `emmy eval` measured view only — **never** consulted when compiling |
 
-The last row surprises people. The search-tree table is the richest data Emmy has — it records not just the winners
-but every position the search visited, including the failures — and it is deliberately not consulted when deciding
-what to deploy. It exists to answer questions about the search itself, which is what the [last
-page](./09-storage-checks-and-limits.md) is about.
+The last row surprises people. The dataset database holds the same kind of rows as the tuning database — every
+benchmarked configuration, failures included — but it is filled from a pinned snapshot rather than from this
+machine's tuning, and it is deliberately not consulted when deciding what to deploy. It exists to answer questions
+about the search itself, which is what the [last page](./09-storage-checks-and-limits.md) is about.
 
 ```
 WRITERS                                     STORES                                READERS
 
 emmy tune ─┬─ each benchmark ─────────────▶ measurements table ────────────────▶ ordinary compile
-           ├─ each training row ──────────▶ reservoir  ────────────────────────▶ ordinary compile, online prior
-           └─ each search position ───────▶ search-tree table ─────────────────▶ emmy eval only
+           └─ each training row ──────────▶ reservoir  ────────────────────────▶ ordinary compile, online prior
 
-emmy run --bench, hand-forced rows ───────▶ search-tree table
+emmy run --bench, hand-forced rows ───────▶ measurements table
+
+emmy dataset import, snapshots/tune DBs ──▶ dataset database ──────────────────▶ emmy eval only
 
 recorded by hand from those rows ─────────▶ golden configuration files ────────▶ ordinary compile
                                                         └── emmy fit ─────────▶ offline prior weights ──▶ ordinary compile

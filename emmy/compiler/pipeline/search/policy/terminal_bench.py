@@ -7,7 +7,6 @@ persists, or reads a policy attribute.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 import statistics
@@ -15,10 +14,9 @@ import statistics
 from emmy.compiler.backend.cuda.program import compile_budget_overrun
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.cuda.ir import CudaOp
-from emmy.compiler.ir.kernel.ir import KernelOp
-from emmy.compiler.ir.loop.ir import LoopOp
-from emmy.compiler.pipeline.search.db import PerfStats
-from emmy.compiler.structural import digest
+from emmy.compiler.loop_wire import kernel_bindings, kernel_tile, kernel_wire
+from emmy.compiler.pipeline.passes.identity import kernel_stamps
+from emmy.compiler.pipeline.search.db import KernelRow, PerfStats
 
 # The engine logger keeps the existing ``[tune]`` log channel and verbosity toggles.
 logger = logging.getLogger("emmy.compiler.pipeline")
@@ -26,7 +24,7 @@ logger = logging.getLogger("emmy.compiler.pipeline")
 
 class TerminalBench:
     """Shared machinery for benching one terminal candidate's ``CudaOp``s and
-    persisting per-kernel ``perf`` / inventory / lowering rows.
+    persisting per-kernel ``perf`` / ``kernel`` rows.
 
     :func:`bench_terminal_async` drives it: the no-cuda / cache-hit / stub
     short-circuits (:meth:`prelude`) and every DB write (:meth:`finalize_result` /
@@ -54,11 +52,6 @@ class TerminalBench:
         #: fork made it several, they hold DIFFERENT rows and there is no single row to attribute
         #: the total to. Each kernel carries its own decisions and earns its own sample.
         self.per_kernel: list[tuple[dict, float, str]] = []
-        #: The kernel set's own identity — the digest of its kernels' variant keys — where a
-        #: multi-kernel terminal's verdict is filed when no single kernel can be blamed for it
-        #: (:func:`persist_bench_failure`). ``None`` for a one-kernel terminal, whose verdict is its kernel's.
-        keys = [n.op.identity_key(with_io=True, with_knobs=True) for n in self.cuda_nodes]
-        self.set_key = digest("kernel-set", *sorted(keys)) if len(keys) > 1 and None not in keys else None
 
     def _note(self, op, stats, status: str) -> None:
         self.per_kernel.append((dict(getattr(op, "knobs", None) or {}), float(stats.median), status))
@@ -69,8 +62,11 @@ class TerminalBench:
         return point_stats(us * len(self.cuda_nodes)), status
 
     def _cached_row(self, node):
-        key = node.op.identity_key(with_io=True, with_knobs=True)
-        return self.db.lookup_perf(self.ctx, key, backend=self.backend_name) if key is not None else None
+        key = kernel_key(node.op)
+        if key is None:
+            return None
+        _tile, identity, bindings = key
+        return self.db.lookup_perf(self.ctx, identity, bindings=bindings, knobs=node.op.knobs or {}, backend=self.backend_name)
 
     @staticmethod
     def _stats_from_launch(lt):
@@ -121,15 +117,7 @@ class TerminalBench:
         # row of their own (the all-or-nothing rule below used to re-bench a hang on every fresh
         # session because the innocent kernels had none). An ``ok`` replay still needs every
         # kernel's row: ``backend.benchmark`` runs the whole graph, so a partial cache cannot
-        # stand in for the Σ. A verdict filed against the kernel set as a whole (an unblamed wall
-        # kill, :meth:`finalize_exc`) is looked up first: it has no kernel behind it.
-        if self.set_key is not None:
-            row = self.db.lookup_perf(self.ctx, self.set_key, backend=self.backend_name)
-            if row is not None:
-                logger.info(
-                    "[tune] cache hit: this %d-kernel set recorded %s as a whole — skipping bench", len(self.cuda_nodes), row.status
-                )
-                return "done", self._fail_verdict(row.stats.median, row.status)
+        # stand in for the Σ.
         rows = [(node, self._cached_row(node)) for node in self.cuda_nodes]
         failed = [(node, row) for node, row in rows if row is not None and row.status != "ok"]
         if failed:
@@ -143,17 +131,16 @@ class TerminalBench:
             for node, row in rows:
                 agg = self._accumulate(agg, row.stats)
                 self._note(node.op, row.stats, row.status)
-                logger.info("[tune]   %s @ %.2f us  (%s, cached)", row.op_key[:12], row.stats.median, row.status)
+                logger.info("[tune]   %s @ %.2f us  (%s, cached)", row.kernel[:12], row.stats.median, row.status)
             return "done", (agg or point_stats(0.0), "ok")
 
         if self.backend is None:
             # No real measurement → do NOT persist. Writing the 1.0us stub
-            # to a shared DB used to clobber tuned ``best_median_us`` values
-            # (record_lowering / record_perf keep the minimum), so any plain
-            # ``emmy run`` (which routes through ``Pipeline.run`` without
-            # a backend) was overwriting real autotune rows with 1.0us stubs.
-            # Tests that need lowering edges in stub mode should pass an
-            # explicit stub backend.
+            # to a shared DB used to clobber tuned rows (record_perf keeps the
+            # minimum), so any plain ``emmy run`` (which routes through
+            # ``Pipeline.run`` without a backend) was overwriting real autotune
+            # rows with 1.0us stubs. Tests that need rows in stub mode should
+            # pass an explicit stub backend.
             agg = None
             for node in self.cuda_nodes:
                 agg = self._accumulate(agg, point_stats(1.0))
@@ -187,12 +174,6 @@ class TerminalBench:
         s = point_stats(fail_us)
         for node in blamed:
             self._note(node.op, s, "bench_fail")
-        if not blamed and self.set_key is not None:
-            # The row carries no knobs: nothing about any kernel is claimed, so the greedy's
-            # disqualification index (which joins on ``S_*`` signatures) and the dataset (which
-            # joins on ``cuda_op``) never see it — only this cache lookup does.
-            error = f"{type(exc).__name__}: {exc}"
-            self.db.record_perf(self.ctx, self.set_key, backend=self.backend_name, status="bench_fail", stats=s, error=error)
         return self._fail_verdict(fail_us)
 
     def finalize_result(self, result):
@@ -227,8 +208,8 @@ class TerminalBench:
 
 
 async def bench_terminal_async(cand, *, backend, db):
-    """Bench every ``CudaOp`` in ``cand.graph``, persist per-kernel ``perf`` / inventory / lowering
-    rows, and return ``(stats, status, measured, per_kernel)``: ``stats`` is the per-kernel
+    """Bench every ``CudaOp`` in ``cand.graph``, persist per-kernel ``perf`` / ``kernel`` rows, and
+    return ``(stats, status, measured, per_kernel)``: ``stats`` is the per-kernel
     ``PerfStats`` summed across the graph (the total terminal latency), ``measured`` whether a live
     backend measurement was required, and ``per_kernel`` the ``(knobs, median_us, status)`` of each
     kernel — the terminal's Σ decomposed into the rows that earned it. The
@@ -265,84 +246,52 @@ def stats_from_launch(lt) -> PerfStats:
     return point_stats(lt.time_ms * 1000.0)
 
 
-def record_op_inventory(db, op, key: str) -> None:
-    """Upsert one op's inventory row (``cuda_op`` / ``kernel_op`` / ``loop_op``) by its variant key."""
-    if isinstance(op, CudaOp):
-        db.record_cuda_op(
-            key,
-            kernel_source=op.kernel_source,
-            arg_order=list(op.arg_order),
-            grid=list(op.grid),
-            block=list(op.block),
-            smem_bytes=op.smem_bytes,
-            pretty=op.kernel_source,
-        )
-    elif isinstance(op, KernelOp):
-        db.record_kernel_op(key, _body_json(op, "kernel"), op.pretty_body())
-    elif isinstance(op, LoopOp):
-        db.record_loop_op(key, _body_json(op, "loop"), op.pretty_body())
+def kernel_key(cuda_op) -> tuple | None:
+    """The kernel half of a measured ``cuda_op``'s ``perf`` key: ``(tile, exact identity, bindings)``
+    of the tile kernel it was rendered from — the kernel row's identity and the sizes the bench
+    bound its symbolic dims to (its knobs are the other half). ``None`` for a kernel no tile stands
+    behind, which is no kernel the tune DB can name."""
+    tile = kernel_tile(cuda_op)
+    identity = tile.identity_key(structural=False, with_io=True) if tile is not None else None
+    return None if identity is None else (tile, identity, kernel_bindings(tile))
 
 
-def _body_json(op, dialect: str) -> str:
-    return json.dumps(
-        {
-            "dialect": dialect,
-            "name": getattr(op, "name", None) or getattr(op, "kernel_name", None) or "?",
-            "body_repr": repr(op.body),
-        },
-        default=str,
+def kernel_row(tile, name: str) -> KernelRow:
+    """The ``kernel`` row of a tile kernel: both identities, its wire, the C name it was rendered
+    under, and its ``S_*`` stamps — the ones the identity strategy wrote onto it at the fusion
+    boundary, which every reader joins evidence on (the deploy's fork signature, the golden replay's
+    kernel signature). They are features of the fused loop body the kernel was lifted from, not of the
+    stored wire: a twisted kernel's derived body spells its reduction differently. A tile nothing
+    stamped (a test's lifted target) gets the features of its wire instead (:func:`kernel_stamps`)."""
+    wire = kernel_wire(tile)
+    stamped = {str(k): float(v) for k, v in (tile.knobs or {}).items() if str(k).startswith("S_")}
+    return KernelRow(
+        exact_identity=tile.identity_key(structural=False, with_io=True),
+        structural_identity=tile.identity_key(with_io=True),
+        loop_ir=wire,
+        name=name,
+        stamps=stamped or kernel_stamps(wire),
     )
 
 
 def persist_kernel_perf(
     db, ctx, backend_name: str, cuda_op, *, stats, status: str, captured: bool = False, error: str | None = None
 ) -> bool:
-    """Persist one measured kernel as deploy evidence: its ``perf`` row under ``ctx``'s card and regime
-    (keep-best policy, see :meth:`SearchDB.record_perf`), the inventory rows of every op on its
-    source chain, and the ``lowering`` hops between them. The ONE writer for a kernel
-    measurement — the tuner's terminal bench and ``run --bench``'s pinned rows both come here, so
-    a replayed golden and a searched candidate are indistinguishable to the evidence pick.
-    Returns whether a row was written (a kernel with no variant key persists nothing)."""
-    cuda_key = cuda_op.identity_key(with_io=True, with_knobs=True)
-    if cuda_key is None:
+    """Persist one measured kernel as deploy evidence: its ``kernel`` row (the definition the
+    measurement is of) and its ``perf`` row under ``ctx``'s card and regime (keep-best policy, see
+    :meth:`SearchDB.record_perf`). The ONE writer for a kernel measurement — the tuner's terminal
+    bench and ``run --bench``'s pinned rows both come here, so a replayed golden and a searched
+    candidate are indistinguishable to the evidence pick. Returns whether a row was written (a
+    kernel no tile stands behind persists nothing)."""
+    key = kernel_key(cuda_op)
+    if key is None:
         return False
-    chain = [op for op in cuda_op.source_chain() if op.dialect is not None]
-    keyed_chain = [(op, cuda_key if op is cuda_op else op.identity_key(with_io=True, with_knobs=True)) for op in chain]
-    for op, key in keyed_chain:
-        if key is not None:
-            record_op_inventory(db, op, key)
-    for (parent_op, p_key), (child_op, c_key) in zip(keyed_chain[1:], keyed_chain[:-1], strict=False):
-        p_dialect = parent_op.dialect
-        c_dialect = child_op.dialect
-        if p_dialect is None or c_dialect is None:
-            continue
-        if p_dialect == c_dialect == "loop":
-            # loop→loop source hops are structural/decision hops, not
-            # lowering rewrites: the splice attribution stamped by the
-            # identity strategy (a decomposition's kernels → the
-            # pre-split op), the keep-vs-split rebind, name stamps.
-            # A ``lowering`` row holds ONE best child per parent, so
-            # recording a multi-kernel decomposition's hops would let
-            # ``best_per_op_time``'s chain walk resolve the pre-split
-            # op to a single fragment kernel's median — half the work
-            # masquerading as the whole op. The decomposition's cost
-            # is a Σ, owned by the two-level tuner, never this table.
-            continue
-        if p_key is None or c_key is None:
-            continue
-        p_knobs = getattr(parent_op, "knobs", None) or {}
-        c_knobs = getattr(child_op, "knobs", None) or {}
-        knobs_delta = {k: v for k, v in c_knobs.items() if p_knobs.get(k) != v}
-        db.record_lowering(
-            p_key,
-            p_dialect,
-            c_key,
-            c_dialect,
-            knobs=knobs_delta,
-            measured_median_us=stats.median if status == "ok" else None,
-        )
+    tile, identity, bindings = key
+    db.record_kernel(kernel_row(tile, cuda_op.kernel_name))
     knobs = getattr(cuda_op, "knobs", None) or {}
-    db.record_perf(ctx, cuda_key, backend=backend_name, status=status, stats=stats, knobs=knobs, captured=captured, error=error)
+    db.record_perf(
+        ctx, identity, bindings=bindings, knobs=knobs, backend=backend_name, status=status, stats=stats, captured=captured, error=error
+    )
     return True
 
 
@@ -370,8 +319,8 @@ def persist_bench_failure(db, ctx, backend_name: str, cuda_nodes, exc, fail_us: 
     bench-worker startup timeout that is not a property of any kernel. So blame is recorded only
     where it is unambiguous: the kernel the watchdog named, or the single kernel of a one-kernel
     graph. Otherwise no kernel earns a row — the run failed, but which kernel failed is unknown,
-    and unknown is not the same as failed (the tuner files that verdict under the kernel set's
-    own key instead)."""
+    and unknown is not the same as failed. The DB holds measurements of kernels and nothing else,
+    so such a slice is spent for this session and benched again, at the run budget, by the next."""
     named = _NAMED_KERNEL.search(str(exc))
     if named is not None:
         blamed = [n for n in cuda_nodes if getattr(n.op, "kernel_name", "") == named.group(1)]

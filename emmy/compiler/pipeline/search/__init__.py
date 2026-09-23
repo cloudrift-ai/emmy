@@ -1,5 +1,5 @@
 """Autotune search infrastructure: candidates, search policies, the
-on-disk inventory + perf store, and the in-memory MCTS tree.
+on-disk kernel + perf store, and the in-memory MCTS tree.
 
 - :mod:`.candidate` — :class:`Candidate` / :class:`LazyCandidate` /
   :class:`Cursor` data classes.
@@ -7,8 +7,8 @@ on-disk inventory + perf store, and the in-memory MCTS tree.
   (``mcts``, PUCT — the exploration policy), and :func:`greedy_decide`
   (``greedy``, the deterministic ``Run.resolve`` pick for single-shot
   compiles — not a ``Search``).
-- :mod:`.db` — :class:`SearchDB` SQLite store (op inventory, lowering
-  edges, ``perf`` table).
+- :mod:`.db` — :class:`SearchDB` SQLite store (the kernels, the decisions that
+  minted them and their measurements).
 - :mod:`.policy.mcts` — :class:`TuningSearch` + the in-memory
   :class:`SearchTree` / :class:`SearchNode` (MCTS-only — no other policy
   reads or writes the tree).
