@@ -868,8 +868,15 @@ def realize(
         for sibling, _, channels in seam.siblings:
             read = taken.get(id(sibling), set(sibling.exposes))
             shared.update(child.exposes[channel] for position, channel in enumerate(channels) if sibling.exposes[position] in read)
-        wanted = tuple(name for name in child.exposes if name in shared)
-        slots = tuple(name in set(wanted) for name in child.exposes)
+        # ONE workspace per DISTINCT component, not one per position. A carrier seats a component
+        # once per reader, so a value two readers share is exposed at SEVERAL positions naming the
+        # one accumulator (flash's numerator, read straight and again through its normalizing
+        # wrapper). Fused lowering collapses those onto that one SSA value; a workspace keyed by
+        # position instead declares the accumulator's storage once per position and emits a
+        # redeclaration no compiler accepts. The first position owns the buffer and the rest read it.
+        owner = {name: position for position, name in reversed(list(enumerate(child.exposes))) if name in shared}
+        slots = tuple(owner.get(name) == position for position, name in enumerate(child.exposes))
+        wanted = tuple(name for position, name in enumerate(child.exposes) if slots[position])
         if front is not None:
             names = (front.name,)
             produced = front.producer
@@ -892,7 +899,8 @@ def realize(
         # workspace read declares the seam axes it indexes, exactly as any other gmem read does.
         # Positional over what the edge exposed, ``None`` where the reader took nothing. A
         # frontier's workspace is the one raw waypoint, which the block below spells instead.
-        held = {} if front is not None else dict(zip((position for position, keep in enumerate(slots) if keep), buffers, strict=True))
+        by_name = dict(zip(wanted, buffers, strict=True))
+        held = {} if front is not None else {position: by_name[name] for position, name in enumerate(child.exposes) if name in by_name}
         loads: tuple = tuple(
             Fold.slab(Load(name=_read_name(name, token), input=held[position], index=index)) if position in held else None
             for position, name in enumerate(child.exposes)
