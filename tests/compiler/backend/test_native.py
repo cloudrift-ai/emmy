@@ -97,3 +97,26 @@ async def test_pack_comparison_matches_lifetimes_and_closes_workers(tmp_path, mo
     assert [w.loads for w in workers] == [2, 3] * 4
     assert len(result["reloads"]) == 4
     assert all(w.runs == 3 and w.closes >= 1 for w in workers)
+
+
+async def test_supervisor_does_not_add_compiler_settings_to_native_requests():
+    worker = StubWorker(
+        "import json,sys; n=int.from_bytes(sys.stdin.buffer.read(8),'little'); "
+        "request=json.loads(sys.stdin.buffer.read(n)); assert request['command']=={'op':'release'}; "
+        "body=json.dumps({'version':1,'result':{'released':True}}).encode(); "
+        "sys.stdout.buffer.write(len(body).to_bytes(8,'little')+body); sys.stdout.flush()"
+    )
+    try:
+        assert (await worker.run_job({"op": "release"}, wall_timeout_s=5))["released"]
+    finally:
+        await worker.aclose()
+
+
+def test_python_pack_keeps_compiler_settings_outside_the_command():
+    import pickle
+
+    from emmy.compiler.backend.native import PythonPackWorker
+
+    request = pickle.loads(PythonPackWorker._encode({"op": "release"}))
+    assert request["pack_command"] == {"op": "release"}
+    assert "fast_math" in request

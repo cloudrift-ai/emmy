@@ -51,8 +51,8 @@ _STATIC_SMEM_CAP = 48 * 1024
 def _ensure_dynamic_smem_attr(kernel: cp.RawKernel, smem_bytes: int) -> None:
     """Opt this kernel into the device's max dynamic-smem allowance.
 
-    Required when ``smem_bytes`` exceeds the 48 KB static cap. cupy's
-    ``RawKernel.max_dynamic_shared_size_bytes`` setter calls
+    Required when total static plus dynamic storage exceeds 48 KB; ``smem_bytes``
+    is the dynamic request. cupy's ``RawKernel.max_dynamic_shared_size_bytes`` setter calls
     ``cuFuncSetAttribute(MaxDynamicSharedMemorySize)``; the driver
     clamps to the device's per-block dynamic max (e.g. ~99 KB on
     sm_120). Already-set kernels are skipped.
@@ -152,12 +152,20 @@ def _load_plan(plan: ExecutionPlan, *, deadline: float | None = None, cubin_dir:
                 f"compile stage exceeded its budget after {index} of {len(plan.kernels)} kernel(s) "
                 f"({name}) — nothing measured; raise {config.BENCH_COMPILE_TIMEOUT_S} to compile it"
             )
+    launches = []
+    for launch in plan.launches:
+        kernel = kernels[launch.kernel_name]
+        # The plan records total shared storage; the cubin already reserves its static part.
+        dynamic = max(0, launch.smem_bytes - kernel.shared_size_bytes)
+        if launch.smem_bytes > _STATIC_SMEM_CAP and dynamic:
+            _ensure_dynamic_smem_attr(kernel, dynamic)
+        launches.append(replace(launch, smem_bytes=dynamic))
     return _Compiled(
         bufs=list(plan.buffers),
         buf_by_name={b.name: b for b in plan.buffers},
         constants=dict(plan.constants),
         kernels=kernels,
-        launches=list(plan.launches),
+        launches=launches,
         outputs=list(plan.outputs),
         symbolic_bindings=dict(plan.symbolic_bindings),
         symbolic_hints=dict(plan.symbolic_hints),
@@ -463,16 +471,7 @@ def _launch(
         args = (*args, *(sym_values[name] for name in launch.runtime_args))
     grid = tuple(resolve_dim(spec, sym_values) for spec in launch.grid)
     block = tuple(resolve_dim(spec, sym_values) for spec in launch.block)
-    # Kernels whose Smem footprint exceeds the 48 KB static cap declare
-    # an ``extern __shared__`` pool; the launch supplies the byte size
-    # via ``shared_mem=`` and (for footprints above 48 KB) opts into the
-    # device's larger dynamic-smem allowance via ``cudaFuncSetAttribute``.
-    smem_bytes = launch.smem_bytes
-    if smem_bytes > _STATIC_SMEM_CAP:
-        _ensure_dynamic_smem_attr(kernel, smem_bytes)
-        kernel(grid, block, args, shared_mem=smem_bytes)
-    else:
-        kernel(grid, block, args, shared_mem=0)
+    kernel(grid, block, args, shared_mem=launch.smem_bytes)
 
 
 def _collapse_inert_dims(arr_shape: tuple[int, ...], box_extents: tuple[int, ...]) -> tuple[int, ...]:
@@ -1636,7 +1635,9 @@ class _AsyncBenchWorker:
 
     @staticmethod
     def _encode(request: dict) -> bytes:
-        return pickle.dumps(request, protocol=pickle.HIGHEST_PROTOCOL)
+        from emmy.compiler.pipeline.search.space import FAST_MATH, precision_pin  # noqa: PLC0415
+
+        return pickle.dumps({**request, "fast_math": precision_pin(FAST_MATH)}, protocol=pickle.HIGHEST_PROTOCOL)
 
     @staticmethod
     def _decode(body: bytes) -> dict:
@@ -1765,9 +1766,6 @@ class _AsyncBenchWorker:
         return self._stderr_tail
 
     async def run_job(self, request_obj: dict, *, wall_timeout_s: float) -> dict:
-        from emmy.compiler.pipeline.search.space import FAST_MATH, precision_pin  # noqa: PLC0415
-
-        request_obj = {**request_obj, "fast_math": precision_pin(FAST_MATH)}
         try:
             return await self._run_job(request_obj, wall_timeout_s=wall_timeout_s)
         except BenchWorkerJobError:

@@ -8,10 +8,46 @@ use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 use std::path::Path;
 
-const GENERATION_FORMAT: u32 = 1;
+const GENERATION_FORMAT: u32 = 2;
+const DEFAULT_TEMPERATURE: f64 = 0.0;
+const DEFAULT_TOP_P: f64 = 1.0;
+const DEFAULT_SEED: u64 = 0;
 const TOKEN_BYTES: usize = size_of::<i64>();
 const MAX_CONTEXT: usize = 4096;
 const PROGRAM: &str = "decode";
+
+/// Request-local sampling controls. Temperature zero selects greedy decoding.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Sampling {
+    pub temperature: f64,
+    pub top_p: f64,
+    pub seed: u64,
+}
+
+impl Default for Sampling {
+    fn default() -> Self {
+        Self {
+            temperature: DEFAULT_TEMPERATURE,
+            top_p: DEFAULT_TOP_P,
+            seed: DEFAULT_SEED,
+        }
+    }
+}
+
+impl Sampling {
+    fn validate(&self) -> Result<()> {
+        ensure!(
+            self.temperature.is_finite() && self.temperature >= 0.0,
+            "temperature must be finite and nonnegative"
+        );
+        ensure!(
+            self.top_p.is_finite() && self.top_p > 0.0 && self.top_p <= 1.0,
+            "top_p must be in (0, 1]"
+        );
+        Ok(())
+    }
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -80,6 +116,8 @@ impl Generator {
             ("prompt", "i64", "input", vec![config.context_length]),
             ("prompt_length", "i64", "input", vec![1]),
             ("position", "i64", "input", vec![1]),
+            ("sampling", "f64", "input", vec![2]),
+            ("seed", "u64", "input", vec![1]),
             ("next_token", "i64", "output", vec![1]),
             ("logits", "f16", "output", vec![1, config.vocab_size]),
         ] {
@@ -101,7 +139,7 @@ impl Generator {
             );
         }
         ensure!(
-            artifact.plan.inputs == ["prompt", "prompt_length", "position"],
+            artifact.plan.inputs == ["prompt", "prompt_length", "position", "sampling", "seed"],
             "invalid generation inputs"
         );
         ensure!(
@@ -118,8 +156,19 @@ impl Generator {
     }
 
     /// Reset request state. Old cache entries are invisible until overwritten at their absolute positions.
-    pub fn start(&mut self, prompt: &[i64]) -> Result<()> {
+    pub fn start(&mut self, prompt: &[i64], sampling: Sampling) -> Result<()> {
         self.config.validate_prompt(prompt)?;
+        sampling.validate()?;
+        self.stopped = true;
+        self.executor.bind(
+            "sampling",
+            &[
+                sampling.temperature.to_le_bytes(),
+                sampling.top_p.to_le_bytes(),
+            ]
+            .concat(),
+        )?;
+        self.executor.bind("seed", &sampling.seed.to_le_bytes())?;
         let mut bytes = vec![0; self.config.context_length * TOKEN_BYTES];
         for (slot, token) in bytes
             .as_chunks_mut::<TOKEN_BYTES>()
@@ -177,13 +226,14 @@ impl Generator {
         prompt: &[i64],
         max_new_tokens: usize,
         capture: bool,
+        sampling: Sampling,
     ) -> Result<Vec<i64>> {
         self.config.validate_prompt(prompt)?;
         ensure!(
             max_new_tokens <= self.config.context_length - prompt.len(),
             "generation exceeds context capacity"
         );
-        self.start(prompt)?;
+        self.start(prompt, sampling)?;
         let mut tokens = Vec::new();
         while tokens.len() < max_new_tokens && !self.stopped {
             if let Some(token) = self.advance(capture)? {
@@ -198,6 +248,38 @@ impl Generator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn validate_sampling_controls() {
+        Sampling::default().validate().unwrap();
+        Sampling {
+            temperature: f64::MIN_POSITIVE,
+            top_p: f64::MIN_POSITIVE,
+            seed: u64::MAX,
+        }
+        .validate()
+        .unwrap();
+        for temperature in [-1.0, f64::NAN, f64::INFINITY] {
+            assert!(
+                Sampling {
+                    temperature,
+                    ..Sampling::default()
+                }
+                .validate()
+                .is_err()
+            );
+        }
+        for top_p in [0.0, -1.0, 1.01, f64::NAN, f64::INFINITY] {
+            assert!(
+                Sampling {
+                    top_p,
+                    ..Sampling::default()
+                }
+                .validate()
+                .is_err()
+            );
+        }
+    }
+
     #[test]
     fn reject_invalid_geometry_and_prompt_before_submission() {
         let mut config = Config {

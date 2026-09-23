@@ -54,7 +54,7 @@ pub struct Executor {
 
 impl Executor {
     /// Load a validated, trusted artifact; all buffers and functions belong to one stream.
-    pub fn load(device: &Device, artifact: Artifact) -> Result<Self> {
+    pub fn load(device: &Device, mut artifact: Artifact) -> Result<Self> {
         let context = &device.0;
         artifact.plan.validate(&artifact.bindings)?;
         let (major, minor) = context.compute_capability()?;
@@ -94,11 +94,22 @@ impl Executor {
                 .map(|l| l.smem)
                 .max()
                 .unwrap_or(0);
-            if smem > DEFAULT_SHARED_MEMORY_BYTES {
+            let static_smem = u32::try_from(function.shared_size_bytes()?)?;
+            let dynamic_smem = smem.saturating_sub(static_smem);
+            if smem > DEFAULT_SHARED_MEMORY_BYTES && dynamic_smem > 0 {
                 function.set_attribute(
                     sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-                    i32::try_from(smem)?,
+                    i32::try_from(dynamic_smem)?,
                 )?;
+            }
+            // The plan records total storage; static bytes are already reserved by the cubin.
+            for launch in artifact
+                .plan
+                .launches
+                .iter_mut()
+                .filter(|l| l.kernel == name)
+            {
+                launch.smem = launch.smem.saturating_sub(static_smem);
             }
             functions.insert(name, function);
         }

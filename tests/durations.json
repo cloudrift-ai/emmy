@@ -2053,7 +2053,7 @@
  "tests/serving/generation/test_gen_runner_gpu.py::test_gen_runner_stitch_matches_eager@cuda": 4.09,
  "tests/serving/generation/test_gen_runner_gpu.py::test_serving_split_computes_the_declared_w4a4_program@cuda": 5.4,
  "tests/serving/generation/test_generate_loop.py::test_slice_last_logits_wrapper_matches_full_logits": 5.5,
- "tests/serving/native/test_generation_gpu.py::test_cached_qwen3_logits_and_generation@cuda": 28.33,
+ "tests/serving/native/test_generation_gpu.py::test_cached_qwen3_logits_and_generation@cuda": 98.37,
  "tests/serving/native/test_generation_gpu.py::test_checkpoint_logits_and_completions[arithmetic]@cuda": 64.8,
  "tests/serving/native/test_generation_gpu.py::test_checkpoint_logits_and_completions[boundary]@cuda": 411.06,
  "tests/serving/native/test_generation_gpu.py::test_checkpoint_logits_and_completions[code]@cuda": 46.24,
@@ -2123,5 +2123,11 @@
  "tests/compiler/backend/test_dtype_cuda.py::test_separate_multiply_and_add_preserve_rounding[dtype1-0.0001220703125]@cuda": 0.83,
  "tests/compiler/cli/test_golden_file_replay.py::test_recorded_greedy_pick_is_picked_again_under_strict_evidence[NVIDIA GeForce RTX 4090-cap0]": 7.82,
  "tests/compiler/cli/test_golden_file_replay.py::test_recorded_greedy_pick_is_picked_again_under_strict_evidence[NVIDIA A100-SXM4-40GB-cap1]": 7.79,
- "tests/compiler/backend/test_torch_ref.py::test_indexmap_broadcast_then_rotary_slice_compiles@cuda": 2.26
+ "tests/compiler/backend/test_torch_ref.py::test_indexmap_broadcast_then_rotary_slice_compiles@cuda": 2.26,
+ "tests/serving/native/test_generation_gpu.py::test_gpu_sampling_matches_independent_nucleus_distribution@cuda": 33.66,
+ "tests/serving/native/test_generation_gpu.py::test_checkpoint_logits_and_completions[context_1024]@cuda": 70.82,
+ "tests/serving/native/test_generation_gpu.py::test_checkpoint_logits_and_completions[context_4096]@cuda": 304.27,
+ "tests/serving/native/test_generation_gpu.py::test_checkpoint_logits_and_completions[heldout_attention]@cuda": 4.17,
+ "tests/serving/native/test_generation_gpu.py::test_checkpoint_logits_and_completions[heldout_context_4096]@cuda": 307.39,
+ "tests/serving/native/test_generation_gpu.py::test_checkpoint_logits_and_completions[heldout_rotary_context]@cuda": 56.23
 }

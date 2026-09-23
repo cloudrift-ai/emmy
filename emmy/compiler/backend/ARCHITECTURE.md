@@ -149,6 +149,10 @@ namespace and its own `build_from_plan` equivalent.
 The declared output list is also the runtime return order; allocation planning may reorder buffers, but cannot reorder
 observable program results.
 
+`LaunchSpec.smem_bytes` records total per-block shared storage. At load time each executor subtracts the cubin's
+static allocation and passes the remainder as dynamic shared memory, including requests below 48 KiB. Larger total
+allocations opt into the device limit. This avoids omitting small dynamic buffers or reserving static storage twice.
+
 `plan_cache.py` is the process-local reuse seam for repeated compiled structure within one immutable compile session.
 It keys the exact graph wire form after loader spelling and ABI hints, erasing only external tensor addresses while
 preserving their alias pattern and `source_parts` order. The stored `ExecutionPlan` template carries binding slots;

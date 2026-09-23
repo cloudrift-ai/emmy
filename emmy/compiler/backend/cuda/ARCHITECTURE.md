@@ -84,7 +84,8 @@ codegen, no nvcc), and both paths share every line downstream. The projection:
   change the emitted-C listing size (the register-tile fragment grid is straight-line regardless).
   Unset → each site's built-in cap; `0` → keep every loop rolled.
 - Builds a static launch plan: per launch, a tuple of
-  `(kernel, arg_names, grid, block, smem_bytes, zero_outputs)`.
+  `(kernel, arg_names, grid, block, smem_bytes, zero_outputs)`. Loading resolves total shared storage against
+  the cubin's static allocation once; each launch then supplies only the dynamic remainder.
 
 `run_program(graph, input_data) → RunResult`:
 
@@ -372,3 +373,7 @@ timing boundaries. Existing autotune and model comparison behavior remains uncha
   under "Rule module convention".
 - The CUDA backend imports from `ir/` and `pipeline/` but never into
   them. A ROCm/SYCL/Metal backend replaces `program.py` only.
+
+The Python worker's protocol encoder adds the current compiler precision policy to its message. The shared process
+supervisor owns only deadlines and process lifetime; it does not inject compiler settings into native runtime
+commands. Prepared-pack reference commands keep that policy in the outer Python message.

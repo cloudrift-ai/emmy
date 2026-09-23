@@ -847,5 +847,8 @@ no Git operation.
 
 `generate --export-native DIR` prepares a standalone dense Qwen3 artifact; `generate --native-pack DIR` invokes the
 supervised Rust generation loop. These modes are mutually exclusive. The command layer owns argument parsing and
-tokenizer I/O; model preparation and binary worker transport live in `serving/native`. Sampling is currently greedy,
-and HTTP serving remains on the existing vLLM path.
+tokenizer I/O; model preparation and binary worker transport live in `serving/native`. Native execution accepts
+`--temperature`, `--top-p`, and `--seed`; temperature zero is greedy, and nonzero `--top-k` is rejected.
+`--timeout` controls the native worker operation deadline, including the complete sequential prefill/decode loop.
+HTTP serving remains on the existing vLLM path. Generation artifacts prepared before sampling support must be
+exported again.
