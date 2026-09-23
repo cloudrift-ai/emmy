@@ -13,8 +13,9 @@ Tables (the DDL is the reference):
   C name. A piece a cut or a split minted is a row like any other, so the same kernel reached from two
   parents has one definition.
 - ``kernel_feature`` — the kernel's ``S_*`` stamps, one per row: what the identity strategy writes onto a
-  kernel at birth, a function of its body only. The structural signature deploy evidence joins and
-  candidate pools group on is the digest of these rows, derived on read (``data.group.kernel_sig``).
+  kernel at the fusion boundary, a function of the fused loop body it was lifted from. The structural
+  signature deploy evidence joins and candidate pools group on is the digest of these rows, derived on
+  read (``data.group.kernel_sig``).
 - ``context`` — one row per backend, card and regime: the card's product name (``Context.hardware_id``),
   the context's target as the backend spells it (``sm_120`` on CUDA — the regime's, never a kernel's
   ``sm_120a``), the compiler's opt level and its residual flags (``''`` in the plain regime).

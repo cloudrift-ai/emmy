@@ -258,16 +258,20 @@ def kernel_key(cuda_op) -> tuple | None:
 
 def kernel_row(tile, name: str) -> KernelRow:
     """The ``kernel`` row of a tile kernel: both identities, both wires, the C name it was rendered
-    under, and the ``S_*`` stamps of its body (:func:`kernel_stamps` — what the identity strategy
-    stamped onto it, re-derived from the definition the row stores)."""
+    under, and its ``S_*`` stamps — the ones the identity strategy wrote onto it at the fusion
+    boundary, which every reader joins evidence on (the deploy's fork signature, the golden replay's
+    kernel signature). They are features of the fused loop body the kernel was lifted from, not of the
+    stored wire: a twisted kernel's derived body spells its reduction differently. A tile nothing
+    stamped (a test's lifted target) gets the features of its wire instead (:func:`kernel_stamps`)."""
     loop_ir, normalized = kernel_wire(tile)
+    stamped = {str(k): float(v) for k, v in (tile.knobs or {}).items() if str(k).startswith("S_")}
     return KernelRow(
         exact_identity=tile.identity_key(structural=False, with_io=True),
         structural_identity=tile.identity_key(with_io=True),
         loop_ir=loop_ir,
         normalized_loop_ir=normalized,
         name=name,
-        stamps=kernel_stamps(normalized),
+        stamps=stamped or kernel_stamps(normalized),
     )
 
 

@@ -131,9 +131,10 @@ def _identity_body(op) -> Body | None:
 
 
 def kernel_stamps(wire: dict) -> dict[str, float]:
-    """The ``S_*`` stamps of the kernel a ``loop_wire.kernel_wire`` wire defines: :func:`structure_features`
-    of its body, the dtype half read off the wire's own buffers. A function of the definition alone, so a
-    ``kernel`` row's stamps are what any later emmy re-derives from its wire."""
+    """The ``S_*`` features of the kernel a ``loop_wire.kernel_wire`` wire defines: :func:`structure_features`
+    of its body, the dtype half read off the wire's own buffers. What a ``kernel`` row stores for a tile
+    nothing stamped; a stamped tile's row carries the strategy's own stamps, which for a twisted kernel
+    are features of the fused body before the twist, not of the derived one the wire holds."""
     from emmy.compiler.loop_wire import loop_graph_from_wire  # noqa: PLC0415
 
     graph = loop_graph_from_wire(wire)

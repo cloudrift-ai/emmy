@@ -98,7 +98,6 @@ _TAMPERS = {
     "loop_ir normalizes to normalized_loop_ir": "UPDATE kernel SET loop_ir = (SELECT loop_ir FROM kernel WHERE kernel_name = 'k_piece') "
     "WHERE kernel_name = 'k_parent'",
     "normalized_loop_ir decodes to the stored identities": "UPDATE kernel SET structural_identity = 'moved' WHERE kernel_name = 'k_parent'",
-    "normalized_loop_ir stamps to kernel_feature": "UPDATE kernel_feature SET value = value + 1 WHERE name = 'S_loop_depth'",
     "perf bindings name the kernel's symbolic dims": "UPDATE perf SET bindings = '{\"ghost\":4}'",
     "schedule and placement digests match their knob rows": "UPDATE placement SET digest = 'moved'",
     "every row names the rows it references": "DELETE FROM kernel WHERE kernel_name = 'k_piece'",
@@ -112,8 +111,8 @@ _TAMPERS = {
 
 def test_a_fresh_instance_has_no_drift(tmp_path):
     """Every definition the tuner stores re-derives under the code that stored it: the raw wire normalizes
-    to the stored one, the stored one decodes to both identities and stamps to the feature rows, the bindings
-    name the dims, and the tables agree with themselves."""
+    to the stored one, the stored one decodes to both identities, the bindings name the dims, and the
+    tables agree with themselves."""
     from emmy.compiler.pipeline.search.data.check import drift
 
     db, _parent, _piece = _instance(tmp_path / "tune.db")
@@ -125,9 +124,9 @@ def test_a_fresh_instance_has_no_drift(tmp_path):
 @pytest.mark.parametrize("check", list(_TAMPERS))
 def test_each_kind_of_drift_is_counted_by_its_own_check(check):
     """One tamper per check, each the shape a code change would leave behind: another kernel's raw wire,
-    an identity the digest no longer produces, a re-stamped feature, a binding of a dim the IR lost, a knob
-    row whose digest moved, a kernel row deleted from under its rows, a card the registry dropped, a
-    placement knob filed as a schedule knob. The check names it; the others stay quiet."""
+    an identity the digest no longer produces, a binding of a dim the IR lost, a knob row whose digest
+    moved, a kernel row deleted from under its rows, a card the registry dropped, a placement knob filed as
+    a schedule knob. The check names it; the others stay quiet."""
     from emmy.compiler.pipeline.search.data.check import drift
 
     db, _parent, _piece = _instance(None)

@@ -1221,8 +1221,9 @@ compilable kernels, the decisions that minted them, and measurements of them —
 
 - **`kernel`** — one row per kernel, keyed by its exact identity: the clustered deploy identity beside it, its Loop IR
   wire before and after normalization (`loop_wire.kernel_wire` — the one-node program of the tile kernel's
-  schedule-free body, which lifts back to the same exact identity) and its C name; **`kernel_feature`** holds its
-  `S_*` stamps, derived from the stored wire (`loop_wire.kernel_stamps`). The fused kernel of a slice and a piece a
+  schedule-free body, which decodes to the same exact identity) and its C name; **`kernel_feature`** holds its
+  `S_*` stamps — the identity strategy's, written at the fusion boundary onto the fused loop body, which every
+  evidence join keys on; a twisted kernel's stored body would stamp differently. The fused kernel of a slice and a piece a
   cut or a split minted are rows alike, so the same kernel reached from two parents has one definition — what a
   candidate pool enumerates from. A kernel wire is a KERNEL, not a program: the Loop passes must not run over it
   (they normalize a size-one axis away and mint another kernel).
@@ -1259,11 +1260,13 @@ re-creates EVERY table empty (dropping one would orphan the rows that reference 
 (re-tune, or `emmy dataset import --fresh`) — and a read-only open refuses the file. Foreign keys are enforced on
 every connection.
 
-**Drift checks** (`data/check.py`, `emmy dataset check`). Storing the wire before and after normalization, both
-identities and the stamps lets a later emmy re-derive each and count the rows that no longer agree: the raw wire
-normalizes to the stored one, the stored one decodes to both identities and stamps to the feature rows, a `perf` row's
-bindings name the kernel's symbolic dims, a schedule or placement digest matches its knob rows, every row names
-the rows it references, every context names a registry card, schedule knobs and placement knobs stay apart. Nothing is fixed: a failing row is re-tuned or re-imported.
+**Drift checks** (`data/check.py`, `emmy dataset check`). Storing the wire before and after normalization and both
+identities lets a later emmy re-derive each and count the rows that no longer agree: the raw wire normalizes to the
+stored one, the stored one decodes to both identities, a `perf` row's bindings name the kernel's symbolic dims, a
+schedule or placement digest matches its knob rows, every row names the rows it references, every context names a
+registry card, schedule knobs and placement knobs stay apart. The stamps are not re-derived — the fused body they
+were computed from is not stored — so a featurizer change is caught where a freeze is loaded, by its manifest's
+version. Nothing is fixed: a failing row is re-tuned or re-imported.
 
 **Measurement freeze** (`data/freeze.py`, written by `emmy dataset freeze`). The tune DB is a live store, so a model
 fit or evaluated straight from it is not reproducible. A *freeze* (v6) is a snapshot written into a directory, in

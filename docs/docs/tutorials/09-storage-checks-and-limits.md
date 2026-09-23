@@ -53,9 +53,9 @@ is a decision, not a measurement of one kernel.
 write, since every row in it can be measured again, and refused by a reader.
 
 **Drift is counted, not hidden.** `emmy dataset check` re-derives what an instance stores — the normalized program,
-both identities, the features, the sizes a row was measured at — and counts the rows that no longer agree with the
-current code, so a change to normalization, identity or featurization shows up as a number rather than as a model
-that quietly trains on rows that mean something else.
+both identities, the sizes a row was measured at — and counts the rows that no longer agree with the current code,
+so a change to normalization or identity shows up as a number rather than as a model that quietly trains on rows
+that mean something else.
 
 **A frozen snapshot makes a fit reproducible.** The tuning database is a live store — tuning runs keep writing into it
 — so a model fitted straight from it cannot be reproduced later. A freeze is a snapshot written as a directory of YAML
