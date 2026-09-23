@@ -565,8 +565,8 @@ width 16 where the old cooperative row ran 7.6 µs and 7.9 ms at width 4,096 whe
 kernel of this model. And the prior picks cooperative reduces everywhere: on the symbolic post twin's two residual
 pieces they cost 28 and 14 ms until a register split at the top reduce with the nested sites off
 (`REDUCE@map.1/inner=r2`) brought them to 189 and 177 µs and the twin's election to 3.5 ms per layer at the 512 hint,
-under the 4.8 ms of the old file. Every other repository golden except Qwen3.5-122B and two hardware files is stale
-the same way — #863 kept the old stored loops everywhere — and a new gate,
+under the 4.8 ms of the old file. Every other repository golden except Qwen3.5-122B, two hardware files and, since
+#869, the Gemma 4 RTX 5090 golden is stale the same way — #863 kept the old stored loops everywhere — and a new gate,
 `test_stored_targets_are_the_fresh_lowering`, decodes each golden's stored targets against a fresh lowering of its own
 programs, with those files as strict xfails until each is restamped on its card.
 
