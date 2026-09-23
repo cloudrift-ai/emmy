@@ -1269,6 +1269,6 @@
  "tests/compiler/realization/test_realization.py::test_realization[matmul/volta-f16acc-direct.yaml-built]@cuda": 5.4,
 "tests/compiler/passes/test_cut_forks.py::test_a_value_read_under_a_reduce_and_at_the_free_axis_is_one_seam": 12.0,
  "tests/compiler/passes/test_cut_forks.py::test_a_clustered_value_cut_once_computes_the_right_answer@cuda": 2.73,
- "tests/compiler/ir/test_kernel_wire.py::test_every_kernel_of_a_set_has_wires_that_re_lift_to_its_exact_identity[reduce/sinkhorn-nested-cut-derived-read-sm70.yaml]": 1.96,
- "tests/compiler/ir/test_kernel_wire.py::test_every_kernel_of_a_set_has_wires_that_re_lift_to_its_exact_identity[reduce/cross-cta-matmul-kernel.yaml]": 0.68
+ "tests/compiler/ir/test_kernel_wire.py::test_every_kernel_of_a_set_has_wires_that_decode_to_its_identities[reduce/sinkhorn-nested-cut-derived-read-sm70.yaml]": 1.96,
+ "tests/compiler/ir/test_kernel_wire.py::test_every_kernel_of_a_set_has_wires_that_decode_to_its_identities[reduce/cross-cta-matmul-kernel.yaml]": 0.68
 }

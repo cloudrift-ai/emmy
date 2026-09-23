@@ -69,7 +69,7 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, NamedTuple
 
 from emmy.compiler.graph import Graph
-from emmy.compiler.pipeline.fork import Fork, flatten_leaves, fork_signature, iter_leaves, leaf_for, leaf_knobs
+from emmy.compiler.pipeline.fork import Fork, flatten_leaves, fork_signature, iter_leaves, leaf_for, leaf_knobs, stamp_signature
 from emmy.compiler.pipeline.knob import schedule_pin_fingerprint
 
 logger = logging.getLogger(__name__)
@@ -517,7 +517,8 @@ def _db_measured_index_build(db, ctx) -> _Measured:
     A golden row spelling a placement or a cross-CTA split (:func:`_is_route_row`) is the measured
     price of applying that decision to the kernel it was recorded on, and lands in ``routes``: at
     that kernel's fork it names one offered arm (:func:`_route_candidates`); the pieces the arm mints
-    are brand-new kernels, decided by rows of their own signatures.
+    are brand-new kernels, decided by rows of their own signatures. A tune DB row is never one: the
+    DB refuses a placement knob in a measurement, so its rows go to ``ok`` unexamined.
 
     Best-effort: any failure returns an empty index so deploy falls back to the prior.
     """
@@ -529,7 +530,7 @@ def _db_measured_index_build(db, ctx) -> _Measured:
     failures: dict[frozenset, list[float]] = {}
     try:
         for row in db.iter_perf(ctx, backend="cuda") if db is not None else ():
-            sig = frozenset((k, str(v)) for k, v in row.knobs.items() if k.startswith("S_"))
+            sig = stamp_signature(row.knobs)
             if row.status != "ok":
                 failures.setdefault(sig, []).append(float(getattr(row.stats, "median", 0.0) or 0.0))
                 continue
@@ -537,7 +538,7 @@ def _db_measured_index_build(db, ctx) -> _Measured:
             if row.stats.median <= 0:
                 continue
             tun = {k: str(v) for k, v in row.knobs.items() if not k.startswith(("S_", "H_"))}
-            (routes if _is_route_row(tun) else index).setdefault(sig, []).append((tun, float(row.stats.median)))
+            index.setdefault(sig, []).append((tun, float(row.stats.median)))
         gpu_name = getattr(ctx, "gpu_name", None) or ""
         if gpu_name or scope_explicit():
             for sig, tun, us, _name in evidence_rows(gpu_name, tuple(ctx.compute_capability)):
@@ -685,7 +686,7 @@ def _strip_fork_stamps_index(source: dict[frozenset, list]) -> dict[frozenset, l
     return out
 
 
-def _route_candidates(fp: ForkPoint, index: _Measured, db=None) -> list[tuple[object, float]]:
+def _route_candidates(fp: ForkPoint, index: _Measured, db) -> list[tuple[object, float]]:
     """The measured arms at this kernel-set fork: one ``(option, µs)`` per measured row of
     the kernel's signature that spells an arm on the ballot
     (:func:`~emmy.compiler.pipeline.search.pins.spelled_arm`) — a schedule row the fused /
@@ -711,8 +712,7 @@ def _route_candidates(fp: ForkPoint, index: _Measured, db=None) -> list[tuple[ob
     measured = [
         entry for source in (index.ok, index.routes) for group in _sig_groups(_strip_fork_stamps_index(source), sig) for entry in group
     ]
-    kernel = root.identity_key(structural=False, with_io=True) if db is not None else None
-    if kernel is not None:
+    if db is not None and (kernel := root.identity_key(structural=False, with_io=True)) is not None:
         measured.extend(db.priced_arms(fp.ctx, kernel, bindings=kernel_bindings(root)))
     out: list[tuple[object, float]] = []
     for row, us in measured:

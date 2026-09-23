@@ -1,27 +1,22 @@
 """A measured kernel's Loop IR wires — the definition a ``kernel`` row stores, before and after
-normalization — re-lift to the kernel they came from.
+normalization — decode to the kernel they came from.
 
 The tune DB keys a kernel on its EXACT identity and stores :func:`kernel_wire`'s two wires beside it, so
 the same kernel reached from two parents (the fused kernel of a slice, a piece a cut or a split minted)
-has one definition and one candidate set. That only holds if lifting the normalized wire again yields
-the same exact identity, and if normalizing the raw wire again yields the stored one, for every kind of
-kernel the compiler mints — which is what the realization corpus lets this assert without a GPU: a fused
-kernel, the pieces of a placement cut, a cross-CTA split's pieces, a nested cut."""
+has one definition and one candidate set. That only holds if the decoded wire's loop op carries the same
+exact and clustered identities as the tile kernel — its body is what the identities digest, its buffers
+the io half — and if normalizing the raw wire again yields the stored one, for every kind of kernel the
+compiler mints — which is what the realization corpus lets this assert without a GPU: a fused kernel, the
+pieces of a placement cut, a cross-CTA split's pieces, a nested cut, an attention kernel whose stored body
+the tile lift does not accept back."""
 
 from __future__ import annotations
 
 import pytest
 
 from emmy.compiler.ir.cuda.ir import CudaOp
-from emmy.compiler.loop_wire import (
-    kernel_bindings,
-    kernel_from_wire,
-    kernel_tile,
-    kernel_wire,
-    loop_graph_from_wire,
-    loop_graph_to_wire,
-    symbolic_vars,
-)
+from emmy.compiler.ir.loop import LoopOp
+from emmy.compiler.loop_wire import kernel_bindings, kernel_tile, kernel_wire, loop_graph_from_wire, loop_graph_to_wire, symbolic_vars
 from emmy.compiler.pipeline.search.golden import _replay, kernel_identity, lead_of, siblings_of
 from tests.compiler.realization import helpers as corpus
 
@@ -30,11 +25,19 @@ CASES = (
     "fused/linear-add-place-cut-sm70.yaml",
     "reduce/cross-cta-matmul-kernel.yaml",
     "reduce/sinkhorn-nested-cut-derived-read-sm70.yaml",
+    "attention/sdpa-hd128-softmax-v-mma.yaml",
 )
 
 
+def _decoded(wire: dict) -> LoopOp:
+    """The wire's one loop op, bound to the wire's own buffers — what a ``kernel`` row defines."""
+    graph = loop_graph_from_wire(wire)
+    [node] = [node for node in graph.nodes.values() if isinstance(node.op, LoopOp)]
+    return node.op.with_io(graph, node)
+
+
 @pytest.mark.parametrize("case_path", CASES)
-def test_every_kernel_of_a_set_has_wires_that_re_lift_to_its_exact_identity(case_path):
+def test_every_kernel_of_a_set_has_wires_that_decode_to_its_identities(case_path):
     case = corpus.load_case(corpus.CASES_DIR / case_path)
     ctx = case.context()
     graph, taken = corpus.lowered(case, ctx)
@@ -44,16 +47,17 @@ def test_every_kernel_of_a_set_has_wires_that_re_lift_to_its_exact_identity(case
     for cuda in kernels:
         tile = kernel_tile(cuda)
         assert tile is not None, cuda.kernel_name
-        exact = tile.identity_key(structural=False, with_io=True)
+        exact, clustered = tile.identity_key(structural=False, with_io=True), tile.identity_key(with_io=True)
         assert exact is not None
         raw, normalized = kernel_wire(tile)
-        assert kernel_from_wire(normalized).identity_key(structural=False, with_io=True) == exact, cuda.kernel_name
+        op = _decoded(normalized)
+        assert (op.identity_key(structural=False, with_io=True), op.identity_key(with_io=True)) == (exact, clustered), cuda.kernel_name
         # Decoding normalizes: the raw wire re-normalized IS the stored one (drift check 1), and it
-        # lifts to the same kernel.
+        # defines the same kernel.
         assert loop_graph_to_wire(loop_graph_from_wire(raw)) == normalized, cuda.kernel_name
-        assert kernel_from_wire(raw).identity_key(structural=False, with_io=True) == exact, cuda.kernel_name
+        assert _decoded(raw).identity_key(structural=False, with_io=True) == exact, cuda.kernel_name
         assert symbolic_vars(normalized) == set(kernel_bindings(tile)), cuda.kernel_name
-        deploy.add(tile.identity_key(with_io=True))
+        deploy.add(clustered)
     # The clustered flavour read off the same tile is the deploy identity the golden side mints for
     # the same kernels when it replays the case (what a receipt names, what an import computes). The
     # replay may know more kernels — the arms it looked into and did not take.

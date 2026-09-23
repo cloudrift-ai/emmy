@@ -7,8 +7,8 @@ on-disk kernel + perf store, and the in-memory MCTS tree.
   (``mcts``, PUCT — the exploration policy), and :func:`greedy_decide`
   (``greedy``, the deterministic ``Run.resolve`` pick for single-shot
   compiles — not a ``Search``).
-- :mod:`.db` — :class:`SearchDB` SQLite store (the ``kernel``, ``kernel_set``
-  and ``perf`` tables).
+- :mod:`.db` — :class:`SearchDB` SQLite store (the kernels, the decisions that
+  minted them and their measurements).
 - :mod:`.policy.mcts` — :class:`TuningSearch` + the in-memory
   :class:`SearchTree` / :class:`SearchNode` (MCTS-only — no other policy
   reads or writes the tree).

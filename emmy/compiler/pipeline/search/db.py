@@ -650,21 +650,25 @@ class SearchDB:
 
         gpu, arch, opt, flags = self._regime(ctx)
         context = self._context_id(backend, gpu, arch, opt, flags, create=False)
+        pieces: dict[int, list[tuple[str, str]]] = {}
+        for pid, child, wire in self._conn.execute(
+            "SELECT r.placement, r.child, k.normalized_loop_ir FROM routing r JOIN kernel k ON k.exact_identity = r.child "
+            "WHERE r.parent = ? ORDER BY r.placement, r.position",
+            (kernel,),
+        ):
+            pieces.setdefault(pid, []).append((child, wire))
         out: list[tuple[dict, float]] = []
-        for row in self.iter_routing():
-            if row.parent != kernel:
-                continue
+        for pid, children in pieces.items():
             total: float | None = 0.0
-            for child in row.children:
-                [wire] = self._conn.execute("SELECT normalized_loop_ir FROM kernel WHERE exact_identity = ?", (child,)).fetchone()
-                projected = {v: bindings[v] for v in sorted(symbolic_vars(json.loads(wire))) if v in bindings}
+            for child, wire in children:
+                projected = {v: bindings[v] for v in symbolic_vars(json.loads(wire)) if v in bindings}
                 us = self._best_leaf(context, child, projected)
                 if us is None:
                     total = None
                     break
                 total += us
             if total is not None:
-                out.append((row.arm, total))
+                out.append((self._knobs_of("placement", pid), total))
         return out
 
     def best_per_op_time(self, ctx: Context, kernel: str, *, bindings: dict, backend: str = "cuda") -> float | None:
@@ -681,8 +685,8 @@ class SearchDB:
 
     def drift(self) -> dict[str, int]:
         """The table-level drift checks, each the count of rows that fail it: a schedule or placement row
-        whose digest is not its knob rows'; a routing child or perf row naming no kernel row (the foreign
-        keys, which a file written with them off can break); a context naming a card the GPU registry
+        whose digest is not its knob rows'; a row naming a row that is gone (the foreign keys, which a file
+        written with them off can break); a context naming a card the GPU registry
         lost; a schedule knob that is a placement knob, or a placement knob that is not. The checks that
         need the compiler are :func:`emmy.compiler.pipeline.search.data.check.drift`."""
         from emmy import gpu  # noqa: PLC0415
@@ -695,20 +699,20 @@ class SearchDB:
         apart += sum(not is_placement_knob(n, v) for n, v in self._conn.execute("SELECT name, value FROM placement_knob"))
         return {
             "schedule and placement digests match their knob rows": digests,
-            "every routing child and perf row names a kernel row": len(self._conn.execute("PRAGMA foreign_key_check").fetchall()),
+            "every row names the rows it references": len(self._conn.execute("PRAGMA foreign_key_check").fetchall()),
             "every context names a registry card": sum(
                 gpu.by_name(n) is None for [n] in self._conn.execute("SELECT gpu_name FROM context")
             ),
             "schedule knobs and placement knobs stay apart": apart,
         }
 
-    def kernel_stamps(self) -> dict[str, dict]:
-        """Every stored kernel's ``S_*`` stamps by exact identity — the signature its evidence joins on,
-        without decoding its wires."""
-        out: dict[str, dict] = {}
-        for kernel, name, value in self._conn.execute("SELECT kernel, name, value FROM kernel_feature"):
-            out.setdefault(kernel, {})[name] = value
-        return out
+    def decisions(self) -> list[tuple[dict, dict]]:
+        """Every stored kernel-set decision as ``(the parent's stamps, the arm)`` — what offers a composed cut
+        to a later compile of a kernel with the parent's signature, without decoding any wire."""
+        return [
+            (self._stamps(parent), self._knobs_of("placement", pid))
+            for parent, pid in self._conn.execute("SELECT DISTINCT parent, placement FROM routing ORDER BY parent, placement")
+        ]
 
     def _row_to_perf(self, row) -> PerfRow:
         """A row selected as :data:`_PERF_SEL`, its ``knobs`` reassembled from the kernel's stamps and the

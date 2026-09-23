@@ -14,7 +14,7 @@ import re
 import tempfile
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from functools import cached_property
 from numbers import Real
@@ -990,12 +990,23 @@ def _lifted_target(record: GoldenRecord):
     lift, then the twist rewrite, exactly as ``lowering/tile`` runs them. A placement key is
     spelled on that tree, so decoding it against the lift alone would name sites the fused
     single-pass carrier no longer has."""
-    from emmy.compiler.loop_wire import lift_kernel  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.lowering.tile._twist import rewrite_twisted  # noqa: PLC0415
 
     lowered, nodes = _target_kernel_nodes(record)
     if len(nodes) != 1:
         raise ValueError(f"{record.name}: target lowers to {len(nodes)} kernels — a row decorates exactly one")
-    return lift_kernel(lowered, nodes[0])
+    node = nodes[0]
+    node.op = node.op.with_io(lowered, node)
+    tile = lift_loop_op(node.op, name=node.id)
+    tile = replace(tile, op=rewrite_twisted(tile.op, tile.axes))
+    # A fork's root op is always matcher-refreshed (``_match_at`` runs ``with_io`` on every matched
+    # node before the rule that offers the fork), so the record side mirrors the io through that
+    # same call rather than a hand-rolled map: a multi-output kernel — an NVFP4 re-encode emits
+    # packed codes beside their block scales — is bound to every one of the node's output buffers,
+    # and the dtype half of the deploy identity (``identity_key(with_io=True)``) reads the same
+    # output fingerprint on both sides.
+    return tile.with_io(lowered, node)
 
 
 def unmatched_reason(row: Sequence[tuple[str, str]], candidates) -> str:

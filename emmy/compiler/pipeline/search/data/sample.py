@@ -133,7 +133,7 @@ class Sample:
     def from_perf_row(cls, row, name: str | None) -> Sample:
         """A DB ``perf`` row (:class:`db.PerfRow`) as a ``Sample``: the recorded knob dict split by
         prefix, and ``name`` the C identifier of its kernel row (for per-knob regret grouping;
-        ``None`` for a row no kernel row backs — an imported one, a kernel-set verdict)."""
+        ``None`` when the caller has none)."""
         tunable, ctx, s = _split_by_prefix(row.knobs)
         return cls(knobs=tunable, latency_us=row.stats.median, name=name, context=ctx, source="db", s_full=s, error=row.error)
 

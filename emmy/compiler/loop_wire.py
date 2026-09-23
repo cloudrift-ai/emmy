@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Iterable
-from dataclasses import fields, is_dataclass, replace
+from dataclasses import fields, is_dataclass
 from enum import Enum
 from typing import Any
 
@@ -296,44 +296,6 @@ def kernel_wire(tile) -> tuple[dict, dict]:
     raw = copy.deepcopy(normalized)
     next(node for node in raw["nodes"] if node["op"] == "loop")["attrs"]["body"] = _value_to_wire(tile.loop_body)
     return raw, normalized
-
-
-def lift_kernel(graph: Graph, node):
-    """The tile kernel of ``node``, a ``LoopOp`` of ``graph``, lifted the way ``lowering/tile`` lifts it: the
-    matcher's io refresh, the lift, the twist rewrite, bound to the node's buffers. The one lift a golden
-    record's target and a stored kernel wire go through, so both read the identities the tuner wrote."""
-    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op  # noqa: PLC0415
-    from emmy.compiler.pipeline.passes.lowering.tile._twist import rewrite_twisted  # noqa: PLC0415
-
-    node.op = node.op.with_io(graph, node)
-    tile = lift_loop_op(node.op, name=node.id)
-    tile = replace(tile, op=rewrite_twisted(tile.op, tile.axes))
-    # A fork's root op is always matcher-refreshed (``_match_at`` runs ``with_io`` on every matched node
-    # before the rule that offers the fork), so the decoded side mirrors the io through that same call
-    # rather than a hand-rolled map: a multi-output kernel — an NVFP4 re-encode emits packed codes beside
-    # their block scales — is bound to every one of the node's output buffers, and the dtype half of the
-    # deploy identity (``identity_key(with_io=True)``) reads the same output fingerprint on both sides.
-    return tile.with_io(graph, node)
-
-
-def kernel_from_wire(wire: dict):
-    """The tile kernel a :func:`kernel_wire` wire defines — decoded (which normalizes the body) and lifted
-    (:func:`lift_kernel`). Never through the Loop passes: they would normalize a size-one axis away and
-    mint another kernel."""
-    graph = loop_graph_from_wire(wire)
-    [node] = [node for node in graph.nodes.values() if isinstance(node.op, LoopOp)]
-    return lift_kernel(graph, node)
-
-
-def kernel_stamps(wire: dict) -> dict[str, float]:
-    """The ``S_*`` stamps of the kernel a :func:`kernel_wire` wire defines — the identity strategy's
-    structural features of its body, the dtype half read off the wire's own buffers. A function of the
-    definition alone, so a ``kernel`` row's stamps are what any later emmy re-derives from its wire."""
-    from emmy.compiler.pipeline.passes.identity import structure_features  # noqa: PLC0415
-
-    graph = loop_graph_from_wire(wire)
-    [node] = [node for node in graph.nodes.values() if isinstance(node.op, LoopOp)]
-    return structure_features(node.op.body, graph)
 
 
 def symbolic_vars(wire: dict) -> set[str]:

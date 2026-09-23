@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 from emmy.compiler.context import Context
 from emmy.compiler.ir.loop.ir import LoopOp
 from emmy.compiler.ir.tile.ir import TileOp
+from emmy.compiler.pipeline.fork import stamp_signature
 from emmy.compiler.pipeline.knob import family_of
 from emmy.compiler.pipeline.pipeline import Decision, LoweringError, Run
 from emmy.compiler.pipeline.search.db import SearchDB
@@ -122,9 +123,8 @@ def _measured_composed_routes(db, ctx) -> list[tuple[frozenset, tuple[str, ...]]
     that marks several seams ``cut`` — a composed decision, keyed by the signature of the kernel it was
     recorded on (less the stamps a schedule fork mints, as the evidence pick matches route rows) — for
     the cut pass to offer."""
-    stamps = db.kernel_stamps() if db is not None else {}
     rows = [(signature, tun) for signature, group in _db_measured_index(db, ctx).routes.items() for tun, _us in group]
-    rows += [(frozenset((k, str(v)) for k, v in stamps.get(row.parent, {}).items()), row.arm) for row in db.iter_routing()] if db else []
+    rows += [(stamp_signature(stamps), arm) for stamps, arm in db.decisions()] if db is not None else []
     out: list[tuple[frozenset, tuple[str, ...]]] = []
     for signature, tun in rows:
         keys = tuple(sorted(key for key, value in tun.items() if family_of(key) == "PLACE" and value == "cut"))

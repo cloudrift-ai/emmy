@@ -23,27 +23,6 @@ from emmy.compiler.pipeline.search.policy.greedy import (
 from tests.compiler.terms import projection
 
 
-@pytest.mark.parametrize("route", ({"PLACE": "cut"}, {"PLACE@inner.1/map": "cut"}, {"PLACE@inner.1/map": "cut", "WORK": "t32"}))
-def test_db_measured_index_files_placement_rows_as_kernel_set_prices(route, monkeypatch) -> None:
-    """A measured row that spells a placement is not a schedule for the kernel it names — its µs
-    belongs to the kernel set the route mints — so it prices that kernel-set decision (``routes``)
-    and never ranks a schedule fork (``ok``)."""
-    from emmy.compiler.pipeline.search import golden
-
-    monkeypatch.setattr(golden, "evidence_rows", lambda _gpu, _cap: [])
-    signature = frozenset({("S_shape", "128")})
-    rows = [
-        SimpleNamespace(status="ok", stats=SimpleNamespace(median=1.0), knobs={"S_shape": 128, **route}, op_key="k" * 16),
-        SimpleNamespace(status="ok", stats=SimpleNamespace(median=7.0), knobs={"S_shape": 128, "WORK": "t64"}, op_key="k" * 16),
-    ]
-    db = SimpleNamespace(iter_perf=lambda *_args, **_kwargs: rows)
-    ctx = SimpleNamespace(structural_key=lambda: "ctx", gpu_name="card", compute_capability=(8, 9), features=lambda: {"H_opt": 3.0})
-
-    index = _db_measured_index_build(db, ctx)
-    assert index.ok == {signature: [({"WORK": "t64"}, 7.0)]}
-    assert index.routes == {signature: [({k: str(v) for k, v in route.items()}, 1.0)]}
-
-
 def test_db_measured_index_collects_shapes_whose_every_measured_variant_failed() -> None:
     """A ``bench_fail`` row is evidence too — the watchdog measured that variant not finishing.
     When EVERY measured variant of one structural shape failed, the shape itself is disqualified;
@@ -207,11 +186,11 @@ def test_route_rows_become_measured_kernel_set_candidates() -> None:
     }
     index = _Measured({sig: [({"WORK": "t32"}, 3.0)]}, {}, routes)
 
-    got = _route_candidates(point, index)
+    got = _route_candidates(point, index, None)
 
     assert got == [(fuse, 3.0), (cut, 9.0), (fuse, 4.0)]
     scheduled = SimpleNamespace(**{**vars(point), "options": [SimpleNamespace(pool_id="pool", knobs={"WORK": "t8"})]})
-    assert _route_candidates(scheduled, index) == []
+    assert _route_candidates(scheduled, index, None) == []
 
 
 def test_strict_evidence_refuses_a_fork_no_measurement_decides(monkeypatch) -> None:

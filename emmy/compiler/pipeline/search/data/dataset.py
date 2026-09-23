@@ -82,7 +82,7 @@ class Dataset:
 
     def group_by_kernel_name(self, *, min_variants: int = 1, kernel: str | None = None) -> dict[str, list[Sample]]:
         """Group by kernel C identifier (the ``kernel`` row's name), dropping samples with
-        no name (golden / prior rows, rows no kernel row backs) and groups below ``min_variants``."""
+        no name (golden / prior rows) and groups below ``min_variants``."""
         g: dict[str, list[Sample]] = defaultdict(list)
         for s in self.samples:
             if s.name is None or (kernel and kernel not in s.name):

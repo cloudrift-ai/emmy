@@ -97,11 +97,11 @@ def _instance(path):
 _TAMPERS = {
     "loop_ir normalizes to normalized_loop_ir": "UPDATE kernel SET loop_ir = (SELECT loop_ir FROM kernel WHERE kernel_name = 'k_piece') "
     "WHERE kernel_name = 'k_parent'",
-    "normalized_loop_ir lifts to the stored identities": "UPDATE kernel SET structural_identity = 'moved' WHERE kernel_name = 'k_parent'",
+    "normalized_loop_ir decodes to the stored identities": "UPDATE kernel SET structural_identity = 'moved' WHERE kernel_name = 'k_parent'",
     "normalized_loop_ir stamps to kernel_feature": "UPDATE kernel_feature SET value = value + 1 WHERE name = 'S_loop_depth'",
     "perf bindings name the kernel's symbolic dims": "UPDATE perf SET bindings = '{\"ghost\":4}'",
     "schedule and placement digests match their knob rows": "UPDATE placement SET digest = 'moved'",
-    "every routing child and perf row names a kernel row": "DELETE FROM kernel WHERE kernel_name = 'k_piece'",
+    "every row names the rows it references": "DELETE FROM kernel WHERE kernel_name = 'k_piece'",
     "every context names a registry card": "UPDATE context SET gpu_name = 'Mystery GPU'",
     "schedule knobs and placement knobs stay apart": (
         f"INSERT INTO schedule (id, digest) VALUES (99, '{digest(knobs_json({'PLACE': 'cut'}))}'); "
@@ -112,7 +112,7 @@ _TAMPERS = {
 
 def test_a_fresh_instance_has_no_drift(tmp_path):
     """Every definition the tuner stores re-derives under the code that stored it: the raw wire normalizes
-    to the stored one, the stored one lifts to both identities and stamps to the feature rows, the bindings
+    to the stored one, the stored one decodes to both identities and stamps to the feature rows, the bindings
     name the dims, and the tables agree with themselves."""
     from emmy.compiler.pipeline.search.data.check import drift
 

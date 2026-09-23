@@ -1261,10 +1261,9 @@ every connection.
 
 **Drift checks** (`data/check.py`, `emmy dataset check`). Storing the wire before and after normalization, both
 identities and the stamps lets a later emmy re-derive each and count the rows that no longer agree: the raw wire
-normalizes to the stored one, the stored one lifts to both identities and stamps to the feature rows, a `perf` row's
-bindings name the kernel's symbolic dims, a schedule or placement digest matches its knob rows, every routing child
-and `perf` row names a kernel row, every context names a registry card, schedule knobs and placement knobs stay
-apart. Nothing is fixed: a failing row is re-tuned or re-imported.
+normalizes to the stored one, the stored one decodes to both identities and stamps to the feature rows, a `perf` row's
+bindings name the kernel's symbolic dims, a schedule or placement digest matches its knob rows, every row names
+the rows it references, every context names a registry card, schedule knobs and placement knobs stay apart. Nothing is fixed: a failing row is re-tuned or re-imported.
 
 **Measurement freeze** (`data/freeze.py`, written by `emmy dataset freeze`). The tune DB is a live store, so a model
 fit or evaluated straight from it is not reproducible. A *freeze* (v6) is a snapshot written into a directory, in

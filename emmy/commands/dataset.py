@@ -73,7 +73,8 @@ def handle_dataset_import(args) -> None:
         for src in sources:
             if src.is_dir():
                 frozen = load_freeze(src)
-                k, s = db.record_kernels(frozen.kernels), db.record_routings(frozen.routing)
+                k = db.record_kernels(frozen.kernels)
+                s = db.record_routings(frozen.routing)
                 n = db.record_perf_rows(frozen.perf)
                 logger.info(
                     "imported %d row(s), %d kernel(s), %d routing row(s) from freeze %s (sha256 %s)",
@@ -86,7 +87,8 @@ def handle_dataset_import(args) -> None:
                 continue
             tune_db = SearchDB.open_readonly(src)
             try:
-                k, s = db.record_kernels(tune_db.iter_kernels()), db.record_routings(tune_db.iter_routing())
+                k = db.record_kernels(tune_db.iter_kernels())
+                s = db.record_routings(tune_db.iter_routing())
                 n = db.record_perf_rows(tune_db.iter_perf_rows(backend="cuda"))
             finally:
                 tune_db.close()
