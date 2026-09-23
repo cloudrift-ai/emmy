@@ -27,6 +27,7 @@ programs:
 configs:
 - program: 0
   target:
+    loop: 0
     origins:
     - h
     - n
@@ -38,8 +39,139 @@ configs:
     knobs:
       REDUCE: coop
       WORK: t128
-    identity: fbbfbba3eb2beb5e8f901eca15a8d8133fbb8a0125f2b09f99857cbb6c916bae
+    identity: ccbdb8d052283185ab1aafbfffe6f73299dc320c7507bf134e8687f3b71505bb
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 1.6021538430299513
         tcompile_us: 2.0495383785321164
+loops:
+- inputs: [r, w, x]
+  outputs: [n]
+  nodes:
+  - id: n_eps
+    op: constant
+    attrs:
+      name: n_eps
+      value: 1.0e-06
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[n_eps, f32, [1]]]
+  - id: n_mean_count
+    op: constant
+    attrs:
+      name: n_mean_count
+      value: 256.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[n_mean_count, f32, [1]]]
+  - id: r
+    op: input
+    outputs: [[r, f32, [8, 256]]]
+  - id: w
+    op: input
+    outputs: [[w, f32, [256]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [8, 256]]]
+  - id: n
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Load
+          fields:
+            names: {tuple: [in0]}
+            input: n_eps
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Load
+          fields:
+            names: {tuple: [in1]}
+            input: n_mean_count
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 8}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 256}, window: null}}
+                  body:
+                    body:
+                    - class: Load
+                      fields:
+                        names: {tuple: [in2]}
+                        input: r
+                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
+                        dtype: null
+                    - class: Load
+                      fields:
+                        names: {tuple: [in3]}
+                        input: x
+                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
+                        dtype: null
+                    - class: Assign
+                      fields: {name: v0, op: {elementwise: add}, args: {tuple: [in2, in3]}, dtype: null}
+                    - class: Assign
+                      fields: {name: v1, op: {elementwise: multiply}, args: {tuple: [v0, v0]}, dtype: null}
+                    - class: Accum
+                      fields: {name: acc0, value: v1, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
+                  unroll: false
+                  seed: true
+              - class: Assign
+                fields: {name: v2, op: {elementwise: divide}, args: {tuple: [acc0, in1]}, dtype: null}
+              - class: Assign
+                fields: {name: v3, op: {elementwise: add}, args: {tuple: [in0, v2]}, dtype: null}
+              - {class: Assign, fields: {name: v4, op: {elementwise: rsqrt}, args: {tuple: [v3]}, dtype: null}}
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a2, extent: {dim: 256}, window: null}}
+                  body:
+                    body:
+                    - class: Load
+                      fields:
+                        names: {tuple: [in4]}
+                        input: r
+                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
+                        dtype: null
+                    - class: Load
+                      fields:
+                        names: {tuple: [in5]}
+                        input: x
+                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
+                        dtype: null
+                    - class: Assign
+                      fields: {name: v5, op: {elementwise: add}, args: {tuple: [in4, in5]}, dtype: null}
+                    - class: Assign
+                      fields: {name: v6, op: {elementwise: multiply}, args: {tuple: [v4, v5]}, dtype: null}
+                    - class: Load
+                      fields: {names: {tuple: [in6]}, input: w, index: {tuple: [{expr: {var: a2}}]}, dtype: null}
+                    - class: Assign
+                      fields: {name: v7, op: {elementwise: multiply}, args: {tuple: [in6, v6]}, dtype: null}
+                    - class: Write
+                      fields:
+                        output: n
+                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
+                        values: {tuple: [v7]}
+                        value_dtype: null
+                        atomic: false
+                        swizzle: NONE
+                  unroll: false
+                  seed: true
+            unroll: false
+            seed: true
+      name: k_rms_norm_ad534e
+    inputs: [n_mean_count, n_eps, x, r, w]
+    outputs: [[n, f32, [8, 256]]]

@@ -172,8 +172,9 @@ def cone_seam(cone, k_name: str, axes: tuple = ()) -> tuple[tuple, tuple, tuple[
         + list(cone.step())
     )
     chunk_results = {nm for edge, c in zip(cone.operands, chunked, strict=True) if c for nm in edge.exposes}
-    chunk_stats = tuple(sorted(chunk_results & Body(cell).ssa_uses))
+    cell_reads = Body(cell).ssa_uses - Body(cell).ssa_defs
+    chunk_stats = tuple(sorted(chunk_results & cell_reads))
     chunk = (chunk_pro, chunk_stats, block) if chunk_stats else ()
     pro_results = {nm for edge, varies in zip(cone.operands, varying, strict=True) if not varies for nm in edge.exposes}
-    stats = tuple(sorted(pro_results & (Body(cell).ssa_uses | Body(chunk_pro).ssa_uses)))
+    stats = tuple(sorted(pro_results & (cell_reads | (Body(chunk_pro).ssa_uses - Body(chunk_pro).ssa_defs))))
     return (pro, cell, stats, chunk) if stats else ((), cell, (), chunk)

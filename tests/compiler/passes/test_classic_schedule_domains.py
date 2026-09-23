@@ -263,7 +263,7 @@ def test_overwide_reduction_is_in_the_domain_before_c_restricts_it(monkeypatch) 
     assert len(tuple(_enumerate_context(c))) == 1
 
 
-def test_multi_channel_contraction_domain_contains_per_cell_and_warp_compute_fill() -> None:
+def test_multi_channel_contraction_domain_is_per_cell_direct_and_warp_staged() -> None:
     m, n, k = Axis("m", 16), Axis("n", 16), Axis("k", 16)
     root = contraction(
         k,
@@ -293,10 +293,16 @@ def test_multi_channel_contraction_domain_contains_per_cell_and_warp_compute_fil
     per_cell = [child for child in compatible if not child.schedule.nodes[0].tile.is_tiled]
     warp = [child for child in compatible if child.schedule.nodes[0].tile.is_warp]
     assert per_cell and all(choice.stage.is_direct for child in per_cell for choice in child.schedule.edges.values())
-    assert warp and all(choice.stage.transport == "smem" for child in warp for choice in child.schedule.edges.values())
+    # The gmem-direct mma leaf folds ONE B out of registers, so no warp choice of a multi-channel
+    # node is direct. Staged it is ordinary, and the compute fill stays among its transports beside
+    # whatever copy transports the card offers.
+    warp_transports = {choice.stage.transport for child in warp for choice in child.schedule.edges.values()}
+    assert warp and not any(choice.stage.is_direct for child in warp for choice in child.schedule.edges.values())
+    assert "smem" in warp_transports
 
 
 def test_tensor_core_enumeration_is_the_compatible_independent_product(monkeypatch) -> None:
+    monkeypatch.setenv("EMMY_FAST_MATH", "0")
     m, n, k = Axis("m", 128), Axis("n", 128), Axis("k", 132)
     tile = _matmul(
         m,
@@ -515,6 +521,7 @@ def test_staged_edges_are_independent_product_factors(monkeypatch) -> None:
 
 
 def test_compute_fill_edges_remain_independent_product_factors(monkeypatch) -> None:
+    monkeypatch.setenv("EMMY_FAST_MATH", "0")
     m, n, k = Axis("m", 64), Axis("n", 64), Axis("k", 64)
     computed_a = projection(
         (), (Load(name="score", input="scores", index=(Var("m"), Var("k"))), Assign(name="prob", op="exp", args=("score",)))

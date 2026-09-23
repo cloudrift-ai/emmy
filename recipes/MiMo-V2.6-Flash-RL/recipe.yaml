@@ -1,0 +1,11 @@
+tags:
+- onboarding
+- untested
+model:
+  huggingface: XiaomiMiMo/MiMo-V2.6-Flash-RL
+  rationale: 'New MiMo V2.6 RL wave: 309B/15B omnimodal MoE, FP8, MIT, agent benchmarks near frontier, active on OpenRouter.'
+  heat: 78
+  task: generate
+matrices:
+- deploy.gpu: AMD Instinct MI350X
+  deploy.gpu_count: 4

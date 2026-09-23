@@ -28,6 +28,7 @@ programs:
 configs:
 - program: 0
   target:
+    loop: 0
     origins:
     - add
     - linear
@@ -84,3 +85,102 @@ configs:
       WORK: ''
       RASTER: ''
     identity: 6cd782b173ded5d06043205c46d1f0d46f922f7ef9d40e574a8af49be737231b
+  - name: k_linear_85ba40.0d50704129f8
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: ''
+      RASTER: ''
+    identity: 0d50704129f8cfef0bb021fcb927150eb69b3329c81351bacd5d5a8d72ffe77a
+  - name: k_linear_85ba40.5e4aef382673
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: 5e4aef38267310d8249623d7a07e2d7d32a693d46c952ba04576ae9b3102bea5
+loops:
+- inputs: [x0, x1, x2]
+  outputs: [add]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 1, 64]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [64, 64]]]
+  - id: x2
+    op: input
+    outputs: [[x2, f16, [1, 1, 64]]]
+  - id: add
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 64}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
+                  body:
+                    body:
+                    - class: Load
+                      fields:
+                        names: {tuple: [in0]}
+                        input: x0
+                        index:
+                          tuple:
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {var: a1}}
+                        dtype: null
+                    - class: Load
+                      fields:
+                        names: {tuple: [in1]}
+                        input: x1
+                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
+                        dtype: null
+                    - class: Assign
+                      fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
+                    - class: Accum
+                      fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
+                  unroll: false
+                  seed: true
+              - class: Assign
+                fields: {name: v1, op: {elementwise: copy}, args: {tuple: [acc0]}, dtype: {dtype: f16}}
+              - class: Load
+                fields:
+                  names: {tuple: [in2]}
+                  input: x2
+                  index:
+                    tuple:
+                    - {expr: {literal: {value: 0, dtype: int}}}
+                    - {expr: {literal: {value: 0, dtype: int}}}
+                    - {expr: {var: a0}}
+                  dtype: null
+              - class: Assign
+                fields: {name: v2, op: {elementwise: add}, args: {tuple: [in2, v1]}, dtype: null}
+              - class: Write
+                fields:
+                  output: add
+                  index:
+                    tuple:
+                    - {expr: {literal: {value: 0, dtype: int}}}
+                    - {expr: {literal: {value: 0, dtype: int}}}
+                    - {expr: {var: a0}}
+                  values: {tuple: [v2]}
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+            unroll: false
+            seed: true
+      name: k_linear_318efd
+    inputs: [x1, x0, x2]
+    outputs: [[add, f16, [1, 1, 64]]]

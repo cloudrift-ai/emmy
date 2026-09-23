@@ -18,6 +18,10 @@ memory-effect reading neither has: a `Write` or an async fill between two identi
 second a different value. A same-name repeat cannot hide such a reload, since a rebind in one C scope is already
 illegal. A name re-bound to a DIFFERENT address is left alone: that is an SSA fault and must surface as one.
 
+When a projection recomputes only some outputs of an already bound reduction, its smaller loop is a distinct
+statement. Its exported accumulators receive distinct names through the same positional renaming used for other
+rebound values. Whole-loop equality alone cannot detect this partial overlap.
+
 The finished body then answers the complementary question, `_unbound_names`: does it read anything its launch never
 supplies? A well-formed kernel reads its own buffers, the symbolic extents passed beside them and the renderer's CTA
 helpers (`lane` / `warp`), and nothing else — every other name is bound by a statement or an enclosing axis, which is
@@ -106,14 +110,17 @@ dynamic-grid tier ceil-divides the launch and threads the runtime extent as an `
 ### The one factorizer
 
 `_factor.factorize(tile, root)` is the **entry** every `TileOp` root lowers through: it builds the ambient `Ctx` and
-dispatches `tile.op` into the recursion `_factorize(op, ctx, tail, out_val)`. `_factorize` walks the node tree — a
+binds a wholly serial tree directly, so shared carriers are lowered together. A schedule that tiles an output or
+partitions a reduction dispatches into `_factorize(op, ctx, tail, out_val)`. `_factorize` walks the node tree — a
 zero-axis `Fold` with an operand recurses (its projection body and sibling operands lower into the `tail`), and each
 leaf binds to the grid via the **ONE** root-binding pipeline, `_bind` — a single pipeline that reads WHICH AXES the
 schedule tiles off the node
 and seals through the one `grid_tile` finalizer. A tiled contraction tiles its OUTPUT `(m, n)` axes (register / warp
 cells; the reduce K serial per cell); a cooperating `Fold` tiles its REDUCE axis instead (`_tile_reduce_axis` —
 BLOCK `coop` lanes at the unit level, REG `reg` ILP chains at the register level, the algebra merge — the fold's
-own `merge` — closing the fold),
+own `merge` — closing the fold; a lane loop whose per-lane trip count is short unrolls, so its loads are in flight
+together rather than one global-load latency per trip, and the cross-warp combine folds the per-warp partials with
+warp 0's butterfly behind one barrier),
 its per-cell reduce loop taken from the node's own lowering; an UNTILED root whose cones close over other reduces
 (its CHAIN MEMBERS, `ops.chain_members`: reached through zero-axis operand edges and the axis-invariant reduce
 operands members hoist ahead of their loops) binds through the chain arm (`_tile_chain_members`) when a member
@@ -187,7 +194,8 @@ sink so a paired Volta operand layout and its accumulator map remain one coupled
 
 - **mma** (`_MmaOps`) — atom `(16, 8, 16)`, `lanes == 32`. The UNIT is a **warp**; its leaves emit `RegFragment` /
   `LdmatrixLoad` / `MmaSyncPtx` / `RegStore` and decode the atom-lane offset at render. `RegStore` derives both
-  algebraic M/N strides from the output index: contiguous N keeps packed stores, while a reversed physical orientation
+  algebraic M/N strides from the full physical output address, including composite coordinate coefficients:
+  contiguous N keeps packed stores, while a reversed physical orientation
   uses scalar strided stores. On Volta, each adjacent accumulator pair stays packed under an M-only tail guard; an N
   guard still splits the pair. Complete paired Volta tiles derive the interleaved 32×32 accumulator map that matches
   their operand layouts. A multi-channel root partitions its projection by output dependence and emits one store sink
@@ -315,9 +323,17 @@ loss against no ring at all (474 vs 468 us on a 512x4096x4096 projection) into 3
 512x4096x28672 one, whose 896 CTAs already hide the latency and whose doubled slab costs occupancy. Which deploys is
 evidence's call per shape, which is the point: before the split, `depth >= 2` was a pessimization everywhere on that
 card. `/p<n>` remains the independent smem→register fragment pipeline. The Volta m8n8k4 atom enables the synchronous
-fill for materialized and computed f16 A/B edges. For a materialized canonical-B tile with even M/N register-fragment
-counts, lowering derives CUTLASS's crosswise-A and B-congruous layouts together: one 128-bit shared load drains each
-adjacent fragment pair, the MMA uses row/row B, and the store uses the coupled interleaved 32×32 accumulator map. This
+fill for materialized and computed f16 A/B edges. Its compute fill stages at depth 1 only: the fill's depth-2 ring is a
+B prefetch that assumes cp.async, and on a V100 it returned silently wrong answers on nine of sixteen measured warp
+grids and fragments of a GPTQ decode cone, each correct at depth 1. For a materialized tile with even M/N
+register-fragment counts, lowering derives CUTLASS's own layouts together: crosswise for A, and for B the congruous
+layout when it is N-contiguous (the MMA then using row/row B) or crosswise again when it is TRANSPOSED, whose slab is
+K-contiguous exactly like A's — it reads that same storage back through a lane map taking its column half from lane
+bit 3 where A takes its row half from bit 2, which is the column role the accumulator map already assumes. Either way
+one 128-bit shared load drains each adjacent fragment pair and the store uses the coupled interleaved 32×32
+accumulator map. Before the transposed B joined, it fell back to a plain row-major slab whose 64-byte row put sixteen
+rows on two bank pairs: on a V100 prefill query projection that was 2.1M conflict replays out of 3.1M shared-load
+wavefronts, about 21 µs of a 35 µs gap to Inductor. This
 is the SM70 default lowering, not a schedule-codec choice; the existing `PAIR_LDMATRIX` policy override disables the
 whole combination. For deep K slabs, the blocking copy also binds each lane's affine global-copy bases and K stride,
 plus the paired shared-store layout bases, once outside the K loop. Shallow slabs retain inline address calculation;
@@ -385,10 +401,12 @@ and clamping only its start still copies past the extent. A **multi-channel prod
 `(b, acc)` channels over one shared A edge, either a computed cone or a materialized load; `_AtomOps.channels` reads
 them off the node) fills one B slab per channel, drains N mma chains off the ONE ldmatrix'd A fragment into
 per-channel C fragments (`_fold_frag`), and the projection (SwiGLU) combines the channels per element in the store's
-epilogue `Lambda` (`extra_frags`). Materialized A copies into the same single A slab; computed A evaluates into it. Both
-forms use the synchronous compute fill because the gmem-direct and single-sided byte-copy MMA paths remain
-single-channel. The block-scaled fp4 cell is the exception: it carries N channels on cp.async, staging `2 + 2N` slabs
-over the one shared A pair, and names each channel's block-scale fragment per channel just as its data fragment is.
+epilogue `Lambda` (`extra_frags`). Materialized A copies into the same single A slab; computed A evaluates into it. A
+computed A has only the synchronous compute fill, as anywhere else; a materialized one stages through whichever
+transport the card offers, each depositing the same `1 + N` slabs — so the gate/up GEMM rings on cp.async and reaches
+the TMA box copy, and with it wgmma. Only the gmem-direct MMA leaf stays single-channel, because it folds one B
+straight out of registers. The block-scaled fp4 cell carries N channels the same way, staging `2 + 2N` slabs over the
+one shared A pair, and names each channel's block-scale fragment per channel just as its data fragment is.
 
 **A gmem fragment's leading dimension is read off the operand's ADDRESS.** A loader reaches its operand through one
 leading dimension: one coordinate steps by 1, the other by `ldm`. Which DIM an index spells a coordinate in does not
@@ -396,9 +414,14 @@ say that. A frontend reshape can pack the reduction coordinate and the operand's
 `hidden[stream * 4096 + channel]`, DeepSeek-V4's hyper-connection mixing over one 16384-wide row — and the dim-position
 reading then names the tensor's trailing extent as `ldm` and calls the operand N-major because its last dim holds the
 reduction axis. Both are wrong, the fragment reads the wrong elements, and nothing raises. `_direct_operand` takes both
-from the operand's own element strides, which say exactly what the dim positions said wherever the dims separate the
-two coordinates. Neither coordinate unit-stride raises rather than emitting an address the loader cannot express; a
-symbolic extent leaves the strides of every earlier dim unknown and keeps the dim-position reading.
+from the operand's FLAT address — each dim's addends scaled by that dim's element stride and simplified — so a reshape
+that splits one coordinate across dims (`x[m / 2, (m % 2) * 128 + k]`) still reads as the `128·m + k` it sums to.
+Wherever the dims separate the two coordinates this says exactly what the dim positions said. Neither coordinate
+unit-stride raises rather than emitting an address the loader cannot express; a symbolic extent leaves the strides of
+every earlier dim unknown and keeps the dim-position reading. The staged transports have their own contracts: a TMA box
+is a rectangle in the descriptor's coordinates, so an operand whose trailing dims do not each hold one tile coordinate
+affinely declines it, and a cp.async or blocking fill copies A in chunks along K, so an A whose K is not the gmem inner
+dim declines those.
 
 **The register tile lifts a computed cone's prologue out of the K-loop.** The gmem-direct spine
 (`_contract_kloop`) takes each operand read as `(hoisted, per-step)`: the cone's row-invariant prologue is a value of
@@ -412,8 +435,8 @@ rows and so drops a prologue nothing bridges. A register tile evaluates the cone
 under the edge split, symbolic-seq SDPA lowered a kernel reading twelve names it never bound.
 
 **A bridged seam value keeps its own dtype.** A computed operand's cone splits at its K seam into a row-invariant
-prologue and a per-cell body, and the prologue publishes its results through smem rows the cell reads back — so
-those rows are the only place a bridged value's dtype is declared (`cone_stat_dtypes`, typed the way `edge_dtypes`
+prologue and a per-cell body. Only external cell reads load bridged results; locally defined values are not reloaded.
+The smem rows declare each bridged value's dtype (`cone_stat_dtypes`, typed the way `edge_dtypes`
 types an edge's results; a name whose statement kind carries no dtype keeps the float default). Declaring every row
 `float` decides the CELL's arithmetic too: a value that crosses as an integer — a pack's shift amount, a nibble
 mask — returns as f32, and the bit operations reading it have no f32 spelling at all, so the kernel fails to render
@@ -492,6 +515,11 @@ peer, because both are issued by the same threads under one CTA barrier. A TMA c
 elected thread and waited on by parity, which no compute fill folds into — so the packed TMA form is TWO operand
 groups over one drain segment (`pipelined_kloop` already schedules a list of them): the box copies ring at the
 stage's depth, the compute-filled scale slab stays single-buffer.
+
+Uniform TMA fills cross from generic shared-memory accesses to the asynchronous proxy. Before arming the transaction,
+`mbarrier_arrive_expect_tx` emits `fence.proxy.async.shared::cta`, making barrier initialization visible and ordering
+prior shared-memory accesses before the copy. The CTA barriers at each slab's last reader still order the readers
+before the elected thread refills it; a CTA barrier alone does not cross the proxy boundary.
 
 **Warp specialization (the producer band → `TileOp.workers`; rows spell it as `WORK`'s `+p<n>` suffix, which is also
 how it is pinned — the `WSPEC` key is retired).** A resolved `WarpSpec` splits the SAME staged phases across two
@@ -604,8 +632,7 @@ it after its first — keeps the whole stream and the per-element mask alone. Th
 every chunk: confining it to the chunks that can hold a masked element (the FA-2 guard, the mask's predicate at the
 chunk's and the block's extreme coordinates) measured no difference on an A100 40GB at 256 to 8192 keys, so it is not
 carried. Without those readings a
-masked carrier fell to the scalar tier whole, which is what `attention.hd256.dynM.pv` on the RTX 4090 recorded and
-then stopped decoding.
+masked carrier fell to the scalar tier whole.
 
 ### What may not come back
 
@@ -642,28 +669,37 @@ the two apply paths stay distinct on a coop-K contraction.
 
 ## Kernel-IR peepholes
 
-`030_stamp_types` resolves element dtypes. Integer algebra is always restamped from its typed operands, repairing a
+`030_stamp_types` resolves element dtypes, including the common branch type of a `Select` used by later statements.
+Integer algebra is always restamped from its typed operands, repairing a
 stale float stamp that a structurally cloned, previously untyped body can carry. `050_vectorize_loads` /
 `080_vectorize_stores` /
 `095_interleave_loads` pack/reorder memory ops; `096_pair_ldmatrix_loads` fuses adjacent staged fragment loads. On
 modern atoms, two B `x2` loads become one `x4` (plain for N-adjacent transposed B, transposed for col-adjacent canonical
 B). On Volta, adjacent A or B fragments under the derived crosswise/congruous layouts become one 128-bit shared load.
+Copy fills and computed operand fills use these same coupled layouts and accumulator mapping.
 The transform halves the staged drain's LSU instructions and is bit-identical; equal modern swizzle modes remain
 pairable because their per-lane address XOR commutes with the paired lane map;
 `110_drop_redundant_syncs` collapses the defensive `Sync`s the
 cooperative / shared-row templates emit (body-level only — a slab `Smem` decl flags `smem_seen`, so a load-bearing
 prologue `Sync` is correctly retained; `with_bodies` preserves the cooperative tile's `block_threads`).
 
-Every codegen-policy peephole records its decision as an on-by-default BOOL policy knob on the `KernelOp`
-(`VECTORIZE_LOADS` / `VECTORIZE_STORES` / `INTERLEAVE_LOADS` / `PAIR_LDMATRIX` — the `050` pattern: idempotence via
-the recorded knob, `EMMY_<NAME>=0` pins it off, never a search dimension), so no rewrite that touches emitted code
-is unconditional-and-unrecorded.
+`090_guard_reductions` propagates coordinate demand backward through pure scalar expressions and selects. A scalar
+reduction whose result is read only under an enclosing-coordinate predicate becomes a zero-trip loop elsewhere.
+Its identity seed stays outside the loop. Stores, synchronization, warp operations and predicates depending on values
+computed later cannot be guarded this way.
 
-Two of these peepholes are **pin-only policy stamps** — off by default, byte-identical, decoupled from production
-codegen (each records its knob on the `KernelOp` for idempotence, like `095`, and returns the body unchanged when off,
-so the whole default pipeline is unaffected and there is no golden / snapshot churn): `085_fast_exp` (`EMMY_FAST_EXP=1`
-lowers f32 `exp` through the SFU `__expf`, the one non-bit-exact policy) and `100_loopify` (`EMMY_LOOPIFY=N`, a generic
-**loop re-roller** iterated to a fixpoint). Loopify folds a maximal run of ≥ `N` congruent per-fragment statements —
+Memory and reduction peepholes record their decisions as on-by-default BOOL policy knobs on the `KernelOp`
+(`VECTORIZE_LOADS` / `VECTORIZE_STORES` / `GUARD_REDUCTIONS` / `INTERLEAVE_LOADS` / `PAIR_LDMATRIX` — the `050`
+pattern: idempotence via the recorded knob, `EMMY_<NAME>=0` pins it off, never a search dimension).
+
+`040_split_invariant_divides` replaces floating division by an axis-invariant divisor with a hoisted reciprocal and
+multiply when `FAST_MATH` is enabled. It runs after dtype stamping, preserves floating dtypes, and leaves integer or
+varying division alone. Structural body normalization stays independent of arithmetic policy.
+
+`085_fast_exp` follows the enabled `FAST_MATH` default, unless an explicit `FAST_EXP` pin overrides it. It lowers
+`exp` through `__expf`, promoting half inputs and rounding back afterward, and records the policy for idempotence.
+`100_loopify` remains off by default (`EMMY_LOOPIFY=N`), a generic **loop re-roller** iterated to a fixpoint.
+Loopify folds a maximal run of ≥ `N` congruent per-fragment statements —
 an mma body's per-fragment epilogue (`FragmentApply`), its load+mma pairs, the fragment `RegStore`s, the A-fragment
 loads, a nested contraction's K-chunks × N-atoms — into
 `#pragma unroll` `StridedLoop`s over `_r{depth}`. The matcher (`_reroll`) is node-type-agnostic: a recursive structural

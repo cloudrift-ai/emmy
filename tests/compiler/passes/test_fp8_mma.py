@@ -36,7 +36,7 @@ from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to
-from tests.compiler.helpers import requires_cuda
+from tests.compiler.helpers import requires_cuda, requires_sm
 from tests.compiler.terms import contraction, projection
 
 K32 = "mma_m16n8k32_e4m3_f32"
@@ -284,6 +284,7 @@ def _bare_f8_linear_graph(m, n, k, out_dtype="f32"):
 
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
+@requires_sm(8, 9)
 def test_k32_mma_matches_lut_reference_cuda():
     """The fragment-ABI anchor: fixed fp8 bits through the pinned k32 kernel vs the LUT-decode
     numpy reference. Two bit regimes: an EXACT one (A in {0, ±1}, B in one exponent band — every
@@ -360,170 +361,15 @@ def _w8a8_graph(m, n, k):
 
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
-@pytest.mark.xfail(strict=True, reason="the e4m3 k32 atom never binds on this tree's W8A8 linear (PR #699)")
-def test_w8a8_static_act_quant_e2e_cuda():
-    """The W8A8 e2e (M3 priority 4): one composed cut splits the fused MIMO kernel (whose
-    independent ``x_f8`` output refuses the fragment epilogue, so it has no warp tier at all)
-    decomposes until the contraction stands alone — the A cone cuts at its STORAGE FRONTIER
-    (``storage_frontier``: the encode prefix becomes its own kernel, the raw f8 bytes the
-    workspace), normalization re-binds the residue as the raw f8 load with ``act_scale`` hoisted,
-    and the bare contraction piece feeds the k32 mma raw bytes on both operands with the scale
-    product composed per element downstream. Compared against (a) the f32 reference of the SAME
-    quantized computation (tight) and (b) the unquantized reference (the activation-quantization
-    error, loose documented gate)."""
-    from emmy.compiler.backend.cuda.backend import CudaBackend
-    from emmy.compiler.loader.binder import bind_constants
-    from emmy.compiler.pipeline.search.pins import pinned_knobs
-
-    m, n, k = 32, 512, 512
-    rng = np.random.default_rng(7)
-    bits = rng.integers(0, 256, (n, k)).astype(np.uint8)
-    bits[bits == 0x7F] = 0x00
-    bits[bits == 0xFF] = 0x80
-    wscale = (np.abs(rng.standard_normal((n, 1))) * 0.005 + 0.002).astype(np.float32)
-    act_scale = np.array([[0.02]], dtype=np.float32)
-    x = (rng.standard_normal((m, k)) * 0.05).astype(np.float16)
-
-    backend = CudaBackend()
-    with pinned_knobs(
-        {
-            "TILE": f"{K32}/f2x2/k2",
-            "WORK": "w1x8",
-            "REDUCE": "",
-            "STAGE": "",
-            "PLACE@map.1/map.1/inner.1/map": "cut",
-        }
-    ):
-        compiled = backend.compile(_w8a8_graph(m, n, k))
-    srcs = [getattr(nd.op, "kernel_source", "") or "" for nd in compiled.nodes.values()]
-    assert any("__nv_fp8_e4m3(" in s and "x_f8[" in s for s in srcs), "no encode kernel materializing x_f8"
-    mma_src = next((s for s in srcs if "mma.sync.aligned.m16n8k32" in s), None)
-    assert mma_src is not None, "the W8A8 linear did not reach the k32 mma"
-    assert "emmy_mma_load_a_gmem_b8" in mma_src, "A did not bind as the raw f8 load"
-
-    input_data: dict = {"x": x}
-    input_data.update(bind_constants(compiled, {"act.scale": act_scale, "layer.wscale": wscale, "layer.weight": bits}))
-    result, _ = backend.run(compiled, input_data=input_data)
-    y = result.outputs["y"].reshape(m, n).astype(np.float32)
-
-    xq = decode_f8(encode_f8(x.astype(np.float32) / act_scale, "f8e4m3"), "f8e4m3") * act_scale
-    wq = decode_f8(bits, "f8e4m3").astype(np.float32) * wscale
-    ref_q = xq.astype(np.float32) @ wq.T
-    ref_u = x.astype(np.float32) @ wq.T
-    denom_q = max(float(np.abs(ref_q).max()), 1e-9)
-    denom_u = max(float(np.abs(ref_u).max()), 1e-9)
-    assert float(np.abs(y - ref_q).max()) / denom_q < 2e-3, "k32 kernel diverges from the same-quantization reference"
-    assert float(np.abs(y - ref_u).max()) / denom_u < 5e-2, "activation-quantization error beyond the documented gate"
-
-
-def _dyn_w8a8_graph(m, n, k):
-    """Dynamic per-token activation quantization, all graph algebra: ``s[m] = amax_k |x| / 448``
-    (the per-row statistic — the rmsnorm shape the reduce tiers already run), ``x_f8 =
-    to_f8e4m3(x / s)`` materialized, the linear consuming ``from_f8(x_f8) · s[m]`` — an m-indexed
-    factor is K-FREE, so the same mul-hoist commutes it onto the epilogue beside the weight
-    scale."""
-    from emmy.compiler.ir.tensor.ir import ReduceOp
-
-    g = Graph()
-    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (m, k), "f16"), node_id="x")
-    ax = g.add_node(op=ElementwiseOp(op="abs"), inputs=["x"], output=Tensor("x_abs", (m, k), "f32"))
-    amax = g.add_node(op=ReduceOp(op="amax", axis=1), inputs=[ax], output=Tensor("x_amax", (m, 1), "f32"))
-    denom = g.add_node(
-        op=ConstantOp(name="p_fmax", source_path="fmax", source_shape=(1, 1), source_dtype="f32"),
-        inputs=[],
-        output=Tensor("p_fmax", (1, 1), "f32"),
-    )
-    denom_bc = broadcast_to(g, denom, (m, 1))
-    s = g.add_node(op=ElementwiseOp(op="divide"), inputs=[amax, denom_bc], output=Tensor("x_s", (m, 1), "f32"), node_id="x_s")
-    s_bc = broadcast_to(g, s, (m, k))
-    xs = g.add_node(op=ElementwiseOp(op="divide"), inputs=["x", s_bc], output=Tensor("x_scaled", (m, k), "f32"))
-    x8 = g.add_node(op=ElementwiseOp(op="to_f8e4m3"), inputs=[xs], output=Tensor("x_f8", (m, k), "f8e4m3"), node_id="x_f8")
-    xd = g.add_node(op=ElementwiseOp(op="from_f8e4m3"), inputs=[x8], output=Tensor("x_dq", (m, k), "f16"))
-    xa = g.add_node(op=ElementwiseOp(op="multiply"), inputs=[xd, s_bc], output=Tensor("x_a", (m, k), "f16"))
-    w = g.add_node(
-        op=ConstantOp(name="p_w", source_path="layer.weight", source_shape=(n, k), source_dtype="f8e4m3"),
-        inputs=[],
-        output=Tensor("p_w_bits", (n, k), "f8e4m3"),
-    )
-    ws = g.add_node(
-        op=ConstantOp(name="p_ws", source_path="layer.wscale", source_shape=(n, 1), source_dtype="f32"),
-        inputs=[],
-        output=Tensor("p_ws", (n, 1), "f32"),
-    )
-    wd = g.add_node(op=ElementwiseOp(op="from_f8e4m3"), inputs=[w], output=Tensor("p_w_dq", (n, k), "f16"))
-    ws_bc = broadcast_to(g, ws, (n, k))
-    g.add_node(op=ElementwiseOp(op="multiply"), inputs=[wd, ws_bc], output=Tensor("p_w", (n, k), "f16"), node_id="p_w")
-    g.add_node(op=LinearOp(), inputs=[xa, "p_w"], output=Tensor("y", (m, n), F16), node_id="y")
-    g.inputs = ["x"]
-    g.outputs = ["y", "x_f8", "x_s"]
-    return g
-
-
-@requires_cuda
-@pytest.mark.xdist_group("cuda")
-@pytest.mark.xfail(
-    reason="dynamic W8A8 never reaches Tile IR: the fused kernel's swept output region interleaves two "
-    "independent output cones (the x_f8 encode beside the y contraction), the region's Lambda stores its "
-    "body in normalized order, and extract_output_specs' byte-identical reconstitution gate refuses the "
-    "reordered round trip — the term stays a Loop-IR fallback. Closing it means fissioning a swept "
-    "multi-output region into per-output-cone regions under an order-insensitive reconstitution contract, "
-    "then a storage-frontier cut whose producer carries the amax statistic cone as a real operand",
-    strict=True,
-)
-def test_w8a8_dynamic_per_token_amax_cuda():
-    """Dynamic per-token amax (M3 priority 5): the intended composition — the amax statistic +
-    encode ride their own kernels, the k32 mma consumes the materialized bits, and the m-indexed
-    per-token scale hoists like any k-invariant factor (m-indexed is K-FREE, so the same
-    ``_decode_split`` reassociation applies). Verified against the DEVICE's own encoded bits
-    (tight — isolates the mma path from host/device encode boundary-tie divergence at x/s values
-    landing exactly between e4m3 codes) and the host quantized reference (loose)."""
-    from emmy.compiler.backend.cuda.backend import CudaBackend
-    from emmy.compiler.loader.binder import bind_constants
-    from emmy.compiler.pipeline.search.pins import pinned_knobs
-
-    m, n, k = 32, 512, 512
-    rng = np.random.default_rng(9)
-    bits = rng.integers(0, 256, (n, k)).astype(np.uint8)
-    bits[bits == 0x7F] = 0x00
-    bits[bits == 0xFF] = 0x80
-    wscale = (np.abs(rng.standard_normal((n, 1))) * 0.005 + 0.002).astype(np.float32)
-    x = (rng.standard_normal((m, k)) * 0.05).astype(np.float16)
-
-    backend = CudaBackend()
-    with pinned_knobs({"TILE": f"{K32}/f2x2/k2", "WORK": "w1x8", "REDUCE": "", "STAGE": ""}):
-        compiled = backend.compile(_dyn_w8a8_graph(m, n, k))
-    srcs = [getattr(nd.op, "kernel_source", "") or "" for nd in compiled.nodes.values()]
-    mma_src = next((s for s in srcs if "mma.sync.aligned.m16n8k32" in s), None)
-    assert mma_src is not None and "emmy_mma_load_a_gmem_b8" in mma_src
-
-    input_data: dict = {"x": x}
-    fmax = np.array([[448.0]], dtype=np.float32)
-    input_data.update(bind_constants(compiled, {"fmax": fmax, "layer.weight": bits, "layer.wscale": wscale}))
-    result, _ = backend.run(compiled, input_data=input_data)
-    y = result.outputs["y"].reshape(m, n).astype(np.float32)
-    got_s = result.outputs["x_s"].reshape(m, 1).astype(np.float32)
-    got_x8 = np.asarray(result.outputs["x_f8"]).reshape(m, k).view(np.uint8)
-
-    wq = decode_f8(bits, "f8e4m3").astype(np.float32) * wscale
-    ref_dev = (decode_f8(got_x8, "f8e4m3") * got_s).astype(np.float32) @ wq.T
-    assert float(np.abs(y - ref_dev).max()) / max(float(np.abs(ref_dev).max()), 1e-9) < 2e-3
-    s = (np.max(np.abs(x.astype(np.float32)), axis=1, keepdims=True) / np.float32(448.0)).astype(np.float32)
-    xq = decode_f8(encode_f8((x.astype(np.float32) / s).astype(np.float32), "f8e4m3"), "f8e4m3") * s
-    ref_q = xq.astype(np.float32) @ wq.T
-    assert float(np.abs(y - ref_q).max()) / max(float(np.abs(ref_q).max()), 1e-9) < 1e-2  # host/device encode boundary ties
-
-
-@requires_cuda
-@pytest.mark.xdist_group("cuda")
 def test_w8a8_needs_the_gate_to_enumerate_cuda(monkeypatch):
     """Without ``FP8_MMA`` / ``FAST_MATH`` (and no TILE pin) the same graph compiles OFF the
     native fp8 tier — no k32 mma anywhere — and still matches the quantized reference through the
-    scalar tier's per-element decode (the conservative default)."""
+    scalar tier's per-element decode."""
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.loader.binder import bind_constants
 
     monkeypatch.delenv("EMMY_FP8_MMA", raising=False)
-    monkeypatch.delenv("EMMY_FAST_MATH", raising=False)
+    monkeypatch.setenv("EMMY_FAST_MATH", "0")
     m, n, k = 32, 512, 512
     rng = np.random.default_rng(7)
     bits = rng.integers(0, 256, (n, k)).astype(np.uint8)

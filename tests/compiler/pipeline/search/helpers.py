@@ -8,6 +8,7 @@ or the freeze suite silently stops exercising the real filter.
 
 from __future__ import annotations
 
+from emmy.compiler.pipeline.knob import KERNEL_IDENTITY
 from emmy.compiler.pipeline.search.db import KernelRow, PerfRow, PerfStats
 
 GPU_5090 = "NVIDIA GeForce RTX 5090"  # registry records fp32/fp16 peaks -> the plausibility gate is active
@@ -77,8 +78,9 @@ def perf_row(
 ) -> PerfRow:
     """A measured CUDA ``perf`` row of ``kernel`` on a registry-known card, in the plain-flags regime
     of ``opt`` — the row a live bench there writes — with ``**over`` overriding any field. ``knobs``
-    defaults to the f16 matmul stamps plus its schedule row; on write only the schedule row is the
-    measurement's, the stamps are the kernel row's."""
+    defaults to the f16 matmul stamps plus its schedule row, and always carries the kernel's exact identity
+    as the ``I_kernel`` stamp a read row has; on write only the schedule row is the measurement's, the
+    stamps and the identity are the kernel row's."""
     kw = dict(
         gpu=gpu,
         cc=cc,
@@ -86,7 +88,7 @@ def perf_row(
         flags=flags,
         kernel=kernel,
         bindings=dict(bindings or {}),
-        knobs=dict(F16_MATMUL_FEATS if knobs is None else knobs),
+        knobs={**(F16_MATMUL_FEATS if knobs is None else knobs), KERNEL_IDENTITY: kernel},
         backend="cuda",
         status="ok",
         stats=PerfStats(median=us, min=us, max=us, mean=us, variance=0.0, n_samples=30),

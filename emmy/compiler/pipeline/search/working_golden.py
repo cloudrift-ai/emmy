@@ -10,11 +10,11 @@ from __future__ import annotations
 import contextlib
 import copy
 import fcntl
-from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from emmy import gpu
 from emmy.compiler.pipeline.search.golden import (
     GoldenEntryState,
     dump_golden_file,
@@ -63,7 +63,6 @@ def write_trace_inventory(
     *,
     model: str | None = None,
     ctx=None,
-    force_loop_targets: bool = False,
     realizations: list[dict] | None = None,
     model_quant_digest: str | None = None,
 ) -> TraceInventoryResult:
@@ -81,7 +80,6 @@ def write_trace_inventory(
         programs=programs,
         loops=loops,
         entries=entries,
-        force_loop_targets=force_loop_targets,
         realizations=realizations,
     )
     _dump_trace_inventory(
@@ -102,7 +100,6 @@ def append_trace_inventory(
     *,
     model: str | None = None,
     ctx=None,
-    force_loop_targets: bool = False,
     model_quant_digest: str | None = None,
 ) -> TraceInventoryResult:
     """Add one more traced program to an existing working inventory.
@@ -122,7 +119,7 @@ def append_trace_inventory(
     programs = document["programs"]
     loops = document.setdefault("loops", [])
     entries = document["configs"]
-    seen_loops = {entry["target"]["loop"] for entry in entries if "loop" in entry["target"]}
+    seen_loops = {entry["target"]["loop"] for entry in entries}
     before = len(entries)
     _append_trace_inventory(
         graph,
@@ -130,7 +127,6 @@ def append_trace_inventory(
         programs=programs,
         loops=loops,
         entries=entries,
-        force_loop_targets=force_loop_targets,
         seen_loops=seen_loops,
     )
     _dump_trace_inventory(
@@ -183,7 +179,6 @@ def write_trace_inventories(
             programs=programs,
             loops=loops,
             entries=entries,
-            force_loop_targets=True,
             name_prefix=name,
             seen_loops=seen_loops,
             realizations=realizations.get(name) if isinstance(realizations, Mapping) else realizations,
@@ -200,6 +195,13 @@ def write_trace_inventories(
     return TraceInventoryResult(path=destination, target_count=len(entries))
 
 
+def whole_origins(coverage: Mapping, program) -> tuple[str, ...]:
+    """The traced ops a kernel computes, when it computes every one of them whole — the frontend
+    slice that is the kernel's exact Torch twin. Empty for a kernel holding part of an op."""
+    origins = tuple(sorted(origin for origin in coverage if origin in program.nodes))
+    return origins if origins and all(coverage[origin][2] for origin in origins) else ()
+
+
 def _append_trace_inventory(
     graph,
     *,
@@ -207,7 +209,6 @@ def _append_trace_inventory(
     programs: list[dict],
     loops: list[dict],
     entries: list[dict],
-    force_loop_targets: bool,
     name_prefix: str | None = None,
     seen_loops: set[int] | None = None,
     realizations: list[dict] | None = None,
@@ -217,6 +218,7 @@ def _append_trace_inventory(
     from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
     from emmy.compiler.loop_wire import intern_loop_program  # noqa: PLC0415
     from emmy.compiler.pipeline import LOOP_PASSES, Pipeline  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import measured_precision_pins  # noqa: PLC0415
     from emmy.compiler.pipeline.search.slice import single_node_graph  # noqa: PLC0415
     from emmy.compiler.torch_wire import intern_program  # noqa: PLC0415
 
@@ -253,10 +255,9 @@ def _append_trace_inventory(
     # selectors must therefore resolve against the original trace context.
     program_ref: int | None = None
     inventory = []
+    totals = provenance.totals(fused)
     for node_id, node in targets:
-        origins = tuple(sorted(origin for origin in provenance.get(node) if origin in input_graph.nodes))
-        inventory.append((node_id, node, origins))
-    origin_counts = Counter(origins for _node_id, _node, origins in inventory if origins)
+        inventory.append((node_id, node, whole_origins(provenance.coverage(provenance.get(node), totals), input_graph)))
     used_names = {
         realization["name"]
         for entry in entries
@@ -282,20 +283,19 @@ def _append_trace_inventory(
                 name = f"{base}.{duplicate}"
                 duplicate += 1
         used_names.add(name)
-        if origins and origin_counts[origins] == 1 and not force_loop_targets:
-            target = {"origins": list(origins)}
-        else:
-            loop_graph = single_node_graph(fused, node_id)
-            loop_ref = intern_loop_program(loops, loop_graph)
-            if seen_loops is not None and loop_ref in seen_loops:
-                continue
-            if seen_loops is not None:
-                seen_loops.add(loop_ref)
-            target = {"loop": loop_ref}
+        # The target IS the kernel's Loop IR: a replay starts from the stored kernel and never re-lowers
+        # the program. The traced ops it computes whole ride beside it as provenance — the frontend
+        # slice a benchmark compares the kernel against.
+        loop_ref = intern_loop_program(loops, single_node_graph(fused, node_id))
+        if seen_loops is not None and loop_ref in seen_loops:
+            continue
+        if seen_loops is not None:
+            seen_loops.add(loop_ref)
+        target = {"loop": loop_ref, **({"origins": list(origins)} if origins else {})}
         if program_ref is None:
             program_ref = intern_program(programs, input_graph)
         if realizations is None:
-            rows = [{"name": name, "bindings": {}, "pins": {"FAST_MATH": False}}]
+            rows = [{"name": name, "bindings": {}, "pins": measured_precision_pins()}]
         else:
             rows = []
             for template in realizations:
@@ -380,7 +380,7 @@ def validate_working_gpu(document: dict, ctx) -> None:
         raise ValueError(
             f"working golden targets compute capability {tuple(file_cap)}, but the live GPU is {tuple(ctx.compute_capability)}"
         )
-    if file_gpu and ctx.gpu_name and file_gpu != ctx.gpu_name:
+    if file_gpu and ctx.gpu_name and gpu.canonical_name(file_gpu) != gpu.canonical_name(ctx.gpu_name):
         raise ValueError(f"working golden targets {file_gpu}, but the live GPU is {ctx.gpu_name}")
 
 
@@ -412,12 +412,12 @@ class _ProposalLoopIdentity(PipelineStrategy):
         if self.value is not None:
             return
         from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
-        from emmy.compiler.pipeline.knob import STRUCT_PREFIX  # noqa: PLC0415
+        from emmy.compiler.pipeline.knob import EVIDENCE_PREFIXES  # noqa: PLC0415
 
         loops = [node.op for node in graph.nodes.values() if isinstance(node.op, LoopOp)]
         if len(loops) != 1:
             return
-        stamped = {key: float(value) for key, value in loops[0].knobs.items() if key.startswith(STRUCT_PREFIX)}
+        stamped = {key: value for key, value in loops[0].knobs.items() if key.startswith(EVIDENCE_PREFIXES)}
         if stamped and loops[0].identity_key(with_io=True, with_knobs=True) is not None:
             self.value = stamped
 
@@ -461,6 +461,7 @@ async def measure_proposals(graph, proposals, *, backend, db, ctx, max_candidate
     """Measure working-file candidates exactly, in file order, before MCTS."""
     from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline, TuningSearch  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import EVIDENCE_PREFIXES  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import pinned_knobs, unreproducible_pin_flag  # noqa: PLC0415
 
     rankings: list[dict] = []
@@ -498,7 +499,7 @@ async def measure_proposals(graph, proposals, *, backend, db, ctx, max_candidate
         structural = searched if searched is not None and searched[3] else None
         structural_parent = loop_identity.structural_parent(structural[0]) if structural is not None else None
         if structural_parent is not None:
-            search._base_knobs.update({key: value for key, value in structural_parent[1].items() if key.startswith("S_")})
+            search._base_knobs.update({key: value for key, value in structural_parent[1].items() if key.startswith(EVIDENCE_PREFIXES)})
         if prior is not None:
             prior.add_rows(search._collect_rows())
             prior.maybe_refit()

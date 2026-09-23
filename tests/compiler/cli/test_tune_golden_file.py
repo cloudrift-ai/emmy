@@ -32,6 +32,7 @@ from emmy.compiler.pipeline.search.working_golden import (
     validate_working_gpu,
 )
 from emmy.compiler.torch_wire import intern_program
+from tests.compiler.helpers import loop_target
 from tests.compiler.pipeline.search.helpers import kernel_row
 
 
@@ -72,13 +73,14 @@ def _document(*entries):
     graph.add_node(MatmulOp(), ["x", "w"], Tensor("matmul", (16, 32), "f16"), node_id="matmul")
     graph.inputs, graph.outputs = ["x", "w"], ["matmul"]
     programs = []
+    loops: list[dict] = []
     program_index = intern_program(programs, graph)
     config = {
         "program": program_index,
-        "target": {"origins": ["matmul"]},
+        "target": loop_target(graph, ["matmul"], loops, (8, 9)),
         "realizations": [dict(entry) for entry in entries],
     }
-    return {"compute_cap": [8, 9], "programs": programs, "configs": [config]}
+    return {"compute_cap": [8, 9], "programs": programs, "configs": [config], "loops": loops}
 
 
 def _classic_row(*, work: str = "", tile: str = "", reduce: str = "", stage: str = "", raster: str = "") -> dict[str, str]:
@@ -101,7 +103,7 @@ def test_working_file_groups_candidate_rows_and_recovers_embedded_program(tmp_pa
     assert document["configs"][0]["realizations"][0]["name"] == "mm"
     assert len(targets) == 1
     mm = targets[0]
-    assert mm.code is None and mm.input is None and isinstance(mm.program.nodes["matmul"].op, MatmulOp)
+    assert mm.code is None and mm.input is None and isinstance(mm.program.producer(mm.program.outputs[0]).op, LoopOp)
     assert mm.entry_indexes == [(0, 0), (0, 1)]
     assert mm.proposals == [((0, 1), {"TILE": "f2x2"})]
 
@@ -129,7 +131,7 @@ def test_empty_knob_map_is_a_forkless_proposal_not_inventory(tmp_path):
 
     assert targets[0].entry_indexes == [(0, 0), (0, 1)]
     assert targets[0].proposals == [((0, 1), {})]
-    assert set(loaded_document) == {"compute_cap", "programs", "configs"}
+    assert set(loaded_document) == {"compute_cap", "programs", "configs", "loops"}
 
 
 def test_multi_cuda_realized_knobs_must_be_conflict_free():
@@ -289,7 +291,7 @@ def test_ambiguous_multi_cuda_winner_is_not_annotated(tmp_path):
     got = load_golden_file(path)
     assert len(got["configs"]) == 1
     assert got["configs"][0]["realizations"][0]["name"] == "mm"
-    assert got["configs"][0]["target"] == {"origins": ["matmul"]}
+    assert got["configs"][0]["target"] == {"loop": 0, "origins": ["matmul"]}
 
 
 def test_structural_multi_cuda_winner_persists_its_exact_replay_row(tmp_path):
@@ -392,7 +394,7 @@ def test_structural_multi_cuda_proposal_keeps_ranking_without_parent_perf(tmp_pa
             return self
 
         async def tune_async(self, graph, **kwargs):
-            assert isinstance(graph.nodes["matmul"].op, MatmulOp)
+            assert isinstance(graph.producer(graph.outputs[0]).op, LoopOp)
             event = SimpleNamespace(graph=loop_graph)
             for strategy in self.strategies:
                 strategy.on_pass_end(event)
@@ -462,7 +464,8 @@ def test_structural_multi_cuda_proposal_keeps_ranking_without_parent_perf(tmp_pa
     db.close()
     reloaded_db = SearchDB.open_readonly(db_path)
     assert {row.kernel for row in reloaded_db.iter_perf(ctx, backend="cuda")} == {fallback_key}
-    candidates = [{**live_features, **fallback}, {**live_features, **route}]
+    # A real fork carries the kernel's exact identity beside its stamps, and a read row carries the kernel column as it.
+    candidates = [{**live_features, "I_kernel": fallback_key, **fallback}, {**live_features, "I_kernel": fallback_key, **route}]
     assert _db_measured_pick(_db_measured_index(reloaded_db, ctx).ok, candidates) == (0, 153.45)
     reloaded_db.close()
     persist_proposal_rankings(path, document, targets[0], rankings)
@@ -538,6 +541,7 @@ def test_working_gpu_guard_allows_portable_trace_and_rejects_mismatch():
     ctx = SimpleNamespace(compute_capability=(9, 0), gpu_name="NVIDIA H100 80GB HBM3")
     validate_working_gpu({"compute_cap": [0, 0]}, ctx)
     validate_working_gpu({"compute_cap": [9, 0], "gpu_name": "NVIDIA H100 80GB HBM3"}, ctx)
+    validate_working_gpu({"compute_cap": [9, 0], "gpu_name": "NVIDIA H100 80GB"}, ctx)
 
     with pytest.raises(ValueError, match="compute capability"):
         validate_working_gpu({"compute_cap": [8, 0]}, ctx)
@@ -677,7 +681,12 @@ def test_multi_gpu_working_sweep_shares_slots_and_prior_across_targets(monkeypat
         bench=False,
     )
 
-    assert tune._tune_working_multi(args, targets, {"configs": []}, backends=backends, db=object(), ctx=object()) == 2
+    assert (
+        tune._tune_working_multi(
+            args, targets, {"configs": []}, backends=backends, db=object(), ctx=SimpleNamespace(compile_flags="--use_fast_math")
+        )
+        == 2
+    )
     assert max_active == 2
     assert seen_prior == [prior, prior]
     assert seen_queues[0] is seen_queues[1]
@@ -741,7 +750,7 @@ def test_record_greedy_pick_appends_routing_rows_and_receipts_once(tmp_path, mon
         record_greedy_pick(path, "mm", decisions=decisions, kernels=kernels, reference_backend="same-input-greedy")
 
 
-def test_record_greedy_pick_names_the_row_a_decision_lands_on(tmp_path):
+def test_record_greedy_pick_names_the_row_a_decision_lands_on(tmp_path, monkeypatch):
     """A route whose seam the seed already records is the SAME row: same bindings, pins, identity
     and knobs. The decision then lands on the seed instead of appending, and the kernel set has to
     name the row that carries the measurement — the seed. Naming the row the recorder would have
@@ -751,6 +760,7 @@ def test_record_greedy_pick_names_the_row_a_decision_lands_on(tmp_path):
 
     path = tmp_path / "working.yaml"
     root = "1" * 64
+    monkeypatch.setenv("EMMY_FAST_MATH", "0")
     seed = _matmul("mm", pins={"FAST_MATH": False}, knobs={"PLACE@map.1/map": "cut"})
     seed["identity"] = root
     dump_golden_file(_document(seed), path)
@@ -770,7 +780,7 @@ def test_record_greedy_pick_names_the_row_a_decision_lands_on(tmp_path):
     assert realizations[0]["measurements"]["emmy_us"] == 30.0
 
 
-def test_record_greedy_pick_does_not_alias_rows_between_input_regimes(tmp_path):
+def test_record_greedy_pick_does_not_alias_rows_between_input_regimes(tmp_path, monkeypatch):
     """Rows with the same route and schedule remain distinct when their pins differ."""
     from emmy.compiler.pipeline.search.working_golden import record_greedy_pick
 
@@ -784,7 +794,9 @@ def test_record_greedy_pick_does_not_alias_rows_between_input_regimes(tmp_path):
     )
     identity = "1" * 64
     decisions = [(identity, {"PLACE@map.1/map": "cut"}, 30.0, 33.0)]
+    monkeypatch.setenv("EMMY_FAST_MATH", "0")
     strict_names = record_greedy_pick(path, "mm.strict", decisions=decisions, kernels=[], reference_backend="same-input-greedy")
+    monkeypatch.setenv("EMMY_FAST_MATH", "1")
     fast_names = record_greedy_pick(path, "mm.fast", decisions=decisions, kernels=[], reference_backend="same-input-greedy")
 
     realizations = load_golden_file(path)["configs"][0]["realizations"]

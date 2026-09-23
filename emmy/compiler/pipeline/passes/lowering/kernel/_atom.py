@@ -32,11 +32,11 @@ from functools import partial
 from emmy.compiler.backend.cuda.dtype import cuda_name
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F32
-from emmy.compiler.ir.address import BYTE_SLAB_PAD
+from emmy.compiler.ir.address import BYTE_SLAB_PAD, gmem_axis_step
 from emmy.compiler.ir.atom import AtomKind, wide_accumulate
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, TernaryExpr, Var, affine_form
+from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, SimplifyCtx, TernaryExpr, Var, affine_form
 from emmy.compiler.ir.kernel.ir import (
     COORD,
     ELEM_COL,
@@ -214,6 +214,13 @@ def _hoist_k_invariant(body, k_name: str) -> tuple[tuple, tuple]:
     return tuple(hoisted), tuple(rest)
 
 
+def _addends(expr: Expr) -> tuple[Expr, ...]:
+    """The terms of ``expr``'s top-level sum."""
+    if isinstance(expr, BinaryExpr) and expr.op == "+":
+        return (*_addends(expr.left), *_addends(expr.right))
+    return (expr,)
+
+
 def _direct_operand(load, inputs, *, k_name: str, own: str | None, legacy: tuple) -> tuple[bool, object]:
     """``(reduction-minor, ldm)`` for one gmem-direct fragment read, off the operand's own ADDRESS.
 
@@ -226,20 +233,24 @@ def _direct_operand(load, inputs, *, k_name: str, own: str | None, legacy: tuple
     reads the wrong elements, and nothing raises. Element strides say it directly, and on an operand
     whose dims separate the two coordinates they say exactly what the dim positions said.
 
+    The strides are read off the FLAT address, not dim by dim: a reshape that splits a coordinate
+    across two dims spells it ``[m / 2, (m % 2) * 128 + k]``, which no single dim holds affinely, while
+    the address it sums to is ``128·m + k``. Each dim's addends are scaled by the dim's element stride
+    and the simplifier recomposes the split pair.
+
     Reduction-minor means the reduction coordinate is the unit-stride one — the A loader's only
-    layout, and B's transposed one. ``legacy`` is the dim-position answer, kept for an index that is
-    not affine in the coordinates and for a symbolic extent, which leaves the strides of every
+    layout, and B's transposed one. ``legacy`` is the dim-position answer, kept for an address that
+    is not affine in the coordinates and for a symbolic extent, which leaves the strides of every
     earlier dim unknown. Neither coordinate unit-stride raises: the loader has no such address."""
     coords = (k_name, *(() if own is None else (own,)))
     tensor = inputs.get(load.input) if inputs else None
-    strides = dict.fromkeys(coords, 0)
+    if tensor is None or len(tensor.shape) != len(load.index):
+        return legacy
+    address: Expr = Literal(0, "int")
     unit = 1
     for dim in reversed(range(len(load.index))):
-        form = affine_form(load.index[dim], set(coords))
-        if tensor is None or len(tensor.shape) != len(load.index) or form is None:
-            return legacy
-        for name, coeff in form[1].items():
-            strides[name] += coeff * unit
+        for addend in _addends(load.index[dim]):
+            address = BinaryExpr("+", address, addend if unit == 1 else BinaryExpr("*", addend, Literal(unit, "int")))
         if dim == 0:
             break  # nothing strides the leading dim, so its extent never enters a stride
         extent = tensor.shape[dim]
@@ -247,6 +258,10 @@ def _direct_operand(load, inputs, *, k_name: str, own: str | None, legacy: tuple
         if not isinstance(extent, int):
             return legacy
         unit *= extent
+    form = affine_form(address.simplify(SimplifyCtx.empty()), set(coords))
+    if form is None:
+        return legacy
+    strides = {name: form[1].get(name, 0) for name in coords}
     own_stride = 1 if own is None else strides[own]
     if strides[k_name] == 1:
         return True, own_stride
@@ -998,7 +1013,8 @@ def _a_slab_operand(
         # σ is hygienic (:meth:`Stmt.substitute`): a cone statistic re-binding the contraction axis
         # name (attention's k-norm inside the K cone) keeps its own iteration var.
         sigma = Sigma({m_name: m_coord(row), k_name: k_coord(k)})
-        stmts: list[Stmt] = [Load(names=(nm,), input=_stat_slab(nm), index=(row,)) for nm in (*stats, *chunk_stats)]
+        reads = Body(cell).ssa_uses - Body(cell).ssa_defs
+        stmts: list[Stmt] = [Load(names=(nm,), input=_stat_slab(nm), index=(row,)) for nm in (*stats, *chunk_stats) if nm in reads]
         stmts += [s.substitute(sigma) for s in cell]
         return _k_masked(stmts, c.operands[0].exposes[-1], k, k_ext)
 
@@ -1637,15 +1653,12 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             staged=stage.depth >= 2 and (not isinstance(n_chunks, int) or n_chunks >= 2),
         )
     else:
-        assert len(ops.channels) == 1, "cp.async / TMA staging is single-fold — a multi-B node rides the smem compute fill"
         # A cp.async-staged 1-byte (fp8) slab pads its rows (`BYTE_SLAB_PAD`) so the cooperative
         # byte-gather drain spreads across banks; a TMA box deposit is dense, so its byte slab
         # stays unpadded (the resolver sized the budget with the same rule).
         elems = ops.slab_elems()
         pads = tuple(BYTE_SLAB_PAD if e.nbytes == 1 and stage.transport == "smem-async" else 0 for e in elems)
-        operands = _slab_operands(
-            index_srcs=(c.operands[0].as_slab().load.index, c.operands[1].as_slab().load.index),
-            bufs=(c.operands[0].as_slab().load.input, c.operands[1].as_slab().load.input),
+        geometry = dict(
             mn=mn,
             k_axis=k_axis,
             bk_elems=stage.bk_elems,
@@ -1656,6 +1669,18 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             b_atoms=ops.b_atoms(mn),
             pads=pads,
         )
+        # One B slab per fold channel, as the compute fill already builds (:func:`_sync_operands`):
+        # the gate/up node shares ONE A across two weights, so the copy transports deposit
+        # (A, B0, B1, …) and the drain reads the same order. Only the slab count differs from the
+        # single-channel form — each B is an ordinary materialized operand under its own tag.
+        a_load = c.operands[0].as_slab().load
+        (a_op,) = _slab_operands(index_srcs=(a_load.index, None), bufs=(a_load.input, None), roles=(0,), **geometry)
+        b_ops = []
+        for f, (edge, _) in enumerate(ops.channels):
+            b_load = edge.as_slab().load
+            (b_op,) = _slab_operands(index_srcs=(None, b_load.index), bufs=(None, b_load.input), roles=(1,), **geometry)
+            b_ops.append(replace(b_op, tag="b" if f == 0 else f"b_x{f}"))
+        operands = (a_op, *b_ops)
         common = dict(
             operands=operands,
             slab_dtype=cuda_name(elem),
@@ -1905,10 +1930,16 @@ class _AtomOps:
     inner: tuple | None = None
     # The launch fits the card in one wave: the chunk tier keeps its stream whole (see ``_factor``).
     one_wave: bool = False
+    outputs: object = None
 
     def frag(self, name: str) -> str:
         """``name`` in this emission's fragment namespace (:attr:`frag_ns`)."""
         return f"{self.frag_ns}{name}"
+
+    def store_stride(self, write: Write, axis: Axis) -> int:
+        """The fragment coordinate's physical stride, including coefficients inside a dimension."""
+        step = gmem_axis_step(Load("", write.output, write.index), axis.name, self.outputs)
+        return step[0] if step is not None else 0
 
     @property
     def channels(self) -> tuple:
@@ -2030,19 +2061,7 @@ class _MmaOps(_AtomOps):
         """Whether this staged cell can use the coupled Volta operand and accumulator layouts."""
         if self.stage is None or self.tile.atom.fragment_layout != "m8n8k4" or PAIR_LDMATRIX.narrow((True,)) != (True,):
             return False
-        a_copied = self.c.operands[0].as_slab() is not None
-
-        def copied_b(edge) -> bool:
-            slab = edge.as_slab() if isinstance(edge, Fold) else None
-            return isinstance(slab.load if slab is not None else edge, Load)
-
-        return (
-            a_copied
-            and all(copied_b(edge) for edge, _ in self.channels)
-            and not self.c.as_contraction().b_trans
-            and mn[0].reg % 2 == 0
-            and mn[1].reg % 2 == 0
-        )
+        return mn[0].reg % 2 == 0 and mn[1].reg % 2 == 0
 
     def slab_swizzles(self, mn, elem_bytes: int) -> tuple[str, ...]:  # noqa: ARG002 — per-operand widths come from slab_elems
         """The smem swizzle mode per operand slab, from each slab's inner (contiguous) row
@@ -2060,17 +2079,24 @@ class _MmaOps(_AtomOps):
         so its inner row span is the K chunk (``bk_elems``) like A's. A 1-byte (fp8) slab stays
         ``NONE`` — its cooperative byte-gather drain applies no address XOR (the ldmatrix XOR is
         b16-indexed); the cp.async byte slab's bank spread is the row pad instead. Complete paired
-        Volta tiles instead use the crosswise A and B-congruous layouts together; the existing
-        ``PAIR_LDMATRIX`` policy pin can disable that lowering and retain the ordinary gather."""
+        Volta tiles instead use CUTLASS's own layouts: crosswise for A, and for B the congruous
+        layout when it is N-contiguous or crosswise again when it is TRANSPOSED, whose slab is
+        K-contiguous exactly like A's. The existing ``PAIR_LDMATRIX`` policy pin can disable that
+        lowering and retain the ordinary gather."""
         if self.tile.atom.fragment_layout == "m8n8k4":
-            # Volta has no ldmatrix. A materialized row-major A uses CUTLASS's crosswise layout;
-            # a materialized canonical row-major B uses its B-congruous layout and the row/row
-            # mma form. Each layout is enabled only when the warp tile contains complete pairs
+            # Volta has no ldmatrix. Row-major A uses CUTLASS's crosswise layout; canonical B
+            # uses its B-congruous layout and the row/row mma form, and a transposed B — staged
+            # K-contiguous like A — reads A's crosswise layout back through a lane map whose
+            # column half comes from lane bit 3 instead of bit 2. Copy and compute fills share
+            # the same swizzled Write. Each layout requires complete pairs
             # of logical 16-row/column fragments, because one ordinary LDS.128 drains each pair.
             paired = self._volta_pair_layout(mn)
+            # A transposed B stages K-contiguous like A, so it takes A's crosswise layout rather
+            # than the congruous one, which is for the N-contiguous canonical B.
+            b_mode = VOLTA_CROSSWISE if self.c.as_contraction().b_trans else VOLTA_B_CONGRUOUS
             return (
                 VOLTA_CROSSWISE if paired else "NONE",
-                *((VOLTA_B_CONGRUOUS if paired else "NONE") for _ in self.channels),
+                *((b_mode if paired else "NONE") for _ in self.channels),
             )
         b_inner = self.stage.bk_elems if self.c.as_contraction().b_trans else mn[1].tile // self.b_atoms(mn)
         return tuple(self.slab_swizzle(inner, e.nbytes) for e, inner in zip(self.slab_elems(), (self.stage.bk_elems, b_inner), strict=True))
@@ -2358,6 +2384,8 @@ class _MmaOps(_AtomOps):
                     fragment_index=(i, j),
                     row_dim=_axis_dim(write.index, m.axis.name),
                     col_dim=_axis_dim(write.index, n.axis.name),
+                    ldm=self.store_stride(write, m.axis),
+                    ldn=self.store_stride(write, n.axis),
                 )
             )
         return out
@@ -3409,6 +3437,8 @@ class _FlashOps(_MmaOps):
                     fragment_layout=atom.fragment_layout,
                     row_dim=_axis_dim(write.index, m.axis.name),
                     col_dim=_axis_dim(write.index, n.axis.name),
+                    ldm=self.store_stride(write, m.axis),
+                    ldn=self.store_stride(write, n.axis),
                 )
             )
         return out
@@ -3429,6 +3459,7 @@ def _atom_ops(
     axes: tuple = (),
     inner: tuple | None = None,
     one_wave: bool = False,
+    outputs=None,
 ) -> _AtomOps:
     """The **one** atom dispatch — select the codegen strategy off the atom kind. ``c`` is the
     stored algebra, ``tile`` the PLACED schedule slice (``Tile.at``) the geometry derives from."""
@@ -3456,6 +3487,7 @@ def _atom_ops(
         axes,
         inner,
         one_wave,
+        outputs,
     )
 
 
@@ -3497,6 +3529,7 @@ def store_sink(
     k_axis: Axis | None = None,
     axes: tuple = (),
     inner: tuple | None = None,
+    outputs=None,
 ):
     """The default **matmul sink** — the per-cell ``store(i, j, offset, mn)`` from the atom strategy
     (an mma ``RegStore`` / the replicated scalar ``epilogue`` tail), folding in the ``epilogue`` (the
@@ -3513,4 +3546,5 @@ def store_sink(
         k_axis=k_axis,
         axes=axes,
         inner=inner,
+        outputs=outputs,
     ).store

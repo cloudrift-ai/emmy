@@ -82,15 +82,16 @@ def test_one_dynamic_kernel_benched_at_two_sizes_is_two_rows() -> None:
 
 def test_a_schedule_row_is_shared_and_a_read_row_reassembles_the_kernel_stamps() -> None:
     """Two measurements taken with the same choices share one schedule row, whatever kernel they are
-    of. The ``S_*`` entries a writer passes are the kernel's, not the row's: what a reader gets back
-    is the kernel row's stamps plus the schedule row, the flat dict the featurizer always read."""
+    of. The ``S_*`` entries a writer passes are the kernel's, not the row's: what a reader gets back is
+    the kernel row's stamps, its exact identity as ``I_kernel`` and the schedule row, the flat dict the
+    featurizer and the evidence index always read."""
     db, ctx = _db("a", "b"), _ctx(_5090)
     _record(db, ctx, "a", 100.0, knobs={"S_x": 1.0, "WORK": "t16", "H_opt": 3.0})
     _record(db, ctx, "b", 200.0, knobs={"S_x": 7.0, "WORK": "t16"})
     assert db._conn.execute("SELECT COUNT(*) FROM schedule").fetchone() == (1,)
     assert db._conn.execute("SELECT COUNT(*) FROM schedule_knob").fetchone() == (1,)
     rows = {r.kernel: r.knobs for r in db.iter_perf_rows()}
-    assert rows == {"a": {"S_x": 1.0, "WORK": "t16"}, "b": {"S_x": 1.0, "WORK": "t16"}}
+    assert rows == {"a": {"S_x": 1.0, "I_kernel": "a", "WORK": "t16"}, "b": {"S_x": 1.0, "I_kernel": "b", "WORK": "t16"}}
     # The empty row is a schedule too: a forkless kernel's one measurement.
     _record(db, ctx, "a", 50.0, knobs={})
     assert db.lookup_perf(ctx, "a", bindings={}, knobs={}, backend="cuda").stats.median == 50.0

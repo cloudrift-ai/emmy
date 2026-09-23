@@ -396,7 +396,7 @@ def lift_body(body, axes: tuple = (), levels: tuple = ()) -> tuple[tuple, Body]:
             inner, cell = lift_body(stmt.body, (*axes, stmt.axis), inner_levels)
             edges.extend(inner)
             level.exposed.update((name, fold) for fold in inner for name in fold.exposes)
-            writes = tuple(member for member in cell if isinstance(member, Write))
+            writes = tuple(cell.writes)
             # A NESTED output sweep is a statement of this cell, not projection material: its own
             # recursion already reduced it to its stores, so it stays in the retained cell — at
             # its source position among the writes — while the projection term is formed from the

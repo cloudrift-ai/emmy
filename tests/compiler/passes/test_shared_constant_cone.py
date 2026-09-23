@@ -36,7 +36,7 @@ from emmy.compiler.ir.schedule.classic import (
     ProjectionSchedule,
     ReductionSchedule,
 )
-from emmy.compiler.ir.stmt import Assign, Body, Load
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
@@ -259,3 +259,32 @@ def test_serial_root_and_projection_tail_re_spell_distinct_values_in_one_scope()
     assert len(additions) == 2
     assert additions[0].name != additions[1].name
     assert reciprocal.args == (additions[1].name,)
+
+
+@pytest.mark.parametrize("coop", [1, 32, 64])
+def test_projection_lowers_overlapping_carriers_together(coop) -> None:
+    free, reduce_axis = Axis("m", 4), Axis("k", 8)
+    shared = reduction(
+        reduce_axis,
+        (slab("x_e", "x", "m", "k"),),
+        tuple(Assign(name=f"{name}__v", op="multiply", args=("x_e", "x_e")) for name in ("a", "b", "c")),
+        ("a", "b", "c"),
+    )
+    left = projection((shared,), (Assign(name="left", op="add", args=("a", "b")),))
+    root = projection((shared, left), (Assign(name="out", op="multiply", args=("c", "left")),))
+
+    tile = _serial_tile(root, free, reduce_axis)
+    tile = replace(
+        tile,
+        schedule=replace(
+            tile.schedule,
+            kernel=KernelSchedule(derive_inventory((Tile(),), coop=coop) or Work(), Raster.parse("")),
+            nodes={
+                site: replace(choice, reduce=Reduce.of(coop=coop)) if isinstance(choice, ReductionSchedule) else choice
+                for site, choice in tile.schedule.nodes.items()
+            },
+        ),
+    )
+    bound = factor.factorize(tile, root=None)
+    accumulators = [stmt.name for stmt in bound.body.iter() if isinstance(stmt, Accum)]
+    assert len(accumulators) == len(set(accumulators))

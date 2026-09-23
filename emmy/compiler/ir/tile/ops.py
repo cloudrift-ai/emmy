@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from emmy.compiler.dtype import get as get_dtype
+from emmy.compiler.ir.address import gmem_axis_step
 from emmy.compiler.ir.pure.fold import (
     Fold,
 )
@@ -31,7 +32,7 @@ from emmy.compiler.ir.schedule.classic import (
 )
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Select, refs_axis, stmt_axis_names
 from emmy.compiler.ir.stmt.base import Stmt, dtype_promote
-from emmy.compiler.ir.tile.ir import TileOp, apply_output_specs
+from emmy.compiler.ir.tile.ir import apply_output_specs
 from emmy.compiler.ir.tile.path import UnknownSiteError, sites
 
 
@@ -307,15 +308,26 @@ class Sched:
         def orient(mn):
             # The pair is each side's own free axis, the first operand's leading — the placement
             # binds both, and a sibling output's sweep promoted beside them (the fused q/k/v
-            # projections, N 64 beside N 32) never stands in for either. With several own axes a
-            # side the trailing one is the role and the rest ride the grid; a side without one
-            # (the unit-row matvec) leaves the trailing pair to the placement.
+            # projections, N 64 beside N 32) never stands in for either. With several own axes,
+            # tile the smallest output stride, so a reordered grid still tiles channels rather
+            # than heads. Undetermined layouts retain the trailing-grid choice.
             view = node.as_contraction()
             if mn is None or view is None:
                 return mn
             order = {axis.name: (position, axis) for position, axis in enumerate((*self.place.free, *self.place.grid))}
-            left = max((order[name] for name in view.left_axes if name in order), default=None)
-            right = max((order[name] for name in view.right_axes if name in order), default=None)
+
+            def rank(item):
+                position, axis = item
+                steps = (
+                    gmem_axis_step(Load("", spec.write.output, spec.write.index), axis.name, self.tile.outputs)
+                    for spec in self.tile.output_specs
+                )
+                return min((abs(step[0]) for step in steps if step is not None and step[0]), default=float("inf")), -position
+
+            left = min((order[name] for name in view.left_axes if name in order), key=rank, default=None)
+            right = min((order[name] for name in view.right_axes if name in order), key=rank, default=None)
+            if left is None and not view.left_axes:
+                left = next((pair for name, pair in order.items() if name not in node.free_axes and pair[1].extent == 1), None)
             if left is not None and right is not None:
                 return (left[1], right[1])
             first, second = mn
@@ -358,16 +370,14 @@ def sched_of(tile) -> Sched:
 
 
 def scheduled(
-    op,
+    tile,
     *,
     name: str,
     place,
     knobs: dict,
-    output_specs: tuple = (),
     schedule=None,
     materialization=None,
     workers=None,
-    axes: tuple = (),
 ):
     """Build a scheduled ``TileOp`` from one accepted semantic schedule.
 
@@ -382,14 +392,12 @@ def scheduled(
         raise ValueError(f"WORK producer band {work.producer} disagrees with WarpSpec producer band {producer}")
     if knobs.get("WORK") != work.spell():
         raise ValueError("encoded WORK does not agree with the accepted classic schedule")
-    return TileOp(
-        op=op,
+    return replace(
+        tile,
         name=name,
         place=place,
         workers=workers,
         knobs=knobs,
-        output_specs=tuple(output_specs),
-        axes=axes,
         schedule=schedule,
         materialization=materialization,
     )
@@ -534,10 +542,9 @@ def head(op):
     node-level fact the scheduler dispatches on — the views, the
     reduce ``Axis``, the operand edges — is a STORED param on what this returns."""
     node = op
-    # A term composes through operands, so a projection's node is its first edge — through every
-    # zero-axis wrapper on the way (an output sweep's projection over its reduce).
+    # Skip slab providers just as the kernel binder does: a captured scalar can precede the reduce.
     while isinstance(node, Fold) and node.axis is None and node.operands:
-        node = node.operands[0]
+        node = next((edge for edge in node.operands if edge.as_slab() is None), None)
     return node if isinstance(node, Fold) and node.axis is not None else None
 
 
@@ -545,7 +552,7 @@ def kernel_roots(op) -> tuple[Fold, ...]:
     """The reduce nodes the kernel binder builds the kernel AROUND — the ones whose ``REDUCE``
     partition it realizes. The binder peels each zero-axis projection to one operand: the
     contraction root of a tiled edge (every such root at once for a multi-output kernel), else the
-    first operand; every other reduce in the tree lowers serially inside its reader, so a partition
+    first non-slab operand; every other reduce in the tree lowers serially inside its reader, so a partition
     offered on it would price a kernel the binder never builds. This is that peel, read off the
     term alone, so the schedule projection offers the partition catalog only where it is realized."""
     node = op
@@ -553,7 +560,7 @@ def kernel_roots(op) -> tuple[Fold, ...]:
         tiled = tuple(projection_root(edge) for edge in tiled_edges(node.operands))
         if len(tiled) > 1:
             return tiled
-        node = tiled[0] if tiled else node.operands[0]
+        node = tiled[0] if tiled else next((edge for edge in node.operands if edge.as_slab() is None), None)
     return (node,) if isinstance(node, Fold) else ()
 
 

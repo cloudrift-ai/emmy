@@ -33,8 +33,9 @@ Tables (the DDL is the reference):
   route rows, no whole-slice totals, no kernel-set verdicts.
 
 Readers see a FLAT :class:`PerfRow`: the context's columns, and ``knobs`` reassembled as the kernel's
-stamps plus the schedule row, so the featurizer, the measured pools and the freeze predicates read what
-they always read. The joins live here and nowhere else.
+stamps, its exact identity as the ``I_kernel`` stamp and the schedule row, so the featurizer, the evidence
+index, the measured pools and the freeze predicates read what they always read. The joins live here and
+nowhere else.
 
 Nothing migrates. A file whose tables have other columns than this DDL was written by another emmy: a
 writer open re-creates every table empty — the rows are regenerable (a tune DB re-tunes, a dataset DB
@@ -57,7 +58,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from emmy.compiler.pipeline.knob import CTX_PREFIX, STRUCT_PREFIX, family_of
+from emmy.compiler.pipeline.knob import KERNEL_IDENTITY, METADATA_PREFIXES, family_of
 from emmy.compiler.structural import digest
 
 if TYPE_CHECKING:
@@ -287,12 +288,12 @@ def _cc(arch: str) -> int:
 
 
 def _split_knobs(knobs: dict) -> dict:
-    """The schedule row of a knob dict: the in-kernel families, without ``S_*`` / ``H_*`` (they are the
-    kernel's and the context's). A placement knob here is an error — a row spelling a cut or a cross-CTA
-    split is a kernel-set decision, not a measurement of one kernel."""
+    """The schedule row of a knob dict: the in-kernel families, without ``S_*`` / ``H_*`` / ``I_*`` (they are
+    the kernel's, the context's and the kernel's identity). A placement knob here is an error — a row
+    spelling a cut or a cross-CTA split is a kernel-set decision, not a measurement of one kernel."""
     schedule = {}
     for name, value in knobs.items():
-        if str(name).startswith((STRUCT_PREFIX, CTX_PREFIX)):
+        if str(name).startswith(METADATA_PREFIXES):
             continue
         if is_placement_knob(name, value):
             raise ValueError(f"{name}={value!r} is a placement knob: a kernel-set decision is a routing row, not a perf row")
@@ -703,16 +704,17 @@ class SearchDB:
             "schedule knobs and placement knobs stay apart": apart,
         }
 
-    def decisions(self) -> list[tuple[dict, dict]]:
-        """Every stored kernel-set decision as ``(the parent's stamps, the arm)`` — what offers a composed cut
-        to a later compile of a kernel with the parent's signature, without decoding any wire."""
+    def decisions(self) -> list[tuple[str, dict, dict]]:
+        """Every stored kernel-set decision as ``(the parent's exact identity, its stamps, the arm)`` — what
+        offers a composed cut to a later compile of the parent kernel, without decoding any wire."""
         return [
-            (self._stamps(parent), self._knobs_of("placement", pid))
+            (parent, self._stamps(parent), self._knobs_of("placement", pid))
             for parent, pid in self._conn.execute("SELECT DISTINCT parent, placement FROM routing ORDER BY parent, placement")
         ]
 
     def _row_to_perf(self, row) -> PerfRow:
-        """A row selected as :data:`_PERF_SEL`, its ``knobs`` reassembled from the kernel's stamps and the
+        """A row selected as :data:`_PERF_SEL`, its ``knobs`` reassembled from the kernel's stamps, its exact
+        identity (the ``I_kernel`` stamp every evidence join keys on — the ``kernel`` column itself) and the
         schedule row."""
         (gpu, arch, opt, flags, backend, kernel, bindings, schedule, status, med, lo, hi, mean, var, n) = row[:15]
         measured_at, captured, error, source = row[15:]
@@ -723,7 +725,7 @@ class SearchDB:
             flags=flags,
             kernel=kernel,
             bindings=json.loads(bindings),
-            knobs={**self._stamps(kernel), **self._knobs_of("schedule", schedule)},
+            knobs={**self._stamps(kernel), KERNEL_IDENTITY: kernel, **self._knobs_of("schedule", schedule)},
             backend=backend,
             status=status,
             stats=PerfStats(median=med, min=lo, max=hi, mean=mean, variance=var, n_samples=n),

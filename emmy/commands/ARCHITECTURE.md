@@ -36,6 +36,10 @@ commands/publish ─► publish (image naming, metadata, collision and digest ga
 - `emmy/redact.py` — `redact_secrets()`, `SecretRedactingFilter`, `install_redaction()` (attach the filter to a handler — must be a handler, not a logger, so child-logger records that propagate up are still redacted), `register_secret()` (call after resolving any secret from a CLI flag — `--hf-token`, `--api-key` — or env var so its value is added to the redaction set)
 - `emmy/benchmark/` — config, logging, workload, tasks, execution, and YAML experiment records
 
+Golden replay keeps the selected input precision pins active through lowering, NVCC compilation, measurement, and
+recording. Tuning creates its measurement context inside each target's precision scope. `FAST_MATH` defaults to true
+and controls NVCC `--use_fast_math`; `--nvcc-flags=--fmad=false` remains a custom contraction diagnostic.
+
 ## Layers
 
 ### `emmy/recipe/` — Recipe Library
@@ -131,7 +135,8 @@ They accept a Hugging Face model, debug Graph IR, or inline `--code`; `causal-lm
 keeps the existing Transformers path. `dit` delegates to the Diffusers block adapter in `compiler/trace/dit.py`; it
 requires `--layer`, accepts the checkpoint's layers 0-27, and rejects dynamic shapes in v1. `run --bench` and
 `tune --bench` include the adapter in the isolated worker's reconstruction payload, so eager PyTorch, `torch.compile`,
-and Emmy always rebuild the same module and example inputs. Inductor compiles with
+and Emmy always rebuild the same module and example inputs. Reference-free runs also honor `--warmup` and `--iters`.
+Inductor compiles with
 `fullgraph=True, mode="max-autotune-no-cudagraphs"`; the harness supplies the shared outer CUDA graph so every backend
 has identical captured timing semantics. Inductor output must match eager on the same inputs at `rtol=atol=1e-3`
 before its latency is accepted. `run --strict` makes every requested backend, captured timing, exact pin, and direct
@@ -179,10 +184,11 @@ handlers retain only the workflow's argument validation and user-facing error/re
 
 `emmy trace MODEL -o PATH` lowers through post-fusion Loop IR and writes one self-contained golden YAML inventory.
 The YAML embeds stable frontend Torch IR programs and emits one target row for every post-fusion kernel occurrence;
-structurally identical occurrences are not collapsed and a missing cache key never drops a target. A target uses
-frontend provenance origins when that selector is non-empty and unique. Otherwise the document embeds its standalone
-Loop IR slice in `loops` and selects that fallback by index. Flash score producers absorbed into their consumer are
-stored as part of that one fused target rather than as a second kernel. Trace records neither knobs nor timings,
+structurally identical occurrences are not collapsed and a missing cache key never drops a target. Every target is its
+kernel's standalone Loop IR, stored in `loops` and selected by index, with the frontend provenance origins beside it
+(`target: {loop, origins}`) when it computes every one of them whole — the traced ops a benchmark compares it against.
+Flash score producers absorbed into their consumer are stored as part of that one fused target rather than as a second
+kernel. Trace records neither knobs nor timings,
 refuses replacement, and never writes a traced Graph JSON or provenance sidecar. Quantized traces store their
 checkpoint-declaration digest in the same YAML.
 
@@ -208,11 +214,11 @@ spawns). `--realization NAME` (`run`, `compile`, `tune`) selects one realization
 substring — inside `--golden PATH`, or, on `run` / `compile` without it, inside the live card's repository goldens.
 There is no second spelling: no file flag beside `--golden`, no name flag beside `--realization`.
 
-`run --golden PATH` without `--realization` walks every target name in one process, benching each target's
-verified rows or its one valid direct tune winner (proposals stay the tuner's). A routing row or a
-child-identity receipt (`<target>.<identity>`) is evidence for its target's walk, not a target of its own; a file
-that dropped its seed rows (a promoted serving-twin golden) benches each target through the row pricing all of it,
-its fastest routing row, else its fastest row. A
+`run --golden PATH` without `--realization` walks every persisted target, binding and input regime in one process,
+benching each target's verified rows or its one valid direct tune winner (proposals stay the tuner's). A routing row
+or child-identity receipt is evidence for its target's walk, not a target of its own. Grouping uses the stored target,
+not dotted name prefixes. A file that dropped its seed rows (a promoted serving-twin golden) benches each target
+through the row pricing all of it, its fastest routing row, else its fastest row. A
 failing target does not stop the walk: every target reports, and the command exits non-zero at the end naming
 the failures. A receipt of a piece a route row minted (its identity is no route row's) replays under the target's
 route rows composed, plus `PLACE=fuse` when no
@@ -840,5 +846,8 @@ no Git operation.
 
 `generate --export-native DIR` prepares a standalone dense Qwen3 artifact; `generate --native-pack DIR` invokes the
 supervised Rust generation loop. These modes are mutually exclusive. The command layer owns argument parsing and
-tokenizer I/O; model preparation and binary worker transport live in `serving/native`. Sampling is currently greedy,
-and HTTP serving remains on the existing vLLM path.
+tokenizer I/O; model preparation and binary worker transport live in `serving/native`. Native execution accepts
+`--temperature`, `--top-p`, and `--seed`; temperature zero is greedy, and nonzero `--top-k` is rejected.
+`--timeout` controls the native worker operation deadline, including the complete sequential prefill/decode loop.
+HTTP serving remains on the existing vLLM path. Generation artifacts prepared before sampling support must be
+exported again.

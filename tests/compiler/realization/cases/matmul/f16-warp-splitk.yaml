@@ -19,6 +19,7 @@ programs:
 configs:
 - program: 0
   target:
+    loop: 0
     origins:
     - c
   realizations:
@@ -54,3 +55,66 @@ configs:
       REDUCE: ''
       RASTER: ''
     identity: 305e55e99728dcea2cb2a6ff8c9b210c24dd98baa3638c5e39c2d6c4b197ddf5
+loops:
+- inputs: [a, b]
+  outputs: [c]
+  nodes:
+  - id: a
+    op: input
+    outputs: [[a, f16, [64, 4096]]]
+  - id: b
+    op: input
+    outputs: [[b, f16, [4096, 512]]]
+  - id: c
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 64}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 512}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 4096}, window: null}}
+                        body:
+                          body:
+                          - class: Load
+                            fields:
+                              names: {tuple: [in0]}
+                              input: a
+                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
+                              dtype: null
+                          - class: Load
+                            fields:
+                              names: {tuple: [in1]}
+                              input: b
+                              index: {tuple: [{expr: {var: a2}}, {expr: {var: a1}}]}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
+                          - class: Accum
+                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
+                        unroll: false
+                        seed: true
+                    - class: Write
+                      fields:
+                        output: c
+                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
+                        values: {tuple: [acc0]}
+                        value_dtype: null
+                        atomic: false
+                        swizzle: NONE
+                  unroll: false
+                  seed: true
+            unroll: false
+            seed: true
+      name: k_matmul_9cff3e
+    inputs: [b, a]
+    outputs: [[c, f16, [64, 512]]]

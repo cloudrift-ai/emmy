@@ -54,6 +54,7 @@ programs:
 configs:
 - program: 0
   target:
+    loop: 0
     origins:
     - matmul
     - transpose
@@ -70,3 +71,73 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
     identity: 57c5eb6a05f259d7aac8d30f9b8ee59139b6a50dc154f25a26d0376114477968
+loops:
+- inputs: [x0, x1]
+  outputs: [transpose]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 512, 1024]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [8, 1024, 128]]]
+  - id: transpose
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 8}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 128}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 512}, window: null}}
+                        body:
+                          body:
+                          - class: Loop
+                            fields:
+                              axis: {class: Axis, fields: {name: a3, extent: {dim: 1024}, window: null}}
+                              body:
+                                body:
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in0]}
+                                    input: x0
+                                    index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a2}}, {expr: {var: a3}}]}
+                                    dtype: null
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in1]}
+                                    input: x1
+                                    index: {tuple: [{expr: {var: a0}}, {expr: {var: a3}}, {expr: {var: a1}}]}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
+                                - class: Accum
+                                  fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a3]}, base: null}
+                              unroll: false
+                              seed: true
+                          - class: Write
+                            fields:
+                              output: transpose
+                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}, {expr: {var: a2}}]}
+                              values: {tuple: [acc0]}
+                              value_dtype: null
+                              atomic: false
+                              swizzle: NONE
+                        unroll: false
+                        seed: true
+                  unroll: false
+                  seed: true
+            unroll: false
+            seed: true
+      name: k_matmul_5c4fa5
+    inputs: [x1, x0]
+    outputs: [[transpose, f16, [8, 128, 512]]]

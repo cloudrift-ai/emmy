@@ -3,7 +3,7 @@
 A case file is a working golden document carrying exactly one config whose realizations are the
 authored ``pins`` / ``knobs`` the compiler is expected to realize: one entry per kernel of the set
 the target compiles to, each addressed by the ``identity`` of the kernel it decides (the first
-entry is the target's own). ``offered`` asks each entry of the pinned enumeration; ``realized``,
+entry is the target's own). ``offered`` strictly decodes each entry, as a golden row is decoded; ``realized``,
 ``built`` and ``correct`` ask the whole set of the compile the way a deploy would — the case's
 entries are the compile's only evidence, strict, and no hand pin rides beside them
 (:func:`evidence_scope`). Everything here is GPU-free except :func:`built` and :func:`correct`.
@@ -24,13 +24,14 @@ from emmy.compiler.context import Context
 from emmy.compiler.pipeline.knob import KERNEL_DECISION_FAMILIES, family_of, validate_family_value
 from emmy.compiler.pipeline.search.golden import (
     GoldenRecord,
+    decode_record,
     dump_golden_file,
     golden_record_from_entry,
     kernel_identity,
     load_golden_file,
+    siblings_of,
     sole_evidence,
 )
-from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
 from emmy.compiler.pipeline.search.pins import parse_reduce, pinned_knobs, unreproducible_pin_flag
 from emmy.compiler.pipeline.strategy import PipelineStrategy
 
@@ -78,24 +79,10 @@ class Case:
     def compute_cap(self) -> tuple[int, int]:
         return tuple(self.document["compute_cap"])
 
-    @property
-    def pinned(self) -> dict:
-        """The target entry's full hand pin: input pins plus the authored schedule row."""
-        return pin_of(self.record)
-
     def context(self) -> Context:
         """The case's own context — its declared capability, never the live card's. This is what
         makes stages 1 and 2 machine-independent, so an sm_70 lockout is exercised on any box."""
         return Context.from_target(self.compute_cap)
-
-    def union_context(self) -> Context:
-        """The case context for enumerating under its pin across structural alternatives.
-
-        Site identities are local to one classic problem.  A corpus row therefore prunes a peer
-        kernel whose coincident identity cannot realize its exact pin, while :func:`offered` still
-        requires every pin to occur somewhere in the offered kernel set.
-        """
-        return replace(self.context(), validate_pins=False)
 
 
 def case_files() -> list[Path]:
@@ -139,19 +126,6 @@ def load_case(path: Path) -> Case:
 def pin_of(record: GoldenRecord) -> dict:
     """One entry as the hand pin ``offered`` publishes: its input pins plus its authored row."""
     return {**record.pin_map, **record.knobs}
-
-
-def set_decisions(case: Case) -> dict:
-    """The kernel-set decisions the case's entries spell — every ``PLACE`` key and every ``REDUCE``
-    value carrying a cross-CTA half — as one hand pin: what mints the pieces the other entries
-    decorate."""
-    decisions: dict = {}
-    for record in case.records:
-        for key, value in pin_of(record).items():
-            family = family_of(str(key))
-            if family == "PLACE" or (family == "REDUCE" and (plan := parse_reduce(value)) is not None and plan.needs_split):
-                decisions[key] = value
-    return decisions
 
 
 def evidence_line(path: Path) -> str | None:
@@ -201,11 +175,14 @@ def regenerate(document: dict) -> dict:
     graph = graph_from_wire(document["programs"][entry["program"]])
     with tempfile.TemporaryDirectory() as directory:
         destination = Path(directory) / "regenerated.yaml"
-        write_trace_inventory(graph, destination, ctx=ctx, model=document.get("model"), force_loop_targets="loop" in entry["target"])
+        write_trace_inventory(graph, destination, ctx=ctx, model=document.get("model"))
         fresh = yaml.safe_load(destination.read_text())
 
-    matched = _matching_entry(fresh, entry)
+    matched = _matching_entry(fresh, entry, document["loops"][entry["target"]["loop"]])
     rebuilt = dict(fresh)
+    # A case keeps its own kernel only: the regenerated pool holds every kernel of the program.
+    rebuilt["loops"] = [fresh["loops"][matched["target"]["loop"]]]
+    matched["target"] = {**matched["target"], "loop": 0}
     rebuilt["configs"] = [matched]
     template = dict(matched["realizations"][0])
     rows = []
@@ -267,13 +244,28 @@ def complete(document: dict) -> dict:
     return document
 
 
-def _matching_entry(fresh: dict, entry: dict) -> dict:
-    """The regenerated config that selects the same target as the stored one."""
+def _matching_entry(fresh: dict, entry: dict, kernel: dict) -> dict:
+    """The regenerated config for the stored kernel: the one from the same traced ops, or, for a
+    kernel that keeps none, the one with the same exact typed Loop identity."""
+    from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
+    from emmy.compiler.loop_wire import loop_graph_from_wire  # noqa: PLC0415
+
+    def identity(wire):
+        graph = loop_graph_from_wire(wire)
+        return tuple(
+            node.op.with_io(graph, node).identity_key(structural=False, with_io=True)
+            for node in graph.nodes.values()
+            if isinstance(node.op, LoopOp)
+        )
+
+    origins = entry["target"].get("origins")
+    key = identity(kernel) if origins is None else None
     for candidate in fresh["configs"]:
-        if candidate["target"] == entry["target"]:
+        target = candidate["target"]
+        if (target.get("origins") == origins) if origins is not None else identity(fresh["loops"][target["loop"]]) == key:
             return dict(candidate)
-    targets = ", ".join(repr(candidate["target"]) for candidate in fresh["configs"])
-    raise CaseError(f"the stored target {entry['target']!r} no longer resolves; the program now offers {targets}")
+    offered = ", ".join(repr(candidate["target"].get("origins")) for candidate in fresh["configs"])
+    raise CaseError(f"no kernel of the program matches the stored one (traced ops {origins!r}); the program now forms {offered}")
 
 
 def canonical_knobs(knobs: dict) -> dict:
@@ -344,34 +336,16 @@ def lowered(case: Case, ctx: Context):
 
 
 def offered(case: Case) -> str | None:
-    """Stage 1 — under the case's pin, does the planner still enumerate its schedule?
+    """Stage 1 — does the compiler still enumerate every entry's schedule?
 
-    Pinned-enumeration membership is the primary oracle, not ``unreproducible_pin_flag`` alone:
-    the flag answers ``None`` for a registered family that nothing stamped, so a pin that cannot
-    be offered at all would read as satisfied. Membership is asked per row, *through* the flag, so
-    the structural families it already reads correctly stay correctly read here.
+    The golden decode is the one question a recorded row and a corpus entry both answer
+    (:func:`~emmy.compiler.pipeline.search.golden.decode_record`): the entry's route resolves to
+    offered seams, and its row equals an enumerated leaf of the kernel its ``identity`` names,
+    decided beside the case's other entries exactly as a deploy reads the set.
     """
     for record in case.records:
-        # An entry's row beside the SET's kernel-set decisions: a piece exists to be enumerated
-        # only once the cuts and splits that mint it are pinned.
-        pinned = {**set_decisions(case), **pin_of(record)}
-        try:
-            with pinned_knobs(pinned):
-                rows = enumerate_graph(record.target_program.copy(), case.union_context()).rows
-        except Exception as exc:  # noqa: BLE001 — a pin the enumeration refuses outright is not offered
-            return f"{record.name}: {type(exc).__name__}: {exc}"
-        # Site identities are problem-local, so one structural target may contain several fresh
-        # classic problems whose exact pins are realized by different kernel rows. Every schedule pin
-        # must appear somewhere in the offered kernel set; no family-wide alias is used to bridge it.
-        if rows and unreproducible_pin_flag(pinned, rows) is None:
-            continue
-        if not record.knobs:
-            # A FORKLESS kernel: its schedule space collapsed to one row, so it opens no fork and the
-            # enumeration has nothing to return. There is no schedule to be denied, so nothing here can
-            # fail — `realized` still proves it lowers, and the later stages still prove it runs. This
-            # mirrors how `golden._replay` reads a forkless kernel's row off the resolved op.
-            continue
-        return f"{record.name}: no enumerated row carries the pin ({len(rows)} rows offered at sm_{''.join(map(str, case.compute_cap))})"
+        if (reason := decode_record(record, siblings_of(record, case.records))) is not None:
+            return f"{record.name}: {reason}"
     return None
 
 
@@ -455,19 +429,22 @@ def built(case: Case):
 def correct(case: Case, compiled) -> None:
     """Stage 4 — the kernel the evidence picks computes the reference answer.
 
-    The reference is derived from the target, the way ``emmy run`` already derives it: a frontend
-    program (``target: {origins: …}``) has a numpy twin; an exact Loop target has none, so it
-    compares against the same-input greedy execution of the same program.
+    The reference is the kernel's traced ops run on the numpy backend
+    (:attr:`~emmy.compiler.pipeline.search.golden.GoldenRecord.reference_program`); a kernel with no
+    exact frontend twin compares against the same-input greedy execution of the same program.
     """
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
     from emmy.compiler.backend.numpy import NumpyBackend  # noqa: PLC0415
 
     program = case.record.target_program
-    feed = seeded_inputs(program)
+    sources = {}
+    feed = seeded_inputs(program, sources=sources)
     result, _ = CudaBackend().run(compiled, input_data=dict(feed))
-    if case.record.loop_wire is None:
+    if (twin := case.record.reference_program) is not None:
         reference = NumpyBackend()
-        want, _ = reference.run(reference.compile(program.copy()), input_data=dict(feed))
+        # The twin reads the kernel's inputs, plus any checkpoint-backed weight of its own.
+        twin_feed = {**seeded_inputs(twin, sources=sources), **{name: feed[name] for name in twin.inputs}}
+        want, _ = reference.run(reference.compile(twin.copy()), input_data=twin_feed)
     else:
         greedy = CudaBackend()
         want, _ = greedy.run(greedy.compile(program.copy()), input_data=dict(feed))
@@ -479,7 +456,7 @@ def correct(case: Case, compiled) -> None:
         )
 
 
-def seeded_inputs(program) -> dict[str, np.ndarray]:
+def seeded_inputs(program, *, sources: dict[str, np.ndarray] | None = None) -> dict[str, np.ndarray]:
     """Deterministic inputs for the target's declared shapes, scaled so an fp16 reduction of a
     model-sized K does not saturate.
 
@@ -492,22 +469,33 @@ def seeded_inputs(program) -> dict[str, np.ndarray]:
     the producer it stands in for, and a multi-buffer producer (an NVFP4 encode, which emits packed
     codes beside their block scales) names its second buffer after the tensor rather than the node.
     """
-    from emmy.compiler.dim import DEFAULT_SEQ_HINT  # noqa: PLC0415
+    from emmy.compiler.dim import DEFAULT_SEQ_HINT, Dim  # noqa: PLC0415
     from emmy.compiler.ir.base import ConstantOp  # noqa: PLC0415
+    from emmy.compiler.loader.binder import bind_constants  # noqa: PLC0415
 
     rng = np.random.default_rng(0)
+    sources = {} if sources is None else sources
 
     def seeded(dims) -> np.ndarray:  # noqa: ANN001
+        dims = tuple(Dim(dim) for dim in dims)
         shape = tuple(dim.as_static() if dim.is_static else (dim.hint or DEFAULT_SEQ_HINT) for dim in dims)
         return (rng.standard_normal(shape) * 0.05).astype(np.float32)
 
     feed: dict[str, np.ndarray] = {name: seeded(program.buffer(name).shape) for name in program.inputs}
     for node_id, node in program.nodes.items():
-        if not isinstance(node.op, ConstantOp) or node_id in feed:
+        # A constant the runtime derives from a symbolic extent (a dynamic mean's count) is the
+        # backend's to fill; seeding it would divide by noise.
+        if not isinstance(node.op, ConstantOp) or node_id in feed or node.op.context_value is not None:
             continue
-        # A checkpoint-backed weight reaches a case with its shape but no value — the corpus has no
-        # checkpoint to bind it from — so it is seeded exactly like an input.
-        feed[node_id] = np.array([node.op.value], dtype=np.float32) if node.op.value is not None else seeded(node.output.shape)
+        op = node.op
+        parts = op.source_parts or (((op.source_path, op.source_shape or node.output.shape),) if op.source_path else ())
+        for path, shape in parts:
+            if path not in sources:
+                sources[path] = seeded(shape)
+        if not parts:
+            feed[node_id] = np.array([op.value], dtype=np.float32) if op.value is not None else seeded(node.output.shape)
+    # Both graphs bind the same source weights through their own transpose / reshape chains.
+    feed.update(bind_constants(program, sources))
     return feed
 
 

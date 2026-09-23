@@ -32,6 +32,7 @@ from dataclasses import replace
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import BF16, F16, F32
 from emmy.compiler.graph import Graph, Node, Tensor
+from emmy.compiler.ir.address import gmem_axis_step
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
@@ -552,9 +553,16 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     # pre-projection state must not round-trip through the output dtype (an fp16 round-trip can
     # saturate outlier partials to ±inf before the combine and costs the mantissa of every
     # partition sum).
+    def output_stride(axis):
+        steps = (gmem_axis_step(Load("", store.write.output, store.write.index), axis.name, tile.outputs) for store in stores)
+        return min((abs(step[0]) for step in steps if step is not None and step[0]), default=float("inf"))
+
+    # Preserve the output's contiguous axes across the split. Free-axis order is a traversal
+    # choice; using it as workspace layout can make the partial tile heads instead of channels.
+    ws_free = tuple(sorted(free, key=output_stride, reverse=True))
     ws_name = f"{out.name}__partial"
-    ws_shape = (Dim(n_comp), Dim(cta), *(a.extent for a in free)) if n_comp > 1 else (Dim(cta), *(a.extent for a in free))
-    ws_cell = tuple(Var(ax.name) for ax in free)
+    ws_shape = (Dim(n_comp), Dim(cta), *(a.extent for a in ws_free)) if n_comp > 1 else (Dim(cta), *(a.extent for a in ws_free))
+    ws_cell = tuple(Var(ax.name) for ax in ws_free)
 
     def ws_index(i: int) -> tuple:
         lead = (Literal(i, "int"), Var(split.name)) if n_comp > 1 else (Var(split.name),)

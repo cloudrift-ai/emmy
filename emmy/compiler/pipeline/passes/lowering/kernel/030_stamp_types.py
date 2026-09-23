@@ -33,7 +33,7 @@ from emmy.compiler.dtype import get as dtype_get
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.expr import Literal
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Let, Load, Stmt, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Let, Load, Select, Stmt, Write
 from emmy.compiler.ir.stmt.base import dtype_promote
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 
@@ -90,6 +90,9 @@ def _stamp_stmt(s: Stmt, ctx: _StampCtx) -> Stmt:
         return _stamp_load(s, ctx)
     if isinstance(s, Assign):
         return _stamp_assign(s, ctx)
+    if isinstance(s, Select):
+        ctx.ssa_dtypes[s.name] = dtype_get(dtype_promote("add", [(ctx.ssa_dtypes.get(b.value) or F32).name for b in s.branches]))
+        return s
     if isinstance(s, Write):
         return _stamp_write(s, ctx)
     if isinstance(s, Accum):

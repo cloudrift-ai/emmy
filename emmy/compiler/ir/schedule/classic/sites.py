@@ -180,7 +180,9 @@ class ClassicNodeSite(Site[ClassicSchedule]):
         if facts is None:
             choices: Iterator[ReductionSchedule] = (ReductionSchedule(Tile(), reduction) for reduction in reductions)
         else:
-            atoms = self.problem.atoms_of(self.id)
+            # A hand-pinned tile is an authored choice past the precision policy; a followed row is not.
+            followed = self.id in tile.family_sites["TILE"] and self.problem.followed(classic_node_key(tile, "TILE", self.id))
+            atoms = self.problem.policy_atoms(self.id) if followed else self.problem.atoms_of(self.id)
             plans = self._select_plans(
                 self._named("TILE"),
                 _contraction_plans(node, facts, self.problem.policy_atoms(self.id)),
@@ -395,6 +397,9 @@ class ClassicProblem(ScheduleProblem[ClassicSchedule]):
     #: Row keys whose values must be accepted exactly. Strict replay adds only the keys it supplies,
     #: leaving unrelated inherited pins under their original published-row reading.
     _strict_row_keys: frozenset[str] = frozenset()
+    #: Row keys a descent supplied rather than the hand pins the fork was built with. Such a row is
+    #: evidence, and evidence obeys the precision policy: only a hand pin authors a tile past it.
+    _followed_row_keys: frozenset[str] = frozenset()
     #: Whether a named value the rules refuse outright — a warp-group tile its grid cannot feed, a
     #: transport the card cannot run, a stage no support resolves — is an error naming the rule.
     #: True for a hand pin, which is wrong wherever it is published; ``with_row`` turns it off, since
@@ -421,7 +426,18 @@ class ClassicProblem(ScheduleProblem[ClassicSchedule]):
         # ``self.row`` is the live hand-pin restriction installed when the schedule fork was
         # built. A measured/prior row narrows that fork to one leaf, but cannot overwrite the
         # restriction: hard pins are authoritative over every ranking source.
-        return replace(self, row=frozendict({**supplied, **self.row}), _strict_row_keys=frozenset(strict_row_keys), loud_pins=False)
+        followed = self._followed_row_keys | {key for key in supplied if key not in self.row}
+        return replace(
+            self,
+            row=frozendict({**supplied, **self.row}),
+            _strict_row_keys=frozenset(strict_row_keys),
+            _followed_row_keys=frozenset(followed),
+            loud_pins=False,
+        )
+
+    def followed(self, key: str) -> bool:
+        """Whether the row's value at ``key`` (or its bare family) came from a descent, not a hand pin."""
+        return bool({key, key.partition("@")[0]} & self._followed_row_keys)
 
     @cached_property
     def node_sites(self) -> tuple[ClassicNodeSite, ...]:

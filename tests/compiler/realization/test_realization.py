@@ -99,3 +99,16 @@ def test_case_derived_half_is_current(path):
         "Run `make test-corpus-regen` to restamp it; that command refuses to write when a case's "
         "verdict also changed, which is a review conversation rather than a mechanical step."
     )
+
+
+def test_volta_compute_fill_offers_no_prefetch_ring():
+    """The Volta mma atom's compute fill stages at depth 1 only. Its depth-2 B prefetch ring copies
+    with blocking copies (sm_70 has no cp.async) and returned silently wrong answers on a V100, so
+    the enumeration must never offer it — asked on the one program known to offer the fill."""
+    from dataclasses import replace
+
+    case = helpers.load_case(helpers.CASES_DIR / "matmul" / "volta-gptq-cone-d1smem.yaml")
+    assert helpers.offered(case) is None, "the depth-1 fill is offered"
+    (record,) = case.records
+    ringed = replace(record, knobs={**record.knobs, "STAGE": "d2/smem"})
+    assert helpers.offered(replace(case, records=(ringed,))) is not None, "the depth-2 ring is not"

@@ -1,0 +1,136 @@
+compute_cap:
+- 9
+- 0
+programs:
+- inputs: [x0, x1, x2]
+  outputs: [add]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 1, 3072]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [1024, 3072]]]
+  - id: linear
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [x0, x1]
+    outputs: [[linear, f16, [1, 1, 1024]]]
+  - id: x2
+    op: input
+    outputs: [[x2, f16, [1, 1, 1024]]]
+  - id: add
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [linear, x2]
+    outputs: [[add, f16, [1, 1, 1024]]]
+configs:
+- program: 0
+  target:
+    loop: 0
+    origins:
+    - add
+    - linear
+  realizations:
+  - name: down_proj_residual-s1
+    bindings: {}
+    pins:
+      FAST_MATH: false
+  - name: down_proj_residual-s1.11bba2a43e37
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      TILE: ''
+      REDUCE: coop
+      STAGE: ''
+      RASTER: ''
+    identity: 11bba2a43e37cc686cf98e5caeb85c57937886fbe6f955466ad7bcf4843ac78f
+    measurements:
+      emmy_us: 3.474285793636734
+      reference_us: 3.45847021069443
+      reference_backend: same-input-greedy
+loops:
+- inputs: [x0, x1, x2]
+  outputs: [add]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 1, 3072]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [1024, 3072]]]
+  - id: x2
+    op: input
+    outputs: [[x2, f16, [1, 1, 1024]]]
+  - id: add
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 1024}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 3072}, window: null}}
+                  body:
+                    body:
+                    - class: Load
+                      fields:
+                        names: {tuple: [in0]}
+                        input: x0
+                        index:
+                          tuple:
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {var: a1}}
+                        dtype: null
+                    - class: Load
+                      fields:
+                        names: {tuple: [in1]}
+                        input: x1
+                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
+                        dtype: null
+                    - class: Assign
+                      fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
+                    - class: Accum
+                      fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
+                  unroll: false
+                  seed: true
+              - class: Assign
+                fields: {name: v1, op: {elementwise: copy}, args: {tuple: [acc0]}, dtype: {dtype: f16}}
+              - class: Load
+                fields:
+                  names: {tuple: [in2]}
+                  input: x2
+                  index:
+                    tuple:
+                    - {expr: {literal: {value: 0, dtype: int}}}
+                    - {expr: {literal: {value: 0, dtype: int}}}
+                    - {expr: {var: a0}}
+                  dtype: null
+              - class: Assign
+                fields: {name: v2, op: {elementwise: add}, args: {tuple: [in2, v1]}, dtype: null}
+              - class: Write
+                fields:
+                  output: add
+                  index:
+                    tuple:
+                    - {expr: {literal: {value: 0, dtype: int}}}
+                    - {expr: {literal: {value: 0, dtype: int}}}
+                    - {expr: {var: a0}}
+                  values: {tuple: [v2]}
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+            unroll: false
+            seed: true
+      name: k_linear_a43667
+    inputs: [x1, x0, x2]
+    outputs: [[add, f16, [1, 1, 1024]]]
+gpu_name: NVIDIA H100 80GB HBM3
+model: Qwen/Qwen3-0.6B@c1899de289a04d12100db370d81485cdf75e47ca

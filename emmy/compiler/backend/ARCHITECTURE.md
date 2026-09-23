@@ -30,6 +30,9 @@ Not a `Backend` — a small Graph→torch evaluator that runs a frontend-dialect
 (`RmsNormOp`→`F.rms_norm`, `LayerNormOp`→`F.layer_norm`, `SdpaOp`→`F.scaled_dot_product_attention`,
 `LinearOp`→`F.linear`, `ElementwiseOp`/`ReduceOp`/additive `ScanOp`→the torch elementwise/reduce/scan, layout
 ops→view/transpose/cat).
+Single-source index maps with unchanged coordinates, broadcasts, permutations, diagonals, or constant-zero coordinates
+use strided views. These preserve noncontiguous input storage and avoid unnecessary gather/clamp expressions that can
+break Inductor fusion across a later slice. Other maps retain the clipped gather and source-selection semantics.
 The stored unary `pad` form is an identity because tracing admits it only when every explicit pad width is zero and
 fails closed otherwise.
 FP8 tensors remain exact `uint8` bit carriers; `to_f8*` casts to torch float8 and reinterprets its storage, while
@@ -145,6 +148,10 @@ CUDA-specific launch fields (TMA descriptors) nest under a `"cuda"` key so anoth
 namespace and its own `build_from_plan` equivalent.
 The declared output list is also the runtime return order; allocation planning may reorder buffers, but cannot reorder
 observable program results.
+
+`LaunchSpec.smem_bytes` records total per-block shared storage. At load time each executor subtracts the cubin's
+static allocation and passes the remainder as dynamic shared memory, including requests below 48 KiB. Larger total
+allocations opt into the device limit. This avoids omitting small dynamic buffers or reserving static storage twice.
 
 `plan_cache.py` is the process-local reuse seam for repeated compiled structure within one immutable compile session.
 It keys the exact graph wire form after loader spelling and ABI hints, erasing only external tensor addresses while

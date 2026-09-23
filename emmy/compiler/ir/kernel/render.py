@@ -39,6 +39,26 @@ from emmy.compiler.tensor import Tensor
 # single dynamic pool with per-buffer offsets.
 STATIC_SMEM_CAP = 48 * 1024
 
+# E4M3's finite values are half bit patterns shifted seven places, times 2**8.
+# This also normalizes subnormals without the SDK emulation's data-dependent loop.
+_F8_DECODE_PRELUDE = """\
+static __device__ __forceinline__ __half emmy_from_f8e4m3(__nv_fp8_e4m3 value) {
+#if __CUDA_ARCH__ >= 890
+    return __half(value);
+#else
+    unsigned int bits = value.__x;
+    unsigned short half_bits = ((bits & 0x7fu) << 7) | ((bits & 0x80u) << 8);
+    __half scaled = __hmul(__ushort_as_half(half_bits), __ushort_as_half(0x5c00u));
+    return (bits & 0x7fu) == 0x7fu ? __ushort_as_half(0x7fffu) : scaled;
+#endif
+}
+
+static __device__ __forceinline__ float emmy_from_f8e4m3_f32(__nv_fp8_e4m3 value) {
+    return __half2float(emmy_from_f8e4m3(value));
+}
+
+"""
+
 # e2m1 encode. The fp8 encodes construct a <cuda_fp8.h> type and inherit its rounding; there is no
 # fp4 type to construct, and the result here is an ordinary integer carrier, so leaving the cast to
 # the target would TRUNCATE the value (1.5 storing 1) instead of encoding it. Hence an explicit
@@ -86,8 +106,10 @@ static __device__ __forceinline__ void mbarrier_init(unsigned long long* mbar, i
 }
 
 static __device__ __forceinline__ void mbarrier_arrive_expect_tx(unsigned long long* mbar, int bytes) {
+    // Publish barrier initialization and order prior shared-memory accesses before the TMA fill.
     unsigned int addr = __cvta_generic_to_shared(mbar);
     unsigned long long state;
+    asm volatile("fence.proxy.async.shared::cta;\\n" ::: "memory");
     asm volatile("mbarrier.arrive.expect_tx.shared.b64 %0, [%1], %2;\\n"
                  : "=l"(state) : "r"(addr), "r"(bytes) : "memory");
 }
@@ -117,12 +139,8 @@ static __device__ __forceinline__ void mbarrier_wait_parity(unsigned long long* 
     // hot-spinning across all 256 CTA threads (~3-4× kernel speedup on
     // small matmuls where the wait-vs-compute ratio is high).
     //
-    // The ``"memory"`` clobber prevents the compiler from reordering
-    // smem loads across this asm. The primary correctness anchor is
-    // the trailing ``__syncthreads()`` materialize emits after each
-    // MbarrierWait (see ``100_materialize_tile.py``); the clobber is
-    // defensive belt-and-braces so the asm itself reads as a fence
-    // even if a future caller forgets the surrounding Sync.
+    // Completion makes the TMA writes visible to this thread's shared-memory reads.
+    // The memory clobber also prevents the compiler from moving those reads before the wait.
     unsigned int addr = __cvta_generic_to_shared(mbar);
     asm volatile("{.reg .pred P; bw: mbarrier.try_wait.parity.shared.b64 P, [%0], %1; @!P bra bw;}\\n"
                  :: "r"(addr), "r"(phase) : "memory");
@@ -371,9 +389,8 @@ static __device__ __forceinline__ void emmy_mma884_load_b_smem_trans(unsigned* r
 // conflict-free LDS.128. A's k-group 2 bit swaps the loaded 64-bit halves;
 // B's congruous layout feeds the row-major-B mma form directly.
 template <typename T>
-static __device__ __forceinline__ void emmy_mma884_load_a_crosswise_pair(
-    unsigned* r0, unsigned* r1, const T* s, int row, int k, int rows) {
-    int lane = threadIdx.x & 31;
+static __device__ __forceinline__ void emmy_mma884_crosswise_pair(
+    unsigned* r0, unsigned* r1, const T* s, int lane, int row, int k, int rows) {
     int quad = lane >> 2;
     int lane_in_quad = lane & 3;
     int access = ((quad & 4) << 1) + (lane_in_quad << 1) + ((quad & 1) ^ ((quad & 4) >> 2));
@@ -391,6 +408,24 @@ static __device__ __forceinline__ void emmy_mma884_load_a_crosswise_pair(
     r0[1] = packed.y;
     r1[0] = packed.z;
     r1[1] = packed.w;
+}
+
+template <typename T>
+static __device__ __forceinline__ void emmy_mma884_load_a_crosswise_pair(
+    unsigned* r0, unsigned* r1, const T* s, int row, int k, int rows) {
+    emmy_mma884_crosswise_pair(r0, r1, s, threadIdx.x & 31, row, k, rows);
+}
+
+// A transposed B slab is K-contiguous like A's, so it takes the same crosswise
+// storage and the same conflict-free LDS.128. Only the lane map differs: A's
+// fragment half comes from lane bit 2, a transposed B's column half from lane
+// bit 3 -- which is the column role the interleaved accumulator map already
+// assumes. Swapping those two lane bits is the whole difference.
+template <typename T>
+static __device__ __forceinline__ void emmy_mma884_load_b_crosswise_pair(
+    unsigned* r0, unsigned* r1, const T* s, int col, int k, int cols) {
+    int lane = threadIdx.x & 31;
+    emmy_mma884_crosswise_pair(r0, r1, s, (lane & ~0xC) | ((lane & 4) << 1) | ((lane & 8) >> 1), col, k, cols);
 }
 
 template <typename T>
@@ -1491,6 +1526,8 @@ def render_kernelop(
     sig_dtypes.extend(s.dtype for s in kernel_op.body.iter_of_type(Assign) if s.dtype is not None)
     sig_dtypes.extend(frag_dtype(ctx, s.frag) for s in kernel_op.body.iter_of_type(LdmatrixLoad) if frag_dtype(ctx, s.frag))
     includes = "".join(f"#include {h}\n" for h in cuda_includes(sig_dtypes))
+    if any(str(dtype) == "f8e4m3" for dtype in sig_dtypes):
+        includes += _F8_DECODE_PRELUDE
     # The mma.sync (s16816) tensor-core path is pure inline PTX — its
     # ldmatrix / mma.sync wrappers are emitted in ``_MMA_SYNC_PRELUDE``, so
     # NVRTC needs no ``<mma.h>`` (the legacy ``nvcuda::wmma`` family is gone).

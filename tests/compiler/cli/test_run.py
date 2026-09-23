@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 import torch  # used by test_bind_inputs_preserves_int_dtype
 
-from tests.compiler.helpers import requires_cuda
+from tests.compiler.helpers import requires_cuda, requires_sm
 
 
 def _classic_row(*, work: str = "", tile: str = "", reduce: str = "", stage: str = "", raster: str = "") -> dict[str, str]:
@@ -390,17 +390,21 @@ def test_ir_ab_replay_retains_boolean_input_pins(tmp_path, monkeypatch):
 
     from emmy.commands import run as run_mod
     from emmy.compiler.graph import Graph
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+    from emmy.compiler.pipeline.search.space import FAST_MATH, precision_pin
 
     seen = []
 
     @contextlib.contextmanager
     def capture_pins(knobs):
         seen.append(knobs)
-        yield
+        with pinned_knobs(knobs):
+            yield
 
     class Backend:
         async def bench_pinned_async(self, _graph, *, warmup, num_iters):
             assert (warmup, num_iters) == (1, 2)
+            assert precision_pin(FAST_MATH) is False
             return SimpleNamespace(min_ms=0.1, time_ms=0.1), None
 
     source = tmp_path / "loop.json"
@@ -412,7 +416,7 @@ def test_ir_ab_replay_retains_boolean_input_pins(tmp_path, monkeypatch):
 
     rows = asyncio.run(run_mod._bench_ab_variants_ir(Backend(), source, (), ["FAST_MATH=False,TILE=f2x4"], warmup=1, iters=2))
 
-    assert seen == [{"FAST_MATH": "False", "TILE": "f2x4"}]
+    assert seen == [{"FAST_MATH": "False", "TILE": "f2x4"}] * 2
     assert len(rows) == 1 and rows[0].status == "ok"
 
 
@@ -641,9 +645,14 @@ def test_unreproducible_pin_flag(monkeypatch):
     untaken = unreproducible_pin_flag({"PLACE@map.1/inner": "cut"}, [{"TILE": "f2"}], placement_knobs=[])
     assert "PLACE@map.1/inner=cut realized (unset)" in untaken
     assert unreproducible_pin_flag({"PLACE@map.1/inner": "cut"}, [{"TILE": "f2"}]) is None, "no trace, no gate"
+    # Global fuse prohibits cuts even when the kernel offers no placement choice. A scoped pin still names a site.
+    assert unreproducible_pin_flag({"PLACE": "fuse"}, [{"TILE": "f2"}], placement_knobs=[]) is None
+    assert unreproducible_pin_flag({"PLACE@map.1/inner": "fuse"}, [{"TILE": "f2"}], placement_knobs=[])
+    assert unreproducible_pin_flag({"PLACE": "fuse"}, [{"TILE": "f2"}], placement_knobs=[{"PLACE@map.1/inner": "cut"}])
 
 
-def test_bench_golden_variants_unmatched_pin_fails_row_without_benching(monkeypatch):
+@pytest.mark.parametrize("ambient_tile", (None, "mma_m16n8k16_f16_f32/f2x4"))
+def test_bench_golden_variants_unmatched_pin_fails_row_without_benching(monkeypatch, ambient_tile):
     """End-to-end through ``_bench_golden_variants``: a pinned config whose compiled
     kernels realized different knobs FAILS its row loudly before any bench — status
     ``pin_unmatched``, no bench (benching the fallback realization would measure the
@@ -926,7 +935,7 @@ def test_pinned_lane_uses_realized_boolean_policy(monkeypatch):
         ({"FP8_MMA": True}, "fm"),
         (
             {"FAST_MATH": True, "FAST_EXP": False, "F16_MMA_F32_ACC": False, "FP8_MMA": False},
-            "std",
+            "fm",
         ),
     ],
 )
@@ -1094,6 +1103,7 @@ def test_run_code_matmul_accuracy(run_cli, dtype):
 
 
 @requires_cuda
+@requires_sm(8)
 def test_run_code_target_override(run_cli):
     """``--gpu-arch sm_80`` gates lowering to the cp.async path (no TMA); the kernel still runs
     on the live device and must match eager, so ``rc == 0`` is the accuracy assertion."""

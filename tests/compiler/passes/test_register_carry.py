@@ -148,6 +148,7 @@ def test_register_state_preserves_old_reads_on_cuda(half, warps):
 @pytest.mark.parametrize("shape", [(17, 80, 35), (64, 128, 128)], ids=["tails", "gdn128"])
 @pytest.mark.parametrize("half", [False, True], ids=["f32-acc", "f16-acc"])
 def test_gdn_chunk_step_matches_loop_on_cuda(shape, half):
+    from emmy import config
     from emmy.commands.trace import graph_from_code
     from emmy.compiler.backend.cuda.program import CompiledProgram
     from emmy.compiler.backend.gpu_lock import gpu_lock
@@ -197,7 +198,9 @@ m(torch.randn(2,4,{chunk},{keys}), torch.randn(2,4,{chunk},{keys}),
     lowered.validate()
     (op,) = (n.op for n in lowered.nodes.values() if isinstance(n.op, CudaOp))
     assert not op.serial and tile.register_program.state.write.output not in op.arg_order
-    with gpu_lock():
+    # The carried state's register residency is a property of the deployable build: at the
+    # correctness lane's `-Xcicc -O1` the fragment arrays stay in local memory.
+    with gpu_lock(), config.nvcc_flags_override(""):
         program = CompiledProgram.build(lowered, arrays)
         program.iter_once()
         result = program.outputs()

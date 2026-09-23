@@ -1,0 +1,162 @@
+compute_cap:
+- 8
+- 0
+programs:
+- inputs: [add_5, mul_12]
+  outputs: [add_7]
+  nodes:
+  - id: add_5
+    op: input
+    outputs: [[add_5, f16, [1, 1, 1024]]]
+  - id: mul_12
+    op: input
+    outputs: [[mul_12, f16, [1, 1, 3072]]]
+  - id: p_mlp_down_proj_weight
+    op: constant
+    attrs:
+      name: p_mlp_down_proj_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: mlp.down_proj.weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [1024, 3072]}
+      source_dtype: float16
+      source_graph: null
+    outputs: [[p_mlp_down_proj_weight, f16, [1024, 3072]]]
+  - id: linear_6
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [mul_12, p_mlp_down_proj_weight]
+    outputs: [[linear_6, f16, [1, 1, 1024]]]
+  - id: add_7
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: add}}
+    inputs: [add_5, linear_6]
+    outputs: [[add_7, f16, [1, 1, 1024]]]
+configs:
+- program: 0
+  target:
+    loop: 0
+    origins:
+    - add_7
+    - linear_6
+  realizations:
+  - name: k_linear_2dcd0c.28b342e368a5.43286bf5010d
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE: g2k
+    identity: 89576628228d5053335477465ef0abe917576af96a8986942e01b44d3ba00707
+  - name: k_linear_2dcd0c.28b342e368a5.8715381131af
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f2x1/k2
+      REDUCE: ''
+      STAGE: d2/smem-async/p2
+      RASTER: ''
+    identity: a41d49d754da6e223a6e7a1a7b7fb235b07514c49f32c379aa07ff4cf9c1e2fb
+  - name: k_linear_2dcd0c.28b342e368a5.cbca61599951
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: bbfc25cf8d543fa1f72e173f42f02df0bddefa5023d366aa4bdf16f51539e95d
+loops:
+- inputs: [add_5, mul_12]
+  outputs: [add_7]
+  nodes:
+  - id: add_5
+    op: input
+    outputs: [[add_5, f16, [1, 1, 1024]]]
+  - id: linear_6_wt
+    op: constant
+    attrs:
+      name: p_mlp_down_proj_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: [{__op__: {op: torch.transpose, attrs: {axes: {__tuple__: [-2, -1]}}}}]}
+      source_path: mlp.down_proj.weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [1024, 3072]}
+      source_dtype: float16
+      source_graph: null
+    outputs: [[linear_6_wt, f16, [3072, 1024]]]
+  - id: mul_12
+    op: input
+    outputs: [[mul_12, f16, [1, 1, 3072]]]
+  - id: add_7
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 1024}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 3072}, window: null}}
+                  body:
+                    body:
+                    - class: Load
+                      fields:
+                        names: {tuple: [in0]}
+                        input: mul_12
+                        index:
+                          tuple:
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {var: a1}}
+                        dtype: null
+                    - class: Load
+                      fields:
+                        names: {tuple: [in1]}
+                        input: linear_6_wt
+                        index: {tuple: [{expr: {var: a1}}, {expr: {var: a0}}]}
+                        dtype: null
+                    - class: Assign
+                      fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
+                    - class: Accum
+                      fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
+                  unroll: false
+                  seed: true
+              - class: Assign
+                fields: {name: v1, op: {elementwise: copy}, args: {tuple: [acc0]}, dtype: {dtype: f16}}
+              - class: Load
+                fields:
+                  names: {tuple: [in2]}
+                  input: add_5
+                  index:
+                    tuple:
+                    - {expr: {literal: {value: 0, dtype: int}}}
+                    - {expr: {literal: {value: 0, dtype: int}}}
+                    - {expr: {var: a0}}
+                  dtype: null
+              - class: Assign
+                fields: {name: v2, op: {elementwise: add}, args: {tuple: [in2, v1]}, dtype: null}
+              - class: Write
+                fields:
+                  output: add_7
+                  index:
+                    tuple:
+                    - {expr: {literal: {value: 0, dtype: int}}}
+                    - {expr: {literal: {value: 0, dtype: int}}}
+                    - {expr: {var: a0}}
+                  values: {tuple: [v2]}
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+            unroll: false
+            seed: true
+      name: k_linear_9807df
+    inputs: [mul_12, linear_6_wt, add_5]
+    outputs: [[add_7, f16, [1, 1, 1024]]]

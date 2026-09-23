@@ -5,6 +5,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from tests.compiler.helpers import loop_target
+
 
 def test_eval_golden_requires_exact_file_and_serving_config(run_cli, tmp_path):
     rc, stdout, stderr = run_cli("eval", "golden")
@@ -50,13 +52,15 @@ def _write_release_golden(path: Path, realizations: list[dict]) -> None:
 
     graph = trace_inline_code("torch.relu(torch.randn(8))")["graph"]
     terminal = graph.producer(graph.outputs[0])
+    loops: list[dict] = []
     dump_golden_file(
         {
             "gpu_name": "NVIDIA GeForce RTX 4090",
             "compute_cap": [8, 9],
             "model": "org/model",
             "programs": [graph_to_wire(graph)],
-            "configs": [{"program": 0, "target": {"origins": [terminal.id]}, "realizations": realizations}],
+            "configs": [{"program": 0, "target": loop_target(graph, [terminal.id], loops, (8, 9)), "realizations": realizations}],
+            "loops": loops,
         },
         path,
         validation=GoldenFileValidation.REPOSITORY,
@@ -222,7 +226,8 @@ def test_eval_golden_compiles_a_static_twin_only_in_the_lanes_that_warm_its_widt
     from emmy.compiler.torch_wire import graph_to_wire
 
     graph = trace_inline_code("torch.relu(torch.randn(8))")["graph"]
-    target = {"origins": [graph.producer(graph.outputs[0]).id]}
+    loops: list[dict] = []
+    target = loop_target(graph, [graph.producer(graph.outputs[0]).id], loops, (8, 9))
 
     def rows(*names_and_bindings):
         return [
@@ -248,6 +253,7 @@ def test_eval_golden_compiles_a_static_twin_only_in_the_lanes_that_warm_its_widt
                 {"program": 0, "target": target, "realizations": rows(("pre64.m64.fm", {"num_tokens": 64}))},
                 {"program": 0, "target": target, "realizations": rows(("pre-sym.dynamic", {}), ("pre-sym.dynamic.fm", {}))},
             ],
+            "loops": loops,
         },
         golden,
         validation=GoldenFileValidation.REPOSITORY,
@@ -329,16 +335,18 @@ def test_offer_audit_flags_unrealized_entries(monkeypatch, caplog):
 
     def records(graph, name, entries):
         origins = [nid for nid, node in graph.nodes.items() if not isinstance(node.op, InputOp)]
+        loops: list[dict] = []
         return load_golden_records(
             {
                 "gpu_name": gpu,
                 "compute_cap": list(cap),
                 "model": "org/model",
                 "programs": [graph_to_wire(graph)],
+                "loops": loops,
                 "configs": [
                     {
                         "program": 0,
-                        "target": {"origins": origins},
+                        "target": loop_target(graph, origins, loops, cap),
                         "realizations": [
                             {
                                 "name": name,

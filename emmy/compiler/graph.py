@@ -415,7 +415,7 @@ def _stmt_eval_scope() -> dict:
 # don't carry a ``Body``. ``name`` is an instance label; ``source`` is the
 # rewrite-chain predecessor on the base ``Op`` (attribution metadata only,
 # stamped automatically by the engine — see ``Op.source``).
-_STRUCTURAL_SKIP_FIELDS = frozenset({"name", "source", "meta"})
+_STRUCTURAL_SKIP_FIELDS = frozenset({"name", "source", "meta", "inputs", "outputs"})
 
 # Op dataclass fields excluded from JSON serialization in :meth:`Graph.to_dict`:
 # pure runtime state (``source`` / ``knobs`` chain metadata, ``inputs`` /
@@ -463,12 +463,14 @@ def _serialize_op_fields(op: Op) -> dict:
     return fields
 
 
-def _deserialize_op(op_cls: type[Op], raw_fields: dict) -> Op:
+def _deserialize_op(op_cls: type[Op], raw_fields: dict, *, inputs=None, outputs=None) -> Op:
     """Deserialize one op and reconstruct typed schedule values before construction."""
     raw = dict(raw_fields)
     schedule_row = raw.pop("schedule", None)
     materialization_row = raw.pop("materialization", None)
     fields = {key: _deserialize_field(key, value) for key, value in raw.items()}
+    if inputs is not None:
+        fields.update(inputs=inputs, outputs=outputs)
     from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
 
     if not issubclass(op_cls, TileOp):
@@ -1333,21 +1335,16 @@ class Graph:
         """Deserialize a graph from a JSON-compatible dict (inverse of to_dict)."""
         g = Graph()
         g.hints = Hints.from_dict(data.get("hints", {}))
-        # First pass: create all nodes (inputs first, then in order).
+        # Restore every buffer before constructing ops: schedule validation reads their layouts,
+        # including a later node's buffer when the dump is not topologically ordered.
         for nid, ndata in data["nodes"].items():
-            op_cls_name = ndata["op"]
-            op_cls = _lookup_op_class(op_cls_name)
-            if op_cls is None:
-                raise ValueError(f"Unknown op class: {op_cls_name}")
-
-            op = _deserialize_op(op_cls, ndata.get("op_fields", {}))
             # Dual-read: the historic single-``output`` dict and the plural
             # ``outputs`` list (slot order). Old dumps stay loadable.
             outs_data = ndata["outputs"] if "outputs" in ndata else [ndata["output"]]
             tensors = tuple(Tensor(name=out["name"], shape=tuple(out["shape"]), dtype=out.get("dtype", "f32")) for out in outs_data)
             node_hints = Hints.from_dict(ndata.get("hints", {}))
             # Add directly to bypass input validation (nodes may reference later nodes).
-            g.nodes[nid] = Node(id=nid, op=op, inputs=list(ndata["inputs"]), outputs=tensors, hints=node_hints)
+            g.nodes[nid] = Node(id=nid, op=Op(), inputs=list(ndata["inputs"]), outputs=tensors, hints=node_hints)
 
         # Rebuild the producer / forward-edge indexes now that every node is present.
         for nid, node in g.nodes.items():
@@ -1358,6 +1355,18 @@ class Graph:
             for inp in node.inputs:
                 if inp in g._users:
                     g._users[inp].add(nid)
+
+        for nid, node in g.nodes.items():
+            ndata = data["nodes"][nid]
+            op_cls = _lookup_op_class(ndata["op"])
+            if op_cls is None:
+                raise ValueError(f"Unknown op class: {ndata['op']}")
+            node.op = _deserialize_op(
+                op_cls,
+                ndata.get("op_fields", {}),
+                inputs={name: g.buffer(name) for name in node.inputs if name in g._producers},
+                outputs=dict(zip(node.buffer_names(), node.outputs, strict=True)),
+            )
 
         g.inputs = list(data["inputs"])
         g.outputs = list(data["outputs"])

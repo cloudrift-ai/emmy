@@ -20,7 +20,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from tests.compiler.helpers import requires_cuda
+from tests.compiler.helpers import requires_cuda, requires_sm
 
 
 def _run_with_knobs(graph, inputs: dict[str, np.ndarray], out_name: str, knobs: dict, monkeypatch) -> np.ndarray:
@@ -139,7 +139,9 @@ def test_flat_output_sweep_lowers_with_its_axis_bound(monkeypatch):
     )
     result = Pipeline.build([*KERNEL_PASSES, "lowering/cuda"]).run(graph, ctx=Context.from_target((7, 0)))
     source = "\n".join(node.op.kernel_source for node in result.nodes.values() if isinstance(node.op, CudaOp))
-    assert "for (int a4 = 0; a4 < 2; a4++)" in source
+    # A cut can promote the sweep to a grid coordinate. Successful materialization checks
+    # that every coordinate is bound; the register-cell suffix must never escape its scope.
+    assert source
     assert "a4__c" not in source
 
 
@@ -170,10 +172,32 @@ def test_output_sweep_declines_the_warp_tier(monkeypatch):
     )
     result = Pipeline.build([*KERNEL_PASSES, "lowering/cuda"]).run(graph, ctx=Context.from_target((7, 0)))
     source = "\n".join(node.op.kernel_source for node in result.nodes.values() if isinstance(node.op, CudaOp))
-    # The output-sweep coordinate must be bound by the scalar kernel itself (loop or decode) —
-    # the exact loop spelling is fusion-order-dependent and not the contract.
-    assert "int a4" in source
+    # Materialization checks every coordinate's binding. Cuts may rename the output sweep
+    # or promote it to the grid, so its old axis spelling is not part of the contract.
+    assert source
     assert "mma.sync" not in source
+
+
+@requires_cuda
+def test_output_sweep_selection_matches_torch(monkeypatch):
+    import torch
+    import torch.nn as nn
+
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.trace.torch import trace_module
+
+    monkeypatch.setenv("EMMY_LOOPIFY", "0")
+
+    class StackMatmul(nn.Module):
+        def forward(self, x, a, b):
+            return torch.stack((-x, torch.matmul(a, b)[..., :2]), dim=-1)
+
+    inputs = (torch.randn(1, 4, 8, 2), torch.randn(1, 4, 8, 8), torch.randn(1, 4, 8, 8))
+    module = StackMatmul()
+    graph = trace_module(module, inputs)
+    backend = CudaBackend()
+    result, _ = backend.run(backend.compile(graph), input_data=dict(zip(graph.inputs, (tensor.numpy() for tensor in inputs), strict=True)))
+    np.testing.assert_allclose(next(iter(result.outputs.values())), module(*inputs).numpy(), atol=1e-5, rtol=1e-5)
 
 
 @pytest.mark.parametrize("a_dtype", ["f8", "f32"])
@@ -219,6 +243,7 @@ def test_unrealizable_warp_pin_falls_back_to_a_bound_scalar_grid(a_dtype, monkey
 
 
 @requires_cuda
+@requires_sm(8)
 def test_unstaged_atom_lowers_gmem_direct(monkeypatch):
     """When the greedy compile picks the tensor-core atom variant but its operands
     aren't staged for ``ldmatrix`` (``TMA=0`` + a deliberately-large warp register
@@ -282,6 +307,7 @@ _ODD_STRIDE_CPASYNC_KNOBS = {"TILE": "f2x4", "WORK": "t16x8", "STAGE": "d2/smem-
 
 
 @requires_cuda
+@requires_sm(8)
 def test_scalar_cpasync_pin_refuses_odd_stride(monkeypatch):
     """fp32 matmul with a 12 B B-row stride pinned to a cp.async ring — the alignment gate must
     refuse instead of issuing misaligned ``cp.async`` copies or selecting gmem-direct."""

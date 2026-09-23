@@ -242,6 +242,24 @@ def test_sm70_materialized_tiles_use_paired_volta_layout_loads(monkeypatch) -> N
     assert "((_vq >> 1) & 1) * 8" in src
 
 
+def test_sm70_transposed_b_drains_the_crosswise_layout(monkeypatch) -> None:
+    """A transposed B stages K-contiguous like A, so it reads A's crosswise layout back rather
+    than falling to the plain row-major tile whose 64-byte row is bank-conflicted."""
+    _pin(monkeypatch, VOLTA, tile="f2x2", stage="d1/smem")
+    src, _ = _source(_graph(m=32, n=32, k=16, trans=True), Context(compute_capability=(7, 0)))
+    assert "_a_smem[emmy_volta_crosswise(" in src
+    assert "_b_smem[emmy_volta_crosswise(" in src
+    assert "_b_smem[emmy_volta_b_congruous(" not in src, "the congruous layout is for an N-contiguous B"
+    assert "emmy_mma884_load_a_crosswise_pair(_a0, _a1" in src
+    assert "emmy_mma884_load_b_crosswise_pair(_b0, _b1" in src
+    assert "emmy_mma884_load_b_smem_trans(_b" not in src, "the conflicted plain gather must be gone"
+    # The B reader is A's with lane bits 2 and 3 swapped, and the row/col mma form stays.
+    assert "(lane & ~0xC) | ((lane & 4) << 1) | ((lane & 8) >> 1)" in src
+    assert src.count("emmy_mma_m8n8k4_f16_f32(_c") == 4
+    # The interleaved accumulator map is unchanged: the column half still comes from lane bit 3.
+    assert "((_vq >> 1) & 1) * 8" in src
+
+
 def test_sm70_pair_policy_off_retains_the_unpaired_gather(monkeypatch) -> None:
     """The existing policy override disables the coupled layout as one complete choice."""
     _pin(monkeypatch, VOLTA, tile="f2x2", stage="d1/smem")
@@ -253,6 +271,17 @@ def test_sm70_pair_policy_off_retains_the_unpaired_gather(monkeypatch) -> None:
     assert "emmy_mma884_load_b_smem(_b0" in src
     assert "emmy_mma_m8n8k4_f16_f32(_c" in src
     assert knobs["PAIR_LDMATRIX"] is False
+
+
+def test_sm70_computed_tiles_use_the_same_paired_layouts(monkeypatch) -> None:
+    _pin(monkeypatch, VOLTA, tile="f2x2/k4", stage="d1/smem")
+    graph = _norm_linear_graph(m=32, n=32, k=32)
+    graph.nodes["y"].op = MatmulOp()
+    src, _ = _source(graph, Context(compute_capability=(7, 0)))
+    assert "_a_smem[emmy_volta_crosswise(" in src
+    assert "_b_smem[emmy_volta_b_congruous(" in src
+    assert "emmy_mma884_load_a_crosswise_pair(_a0, _a1" in src
+    assert "emmy_mma884_load_b_congruous_pair(_b0, _b1" in src
 
 
 def test_sm70_gmem_direct_tile_keeps_the_ordinary_accumulator_map(monkeypatch) -> None:
@@ -399,16 +428,16 @@ def test_sm70_causal_attention_selects_the_mask_per_fragment_element(monkeypatch
     assert "emmy_c_to_a_f16_m8n8k4" in src
 
 
-@pytest.mark.parametrize("stage", ["d1/smem", "d2/smem"])
-def test_sm70_computed_a_edge_stages_through_the_smem_compute_fill(monkeypatch, stage) -> None:
+def test_sm70_computed_a_edge_stages_through_the_smem_compute_fill(monkeypatch) -> None:
     """A COMPUTED ``a`` edge reaches the Volta mma tier: the fill evaluates the norm cone into the
     A slab the Volta shared gather reads, and the materialized B peer rides the BLOCKING vector
-    copy — sm_70 has no ``cp.async`` to fly it under the fill."""
-    _pin(monkeypatch, VOLTA, tile="f1x1", stage=stage)
+    copy — sm_70 has no ``cp.async`` to fly it under the fill, which is also why the fill stages
+    at depth 1 only here."""
+    _pin(monkeypatch, VOLTA, tile="f1x1", stage="d1/smem")
     monkeypatch.setenv("EMMY_PLACE", "fuse")
     src, knobs = _source(_norm_linear_graph(), Context(compute_capability=(7, 0)))
     assert family_value(knobs, "TILE") == f"{VOLTA}/f1x1"
-    assert family_value(knobs, "STAGE") == stage
+    assert family_value(knobs, "STAGE") == "d1/smem"
     assert "emmy_mma884_load_a_smem(_a0, &_a_smem" in src
     assert "emmy_mma884_load_b_smem_trans(_b0, &_b_smem" in src
     assert "rsqrtf" in src  # the norm cone itself, evaluated into the A slab

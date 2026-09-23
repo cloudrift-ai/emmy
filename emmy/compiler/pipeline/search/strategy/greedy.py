@@ -16,7 +16,7 @@ from emmy.compiler.context import Context
 from emmy.compiler.ir.loop.ir import LoopOp
 from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline.fork import stamp_signature
-from emmy.compiler.pipeline.knob import family_of
+from emmy.compiler.pipeline.knob import KERNEL_IDENTITY, family_of
 from emmy.compiler.pipeline.pipeline import Decision, LoweringError, Run
 from emmy.compiler.pipeline.search.db import SearchDB
 from emmy.compiler.pipeline.search.pins import PLACEMENT_DECISIONS_HINT, composed_routes
@@ -124,7 +124,9 @@ def _measured_composed_routes(db, ctx) -> list[tuple[frozenset, tuple[str, ...]]
     recorded on (less the stamps a schedule fork mints, as the evidence pick matches route rows) — for
     the cut pass to offer."""
     rows = [(signature, tun) for signature, group in _db_measured_index(db, ctx).routes.items() for tun, _us in group]
-    rows += [(stamp_signature(stamps), arm) for stamps, arm in db.decisions()] if db is not None else []
+    rows += (
+        [(stamp_signature({**stamps, KERNEL_IDENTITY: parent}), arm) for parent, stamps, arm in db.decisions()] if db is not None else []
+    )
     out: list[tuple[frozenset, tuple[str, ...]]] = []
     for signature, tun in rows:
         keys = tuple(sorted(key for key, value in tun.items() if family_of(key) == "PLACE" and value == "cut"))

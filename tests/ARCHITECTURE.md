@@ -58,15 +58,20 @@ point: a replay costs a rebind instead of ~1M `schedule()` calls per model, and 
 machine-local tune DB and online prior a cold pick resolves through. Strict evidence keeps the golden honest — a fork no
 row decides raises `EvidenceError` naming the kernel, so a stale or partial golden fails loudly instead of quietly
 restoring the search. Regenerate with `python -m tests.serving.regen` when a shape changes or a new one joins a table.
+These unmeasured scalar schedules are scoped to the live card. Missing or stale schedules still fail strict evidence;
+they must be refreshed when compiler changes alter the traced kernels.
 
 ## Test Layers
 
 The standalone Rust runtime keeps unit tests beside its modules. `make test-native` builds the worker and runs the
 Python parity and process-recovery tests against it; GPU cases skip when CUDA or the worker binary is unavailable.
-The native generation tests additionally exercise cached tiny-Qwen3 logits, EOS, request reset, and exact-once graph
-replay, independent rotary rounding, and attention/cache boundaries. Local checkpoint qualification compares FP16
+The native generation tests additionally exercise cached tiny-Qwen3 logits, EOS, seeded request reset, and exact-once
+graph replay, independent rotary rounding, and attention/cache boundaries, including near-tied scores checked against
+float64 attention. Local checkpoint qualification compares FP16
 and FP32 references using the same rounded weights; it is opt-in. The normal suite still exercises export, protocol, and
-command validation. Pull-request CI also runs locked Cargo tests, Rustfmt, and Clippy without a GPU.
+command validation. Sampling tests compare GPU frequencies with an independently sorted NumPy nucleus distribution,
+including tied/extreme logits, invalid values, and captured replay. Long checkpoint cases check a short request after
+a full cache. Pull-request CI also runs locked Cargo tests, Rustfmt, and Clippy without a GPU.
 
 The suite runs in four layers, distinguished by what they touch rather than by where they live:
 
@@ -126,11 +131,9 @@ the shared module already provides.
   enumeration and
   lowering stages are machine-independent and an sm_70 lockout is exercised on a box that has no sm_70. Only the
   build and accuracy stages consult the live card, and they gate on `device_compute_capability() == compute_cap`,
-  beside `requires_sm90` in spirit but keyed on equality rather than a floor. Golden decode splits the same way: the
-  hardware goldens are decoded row by row on the default lane, while the model goldens sit off it behind the
-  `goldens` marker (`make test-goldens`). The model half is deselected for COST, not for card-dependence — decoding
-  replays each record at its declared capability, so a stale row is detectable on any machine; re-recording one is
-  what needs the card.
+  beside `requires_sm90` in spirit but keyed on equality rather than a floor. Golden decode is machine-independent
+  the same way: every repository golden is decoded row by row on the default lane, each record replayed at its
+  declared capability, so a stale row is detectable on any machine; re-recording one is what needs the card.
 - **Keep one subprocess smoke per report path.** Filtering, join, and presentation variants use small synthetic
   records at the owning unit layer instead of launching the CLI repeatedly over the full repository corpus.
 - **Async tests** — tests for async functions are plain `async def` (no decorator needed; `asyncio_mode = "auto"` handles it). Mock async callables with `AsyncMock`.
@@ -180,9 +183,8 @@ minutes and belongs to the finalization stage of a PR — see the Contribution I
 ```bash
 pytest tests/deploy/test_recipe.py -v   # single file — the development lane
 pytest tests/deploy/ -k recipe -v      # a few tests — the development lane
-pytest tests/ -v                       # all tests, finalization only (skips off-lane `perf` / `goldens` tests)
+pytest tests/ -v                       # all tests, finalization only (skips the off-lane `perf` tests)
 pytest tests/perf/ -m perf -v          # GPU perf suite (see tests/perf/ARCHITECTURE.md)
-pytest tests/compiler/pipeline/search/ -m goldens -v   # strict-decode the model goldens (make test-goldens)
 ```
 
 Under `make test` (`-n auto --dist=loadgroup`) the root `conftest.py` routes every CUDA-touching test onto two
@@ -236,17 +238,16 @@ large fraction of the card FREE at startup, plus checkpoint downloads and minute
 mark on anything else silently drops it from `make test` even on GPU machines (this hid the serving runner's GPU
 correctness pins for a while). GPU correctness tests guard themselves with `requires_cuda` / `importorskip` instead.
 
-`goldens` is the second off-lane marker, gated by the same hook. `tests/compiler/pipeline/search/test_golden.py`
-strictly decodes recorded rows against the current compiler, and it splits by what the file costs. The five hardware
-goldens run on the DEFAULT lane, one node per recorded row: parsing one of those files costs milliseconds and
-deciding one row costs about a second, so 224 nodes scatter over the workers instead of five files queueing behind
-the widest, and a failure names the row rather than a count. The model goldens keep one case per file behind the
-marker, which `make test-goldens` runs — an inventory is hundreds of rows whose per-row nodes would cost more to
-collect than to run, and the widest file is a multi-megabyte parse. The derivation memo
+`tests/compiler/pipeline/search/test_golden.py` strictly decodes every repository golden — the hardware goldens and
+each recipe's model golden — on the DEFAULT lane, one node per recorded row, so a failure names the row rather than a
+count. Every golden target is its kernel's stored Loop IR, so a row replays from that kernel and nothing re-lowers a
+traced program, and the replay leaves undecided every kernel of the set that cannot hold the row. The derivation memo
 (`~/.cache/emmy/golden_identity.<fingerprint>.json`, one file per compiler fingerprint, keyed by record content) makes a
-re-run cost only the rows that actually changed; cold, the whole hardware set is about 25 s on 16 workers.
+re-run cost only the rows that actually changed; CI keeps no memo, so every CI run decodes cold. Collecting the rows
+parses every golden in each worker. The realization corpus's `offered` stage is this same decode (see
+`tests/compiler/realization/ARCHITECTURE.md`).
 
-Hardware rows that no longer decode are listed in `golden_xfails.yaml` beside the test and asked as STRICT xfails, so
+Rows that no longer decode are listed in `golden_xfails.yaml` beside the test and asked as STRICT xfails, so
 the list can only shrink: closing a row turns its node red until the line is deleted, and a line naming a row the
 file no longer records fails on its own. Never add a line to make a red row green — a recorded row that stops
 decoding is a regression in the enumeration, and listing it enshrines that as the reference. The rule is the
@@ -255,16 +256,20 @@ filename.
 
 Repository golden *qualification* is intentionally outside pytest. Model goldens are GPU-specific qualification
 evidence, so the nightly `onboard-model` workflow validates the selected recipe-local file, strictly decodes every
-row, and replays it on the named GPU. This keeps expensive model/card qualification out of the default suite. Only
-the decode half is also reachable without the card, off the default lane (`make test-goldens` above) — it targets each
-record's declared capability; the measured replay is what the nightly's GPU is for.
+row, and replays it on the named GPU. This keeps expensive model/card qualification out of the default suite. The
+decode half needs no card and runs on the default lane (above); the measured replay is what the nightly's GPU is for.
 
 Optional adapter tests use `pytest.importorskip` for their own dependency extras. The network-free tiny Diffusers DiT
 trace runs when the `image` extra is installed; the real checkpoint/CUDA comparison is additionally `perf`-marked and
 requires `EMMY_RUN_DIT_PRETRAINED=1`, so normal CI never downloads the multi-gigabyte checkpoint.
 
-`tests/compiler/helpers.py` exposes `device_compute_capability()` and the `requires_sm90` skip marker. The
-mma.sync warp tier (swizzled `ldmatrix` + `mma.sync`, TMA transport) auto-enumerates and is validated on **sm_90+**;
+`tests/compiler/helpers.py` exposes `device_compute_capability()`, the `requires_sm(major, minor)` marker, and
+`requires_sm90`. Tests pinning a particular instruction must name its minimum capability: sm_80 for cp.async and
+m16n8k16, sm_89 for FP8 mma, and sm_90 for TMA. Native block-scaled FP4 tests require sm_12x. Scalar and Volta schedules
+remain covered on V100. The serving fixture's authored scalar schedules are scoped to the live card; their original
+tracing card does not restrict these unmeasured correctness cases, and strict evidence remains required. The fixture
+publishes the golden's shared precision pins while building the runner, so its precise schedules remain valid when
+the compiler default is fast math. The mma.sync warp tier (swizzled `ldmatrix` + `mma.sync`, TMA transport) auto-enumerates and is validated on **sm_90+**;
 on sm_80-89 it is pin-only and currently non-functional for two independent reasons — the `sm_NNa` arch-accelerated
 target the TMA path emits is rejected by nvcc (`Unsupported gpu architecture 'sm_89a'`), and `ldmatrix` itself faults
 at runtime on at least Ada (sm_89). Tests that **force** the warp tier via a warp `TILE` codec (`<atom>/…`) + `STAGE`
@@ -275,8 +280,10 @@ masked-symbolic sweep (symbolic M/N/K at off-hint sizes), the static-vs-dynamic 
 `d2/smem-tma` transports, and the operand-pipelining transforms — the gmem→smem ring (`d<depth>/smem-async`) and the smem→register
 double-buffer (`/p<n>`), each asserted **bit-identical** to the single-buffer / gmem-direct baseline (a pure perf
 transform) — gating its GPU cases on `requires_sm90` / `_supports_tma()` (≥ sm_90); its GPU-less render / structure cases
-run anywhere. The TMA accuracy path additionally exercises the host descriptor encoder (`backend/cuda/_tma.py`). The same
-gate applies to TMA-transport `STAGE` pins (`…/tma…`) anywhere: below sm_90 the pin refuses rather than selecting a
+run anywhere. The TMA accuracy path additionally exercises the host descriptor encoder (`backend/cuda/_tma.py`).
+Live capability checks also guard TMA variants in quantized-weight tests. Native FP8 MMA tests require sm_89+, while
+their FP16/BF16 decode-and-compute counterparts remain eligible on older cards. The same TMA gate applies to
+TMA-transport `STAGE` pins (`…/tma…`) anywhere: below sm_90 the pin refuses rather than selecting a
 different transport, so `test_attention_coverage.py`'s TMA-staged flash cases carry `requires_sm90` (their `cp`
 siblings run on sm_80+). Golden-scoped CLI tests are the other environment trap: `--realization` without `--golden
 PATH` and

@@ -105,7 +105,9 @@ coordinate under different names and in different operand orders (the o_proj res
 inside a reduce and the residual add at the kernel's free axis). The identity is taken per exposed component, so a
 lone contraction is a CHANNEL of the twin that folds it beside another over the same input (k under the QK-norm's
 reduce, beside the k/v pair): the twin is the representative, the sibling records which component is its value,
-and reads that channel of the shared workspace. The arm that cuts a clustered seam spells every occurrence and
+and reads that channel of the shared workspace. An ancestor and its descendant cannot join such a cluster: a
+multi-result ancestor may consume one of the values it exposes, which would make its workspace producer cyclic.
+The arm that cuts a clustered seam spells every occurrence and
 names the seam each spelling stands for, so a route recorded at any occurrence — a row from before the clustering,
 a pin at the copy a hand found — selects the one decision. A term is closed by construction —
 its values arrive through its operand edges — so every stored non-slab edge is a seam and there is no capture to
@@ -266,10 +268,15 @@ never offered rather than failing at materialization, while row identity reads o
 transport families: the copy transports
 (the synchronous copy on atoms that stage that way, cp.async, TMA — gmem-direct `None` is their ever-present sibling),
 the fp8 byte slabs (a 1-byte operand staged as raw bytes and converted at the drain — the same `d<n>` fork family, no
-new knob), and the smem compute fill, which is MANDATORY for a computed operand, a multi-channel product, or a
-materialized A the atom cannot bind (only the fill's typed slab store converts — byte transports move raw bits), so it
-has no gmem-direct sibling and a `STAGE` pin can only choose its depth. This requirement belongs to warp choices; the
-scalar contraction tier evaluates every channel serially and keeps direct edges. A NESTED-reduce B edge (the streamed
+new knob), and the smem compute fill, which is MANDATORY for a computed operand or a materialized A the atom cannot
+bind (only the fill's typed slab store converts — byte transports move raw bits), so there it has no gmem-direct
+sibling and a `STAGE` pin can only choose its depth. A MULTI-CHANNEL product — the gate/up pair, one A shared across
+several weights — is the other form with no gmem-direct sibling, because that leaf folds a single B out of registers;
+but it is not confined to the fill. Every staging transport deposits one A slab beside one B per channel, which is the
+operand list the fill already built and the one drain already reads, so the copy transports are offered beside it and a
+multi-channel GEMM reaches cp.async and TMA — and therefore wgmma — like any other. This requirement belongs to warp
+choices; the scalar contraction tier evaluates every channel serially and keeps direct edges. A NESTED-reduce B edge
+(the streamed
 computed-B decode cone) rides the same mandatory multi-channel fill — the fill evaluates every non-materialized B
 channel into its slab, nested reduce included — while a nested A, or a nested B on a single-channel node, keeps the
 refusal: no transport realizes a nested scheduling site without a fill mandated to evaluate it. ONE computed operand
@@ -376,9 +383,9 @@ one immutable `c`, then evaluates Algorithm 1(c, p, t). `Fork.pool_id` stamps th
 free-axis extents, exact codec vocabulary, schedule-parameter fingerprint, and split receipt; it keys the greedy
 decision memo without weakening any enumeration input, and it seeds a budgeted pool's draw. The fingerprint
 (`knob.schedule_pin_fingerprint`) spells the pins as the enumeration reads them: the schedule-family pins as set,
-and the precision gates by effect — a gate `precision_pin` resolves ON, nothing for one OFF or unset — so a regime
-spelled out (a standard-lane golden's `FAST_MATH: false`, published for a replay or the release gate) and an unset
-environment enumerate the same rows, share one stamp, and draw the same subset. Sampled lazy enumeration remains
+and the precision gates by effect — a gate `precision_pin` resolves ON, nothing for one OFF. Unset gates follow the
+enabled `FAST_MATH` default. Equivalent effective gates enumerate the same rows, share one stamp, and draw the same
+subset regardless of how their pins are spelled. Sampled lazy enumeration remains
 behind the explicit classic reconstruction boundary.
 
 **Cost is per kernel; a kernel SET is a sum.** A schedule fork picks one alternative and its cost is that
@@ -428,6 +435,9 @@ then preserve the typed `copy` as an ordinary statement rather than reconstructi
 FP16/BF16 matmul decomposition declares its product at FP32 before reduction. Widening only the accumulator loses
 precision or overflows at each half-precision multiply, even when the dot product is representable. The explicit
 product dtype survives lifting and fusion, so scalar and tensor-core schedules implement the same wide product.
+
+SiLU widens FP16/BF16 inputs to FP32, computes `x / (1 + exp(-x))`, and narrows once to the output dtype. Replacing
+division with multiplication by a separately rounded reciprocal can change the final FP16 result.
 
 Loop fusion is maximal and schedule-blind: every structurally legal merge is taken to fixpoint before lowering
 considers a kernel boundary. Fusion never asks whether the merged body is recognized, schedulable by an optimized
@@ -517,8 +527,12 @@ declines the pair and the nest stands. A store that reverses the quotient/remain
 output-storage order is canonical. Split and unsplit spellings of one contraction thereby converge to ONE canonical
 nest — one kernel identity, one shape key, one golden family.
 
-It runs as its own pass between `loop/fusion` and `loop/stamp`, not inside `normalize_body` and not as a
-fusion rule. `normalize_body` is a pure body→body transform with no buffer shapes (the store-side stride
+The inverse case is normalized first: an operand pair reading one static free coordinate through both `i/H` and
+`i%H` receives separate quotient and remainder loops when H divides the extent. This recovers distinct row and head
+axes for contraction binding. Their separate operand reads prevent the fusion rule from undoing the split.
+
+It runs as its own pass between `loop/fusion` and `loop/stamp`, not inside `normalize_body` and not as a fusion
+rule. `normalize_body` is a pure body→body transform with no buffer shapes (the store-side stride
 check needs them) and fires on every Op construction — including scheduled Tile-IR bodies and cross-CTA split pieces
 minted at splice time, where re-fusing axes would fight the scheduler. Canonicalizing a producer that still awaits a
 merge could re-spell the very indices the splicer composes through, so it waits for fusion's fixpoint; running before
@@ -528,8 +542,8 @@ The consumers that had assumed "one output axis per buffer dim" were generalized
 reading — an axis's unit step moves its INNERMOST carrying dim (the `%` dim of a split pair): the lift's
 output-ordering positions an axis at that dim (under the permuted store the quotient dim sits outside another
 axis entirely, and positioning there would make the fused axis the row and the stride-`Q` axis the column);
-the mma `RegStore`'s auto row stride derives from the store template's innermost M-carrying dim (`row_dim`)
-instead of assuming the inner extent; an epilogue load's per-dim role (`_warp_roles`) moves only that dim;
+the mma `RegStore` derives physical M/N strides from unit steps in the complete output index, including coefficients
+that pack a row and head into one tensor dimension; an epilogue load's per-dim role (`_warp_roles`) moves only that dim;
 and `080_vectorize_stores` re-reads a run its per-dim matching declines by the row-major flat address when a
 div/mod residue is present, so a row-major split store keeps its vectorized transactions (the permuted one
 stores scalar on the scalar tiers — exact, unvectorized). The warp tier's fragment store evaluates the cell
@@ -549,8 +563,8 @@ The Tile IR boundary is one structural operation:
 
 1. peel the outer parallel loop chain into the unmapped placement;
 2. recursively replace every remaining reduction `Loop` with a `Fold`, in the same statement position;
-3. move every `Write` to `TileOp.output_specs`, as a sweep spec over its output loop, the loop's per-cell projection
-   lifting as a zero-axis term evaluated over that axis;
+3. move every `Write`, including nested writes, to `TileOp.output_specs`; preserve the values those writes read,
+   lifting each output loop's per-cell projection as a zero-axis term evaluated over that axis;
 4. reject any raw inner loop that remains;
 5. rely on each `Lambda.__post_init__` to canonicalize its local pure body;
 6. let `TileOp.__post_init__` factor maximal pure product-operand cones into canonical contractions, orient each
@@ -629,17 +643,21 @@ that canonical input:
   cuts at the frontier instead (`_cut.storage_frontier`): the producer piece is the encode prefix, the workspace holds
   the raw storage bits (exact — the element the graph's own quantize produced), and the consumer keeps the
   decode-plus-factors residue, which normalization then re-binds as a raw storage-dtype load with the factors hoisted
-  onto the accumulator epilogue (W8A8's route to the fp8 mma tier). The frontier REPLACES the fed-store realization at
+  onto the accumulator epilogue (W8A8's route to the fp8 mma tier). Shared scale expressions remain available to both
+  the encode prefix and decode residue. Composed cuts rewrite nested operands inside that residue too, and producers
+  are topologically ordered by actual workspace reads. The frontier REPLACES the fed-store realization at
   that seam rather than joining the offer: the raw bits dominate the fed-store workspace on both precision (exact vs
   re-rounded) and footprint (storage width vs store width), so there is no trade for the evidence to decide. Every
   seam's per-component dtypes are decided at offer time and ride the seam into realization, so the two cannot
   disagree. A cut workspace retains captured axes plus static unit axes: unit extents add no storage, while preserving
-  them keeps later schedule and split axes in their original geometric roles. The new producer and consumer are fresh
-  unmapped TileOps, so further legal cuts and schedules use the same ordinary passes. An unpinned cut may expose more
-  cut choices; any pinned cut consumes its restriction on every piece. If the parent already carries a cross-CTA
-  split receipt, every placement piece inherits it, so a later cut cannot make the same split pending again. A piece
-  minted by a structural apply stays in the ordinary pass sequence; no schedule-specific visitor discovers or
-  realizes another placement decision.
+  them keeps later schedule and split axes in their original geometric roles. A coordinate read only through a common
+  integer divisor stores one value per quotient; producers and consumers apply inverse index substitutions. The new
+  producer and consumer are fresh unmapped TileOps, so further legal cuts and schedules use the same ordinary passes.
+  Cross-CTA partial workspaces order their free axes by output storage layout.
+  An unpinned cut may expose more cut choices; any pinned cut consumes its restriction on every piece. If the parent
+  already carries a cross-CTA split receipt, every placement piece inherits it, so a later cut cannot make the same
+  split pending again. A piece minted by a structural apply stays in the ordinary pass sequence; no schedule-specific
+  visitor discovers or realizes another placement decision.
 
 - **The cross-CTA reduce split is structural.** Splitting the reduce axis across CTAs into a partial and finalize
   changes which kernels exist, so `030_cut` offers it after stored-edge placement and before any schedule
@@ -691,7 +709,7 @@ the consumer GeForce dies (sm_86/89/120)
 f32-accumulate HMMA runs at HALF the f16-accumulate rate, so this atom keeps the whole mma chain on the full-rate f16
 accumulator and the lowering promote-folds the packed f16 partials into f32 shadow fragments per K chunk
 (`FragmentPromote` — the staged bk slab is the cadence; gmem-direct promotes every `_atom._F16ACC_STEPS` steps plus a
-final fold). Precision-gated enumeration, off by default — the precise `EMMY_F16_MMA_F32_ACC` parameter admits it on
+final fold). Precision-gated enumeration — an explicit `EMMY_F16_MMA_F32_ACC=1` admits it on
 any target where the atom is statically available, while the `EMMY_FAST_MATH` umbrella admits it on the consumer-die
 ccs only (`_F16ACC_CCS`). The policy filters the catalog; an authored `TILE` row bypasses it.
 The realized fork is identified by the `TILE`

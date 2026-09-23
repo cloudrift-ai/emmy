@@ -32,13 +32,13 @@ LD_PRELOAD=/usr/local/cuda-12.9/lib64/libnvrtc.so.12 emmy tune ...
 
 The torch wheel itself is a second, separate pre-Turing trap: the default `+cu130` build carries no `sm_70` kernels at
 all, so the reference side of every accuracy check and every `--bench-backends eager,tcompile` comparison dies with
-`no kernel image is available for execution on the device`. The newest build that still ships Volta is `2.9.1+cu126`:
+`no kernel image is available for execution on the device`. The `2.13.0+cu126` build includes Volta kernels:
 
 ```bash
-pip install --force-reinstall "torch==2.9.1+cu126" --index-url https://download.pytorch.org/whl/cu126
+pip install --force-reinstall "torch==2.13.0+cu126" --index-url https://download.pytorch.org/whl/cu126
 ```
 
-Ask for the `+cu126` local version explicitly — a bare `torch==2.9.1` matches the already-installed `+cu130` wheel and
+Ask for the `+cu126` local version explicitly — a bare `torch==2.13.0` matches the already-installed `+cu130` wheel and
 pip reports the requirement satisfied without changing anything.
 
 Commands that compile or launch kernels locally check this at startup and abort with that remedy rather than letting
@@ -70,6 +70,10 @@ emmy trace /models/gemma --serving-twins --serving-config docker/vllm-emmy-serve
 emmy eval golden --golden recipes/gemma-4-12B-it/golden/rtx5090_sm120.yaml \
   --serving-config docker/vllm-emmy-serve/models/gemma-4-12b-it.env
 ```
+
+Fast math is enabled by default. `EMMY_FAST_MATH=0` disables NVCC fast math and the compiler's precision-trading
+optimizations; individual precision pins override that umbrella. For a separate-rounding accuracy diagnostic, add
+`--nvcc-flags=--fmad=false`. That custom flag disables multiply-add contraction without changing the other policies.
 
 Layer-norm-style reduction (two reductions, broadcast subtract, elementwise chain) fused into single kernel:
 
@@ -249,8 +253,8 @@ emmy serve Qwen/Qwen3-Embedding-0.6B --bench --random-input-len 32 --stock
 ## Experimental native generation
 
 Dense FP16 Qwen3 can be prepared as a standalone artifact and run through the Rust cached-generation loop. This
-single-request path supports greedy sampling and optional CUDA graphs. It is a correctness prototype with sequential
-prefill; vLLM remains the serving default. See the [native generation contract](emmy/serving/native/ARCHITECTURE.md)
+single-request path supports greedy or seeded temperature/top-p sampling and optional CUDA graphs. Residuals and
+attention/rotary intermediates use FP32. It uses sequential prefill; vLLM remains the serving default. See the [native generation contract](emmy/serving/native/ARCHITECTURE.md)
 for preparation, commands, limitations, and qualification.
 
 ## Recipe
@@ -345,9 +349,8 @@ three proposed deployment matrix entries. Disabled recipes are not deployable or
 Canonical model goldens live beside their recipe at `recipes/<model>/golden/<gpu-slug>_<compute-cap>.yaml`, with one
 file per exact GPU. A model with complete compiler evidence but no serving recipe receives an `onboarding`/`untested`
 recipe shell before its golden is committed. Model-agnostic hardware goldens remain under
-`emmy/compiler/pipeline/search/goldens/`, and `make test` strictly decodes those row by row. `make test-goldens`
-does the same for the model goldens — off the default test lane and needing no GPU, it is how you see which cards a
-tuning round has brought back in line.
+`emmy/compiler/pipeline/search/goldens/`. `make test` strictly decodes both kinds row by row, with no GPU needed, so a
+compiler change that strands a recorded row fails the suite.
 
 Generic workload (run any tool on the VM, pull back result files):
 

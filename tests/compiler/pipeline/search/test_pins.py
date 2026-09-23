@@ -7,6 +7,25 @@ from emmy.compiler.pipeline.fork import DeferredFork
 from emmy.compiler.pipeline.search.pins import spelled_arm, unreproducible_pin_flag
 
 
+def test_recorded_precision_pins_preserve_the_default_and_overrides(monkeypatch):
+    from types import SimpleNamespace
+
+    from emmy.compiler.pipeline.search.golden import regime_live
+    from emmy.compiler.pipeline.search.pins import measured_precision_pins
+
+    for name in ("FAST_MATH", "FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA"):
+        monkeypatch.delenv(f"EMMY_{name}", raising=False)
+    assert measured_precision_pins() == {"FAST_MATH": True}
+    assert regime_live(SimpleNamespace(pin_map={"FAST_MATH": True}))
+    assert not regime_live(SimpleNamespace(pin_map={"FAST_MATH": False}))
+    monkeypatch.setenv("EMMY_FAST_MATH", "0")
+    monkeypatch.setenv("EMMY_F16_MMA_F32_ACC", "1")
+    recorded = measured_precision_pins()
+    assert recorded == {"FAST_MATH": False, "F16_MMA_F32_ACC": True}
+    assert regime_live(SimpleNamespace(pin_map=recorded))
+    assert not regime_live(SimpleNamespace(pin_map={"FAST_MATH": False}))
+
+
 def _arm(knobs: dict, *, structural: bool = False) -> DeferredFork:
     return DeferredFork(materialize=lambda: None, knobs=knobs, structural=structural)
 

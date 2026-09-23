@@ -104,7 +104,7 @@ import torch
 import torch.nn.functional as F
 
 from emmy.compiler.pipeline.search.pins import pinned_knobs
-from tests.compiler.helpers import direct_classic_leaf, from_pretrained_or_skip, requires_cuda
+from tests.compiler.helpers import direct_classic_leaf, from_pretrained_or_skip, requires_cuda, requires_sm
 
 
 class _Sdpa(torch.nn.Module):
@@ -407,6 +407,7 @@ def _sdpa_ref(cuda: dict):
 
 @requires_cuda
 @pytest.mark.parametrize("keys", [128, 100])
+@requires_sm(8)
 def test_chunk_tier_folds_the_carrier_on_tensor_cores(keys):
     """An f16 SDPA pinned to the chunk tier is ONE mma kernel and matches torch.
 
@@ -423,6 +424,7 @@ def test_chunk_tier_folds_the_carrier_on_tensor_cores(keys):
 
 
 @requires_cuda
+@requires_sm(8)
 def test_chunk_tier_takes_a_symbolic_key_extent():
     """Nothing in the tier sizes itself against the key extent, so a dynamic stream reaches it."""
     torch.manual_seed(0)
@@ -437,6 +439,7 @@ def test_chunk_tier_takes_a_symbolic_key_extent():
 
 @requires_cuda
 @pytest.mark.parametrize("transport", ["smem-async", "smem-tma"])
+@requires_sm(8)
 def test_chunk_tier_stages_a_symbolic_key_extent(transport):
     """The streamed value stages against a key extent known only at runtime — the serving shape.
 
@@ -473,6 +476,7 @@ def test_chunk_tier_stages_a_symbolic_key_extent(transport):
 
 @requires_cuda
 @pytest.mark.parametrize("stage", ["", "d2/smem-async"])
+@requires_sm(8)
 def test_chunk_tier_skips_the_chunks_a_causal_band_masks(stage):
     """A causal sliding-window SDPA on the chunk tier runs ONE loop bounded at both ends — it starts
     on the chunk holding the CTA's first row's near edge and stops at its diagonal — and matches torch
@@ -638,6 +642,7 @@ extern "C" __global__ void fa2(const __half* Q,const __half* K,const __half* V,f
 
 @requires_cuda
 @pytest.mark.parametrize("S", [16, 32, 64, 128])
+@requires_sm(8)
 def test_fused_tensorcore_flash_reference_matches_torch(S):
     """The hand-written fused tensor-core flash matches torch SDPA across the KV stream (1–8 tiles).
     The validated spec for the warp-chain codegen — every lane layout (A/B fragments, the
@@ -646,7 +651,7 @@ def test_fused_tensorcore_flash_reference_matches_torch(S):
 
     from emmy.compiler.backend.cuda import nvcc  # noqa: PLC0415
 
-    fn = nvcc.load_function(_KERNEL, "fa2", "", arch_specific=False)
+    fn = nvcc.load_function(_KERNEL, "fa2", arch_specific=False)
     torch.manual_seed(S)
     D = 16
     q, k, v = (torch.randn(S, D, dtype=torch.float16) for _ in range(3))
@@ -780,10 +785,6 @@ class _StackedLinears(torch.nn.Module):
 
 
 @requires_cuda
-@pytest.mark.xfail(
-    run=False,
-    reason="pre-existing on clean main: the wide-product form faults and poisons the CUDA context",
-)
 def test_two_linears_tinyllama_shape(_chain_tile_pins):
     """Two chained 2048×2048 Linears at TinyLlama hidden size and seq=32. Confirms basic
     matmul-chain accuracy — if this fails, every matmul is broken."""

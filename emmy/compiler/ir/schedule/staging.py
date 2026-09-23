@@ -26,6 +26,7 @@ from dataclasses import replace
 
 from emmy.compiler.ir.address import BYTE_SLAB_PAD
 from emmy.compiler.ir.axis import Axis
+from emmy.compiler.ir.expr import affine_form
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule import ResolvedStage, Stage, Tile
 from emmy.compiler.ir.schedule.packing import block_scaled_atom, packed_readings
@@ -77,6 +78,13 @@ def _tma_operand_box(index: tuple, tile_name: str, k_name: str, order: tuple[str
     names = {tile_name, k_name}
     if not 2 <= len(index) <= 4 or any(names & expr.free_vars() for expr in index[:-2]):
         return False
+    # A box is a rectangle in the descriptor's coordinates, one tile coordinate per dim. A reshape
+    # that splits a coordinate across dims, or packs both into one, has no such rectangle: the box
+    # would copy the declared row pitch and deposit the wrong elements.
+    for expr in index[-2:]:
+        axes = expr.free_vars() & names
+        if len(axes) > 1 or (axes and affine_form(expr, axes) is None):
+            return False
     physical = tuple(next(iter(axes)) for expr in index[-2:] if len(axes := expr.free_vars() & names) == 1)
     return order is None or len(physical) != 2 or set(physical) != names or physical == order
 
@@ -450,8 +458,18 @@ def resolve_warp_stage(
     bk_elems = tile.bk * atom.atom_k
     m, n = tile.m, tile.n
     a_nbytes, b_nbytes = atom.operand_dtype("a").nbytes, atom.operand_dtype("b").nbytes
+    # The node's B edges — one per fold channel. A gate/up node shares its A across two weights,
+    # so every rule below is asked of EACH B and the slot is sized for all of them; the
+    # single-channel form is the one-element case of the same walk.
+    b_edges = tuple(edge for _, edge in c.bilinear_channels())
     if inputs:
-        for edge, role in ((c.operands[0], "a"), (c.operands[1], "b")):
+        # Every channel shares ONE slab geometry and one ``b`` element width, so channels whose
+        # weights are stored at different widths have no single slot size and decline here rather
+        # than sizing the slab off whichever edge the walk reached first.
+        widths = {t.dtype for b in b_edges if (t := inputs.get(b.as_slab().load.input) if b.as_slab() is not None else None) is not None}
+        if len(widths) > 1:
+            return None
+        for edge, role in ((c.operands[0], "a"), *((b, "b") for b in b_edges)):
             t = inputs.get(edge.as_slab().load.input) if edge.as_slab() is not None else None
             if t is None or t.dtype == atom.operand_dtype(role):
                 continue
@@ -475,9 +493,9 @@ def resolve_warp_stage(
             return None  # canonical byte B: the 16 B gmem chunks stride rows of N bytes
     rank_ok = (
         c.operands[0].as_slab() is not None
-        and c.operands[1].as_slab() is not None  # a descriptor needs a gmem address on BOTH edges
+        and all(b.as_slab() is not None for b in b_edges)  # a descriptor needs a gmem address on EVERY edge
         and _tma_operand_box(c.operands[0].as_slab().load.index, m.axis.name, k_axis.name)
-        and _tma_operand_box(c.operands[1].as_slab().load.index, n.axis.name, k_axis.name)
+        and all(_tma_operand_box(b.as_slab().load.index, n.axis.name, k_axis.name) for b in b_edges)
     )
     box_ok = max(m.tile, n.tile, bk_elems) <= _TMA_MAX_BOX
     tma_ok = (
@@ -493,7 +511,7 @@ def resolve_warp_stage(
         return None
     pad_a, pad_b = (BYTE_SLAB_PAD if eb == 1 and cp_ok else 0 for eb in (a_nbytes, b_nbytes))
     b_rows, b_cols = (n.tile, bk_elems + pad_b) if c.as_contraction().b_trans else (bk_elems, n.tile + pad_b)
-    slot_bytes = m.tile * (bk_elems + pad_a) * a_nbytes + b_rows * b_cols * b_nbytes
+    slot_bytes = m.tile * (bk_elems + pad_a) * a_nbytes + len(b_edges) * b_rows * b_cols * b_nbytes
     if slot_bytes > budget:
         return None
     depth = _clamp_depth(stage.depth, slot_bytes, budget)
@@ -516,6 +534,10 @@ def resolve_scalar_stage(c: Fold, tile: Tile, stage: Stage, inputs, budget: int,
     if tile.n.mask or c.as_contraction().b_trans:
         return None
     if not inputs or c.operands[0].as_slab() is None or c.operands[1].as_slab() is None or c.operands[0].as_slab().load.input not in inputs:
+        return None
+    # The fill copies A's rows in chunks along K, so K must be A's gmem inner dim. A transposed A
+    # strides its columns instead, and a chunk copy there issues misaligned addresses and hangs.
+    if k_axis.name not in c.operands[0].as_slab().load.index[-1].free_vars():
         return None
     # 1-byte (fp8) elements decline: the fill's chunk-width and alignment math below is written
     # for the 2/4-byte dtypes and is unaudited at nbytes == 1 — refusing keeps the tier
@@ -681,6 +703,19 @@ def resolve_fill_stage(
         # fp8 atoms: the compute fill's slab store + ldmatrix drain are 16-bit-only
         _decline(why, f"the smem compute fill is 16-bit-only, but this atom's a operand is {atom.operand_dtype('a').nbytes}-byte")
         return None
+    cones = c.operands[0].as_slab() is None or any(b.as_slab() is None for _, b in c.bilinear_channels())
+    computes = cones or converting_a(c, atom, inputs)
+    if want_depth >= 2 and atom.sync_copy_staging and computes:
+        # With no cp.async the ring's B copies are blocking copies, and on sm_70 the depth-2 ring
+        # returned silently wrong answers on nine of sixteen measured warp grids and fragments,
+        # every one of them correct at depth 1. That is the ring under a COMPUTE fill, whose
+        # deposit runs on the drain's own threads; a node whose operands are all materialized
+        # reaches this tier only because it folds several channels, and then the transport is the
+        # ordinary blocking-copy ring the single-channel tiers already stage (``SPLIT_COPY_DEPTH``).
+        _decline(why, "the smem compute fill's B prefetch ring needs cp.async; this atom stages with blocking copies")
+        return None
+    if atom.sync_copy_staging:
+        want_depth = min(want_depth, SPLIT_COPY_DEPTH)
     bk_elems = tile.bk * atom.atom_k
     if k_axis.extent.is_static and k_axis.extent.as_static() % bk_elems:
         # the staged driver unrolls WHOLE K chunks — the same rule the copy transports state on their own

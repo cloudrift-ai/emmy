@@ -23,7 +23,7 @@ from __future__ import annotations
 import functools
 from dataclasses import dataclass, field
 
-from emmy.compiler.pipeline.knob import CTX_PREFIX, STRUCT_PREFIX
+from emmy.compiler.pipeline.knob import CTX_PREFIX, IDENTITY_PREFIX, METADATA_PREFIXES, STRUCT_PREFIX
 from emmy.compiler.pipeline.search.data.shape import ShapeKey
 from emmy.compiler.pipeline.search.features import knob_features
 
@@ -48,9 +48,9 @@ def measured_features(row) -> dict:
 def _split_by_prefix(knobs: dict) -> tuple[dict, dict, dict]:
     """Split a stamped knob dict into ``(tunable, context H_*, structural S_*)`` by
     key prefix. Disjoint prefixes → re-merging is lossless."""
-    ctx = {k: v for k, v in knobs.items() if k.startswith(CTX_PREFIX)}
+    ctx = {k: v for k, v in knobs.items() if k.startswith((CTX_PREFIX, IDENTITY_PREFIX))}
     s = {k: v for k, v in knobs.items() if k.startswith(STRUCT_PREFIX)}
-    tunable = {k: v for k, v in knobs.items() if not k.startswith((CTX_PREFIX, STRUCT_PREFIX))}
+    tunable = {k: v for k, v in knobs.items() if not k.startswith(METADATA_PREFIXES)}
     return tunable, ctx, s
 
 

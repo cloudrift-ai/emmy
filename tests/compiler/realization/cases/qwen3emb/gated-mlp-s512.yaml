@@ -37,6 +37,7 @@ programs:
 configs:
 - program: 0
   target:
+    loop: 0
     origins:
     - gate
     - o
@@ -48,7 +49,7 @@ configs:
     pins:
       FAST_MATH: false
     knobs: {}
-    identity: d37fdea048fdc7487ef980f24d1ea10713f4293c6325dcacb502b191c6f1e958
+    identity: 66f6210a3802f2a1234773d7ca9e4090a86939956d66144b7045b12fca55913f
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 1716.70401096344
@@ -74,3 +75,107 @@ configs:
       STAGE: ''
       RASTER: ''
     identity: 94a907ebd314a0d3f2ef3f5e30e10bda7b6c2976f476724e6ba5f6754382c2a8
+loops:
+- inputs: [wg, wu, x]
+  outputs: [o]
+  nodes:
+  - id: sg_one
+    op: constant
+    attrs:
+      name: sg_one
+      value: 1.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[sg_one, f32, [1]]]
+  - id: wg
+    op: input
+    outputs: [[wg, f32, [1024, 3072]]]
+  - id: wu
+    op: input
+    outputs: [[wu, f32, [1024, 3072]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [1, 512, 1024]]]
+  - id: o
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Load
+          fields:
+            names: {tuple: [in0]}
+            input: sg_one
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 512}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 3072}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 1024}, window: null}}
+                        body:
+                          body:
+                          - class: Load
+                            fields:
+                              names: {tuple: [in1]}
+                              input: x
+                              index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a0}}, {expr: {var: a2}}]}
+                              dtype: null
+                          - class: Load
+                            fields:
+                              names: {tuple: [in2]}
+                              input: wg
+                              index: {tuple: [{expr: {var: a2}}, {expr: {var: a1}}]}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in1, in2]}, dtype: null}
+                          - class: Accum
+                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
+                          - class: Load
+                            fields:
+                              names: {tuple: [in3]}
+                              input: wu
+                              index: {tuple: [{expr: {var: a2}}, {expr: {var: a1}}]}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v1, op: {elementwise: multiply}, args: {tuple: [in1, in3]}, dtype: null}
+                          - class: Accum
+                            fields: {name: acc1, value: v1, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
+                        unroll: false
+                        seed: true
+                    - class: Assign
+                      fields: {name: v2, op: {elementwise: negative}, args: {tuple: [acc0]}, dtype: null}
+                    - {class: Assign, fields: {name: v3, op: {elementwise: exp}, args: {tuple: [v2]}, dtype: null}}
+                    - class: Assign
+                      fields: {name: v4, op: {elementwise: add}, args: {tuple: [in0, v3]}, dtype: null}
+                    - class: Assign
+                      fields: {name: v5, op: {elementwise: divide}, args: {tuple: [acc0, v4]}, dtype: null}
+                    - class: Assign
+                      fields: {name: v6, op: {elementwise: multiply}, args: {tuple: [acc1, v5]}, dtype: null}
+                    - class: Write
+                      fields:
+                        output: o
+                        index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a0}}, {expr: {var: a1}}]}
+                        values: {tuple: [v6]}
+                        value_dtype: null
+                        atomic: false
+                        swizzle: NONE
+                  unroll: false
+                  seed: true
+            unroll: false
+            seed: true
+      name: k_matmul_reduce_17f7d4
+    inputs: [sg_one, wg, x, wu]
+    outputs: [[o, f32, [1, 512, 3072]]]

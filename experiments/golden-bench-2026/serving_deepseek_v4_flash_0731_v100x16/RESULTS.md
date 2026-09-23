@@ -471,6 +471,52 @@ also one compiler merge apart (#847), so the last few milliseconds are not attri
 Against the fork's 0.147 s the repository arm is 1.46× slower per output token. Evidence on the host under
 `~/serve-evidence/pin-exp1-*`, `abm1-e16*`, `recm1-exp16*` and `boot33-*`.
 
+**Main's restamp took the golden off the card, and the recorder put it back (2026-09-22).** #864 restamped every
+golden to the Loop IR target format and dropped 17 DeepSeek V100 rows: eight expert tensor-core tiles staged at depth
+2, a ring the compiler no longer offers on Volta because it returned wrong answers on nine of sixteen measured grids,
+and nine post rows "whose kernels #829 reshaped" — among them, in every post twin, the receipt of the piece that
+broadcasts the second matmul operand. All 398 remaining rows decode, yet `main` at `dab7bce9` refuses all five twins
+under strict evidence: the single-token and symbolic post twins at that piece's cut fork, the width-16 and 4,096 post
+twins at their root's schedule fork, the width-16 expert twin at its gate/up piece. Replays on the #864, #863, #866
+and #861 trees, each with the golden as of that commit, refuse identically, so the restamp itself is the cause. It had
+also keyed four split rows and three tile rows onto their leads' identities (`.a64df778c19d` on the post16 lead,
+`.20e5861ce454` and `.ef6794e8214b` on the post4096 lead, `.3cb64a167eb2` and three post4096 tiles onto siblings), and
+a 12 µs split row on the root's identity outbids an 8.8 ms cut: the root splits instead of cutting and the split
+kernel's serial schedule hangs the bench. Dropping those rows and recording each twin greedy from `main`'s tree gave
+every live piece a receipt, with the prior choosing double-cooperative reduces for the uncovered residuals (24 ms at
+the 512 hint, 94 ms at width 4,096, 358 µs at width 16); those were respelled serial (144 µs, 1.1 ms, 4 µs) and the
+expert pieces re-tiled at depth 1 from kernel-scoped A/Bs (`w2x1 f1x1/k8` best of fourteen for the width-16 gate/up;
+`w4x1 f2x4/k4` for both width-4,096 pieces), then every twin re-recorded strict. Per layer, strict election of the old
+file on the #860 tree → this file on `main`: post m1 406 → 449 µs; post m16 8,847 → 5,966; post symbolic at the 512
+hint 4,836 → 3,625; post m4096 120.6 → 84.6 ms; expert m16 430 → 719 µs; expert symbolic at the 512 hint 2.44 → 22.6
+ms; expert m4096 22.5 → 14.2 ms. Three of those are the compiler, not the rows, and stay open: cooperative reductions
+run 2–30× slower on `main` than on `9607133e` for the same spelling (a `coop-t` t256 piece 61.8 → 133.5 µs; the
+symbolic residual's single `coop` t128, 303 µs before, is 11 ms now, so serial wins everywhere); the depth-2 ring is
+gone (gate/up 265 → 490 µs at width 16, the m4096 expert pieces 2.5 → 6.8 and 7.4 ms); and the symbolic expert twin's
+root piece offers no tensor-core tile any more (`t32x8 f2x26`, 20.4 ms against 1.8 ms at depth 2 before), which is
+what a single request's prefill pays. Booted strict from that file (sha e4631af5), the server died three and a half
+minutes in, before any post twin was compiled: the symbolic expert twin's root kernel under serving's fresh trace
+carries an identity no row names, although the same twin replayed from the golden's stored Loop IR had just elected
+and measured. `emmy trace --serving-twins` on the two trees explains it. On `9607133e` the serving twins lower to
+exactly the golden's kernel families: 152 kernels, 36 per post twin, the two large fused softmax-matmul kernels every
+tuning round since #799 targeted. On `dab7bce9` they lower to 188: 45 per post twin, the fused kernels split into a
+linear-mean reduce, a softmax, two matmuls, twelve broadcast adds and three sums, and the four trees between them put
+the change at #863 (`f6bd311b`, the reduction-dependency and coordinate normalization), not at #862 as its title
+suggested. The decode gate and `emmy run --golden` replay stored Loop IR and cannot see this, and the runner builds
+the expert group before a layer's pre and post twins, so the boot's first refusal names an expert kernel while every
+post row is just as unreachable. No row of this golden deploys on `main`, and the re-recorded file is kept on the host
+as evidence, not committed. The follow-up (2026-09-23) found two causes. The fusion moved because #863's merge rule
+leaves a copy beside the consumers departing with an unfusable chain instead of materializing it in the region; on
+this model that output is what later merges grow around, and restoring the pre-#863 region gives every serving twin
+the golden's kernel set again (draft PR #875). The same hunk moves Qwen3.8's kernel sets the other way (the AWQ layer
+42 → 40 kernels, EXL3 42 → 38, GPTQ 42 → 40), and #861 recorded on the 42-kernel sets, so the rule needs a condition
+or one of the two goldens a re-record. And the boot from the fixed tree still refuses at the symbolic expert twin:
+#863 also normalized the Loop IR of every kernel, this golden's stored loops were never re-lowered for it, and the
+decode gate cannot tell because it replays the stored loop. Deploying on `main` therefore needs the rule settled and
+the golden's programs re-lowered with every row re-keyed onto the new identities. Evidence on the host under
+`~/serve-evidence/elect34-*`, `elect34b-*`, `rec34-*`, `ab34*`, `boot34-*`, `twins33.yaml`, `twins34.yaml` and
+`twins-<sha>.yaml`.
+
 
 ### The M=1 decode tier: what broke and what now guards it
 

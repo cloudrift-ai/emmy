@@ -29,6 +29,7 @@ programs:
 configs:
 - program: 0
   target:
+    loop: 0
     origins:
     - o
     - probs
@@ -41,8 +42,122 @@ configs:
       TILE: mma_m16n8k16_f16_f32/f2x2/k2
       WORK: w2x2
       REDUCE: ''
-    identity: 40807d8f51da50cc87e8b46c38fc405fdea693e653e79ae9e9ac221b6de9070f
+    identity: b0b0f54167418a44fb1d5aea29a3220f812b4f1767ff5cfd1bc166151f221b3e
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 33.37813218434651
         tcompile_us: 14.322963025834826
+loops:
+- inputs: [scores, v]
+  outputs: [o]
+  nodes:
+  - id: scores
+    op: input
+    outputs: [[scores, f16, [16, {sym: seq_len, hint: 512}, {sym: seq_len, hint: 512}]]]
+  - id: v
+    op: input
+    outputs: [[v, f16, [16, {sym: seq_len, hint: 512}, 128]]]
+  - id: o
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 16}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
+                        body:
+                          body:
+                          - class: Load
+                            fields:
+                              names: {tuple: [in0]}
+                              input: scores
+                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}, {expr: {var: a2}}]}
+                              dtype: null
+                          - class: Accum
+                            fields:
+                              name: acc0
+                              value: in0
+                              op: {elementwise: maximum}
+                              dtype: null
+                              axes: {tuple: [a2]}
+                              base: null
+                        unroll: false
+                        seed: true
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
+                        body:
+                          body:
+                          - class: Load
+                            fields:
+                              names: {tuple: [in1]}
+                              input: scores
+                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}, {expr: {var: a2}}]}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v0, op: {elementwise: subtract}, args: {tuple: [in1, acc0]}, dtype: null}
+                          - {class: Assign, fields: {name: v1, op: {elementwise: exp}, args: {tuple: [v0]}, dtype: null}}
+                          - class: Accum
+                            fields: {name: acc1, value: v1, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
+                        unroll: false
+                        seed: true
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a4, extent: {dim: 128}, window: null}}
+                        body:
+                          body:
+                          - class: Loop
+                            fields:
+                              axis: {class: Axis, fields: {name: a5, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
+                              body:
+                                body:
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in2]}
+                                    input: scores
+                                    index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}, {expr: {var: a5}}]}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v2, op: {elementwise: subtract}, args: {tuple: [in2, acc0]}, dtype: null}
+                                - {class: Assign, fields: {name: v3, op: {elementwise: exp}, args: {tuple: [v2]}, dtype: null}}
+                                - class: Assign
+                                  fields: {name: v4, op: {elementwise: divide}, args: {tuple: [v3, acc1]}, dtype: null}
+                                - class: Load
+                                  fields:
+                                    names: {tuple: [in3]}
+                                    input: v
+                                    index: {tuple: [{expr: {var: a0}}, {expr: {var: a5}}, {expr: {var: a4}}]}
+                                    dtype: null
+                                - class: Assign
+                                  fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [in3, v4]}, dtype: {dtype: f32}}
+                                - class: Accum
+                                  fields: {name: acc2, value: v5, op: {elementwise: add}, dtype: null, axes: {tuple: [a5]}, base: null}
+                              unroll: false
+                              seed: true
+                          - class: Write
+                            fields:
+                              output: o
+                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}, {expr: {var: a4}}]}
+                              values: {tuple: [acc2]}
+                              value_dtype: null
+                              atomic: false
+                              swizzle: NONE
+                        unroll: false
+                        seed: true
+                  unroll: false
+                  seed: true
+            unroll: false
+            seed: true
+      name: k_matmul_softmax_reduce_4ad394
+    inputs: [scores, v]
+    outputs: [[o, f16, [16, {sym: seq_len, hint: 512}, 128]]]

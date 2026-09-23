@@ -42,9 +42,8 @@ codegen, no nvcc), and both paths share every line downstream. The projection:
   compiles in two subprocesses and asserts identical sources. This avoids the driver PTX→SASS JIT cupy's NVRTC path
   pays on a cold compile — ~3× faster on the complex tile-search kernels that
   dominate autotune, and the compile step is GPU-free so the cubin cache can be
-  warmed by a parallel pool (planned). Falls back to `cupy.RawKernel` (NVRTC)
-  when `nvcc` is absent or a compile fails (`EMMY_NO_NVCC=1` forces the
-  fallback). Kernels are emitted with `extern "C" __global__` so neither
+  warmed by a parallel pool (planned). A missing or failing `nvcc` is an error; the NVRTC fallback is retired.
+  Kernels are emitted with `extern "C" __global__` so neither
   toolchain name-mangles them (and the cubin symbol loads by `kernel_name`).
   Compile vs load is split (`compile_to_cubin` / `load_function`) so the
   GPU-free compile can run off-process; the loaded `Function` is launch- and
@@ -56,6 +55,15 @@ codegen, no nvcc), and both paths share every line downstream. The projection:
   (override logic, no longer in the command layer) — `tune`, `compile` and `run` all default to nvcc's own -O3, the
   deployable regime, and `--nvcc-flags` overrides. **Tuning measures in the regime it deploys into**, so a tuned
   latency is the deployed one.
+
+  `FAST_MATH` defaults to true and adds `--use_fast_math`; `EMMY_FAST_MATH=0` omits that flag and disables the
+  umbrella's compiler rewrites. Individual precision pins still override the umbrella. For an intermediate-rounding
+  diagnostic, pass `--nvcc-flags=--fmad=false`; custom flags follow the policy flag. Disabling contraction alone leaves
+  other fast-math transformations enabled. Combine it with `EMMY_FAST_MATH=0` for precise arithmetic checks.
+  Explicit tensor-core instructions retain their own accumulation semantics. Accuracy and latency evidence must name
+  the effective flags; a precise diagnostic does not qualify the default fast-math kernel. Persistent benchmark
+  workers receive the effective `FAST_MATH` value with every request and restore their prior value afterward, so a
+  previous request's arithmetic mode cannot leak into the next measurement.
 
   `tune` used to rank at `-Xcicc -O1` to dodge a cicc front-end blowup on big unrolled register-tile kernels. That
   rationale was measured against the WMMA codegen deleted in #189 four days later; on current codegen (fragment work
@@ -76,7 +84,8 @@ codegen, no nvcc), and both paths share every line downstream. The projection:
   change the emitted-C listing size (the register-tile fragment grid is straight-line regardless).
   Unset → each site's built-in cap; `0` → keep every loop rolled.
 - Builds a static launch plan: per launch, a tuple of
-  `(kernel, arg_names, grid, block, smem_bytes, zero_outputs)`.
+  `(kernel, arg_names, grid, block, smem_bytes, zero_outputs)`. Loading resolves total shared storage against
+  the cubin's static allocation once; each launch then supplies only the dynamic remainder.
 
 `run_program(graph, input_data) → RunResult`:
 
@@ -91,6 +100,10 @@ codegen, no nvcc), and both paths share every line downstream. The projection:
 3. Copy `graph.outputs` buffers back to numpy in their declared order, independently of buffer allocation order. BF16
    outputs remain raw `uint16` bits at this backend boundary;
    command-layer correctness checks decode them.
+
+On targets without native FP8 conversion, E4M3 decode constructs the exact FP16 bit pattern, then widens when the
+consumer wants FP32. Subnormals, signed zero and the NaN code follow the dtype contract; exhaustive byte tests cover
+both result widths. This removes per-element exponent arithmetic without changing the stored representation.
 
 **Scratch-buffer reuse (`_planner.py`).** Step 1 does *not* give every node its
 own permanently-live buffer — that holds all 28 layers' `[heads, S, S]` attention scratch resident at once (~29 GB for
@@ -283,8 +296,8 @@ availability, and capture state. `tune --bench` persists that verdict per proven
 successful timing response as proof of correctness.
 
 **One async transport — `_AsyncBenchWorker`.** It drives the `_bench_worker.py` subprocess protocol (`<8-byte LE
-length><pickle>`, both directions) over `asyncio` streams, so one event loop can keep N device-pinned workers benching
-concurrently (`tune --gpus`, see `pipeline/ARCHITECTURE.md` → *Per-kernel GPU parallelism*). Two entry shapes:
+length><pickle>`, both directions) over `asyncio` streams. The child completes short writes of both header and payload.
+One event loop keeps N device-pinned workers benching concurrently (`tune --gpus`). Two entry shapes:
 
 - **Autotune sweep** awaits `benchmark_program_isolated_async(graph, worker=…)`. `CudaBackend(device_id=i)` lazily owns
   one **persistent** worker (reused across configs — pay the ~0.2 s Python spawn once) and exposes `benchmark_async`,
@@ -360,3 +373,7 @@ timing boundaries. Existing autotune and model comparison behavior remains uncha
   under "Rule module convention".
 - The CUDA backend imports from `ir/` and `pipeline/` but never into
   them. A ROCm/SYCL/Metal backend replaces `program.py` only.
+
+The Python worker's protocol encoder adds the current compiler precision policy to its message. The shared process
+supervisor owns only deadlines and process lifetime; it does not inject compiler settings into native runtime
+commands. Prepared-pack reference commands keep that policy in the outer Python message.

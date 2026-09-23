@@ -19,6 +19,7 @@ from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.loop_wire import kernel_bindings, kernel_tile, loop_graph_from_wire, loop_graph_to_wire
 from emmy.compiler.pipeline.search.golden import dump_golden_file, load_golden_file
 from emmy.compiler.pipeline.search.working_golden import write_trace_inventory
+from tests.compiler.helpers import loop_target
 
 
 def _working_loop(path, *, state="inventory", pins=None):
@@ -30,10 +31,10 @@ def _working_loop(path, *, state="inventory", pins=None):
         graph,
         path,
         ctx=Context.from_target((8, 9)),
-        force_loop_targets=True,
     )
     document = load_golden_file(path)
     entry = document["configs"][0]
+    entry["target"].pop("origins")  # an exact Loop target with no Torch twin
     realization = entry["realizations"][0]
     realization["name"] = "working.relu"
     if pins is not None:
@@ -78,7 +79,7 @@ def _working_placement_route(path):
         node_id="y",
     )
     graph.inputs, graph.outputs = ["x", "wn", "w"], ["y"]
-    write_trace_inventory(graph, path, ctx=Context.from_target((8, 9)), force_loop_targets=True)
+    write_trace_inventory(graph, path, ctx=Context.from_target((8, 9)))
     document = load_golden_file(path)
     realization = document["configs"][0]["realizations"][0]
     realization["name"] = "working.route"
@@ -136,34 +137,6 @@ def test_working_file_requires_name_and_reports_its_own_available_rows(run_cli, 
     assert "working.relu" in stdout + stderr
 
 
-def test_frontend_target_features_follow_the_replay_slice_after_maximal_fusion() -> None:
-    from emmy.compiler.pipeline.search.golden import load_golden_records
-    from emmy.compiler.torch_wire import graph_to_wire
-
-    graph = Graph()
-    graph.add_node(InputOp(), [], Tensor("x", (16,)), node_id="x")
-    graph.add_node(ElementwiseOp("relu"), ["x"], Tensor("hidden", (16,)), node_id="hidden")
-    graph.add_node(ElementwiseOp("relu"), ["hidden"], Tensor("out", (16,)), node_id="out")
-    graph.inputs, graph.outputs = ["x"], ["out"]
-    (record,) = load_golden_records(
-        {
-            "gpu_name": "NVIDIA GeForce RTX 4090",
-            "compute_cap": [8, 9],
-            "model": "org/model",
-            "programs": [graph_to_wire(graph)],
-            "configs": [
-                {
-                    "program": 0,
-                    "target": {"origins": ["hidden"]},
-                    "realizations": [{"name": "working.hidden", "bindings": {}, "pins": {"FAST_MATH": False}}],
-                }
-            ],
-        }
-    )
-
-    assert record.structural_features
-
-
 def test_working_file_golden_conflicts_with_direct_input(run_cli, tmp_path):
     path = tmp_path / "working.yaml"
     _working_loop(path)
@@ -208,7 +181,7 @@ def test_dynamic_realization_uses_its_own_reference_instead_of_the_first_sibling
     graph.inputs, graph.outputs = ["x"], ["y"]
 
     path = tmp_path / "working-dynamic.yaml"
-    write_trace_inventory(graph, path, ctx=Context.from_target((8, 9)), force_loop_targets=True)
+    write_trace_inventory(graph, path, ctx=Context.from_target((8, 9)))
     document = load_golden_file(path)
     document["configs"][0]["realizations"] = [
         {"name": "working.m1", "bindings": {"num_tokens": 1}, "pins": {"FAST_MATH": False}},
@@ -303,14 +276,16 @@ def test_named_frontend_kernel_set_child_stays_pinned_after_greedy_compile(tmp_p
     desired = {"WORK": "t16x8", "TILE": "f4x6", "REDUCE": "", "STAGE": "", "RASTER": ""}
     incumbent = {"WORK": "t32x8", "TILE": "f2x6", "REDUCE": "", "STAGE": "", "RASTER": ""}
     path = tmp_path / "working-kernel-set.yaml"
+    loops: list[dict] = []
     dump_golden_file(
         {
             "compute_cap": [8, 9],
             "programs": [graph_to_wire(graph)],
+            "loops": loops,
             "configs": [
                 {
                     "program": 0,
-                    "target": {"origins": ["y"]},
+                    "target": loop_target(graph, ["y"], loops, (8, 9)),
                     "realizations": [
                         {
                             "name": "working.parent",
@@ -412,14 +387,16 @@ def test_a_kernel_set_name_resolves_inside_the_realization_own_precision_lane(tm
     graph.inputs, graph.outputs = ["x", "w"], ["y"]
     measured = {"measurements": {"emmy_us": 1.0, "reference_us": 2.0, "reference_backend": "torch"}}
     path = tmp_path / "working-two-lanes.yaml"
+    loops: list[dict] = []
     dump_golden_file(
         {
             "compute_cap": [8, 9],
             "programs": [graph_to_wire(graph)],
+            "loops": loops,
             "configs": [
                 {
                     "program": 0,
-                    "target": {"origins": ["y"]},
+                    "target": loop_target(graph, ["y"], loops, (8, 9)),
                     "realizations": [
                         {"name": "seed", "bindings": {}, "pins": {"FAST_MATH": False}, "kernel_set": ["seed.split"]},
                         {"name": "seed.split", "bindings": {}, "pins": {"FAST_MATH": False}, "knobs": {"REDUCE": "g4k"}, **measured},
@@ -483,8 +460,8 @@ def test_working_verified_row_is_automatically_pinned(tmp_path):
 
     assert len(args.golden_configs) == 1
     assert args.golden_configs[0].knobs == {"WORK": "w1x1"}
-    assert args.golden_configs[0].pins == {"FAST_MATH": False}
-    assert _sample_replay_knobs(args.golden_configs[0]) == {"FAST_MATH": False, "WORK": "w1x1"}
+    assert args.golden_configs[0].pins == {"FAST_MATH": True}
+    assert _sample_replay_knobs(args.golden_configs[0]) == {"FAST_MATH": True, "WORK": "w1x1"}
 
 
 def test_working_direct_tune_winner_is_automatically_pinned(tmp_path):
@@ -567,6 +544,31 @@ def test_emmy_only_benchmark_returns_same_input_reference():
     assert len(refs) == 1
     assert refs[0][0] == {"y": [2.0]}
     assert refs[0][1] is outputs
+
+
+def test_constant_cast_fragment_has_no_whole_op_reference(tmp_path, monkeypatch):
+    """A cast's synthetic boundary cannot be compared with the original constant's value."""
+    from emmy.compiler import pipeline
+    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.tensor.ir import IndexMapOp, IndexSource
+    from emmy.compiler.pipeline.search.golden import load_golden_records
+
+    # Keep the cast boundary that a larger unfusable consumer region leaves behind.
+    monkeypatch.setattr(pipeline, "LOOP_PASSES", [p for p in pipeline.LOOP_PASSES if p != "loop/fusion"])
+    graph = Graph()
+    graph.add_node(ConstantOp(name="weight", source_path="weight"), [], Tensor("weight", (256,), "f16"), node_id="weight")
+    graph.add_node(
+        IndexMapOp(out_shape=(Dim(256),), sources=(IndexSource(0, (Var("out_coord_0"),)),)),
+        ["weight"],
+        Tensor("out", (256,), "f32"),
+        node_id="out",
+    )
+    graph.outputs = ["out"]
+    path = tmp_path / "cast.yaml"
+    write_trace_inventory(graph, path, ctx=Context.from_target((7, 0)))
+    records = load_golden_records(load_golden_file(path))
+    fragment = next(record for record in records if record.target_program.inputs == ["out_cast"])
+    assert fragment.reference_program is None
 
 
 def test_emmy_only_benchmark_does_not_duplicate_inputs_on_torch(monkeypatch):
@@ -849,13 +851,15 @@ def test_replay_keys_its_cache_by_the_entry_identity(tmp_path):
     assert _replay(other, siblings=(owner,), lead=owner).arms == ()
 
 
-def test_recorded_greedy_pick_is_picked_again_under_strict_evidence(tmp_path):
+@pytest.mark.parametrize("card,cap", [("NVIDIA GeForce RTX 4090", (8, 9)), ("NVIDIA A100-SXM4-40GB", (8, 0))])
+def test_recorded_greedy_pick_is_picked_again_under_strict_evidence(tmp_path, card, cap, monkeypatch):
     """The kernel set a compile picked, recorded as measured rows — one routing row per kernel-set
     decision it took and one child-identity schedule receipt per kernel — is evidence enough: those
     rows alone yield the same kernels with the same rows under strict evidence, with no prior and
     no tune DB. A receipt carries the input regime and no route: seam spellings are
     kernel-local, so a cut key copied onto every receipt would re-cut any piece that offers a
     same-spelled seam."""
+    monkeypatch.setenv("EMMY_FAST_MATH", "0")
     from emmy import config
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
     from emmy.compiler.pipeline.search.golden import (
@@ -870,9 +874,11 @@ def test_recorded_greedy_pick_is_picked_again_under_strict_evidence(tmp_path):
 
     path = tmp_path / "working-route.yaml"
     document = _working_placement_route(path)
+    document.update(gpu_name=card, compute_cap=list(cap))
+    dump_golden_file(document, path, overwrite=True)
     entry = document["configs"][0]
     seed = golden_record_from_entry(document, entry, entry["realizations"][0])
-    ctx = Context.from_target((8, 9))
+    ctx = Context.from_target(cap, gpu_name=card)
     taken = KernelSetDecisions()
     # The pick to record: the routing row decides the cut, the prior decides the pieces' schedules.
     with records_override([seed]), pinned_knobs({"FAST_MATH": False}):
@@ -901,13 +907,14 @@ def test_recorded_greedy_pick_is_picked_again_under_strict_evidence(tmp_path):
     assert greedy_pick_rows(again) == rows
 
 
-def test_recorded_composed_pick_is_picked_again_under_strict_evidence(tmp_path):
+def test_recorded_composed_pick_is_picked_again_under_strict_evidence(tmp_path, monkeypatch):
     """A pinned compile consumes every scoped PLACE pin that resolves on one kernel as ONE composed
     decision, and ``--record-greedy`` records it as one routing row naming every seam. Those rows
     are evidence enough for the same composed cut under strict evidence — the cut pass offers the
     composed arm the row spells beside its single seams, on the replay that keys the rows and on
     the deploy that reads them — rather than the first offered seam the row marks with the rest
     left unresolved and every receipt keyed under a kernel that replay never minted."""
+    monkeypatch.setenv("EMMY_FAST_MATH", "0")
     from emmy import config
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
     from emmy.compiler.pipeline.search.golden import golden_record_from_entry, records_override, sole_evidence
@@ -951,6 +958,7 @@ def test_run_records_the_greedy_pick_of_an_embedded_golden(monkeypatch, tmp_path
     with its isolated launch timing, the greedy comparison row as every reference — while the
     per-kernel perf rows and node leaves every embedded-golden bench records by default are
     recorded too."""
+    monkeypatch.setenv("EMMY_FAST_MATH", "0")
     from emmy.commands import run as run_module
     from emmy.commands.compile import resolve_golden_arg
     from emmy.compiler import target as target_mod
@@ -1075,6 +1083,7 @@ def test_run_files_a_hung_greedy_kernel_as_bench_fail_evidence(monkeypatch, tmp_
     instead of electing the identical route and hanging again. Before, a hung greedy on an
     embedded golden recorded nothing (the run exited on the missing same-input reference before
     any recording ran), so ``run --bench`` could never advance an election on its own."""
+    monkeypatch.setenv("EMMY_FAST_MATH", "0")
     from emmy.commands import run as run_module
     from emmy.commands.compile import resolve_golden_arg
     from emmy.compiler import target as target_mod

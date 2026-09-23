@@ -441,7 +441,9 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   allocates a KV-cache spec and runs paged attention; each is built at its **per-layer** dims (`runner.layer_meta` —
   Gemma-4 global layers use a larger head_dim) and gets `per_layer_sliding_window` so Gemma's sliding/global layers
   window correctly) + one RoPE module **per layer** (`_build_rotaries`: homogeneous models share one; Gemma-3/4
-  keys theta AND head_dim on layer type — local vs global — a bare `Attention` does no RoPE) + `ParallelLMHead` +
+  keys theta AND head_dim on layer type — local vs global — a bare `Attention` does no RoPE; each module takes vLLM's
+  fused kernel whatever `--compilation-config` says, because under inductor's default `custom_ops: none` vLLM would
+  hand it `forward_native` and nothing compiles the plugin) + `ParallelLMHead` +
   `LogitsProcessor` (`soft_cap=final_logit_softcapping`, so Gemma-4's final-logit softcap applies; `compute_logits`
   also -infs the generation config's `suppress_tokens` — gemma-4 lists the mm delimiter tokens
   `<image|>`/`<audio|>` there, HF

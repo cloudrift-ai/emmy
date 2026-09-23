@@ -54,7 +54,7 @@ spot from knowledge recorded earlier, in a fixed order — measured first:
    prior's checkpoint (its **reservoir**) that were taken at deployable flags, the tune database's `perf` rows for
    this compile's context, and the **golden rows** in scope — the repository's per-card golden files, or the file
    `--golden PATH` names (Part 3). A golden row is a measurement like any other: it joins a candidate by the kernel's
-   `S_*` signature and value-of-position agreement, and it competes with local rows on µs alone.
+   `S_*` features, exact `I_kernel` identity and value-of-position agreement. It competes with local rows on µs alone.
 2. **The prior** — the online model when trained and calibrated, the offline model otherwise (Part 3).
 3. **Option-0** — the first option in the order the rule emitted them. This is only the no-evidence fallback;
    enumeration order carries no performance meaning. Under **strict evidence** (`--strict-evidence`,
@@ -126,8 +126,8 @@ rule matches a `LoopOp` and returns several tile options.
    lazy tree — legal complete rows, every level covered) instead of walked at full length: the cold pick needs a
    reasonable kernel, and the optimal one comes from measured evidence, which descends directly whatever the pool
    size. The seed is the pool's schedule-space stamp, which spells the precision gates by effect (Part 6's pool
-   identity), so a compile under a golden's published `FAST_MATH: false` regime draws the subset the unpinned
-   deploy draws and makes the same cold pick. Drawing has a hard option-check budget while one descent fits
+   identity), so equivalent effective precision gates draw the same subset, while precise and fast defaults can
+   draw different subsets. Drawing has a hard option-check budget while one descent fits
    inside it. If one complete descent's declared bound is already larger, exactly one descent attempt is the
    soft-cap exception; an empty sample fails rather than walking the full pool or substituting a partial
    branch. Under strict evidence this step is never reached: the
@@ -555,7 +555,8 @@ At a **schedule fork** (one kernel's row):
    compile's context key (one lane, because a sweep measures in the regime a deploy compiles in; rows from a
    deliberately non-deployable `--nvcc-flags` run key elsewhere and are simply never consulted) and the **golden rows**
    in scope (`golden.evidence_rows`): every MEASURED record in the live input regime (`golden.regime_live`), keyed by
-   its fork-time `S_*` signature — a record that decorates one kernel under the kernel its target lifts to; any other
+   its fork-time `S_*` features and exact `I_kernel` identity. A record decorating one kernel is keyed by the kernel
+   its target lifts to; any other
    record through its replay (`golden._replay`), which files each kernel-set arm the record spelled under the kernel
    that fork was offered on and its schedule row under the kernel its stored identity names (an empty row too: a
    piece the pick took no knobs on is recorded as `knobs: {}`, and that row spells its fused, unsplit arm), or, for a
@@ -608,9 +609,11 @@ Three definitions the list leans on:
   index): a measured row counts as evidence for a candidate when every tuning knob the candidate has decided so far
   has the same value in that row. Knobs the candidate has not decided yet are free — a later pass will decide them.
   That is what lets one fully-decided measured row settle a fork whose candidates are still only partly decided.
-  Rows are matched to a candidate by its `S_*` signature through `Prior.sig_groups`: a row describes the candidate
-  when the candidate carries every key the row has, with the same value (a stamp the row predates is free; a
-  recorded key the candidate lacks is a different kernel); there is no identity join at deploy.
+  Rows first require the same exact `I_kernel` identity. `Prior.sig_groups` then matches their `S_*` features:
+  the candidate must carry every feature the row has with the same value; a newer feature may remain unspecified.
+  `I_kernel` hashes the typed, schedule-free Loop body at kernel birth. Equal feature histograms alone cannot make
+  two kernels share measurements. Legacy rows without this identity remain training data but cannot decide a current
+  kernel's measured pick. Golden imports derive the stamp from the current target or its cut replay.
 - **The reservoir** is the online prior's own training dataset: a bounded uniform sample (Algorithm R, capped at
   `MAX_ROWS` = 100k) of every training row ever streamed in across runs, stored INSIDE the online checkpoint
   (`online.json`, Part 5). Its rows are all `H_opt=3` — `Prior.add_rows` admits no other regime — and they double as
@@ -619,8 +622,8 @@ Three definitions the list leans on:
   per-kernel rows do not. One consequence: anything that discards the checkpoint — a `FEATURIZER_VERSION` bump
   discards it WHOLE, see "Featurizer versioning" — deletes that evidence along with the model, and the machine's
   deploys drop to the index → the offline prior. The SQLite `perf` rows and the golden rows survive such a bump: the
-  DB is keyed by content, and the join that matches rows to candidates tolerates feature-set changes, so old rows
-  stay usable.
+  DB is keyed by content. Rows retaining the same exact identity tolerate added structural features; rows that
+  predate the exact identity need a fresh measurement before serving as deploy evidence.
 - **Which compile flags evidence applies under**: the deployable regime, and that is the only regime anything is
   measured in. `H_opt` is read from the `-O<n>` in the compile flags; flags with no `-O<n>` at all — the default
   everywhere — count as 3, so an ordinary compile is always deployable. The identity a measurement is *stored* under
@@ -699,7 +702,9 @@ offers, or a schedule row no kernel of the replay enumerates, is stale and is no
 realizes is the question the nightly `onboard-model` workflow asks with the strict decode (`golden.decode_record`),
 over the same replay: the persisted program must select exactly one kernel (a receipt selects its child by stored
 identity), a routing record's every cut key must name a seam the cut pass offers, and a schedule row must equal one
-enumerated leaf under the record's own pins. Equality there is blind to the two sides' OFF anchors. A resolved kernel
+enumerated leaf under the record's own pins. An explicit kernel-set entry supplies the replay's route even when its
+parent identity changes; each receipt still has to match its own stored child identity and schedule. Equality there is
+blind to the two sides' OFF anchors. A resolved kernel
 carries every declared OFF value, because the pipeline stamps them at the pass boundary, and that is the row a
 recording is taken from; a fork offers its leaves carrying only the families the kernel's own sites give it. Both
 spell the same schedule, so which anchors appear says where a spelling came from, not what it decided. The default
@@ -1139,7 +1144,8 @@ reverse), so old rows upgrade in place.
 
 There is ONE global `OnlinePrior` across every kernel, GPU, and nvcc setting — not per-op, not partitioned by
 regime. Op structure (`S_*`) and the host/hardware regime (`H_*` — GPU compute capability + nvcc opt level, from
-`Context.features`) are **features in every row**, not a cache key.
+`Context.features`) are numeric features in every row. The exact `I_kernel` stamp travels beside them for evidence
+matching; it is excluded from the learned feature vector.
 
 **A partly-decided config is labeled with the best result reachable from it.** Real benches exist only at leaves, but
 the prior ranks partly-decided siblings at every fork level, so the label for any node is the best (minimum) median
@@ -1340,13 +1346,13 @@ training data for the offline prior, and a regression reference. This Part cover
 obligations, and the checks that keep the A/B honest.
 
 `golden.py` holds one generic `GoldenRecord` per realization. A structural config references a stable frontend Torch
-IR program by its document-local list index. The preferred target selector is a non-empty, unique set of frontend
-provenance origins.
-When lowering produces a kernel without such a selector, the record points into the document's optional `loops` pool,
-which stores that standalone post-fusion Loop IR slice. Current lowering derives the `S_*` histogram, `ShapeKey`, dtype
-classification, dynamic status, and operation kind lazily; none is serialized. Trace inventories retain the complete
-frontend program so provenance selectors re-lower in their original fusion context, while Loop IR fallbacks load
-directly. There are no kernel-kind classes or snippet generators.
+IR program by its document-local list index, and its target IS a kernel: an index into the document's `loops` pool,
+which stores that standalone post-fusion Loop IR. A replay, a strict decode and an evidence import start from the
+stored kernel and never re-lower the program. The frontend provenance origins ride beside it (`target: {loop,
+origins}`) when the kernel computes every one of them whole, so they are its exact Torch twin; they select nothing and
+serve only as the Torch reference. A kernel holding part of an op keeps none.
+Current lowering derives the `S_*` histogram, `ShapeKey`, dtype classification, dynamic status, and operation kind
+lazily; none is serialized. There are no kernel-kind classes or snippet generators.
 
 **Repository goldens are the entire compatibility boundary.** The embedded Torch IR has no independent version field.
 The golden document has no format version either. When the YAML schema or its Torch IR encoding changes, regenerate
@@ -1422,11 +1428,10 @@ again from the file's rows alone (no tune DB, no prior): that 10-kernel twin, wh
 pricing, resolves from its 19 recorded rows in seconds.
 
 The preferred reference is the runnable Torch slice (`torch-eager`) or the applicable library kernel (`cublas`). A
-stored Loop IR kernel derives its slice from the embedded program (`GoldenRecord.reference_program`): the program is
-lowered once, the kernel is found by its Loop IR wire, and its provenance origins become the slice when it computes
-every one of them whole, reads only inputs it binds, and exposes its outputs. The slice is comparison only; identity
-stays the stored kernel. A kernel holding part of an op, or recomputing a value its slice would read, has no frontend
-callable; an origin slice can also have synthetic boundaries whose
+stored kernel's slice is its stored origins cut from the embedded program (`GoldenRecord.reference_program`), taken
+when the kernel writes only values those ops compute and the slice reads exactly the inputs the kernel binds; nothing is
+lowered to find it. The slice is comparison only; identity stays the stored kernel. A kernel with no stored origins
+has no frontend callable; an origin slice can also have synthetic boundaries whose
 post-fusion output geometry is not independently comparable to its Torch slice. Such a target may use a separately
 compiled, repeated O3 `same-input-greedy` row as its positive reference only when the candidate and reference execute on
 identical deterministic inputs, their outputs pass the normal accuracy policy, and the model report discloses that
@@ -1450,7 +1455,7 @@ still differ per layout (different slab geometry and gmem walk), which is why a 
 linear fork must be TUNED on the `F.linear` snippet, and why a canonical entry (the harness/eval truth) and a
 `trans_b` entry (the serving truth) both stay current. The same rule applies to fused computed-A programs: their
 stored `torch.linear` edge is the served layout, and the smem compute fill stages every B fold channel via cp.async
-on either layout.
+on either layout; once the computed A is cut away, the copy transports stage every channel on their own.
 
 **Provenance validation.** `emmy eval golden --golden GOLDEN_YAML --serving-config PATH` derives model, revision,
 GPU, canonical file, precision regimes, and reachable static/symbolic widths from one pinned env, requires that exact
@@ -1463,7 +1468,8 @@ A/B integrity checks below).
 (`goldens_for_live_gpu`) — names repeat across per-GPU golden files with diverging shapes/dtypes, so a flat union can
 select another card's spelling. They keep the union fallback on an uncovered card (the seed / transfer flow — the
 pinned config re-benches live), and off-GPU the full union is returned (pure-logic tests). Tuning instead consumes an
-explicit working file whose GPU header is checked against the selected tune device.
+explicit working file whose GPU header is checked against the selected tune device. Registered device aliases are
+resolved through the GPU registry when loading records and filtering files, just as they are for the live context.
 
 **The A/B carries three integrity gates:**
 
@@ -1478,7 +1484,8 @@ explicit working file whose GPU header is checked against the selected tune devi
    alarm. A pin satisfied by ANY kernel counts as honored, which is what makes split main+finalize pairs
    work, but it does mean that a pin dropped on its intended kernel goes undetected if a sibling kernel happens to
    match it. `PLACE` is consumed before CUDA emission, so the final greedy resolution's placement receipts ride the
-   compiled graph as attribution and supply its realized side. The `g<n>` cross-CTA stage of a `REDUCE` value is
+   compiled graph as attribution and supply its realized side. Bare `PLACE=fuse` accepts an empty placement trace;
+   a site-scoped pin still requires its site. The `g<n>` cross-CTA stage of a `REDUCE` value is
    structural and cannot be read off a knob stamp, so the check skips it. A split replaces the kernel it splits, and
    `knob.consume_kernel_row` strips the schedule row from the pieces it mints — no piece may carry the `g<n>` it came
    from — so the receipt is the piece's sliced reduce axis, not a stamp. Only that stage is exempt: the rest of the
@@ -1555,9 +1562,9 @@ in would be reporting mostly arithmetic.
 
 **A measured pool is keyed on the KERNEL, not on the site that offered it.** The key digests the row's own `S_*`
 stamps — the same digest `Identity.op_sig` computes for an op, asked of the kernel that ran. Two kernels of one
-structure on one card are ONE tuning problem whatever produced them, which is already how the deploy path joins
-evidence: `Prior.evidence_pick` and `policy/greedy._db_measured_pick` both index on the `S_*` signature. It is safe
-because the identity strategy stamps a kernel **at birth**, at the fusion boundary or lowering splice, before
+feature structure on one card share a training pool whatever produced them. Deploy evidence is stricter: it also
+requires the exact `I_kernel` stamp, so distinct bodies with equal histograms never exchange measured schedules.
+The identity strategy stamps a kernel at birth, at the fusion boundary or lowering splice, before
 `040_schedule` offers the first fork — so nothing a schedule fork decides can move an `S_*` value, and sibling
 schedules cannot be split apart.
 
@@ -1791,13 +1798,14 @@ Not tunable — identity facts that make a knob dict a complete variant identity
 Skipped by `format_tuning_knobs`.
 
 **`FAST_MATH` / `F16_MMA_F32_ACC` / `FP8_MMA` / `FAST_EXP`** (BOOL, pin-only precision restrictions /
-`lowering/kernel/085_fast_exp`) — the **precision-trading family**, never silently on. Precedence per knob: its own pin
-> the `FAST_MATH` umbrella > off (`space.precision_pin`). `FAST_EXP` swaps libm `expf` for `__expf`;
+`lowering/kernel/085_fast_exp`) — the **precision-trading family**. Precedence per knob: its own pin > the
+`FAST_MATH` umbrella > true (`space.precision_pin`). `FAST_EXP` swaps libm `expf` for `__expf`;
 `F16_MMA_F32_ACC` admits the fixed domain's f16-accumulate atom choices (`mma_m16n8k16_f16_f16` — chunked f32
 register promote), while `FP8_MMA` admits its native fp8 atoms. Without the effective gate, Algorithm 1's immutable
 context excludes those choices while composing its lazy frontier.
-`FAST_MATH` is a meta gate over the others — `unfeatured`, never stamped/enumerated/featurized (the realized fork is
-identified by what it enables: `FAST_EXP`'s stamped BOOL, the `TILE` atom token).
+`FAST_MATH` also controls NVCC `--use_fast_math` and the typed invariant-divide rewrite. It remains `unfeatured`:
+schedule choices keep their concrete knob identity, and effective compiler flags separate measurement contexts.
+New golden inventories and measurements record the effective umbrella explicitly, so replay preserves that regime.
 
 ### Classic schedule keys
 

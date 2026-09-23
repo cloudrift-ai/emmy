@@ -831,9 +831,10 @@ def _emit_prior_golden_check(configs: list, *, title: bool = True, perf: dict | 
 
     from emmy import config  # noqa: PLC0415
     from emmy.compiler.pipeline import TILE_PASSES, Pipeline  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import METADATA_PREFIXES  # noqa: PLC0415
 
     def tunable(knobs: dict) -> dict:
-        return {k: v for k, v in knobs.items() if not k.startswith(("S_", "H_"))}
+        return {k: v for k, v in knobs.items() if not k.startswith(METADATA_PREFIXES)}
 
     def picked(graph) -> dict:
         compiled = Pipeline.build(TILE_PASSES).run(graph)  # tile dialect only — no codegen/nvcc

@@ -158,6 +158,8 @@ class CudaRenderTarget:
     def convert(self, value: str, src_dt: str, dst_dt: str) -> str:
         if src_dt == dst_dt:
             return value
+        if src_dt == "f8e4m3" and dst_dt in ("f32", "f16"):
+            return f"emmy_from_f8e4m3{'_f32' if dst_dt == 'f32' else ''}({value})"
         if src_dt in _F8_DTYPES and dst_dt in ("f32", "f16"):
             # fp8 decode — the ``from_f8*`` cast's device spelling. The functional
             # cast invokes ``<cuda_fp8.h>``'s explicit conversion operator, which

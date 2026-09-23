@@ -313,7 +313,7 @@ def coop_reduce_moves() -> list[Reduce]:
     """Return the finite cooperative and register reduction domain."""
     return [
         *(Reduce.of(coop=coop, reg=reg) for coop in (1, 4, 8, 16, 32, 64, 128, 256, 512) for reg in (1, 2, 4) if coop > 1 or reg > 1),
-        *(Reduce.of(coop=width, coop_transposed=True) for width in (32, 64, 128, 256)),
+        *(Reduce.of(coop=width, coop_transposed=True) for width in (32, 64, 128, 256, 512)),
     ]
 
 

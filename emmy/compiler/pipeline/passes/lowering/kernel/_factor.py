@@ -59,6 +59,7 @@ from emmy.compiler.ir.schedule.classic.schedule import binds_root
 from emmy.compiler.ir.schedule.views import cone_seam
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
+from emmy.compiler.ir.stmt.body import _exposed_defines
 from emmy.compiler.ir.tile import FoldMove, Level, Reduce, ReduceStage
 from emmy.compiler.ir.tile.ir import apply_output_specs, observed_result_names
 from emmy.compiler.ir.tile.ops import UnbindableProjection, chain_form, chain_members, projection_regions, sched_of, tiled_edges
@@ -67,6 +68,7 @@ from emmy.compiler.pipeline.passes.lowering.kernel._atom import (
     copy_cell,
     reduce_codegen,
     store_sink,
+    unroll_ok_n,
 )
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import sync_row_fill
 from emmy.compiler.pipeline.passes.lowering.kernel._tiling import atomize, grid_tile, register_tile, unit_tile
@@ -191,7 +193,10 @@ def factorize(tile, root, store=None, sm_count: int = 0) -> Tile:
         sm_count=sm_count,
     )
     out_val = _wire(op).name if op is not None else ""
-    return _factorize(op, ctx, tail=(), out_val=out_val, store=store, output_specs=tuple(tile.output_specs))
+    # A serial tree needs no projection peel: lower it whole so shared carriers keep one scope.
+    schedule = ctx.sched.schedule
+    bind = _factorize if schedule is not None and any(binds_root(choice) for choice in schedule.nodes.values()) else _bind
+    return bind(op, ctx, tail=(), out_val=out_val, store=store, output_specs=tuple(tile.output_specs))
 
 
 def _root_is_scheduled(root: Fold, ctx: Ctx) -> bool:
@@ -237,8 +242,9 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
         # serial arm does, and a second copy of the whole fold beside the tier's is dead code that
         # redeclares the carrier.
         if reducing is None or reducing.as_contraction() is None or ctx.sched.tile_of(reducing) is None or reducing.chunked():
-            placed = set(root.lower(axes=axes))
+            placed = list(root.lower(axes=axes))
             siblings = [stmt for edge in op.operands if edge is not root for stmt in edge.lower(axes=axes) if stmt not in placed]
+            siblings = _one_value_per_name([*placed, *siblings])[len(placed) :]
         else:
             # The root's results keep their names (the cell's own accumulators, the values its step
             # defines per cell); everything else its lowering defines — the cone's statistic a
@@ -379,19 +385,21 @@ def _one_value_per_name(stmts) -> list:
 
     The sweep is positional, which is what makes it right in one C scope: a use before the second
     binding means the first value and a use after it means the second, exactly as the redeclaration
-    nvcc refuses would have read. Nothing moves while the two agree.
+    nvcc refuses would have read. Exported accumulators count as bindings too: a partial copy of
+    a reduction is a different loop even when some outputs retain their original names.
+    Nothing moves while the two agree.
     """
     bound: dict[str, object] = {}
     rename: dict[str, str] = {}
     out: list = []
     for stmt in stmts:
         spelled = stmt.rename(lambda name: rename.get(name, name)) if rename else stmt
-        for original in stmt.defines():
+        for original in sorted(_exposed_defines(stmt)):
             name = rename.get(original, original)
             if bound.get(name, spelled) != spelled:
                 rename[original] = f"{original}__s{len(rename)}"
                 spelled = stmt.rename(lambda name: rename.get(name, name))
-        for name in spelled.defines():
+        for name in _exposed_defines(spelled):
             bound[name] = spelled
         out.append(spelled)
     return out
@@ -531,6 +539,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
                 k_axis=k_axis,
                 axes=ctx.sched.tile.axes,
                 inner=inner,
+                outputs=ctx.sched.tile.outputs,
             )
         )
         t = unit_tile(register_tile(atomize(tile.atom.shape[:2]), tile.mn), tile.mn)
@@ -878,7 +887,7 @@ def _tile_reduce_axis_transposed(
     copies: list[Stmt] = []
     for r in range(reg):
         copies.extend(_replicate(rloop.body, r, k_ways, axis, masked, protected, stream_identity))
-    strided = StridedLoop(axis=axis, start=start, step=Literal(stride, "int"), body=Body(tuple(copies)), unroll=rloop.unroll)
+    strided = StridedLoop(axis=axis, start=start, step=Literal(stride, "int"), body=Body(tuple(copies)), unroll=_lane_unroll(axis, stride))
     strided = strided.substitute(subst)
 
     merge: list[Stmt] = [st for r in range(1, reg) for st in merge_stmts(op, tuple(f"{n}__r{r}" for n in view.states))]
@@ -894,6 +903,12 @@ def _tile_reduce_axis_transposed(
 
     lanes_axes = ((k_co,) if k_co is not None else ()) + (n_lane,)
     return [], [*(s.substitute(subst) for s in hoisted), strided, *merge], tail_stmts, lanes_axes
+
+
+def _lane_unroll(axis: Axis, stride: int) -> bool:
+    """Whether a loop that strides a static ``axis`` by ``stride`` lanes unrolls: each lane runs only
+    ``ceil(extent / stride)`` trips, so a short one unrolls and its loads are all in flight at once."""
+    return axis.extent.is_static and unroll_ok_n(-(-axis.extent.as_static() // stride), 16)
 
 
 def _strided_fold(op: Fold, rloop, plan, ctx: Ctx, lane: Axis | None) -> list[Stmt]:
@@ -942,7 +957,7 @@ def _strided_fold(op: Fold, rloop, plan, ctx: Ctx, lane: Axis | None) -> list[St
     copies: list[Stmt] = []
     for r in range(reg):
         copies.extend(_replicate(rloop.body, r, coop, axis, masked, protected, stream_identity))
-    strided = StridedLoop(axis=axis, start=start, step=Literal(stride, "int"), body=Body(tuple(copies)), unroll=rloop.unroll)
+    strided = StridedLoop(axis=axis, start=start, step=Literal(stride, "int"), body=Body(tuple(copies)), unroll=_lane_unroll(axis, stride))
 
     # The carrier-driven partial merge: the REG-tree fold of the ``reg`` ILP copies into the survivor
     # (copy 0's names) + (when threads cooperate) the cross-thread combine, reassigning the carried
@@ -994,7 +1009,7 @@ def _lane_close(tail: list[Stmt], lane: Axis | None, coop: int, ctx: Ctx, out_va
         body_tail = with_store(tail, ctx.output, ctx.grid, out_val)
     elif any(isinstance(s, Loop) and not s.is_reduce for s in tail):
         body_tail = [
-            StridedLoop(axis=s.axis, start=Var(lane.name), step=Literal(coop, "int"), body=s.body, unroll=s.unroll)
+            StridedLoop(axis=s.axis, start=Var(lane.name), step=Literal(coop, "int"), body=s.body, unroll=_lane_unroll(s.axis, coop))
             if isinstance(s, Loop) and not s.is_reduce
             else s
             for s in tail

@@ -1,4 +1,9 @@
-# Frozen RTX 5090 serving A/B from one immutable derivative image. The stock arm overrides the image's Emmy
+# Frozen RTX 5090 serving A/B from one immutable derivative image.
+# Both arms declare no multimodal items. Gemma 4 12B is a multimodal checkpoint, and vLLM sizes an encoder
+# budget from it: at this context a stock server refuses to start whenever --max-num-batched-tokens is below
+# max_tokens_per_mm_item (2496), which two of the four points are. The Emmy arm never hit it because
+# EmmyGenModel is text-only. The benchmark sends text, so the declaration costs nothing and it is on BOTH arms
+# so their argv stays identical, which is what makes this an A/B. The stock arm overrides the image's Emmy
 # entrypoint with the stock vLLM launcher; arm order alternates within each repeat to balance time and thermal drift.
 model:
   huggingface: "google/gemma-4-12B-it"
@@ -13,7 +18,7 @@ engine:
     context_length: 16384
     max_concurrent_requests: 64
     vllm:
-      image: "cloudriftai/vllm-emmy-gemma-4-12b-it@sha256:5add12d3b7f4673790b435b76635082433538e3615fbc40227fa1c0db64c9ff3"
+      image: "cloudriftai/vllm-emmy-gemma-4-12b-it@sha256:3a690e9f7859d46b969dd9eaaed36f52f92c25c5595dc112aee2adb781d26e28"
 
 benchmark:
   seed: 0
@@ -21,7 +26,7 @@ benchmark:
   ignore_eos: true
 
 matrices:
-  # Short high-concurrency point. Order by process repeat: S/E, E/S, S/E, E/S, S/E.
+  # Short high-concurrency point. Order by process repeat: S/E, E/S, S/E.
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
     deploy.gpu_count: 1
     benchmark.random_input_len: 256
@@ -36,19 +41,13 @@ matrices:
         - "python3 -m vllm.entrypoints.openai.api_server"
         - "python3 -m vllm.entrypoints.openai.api_server"
         - null
-        - null
-        - "python3 -m vllm.entrypoints.openai.api_server"
-        - "python3 -m vllm.entrypoints.openai.api_server"
-        - null
       engine.llm.vllm.extra_args:
-        - &stock_short "--dtype float16 --max-num-batched-tokens 2112 --no-enable-prefix-caching"
+        - &stock_short >-
+          --dtype float16 --max-num-batched-tokens 2112 --no-enable-prefix-caching
+          --limit-mm-per-prompt '{"image":0,"video":0,"audio":0}'
         - &emmy_short >-
           --runner generate --dtype float16 --hf-overrides '{"architectures":["EmmyGenModel"]}'
-          --max-num-batched-tokens 2112 --no-enable-prefix-caching
-        - *emmy_short
-        - *stock_short
-        - *stock_short
-        - *emmy_short
+          --max-num-batched-tokens 2112 --no-enable-prefix-caching --limit-mm-per-prompt '{"image":0,"video":0,"audio":0}'
         - *emmy_short
         - *stock_short
         - *stock_short
@@ -60,12 +59,8 @@ matrices:
         - ""
         - ""
         - "EMMY_GEN_DECODE_BUCKET=64 EMMY_GEN_PREFILL_BUCKET=2048"
-        - "EMMY_GEN_DECODE_BUCKET=64 EMMY_GEN_PREFILL_BUCKET=2048"
-        - ""
-        - ""
-        - "EMMY_GEN_DECODE_BUCKET=64 EMMY_GEN_PREFILL_BUCKET=2048"
-      arm: &balanced_arms [stock, emmy, emmy, stock, stock, emmy, emmy, stock, stock, emmy]
-      repeat: &balanced_repeats [0, 0, 1, 1, 2, 2, 3, 3, 4, 4]
+      arm: &balanced_arms [stock, emmy, emmy, stock, stock, emmy]
+      repeat: &balanced_repeats [0, 0, 1, 1, 2, 2]
 
   # Interactive point.
   - deploy.gpu: "NVIDIA GeForce RTX 5090"
@@ -77,23 +72,17 @@ matrices:
     zip:
       engine.llm.vllm.entrypoint: *balanced_entrypoints
       engine.llm.vllm.extra_args:
-        - &stock_interactive "--dtype float16 --max-num-batched-tokens 4128 --no-enable-prefix-caching"
+        - &stock_interactive >-
+          --dtype float16 --max-num-batched-tokens 4128 --no-enable-prefix-caching
+          --limit-mm-per-prompt '{"image":0,"video":0,"audio":0}'
         - &emmy_interactive >-
           --runner generate --dtype float16 --hf-overrides '{"architectures":["EmmyGenModel"]}'
-          --max-num-batched-tokens 4128 --no-enable-prefix-caching
-        - *emmy_interactive
-        - *stock_interactive
-        - *stock_interactive
-        - *emmy_interactive
+          --max-num-batched-tokens 4128 --no-enable-prefix-caching --limit-mm-per-prompt '{"image":0,"video":0,"audio":0}'
         - *emmy_interactive
         - *stock_interactive
         - *stock_interactive
         - *emmy_interactive
       engine.llm.vllm.extra_env:
-        - ""
-        - "EMMY_GEN_DECODE_BUCKET=32"
-        - "EMMY_GEN_DECODE_BUCKET=32"
-        - ""
         - ""
         - "EMMY_GEN_DECODE_BUCKET=32"
         - "EMMY_GEN_DECODE_BUCKET=32"
@@ -113,23 +102,17 @@ matrices:
     zip:
       engine.llm.vllm.entrypoint: *balanced_entrypoints
       engine.llm.vllm.extra_args:
-        - &stock_batch "--dtype float16 --max-num-batched-tokens 2056 --no-enable-prefix-caching"
+        - &stock_batch >-
+          --dtype float16 --max-num-batched-tokens 2056 --no-enable-prefix-caching
+          --limit-mm-per-prompt '{"image":0,"video":0,"audio":0}'
         - &emmy_batch >-
           --runner generate --dtype float16 --hf-overrides '{"architectures":["EmmyGenModel"]}'
-          --max-num-batched-tokens 2056 --no-enable-prefix-caching
-        - *emmy_batch
-        - *stock_batch
-        - *stock_batch
-        - *emmy_batch
+          --max-num-batched-tokens 2056 --no-enable-prefix-caching --limit-mm-per-prompt '{"image":0,"video":0,"audio":0}'
         - *emmy_batch
         - *stock_batch
         - *stock_batch
         - *emmy_batch
       engine.llm.vllm.extra_env:
-        - ""
-        - "EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048"
-        - "EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048"
-        - ""
         - ""
         - "EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048"
         - "EMMY_GEN_DECODE_BUCKET=8 EMMY_GEN_PREFILL_BUCKET=2048"
@@ -149,23 +132,17 @@ matrices:
     zip:
       engine.llm.vllm.entrypoint: *balanced_entrypoints
       engine.llm.vllm.extra_args:
-        - &stock_long "--dtype float16 --max-num-batched-tokens 4104 --no-enable-prefix-caching"
+        - &stock_long >-
+          --dtype float16 --max-num-batched-tokens 4104 --no-enable-prefix-caching
+          --limit-mm-per-prompt '{"image":0,"video":0,"audio":0}'
         - &emmy_long >-
           --runner generate --dtype float16 --hf-overrides '{"architectures":["EmmyGenModel"]}'
-          --max-num-batched-tokens 4104 --no-enable-prefix-caching
-        - *emmy_long
-        - *stock_long
-        - *stock_long
-        - *emmy_long
+          --max-num-batched-tokens 4104 --no-enable-prefix-caching --limit-mm-per-prompt '{"image":0,"video":0,"audio":0}'
         - *emmy_long
         - *stock_long
         - *stock_long
         - *emmy_long
       engine.llm.vllm.extra_env:
-        - ""
-        - "EMMY_GEN_DECODE_BUCKET=8"
-        - "EMMY_GEN_DECODE_BUCKET=8"
-        - ""
         - ""
         - "EMMY_GEN_DECODE_BUCKET=8"
         - "EMMY_GEN_DECODE_BUCKET=8"

@@ -380,6 +380,21 @@ def _index_map(op, ins: list, sym_env: dict[str, int] | None = None, device=None
     from emmy.compiler.ir.expr import PLACEHOLDER_PREFIX  # noqa: PLC0415
 
     out_shape = _shape_ints(op.out_shape, sym_env or {})
+    if len(op.sources) == 1 and op.sources[0].select is None:
+        source = op.sources[0]
+        tensor = ins[source.input_idx]
+        if torch.is_tensor(tensor):
+            strides = [0] * len(out_shape)
+            axes = {f"{PLACEHOLDER_PREFIX}{i}": i for i in range(len(out_shape))}
+            for i, coord in enumerate(source.coord_map):
+                if tensor.shape[i] == 1 or (type(coord).__name__ == "Literal" and coord.value == 0):
+                    continue
+                axis = axes.get(getattr(coord, "name", None))
+                if axis is None or tensor.shape[i] != out_shape[axis]:
+                    break
+                strides[axis] += tensor.stride(i)
+            else:
+                return tensor.as_strided(out_shape, strides)
     # device / dtype from the first tensor-valued source (a source can be a
     # scalar constant — stored as a python float).
     base = next((ins[s.input_idx] for s in op.sources if torch.is_tensor(ins[s.input_idx])), None)

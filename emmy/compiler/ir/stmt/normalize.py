@@ -55,7 +55,6 @@ def _normalize_body(stmts: Body) -> Body:
     stmts = eliminate_copy_aliases(stmts)
     stmts = unify_sibling_reduce_axes(stmts)
     stmts = merge_sibling_reduce_loops(stmts)
-    stmts = split_invariant_divides(stmts)
     stmts = hoist_loop_invariants(stmts)
     stmts = simplify_body(stmts)
     stmts = dedup_loads(stmts)
@@ -597,98 +596,7 @@ def _merge_sibling_reduce_loops(body: Body) -> Body:
 
 
 # ---------------------------------------------------------------------------
-# Pass 5a: split loop-invariant divides into reciprocal + multiply.
-# ---------------------------------------------------------------------------
-#
-# ``divide(x, y)`` lowers to a single-precision divide on the XU pipe (the
-# same pipe ``exp`` uses). When ``y`` is loop-invariant w.r.t. some
-# enclosing Loop and ``x`` is not, the divide can't hoist as-is — its live
-# set is the union of x's and y's. Splitting into::
-#
-#     recip_y = reciprocal(y)        # live = axes_of(y)
-#     result  = multiply(x, recip_y) # live = axes_of(x) ∪ {recip_y}
-#
-# lets the next pass (``hoist_loop_invariants``) move ``recip_y`` out of
-# every Loop axis that doesn't appear in ``y``. Inside the loop the
-# divide turns into a multiply (FMA pipe), which is typically the
-# under-utilized pipe on transcendental-heavy kernels (softmax,
-# RMSNorm, attention output). One XU op per outer-axis iteration
-# instead of one per inner-axis iteration.
-#
-# Gate: split iff ``axes_of(y)`` is a strict subset of ``axes_of(x)``.
-# That's the precise structural condition for "splitting unblocks at
-# least one Loop's worth of hoisting." Skip when y has axes x doesn't
-# (no hoisting wins) or when both have identical axes (rcp would stay
-# in the same scope as the original divide, no win and slight
-# precision drift). When y is a true scalar (axes_of empty), the rcp
-# hoists all the way to body root.
-# ---------------------------------------------------------------------------
-
-
-def split_invariant_divides(stmts: Body) -> Body:
-    """Rewrite ``divide(x, y)`` → ``reciprocal(y) + multiply(x, recip)``
-    when ``y``'s axis-dependency set is a strict subset of ``x``'s.
-
-    Invariance is queried via :attr:`Body.axis_dependencies` over the
-    pre-rewrite body. The strict-subset check means there's at least one
-    axis ``x`` depends on that ``y`` doesn't — splitting moves the rcp out
-    of that axis's Loop while the multiply stays. Generates fresh SSA names
-    for the rcp; the trailing :func:`rename_ssa_sequential` pass renumbers
-    them into ``vN`` form.
-    """
-    from emmy.compiler.ir.elementwise import ElementwiseImpl  # noqa: PLC0415
-
-    stmts = Body.coerce(stmts)
-    if not any(isinstance(stmt, Assign) and stmt.op.name == "divide" for stmt in stmts.iter()):
-        return stmts
-    axis_dependencies = dict(stmts.axis_dependencies)
-    ssa_names: set[str] = set(axis_dependencies)
-    fresh_counter = [0]
-
-    def _fresh(prefix: str) -> str:
-        while True:
-            fresh_counter[0] += 1
-            n = f"{prefix}_{fresh_counter[0]}"
-            if n not in ssa_names:
-                ssa_names.add(n)
-                return n
-
-    def _axes_of(name: str) -> frozenset[str]:
-        return axis_dependencies.get(name, frozenset())
-
-    def walk(body: Body) -> Body:
-        out: list[Stmt] = []
-        for s in body:
-            nested = s.nested()
-            if nested:
-                # Generic descent — recurse into every nested body, rebuild
-                # the wrapper via with_bodies. The closure was built once
-                # over the whole body, so post-Loop Accum bookkeeping is
-                # already baked in — no per-wrapper update needed here.
-                out.append(s.with_bodies(tuple(walk(b) for b in nested)))
-                continue
-            if isinstance(s, Assign) and s.op == ElementwiseImpl("divide") and len(s.args) == 2:
-                x_name, y_name = s.args
-                if _axes_of(y_name) < _axes_of(x_name):  # strict subset → splitting unblocks at least one hoist
-                    recip_name = _fresh(f"recip_{y_name}")
-                    recip = Assign(name=recip_name, op=ElementwiseImpl("reciprocal"), args=(y_name,))
-                    mult = Assign(name=s.name, op=ElementwiseImpl("multiply"), args=(x_name, recip_name))
-                    # Patch dependencies for the freshly-introduced rcp so a
-                    # later divide reading the same y in the same body
-                    # still sees the correct axis set.
-                    axis_dependencies[recip_name] = axis_dependencies.get(y_name, frozenset())
-                    axis_dependencies[mult.name] = axis_dependencies.get(x_name, frozenset()) | axis_dependencies[recip_name]
-                    out.append(recip)
-                    out.append(mult)
-                    continue
-            out.append(s)
-        return Body(out)
-
-    return walk(stmts)
-
-
-# ---------------------------------------------------------------------------
-# Pass 5b: loop-invariant code motion
+# Pass 5: loop-invariant code motion
 # ---------------------------------------------------------------------------
 
 
@@ -836,15 +744,13 @@ def dedup_loads(stmts: Body) -> Body:
         def rename(n: str) -> str:
             return alias.get(n, n)
 
-        def descend(inner: Body, clobbered: frozenset[str]) -> Body:
-            """Enter ``inner``'s scope, dropping every alias / kept name whose spelling ``inner``
-            re-binds. SSA names bound inside a Loop / Cond body are scoped to it, so such a name is
-            a DIFFERENT variable — following it out would rewire the inner arithmetic to the outer
-            value and redeclare the survivor. An accumulator the inner loop aliased is visible out
-            here once the loop closes, so that alias comes back up."""
-            shadowed = Body.coerce(inner).ssa_defs
-            out = walk(inner, {k: v for k, v in local.items() if k[0] not in clobbered and not shadowed.intersection(v)}, alias)
-            return out
+        def descend(inner: Body, clobbered: frozenset[str], coordinates: frozenset[str]) -> Body:
+            """Keep cached values only while their definitions and dependencies retain their bindings.
+            Rebound coordinates change a read even when its index has the same spelling. Accumulator
+            aliases carry out of the inner loop to the scope that reads the sum."""
+            shadowed = Body.coerce(inner).ssa_defs | coordinates
+            env = {k: v for k, v in local.items() if k[0] not in clobbered and not shadowed.intersection((*v, *k[-1]))}
+            return walk(inner, env, alias)
 
         def invalidate(buffers: frozenset[str]) -> None:
             for key in tuple(local):
@@ -860,7 +766,7 @@ def dedup_loads(stmts: Body) -> Body:
                 # kept name, or the index dangles after the duplicate is
                 # dropped. (No-op for plain axis indices: axes aren't aliased.)
                 s = s.rewrite(rename)
-                key = (s.input, tuple(e.pretty() for e in s.index), s.width, s.dtype)
+                key = (s.input, tuple(e.pretty() for e in s.index), s.width, s.dtype, s.deps())
                 if key in local:
                     alias.update(dict(zip(s.names, local[key], strict=True)))
                     continue
@@ -870,7 +776,7 @@ def dedup_loads(stmts: Body) -> Body:
                 s = rename_free(s, alias)
                 key = (
                     ("assign", s.op, s.args, s.dtype) if isinstance(s, Assign) else ("accum", s.value, s.op, s.dtype, s.axes, repr(s.base))
-                )
+                ) + (s.deps(),)
                 if key in local:
                     alias[s.name] = local[key][0]
                     if isinstance(s, Accum):
@@ -881,7 +787,7 @@ def dedup_loads(stmts: Body) -> Body:
             elif s.nested():
                 clobbered = written_buffers(s)
                 renamed = rename_free(s, alias)
-                out.append(renamed.with_bodies(tuple(descend(child, clobbered) for child in renamed.nested())))
+                out.append(renamed.with_bodies(tuple(descend(child, clobbered, renamed.binds_axes()) for child in renamed.nested())))
                 invalidate(clobbered)
             else:
                 out.append(rename_free(s, alias))
@@ -1063,26 +969,26 @@ def _canonical_order(stmts: Body) -> Body:
     return result
 
 
-def _canonicalize_exprs(stmts: Body) -> Body:
-    """Canonicalize equivalent integer coordinate and condition expressions."""
+def _canonicalize_exprs(stmts: Body, axes: tuple[str, ...] = ()) -> Body:
+    """Canonicalize integer expressions using lexical binding order, never axis spelling."""
     from dataclasses import fields  # noqa: PLC0415
 
     from emmy.compiler.structural import form  # noqa: PLC0415
 
     commutative = frozenset({"+", "*", "==", "!=", "&&", "||", "&", "|", "^"})
     dual = {">": "<", ">=": "<="}
-    axis_names = stmts.axis_names
+    axis_order = {name: index for index, name in enumerate(axes)}
 
     def affine(expr: Expr) -> Expr:
         variables = expr.free_vars()
         # Reassociation and coefficient folding are exact for integer coordinates. An SSA value
         # may be floating point, where changing the operation tree changes rounding and kernel work.
-        if not variables or not variables <= axis_names or (decomposed := affine_form(expr, variables)) is None:
+        if not variables or not variables <= axis_order.keys() or (decomposed := affine_form(expr, variables)) is None:
             return expr
         anchor, coefficients = decomposed
         anchor = anchor.simplify(SimplifyCtx.empty())
         terms: list[Expr] = []
-        for name, coefficient in sorted(coefficients.items()):
+        for name, coefficient in sorted(coefficients.items(), key=lambda item: axis_order[item[0]]):
             variable = Var(name)
             terms.append(variable if coefficient == 1 else BinaryExpr("*", Literal(coefficient, "int"), variable))
         if not (isinstance(anchor, Literal) and anchor.value == 0):
@@ -1123,9 +1029,11 @@ def _canonicalize_exprs(stmts: Body) -> Body:
 
     def statement(stmt: Stmt) -> Stmt:
         changes = {field.name: value(getattr(stmt, field.name)) for field in fields(stmt)}
-        return replace(stmt, **changes)
+        rewritten = replace(stmt, **changes)
+        bound = (*axes, *(axis.name for axis in bound_axes(stmt)))
+        return rewritten.with_bodies(tuple(_canonicalize_exprs(child, bound) for child in rewritten.nested()))
 
-    return Body.coerce(stmts).map(statement)
+    return Body(statement(stmt) for stmt in stmts)
 
 
 def _orders_modulo_transpositions(items: list, interchangeable: Callable[[object, object], bool]) -> Iterator[tuple]:

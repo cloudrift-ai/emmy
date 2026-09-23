@@ -63,7 +63,7 @@ from typing import NamedTuple
 
 import yaml
 
-from emmy.compiler.pipeline.knob import CTX_PREFIX, STRUCT_PREFIX
+from emmy.compiler.pipeline.knob import KERNEL_IDENTITY, METADATA_PREFIXES
 from emmy.compiler.pipeline.search.db import KernelRow, PerfRow, PerfStats, RoutingRow, SearchDB
 from emmy.compiler.pipeline.search.features import DEPLOYABLE_OPT, FEATURIZER_VERSION
 
@@ -222,7 +222,7 @@ def _row_payload(row: PerfRow) -> dict:
     return {
         "kernel": row.kernel,
         "bindings": row.bindings,
-        "knobs": {k: v for k, v in row.knobs.items() if not k.startswith((STRUCT_PREFIX, CTX_PREFIX))},
+        "knobs": {k: v for k, v in row.knobs.items() if not k.startswith(METADATA_PREFIXES)},
         "opt": row.opt,
         "flags": row.flags,
         "status": row.status,
@@ -414,8 +414,8 @@ def _read_rows(p: Path, name: str, info: dict, regen: str) -> tuple[dict, list[d
 
 def load_freeze(path: Path | str) -> Freeze:
     """Parse + verify the freeze directory at ``path``: the manifest, the ``kernel`` rows, the ``routing``
-    rows and the ``perf`` rows (each keyed by its file's card, its ``knobs`` the kernel's stamps plus its
-    schedule row — the flat row a DB reader gives — and sourced ``freeze:<digest>``). Hard
+    rows and the ``perf`` rows (each keyed by its file's card, its ``knobs`` the kernel's stamps, its exact
+    identity and its schedule row — the flat row a DB reader gives — and sourced ``freeze:<digest>``). Hard
     ``RuntimeError`` — never a silent fallback — on any integrity failure."""
     p = Path(path)
     regen = "re-freeze with `emmy dataset freeze`"
@@ -483,7 +483,7 @@ def load_freeze(path: Path | str) -> Freeze:
                     flags=str(payload["flags"]),
                     kernel=payload["kernel"],
                     bindings=payload["bindings"],
-                    knobs={**stamps[payload["kernel"]], **payload["knobs"]},
+                    knobs={**stamps[payload["kernel"]], KERNEL_IDENTITY: payload["kernel"], **payload["knobs"]},
                     backend="cuda",
                     status=payload["status"],
                     stats=PerfStats(**payload["stats"]),

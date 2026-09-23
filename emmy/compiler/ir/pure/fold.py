@@ -404,12 +404,12 @@ class Fold:
         """This term restricted to the results ``names`` — same operands and params, body cut to
         what those results need.
 
-        What :meth:`lower` places when a reader takes only SOME of a computed edge's components. A
-        twisted carrier's weight cone carries the score its step folds beside a weight only a
-        schedule wants, and emitting the second costs a transcendental per element for nothing.
+        What :meth:`lower` places when a reader takes only SOME of a computed edge's components.
+        Planar reduction states are independent, so their injection and identity narrow together.
+        Twisted and observed states remain whole because their components can depend on each other.
         Memoized on the term.
         """
-        if self.axis is not None or self.exposes == names:
+        if self.exposes == names or self.twist is not None or self.observe is not None:
             return self
         # ``names`` are EXPOSED names — what :attr:`applied` spells — while the body and the lift's
         # own results are in the term's private spelling. The two coincide wherever the body defines
@@ -417,9 +417,20 @@ class Fold:
         # projection over one term per carried state, once a cut renames a child's state to its
         # workspace). They stay positional, so translate before cutting: writing an exposed name
         # into the lift's results leaves a result nothing defines.
-        keep = tuple(self.lift.results[self.exposes.index(name)] for name in names)
+        positions = tuple(self.exposes.index(name) for name in names)
+        keep = tuple(self.lift.results[index] for index in positions)
         members = tuple(self.lift.body.backward_cone(keep).members)
-        return replace(self, lift=replace(self.lift, body=Body(members), results=keep))
+        lead = self.lift.params[: (self.axis is not None) + len(self.bindings)]
+        lift = Lambda.closing(lead, Body(members), keep)
+        if self.axis is None:
+            return replace(self, lift=lift)
+        ops = self.base.components()
+        return replace(
+            self,
+            lift=lift,
+            init=tuple(self.init[index] for index in positions),
+            base=Lambda.componentwise(tuple(ops[index] for index in positions), names),
+        )
 
     def binds_axes(self) -> frozenset[str]:
         """The axis this term binds — what the statement-door ``rewrite`` drops from σ for the subtree."""
@@ -717,7 +728,7 @@ class Fold:
                 continue  # a planar fold seeds the ⊕ itself; a recipe's base is a monoid by construction
             if not product.op.distributes_over(plus):
                 continue
-            left = [arg for arg in product.args if _over_a(arg, cone, a_names, uniform)]
+            left = [arg for arg in product.args if _over_a(arg, cone, a_names, uniform | a_edge.free_axes)]
             right = [arg for arg in product.args if (edge := by_name.get(arg)) is not None and edge is not a_edge and edge.free_axes]
             if len(left) != 1 or len(right) != 1 or left[0] == right[0]:
                 continue  # a square, or a product that does not multiply A by exactly one other edge
@@ -737,11 +748,11 @@ class Fold:
         (:meth:`bilinear_channels`, :meth:`tiles_whole`, ``TileOp.contracts``, the atom's channels)
         stays exactly as strict as it was.
 
-        Only what refuses comes apart: a carrier that folds whole is the FUSED form the atom wants
-        (one ldmatrix'd A fragment, N mma chains off it) and stays one term, and a state that is no
-        product of its own — a sum beside a sum of squares, whose two states read one loaded value —
-        stays too, since two terms would read that value twice for nothing. A twisted or observed
-        carrier never comes apart: its states are coupled by the recipe.
+        Independent states over different coordinates also separate: combining a row statistic
+        with a column statistic otherwise makes both depend on the full pair of coordinates.
+        A carrier that folds whole stays fused (one A fragment, N mma chains). Non-product states
+        over the same coordinates stay together too: a sum beside a sum of squares shares its
+        loads. A twisted or observed carrier never comes apart: its states are coupled by the recipe.
         """
         if self.axis is None or self.twist is not None or self.observe is not None or self.base is None:
             return None
@@ -751,7 +762,7 @@ class Fold:
         children: list[Fold] = []
         for index, result in enumerate(self.lift.results):
             body = Body(tuple(self.lift.body.backward_cone((result,)).members))
-            read = body.ssa_uses
+            read = body.ssa_uses | {result}
             operands, params = [], []
             for edge in self.operands:
                 slots = [param for param, other, _ in self.bindings if other is edge]
@@ -765,9 +776,9 @@ class Fold:
                 init=(self.init[index],),
                 base=Lambda.componentwise((pluses[index],), (self.base.results[index],)),
             )
-            if not child.tiles_whole():
-                return None
             children.append(child)
+        if not all(child.tiles_whole() for child in children) and len({child.free_axes for child in children}) == 1:
+            return None
         return Fold(operands=tuple(children), lift=Lambda.closing(self.exposes, Body(()), self.exposes))
 
     @cached_method
@@ -1129,6 +1140,28 @@ class Fold:
             observe=None if self.observe is None else self.observe.rename(mapping),
         )
 
+    def read_components(self, stored: frozenset[str] = frozenset()) -> dict[int, tuple[str, ...]]:
+        """The components each term in this tree supplies to all its readers and boundary stores.
+
+        Propagate demand through narrowed lifts. Shared terms keep the union of their readers'
+        requests, so lowering never emits overlapping carriers with duplicate accumulator names.
+        """
+        taken: dict[int, tuple[str, ...]] = {}
+        pending = [(self, self.exposes)]
+        while pending:
+            term, asked = pending.pop()
+            wanted = set(taken.get(id(term), ())) | set(asked)
+            names = tuple(name for name in term.exposes if name in wanted)
+            if taken.get(id(term)) == names:
+                continue
+            taken[id(term)] = names
+            narrowed = term.exposing(names) if names else None
+            read = narrowed.step().ssa_uses | set(narrowed.exposes) if narrowed is not None else set()
+            for edge in term.operands:
+                keep = edge.exposes if _writes_under(edge, stored) else tuple(name for name in edge.exposes if name in read)
+                pending.append((edge, keep))
+        return taken
+
     @cached_method
     def lower(self, bound: frozenset[str] | None = None, stores: tuple[OutputSpec, ...] = (), axes: tuple[Axis, ...] = ()) -> Body:
         """Flatten this term to the Loop IR nest the materializer expands, the kernel's boundary
@@ -1198,22 +1231,10 @@ class Fold:
                     origin.update((name, (id(term), "observed")) for name in term.observe.results)
             pending.extend(reversed(term.operands))
         owned: dict[tuple[int, str], list[OutputSpec]] = {}
+        taken = self.read_components(frozenset(name for spec in stores for name in spec.write.values))
 
         def placed(term: Fold) -> tuple[Fold, ...]:
-            # An operand is placed for the COMPONENTS the term reads, or whole when the tree below
-            # it defines a value the kernel STORES — a nested output sweep is materialized for its
-            # own store, not for its reader, and narrowing it would lose that store's owner. An
-            # edge no component of which is read is a site the schedule may take and the nest has
-            # no use for; one only partly read costs only the part.
-            seen = set(term.step().ssa_uses) | set(term.exposes)
-            out = []
-            for edge in term.operands:
-                kept = tuple(name for name in edge.exposes if name in seen)
-                if _writes_under(edge, writing):
-                    out.append(edge)
-                elif kept:
-                    out.append(edge.exposing(kept))
-            return tuple(out)
+            return tuple(edge.exposing(taken[id(edge)]) for edge in term.operands if taken[id(edge)])
 
         for spec in stores:
             key = origin.get(spec.write.values[0])
@@ -1296,7 +1317,6 @@ class Fold:
                     body.append(Loop(axis=coordinates[name], body=assemble((*path, name))))
             return _scope(body)
 
-        writing = {term for term, _ in owned}
         place(self, [], None)
         return assemble(())
 
@@ -1380,25 +1400,24 @@ def _channel_product(lift: Lambda, result: str) -> tuple[Lambda, Assign | None]:
     return cone, stmt if isinstance(stmt, Assign) else None
 
 
-def _over_a(name: str, cone: Lambda, a_names: set[str], uniform: set[str]) -> bool:
+def _over_a(name: str, cone: Lambda, a_names: set[str], available: set[str]) -> bool:
     """Whether ``name`` is the A factor of ``cone``'s product — a component ``operands[0]`` binds,
-    or a value the cone computes from those components and kernel-UNIFORM ones alone.
+    or a value the cone computes from those components, A's coordinates and uniform values.
 
     The second reading is what lets a carrier read bilinear before its weight is reified. It walks
     the cone, which is this lift's own body, and never an operand's internals: a name bound to any
     other edge closes back as itself and fails the test.
 
-    ``uniform`` are the components of operands with no free coordinates — attention's scale, an rms
-    epsilon. One contributes no variation, so a factor reading it varies exactly as A does and the
-    channel is bilinear all the same. Without them the weight ``exp(a·scale)`` reads as a product
-    of A with a second varying value and no mma is offered at all."""
+    ``available`` includes A's free coordinates and components of coordinate-free operands. A mask
+    over A's coordinates or a uniform scale adds no dependence outside A; a coordinate exclusive
+    to B does, and must refuse the contraction."""
     if name in a_names:
         return True
     reads = set(cone.cone(name).params)
-    return bool(reads & a_names) and reads <= a_names | uniform
+    return bool(reads & a_names) and reads <= a_names | available
 
 
-def _writes_under(term: Fold, writing: set[int]) -> bool:
+def _writes_under(term: Fold, stored: frozenset[str]) -> bool:
     """Whether any term of ``term``'s subtree defines a value the kernel's boundary stores."""
     pending, seen = [term], set()
     while pending:
@@ -1406,7 +1425,7 @@ def _writes_under(term: Fold, writing: set[int]) -> bool:
         if id(node) in seen:
             continue
         seen.add(id(node))
-        if id(node) in writing:
+        if (set(node.exposes) | node.step().ssa_defs) & stored:
             return True
         pending.extend(node.operands)
     return False

@@ -68,6 +68,12 @@ member, and the existing tables are to be converted to one.
 schedule, materialization, output specifications, and knobs belong to `TileOp`, not the term. So `Fold` lives in
 `ir/pure/fold.py` and is not a `Stmt`.
 
+**Lambda construction binds every read and orders definitions before uses.** Both checks use the scope-aware
+`free_names` analysis, including coordinates in predicates and indices. `Lambda.closing` appends unbound reads as
+parameters; direct construction rejects them. Canonical ordering uses the same dependencies, so a predicate cannot
+move before its definition. The narrower `Body.ssa_uses` query follows statement `deps()` and does not include every
+expression read.
+
 ## Classic schedule model
 
 The [schedule package](schedule/ARCHITECTURE.md) separates schedule-wide interfaces and reusable choices from concrete
@@ -495,6 +501,10 @@ The optional readable-source fold keeps a single-use `Assign` named when any arg
 the result dtype, so the target-aware `Assign.render` path remains responsible for conversions such as
 `__half2float`.
 
+`Select` uses the common dtype of its branch values, and type propagation gives its consumers that same dtype.
+Selecting between two FP16 values must preserve the rounding of a subsequent FP16 product; promoting the selection
+to FP32 would silently change the computation.
+
 Dependence cones (`ir/stmt/body.py`): `Body.backward_cone(roots)` builds a `Cone` —
 the subset of the body's immediate stmts closed under SSA dependence (a wrapper joins as a unit; internally-bound
 axes excluded), plus `external_reads`, the names read from outside (axis vars and enclosing/sibling scopes alike).
@@ -566,20 +576,19 @@ canonicalized before validation:
   duplicate K traversal in patterns like `silu(x@Wg) * (x@Wu)`, and the duplicate score pass between the channels of a
   blocked twisted carrier; subsequent normalization collapses the duplicate loads, and the lowering passes stage both
   weight tensors symmetrically.
-- `split_invariant_divides` — rewrite `divide(x, y)` into
-  `reciprocal(y) + multiply(x, recip)` when `y` is loop-invariant
-  w.r.t. some axis `x` depends on, so the rcp can hoist out of the
-  inner loop and the per-iter cost drops from XU divide to FMA
-  multiply.
 - `hoist_loop_invariants` — pull loop-invariant Assigns out of reduce
   Loops. The hoisted set is closed under the scope's ordering constraints, the same ones the sibling order respects:
   the consumer of an accumulator a pinned reduction exports, a read of a buffer the loop writes, and anything behind
   a barrier or a declaration stay in the loop. Effect summaries are cached on immutable statements, and
   `Body.axis_dependencies` retains only the axes reachable from each definition. Long SSA chains therefore remain
   linear in definitions × loop depth instead of materializing the quadratic full SSA dependency closure.
+  Division retains its own rounding even when its denominator is invariant; reciprocal multiplication can change
+  quantization at a rounding boundary and is not a normalization.
 - `dedup_loads` — after expression simplification, keep one `Load` for each identical
   `(input, index, width, dtype)` read in a scope and rewire every scalar or vector lane. A write invalidates retained
-  reads of that buffer, including around a nested scope with a write. The same walk keeps one `Assign` per identical
+  reads of that buffer, including around a nested scope with a write. Entering a scope also drops cached values whose
+  definitions or dependencies are rebound there; an identical index spelling can name a different loop coordinate.
+  The same walk keeps one `Assign` per identical
   operation over identical arguments and one `Accum` per identical accumulation — a value the loop tree computes
   twice (a contraction spelled on both sides of a cut seam, a repeated pure expression) folds to one definition, and
   an accumulator alias carries out of the loop that defined it to the scope that reads the sum. This is
@@ -603,7 +612,9 @@ canonicalized before validation:
   of source order and spelling, and it rides the normalized body: structural identity labels the same graph again
   under its own buffer coloring instead of building it a second time. A scope's definitions bind its reads in any
   order and shadow an enclosing binding of the same spelling; a deeper scope's definition binds nothing read above
-  it, so the block still depends on the enclosing definition it reads.
+  it, so the block still depends on the enclosing definition it reads. Affine coordinates sort by lexical binding
+  order, so renaming axes or loading a saved body preserves their normal form and exact identity. Identity normalizes
+  remaining commutative expressions again after its final rename.
 - A standard smaller-half worklist computes the equitable partition in
   `O((vertices + relations) log vertices)` relation visits. Exact individualization is isolated to partitions that
   refinement cannot distinguish; no exact near-linear worst-case graph-canonization algorithm is known. The search

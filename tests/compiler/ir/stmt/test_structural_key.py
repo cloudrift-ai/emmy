@@ -1023,6 +1023,35 @@ def test_structural_key_idempotent() -> None:
     assert canonicalize_identity(canonical.body).key == canonical.key
 
 
+def test_identity_coordinate_order_survives_axis_rename() -> None:
+    """Renaming axes across lexical order must not re-key a saved kernel's measured evidence."""
+    keys = set()
+    for outer, inner in (("a9", "a10"), ("outer", "inner"), ("i", "j")):
+        index = BinaryExpr("+", BinaryExpr("*", Literal(128, "int"), Var(outer)), Var(inner))
+        body = Body(
+            (
+                Loop(
+                    Axis(outer, 40),
+                    (
+                        Loop(
+                            Axis(inner, 128),
+                            (
+                                Load(name="v", input="X", index=(index,)),
+                                Write(output="Y", index=(Var(outer), Var(inner)), value="v"),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+        )
+        canonical = canonicalize_identity(body)
+        assert canonicalize_identity(canonical.body).key == canonical.key
+        normalized = normalize_body(body)
+        assert normalize_body(Body(tuple(normalized))) == normalized
+        keys.add(canonical.key)
+    assert len(keys) == 1
+
+
 def test_structural_key_is_string_and_hashable() -> None:
     body = _matmul_body("X", "Y", "O")
     key = body.structural_key()

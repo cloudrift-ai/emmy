@@ -28,7 +28,7 @@ from emmy.compiler.ir.schedule import Stage, Tile, Work
 from emmy.compiler.ir.schedule.packing import packed_readings
 from emmy.compiler.ir.schedule.staging import resolve_warp_stage
 from emmy.compiler.ir.stmt import Assign, Load
-from tests.compiler.helpers import literal_classic_context, requires_cuda
+from tests.compiler.helpers import literal_classic_context, requires_cuda, requires_sm
 from tests.compiler.terms import contraction, projection
 
 K16 = "mma_m16n8k16_f16_f32"
@@ -457,11 +457,12 @@ def test_the_row_features_the_width_the_weight_really_moves(tmp_path, stage, pac
         ("f16", 32, 128, 128, 1e-3, "d2/smem-async"),
         ("f16", 4, 2048, 2048, 1e-3, "d2/smem-async"),
         ("bf16", 32, 128, 128, 6e-3, "d2/smem-async"),
-        ("f16", 32, 128, 128, 1e-3, "d2/smem-tma"),
-        ("bf16", 32, 128, 128, 6e-3, "d2/smem-tma"),
+        pytest.param("f16", 32, 128, 128, 1e-3, "d2/smem-tma", marks=requires_sm(9)),
+        pytest.param("bf16", 32, 128, 128, 6e-3, "d2/smem-tma", marks=requires_sm(9)),
     ],
 )
 @pytest.mark.xdist_group("cuda")
+@requires_sm(8)
 def test_the_packed_drain_matches_the_decoded_oracle(tmp_path, dtype, m, n, k, tol, stage):
     """Numerical parity on the device: the packed kernel equals ``x @ dequantize_nvfp4(w)ᵀ``.
 
@@ -511,6 +512,7 @@ def test_the_packed_drain_matches_the_decoded_oracle(tmp_path, dtype, m, n, k, t
 
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
+@requires_sm(9)
 def test_the_packed_drain_stages_a_batched_activation_over_tma(tmp_path):
     """A leading unit batch axis on A — the shape every ``emmy compile --layer`` trace carries
     (``[1, seq, K]``) — must box the TMA descriptor at FULL rank. ``_a_slab_operand`` used to
@@ -581,6 +583,7 @@ def test_the_packed_drain_stages_a_batched_activation_over_tma(tmp_path):
 
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
+@requires_sm(8)
 def test_the_packed_drain_composes_with_the_f16_accumulate_atom(tmp_path):
     """The byte slab under the f16-accumulate atom (``FAST_MATH``'s ``F16_MMA_F32_ACC`` member):
     the kernel carries the packed drain, the f16-fragment mma chain and its chunk promote
@@ -624,8 +627,9 @@ def test_the_packed_drain_composes_with_the_f16_accumulate_atom(tmp_path):
 
 
 @requires_cuda
-@pytest.mark.parametrize("stage", ["d2/smem-async", "d2/smem-tma"])
+@pytest.mark.parametrize("stage", ["d2/smem-async", pytest.param("d2/smem-tma", marks=requires_sm(9))])
 @pytest.mark.xdist_group("cuda")
+@requires_sm(8)
 def test_the_packed_drain_addresses_its_own_split_k_slice(tmp_path, stage):
     """A SPLIT contraction axis must reach the packed bytes of ITS OWN slice.
 

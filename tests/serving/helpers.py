@@ -232,14 +232,21 @@ def golden_records() -> list:
     """
     from dataclasses import replace
 
+    from emmy.compiler.context import Context
     from emmy.compiler.pipeline.search.golden import load_golden_file, load_golden_records
 
     if not GOLDEN.exists():
         raise FileNotFoundError(f"{GOLDEN} is missing; regenerate with `python -m tests.serving.regen`")
+    # These authored scalar schedules carry no device measurements. The header names the card
+    # that traced them; scope them to the live card so strict replay can validate them there.
+    cap = Context.probe().compute_capability
     return [
-        record
-        if record.measurements is not None
-        else replace(record, measurements={"emmy_us": 1.0, "reference_us": 1.0, "reference_backend": "serving-lane"})
+        replace(
+            record,
+            compute_cap=cap,
+            gpu_name="",
+            measurements=record.measurements or {"emmy_us": 1.0, "reference_us": 1.0, "reference_backend": "serving-lane"},
+        )
         for record in load_golden_records(load_golden_file(GOLDEN))
     ]
 
@@ -262,7 +269,9 @@ def build(runner_id: str, *, model=None, plan_cache=None, **overrides):
 @contextmanager
 def evidence_scope():
     """The lane's golden as the compile's only evidence, strictly (:func:`golden.sole_evidence`)."""
-    from emmy.compiler.pipeline.search.golden import sole_evidence
+    from emmy.compiler.pipeline.search.golden import shared_regime_pins, sole_evidence
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
 
-    with sole_evidence(golden_records()):
+    records = golden_records()
+    with pinned_knobs(shared_regime_pins(records)), sole_evidence(records):
         yield

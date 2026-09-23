@@ -127,8 +127,10 @@ in the 2026-08-01 article reproduction 24 of 28 emmy benchmark cells missed the 
 about 4.5 hours of the session — and every customer following the documented per-workload knobs pays the same on
 every boot. An extra shape that will not converge normally does **not** fail the release: the pinned shape is the
 contract, and the degraded outcome for other exploratory shapes is a cold boot, not a broken image. The exception is
-an `:fm` shape selected by the final recipe. FAST_MATH is the default Emmy deployment lane when its accuracy gate does
-not regress, so that selected shape must converge and pass pack-HIT plus zero-recompile verification before release.
+an `:fm` shape selected by the final recipe: a lane a recipe deploys must converge and pass pack-HIT plus
+zero-recompile verification before release. `serve.sh` pins `EMMY_FAST_MATH=0` unless the caller sets it, so a shape
+without the suffix is the standard lane whatever the compiler's own default is — without that pin the two lanes bake
+the same cubins and the standard-lane pack never exists.
 
 ## Files
 
@@ -152,7 +154,7 @@ not regress, so that selected shape must converge and pass pack-HIT plus zero-re
   warm-shape override outside that same envelope. Without it the audit derives every warm width plus symbolic.
 - `serve.sh` — the frozen generative serve invocation (the arg set `emmy serve --generate` builds: `--runner
   generate --dtype float16 --hf-overrides EmmyGenModel`, the `FULL_DECODE_ONLY` whole-step decode-cudagraph
-  compilation-config with the forced fused `rotary_embedding` CustomOp, `--no-enable-prefix-caching`, + the
+  compilation-config (its fused `rotary_embedding` CustomOp is now redundant), `--no-enable-prefix-caching`, + the
   `SERVE_*` config; keep in sync with `_gen_graph_args` / `build_serve_cmd` in `emmy/commands/serve.py`). What the
   CLI decides by probing the checkpoint, this script reads from the config, because the config is what the bake
   seals: `SERVE_QUANT=exl3` adds `"quantization_config": null` beside the architectures override (vLLM has no EXL3

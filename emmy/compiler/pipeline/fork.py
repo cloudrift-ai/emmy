@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     from emmy.compiler.ir.base import Op
 
 from emmy.compiler.ir.schedule import Schedule, ScheduleContext, schedule
-from emmy.compiler.pipeline.knob import evidence_row_vouches, values_equal
+from emmy.compiler.pipeline.knob import EVIDENCE_PREFIXES, METADATA_PREFIXES, evidence_row_vouches, values_equal
 
 
 class Fork(ABC):
@@ -112,7 +112,7 @@ class Fork(ABC):
         return all(
             name not in row or values_equal(name, row[name], value)
             for name, value in self.knobs.items()
-            if not name.startswith(("S_", "H_"))
+            if not name.startswith(METADATA_PREFIXES)
         )
 
 
@@ -227,7 +227,7 @@ class _ScheduleFork(Fork):
         is a pin, not a decision, and still admits, as does a bare family key — a bare pin permits
         OFF."""
         for name, value in self.knobs.items():
-            if name.startswith(("S_", "H_")):
+            if name.startswith(METADATA_PREFIXES):
                 continue
             family = name.split("@", 1)[0]
             if name in row:
@@ -316,14 +316,14 @@ def fork_signature(root_op: Op, options: Sequence[Op | Graph | Fork], ctx) -> fr
     agree by construction."""
     base = {**ctx.features(), **dict(getattr(root_op, "knobs", None) or {})}
     for option in options:
-        base.update((key, value) for key, value in (getattr(option, "knobs", None) or {}).items() if key.startswith("S_"))
+        base.update((key, value) for key, value in (getattr(option, "knobs", None) or {}).items() if key.startswith(EVIDENCE_PREFIXES))
     return stamp_signature(base)
 
 
 def stamp_signature(knobs: Mapping) -> frozenset:
-    """The ``S_*`` signature of a knob dict, values as strings — the one spelling a measured row, a stored
-    kernel's stamps and a fork's offer are joined on."""
-    return frozenset((key, str(value)) for key, value in knobs.items() if key.startswith("S_"))
+    """The evidence signature of a knob dict, values as strings: its ``S_*`` stamps and its exact ``I_kernel``
+    identity — the one spelling a measured row, a stored kernel and a fork's offer are joined on."""
+    return frozenset((key, str(value)) for key, value in knobs.items() if key.startswith(EVIDENCE_PREFIXES))
 
 
 def leaf_for(options: Sequence[Op | Graph | Fork], row: Mapping, *, skip: Callable[[dict], bool] | None = None):
@@ -343,7 +343,7 @@ def leaf_for(options: Sequence[Op | Graph | Fork], row: Mapping, *, skip: Callab
         knobs = leaf_knobs(option)
         if skip is not None and skip(knobs):
             continue
-        tunable = {key: str(value) for key, value in knobs.items() if not key.startswith(("S_", "H_"))}
+        tunable = {key: str(value) for key, value in knobs.items() if not key.startswith(METADATA_PREFIXES)}
         if evidence_row_vouches(tunable, row):
             return option, knobs
     return None

@@ -135,7 +135,7 @@ def unreproducible_pin_flag(
 
     A registered family with no realized key is ungateable because serialized IR
     can omit knob stamps. Declared OFF values mean not-applicable rather than a
-    conflicting realization; an unknown absent family remains a likely typo.
+    conflicting realization; a bare fuse pin also accepts an empty placement trace.
     ``reject_conflicts`` additionally rejects any matching child scope that decided
     a different non-OFF value, even when another child realized the requested pin.
     """
@@ -182,7 +182,7 @@ def unreproducible_pin_flag(
                 break
         if hit and (not reject_conflicts or not conflicts):
             continue
-        if not conflicts and is_off_value(fam, probe):
+        if not conflicts and (is_off_value(fam, probe) or (name == "PLACE" and probe == "fuse" and not realized_knobs)):
             continue  # a family pinned OFF is what a kernel that never stamps it realizes
         # An unstamped registered family is ungateable, except PLACE beside a resolution trace: the trace
         # records every placement decision, so a pinned cut it does not carry was not taken.
@@ -224,17 +224,16 @@ def composed_cuts_for(signature: frozenset) -> list[tuple[str, ...]]:
 
 
 def measured_precision_pins() -> dict[str, bool]:
-    """The precision gates this process ENUMERATES under, read off the environment as golden
-    ``pins``.
+    """The effective precision gates, including the default umbrella, recorded as golden input pins.
 
     A recorded row's ``pins`` is the regime a replay republishes (:func:`pinned_knobs`), so a row
     measured under one of these has to carry it: the reduced-accumulate and native-fp8 cells are
     not offered without it, and the row would otherwise name a candidate no later compile enumerates
     — measured evidence for a pick nothing can take again."""
-    from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, FAST_MATH, FP8_MMA  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, FAST_MATH, FP8_MMA, precision_pin  # noqa: PLC0415
 
     live = ((knob, knob.raw()) for knob in (FAST_MATH, F16_MMA_F32_ACC, FP8_MMA))
-    return {knob.name: knob.parse(raw) for knob, raw in live if raw is not None}
+    return {FAST_MATH.name: precision_pin(FAST_MATH), **{knob.name: knob.parse(raw) for knob, raw in live if raw is not None}}
 
 
 @contextlib.contextmanager

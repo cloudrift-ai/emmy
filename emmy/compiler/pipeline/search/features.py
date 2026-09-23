@@ -20,6 +20,7 @@ from types import MappingProxyType
 from emmy.compiler.pipeline.knob import (
     _SITE_FAMILIES,
     CTX_PREFIX,
+    IDENTITY_PREFIX,
     STRUCT_PREFIX,
     KnobType,
     axis_of,
@@ -400,6 +401,8 @@ def knob_features(knobs: dict) -> dict[str, float]:
     node's block. Per-node attribution remains outside this whole-kernel feature contract."""
     feats: dict[str, float] = {}
     for name, val in knobs.items():
+        if name.startswith(IDENTITY_PREFIX):
+            continue
         if name.startswith(STRUCT_PREFIX) or name.startswith(CTX_PREFIX):
             feats[name] = float(val)
             continue

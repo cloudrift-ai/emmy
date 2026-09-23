@@ -559,20 +559,17 @@ def test_every_command_variant_renders(project_root) -> None:
             assert "/task" in command
             subprocess.run(["bash", "-n"], input=command, text=True, check=True)
             rendered += 1
-    assert rendered == 113
+    assert rendered == 167
 
 
 def test_gemma_serving_ab_has_four_points_per_lane(project_root) -> None:
     tasks = enumerate_tasks([_experiment(project_root, "serving_gemma4_rtx5090")])
-    assert len(tasks) == 40
+    assert len(tasks) == 24
 
     stock = [task for task in tasks if task.variant.params["arm"] == "stock"]
     emmy = [task for task in tasks if task.variant.params["arm"] == "emmy"]
-    assert len(stock) == 20
-    assert len(emmy) == 20
-    assert {task.recipe.engine.llm.vllm.image for task in tasks} == {
-        "cloudriftai/vllm-emmy-gemma-4-12b-it@sha256:5add12d3b7f4673790b435b76635082433538e3615fbc40227fa1c0db64c9ff3"
-    }
+    assert len(stock) == 12
+    assert len(emmy) == 12
 
     expected_points = {(256, 256, 64), (4096, 4096, 1), (4096, 4096, 8), (8192, 256, 4)}
     for lane in (stock, emmy):
@@ -604,15 +601,18 @@ def test_gemma_serving_ab_has_four_points_per_lane(project_root) -> None:
         lane = task.variant.params["arm"]
         repeats_by_lane_and_point.setdefault((lane, point), set()).add(task.variant.params["repeat"])
     assert len(repeats_by_lane_and_point) == 8
-    assert all(repeats == {0, 1, 2, 3, 4} for repeats in repeats_by_lane_and_point.values())
+    assert all(repeats == {0, 1, 2} for repeats in repeats_by_lane_and_point.values())
 
 
 def test_gemma_arms_share_one_immutable_image(project_root) -> None:
     directory = Path(project_root) / EXP / "serving_gemma4_rtx5090"
     tasks = enumerate_tasks([str(directory)])
-    assert {task.recipe.engine.llm.vllm.image for task in tasks} == {
-        "cloudriftai/vllm-emmy-gemma-4-12b-it@sha256:5add12d3b7f4673790b435b76635082433538e3615fbc40227fa1c0db64c9ff3"
-    }
+    # One image for both arms, named by digest rather than by tag — a tag can be re-pushed, and then the
+    # two arms are no longer known to have run the same bits. The digest ITSELF is not pinned here: it
+    # changes legitimately whenever the image is republished, and the recipe and RESULTS.md record which
+    # one a run used.
+    (image,) = {task.recipe.engine.llm.vllm.image for task in tasks}
+    assert image.startswith("cloudriftai/vllm-emmy-gemma-4-12b-it@sha256:")
     assert {task.recipe.engine.llm.vllm.entrypoint for task in tasks if task.variant.params["arm"] == "stock"} == {
         "python3 -m vllm.entrypoints.openai.api_server"
     }
@@ -621,3 +621,7 @@ def test_gemma_arms_share_one_immutable_image(project_root) -> None:
         for task in tasks
         if task.variant.params["arm"] == "emmy"
     )
+    # Gemma 4 is a multimodal checkpoint and vLLM sizes an encoder budget from it, so a stock server
+    # refuses to start below max_tokens_per_mm_item. Declaring no items is what lets it run at the small
+    # per-workload token budgets, and it must be on BOTH arms or their argv differs and this is no A/B.
+    assert all('--limit-mm-per-prompt \'{"image":0,"video":0,"audio":0}\'' in task.recipe.engine.llm.vllm.extra_args for task in tasks)

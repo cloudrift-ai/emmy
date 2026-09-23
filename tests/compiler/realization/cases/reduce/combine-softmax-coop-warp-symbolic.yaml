@@ -29,6 +29,7 @@ programs:
 configs:
 - program: 0
   target:
+    loop: 0
     origins:
     - softmax
   realizations:
@@ -39,8 +40,95 @@ configs:
     knobs:
       REDUCE: coop
       WORK: t32
-    identity: ee6830c9ec231155447674f2f3848043cc8a832b1c21df9cc54fd946ec4627ea
+    identity: 22ff10a34c43e47b3a3f3208921d5972a563d4aba37d68abf66426bde7e4f5bf
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 1.809797101262687
         tcompile_us: 2.05019517435562
+loops:
+- inputs: [x]
+  outputs: [softmax]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [4, {sym: seq_len, hint: 512}]]]
+  - id: softmax
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 4}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
+                  body:
+                    body:
+                    - class: Load
+                      fields:
+                        names: {tuple: [in0]}
+                        input: x
+                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
+                        dtype: null
+                    - class: Accum
+                      fields:
+                        name: acc0
+                        value: in0
+                        op: {elementwise: maximum}
+                        dtype: null
+                        axes: {tuple: [a1]}
+                        base: null
+                  unroll: false
+                  seed: true
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
+                  body:
+                    body:
+                    - class: Load
+                      fields:
+                        names: {tuple: [in1]}
+                        input: x
+                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
+                        dtype: null
+                    - class: Assign
+                      fields: {name: v0, op: {elementwise: subtract}, args: {tuple: [in1, acc0]}, dtype: null}
+                    - {class: Assign, fields: {name: v1, op: {elementwise: exp}, args: {tuple: [v0]}, dtype: null}}
+                    - class: Accum
+                      fields: {name: acc1, value: v1, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
+                  unroll: false
+                  seed: true
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a3, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
+                  body:
+                    body:
+                    - class: Load
+                      fields:
+                        names: {tuple: [in2]}
+                        input: x
+                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a3}}]}
+                        dtype: null
+                    - class: Assign
+                      fields: {name: v2, op: {elementwise: subtract}, args: {tuple: [in2, acc0]}, dtype: null}
+                    - {class: Assign, fields: {name: v3, op: {elementwise: exp}, args: {tuple: [v2]}, dtype: null}}
+                    - class: Assign
+                      fields: {name: v4, op: {elementwise: divide}, args: {tuple: [v3, acc1]}, dtype: null}
+                    - class: Write
+                      fields:
+                        output: softmax
+                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a3}}]}
+                        values: {tuple: [v4]}
+                        value_dtype: null
+                        atomic: false
+                        swizzle: NONE
+                  unroll: false
+                  seed: true
+            unroll: false
+            seed: true
+      name: k_softmax_694c1b
+    inputs: [x]
+    outputs: [[softmax, f32, [4, {sym: seq_len, hint: 512}]]]

@@ -11,7 +11,7 @@ from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.stmt.blocks import Loop, StridedLoop
 from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.leaves import Accum, Assign, Load, Write
-from emmy.compiler.ir.stmt.normalize import hoist_loop_invariants, split_invariant_divides
+from emmy.compiler.ir.stmt.normalize import hoist_loop_invariants, normalize_body
 
 
 def test_hoists_invariant_load_above_loop() -> None:
@@ -221,11 +221,11 @@ def test_normalization_does_not_build_the_full_ssa_dependency_closure() -> None:
         )
     )
 
-    split = split_invariant_divides(body)
-    hoist_loop_invariants(split)
+    normalized = normalize_body(body)
+    assert [s.op.name for s in normalized.iter() if isinstance(s, Assign)] == ["divide"]
 
     assert "deps_closure" not in body.__dict__
-    assert "deps_closure" not in split.__dict__
+    assert "deps_closure" not in normalized.__dict__
 
 
 def test_hoist_keeps_a_read_of_a_buffer_the_loop_writes() -> None:

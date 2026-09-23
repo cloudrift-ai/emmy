@@ -16,9 +16,74 @@ programs:
     attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[matmul, f16, [512, 3840]]]
+gpu_name: NVIDIA GeForce RTX 5090
+loops:
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [512, 4096]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [4096, 3840]]]
+  - id: matmul
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 512}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 3840}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 4096}, window: null}}
+                        body:
+                          body:
+                          - class: Load
+                            fields:
+                              names: {tuple: [in0]}
+                              input: x0
+                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
+                              dtype: null
+                          - class: Load
+                            fields:
+                              names: {tuple: [in1]}
+                              input: x1
+                              index: {tuple: [{expr: {var: a2}}, {expr: {var: a1}}]}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
+                          - class: Accum
+                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
+                        unroll: false
+                        seed: true
+                    - class: Write
+                      fields:
+                        output: matmul
+                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
+                        values: {tuple: [acc0]}
+                        value_dtype: null
+                        atomic: false
+                        swizzle: NONE
+                  unroll: false
+                  seed: true
+            unroll: false
+            seed: true
+      name: k_matmul_3eda46
+    inputs: [x1, x0]
+    outputs: [[matmul, f16, [512, 3840]]]
 configs:
 - program: 0
   target:
+    loop: 0
     origins:
     - matmul
   realizations:
@@ -34,7 +99,7 @@ configs:
       FAST_MATH: false
     knobs:
       REDUCE: g2k
-    identity: c7b2869f88025d0b86073d51772c31d29d73b22b87a771f8b776ca55a34b64db
+    identity: 1bff349a351f5a238228d1aa231c7eecf879890095cca9b281237a142608a4de
     measurements:
       emmy_us: 81.11193728016765
       reference_us: 80.90649490997959
@@ -49,7 +114,7 @@ configs:
       REDUCE: ''
       STAGE: d2/smem-tma
       RASTER: ''
-    identity: a5f577f36835e8e826208604114435338cff34557a817330866606e5f9b44242
+    identity: 9d11d854c898c1dc48d4c65450558421a263e9e40d0c3fb9093475a73f917ca6
     measurements:
       emmy_us: 77.00184675363394
       reference_us: 76.77046152261588
@@ -73,7 +138,7 @@ configs:
       FAST_MATH: true
     knobs:
       REDUCE: g2k
-    identity: c7b2869f88025d0b86073d51772c31d29d73b22b87a771f8b776ca55a34b64db
+    identity: 1bff349a351f5a238228d1aa231c7eecf879890095cca9b281237a142608a4de
     measurements:
       emmy_us: 73.76729638649186
       reference_us: 68.47287201080002
@@ -88,7 +153,7 @@ configs:
       REDUCE: ''
       STAGE: d2/smem-tma
       RASTER: ''
-    identity: a5f577f36835e8e826208604114435338cff34557a817330866606e5f9b44242
+    identity: 9d11d854c898c1dc48d4c65450558421a263e9e40d0c3fb9093475a73f917ca6
     measurements:
       emmy_us: 69.58399925913129
       reference_us: 64.33828387941632
@@ -106,4 +171,3 @@ configs:
       emmy_us: 4.1832971273605795
       reference_us: 4.134588131383688
       reference_backend: same-input-greedy
-gpu_name: NVIDIA GeForce RTX 5090

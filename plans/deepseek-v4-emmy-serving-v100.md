@@ -210,6 +210,23 @@ cut was found by hand; `k_div_4` and `k_div_30`, 12 ms. Then the m16 post twin's
 of its 8.8 ms, the same serial pattern as the M=1 pieces; the static m4096 post twin, 3.4× slower than the symbolic
 twin at the same width, whose three largest `r4` pieces are 72 of its 121 ms; then the experts and Stage 4.
 
+**The golden does not deploy on `main` any more (2026-09-22/23).** #864's restamp dropped 17 rows and keyed split rows
+onto their leads' identities, so `main` at `dab7bce9` refuses all five twins under strict evidence; every twin was
+re-recorded from `main`'s tree with the pieces covered again (post m16 8.8 → 6.0 ms per layer, post symbolic 4.8 → 3.6
+ms at the 512 hint, post m4096 121 → 85 ms; the experts pay the removed Volta depth-2 ring: m16 430 → 719 µs, symbolic
+2.4 → 22.6 ms because its root piece offers no tensor-core tile now) and the file decodes and audits clean, yet the
+strict boot dies at the symbolic expert twin because serving's fresh trace no longer lowers to the golden's kernels:
+between `9607133e` and `dab7bce9` the fusion of this model's post block changed from 36 kernels per twin, with the two
+big softmax-matmul kernels every round tuned, to 45 with them split apart by #863, the reduction-dependency and
+coordinate normalization. Stored Loop IR replays (the decode gate, `emmy run --golden`) cannot see that; `emmy trace
+--serving-twins` on the tree, diffed against the golden's kernel families, can, and must precede any record.
+Cooperative reductions also run 2–30× slower on `main` for the same spelling. The re-recorded file is kept on the host
+and not committed. The follow-up found two causes (2026-09-23): the merge rule's copy-drop from #863, reverted on
+draft PR #875, which restores this model's kernel set but moves Qwen3.8's the other way (#861 recorded on the
+post-#863 sets), and #863's Loop IR normalization, for which this golden's stored loops were never re-lowered. Next:
+the author settles the rule, then the golden's programs are re-lowered and every row re-keyed; only if the rule stays
+as it is does a re-tune from the fresh capture follow.
+
 ## Operations handoff
 
 The host's address is deliberately absent from this repo; it lives in the operator's notes and is used only inside

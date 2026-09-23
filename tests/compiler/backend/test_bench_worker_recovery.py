@@ -75,6 +75,23 @@ def _wire(resp: dict) -> bytes:
     return len(body).to_bytes(8, "little") + body
 
 
+def test_worker_completes_short_response_writes():
+    child = """
+        import os
+        from emmy.compiler.backend.cuda import _bench_worker as worker
+        write = os.write
+        os.write = lambda fd, data: write(fd, data[:3])
+        async def result(request):
+            return {"result": request["value"]}
+        worker._run_job = result
+        worker.main()
+    """
+    with _spawn(child) as proc:
+        output, error = proc.communicate(_wire({"value": "reference" * 32}), timeout=5)
+    assert proc.returncode == 0, error.decode()
+    assert output == _wire({"ok": True, "result": "reference" * 32})
+
+
 class _FakeStdin:
     def __init__(self, *, broken: bool) -> None:
         self._broken = broken

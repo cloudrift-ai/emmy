@@ -4,6 +4,9 @@ The follow-up to PR #835 separates kernel correctness from complete-model servin
 all eight distinct pre/post-attention programs executable in isolation. This is synthetic-input evidence; it does
 not establish checkpoint generation parity or a serving speedup.
 
+This qualification describes revision `2144b15a`. The current golden retains 139 compatible records; obsolete
+kernel sets were removed after compiler normalization. See [RESULTS.md](RESULTS.md) for the current coverage limits.
+
 ## Protocol
 
 The target is one RTX 4080 (`sm_89`), Qwen3-0.6B revision

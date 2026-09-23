@@ -113,7 +113,7 @@ def test_trace_serving_twins_writes_one_exact_inventory_with_explicit_provenance
     }
     assert document["model"] == "cloudriftai/model-exl3@0123456789abcdef0123456789abcdef01234567"
     assert {record.name.split(".", 1)[0] for record in records} == {"pre1@b2", "expert512@b2"}
-    assert all(record.loop_wire is not None and not record.origins for record in records)
+    assert all(record.loop_wire is not None for record in records)
     assert all(torch_ref.is_runnable(record.reference_program) for record in records)
     # A static twin's target carries the rows of its own width, in every lane the config reaches it.
     assert {(record.name.split(".", 1)[0], record.bindings, record.pins) for record in records} == {
@@ -242,7 +242,7 @@ def test_trace_writes_deterministic_self_contained_programs(tmp_path) -> None:
     assert first_doc["programs"] and first_doc["configs"]
     assert all(set(entry) == {"program", "target", "realizations"} for entry in first_doc["configs"])
     assert all(set(entry["realizations"][0]) == {"name", "bindings", "pins"} for entry in first_doc["configs"])
-    assert all(set(entry["target"]) == {"origins"} for entry in first_doc["configs"])
+    assert all(set(entry["target"]) == {"loop", "origins"} for entry in first_doc["configs"])
 
 
 def test_trace_inventory_replays_depthwise_conv1d_program(tmp_path) -> None:
@@ -259,11 +259,11 @@ def test_trace_inventory_replays_depthwise_conv1d_program(tmp_path) -> None:
 
     path = tmp_path / "conv1d.yaml"
     write_trace_inventory(graph, path, ctx=_TARGET_CTX)
-    _document, targets = load_working_targets(path)
+    document, targets = load_working_targets(path)
 
     assert targets
     expected = Conv1dOp(stride=1, padding=3, dilation=1, groups=8)
-    assert all(target.program.nodes["conv"].op == expected for target in targets)
+    assert all(record.origins == ("conv",) and record.program.nodes["conv"].op == expected for record in load_golden_records(document))
 
 
 def test_trace_keeps_materialized_storage_outputs_and_quant_digest(tmp_path) -> None:
@@ -323,7 +323,7 @@ def test_trace_inventory_keeps_fused_sdpa_as_one_frontend_target(tmp_path) -> No
     records = load_golden_records(load_golden_file(path))
     assert len(records) == 1
     (record,) = records
-    assert record.loop_index is None
+    assert record.loop_index is not None
     assert record.origins == ("scaled_dot_product_attention",)
     assert record.name.startswith("k_sdpa")
 
@@ -393,19 +393,20 @@ def test_trace_inventory_stamps_the_card_its_context_is_for(tmp_path) -> None:
     assert load_golden_file(path)["gpu_name"] == "NVIDIA GeForce RTX 4090"
 
 
-def test_trace_inventory_can_force_exact_loop_targets(tmp_path) -> None:
+def test_trace_inventory_stores_the_kernel_and_its_traced_ops(tmp_path) -> None:
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (16,)), node_id="x")
     graph.add_node(ElementwiseOp("relu"), ["x"], Tensor("y", (16,)), node_id="y")
     graph.inputs, graph.outputs = ["x"], ["y"]
 
     path = tmp_path / "working.yaml"
-    write_trace_inventory(graph, path, force_loop_targets=True, ctx=_TARGET_CTX)
+    write_trace_inventory(graph, path, ctx=_TARGET_CTX)
     (record,) = load_golden_records(load_golden_file(path))
 
-    assert record.origins == ()
+    assert record.origins == ("y",)
+    assert record.pin_map == {"FAST_MATH": True}
     assert record.loop_wire is not None
-    # The stored kernel stays the identity; the PyTorch slice it computes is derived for comparison.
+    # The stored kernel stays the identity; its traced ops give the PyTorch slice it is compared against.
     assert torch_ref.is_runnable(record.reference_program)
     assert record.reference_program.outputs == record.target_program.outputs == ["y"]
 
@@ -416,11 +417,12 @@ def test_a_stored_kernel_holding_part_of_an_op_has_no_pytorch_reference(monkeypa
     graph.add_node(ElementwiseOp("relu"), ["x"], Tensor("y", (16,)), node_id="y")
     graph.inputs, graph.outputs = ["x"], ["y"]
     path = tmp_path / "working.yaml"
-    write_trace_inventory(graph, path, force_loop_targets=True, ctx=_TARGET_CTX)
     monkeypatch.setattr(provenance, "coverage", lambda prov, _totals: {origin: (1, 2, False) for origin in prov})
+    write_trace_inventory(graph, path, ctx=_TARGET_CTX)
 
     (record,) = load_golden_records(load_golden_file(path))
 
+    assert record.origins == (), "a kernel holding part of an op keeps no traced ops"
     assert record.reference_program is None
 
 
@@ -449,7 +451,7 @@ def test_exact_loop_targets_disambiguate_same_body_at_distinct_cast_boundaries(t
     graph.outputs = outputs
 
     path = tmp_path / "working.yaml"
-    write_trace_inventory(graph, path, force_loop_targets=True, ctx=_TARGET_CTX)
+    write_trace_inventory(graph, path, ctx=_TARGET_CTX)
     names = [record.name for record in load_golden_records(load_golden_file(path))]
     assert len(names) == len(set(names))
 
@@ -481,7 +483,7 @@ def test_trace_yaml_uses_compact_graph_rows_but_block_candidate_rows(tmp_path) -
     assert "inputs: [x0, x1]" in text
     assert "outputs: [[x0, f16, [512, 512]]]" in text
     assert "attrs: {has_bias: false}" in text
-    assert "target:\n    origins:\n" in text
+    assert "target:\n    loop: 0\n    origins:\n" in text
 
 
 def test_trace_refuses_to_replace_existing_yaml(tmp_path) -> None:
@@ -514,8 +516,8 @@ def test_append_keeps_a_kernel_already_covered_once(tmp_path) -> None:
     graph = trace_inline_code("torch.relu(torch.randn(8))")["graph"]
     path = tmp_path / "working.yaml"
 
-    write_trace_inventory(graph.copy(), path, ctx=_TARGET_CTX, force_loop_targets=True)
-    result = append_trace_inventory(graph.copy(), path, ctx=_TARGET_CTX, force_loop_targets=True)
+    write_trace_inventory(graph.copy(), path, ctx=_TARGET_CTX)
+    result = append_trace_inventory(graph.copy(), path, ctx=_TARGET_CTX)
 
     document = load_golden_file(path)
     assert result.target_count == 0

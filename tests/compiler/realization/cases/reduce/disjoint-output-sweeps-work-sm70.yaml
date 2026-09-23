@@ -1130,6 +1130,41 @@ configs:
 - program: 0
   target:
     loop: 0
+    origins:
+    - add_12
+    - add_13
+    - add_14
+    - copy__7
+    - copy__7_base
+    - copy__8
+    - copy__8_base
+    - mul_18
+    - mul_19
+    - mul_20
+    - select_14
+    - select_16
+    - select_18
+    - slice_30
+    - slice_31
+    - slice_32
+    - slice_34
+    - slice_35
+    - slice_36
+    - slice_38
+    - slice_39
+    - slice_40
+    - sum_10
+    - sum_10_keepdim
+    - sum_11
+    - sum_11_keepdim
+    - sum_12
+    - sum_12_keepdim
+    - unsqueeze_11
+    - unsqueeze_11_bc
+    - unsqueeze_12
+    - unsqueeze_12_bc
+    - unsqueeze_13
+    - unsqueeze_13_bc
   realizations:
   - name: k_slice_unsqueeze_reduce_cf9205.ab6748b55b7d
     bindings: {}

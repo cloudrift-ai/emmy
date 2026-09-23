@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import CastExpr, Var
+from emmy.compiler.ir.expr import CastExpr, TernaryExpr, Var
 from emmy.compiler.ir.loop import Axis, Load, Loop, LoopOp, Write
 from emmy.compiler.ir.stmt import Body
 from emmy.compiler.ir.tensor.ir import GatherOp
@@ -39,28 +39,22 @@ def rewrite(root: Node, inp_data: Node, inp_idx: Node, out: Tensor) -> Graph | N
     out_rank = len(out_shape)
     data_rank = len(inp_data.output.shape)
     idx_rank = len(inp_idx.output.shape)
-    axis = int(root.op.axis) if int(root.op.axis) >= 0 else out_rank + int(root.op.axis)
+    axis = int(root.op.axis) % data_rank
+    index = CastExpr("int", Var("idx"))
+    index = TernaryExpr(index.lt(0), index + inp_data.output.shape[axis].expr, index)
 
     axes = tuple(Axis(name=f"a{i}", extent=d) for i, d in enumerate(out_shape))
 
     if out_rank == data_rank and out_rank == idx_rank:
         # torch.gather: idx, data, output all same rank.
         idx_index = tuple(Var(a.name) for a in axes)
-        data_index = tuple(CastExpr("int", Var("idx")) if i == axis else Var(axes[i].name) for i in range(data_rank))
+        data_index = tuple(index if i == axis else Var(axes[i].name) for i in range(data_rank))
     elif out_rank == idx_rank + data_rank - 1:
         # Embedding / index_select: idx contributes ``idx_rank`` output
         # axes at positions [axis : axis + idx_rank]; the remaining
         # output axes map onto data's non-axis dims.
         idx_index = tuple(Var(axes[i].name) for i in range(axis, axis + idx_rank))
-        data_index_l: list = []
-        for j in range(data_rank):
-            if j == axis:
-                data_index_l.append(CastExpr("int", Var("idx")))
-            elif j < axis:
-                data_index_l.append(Var(axes[j].name))
-            else:
-                data_index_l.append(Var(axes[j + idx_rank - 1].name))
-        data_index = tuple(data_index_l)
+        data_index = (*(Var(a.name) for a in axes[:axis]), index, *(Var(a.name) for a in axes[axis + idx_rank :]))
     else:
         raise ValueError(f"lift_gather: incompatible ranks — out_rank={out_rank}, data_rank={data_rank}, idx_rank={idx_rank}, axis={axis}")
 

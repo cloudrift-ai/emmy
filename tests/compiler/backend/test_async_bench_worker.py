@@ -10,6 +10,7 @@ or touching CUDA.
 from __future__ import annotations
 
 import os
+import pickle
 from unittest.mock import AsyncMock
 
 from emmy import config
@@ -56,6 +57,14 @@ async def test_worker_warmup_uses_separate_readiness_request() -> None:
     worker.run_job = AsyncMock(return_value={"warmed": True})
     await worker.warmup(wall_timeout_s=45.0)
     worker.run_job.assert_awaited_once_with({"worker_warmup": True}, wall_timeout_s=45.0)
+
+
+def test_each_worker_request_carries_its_fast_math_policy(monkeypatch):
+    worker = _AsyncBenchWorker()
+    for value in ("0", "1", "0"):
+        monkeypatch.setenv("EMMY_FAST_MATH", value)
+        request = pickle.loads(worker._encode({"graph": None}))
+        assert request == {"graph": None, "fast_math": value == "1"}
 
 
 @requires_cuda

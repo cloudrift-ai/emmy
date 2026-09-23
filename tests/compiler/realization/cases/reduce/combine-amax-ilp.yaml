@@ -16,6 +16,7 @@ programs:
 configs:
 - program: 0
   target:
+    loop: 0
     origins:
     - amax
   realizations:
@@ -30,3 +31,54 @@ configs:
       NVIDIA GeForce RTX 5090:
         emmy_us: 8.886285658393588
         tcompile_us: 2.04913620882956
+loops:
+- inputs: [x]
+  outputs: [amax]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [4, 1024]]]
+  - id: amax
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 4}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 1024}, window: null}}
+                  body:
+                    body:
+                    - class: Load
+                      fields:
+                        names: {tuple: [in0]}
+                        input: x
+                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
+                        dtype: null
+                    - class: Accum
+                      fields:
+                        name: acc0
+                        value: in0
+                        op: {elementwise: maximum}
+                        dtype: null
+                        axes: {tuple: [a1]}
+                        base: null
+                  unroll: false
+                  seed: true
+              - class: Write
+                fields:
+                  output: amax
+                  index: {tuple: [{expr: {var: a0}}, {expr: {literal: {value: 0, dtype: int}}}]}
+                  values: {tuple: [acc0]}
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+            unroll: false
+            seed: true
+      name: k_amax_reduce
+    inputs: [x]
+    outputs: [[amax, f32, [4, 1]]]

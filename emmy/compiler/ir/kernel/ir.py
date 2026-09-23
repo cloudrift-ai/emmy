@@ -807,6 +807,24 @@ class TreeHalve(Stmt):
         # names. Captured before those shadows overwrite the flat ssa map, restored after the
         # broadcast so the epilogue's conversions read the live declaration, not the dead shadow.
         outer_dtypes = {st: ctx.ssa_dtypes.get(st) for st in self.state}
+        if t == "warp" and self.inner is None and self.barrier_id == 0 and self.length <= 32:
+            # The hierarchical cross-warp slab holds one partial per warp, so warp 0 alone folds it with a
+            # register butterfly: one barrier before the broadcast instead of one per halving step.
+            out = [f"{pad}if (warp == 0) {{"]
+            for buf, st in zip(self.bufs, self.state, strict=True):
+                out.append(f"{in1}{ty} {st} = {buf}[lane & {self.length - 1}];")
+                ctx.ssa_dtypes[st] = self.dtype.name
+            butterfly = WarpShuffle(
+                state=self.state, state_b=self.state_b, combine_states=self.combine_states, length=self.length, dtype=self.dtype
+            )
+            out.extend(butterfly.render(ctx.child()))
+            out.append(f"{in1}if (lane == 0) {{")
+            out.extend(f"{in2}{buf}[0] = {st};" for buf, st in zip(self.bufs, self.state, strict=True))
+            out += [f"{in1}}}", f"{pad}}}", f"{pad}__syncthreads();"]
+            for buf, st in zip(self.bufs, self.state, strict=True):
+                out.append(f"{pad}{st} = {buf}[0];")
+                ctx.ssa_dtypes[st] = outer_dtypes[st] or self.dtype.name
+            return out
         out: list[str] = [f"{pad}for (int s = {half}; s > 0; s >>= 1) {{", f"{in1}if ({t} < s) {{"]
         # Shadow temps named after the carried state so ``combine_states`` (which
         # reassigns ``state``) folds ``buf[t+s]`` into ``buf[t]`` per component.
@@ -1764,13 +1782,14 @@ class LdmatrixLoad(Stmt):
             frag_dt = frag_dtype(ctx, self.frag) or slab_dt
             targs = "" if slab_dt == frag_dt else f"<{ctx.type_name(slab_dt)}, {ctx.type_name(frag_dt)}>"
             if self.swizzle == VOLTA_CROSSWISE:
-                assert self.role == "a" and self.pair_frag is not None and slab_dt == frag_dt == "f16"
+                # A, or a TRANSPOSED B — whose slab is K-contiguous like A's and so takes the
+                # same storage; the reader differs only in which lane bit selects the half.
+                assert self.pair_frag is not None and slab_dt == frag_dt == "f16"
+                assert self.role == "a" or self.b_trans, "a canonical B reads the congruous layout, not crosswise"
                 row, col = (e.render(ctx) for e in self.src_index)
                 rows = ctx.shapes[self.src_buffer][0]
-                return [
-                    f"{_pad(ctx.indent)}emmy_mma884_load_a_crosswise_pair({self.frag}, {self.pair_frag}, "
-                    f"{self.src_buffer}, {row}, {col}, {rows});"
-                ]
+                helper = "emmy_mma884_load_a_crosswise_pair" if self.role == "a" else "emmy_mma884_load_b_crosswise_pair"
+                return [f"{_pad(ctx.indent)}{helper}({self.frag}, {self.pair_frag}, {self.src_buffer}, {row}, {col}, {rows});"]
             if self.swizzle == VOLTA_B_CONGRUOUS:
                 assert self.role == "b" and self.pair_frag is not None and slab_dt == frag_dt == "f16"
                 row, col = (e.render(ctx) for e in self.src_index)
@@ -2252,6 +2271,7 @@ class RegStore(Stmt):
     frag: str
     shape: tuple[int, int, int]
     ldm: int = 0
+    ldn: int = 0
     epilogue: Lambda | None = None
     extra_frags: tuple[str, ...] = ()
     m_guard: tuple[Expr, Expr] | None = None
@@ -2456,7 +2476,7 @@ class RegStore(Stmt):
 
         flat = render_index(self.dst_buffer, self.dst_index, ctx)
         ldm = self.ldm if self.ldm else _resolve_ldm(self.dst_buffer, ctx, self.row_dim)
-        ldn = _dim_stride(self.dst_buffer, self.col_dim, ctx) if self.col_dim is not None else 1
+        ldn = self.ldn or (_dim_stride(self.dst_buffer, self.col_dim, ctx) if self.col_dim is not None else 1)
         dst_dt = ctx.buffer_dtypes.get(self.dst_buffer, "f32")
         pad = _pad(ctx.indent)
         lane = "(threadIdx.x & 31)"
@@ -3008,6 +3028,7 @@ def _(s: TreeHalve, rename, sigma, axis_fn):
         dtype=s.dtype,
         barrier_id=s.barrier_id,
         barrier_count=s.barrier_count,
+        inner=s.inner,
     )
 
 

@@ -197,7 +197,7 @@ _GATE_SECONDS = 5.0
 #: so they are exempt from the staleness gate and from the written baseline — otherwise every
 #: `make bench-kernels` would fail demanding entries that `make test`, which skips it,
 #: can never record.
-_OFF_LANE_MARKERS = ("perf", "goldens")
+_OFF_LANE_MARKERS = ("perf",)
 #: Node ids seen carrying an off-lane marker this session (filled during collection).
 _OFF_LANE_ITEMS: set[str] = set()
 

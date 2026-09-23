@@ -76,7 +76,9 @@ For a broadcast-batched product whose batch axis occurs in only one operand, the
 still supplies that geometry. If its geometric first operand reads the reduction axis non-contiguously and the other
 materialized operand reads it contiguously, the commutative product puts the contiguous operand in the shared A slot;
 placement then derives the corresponding physical M/N orientation from the operand axes. Physical M/N orientation
-remains a placement fact rather than part of the Fold algebra.
+remains a placement fact rather than part of the Fold algebra. Where an operand owns several free axes, the smallest
+known output stride chooses its tiled axis. Undetermined layouts retain the trailing placement order. Stored schedules
+retain the same input and output tensors as the unscheduled Tile so reconstruction makes the same choice.
 
 The bilinear form is CANONICAL BY CONSTRUCTION: formation (`lowering/tile/_fromloop`) turns every load of a reduce
 step over coordinates into a slab operand (a data-dependent gather, the packed-pair table read by a decoded code,
@@ -100,15 +102,17 @@ An operand result component NO READER READS is dropped, and the edge's body cut 
 A reader is a consuming lift or a kernel-boundary store, so a sweep's per-cell projection keeps what its `Write` names
 even though no lift binds it. The dead components are rewrite residue: the twisted fusion re-seats a carrier's channels
 and mints `_unread<i>` for a slot its reader stopped binding, and an epilogue cone beside it keeps exposing a scale that
-was live when it was formed and went dead when the folds fused. Only a zero-axis operand is restricted — a reducing
-one's components ARE its carried states, and dropping one changes the monoid, which is why attention's running maximum
-stays spelled as the `_unread` it honestly is. The rule is tree-wide and unions over readers, because restricting per
-occurrence would sever the object sharing the next paragraph restores.
+was live when it was formed and went dead when the folds fused. Independent planar states narrow their injection,
+identity and componentwise combine together. Twisted and observed states remain whole because their components may
+be coupled. `Fold.read_components` propagates demand through narrowed lifts and unions every shared term's readers.
+Both lowering and placement cuts use that result. Narrowing separately for each reader would emit overlapping
+carriers that declare the same accumulator twice. Operands that no retained result or boundary store reads disappear
+as well.
 
-An identity pass-through — a projection that only re-exposes its single operand's results — dissolves wherever a
-projection is formed or revisited. That is not cosmetic: a pass-through is what makes two occurrences of the same
-computation compare unequal, and the placement fork's value clustering (`lowering/tile/_cut.py`) relies on
-alpha-equivalent cones converging to one canonical shape.
+An identity projection dissolves into its operand, or flattens its operand list into a consuming projection. A
+pass-through can make two occurrences of the same computation compare unequal, and the placement fork's value
+clustering (`lowering/tile/_cut.py`) relies on alpha-equivalent cones converging to one canonical shape. Independent
+states over different free coordinates separate; statistics sharing the same coordinates remain together.
 
 Normalization ends by restoring OBJECT SHARING: same-value cones — alpha-equal with identical captures and exposed
 result names, so a copy differing only in internal binder spelling still qualifies — collapse onto one Fold object
@@ -156,6 +160,8 @@ binds. Stating the rule once keeps all three answers one rule rather than copies
 Root ownership is asked twice, in two shapes, and the answers differ. `refused_roots` names the contraction roots the
 binder will not bind together, and the schedule projection refuses a prefix that schedules a second of them (an
 output tile, or a cooperative or ILP reduce).
+Both the split scheduler's `head` and `kernel_roots` skip slab providers while peeling a projection, as the kernel
+binder does. A captured scalar can be the first operand without becoming the kernel's reducing root.
 `owns_outputs_it_cannot_bind` asks what the full-projection cut is offered on: every output has one producing branch,
 and some branch is not about a single reduce — it reads several, or none. Both are needed. A projection whose outputs
 do not partition at all still refuses roots, and a projection the binder found one root in refuses none here yet is
@@ -233,8 +239,9 @@ the per-cell tier. A candidate is kept only when the BOUND axis is itself a cont
 whether some contraction gained one accepts a binding that handed the row to the other side, because a contraction
 reorients.
 
-Post-init ANNOUNCES it (`_implicit_unit_row`) when the stores prove a leading zero prefix and a dense column. The row
-is then unbound — no operand reads it — which gives the placement a fragment geometry without giving any contraction
+Post-init ANNOUNCES it (`_implicit_unit_row`) when the stores prove a leading zero prefix and dense columns. Several
+free coordinates may partition the columns into groups; the matrix pair remains the unit row and the last column.
+The row is then unbound — no operand reads it — which gives the placement a fragment geometry without giving any contraction
 a left axis. That is the weaker statement, and it is the only one available where there is nothing to bind: a matvec
 whose A is a bare vector. The binding yields to it, firing only where the placement carries no extent-one free axis.
 
@@ -287,8 +294,8 @@ recipe's full carrier and is restricted to the channels a term actually holds, s
 ordinary case during the rewrite's own fixpoint.
 
 Nothing is minted to make that reading work. A is what `operands[0]` SUPPLIES, not what it exposes: the left factor
-may be a component of that edge or a value the reading derives from those components and kernel-uniform ones (a scale,
-an epsilon — one contributes no variation, so the factor varies exactly as A does).
+may be a component of that edge or a value derived from those components, A's free coordinates, and kernel-uniform
+values. A coordinate mask over A preserves the contraction; dependence on a coordinate exclusive to B does not.
 
 ### One reading for "a tier folds this whole"
 

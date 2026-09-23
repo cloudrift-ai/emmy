@@ -143,14 +143,13 @@ def _inline(term: Fold, edge: Fold) -> Fold:
     operands: list[Fold] = []
     for operand in term.operands:
         if operand is edge:
-            params.extend((*applied.params, *(load.name for load in loads)))
+            params.extend((*applied.params[: len(edge.bindings)], *(load.name for load in loads)))
             operands.extend((*edge.operands, *(Fold.slab(load) for load in loads)))
         else:
             params.extend(p for p, e, _ in term.bindings if e is operand)
             operands.append(operand)
-    params.extend(reader.params[lead + len(term.bindings) :])
     body = Body((*(stmt for stmt in applied.body if not isinstance(stmt, Load)), *reader.body))
-    return replace(term, operands=tuple(operands), lift=Lambda(params=tuple(params), body=body, results=reader.results))
+    return replace(term, operands=tuple(operands), lift=Lambda.closing(tuple(params), body, reader.results))
 
 
 def _reads_reduce(edge: Fold) -> bool:

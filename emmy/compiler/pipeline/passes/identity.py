@@ -1,9 +1,8 @@
 """IdentityStrategy — a kernel's structural identity, owned end to end.
 
-The ``S_*`` row (an extent-aware histogram of the kernel body — the structural identity that
-keys the tune DB's evidence, featurizes into the online prior, and folds into ``identity_key(with_io=True, with_knobs=True)``'s
-knob half) is computed here and MATERIALIZED into ``op.knobs`` at exactly two moments, once per
-kernel, at birth:
+The ``S_*`` row is an extent-aware histogram used by the learned prior. ``I_kernel`` is the exact
+schedule-free typed Loop identity required for measured evidence. Both are materialized into
+``op.knobs`` once per kernel, at birth:
 
 - **fusion settled** — the end of the pipeline's last non-lowering pass (``on_pass_end`` at the
   computed stamp boundary; run start for a pipeline entering at lowering): the fused body is
@@ -37,7 +36,7 @@ from emmy.compiler.ir.stmt import Body
 from emmy.compiler.ir.stmt.blocks import Cond, Loop
 from emmy.compiler.ir.stmt.leaves import Assign
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.pipeline.knob import STRUCT_PREFIX
+from emmy.compiler.pipeline.knob import KERNEL_IDENTITY, STRUCT_PREFIX
 from emmy.compiler.pipeline.strategy import PassEndEvent, PipelineStrategy, RunStartEvent, SpliceEvent
 from emmy.compiler.structural import digest
 
@@ -46,8 +45,8 @@ if TYPE_CHECKING:
 
 
 class IdentityStrategy(PipelineStrategy):
-    """Stamp every kernel's ``S_*`` structural identity at birth and serve the
-    one spelling of identity to every reader (``signature`` / ``op_sig``)."""
+    """Stamp exact identity and structural features at birth; expose the feature signature to
+    inventory and training readers (``signature`` / ``op_sig``)."""
 
     @staticmethod
     def _stamp_boundary(passes: tuple[str, ...]) -> str | None:
@@ -91,10 +90,15 @@ class IdentityStrategy(PipelineStrategy):
 
     def _stamp(self, node, graph: Graph) -> None:
         op = node.op
-        if not isinstance(op, (LoopOp, TileOp)) or any(k.startswith(STRUCT_PREFIX) for k in op.knobs):
+        if not isinstance(op, (LoopOp, TileOp)):
             return
-        body = _identity_body(op)
-        node.op = replace(op, knobs={**op.knobs, **structure_features(body, graph)})
+        op = op.with_io(graph, node)
+        knobs = dict(op.knobs)
+        if not any(k.startswith(STRUCT_PREFIX) for k in knobs):
+            knobs.update(structure_features(_identity_body(op), graph))
+        if KERNEL_IDENTITY not in knobs:
+            knobs[KERNEL_IDENTITY] = op.identity_key(structural=False, with_io=True)
+        node.op = replace(op, knobs=knobs)
 
     # --- the read API: the one spelling of identity ------------------------------------------
 

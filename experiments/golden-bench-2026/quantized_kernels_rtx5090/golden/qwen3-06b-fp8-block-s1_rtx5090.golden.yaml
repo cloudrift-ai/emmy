@@ -1807,9 +1807,366 @@ programs:
     attrs: {op: {__elementwise__: add}}
     inputs: [add_5, linear_6]
     outputs: [[add_7, f16, [1, 1, 1024]]]
+gpu_name: NVIDIA GeForce RTX 5090
+model_quant_digest: ab358aac11892fee
+model: Qwen/Qwen3-0.6B-FP8@e5be08033360965ceca7b0ffd72d521a51331ce0
+loops:
+- inputs: [hidden_states]
+  outputs: [mul_1_dynamic_fp8_decoded]
+  nodes:
+  - id: add_c1
+    op: constant
+    attrs:
+      name: add_c1
+      value: 1.0e-06
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[add_c1, f32, [1]]]
+  - id: hidden_states
+    op: input
+    outputs: [[hidden_states, f16, [1, 1, 1024]]]
+  - id: mean_count
+    op: constant
+    attrs:
+      name: mean_count
+      value: 1024.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[mean_count, f32, [1]]]
+  - id: mul_1_dynamic_fp8_finite_max
+    op: constant
+    attrs:
+      name: mul_1_dynamic_fp8_finite_max
+      value: 448.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[mul_1_dynamic_fp8_finite_max, f32, [1]]]
+  - id: mul_1_dynamic_fp8_floor
+    op: constant
+    attrs:
+      name: mul_1_dynamic_fp8_floor
+      value: 1.0e-12
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[mul_1_dynamic_fp8_floor, f32, [1]]]
+  - id: p_input_layernorm_weight
+    op: constant
+    attrs:
+      name: p_input_layernorm_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: model.layers.0.input_layernorm.weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [1024]}
+      source_dtype: float16
+      source_graph: null
+    outputs: [[p_input_layernorm_weight, f16, [1024]]]
+  - id: mul_1_dynamic_fp8_decoded
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 1024}, window: null}}
+            body:
+              body:
+              - class: Load
+                fields:
+                  names: {tuple: [in0]}
+                  input: hidden_states
+                  index:
+                    tuple:
+                    - {expr: {literal: {value: 0, dtype: int}}}
+                    - {expr: {literal: {value: 0, dtype: int}}}
+                    - {expr: {var: a0}}
+                  dtype: null
+              - class: Assign
+                fields: {name: v0, op: {elementwise: copy}, args: {tuple: [in0]}, dtype: {dtype: f32}}
+              - class: Assign
+                fields: {name: v1, op: {elementwise: multiply}, args: {tuple: [v0, v0]}, dtype: null}
+              - class: Accum
+                fields: {name: acc0, value: v1, op: {elementwise: add}, dtype: null, axes: {tuple: [a0]}, base: null}
+            unroll: false
+            seed: true
+        - class: Load
+          fields:
+            names: {tuple: [in1]}
+            input: add_c1
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Load
+          fields:
+            names: {tuple: [in2]}
+            input: mean_count
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Assign
+          fields: {name: v2, op: {elementwise: divide}, args: {tuple: [acc0, in2]}, dtype: null}
+        - class: Assign
+          fields: {name: v3, op: {elementwise: add}, args: {tuple: [in1, v2]}, dtype: null}
+        - {class: Assign, fields: {name: v4, op: {elementwise: rsqrt}, args: {tuple: [v3]}, dtype: null}}
+        - class: Load
+          fields:
+            names: {tuple: [in3]}
+            input: mul_1_dynamic_fp8_finite_max
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Assign
+          fields: {name: v5, op: {elementwise: reciprocal}, args: {tuple: [in3]}, dtype: null}
+        - class: Load
+          fields:
+            names: {tuple: [in4]}
+            input: mul_1_dynamic_fp8_floor
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a1, extent: {dim: 1024}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a2, extent: {dim: 128}, window: null}}
+                  body:
+                    body:
+                    - class: Load
+                      fields:
+                        names: {tuple: [in5]}
+                        input: p_input_layernorm_weight
+                        index:
+                          tuple:
+                          - expr:
+                              binary:
+                                op: +
+                                left:
+                                  binary:
+                                    op: '*'
+                                    left: {binary: {op: /, left: {var: a1}, right: {literal: {value: 128, dtype: int}}}}
+                                    right: {literal: {value: 128, dtype: int}}
+                                right: {var: a2}
+                        dtype: null
+                    - class: Load
+                      fields:
+                        names: {tuple: [in6]}
+                        input: hidden_states
+                        index:
+                          tuple:
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - {expr: {literal: {value: 0, dtype: int}}}
+                          - expr:
+                              binary:
+                                op: +
+                                left:
+                                  binary:
+                                    op: '*'
+                                    left: {binary: {op: /, left: {var: a1}, right: {literal: {value: 128, dtype: int}}}}
+                                    right: {literal: {value: 128, dtype: int}}
+                                right: {var: a2}
+                        dtype: null
+                    - class: Assign
+                      fields: {name: v6, op: {elementwise: copy}, args: {tuple: [in6]}, dtype: {dtype: f32}}
+                    - class: Assign
+                      fields: {name: v7, op: {elementwise: multiply}, args: {tuple: [v4, v6]}, dtype: null}
+                    - class: Assign
+                      fields: {name: v8, op: {elementwise: copy}, args: {tuple: [v7]}, dtype: {dtype: f16}}
+                    - class: Assign
+                      fields: {name: v9, op: {elementwise: multiply}, args: {tuple: [in5, v8]}, dtype: null}
+                    - class: Assign
+                      fields: {name: v10, op: {elementwise: abs}, args: {tuple: [v9]}, dtype: {dtype: f32}}
+                    - class: Accum
+                      fields:
+                        name: acc1
+                        value: v10
+                        op: {elementwise: maximum}
+                        dtype: null
+                        axes: {tuple: [a2]}
+                        base: null
+                  unroll: false
+                  seed: true
+              - class: Assign
+                fields: {name: v11, op: {elementwise: maximum}, args: {tuple: [acc1, in4]}, dtype: null}
+              - class: Assign
+                fields: {name: v12, op: {elementwise: multiply}, args: {tuple: [v11, v5]}, dtype: null}
+              - class: Load
+                fields:
+                  names: {tuple: [in7]}
+                  input: hidden_states
+                  index:
+                    tuple:
+                    - {expr: {literal: {value: 0, dtype: int}}}
+                    - {expr: {literal: {value: 0, dtype: int}}}
+                    - {expr: {var: a1}}
+                  dtype: null
+              - class: Assign
+                fields: {name: v13, op: {elementwise: copy}, args: {tuple: [in7]}, dtype: {dtype: f32}}
+              - class: Assign
+                fields: {name: v14, op: {elementwise: multiply}, args: {tuple: [v13, v4]}, dtype: null}
+              - class: Assign
+                fields: {name: v15, op: {elementwise: copy}, args: {tuple: [v14]}, dtype: {dtype: f16}}
+              - class: Load
+                fields:
+                  names: {tuple: [in8]}
+                  input: p_input_layernorm_weight
+                  index: {tuple: [{expr: {var: a1}}]}
+                  dtype: null
+              - class: Assign
+                fields: {name: v16, op: {elementwise: multiply}, args: {tuple: [in8, v15]}, dtype: null}
+              - class: Assign
+                fields: {name: v17, op: {elementwise: divide}, args: {tuple: [v16, v12]}, dtype: null}
+              - class: Assign
+                fields: {name: v18, op: {elementwise: to_f8e4m3}, args: {tuple: [v17]}, dtype: {dtype: f8e4m3}}
+              - class: Assign
+                fields: {name: v19, op: {elementwise: from_f8e4m3}, args: {tuple: [v18]}, dtype: {dtype: f16}}
+              - class: Write
+                fields:
+                  output: mul_1_dynamic_fp8_decoded
+                  index:
+                    tuple:
+                    - {expr: {literal: {value: 0, dtype: int}}}
+                    - {expr: {literal: {value: 0, dtype: int}}}
+                    - {expr: {var: a1}}
+                  values: {tuple: [v19]}
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+            unroll: false
+            seed: true
+      name: k_mean_3574df
+    inputs: [hidden_states, mean_count, add_c1, mul_1_dynamic_fp8_floor, mul_1_dynamic_fp8_finite_max, p_input_layernorm_weight]
+    outputs: [[mul_1_dynamic_fp8_decoded, f16, [1, 1, 1024]]]
+- inputs: [mul_1_dynamic_fp8_decoded, mul_1_dynamic_fp8_scale_bc]
+  outputs: [mul_1_dynamic_fp8_value]
+  nodes:
+  - id: mul_1_dynamic_fp8_decoded
+    op: input
+    outputs: [[mul_1_dynamic_fp8_decoded, f16, [1, 1, 1024]]]
+  - id: mul_1_dynamic_fp8_scale_bc
+    op: input
+    outputs: [[mul_1_dynamic_fp8_scale_bc, f32, [1, 1, 1024]]]
+  - id: mul_1_dynamic_fp8_value
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 1024}, window: null}}
+            body:
+              body:
+              - class: Load
+                fields:
+                  names: {tuple: [in0]}
+                  input: mul_1_dynamic_fp8_decoded
+                  index:
+                    tuple:
+                    - {expr: {literal: {value: 0, dtype: int}}}
+                    - {expr: {literal: {value: 0, dtype: int}}}
+                    - {expr: {var: a0}}
+                  dtype: null
+              - class: Load
+                fields:
+                  names: {tuple: [in1]}
+                  input: mul_1_dynamic_fp8_scale_bc
+                  index:
+                    tuple:
+                    - {expr: {literal: {value: 0, dtype: int}}}
+                    - {expr: {literal: {value: 0, dtype: int}}}
+                    - {expr: {var: a0}}
+                  dtype: null
+              - class: Assign
+                fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f16}}
+              - class: Write
+                fields:
+                  output: mul_1_dynamic_fp8_value
+                  index:
+                    tuple:
+                    - {expr: {literal: {value: 0, dtype: int}}}
+                    - {expr: {literal: {value: 0, dtype: int}}}
+                    - {expr: {var: a0}}
+                  values: {tuple: [v0]}
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+            unroll: false
+            seed: true
+      name: k_mul_1_dynamic_fp8_value_pointwise
+    inputs: [mul_1_dynamic_fp8_decoded, mul_1_dynamic_fp8_scale_bc]
+    outputs: [[mul_1_dynamic_fp8_value, f16, [1, 1, 1024]]]
+- inputs: []
+  outputs: [p_post_attention_layernorm_weight_bc]
+  nodes:
+  - id: p_post_attention_layernorm_weight
+    op: constant
+    attrs:
+      name: p_post_attention_layernorm_weight
+      value: null
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: model.layers.0.post_attention_layernorm.weight
+      source_parts: {__tuple__: []}
+      source_shape: {__tuple__: [1024]}
+      source_dtype: float16
+      source_graph: null
+    outputs: [[p_post_attention_layernorm_weight, f16, [1024]]]
+  - id: p_post_attention_layernorm_weight_bc
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 1024}, window: null}}
+            body:
+              body:
+              - class: Load
+                fields:
+                  names: {tuple: [in0]}
+                  input: p_post_attention_layernorm_weight
+                  index: {tuple: [{expr: {var: a0}}]}
+                  dtype: null
+              - class: Write
+                fields:
+                  output: p_post_attention_layernorm_weight_bc
+                  index:
+                    tuple:
+                    - {expr: {literal: {value: 0, dtype: int}}}
+                    - {expr: {literal: {value: 0, dtype: int}}}
+                    - {expr: {var: a0}}
+                  values: {tuple: [in0]}
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+            unroll: false
+            seed: true
+      name: k_p_post_attention_layernorm_weight_bc_pointwise
+    inputs: [p_post_attention_layernorm_weight]
+    outputs: [[p_post_attention_layernorm_weight_bc, f16, [1, 1, 1024]]]
 configs:
 - program: 0
   target:
+    loop: 0
     origins:
     - add
     - add_c1_bc
@@ -1847,13 +2204,14 @@ configs:
       REDUCE@map.2/reduce: ''
       WORK: t512
       RASTER: ''
-    identity: d331ca039f0bb2d1e1ad9d85549df4bf4361af46991e68c1d275757e11e681a7
+    identity: 4b2924eab47565de22024d826b0680420312e8ba24e4ead70b94eddc850e1392
     measurements:
       emmy_us: 7.491368548314374
       reference_us: 7.496180390953121
       reference_backend: same-input-greedy
 - program: 0
   target:
+    loop: 1
     origins:
     - mul_1_dynamic_fp8_value
   realizations:
@@ -1869,13 +2227,14 @@ configs:
       WORK: ''
       TILE: f2
       RASTER: ''
-    identity: f60826cc1b9e955259f55e9f27ddd60c11256c843f3bd073cb0c125217e969e5
+    identity: 3c3bb7cbde19705cdd0c8286ca9fdcdf9759e0ca8046ad051682266fda136bae
     measurements:
       emmy_us: 0.653427449706333
       reference_us: 0.6531071772628674
       reference_backend: same-input-greedy
 - program: 0
   target:
+    loop: 2
     origins:
     - p_post_attention_layernorm_weight_bc
   realizations:
@@ -1891,11 +2250,8 @@ configs:
       WORK: ''
       TILE: f2
       RASTER: ''
-    identity: c3f044358ff363d9ed627f86dfca6347c2fc0cb9a2993b4ff30aeaa5d777f8d3
+    identity: 7b93a00190c010fadf3c893f0e3b901bdd6cf932bb2b0a4174d1e0a433f37030
     measurements:
       emmy_us: 0.6206121242172936
       reference_us: 0.6204543832960076
       reference_backend: same-input-greedy
-gpu_name: NVIDIA GeForce RTX 5090
-model_quant_digest: ab358aac11892fee
-model: Qwen/Qwen3-0.6B-FP8@e5be08033360965ceca7b0ffd72d521a51331ce0

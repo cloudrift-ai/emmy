@@ -14,7 +14,7 @@ from dataclasses import replace
 
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.loop import LoopOp, UnfusableStmt
+from emmy.compiler.ir.loop import Load, Loop, LoopOp, UnfusableStmt, Write
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.loop.fusion._region import build_merged_region, carries_state, live_outputs_of
 
@@ -179,7 +179,15 @@ def rewrite(match: Match, producer: Node) -> Graph | None:
         except UnfusableStmt as doom:
             if doom.origin == producer.id or doom.origin not in region or len(region) <= 2:
                 raise RuleSkipped(f"region is dominated by an unfusable chain: {doom}") from doom
-            region = region - _downstream(graph, doom.origin, region)
+            dropped = _downstream(graph, doom.origin, region)
+            # Leave copies beside the consumers that departed. Keeping a broadcast in this
+            # region would store its expanded shape and erase the index map its consumer needs.
+            for nid in reversed(graph.topological_order()):
+                if nid in region - dropped and nid != producer.id:
+                    users = graph.users(nid)
+                    if users and users <= dropped and all(isinstance(s, (Loop, Load, Write)) for s in graph.nodes[nid].op.body.iter()):
+                        dropped.add(nid)
+            region = region - dropped
             if producer.id not in region or len(region) < 2:
                 raise RuleSkipped(f"region shrank away from its producer: {doom}") from doom
             live_outputs = live_outputs_of(graph, region)
