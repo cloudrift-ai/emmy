@@ -1295,9 +1295,12 @@ def _cut_arms(graph: Graph, node) -> list:
 
 
 def _composed_arm(graph: Graph, node):
-    """The one arm whose knob row marks several seams ``cut``."""
-    composed = [(option, knobs) for option, knobs in _cut_arms(graph, node) if len(knobs) > 1]
-    assert len(composed) == 1, f"expected one composed arm, got {[sorted(knobs) for _, knobs in composed]}"
+    """The one arm that cuts the FULL projection: its knob row marks every owning seam ``cut``. A
+    clustered sibling seam (two alpha-equivalent operand cones, one decision) also spells several
+    seams, and is not this arm."""
+    owning = {seam.spelling for seam in cuttable_seams(node.op) if seam.owned is not None}
+    composed = [(option, knobs) for option, knobs in _cut_arms(graph, node) if len(knobs) > 1 and owning <= set(knobs)]
+    assert len(composed) == 1, f"expected one full-projection arm, got {[sorted(knobs) for _, knobs in composed]}"
     return composed[0]
 
 
