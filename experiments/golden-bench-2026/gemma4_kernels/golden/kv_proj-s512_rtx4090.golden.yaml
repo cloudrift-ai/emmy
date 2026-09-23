@@ -101,7 +101,7 @@ configs:
       REDUCE: ''
       STAGE: d2/smem-async
       RASTER: ''
-    identity: ea6902eee4018e873942ba5cad484a7df0274b663d36473ab209ae8d57e2a8f8
+    identity: c88aca3742f0e3767c5cce5125f56de87a4be00c98520bfbe07660d55730b99d
     measurements:
       emmy_us: 59.27153194651884
       reference_us: 61.24800071120262
@@ -116,7 +116,7 @@ configs:
       REDUCE: ''
       STAGE: d2/smem-async
       RASTER: ''
-    identity: ea6902eee4018e873942ba5cad484a7df0274b663d36473ab209ae8d57e2a8f8
+    identity: c88aca3742f0e3767c5cce5125f56de87a4be00c98520bfbe07660d55730b99d
     measurements:
       emmy_us: 43.72034902157991
       reference_us: 45.38181695071133

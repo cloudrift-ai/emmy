@@ -118,7 +118,9 @@ schedule tiles off the node
 and seals through the one `grid_tile` finalizer. A tiled contraction tiles its OUTPUT `(m, n)` axes (register / warp
 cells; the reduce K serial per cell); a cooperating `Fold` tiles its REDUCE axis instead (`_tile_reduce_axis` —
 BLOCK `coop` lanes at the unit level, REG `reg` ILP chains at the register level, the algebra merge — the fold's
-own `merge` — closing the fold),
+own `merge` — closing the fold; a lane loop whose per-lane trip count is short unrolls, so its loads are in flight
+together rather than one global-load latency per trip, and the cross-warp combine folds the per-warp partials with
+warp 0's butterfly behind one barrier),
 its per-cell reduce loop taken from the node's own lowering; an UNTILED root whose cones close over other reduces
 (its CHAIN MEMBERS, `ops.chain_members`: reached through zero-axis operand edges and the axis-invariant reduce
 operands members hoist ahead of their loops) binds through the chain arm (`_tile_chain_members`) when a member

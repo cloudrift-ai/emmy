@@ -807,6 +807,24 @@ class TreeHalve(Stmt):
         # names. Captured before those shadows overwrite the flat ssa map, restored after the
         # broadcast so the epilogue's conversions read the live declaration, not the dead shadow.
         outer_dtypes = {st: ctx.ssa_dtypes.get(st) for st in self.state}
+        if t == "warp" and self.inner is None and self.barrier_id == 0 and self.length <= 32:
+            # The hierarchical cross-warp slab holds one partial per warp, so warp 0 alone folds it with a
+            # register butterfly: one barrier before the broadcast instead of one per halving step.
+            out = [f"{pad}if (warp == 0) {{"]
+            for buf, st in zip(self.bufs, self.state, strict=True):
+                out.append(f"{in1}{ty} {st} = {buf}[lane & {self.length - 1}];")
+                ctx.ssa_dtypes[st] = self.dtype.name
+            butterfly = WarpShuffle(
+                state=self.state, state_b=self.state_b, combine_states=self.combine_states, length=self.length, dtype=self.dtype
+            )
+            out.extend(butterfly.render(ctx.child()))
+            out.append(f"{in1}if (lane == 0) {{")
+            out.extend(f"{in2}{buf}[0] = {st};" for buf, st in zip(self.bufs, self.state, strict=True))
+            out += [f"{in1}}}", f"{pad}}}", f"{pad}__syncthreads();"]
+            for buf, st in zip(self.bufs, self.state, strict=True):
+                out.append(f"{pad}{st} = {buf}[0];")
+                ctx.ssa_dtypes[st] = outer_dtypes[st] or self.dtype.name
+            return out
         out: list[str] = [f"{pad}for (int s = {half}; s > 0; s >>= 1) {{", f"{in1}if ({t} < s) {{"]
         # Shadow temps named after the carried state so ``combine_states`` (which
         # reassigns ``state``) folds ``buf[t+s]`` into ``buf[t]`` per component.
@@ -3010,6 +3028,7 @@ def _(s: TreeHalve, rename, sigma, axis_fn):
         dtype=s.dtype,
         barrier_id=s.barrier_id,
         barrier_count=s.barrier_count,
+        inner=s.inner,
     )
 
 

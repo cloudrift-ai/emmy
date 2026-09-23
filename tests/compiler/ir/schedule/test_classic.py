@@ -372,10 +372,12 @@ def test_context_rejects_incomplete_or_duplicate_composition_orders() -> None:
         ClassicScheduleContext(*problem, order=(site, site))
 
 
-def test_an_authored_tile_bypasses_enumeration_precision_policy() -> None:
+def test_a_hand_pinned_tile_bypasses_the_precision_policy_and_a_followed_row_does_not() -> None:
     """The precision policy filters the CATALOG: with f16 accumulation disallowed the site offers no
-    f16-accumulate atom. A row naming such a tile is an authored, legal independent choice and the
-    site offers exactly it — the policy is a property of unpinned enumeration, never of a parse."""
+    f16-accumulate atom. A hand pin naming such a tile is an authored choice and the site offers exactly
+    it. A row the compile FOLLOWS — measured evidence, a golden row's replay — is not: the standard lane
+    of the Gemma 4 serving golden carried FP16-accumulate rows, and a strict boot deployed them as if
+    the user had pinned the fast-math tile."""
     root = _contraction()
     m, n = Axis("m", 8), Axis("n", 8)
     source = TileOp(
@@ -388,15 +390,19 @@ def test_an_authored_tile_bypasses_enumeration_precision_policy() -> None:
     target = Context.from_target((12, 0))
     site = source.node_sites[0]
     tile = Tile(atom=ATOM_REGISTRY["mma_m16n8k16_f16_f16"], units=(1, 4), regs=(2, 2))
+    row = {"WORK": "w1x4", "TILE": tile.spell()}
 
     policy_only = ClassicProblem(source, target, allow_f16_accumulate=False)
     offered = policy_only.node_site(site).nodes
     assert offered and all(not (choice.tile.is_warp and choice.tile.atom.operand_dtype("c").nbytes == 2) for choice in offered)
 
-    authored = policy_only.with_row({"WORK": "w1x4", "TILE": tile.spell()}, strict=True)
-    assert [choice.tile for choice in authored.node_site(site).nodes] == [tile]
-    schedule = next(iter(_enumerate_context(ClassicScheduleContext(source, target, authored))))
+    pinned = ClassicProblem(source, target, row=row, allow_f16_accumulate=False)
+    assert [choice.tile for choice in pinned.node_site(site).nodes] == [tile]
+    schedule = next(iter(_enumerate_context(ClassicScheduleContext(source, target, pinned))))
     assert schedule.nodes[site].tile == tile
+
+    assert policy_only.with_row(row, strict=True).node_site(site).nodes == ()
+    assert all(choice.tile != tile for choice in policy_only.with_row(row).node_site(site).nodes)
 
 
 def test_a_row_narrows_within_a_pin_and_never_lifts_it() -> None:
