@@ -1,0 +1,171 @@
+# The gate/up pair over a TMA ring: one A box shared by two weight boxes, drained by one wgmma chain per
+# channel off the shared A descriptor. The staging catalog used to confine any multi-channel fold to the
+# synchronous compute fill, so this shape could reach neither the box copy nor the wgmma tier it feeds.
+compute_cap:
+- 9
+- 0
+programs:
+- inputs: [x, wg, wu]
+  outputs: [o]
+  nodes:
+  - id: wg
+    op: input
+    outputs: [[wg, f16, [512, 512]]]
+  - id: wu
+    op: input
+    outputs: [[wu, f16, [512, 512]]]
+  - id: x
+    op: input
+    outputs: [[x, f16, [128, 512]]]
+  - id: gate
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [x, wg]
+    outputs: [[gate, f16, [128, 512]]]
+  - id: sg
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: silu}}
+    inputs: [gate]
+    outputs: [[sg, f16, [128, 512]]]
+  - id: up
+    op: torch.linear
+    attrs: {has_bias: false}
+    inputs: [x, wu]
+    outputs: [[up, f16, [128, 512]]]
+  - id: o
+    op: tensor.elementwise
+    attrs: {op: {__elementwise__: multiply}}
+    inputs: [sg, up]
+    outputs: [[o, f16, [128, 512]]]
+configs:
+- program: 0
+  target:
+    loop: 0
+    origins:
+    - gate
+    - o
+    - sg
+    - up
+  realizations:
+  - name: k_linear_reduce_10fc11
+    bindings: {}
+    pins:
+      FAST_MATH: false
+      PLACE: fuse
+    knobs:
+      WORK: w4x1
+      TILE: wgmma_m64n64k16_f16_f32/f1x8/k4
+      REDUCE: ''
+      STAGE: d2/smem-tma
+      RASTER: ''
+    identity: 870cfb8028650430359d1b563334582e7bae8caf7738a30b66803a18ce552229
+loops:
+- inputs: [wg, wu, x]
+  outputs: [o]
+  nodes:
+  - id: sg_one
+    op: constant
+    attrs:
+      name: sg_one
+      value: 1.0
+      context_value: null
+      load_ops: {__tuple__: []}
+      source_path: null
+      source_parts: {__tuple__: []}
+      source_shape: null
+      source_dtype: null
+      source_graph: null
+    outputs: [[sg_one, f32, [1]]]
+  - id: wg
+    op: input
+    outputs: [[wg, f16, [512, 512]]]
+  - id: wu
+    op: input
+    outputs: [[wu, f16, [512, 512]]]
+  - id: x
+    op: input
+    outputs: [[x, f16, [128, 512]]]
+  - id: o
+    op: loop
+    attrs:
+      body:
+        body:
+        - class: Load
+          fields:
+            names: {tuple: [in0]}
+            input: sg_one
+            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
+            dtype: null
+        - class: Loop
+          fields:
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 128}, window: null}}
+            body:
+              body:
+              - class: Loop
+                fields:
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 512}, window: null}}
+                  body:
+                    body:
+                    - class: Loop
+                      fields:
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 512}, window: null}}
+                        body:
+                          body:
+                          - class: Load
+                            fields:
+                              names: {tuple: [in1]}
+                              input: wg
+                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
+                              dtype: null
+                          - class: Load
+                            fields:
+                              names: {tuple: [in2]}
+                              input: wu
+                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
+                              dtype: null
+                          - class: Load
+                            fields:
+                              names: {tuple: [in3]}
+                              input: x
+                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
+                              dtype: null
+                          - class: Assign
+                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in1, in3]}, dtype: {dtype: f32}}
+                          - class: Accum
+                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
+                          - class: Assign
+                            fields: {name: v1, op: {elementwise: multiply}, args: {tuple: [in2, in3]}, dtype: {dtype: f32}}
+                          - class: Accum
+                            fields: {name: acc1, value: v1, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
+                        unroll: false
+                        seed: true
+                    - class: Assign
+                      fields: {name: v2, op: {elementwise: copy}, args: {tuple: [acc0]}, dtype: {dtype: f16}}
+                    - class: Assign
+                      fields: {name: v3, op: {elementwise: copy}, args: {tuple: [acc1]}, dtype: {dtype: f16}}
+                    - class: Assign
+                      fields: {name: v4, op: {elementwise: copy}, args: {tuple: [v2]}, dtype: {dtype: f32}}
+                    - class: Assign
+                      fields: {name: v5, op: {elementwise: negative}, args: {tuple: [v4]}, dtype: null}
+                    - {class: Assign, fields: {name: v6, op: {elementwise: exp}, args: {tuple: [v5]}, dtype: null}}
+                    - class: Assign
+                      fields: {name: v7, op: {elementwise: add}, args: {tuple: [in0, v6]}, dtype: null}
+                    - class: Assign
+                      fields: {name: v8, op: {elementwise: divide}, args: {tuple: [v4, v7]}, dtype: {dtype: f16}}
+                    - class: Assign
+                      fields: {name: v9, op: {elementwise: multiply}, args: {tuple: [v3, v8]}, dtype: null}
+                    - class: Write
+                      fields:
+                        output: o
+                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
+                        values: {tuple: [v9]}
+                        value_dtype: null
+                        atomic: false
+                        swizzle: NONE
+                  unroll: false
+                  seed: true
+            unroll: false
+            seed: true
+      name: k_linear_reduce_79fc56
+    inputs: [sg_one, x, wg, wu]
+    outputs: [[o, f16, [128, 512]]]
