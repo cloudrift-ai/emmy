@@ -187,6 +187,11 @@ digests, driver/CUDA state, and failures. General fast
 math is outside this preregistered suite; the exact `FP8_MMA` pin is confined to the dynamic-FP8 checkpoint layer
 traces and does not establish a W8A8-only result without the deferred target filter.
 
+Both Gemma arms also declare no multimodal items. Gemma 4 12B is a multimodal checkpoint and vLLM sizes an encoder
+budget from it, so a stock server refuses to start whenever `--max-num-batched-tokens` is below
+`max_tokens_per_mm_item`, which two of the four points are; the Emmy arm never hit it because `EmmyGenModel` is
+text-only. The benchmark sends text, and the declaration is on both arms, so their argv stays identical.
+
 The Gemma stock and Emmy arms use identical per-workload `--max-num-batched-tokens` settings and the same immutable
 `cloudriftai/vllm-emmy-gemma-4-12b-it@sha256:3a690e9f7859d46b969dd9eaaed36f52f92c25c5595dc112aee2adb781d26e28`
 image, which records vLLM source revision `91df0fad4dc98a67c7659d9dbd915245d5c43d96`. The stock arm overrides the
