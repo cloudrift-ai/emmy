@@ -1764,13 +1764,14 @@ class LdmatrixLoad(Stmt):
             frag_dt = frag_dtype(ctx, self.frag) or slab_dt
             targs = "" if slab_dt == frag_dt else f"<{ctx.type_name(slab_dt)}, {ctx.type_name(frag_dt)}>"
             if self.swizzle == VOLTA_CROSSWISE:
-                assert self.role == "a" and self.pair_frag is not None and slab_dt == frag_dt == "f16"
+                # A, or a TRANSPOSED B — whose slab is K-contiguous like A's and so takes the
+                # same storage; the reader differs only in which lane bit selects the half.
+                assert self.pair_frag is not None and slab_dt == frag_dt == "f16"
+                assert self.role == "a" or self.b_trans, "a canonical B reads the congruous layout, not crosswise"
                 row, col = (e.render(ctx) for e in self.src_index)
                 rows = ctx.shapes[self.src_buffer][0]
-                return [
-                    f"{_pad(ctx.indent)}emmy_mma884_load_a_crosswise_pair({self.frag}, {self.pair_frag}, "
-                    f"{self.src_buffer}, {row}, {col}, {rows});"
-                ]
+                helper = "emmy_mma884_load_a_crosswise_pair" if self.role == "a" else "emmy_mma884_load_b_crosswise_pair"
+                return [f"{_pad(ctx.indent)}{helper}({self.frag}, {self.pair_frag}, {self.src_buffer}, {row}, {col}, {rows});"]
             if self.swizzle == VOLTA_B_CONGRUOUS:
                 assert self.role == "b" and self.pair_frag is not None and slab_dt == frag_dt == "f16"
                 row, col = (e.render(ctx) for e in self.src_index)

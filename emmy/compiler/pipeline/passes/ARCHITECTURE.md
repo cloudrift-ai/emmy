@@ -268,10 +268,15 @@ never offered rather than failing at materialization, while row identity reads o
 transport families: the copy transports
 (the synchronous copy on atoms that stage that way, cp.async, TMA — gmem-direct `None` is their ever-present sibling),
 the fp8 byte slabs (a 1-byte operand staged as raw bytes and converted at the drain — the same `d<n>` fork family, no
-new knob), and the smem compute fill, which is MANDATORY for a computed operand, a multi-channel product, or a
-materialized A the atom cannot bind (only the fill's typed slab store converts — byte transports move raw bits), so it
-has no gmem-direct sibling and a `STAGE` pin can only choose its depth. This requirement belongs to warp choices; the
-scalar contraction tier evaluates every channel serially and keeps direct edges. A NESTED-reduce B edge (the streamed
+new knob), and the smem compute fill, which is MANDATORY for a computed operand or a materialized A the atom cannot
+bind (only the fill's typed slab store converts — byte transports move raw bits), so there it has no gmem-direct
+sibling and a `STAGE` pin can only choose its depth. A MULTI-CHANNEL product — the gate/up pair, one A shared across
+several weights — is the other form with no gmem-direct sibling, because that leaf folds a single B out of registers;
+but it is not confined to the fill. Every staging transport deposits one A slab beside one B per channel, which is the
+operand list the fill already built and the one drain already reads, so the copy transports are offered beside it and a
+multi-channel GEMM reaches cp.async and TMA — and therefore wgmma — like any other. This requirement belongs to warp
+choices; the scalar contraction tier evaluates every channel serially and keeps direct edges. A NESTED-reduce B edge
+(the streamed
 computed-B decode cone) rides the same mandatory multi-channel fill — the fill evaluates every non-materialized B
 channel into its slab, nested reduce included — while a nested A, or a nested B on a single-channel node, keeps the
 refusal: no transport realizes a nested scheduling site without a fill mandated to evaluate it. ONE computed operand

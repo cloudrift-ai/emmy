@@ -21,6 +21,7 @@ from .refusals import (
     _AxisAgreement,
     _fragment_agreements,
     _FragmentAgreement,
+    _multi_fold_direct_refusal,
     _needs_fill,
     _paired_budget_refusal,
     _plan_node_refusal,
@@ -380,7 +381,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
                 return None
         stage = next(iter(edges.values())).stage if edges else Stage.direct()
         resolved_stage = None
-        if _wgmma_refusal(node.tile, stage) is not None:
+        if _wgmma_refusal(node.tile, stage) is not None or _multi_fold_direct_refusal(fold, node.tile, stage) is not None:
             cache[key] = None
             return None
         if view.as_contraction() is None or not node.tile.is_tiled:

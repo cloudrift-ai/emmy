@@ -242,6 +242,24 @@ def test_sm70_materialized_tiles_use_paired_volta_layout_loads(monkeypatch) -> N
     assert "((_vq >> 1) & 1) * 8" in src
 
 
+def test_sm70_transposed_b_drains_the_crosswise_layout(monkeypatch) -> None:
+    """A transposed B stages K-contiguous like A, so it reads A's crosswise layout back rather
+    than falling to the plain row-major tile whose 64-byte row is bank-conflicted."""
+    _pin(monkeypatch, VOLTA, tile="f2x2", stage="d1/smem")
+    src, _ = _source(_graph(m=32, n=32, k=16, trans=True), Context(compute_capability=(7, 0)))
+    assert "_a_smem[emmy_volta_crosswise(" in src
+    assert "_b_smem[emmy_volta_crosswise(" in src
+    assert "_b_smem[emmy_volta_b_congruous(" not in src, "the congruous layout is for an N-contiguous B"
+    assert "emmy_mma884_load_a_crosswise_pair(_a0, _a1" in src
+    assert "emmy_mma884_load_b_crosswise_pair(_b0, _b1" in src
+    assert "emmy_mma884_load_b_smem_trans(_b" not in src, "the conflicted plain gather must be gone"
+    # The B reader is A's with lane bits 2 and 3 swapped, and the row/col mma form stays.
+    assert "(lane & ~0xC) | ((lane & 4) << 1) | ((lane & 8) >> 1)" in src
+    assert src.count("emmy_mma_m8n8k4_f16_f32(_c") == 4
+    # The interleaved accumulator map is unchanged: the column half still comes from lane bit 3.
+    assert "((_vq >> 1) & 1) * 8" in src
+
+
 def test_sm70_pair_policy_off_retains_the_unpaired_gather(monkeypatch) -> None:
     """The existing policy override disables the coupled layout as one complete choice."""
     _pin(monkeypatch, VOLTA, tile="f2x2", stage="d1/smem")

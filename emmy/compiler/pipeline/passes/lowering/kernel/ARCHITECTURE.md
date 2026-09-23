@@ -323,10 +323,15 @@ evidence's call per shape, which is the point: before the split, `depth >= 2` wa
 card. `/p<n>` remains the independent smem→register fragment pipeline. The Volta m8n8k4 atom enables the synchronous
 fill for materialized and computed f16 A/B edges. Its compute fill stages at depth 1 only: the fill's depth-2 ring is a
 B prefetch that assumes cp.async, and on a V100 it returned silently wrong answers on nine of sixteen measured warp
-grids and fragments of a GPTQ decode cone, each correct at depth 1. For a materialized canonical-B tile with even M/N
-register-fragment counts, lowering derives CUTLASS's crosswise-A and B-congruous layouts together: one 128-bit shared
-load drains each adjacent fragment pair, the MMA uses row/row B, and the store uses the coupled interleaved 32×32
-accumulator map. This
+grids and fragments of a GPTQ decode cone, each correct at depth 1. For a materialized tile with even M/N
+register-fragment counts, lowering derives CUTLASS's own layouts together: crosswise for A, and for B the congruous
+layout when it is N-contiguous (the MMA then using row/row B) or crosswise again when it is TRANSPOSED, whose slab is
+K-contiguous exactly like A's — it reads that same storage back through a lane map taking its column half from lane
+bit 3 where A takes its row half from bit 2, which is the column role the accumulator map already assumes. Either way
+one 128-bit shared load drains each adjacent fragment pair and the store uses the coupled interleaved 32×32
+accumulator map. Before the transposed B joined, it fell back to a plain row-major slab whose 64-byte row put sixteen
+rows on two bank pairs: on a V100 prefill query projection that was 2.1M conflict replays out of 3.1M shared-load
+wavefronts, about 21 µs of a 35 µs gap to Inductor. This
 is the SM70 default lowering, not a schedule-codec choice; the existing `PAIR_LDMATRIX` policy override disables the
 whole combination. For deep K slabs, the blocking copy also binds each lane's affine global-copy bases and K stride,
 plus the paired shared-store layout bases, once outside the K loop. Shallow slabs retain inline address calculation;
@@ -394,10 +399,12 @@ and clamping only its start still copies past the extent. A **multi-channel prod
 `(b, acc)` channels over one shared A edge, either a computed cone or a materialized load; `_AtomOps.channels` reads
 them off the node) fills one B slab per channel, drains N mma chains off the ONE ldmatrix'd A fragment into
 per-channel C fragments (`_fold_frag`), and the projection (SwiGLU) combines the channels per element in the store's
-epilogue `Lambda` (`extra_frags`). Materialized A copies into the same single A slab; computed A evaluates into it. Both
-forms use the synchronous compute fill because the gmem-direct and single-sided byte-copy MMA paths remain
-single-channel. The block-scaled fp4 cell is the exception: it carries N channels on cp.async, staging `2 + 2N` slabs
-over the one shared A pair, and names each channel's block-scale fragment per channel just as its data fragment is.
+epilogue `Lambda` (`extra_frags`). Materialized A copies into the same single A slab; computed A evaluates into it. A
+computed A has only the synchronous compute fill, as anywhere else; a materialized one stages through whichever
+transport the card offers, each depositing the same `1 + N` slabs — so the gate/up GEMM rings on cp.async and reaches
+the TMA box copy, and with it wgmma. Only the gmem-direct MMA leaf stays single-channel, because it folds one B
+straight out of registers. The block-scaled fp4 cell carries N channels the same way, staging `2 + 2N` slabs over the
+one shared A pair, and names each channel's block-scale fragment per channel just as its data fragment is.
 
 **A gmem fragment's leading dimension is read off the operand's ADDRESS.** A loader reaches its operand through one
 leading dimension: one coordinate steps by 1, the other by `ldm`. Which DIM an index spells a coordinate in does not

@@ -1653,15 +1653,12 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             staged=stage.depth >= 2 and (not isinstance(n_chunks, int) or n_chunks >= 2),
         )
     else:
-        assert len(ops.channels) == 1, "cp.async / TMA staging is single-fold — a multi-B node rides the smem compute fill"
         # A cp.async-staged 1-byte (fp8) slab pads its rows (`BYTE_SLAB_PAD`) so the cooperative
         # byte-gather drain spreads across banks; a TMA box deposit is dense, so its byte slab
         # stays unpadded (the resolver sized the budget with the same rule).
         elems = ops.slab_elems()
         pads = tuple(BYTE_SLAB_PAD if e.nbytes == 1 and stage.transport == "smem-async" else 0 for e in elems)
-        operands = _slab_operands(
-            index_srcs=(c.operands[0].as_slab().load.index, c.operands[1].as_slab().load.index),
-            bufs=(c.operands[0].as_slab().load.input, c.operands[1].as_slab().load.input),
+        geometry = dict(
             mn=mn,
             k_axis=k_axis,
             bk_elems=stage.bk_elems,
@@ -1672,6 +1669,18 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             b_atoms=ops.b_atoms(mn),
             pads=pads,
         )
+        # One B slab per fold channel, as the compute fill already builds (:func:`_sync_operands`):
+        # the gate/up node shares ONE A across two weights, so the copy transports deposit
+        # (A, B0, B1, …) and the drain reads the same order. Only the slab count differs from the
+        # single-channel form — each B is an ordinary materialized operand under its own tag.
+        a_load = c.operands[0].as_slab().load
+        (a_op,) = _slab_operands(index_srcs=(a_load.index, None), bufs=(a_load.input, None), roles=(0,), **geometry)
+        b_ops = []
+        for f, (edge, _) in enumerate(ops.channels):
+            b_load = edge.as_slab().load
+            (b_op,) = _slab_operands(index_srcs=(None, b_load.index), bufs=(None, b_load.input), roles=(1,), **geometry)
+            b_ops.append(replace(b_op, tag="b" if f == 0 else f"b_x{f}"))
+        operands = (a_op, *b_ops)
         common = dict(
             operands=operands,
             slab_dtype=cuda_name(elem),
@@ -2052,7 +2061,7 @@ class _MmaOps(_AtomOps):
         """Whether this staged cell can use the coupled Volta operand and accumulator layouts."""
         if self.stage is None or self.tile.atom.fragment_layout != "m8n8k4" or PAIR_LDMATRIX.narrow((True,)) != (True,):
             return False
-        return not self.c.as_contraction().b_trans and mn[0].reg % 2 == 0 and mn[1].reg % 2 == 0
+        return mn[0].reg % 2 == 0 and mn[1].reg % 2 == 0
 
     def slab_swizzles(self, mn, elem_bytes: int) -> tuple[str, ...]:  # noqa: ARG002 — per-operand widths come from slab_elems
         """The smem swizzle mode per operand slab, from each slab's inner (contiguous) row
@@ -2070,17 +2079,24 @@ class _MmaOps(_AtomOps):
         so its inner row span is the K chunk (``bk_elems``) like A's. A 1-byte (fp8) slab stays
         ``NONE`` — its cooperative byte-gather drain applies no address XOR (the ldmatrix XOR is
         b16-indexed); the cp.async byte slab's bank spread is the row pad instead. Complete paired
-        Volta tiles instead use the crosswise A and B-congruous layouts together; the existing
-        ``PAIR_LDMATRIX`` policy pin can disable that lowering and retain the ordinary gather."""
+        Volta tiles instead use CUTLASS's own layouts: crosswise for A, and for B the congruous
+        layout when it is N-contiguous or crosswise again when it is TRANSPOSED, whose slab is
+        K-contiguous exactly like A's. The existing ``PAIR_LDMATRIX`` policy pin can disable that
+        lowering and retain the ordinary gather."""
         if self.tile.atom.fragment_layout == "m8n8k4":
             # Volta has no ldmatrix. Row-major A uses CUTLASS's crosswise layout; canonical B
-            # uses its B-congruous layout and the row/row mma form. Copy and compute fills share
+            # uses its B-congruous layout and the row/row mma form, and a transposed B — staged
+            # K-contiguous like A — reads A's crosswise layout back through a lane map whose
+            # column half comes from lane bit 3 instead of bit 2. Copy and compute fills share
             # the same swizzled Write. Each layout requires complete pairs
             # of logical 16-row/column fragments, because one ordinary LDS.128 drains each pair.
             paired = self._volta_pair_layout(mn)
+            # A transposed B stages K-contiguous like A, so it takes A's crosswise layout rather
+            # than the congruous one, which is for the N-contiguous canonical B.
+            b_mode = VOLTA_CROSSWISE if self.c.as_contraction().b_trans else VOLTA_B_CONGRUOUS
             return (
                 VOLTA_CROSSWISE if paired else "NONE",
-                *((VOLTA_B_CONGRUOUS if paired else "NONE") for _ in self.channels),
+                *((b_mode if paired else "NONE") for _ in self.channels),
             )
         b_inner = self.stage.bk_elems if self.c.as_contraction().b_trans else mn[1].tile // self.b_atoms(mn)
         return tuple(self.slab_swizzle(inner, e.nbytes) for e, inner in zip(self.slab_elems(), (self.stage.bk_elems, b_inner), strict=True))

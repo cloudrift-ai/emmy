@@ -1,5 +1,101 @@
 # Golden-bench kernel corpus
 
+## Three cards — the gated MLP's staging lockout (2026-09-23)
+
+### Question and scope
+
+The `post-norm + gate/up + SiLU` target loses to Inductor on every card in the sections below — 0.36x and 0.29x on
+the A100, 0.47x and 0.56x on the H100 — while the single-channel projections beside it beat Inductor on the same
+runs. This pass asks why that one target is different, and covers only it: Qwen3-0.6B layer 0, sequence lengths 1
+and 512, on a V100, an A100 and an H100. It retunes no other target and supports no claim about them.
+
+The answer is structural, not a tuning shortfall. The gate and up projections share one A operand, so the term folds
+TWO channels. The staging catalog refused the prefetching transports for any multi-channel fold and confined it to
+the synchronous compute fill, which on Hopper also put the wgmma tier out of reach, because wgmma reads its operands
+through shared-memory descriptors a TMA box fills. Every transport already deposits one slab per operand and the
+drain already reads them in order, so the confinement bought nothing; lifting it is what the compiler half of this
+pass does. A second, narrower refusal barred the fill's depth-2 ring on Volta — written for the ring under a compute
+fill, it also caught the case where nothing is computed and the ring is an ordinary blocking-copy double-buffer.
+
+### Protocol
+
+One card each: a V100-SXM2-16GB (CloudRift, driver 580.178.04, nvcc 12.9) — NOT the SXM3 32GB part the recipe names,
+so its numbers are not comparable to a recipe row; an A100-SXM4-40GB and an H100 80GB HBM3 (GCP, driver 580.173.02,
+nvcc 12.9). Every number is deployable `-O3`, 10 warmups, 100 iterations, eager, Inductor and Emmy in one process.
+Tuning was manual, as in the sections below: about 45 pinned `emmy run --ab` rows in three rounds per length, each
+round one process so the eager reference slice is built once, seeding a task-owned tune DB. Each winner was then
+re-recorded with `--record-greedy` into a stripped copy of the inventory, and the committed file replayed UNPINNED
+from a fresh tune DB under `--strict --strict-evidence` — the deploy contract, and the numbers reported here.
+
+### Result summary
+
+`before` is the committed golden replayed on this card today; the V100 has no golden in this recipe, so its before is
+the cold greedy at its best route. Inductor is the torch.compile lane of the same process.
+
+| target | eager | Inductor | before | after | Inductor / after |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| V100 prefill (512) | 221 | 130 | 328.7 | **106.1** | **1.23** |
+| V100 decode (1) | 77 | 19 | 34.2 | 34.2 | 0.56 |
+| A100 prefill (512) | 125 | 53 | 950.7 | **50.1** | **1.06** |
+| A100 decode (1) | 63 | 13 | 31.9 | 19.5 | 0.67 |
+| H100 prefill (512) | 79 | 23 | 44.1 | **18.5** | **1.24** |
+| H100 decode (1) | 50 | 9 | 15.7 | 10.2 | 0.88 |
+
+Both kernels of the cut, after:
+
+| card | statistic piece | GEMM piece |
+| --- | --- | --- |
+| V100 prefill | 5.0 µs `t128/coop` | 101.1 µs `w4x2`, `mma_m8n8k4/f2x2/k8`, `d2/smem`, `gm8` |
+| A100 prefill | 4.3 µs `t128/coop` | 45.7 µs `w2x2`, `mma_m16n8k16/f2x4/k4`, `d2/smem-async` |
+| H100 prefill | 3.8 µs `t128/coop` | 14.8 µs `w4x1`, `wgmma_m64n64k16/f1x8/k4`, `d2/smem-tma`, `gm8` |
+| A100 decode | 3.5 µs `t128/coop` | 16.0 µs `w1x1`, `mma_m16n8k16/f1x8/k4`, `d2/smem-async`, `gm8` |
+| H100 decode | 3.0 µs `t128/coop` | 7.2 µs `w1x1`, `mma_m16n8k16/f1x2/k4`, `d2/smem-tma` |
+
+### What the pass found
+
+- **The committed A100 rows recorded an unscheduled kernel.** Both A100 files gave the cut's norm producer an EMPTY
+  knob row — what the recorder writes when the term falls unmapped — and the replay honours it: 905 µs for a
+  512×1024 norm the same card runs standalone in 3.4. The producer forks normally on main, so this is a stale
+  recording and not a live defect; re-recording is the whole of the A100 prefill gap.
+- **The H100's deeper cut was a workaround that outlived its defect.** `PLACE@map.2/inner.1/map.3/map=cut` keeps only
+  the statistic in the producer and folds the scale into the GEMM's A, which the 09-11 section took because the
+  shallower seam left the whole norm in an unforked producer. That producer forks now (`t128/coop`, 3.8 µs prefill),
+  and the shallower seam is better on all three cards: it leaves the GEMM a MATERIALIZED A, which is what lets the
+  copy transports carry it at all.
+- **TMA is worth 2.3x on the H100 GEMM, and it was unreachable.** Under the compute fill the gate/up GEMM ran 33.9 µs
+  on mma.sync. One A box and two weight boxes over a two-deep ring, drained by two wgmma chains off the ONE shared A
+  descriptor, run 14.8 µs — and the `gm8` raster is a third of that on its own (20.1 µs without it). The single
+  linear of the same 512×6144×1024 shape measures 17.7 µs pinned to the same row, and cuBLAS 12; the fused form is
+  now faster than either because it never writes the gate and up products to memory.
+- **The cp.async ring is worth little on the A100 and a lot on Volta.** The A100 GEMM moves 47.2 → 45.7 µs, because
+  its compute fill already put the peers on cp.async; the whole A100 gap was the producer row. The V100 has no
+  cp.async at all, so its fill had no peers to fly and ran single-buffered: 178.0 µs. With nothing computed, the
+  ring is an ordinary blocking-copy double-buffer, and the same row over it runs 100.8.
+- **Decode closes by less, and the reason is not staging.** The gate/up decode is a GEMV reading 12.6 MB of weights:
+  8.1 µs of A100 bandwidth, 3.8 of H100. Emmy runs 16.0 and 7.2. What the shape wants is a cross-CTA split filling
+  the card, and the split declines on this term — *the head fold is nested inside the projection's sweep loop; the
+  split cannot strip it* — so the kernel stays on 48 and 192 CTAs. That refusal is the decode gap and this pass does
+  not touch it.
+- **The cold prior ranks the new options badly.** Widening the catalog cost the H100's unpinned cold pick, which went
+  from 37.7 µs to 85 on the same target: the prior has never seen a multi-channel row carrying a copy transport. The
+  deploy path is the recorded golden, which is unaffected, but a lane that searches instead of replaying — the
+  recipe's V100, RTX and H200/B200 rows — may need a retune before it sees the win.
+
+### Systems and provenance
+
+- V100-SXM2-16GB at `185.165.50.75` (CloudRift), driver 580.178.04, nvcc 12.9, torch cu126.
+- A100-SXM4-40GB `bench-keep-a100-0921-1621-6784` and H100 80GB HBM3 `bench-keep-h100-0921-1621-1fa1` (GCP
+  `a2-highgpu-1g` / `a3-highgpu-1g`), driver 580.173.02, nvcc 12.9.
+- Source: this branch, on top of main `1d5a7a73`. The tuning rows and their `--json` records are host-local under
+  `~/gmlp-out/` on each box; no recipe lane was run, so the `results_*.tar.gz` archives are unchanged.
+
+### Durable files
+
+- Goldens: loop 6 re-recorded in `golden/qwen3-06b-s1_a100.golden.yaml`, `golden/qwen3-06b-s512_a100.golden.yaml`,
+  `golden/qwen3-06b-s1_h100.golden.yaml`, `golden/qwen3-06b-s512_h100.golden.yaml`. Every other target is untouched.
+- No archive: this pass tuned one target by hand and did not re-run the recipe, so it replaces no platform archive
+  and the sections below remain the current lane evidence for every other target.
+
 ## Platform a10040x1 — hand-found common corpus on the 40GB part (2026-09-11)
 
 ### Question and scope
