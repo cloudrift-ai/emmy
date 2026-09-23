@@ -792,6 +792,84 @@ def test_shared_transpose_correctness():
 
 
 # ===================================================================
+# Siblings: kernels that share an input buffer but have no producer/consumer
+# relation. A region is closed under co-readers, so they merge into one
+# multi-output kernel with one load of the shared buffer.
+# ===================================================================
+
+
+def _make_sibling_products():
+    """``(a * b, a * c)`` over three graph inputs — no kernel produces ``a``."""
+    g = Graph()
+    for name in ("a", "b", "c"):
+        g.add_node(InputOp(), [], Tensor(name, (4, 8)), node_id=name)
+    g.add_node(ElementwiseOp("multiply"), ["a", "b"], Tensor("ab", (4, 8)), node_id="ab")
+    g.add_node(ElementwiseOp("multiply"), ["a", "c"], Tensor("ac", (4, 8)), node_id="ac")
+    g.inputs, g.outputs = ["a", "b", "c"], ["ab", "ac"]
+    return g
+
+
+def test_sibling_products_fuse_to_one_kernel():
+    result = _fuse(_make_sibling_products())
+    (kernel,) = _kernel_nodes(result)
+    assert kernel.buffer_names() == ("ab", "ac")
+
+
+def test_sibling_products_load_the_shared_input_once():
+    (kernel,) = _kernel_nodes(_fuse(_make_sibling_products()))
+    loads = [ld for ld in kernel.op.body.loads if ld.input == "a"]
+    assert len(loads) == 1, [str(ld) for ld in loads]
+
+
+def test_sibling_products_correctness():
+    a, b, c = (rng.standard_normal((4, 8)).astype(np.float32) for _ in range(3))
+    _assert_correctness(_make_sibling_products, {"a": a, "b": b, "c": c})
+
+
+def _make_sibling_pointwise_and_reduce():
+    """``a * b`` beside ``sum(a, -1)`` — siblings over different iteration spaces."""
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("a", (4, 8)), node_id="a")
+    g.add_node(InputOp(), [], Tensor("b", (4, 8)), node_id="b")
+    g.add_node(ElementwiseOp("multiply"), ["a", "b"], Tensor("ab", (4, 8)), node_id="ab")
+    g.add_node(ReduceOp("sum", -1), ["a"], Tensor("s", (4, 1)), node_id="s")
+    g.inputs, g.outputs = ["a", "b"], ["ab", "s"]
+    return g
+
+
+def test_sibling_pointwise_and_reduce_fuse_to_one_kernel():
+    (kernel,) = _kernel_nodes(_fuse(_make_sibling_pointwise_and_reduce()))
+    assert set(kernel.buffer_names()) == {"ab", "s"}
+
+
+def test_sibling_pointwise_and_reduce_correctness():
+    a = rng.standard_normal((4, 8)).astype(np.float32)
+    b = rng.standard_normal((4, 8)).astype(np.float32)
+    _assert_correctness(_make_sibling_pointwise_and_reduce, {"a": a, "b": b})
+
+
+def _make_readers_of_a_packed_buffer():
+    """A kernel computing PACKED codes (two e2m1 values per stored byte) and two readers of them.
+
+    The packed buffer is a fusion boundary: its writer stays its own kernel. The two readers
+    share that buffer, so they are siblings and merge with each other.
+    """
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("bytes", (4, 4), "i32"), node_id="bytes")
+    g.add_node(ElementwiseOp("copy"), ["bytes"], Tensor("codes", (4, 4), "f4e2m1x2"), node_id="codes")
+    g.add_node(ElementwiseOp("copy"), ["codes"], Tensor("r1", (4, 4), "i32"), node_id="r1")
+    g.add_node(ElementwiseOp("copy"), ["codes"], Tensor("r2", (4, 4), "f32"), node_id="r2")
+    g.inputs, g.outputs = ["bytes"], ["r1", "r2"]
+    return g
+
+
+def test_readers_of_a_packed_buffer_merge_while_its_writer_stays():
+    result = _fuse(_make_readers_of_a_packed_buffer())
+    kernels = {node.buffer_names(): node for node in _kernel_nodes(result)}
+    assert set(kernels) == {("codes",), ("r1", "r2")}, sorted(kernels)
+
+
+# ===================================================================
 # Data-dependent (gather) producer fused into a multi-read reduce.
 #
 # A gather lowers to ``in1 = load w[(int)in0, h]`` where ``in0 = load idx`` — a

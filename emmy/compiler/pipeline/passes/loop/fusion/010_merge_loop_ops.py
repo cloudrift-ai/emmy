@@ -1,7 +1,11 @@
-"""Greedily fuse maximal downstream ``LoopOp`` regions to a fixed point.
+"""Greedily fuse maximal ``LoopOp`` regions to a fixed point.
 
-Separate consumers become output ports of one kernel. All roots enter the
-same worklist, so shared upstream statements remain one SSA definition.
+A region is every kernel connected to the matched one through buffers: its consumers, their
+consumers, and every kernel that reads a buffer some member reads (a co-reader). Two kernels
+that share an input but have no producer/consumer relation between them (siblings, such as
+``a * b`` and ``a * c`` over three graph inputs) are therefore one region, and become one kernel
+with one load of the shared buffer. Separate consumers become output ports of one kernel. All
+roots enter the same worklist, so shared upstream statements remain one SSA definition.
 
 Fusion has only correctness boundaries. Neither tile lifting, nor scheduling, nor speed narrows
 it. A region does stop at one buffer: a PACKED one it computes (:func:`_packed_readers`). That
@@ -103,8 +107,28 @@ def _downstream(graph: Graph, origin: str, region: set[str]) -> set[str]:
     return dropped
 
 
+def _co_readers(graph: Graph, node: Node) -> set[str]:
+    """The ``LoopOp`` nodes reading any buffer ``node`` reads, ``node`` itself excluded."""
+    return {
+        reader
+        for buf in node.inputs
+        for reader in graph.buffer_users(buf)
+        if reader != node.id and isinstance(graph.nodes[reader].op, LoopOp)
+    }
+
+
 def _loop_consumer_region(graph: Graph, producer: Node) -> tuple[set[str], tuple[str, ...]] | None:
-    """Return the maximal downstream ``LoopOp`` region and its live buffers."""
+    """Return the maximal ``LoopOp`` region around ``producer`` and its live buffers.
+
+    The region is closed under two steps: a member's ``LoopOp`` consumers join, and so do a
+    member's co-readers (:func:`_co_readers`). The first step alone reaches only what lies
+    downstream of ``producer``; the second reaches siblings that share an input with a member
+    without consuming one. Both steps add readers only, never a buffer's producer, so the
+    region is downstream-closed among kernels. After lifting every node with inputs is a kernel,
+    so downstream-closed means convex: no path leaves the region and re-enters it, and the merged
+    kernel cannot depend on a node that depends on it. The subtractions below remove
+    downstream-closed subsets, which keeps that property.
+    """
     region: set[str] = set()
     pending = [producer.id]
     while pending:
@@ -112,7 +136,9 @@ def _loop_consumer_region(graph: Graph, producer: Node) -> tuple[set[str], tuple
         if nid in region:
             continue
         region.add(nid)
+        node = graph.nodes[nid]
         pending.extend(user for user in graph.users(nid) if isinstance(graph.nodes[user].op, LoopOp))
+        pending.extend(_co_readers(graph, node))
     region -= _packed_readers(graph, region)
     # A kernel that carries a state is a region of its own: the splice inlines a store into its
     # readers, and a state is stored once per step, not once.
@@ -188,6 +214,8 @@ def rewrite(match: Match, producer: Node) -> Graph | None:
                     if users and users <= dropped and all(isinstance(s, (Loop, Load, Write)) for s in graph.nodes[nid].op.body.iter()):
                         dropped.add(nid)
             region = region - dropped
+            # A region that shrinks away from the matched producer is not lost: the rule runs to
+            # a fixpoint over every kernel, so a surviving member's own match seeds it again.
             if producer.id not in region or len(region) < 2:
                 raise RuleSkipped(f"region shrank away from its producer: {doom}") from doom
             live_outputs = live_outputs_of(graph, region)
