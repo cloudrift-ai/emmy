@@ -308,8 +308,10 @@ def test_scheduled_tile_child_is_not_reenrolled_or_rescheduled() -> None:
     assert cuda.knobs["STAGE"] == "d1/smem-async"
 
 
-def test_placement_route_total_is_not_persisted_without_a_child_schedule_receipt(monkeypatch, tmp_path) -> None:
-    """A measured route stays search evidence until its exact child tree can replay."""
+def test_a_measured_cut_is_priced_from_its_pieces_and_writes_no_row_of_its_own(monkeypatch, tmp_path) -> None:
+    """A cut the search measured leaves the DB one routing row and its pieces' own measurements:
+    no whole-slice total under the parent, no row spelling the cut. The parent's price is read back
+    as the Σ of its pieces' best rows, the same number the search scored the arm at."""
     monkeypatch.setenv("EMMY_REDUCE", "")
     graph = _placement_route_graph()
     ctx = Context.from_target((8, 0))
@@ -328,8 +330,11 @@ def test_placement_route_total_is_not_persisted_without_a_child_schedule_receipt
     assert result.best_reward is not None
     assert result.best_reward.searched_winner() == ({"PLACE": "cut"}, 2.0)
     assert backend.measured_route is not None
-    route_rows = [row for row in db.iter_perf(ctx, backend="cuda") if row.knobs.get("PLACE") == "cut"]
-    assert route_rows == []
+    [routing] = list(db.iter_routing())
+    assert routing.arm == {"PLACE": "cut"} and len(routing.children) == 2
+    assert db.lookup_perf(ctx, routing.parent, bindings={}, knobs={}, backend="cuda") is None, "no total row under the parent"
+    assert db.best_per_op_time(ctx, routing.parent, bindings={}, backend="cuda") == 2.0
+    assert [r.best_us for r in result.best_reward.per_op] == [2.0]
     db.close()
 
 
@@ -376,9 +381,9 @@ def test_a_pinned_cut_stores_the_routing_it_minted(monkeypatch) -> None:
     assembled = [node.op for node in result.assembled.nodes.values() if isinstance(node.op, CudaOp)]
     pieces = {kernel_tile(op).identity_key(structural=False, with_io=True) for op in assembled}
     assert len(pieces) == 2
-    [row] = list(db.iter_routing_rows())
+    [row] = list(db.iter_routing())
     assert set(row.children) == pieces
-    assert set(row.decision.values()) == {"cut"} and row.parent not in pieces
+    assert row.arm == {"PLACE": "cut"} and row.parent not in pieces
     names = db.kernel_names()
     assert {row.parent, *pieces} <= set(names)
 

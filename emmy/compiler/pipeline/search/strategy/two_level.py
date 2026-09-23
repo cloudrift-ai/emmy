@@ -204,8 +204,10 @@ class _KernelInventory(PipelineStrategy):
     the event protocol is how a search shape hears about splices.
 
     It also reports each kernel-set decision once, to ``on_routing(parent, arm, pieces)``: the
-    tile kernel the fork was offered on, the arm's knobs, and the pieces as they stand in the
-    graph after the splice — a piece's buffers are bound only then, and its identity reads them."""
+    tile kernel the fork was offered on, the arm's knobs with one key per seam cut (the fork's
+    other spellings of a seam resolved through the event's ``aliases``), and the pieces as they
+    stand in the graph after the splice — a piece's buffers are bound only then, and its identity
+    reads them."""
 
     def __init__(self, identity: IdentityStrategy, on_kernel, seen: set[str] | None = None, on_routing=None) -> None:
         self.identity = identity
@@ -225,7 +227,9 @@ class _KernelInventory(PipelineStrategy):
                 continue
             self.seen.add(key)
             self.on_kernel(nid, op, e.fragment)
-        self._open = (e.root_op, dict(e.knobs)) if isinstance(e.root_op, TileOp) and e.knobs else None
+        self._open = (
+            (e.root_op, {e.aliases.get(k, k): v for k, v in e.knobs.items()}) if isinstance(e.root_op, TileOp) and e.knobs else None
+        )
 
     def on_spliced(self, e: SplicedEvent) -> None:
         if self._open is None:
@@ -462,24 +466,11 @@ class TwoLevelStrategy(SearchStrategy):
                             slot=op_idx,
                         )
                 # The inner MCTS's best reward is ``1 / min whole-slice total`` (the bench sums
-                # every CudaOp in the slice, so a split-K main + combine both count). Record
-                # that total under the kernel with no knobs so ``best_per_op_time`` reads the
-                # true per-op cost.
+                # every CudaOp in the slice, so a split-K main + combine both count). The total is
+                # this session's; the DB prices the kernel from what it stores — a leaf's best row,
+                # or a cut as the Σ of its pieces' best rows — and no total row is written.
                 best_total = 1.0 / inner.tree.best_reward if inner.tree.best_reward > 0 else None
                 searched = inner.best_realized()
-                if best_total is not None:
-                    # captured=True: the sweep benches under graph capture by default, so this
-                    # Σ-best bookkeeping row derives from captured measurements.
-                    db.record_perf(
-                        ctx,
-                        work.identity,
-                        bindings=work.bindings,
-                        knobs={},
-                        backend=backend_name,
-                        status="ok",
-                        stats=_point_stats(best_total),
-                        captured=True,
-                    )
                 if prior is not None:
                     # In-flight refit (single-threaded → no lock): stream this op's rows into
                     # the global reservoir; refit + checkpoint once enough new rows accumulate.
@@ -492,7 +483,15 @@ class TwoLevelStrategy(SearchStrategy):
                     else:
                         logger.info("[tune] enrolled minted kernel %s: no clean measurement", name)
                     return
-                best = db.best_per_op_time(ctx, work.identity, bindings=work.bindings, backend=backend_name)
+                # The DB's price can beat this session's (an earlier session's row) and this
+                # session's can beat the DB's (a piece with no identity is not a kernel the DB can
+                # name, so its cut stays unpriced there).
+                priced = [
+                    us
+                    for us in (best_total, db.best_per_op_time(ctx, work.identity, bindings=work.bindings, backend=backend_name))
+                    if us is not None
+                ]
+                best = min(priced) if priced else None
                 searched_knobs = searched_us = searched_cuda_ops = None
                 searched_structural = False
                 if searched is not None:

@@ -32,6 +32,7 @@ from emmy.compiler.pipeline.search.working_golden import (
     validate_working_gpu,
 )
 from emmy.compiler.torch_wire import intern_program
+from tests.compiler.pipeline.search.helpers import kernel_row
 
 
 def _args(path, **over):
@@ -441,15 +442,13 @@ def test_structural_multi_cuda_proposal_keeps_ranking_without_parent_perf(tmp_pa
     assert list(reloaded_db.iter_perf_rows()) == [], "a proposal measurement fabricates no deploy evidence"
     reloaded_db.close()
 
-    # A later ordinary search keeps its own whole-slice bookkeeping under the unpinned Loop key and
-    # its kernel row under the kernel's own key. Neither may fabricate deploy evidence for the
-    # structural parent captured by the proposal's node lineage.
+    # A later ordinary search files its measurements under each kernel's own row. None may fabricate
+    # deploy evidence for the structural parent captured by the proposal's node lineage.
     db = SearchDB(db_path)
-    bookkeeping = PerfStats(median=106.95, min=106.95, max=106.95, mean=106.95, variance=0.0, n_samples=1)
     monolithic = PerfStats(median=153.45, min=153.45, max=153.45, mean=153.45, variance=0.0, n_samples=1)
     fallback = {**route, "REDUCE": ""}
     fallback_key = "monolithic-cuda"
-    db.record_perf(ctx, loop_key, bindings={}, knobs={}, backend="cuda", status="ok", stats=bookkeeping, captured=True)
+    db.record_kernel(kernel_row(fallback_key, stamps=live_features, name=fallback_key))
     db.record_perf(
         ctx,
         fallback_key,
@@ -462,9 +461,7 @@ def test_structural_multi_cuda_proposal_keeps_ranking_without_parent_perf(tmp_pa
     )
     db.close()
     reloaded_db = SearchDB.open_readonly(db_path)
-    assert {row.kernel for row in reloaded_db.iter_perf(ctx, backend="cuda")} == {loop_key, fallback_key}
-    loop_perf = reloaded_db.lookup_perf(ctx, loop_key, bindings={}, knobs={}, backend="cuda")
-    assert loop_perf is not None and loop_perf.stats.median == pytest.approx(106.95)
+    assert {row.kernel for row in reloaded_db.iter_perf(ctx, backend="cuda")} == {fallback_key}
     candidates = [{**live_features, **fallback}, {**live_features, **route}]
     assert _db_measured_pick(_db_measured_index(reloaded_db, ctx).ok, candidates) == (0, 153.45)
     reloaded_db.close()

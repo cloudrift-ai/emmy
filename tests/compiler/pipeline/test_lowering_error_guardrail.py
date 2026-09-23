@@ -43,7 +43,7 @@ from emmy.compiler.ir.kernel.ir import KernelOp, Smem
 from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline import FINAL_LOWERING_PASS, LoweringError
 from emmy.compiler.pipeline.pipeline import Pass, Pattern, Pipeline, Rule, RuleSkipped
-from emmy.compiler.pipeline.search.policy.terminal_bench import point_stats
+from emmy.compiler.pipeline.search.policy.terminal_bench import kernel_row, point_stats
 from emmy.compiler.pipeline.search.strategy import greedy as greedy_strategy
 from emmy.compiler.pipeline.search.strategy.greedy import GreedyStrategy, _raise_on_unlowered
 from tests.compiler.helpers import drain_tune
@@ -234,6 +234,7 @@ def test_unlowered_terminal_is_bench_fail_despite_cached_residual_kernel():
     db = SearchDB()
     b = _terminal_bench(g, backend=_StubBackend(), db=db)
     identity = tile.identity_key(structural=False, with_io=True)
+    db.record_kernel(kernel_row(tile, "k_fin"))
     db.record_perf(b.ctx, identity, bindings=kernel_bindings(tile), knobs={}, backend="cuda", status="ok", stats=point_stats(104.0))
     kind, (stats, status) = b.prelude()
     assert kind == "done"

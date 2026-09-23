@@ -16,7 +16,6 @@ from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.cuda.ir import CudaOp
 from emmy.compiler.loop_wire import kernel_bindings, kernel_tile, kernel_wire
 from emmy.compiler.pipeline.search.db import KernelRow, PerfStats
-from emmy.compiler.structural import digest
 
 # The engine logger keeps the existing ``[tune]`` log channel and verbosity toggles.
 logger = logging.getLogger("emmy.compiler.pipeline")
@@ -52,11 +51,6 @@ class TerminalBench:
         #: fork made it several, they hold DIFFERENT rows and there is no single row to attribute
         #: the total to. Each kernel carries its own decisions and earns its own sample.
         self.per_kernel: list[tuple[dict, float, str]] = []
-        #: The kernel set's own identity — the digest of its kernels' variant keys — where a
-        #: multi-kernel terminal's verdict is filed when no single kernel can be blamed for it
-        #: (:func:`persist_bench_failure`). ``None`` for a one-kernel terminal, whose verdict is its kernel's.
-        keys = [n.op.identity_key(with_io=True, with_knobs=True) for n in self.cuda_nodes]
-        self.set_key = digest("kernel-set", *sorted(keys)) if len(keys) > 1 and None not in keys else None
 
     def _note(self, op, stats, status: str) -> None:
         self.per_kernel.append((dict(getattr(op, "knobs", None) or {}), float(stats.median), status))
@@ -122,15 +116,7 @@ class TerminalBench:
         # row of their own (the all-or-nothing rule below used to re-bench a hang on every fresh
         # session because the innocent kernels had none). An ``ok`` replay still needs every
         # kernel's row: ``backend.benchmark`` runs the whole graph, so a partial cache cannot
-        # stand in for the Σ. A verdict filed against the kernel set as a whole (an unblamed wall
-        # kill, :meth:`finalize_exc`) is looked up first: it has no kernel behind it.
-        if self.set_key is not None:
-            row = self.db.lookup_perf(self.ctx, self.set_key, bindings={}, knobs={}, backend=self.backend_name)
-            if row is not None:
-                logger.info(
-                    "[tune] cache hit: this %d-kernel set recorded %s as a whole — skipping bench", len(self.cuda_nodes), row.status
-                )
-                return "done", self._fail_verdict(row.stats.median, row.status)
+        # stand in for the Σ.
         rows = [(node, self._cached_row(node)) for node in self.cuda_nodes]
         failed = [(node, row) for node, row in rows if row is not None and row.status != "ok"]
         if failed:
@@ -187,15 +173,6 @@ class TerminalBench:
         s = point_stats(fail_us)
         for node in blamed:
             self._note(node.op, s, "bench_fail")
-        if not blamed and self.set_key is not None:
-            # The row carries no knobs and names no kernel row: nothing about any kernel is
-            # claimed, so the greedy's disqualification index (which joins on ``S_*`` signatures)
-            # and the per-kernel views (which join on the kernel row) never see it — only this
-            # cache lookup does.
-            error = f"{type(exc).__name__}: {exc}"
-            self.db.record_perf(
-                self.ctx, self.set_key, bindings={}, knobs={}, backend=self.backend_name, status="bench_fail", stats=s, error=error
-            )
         return self._fail_verdict(fail_us)
 
     def finalize_result(self, result):
@@ -337,8 +314,8 @@ def persist_bench_failure(db, ctx, backend_name: str, cuda_nodes, exc, fail_us: 
     bench-worker startup timeout that is not a property of any kernel. So blame is recorded only
     where it is unambiguous: the kernel the watchdog named, or the single kernel of a one-kernel
     graph. Otherwise no kernel earns a row — the run failed, but which kernel failed is unknown,
-    and unknown is not the same as failed (the tuner files that verdict under the kernel set's
-    own key instead)."""
+    and unknown is not the same as failed. The DB holds measurements of kernels and nothing else,
+    so such a slice is spent for this session and benched again, at the run budget, by the next."""
     named = _NAMED_KERNEL.search(str(exc))
     if named is not None:
         blamed = [n for n in cuda_nodes if getattr(n.op, "kernel_name", "") == named.group(1)]

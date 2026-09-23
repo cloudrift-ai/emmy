@@ -166,7 +166,7 @@ class Candidate:
         self.apply(match, options[0])
         return _REWRITE_APPLIED
 
-    def apply(self, match: Match, option: Op | Graph, *, knobs: dict | None = None) -> tuple[str, ...] | None:
+    def apply(self, match: Match, option: Op | Graph, *, knobs: dict | None = None, aliases: dict | None = None) -> tuple[str, ...] | None:
         """Lazy mode (called by ``LazyCandidate.resolve`` and
         internally by :meth:`try_rewrite` for single-option matches):
         apply the specific ``option`` to this candidate's graph.
@@ -190,8 +190,8 @@ class Candidate:
         knob merge, which is idempotent for rules that already merged
         manually). Knobs are NOT merged forward on the ``Graph`` path —
         fragment kernels carry their own structural identity. The selected
-        fork's delta instead rides ``SpliceEvent.knobs`` for strategies that
-        need the consumed parent's route identity.
+        fork's delta instead rides ``SpliceEvent.knobs`` (with the fork's
+        ``aliases``) for strategies that need the consumed parent's route identity.
 
         What a splice MEANS in any dialect is strategy business, not
         the engine's: ``on_splice`` fires before the splice (fragment
@@ -218,6 +218,7 @@ class Candidate:
                 pass_name=pass_name,
                 graph=self.graph,
                 knobs=dict(knobs or {}),
+                aliases=dict(aliases or {}),
             )
             for strat in strategies:
                 strat.on_splice(event)
@@ -371,7 +372,7 @@ class LazyCandidate:
             cursor=self.cursor,
             structural_decisions=list(self.inner.structural_decisions),
         )
-        resolved.apply(match.remap(resolved.graph), option, knobs=fork.knobs)
+        resolved.apply(match.remap(resolved.graph), option, knobs=fork.knobs, aliases=getattr(fork, "aliases", None))
         if self.structural_domain is not None:
             _remember_structural_decision(resolved.structural_decisions, root_op, self.structural_domain, dict(fork.knobs))
         self.resolved_knobs = dict(fork.knobs)

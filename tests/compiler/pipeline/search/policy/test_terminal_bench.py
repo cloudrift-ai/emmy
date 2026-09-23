@@ -255,7 +255,9 @@ async def test_a_blamed_kernel_replays_the_hang_for_its_slice() -> None:
 async def test_an_unattributable_failure_blames_no_kernel() -> None:
     """A bench-worker startup timeout is not a property of any kernel — it names none, and with
     several kernels in the terminal there is no unambiguous culprit. Unknown is not failed, so
-    nothing is persisted; the terminal still reports ``bench_fail`` and the candidate is spent."""
+    nothing is persisted (the DB holds measurements of kernels and nothing else); the terminal
+    still reports ``bench_fail``, the candidate is spent for this session, and the next session
+    benches the slice again at the run budget."""
     db, cand = SearchDB(), _candidate_pair()
     exc = RuntimeError("bench worker did not accept the request within 74.0s wall budget — SIGKILL'd, stream cleaned")
 
@@ -264,30 +266,6 @@ async def test_an_unattributable_failure_blames_no_kernel() -> None:
     assert status == "bench_fail"
     assert _fail_rows(db, cand) == {}
     assert per_kernel == []
-
-
-async def test_an_unattributable_failure_is_replayed_for_its_kernel_set() -> None:
-    """What IS known after a wall kill that names no kernel is that THIS kernel set failed at that
-    budget, and that much must persist: a multi-kernel slice whose slow member could not be blamed
-    used to write nothing and re-burn its whole wall budget on every restart — 20 minutes per
-    composed arm on the DeepSeek-V4-Flash post4096 twin. The verdict is filed under the kernel
-    set's own key: no kernel earns a row, so one of them enrolled on its own still benches."""
-    db, cand = SearchDB(), _candidate_pair()
-    wall = RuntimeError("bench worker exceeded 74.0s wall budget — SIGKILL'd, stream cleaned")
-    await bench_terminal_async(cand, backend=_RaisingBackend(wall), db=db)
-
-    retry = _BudgetedBackend(iter_ms=1.0)
-    _stats, status, measured, per_kernel = await bench_terminal_async(_candidate_pair(), backend=retry, db=db)
-
-    assert retry.calls == [], "the kernel set was wall-killed at this budget — it must not burn the budget again"
-    assert (status, measured) == ("bench_fail", False)
-    assert per_kernel == [] and _fail_rows(db, cand) == {}, "still no kernel is blamed"
-
-    solo = _BudgetedBackend(iter_ms=1.0)
-    _stats, status, _measured, _ = await bench_terminal_async(_candidate_solo("k_innocent"), backend=solo, db=db)
-
-    assert solo.calls == [(1, "auto")], "a kernel of the set is not condemned — on its own it still benches"
-    assert status == "ok"
 
 
 async def test_search_cache_replay_preserves_patience() -> None:
