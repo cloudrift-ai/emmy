@@ -703,12 +703,19 @@ def resolve_fill_stage(
         # fp8 atoms: the compute fill's slab store + ldmatrix drain are 16-bit-only
         _decline(why, f"the smem compute fill is 16-bit-only, but this atom's a operand is {atom.operand_dtype('a').nbytes}-byte")
         return None
-    if want_depth >= 2 and atom.sync_copy_staging:
+    cones = c.operands[0].as_slab() is None or any(b.as_slab() is None for _, b in c.bilinear_channels())
+    computes = cones or converting_a(c, atom, inputs)
+    if want_depth >= 2 and atom.sync_copy_staging and computes:
         # With no cp.async the ring's B copies are blocking copies, and on sm_70 the depth-2 ring
         # returned silently wrong answers on nine of sixteen measured warp grids and fragments,
-        # every one of them correct at depth 1.
+        # every one of them correct at depth 1. That is the ring under a COMPUTE fill, whose
+        # deposit runs on the drain's own threads; a node whose operands are all materialized
+        # reaches this tier only because it folds several channels, and then the transport is the
+        # ordinary blocking-copy ring the single-channel tiers already stage (``SPLIT_COPY_DEPTH``).
         _decline(why, "the smem compute fill's B prefetch ring needs cp.async; this atom stages with blocking copies")
         return None
+    if atom.sync_copy_staging:
+        want_depth = min(want_depth, SPLIT_COPY_DEPTH)
     bk_elems = tile.bk * atom.atom_k
     if k_axis.extent.is_static and k_axis.extent.as_static() % bk_elems:
         # the staged driver unrolls WHOLE K chunks — the same rule the copy transports state on their own
