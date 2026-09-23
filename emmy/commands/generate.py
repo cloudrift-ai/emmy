@@ -35,6 +35,12 @@ def register_generate_command(subparsers):
     native.add_argument("--export-native", metavar="DIR", help="Prepare a standalone cached Qwen3 artifact and exit")
     native.add_argument("--native-pack", metavar="DIR", help="Generate with a prepared Rust artifact (greedy only)")
     parser.add_argument("--context-length", type=int, default=None, help="Native export context capacity (default: 4096)")
+    parser.add_argument(
+        "--page-tokens",
+        type=int,
+        default=None,
+        help="Tokens of KV cache per page for the native export (default: the whole context, i.e. one page)",
+    )
     parser.add_argument("--capture", action="store_true", help="Replay native token steps as a CUDA graph")
     parser.add_argument("--revision", help="Checkpoint and tokenizer revision")
     parser.add_argument("--golden", help="Measured compiler evidence for native export")
@@ -103,7 +109,11 @@ def handle_generate(args):
         eos = [eos] if isinstance(eos, int) else (eos or [])
         with gpu_lock(), config.golden_file_override(args.golden), config.strict_evidence_override(args.strict_evidence):
             export_model(
-                model, args.export_native, context_length=MAX_CONTEXT if args.context_length is None else args.context_length, eos_ids=eos
+                model,
+                args.export_native,
+                context_length=MAX_CONTEXT if args.context_length is None else args.context_length,
+                page_tokens=args.page_tokens,
+                eos_ids=eos,
             )
         logger.info("Prepared native artifact at %s", args.export_native)
         return

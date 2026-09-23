@@ -18,11 +18,13 @@ obeys its declared ABI or memory bounds. Every referenced member must resolve in
 The initial supported subset is deliberately explicit:
 
 - CUDA plan formats 1 and 3, with static nonnegative shapes and ordinary pointer arguments. Format 2, symbolic shapes,
-  runtime constants/arguments, indirect operands, and TMA descriptors are rejected before submission.
+  runtime constants, indirect operands, and TMA descriptors are rejected before submission. The only runtime argument
+  accepted is a paged buffer's start (below); any other one names an extent nothing here can resolve.
 - Contiguous little-endian f16, bf16, f32, f64, signed/unsigned integer storage, and one-byte booleans. bf16 payloads
   contain encoded uint16 bits. Packed and quantized dtypes are not supported.
-- One allocation per named buffer, retained for the loaded program's lifetime. There are no external pointer aliases,
-  cross-program shared arrays, or liveness-based scratch reuse. Empty buffers have an address but return zero bytes.
+- One allocation per named buffer, retained for the loaded program's lifetime, EXCEPT a paged buffer (below). There are
+  no external pointer aliases, cross-program shared arrays, or liveness-based scratch reuse. Empty buffers have an
+  address but return zero bytes.
 - Ordered launch arguments follow `args`. Grid/block axes multiply their integer factors. `zero_outputs` clears a
   buffer before its launch; `zero_prologues` records zeroing performed inside the kernel and adds no extra memset.
 - Cubins must target the device's exact `sm_<major><minor>` architecture. Architecture-specific suffixes are rejected.
@@ -30,6 +32,29 @@ The initial supported subset is deliberately explicit:
 
 The manifest's standalone version governs bundle resolution. Plan versions govern execution semantics. Changing
 compiler scheduling without changing those semantics does not require a new artifact format.
+
+## Paged buffers
+
+A KV cache stops being one allocation as soon as it belongs to a request rather than to a program. A plan may therefore
+declare a buffer **paged**: cut along one axis every `page` elements, with an optional `start` naming the runtime
+argument that shifts a write's coordinate into the cache's own. The compiler renames that buffer's launch argument to
+`<name>__pages`, so what the kernel receives is a table of page pointers rather than one base, and every read and write
+resolves its page before its offset inside one. Shapes are unchanged — the declaration says how the memory is reached,
+not what it holds.
+
+The runtime owns the pages, and this is the one place where it, not the plan, decides anything. `PagePool` hands out
+equal-sized pages; `PagePool::table` publishes a set of them, in cache order, as the device array the executor binds
+under `<name>__pages`; `Executor::set_symbol` supplies the start a step writes at. A paged buffer is never allocated as
+a slab, never bound with bytes, and cannot be read back as one — its pages are the caller's to read.
+
+`scripts/export_paged_pack.py` exports a pack whose one program is a step of a cache fill;
+`crates/emmy-runtime/tests/paged.rs` runs it against a real device when `EMMY_PAGED_PACK` points
+at the result, and skips otherwise, because the pack needs a compiler this crate does not have.
+
+Residency is deliberately absent. Whether a page lives in device or host memory would be a property of a page inside
+the pool, and nothing above the pool would change; which processor runs a launch is a separate axis again, and belongs
+on the launch, not on the buffer. Neither exists yet, and a host-resident page read by a CUDA kernel crosses PCIe per
+access, so neither is worth building before there is something to measure.
 
 ## CUDA ownership
 

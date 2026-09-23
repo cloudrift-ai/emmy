@@ -1587,6 +1587,33 @@ def test_sdpa_scale_kwarg_captured():
     assert sdpa.scale is None
 
 
+def test_sdpa_is_causal_read_by_position_not_by_bool_scan():
+    """``is_causal`` must be read from its own slot. ``enable_gqa`` is the signature's other bool,
+    so scanning for the first bool anywhere read ``enable_gqa=True`` as causal and masked a full
+    GQA attention. Export positionalizes a non-default ``is_causal`` (slot 5) and leaves the
+    default off the node entirely, which is what makes the two spellings distinguishable."""
+    import torch
+    import torch.nn.functional as F
+    from torch import nn
+
+    from emmy.compiler.ir.frontend.ir import SdpaOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class Gqa(nn.Module):
+        def forward(self, q, k, v):
+            return F.scaled_dot_product_attention(q, k, v, enable_gqa=True)
+
+    class GqaCausal(nn.Module):
+        def forward(self, q, k, v):
+            return F.scaled_dot_product_attention(q, k, v, is_causal=True, enable_gqa=True)
+
+    qkv = (torch.randn(1, 4, 8, 4), torch.randn(1, 2, 8, 4), torch.randn(1, 2, 8, 4))
+    for module, expected in ((Gqa(), False), (GqaCausal(), True)):
+        g = trace_module(module.eval(), qkv)
+        (sdpa,) = [n.op for n in g.nodes.values() if isinstance(n.op, SdpaOp)]
+        assert sdpa.is_causal is expected, f"{type(module).__name__}: is_causal={sdpa.is_causal}"
+
+
 def test_sdpa_forward_honors_scale():
     """``SdpaOp.forward`` (the numpy reference) applies ``scale`` when set and the
     1/sqrt(d) default when not — checked against torch's own SDPA."""

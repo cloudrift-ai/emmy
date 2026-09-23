@@ -1822,11 +1822,11 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
         # decomposition can fold it into the scores; dropping it (the old
         # ``input_ids[:3]``) silently turned masked attention into full
         # bidirectional attention.
-        is_causal = False
-        for a in (*fx_node.args[3:], *(fx_node.kwargs or {}).values()):
-            if isinstance(a, bool):
-                is_causal = a
-                break
+        # ``is_causal``: positional slot 5 (export fills the preceding defaults when the flag is
+        # non-default) or the kwarg. Reading it as "the first bool anywhere" misread a trailing
+        # ``enable_gqa=True`` — the only other bool in the signature — as causal, turning a full
+        # GQA attention into a masked one.
+        is_causal = bool(fx_node.args[5] if len(fx_node.args) > 5 else (fx_node.kwargs or {}).get("is_causal", False))
         # ``scale``: positional slot 6 (after dropout_p at 4 — never captured, so a
         # bare float at 4 is dropout, at 6 is scale) or the kwarg. ``None`` = torch's
         # ``1/sqrt(head_dim)`` default. Dropping an explicit scale (Gemma-nano passes

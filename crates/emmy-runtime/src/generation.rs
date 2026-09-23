@@ -60,6 +60,17 @@ impl Config {
     }
 }
 
+/// Give every paged buffer the pages its declared shape spans.
+///
+/// This is where the runtime, not the plan, decides what the cache costs: enough pages to cover
+/// the context, allocated once and held for the generator's life.
+fn allocate_cache(executor: &mut Executor) -> Result<()> {
+    for (name, _page_bytes, pages) in executor.paged_buffers()? {
+        executor.alloc_pages(&name, pages)?;
+    }
+    Ok(())
+}
+
 pub struct Generator {
     executor: Executor,
     config: Config,
@@ -108,8 +119,12 @@ impl Generator {
             artifact.plan.outputs == ["logits", "next_token"],
             "invalid generation outputs"
         );
+        let mut executor = Executor::load(device, artifact)?;
+        // The KV cache: enough pages per paged buffer to cover the context, held for the
+        // generator's life. A request keeps its pages from prompt to EOS, so nothing is returned.
+        allocate_cache(&mut executor)?;
         Ok(Self {
-            executor: Executor::load(device, artifact)?,
+            executor,
             config,
             position: 0,
             prompt_length: 0,

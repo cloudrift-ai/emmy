@@ -40,6 +40,43 @@ impl Buffer {
     }
 }
 
+/// How one buffer is virtualized: it is not one allocation but a table of equal-sized pages, cut
+/// along `axis` every `page` elements. `start` names the runtime argument that shifts the
+/// buffer's own coordinate to an absolute one, which is how a step writes only its new rows.
+/// The runtime owns the pages; the plan only says what shape they have.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Paging {
+    pub axis: usize,
+    pub page: u64,
+    #[serde(default)]
+    pub start: Option<String>,
+}
+
+impl Paging {
+    /// The kernel parameter that carries the page table in place of the buffer's pointer.
+    pub fn table(name: &str) -> String {
+        format!("{name}__pages")
+    }
+
+    /// One page's byte size: the buffer's shape with the paged axis cut to `page`.
+    ///
+    /// How MANY pages exist is not the plan's business. A step writes a chunk of the cache, so
+    /// its buffer spans the chunk while the cache spans a request; only the page's own shape —
+    /// the other axes, at their declared extents — is shared between them, and that is what the
+    /// pool needs to size a page.
+    pub fn page_bytes(&self, buffer: &Buffer) -> Result<usize> {
+        let extent = buffer
+            .shape
+            .get(self.axis)
+            .context("paged axis is out of range")?
+            .as_u64()
+            .context("only static nonnegative shapes are supported")?;
+        ensure!(extent > 0 && self.page > 0, "empty paged axis");
+        Ok(buffer.byte_len()? / usize::try_from(extent)? * usize::try_from(self.page)?)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Kernel {
@@ -107,6 +144,8 @@ pub struct Plan {
     pub launches: Vec<Launch>,
     pub kernels: BTreeMap<String, Kernel>,
     pub weights: BTreeMap<String, Value>,
+    #[serde(default)]
+    pub paged: BTreeMap<String, Paging>,
     pub symbols: Symbols,
 }
 
@@ -133,6 +172,12 @@ impl Plan {
                 && self.symbols.caps.is_empty(),
             "dynamic plans are not yet supported"
         );
+        let tables: BTreeSet<String> = self.paged.keys().map(|n| Paging::table(n)).collect();
+        let starts: BTreeSet<&str> = self
+            .paged
+            .values()
+            .filter_map(|p| p.start.as_deref())
+            .collect();
         let mut names = BTreeSet::new();
         for buffer in &self.buffers {
             ensure!(
@@ -145,6 +190,22 @@ impl Plan {
                 "invalid buffer role"
             );
             let bytes = buffer.byte_len()?;
+            if let Some(paging) = self.paged.get(&buffer.name) {
+                // A paged buffer has no slab to upload into or allocate: the runtime owns its
+                // pages and binds their table. Only what the kernel reads and writes is declared.
+                ensure!(
+                    ["input", "output"].contains(&buffer.role.as_str()),
+                    "only inputs and outputs may be paged: {}",
+                    buffer.name
+                );
+                ensure!(
+                    !bindings.contains_key(&buffer.name),
+                    "paged buffer {} cannot carry bytes",
+                    buffer.name
+                );
+                paging.page_bytes(buffer)?;
+                continue;
+            }
             if let Some(data) = bindings.get(&buffer.name) {
                 ensure!(
                     ["input", "constant"].contains(&buffer.role.as_str()),
@@ -173,6 +234,9 @@ impl Plan {
         {
             ensure!(names.contains(name.as_str()), "unknown buffer {name}");
         }
+        for name in self.paged.keys() {
+            ensure!(names.contains(name.as_str()), "unknown paged buffer {name}");
+        }
         for (list, role) in [(&self.inputs, "input"), (&self.outputs, "output")] {
             ensure!(
                 list.iter().collect::<BTreeSet<_>>().len() == list.len(),
@@ -194,11 +258,17 @@ impl Plan {
                 launch.kernel
             );
             ensure!(
-                launch.indirect.is_empty()
-                    && launch.cuda.tma.is_empty()
-                    && launch.runtime_args.is_empty(),
-                "indirect operands, descriptors, and runtime arguments are not yet supported"
+                launch.indirect.is_empty() && launch.cuda.tma.is_empty(),
+                "indirect operands and descriptors are not yet supported"
             );
+            // The only runtime argument this runtime supplies is a paged buffer's start; every
+            // other one still names a symbolic extent nothing here can resolve.
+            for name in &launch.runtime_args {
+                ensure!(
+                    starts.contains(name.as_str()),
+                    "runtime argument {name} is not a paged buffer's start"
+                );
+            }
             dimensions(&launch.grid)?;
             dimensions(&launch.block)?;
             for name in launch
@@ -209,8 +279,23 @@ impl Plan {
                 .chain(&launch.writes)
             {
                 ensure!(
-                    names.contains(name.as_str()),
+                    names.contains(name.as_str()) || tables.contains(name.as_str()),
                     "unknown launch buffer {name}"
+                );
+            }
+            // ``writes`` and the zero lists name buffers; only ``args`` passes pointers, and a
+            // paged buffer has none. Zeroing one would have to memset a slab that does not exist.
+            for name in &launch.args {
+                ensure!(
+                    !self.paged.contains_key(name.as_str()),
+                    "paged buffer {name} has no pointer to pass; its launch must name {}",
+                    Paging::table(name)
+                );
+            }
+            for name in launch.zero_outputs.iter().chain(&launch.zero_prologues) {
+                ensure!(
+                    !self.paged.contains_key(name.as_str()),
+                    "paged buffer {name} cannot be zero-initialized per launch"
                 );
             }
         }
@@ -339,6 +424,65 @@ mod tests {
         let mut unknown = example();
         unknown["launches"][0]["unrecognized_abi"] = json!(true);
         assert!(serde_json::from_value::<Plan>(unknown).is_err());
+    }
+
+    /// One step of a cache fill: `k` holds the four keys this step produces, and `past` says which
+    /// pages of the cache — pages the runtime owns, not the plan — they land in.
+    fn paged_example() -> Value {
+        json!({
+            "format": 1, "backend": "cuda", "inputs": ["x"], "outputs": ["k"],
+            "buffers": [
+                {"name":"x", "shape":[1,2,4,8], "dtype":"f32", "role":"input"},
+                {"name":"k", "shape":[1,2,4,8], "dtype":"f32", "role":"output"}
+            ],
+            "constants": {}, "runtime_constants": {}, "weights": {},
+            "paged": {"k": {"axis": 2, "page": 8, "start": "past"}},
+            "kernels": {"fill": {"binary_key":"ab", "arch_specific":false}},
+            "symbols": {"bindings":{},"hints":{},"caps":{}},
+            "launches": [{"node_id":"k", "kernel":"fill", "args":["x","k__pages"],
+                "grid":[[1],[1],[1]],"block":[[32],[1],[1]],"smem":0,
+                "zero_outputs":[],"runtime_args":["past"],"cuda":{"tma":[]}}]
+        })
+    }
+
+    #[test]
+    fn paged_buffer_is_addressed_through_its_table_and_never_allocated() {
+        let plan: Plan = serde_json::from_value(paged_example()).unwrap();
+        plan.validate(&BTreeMap::new()).unwrap();
+
+        let buffer = plan.buffers.iter().find(|b| b.name == "k").unwrap();
+        let paging = &plan.paged["k"];
+        assert_eq!(Paging::table("k"), "k__pages");
+        // One page is the buffer's shape with the paged axis cut to the page size — so a step
+        // whose own buffer spans four keys still sizes the cache's eight-key pages correctly.
+        assert_eq!(paging.page_bytes(buffer).unwrap(), 2 * 8 * 8 * 4);
+
+        // A paged buffer carries no bytes: there is no slab to upload into.
+        let bound = BTreeMap::from([("k".to_string(), vec![0u8; buffer.byte_len().unwrap()])]);
+        assert!(plan.validate(&bound).is_err());
+    }
+
+    #[test]
+    fn paging_rejects_geometry_and_arguments_it_cannot_honor() {
+        for (pointer, value) in [
+            // The launch must name the table; the buffer itself has no pointer to pass.
+            ("/launches/0/args/1", json!("k")),
+            // A runtime argument that is not a paging start still has nothing to resolve it.
+            ("/launches/0/runtime_args", json!(["seq_len"])),
+            // The axis must exist and a page must hold something.
+            ("/paged/k/axis", json!(9)),
+            ("/paged/k/page", json!(0)),
+            // Only what a kernel reads or writes can be paged.
+            ("/paged", json!({"missing": {"axis": 0, "page": 1}})),
+        ] {
+            let mut value_plan = paged_example();
+            *value_plan.pointer_mut(pointer).unwrap() = value;
+            let plan: Plan = serde_json::from_value(value_plan).unwrap();
+            assert!(
+                plan.validate(&BTreeMap::new()).is_err(),
+                "accepted {pointer}"
+            );
+        }
     }
 
     #[test]

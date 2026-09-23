@@ -27,7 +27,7 @@ from emmy.compiler.ir.kernel.ir import (
     swizzle_fn,
     swizzle_xor,
 )
-from emmy.compiler.ir.stmt import RenderCtx, render_body
+from emmy.compiler.ir.stmt import Paged, RenderCtx, render_body
 from emmy.compiler.ir.stmt.leaves import Assign, Write
 from emmy.compiler.tensor import Tensor
 
@@ -1398,6 +1398,7 @@ def render_kernelop(
     literal_constants: dict[str, float] | None = None,
     runtime_args: tuple[str, ...] = (),
     indirect_inputs: tuple[str, ...] = (),
+    paged_buffers: tuple[tuple[str, int, int], ...] = (),
 ) -> str:
     """Render a complete ``extern "C" __global__`` CUDA function for a ``KernelOp``.
 
@@ -1429,6 +1430,17 @@ def render_kernelop(
     ``kernel_op.inputs`` are ignored. Empty (the default) renders exactly
     the historical signature — non-indirect kernel sources stay
     byte-identical.
+
+    ``paged_buffers`` names buffers virtualized along one axis, as
+    ``(name, axis, page_size, start)``: instead of a plain pointer the signature
+    takes ``<n>__pages``, a table of equal-sized pages, and every read or
+    write resolves its page before its offset (see ``render_paged_access``)
+    — the KV cache, whose pages are allocated per request and are not one
+    contiguous block. Shapes are untouched, so the paged axis stays
+    ``kv_len`` everywhere above the load. ``start`` names a runtime ``int``
+    added to the paged index before the split — the absolute position a
+    cache write lands at — or ``None`` to address from page 0. Empty (the
+    default) renders every buffer flat.
 
     Kernel signature is derived from the body: ``kernel_op.inputs``
     (distinct ``Load.input`` names) become input params,
@@ -1469,14 +1481,30 @@ def render_kernelop(
             )
 
     indirect = tuple(n for n in kernel_op.inputs if n in indirect_inputs and n not in literals)
+    paged = {
+        n: Paged(n, axis, page, start)
+        for n, axis, page, start in paged_buffers
+        if n not in literals and (n in kernel_op.inputs or n in kernel_op.outputs)
+    }
+    if set(paged) & set(indirect):
+        raise NotImplementedError(f"buffer(s) {sorted(set(paged) & set(indirect))} are both indirect and paged")
+    ctx.memory = dict(paged)
     sig_parts = [
         f"const {cuda_name(_dtype_for(n))}* const* {n}__table, const int* {n}__sel, int {n}__slot"
         if n in indirect
+        else f"const {cuda_name(_dtype_for(n))}* const* {n}__pages"
+        if n in paged
         else f"const {cuda_name(_dtype_for(n))}* {n}"
         for n in kernel_op.inputs
         if n not in literals
     ]
-    sig_parts.extend(f"{cuda_name(_dtype_for(n))}* {n}" for n in kernel_op.outputs)
+
+    def _out_param(n: str) -> str:
+        """A paged output takes its page table; every other output stays a plain pointer."""
+        elem = cuda_name(_dtype_for(n))
+        return f"{elem}* const* {n}__pages" if n in paged else f"{elem}* {n}"
+
+    sig_parts.extend(_out_param(n) for n in kernel_op.outputs)
     # TMA descriptors are passed as ``__grid_constant__`` value parameters.
     # The kernel only takes their address (``&desc``) for inline asm, so
     # the opaque ``CUtensorMap`` forward decl above suffices.

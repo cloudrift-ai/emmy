@@ -1,0 +1,33 @@
+# Qwen3-0.6B: the smallest dense Qwen3, used as the generative smoke model.
+#
+# This recipe exists for the native cached-generation path (emmy/serving/native), not for a
+# serving comparison: it is the model the paged-KV-cache experiment qualifies against
+# (experiments/Qwen3-0.6B/paged_cache). The golden below is what pins its schedule.
+tags:
+  - maintained
+
+model:
+  huggingface: "Qwen/Qwen3-0.6B"
+  rationale: "Smallest dense Qwen3 — the generative smoke model, same family as the embedding one."
+  heat: 40
+  task: generate
+
+engine:
+  llm:
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    gpu_memory_utilization: 0.9
+    context_length: 4096
+    max_concurrent_requests: 32
+
+benchmark:
+  max_concurrency: 32
+  num_prompts: 256
+  random_input_len: 512
+  random_output_len: 128
+
+matrices:
+  cross:
+    deploy.gpu:
+      - "NVIDIA GeForce RTX 5090"
+    deploy.gpu_count: 1

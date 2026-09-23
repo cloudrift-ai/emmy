@@ -18,7 +18,7 @@ from emmy.compiler.ir.cuda import CudaOp, TmaDescMeta
 from emmy.compiler.ir.kernel import KernelOp, Tile
 from emmy.compiler.ir.kernel.ir import TmaDescriptor
 from emmy.compiler.ir.kernel.render import _BLOCK_SIZE, render_kernelop
-from emmy.compiler.ir.stmt import ZeroPrologue
+from emmy.compiler.ir.stmt import Load, Write, ZeroPrologue
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering.cuda._helpers import atomic_outputs as _atomic_outputs
 
@@ -95,7 +95,31 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
                 f"indirect operand(s) {staged} are staged through TMA descriptors (descriptors bake the base "
                 f"address at encode) — an indirect build requires a descriptor-free schedule for these operands"
             )
-    source = render_kernelop(kernel, tensors=tensors, runtime_args=runtime_args, indirect_inputs=indirect)
+    # Paged buffers (graph-level hint, same ABI-only story as the indirect ones): the marked
+    # buffers are a device table of equal-sized pages rather than one allocation, so each read
+    # and write resolves its page first — the KV cache, whose pages belong to a request rather
+    # than to one contiguous slab. Shapes are untouched, so the schedule search never sees it.
+    scope = {*kernel.inputs, *kernel.outputs}
+    paged = tuple(entry for entry in match.graph.hints.get("cuda.paged_buffers", ()) if entry[0] in scope)
+    # A page start is a runtime ``int`` the caller supplies per step (``past``): it names no axis,
+    # so no shape carries it and the signature has to take it on the paged buffer's behalf.
+    runtime_args = tuple(dict.fromkeys((*runtime_args, *(start for *_, start in paged if start is not None))))
+    if paged:
+        # A paged buffer has no base pointer to take: only ``Load`` / ``Write`` resolve a page,
+        # so any other stmt touching it (a TMA descriptor, a cp.async stage) would need a base
+        # this ABI cannot give, and a zero-init would have to memset a slab that does not exist.
+        names = {entry[0] for entry in paged}
+        staging = [s for s in kernel.body.iter() if not isinstance(s, (Load, Write))]
+        touched = {b for s in staging for b in (*s.external_reads(), *s.external_writes()) if b in names}
+        if touched:
+            raise NotImplementedError(
+                f"paged buffer(s) {sorted(touched)} are staged by a stmt that takes their base address "
+                f"(a TMA descriptor or a cp.async copy) — a paged build requires a schedule that reads them directly"
+            )
+        zeroed = sorted(names & {*_atomic_outputs(kernel), *(zp.dst for zp in kernel.body.iter_of_type(ZeroPrologue))})
+        if zeroed:
+            raise NotImplementedError(f"paged buffer(s) {zeroed} are zero-initialized per launch, which has no page table to clear")
+    source = render_kernelop(kernel, tensors=tensors, runtime_args=runtime_args, indirect_inputs=indirect, paged_buffers=paged)
 
     # A cooperative tile fixes the per-CTA thread count (``coop · ∏block-cells``): one CTA
     # per output-cell group, ``blockDim = block_threads``, ``gridDim = N / block_threads``
@@ -116,7 +140,14 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
     # (tail-appended in ``_launch``) — matching ``render_kernelop``'s param layout. An
     # indirect operand keeps its plain name in ``arg_order``; the launcher expands it in
     # place to (table, sel, slot) via ``indirect_args``.
-    arg_order = (*kernel.inputs, *kernel.outputs, *(d.name for d in tma_descs))
+    # A paged operand binds its page TABLE, not the buffer: the name in ``arg_order`` is what the
+    # launcher looks up in ``arrays``, so the rename is the whole runtime change.
+    paged_names = {entry[0] for entry in paged}
+
+    def _bound(n: str) -> str:
+        return f"{n}__pages" if n in paged_names else n
+
+    arg_order = (*(_bound(n) for n in kernel.inputs), *(_bound(n) for n in kernel.outputs), *(d.name for d in tma_descs))
     return CudaOp(
         kernel_source=source,
         kernel_name=name,
