@@ -162,6 +162,8 @@ CHECKPOINT_CASES = (
     ("heldout_math", "A box has 7 red balls and 5 blue balls. How many balls are in the box?", None, 24, False),
     ("heldout_code", "def is_even(number):\n    return", None, 24, True),
     ("heldout_context", "The train crosses a bridge and stops beside a quiet village. ", 128, 24, True),
+    ("context_1024", "The garden has a pond, a wooden bench, and a path lined with trees. ", 1008, 16, False),
+    ("context_4096", "The museum catalog describes paintings, pottery, maps, and tools from different centuries. ", 4080, 16, True),
 )
 
 
@@ -256,7 +258,8 @@ def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch, name,
                             "full_model_close": bool(np.allclose(actual, expected, rtol=2e-2, atol=2e-2)),
                         }
                     )
-                    (tmp_path / "measurements.json").write_text(json.dumps(measurements, indent=2))
+                    if position % 64 == 0 or position + 1 == len(prompt) + decode_steps:
+                        (tmp_path / "measurements.json").write_text(json.dumps(measurements, indent=2))
                     if result["token"] is not None:
                         next_token = result["token"]
                         assert next_token == int(actual.argmax())
@@ -276,6 +279,13 @@ def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch, name,
                         native_rms,
                         reference_rms,
                     )
+                if prompt_length is not None and prompt_length >= 1008:
+                    # A short request after a full cache must see only its own overwritten prefix.
+                    np.asarray(prompt[:3], np.int64).tofile(path)
+                    await worker.run_job({"op": "start_generation", "prompt": str(path)}, wall_timeout_s=30)
+                    for _ in range(3):
+                        reset = await worker.run_job({"op": "generation_step", "capture": True}, wall_timeout_s=30)
+                    assert reset["token"] == measurements[2]["native_token"]
             finally:
                 await worker.aclose()
 
@@ -429,7 +439,7 @@ def test_gpu_sampling_matches_independent_nucleus_distribution():
     # independently of the device's histogram representation.
     source = (
         "#define HIDDEN 32\n#define HEADS 4\n#define KV_HEADS 2\n#define HEAD_DIM 8\n"
-        "#define VOCAB 32\n#define SCALE 0.3535533905932738f\n" + SOURCE
+        "#define VOCAB 257\n#define SCALE 0.3535533905932738f\n" + SOURCE
     )
     with gpu_lock():
         module = cp.RawModule(code=source, backend="nvcc")
@@ -439,22 +449,22 @@ def test_gpu_sampling_matches_independent_nucleus_distribution():
         position, length = cp.array([0], cp.int64), cp.array([1], cp.int64)
         seed, output = cp.array([0], cp.uint64), cp.array([-1], cp.int64)
         rng = np.random.default_rng(928)
-        cases = [rng.normal(size=32).astype(np.float16), np.zeros(32, np.float16)]
-        cases += [np.array([-65504, 65504, -0.0, 0.0] * 8, np.float16)]
+        cases = [rng.normal(size=257).astype(np.float16), np.zeros(257, np.float16)]
+        cases += [np.resize(np.array([-65504, 65504, -0.0, 0.0], np.float16), 257)]
         for values in cases:
             logits = cp.asarray(values)
             for temperature, top_p in ((0.0, 1.0), (0.7, 0.8), (2.0, 1.0), (1e-300, 0.01), (1e300, 0.5)):
                 params = cp.array([temperature, top_p], cp.float64)
                 histogram.fill(0)
-                histogram_kernel((1,), (32,), (logits, params, position, length, histogram))
+                histogram_kernel((3,), (128,), (logits, params, position, length, histogram))
                 if temperature == 0:
-                    probabilities = np.eye(32)[values.argmax()]
+                    probabilities = np.eye(257)[values.argmax()]
                 else:
                     order = np.argsort(-values.astype(np.float64), kind="stable")
                     weights = np.exp((values.astype(np.float64) - values.max()) / temperature)
                     weights /= weights.sum()
-                    keep = min(32, np.searchsorted(np.cumsum(weights[order]), top_p) + 1)
-                    probabilities = np.zeros(32)
+                    keep = min(257, np.searchsorted(np.cumsum(weights[order]), top_p) + 1)
+                    probabilities = np.zeros(257)
                     probabilities[order[:keep]] = weights[order[:keep]]
                     probabilities /= probabilities.sum()
                 selected = []
@@ -464,7 +474,7 @@ def test_gpu_sampling_matches_independent_nucleus_distribution():
                     token = int(output.get()[0])
                     assert probabilities[token] > 0
                     selected.append(token)
-                frequencies = np.bincount(selected, minlength=32) / len(selected)
+                frequencies = np.bincount(selected, minlength=257) / len(selected)
                 # Six binomial standard deviations plus one sample for rounding.
                 bounds = 6 * np.sqrt(probabilities * (1 - probabilities) / len(selected)) + 1 / len(selected)
                 assert np.all(np.abs(frequencies - probabilities) <= bounds), (temperature, top_p, frequencies, probabilities)
@@ -473,19 +483,19 @@ def test_gpu_sampling_matches_independent_nucleus_distribution():
                 with stream:
                     stream.begin_capture()
                     histogram.fill(0)
-                    histogram_kernel((1,), (32,), (logits, params, position, length, histogram))
+                    histogram_kernel((3,), (128,), (logits, params, position, length, histogram))
                     sample_kernel((1,), (1,), (logits, histogram, params, seed, position, length, output))
                     graph = stream.end_capture()
                     graph.launch(stream)
                 stream.synchronize()
                 assert int(output.get()[0]) == selected[77]
         for invalid in (np.nan, np.inf, -np.inf):
-            values = np.zeros(32, np.float16)
+            values = np.zeros(257, np.float16)
             values[3] = invalid
             logits = cp.asarray(values)
             for temperature in (0.0, 1.0):
                 params = cp.array([temperature, 1.0], cp.float64)
                 histogram.fill(0)
-                histogram_kernel((1,), (32,), (logits, params, position, length, histogram))
+                histogram_kernel((3,), (128,), (logits, params, position, length, histogram))
                 sample_kernel((1,), (1,), (logits, histogram, params, seed, position, length, output))
                 assert int(output.get()[0]) == -1

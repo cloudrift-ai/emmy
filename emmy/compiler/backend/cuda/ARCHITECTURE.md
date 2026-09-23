@@ -372,3 +372,7 @@ timing boundaries. Existing autotune and model comparison behavior remains uncha
   under "Rule module convention".
 - The CUDA backend imports from `ir/` and `pipeline/` but never into
   them. A ROCm/SYCL/Metal backend replaces `program.py` only.
+
+The Python worker's protocol encoder adds the current compiler precision policy to its message. The shared process
+supervisor owns only deadlines and process lifetime; it does not inject compiler settings into native runtime
+commands. Prepared-pack reference commands keep that policy in the outer Python message.

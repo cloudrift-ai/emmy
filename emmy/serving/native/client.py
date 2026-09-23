@@ -19,7 +19,7 @@ def validate_sampling(temperature, top_p, seed):
         raise ValueError("temperature must be finite and nonnegative")
     if not math.isfinite(top_p) or not 0 < top_p <= 1:
         raise ValueError("top_p must be in (0, 1]")
-    if not isinstance(seed, int) or not 0 <= seed < 2**64:
+    if type(seed) is not int or not 0 <= seed < 2**64:
         raise ValueError("seed must be an unsigned 64-bit integer")
 
 

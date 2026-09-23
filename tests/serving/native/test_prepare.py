@@ -53,7 +53,9 @@ def test_native_only_arguments_fail_before_loading_a_model():
             handle_generate(parser.parse_args(["generate", "unused", *options]))
 
 
-@pytest.mark.parametrize("temperature,top_p,seed", [(-1, 1, 0), (float("nan"), 1, 0), (1, 0, 0), (1, 1.1, 0), (1, 1, -1), (1, 1, 2**64)])
+@pytest.mark.parametrize(
+    "temperature,top_p,seed", [(-1, 1, 0), (float("nan"), 1, 0), (1, 0, 0), (1, 1.1, 0), (1, 1, -1), (1, 1, 2**64), (1, 1, True)]
+)
 def test_invalid_sampling_controls(temperature, top_p, seed):
     from emmy.serving.native.client import validate_sampling
 

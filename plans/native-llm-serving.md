@@ -8,7 +8,7 @@ and launcher. The runtime executes Emmy's exported programs independently for be
 Once complete cached generation works, add `--native` to the existing serving command to launch `emmy-server`
 instead of vLLM. Keep vLLM as the default. Qualify dense Qwen3-0.6B in FP16 on one GPU first.
 
-## Implementation status — PR #820
+## Implementation status
 
 [PR #820](https://github.com/cloudrift-ai/emmy/pull/820) merged the static runtime foundation and records RTX 4080
 experiments. It does not implement native LLM serving. This plan remains open until the remaining work is completed
@@ -24,13 +24,13 @@ or its scope is explicitly revised.
   using identical artifacts with persistent and one-shot workers. GPU parity and recovery checks pass. General tune
   integration and separately isolated serialization costs remain outstanding. Unsupported dynamic shapes, indirect
   operands, TMA, and buffer aliasing remain explicit limits of the initial static subset.
-- **Milestone 2 — implemented on a draft branch, PR #859.** Native cached Qwen3 preparation and execution
-  are implemented on a separate branch. Tiny-model logits pass at `rtol=atol=1e-3`, including request reset and graph
+- **Milestone 2 — cached generation merged in PR #859.** Native cached Qwen3 preparation and execution
+  run through the Rust runtime. Tiny-model logits pass at `rtol=atol=1e-3`, including request reset and graph
   replay; Python/Rust logits from the same artifact are bit-identical. A rotary-rounding fix restores the original
   greedy agreement. The explicit FP32-based contract and its failed calibration trials are recorded in the
   [investigation](../experiments/Qwen3-0.6B/native_generation/RESULTS.md). Coverage reaches 256 checkpoint positions
   and independently checks attention through 4,096 positions. All four fresh held-out cases pass. Full-suite
-  finalization remains blocked by 26 failures reproduced on main. Prefill is sequential and sampling is greedy.
+  validation recorded 26 failures reproduced on its main baseline. Prefill is sequential and sampling is greedy.
   General Python-dispatch replacement is not included.
 - **Milestones 3–4 — not implemented.** Native HTTP serving and serving optimizations remain future work. Existing
   Python dispatch and vLLM serving remain in place.
@@ -40,7 +40,7 @@ but little change in captured GPU time for the tested small programs. This is no
 speedup. Before that merge, full-suite validation had failures reproduced on main; model-golden failures were only
 partly checked against main. The merged PR records those validation limits.
 
-**Selected next step:** fix the existing serving baseline before expanding. Merged
+**Completed baseline repair:** Merged
 [PR #835](https://github.com/cloudrift-ai/emmy/pull/835) rejects unsupported nested fragment epilogues and contraction
 roots the binder cannot compute together. The isolated Qwen3 pre-attention program passes GPU parity with synthetic
 weights at 1, 4, and 8 tokens. A complete four-configuration rerun held source fixed: stock passed; all three Emmy
@@ -60,6 +60,10 @@ allocation/occupancy accounting remain open; this PR does not implement mileston
 The user selected parallel work after #847: GPU schedule optimization continues independently, while #859 advances
 cached native generation as a correctness and reuse milestone. This does not claim a Rust serving speedup. API work
 still follows generation qualification, and dispatch replacement still requires its separate parity inventory.
+
+**Selected next step — PR #876:** add seeded GPU temperature/top-p sampling and qualify full-model contexts through
+4,096 tokens using the existing FP32 acceptance criteria. Then implement milestone 3 against that qualified runtime.
+General dispatch migration remains a separate obligation; the native serving subset cannot replace all run/tune uses.
 
 ## Evidence before implementation
 

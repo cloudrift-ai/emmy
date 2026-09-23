@@ -94,7 +94,7 @@ executor. The model remains compiler-prepared; the Rust library has no Qwen3 mat
 The native preparation and attention contract lives in
 [`serving/native/ARCHITECTURE.md`](../../emmy/serving/native/ARCHITECTURE.md).
 
-`start` binds the prompt once and resets request state. `advance` processes exactly one token at the current absolute
+`start` binds the prompt and sampling controls once and resets request state. `advance` processes exactly one token at the current absolute
 position. Before prompt completion it returns no token; afterward it returns the GPU-selected ID, which stays on the
 GPU for the next step. `generate` owns the complete prompt/decode loop and stops at EOS or the requested output count.
 Prompt plus requested output must fit capacity. `logits` is an explicit diagnostic download. All CUDA operations stay
@@ -103,6 +103,9 @@ inside `cuda`, and a failed step cannot continue the current request.
 The executor's stateful `advance` differs from benchmark `execute`: capture does not run an initialization step or
 warmup, since executing twice would consume the next token twice. Stable allocations allow the same graph to serve
 new requests. The benchmark API retains its warmup and timing behavior.
+
+The optional `sampling` object on `start_generation` and `generate` carries temperature, top-p, and seed; omitted
+controls select greedy decoding. The library validates them before binding or submitting GPU work.
 
 The worker adds `load_generation`, `start_generation`, `generation_step`, and `generate`. Prompt and result token
 arrays are little-endian i64 binary files. Step responses contain a selected token or null during prefill; optional
