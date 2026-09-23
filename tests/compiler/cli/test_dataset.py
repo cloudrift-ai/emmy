@@ -1,6 +1,6 @@
 """``emmy dataset import`` — a dataset DB filled from a measurement freeze and from tune DBs — the readers'
 refusal of a default dataset DB that does not hold the checked-in freeze, and ``emmy dataset check``, the
-drift checks the stored definitions allow."""
+checks that an instance's tables agree with themselves."""
 
 from __future__ import annotations
 
@@ -95,10 +95,6 @@ def _instance(path):
 
 
 _TAMPERS = {
-    "loop_ir normalizes to normalized_loop_ir": "UPDATE kernel SET loop_ir = (SELECT loop_ir FROM kernel WHERE kernel_name = 'k_piece') "
-    "WHERE kernel_name = 'k_parent'",
-    "normalized_loop_ir decodes to the stored identities": "UPDATE kernel SET structural_identity = 'moved' WHERE kernel_name = 'k_parent'",
-    "perf bindings name the kernel's symbolic dims": "UPDATE perf SET bindings = '{\"ghost\":4}'",
     "schedule and placement digests match their knob rows": "UPDATE placement SET digest = 'moved'",
     "every row names the rows it references": "DELETE FROM kernel WHERE kernel_name = 'k_piece'",
     "every context names a registry card": "UPDATE context SET gpu_name = 'Mystery GPU'",
@@ -110,29 +106,23 @@ _TAMPERS = {
 
 
 def test_a_fresh_instance_has_no_drift(tmp_path):
-    """Every definition the tuner stores re-derives under the code that stored it: the raw wire normalizes
-    to the stored one, the stored one decodes to both identities, the bindings name the dims, and the
-    tables agree with themselves."""
-    from emmy.compiler.pipeline.search.data.check import drift
-
+    """What the tuner writes agrees with itself: every knob row's digest, every reference, the card, the two
+    knob vocabularies."""
     db, _parent, _piece = _instance(tmp_path / "tune.db")
-    assert drift(db) == dict.fromkeys(_TAMPERS, 0)
+    assert db.drift() == dict.fromkeys(_TAMPERS, 0)
     db.close()
     handle_dataset_check(Namespace(db=str(tmp_path / "tune.db")))
 
 
 @pytest.mark.parametrize("check", list(_TAMPERS))
 def test_each_kind_of_drift_is_counted_by_its_own_check(check):
-    """One tamper per check, each the shape a code change would leave behind: another kernel's raw wire,
-    an identity the digest no longer produces, a binding of a dim the IR lost, a knob row whose digest
+    """One tamper per check, each the shape a code change would leave behind: a knob row whose digest
     moved, a kernel row deleted from under its rows, a card the registry dropped, a placement knob filed as
     a schedule knob. The check names it; the others stay quiet."""
-    from emmy.compiler.pipeline.search.data.check import drift
-
     db, _parent, _piece = _instance(None)
     db._conn.execute("PRAGMA foreign_keys = OFF")
     db._conn.executescript(_TAMPERS[check])
-    counts = drift(db)
+    counts = db.drift()
     assert counts[check] >= 1, counts
     assert all(n == 0 for name, n in counts.items() if name != check), counts
 

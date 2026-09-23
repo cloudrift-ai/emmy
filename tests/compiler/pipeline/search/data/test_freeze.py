@@ -240,7 +240,7 @@ def test_load_freeze_missing_listed_file_hard_error(tmp_path, name) -> None:
 
 def test_load_freeze_malformed_definition_hard_error(tmp_path) -> None:
     out = _frozen(tmp_path)
-    _restamp(out, KERNELS_NAME, "kernels", lambda k: k.update(normalized_loop_ir="not-a-program"))
+    _restamp(out, KERNELS_NAME, "kernels", lambda k: k.update(loop_ir="not-a-program"))
     with pytest.raises(RuntimeError, match="lacks a kernel definition"):
         load_freeze(out)
 

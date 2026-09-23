@@ -303,4 +303,4 @@ def test_a_kernel_row_carries_the_stamps_the_deploy_joins_on() -> None:
     assert row.stamps == {k: float(v) for k, v in cuda.knobs.items() if k.startswith("S_")}, (
         "the strategy's stamps, as the kernel carries them"
     )
-    assert row.stamps != kernel_stamps(row.normalized_loop_ir), "a twisted kernel's derived body spells another reduction"
+    assert row.stamps != kernel_stamps(row.loop_ir), "a twisted kernel's derived body spells another reduction"

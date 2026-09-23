@@ -116,7 +116,7 @@ def test_a_kernel_row_is_written_once_and_its_stamps_replaced_on_a_restamp() -> 
     db.record_kernel(kernel_row("k", stamps={"S_x": 2.0, "S_y": 1.0}, name="k_third"))
     [row] = list(db.iter_kernels())
     assert (row.name, row.stamps) == ("k_first", {"S_x": 2.0, "S_y": 1.0})
-    assert row.structural_identity == "deploy:k" and row.loop_ir == row.normalized_loop_ir
+    assert row.structural_identity == "deploy:k"
 
 
 def test_a_routing_row_holds_one_piece_per_position_and_a_later_splice_replaces_it() -> None:

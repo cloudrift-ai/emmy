@@ -1,5 +1,5 @@
 """``emmy dataset {import,freeze,check}`` — fill a dataset DB instance, snapshot one into a measurement
-freeze, and check one for drift.
+freeze, and check that one's tables agree with themselves.
 
 A dataset DB is the tune DB's schema in its own file (``EMMY_DATASET_DB``): the measurement-data readers
 (``eval prior``) read it, and no compile ever does, so what is imported into it cannot change a deploy.
@@ -10,8 +10,9 @@ A dataset DB is the tune DB's schema in its own file (``EMMY_DATASET_DB``): the 
   arrived from, and the upsert is the tune DB's own, so importing the same source twice changes nothing.
 - ``freeze`` writes a DB instance's admitted rows as a digest-pinned freeze directory — the artifact
   that gets checked in, so a reported number is one anyone can reproduce.
-- ``check`` re-derives what an instance stores (normalization, identities, stamps, bindings, digests,
-  foreign keys, cards, knob vocabularies) and counts the rows that no longer agree with the current code.
+- ``check`` counts the rows of an instance whose tables disagree with themselves (a knob row's digest, a
+  reference, a card, the two knob vocabularies). A DB is a cache: a row the current code disagrees with is
+  re-tuned or re-imported, so nothing here decodes what the compiler wrote.
 
 :func:`dataset_db` is the readers' way in: it resolves the instance and refuses a missing one, or a
 default one that does not hold the checked-in freeze, with the command that fixes it.
@@ -50,7 +51,7 @@ def register_dataset_command(subparsers) -> None:
     pf.add_argument("--note", default="", help="Freeform collection-policy note stamped into the manifest.")
     pf.set_defaults(func=handle_dataset_freeze)
 
-    pc = sub.add_parser("check", help="Count the rows of a DB instance that no longer re-derive under the current code")
+    pc = sub.add_parser("check", help="Count the rows of a DB instance whose tables disagree with themselves")
     pc.add_argument("--db", help="DB instance to check (default: EMMY_DATASET_DB or ~/.cache/emmy/dataset.db).")
     pc.set_defaults(func=handle_dataset_check)
 
@@ -122,12 +123,11 @@ def handle_dataset_freeze(args) -> None:
 
 
 def handle_dataset_check(args) -> None:
-    from emmy.compiler.pipeline.search.data.check import drift  # noqa: PLC0415
     from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
 
     db = SearchDB.open_readonly(dataset_db(args.db))
     try:
-        counts = drift(db)
+        counts = db.drift()
     finally:
         db.close()
     for name, n in counts.items():

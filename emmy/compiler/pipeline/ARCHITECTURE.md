@@ -756,9 +756,9 @@ touches the µs scale a deploy sees.
   the reservoir's evidence (Part 3) and hands the structural cost estimate to the offline half (there is no trusted
   online prior any more) until the machine re-tunes. A version bump therefore changes deploy behavior — the machine
   drops to the tune DB's and the golden rows → offline prior, with no warning at deploy time.
-- **The DB's `kernel` rows** carry no version: their `S_*` stamps are re-derived from the stored wire, so `emmy
-  dataset check` counts the kernels whose stamps moved, and a freeze written under another version refuses to load
-  (its manifest records the version; `load_freeze`).
+- **The DB's `kernel` rows** carry no version: their `S_*` stamps are copied off the kernel at write time and never
+  re-derived — a tune DB is a cache, re-tuned or re-imported after a change — while a freeze written under another
+  version refuses to load (its manifest records the version; `load_freeze`).
 
 Bump the constant on any incompatible change to knob naming or feature encoding; artifacts from the old version then
 age out instead of poisoning the model.
@@ -1220,8 +1220,8 @@ import`, and is what the measurement-data readers read, so an import can never c
 compilable kernels, the decisions that minted them, and measurements of them — nothing else.
 
 - **`kernel`** — one row per kernel, keyed by its exact identity: the clustered deploy identity beside it, its Loop IR
-  wire before and after normalization (`loop_wire.kernel_wire` — the one-node program of the tile kernel's
-  schedule-free body, which decodes to the same exact identity) and its C name; **`kernel_feature`** holds its
+  wire (`loop_wire.kernel_wire` — the one-node program of the tile kernel's schedule-free body, which decodes to the
+  same exact identity) and its C name; **`kernel_feature`** holds its
   `S_*` stamps — the identity strategy's, written at the fusion boundary onto the fused loop body, which every
   evidence join keys on; a twisted kernel's stored body would stamp differently. The fused kernel of a slice and a piece a
   cut or a split minted are rows alike, so the same kernel reached from two parents has one definition — what a
@@ -1260,13 +1260,12 @@ re-creates EVERY table empty (dropping one would orphan the rows that reference 
 (re-tune, or `emmy dataset import --fresh`) — and a read-only open refuses the file. Foreign keys are enforced on
 every connection.
 
-**Drift checks** (`data/check.py`, `emmy dataset check`). Storing the wire before and after normalization and both
-identities lets a later emmy re-derive each and count the rows that no longer agree: the raw wire normalizes to the
-stored one, the stored one decodes to both identities, a `perf` row's bindings name the kernel's symbolic dims, a
-schedule or placement digest matches its knob rows, every row names the rows it references, every context names a
-registry card, schedule knobs and placement knobs stay apart. The stamps are not re-derived — the fused body they
-were computed from is not stored — so a featurizer change is caught where a freeze is loaded, by its manifest's
-version. Nothing is fixed: a failing row is re-tuned or re-imported.
+**Drift checks** (`emmy dataset check`, `SearchDB.drift`). A tune DB is a cache: a row the current code disagrees with
+is re-tuned or re-imported, never patched, so the checks are the cheap ones over the tables themselves — a schedule or
+placement digest matches its knob rows, every row names the rows it references, every context names a registry card,
+schedule knobs and placement knobs stay apart. Nothing decodes a stored wire, and the stamps are not re-derived (the
+fused body they were computed from is not stored). The artifact that has to survive a code change is the freeze, and
+a freeze written under another featurizer version refuses to load.
 
 **Measurement freeze** (`data/freeze.py`, written by `emmy dataset freeze`). The tune DB is a live store, so a model
 fit or evaluated straight from it is not reproducible. A *freeze* (v6) is a snapshot written into a directory, in

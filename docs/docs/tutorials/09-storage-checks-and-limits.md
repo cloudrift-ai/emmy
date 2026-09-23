@@ -31,8 +31,8 @@ take — so the sizes a measurement ran at are part of the key, and one kernel b
 The database holds kernels, the decisions that minted them, and measurements of them, and every instance of it — the
 tuning database a compile reads, the dataset database the evaluations read — holds the same tables.
 
-**Kernels.** One row per kernel: its exact identity, the loop program that defines it before and after normalization,
-its structural features and its C name. A kernel that a cut or a split minted is a row like any other, so the same
+**Kernels.** One row per kernel: its exact identity, the loop program that defines it, its structural features and its
+C name. A kernel that a cut or a split minted is a row like any other, so the same
 kernel reached from two parents has one definition, and that definition is what its candidate pool is enumerated
 from.
 
@@ -52,10 +52,11 @@ is a decision, not a measurement of one kernel.
 **Nothing migrates.** A database file written by an older version of the compiler is re-created empty on the next
 write, since every row in it can be measured again, and refused by a reader.
 
-**Drift is counted, not hidden.** `emmy dataset check` re-derives what an instance stores — the normalized program,
-both identities, the sizes a row was measured at — and counts the rows that no longer agree with the current code,
-so a change to normalization or identity shows up as a number rather than as a model that quietly trains on rows
-that mean something else.
+**The tables are checked, not the code.** `emmy dataset check` verifies that an instance's tables agree with
+themselves — every knob row's digest, every reference, every card, the two knob vocabularies — and counts the rows
+that fail. It does not re-derive what the compiler wrote: the tuning database is a cache, and a row the current code
+disagrees with is re-tuned or re-imported. The freeze is what travels between machines, and one written under another
+featurizer version refuses to load.
 
 **A frozen snapshot makes a fit reproducible.** The tuning database is a live store — tuning runs keep writing into it
 — so a model fitted straight from it cannot be reproduced later. A freeze is a snapshot written as a directory of YAML

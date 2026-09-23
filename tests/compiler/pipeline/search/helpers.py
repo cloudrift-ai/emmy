@@ -58,7 +58,6 @@ def kernel_row(identity: str, *, stamps: dict | None = None, name: str | None = 
         exact_identity=identity,
         structural_identity=f"deploy:{identity}",
         loop_ir=wire,
-        normalized_loop_ir=wire,
         name=name or f"k_{identity}",
         stamps=dict(F16_MATMUL_STAMPS if stamps is None else stamps),
     )

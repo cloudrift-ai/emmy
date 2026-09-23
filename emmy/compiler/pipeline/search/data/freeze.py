@@ -12,7 +12,7 @@ says: the kernel it measured (exact identity), the sizes its symbolic dims were 
 row (the in-kernel knobs, never a stamp), the opt level and the residual compiler flags, the status,
 the latency statistics, ``captured``, ``measured_at`` and a failure's ``error``. Two card-independent
 files ride beside them: ``kernels.yaml`` (the ``kernel`` row of every kernel a frozen row or a routing
-row names — both identities, both Loop IR wires, the C name and its ``S_*`` stamps) and
+row names — both identities, the Loop IR wire, the C name and its ``S_*`` stamps) and
 ``routing.yaml`` (every ``routing`` row: parent, arm, pieces in order), so an import can enumerate
 from the freeze alone. The manifest lists every file with its kind (``perf``, ``kernels``,
 ``routing``) and its digest. Device ``H_*`` features are never stored: readers derive them from the
@@ -233,7 +233,7 @@ def _row_payload(row: PerfRow) -> dict:
     }
 
 
-_KERNEL_FIELDS = ("exact_identity", "structural_identity", "loop_ir", "normalized_loop_ir", "name", "stamps")
+_KERNEL_FIELDS = ("exact_identity", "structural_identity", "loop_ir", "name", "stamps")
 
 
 def _kernel_payload(k: KernelRow) -> dict:
@@ -447,7 +447,7 @@ def load_freeze(path: Path | str) -> Freeze:
         for payload in payloads:
             if not (
                 all(isinstance(payload.get(f), str) for f in ("exact_identity", "structural_identity", "name"))
-                and all(isinstance(payload.get(f), dict) for f in ("loop_ir", "normalized_loop_ir", "stamps"))
+                and all(isinstance(payload.get(f), dict) for f in ("loop_ir", "stamps"))
             ):
                 raise RuntimeError(f"measurement freeze {p}: {name} row lacks a kernel definition — {regen}")
             frozen.kernels.append(KernelRow(**{f: payload[f] for f in _KERNEL_FIELDS}))

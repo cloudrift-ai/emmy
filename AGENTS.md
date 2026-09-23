@@ -49,7 +49,7 @@ relevant `ARCHITECTURE.md` before answering.
   the `emmy dataset import` command line. The tune DB and the online reservoir are machine-local and mutable; reach
   them with `--db` when you want one machine's data, not as the default. A freeze's payload YAML is tracked in
   **git LFS**; its manifest is plain git so provenance stays diffable. Re-freeze with `emmy dataset freeze`; `emmy
-  dataset check` counts the rows of an instance that no longer re-derive under the current code.
+  dataset check` counts the rows of an instance whose tables disagree with themselves.
 - `EMMY_DATASET_DB` environment variable (optional) — overrides the dataset DB path (`~/.cache/emmy/dataset.db`):
   the tune DB's tables in a file of their own, filled by `emmy dataset import` and read by the measurement-data
   readers, never by a compile.
@@ -177,7 +177,7 @@ it before answering any CLI-flag question. Quickstart for the common paths:
 | `emmy run <model_or_ir_or_--code> [--bench]` | compile + execute on the CUDA backend, check accuracy, optionally bench vs eager / `torch.compile` |
 | `emmy tune <target> [--bench] [--gpus N]` | two-level autotune; writes the online prior + tune DB |
 | `emmy eval {knobs,prior,golden,variants,failures} [--dataset {golden,db}]` | inspect the priors / tune DB |
-| `emmy dataset {import,freeze,check} …` | fill the dataset DB from measurement freezes and tune DBs; snapshot a DB into a freeze; count the rows that no longer re-derive |
+| `emmy dataset {import,freeze,check} …` | fill the dataset DB from measurement freezes and tune DBs; snapshot a DB into a freeze; check a DB's tables agree with themselves |
 | `emmy {pull,trace,generate,inspect,compare} …` | model download, IR tracing, the naive generation oracle, IR inspection, dump diffing |
 
 Quick test models / scripts (for local iteration):

@@ -9,9 +9,8 @@ Tables (the DDL is the reference):
 - ``kernel`` — one row per compilable kernel, keyed by its EXACT identity (``identity_key(structural=False,
   with_io=True)``: the digest of the normalized body's form plus each buffer's dtype and hint-free shape).
   The clustered deploy identity (``identity_key(with_io=True)``, pointwise ops merged — the identity
-  golden receipts store) is beside it, with the kernel's Loop IR before and after normalization and its
-  C name. A piece a cut or a split minted is a row like any other, so the same kernel reached from two
-  parents has one definition.
+  golden receipts store) is beside it, with the kernel's Loop IR wire and its C name. A piece a cut or a
+  split minted is a row like any other, so the same kernel reached from two parents has one definition.
 - ``kernel_feature`` — the kernel's ``S_*`` stamps, one per row: what the identity strategy writes onto a
   kernel at the fusion boundary, a function of the fused loop body it was lifted from. The structural
   signature deploy evidence joins and candidate pools group on is the digest of these rows, derived on
@@ -132,12 +131,11 @@ class PerfRow:
 @dataclass(frozen=True)
 class KernelRow:
     """One ``kernel`` row with its stamps: the exact identity, the clustered deploy identity, the Loop IR
-    wire before normalization and after (what the identities digest), the C name, and the ``S_*`` dict."""
+    wire (what the identities digest), the C name, and the ``S_*`` dict."""
 
     exact_identity: str
     structural_identity: str
     loop_ir: dict
-    normalized_loop_ir: dict
     name: str
     stamps: dict
 
@@ -159,7 +157,6 @@ _DDL = {
             exact_identity       TEXT PRIMARY KEY,
             structural_identity  TEXT NOT NULL,
             loop_ir              TEXT NOT NULL,
-            normalized_loop_ir   TEXT NOT NULL,
             kernel_name          TEXT NOT NULL
         )""",
     "kernel_feature": """
@@ -236,7 +233,7 @@ _INDEXES = (
     "CREATE INDEX kernel_structural ON kernel (structural_identity)",
 )
 _COLS = {
-    "kernel": ("exact_identity", "structural_identity", "loop_ir", "normalized_loop_ir", "kernel_name"),
+    "kernel": ("exact_identity", "structural_identity", "loop_ir", "kernel_name"),
     "kernel_feature": ("kernel", "name", "value"),
     "context": ("id", "backend", "gpu_name", "arch", "opt", "flags"),
     "schedule": ("id", "digest"),
@@ -444,9 +441,8 @@ class SearchDB:
         the one place a re-stamp under a new featurizer lands."""
         fresh = (
             self._conn.execute(
-                "INSERT OR IGNORE INTO kernel (exact_identity, structural_identity, loop_ir, normalized_loop_ir, kernel_name) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (row.exact_identity, row.structural_identity, _wire_json(row.loop_ir), _wire_json(row.normalized_loop_ir), row.name),
+                "INSERT OR IGNORE INTO kernel (exact_identity, structural_identity, loop_ir, kernel_name) VALUES (?, ?, ?, ?)",
+                (row.exact_identity, row.structural_identity, _wire_json(row.loop_ir), row.name),
             ).rowcount
             == 1
         )
@@ -465,10 +461,10 @@ class SearchDB:
         return dict(self._conn.execute("SELECT exact_identity, kernel_name FROM kernel"))
 
     def iter_kernels(self) -> Iterator[KernelRow]:
-        for exact, structural, loop_ir, normalized, name in self._conn.execute(
-            "SELECT exact_identity, structural_identity, loop_ir, normalized_loop_ir, kernel_name FROM kernel ORDER BY exact_identity"
+        for exact, structural, loop_ir, name in self._conn.execute(
+            "SELECT exact_identity, structural_identity, loop_ir, kernel_name FROM kernel ORDER BY exact_identity"
         ).fetchall():
-            yield KernelRow(exact, structural, json.loads(loop_ir), json.loads(normalized), name, self._stamps(exact))
+            yield KernelRow(exact, structural, json.loads(loop_ir), name, self._stamps(exact))
 
     # ------------------------------------------------------------------
     # Routing
@@ -653,7 +649,7 @@ class SearchDB:
         context = self._context_id(backend, gpu, arch, opt, flags, create=False)
         pieces: dict[int, list[tuple[str, str]]] = {}
         for pid, child, wire in self._conn.execute(
-            "SELECT r.placement, r.child, k.normalized_loop_ir FROM routing r JOIN kernel k ON k.exact_identity = r.child "
+            "SELECT r.placement, r.child, k.loop_ir FROM routing r JOIN kernel k ON k.exact_identity = r.child "
             "WHERE r.parent = ? ORDER BY r.placement, r.position",
             (kernel,),
         ):
@@ -685,11 +681,11 @@ class SearchDB:
         return min(candidates) if candidates else None
 
     def drift(self) -> dict[str, int]:
-        """The table-level drift checks, each the count of rows that fail it: a schedule or placement row
-        whose digest is not its knob rows'; a row naming a row that is gone (the foreign keys, which a file
-        written with them off can break); a context naming a card the GPU registry
-        lost; a schedule knob that is a placement knob, or a placement knob that is not. The checks that
-        need the compiler are :func:`emmy.compiler.pipeline.search.data.check.drift`."""
+        """The drift checks — each the count of rows that fail it: a schedule or placement row whose digest is
+        not its knob rows'; a row naming a row that is gone (the foreign keys, which a file written with them
+        off can break); a context naming a card the GPU registry lost; a schedule knob that is a placement
+        knob, or a placement knob that is not. Nothing decodes a stored wire: a tune DB is a cache, and a row
+        the current code disagrees with is re-tuned or re-imported, never patched."""
         from emmy import gpu  # noqa: PLC0415
 
         digests = 0

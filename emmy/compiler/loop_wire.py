@@ -13,7 +13,6 @@ split minted, so the same kernel reached from two parents has one definition and
 
 from __future__ import annotations
 
-import copy
 from collections.abc import Iterable
 from dataclasses import fields, is_dataclass
 from enum import Enum
@@ -274,15 +273,13 @@ def kernel_tile(op):
     return next((ancestor for ancestor in op.source_chain() if isinstance(ancestor, TileOp)), None)
 
 
-def kernel_wire(tile) -> tuple[dict, dict]:
-    """The Loop IR wires of one tile kernel, ``(before normalization, after)``: a one-node program holding
-    the tile's schedule-free body bound to its own buffers. The normalized wire is what the ``LoopOp``
-    stores and what the identities digest — lifting its decoded node again (the matcher's io refresh, the
-    lift, the twist rewrite) yields the tile's exact identity, so a piece a cut minted has a definition of
-    its own rather than "its parent plus the route". The raw wire holds ``tile.loop_body`` as lowered, so
-    normalizing it again (decoding does that) and comparing with the stored one shows when the
-    normalization code moved. Either is a KERNEL, not a program: the Loop passes must not run over it —
-    they normalize a size-one axis away and mint another kernel."""
+def kernel_wire(tile) -> dict:
+    """The Loop IR wire of one tile kernel: a one-node program holding the tile's schedule-free body, as
+    the ``LoopOp`` normalizes it, bound to the tile's own buffers. Its decoded loop op carries the tile's
+    exact and clustered identities (the body is what they digest, the buffers the io half), so a piece a
+    cut minted has a definition of its own rather than "its parent plus the route". It is a KERNEL, not a
+    program: the Loop passes must not run over it — they normalize a size-one axis away and mint another
+    kernel."""
     graph = Graph()
     for name, tensor in tile.inputs.items():
         graph.add_node(InputOp(), [], outputs=(tensor,), node_id=name)
@@ -292,10 +289,7 @@ def kernel_wire(tile) -> tuple[dict, dict]:
     graph.add_node(LoopOp(body=tile.loop_body, name=tile.name), list(tile.inputs), outputs=tuple(tile.outputs.values()), node_id=primary)
     graph.inputs = list(tile.inputs)
     graph.outputs = list(tile.outputs)
-    normalized = loop_graph_to_wire(graph)
-    raw = copy.deepcopy(normalized)
-    next(node for node in raw["nodes"] if node["op"] == "loop")["attrs"]["body"] = _value_to_wire(tile.loop_body)
-    return raw, normalized
+    return loop_graph_to_wire(graph)
 
 
 def symbolic_vars(wire: dict) -> set[str]:
