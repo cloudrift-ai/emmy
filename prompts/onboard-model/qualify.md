@@ -26,17 +26,19 @@ pause, and do not publish when it is `false`.
 
 ## Recipe policy per mode
 
-In `onboarding` mode, use the existing `onboarding`/`untested` recipe shell when present, or create the recipe for a
-direct manual request. Preserve `model.heat` and replace `onboarding` and `untested` with `best-effort` only after
-qualification and artifact completion.
-
-In `verification` mode, begin from the existing recipe's current configuration, refresh its measured artifacts, and
-preserve its `expected_lifecycle` tag and `model.heat`.
+The attached skill states the per-mode recipe policy; this section adds only what the task payload names. In
+`onboarding` mode there is no direct manual request, so use the existing `onboarding`/`untested` recipe shell when
+present. In `verification` mode, the lifecycle tag the refreshed recipe must keep is the task's `expected_lifecycle`.
 
 ## Boundaries
 
-Do not select a model or GPU, provision or delete the VM, commit, push, or open or update a pull request. The caller
-owns those steps. Tear down every deployed workload before returning.
+Do not select a model or GPU, rent or delete the VM, commit, push, or open or update a pull request. The caller owns
+those steps. Tear down every deployed workload before returning.
+
+The caller owns the VM's lifetime, not its contents. Finishing the node's provisioning is your work, under the rule
+the attached skill states: `ssh_user` has passwordless sudo, and a host missing something the run needs is a node to
+provision rather than a gate failure. Report a host gate failure only after Emmy's own provisioning ran and a
+specific step failed, and quote that step's output in the summary.
 
 For a missing image or an unfamiliar launch failure, investigate current official registries, release notes, engine
 documentation, and upstream issues. Test an evidence-backed current repository or tag when the configured image moved
@@ -78,6 +80,6 @@ including every realization-corpus case, which is staged only when the summary m
 Include `experiment_artifacts` with the shared experiment recipe and `RESULTS.md` plus the exact platform archive, and
 one-line `deployment_summary` and `performance_summary` values drawn from the exact selected recipe lane.
 
-On failure, set `failure.regression` to `true` only when a previously qualified behavior or measured performance lane
-regressed and the bounded fix attempt could not restore it. Keep the message concise and credential-free; the caller
-sends it to a chat notification. Print the summary path as the final line and return nonzero for a failed run.
+The attached skill's own summary section owns the rest of that contract — the field shapes, when a failure counts as
+a regression, printing the path as the final line, and the exit code. Follow it there rather than from a second copy
+here. Keep the failure message concise and credential-free; the caller sends it to a chat notification.
