@@ -62,7 +62,7 @@ eval = ["lm-eval[api]>=0.4.9"]
 visualize = ["playwright>=1.40"]
 # flash-attn requires torch at build time, install separately:
 #   pip install flash-attn --no-build-isolation
-dev = ["pytest", "pytest-asyncio", "pytest-xdist", "ruff", "matplotlib", "graphviz", "torch", "transformers>=5.13,<5.15", "diffusers>=0.39,<0.40", "cupy-cuda12x; sys_platform == 'linux'", "cppyy==3.5.0", "safetensors", "playwright>=1.40"]
+dev = ["pytest", "pytest-asyncio", "pytest-xdist", "ruff", "matplotlib", "graphviz", "torch", "transformers>=5.13,<5.15", "diffusers>=0.39,<0.40", "maturin>=1.5,<2", "cppyy==3.5.0", "safetensors", "playwright>=1.40"]
 
 [project.urls]
 Homepage = "https://github.com/cloudrift-ai/emmy"

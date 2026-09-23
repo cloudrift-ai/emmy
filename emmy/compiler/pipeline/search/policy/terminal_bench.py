@@ -197,13 +197,6 @@ class TerminalBench:
                 self._persist(node.op, stats=s, status="ok", captured=result.captured)
                 self._note(node.op, s, "ok")
                 agg = self._accumulate(agg, s)
-        try:
-            import cupy as _cp  # noqa: PLC0415
-
-            _cp.cuda.runtime.deviceSynchronize()
-            _cp.get_default_memory_pool().free_all_blocks()
-        except Exception:  # noqa: BLE001 — best-effort cleanup
-            pass
         return agg or point_stats(0.0), "ok"
 
 

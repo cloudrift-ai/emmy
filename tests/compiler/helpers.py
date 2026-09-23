@@ -129,13 +129,10 @@ def case_target_tile(case: str):
 
 
 def has_cuda_gpu() -> bool:
-    """Check if cupy is importable and sees at least one CUDA device."""
-    try:
-        import cupy as cp
+    """Check that the runtime extension loads and sees a CUDA device."""
+    from emmy.compiler.backend.cuda.device import compute_capability
 
-        return cp.cuda.runtime.getDeviceCount() > 0
-    except Exception:
-        return False
+    return compute_capability() is not None
 
 
 def has_cuda_toolchain() -> bool:
@@ -149,19 +146,16 @@ def has_cuda_toolchain() -> bool:
 
 requires_cuda = pytest.mark.skipif(
     not has_cuda_toolchain(),
-    reason="CUDA not available (need cupy + GPU + nvcc)",
+    reason="CUDA not available (need the emmy_runtime extension + GPU + nvcc)",
 )
 
 
 @functools.cache
 def device_compute_capability() -> tuple[int, int] | None:
     """Return the live CUDA device compute capability, or ``None`` when no GPU is visible."""
-    if not has_cuda_gpu():
-        return None
-    import cupy as cp
+    from emmy.compiler.backend.cuda.device import compute_capability
 
-    cap = str(cp.cuda.Device().compute_capability)
-    return (int(cap[:-1]), int(cap[-1]))
+    return compute_capability()
 
 
 def requires_sm(major: int, minor: int = 0):
@@ -217,7 +211,7 @@ def dtype_input_scale(dtype) -> float:
 def skip_if_no_cuda() -> None:
     """Skip the current test when Emmy cannot compile CUDA kernels."""
     if not has_cuda_toolchain():
-        pytest.skip("CUDA not available (need cupy + GPU + nvcc)")
+        pytest.skip("CUDA not available (need the emmy_runtime extension + GPU + nvcc)")
 
 
 def matmul_graph(m: int, k: int, n: int):

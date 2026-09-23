@@ -42,22 +42,12 @@ from emmy.compiler.pipeline.search.features import mma_atom
 from tests.compiler.helpers import dyn_M, requires_cuda, requires_sm, requires_sm90
 
 
-def _has_cuda() -> bool:
-    try:
-        import cupy as cp  # noqa: PLC0415
-
-        return cp.cuda.is_available()
-    except Exception:  # noqa: BLE001
-        return False
-
-
 def _supports_tma() -> bool:
     """TMA (``cp.async.bulk.tensor``) needs sm_90+ (Hopper / Blackwell)."""
-    if not _has_cuda():
-        return False
-    import cupy as cp  # noqa: PLC0415
+    from emmy.compiler.backend.cuda.device import compute_capability  # noqa: PLC0415
 
-    return int(cp.cuda.Device().compute_capability) >= 90
+    cap = compute_capability()
+    return cap is not None and cap >= (9, 0)
 
 
 def _dtype(name: str):

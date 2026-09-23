@@ -24,9 +24,10 @@ impl Buffer {
     pub fn byte_len(&self) -> Result<usize> {
         let size: usize = match self.dtype.as_str() {
             "f16" | "bf16" | "i16" | "u16" => 2,
-            "f32" | "i32" | "u32" => 4,
+            "f32" | "i32" | "u32" | "f16x2" => 4,
             "f64" | "i64" | "u64" => 8,
-            "i8" | "u8" | "bool" => 1,
+            // Shapes count stored elements: a packed fp4 pair is one byte holding two values.
+            "i8" | "u8" | "bool" | "f8e4m3" | "f8e5m2" | "f4e2m1x2" => 1,
             other => bail!("unsupported dtype: {other}"),
         };
         self.shape.iter().try_fold(size, |bytes, dim| {
@@ -43,9 +44,14 @@ impl Buffer {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Kernel {
+    #[serde(default)]
     pub binary_key: String,
     #[serde(default)]
     pub arch_specific: bool,
+    /// The rendered CUDA source a compiler-side plan carries; the host compiles it and hands
+    /// the executor the cubin path, so the executor itself never reads it.
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -65,6 +71,8 @@ pub struct Launch {
     #[serde(default)]
     pub indirect: Vec<Value>,
     pub runtime_args: Vec<String>,
+    #[serde(default)]
+    pub serial: Vec<Value>,
     pub cuda: CudaFeatures,
 }
 
@@ -196,8 +204,9 @@ impl Plan {
             ensure!(
                 launch.indirect.is_empty()
                     && launch.cuda.tma.is_empty()
-                    && launch.runtime_args.is_empty(),
-                "indirect operands, descriptors, and runtime arguments are not yet supported"
+                    && launch.runtime_args.is_empty()
+                    && launch.serial.is_empty(),
+                "indirect operands, descriptors, runtime arguments, and serial launches are not yet supported"
             );
             dimensions(&launch.grid)?;
             dimensions(&launch.block)?;
@@ -220,7 +229,8 @@ impl Plan {
 
 pub struct Artifact {
     pub(crate) plan: Plan,
-    pub(crate) arch: String,
+    /// The pack's recorded target; `None` for a program the host compiled for the live device.
+    pub(crate) arch: Option<String>,
     pub(crate) bindings: BTreeMap<String, Vec<u8>>,
     pub(crate) binaries: BTreeMap<String, PathBuf>,
 }
@@ -235,6 +245,37 @@ fn member(root: &Path, name: &str) -> Result<PathBuf> {
 }
 
 impl Artifact {
+    /// A program the host compiled itself: the plan's JSON form, the bound input and constant
+    /// bytes, and one cubin path per kernel. Nothing is read from disk but the cubins.
+    pub fn new(
+        plan: &str,
+        bindings: BTreeMap<String, Vec<u8>>,
+        binaries: BTreeMap<String, PathBuf>,
+    ) -> Result<Self> {
+        let plan: Plan = serde_json::from_str(plan)?;
+        plan.validate(&bindings)?;
+        for (name, path) in &binaries {
+            ensure!(
+                plan.kernels.contains_key(name),
+                "cubin for unknown kernel {name}"
+            );
+            ensure!(
+                path.is_file(),
+                "missing cubin for kernel {name}: {}",
+                path.display()
+            );
+        }
+        for name in plan.kernels.keys() {
+            ensure!(binaries.contains_key(name), "no cubin for kernel {name}");
+        }
+        Ok(Self {
+            plan,
+            arch: None,
+            bindings,
+            binaries,
+        })
+    }
+
     pub fn load(root: &Path, program: &str) -> Result<Self> {
         let root = root.canonicalize()?;
         let manifest: Value =
@@ -283,7 +324,7 @@ impl Artifact {
             .to_owned();
         Ok(Self {
             plan,
-            arch,
+            arch: Some(arch),
             bindings,
             binaries,
         })

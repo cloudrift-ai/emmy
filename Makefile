@@ -49,12 +49,15 @@ venv/.setup-complete: pyproject.toml
 	fi
 	@echo "Installing Python dependencies..."
 	./venv/bin/pip install -e ".[dev]"
+	@echo "Building the runtime extension..."
+	VIRTUAL_ENV="$(CURDIR)/venv" ./venv/bin/maturin develop --release -m crates/emmy-runtime-py/Cargo.toml
 	@touch $@
 
 setup-ci:
 	python3.13 -m venv venv --prompt "emmy"
 	./venv/bin/pip install --index-url https://download.pytorch.org/whl/cpu torch
-	./venv/bin/pip install -e ".[compile,test,image]"
+	./venv/bin/pip install -e ".[compile,test,image]" "maturin>=1.5,<2"
+	VIRTUAL_ENV="$(CURDIR)/venv" ./venv/bin/maturin develop --release -m crates/emmy-runtime-py/Cargo.toml
 	@touch venv/.setup-complete
 
 lint: setup

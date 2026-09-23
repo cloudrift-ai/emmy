@@ -710,7 +710,7 @@
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[Qwen3.8-27B-FP8/v100_sm70.yaml/k_conv1d_linear_mean_reduce_6bd563.b31a57e0146a]": 7.3,
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[Qwen3.8-27B-FP8/v100_sm70.yaml/k_conv1d_linear_mean_reduce_6bd563.326a74da91e2]": 7.2,
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[Qwen3.8-27B-FP8/v100_sm70.yaml/k_conv1d_linear_mean_reduce_6bd563.0350fbdcb165]": 7.2,
- "tests/compiler/backend/test_hung_kernel_watchdog.py::test_wait_for_event_raises_hungkernelerror_promptly@cuda": 7.0,
+ "tests/compiler/backend/test_hung_kernel_watchdog.py::test_timed_launch_raises_hungkernelerror_promptly@cuda": 7.0,
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[Qwen3.8-27B-FP8/v100_sm70.yaml/k_linear_matmul_mean_reduce_4b396c.bb8afe89bc1b]": 6.8,
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[Qwen3.8-27B-FP8/v100_sm70.yaml/k_slice_unsqueeze_reduce_897e34.e52aa2f7f110]": 6.7,
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[Qwen3.8-27B-FP8/v100_sm70.yaml/k_conv1d_linear_mean_reduce_6bd563.deed135c0d3a]": 6.7,
