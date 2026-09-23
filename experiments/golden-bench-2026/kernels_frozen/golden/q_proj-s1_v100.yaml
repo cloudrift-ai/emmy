@@ -27,6 +27,11 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
+    latency:
+      NVIDIA Tesla V100 SXM2 16GB:
+        emmy_us: 5.677850833579676
+        tcompile_us: 6.717134322693099
+        eager_us: 7.083940417019289
   - name: q_proj-s1.ad9de1084843
     bindings: {}
     pins:

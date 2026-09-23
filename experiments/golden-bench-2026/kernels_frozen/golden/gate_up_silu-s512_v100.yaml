@@ -58,8 +58,8 @@ configs:
       PLACE: cut
     identity: aa2f50509a28db2f6d627e81699762413fd04b8d151458547b223fafd5e2b365
     measurements:
-      emmy_us: 249.6
-      reference_us: 248.83
+      emmy_us: 304.3527704913442
+      reference_us: 303.0442665020625
       reference_backend: same-input-greedy
   - name: gate_up_silu-s512.3d38ad01de77
     bindings: {}
@@ -67,15 +67,20 @@ configs:
       FAST_MATH: false
     knobs:
       WORK: w2x2
-      TILE: mma_m8n8k4_f16_f32/f2x2/k4
+      TILE: mma_m8n8k4_f16_f32/f2x2/k8
       REDUCE: ''
       STAGE: d1/smem
       RASTER: ''
     identity: 3d38ad01de778014023be9c1823dc9d21b5ea0533d0e14fb3d139593feb24a68
     measurements:
-      emmy_us: 224.3
-      reference_us: 223.5
+      emmy_us: 280.5759906768799
+      reference_us: 279.2106668154399
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM2 16GB:
+        emmy_us: 196.8127965927124
+        tcompile_us: 124.52838479018793
+        eager_us: 129.22380028701411
   - name: gate_up_silu-s512.b02a70856d86
     bindings: {}
     pins:
@@ -89,6 +94,11 @@ configs:
       emmy_us: 23.776779814464287
       reference_us: 23.83359968662262
       reference_backend: same-input-greedy
+    latency:
+      NVIDIA Tesla V100 SXM2 16GB:
+        emmy_us: 198.04160594940186
+        tcompile_us: 124.39039945602417
+        eager_us: 129.1775941848755
 loops:
 - inputs: [x0, x1, x2]
   outputs: [mul]
