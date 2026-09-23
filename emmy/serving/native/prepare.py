@@ -9,7 +9,7 @@ import numpy as np
 from emmy.compiler.backend.pack import save_executable
 from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan, KernelSpec, LaunchSpec, plan_from_graph
 from emmy.compiler.dim import Dim
-from emmy.compiler.dtype import F16, F64, I64, U32, U64
+from emmy.compiler.dtype import F16, F32, F64, I64, U32, U64
 from emmy.serving.native.kernels import SOURCE
 
 MAX_CONTEXT = 4096
@@ -159,9 +159,9 @@ def export_model(model, destination, *, context_length=MAX_CONTEXT, eos_ids=(), 
     step.buffer("logits", (1, vocab), F16, "output")
     step.buffer("embedding", (vocab, h), role="constant", data=model.model.embed_tokens.weight.detach().numpy())
     with torch.no_grad():
-        cosine, sine = model.model.rotary_emb(torch.zeros(1, 1, h, dtype=torch.float16), torch.arange(context_length).reshape(1, -1))
-    step.buffer("cosine", (context_length, d), role="constant", data=cosine.numpy())
-    step.buffer("sine", (context_length, d), role="constant", data=sine.numpy())
+        cosine, sine = model.model.rotary_emb(torch.zeros(1, 1, h, dtype=torch.float32), torch.arange(context_length).reshape(1, -1))
+    step.buffer("cosine", (context_length, d), F32, role="constant", data=cosine.numpy())
+    step.buffer("sine", (context_length, d), F32, role="constant", data=sine.numpy())
     hidden = step.buffer("hidden0", (1, h))
     step.launch(
         "native_embed",

@@ -8,20 +8,20 @@ extern "C" __global__ void native_embed(const long long* prompt, const long long
     if (d < HIDDEN) hidden[d] = weight[token * HIDDEN + d];
 }
 extern "C" __global__ void native_rope_cache(const half* q, const half* k, const half* v,
-    const half* cosine, const half* sine, const long long* position,
+    const float* cosine, const float* sine, const long long* position,
     half* rotated_q, half* cache_k, half* cache_v) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     int d = i % HEAD_DIM;
     int paired = d < HEAD_DIM / 2 ? i + HEAD_DIM / 2 : i - HEAD_DIM / 2;
-    half c = cosine[*position * HEAD_DIM + d], s = sine[*position * HEAD_DIM + d];
+    float c = cosine[*position * HEAD_DIM + d], s = sine[*position * HEAD_DIM + d];
     if (i < HEADS * HEAD_DIM) {
         half r = d < HEAD_DIM / 2 ? __hneg(q[paired]) : q[paired];
-        rotated_q[i] = __hadd_rn(__hmul_rn(q[i], c), __hmul_rn(r, s));
+        rotated_q[i] = __float2half(__half2float(q[i]) * c + __half2float(r) * s);
     }
     if (i < KV_HEADS * HEAD_DIM) {
         half r = d < HEAD_DIM / 2 ? __hneg(k[paired]) : k[paired];
         long long offset = *position * KV_HEADS * HEAD_DIM + i;
-        cache_k[offset] = __hadd_rn(__hmul_rn(k[i], c), __hmul_rn(r, s));
+        cache_k[offset] = __float2half(__half2float(k[i]) * c + __half2float(r) * s);
         cache_v[offset] = v[i];
     }
 }

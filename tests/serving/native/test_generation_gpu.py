@@ -164,6 +164,9 @@ CHECKPOINT_CASES = (
     ("heldout_context", "The train crosses a bridge and stops beside a quiet village. ", 128, 24, True),
     ("context_1024", "The garden has a pond, a wooden bench, and a path lined with trees. ", 1008, 16, False),
     ("context_4096", "The museum catalog describes paintings, pottery, maps, and tools from different centuries. ", 4080, 16, True),
+    # Held out until the FP32 attention-intermediate fix and its independent regression were committed.
+    ("heldout_attention", "Why does an ice cube float in water? Give a brief explanation.", None, 24, True),
+    ("heldout_context_4096", "The coastal survey records tides, winds, water temperatures, and seabird sightings. ", 4080, 16, False),
 )
 
 
@@ -292,11 +295,11 @@ def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch, name,
         asyncio.run(check())
 
 
-def test_rotary_preserves_half_precision_operation_boundaries(tmp_path):
+def test_rotary_rounds_only_the_output(tmp_path):
     from emmy.compiler.backend.pack import save_executable
     from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan, KernelSpec, LaunchSpec
     from emmy.compiler.dim import Dim
-    from emmy.compiler.dtype import F16, I64
+    from emmy.compiler.dtype import F16, F32, I64
     from emmy.serving.native.kernels import SOURCE
 
     executable = shutil.which("emmy-runtime-worker")
@@ -307,13 +310,16 @@ def test_rotary_preserves_half_precision_operation_boundaries(tmp_path):
     k = (rng.normal(size=(2, 128)) * 10).astype(np.float16)
     v = rng.normal(size=(2, 128)).astype(np.float16)
     angles = np.tile(rng.normal(size=64), 2)
-    cosine, sine = np.cos(angles).astype(np.float16), np.sin(angles).astype(np.float16)
+    cosine, sine = np.cos(angles).astype(np.float32), np.sin(angles).astype(np.float32)
     data = {"q": q, "k": k, "v": v, "cosine": cosine, "sine": sine, "position": np.array([0], np.int64)}
     source = (
         "#define HIDDEN 32\n#define HEADS 4\n#define KV_HEADS 2\n#define HEAD_DIM 128\n"
         "#define VOCAB 32\n#define SCALE 0.08838834764831845f\n" + SOURCE
     )
-    buffers = [BufferSpec(n, tuple(Dim(x) for x in a.shape), I64 if n == "position" else F16, "input") for n, a in data.items()]
+    buffers = [
+        BufferSpec(n, tuple(Dim(x) for x in a.shape), I64 if n == "position" else F32 if n in ("cosine", "sine") else F16, "input")
+        for n, a in data.items()
+    ]
     outputs = {"rotated": q, "keys": k, "values": v}
     buffers += [BufferSpec(n, tuple(Dim(x) for x in a.shape), F16, "output") for n, a in outputs.items()]
     args = tuple(data) + tuple(outputs)
@@ -344,7 +350,7 @@ def test_rotary_preserves_half_precision_operation_boundaries(tmp_path):
         asyncio.run(check())
         for name, values in (("rotated", q), ("keys", k)):
             rotated = np.concatenate((-values[:, 64:], values[:, :64]), axis=-1)
-            expected = (values * cosine + rotated * sine).astype(np.float16)
+            expected = (values.astype(np.float64) * cosine + rotated.astype(np.float64) * sine).astype(np.float16)
             np.testing.assert_array_equal(np.fromfile(tmp_path / name, np.float16).reshape(values.shape), expected)
         np.testing.assert_array_equal(np.fromfile(tmp_path / "values", np.float16).reshape(v.shape), v)
 
