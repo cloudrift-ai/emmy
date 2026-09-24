@@ -1493,3 +1493,42 @@ def test_a_decision_consumes_the_key_that_spelled_it_on_import(monkeypatch) -> N
         db, Context.from_target((12, 0), gpu_name=_ROUTING_CARD), [_routing_record({"PLACE": "cut"})], source="golden:t"
     )
     assert counts["routing rows"] == 1 and len(list(db.iter_routing())) == 1
+
+
+def _row_statistic_graph() -> Graph:
+    """``out[m, n] = f(sum_k x[m, k], w[n])`` — a cut piece whose cone holds a ROW statistic the
+    output sweep is invariant in, which is the shape every norm-plus-rotation operand cone has."""
+    m, n, k = Axis("m", 8), Axis("n", 16), Axis("k", 32)
+    statistic = reduction(k, (slab("x", "x", "m", "k"),), (Assign(name="acc__v", op="multiply", args=("x", "x")),), ("acc",))
+    cone = projection(
+        (statistic, slab("w", "w", "n")),
+        (Assign(name="scaled", op="multiply", args=("acc", "w")),),
+    )
+    tile = TileOp(
+        op=projection((cone,), (Assign(name="out_v", op="multiply", args=("scaled", "scaled")),)),
+        name="out",
+        place=Placement(free=(m, n)),
+        axes=(m, n, k),
+    )
+    graph = Graph()
+    _input(graph, "x", (8, 32))
+    _input(graph, "w", (16,))
+    graph.add_node(tile, ["x", "w"], Tensor("out", (8, 16), "f16"), node_id="out")
+    graph.inputs, graph.outputs = ["x", "w"], ["out"]
+    return graph
+
+
+def test_cut_piece_sweeps_the_axis_its_row_statistic_is_invariant_in() -> None:
+    """The piece's grid binds ``m`` and sweeps ``n``: binding ``n`` too would re-fold the statistic
+    once per output cell, which is what a materialized q/k RoPE cone did — one cooperative block
+    per element."""
+    graph = _row_statistic_graph()
+    pipeline = Pipeline.build(["lowering/tile"], select={"cut"})
+    match = pipeline.match(graph, pipeline.passes[0].rules[0])[0]
+    seams = cuttable_seams(match.root.op)
+
+    fragment = realize(match, match.root, (seams[0],))
+
+    producer = next(node.op for name, node in fragment.nodes.items() if isinstance(node.op, TileOp) and "__place_" in name)
+    assert [axis.name for axis in producer.place.free] == ["m"]
+    assert [axis.name for store in producer.output_specs for axis in store.sweep] == ["n"]
