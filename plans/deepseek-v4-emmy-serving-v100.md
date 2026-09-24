@@ -17,8 +17,9 @@ lowering so the drift cannot return unseen. The file holds 454 measured rows ove
 index reads 437 of them, and 318 of the 335 kernels the nine serving twins mint have a measured row. Of the seventeen
 without, eleven are the single-token expert and pre twins' pieces, whose refusal that tier survives by riding the
 wider one, and six are the pieces #883 re-shaped in the three post twins, whose refusal ends the boot. The durable
-record of every boot, election and A/B is
-`experiments/golden-bench-2026/serving_deepseek_v4_flash_0731_v100x16/RESULTS.md`; this file only says what is left.
+record of every boot, election and A/B was
+`experiments/golden-bench-2026/serving_deepseek_v4_flash_0731_v100x16/RESULTS.md` until #896 removed this lane from
+`main` on 2026-09-24; it survives in `main`'s history at bc58445ef, and this file carries what is left.
 
 It serves strict from the repository golden, but slower and worse than the tree before #863 did. Boot36b (main plus
 #875 at #869, 2026-09-23, fast math pinned off): 0.73 s to first token warm at 5 prompt tokens and 5.5 s at 2,155;
@@ -32,11 +33,12 @@ to ride — so `main` as merged did not boot strict until the three post leads w
 below); their cut receipts still carry the old pieces' time.
 
 Three things hold the numbers. Fast math became the default (#868) while serving published no precision pin, so every
-boot needed the regime pinned off by hand — closed by `serve --golden` publishing the rows' regime to its workers.
-Cooperative reduction on the fresh divide kernels does not compile (`float v125` declared once per half of the split
-accumulator), so those kernels run serial, 36 to 250 times slower than the old cooperative rows, and the transposed
-cooperative reduce is offered on no kernel of this model; that is most of the 0.215 → 0.56 s. And the prior's
-cooperative picks cost 10 to 100 times wherever nothing is measured.
+boot needed the regime pinned off by hand — closed by `serve --golden` publishing the rows' regime to its workers. The
+fresh divide kernels run serial, 36 to 250 times slower than the old cooperative rows and up to 40 times slower than
+eager: #863 lowers them to chains of nested four-element folds recomputed per element, so the one long reduce axis the
+transposed cooperative reduce needs is gone (the build defect that hid this, a name declared twice under any
+cooperative reduce, is fixed by #895); that is most of the 0.215 → 0.56 s. And the prior's cooperative picks cost 10
+to 100 times wherever nothing is measured.
 
 Stages −1 to 3 are done, and Stage 0's question — can the compiler serve this model — is answered yes. Gate (c),
 coherent completions, passed on the old tree, was red on `main` from #829 to #893 without anyone seeing it, and is
@@ -60,11 +62,15 @@ checkpoint stays impractical here.
    recorded rows. Boot39 from that tree serves coherent completions at boot38's timings, so gate (c) is green again.
    Still owed: a finite-input replay per twin and an independent reference on `run --golden`, and a boot that reads
    the election's check instead of printing it as a warning.
-3. **The cooperative-reduce codegen defect**, then the transposed cooperative reduce. GPU-free repro:
-   `EMMY_KNOBS="REDUCE@map.1/map.1/reduce=coop,WORK=t128" emmy compile --golden
-   recipes/DeepSeek-V4-Flash-0731/golden/v100_sm70.yaml --realization
-   post16.k_div_50_reduce.d81043a46649.m16.4e18a355bd66 --target sm_70 --ir cuda`. This is what brings decode back
-   near 1.5× the fork.
+3. **The transposed cooperative reduce on the fresh divide kernels.** The build defect under any cooperative reduce is
+   fixed (#895, 2026-09-24: the one-value-per-name sweep now reaches nested scopes), and the six divide leads build
+   and run under it on the V100 — at the serial rows' speed, because the only site the fresh kernels offer is the
+   four-element inner reduce. The rows that made these kernels fast before #863 (7.6 µs at width 16, 49 µs symbolic,
+   32 µs at width 4,096, against 270 µs, 1.5 ms and 7.8 ms serial today, and eager PyTorch's 150 to 200 µs) were
+   `coop-t` over one long reduce axis, and the kernels #863 lowers to have none: their Tile IR is a chain of nested
+   four-element folds recomputed per element of the sweep around them (a `coop-t` pin is quietly taken as `coop`). The
+   item is the reduction normalization that fragments the axis, not a schedule; undoing it for these kernels is what
+   brings decode back near 1.5× the fork.
 4. **Stage 4 — image and release plumbing.** Bake FROM the immutable 1Cat digest with `cupy-cuda12x` under its own
    image identity — not the Makefile's default version/tag for a 1Cat 1.2.3 base — labelled with the 1Cat digest and
    source SHA, Emmy SHA, checkpoint revision and CUDA/NVRTC versions; carry the fork's `VLLM_SM70_*` variables with
