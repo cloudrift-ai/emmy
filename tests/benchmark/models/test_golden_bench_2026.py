@@ -495,7 +495,7 @@ def test_gemma4_kernels_replay_a_hand_recorded_golden_per_lane(project_root) -> 
     recipe_dir = _experiment(project_root, "gemma4_kernels")
     recipe = load_recipe(recipe_dir)
     tasks = enumerate_tasks([recipe_dir])
-    cards = {"rtx5090": "NVIDIA GeForce RTX 5090", "rtx4090": "NVIDIA GeForce RTX 4090"}
+    cards = {"rtx5090": "NVIDIA GeForce RTX 5090"}
     assert sorted((task.variant.params["card"], task.variant.params["kernel"], task.variant.params["lane"]) for task in tasks) == sorted(
         (card, kernel, lane)
         for card in cards
@@ -559,7 +559,7 @@ def test_every_command_variant_renders(project_root) -> None:
             assert "/task" in command
             subprocess.run(["bash", "-n"], input=command, text=True, check=True)
             rendered += 1
-    assert rendered == 167
+    assert rendered == 155
 
 
 def test_gemma_serving_ab_has_four_points_per_lane(project_root) -> None:

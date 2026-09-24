@@ -17,7 +17,6 @@
 #
 # Repro on a pre-allocated card (no cloud provisioning):
 #   emmy bench experiments/golden-bench-2026/gemma4_kernels --local --filter card=rtx5090
-#   emmy bench experiments/golden-bench-2026/gemma4_kernels --ssh USER@HOST[:PORT] --filter card=rtx4090
 command:
   stage:
     - emmy
@@ -81,10 +80,4 @@ matrices:
       lane: [std, fm]
       card: rtx5090
       deploy.gpu: "NVIDIA GeForce RTX 5090"
-      deploy.gpu_count: 1
-  - cross:
-      kernel: [q_proj, kv_proj, o_proj, mlp_gate_up, mlp_down, attention]
-      lane: [std, fm]
-      card: rtx4090
-      deploy.gpu: "NVIDIA GeForce RTX 4090"
       deploy.gpu_count: 1
