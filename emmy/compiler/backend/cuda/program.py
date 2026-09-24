@@ -392,6 +392,8 @@ class CompiledProgram:
     between them — single pass vs warmup+measure vs snapshot-every-launch — collapses to which
     optional callbacks they pass."""
 
+    # Field order is teardown order: the executor drops first and synchronizes its stream, so
+    # the tensors lent to it are released only after every launch that read them completed.
     plan: ExecutionPlan
     program: Any
     executor: Any
@@ -463,7 +465,6 @@ class CompiledProgram:
         regions = self._provision(sym_values, input_data)
         bindings = _host_bindings(plan, input_data, sym_values)
         self.executor = emmy_runtime.Executor(device(), program, binaries, bindings, sym_values, regions)
-        self._track()
         elapsed = _time_module.monotonic() - t0
         if compile_timeout_s is not None and elapsed > compile_timeout_s:
             raise CompileBudgetExceeded(f"compile stage exceeded {compile_timeout_s:.1f}s budget ({elapsed:.2f}s) — nothing measured")
@@ -503,17 +504,6 @@ class CompiledProgram:
             regions[name] = (tensor.data_ptr(), tensor.numel() * tensor.element_size())
         return regions
 
-    def _track(self) -> None:
-        """Record every lent tensor on the runtime's stream, so torch's caching allocator waits
-        for the launches that read a block before handing it to another tensor."""
-        if not self._tensors:
-            return
-        import torch  # noqa: PLC0415
-
-        stream = torch.cuda.ExternalStream(int(self.executor.stream()))
-        for tensor in self._tensors.values():
-            tensor.record_stream(stream)
-
     def rebind(self, input_data: dict) -> None:
         """Re-bind ``input_data`` on an already-built program, re-sizing symbolic-shaped buffers
         to the new runtime dims — the serving path, where one compiled dynamic-seq_len program
@@ -531,7 +521,6 @@ class CompiledProgram:
         bindings = _host_bindings(self.plan, input_data, new_sym, only=touched)
         regions = self._provision(new_sym, input_data)
         self.executor.rebind(new_sym, bindings, regions)
-        self._track()
         self.sym_values = new_sym
 
     def set_sym_values(self, values: dict[str, int]) -> None:
@@ -723,7 +712,6 @@ class CompiledProgram:
         else:
             self.executor.set_region(placement["region"], flat.data_ptr(), flat.numel())
             self._tensors[placement["region"]] = flat
-        self._track()
 
     def release_buffer(self, name: str) -> None:
         """Give a buffer's memory back: an operand the kernels resolve through an indirect table
