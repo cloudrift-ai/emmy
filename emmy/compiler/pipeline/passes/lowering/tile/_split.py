@@ -269,7 +269,13 @@ def _slice_fold(fold: Fold, axis: Axis, b: int, split: Axis) -> tuple[Axis, Fold
     # what changes here is the axis itself, which only the caller can say.
     operands = tuple(_sliced_edge(edge, sigma, axis.name, sliced_axis, split) for edge in fold.operands)
     body = Body(tuple(stmt.substitute(sigma) for stmt in fold.lift.body))
-    return sliced_axis, replace(fold, operands=operands, lift=replace(fold.lift, body=body))
+    # Re-CLOSED, exactly as the contraction slicer closes its own: a lift that reads the reduce
+    # coordinate directly — a causal mask's ``row <= key`` — reads the partition coordinate once the
+    # σ-offset lands, and keeping the original param list leaves it unbound. The cut that mints a
+    # piece whose head IS such a masked reduce makes the split pass offer ``g<n>k`` on it, and greedy
+    # prices a fork by materializing every arm, so merely OFFERING the split raised.
+    lift = Lambda.closing(fold.lift.params, body, fold.lift.results)
+    return sliced_axis, replace(fold, operands=operands, lift=lift)
 
 
 def _factor_k(k_axis: Axis, w: int) -> tuple[Axis, Axis, Sigma]:
@@ -299,17 +305,15 @@ def _sliced_edge(edge, sigma: Sigma, k_name: str, kslice=None, ksplit: Axis | No
     if isinstance(edge, Load):
         return replace(edge, index=tuple(sigma.apply(e) for e in edge.index))
 
-    def images(name: str) -> tuple[str, ...]:
-        # A coordinate a term takes as a value rides a trailing param, so a σ-reindex re-spells it
-        # with the body. σ is not a rename: a split maps one coordinate onto an EXPRESSION over two
-        # (slice and partition), so a param's image is the free names of that expression, in order.
-        mapped = sigma.get(name)
-        return (name,) if mapped is None else tuple(dict.fromkeys(mapped.free_vars()))
-
     ops = tuple(_sliced_edge(e, sigma, k_name, kslice, ksplit) if k_name in e.free_axes else e for e in edge.operands)
     body = Body(tuple(s.substitute(sigma) for s in edge.lift.body))
-    params = tuple(dict.fromkeys(name for param in edge.lift.params for name in images(param)))
-    return replace(edge, operands=ops, lift=replace(edge.lift, params=params, body=body))
+    # Re-CLOSED, like every other σ-reindexed lift here. σ maps one coordinate onto an expression
+    # over TWO (slice and partition), and expanding a param in PLACE shifted the operand
+    # correspondence the prefix carries — by a ``free_vars()`` set order, so which name landed there
+    # moved with the hash seed and ``_prune_unread`` then dropped a param the body still read.
+    # Closing keeps the prefix exactly and appends the partition coordinate where a coordinate sits.
+    lift = Lambda.closing(edge.lift.params, body, edge.lift.results)
+    return replace(edge, operands=ops, lift=lift)
 
 
 def _sliced_contraction(node: Fold, k_axis: Axis, w: int) -> tuple[Axis, Axis, Fold]:
