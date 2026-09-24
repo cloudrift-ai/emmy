@@ -83,8 +83,9 @@ def register_run_command(subparsers):
         help=(
             "With --golden PATH --realization NAME --bench, write the greedy pick's kernel set back into the file as "
             "measured realizations: one routing row per kernel-set decision it took and one child-identity schedule "
-            "receipt per kernel, timed by the isolated re-bench with the greedy comparison row as the reference. Those "
-            "rows are what a strict-evidence compile of the file picks the same kernel set from."
+            "receipt per kernel, timed by the isolated re-bench with the greedy comparison row as the reference. The "
+            "named realization's own route is pinned for that compile; the receipts it records are what price the "
+            "kernel set for a compile nothing pins, and what a strict-evidence compile picks it from."
         ),
     )
     parser.add_argument(
@@ -321,11 +322,10 @@ def _handle_run_once(args):
     if dump:
         dump.dump_input_graph(graph)
 
-    # Backend auto-resolves ``EMMY_TUNE_DB`` env →
-    # ``~/.cache/emmy/autotune.db`` (opens if the file exists,
-    # silent fall-back to rule defaults otherwise).
+    # Backend auto-resolves ``EMMY_TUNE_DB`` env → ``~/.cache/emmy/autotune.db``, created on
+    # first use: the card's golden rows are imported into it before the compile picks.
     backend = CudaBackend(debug=args.debug or None, dump=dump, tune_db="auto")
-    if backend.tune_db is not None and backend.tune_db.exists():
+    if backend.tune_db is not None:
         logger.info("Using tuning DB: %s", backend.tune_db)
     compiled = backend.compile(graph)
 
@@ -612,10 +612,11 @@ def _record_greedy_pick(args, graph, bench, greedy_iso, taken) -> None:
 
     whole, whole_ref = _bench_total_us(isolated)[0], _bench_total_us(bench)[0]
     node_ids = [node.id for node in _launch_order_cuda_nodes(graph)]
-    prices = [kernel_set_prices(taken.kernel_sets, dict(zip(node_ids, (us(launch) for launch in side), strict=True))) for side in launches]
+    kernel_sets = [ids for _parent, _arm, ids in taken]
+    prices = [kernel_set_prices(kernel_sets, dict(zip(node_ids, (us(launch) for launch in side), strict=True))) for side in launches]
     decisions = [
-        (identity, knobs, whole if mine is None else mine, whole_ref if theirs is None else theirs)
-        for (identity, knobs), mine, theirs in zip(taken.decisions, *prices, strict=True)
+        (parent.identity_key(with_io=True), arm, whole if mine is None else mine, whole_ref if theirs is None else theirs)
+        for (parent, arm, _ids), mine, theirs in zip(taken, *prices, strict=True)
     ]
     record_greedy_pick(
         args.golden,
@@ -2564,26 +2565,31 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
 
     backend = CudaBackend(debug=args.debug or None, dump=dump, tune_db="auto")
     db = None
-    if backend.tune_db is not None and backend.tune_db.exists():
+    if backend.tune_db is not None:
         from emmy.compiler.pipeline.search.db import SearchDB
 
         db = SearchDB(path=backend.tune_db)
         logger.info("Using tuning DB: %s", backend.tune_db)
-    from emmy.compiler.pipeline.search.working_golden import KernelSetDecisions  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.strategy.two_level import KernelInventory, _identity  # noqa: PLC0415
 
-    taken = KernelSetDecisions()
+    # Every kernel-set decision the greedy compile takes, as the splice watcher reports it: the tile
+    # kernel the fork was offered on, the arm, and the graph ids the splice consumed and minted.
+    taken: list[tuple[object, dict, tuple[str, tuple[str, ...]]]] = []
+    watcher = KernelInventory(_identity(), lambda *_: None, on_routing=lambda parent, arm, pieces, ids: taken.append((parent, arm, ids)))
     if tail:
         # Finish the tail lowering — the greedy compile — with the selected golden's records as its
-        # golden evidence and their shared input regime published, as ``compile`` does, so the
-        # greedy row deploys from the file it is measured against. Recording the pick composes the
-        # capture of its kernel-set decisions into the same compile.
+        # golden evidence, their shared input regime published (by the caller) and the kernel-set
+        # decisions the named realization records pinned, as ``compile`` does, so the greedy row
+        # deploys the kernel set the file describes. Recording the pick composes the capture of its
+        # kernel-set decisions into the same compile.
+        from emmy.commands.compile import selected_decisions  # noqa: PLC0415
         from emmy.compiler.pipeline.search.golden import records_override  # noqa: PLC0415
 
         scope = getattr(args, "_golden_records", None) or None
         pipeline = Pipeline.build(tail)
         if getattr(args, "record_greedy", False):
-            pipeline = pipeline.with_strategies(taken)
-        with records_override(scope):
+            pipeline = pipeline.with_strategies(watcher)
+        with records_override(scope), pinned_knobs(selected_decisions(args)):
             graph = pipeline.run(graph, db=db, dump=dump)
 
     if not args.bench:

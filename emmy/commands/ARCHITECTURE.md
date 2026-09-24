@@ -222,8 +222,8 @@ or child-identity receipt is evidence for its target's walk, not a target of its
 not dotted name prefixes. A file that dropped its seed rows (a promoted serving-twin golden) benches each target
 through the row pricing all of it, its fastest routing row, else its fastest row. A
 failing target does not stop the walk: every target reports, and the command exits non-zero at the end naming
-the failures. A receipt of a piece a route row minted (its identity is no route row's) replays under the target's
-route rows composed, plus `PLACE=fuse` when no
+the failures. A receipt of a piece a routing row minted (its identity is no routing row's) replays under the target's
+routing rows composed, plus `PLACE=fuse` when no
 cut was recorded: bare, its piece keys would spell against the unsplit program and match nothing. It parses and validates the
 document once and hands that object to each name's resolution step, because a whole-model inventory is large
 enough that re-reading it per target dominates the replay: the 279-target DeepSeek V4 Flash golden costs about
@@ -300,8 +300,11 @@ measured realizations of the named target: one routing row per kernel-set decisi
 summed isolated launches of the kernels that decision produced, and one child-identity schedule receipt per kernel at
 its own isolated launch, both with the greedy comparison row as their `same-input-greedy` reference
 (`working_golden.record_greedy_pick`; the pipeline ARCHITECTURE's golden-record Part has the spelling and the
-pricing). That is how a pick the prior made becomes rows a strict-evidence compile of the file deploys
-from without a prior. Under `EMMY_KNOBS` the recorded pick IS the pin, so the recording refuses, and the run exits
+pricing). The named realization's own kernel-set decisions — its route, a cross-CTA split it spells — are pinned
+for that compile (`compile.selected_decisions`, for `compile --golden --realization` too), so the greedy row takes the
+kernel set the file describes; a routing row's own time prices nothing, and the receipts this writes are what price
+the decision for a compile nothing pins. That is how a pick the prior made becomes rows a strict-evidence compile of
+the file deploys from without a prior. Under `EMMY_KNOBS` the recorded pick IS the pin, so the recording refuses, and the run exits
 nonzero, when the env pin did not realize (`greedy_record_refusal`): the row would file the planner's own schedule
 under the pin's name and lane. It refuses a pick whose answer `--strict` rejected for the same reason. Independently of both, every clean pinned row and the greedy isolated re-bench are written into
 the tune DB by default at tune-standard measurement quality: per-kernel `perf` rows through the tuner's own writer —

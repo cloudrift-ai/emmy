@@ -528,12 +528,14 @@ class SearchDB:
         stats: PerfStats,
         captured: bool = False,
         error: str | None = None,
+        source: str = "measured",
     ) -> None:
         """Record one measurement taken now under ``ctx``: keyed by the context ``ctx`` names, and upserted
         through :meth:`record_perf_row`. ``knobs`` is the kernel's stamped dict as the tuner holds it; the
         ``S_*`` / ``H_*`` entries are the kernel's and the context's and are not stored with the row.
         ``error`` is the failure text for a ``bench_fail`` row (whitespace-collapsed, truncated) so failure
-        forensics (``eval failures``) need no tune-log grepping."""
+        forensics (``eval failures``) need no tune-log grepping. ``source`` names where the row came from: a
+        live bench, or the golden file it was imported from (``golden:<digest>``)."""
         gpu, arch, opt, flags = self._regime(ctx)
         if error is not None:
             error = " ".join(str(error).split())[:300] or None
@@ -552,6 +554,7 @@ class SearchDB:
                 measured_at=datetime.now(UTC).isoformat(),
                 captured=captured,
                 error=error,
+                source=source,
             )
         )
 
@@ -605,9 +608,29 @@ class SearchDB:
     # Perf — read
     # ------------------------------------------------------------------
 
-    def perf_sources(self) -> dict[str, int]:
-        """How many ``perf`` rows each source contributed — what a report over this instance names as its data."""
-        return dict(self._conn.execute("SELECT source, COUNT(*) FROM perf GROUP BY 1 ORDER BY 1"))
+    def perf_sources(self, ctx: Context | None = None) -> dict[str, int]:
+        """How many ``perf`` rows each source contributed — what a report over this instance names as its data;
+        the rows under ``ctx``'s card and regime only when one is given."""
+        if ctx is None:
+            return dict(self._conn.execute("SELECT source, COUNT(*) FROM perf GROUP BY 1 ORDER BY 1"))
+        return dict(
+            self._conn.execute(
+                "SELECT p.source, COUNT(*) FROM perf p JOIN context c ON c.id = p.context "
+                "WHERE c.gpu_name = ? AND c.arch = ? AND c.opt = ? AND c.flags = ? GROUP BY 1 ORDER BY 1",
+                self._regime(ctx),
+            )
+        )
+
+    def forget_perf(self, ctx: Context, source_prefix: str) -> int:
+        """Delete the rows measured under ``ctx``'s card and regime whose ``source`` starts with ``source_prefix``
+        — how the cache lets a golden file's rows go before the file's current rows are imported, since
+        keep-best would keep a stale faster row. Returns how many were deleted."""
+        gpu, arch, opt, flags = self._regime(ctx)
+        return self._conn.execute(
+            "DELETE FROM perf WHERE source LIKE ? AND context IN "
+            "(SELECT id FROM context WHERE gpu_name = ? AND arch = ? AND opt = ? AND flags = ?)",
+            (source_prefix + "%", gpu, arch, opt, flags),
+        ).rowcount
 
     def lookup_perf(self, ctx: Context, kernel: str, *, bindings: dict, knobs: dict, backend: str) -> PerfRow | None:
         """The row ``ctx``'s context measured for this kernel variant."""

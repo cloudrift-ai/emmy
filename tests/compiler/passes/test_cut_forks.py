@@ -626,14 +626,16 @@ def test_child_identity_receipt_selects_one_kernel_from_multi_kernel_loop_target
     assert decode_record(receipt) is None
 
 
-def test_evidence_rows_key_each_row_by_the_kernel_it_decides(monkeypatch) -> None:
-    """Golden evidence is per kernel. A target's entries walk one path: the leading entry (the
-    routing record here) decides the parent's placement fork and is its route row under the
-    signature of the kernel the cut was offered on; the child-identity receipt decides only the
-    forks of the kernel it names, and its schedule row is keyed under that child's signature — a
+def test_import_files_each_row_under_the_kernel_it_decides(monkeypatch) -> None:
+    """Golden evidence is per kernel, in the DB as in the file. A target's entries walk one path: the
+    leading entry (the routing record here) decides the parent's placement fork and is its routing
+    row — the parent's exact identity, the arm, the pieces — and the child-identity receipt decides
+    only the forks of the kernel it names and is that child's perf row, its schedule row as
+    recorded, captured, under the golden's source. The parent ran as no kernel and has no row; a
     piece inherits nothing from the kernel it replaced."""
     monkeypatch.setenv("EMMY_FAST_MATH", "0")
-    from emmy.compiler.pipeline.search.golden import evidence_rows, records_override
+    from emmy.compiler.pipeline.search.db import SearchDB
+    from emmy.compiler.pipeline.search.golden_import import import_goldens
 
     fields = {**_receipt_fields(), "measurements": {"emmy_us": 1.0, "reference_us": 2.0, "reference_backend": "torch"}}
     route = {"PLACE@map.1/twist.1/inner": "cut"}
@@ -643,57 +645,19 @@ def test_evidence_rows_key_each_row_by_the_kernel_it_decides(monkeypatch) -> Non
     replay = _replay(parent, exhaustive=True)
     child, rows = next((identity, rows) for identity, rows in replay.rows.items() if identity is not None and identity != lift_identity)
     receipt = GoldenRecord(knobs=dict(next(iter(rows))), identity=child, **fields)
-    parent_signature = frozenset(
-        (key, str(value)) for key, value in _target_kernel_nodes(parent)[1][0].op.knobs.items() if key.startswith(("S_", "I_"))
-    )
 
-    assert _replay(routing).arms == ((parent_signature, route),)
-    with records_override([routing, receipt]):
-        got = evidence_rows("", (12, 0))
-    assert got == [
-        (parent_signature, route, 1.0, routing.name),
-        (replay.signatures[child], receipt.schedule_row, 1.0, receipt.name),
-    ]
+    db = SearchDB()
+    counts = import_goldens(db, Context.from_target((12, 0)), [routing, receipt], source="golden:test")
 
-
-def test_evidence_rows_keep_an_empty_receipt_as_its_kernel_fused_arm_evidence(monkeypatch) -> None:
-    """A child-identity receipt whose schedule row is empty is still that kernel's measured row.
-    ``run --record-greedy`` writes ``knobs: {}`` for a piece the pick took no knobs on — the
-    OFF fill skips an op that never carried one — and an empty row spells the fused, unsplit arm
-    at the piece's kernel-set forks (``pins.spelled_arm``). Dropping it left the piece with no
-    measured row at its placement fork, which strict evidence refuses."""
-    monkeypatch.setenv("EMMY_FAST_MATH", "0")
-    from emmy.compiler.pipeline.search.golden import evidence_rows, records_override
-
-    fields = {**_receipt_fields(), "measurements": {"emmy_us": 1.0, "reference_us": 2.0, "reference_backend": "torch"}}
-    routing = GoldenRecord(knobs={"PLACE@map.1/twist.1/inner": "cut"}, **{**fields, "pins": ()})
-    parent = GoldenRecord(knobs={}, **fields)
-    lift_identity = _lifted_target(parent).identity_key(with_io=True)
-    replay = _replay(parent, exhaustive=True)
-    child = next(identity for identity in replay.rows if identity is not None and identity != lift_identity)
-    receipt = GoldenRecord(knobs={}, identity=child, **fields)
-
-    with records_override([routing, receipt]):
-        got = evidence_rows("", (12, 0))
-    assert (replay.signatures[child], {}, 1.0, receipt.name) in got
-
-
-def test_evidence_rows_replay_an_identityless_kernel_set_lead(monkeypatch) -> None:
-    """A seed with no row of its own still contributes the routes listed by ``kernel_set``."""
-    monkeypatch.setenv("EMMY_FAST_MATH", "0")
-    from emmy.compiler.pipeline.search.golden import evidence_rows, records_override
-
-    fields = {**_receipt_fields(), "measurements": {"emmy_us": 1.0, "reference_us": 2.0, "reference_backend": "torch"}}
-    route = {"PLACE@map.1/twist.1/inner": "cut"}
-    routing = GoldenRecord(name="sdpa.route", knobs=route, identity="0" * 64, **{k: v for k, v in fields.items() if k != "name"})
-    lead = GoldenRecord(name="sdpa.lead", knobs={}, kernel_set=(routing.name,), **{k: v for k, v in fields.items() if k != "name"})
-    parent_signature = frozenset(
-        (key, str(value)) for key, value in _target_kernel_nodes(lead)[1][0].op.knobs.items() if key.startswith(("S_", "I_"))
-    )
-
-    with records_override([lead, routing]):
-        got = evidence_rows("", (12, 0))
-    assert (parent_signature, route, 1.0, lead.name) in got
+    assert counts == {"routing rows": 1, "perf rows": 1}
+    [decision] = db.iter_routing()
+    assert decision.arm == route and len(decision.children) >= 2
+    [row] = db.iter_perf_rows()
+    assert row.kernel in decision.children and row.kernel != decision.parent
+    schedule = {k: str(v) for k, v in row.knobs.items() if not k.startswith(("S_", "I_"))}
+    assert schedule == {k: str(v) for k, v in receipt.schedule_row.items()}
+    assert (row.stats.median, row.captured, row.source) == (1.0, True, "golden:test")
+    assert next(kernel for kernel in db.iter_kernels() if kernel.exact_identity == row.kernel).structural_identity == child
 
 
 def test_multi_output_kernel_record_derives_the_identity_its_live_fork_carries() -> None:
@@ -834,18 +798,21 @@ def _routing_record(knobs: dict, *, name: str = "sdpa.route") -> GoldenRecord:
 
 
 def _deploy_kernels(records: list) -> list[str]:
-    """Resolve the sdpa program through the deploy policy with ``records`` as the card's corpus,
-    and return the resolved kernel set. ``prior=None`` pins the non-recorded forks to emission
+    """Resolve the sdpa program through the deploy policy with ``records`` as the card's corpus —
+    imported into the compile's DB, as every compile imports its golden scope — and return the
+    resolved kernel set. ``prior=None`` pins the non-recorded forks to emission
     order, so the recorded evidence is the only thing that can move the answer. The records are
     evidence in any nvcc regime: a golden row is scoped by the card and by its own input pins
     (``regime_live``), never by the optimization level the suite compiles at."""
     from emmy.compiler.pipeline.search.golden import records_override
+    from emmy.compiler.pipeline.search.golden_import import evidence_db
     from emmy.compiler.pipeline.search.policy.greedy import greedy_decide
 
     ctx = Context.from_target((12, 0), gpu_name=_ROUTING_CARD)
     lowered = Pipeline.build(LOOP_PASSES).run(_sdpa_graph(), ctx=ctx)
     with records_override(records):
-        terminal, _trace = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(lowered, greedy_decide(prior=None))
+        db = evidence_db(None, ctx)
+        terminal, _trace = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(lowered, greedy_decide(prior=None, db=db))
     return sorted(node.id for node in terminal.nodes.values() if isinstance(node.op, TileOp))
 
 
@@ -858,22 +825,24 @@ def test_a_recorded_kernel_set_deploys_the_cut_every_entry_spells(monkeypatch) -
     """A cut mints brand-new kernels, so a kernel set cut twice over is recorded per kernel and not
     as one row spelling both seams: the leading entry spells the seam offered on the target's own
     kernel, and an entry naming a piece by its stored identity spells the seam that piece offers on
-    its own tree. Each entry's route is a row under the signature of the kernel whose fork it
-    decided, so the deploy composes the whole recorded set — the parent's entry alone deploys only
-    the parent's seam."""
+    its own tree. Each entry's decision is a routing row on the kernel whose fork it decided, priced
+    from the receipts of the kernels the set finally ran as, so the deploy composes the whole
+    recorded set — and a decision whose pieces carry no receipt prices nothing."""
     monkeypatch.setenv("EMMY_FAST_MATH", "0")
     fused = _deploy_kernels([])
     assert len(fused) == 1, f"with no recorded route the fork falls to emission order (fuse): {fused}"
 
     parent = _routing_record({_SDPA_ROUTE: "cut"})
-    routed = _deploy_kernels([parent])
+    assert _deploy_kernels([parent]) == fused, "a routing row alone prices nothing: its pieces have no receipt"
+    pieces = sorted(_replay(parent).kernels)
+    receipts = [replace(parent, name=f"sdpa.receipt{i}", knobs={}, identity=identity) for i, identity in enumerate(pieces)]
+    routed = _deploy_kernels([parent, *receipts])
     assert sum(1 for name in routed if "__place_" in name) == 1, f"the parent's entry deploys its one seam: {routed}"
 
-    pieces = [
-        replace(parent, name=f"sdpa.piece{i}", knobs={"PLACE": "cut"}, identity=identity)
-        for i, identity in enumerate(sorted(_replay(parent).kernels))
-    ]
-    composed = _deploy_kernels([parent, *pieces])
+    cuts = [replace(parent, name=f"sdpa.piece{i}", knobs={"PLACE": "cut"}, identity=identity) for i, identity in enumerate(pieces)]
+    leaves = sorted(_replay(parent, siblings=tuple(cuts), lead=parent).kernels)
+    leaf_receipts = [replace(parent, name=f"sdpa.leaf{i}", knobs={}, identity=identity) for i, identity in enumerate(leaves)]
+    composed = _deploy_kernels([parent, *cuts, *leaf_receipts])
     assert sum(1 for name in composed if "__place_" in name) >= 2, f"every recorded seam must be cut: {composed}"
 
 

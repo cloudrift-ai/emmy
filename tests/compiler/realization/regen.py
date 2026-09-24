@@ -58,17 +58,18 @@ def _records(document: dict) -> tuple:
 
 
 def complete_all() -> int:
-    """Add an entry for every kernel of a case's set that no entry decides yet
-    (``helpers.complete``), then restamp — authoring, so it runs only when asked
-    (``make test-corpus-regen COMPLETE=1``)."""
+    """Add an entry for every kernel of a case's set that no entry names, dropping the entries that
+    name kernels the compiler no longer mints (``helpers.complete``), then restamp — authoring, so
+    it runs only when asked (``make test-corpus-regen COMPLETE=1``)."""
     for path in helpers.case_files():
         case = helpers.load_case(path)
-        before = len(case.document["configs"][0]["realizations"])
+        before = list(case.document["configs"][0]["realizations"])
         document = helpers.complete(case.document)
-        if len(document["configs"][0]["realizations"]) != before:
+        after = document["configs"][0]["realizations"]
+        if after != before:
             helpers.write_case(path, helpers.regenerate(document))
-            added = len(document["configs"][0]["realizations"]) - before
-            print(f"completed {path.relative_to(helpers.CASES_DIR).as_posix()}: +{added} entries")
+            dropped = sum(1 for realization in before if realization not in after)
+            print(f"completed {path.relative_to(helpers.CASES_DIR).as_posix()}: +{len(after) - len(before) + dropped} -{dropped} entries")
     return 0
 
 

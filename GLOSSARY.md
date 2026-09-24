@@ -328,12 +328,14 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   `emmy/compiler/pipeline/search/goldens/`. Every realization contains verified deployable measurements; `emmy tune`
   refuses to mutate these files directly. The files for the live card are the golden evidence an ordinary compile
   reads.
-- **Evidence** — A compatible recorded measurement used to select between candidates: a reservoir row, a tune
-  database row, or a measured golden row. All three enter one index and are read by one rule.
-- **Route row** (*routing row*, in `pipeline/ARCHITECTURE.md`) — A measured golden row that spells a kernel-set
-  decision — a `PLACE` key, or a `REDUCE` value carrying a cross-CTA `g<n>` half. Its latency is the measured price of
-  applying that decision to the kernel it was recorded on; at that kernel's fork a compile takes the offered arm the
-  row spells, which outranks any arm priced by prediction, and the pieces the arm mints are decided from rows of
+- **Evidence** — A compatible recorded measurement used to select between candidates: a reservoir row or a tune
+  database row — a measured golden row is imported into the tune database before a compile picks. Both are read by
+  one rule.
+- **Routing row** (*route row*, in older text) — A golden row that spells a kernel-set decision — a `PLACE` key, or
+  a `REDUCE` value carrying a cross-CTA `g<n>` half — and the rows the tune database stores for that decision: the
+  kernel it was offered on, the arm, and the pieces it minted. At that kernel's fork the decision is priced as the sum
+  of its pieces' measured rows, which outranks any arm priced by prediction; a decision no piece's row prices is off
+  the measured ballot, and the pieces the arm mints are decided from rows of
   their own. The tuning database holds no such row: a decision it stores is priced from its pieces (see *Routing
   table*).
 - **Routing table** — The tune database table that links a parent kernel and one decision taken on it to the kernels
@@ -355,9 +357,10 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   is kept with the repository it is what `emmy dataset import` loads into the dataset DB by default; none is at the
   moment.
 - **Deploy evidence hierarchy** — The fixed order in which an ordinary compile answers a tuning choice: measured
-  evidence first — the reservoir, then the tune database's rows and the golden rows in scope, the fastest compatible
-  row winning — then the prior's prediction, and last the rule's own first option. A structural fork follows the
-  same order over route rows, priced alternatives standing in for the prior.
+  evidence first — the reservoir, then the tune database's rows, the golden rows in scope imported among them, the
+  fastest compatible row winning — then the prior's prediction, and last the rule's own first option. A structural
+  fork follows the same order over routing rows priced from their pieces, priced alternatives standing in for the
+  prior.
 - **Calibration** — A check of whether a learned model ranks measured candidates well enough to influence
   compilation.
 - **Regret** — What choosing by prediction costs, as a ratio to the best measured option: 1.00 means the choice was

@@ -317,8 +317,8 @@ def test_a_flush_from_another_compiler_tree_keeps_this_trees_derivations(tmp_pat
     def derive(fingerprint: str, key: str) -> dict:
         monkeypatch.setattr(golden, "_compiler_fingerprint", lambda: fingerprint)
         monkeypatch.setattr(golden, "_IDENTITY_STORE", None)
-        kept = dict(golden._identity_store()["replays"])
-        golden._identity_store()["replays"][key] = {}
+        kept = dict(golden._identity_store()["entries"])
+        golden._identity_store()["entries"][key] = None
         monkeypatch.setattr(golden, "_IDENTITY_STORE_DIRTY", True)
         flush_identity_store()
         return kept

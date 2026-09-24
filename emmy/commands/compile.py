@@ -174,7 +174,8 @@ def resolve_golden_arg(args) -> None:
     a whole-file walk (``run --golden PATH`` alone, ``_explicit_realization`` false) benches a
     target's verified rows, or its one valid direct tune winner, and leaves proposals to the
     tuner. Nothing here installs a pin: a measured record reaches its kernel through the evidence
-    pick when the compile reaches that kernel's forks.
+    pick when the compile reaches that kernel's forks — except the kernel-set decisions a named
+    realization records, which the compile pins (:func:`selected_decisions`).
 
     ``NAME`` matches an exact realization name first, else a name **substring** — the same
     identifier ``emmy eval --kernel`` filters the golden dataset on. Because compile/run build a
@@ -307,6 +308,18 @@ def resolve_golden_arg(args) -> None:
         len(pinned),
         "" if len(pinned) == 1 else "s",
     )
+
+
+def selected_decisions(args) -> dict[str, str]:
+    """The kernel-set decisions the realizations ``--realization`` named record — their routes and
+    cross-CTA splits, as one hand pin — so the compile of a named realization takes the kernel set
+    it describes. A kernel set's measured price is its pieces' rows, which the compile that takes
+    the route is what records (``run --record-greedy``); until then nothing prices the set, and a
+    compile nothing pins keeps the kernel whole."""
+    from emmy.compiler.pipeline.search.db import is_placement_knob  # noqa: PLC0415
+
+    rows = getattr(args, "golden_configs", None) or []
+    return {str(key): str(value) for row in rows for key, value in {**row.pins, **row.knobs}.items() if is_placement_knob(key, value)}
 
 
 def golden_row(record, records=()):
@@ -521,25 +534,22 @@ def handle_compile(args):
     if dump:
         dump.dump_input_graph(graph)
 
-    # Pick tuned forks from the DB when one is reachable; otherwise the
-    # engine falls back to rule defaults (single-shot option-0). Compile never
-    # errors on a missing DB — that's only a hint, not a requirement.
+    # The tune DB is the evidence a compile picks from: its own rows, and the card's golden rows
+    # imported into it before the pick — so it is created on first use, not only by a tune.
     # ``EMMY_TUNE_DB`` env var overrides the default path.
     tune_db_path = resolve_tune_db()
-    db = SearchDB(path=tune_db_path) if tune_db_path.exists() else None
-    if db is not None:
-        logger.info("Using tuning DB: %s", tune_db_path)
-    else:
-        logger.debug("No tuning DB at %s — using rule defaults", tune_db_path)
+    db = SearchDB(path=tune_db_path)
+    logger.info("Using tuning DB: %s", tune_db_path)
 
     from emmy.compiler.pipeline.search.golden import records_override, shared_regime_pins  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
 
     # A selected golden's records are the golden evidence this compile deploys from; their shared
-    # input regime is published so the rows read as live measurements.
+    # input regime is published so the rows read as live measurements, and the kernel-set decisions
+    # the named realization records are pinned so the compile takes the kernel set it describes.
     scope = getattr(args, "_golden_records", None) or None
     with (
-        pinned_knobs(shared_regime_pins(scope or [])),
+        pinned_knobs({**shared_regime_pins(scope or []), **selected_decisions(args)}),
         records_override(scope),
         config.strict_evidence_override(True if args.strict_evidence else None),
     ):

@@ -13,11 +13,11 @@ evidence hierarchy**, and each step in it is called a **tier**.
 
 ## The order
 
-1. **Measured evidence.** Every measured row whose structural signature is this kernel's, from three stores read as
-   one index: the reservoir (measurements taken at the deployable setting), the tuning database's rows for this
-   compile's regime, and the golden rows in scope — the golden configurations recorded for this GPU that ship with
-   the repository, or the file `--golden PATH` names instead. The option that agrees with the fastest such row
-   decides. A golden is a preference among measured rows, never a forced pin: a recorded row that is slower than a
+1. **Measured evidence.** Every measured row whose structural signature is this kernel's, from two stores: the
+   reservoir (measurements taken at the deployable setting) and the tuning database's rows for this compile's
+   regime — which hold the golden rows in scope too, the golden configurations recorded for this GPU that ship with
+   the repository, or the file `--golden PATH` names instead, imported into the database before the compile picks.
+   The option that agrees with the fastest such row decides. A golden is a preference among measured rows, never a forced pin: a recorded row that is slower than a
    local measurement loses, and a row nothing measured yet (a proposal) is not evidence until `run --golden PATH
    --bench` has measured it.
 2. **The prior's prediction.** Only when no option has any measurement behind it at all: the option with the lowest
@@ -130,12 +130,13 @@ they do among siblings of one fork. Instead the compile *costs* each side: for e
 it runs a small nested resolution through the same hierarchy above and takes the cost of that kernel's chosen
 configuration. The cheaper total wins. Because the nested resolution consults the whole hierarchy, one side's total
 can mix a golden's recorded time, local measurements and model predictions across its kernels — which is why a
-measured route row, when one exists, outranks that costing outright.
+recorded decision whose pieces are measured, when one exists, outranks that costing outright.
 
 That costing runs with whichever prior is loaded — the online model when it is trusted, the offline half otherwise —
 so on a machine with no measurements it is a comparison of predictions. When one side cannot be costed at all, nothing
-is withheld: every option, the structural ones included, goes to the ordinary ranking. A measured route row is the one
-thing that settles such a fork without a prediction, and a placement pin removes the fork altogether.
+is withheld: every option, the structural ones included, goes to the ordinary ranking. A recorded decision priced from
+its pieces' measurements is the one thing that settles such a fork without a prediction, and a placement pin removes
+the fork altogether.
 
 ## When the chosen option does not fit
 

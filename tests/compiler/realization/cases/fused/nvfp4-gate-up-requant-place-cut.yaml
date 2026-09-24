@@ -1764,37 +1764,6 @@ configs:
       STAGE: d1/smem-async
       RASTER: ''
     identity: 6dde1a6d96921461115a5a52336d066d9024302f2f49476c3ef66d61290407f8
-  - name: k_linear_reduce_bbf90a.165fbb139c44
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      TILE@map.1/map.2/reduce.1/inner: ''
-      TILE@map.1/map.2/reduce.2/inner: ''
-      TILE@map.1/map.4/inner: ''
-      TILE@map.1/map.5/inner: ''
-      TILE@map.1/map.6/inner: ''
-      TILE@map.2/map.2/reduce.1/inner: ''
-      TILE@map.2/map.2/reduce.2/inner: ''
-      REDUCE@map.1/map.2/reduce: ''
-      REDUCE@map.1/map.2/reduce.1/inner: ''
-      REDUCE@map.1/map.2/reduce.2/inner: ''
-      REDUCE@map.1/map.4/inner: ''
-      REDUCE@map.1/map.5/inner: ''
-      REDUCE@map.1/map.6/inner: ''
-      REDUCE@map.2/map.2/reduce: ''
-      REDUCE@map.2/map.2/reduce.1/inner: ''
-      REDUCE@map.2/map.2/reduce.2/inner: ''
-      STAGE@map.1/map.2/reduce.1/inner: ''
-      STAGE@map.1/map.2/reduce.2/inner: ''
-      STAGE@map.1/map.4/inner: ''
-      STAGE@map.1/map.5/inner: ''
-      STAGE@map.1/map.6/inner: ''
-      STAGE@map.2/map.2/reduce.1/inner: ''
-      STAGE@map.2/map.2/reduce.2/inner: ''
-      WORK: ''
-      RASTER: ''
-    identity: 56c6aa0d18bf0845640d8d34ef0ab2a2c23af893f420bd69e0878821f360a41c
   - name: k_linear_reduce_bbf90a.598b68a7d36b
     bindings: {}
     pins:
@@ -1826,6 +1795,17 @@ configs:
       WORK: ''
       RASTER: ''
     identity: eb904240bb16c20b5616a3b79e72075f116f2bfb5ccfed8d9cc4befa36c54961
+  - name: k_linear_reduce_bbf90a.7be38a493ec7
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x1
+      TILE: mma_m16n8k64_e2m1_f32/f1x4/k8
+      REDUCE: ''
+      STAGE: d1/smem-async
+      RASTER: ''
+    identity: 7be38a493ec7ac59ae072e04d3dcecef899c7b3975a122ed354bcc5918a5ad1d
 loops:
 - inputs: [x_static_fp4_scale_bits, x_static_fp4_bits]
   outputs: [mul_static_fp4_scale_bits, mul_static_fp4_bits]

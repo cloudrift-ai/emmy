@@ -36,15 +36,6 @@ configs:
       NVIDIA GeForce RTX 5090:
         emmy_us: 6.1433757223734045
         tcompile_us: 4.147287509212755
-  - name: k_matmul_f10108.dceb02174b50
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      REDUCE: ''
-      RASTER: ''
-    identity: dceb02174b50f08c72bf3175d599438634f5847e3377eba168531a4497e971ef
   - name: k_matmul_f10108.80b79d660e36
     bindings: {}
     pins:
@@ -54,6 +45,17 @@ configs:
       REDUCE: ''
       RASTER: ''
     identity: 80b79d660e36ada8d5e41ddd8878f84a6dceeada861a86334f5f73770cefd7d3
+  - name: k_matmul_f10108.7dc43743ffd4
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f2x2/k2
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    identity: 7dc43743ffd4b290fd532d69a5dcbebb46518bc5d605bfdf1dd2add858306524
 loops:
 - inputs: [a, b]
   outputs: [o]
