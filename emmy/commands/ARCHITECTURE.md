@@ -210,7 +210,9 @@ directly by `tune --golden PATH` and verified by `run --golden PATH [--realizati
 `compile`, `tune`, `serve` and `eval golden`: its MEASURED rows are the golden evidence that command deploys from,
 instead of the repository's per-card goldens, joining the tune DB's rows in the one measured-evidence index the
 greedy pick reads (`search.golden.records_override` in-process; `EMMY_GOLDEN_FILE` for the vLLM child `serve`
-spawns). `--realization NAME` (`run`, `compile`, `tune`) selects one realization by exact name or an unambiguous
+spawns, together with the precision regime the file's rows share — `EMMY_FAST_MATH` and friends — because a row
+is evidence only in its own regime and the child learns it from nowhere else; an environment pin at another value
+fails the boot). `--realization NAME` (`run`, `compile`, `tune`) selects one realization by exact name or an unambiguous
 substring — inside `--golden PATH`, or, on `run` / `compile` without it, inside the live card's repository goldens.
 There is no second spelling: no file flag beside `--golden`, no name flag beside `--realization`.
 
