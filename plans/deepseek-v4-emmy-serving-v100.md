@@ -18,7 +18,7 @@ index reads 437 of them, and 318 of the 335 kernels the nine serving twins mint 
 without, eleven are the single-token expert and pre twins' pieces, whose refusal that tier survives by riding the
 wider one, and six are the pieces #883 re-shaped in the three post twins, whose refusal ends the boot. The durable
 record of every boot, election and A/B is
-`experiments/golden-bench-2026/serving_deepseek_v4_flash_0731_v100x16/RESULTS.md`; this file only says what is left.
+`experiments/cgo-2027/serving_deepseek_v4_flash_0731_v100x16/RESULTS.md`; this file only says what is left.
 
 It serves strict from the repository golden, but slower and worse than the tree before #863 did. Boot36b (main plus
 #875 at #869, 2026-09-23, fast math pinned off): 0.73 s to first token warm at 5 prompt tokens and 5.5 s at 2,155;

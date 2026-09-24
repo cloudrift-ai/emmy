@@ -19,7 +19,7 @@
 #
 # Repro on a pre-allocated card (no cloud provisioning):
 #   make vllm-emmy-image
-#   emmy bench experiments/golden-bench-2026/gemma4_serving --local
+#   emmy bench experiments/cgo-2027/gemma4_serving --local
 model:
   huggingface: "google/gemma-4-12B-it"
   revision: 707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7

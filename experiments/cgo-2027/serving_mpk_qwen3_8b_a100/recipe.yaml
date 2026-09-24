@@ -12,7 +12,7 @@
 # multi-channel projection refusals remain after this branch's staged-transport fix).
 #
 # Repro on a pre-allocated A100 (no cloud provisioning):
-#   emmy bench experiments/golden-bench-2026/serving_mpk_qwen3_8b_a100 --local
+#   emmy bench experiments/cgo-2027/serving_mpk_qwen3_8b_a100 --local
 command:
   stage:
     - emmy

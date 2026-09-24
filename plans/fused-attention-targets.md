@@ -1,8 +1,8 @@
-# The golden-bench-2026 fused attention targets: what was fixed, what is next (2026-09-23)
+# The cgo-2027 fused attention targets: what was fixed, what is next (2026-09-23)
 
 ## Where things stand
 
-Qwen3-0.6B layer 0, prefill, sequence length 512, from the `golden-bench-2026/kernels` corpus. Deployable `-O3`,
+Qwen3-0.6B layer 0, prefill, sequence length 512, from the `cgo-2027/kernels` corpus. Deployable `-O3`,
 `--fmad=false`, warmup 10 / iters 100, strict against eager at `rtol=atol=1e-3`, eager and torch.compile timed in the
 same process. "Before" is the committed golden replayed on that card at the start of this work, not the September
 report — two of these targets did not run at all then.

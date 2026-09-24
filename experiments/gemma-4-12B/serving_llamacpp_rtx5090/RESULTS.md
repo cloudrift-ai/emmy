@@ -41,7 +41,7 @@ temperature 0 and `--ignore-eos`, the same flags as the vLLM lanes. Every point 
 
 ### Comparison with the article and with stock vLLM
 
-Stock vLLM is the `golden-bench-2026/gemma4_serving` run of the same morning on the same box
+Stock vLLM is the `cgo-2027/gemma4_serving` run of the same morning on the same box
 (`2026-09-19_06-15-04`), which also reproduces the article's stock column to within 0.7%.
 
 | Point | Article tok/s | This run | Stock vLLM | Article TTFT / TPOT (ms) | This run | Stock vLLM |

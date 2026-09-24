@@ -12,8 +12,8 @@ command:
     - pyproject.toml
     - requirements.txt
     - Makefile
-    - experiments/golden-bench-2026/quantized_kernels_rtx5090/recipe.yaml
-    - experiments/golden-bench-2026/quantized_kernels_rtx5090/golden
+    - experiments/cgo-2027/quantized_kernels_rtx5090/recipe.yaml
+    - experiments/cgo-2027/quantized_kernels_rtx5090/golden
   strict: true
   run: |
     set -euo pipefail
@@ -42,7 +42,7 @@ command:
     export EMMY_CUBIN_CACHE=$task_dir/cubins
 
     if [ -n "$golden" ]; then
-      cp $repo_dir/experiments/golden-bench-2026/quantized_kernels_rtx5090/golden/$golden.golden.yaml \
+      cp $repo_dir/experiments/cgo-2027/quantized_kernels_rtx5090/golden/$golden.golden.yaml \
         $task_dir/working.yaml
       echo "replaying committed golden $golden" | tee $task_dir/trace.log
     else

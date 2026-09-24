@@ -117,7 +117,7 @@ as `golden/qwen3-06b-s1_a100.golden.yaml` and `golden/qwen3-06b-s512_a100.golden
 One `a2-highgpu-1g` VM (A100-SXM4-40GB, GPU-be299b90, driver 580.173.02, nvcc 12.9, PyTorch 2.11.0+cu130, triton
 3.6.0, Ubuntu 24.04.4). Every number is deployable `-O3`, 10 warmups, 100 iterations, eager and Emmy in one process;
 Inductor is the separate `torch.compile` lane the recipe runs once per task. The lane is one `emmy bench
-experiments/golden-bench-2026/kernels --ssh … --filter "deploy.gpu=NVIDIA A100 40GB"` invocation at source
+experiments/cgo-2027/kernels --ssh … --filter "deploy.gpu=NVIDIA A100 40GB"` invocation at source
 `79eef22c`, run `20260911T135801Z` (13:58-14:24 UTC), five strict repeats per sequence length, with a task-owned tune
 DB and cubin cache.
 
@@ -242,7 +242,7 @@ every target re-recorded with `--record-greedy` under its winning pin, one run p
 softmax × V cuts; receipts that a later run of the same target superseded were pruned so each kernel identity keeps
 its fastest strict-correct receipt. Both files then replayed unpinned from a fresh DB (`--strict`, eager, Inductor
 and Emmy in one process) and deployed the intended kernel set on every target. The lane is one
-`emmy bench experiments/golden-bench-2026/kernels --ssh … --filter deploy.gpu=…` invocation from a clean checkout at
+`emmy bench experiments/cgo-2027/kernels --ssh … --filter deploy.gpu=…` invocation from a clean checkout at
 `f8debb51`, run `20260911T091850Z`, five strict repeats per sequence length.
 
 ### Result summary
@@ -363,7 +363,7 @@ One `a3-highgpu-1g` SPOT VM (H100 80GB HBM3, GPU-b9509f7c, driver 580.173.02, nv
 cupy 14.2). Every number is deployable `-O3`, 10 warmups, 100 iterations, eager and Emmy in one process; Inductor is
 the separate `torch.compile` lane the recipe runs once per task. The tuning rounds ran with a task-owned tune DB; the
 recorded rows were measured against a fresh DB (see the failure-row finding below). The lane is one
-`emmy bench experiments/golden-bench-2026/kernels --filter deploy.gpu=…` invocation against that host over SSH at
+`emmy bench experiments/cgo-2027/kernels --filter deploy.gpu=…` invocation against that host over SSH at
 source `2d4f9510`, run `20260910T210813Z` (21:08-22:06 UTC), five strict repeats per sequence length.
 
 ### Result summary
