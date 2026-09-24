@@ -214,7 +214,10 @@ spawns, together with the precision regime the file's rows share — `EMMY_FAST_
 is evidence only in its own regime and the child learns it from nowhere else; an environment pin at another value
 fails the boot). `--realization NAME` (`run`, `compile`, `tune`) selects one realization by exact name or an unambiguous
 substring — inside `--golden PATH`, or, on `run` / `compile` without it, inside the live card's repository goldens.
-There is no second spelling: no file flag beside `--golden`, no name flag beside `--realization`.
+There is no second spelling: no file flag beside `--golden`, no name flag beside `--realization`. `--pin-route` compiles
+the named realization under the kernel-set decisions it records — the cut its route spells, a cross-CTA split — as a
+hand pin, the same one `EMMY_KNOBS` publishes (a hand pin of the same seam with another value is refused); without it
+the compile picks the kernel set from the evidence, and a routing row alone prices nothing.
 
 `run --golden PATH` without `--realization` walks every persisted target, binding and input regime in one process,
 benching each target's verified rows or its one valid direct tune winner (proposals stay the tuner's). A routing row
@@ -300,10 +303,9 @@ measured realizations of the named target: one routing row per kernel-set decisi
 summed isolated launches of the kernels that decision produced, and one child-identity schedule receipt per kernel at
 its own isolated launch, both with the greedy comparison row as their `same-input-greedy` reference
 (`working_golden.record_greedy_pick`; the pipeline ARCHITECTURE's golden-record Part has the spelling and the
-pricing). The named realization's own kernel-set decisions — its route, a cross-CTA split it spells — are pinned
-for that compile (`compile.selected_decisions`, for `compile --golden --realization` too), so the greedy row takes the
-kernel set the file describes; a routing row's own time prices nothing, and the receipts this writes are what price
-the decision for a compile nothing pins. That is how a pick the prior made becomes rows a strict-evidence compile of
+pricing). Recording a set the file describes takes `--pin-route` beside it: a routing row's own time prices nothing,
+so without the pin the greedy row is the compiler's own pick, whole, and the receipts this writes are what price the
+decision for a compile nothing pins. That is how a pick the prior made becomes rows a strict-evidence compile of
 the file deploys from without a prior. Under `EMMY_KNOBS` the recorded pick IS the pin, so the recording refuses, and
 the run exits nonzero, when the env pin did not realize (`greedy_record_refusal`): the row would file the planner's own schedule
 under the pin's name and lane. It refuses a pick whose answer `--strict` rejected for the same reason. Independently of both, every clean pinned row and the greedy isolated re-bench are written into

@@ -1095,7 +1095,7 @@ parent whose pins
 name a different independently tuned child is left unpromoted. A `PLACE`-only row is a routing row, and so is a row
 spelling only a cross-CTA `REDUCE` arm (`g<n>k` / `g<n>a`, which mints its pieces the way a cut does): it does not
 claim the child schedules, and imported it is the routing row of that kernel set, priced from its pieces' receipts
-(Part 3) — which `run --record-greedy` writes, its compile taking the named realization's route as a pin
+(Part 3) — which `run --record-greedy` writes, its compile taking the named realization's route under `--pin-route`
 (`compile.selected_decisions`). A receipt `--record-greedy` writes carries no route of its own,
 so the golden's per-row bench replays a receipt whose identity no route row names under the target's route rows
 composed (plus `PLACE=fuse` when no cut was recorded, the state a set with no placement row ran in); a receipt

@@ -341,11 +341,12 @@ def test_named_frontend_kernel_set_child_stays_pinned_after_greedy_compile(tmp_p
 
 @pytest.mark.parametrize("explicit", [False, True], ids=["ordinary", "explicit"])
 def test_recorded_route_cuts_the_selected_compile_target(run_cli, tmp_path, monkeypatch, explicit):
-    """Naming a routing realization compiles the kernel set its route spells: the route is pinned
-    for the compile (``compile.selected_decisions``), so the pass's own cut arm is taken and the
-    compile splits into the placed producer plus its consumers. A hand pin of the same route
-    through ``EMMY_KNOBS`` lands identically. The routing row's own time prices nothing: the
-    receipts of its pieces, once recorded, are what a compile nothing pins picks the set from."""
+    """``--pin-route`` compiles the named routing realization under the kernel set its route spells:
+    the route is pinned for the compile (`compile.selected_decisions`), so the pass's own cut arm is
+    taken and the compile splits into the placed producer plus its consumers. A hand pin of the
+    same route through ``EMMY_KNOBS`` lands identically, and agrees with the flag's. The routing
+    row's own time prices nothing: the receipts of its pieces, once recorded, are what a compile
+    nothing pins picks the set from."""
     path = tmp_path / "working-route.yaml"
     _working_placement_route(path)
     monkeypatch.delenv("EMMY_KNOBS", raising=False)
@@ -361,6 +362,7 @@ def test_recorded_route_cuts_the_selected_compile_target(run_cli, tmp_path, monk
         str(path),
         "--realization",
         "working.route",
+        "--pin-route",
         "--target",
         "sm_89",
         "--ir",
@@ -996,6 +998,7 @@ def test_run_records_the_greedy_pick_of_an_embedded_golden(monkeypatch, tmp_path
         profile=False,
         record=False,
         record_greedy=True,
+        pin_route=True,
         strict_correctness=False,
     )
     resolve_golden_arg(args)
@@ -1126,6 +1129,7 @@ def test_run_files_a_hung_greedy_kernel_as_bench_fail_evidence(monkeypatch, tmp_
         profile=False,
         record=False,
         record_greedy=True,
+        pin_route=True,
         strict_correctness=False,
     )
     resolve_golden_arg(args)
@@ -1270,14 +1274,29 @@ def test_run_skips_pinned_rebench_of_the_same_election_after_a_greedy_hang(monke
     assert calls[1] == ("bench_golden_variants", []), "the knob-less seed pin must not be re-compiled and re-benched"
 
 
-def test_a_named_realizations_decisions_are_pinned_only_where_its_rows_agree():
-    """The kernel-set decisions the named rows record are one hand pin for their compile — the route, a
-    cross-CTA split — never a schedule knob; rows that disagree on a decision pin nothing, as the walk
-    leaves their receipts to replay bare."""
+def test_pin_route_pins_the_decisions_the_named_rows_agree_on(monkeypatch):
+    """Under ``--pin-route`` the kernel-set decisions the named rows record are one hand pin for their
+    compile — the route, a cross-CTA split — never a schedule knob; rows that disagree on a decision
+    pin nothing, as the walk leaves their receipts to replay bare; without the flag nothing is pinned.
+    It is the hand pin ``EMMY_KNOBS`` publishes, so one already set on a seam with another value is
+    refused, and one that agrees is not."""
     from emmy.commands.compile import selected_decisions
 
+    monkeypatch.delenv("EMMY_KNOBS", raising=False)
     cut = SimpleNamespace(pins={"FAST_MATH": False}, knobs={"PLACE@inner.1/map": "cut", "WORK": "t8"})
     split = SimpleNamespace(pins={"FAST_MATH": False, "PLACE@inner.1/map": "cut"}, knobs={"REDUCE": "g2k", "WORK": "t8"})
-    assert selected_decisions(SimpleNamespace(golden_configs=[cut, split])) == {"PLACE@inner.1/map": "cut", "REDUCE": "g2k"}
-    assert selected_decisions(SimpleNamespace(golden_configs=[cut, SimpleNamespace(pins={}, knobs={"PLACE@inner.1/map": "fuse"})])) == {}
-    assert selected_decisions(SimpleNamespace(golden_configs=[SimpleNamespace(pins={}, knobs={"WORK": "t8", "REDUCE": "coop"})])) == {}
+    fused = SimpleNamespace(pins={}, knobs={"PLACE@inner.1/map": "fuse"})
+    assert selected_decisions(SimpleNamespace(golden_configs=[cut, split], pin_route=True)) == {"PLACE@inner.1/map": "cut", "REDUCE": "g2k"}
+    assert selected_decisions(SimpleNamespace(golden_configs=[cut, split])) == {}
+    assert selected_decisions(SimpleNamespace(golden_configs=[cut, fused], pin_route=True)) == {}
+    assert (
+        selected_decisions(
+            SimpleNamespace(golden_configs=[SimpleNamespace(pins={}, knobs={"WORK": "t8", "REDUCE": "coop"})], pin_route=True)
+        )
+        == {}
+    )
+    monkeypatch.setenv("EMMY_KNOBS", "PLACE@inner.1/map=cut")
+    assert selected_decisions(SimpleNamespace(golden_configs=[cut], pin_route=True)) == {"PLACE@inner.1/map": "cut"}
+    monkeypatch.setenv("EMMY_KNOBS", "PLACE@inner.1/map=fuse")
+    with pytest.raises(SystemExit):
+        selected_decisions(SimpleNamespace(golden_configs=[cut], pin_route=True))

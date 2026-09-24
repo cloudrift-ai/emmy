@@ -83,9 +83,9 @@ def register_run_command(subparsers):
         help=(
             "With --golden PATH --realization NAME --bench, write the greedy pick's kernel set back into the file as "
             "measured realizations: one routing row per kernel-set decision it took and one child-identity schedule "
-            "receipt per kernel, timed by the isolated re-bench with the greedy comparison row as the reference. The "
-            "named realization's own route is pinned for that compile; the receipts it records are what price the "
-            "kernel set for a compile nothing pins, and what a strict-evidence compile picks it from."
+            "receipt per kernel, timed by the isolated re-bench with the greedy comparison row as the reference. With "
+            "--pin-route the greedy row is the kernel set the named row describes; the receipts recorded are what price "
+            "that set for a compile nothing pins, and what a strict-evidence compile picks it from."
         ),
     )
     parser.add_argument(
@@ -2578,10 +2578,10 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
     watcher = KernelInventory(on_routing=lambda parent, arm, pieces, ids: taken.append((parent, arm, ids)))
     if tail:
         # Finish the tail lowering — the greedy compile — with the selected golden's records as its
-        # golden evidence, their shared input regime published (by the caller) and the kernel-set
-        # decisions the named realization records pinned, as ``compile`` does, so the greedy row
-        # deploys the kernel set the file describes. Recording the pick composes the capture of its
-        # kernel-set decisions into the same compile.
+        # golden evidence, their shared input regime published (by the caller) and, under
+        # ``--pin-route``, the kernel-set decisions the named realization records pinned, as
+        # ``compile`` does. Recording the pick composes the capture of its kernel-set decisions into
+        # the same compile.
         from emmy.commands.compile import selected_decisions  # noqa: PLC0415
         from emmy.compiler.pipeline.search.golden import records_override  # noqa: PLC0415
 
