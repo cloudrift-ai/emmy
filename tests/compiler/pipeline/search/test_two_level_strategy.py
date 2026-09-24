@@ -20,7 +20,6 @@ import zlib
 import pytest
 
 from emmy.compiler.backend.base import BenchmarkResult, LaunchTime
-from emmy.compiler.backend.cuda._planner import compute_live_intervals
 from emmy.compiler.backend.plan import plan_from_graph
 from emmy.compiler.context import Context
 from emmy.compiler.graph import Graph, Tensor
@@ -206,10 +205,15 @@ def test_single_node_slice_declares_unregistered_input_boundaries_in_the_runtime
     assert set(sliced.inputs) == {"xa", "xb"}
     roles = {buffer.name: buffer.role for buffer in plan.buffers}
     assert roles == {"xa": "input", "xb": "input", "xc": "output"}
-    scratch = [buffer.name for buffer in plan.buffers if buffer.role == "scratch"]
-    # Exercise the allocator's exact liveness seam: an undeclared InputOp would
-    # be scratch here and fail because no CUDA launch produces it.
-    assert compute_live_intervals(scratch, plan.launches) == {}
+    # Exercise the runtime's exact liveness seam: an undeclared InputOp would be scratch
+    # here, and the layout would refuse it because no CUDA launch produces it.
+    import json
+
+    from emmy import emmy_runtime
+    from emmy.compiler.backend.plan import plan_to_dict
+
+    layout = emmy_runtime.Program(json.dumps(plan_to_dict(plan))).layout()
+    assert "scratch" not in layout["regions"]
 
 
 def test_run_drives_outer_scores_separably_and_assembles() -> None:

@@ -939,17 +939,13 @@ class EmmyGenModel(nn.Module, SupportsPP):
 
     @staticmethod
     def reclaim_device_memory() -> None:
-        """Return both allocators' free blocks to the driver (torch's caching allocator and
-        cupy's memory pool). Idempotent and cheap; call it before anything sizes itself off the
-        driver's free-memory reading.
+        """Return the caching allocator's free blocks to the driver. Idempotent and cheap; call it
+        before anything sizes itself off the driver's free-memory reading.
 
         Logged in the driver's own units, because that is the accounting vLLM's KV sizing reads
         and the reclaim is otherwise invisible — which is how the untied path went without one."""
-        import cupy as cp
-
         before = torch.cuda.mem_get_info()[0]
         torch.cuda.empty_cache()
-        cp.get_default_memory_pool().free_all_blocks()
         free, total = torch.cuda.mem_get_info()
         logger.info(
             "[EmmyGenModel] reclaimed %.3f GiB of allocator free blocks; %.3f of %.3f GiB now free for the KV cache",

@@ -2,7 +2,7 @@
 
 DELIBERATELY ``perf``-marked (deselected by default; the in-process engine demands 40%
 of the card FREE at startup — incompatible with the parallel suite's live CUDA contexts,
-so it stays out of ``make test`` unlike the serving correctness pins): needs CUDA + cupy
+so it stays out of ``make test`` unlike the serving correctness pins): needs CUDA
 + vllm. Saves a TINY random
 Llama (vocab matches a cached Llama tokenizer, 2 layers — no network), serves it through
 ``EmmyGenModel`` in an in-process vLLM engine (real paged ``Attention`` + KV cache +
@@ -60,7 +60,6 @@ def _generate(vllm, model_dir, prompt_ids, max_new, **extra):
 
 
 def test_vllm_gen_plugin_matches_hf_eager(tmp_path, monkeypatch):
-    pytest.importorskip("cupy")
     vllm = pytest.importorskip("vllm")
     import torch
     import transformers
@@ -113,7 +112,6 @@ def test_vllm_gen_plugin_fp8_kv_cache(tmp_path, monkeypatch):
     1.0 perturbs attention, and this random-init 2-layer model has no meaningful greedy trajectory
     to match — the pin is that the alias path is exercised (counted through a spy) and generation
     stays in-vocab."""
-    pytest.importorskip("cupy")
     vllm = pytest.importorskip("vllm")
     import torch
     import transformers

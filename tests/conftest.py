@@ -52,19 +52,12 @@ def _cuda_context_poisoned() -> bool:
     """Whether the live CUDA context is in a sticky-error state.
 
     ``False`` when no CUDA context can exist: ``torch.cuda.is_available()`` is
-    the CPU-lane gate (cupy imports fine without a device, and its
-    ``deviceSynchronize`` would then raise ``cudaErrorNoDevice`` — an
-    unpoisoned box, not a poisoned one), and an unimported cupy means nothing
-    in this worker ever created a context.
+    the CPU-lane gate, and the runtime reports ``False`` itself when nothing in
+    this worker ever created a context.
     """
-    cupy = sys.modules.get("cupy")
-    if cupy is None or not torch.cuda.is_available():
-        return False
-    try:
-        cupy.cuda.runtime.deviceSynchronize()
-    except Exception:  # noqa: BLE001 — any CUDA error here means the context is unusable
-        return True
-    return False
+    from emmy.compiler.backend.cuda.device import context_poisoned
+
+    return torch.cuda.is_available() and context_poisoned()
 
 
 #: Node id of the test that poisoned the context, set the moment it is detected and
@@ -316,32 +309,24 @@ def _is_cuda_item(item) -> bool:
     return "[cuda" in nid or "-cuda-" in nid or nid.endswith("-cuda]")
 
 
-_NO_TOOLCHAIN = "CUDA not available (need cupy + GPU + nvcc)"
+_NO_TOOLCHAIN = "CUDA not available (need the emmy.emmy_runtime extension + GPU + nvcc)"
 
 
 @functools.cache
 def _cuda_unavailable_reason() -> str | None:
     """Why Emmy CUDA tests cannot run here, or ``None`` when they can.
 
-    A visible device and importable CuPy are not sufficient: Emmy compiles its
-    kernels with the CUDA toolkit's ``nvcc`` binary.  Some CI runners expose a
-    GPU through the driver while installing only the CuPy runtime wheel.  The
-    other silent case is a pre-Turing card whose NVRTC is too new to target it:
-    left unnamed, one setup problem reads as dozens of unrelated
-    ``NVRTC_ERROR_INVALID_OPTION`` failures.  Cached — the answer is a property
-    of the host, and the probe touches the driver.
+    A visible device is not sufficient: Emmy compiles its kernels with the CUDA
+    toolkit's ``nvcc`` binary, and launches them through the ``emmy.emmy_runtime``
+    extension.  Cached — the answer is a property of the host, and the probe
+    touches the driver.
     """
     try:
-        import cupy as cp
-
+        from emmy.compiler.backend.cuda.device import compute_capability
         from emmy.compiler.backend.cuda.nvcc import nvcc_path
-        from emmy.compiler.target import check_nvrtc_supports_live_device
 
-        if cp.cuda.runtime.getDeviceCount() == 0 or nvcc_path() is None:
+        if compute_capability() is None or nvcc_path() is None:
             return _NO_TOOLCHAIN
-        check_nvrtc_supports_live_device()  # raises SystemExit, carrying the remedy
-    except SystemExit as exc:
-        return str(exc)
     except Exception:  # noqa: BLE001 -- an unusable CUDA runtime means skip
         return _NO_TOOLCHAIN
     return None

@@ -1,6 +1,6 @@
 """Gen-runner pack round-trip (``EMMY_PACK_DIR``): the first ``from_model`` boot writes the
 pack, the second boots from it (no trace / compile) and produces identical layer outputs.
-Needs CUDA + cupy (skips itself otherwise); tiny random Qwen3, same pattern as
+Needs CUDA (skips itself otherwise); tiny random Qwen3, same pattern as
 ``test_gen_runner_gpu``."""
 
 import logging
@@ -21,7 +21,6 @@ def test_gen_pack_second_boot_hits_and_matches(tmp_path, monkeypatch, caplog):
     schedule, and the equality holds. Neither boot takes the session plan cache: the claim is that
     the FIRST compiles and the second hits the pack, which a warm template cache would decide.
     """
-    pytest.importorskip("cupy")
     import torch
 
     if not torch.cuda.is_available():
@@ -66,7 +65,6 @@ def test_gen_pack_key_separates_quantized_rungs(tmp_path, monkeypatch):
     ``quantization_config`` before ``from_config``). So the config hash alone put both boots in
     ONE directory, where the second warm overwrote the first and either boot could load plans
     built for the other rung's coded extents. Same model, two checkpoints ⇒ two packs."""
-    pytest.importorskip("cupy")
     import json
 
     import torch

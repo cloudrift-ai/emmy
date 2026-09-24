@@ -104,8 +104,8 @@ class _Program:
         ``T <= bucket``). Uploads the ``T`` real rows into the buffer prefix (device-to-device),
         captures-or-replays the whole-program graph, and returns the outputs as torch CUDA tensors
         sliced to ``T`` — no host round-trip. Stale prefix padding rows are safe (pre/post are
-        per-token-independent; only ``[:T]`` is read out). All cupy work runs on torch's current
-        stream so the upload, replay and output read stay ordered.
+        per-token-independent; only ``[:T]`` is read out). Every launch and copy runs on torch's
+        current stream so the upload, replay and output read stay ordered.
 
         ``out`` (A3): a list of torch CUDA destination views aligned to ``output_names``,
         each ``[T, …]``. The single protective copy lands directly in the caller's
@@ -124,14 +124,13 @@ class _Program:
         (``run_once`` — the exact work ``capture_program_graph`` records: prebuilt buffers, no
         allocation, no sync). The outer graph absorbs the launches and the per-call Python
         overhead vanishes at replay."""
-        import cupy as cp
         import torch
 
         from emmy.compiler.backend.gpu_lock import gpu_lock
 
         t = arrays[0].shape[0]
-        with gpu_lock(), cp.cuda.Stream.from_external(torch.cuda.current_stream()):
-            feed = {n: cp.from_dlpack(a.detach().contiguous()) for n, a in zip(self.input_names, arrays, strict=True)}
+        with gpu_lock(), self.program.on_stream(torch.cuda.current_stream()):
+            feed = {n: a.detach().contiguous() for n, a in zip(self.input_names, arrays, strict=True)}
             self.program.upload_prefix_device(feed)
             if torch.cuda.is_current_stream_capturing():
                 self.program.run_once()
@@ -148,17 +147,17 @@ class _Program:
                 outs = self.program.output_prefix_device()
                 if out is not None:
                     for o, n in zip(out, self.output_names, strict=True):
-                        o.copy_(torch.from_dlpack(outs[n])[:t])
+                        o.copy_(outs[n][:t])
                     return out
-                return [torch.from_dlpack(outs[n])[:t] for n in self.output_names]
+                return [outs[n][:t] for n in self.output_names]
             self.program.capture_program_graph()  # static graph → one cached entry (empty sym_values)
             self.program.replay_program_graph()
             outs = self.program.output_prefix_device()
             if out is not None:
                 for o, n in zip(out, self.output_names, strict=True):
-                    o.copy_(torch.from_dlpack(outs[n])[:t])
+                    o.copy_(outs[n][:t])
                 return out
-            return [torch.from_dlpack(outs[n])[:t].clone() for n in self.output_names]
+            return [outs[n][:t].clone() for n in self.output_names]
 
     def run_device_sym(self, arrays):
         """Device-resident twin of :meth:`run` for the SYMBOLIC (prefill) programs at any width
@@ -180,21 +179,20 @@ class _Program:
         has already populated this sym key's TMA descriptor overlay — the descriptor H2D never
         lands inside the capture window. The uncaptured path keeps the clone: there the buffers
         may be rewritten before the caller consumes the view."""
-        import cupy as cp
         import torch
 
         from emmy.compiler.backend.gpu_lock import gpu_lock
 
         t = arrays[0].shape[0]
-        with gpu_lock(), cp.cuda.Stream.from_external(torch.cuda.current_stream()):
-            feed = {n: cp.from_dlpack(a.detach().contiguous()) for n, a in zip(self.input_names, arrays, strict=True)}
+        with gpu_lock(), self.program.on_stream(torch.cuda.current_stream()):
+            feed = {n: a.detach().contiguous() for n, a in zip(self.input_names, arrays, strict=True)}
             self.program.set_sym_values({"num_tokens": t})
             self.program.upload_prefix_device(feed)
             self.program.run_once()
             outs = self.program.output_prefix_device({"num_tokens": t})
             if torch.cuda.is_current_stream_capturing():
-                return [torch.from_dlpack(outs[n]) for n in self.output_names]
-            return [torch.from_dlpack(outs[n]).clone() for n in self.output_names]
+                return [outs[n] for n in self.output_names]
+            return [outs[n].clone() for n in self.output_names]
 
 
 def local_expert_slice(expert: int, expert_range):
@@ -284,7 +282,7 @@ _EXPERT_PREFILL_M = 256
 def _bind_plan_constants(plan, sources, cache):
     """Build the constant feed from the plan's weight specs (works identically whether the
     plan came from a fresh compile or a pack). With a ``cache`` (per-wrapper), each distinct
-    ``(source_path, load_ops)`` weight uploads ONCE and the cupy array is shared across
+    ``(source_path, load_ops)`` weight uploads ONCE and the device tensor is shared across
     program builds — the symbolic and decode/prefill-bucket twins bind the same weights;
     per-build numpy feeds would upload a second full on-GPU copy of the trunk (~2× the
     weight footprint). ``cache`` must be scoped to one wrapper — param paths are
@@ -300,12 +298,13 @@ def _bind_plan_constants(plan, sources, cache):
         if cache is None:
             out[nid] = apply_weight_loads(src, w.load_ops)
             continue
-        import cupy as cp
+        import numpy as np
+        import torch
 
         key = (w.source_path, w.source_parts, w.generated, w.load_ops)
         arr = cache.get(key)
         if arr is None:
-            arr = cp.asarray(apply_weight_loads(src, w.load_ops))
+            arr = torch.from_numpy(np.ascontiguousarray(apply_weight_loads(src, w.load_ops))).cuda()
             cache[key] = arr
         out[nid] = arr
     return out
@@ -707,7 +706,7 @@ class EmmyGenRunner:
         # would make the captured step wrong for its layers.
         self._slots_ok = bool(expert_tiers) and all(t["slots"] is not None for t in expert_tiers)
         self._expert_swap_safe = {
-            id(prog): not any("_desc" in a for launch in prog.program.compiled.launches for a in launch.arg_names)
+            id(prog): not any("_desc" in a for launch in prog.program.plan.launches for a in launch.arg_names)
             for tiers in expert_tiers or ()
             for prog in (tiers["sym"], tiers["bucket"], tiers["one"])
             if prog is not None
@@ -1589,31 +1588,26 @@ class EmmyGenRunner:
         # MoE post programs are EXCLUDED from every chaining block below (the two-output guard):
         # their layer output is a fresh torch tensor (h + expert combine), so a rewire buys no
         # skip — and h must survive the torch interlude, not sit on the next pre's input backing.
-        if decode_ok and pre_decode and post_decode:
-            pre_in = pre_decode[0].input_names[0]
-            shared_in = pre_decode[0].program.arrays[pre_in]
-            for prog in post_decode:
+        def chain(pre_handles, post_handles):
+            """Point every one-output post twin's output at the pre twins' shared input memory."""
+            pre_in = pre_handles[0].input_names[0]
+            shared_in = pre_handles[0].program.buffer_view(pre_in)
+            for prog in post_handles:
                 if len(prog.output_names) != 1:
                     continue
                 out_name = prog.output_names[0]
-                if prog.program.arrays[out_name].nbytes == shared_in.nbytes:
-                    prog.program.arrays[out_name] = shared_in
-        if m1_ok and pre_m1 and post_m1:
-            import cupy as cp
+                cur = prog.program.buffer_view(out_name)
+                if cur.shape == shared_in.shape and cur.dtype == shared_in.dtype:
+                    prog.program.alias_buffer(out_name, shared_in)
 
+        if decode_ok and pre_decode and post_decode:
+            chain(pre_decode, post_decode)
+        if m1_ok and pre_m1 and post_m1:
             # Same chaining for the M=1 twins. Their pre input is a [1, H] view into the SAME
             # role:name arena backing the bucket twins use, so the post outputs rewire onto a
-            # [1, H] view over that backing's memory (nbytes differ from the bucket view; the
-            # pointer is what the upload self-copy skip keys on).
-            m1_in = pre_m1[0].input_names[0]
-            m1_shared = pre_m1[0].program.arrays[m1_in]
-            for prog in post_m1:
-                if len(prog.output_names) != 1:
-                    continue
-                out_name = prog.output_names[0]
-                cur = prog.program.arrays[out_name]
-                if cur.shape == m1_shared.shape and cur.dtype == m1_shared.dtype:
-                    prog.program.arrays[out_name] = cp.ndarray(m1_shared.shape, dtype=m1_shared.dtype, memptr=m1_shared.data)
+            # [1, H] view over that backing's memory (the pointer is what the upload self-copy
+            # skip keys on).
+            chain(pre_m1, post_m1)
         # A2: the same chaining for the SYMBOLIC programs (capacity-view buffers — device path
         # only, `max_tokens` set; the oracle's host `rebind` re-takes arena views per call and
         # neither needs nor keeps the rewire) and for the static prefill-chunk twins. The skip
@@ -1627,23 +1621,9 @@ class EmmyGenRunner:
         # eager by construction (prefill is never captured), and `run_device`'s uncaptured path
         # CLONES the chunk-twin head before the decode-twin tail overwrites the shared rows.
         if max_tokens is not None and pre_programs and post_programs:
-            sym_in = pre_programs[0].input_names[0]
-            sym_shared = pre_programs[0].program.arrays[sym_in]
-            for prog in post_programs:
-                if len(prog.output_names) != 1:
-                    continue
-                out_name = prog.output_names[0]
-                if prog.program.arrays[out_name].nbytes == sym_shared.nbytes:
-                    prog.program.arrays[out_name] = sym_shared
+            chain(pre_programs, post_programs)
         if prefill_ok and pre_prefill and post_prefill:
-            pf_in = pre_prefill[0].input_names[0]
-            pf_shared = pre_prefill[0].program.arrays[pf_in]
-            for prog in post_prefill:
-                if len(prog.output_names) != 1:
-                    continue
-                out_name = prog.output_names[0]
-                if prog.program.arrays[out_name].nbytes == pf_shared.nbytes:
-                    prog.program.arrays[out_name] = pf_shared
+            chain(pre_prefill, post_prefill)
 
         embed_weight = None
         # Gemma scales embeddings by sqrt(hidden) (a ``Gemma3TextScaledWordEmbedding`` carries it as
@@ -1858,21 +1838,17 @@ class EmmyGenRunner:
         if self._moe is not None:
             # The routers and the 3-D expert weight tensors move to CUDA HERE — eagerly, inside
             # vLLM's profiled footprint (same contract as the embed table above). The expert
-            # tensors ARE the model's dominant weights. The per-expert cupy views are minted
-            # ONCE here (``cp.from_dlpack`` negotiates a stream sync per call — 2·E·layers of
-            # them don't belong on the per-step path) and reused by every expert launch.
-            import cupy as cp
-
+            # tensors ARE the model's dominant weights. The per-expert views are minted ONCE
+            # here and reused by every expert launch.
             from emmy.compiler.backend.gpu_lock import gpu_lock
 
-            with gpu_lock(), cp.cuda.Stream.from_external(torch.cuda.current_stream()):
-                # Program construction churns both allocator pools. Release their FREE blocks
-                # before the dominant expert-store transfer: vLLM cannot reclaim them until
+            with gpu_lock():
+                # Program construction churns the allocator. Release its FREE blocks before the
+                # dominant expert-store transfer: vLLM cannot reclaim them until
                 # ``load_weights`` returns, and on a 32-GiB card that ordering alone can make
                 # the final layer's codes fail despite enough live-memory headroom.
                 before = torch.cuda.mem_get_info()[0]
                 torch.cuda.empty_cache()
-                cp.get_default_memory_pool().free_all_blocks()
                 free, total = torch.cuda.mem_get_info()
                 logger.info(
                     "[gen_runner] pre-expert allocator reclaim: %.3f GiB released; %.3f of %.3f GiB free",
@@ -1885,7 +1861,7 @@ class EmmyGenRunner:
                         continue
                     m["gate"] = m["gate"].to("cuda")
                     m["inputs"] = {n: t.cuda() for n, t in m["inputs"].items()}
-                    m["inputs_cp"] = {n: [cp.from_dlpack(w) for w in t] for n, t in m["inputs"].items()}
+                    m["inputs_dev"] = {n: list(t) for n, t in m["inputs"].items()}
                 if self._routing_histogram_interval:
                     width = max(m["num_experts"] for m in self._moe if m is not None)
                     self._routing_histogram_counts = torch.zeros(len(self._moe), width, dtype=torch.int64, device="cuda")
@@ -1915,7 +1891,6 @@ class EmmyGenRunner:
                         raise RuntimeError("fixed-slot expert groups must agree on their output precision")
                     partial_dtype = torch.float32 if slot_precision.pop() else act_dtype
                     self._slot_partials = torch.empty(k, h, dtype=partial_dtype, device="cuda")
-                    sel_cp = cp.from_dlpack(self._slot_sel)
                     self._slot_tables = []
                     for g, tiers in enumerate(self._expert_tiers):
                         members = [m for m in self._moe if m is not None and m["group"] == g]
@@ -1928,19 +1903,18 @@ class EmmyGenRunner:
                                 ptrs.extend(w.data_ptr() + e * w.stride(0) * w.element_size() for e in range(num_e))
                         dev_tables = {n: torch.tensor(p, dtype=torch.int64, device="cuda") for n, p in tables.items()}
                         self._slot_tables.append(dev_tables)
-                        table_cps = {n: cp.from_dlpack(t) for n, t in dev_tables.items()}
                         for j, slot in enumerate(tiers["slots"]):
                             p = slot.program
-                            for name, tcp in table_cps.items():
-                                p.arrays[f"{name}__table"] = tcp
-                                p.arrays[f"{name}__sel"] = sel_cp
-                            p.arrays[slot.output_names[0]] = cp.from_dlpack(self._slot_partials[j : j + 1])
+                            for name, table in dev_tables.items():
+                                p.alias_buffer(f"{name}__table", table)
+                                p.alias_buffer(f"{name}__sel", self._slot_sel)
+                            p.alias_buffer(slot.output_names[0], self._slot_partials[j : j + 1])
                             # The build allocated the (never-read) direct per-expert input
                             # buffers — drop them (~two experts' weights per slot) so vLLM's
                             # KV-cache profiling sees the memory.
-                            for name in table_cps:
-                                p.arrays[name] = cp.empty(0, dtype=p.arrays[name].dtype)
-                    cp.get_default_memory_pool().free_all_blocks()
+                            for name in dev_tables:
+                                p.release_buffer(name)
+                    torch.cuda.empty_cache()
         self._dev_ready = True
 
     def _map_embed_table_to_host(self):
@@ -1960,24 +1934,16 @@ class EmmyGenRunner:
 
         Host memory does not double: the numpy table the oracle / prefill fallback gathers from is
         rebound to a view of the SAME buffer, and the original host array is dropped."""
-        import ctypes  # noqa: PLC0415
-
-        import cupy as cp  # noqa: PLC0415
         import numpy as np  # noqa: PLC0415
         import torch  # noqa: PLC0415
 
+        from emmy.compiler.backend.cuda.program import device_view  # noqa: PLC0415
+
         table = np.ascontiguousarray(self._embed_weight)
-        rt = cp.cuda.runtime
-        pinned = cp.cuda.PinnedMemory(table.nbytes, flags=rt.hostAllocMapped | rt.hostAllocPortable)
-        host = np.frombuffer((ctypes.c_char * table.nbytes).from_address(pinned.ptr), dtype=table.dtype).reshape(table.shape)
+        pinned = torch.empty(table.shape, dtype=torch.from_numpy(np.zeros(0, dtype=table.dtype)).dtype, pin_memory=True)
+        host = pinned.numpy()
         host[...] = table
-        # UVA makes the host address the device address; assert it rather than trust it — a
-        # platform where it does not hold would hand the gather kernel an unmapped pointer.
-        attrs = rt.pointerGetAttributes(pinned.ptr)
-        if int(attrs.devicePointer) != int(pinned.ptr):
-            raise RuntimeError("EMMY_GEN_EMBED_HOST: this platform does not map host allocations into the device address space")
-        mem = cp.cuda.UnownedMemory(pinned.ptr, table.nbytes, pinned)
-        arr = cp.ndarray(table.shape, dtype=table.dtype, memptr=cp.cuda.MemoryPointer(mem, 0))
+        arr = device_view(pinned)  # the same bytes, addressed as a device tensor
         self._embed_pinned = (pinned, arr)  # keepalive: the views below do not own the allocation
         logger.info(
             "[gen_runner] embed table (%d x %d, %.3f GiB) mapped in host memory — 0 device bytes",
@@ -1985,7 +1951,7 @@ class EmmyGenRunner:
             table.shape[1],
             table.nbytes / 2**30,
         )
-        return host, torch.from_dlpack(arr)
+        return host, arr
 
     def adopt_embed_table(self, weight, *, scale=1.0):
         """Share an already-resident device copy of the RAW (unscaled) embed table — gemma ties
@@ -2201,19 +2167,15 @@ class EmmyGenRunner:
         """The torch half of the MoE third seam: route via the HF router module (linear +
         softmax + top-k — ops the tracer cannot map), launch the tier-routed shared expert
         program once per HIT expert on that expert's routed rows, and weighted-scatter the
-        partials. ``xn[T, H]`` → combined expert output ``[T, H]``. The GPU lock and the cupy
-        external-stream bind are hoisted around the WHOLE per-expert loop — per-launch framing,
-        not the weight bytes, was the measured decode wall (~0.23 ms/launch through the
-        symbolic per-call path)."""
-        import cupy as cp
-        import torch
-
+        partials. ``xn[T, H]`` → combined expert output ``[T, H]``. The GPU lock is hoisted
+        around the WHOLE per-expert loop — per-launch framing, not the weight bytes, was the
+        measured decode wall (~0.23 ms/launch through the symbolic per-call path)."""
         from emmy.compiler.backend.gpu_lock import gpu_lock
 
         self._ensure_device()
         gated = self._route(moe, xn, token_ids)
         self._record_routing(moe, gated[-1])
-        with gpu_lock(), cp.cuda.Stream.from_external(torch.cuda.current_stream()):
+        with gpu_lock():
             return combine_routed_experts(
                 xn,
                 gated,
@@ -2234,7 +2196,6 @@ class EmmyGenRunner:
         it; under an outer capture each slot issues its raw launch sequence, mirroring
         :meth:`_Program.run_device` (nested graph machinery is illegal in a capturing stream).
         ``combine_routed_experts`` (the routed path) stays the parity oracle."""
-        import cupy as cp
         import torch
 
         from emmy.compiler.backend.gpu_lock import gpu_lock
@@ -2244,17 +2205,19 @@ class EmmyGenRunner:
         scores, indices = gated[-2], gated[-1]  # [1, k] each
         self._record_routing(moe, indices)
         capturing = torch.cuda.is_current_stream_capturing()
-        with gpu_lock(), cp.cuda.Stream.from_external(torch.cuda.current_stream()):
+        stream = torch.cuda.current_stream()
+        with gpu_lock():
             self._slot_sel.copy_(indices.reshape(-1) + moe["sel_off"])
-            x_cp = cp.from_dlpack(xn.detach().contiguous())
+            x_dev = xn.detach().contiguous()
             for slot in self._expert_tiers[moe["group"]]["slots"]:
                 p = slot.program
-                p.upload_prefix_device({"x": x_cp})
-                if capturing:
-                    p.run_once()
-                else:
-                    p.capture_program_graph()  # static program → one cached graph per slot
-                    p.replay_program_graph()
+                with p.on_stream(stream):
+                    p.upload_prefix_device({"x": x_dev})
+                    if capturing:
+                        p.run_once()
+                    else:
+                        p.capture_program_graph()  # static program → one cached graph per slot
+                        p.replay_program_graph()
         # [1, k] @ [k, H] — the fixed-shape weighted combine.
         return _combine_slot_partials(
             scores,
@@ -2337,13 +2300,13 @@ class EmmyGenRunner:
             logger.info("[gen_runner] routing histogram %s", json.dumps(payload, separators=(",", ":")))
 
     def _launch_expert(self, moe, e, rows):
-        """One expert-program launch on ``rows`` routed rows (caller holds the GPU lock + the
-        external-stream bind). Tier routing mirrors the main programs: M=1 twin, then the
+        """One expert-program launch on ``rows`` routed rows (caller holds the GPU lock; the
+        launch runs on torch's current stream). Tier routing mirrors the main programs: M=1 twin, then the
         decode-bucket twin (pad → run → slice; stale prefix rows are per-token-independent),
         then the static M=256 prefill twin for row sets up to ``_EXPERT_PREFILL_M`` (same
         pad-up contract), then the symbolic program. A swap-safe tier (no TMA descriptors —
         descriptors bake pointers at build) takes the per-expert weight slices by POINTER SWAP
-        into ``program.arrays`` — no D2D weight copy; otherwise the slices upload normally.
+        (``alias_buffer``) — no D2D weight copy; otherwise the slices upload normally.
         The M=256 twin instead replays its captured whole-program graph
         (``capture_program_graph`` — one host call per expert instead of per-kernel Python
         framing; at ~64 expert launches per chunk the framing was ~3× the GPU work). The
@@ -2351,20 +2314,21 @@ class EmmyGenRunner:
         (a pointer swap would freeze the first expert's slices into every later replay).
         Eager only — on torch's current stream, never under an outer capture (MoE
         serves eager above T=1; see the boot guard)."""
-        import cupy as cp
         import torch
 
         t = rows.shape[0]
-        per_e = {name: views[e] for name, views in moe["inputs_cp"].items()}
+        per_e = {name: views[e] for name, views in moe["inputs_dev"].items()}
         tiers = self._expert_tiers[moe["group"]]  # this layer's shape group
+        stream = torch.cuda.current_stream()
         if tiers["m256"] is not None and self._decode_bucket < t <= _EXPERT_PREFILL_M:
             prog = tiers["m256"]
             p = prog.program
-            p.upload_prefix_device({"x": cp.from_dlpack(rows.detach().contiguous()), **per_e})
-            p.capture_program_graph()  # static program → one cached graph, replayed per expert
-            p.replay_program_graph()
-            outs = p.output_prefix_device()
-            return torch.from_dlpack(outs[prog.output_names[0]])[:t]
+            with p.on_stream(stream):
+                p.upload_prefix_device({"x": rows.detach().contiguous(), **per_e})
+                p.capture_program_graph()  # static program → one cached graph, replayed per expert
+                p.replay_program_graph()
+                outs = p.output_prefix_device()
+            return outs[prog.output_names[0]][:t]
         if t == 1 and tiers["one"] is not None:
             prog, sym = tiers["one"], False
         elif tiers["bucket"] is not None and t <= self._decode_bucket:
@@ -2374,20 +2338,21 @@ class EmmyGenRunner:
             if prog is None:
                 raise RuntimeError(f"expert row width {t} exceeds the static-only decode bucket {self._decode_bucket}")
         p = prog.program
-        feed = {"x": cp.from_dlpack(rows.detach().contiguous())}
-        if self._expert_swap_safe[id(prog)]:
-            for name, view in per_e.items():
-                p.arrays[name] = view
-        else:
-            feed.update(per_e)
-        if sym:
-            p.set_sym_values({"num_tokens": t})
-        p.upload_prefix_device(feed)
-        p.run_once()
-        outs = p.output_prefix_device({"num_tokens": t} if sym else None)
+        feed = {"x": rows.detach().contiguous()}
+        with p.on_stream(stream):
+            if self._expert_swap_safe[id(prog)]:
+                for name, view in per_e.items():
+                    p.alias_buffer(name, view)
+            else:
+                feed.update(per_e)
+            if sym:
+                p.set_sym_values({"num_tokens": t})
+            p.upload_prefix_device(feed)
+            p.run_once()
+            outs = p.output_prefix_device({"num_tokens": t} if sym else None)
         # A VIEW of the shared output buffer: the caller's weighted index_add_ consumes it
         # before the next expert launch overwrites it (same stream, ordered).
-        return torch.from_dlpack(outs[prog.output_names[0]])[:t]
+        return outs[prog.output_names[0]][:t]
 
     def post_attn_backing(self, layer: int, rows: int):
         """A torch CUDA view (first ``rows`` rows) of the ``attn_out`` INPUT backing of the post
@@ -2400,11 +2365,9 @@ class EmmyGenRunner:
         two programs, and one contiguous attention output cannot alias two buffers.
 
         The tier routing MUST mirror :meth:`forward_layer_post_device` — a mismatch is still
-        correct (the upload simply copies) but silently loses the skip. The wrap is CACHED per
-        ``(layer, tier)``: ``torch.from_dlpack`` on a cupy array negotiates a stream sync, which
-        INVALIDATES an in-flight CUDA-graph capture — the view must be minted on an uncaptured
-        (warmup) step and only re-served under capture. An uncached entry asked for mid-capture
-        returns ``None`` (the caller falls back to the ordinary copy path)."""
+        correct (the upload simply copies) but silently loses the skip. The view is CACHED per
+        ``(layer, tier)`` and minted on an uncaptured (warmup) step; an uncached entry asked for
+        mid-capture returns ``None`` (the caller falls back to the ordinary copy path)."""
         if rows == 1 and self._post_m1 is not None:
             handle, tier = self._post_m1[layer], "m1"
         elif self._post_decode is not None and rows <= self._decode_bucket:
@@ -2428,10 +2391,9 @@ class EmmyGenRunner:
 
             if torch.cuda.is_current_stream_capturing():
                 return None
-            arr = handle.program.arrays.get("attn_out")
-            if arr is None:
+            if not any(b.name == "attn_out" for b in handle.program.plan.buffers):
                 return None
-            view = views[(layer, tier)] = torch.from_dlpack(arr)
+            view = views[(layer, tier)] = handle.program.buffer_view("attn_out")
         return view[:rows]
 
     def _broadcast_streams(self, rows):

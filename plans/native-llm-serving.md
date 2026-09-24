@@ -35,7 +35,7 @@ or its scope is explicitly revised.
 - **Milestone 3 — implemented in PR #890.** Native text and HTTP serving consume the qualified Rust runtime.
   Checkpoint template/tokenizer parity and real GPU HTTP lifecycle tests pass. The full Python suite has no test
   failures; four missing baseline timing records were added and their tests rechecked.
-- **Milestone 4 — not implemented.** Serving optimizations and general dispatch migration remain separate work.
+- **Milestone 4 — not implemented.** Serving optimizations remain separate work.
 
 The [runtime report](../experiments/Qwen3-0.6B/native_runtime/RESULTS.md) shows reduced uncaptured submission cost,
 but little change in captured GPU time for the tested small programs. This is not evidence of a full-model serving
@@ -68,7 +68,8 @@ The full-checkpoint matrix passes all seventeen cases across 10,585 positions, i
 FP32 attention, rotary intermediates, and residual accumulation close the failures without changing error budgets. The
 [follow-up report](../experiments/Qwen3-0.6B/native_generation/SAMPLING_CONTEXT.md) retains failures, repairs, and
 deterministic working schedules. PR #890 adds milestone 3 using the selected Axum adapter, tokenizers, and MiniJinja.
-General dispatch migration remains a separate obligation; the native serving subset cannot replace all run/tune uses.
+PR #885 has since merged the general Rust executor migration into main. Native HTTP serving consumes that shared
+runtime; production serving optimizations remain separate work.
 
 ## Evidence before implementation
 

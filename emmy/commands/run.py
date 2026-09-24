@@ -124,9 +124,6 @@ def register_run_command(subparsers):
     )
     parser.add_argument("--seed", type=int, default=0, help="RNG seed for --ir random inputs (default: 0).")
     parser.add_argument(
-        "--pack", metavar="DIR", help="With --bench --json: compare Python and Rust on a standalone static executable pack."
-    )
-    parser.add_argument(
         "--ab",
         action="append",
         default=None,
@@ -208,56 +205,6 @@ def register_run_command(subparsers):
 
 
 def handle_run(args):
-    if getattr(args, "pack", None):
-        import json
-
-        from emmy.compiler.backend.native import benchmark_pack
-        from emmy.compiler.dim import DEFAULT_SEQ_HINT
-
-        compiling = any(
-            value is not None
-            for value in (
-                args.input,
-                args.code,
-                args.ir,
-                args.golden,
-                args.realization,
-                args.dynamic,
-                args.ab,
-                args.bench_backends,
-                args.layer,
-                args.quantize,
-                args.dump_dir,
-                args.nvcc_flags,
-                args.gpu_arch,
-            )
-        )
-        incompatible = any(
-            (
-                args.profile,
-                args.record,
-                args.record_greedy,
-                args.strict_evidence,
-                args.strict_correctness,
-                args.no_record_evidence,
-                args.debug,
-            )
-        )
-        if (
-            not args.bench
-            or not args.json
-            or compiling
-            or incompatible
-            or args.adapter != "causal-lm"
-            or args.seq_len != DEFAULT_SEQ_HINT
-            or args.seed != 0
-        ):
-            logger.error("--pack requires --bench --json and cannot be combined with compilation or model benchmark options")
-            sys.exit(2)
-        result = asyncio.run(benchmark_pack(args.pack, warmup=args.warmup, iterations=args.iters))
-        Path(args.json).write_text(json.dumps(result, indent=2))
-        logger.info("Both runtimes produced identical outputs; measurements saved to %s", args.json)
-        return
     from emmy.commands.compile import apply_nvcc_flags
     from emmy.compiler.target import apply_target_arg
 
@@ -424,8 +371,8 @@ def _handle_run_once(args):
                 _eager_output(module, example_args, example_kwargs)
         except RuntimeError as exc:
             # Per-launch watchdog fired in ``run_program`` (kernel >1 s).
-            # The CUDA context is dirty — bypass Python cleanup so cupy's
-            # atexit doesn't block on the still-running kernel.
+            # The CUDA context is dirty — bypass Python cleanup so the driver's
+            # teardown doesn't block on the still-running kernel.
             sys.stderr.write(f"accuracy check failed: {exc}\n")
             sys.stdout.flush()
             sys.stderr.flush()
@@ -825,7 +772,7 @@ def _reset_persisting_l2_cache() -> None:
     bench path doesn't fail loud on driver quirks.
 
     Loads ``libcudart`` from the already-mapped image so the call
-    targets the SAME runtime torch + cupy are using (the system
+    targets the SAME runtime torch is using (the system
     ``libcudart.so`` may belong to a different CUDA install and would
     operate on a different driver context — its reset returns success
     but doesn't touch our context's L2 carveout). Walks
@@ -1420,7 +1367,7 @@ def _launch_order_cuda_nodes(graph):
 def _print_kernel_stats(graph, bench, golden_benches=None, greedy_fail=None, greedy_iso=None, sym_env=None):
     """Per-kernel breakdown. Pulls structural stats off each ``CudaOp``
     (block / grid / smem), per-launch timings from ``bench.per_launch``,
-    and per-kernel hardware attributes from the compiled cupy RawKernels
+    and per-kernel hardware attributes read off the compiled cubins
     (register count, achieved theoretical occupancy). One row per kernel
     — quick at-a-glance for spotting which kernel dominates, whether
     register pressure is killing occupancy, etc.
@@ -1823,7 +1770,7 @@ def _write_ab_json(
 
 def _collect_kernel_attrs(graph) -> dict[str, dict]:
     """Read attributes from the runtime's cached cubins, using its compile flags and target."""
-    from emmy.compiler.backend.cuda.program import _load_kernel
+    from emmy.compiler.backend.cuda.program import kernel_attributes
     from emmy.compiler.backend.plan import KernelSpec
 
     out = {}
@@ -1832,30 +1779,26 @@ def _collect_kernel_attrs(graph) -> dict[str, dict]:
         if op.kernel_name in out:
             continue
         try:
-            kernel = _load_kernel(op.kernel_name, KernelSpec.from_op(op))
-            out[op.kernel_name] = {key: getattr(kernel, key) for key in ("num_regs", "local_size_bytes", "shared_size_bytes")}
+            out[op.kernel_name] = kernel_attributes(op.kernel_name, KernelSpec.from_op(op))
         except Exception:  # pragma: no cover — unavailable GPU/compiler or a failed kernel
             continue
     return out
 
 
 def _occupancy_limits() -> dict | None:
-    """Per-device limits used to estimate theoretical occupancy. ``None``
-    when cupy / CUDA aren't available."""
-    try:
-        import cupy as cp
+    """Per-device limits used to estimate theoretical occupancy. ``None`` when no device answers."""
+    from emmy.compiler.backend.cuda.device import properties
 
-        dev = cp.cuda.Device()
-        a = dev.attributes
-        return {
-            "max_threads_per_sm": a.get("MaxThreadsPerMultiProcessor", 0),
-            "max_blocks_per_sm": a.get("MaxBlocksPerMultiprocessor", 0),
-            "max_regs_per_sm": a.get("MaxRegistersPerMultiprocessor", 0),
-            "max_smem_per_sm": a.get("MaxSharedMemoryPerMultiprocessor", 0),
-            "warp_size": a.get("WarpSize", 32),
-        }
-    except Exception:
+    props = properties()
+    if props is None:
         return None
+    return {
+        "max_threads_per_sm": int(props["max_threads_per_sm"]),
+        "max_blocks_per_sm": int(props["max_blocks_per_sm"]),
+        "max_regs_per_sm": int(props["regs_per_sm"]),
+        "max_smem_per_sm": int(props["smem_per_sm"]),
+        "warp_size": int(props["warp_size"]),
+    }
 
 
 def _theoretical_occupancy(regs_per_thread: int, smem_per_block: int, threads_per_block: int, limits: dict | None) -> float | None:
@@ -2660,7 +2603,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
                 )
             )
         except RuntimeError as exc:
-            # Per-launch watchdog fired — the CUDA context is dirty; bypass cupy's atexit.
+            # Per-launch watchdog fired — the CUDA context is dirty; bypass the driver's teardown.
             sys.stderr.write(f"run failed: {exc}\n")
             sys.stdout.flush()
             sys.stderr.flush()
@@ -3472,7 +3415,7 @@ def _capture_torch_fn(fn):
     torch.cuda.current_stream().wait_stream(side)
     g = torch.cuda.CUDAGraph()
     # Default ``capture_error_mode`` (global): the bench is single-threaded and
-    # no cupy call happens between begin/end. If CI ever flakes on concurrent
+    # no runtime call happens between begin/end. If CI ever flakes on concurrent
     # CUDA activity, ``capture_error_mode="thread_local"`` is the one-line knob.
     with torch.no_grad(), torch.cuda.graph(g):
         fn()
@@ -3539,8 +3482,8 @@ async def _bench_interleaved(module, args, kwargs, backend, compiled_graph, warm
     state as the comparison numbers.
 
     Per-iter ``torch.cuda.Event``s queue on the (legacy) default
-    stream; cupy's default stream is the same NULL stream, so events
-    from both libraries see all preceding work.
+    stream, and the emmy program's launches are issued on that same stream
+    (``CompiledProgram.on_stream``), so events see all preceding work.
 
     ``torch_fns`` is the pre-built backend closure dict from
     :func:`_build_torch_fns` (``handle_run`` builds it outside the

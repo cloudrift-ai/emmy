@@ -113,37 +113,31 @@ impl Generator {
         let artifact = Artifact::load(root, PROGRAM)?;
         // Fixed interface names and geometry are part of the generation contract. Check before GPU allocation.
         for (name, dtype, role, shape) in [
-            ("prompt", "i64", "input", vec![config.context_length]),
+            ("prompt", "i64", "input", vec![config.context_length as i64]),
             ("prompt_length", "i64", "input", vec![1]),
             ("position", "i64", "input", vec![1]),
             ("sampling", "f64", "input", vec![2]),
             ("seed", "u64", "input", vec![1]),
             ("next_token", "i64", "output", vec![1]),
-            ("logits", "f16", "output", vec![1, config.vocab_size]),
+            ("logits", "f16", "output", vec![1, config.vocab_size as i64]),
         ] {
             let buffer = artifact
-                .plan
-                .buffers
-                .iter()
-                .find(|b| b.name == name)
+                .program
+                .buffer(name)
                 .context("missing generation buffer")?;
             ensure!(
                 buffer.dtype == dtype
                     && buffer.role == role
-                    && buffer.shape
-                        == shape
-                            .iter()
-                            .map(|&n| serde_json::json!(n))
-                            .collect::<Vec<_>>(),
+                    && buffer.static_shape().as_deref() == Some(shape.as_slice()),
                 "invalid generation buffer {name}"
             );
         }
         ensure!(
-            artifact.plan.inputs == ["prompt", "prompt_length", "position", "sampling", "seed"],
+            artifact.program.inputs == ["prompt", "prompt_length", "position", "sampling", "seed"],
             "invalid generation inputs"
         );
         ensure!(
-            artifact.plan.outputs == ["logits", "next_token"],
+            artifact.program.outputs == ["logits", "next_token"],
             "invalid generation outputs"
         );
         Ok(Self {

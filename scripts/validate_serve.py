@@ -14,7 +14,7 @@ coherence).
 
     ./venv/bin/python scripts/validate_serve.py --model google/gemma-4-12B-it
 
-Prereqs: the `serving` extra + cupy installed, a CUDA toolkit whose nvcc supports the target arch,
+Prereqs: the `serving` extra installed, a CUDA toolkit whose nvcc supports the target arch,
 and HF access to the checkpoint (`export HF_TOKEN=...` when gated). The first `emmy serve` boot
 compiles every layer — minutes.
 """

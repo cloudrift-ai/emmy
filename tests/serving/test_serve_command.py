@@ -192,9 +192,9 @@ def test_serve_cmd_generate_branch():
     # Mixed-batch full capture needs an ALWAYS-support attention backend; FA2 is
     # uniform-batch only, so the emmy arm selects TRITON_ATTN.
     assert cmd[cmd.index("--attention-backend") + 1] == "TRITON_ATTN"
-    # The emmy generative arm defaults util to 0.97 — its cupy residents are invisible to
-    # vLLM's torch-only profiler, so the 0.90 line can fall below them and fail the min-KV
-    # fit at long model lens. Stock (and the embedding plugin) keep 0.90.
+    # The emmy generative arm defaults util to 0.97, the line measured when its residents were
+    # invisible to vLLM's profiler and 0.90 failed the min-KV fit at long model lens. Stock
+    # (and the embedding plugin) keep 0.90.
     assert "--gpu-memory-utilization=0.97" in cmd
     stock_cmd = build_serve_cmd(MODEL, stock=True, vllm_args=[], generate=True)
     assert "--gpu-memory-utilization=0.9" in stock_cmd

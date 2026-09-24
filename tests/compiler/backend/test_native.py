@@ -61,44 +61,6 @@ def test_native_wire_version_and_error_translation():
         NativeWorker._decode(b'{"version":2}')
 
 
-async def test_pack_comparison_matches_lifetimes_and_closes_workers(tmp_path, monkeypatch):
-    from pathlib import Path
-
-    from emmy.compiler.backend import native
-    from emmy.compiler.backend.plan import ExecutionPlan, plan_to_dict
-
-    plan = ExecutionPlan("cuda", [], [], [], {}, {}, [], {})
-    (tmp_path / "plan.json").write_text(json.dumps(plan_to_dict(plan)))
-    (tmp_path / "manifest.json").write_text(json.dumps({"programs": {"test": "plan.json"}}))
-    workers = []
-
-    class Worker:
-        def __init__(self, **kwargs):
-            self.loads = self.runs = self.closes = 0
-            workers.append(self)
-
-        async def run_job(self, request, **kwargs):
-            if request["op"] == "load":
-                self.loads += 1
-                assert Path(request["root"]) == tmp_path
-                return {"loaded": True}
-            self.runs += 1
-            assert request["iterations"] == 7 and request["warmup"] == 2
-            return {"time_ms": 0.1}
-
-        async def aclose(self):
-            self.closes += 1
-
-    monkeypatch.setattr(native, "NativeWorker", Worker)
-    monkeypatch.setattr(native, "PythonPackWorker", Worker)
-    result = await native.benchmark_pack(tmp_path, warmup=2, iterations=7)
-    assert len(result["rows"]) == 24
-    assert len(workers) == 8
-    assert [w.loads for w in workers] == [2, 3] * 4
-    assert len(result["reloads"]) == 4
-    assert all(w.runs == 3 and w.closes >= 1 for w in workers)
-
-
 async def test_supervisor_does_not_add_compiler_settings_to_native_requests():
     worker = StubWorker(
         "import json,sys; n=int.from_bytes(sys.stdin.buffer.read(8),'little'); "
@@ -110,13 +72,3 @@ async def test_supervisor_does_not_add_compiler_settings_to_native_requests():
         assert (await worker.run_job({"op": "release"}, wall_timeout_s=5))["released"]
     finally:
         await worker.aclose()
-
-
-def test_python_pack_keeps_compiler_settings_outside_the_command():
-    import pickle
-
-    from emmy.compiler.backend.native import PythonPackWorker
-
-    request = pickle.loads(PythonPackWorker._encode({"op": "release"}))
-    assert request["pack_command"] == {"op": "release"}
-    assert "fast_math" in request

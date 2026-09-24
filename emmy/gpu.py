@@ -8,7 +8,7 @@ By convention the **PCIe product name** (what ``cudaDeviceProp.name`` /
 provisioning tables, detection, results filenames. Look a card up by that name
 (:func:`by_name`) or by its PCI device id (:func:`by_pci_device_id`).
 
-When a live CUDA probe is available (cupy present), :func:`probe_live_features`
+When a live CUDA probe is available, :func:`probe_live_features`
 returns the device's real properties; otherwise it falls back to the **memorized
 specs** recorded here for :data:`DEFAULT_GPU` (or a name passed in). This lets
 GPU-less hosts (CI, offline golden ranking, cross-target compiles) get faithful
@@ -342,25 +342,17 @@ def short_names() -> dict[str, str]:
 
 def probe_live_features(fallback_name: str | None = None) -> dict[str, float]:
     """Physical device features (``sm_count`` / ``smem_per_sm`` / ``smem_per_block``
-    / ``regs_per_block`` / ``warp_size``) of the live CUDA device via cupy. When no
-    device is visible (or cupy is missing), fall back to the **memorized** specs of
+    / ``regs_per_block`` / ``warp_size``) of the live CUDA device via the runtime. When no
+    device is visible, fall back to the **memorized** specs of
     ``fallback_name`` (a PCIe name) — or :data:`DEFAULT_GPU` — so GPU-less hosts
     still get per-SKU features. Empty only when even the fallback spec is unknown."""
-    try:
-        import cupy as cp  # noqa: PLC0415
+    from emmy.compiler.backend.cuda.device import properties  # noqa: PLC0415
 
-        props = cp.cuda.runtime.getDeviceProperties(cp.cuda.Device().id)
-        return {
-            "sm_count": float(props["multiProcessorCount"]),
-            "smem_per_sm": float(props["sharedMemPerMultiprocessor"]),
-            "smem_per_block": float(props["sharedMemPerBlock"]),
-            "regs_per_block": float(props["regsPerBlock"]),
-            "warp_size": float(props["warpSize"]),
-            "total_mem": float(props["totalGlobalMem"]),
-        }
-    except Exception:  # noqa: BLE001 — no live device ⇒ memorized fallback
+    props = properties()
+    if props is None:  # no live device ⇒ memorized fallback
         spec = (by_name(fallback_name) if fallback_name else None) or DEFAULT_GPU
         return spec.device_features()
+    return {key: props[key] for key in ("sm_count", "smem_per_sm", "smem_per_block", "regs_per_block", "warp_size", "total_mem")}
 
 
 @functools.cache
@@ -373,11 +365,7 @@ def live_name() -> str | None:
     H200) — ``compute_capability`` + SM features alone can't. Canonicalizing matters so a
     live ``perf`` row and a golden reconstructed from the canonical name share one
     ``gpu`` string. Cached: physical, target-independent."""
-    try:
-        import cupy as cp  # noqa: PLC0415
+    from emmy.compiler.backend.cuda.device import name as device_name  # noqa: PLC0415
 
-        raw = cp.cuda.runtime.getDeviceProperties(cp.cuda.Device().id)["name"]
-    except Exception:  # noqa: BLE001 — no live device
-        return None
-    name = raw.decode() if isinstance(raw, (bytes, bytearray)) else str(raw)
-    return canonical_name(name)
+    raw = device_name()
+    return None if raw is None else canonical_name(raw)
