@@ -937,7 +937,16 @@ def _reformed(piece: TileOp) -> TileOp:
     with both channels once the o_proj result is a load. The twin is the term the warp tier tiles;
     two terms give one of them the scalar tier. Formed fresh, the piece is the kernel the same
     program gets on its own, which is also the kernel the card's rows were recorded on. A nest the
-    lift cannot take whole keeps the piece as minted."""
+    lift cannot take whole keeps the piece as minted.
+
+    A piece the rank rule left a SWEEP (:func:`_piece_rank`) keeps its minted form too. Re-forming
+    walks the piece out to a full loop nest and lifts it back, and that nest opens the sweep loop
+    AROUND the statistic the minted term holds beside it — the re-lifted reduce then reads the sweep
+    axis, the rank rule promotes it, and the piece is back to folding its row statistic per output
+    cell. The hoist is the form the reform is meant to preserve, so a piece that already has it is
+    not re-formed."""
+    if any(store.sweep for store in piece.output_specs):
+        return piece
     body = piece.op.lower(bound=frozenset(), stores=piece.output_specs, axes=piece.axes)
     try:
         # Through the LoopOp's normalization: that is where two reduce loops over one axis become
@@ -955,6 +964,25 @@ def _reformed(piece: TileOp) -> TileOp:
     )
     place = replace(formed.place, free=grid)
     return replace(piece, op=rewrite_twisted(formed.op, formed.axes), place=place, axes=formed.axes, output_specs=specs)
+
+
+def _piece_rank(produced: Fold, grid: tuple, index: tuple) -> tuple[tuple, tuple]:
+    """Split a piece's workspace axes into the ones its grid BINDS and the ones its store sweeps.
+
+    The one rank rule (:func:`~emmy.compiler.ir.tile.ir.promoted_sweep`) answers it, asked of the
+    piece as if every workspace axis were a sweep: an axis a reduce the piece holds does not read
+    is that reduce's ROW STATISTIC, and binding it folds the statistic once per output CELL. A
+    materialized q/k RoPE cone bound that way launched one cooperative block per element — 1048576
+    blocks and 317 us for a 1 MB pass, against 8192 blocks that each fold once and then sweep.
+
+    Static unit axes stay bound whatever the rule says: they cost the grid nothing and they are the
+    piece's schedule geometry (:func:`_workspace_axes`), so sweeping one drops the ``(m, n)`` pair a
+    contraction piece tiles on. Grid order is kept on both sides.
+    """
+    specs = tuple(OutputSpec(Write(output="", index=index, value=""), sweep=grid) for _ in range(1))
+    keep = {axis.name for axis in grid if axis.extent.is_static and axis.extent.as_static() == 1}
+    keep |= promoted_sweep(produced, specs, free=())
+    return tuple(axis for axis in grid if axis.name in keep), tuple(axis for axis in grid if axis.name not in keep)
 
 
 def _producer_order(pieces) -> list:
@@ -1130,19 +1158,21 @@ def realize(
         # moves the GRID and nothing else.
         shape = tuple(axis.extent for axis in axes)
         produced, grid, index, minted = _split_fused_pair(produced, axes, index)
+        bound, swept = _piece_rank(produced, grid, index)
         producer = TileOp(
             op=produced,
             # The seam token keeps recursive pieces' kernel names distinct — the one-name-one-source
             # launch rule stated beside ``nvcc.load_cubin_function``: two same-named producers from
             # different cut levels would launch one kernel twice.
             name=f"{tile.name}__place_{token}",
-            place=Placement(free=grid),
+            place=Placement(free=bound),
             axes=(
                 *(next((axis for axis in grid if axis.name == original.name), original) for original in tile.axes),
                 *minted,
             ),
             output_specs=tuple(
-                OutputSpec(Write(output=buffer, index=index, value=name)) for name, buffer in zip(names, buffers, strict=True)
+                OutputSpec(Write(output=buffer, index=index, value=name), sweep=swept)
+                for name, buffer in zip(names, buffers, strict=True)
             ),
             placement_decided=placement_decided,
             split_consumed=split_consumed,
