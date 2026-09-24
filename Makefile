@@ -301,3 +301,9 @@ test-compose:
 	@echo "✅ Generated: /tmp/test-compose.yml"
 	@echo ""
 	@cat /tmp/test-compose.yml
+
+.PHONY: native-dist
+native-dist:
+	cargo build --release --locked --workspace
+	mkdir -p dist
+	tar -czf dist/emmy-native-$$(git rev-parse --short HEAD)-$$(uname -s)-$$(uname -m).tar.gz -C target/release emmy-server emmy-runtime-worker

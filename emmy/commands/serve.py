@@ -56,6 +56,7 @@ def _add_own_flags(parser, *, suppress_defaults: bool) -> None:
     def d(value):
         return argparse.SUPPRESS if suppress_defaults else value
 
+    parser.add_argument("--native", action="store_true", default=d(False), help="Use the experimental native text server with --generate.")
     parser.add_argument(
         "--stock", action="store_true", default=d(False), help="Serve stock vLLM kernels instead of the emmy plugin (A/B baseline)."
     )
@@ -477,6 +478,10 @@ def handle_serve(args):
     from emmy.compiler.loader.safetensors import split_revision  # noqa: PLC0415
 
     vllm_args = _split_own_flags(args)  # re-parses own flags placed after MODEL into args
+    if args.native:
+        from emmy.serving.native.launch import launch
+
+        return launch(args, vllm_args)
     # ``<repo>@<revision>`` is emmy's pin spelling — ``compile``, ``pull``, the gen runner and the
     # twins all read it, and a repo publishing one quantization rung per branch is a DIFFERENT
     # model on each, so the default branch is never a safe stand-in. vLLM takes the two apart, and
