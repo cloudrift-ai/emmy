@@ -7,15 +7,16 @@ artifacts exist and an intelligent reviewer accepts them against the checklist b
 
 ## Evidence sets
 
+The Gemma 4 12B kernel and serving evidence of the CGO 2027 submission is kept on the `results/cgo-2027` branch.
+
 | Evidence set | Workload | Platforms | Permitted interpretation |
 | --- | --- | --- | --- |
 | Common kernel corpus | Qwen3-0.6B layer 0, sequence lengths 1 and 512 | V100, A100, H100, RTX 4090, RTX 5090, H200, B200 | Identical, portable model-derived kernel comparison |
 | Dynamic-FP8 checkpoint layer | Qwen3-0.6B-FP8-dynamic layer 0, sequence lengths 1 and 512 | RTX 4090, RTX 5090, H200, B200 | Complete layer inventory; W8A8-only claim deferred |
-| Hybrid-precision projection kernels | Gemma 4 12B decoder-layer projections and causal attention, sequence length 512, FP32 and periodic-promotion FP16 accumulation | RTX 5090, RTX 4090 | Replay of hand-recorded goldens against eager and Inductor; backs the periodic-promotion figure |
 | Quantized checkpoint kernels | Qwen3-8B NVFP4 and Qwen3-0.6B block-scaled FP8 layer 0 at 1 and 512; Llama 3.1 AWQ and Laguna EXL3 layer 0 at 1 | RTX 5090 | Compiler support and correctness; the block-FP8 rows replay hand-tuned goldens against eager |
 | Dynamic-FP8 large-layer trace | Qwen3-32B-FP8-dynamic layer 0, sequence lengths 1 and 512 | H200 and B200 | Complete large-layer inventory; W8A8-only claim deferred |
 | Large-layer shape stress | Qwen3.6-27B layers 0 and 3, sequence lengths 1 and 512 | H200 and B200 | Unsharded BF16 large-shape stress only |
-| End-to-end serving | Pinned recipes below | Consumer single GPU and the V100 TP8xPP2 lane | System performance for explicitly matched stock and Emmy arms |
+| End-to-end serving | Pinned recipes below | The V100 TP8xPP2 lane | System performance for explicitly matched stock and Emmy arms |
 | Megakernel decode pair | Qwen3-8B, one 128/512 single-stream point | A100 | Cross-harness kernel-launch-overhead comparison |
 | Neptune compiler comparison | 10 artifact operators and a five-operator Emmy/PyTorch subset | A100 80GB | One archived cross-compiler result |
 
@@ -51,24 +52,6 @@ pinned checkpoint layer each, retain every distinct post-fusion target, skip sea
 `-O3` replay. NVFP4 and block-scaled FP8 cover sequence lengths 1 and 512. AWQ and Trellis/EXL3 cover the
 decode-shaped sequence length 1 only. The working YAML and cubin cache are retained so review can verify the declared
 packed checkpoint inputs survive into the compiled programs instead of becoming dense checkpoint weights.
-
-The `gemma4_kernels` recipe is the fast-math evidence this suite otherwise leaves out. Its twelve tasks per card
-(RTX 5090 and RTX 4090) replay six hand-recorded goldens (the five projections of a Gemma 4 12B decoder layer and its
-causal attention at sequence length 512) once with FP32 accumulation and once under `EMMY_FAST_MATH=1`, from an empty
-tune DB and under `--strict-evidence`, against eager and Inductor on PyTorch 2.13.0. The rows were found by
-hand-pinned sweeps on each card, not by search, and a golden is only ever replayed on the card it was recorded on.
-It uses the run command's scaled correctness check: periodic promotion trades accumulation precision by design, and
-at K = 15360 a flat `1e-3` tolerance does not hold for an FP16 output even in the FP32-accumulate lane. Report each
-lane against its own task's eager, and keep the two lanes in separate columns.
-
-The `gemma4_serving` recipe is the same article's serving table: its six points in its three vLLM lanes (stock vLLM
-0.23.0, vLLM with the Emmy plugin, and the plugin's fast-math fork), eighteen tasks on one RTX 5090 with the article's
-per-workload knobs, except that the single-stream points take the recorded width-8 decode twins where the article
-took width 32. Every Emmy lane boots under `EMMY_STRICT_EVIDENCE=1`, so the RTX 5090 Gemma 4 serving golden's rows
-decide every kernel the server compiles and a fork no row decides fails the boot; the image is the plain
-`vllm-emmy` base built at the commit the run names, compiling its programs on first boot. It is a reproduction of the
-article's protocol on the current compiler, not the preregistered same-image A/B below, which runs the standard lane
-only from the warmed derivative image.
 
 The two block-scaled FP8 tasks trace `Qwen/Qwen3-0.6B-FP8`: 128×128 weight blocks with activations quantized per
 token and per 128-wide K group, the form of the official Qwen, DeepSeek, and GLM FP8 releases and of the datacenter
@@ -175,8 +158,6 @@ form; the separate FP8 and NVFP4 rows cover them.
 
 | Platform | Recipe | Purpose | Claim status |
 | --- | --- | --- | --- |
-| RTX 5090 | Gemma-4-12B-it, TP1 | Same-image stock and Emmy A/B | Primary matched-system result after semantic review |
-| RTX 5090 | Gemma-4-12B-it, TP1 (`gemma4_serving`) | The article's three-lane matrix under strict evidence | Reproduction of the article's protocol; both precision lanes |
 | 16x V100 | DeepSeek-V4-Flash-0731, TP8xPP2 | New checkpoint on the proven SM70 serving path | Portability result until a matched stock arm exists |
 | 1x A100 | Qwen3-8B BF16, TP1 | vLLM and megakernel (MPK) decode comparison | MPK harness pair and stock vLLM |
 
@@ -186,46 +167,6 @@ against one process. Preserve latency, time to first token, inter-token latency,
 digests, driver/CUDA state, and failures. General fast
 math is outside this preregistered suite; the exact `FP8_MMA` pin is confined to the dynamic-FP8 checkpoint layer
 traces and does not establish a W8A8-only result without the deferred target filter.
-
-Both Gemma arms also declare no multimodal items. Gemma 4 12B is a multimodal checkpoint and vLLM sizes an encoder
-budget from it, so a stock server refuses to start whenever `--max-num-batched-tokens` is below
-`max_tokens_per_mm_item`, which two of the four points are; the Emmy arm never hit it because `EmmyGenModel` is
-text-only. The benchmark sends text, and the declaration is on both arms, so their argv stays identical.
-
-The Gemma stock and Emmy arms use identical per-workload `--max-num-batched-tokens` settings and the same immutable
-`cloudriftai/vllm-emmy-gemma-4-12b-it@sha256:3a690e9f7859d46b969dd9eaaed36f52f92c25c5595dc112aee2adb781d26e28`
-image, which records vLLM source revision `91df0fad4dc98a67c7659d9dbd915245d5c43d96`. The stock arm overrides the
-image entrypoint with `python3 -m vllm.entrypoints.openai.api_server`; the Emmy arm selects `EmmyGenModel`. An
-intelligent reviewer rejects the A/B if the final evidence shows different scheduler settings, runtime revisions,
-package inventories, or model semantics. `emmy bench` does not compare outputs or make this scientific decision.
-
-The Gemma delta supports a matched end-to-end serving-system speedup claim. Stock uses vLLM's native route while Emmy
-uses `EmmyGenModel`, so this A/B does not isolate compiler kernels alone. A compiler-caused end-to-end claim requires
-a same-`EmmyGenModel` reference-kernel or compiled-kernels-off arm. The remaining recipes qualify systems or
-compatibility and deliberately fail to imply a compiler speedup by themselves.
-
-### Gemma estimator and claim rule
-
-Pair stock and Emmy by workload and the neutral matrix label `repeat`, independent of their balanced execution order.
-The
-primary metric is output-token throughput for `(256,256,64)`, median end-to-end latency for `(4096,4096,1)`,
-output-token throughput for `(4096,4096,8)`, and median time to first token for `(8192,256,4)`. Other recorded
-throughput, TTFT, TPOT, ITL, and latency fields are secondary diagnostics and cannot substitute for a primary metric.
-
-For throughput, the paired improvement ratio is `Emmy / stock`; for latency it is `stock / Emmy`, so values above one
-always favor Emmy. A point estimate is the median of its five paired ratios. Report all ratios, the median and range,
-and a 10,000-draw seed-0 paired-repeat percentile bootstrap 95% interval. A point is "faster" only when the interval's
-lower endpoint exceeds one. The equal-weight four-point summary is the geometric mean of the point medians, with a
-10,000-draw seed-0 bootstrap that resamples the five pairs within each point. "Faster across the matrix" requires
-all four points and the summary to meet the same lower-bound rule.
-
-For every serving task, intelligent review of the raw output must confirm `successful_requests == num_prompts`,
-`failed_requests == 0`, the complete preregistered matrix, the intended backend from the raw logs, and plausible
-outputs and metrics. `emmy bench` preserves the raw output but does not parse, accept, or reject measurements. No
-performance outlier is removed. A machine-readable deployment, client, or network failure before a complete metric
-may trigger one rerun of the entire stock/Emmy pair for that workload/repeat; retain and disclose both failed
-originals. A second failure makes the point incomplete. A semantic mismatch or post-metric performance anomaly is
-never a rerun reason; after a code/configuration fix, restart the entire 40-task matrix under a new source ID.
 
 ## Megakernel comparison lane
 
@@ -389,8 +330,6 @@ mean.
   on the authorized host before publication.
 - The suite makes no TP8 kernel claim; datacenter kernel results retain the stated unsharded corpus boundary.
 - End-to-end speedup claims require matched hardware, model revision, engine revision, workload, and stock/Emmy arms.
-- The Gemma system table additionally requires matched scheduler settings, image digest/runtime revision, and a
-  documented intelligent semantic comparison; it is not labeled compiler-caused without a same-route reference arm.
 - Native end-to-end quantization claims require the reviewer to identify the exact method and backend in raw logs and
   reject fallback paths; a recipe alone is planned evidence only.
 - Datacenter claims remain per-system. Results are not generalized from TP8 to TP4, or across GPU generations.
