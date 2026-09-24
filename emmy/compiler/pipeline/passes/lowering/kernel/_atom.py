@@ -1204,9 +1204,9 @@ def _packed_operands(
     """The staged operands of a byte-slab B contraction — the NVFP4 weight's byte-slab form, and the
     block-scaled fp8 weight's.
 
-    Three slabs where the ordinary matmul has two — one A, then one bits slab and one scale slab
-    PER weight channel (a gate/up edge over two packed weights stages five) — because the weight
-    arrives as two tensors that are cheapest to move apart and combine at the fragment: the BITS copy verbatim (one byte per
+    One shared A slab, then one bits slab and one scale slab per weight channel: three slabs for
+    one channel, five for a gate/up pair. The weight arrives as two tensors that move separately
+    and combine at the fragment: the BITS copy verbatim (one byte per
     ``per_byte`` K elements, so the slab is a half or a quarter of a 16-bit one's width and the
     copy moves that much less traffic), and the block SCALES are decoded once per k block into
     their own small slab — at the fragment dtype for a packed pair, whose fused scale the declared
@@ -1227,8 +1227,8 @@ def _packed_operands(
     wants the bank spread, and zero under TMA, whose box deposits dense. The drain reads it back
     off ``Operand.pad_cols``, so the two cannot disagree.
 
-    Returns ``(drain-ordered operands, sync operands, async operands)``. The scale slab is absent
-    from the drain order: it is not a fragment source of its own, it is the bits drain's second
+    Returns ``(drain-ordered operands, sync operands, async operands, A prologue)``. The scale slabs
+    are absent from the drain order: each is its bits drain's second
     input (``Operand.scale``).
     """
     m, n = mn
