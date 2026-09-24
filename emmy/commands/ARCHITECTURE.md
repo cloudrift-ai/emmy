@@ -526,6 +526,11 @@ Both `deploy local` and `deploy ssh` auto-detect the target GPU by scanning PCI 
 
 ### `emmy serve`
 
+`--generate --native` selects the experimental Rust text server. Its launcher prepares or reuses a checkpoint-owned
+bundle and executes a prebuilt binary. Native arguments are validated separately; vLLM forwarding remains the default.
+See the [native serving contract](../serving/native/ARCHITECTURE.md) for supported options and preparation controls.
+
+
 Serves an embedding model (or a generative chat model via `EmmyGenModel` with `--generate` — `--runner generate` +
 fp16) through vLLM with the emmy plugin flags baked in (`serving/` plugin; needs the `serving` extra). Unrecognized flags forward to `vllm serve`; tokens after a literal `--` forward verbatim (emmy's
 own flags are otherwise extracted wherever they appear — argparse REMAINDER swallows everything after MODEL, so the

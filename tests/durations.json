@@ -2143,5 +2143,11 @@
  "tests/compiler/pipeline/search/test_golden.py::test_stored_targets_are_the_fresh_lowering[h100_sm90.yaml]": 1.38,
  "tests/compiler/pipeline/search/test_golden.py::test_stored_targets_are_the_fresh_lowering[v100_sm70.yaml]": 1.31,
  "tests/compiler/pipeline/search/test_golden.py::test_stored_targets_are_the_fresh_lowering[rtx4090_sm89.yaml]": 1.3,
- "tests/compiler/pipeline/search/test_golden.py::test_stored_targets_are_the_fresh_lowering[Qwen3.5-122B-A10B/v100_sm70.yaml]": 0.95
+ "tests/compiler/pipeline/search/test_golden.py::test_stored_targets_are_the_fresh_lowering[Qwen3.5-122B-A10B/v100_sm70.yaml]": 0.95,
+ "tests/serving/native/test_server_gpu.py::test_checkpoint_http@cuda": 7.57,
+ "tests/serving/native/test_text.py::test_checkpoint_text_parity": 3.03,
+ "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[DeepSeek-V4-Flash-0731/v100_sm70.yaml/post1.k_div_57_reduce.4775a192d2e2.m1.592e0f3732ec]": 5.85,
+ "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[DeepSeek-V4-Flash-0731/v100_sm70.yaml/post1.k_div_18_reduce.4775a192d2e2.m1.0dc3ad5a4d89]": 5.72,
+ "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[DeepSeek-V4-Flash-0731/v100_sm70.yaml/post1.k_div_57_reduce.4775a192d2e2.m1.472f2218c0cb]": 5.59,
+ "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[DeepSeek-V4-Flash-0731/v100_sm70.yaml/post4096.k_div_18_reduce.134a4c74f3b4.m4096.58c14ac215f1.90ec885222f9]": 5.22
 }

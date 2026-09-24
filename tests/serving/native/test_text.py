@@ -25,8 +25,11 @@ def test_checkpoint_text_parity(request, tmp_path):
     for messages in [
         [{"role": "user", "content": "Hello 🦀"}],
         [{"role": "system", "content": "Be brief."}, {"role": "user", "content": "你好"}],
-        [{"role": "user", "content": "one"}, {"role": "assistant", "content": "<think>reason</think>\nanswer"},
-         {"role": "user", "content": "two"}],
+        [
+            {"role": "user", "content": "one"},
+            {"role": "assistant", "content": "<think>reason</think>\nanswer"},
+            {"role": "user", "content": "two"},
+        ],
         [{"role": "user", "content": "one"}, {"role": "assistant", "content": "answer"}],
     ]:
         prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=False)
@@ -37,5 +40,10 @@ def test_checkpoint_text_parity(request, tmp_path):
     fixture = tmp_path / "cases.json"
     fixture.write_text(json.dumps({"root": str(tmp_path), "cases": cases}))
     root = Path(__file__).resolve().parents[3]
-    subprocess.run(["cargo", "test", "--locked", "-p", "emmy-server", "--test", "text_parity"], cwd=root,
-                   env={**os.environ, "NATIVE_TEXT_FIXTURE": str(fixture)}, check=True, timeout=90)
+    subprocess.run(
+        ["cargo", "test", "--locked", "-p", "emmy-server", "--test", "text_parity"],
+        cwd=root,
+        env={**os.environ, "NATIVE_TEXT_FIXTURE": str(fixture)},
+        check=True,
+        timeout=90,
+    )
