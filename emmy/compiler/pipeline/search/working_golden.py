@@ -754,6 +754,25 @@ def _record_rows(destination: Path, name: str, *, decisions, kernels, reference_
         # measurement just taken is lost.
         written.append(row["name"] if recorded is None else recorded["name"])
     if decisions:
+        # A realization's rows describe ONE kernel set. Re-recording the same realization under a
+        # different route rewrites the listing, and leaving the superseded set's rows behind makes
+        # the file self-contradictory: a schedule row does not store the route it was measured
+        # under, so the replay reads every row against whichever listing the seed now carries. The
+        # A100's softmax x V target replayed at 67 ms instead of 166 us that way. Scoped to THIS
+        # seed's family and regime — one config entry can hold several seeds side by side — and
+        # never to the seed itself, which carries no measurement of its own.
+        superseded = set(written[: len(decisions)])
+        entry["realizations"] = [
+            r
+            for r in entry["realizations"]
+            if not (
+                str(r.get("name", "")).startswith(f"{name}.")
+                and r.get("bindings") == seed["bindings"]
+                and r.get("pins") == regime
+                and r.get("name") not in written
+                and r.get("name") not in superseded
+            )
+        ]
         seed["kernel_set"] = written[: len(decisions)]
     dump_golden_file(document, destination, overwrite=True, incremental=True)
     return written

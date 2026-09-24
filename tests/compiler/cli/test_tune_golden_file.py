@@ -750,6 +750,43 @@ def test_record_greedy_pick_appends_routing_rows_and_receipts_once(tmp_path, mon
         record_greedy_pick(path, "mm", decisions=decisions, kernels=kernels, reference_backend="same-input-greedy")
 
 
+def test_record_greedy_pick_drops_the_superseded_kernel_set(tmp_path):
+    """Re-recording one realization under a DIFFERENT route replaces its rows, it does not add to
+    them.
+
+    A realization's rows describe one kernel set, and a schedule row does not store the route it was
+    measured under — the replay reads every row against whichever listing the seed carries. Leaving
+    the old route's rows beside the new listing makes the file say two incompatible things about the
+    same target, and the deploy then picks from rows measured behind a route it is not taking: the
+    A100's softmax x V target replayed at 67 ms that way, against 166 us from the same file with the
+    stale rows gone.
+    """
+    from emmy.compiler.pipeline.search.working_golden import record_greedy_pick
+
+    path = tmp_path / "working.yaml"
+    dump_golden_file(_document(_matmul("mm", pins={"FAST_MATH": True})), path)
+    first = record_greedy_pick(
+        path,
+        "mm",
+        decisions=[("1" * 64, {"PLACE@map.1/map": "cut"}, 30.0, 33.0)],
+        kernels=[("a" * 64, _classic_row(work="w1x1"), 10.0, 11.0)],
+        reference_backend="same-input-greedy",
+    )
+    second = record_greedy_pick(
+        path,
+        "mm",
+        decisions=[("2" * 64, {"PLACE@map.1/map.1/reduce": "cut"}, 20.0, 21.0)],
+        kernels=[("c" * 64, _classic_row(work="w2x1"), 8.0, 9.0)],
+        reference_backend="same-input-greedy",
+    )
+
+    document = load_golden_file(path)
+    realizations = document["configs"][0]["realizations"]
+    assert [row["name"] for row in realizations] == ["mm", *second]
+    assert document["configs"][0]["realizations"][0]["kernel_set"] == second[:1]
+    assert not set(first) & {row["name"] for row in realizations}, "the superseded route's rows stayed"
+
+
 def test_record_greedy_pick_names_the_row_a_decision_lands_on(tmp_path, monkeypatch):
     """A route whose seam the seed already records is the SAME row: same bindings, pins, identity
     and knobs. The decision then lands on the seed instead of appending, and the kernel set has to
