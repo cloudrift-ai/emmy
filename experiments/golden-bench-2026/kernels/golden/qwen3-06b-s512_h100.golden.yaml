@@ -3932,7 +3932,7 @@ configs:
     pins:
       FAST_MATH: false
     kernel_set:
-    - k_sdpa_linear_reduce_c0a378.ace3043c96cf.bb3350bad023
+    - k_sdpa_linear_reduce_c0a378.ace3043c96cf.6a85b825e527
   - name: k_sdpa_linear_reduce_c0a378.ace3043c96cf.bb3350bad023
     bindings: {}
     pins:
@@ -3986,8 +3986,8 @@ configs:
       PLACE@map.1/twist.2/inner: cut
     identity: 6a85b825e527887aeb53c77092ed6a739e6933ddd673a05f0ff8b8a1704b0798
     measurements:
-      emmy_us: 79.92649337112675
-      reference_us: 80.36464081870184
+      emmy_us: 64.40361868590117
+      reference_us: 64.53621573746204
       reference_backend: same-input-greedy
   - name: k_sdpa_linear_reduce_c0a378.ace3043c96cf.786aa9686678
     bindings: {}
@@ -4018,6 +4018,51 @@ configs:
     measurements:
       emmy_us: 51.73688795831469
       reference_us: 52.07644568549262
+      reference_backend: same-input-greedy
+  - name: k_sdpa_linear_reduce_c0a378.ace3043c96cf.14da0a9bceb1
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x1
+      TILE: mma_m16n8k16_f16_f32/f1x8/k4
+      REDUCE: ''
+      STAGE: d2/smem-tma
+      RASTER: ''
+    identity: 14da0a9bceb170e66660b0eb496174b3197d529deff5bd081c1cba8f271e4254
+    measurements:
+      emmy_us: 8.239603601396084
+      reference_us: 8.246701210737228
+      reference_backend: same-input-greedy
+  - name: k_sdpa_linear_reduce_c0a378.ace3043c96cf.786aa9686678
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x1
+      TILE: mma_m16n8k16_f16_f32/f1x8/k4
+      REDUCE: ''
+      STAGE: d2/smem-tma
+      RASTER: ''
+    identity: 786aa9686678b75fb143505c6b9d2eede76cfe516d65408cfe9689713de6e860
+    measurements:
+      emmy_us: 16.78481325507164
+      reference_us: 16.805516555905342
+      reference_backend: same-input-greedy
+  - name: k_sdpa_linear_reduce_c0a378.ace3043c96cf.565729821c3d
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x1
+      TILE: mma_m16n8k16_f16_f32/f2x4/k4
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    identity: 565729821c3d61543c7614e6a90e3b4b40c55bf48c832892ebee1fde159f666e
+    measurements:
+      emmy_us: 39.37920182943344
+      reference_us: 39.48399797081947
       reference_backend: same-input-greedy
 - program: 0
   target:
@@ -4305,8 +4350,8 @@ configs:
       RASTER: ''
     identity: 8dd85afb6a7c29b443aba6cb5e259d6bdc95dac5f9e0db00308438300767da5b
     measurements:
-      emmy_us: 16.316266854604084
-      reference_us: 16.337897817967303
+      emmy_us: 15.96149057149887
+      reference_us: 16.455428674817085
       reference_backend: same-input-greedy
   - name: k_sdpa_mean_reduce_29d3df.171afed452e2.6580d626dba0
     bindings: {}
@@ -4317,8 +4362,8 @@ configs:
       PLACE@map.1/twist.1/inner.2/map.9/map.1/reduce: cut
     identity: 6580d626dba07a35280cb0426fd24a755e3fed4cca74e31aade922e9cdbef63b
     measurements:
-      emmy_us: 99.40323373128412
-      reference_us: 102.65434047048406
+      emmy_us: 91.9996581505984
+      reference_us: 94.56206788308918
       reference_backend: same-input-greedy
   - name: k_sdpa_mean_reduce_29d3df.171afed452e2.b6b616827440
     bindings: {}
@@ -4330,8 +4375,8 @@ configs:
       RASTER: ''
     identity: b6b6168274403ffb1cc182d759ffe0fe6c3c877aa79bfbbf852a3683be839260
     measurements:
-      emmy_us: 3.725902641310674
-      reference_us: 3.858604634455008
+      emmy_us: 3.523708088323474
+      reference_us: 3.714022459462285
       reference_backend: same-input-greedy
   - name: k_sdpa_mean_reduce_29d3df.171afed452e2.0ce35a87f55f
     bindings: {}
@@ -4348,4 +4393,20 @@ configs:
     measurements:
       emmy_us: 79.48266466458638
       reference_us: 82.49600231647491
+      reference_backend: same-input-greedy
+  - name: k_sdpa_mean_reduce_29d3df.171afed452e2.0ce35a87f55f
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@inner: ''
+      REDUCE@inner.1/map.9/map.1/reduce: ''
+      WORK: w4x2
+      TILE: mma_m16n8k16_f16_f32/f4x8/k4
+      STAGE: d1/smem
+      RASTER: ''
+    identity: 0ce35a87f55f4a3485e90a1c35b744f85194ce9c306bfcfd35de883de09dec3d
+    measurements:
+      emmy_us: 72.51445949077606
+      reference_us: 74.39261674880981
       reference_backend: same-input-greedy
