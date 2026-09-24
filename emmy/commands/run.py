@@ -2568,14 +2568,14 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
     if backend.tune_db is not None:
         from emmy.compiler.pipeline.search.db import SearchDB
 
-        db = SearchDB(path=backend.tune_db)
+        db = SearchDB.for_compile(backend.tune_db)
         logger.info("Using tuning DB: %s", backend.tune_db)
-    from emmy.compiler.pipeline.search.strategy.two_level import KernelInventory, _identity  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.strategy.two_level import KernelInventory  # noqa: PLC0415
 
     # Every kernel-set decision the greedy compile takes, as the splice watcher reports it: the tile
     # kernel the fork was offered on, the arm, and the graph ids the splice consumed and minted.
     taken: list[tuple[object, dict, tuple[str, tuple[str, ...]]]] = []
-    watcher = KernelInventory(_identity(), lambda *_: None, on_routing=lambda parent, arm, pieces, ids: taken.append((parent, arm, ids)))
+    watcher = KernelInventory(on_routing=lambda parent, arm, pieces, ids: taken.append((parent, arm, ids)))
     if tail:
         # Finish the tail lowering — the greedy compile — with the selected golden's records as its
         # golden evidence, their shared input regime published (by the caller) and the kernel-set

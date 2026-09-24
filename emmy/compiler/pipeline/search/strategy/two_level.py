@@ -213,8 +213,8 @@ class KernelInventory(PipelineStrategy):
     them. A run that starts over (a greedy retry) reports its decisions afresh: a retired decision
     must not stand."""
 
-    def __init__(self, identity: IdentityStrategy, on_kernel, seen: set[str] | None = None, on_routing=None) -> None:
-        self.identity = identity
+    def __init__(self, identity: IdentityStrategy | None = None, on_kernel=None, seen: set[str] | None = None, on_routing=None) -> None:
+        self.identity = identity if identity is not None else _identity()
         self.on_kernel = on_kernel
         self.on_routing = on_routing
         self.seen = seen if seen is not None else set()
@@ -227,7 +227,7 @@ class KernelInventory(PipelineStrategy):
         self._open = None
 
     def on_splice(self, e: SpliceEvent) -> None:
-        for nid, node in e.fragment.nodes.items():
+        for nid, node in e.fragment.nodes.items() if self.on_kernel is not None else ():
             op = node.op
             if op.dialect is None:
                 continue

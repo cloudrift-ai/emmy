@@ -2144,5 +2144,6 @@
  "tests/compiler/realization/test_realization.py::test_realization[attention/sdpa-gqa-decode-split-kv.yaml-built]@cuda": 1.27,
  "tests/compiler/realization/test_realization.py::test_realization[attention/sdpa-gqa-decode-split-kv.yaml-correct]@cuda": 0.57,
  "tests/compiler/passes/test_cut_forks.py::test_import_files_each_row_under_the_kernel_it_decides": 3.27,
- "tests/compiler/pipeline/search/test_golden_import.py::test_the_rtx_5090_hardware_golden_deploys_from_the_db@golden_import_rtx5090": 2.77
+ "tests/compiler/pipeline/search/test_golden_import.py::test_the_rtx_5090_hardware_golden_deploys_from_the_db@golden_import_rtx5090": 2.77,
+ "tests/compiler/passes/test_cut_forks.py::test_a_decision_consumes_the_key_that_spelled_it_on_import": 5.52
 }

@@ -304,8 +304,8 @@ pricing). The named realization's own kernel-set decisions — its route, a cros
 for that compile (`compile.selected_decisions`, for `compile --golden --realization` too), so the greedy row takes the
 kernel set the file describes; a routing row's own time prices nothing, and the receipts this writes are what price
 the decision for a compile nothing pins. That is how a pick the prior made becomes rows a strict-evidence compile of
-the file deploys from without a prior. Under `EMMY_KNOBS` the recorded pick IS the pin, so the recording refuses, and the run exits
-nonzero, when the env pin did not realize (`greedy_record_refusal`): the row would file the planner's own schedule
+the file deploys from without a prior. Under `EMMY_KNOBS` the recorded pick IS the pin, so the recording refuses, and
+the run exits nonzero, when the env pin did not realize (`greedy_record_refusal`): the row would file the planner's own schedule
 under the pin's name and lane. It refuses a pick whose answer `--strict` rejected for the same reason. Independently of both, every clean pinned row and the greedy isolated re-bench are written into
 the tune DB by default at tune-standard measurement quality: per-kernel `perf` rows through the tuner's own writer —
 the deploy evidence the next `compile` / `run` / `serve` picks from, which is how a replayed golden or a hand-pinned

@@ -422,3 +422,18 @@ def test_stored_targets_are_the_fresh_lowering(path: Path) -> None:
             name = entry["realizations"][0]["name"] if entry.get("realizations") else f"loop {entry['target']['loop']}"
             stale.append(f"{name}: " + ("no fresh kernel writes its outputs" if wire is None else "the fresh kernel's Loop IR differs"))
     assert not stale, f"{len(stale)} of {len(document['configs'])} targets are not the fresh lowering:\n  " + "\n  ".join(stale[:12])
+
+
+def test_a_stored_identity_the_compiler_re_keyed_is_refused() -> None:
+    """A row's stored identity must be one kernel the replay resolves under its pins — the target's own
+    as much as a receipt's child. A compiler change that re-keys the kernel turns the row red on the
+    commit that causes it; re-keying the file is the fix, and no import stands in for it meanwhile."""
+    from dataclasses import replace
+
+    from tests.compiler.realization import helpers as corpus
+
+    case = corpus.load_case(corpus.CASES_DIR / "fused/norm-linear-f16-scalar-reduce.yaml")
+    record = case.record
+    assert _decode(record, case.records) is None
+    stale = replace(record, identity="0" * 64)
+    assert "stored identity equals none of the kernel identities" in (_decode(stale, [stale]) or "")

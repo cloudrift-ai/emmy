@@ -1268,3 +1268,16 @@ def test_run_skips_pinned_rebench_of_the_same_election_after_a_greedy_hang(monke
 
     assert calls[0] == "record", "the bench_fail row must be recorded before the pinned walk starts"
     assert calls[1] == ("bench_golden_variants", []), "the knob-less seed pin must not be re-compiled and re-benched"
+
+
+def test_a_named_realizations_decisions_are_pinned_only_where_its_rows_agree():
+    """The kernel-set decisions the named rows record are one hand pin for their compile — the route, a
+    cross-CTA split — never a schedule knob; rows that disagree on a decision pin nothing, as the walk
+    leaves their receipts to replay bare."""
+    from emmy.commands.compile import selected_decisions
+
+    cut = SimpleNamespace(pins={"FAST_MATH": False}, knobs={"PLACE@inner.1/map": "cut", "WORK": "t8"})
+    split = SimpleNamespace(pins={"FAST_MATH": False, "PLACE@inner.1/map": "cut"}, knobs={"REDUCE": "g2k", "WORK": "t8"})
+    assert selected_decisions(SimpleNamespace(golden_configs=[cut, split])) == {"PLACE@inner.1/map": "cut", "REDUCE": "g2k"}
+    assert selected_decisions(SimpleNamespace(golden_configs=[cut, SimpleNamespace(pins={}, knobs={"PLACE@inner.1/map": "fuse"})])) == {}
+    assert selected_decisions(SimpleNamespace(golden_configs=[SimpleNamespace(pins={}, knobs={"WORK": "t8", "REDUCE": "coop"})])) == {}

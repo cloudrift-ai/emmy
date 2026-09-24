@@ -17,8 +17,8 @@ evidence hierarchy**, and each step in it is called a **tier**.
    reservoir (measurements taken at the deployable setting) and the tuning database's rows for this compile's
    regime — which hold the golden rows in scope too, the golden configurations recorded for this GPU that ship with
    the repository, or the file `--golden PATH` names instead, imported into the database before the compile picks.
-   The option that agrees with the fastest such row decides. A golden is a preference among measured rows, never a forced pin: a recorded row that is slower than a
-   local measurement loses, and a row nothing measured yet (a proposal) is not evidence until `run --golden PATH
+   The option that agrees with the fastest such row decides. A golden is a preference among measured rows, never a
+   forced pin: a recorded row that is slower than a local measurement loses, and a row nothing measured yet (a proposal) is not evidence until `run --golden PATH
    --bench` has measured it.
 2. **The prior's prediction.** Only when no option has any measurement behind it at all: the option with the lowest
    predicted latency. `--strict-evidence` turns this step into an error naming the kernel, for a deploy that must

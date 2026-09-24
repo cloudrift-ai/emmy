@@ -145,7 +145,7 @@ class CudaBackend(Backend):
         if self.tune_db is not None:
             from emmy.compiler.pipeline.search.db import SearchDB
 
-            db = SearchDB(path=self.tune_db)
+            db = SearchDB.for_compile(self.tune_db)
         return Pipeline.build(CUDA_PASSES).run(graph, ctx=ctx, db=db, dump=self.dump)
 
     def run(

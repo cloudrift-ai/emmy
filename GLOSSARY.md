@@ -331,13 +331,12 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Evidence** — A compatible recorded measurement used to select between candidates: a reservoir row or a tune
   database row — a measured golden row is imported into the tune database before a compile picks. Both are read by
   one rule.
-- **Routing row** (*route row*, in older text) — A golden row that spells a kernel-set decision — a `PLACE` key, or
-  a `REDUCE` value carrying a cross-CTA `g<n>` half — and the rows the tune database stores for that decision: the
-  kernel it was offered on, the arm, and the pieces it minted. At that kernel's fork the decision is priced as the sum
-  of its pieces' measured rows, which outranks any arm priced by prediction; a decision no piece's row prices is off
-  the measured ballot, and the pieces the arm mints are decided from rows of
-  their own. The tuning database holds no such row: a decision it stores is priced from its pieces (see *Routing
-  table*).
+- **Routing row** (*route row*, in older text) — The tune database's record of one kernel-set decision: the kernel
+  it was offered on, the arm — a `PLACE` key, or a `REDUCE` value carrying a cross-CTA `g<n>` half — and the pieces
+  it minted, one row per piece. A golden row that spells such a decision imports as routing rows. At that kernel's
+  fork the decision is priced as the sum of its pieces' measured rows, which outranks any arm priced by prediction; a
+  decision no piece's row prices is off the measured ballot, and the pieces the arm mints are decided from rows of
+  their own (see *Routing table*).
 - **Routing table** — The tune database table that links a parent kernel and one decision taken on it to the kernels
   the decision minted, one row per piece. It says which pieces a route leads to, and the decision's price on a card
   is the sum of the pieces' fastest measurements there — every piece measured, or the decision is unpriced.

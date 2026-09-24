@@ -318,8 +318,12 @@ def selected_decisions(args) -> dict[str, str]:
     compile nothing pins keeps the kernel whole."""
     from emmy.compiler.pipeline.search.db import is_placement_knob  # noqa: PLC0415
 
-    rows = getattr(args, "golden_configs", None) or []
-    return {str(key): str(value) for row in rows for key, value in {**row.pins, **row.knobs}.items() if is_placement_knob(key, value)}
+    decisions: dict[str, str] = {}
+    for row in getattr(args, "golden_configs", None) or []:
+        for key, value in {**row.pins, **row.knobs}.items():
+            if is_placement_knob(key, value) and decisions.setdefault(str(key), str(value)) != str(value):
+                return {}  # the named rows disagree on a decision: nothing is pinned, as the walk leaves their receipts bare
+    return decisions
 
 
 def golden_row(record, records=()):
@@ -538,7 +542,7 @@ def handle_compile(args):
     # imported into it before the pick — so it is created on first use, not only by a tune.
     # ``EMMY_TUNE_DB`` env var overrides the default path.
     tune_db_path = resolve_tune_db()
-    db = SearchDB(path=tune_db_path)
+    db = SearchDB.for_compile(tune_db_path)
     logger.info("Using tuning DB: %s", tune_db_path)
 
     from emmy.compiler.pipeline.search.golden import records_override, shared_regime_pins  # noqa: PLC0415

@@ -550,7 +550,7 @@ def test_child_decode_verdict_changes_with_sibling_route_owner() -> None:
 
     stale_route = replace(current_route, identity="0" * 64)
     reason = decode_record(child, (stale_route,))
-    assert reason is not None and "replay offers no" in reason
+    assert reason is not None and "stored identity equals none of the kernel identities" in reason
     assert decode_record(child, (current_route,)) is None
 
     # An explicit kernel set supplies its route even after the pre-cut identity changes.
@@ -563,7 +563,7 @@ def test_post_schedule_receipt_does_not_steer_an_unowned_peer(monkeypatch) -> No
     """A receipt identity that appears after scheduling selects only that materialized kernel.
 
     Another cut child accepts the same schedule row, but must retain the lead's distinct row and
-    must not become a holder of the receipt's evidence.
+    must not realize the receipt's.
     """
     from emmy.compiler.pipeline.knob import evidence_row_vouches
 
@@ -595,9 +595,7 @@ def test_post_schedule_receipt_does_not_steer_an_unowned_peer(monkeypatch) -> No
 
     replay = _replay(receipt, siblings=(lead,), lead=lead)
 
-    assert replay.holders == {post_identity}
     assert evidence_row_vouches(replay.realized[post_identity], dict(target_row))
-    assert peer_identity not in replay.holders
     assert evidence_row_vouches(replay.realized[peer_identity], dict(peer_row))
     assert not evidence_row_vouches(replay.realized[peer_identity], dict(target_row))
 
@@ -1480,3 +1478,18 @@ def test_storage_frontier_recomputes_the_encode_scale_in_the_consumer(computed_s
         assert sum("scale" in node.inputs for node in pieces) == 1, "both encode and decode reuse the separately computed scale"
     for node in pieces:
         node.op.op.lower(bound=frozenset(), stores=node.op.output_specs, axes=node.op.axes)
+
+
+def test_a_decision_consumes_the_key_that_spelled_it_on_import(monkeypatch) -> None:
+    """A bare ``PLACE=cut`` spells one cut — the root-most seam of the kernel the entry decides — and is
+    spent by it: the pieces are read against what the entry has left to say, so the import writes the
+    one decision the recording took, not a cut at every piece that offers a seam."""
+    monkeypatch.setenv("EMMY_FAST_MATH", "0")
+    from emmy.compiler.pipeline.search.db import SearchDB
+    from emmy.compiler.pipeline.search.golden_import import import_goldens
+
+    db = SearchDB()
+    counts = import_goldens(
+        db, Context.from_target((12, 0), gpu_name=_ROUTING_CARD), [_routing_record({"PLACE": "cut"})], source="golden:t"
+    )
+    assert counts["routing rows"] == 1 and len(list(db.iter_routing())) == 1

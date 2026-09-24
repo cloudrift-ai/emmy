@@ -850,7 +850,7 @@ def _record_fingerprint(record: GoldenRecord) -> str:
     return digest(cached[1], str(record.target_key), str(record.bindings), str(record.compute_cap), record.gpu_name or "")
 
 
-#: One evidence :class:`_Replay` per exact target, pins and spelled knobs — imports walk whole
+#: One :class:`_Replay` per exact target, pins and spelled knobs — the strict decode walks whole
 #: files, and sibling realizations that spell the same kernel-set decisions share one replay.
 #: Exhaustive strict-decode results are not retained: a miss can contain millions of candidate
 #: rows, and its requested-row cache key means no different recording can reuse it.
@@ -949,9 +949,10 @@ def decode_record(record: GoldenRecord, siblings: Sequence[GoldenRecord] = ()) -
     one enumerated leaf (``schedule_match_key`` equality under the record's own pins) — no prefix
     matching, no any-of, no classified shape. That equality is blind to the two sides' OFF anchors:
     which of them a spelling writes down depends on whether it came from a resolved kernel or from a
-    fork's offered leaf, and neither carries schedule content. A receipt's
-    identity must equal one kernel resolved under the record's pins, and the spelled row must equal
-    one of THAT kernel's rows — a sibling child's row must not vouch for it."""
+    fork's offered leaf, and neither carries schedule content. A stored identity — a receipt's, or
+    a target's own — must equal one kernel resolved under the record's pins, and the spelled row must
+    equal one of THAT kernel's rows — a sibling child's row must not vouch for it; a compiler change
+    that re-keys the kernel turns the row red until the file is re-keyed."""
     from emmy.compiler.pipeline.knob import schedule_match_key  # noqa: PLC0415
 
     sibling_spelling = tuple(
@@ -988,14 +989,19 @@ def decode_record(record: GoldenRecord, siblings: Sequence[GoldenRecord] = ()) -
     # replay already resolved, and the pieces it mints cannot stamp it, so comparing it to a leaf
     # asks a piece to spell its parent's decision.
     row = schedule_match_key(piece_row(record.knobs))
-    replay = _replay(record, siblings=siblings, exhaustive=True, wanted=row)
+    # The set's leading entry is the target's own — the one naming the kernel the target lifts to —
+    # and it decides every fork no entry names, a residual's further cut or split included; a
+    # receipt replayed as its own lead would read those forks as fused and never mint its kernel.
+    own = tile.identity_key(with_io=True) if tile is not None else None
+    lead = next((entry for entry in (record, *siblings) if own is not None and entry.identity == own), None)
+    replay = _replay(record, siblings=siblings, lead=lead, exhaustive=True, wanted=row)
     if record.is_routing:
         reason = f"routing key {replay.unresolved[0]!r} does not resolve to an offered cut seam" if replay.unresolved else None
         return _remember_verdict(verdict_key, reason)
 
     def verdict(replay: _Replay) -> str | None:
         candidates = replay.rows
-        if record.is_receipt and (tile is None or record.identity != tile.identity_key(with_io=True)):
+        if record.identity is not None and (tile is None or record.identity != tile.identity_key(with_io=True)):
             child_rows = candidates.get(record.identity)
             offered = replay.offered.get(record.identity, (frozenset(), frozenset()))
             if record.identity not in replay.kernels:
@@ -1011,7 +1017,7 @@ def decode_record(record: GoldenRecord, siblings: Sequence[GoldenRecord] = ()) -
     reason = verdict(replay)
     if reason is not None:
         # A miss: replay again walking every fork, so the reason names what the kernels offer.
-        reason = verdict(_replay(record, siblings=siblings, exhaustive=True, wanted=row, explain=True))
+        reason = verdict(_replay(record, siblings=siblings, lead=lead, exhaustive=True, wanted=row, explain=True))
     verdicts[verdict_key] = reason
     global _IDENTITY_STORE_DIRTY
     _IDENTITY_STORE_DIRTY = True
@@ -1036,20 +1042,15 @@ class _Replay(NamedTuple):
     own realized row — a forkless kernel (the schedule space collapsed to one row, often the all-OFF
     anchor) never opens a fork, so its one row is read off the resolved op instead. Behind a cut the
     buckets are exactly the pieces, which is what lets a child-identity receipt decode against its
-    own kernel only. A requested-row replay keeps only an exact match here. ``holders`` — the
-    plain replay's answer to one question of the same enumeration: the kernels whose enumeration
-    admits the record's piece row (:func:`piece_row`), found by the deploy's own descent
-    (``fork.leaf_for``) instead of by flattening every pool — what the realization corpus completes
-    a case's entries from. ``arms`` — the arm the record's route and knobs spelled at each
-    kernel-set fork it decided (a cut seam, a cross-CTA plan), keyed by the signature of the kernel
-    that fork was offered on.
+    own kernel only. A requested-row replay keeps only an exact match here. ``arms`` — the arm the
+    record's route and knobs spelled at each kernel-set fork it decided (a cut seam, a cross-CTA
+    plan), keyed by the signature of the kernel that fork was offered on.
     ``unresolved`` — the record's scoped cut keys no offered seam carried, the strict decode's
     routing failure. ``offered`` — for a requested-row replay, the bounded set of keys and
     key/value pairs offered per kernel identity; a miss uses it to explain re-spelling, narrowing
     or regrouping without retaining every candidate row."""
 
     rows: dict[str | None, frozenset]
-    holders: frozenset[str]
     #: The kernels the replay scheduled — those that reached a schedule fork or were resolved
     #: without one; a kernel a cut or split consumed is not among them.
     kernels: frozenset[str]
@@ -1125,8 +1126,8 @@ def _replay(
     lead's — never by an entry that does not own it, whose row would say "fused" or "unsplit" of a
     kernel it never described. So a set of per-kernel entries — the parent's cut, each piece's
     row — walks one path together, and the record's own rows are what this replay reports.
-    ``exhaustive`` streams every schedule pool for ``rows``; a plain replay asks only ``holders``
-    and descends. ``wanted`` names the ONE match key the caller will ask ``rows`` about.
+    ``exhaustive`` streams every schedule pool for ``rows``; a plain replay descends to each
+    kernel's realized row. ``wanted`` names the ONE match key the caller will ask ``rows`` about.
     An unsampled schedule answers by decoding that complete row through its codec and compatibility
     context, without enumerating candidates. Other forks use lazy descent and keep only the wanted
     keys and values needed to classify a miss, never the candidate rows. A schedule fork that cannot
@@ -1139,7 +1140,6 @@ def _replay(
     from emmy.compiler.pipeline.fork import exact_schedule_leaf, fork_signature, iter_leaves, leaf_for, leaf_knobs  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import (  # noqa: PLC0415
         canonical_row_key,
-        evidence_row_vouches,
         family_of,
         schedule_match_key,
         schedule_row_key,
@@ -1197,7 +1197,6 @@ def _replay(
     offered_pairs: dict[str | None, set[tuple[str, str]]] = {}
     wanted_keys = frozenset(key for key, _ in wanted or ())
     wanted_pairs = frozenset(wanted or ())
-    holders: set[str] = set()
     kernels: set[str] = set()
     realized: dict[str, dict[str, str]] = {}
     arms: list[tuple[frozenset, dict[str, str]]] = []
@@ -1248,8 +1247,6 @@ def _replay(
                 hit = None
             if hit is None:
                 hit = leaf_for(fp.options, asked) if asked else None
-            if hit is not None and identity is not None and decider is record:
-                holders.add(identity)
             return hit[0] if hit is not None else next(iter_leaves(fp.options))
         # An unsampled semantic schedule decodes the complete wanted row through the same codec and
         # compatibility context that validates a direct schedule. Other forks retain the generic
@@ -1333,11 +1330,8 @@ def _replay(
             if identity is not None:
                 kernels.add(identity)
                 realized[identity] = dict(row)
-                if piece and (named.get(identity) or lead) is record and evidence_row_vouches(dict(row), piece):
-                    holders.add(identity)  # a forkless kernel: its one row is the resolved op's
     result = _Replay(
         {identity: frozenset(rows) for identity, rows in buckets.items()},
-        frozenset(holders),
         frozenset(kernels),
         tuple(arms),
         tuple(sorted(pending)),

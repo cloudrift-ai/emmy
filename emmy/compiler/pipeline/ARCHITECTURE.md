@@ -67,9 +67,9 @@ rule that measured evidence applies only to a compile at deployable `-O3` flags.
 
 Structural forks — the ones that change which kernels exist — follow the same rule. A decision the tune DB stores on
 the kernel (a **routing row** — the tuner's, or a golden's cut or split imported as one) is priced as the sum of its
-pieces' fastest rows, and outranks arms whose price is a Σ of nested predictions. With no measured arm the compiler compares whole-kernel-set costs, priced by
-measurements where they exist and by any loaded prior — the offline model on a cold machine — for the remainder
-(Part 4).
+pieces' fastest rows, and outranks arms whose price is a Σ of nested predictions. With no measured arm the compiler
+compares whole-kernel-set costs, priced by measurements where they exist and by any loaded prior — the offline model
+on a cold machine — for the remainder (Part 4).
 
 ### The four stores
 
@@ -568,8 +568,8 @@ At a **schedule fork** (one kernel's row):
    `knob.canonical_row_key`, never by the order options were emitted in.
 
 At a **kernel-set fork** (the cut pass's placement fork and its cross-CTA split fork), the same rule holds — measured
-first — over one more kind of evidence. A kernel-set decision is a `routing` row on the exact kernel — the tuner's, or
-a golden's cut or split imported as one — and its price on this card is the sum of its pieces' fastest rows, each
+first — over one more kind of evidence. A kernel-set decision is a `routing` row on the exact kernel — the tuner's,
+or a golden's cut or split imported as one — and its price on this card is the sum of its pieces' fastest rows, each
 piece at its own projection of the fork's bindings, all-or-nothing (`SearchDB.priced_arms` — the same read the
 tuner's reward uses, so the two agree); a decision no piece's row prices is off the measured ballot, which is what a
 golden's cross-CTA split timed as a whole is until its pieces are benched. `greedy._route_candidates` turns EVERY

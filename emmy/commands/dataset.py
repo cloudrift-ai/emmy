@@ -90,7 +90,9 @@ def handle_dataset_import(args) -> None:
             try:
                 k = db.record_kernels(tune_db.iter_kernels())
                 s = db.record_routings(tune_db.iter_routing())
-                n = db.record_perf_rows(tune_db.iter_perf_rows(backend="cuda"))
+                # A tune DB's golden rows are the golden files' (a compile imports them there), and the
+                # golden dataset holds those already: the dataset DB takes the tune's own measurements.
+                n = db.record_perf_rows(row for row in tune_db.iter_perf_rows(backend="cuda") if not row.source.startswith("golden:"))
             finally:
                 tune_db.close()
             logger.info("imported %d row(s), %d kernel(s), %d routing row(s) from tune DB %s", n, k, s, src)

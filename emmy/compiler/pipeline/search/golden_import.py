@@ -46,11 +46,10 @@ def import_goldens(db: SearchDB, ctx: Context, records: Sequence[GoldenRecord], 
     from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
     from emmy.compiler.loop_wire import kernel_tile  # noqa: PLC0415
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline  # noqa: PLC0415
-    from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.db import is_placement_knob  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden import _set_key, regime_live  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.pins import parse_reduce  # noqa: PLC0415
     from emmy.compiler.pipeline.search.policy.terminal_bench import persist_kernel_perf, point_stats  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.strategy.two_level import KernelInventory, _identity, record_routing  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.strategy.two_level import KernelInventory, record_routing  # noqa: PLC0415
 
     counts: Counter[str] = Counter()
     consumed: set[str] = set()  # the deploy identities of the kernels a decision replaced: they ran as no kernel
@@ -60,7 +59,7 @@ def import_goldens(db: SearchDB, ctx: Context, records: Sequence[GoldenRecord], 
         consumed.add(parent.identity_key(with_io=True))
         counts["routing rows"] += 1
 
-    pipeline = Pipeline.build(CUDA_PASSES).with_strategies(KernelInventory(_identity(), lambda *_: None, on_routing=on_routing))
+    pipeline = Pipeline.build(CUDA_PASSES).with_strategies(KernelInventory(on_routing=on_routing))
     sets: dict[tuple, list[GoldenRecord]] = {}
     for record in records:
         sets.setdefault(_set_key(record), []).append(record)
@@ -81,20 +80,17 @@ def import_goldens(db: SearchDB, ctx: Context, records: Sequence[GoldenRecord], 
             if entry.is_routing:
                 continue
             row = entry.schedule_row
-            split = any(family_of(k) == "REDUCE" and (plan := parse_reduce(v)) is not None and plan.needs_split for k, v in row.items())
+            if any(is_placement_knob(key, value) for key, value in row.items()):
+                counts["kernel sets timed as a whole"] += 1
+                continue
             if entry.identity is not None:
                 op = next((op for op, tile in kernels if tile is not None and tile.identity_key(with_io=True) == entry.identity), None)
                 what = "kernels a decision replaced" if entry.identity in consumed else "identities no kernel carries"
-                if op is None and len(kernels) == 1 and entry.identity not in consumed:
-                    # The target ran as one kernel: the row is its, whatever identity the entry stored
-                    # for it (a compiler change re-keys a kernel; the row still says how it ran).
-                    op = kernels[0][0]
-                    counts["identities the compiler re-keyed"] += 1
             else:
                 op = kernels[0][0] if len(kernels) == 1 else None
-                what = "kernel sets timed as a whole"
-            if split or op is None:
-                counts["kernel sets timed as a whole" if split else what] += 1
+                what = "multi-kernel targets without receipts"
+            if op is None:
+                counts[what] += 1
                 continue
             stats = point_stats(entry.emmy_us)
             if persist_kernel_perf(db, ctx, "cuda", op, stats=stats, status="ok", captured=True, knobs=row, source=source):
@@ -112,7 +108,7 @@ def _lower(pipeline, ctx: Context, entries: list[GoldenRecord]):
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
     from emmy.compiler.pipeline.fork import iter_leaves, leaf_for  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
-    from emmy.compiler.pipeline.pipeline import Run  # noqa: PLC0415
+    from emmy.compiler.pipeline.pipeline import Run, _is_structural_option  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden import kernel_set_pins, piece_row  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import composed_routes, spelled_arm, unpinned_decisions  # noqa: PLC0415
 
@@ -131,10 +127,17 @@ def _lower(pipeline, ctx: Context, entries: list[GoldenRecord]):
     def decide(fp):
         identity = fp.root_op.identity_key(with_io=True) if isinstance(fp.root_op, TileOp) else None
         decider = named.get(identity, lead)
+        row = spelling[id(decider)]
         if fp.structural:
-            arm = spelled_arm(fp.options, spelling[id(decider)])
+            arm = spelled_arm(fp.options, row)
             if arm is not None:
-                return arm[0]
+                option, knobs = arm
+                if _is_structural_option(option):
+                    # A decision consumes the keys that spelled it (a bare ``PLACE=cut`` its one root-most
+                    # cut), so the pieces are read against what the entry has left to say.
+                    for key in (*(set(knobs) & set(row)), *(("PLACE",) if row.get("PLACE") == "cut" else ())):
+                        row.pop(key, None)
+                return option
         elif (asked := piece_row(decider.schedule_row)) and (hit := leaf_for(fp.options, asked)) is not None:
             return hit[0]
         return next(iter_leaves(fp.options))
@@ -174,6 +177,8 @@ def evidence_db(db: SearchDB | None, ctx: Context) -> SearchDB:
     key = (str(path), source, *regime)
     if (path is None or key not in _IMPORTED) and source not in db.perf_sources(ctx):
         db.forget_perf(ctx, "golden:")
+        # The scopes just forgotten on this card and regime are no longer in the file, whatever this process remembers.
+        _IMPORTED.difference_update({done for done in _IMPORTED if done[0] == str(path) and done[2:] == regime})
         _import(db, ctx, records, source)
     _IMPORTED.add(key)
     return db

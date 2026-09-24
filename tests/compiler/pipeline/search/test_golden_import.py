@@ -98,17 +98,16 @@ def test_an_unmeasured_or_foreign_regime_entry_writes_nothing() -> None:
     assert not list(db.iter_perf_rows())
 
 
-def test_a_stored_identity_the_compiler_re_keyed_still_names_a_one_kernel_target() -> None:
-    """A compiler change re-keys a kernel; an entry that names the old key on a target that runs as
-    one kernel is that kernel's row still. Behind a cut nothing stands in: a receipt naming a piece
-    the compiler no longer mints writes nothing."""
+def test_an_entry_naming_a_kernel_the_compiler_no_longer_mints_writes_nothing() -> None:
+    """A stored identity the compiler has re-keyed is a golden to fix, not a row to guess a kernel
+    for: on a one-kernel target as behind a cut, the entry writes nothing and is counted, so no
+    time is ever filed under a kernel the entry did not measure."""
     case = corpus.load_case(corpus.CASES_DIR / "fused/norm-linear-f16-scalar-reduce.yaml")
     db, ctx = SearchDB(), case.context()
     [record] = _records(case)
     with pinned_knobs(_regime(record)):
         counts = import_goldens(db, ctx, [replace(record, identity="0" * 64)], source="golden:test")
-    assert counts == {"identities the compiler re-keyed": 1, "perf rows": 1}
-    assert next(iter(db.iter_kernels())).structural_identity == record.identity
+    assert counts == {"identities no kernel carries": 1} and not list(db.iter_perf_rows())
     cut = corpus.load_case(corpus.CASES_DIR / "fused/linear-add-place-cut-sm70.yaml")
     lead, first, *rest = _records(cut)
     _db, _ctx, _records_, counts = _imported("fused/linear-add-place-cut-sm70.yaml", [lead, replace(first, identity="0" * 64), *rest])
@@ -138,6 +137,11 @@ def test_a_compile_imports_its_scope_once_and_lets_a_re_recorded_files_rows_go(t
         with records_override([]):
             assert evidence_db(db, ctx) is db
             assert [row.stats.median for row in db.iter_perf_rows()] == [2.0]
+        # Back to the first scope: its rows were let go by the second's import, so it imports again
+        # whatever this process remembers having imported.
+        with records_override([record]):
+            assert evidence_db(db, ctx) is db
+            assert [row.stats.median for row in db.iter_perf_rows()] == [1.0]
 
 
 def test_a_compile_without_a_db_picks_from_one_in_memory_instance_per_scope() -> None:
@@ -208,3 +212,44 @@ def test_the_rtx_5090_hardware_golden_deploys_from_the_db(tmp_path) -> None:
                 [op] = [node.op for node in graph.nodes.values() if isinstance(node.op, CudaOp)]
                 picked = {k: str(v) for k, v in dict(schedule_row_key(dict(op.knobs or {}))).items()}
                 assert picked in measured[kernel_tile(op).identity_key(structural=False, with_io=True)], record.name
+
+
+def test_a_measurement_taken_here_is_never_replaced_by_an_import(tmp_path) -> None:
+    """The tune DB is a cache the import fills, and a row this machine measured is the one copy of that
+    measurement: a golden row of the same kernel and schedule, captured or faster, leaves it alone, and a
+    scope change lets golden rows go, never a local one."""
+    from emmy.compiler.pipeline.search.db import PerfStats
+    from emmy.compiler.pipeline.search.policy.terminal_bench import point_stats
+
+    case = corpus.load_case(corpus.CASES_DIR / "fused/norm-linear-f16-scalar-reduce.yaml")
+    [record] = _records(case)
+    ctx = case.context()
+    scratch, db = SearchDB(), SearchDB(tmp_path / "tune.db")
+    with pinned_knobs(_regime(record)):
+        # The kernel and its row as the import would file them, measured here first at a slower time.
+        import_goldens(scratch, ctx, [record], source="golden:probe")
+        [key] = scratch.iter_perf_rows()
+        [kernel] = scratch.iter_kernels()
+        db.record_kernel(kernel)
+        local = PerfStats(median=9.0, min=9.0, max=9.0, mean=9.0, variance=0.0, n_samples=30)
+        db.record_perf(ctx, key.kernel, bindings=key.bindings, knobs=key.knobs, backend="cuda", status="ok", stats=local)
+        with records_override([record]):
+            evidence_db(db, ctx)
+        [row] = db.iter_perf_rows()
+        assert (row.stats.median, row.source) == (9.0, "measured")
+        faster = point_stats(1.0)
+        db.record_perf(
+            ctx,
+            row.kernel,
+            bindings=row.bindings,
+            knobs=row.knobs,
+            backend="cuda",
+            status="ok",
+            stats=faster,
+            captured=True,
+            source="golden:x",
+        )
+        with records_override([replace(record, measurements={**_MEASURED, "emmy_us": 0.5})]):
+            evidence_db(db, ctx)
+        [row] = db.iter_perf_rows()
+        assert (row.stats.median, row.source) == (9.0, "measured")

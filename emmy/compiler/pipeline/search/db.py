@@ -361,6 +361,17 @@ class SearchDB:
         return 0 < sum(bool(cols) for cols in present.values()) < len(present)
 
     @classmethod
+    def for_compile(cls, path: Path | str) -> SearchDB | None:
+        """The DB a compile picks from, made when absent (the golden rows in scope are imported into it), or
+        ``None`` where the file cannot be made or opened — a read-only cache directory — so the compile picks
+        from an in-memory instance instead, as one given no DB does."""
+        try:
+            return cls(path=Path(path))
+        except (OSError, sqlite3.OperationalError) as exc:
+            logger.warning("tune DB %s cannot be opened (%s); picking from an in-memory instance", path, exc)
+            return None
+
+    @classmethod
     def open_readonly(cls, path: Path | str) -> SearchDB:
         """Open an existing DB **read-only** — no schema creation, no table drop, no WAL pragma — so a
         read-side consumer (``eval``, the dataset import) never contends with a concurrent ``tune`` writer
@@ -564,15 +575,21 @@ class SearchDB:
         the lowest median wins. ``captured`` (CUDA-graph-captured, pure GPU time) adds a precedence axis:
         a captured measurement supersedes an uncaptured (wall-semantics) one regardless of median — the
         numbers aren't comparable, and captured is the better truth — while an uncaptured measurement
-        never overwrites a captured one. The kernel must be a ``kernel`` row already."""
+        never overwrites a captured one. A row measured here (``source`` ``measured``) is never replaced
+        by an imported one: the import is a cache fill, and the local row is the one copy of what this
+        machine measured. The kernel must be a ``kernel`` row already."""
         context = self._context_id(row.backend, row.gpu, _arch(row.cc), row.opt, row.flags, create=True)
         schedule = self._row_id("schedule", _split_knobs(row.knobs), create=True)
         key = (context, row.kernel, knobs_json(row.bindings), schedule)
         existing = self._conn.execute(
-            "SELECT status, captured, latency_us_median FROM perf WHERE context = ? AND kernel = ? AND bindings = ? AND schedule = ?", key
+            "SELECT status, captured, latency_us_median, source FROM perf "
+            "WHERE context = ? AND kernel = ? AND bindings = ? AND schedule = ?",
+            key,
         ).fetchone()
         if existing is not None:
-            prev_status, prev_captured, prev_median = existing
+            prev_status, prev_captured, prev_median, prev_source = existing
+            if prev_source == "measured" and row.source != "measured":
+                return  # an import never replaces a measurement taken here
             if prev_status == "ok":
                 if row.status != "ok":
                     return  # a failure never replaces a good measurement
