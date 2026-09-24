@@ -92,7 +92,7 @@ test: setup
 
 # The fresh-lowering gate: every repository golden's stored targets against a fresh lowering of its own
 # programs, GPU-free. Its own lane because a whole-model program takes minutes to lower, which the default
-# suite's cap cannot carry for every golden; CI runs it on a hosted runner beside the suite.
+# suite's cap cannot carry for every golden; CI runs it as its own job beside the suite.
 test-lowering: setup
 	./venv/bin/pytest tests/compiler/pipeline/search/test_golden.py -m lowering -v -n auto
 

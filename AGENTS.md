@@ -108,7 +108,7 @@ golden's exact-GPU replay.
 
 Beside it, `make test-lowering` checks every repository golden's stored targets against a fresh lowering of its own
 programs — the drift the row decode is blind to, since it replays the stored target. It is its own lane (CI's
-`lowering` job, on a hosted runner) because a whole-model program takes minutes to lower. Goldens that no longer
+`lowering` job) because a whole-model program takes minutes to lower. Goldens that no longer
 match are strict xfails in `tests/compiler/pipeline/search/golden_lowering_xfails.yaml`, under the same rule: the
 list only shrinks, and a restamp on the card is what closes a line.
 
