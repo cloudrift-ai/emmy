@@ -38,124 +38,7 @@ configs:
       NVIDIA GeForce RTX 5090:
         emmy_us: 22.498559951782227
         tcompile_us: 8.232000283896923
-  - name: k_sdpa_075fec.87b2bf6c99a8
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      REDUCE: ''
-      RASTER: ''
-    identity: 87b2bf6c99a847a70436bfdb1ec996d1a432a0e43f34e3dce157ca9d41e319d6
-  - name: k_sdpa_075fec.8b77fda293c7
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      REDUCE@twist: ''
-      REDUCE@twist.1/inner: ''
-      WORK: ''
-      TILE: ''
-      STAGE: ''
-      RASTER: ''
-    identity: 8b77fda293c729aeb5c1178682a6b101e2a1f9c5bdfa401f3996d67a8b8b3a39
-  - name: k_sdpa_075fec.8f4a50ebac20
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      REDUCE: ''
-      RASTER: ''
-    identity: 8f4a50ebac2018ffd2f33c1e413651294751769a9adbe8c1ecd3828b5503a889
-  - name: k_sdpa_075fec.9a5f9a3a93a2
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      REDUCE@twist: ''
-      REDUCE@twist.1/inner: ''
-      WORK: ''
-      TILE: ''
-      STAGE: ''
-      RASTER: ''
-    identity: 9a5f9a3a93a28ec7bef70c3fb9da77d022f14b6d8b1178e387f4b6832983e190
-  - name: k_sdpa_075fec.1c4cbc6d14fc
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      REDUCE: ''
-      RASTER: ''
-    identity: 1c4cbc6d14fcd989671d2fb95918afbe758319f0487768b7042bcc50cf1c67c7
-  - name: k_sdpa_075fec.5a2933635c03
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      REDUCE@twist: ''
-      REDUCE@twist.1/inner: ''
-      WORK: ''
-      TILE: ''
-      STAGE: ''
-      RASTER: ''
-    identity: 5a2933635c03c8d6da2ab5aefb24503b720d499a9fa5ff19cef36ddc49e8659d
-  - name: k_sdpa_075fec.75c279335783
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      REDUCE@twist: ''
-      REDUCE@twist.1/inner: ''
-      WORK: ''
-      TILE: ''
-      STAGE: ''
-      RASTER: ''
-    identity: 75c2793357838caef7114aa8e83911c2184a6f4248e734b346f060d70b57979d
-  - name: k_sdpa_075fec.1006fd017f81
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      REDUCE@twist: ''
-      REDUCE@twist.1/inner: ''
-      WORK: ''
-      TILE: ''
-      STAGE: ''
-      RASTER: ''
-    identity: 1006fd017f8155be78f84a0b4d255382535e48007fca8d1b791feef1c46b56cd
-  - name: k_sdpa_075fec.8d7d8cf4973e
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      REDUCE: ''
-      RASTER: ''
-    identity: 8d7d8cf4973ead77bea989c4b792b5226db77d473d96889199c8de8816781df3
-  - name: k_sdpa_075fec.71f3f4d022cf
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      REDUCE@twist: ''
-      REDUCE@twist.1/inner: ''
-      WORK: ''
-      TILE: ''
-      STAGE: ''
-      RASTER: ''
-    identity: 71f3f4d022cf69705ee580877fc0d3c19816feaafa7fd4b5fd2f12a30d17a990
-  - name: k_sdpa_075fec.9d4e8c6d3ba2
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      REDUCE: ''
-      RASTER: ''
-    identity: 9d4e8c6d3ba276f2722d32e648aa41aabc3b93bdbdd0c2b32528bcbe932ac1b7
-  - name: k_sdpa_075fec.2f9f43ff4cc3
+  - name: k_sdpa_075fec.952511e0427b
     bindings: {}
     pins:
       FAST_MATH: false
@@ -164,10 +47,20 @@ configs:
       TILE@twist.1/inner: ''
       REDUCE@twist: ''
       REDUCE@twist.1/inner: ''
+      STAGE@twist: ''
+      STAGE@twist.1/inner: ''
       WORK: ''
-      STAGE: ''
       RASTER: ''
-    identity: 2f9f43ff4cc34be9038409c21fae86903b0523bbd60baf0eb9fda49811ff68fd
+    identity: 952511e0427beb69f2032adc39e982d5b10ecdb2ed74afa3709e10fdd7697c92
+  - name: k_sdpa_075fec.cd4684d08d58
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: cd4684d08d58cf0a0439e3891fd6c5be89dd81ad0f0254db4a50b8bd1f3f9815
 loops:
 - inputs: [x0, x1, x2]
   outputs: [scaled_dot_product_attention]

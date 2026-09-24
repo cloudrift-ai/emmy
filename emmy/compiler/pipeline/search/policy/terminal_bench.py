@@ -268,22 +268,44 @@ def kernel_row(tile, name: str) -> KernelRow:
 
 
 def persist_kernel_perf(
-    db, ctx, backend_name: str, cuda_op, *, stats, status: str, captured: bool = False, error: str | None = None
+    db,
+    ctx,
+    backend_name: str,
+    cuda_op,
+    *,
+    stats,
+    status: str,
+    captured: bool = False,
+    error: str | None = None,
+    knobs: dict | None = None,
+    source: str = "measured",
 ) -> bool:
     """Persist one measured kernel as deploy evidence: its ``kernel`` row (the definition the
     measurement is of) and its ``perf`` row under ``ctx``'s card and regime (keep-best policy, see
     :meth:`SearchDB.record_perf`). The ONE writer for a kernel measurement — the tuner's terminal
-    bench and ``run --bench``'s pinned rows both come here, so a replayed golden and a searched
-    candidate are indistinguishable to the evidence pick. Returns whether a row was written (a
-    kernel no tile stands behind persists nothing)."""
+    bench, ``run --bench``'s pinned rows and the golden import all come here, so a replayed golden
+    and a searched candidate are indistinguishable to the evidence pick. The row is the op's knobs
+    unless ``knobs`` says otherwise — a golden's recorded schedule row, stored as written rather
+    than as the import's lowering realized it; ``source`` names where the measurement came from.
+    Returns whether a row was written (a kernel no tile stands behind persists nothing)."""
     key = kernel_key(cuda_op)
     if key is None:
         return False
     tile, identity, bindings = key
     db.record_kernel(kernel_row(tile, cuda_op.kernel_name))
-    knobs = getattr(cuda_op, "knobs", None) or {}
+    if knobs is None:
+        knobs = getattr(cuda_op, "knobs", None) or {}
     db.record_perf(
-        ctx, identity, bindings=bindings, knobs=knobs, backend=backend_name, status=status, stats=stats, captured=captured, error=error
+        ctx,
+        identity,
+        bindings=bindings,
+        knobs=knobs,
+        backend=backend_name,
+        status=status,
+        stats=stats,
+        captured=captured,
+        error=error,
+        source=source,
     )
     return True
 

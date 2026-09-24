@@ -60,15 +60,6 @@ configs:
       STAGE: ''
       RASTER: ''
     identity: d2849736ff9472405900e26f2d2686b289b45f646cb3d66621c2e307bd6dbfe4
-  - name: k_sdpa_rms_norm_reduce_64db54.018f97a65dca
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      REDUCE: ''
-      RASTER: ''
-    identity: 018f97a65dcad0b10cafb729230c001001f311284391468a4dfb7bb248838fba
   - name: k_sdpa_rms_norm_reduce_64db54.3e178fcc53b1
     bindings: {}
     pins:
@@ -78,6 +69,21 @@ configs:
       REDUCE: ''
       RASTER: ''
     identity: 5f06a4ce3cc6364bc4eb943b9995ef89ef6aaef343271890fcfdb775db2d9c4b
+  - name: k_sdpa_rms_norm_reduce_64db54.fa3d7889bb44
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE@map.1/twist: ''
+      TILE@map.1/twist.1/inner: ''
+      REDUCE@map.1/twist: coop
+      REDUCE@map.1/twist.1/inner: ''
+      REDUCE@map.1/twist.1/inner.1/map.3/map.1/reduce: ''
+      STAGE@map.1/twist: ''
+      STAGE@map.1/twist.1/inner: ''
+      WORK: t16
+      RASTER: ''
+    identity: fa3d7889bb44a6535eb7899ac845bf706554589deb03e7c2a93a806e1f0dc891
 loops:
 - inputs: [k, kw, q, qw, v]
   outputs: [out]

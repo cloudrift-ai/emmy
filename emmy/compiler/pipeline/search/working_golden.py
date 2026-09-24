@@ -581,44 +581,13 @@ def _record_latency_row(destination: Path, name: str, *, hardware_id, emmy_us, t
     dump_golden_file(document, destination, overwrite=True, incremental=True)
 
 
-class KernelSetDecisions(PipelineStrategy):
-    """Every kernel-set decision one compile took, as ``(identity, arm knobs)``: the deploy identity
-    of the kernel the fork was offered on and the knobs of the arm its splice carried — a placement
-    cut's ``PLACE@seam: cut``, a cross-CTA split's ``REDUCE`` value. ``kernel_sets`` pairs each
-    decision with the graph ids its splice consumed and minted (``(consumed root id, minted ids)``),
-    which :func:`kernel_set_prices` sums into the decision's measured price. Cleared when a resolve
-    starts, so a greedy retry reports only the resolution that stood."""
-
-    def __init__(self) -> None:
-        self.decisions: list[tuple[str, dict[str, str]]] = []
-        self.kernel_sets: list[tuple[str, tuple[str, ...]]] = []
-        self._open: str | None = None
-
-    def on_run_start(self, event) -> None:
-        del event
-        self.decisions.clear()
-        self.kernel_sets.clear()
-        self._open = None
-
-    def on_splice(self, event) -> None:
-        from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
-
-        identity = event.root_op.identity_key(with_io=True) if isinstance(event.root_op, TileOp) else None
-        if identity is not None:
-            self.decisions.append((identity, {str(key): str(value) for key, value in event.knobs.items()}))
-            self._open = event.match.root_node_id
-
-    def on_spliced(self, event) -> None:
-        if self._open is not None:
-            self.kernel_sets.append((self._open, tuple(event.receipt.new_compute_ids)))
-            self._open = None
-
-
 def kernel_set_prices(kernel_sets: list[tuple[str, tuple[str, ...]]], launch_us: dict[str, float]) -> list[float | None]:
     """The measured price of each kernel-set decision: the summed launch timings of the kernels it
     produced, in the same units as the schedule receipt of the kernel it replaced — the two arms a
     kernel-set fork ranks against each other (``policy.greedy._route_candidates``). ``kernel_sets``
-    is :attr:`KernelSetDecisions.kernel_sets` in decision order: a later decision that consumed one
+    pairs each decision, in decision order, with the graph ids its splice consumed and minted
+    (``(consumed root id, minted ids)``, as the splice watcher ``two_level.KernelInventory`` reports
+    them): a later decision that consumed one
     of an earlier decision's kernels stands in for it with its own kernels. ``launch_us`` maps the
     terminal graph's CUDA kernel ids to their launch timings. ``None`` where a kernel of the set is
     not among the launches, so the caller can fall back to the whole graph's timing."""

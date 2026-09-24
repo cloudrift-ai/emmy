@@ -53,6 +53,8 @@ def test_a_tune_db_imports_its_rows_and_definitions(tmp_path):
     tune = SearchDB(tmp_path / "autotune.db")
     tune.record_kernels([kernel_row("k", name="k_test", symbolic=("seq_len",)), kernel_row("p")])
     tune.record_perf_rows([perf_row("k", us=500.0), perf_row("k", us=300.0, bindings={"seq_len": 128})])
+    # A golden row a compile imported into the tune DB stays behind: the golden dataset holds it already.
+    tune.record_perf_rows([perf_row("p", us=100.0, source="golden:abcdef012345")])
     tune.record_routing(RoutingRow(parent="p", arm={"PLACE": "cut"}, children=("k",)))
     tune.close()
 

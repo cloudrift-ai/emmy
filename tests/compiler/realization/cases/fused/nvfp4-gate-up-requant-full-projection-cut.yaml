@@ -1785,15 +1785,6 @@ configs:
       STAGE: ''
       RASTER: ''
     identity: 0298343af64c77a61169e98a6b9dfad38398191e29911f4784022adf4cc8be3a
-  - name: k_linear_reduce_bbf90a.514d7e75a1b5
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      REDUCE: ''
-      RASTER: ''
-    identity: 514d7e75a1b542db25273161419678acddcb9c25f1e8f8029d701294c48d6898
   - name: k_linear_reduce_bbf90a.367c4ee40ddf
     bindings: {}
     pins:

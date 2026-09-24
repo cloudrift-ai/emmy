@@ -1011,8 +1011,8 @@
  "tests/compiler/passes/test_conv1d_einsum_rules.py::test_depthwise_conv1d_matches_eager[loop]": 0.07,
  "tests/compiler/passes/test_cut_forks.py::test_a_clustered_value_cut_once_computes_the_right_answer@cuda": 2.73,
  "tests/compiler/passes/test_cut_forks.py::test_a_composed_route_skips_a_bare_key_and_still_fails_on_a_broken_one": 5.3,
- "tests/compiler/passes/test_cut_forks.py::test_a_recorded_kernel_set_deploys_the_cut_every_entry_spells": 11.55,
- "tests/compiler/passes/test_cut_forks.py::test_a_recorded_schedule_row_never_routes": 7.6,
+ "tests/compiler/passes/test_cut_forks.py::test_a_recorded_kernel_set_deploys_the_cut_every_entry_spells": 22.27,
+ "tests/compiler/passes/test_cut_forks.py::test_a_recorded_schedule_row_never_routes": 14.0,
  "tests/compiler/passes/test_cut_forks.py::test_a_value_read_under_a_reduce_and_at_the_free_axis_is_one_seam": 12.0,
  "tests/compiler/passes/test_cut_forks.py::test_bare_and_scoped_place_cuts_compose_in_one_decision": 0.26,
  "tests/compiler/passes/test_cut_forks.py::test_bare_place_cut_is_consumed_once_by_both_pieces": 0.27,
@@ -1024,9 +1024,6 @@
  "tests/compiler/passes/test_cut_forks.py::test_computed_operand_offers_fused_and_cut_and_pinned_cut_lowers[b]": 1.08,
  "tests/compiler/passes/test_cut_forks.py::test_disjoint_output_sweeps_offer_an_output_owning_seam": 0.11,
  "tests/compiler/passes/test_cut_forks.py::test_every_seam_is_an_unpinned_arm": 0.26,
- "tests/compiler/passes/test_cut_forks.py::test_evidence_rows_keep_an_empty_receipt_as_its_kernel_fused_arm_evidence": 4.53,
- "tests/compiler/passes/test_cut_forks.py::test_evidence_rows_key_each_row_by_the_kernel_it_decides": 4.98,
- "tests/compiler/passes/test_cut_forks.py::test_evidence_rows_replay_an_identityless_kernel_set_lead": 10.7,
  "tests/compiler/passes/test_cut_forks.py::test_mimo_cut_preserves_both_outputs_and_lowers_both_pieces": 2.09,
  "tests/compiler/passes/test_cut_forks.py::test_output_owning_cut_leaves_single_output_pieces_that_promote": 0.26,
  "tests/compiler/passes/test_cut_forks.py::test_pinned_fusion_lowers_one_computed_operand_kernel": 0.3,
@@ -2145,5 +2142,8 @@
  "tests/compiler/pipeline/search/test_golden.py::test_stored_targets_are_the_fresh_lowering[rtx4090_sm89.yaml]": 1.3,
  "tests/compiler/pipeline/search/test_golden.py::test_stored_targets_are_the_fresh_lowering[Qwen3.5-122B-A10B/v100_sm70.yaml]": 0.95,
  "tests/compiler/realization/test_realization.py::test_realization[attention/sdpa-gqa-decode-split-kv.yaml-built]@cuda": 1.27,
- "tests/compiler/realization/test_realization.py::test_realization[attention/sdpa-gqa-decode-split-kv.yaml-correct]@cuda": 0.57
+ "tests/compiler/realization/test_realization.py::test_realization[attention/sdpa-gqa-decode-split-kv.yaml-correct]@cuda": 0.57,
+ "tests/compiler/passes/test_cut_forks.py::test_import_files_each_row_under_the_kernel_it_decides": 3.27,
+ "tests/compiler/pipeline/search/test_golden_import.py::test_the_rtx_5090_hardware_golden_deploys_from_the_db@golden_import_rtx5090": 2.77,
+ "tests/compiler/passes/test_cut_forks.py::test_a_decision_consumes_the_key_that_spelled_it_on_import": 5.52
 }

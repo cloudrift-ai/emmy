@@ -70,6 +70,22 @@ configs:
       WORK: ''
       RASTER: ''
     identity: 685a523fbbee23361ff0f671d2259bed84eb93fd33bc3734553c195e290b5a26
+  - name: k_sdpa_rms_norm_reduce_64db54.0c09d8d6ecf9
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE@twist: ''
+      TILE@twist.1/inner: f1
+      REDUCE@twist: ''
+      REDUCE@twist.1/inner: ''
+      REDUCE@twist.1/inner.1/map.3/map.1/reduce: ''
+      REDUCE@twist.1/inner.2/map.3/map.1/reduce: ''
+      STAGE@twist: ''
+      STAGE@twist.1/inner: ''
+      WORK: t256
+      RASTER: ''
+    identity: 0c09d8d6ecf99d45c2cad12c2dc0d1d7d6f121a03e93ae616e91031ac50b318d
 loops:
 - inputs: [k, kw, q, qw, v]
   outputs: [out]
