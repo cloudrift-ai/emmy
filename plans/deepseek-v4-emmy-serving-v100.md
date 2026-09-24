@@ -27,8 +27,8 @@ completions are worse than that boot's, the width-16 expert twin's election repo
 outliers over a budget of 4, and the width-4,096 post twin's reproducer returns NaN. Boot37 (`main` as merged,
 2026-09-24) did not serve: seventeen minutes in, the symbolic post twin's compile refused at one of the pieces #883
 re-shaped — the piece opens a cut fork of its own, a kernel-set decision strict cannot take without a row, and a post
-twin has no wider tier to ride — so `main` as merged does not boot strict until the three post leads are recorded
-again, and their cut receipts carry the old pieces' time until then.
+twin has no wider tier to ride — so `main` as merged did not boot strict until the three post leads were recorded
+again (boot38, item 1 below); their cut receipts still carry the old pieces' time.
 
 Three things hold the numbers. Fast math became the default (#868) while serving published no precision pin, so every
 boot needed the regime pinned off by hand — closed by `serve --golden` publishing the rows' regime to its workers.
@@ -44,9 +44,12 @@ never ran, and an HF eager reference for a 156 GB checkpoint stays impractical h
 
 ## What is left, in order
 
-1. **Record the three post leads on `main`** (`post-sym`, `post16`, `post4096`): the two pieces #883 re-shaped in each
-   and their cut receipts. Started 2026-09-24 as rec37 on the host from the tree at `1494e4be`; until the rows land,
-   no boot from `main` serves strict.
+1. **Boot `main` with the six pieces recorded.** Done 2026-09-24: the pieces #883 re-shaped are recorded serial, at
+   199 and 178 µs on the symbolic twin, 6 and 6 µs at width 16 and 1.4 and 1.6 ms at width 4,096 (the old
+   register-split row cost 39.7 ms and was never in the deployed route), all three post leads elect strict from the
+   file, and boot38 serves in thirteen minutes at the same numbers as boot36b: 0.71 s to first token warm at 5 prompt
+   tokens, 5.5 s at 2,155, 0.53–0.58 s per output token, the width-4,096 post twin at 104 ms per layer, the
+   completions degraded.
 2. **Correctness on `main`.** Boot `main` with those rows, probe it, and find the wrong kernel by switching twin
    families off one at a time. Suspects: #863's reduction normalization, the cooperative-reduce codegen defect, the
    register-split rows pinned on the post twins during the restamp. Nothing else is worth measuring until the output

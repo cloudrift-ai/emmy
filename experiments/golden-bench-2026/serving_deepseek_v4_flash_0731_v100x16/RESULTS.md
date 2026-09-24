@@ -595,6 +595,30 @@ kernel-set decision, and a post twin has no wider tier to ride. So `main` as mer
 audits and gates clean and does not serve strict. The three post leads are recorded again from this tree (rec37,
 greedy, one card each), and the boot that follows says what the new pieces cost.
 
+**The six re-shaped pieces recorded; `main` boots strict again (2026-09-24).** Each of the six pieces #883 re-shaped
+opens a cut fork of its own (the ballot: fused, or a cross-CTA split by 2 or 4), and under it one schedule fork whose
+reduce is four elements wide. A plain greedy record of each post lead from the tree at 1494e4beb (rec37, one card per
+lead) wrote a row for every new piece at the prior's pick even though the lead's own bench failed on a pick the prior
+made elsewhere in the route (a split of 16 on a reduction of 4, an atomic reduce into f16 storage): cooperative at
+both reduce sites, which costs 20.4 and 20.3 ms per piece on the symbolic twin, 357 and 358 µs at width 16, 93.2 and
+93.4 ms at width 4,096 — the four-element cooperative reduce again. Pinned runs recorded the serial schedule and a
+register split on the same pieces: serial runs 198.7 and 177.7 µs on the symbolic twin (the old pieces' 189 and 177),
+6.1 and 5.8 µs at width 16 (the old second piece cost 2,533 µs), and 1,399 and 1,570 µs at width 4,096, where the old
+second piece's best row was the 39.7 ms register split — the batched matmul #883 set out to restore; the register
+split equals serial everywhere. Sixteen rows were merged, for the six kernels only: 470 rows, 459 measured, the
+evidence index reads 453 of them live with the same six dead, 324 of the 335 serving-twin kernels have a row again,
+the decode tests pass, and all three post leads elect strict from the file on the host in about two minutes each.
+Booted strict from the merged file (boot38, fast math pinned off), the server reached its serving state in thirteen
+minutes — the first compile on each rank no longer pays the cold evidence index the earlier boots on this tree paid —
+and answered the probe: 3.50 s to first token cold and 0.71 s warm at 5 prompt tokens, 68.0 s cold and 5.52 s warm at
+2,155, 0.53 s per output token at the short prompt and 0.58 s at the long one, all within noise of boot36b. The
+roofline audit reads the width-16 post twin at 7.41 ms per layer (8.05 on boot36b: the re-shaped pieces' 6 µs against
+the old second piece's 2.5 ms), the pre twin at 3.12 ms and the width-4,096 post twin at 104.0 ms, unchanged — so the
+39.7 ms register-split row the old file carried was never in the route this twin deploys, and the 1.6 ms serial row
+does not move it. The completions are as degraded as boot36b's: the 5-token prompt continues into punctuation noise,
+the 2,155-token one into a repeated fragment of the passage. `main` boots strict again from this file; what it serves
+is the correctness question the plan's next item owns.
+
 
 ### The M=1 decode tier: what broke and what now guards it
 
