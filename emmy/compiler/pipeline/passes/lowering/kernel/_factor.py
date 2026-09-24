@@ -389,20 +389,28 @@ def _one_value_per_name(stmts) -> list:
     a reduction is a different loop even when some outputs retain their original names.
     Nothing moves while the two agree.
     """
-    bound: dict[str, object] = {}
-    rename: dict[str, str] = {}
-    out: list = []
-    for stmt in stmts:
-        spelled = stmt.rename(lambda name: rename.get(name, name)) if rename else stmt
-        for original in sorted(_exposed_defines(stmt)):
-            name = rename.get(original, original)
-            if bound.get(name, spelled) != spelled:
-                rename[original] = f"{original}__s{len(rename)}"
-                spelled = stmt.rename(lambda name: rename.get(name, name))
-        for name in _exposed_defines(spelled):
-            bound[name] = spelled
-        out.append(spelled)
-    return out
+
+    def sweep(stmts, bound: dict[str, object], rename: dict[str, str]) -> list:
+        out: list = []
+        for stmt in stmts:
+            spelled = stmt.rename(lambda name: rename.get(name, name)) if rename else stmt
+            if spelled.nested():
+                # Each nested body is a C scope of its own: it reads the names spelled around it
+                # and re-spells a second value of a name INSIDE it, and what it binds stays inside
+                # (a projection distributed over a reduce's lanes is one sweep loop holding a
+                # sibling's copy of the root's cell beside the projection's own).
+                spelled = spelled.with_bodies(tuple(Body(sweep(list(body), {}, dict(rename))) for body in spelled.nested()))
+            for original in sorted(_exposed_defines(spelled)):
+                name = rename.get(original, original)
+                if bound.get(name, spelled) != spelled:
+                    rename[original] = f"{original}__s{len(rename)}"
+                    spelled = spelled.rename(lambda name: rename.get(name, name))
+            for name in _exposed_defines(spelled):
+                bound[name] = spelled
+            out.append(spelled)
+        return out
+
+    return sweep(stmts, {}, {})
 
 
 def _bind_roots(op: Fold, ctx: Ctx, output_specs: tuple) -> Tile:
