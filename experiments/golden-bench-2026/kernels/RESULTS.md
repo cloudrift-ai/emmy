@@ -5,7 +5,7 @@
 ### Question and scope
 
 `q/k norm + RoPE + score statistics` was the corpus's slowest target on every card — 94 us on the H100, 161 on the
-A100, 361 on the V100, against 29, 63 and 285 for Inductor. The 2026-09-11 pass called its route space exhausted and
+A100, 361 on the V100, against 29, 64 and 285 for Inductor. The 2026-09-11 pass called its route space exhausted and
 its remaining gap structural: two pieces at 12% occupancy with 176 and 204 registers. This pass asks what those
 pieces are actually doing, and covers only this target: Qwen3-0.6B layer 0 at sequence length 512, on a V100, an
 A100 and an H100. It retunes no other target.
@@ -34,38 +34,38 @@ only the last row changed, so the other eight are one measurement printed once.
 | target | eager | Inductor | before | after |
 | --- | ---: | ---: | ---: | ---: |
 | **H100** | | | | |
-| input RMSNorm | 52 | 4 | | 2.6 |
-| value projection | 5 | 5 | | 6.3 |
-| query projection | 11 | 7 | | 7.7 |
-| key projection | 8 | 6 | | 6.1 |
-| softmax x V | 18 | 18 | | 64.6 |
-| SDPA + o_proj + residual | 25 | 21 | | 46.7 |
-| post-attn norm + gate/up | 77 | 22 | | 18.3 |
-| down_proj + residual | 12 | 11 | | 16.3 |
+| input RMSNorm | 53 | 5 |  | 2.6 |
+| value projection | 5 | 5 |  | 6.2 |
+| query projection | 11 | 7 |  | 7.6 |
+| key projection | 9 | 6 |  | 6.0 |
+| softmax x V | 18 | 18 |  | 64.6 |
+| SDPA + o_proj + residual | 25 | 21 |  | 46.8 |
+| post-attn norm + gate/up | 79 | 22 |  | 18.3 |
+| down_proj + residual | 12 | 11 |  | 15.8 |
 | q/k norm + RoPE + score statistics | 168 | 29 | 94.2 | **29.5** |
-| H100 total | | 123 | 262.8 | **198.1** |
+| H100 total | | 124 | 262.1 | **197.4** |
 | **A100** | | | | |
-| input RMSNorm | 65 | 6 | | 3.9 |
-| value projection | 12 | 13 | | 13.9 |
-| query projection | 22 | 21 | | 19.2 |
-| key projection | 16 | 13 | | 13.7 |
-| softmax x V | 49 | 50 | | 163.0 |
-| SDPA + o_proj + residual | 65 | 63 | | 66.8 |
-| post-attn norm + gate/up | 125 | 55 | | 49.6 |
-| down_proj + residual | 31 | 37 | | 41.6 |
-| q/k norm + RoPE + score statistics | 236 | 63 | 161.0 | **49.1** |
-| A100 total | | 321 | 532.7 | **420.8** |
+| input RMSNorm | 65 | 6 |  | 3.9 |
+| value projection | 11 | 13 |  | 13.9 |
+| query projection | 22 | 21 |  | 19.2 |
+| key projection | 16 | 13 |  | 13.7 |
+| softmax x V | 49 | 50 |  | 163.2 |
+| SDPA + o_proj + residual | 65 | 63 |  | 67.0 |
+| post-attn norm + gate/up | 125 | 52 |  | 49.5 |
+| down_proj + residual | 27 | 32 |  | 36.3 |
+| q/k norm + RoPE + score statistics | 236 | 64 | 161.0 | **49.2** |
+| A100 total | | 314 | 527.7 | **415.9** |
 | **V100** | | | | |
-| input RMSNorm | 78 | 7 | | 4.3 |
-| value projection | 42 | 41 | | 33.0 |
-| query projection | 46 | 42 | | 47.3 |
-| key projection | 48 | 46 | | 32.0 |
-| softmax x V | 534 | 299 | | 347.0 |
-| SDPA + o_proj + residual | 560 | 319 | | 281.0 |
-| post-attn norm + gate/up | 218 | 131 | | 104.9 |
-| down_proj + residual | 69 | 68 | | 110.0 |
-| q/k norm + RoPE + score statistics | 824 | 285 | 360.7 | **227.5** |
-| V100 total | | 1238 | 1320.2 | **1187.0** |
+| input RMSNorm | 78 | 7 |  | 4.3 |
+| value projection | 42 | 41 |  | 33.0 |
+| query projection | 46 | 42 |  | 47.3 |
+| key projection | 48 | 46 |  | 32.0 |
+| softmax x V | 533 | 300 |  | 349.5 |
+| SDPA + o_proj + residual | 560 | 321 |  | 281.3 |
+| post-attn norm + gate/up | 217 | 130 |  | 105.5 |
+| down_proj + residual | 70 | 67 |  | 110.0 |
+| q/k norm + RoPE + score statistics | 822 | 285 | 360.7 | **229.3** |
+| V100 total | | 1239 | 1323.6 | **1192.2** |
 
 The retuned target's three kernels, after:
 
@@ -84,9 +84,10 @@ The retuned target's three kernels, after:
   rule the fused kernel and the cut's own peel test already ask, and runs 6.6 us. That fix is what makes every
   number above reachable.
 - **The win is the transport, not the tile.** Fused, the flash kernel's operands are computed, so only the
-  synchronous compute fill resolves and every `smem-async` pin raises. With both cones materialized it takes
-  `d2/smem-async` on the H100 and V100 and `d3` on the A100, and the same `f1x8/k4` tile that measured 69 us under
-  the prior's own pick measures 17.7 once staged. The cones cost 10.7 us on the H100 to save 56.
+  synchronous compute fill resolves — every committed row on all three cards is `d1/smem`. With both cones
+  materialized it takes `d2/smem-async` on the H100 and V100 and `d3` on the A100. The tile alone buys little: the
+  first staged pick on the H100 still ran 69 us, and the same `f1x8/k4` tile measures 17.7 once the transport
+  follows. On the H100 the two cones cost 10.7 us and the set totals 28.4 against 94.2.
 - **The corpus's remaining gap on the datacenter cards is `softmax x V`, and it is the same defect one level down.**
   That target's value projection is computed inside the attention sweep. Cutting it materializes the projection into
   an f32 workspace shaped (head, dim, key), which the consumer reads back one fragment at a time through
@@ -97,8 +98,8 @@ The retuned target's three kernels, after:
 - **The V100's flash kernel still spills.** 205 us at 255 registers, 8 bytes of local, 12% occupancy; every tile,
   warp split and staging depth the sweep reached lands between 197 and 636. That is the V100's remaining gap, and it
   is register pressure, not placement.
-- **The V100 corpus now beats Inductor overall** (1187 against 1238) while the H100 and A100 still trail (198
-  against 123, 421 against 321). Both remaining gaps are `softmax x V` and `SDPA + o_proj + residual`.
+- **The V100 corpus now beats Inductor overall** (1192 against 1239) while the H100 and A100 still trail (197
+  against 124, 416 against 314). Both remaining gaps are `softmax x V` and `SDPA + o_proj + residual`.
 
 ### Systems and provenance
 
