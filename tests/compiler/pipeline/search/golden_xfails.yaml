@@ -2,7 +2,6 @@
 # current compiler. Strict xfails: closing one turns its node red until the line is
 # deleted. Never add a line to make a red row green — re-record the card, or fix the
 # enumeration. See test_golden.py.
-
 #
 # The entries below are child-identity receipts whose stored identity the compiler has since
 # re-keyed and whose recorded row several pieces of the current set enumerate, so nothing says
@@ -10,70 +9,31 @@
 # Re-recording the kernel set on the card (`run --golden PATH --bench --record-greedy`) is the
 # fix, and turns each entry stale until it is deleted.
 DeepSeek-V4-Flash-0731/v100_sm70.yaml:
-- post-sym.k_linear_softmax_mean_matmul_reduce_dba017.deb454931ca7.m16.c8a6c12fa5e2.e0098ed87b96
-- post-sym.k_linear_softmax_mean_matmul_reduce_dba017.deb454931ca7.m16.c8a6c12fa5e2.9e5857a2c498
-- post-sym.k_linear_softmax_mean_matmul_reduce_dba017.deb454931ca7.dynamic.fbfa5ea89c02.48a7740cca27
-- post-sym.k_linear_softmax_mean_matmul_reduce_dba017.deb454931ca7.dynamic.fbfa5ea89c02.0c1ef690d492
-- post-sym.k_linear_softmax_mean_matmul_reduce_dba017.deb454931ca7.m4096.f9d6a5b45f94.81ce286fe607
-- post-sym.k_linear_softmax_mean_matmul_reduce_dba017.deb454931ca7.m4096.f9d6a5b45f94.040fe9097718
-- post-sym.k_div_18_reduce.e08028a9e8ff.m4096.58c14ac215f1.c7ec7ec28b97
-- post1.k_div_11_reduce.393de839665e.m1.4f1d82857b33
-- post1.k_div_11_reduce.393de839665e.m1.ba49c887bb92
-- post1.k_div_11_reduce.393de839665e.m1.4a2163061b95
-- post1.k_div_18_reduce.4775a192d2e2.m1.924d856b5b86
-- post1.k_div_18_reduce.4775a192d2e2.m1.dd9807b3f7ea
-- post1.k_div_25_reduce.393de839665e.m1.ba49c887bb92
-- post1.k_div_25_reduce.393de839665e.m1.4f1d82857b33
-- post1.k_linear_softmax_matmul_mean_reduce_9e578e.8595d2e73ba3.m1.5b1191cee458.517fac8cc803
-- post1.k_linear_softmax_matmul_mean_reduce_9e578e.8595d2e73ba3.m1.5b1191cee458.73009fb48848
-- post1.k_linear_softmax_matmul_mean_reduce_9e578e.8595d2e73ba3.m1.5b1191cee458.1bc0b6ad4ecf
-- post1.k_div_50_reduce.393de839665e.m1.4f1d82857b33
-- post1.k_div_50_reduce.393de839665e.m1.ba49c887bb92
-- post1.k_div_57_reduce.4775a192d2e2.m1.924d856b5b86
-- post1.k_div_57_reduce.4775a192d2e2.m1.dd9807b3f7ea
-- post1.k_div_64_reduce.393de839665e.m1.4f1d82857b33
-- post1.k_div_64_reduce.393de839665e.m1.ba49c887bb92
-- post1.k_div_71_reduce.4775a192d2e2.m1.924d856b5b86
-- post1.k_div_71_reduce.4775a192d2e2.m1.dd9807b3f7ea
-- post16.k_linear_softmax_mean_matmul_reduce_20ed9d.5a8c1a6bc52f.m16.c8a6c12fa5e2.e0098ed87b96
-- post16.k_linear_softmax_mean_matmul_reduce_20ed9d.5a8c1a6bc52f.m16.c8a6c12fa5e2.9e5857a2c498
-- post-sym.k_linear_softmax_matmul_mean_reduce_3836f9.e906d92853d9.dynamic.52983282da5e.8d1323a357db#2
-- post-sym.k_linear_softmax_matmul_mean_reduce_3836f9.e906d92853d9.dynamic.52983282da5e.00754da81817
-- post16.k_linear_softmax_matmul_mean_reduce_8e1e80.ee59c5a2f07f.m16.9c098e32a2f6.ea97e9a718bf
-- post16.k_linear_softmax_matmul_mean_reduce_8e1e80.ee59c5a2f07f.m16.9c098e32a2f6.d63e499dd3d0
-- post16.k_linear_softmax_matmul_mean_reduce_8e1e80.ee59c5a2f07f.m16.9c098e32a2f6.8886b6870760
-- post4096.k_linear_softmax_mean_matmul_reduce_4682df.dc494bf4468c.m4096.f9d6a5b45f94.81ce286fe607
-- post4096.k_linear_softmax_mean_matmul_reduce_4682df.dc494bf4468c.m4096.f9d6a5b45f94.040fe9097718
-- post16.k_linear_softmax_matmul_mean_reduce_8e1e80.ee59c5a2f07f.m16.9c098e32a2f6.41930a7c1e35
-- post16.k_linear_softmax_matmul_mean_reduce_8e1e80.ee59c5a2f07f.m16.9c098e32a2f6.ad516389f582
-- post4096.k_div_18_reduce.134a4c74f3b4.m4096.58c14ac215f1.c7ec7ec28b97
-- post4096.k_linear_softmax_matmul_mean_reduce_366777.f0fc3dc05f5c.m4096.02e3b8ae01c2.c21755b972c0
-- post4096.k_linear_softmax_matmul_mean_reduce_366777.f0fc3dc05f5c.m4096.02e3b8ae01c2.b9838768e8a2
-- post4096.k_linear_softmax_matmul_mean_reduce_366777.f0fc3dc05f5c.m4096.02e3b8ae01c2.b1372718d626
-- post4096.k_linear_softmax_matmul_mean_reduce_366777.f0fc3dc05f5c.m4096.02e3b8ae01c2.e76a716261cd
-- post4096.k_div_43_reduce.4558499de9cd.m4096.ba542daaf470.ed3644250d6d
-- pre1.k_linear_mean_reduce_7fce9f.7c4629931db7.m1.0733f2fad083.2580b0f2de11
-- post4096.k_div_57_reduce.134a4c74f3b4.m4096.58c14ac215f1.c7ec7ec28b97
-- post4096.k_div_71_reduce.134a4c74f3b4.m4096.58c14ac215f1.c7ec7ec28b97
+- post-sym.k_linear_softmax_matmul_mean_reduce_3836f9.e906d92853d9.dynamic.52983282da5e.54375d11324a
+- post-sym.k_linear_softmax_matmul_mean_reduce_3836f9.e906d92853d9.dynamic.52983282da5e.bb6d966275ff
+- post1.k_linear_softmax_matmul_mean_reduce_9e578e.8595d2e73ba3.m1.5b1191cee458.a4274b404852
+- post1.k_linear_softmax_matmul_mean_reduce_9e578e.8595d2e73ba3.m1.5b1191cee458.ff25313e3e06#1
+- post1.k_linear_softmax_matmul_mean_reduce_9e578e.8595d2e73ba3.m1.5b1191cee458.3378306010a2
+- post1.k_linear_softmax_matmul_mean_reduce_9e578e.8595d2e73ba3.m1.5b1191cee458.ff25313e3e06#2
 Qwen3.8-27B-FP8/v100_sm70.yaml:
 - k_to_pointwise.9516fd90e54a
 - k_linear_matmul_mean_reduce_4b396c.10c49f3e611c
 gemma-4-12B-it/rtx5090_sm120.yaml:
-- post1.k_linear_mean_reduce_97b2ad.m1.705b86ec4bc9
 - post1.k_linear_mean_reduce_97b2ad.m1.9838c7e64c9a
+- post1.k_linear_mean_reduce_97b2ad.m1.705b86ec4bc9
+- post1.k_linear_mean_reduce_97b2ad.m1.b4640069a50f
 - post1.k_linear_mean_reduce_97b2ad.m1.fm.705b86ec4bc9
 - post1.k_linear_mean_reduce_97b2ad.m1.24d31bb2730a
-- post1.k_linear_mean_reduce_97b2ad.m1.b4640069a50f
-- post1-global.k_linear_mean_reduce_9c8af6.m1.4961259b6c5a
 - post1.k_linear_mean_reduce_97b2ad.m1.fm.9838c7e64c9a
 - post1.k_linear_mean_reduce_97b2ad.m1.fm.b4640069a50f
-- post1.k_linear_mean_reduce_97b2ad.m1.fm.24d31bb2730a
-- post1-global.k_linear_mean_reduce_9c8af6.m1.b4640069a50f
 - post1-global.k_linear_mean_reduce_9c8af6.m1.9838c7e64c9a
+- post1.k_linear_mean_reduce_97b2ad.m1.fm.24d31bb2730a
+- post1-global.k_linear_mean_reduce_9c8af6.m1.4961259b6c5a
 - post1-global.k_linear_mean_reduce_9c8af6.m1.24d31bb2730a
-- post1-global.k_linear_mean_reduce_9c8af6.m1.fm.4961259b6c5a#1
-- post1-global.k_linear_mean_reduce_9c8af6.m1.fm.b4640069a50f#1
 - post1-global.k_linear_mean_reduce_9c8af6.m1.fm.9838c7e64c9a
+- post1-global.k_linear_mean_reduce_9c8af6.m1.b4640069a50f
+- post1-global.k_linear_mean_reduce_9c8af6.m1.fm.4961259b6c5a#1
 - post1-global.k_linear_mean_reduce_9c8af6.m1.fm.24d31bb2730a
-- post1-global.k_linear_mean_reduce_9c8af6.m1.fm.b4640069a50f#2
+- post1-global.k_linear_mean_reduce_9c8af6.m1.fm.b4640069a50f#1
 - post1-global.k_linear_mean_reduce_9c8af6.m1.fm.4961259b6c5a#2
+- post1-global.k_linear_mean_reduce_9c8af6.m1.fm.b4640069a50f#2

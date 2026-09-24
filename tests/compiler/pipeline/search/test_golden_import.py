@@ -181,14 +181,12 @@ def test_the_rtx_5090_hardware_golden_deploys_from_the_db(tmp_path) -> None:
     from emmy.compiler.loop_wire import kernel_tile
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
     from emmy.compiler.pipeline.knob import schedule_row_key
+    from emmy.compiler.pipeline.search.db import is_placement_knob
     from emmy.compiler.pipeline.search.golden import _HARDWARE_GOLDENS_DIR, load_golden_file, load_golden_records, regime_live
-    from emmy.compiler.pipeline.search.pins import parse_reduce
     from tests.compiler.pipeline.search.helpers import GPU_5090
 
     def splits(record) -> bool:
-        return any(
-            family_of(k) == "REDUCE" and (plan := parse_reduce(v)) is not None and plan.needs_split for k, v in record.schedule_row.items()
-        )
+        return not record.is_routing and any(is_placement_knob(key, value) for key, value in record.schedule_row.items())
 
     records = load_golden_records(load_golden_file(_HARDWARE_GOLDENS_DIR / "rtx5090_sm120.yaml"))
     ctx = Context.from_target((12, 0), gpu_name=GPU_5090)
@@ -196,20 +194,27 @@ def test_the_rtx_5090_hardware_golden_deploys_from_the_db(tmp_path) -> None:
     with pinned_knobs({"FAST_MATH": False}):
         counts = import_goldens(db, ctx, records, source="golden:rtx5090")
         live = [record for record in records if record.measurements is not None and regime_live(record)]
+        # A routing entry is its decision (routing rows, no perf row); a split winner is a schedule row
+        # that spells a split, timed as a whole; every other live record is one kernel's row.
+        routing = [record for record in live if record.is_routing]
         whole = [record for record in live if splits(record)]
-        assert len(live) - len(whole) >= 30 and len(whole) >= 5
-        assert counts["perf rows"] == len(live) - len(whole) and counts["kernel sets timed as a whole"] == len(whole)
+        single = [record for record in live if record not in routing and record not in whole]
+        assert len(single) >= 30 and len(whole) >= 5
+        assert counts["perf rows"] == len(single) and counts["kernel sets timed as a whole"] == len(whole)
+        assert counts["routing rows"] >= len(whole) + len(routing)
         assert counts["routing rows"] >= 1 and not counts["did not lower"] and not counts["identities no kernel carries"]
         assert not any(db.drift().values())
         measured: dict[str, list[dict]] = {}
         for row in db.iter_perf(ctx, backend="cuda"):
             measured.setdefault(row.kernel, []).append({k: str(v) for k, v in dict(schedule_row_key(dict(row.knobs))).items()})
         with records_override([]), config.online_file_override(tmp_path / "absent-online.json"):
-            for record in live:
-                if record in whole:
-                    continue
+            for record in single:
                 graph = Pipeline.build(CUDA_PASSES).run(record.target_program.copy(), ctx=ctx, db=db)
-                [op] = [node.op for node in graph.nodes.values() if isinstance(node.op, CudaOp)]
+                ops = [node.op for node in graph.nodes.values() if isinstance(node.op, CudaOp)]
+                # A receipt names its kernel inside the set the target compiles to; any other record's target is one kernel.
+                by_deploy = {kernel_tile(op).identity_key(with_io=True): op for op in ops}
+                assert record.identity is not None or len(ops) == 1, record.name
+                op = by_deploy[record.identity] if record.identity is not None else ops[0]
                 picked = {k: str(v) for k, v in dict(schedule_row_key(dict(op.knobs or {}))).items()}
                 assert picked in measured[kernel_tile(op).identity_key(structural=False, with_io=True)], record.name
 
