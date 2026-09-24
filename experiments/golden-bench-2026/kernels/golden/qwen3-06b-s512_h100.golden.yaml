@@ -3959,24 +3959,6 @@ configs:
       emmy_us: 10.272333398461342
       reference_us: 10.256505012512207
       reference_backend: same-input-greedy
-  - name: k_sdpa_linear_reduce_c0a378.ace3043c96cf.472f31dfba3d
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      TILE@map.1/twist: mma_m16n8k16_f16_f32/f1x16/k4
-      TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x8/k4
-      REDUCE@map.1/twist: ''
-      REDUCE@map.1/twist.1/inner: ''
-      STAGE@map.1/twist: ''
-      STAGE@map.1/twist.1/inner: d2/smem-async/p2
-      WORK: w4x1
-      RASTER: ''
-    identity: 3d1b74cda74a47f750ff48773dc14a8ad1a92adc16b1ada2f8efb34528e7d179
-    measurements:
-      emmy_us: 88.63418210636485
-      reference_us: 88.65745501084761
-      reference_backend: same-input-greedy
   - name: k_sdpa_linear_reduce_c0a378.ace3043c96cf.6a85b825e527
     bindings: {}
     pins:
