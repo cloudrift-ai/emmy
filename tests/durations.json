@@ -2257,5 +2257,16 @@
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[DeepSeek-V4-Flash-0731/v100_sm70.yaml/post4096.k_linear_softmax_matmul_mean_reduce_366777.f0fc3dc05f5c.m4096.02e3b8ae01c2.9b25749c5f8e]": 7.5,
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[DeepSeek-V4-Flash-0731/v100_sm70.yaml/post4096.k_linear_softmax_matmul_mean_reduce_366777.f0fc3dc05f5c.m4096.02e3b8ae01c2.a5b27df05d86]": 8.4,
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[DeepSeek-V4-Flash-0731/v100_sm70.yaml/post4096.k_linear_softmax_matmul_mean_reduce_366777.f0fc3dc05f5c.m4096.02e3b8ae01c2.db0e3f674020]": 8.1,
- "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[DeepSeek-V4-Flash-0731/v100_sm70.yaml/post4096.k_linear_softmax_matmul_mean_reduce_366777.f0fc3dc05f5c.m4096.02e3b8ae01c2.e0f8220582a6]": 7.8
+ "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[DeepSeek-V4-Flash-0731/v100_sm70.yaml/post4096.k_linear_softmax_matmul_mean_reduce_366777.f0fc3dc05f5c.m4096.02e3b8ae01c2.e0f8220582a6]": 7.8,
+ "tests/compiler/trace/test_torch.py::test_trace_masked_fill_lowers_to_ternary_where_and_matches_eager": 14.6,
+ "tests/compiler/trace/test_torch.py::test_trace_bmm_produces_matmul_and_matches_eager": 14.5,
+ "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[DeepSeek-V4-Flash-0731/v100_sm70.yaml/post1.k_div_43_reduce.069cb437e63f.m1.49fc5107dae3]": 6.1,
+ "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[DeepSeek-V4-Flash-0731/v100_sm70.yaml/post4096.k_div_11_reduce.5d1b75557f3f.m4096.b0e481e50019.15f692eab964]": 5.9,
+ "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[DeepSeek-V4-Flash-0731/v100_sm70.yaml/post4096.k_div_25_reduce.5d1b75557f3f.m4096.b0e481e50019.15f692eab964]": 5.7,
+ "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[DeepSeek-V4-Flash-0731/v100_sm70.yaml/post16.k_div_25_reduce.d81043a46649.m16.4e18a355bd66.e5578bb8f301]": 5.5,
+ "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[DeepSeek-V4-Flash-0731/v100_sm70.yaml/post-sym.k_div_11_reduce.900abf212ff5.dynamic.b6fc9b9ac9a2.96f398726072]": 5.2,
+ "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[DeepSeek-V4-Flash-0731/v100_sm70.yaml/post16.k_div_64_reduce.d81043a46649.m16.4e18a355bd66.e5578bb8f301]": 5.2,
+ "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[DeepSeek-V4-Flash-0731/v100_sm70.yaml/post16.k_div_50_reduce.d81043a46649.m16.4e18a355bd66.e5578bb8f301]": 5.1,
+ "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[DeepSeek-V4-Flash-0731/v100_sm70.yaml/post4096.k_div_64_reduce.5d1b75557f3f.m4096.b0e481e50019.15f692eab964]": 5.1,
+ "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[DeepSeek-V4-Flash-0731/v100_sm70.yaml/post16.k_div_11_reduce.d81043a46649.m16.4e18a355bd66.e5578bb8f301]": 5.1
 }
