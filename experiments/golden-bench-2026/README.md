@@ -15,7 +15,6 @@ artifacts exist and an intelligent reviewer accepts them against the checklist b
 | Quantized checkpoint kernels | Qwen3-8B NVFP4 and Qwen3-0.6B block-scaled FP8 layer 0 at 1 and 512; Llama 3.1 AWQ and Laguna EXL3 layer 0 at 1 | RTX 5090 | Compiler support and correctness; the block-FP8 rows replay hand-tuned goldens against eager |
 | Dynamic-FP8 large-layer trace | Qwen3-32B-FP8-dynamic layer 0, sequence lengths 1 and 512 | H200 and B200 | Complete large-layer inventory; W8A8-only claim deferred |
 | Large-layer shape stress | Qwen3.6-27B layers 0 and 3, sequence lengths 1 and 512 | H200 and B200 | Unsharded BF16 large-shape stress only |
-| End-to-end serving | Pinned recipes below | Consumer single GPU and the V100 TP8xPP2 lane | System performance for explicitly matched stock and Emmy arms |
 | Megakernel decode pair | Qwen3-8B, one 128/512 single-stream point | A100 | Cross-harness kernel-launch-overhead comparison |
 | Neptune compiler comparison | 10 artifact operators and a five-operator Emmy/PyTorch subset | A100 80GB | One archived cross-compiler result |
 
@@ -177,7 +176,6 @@ form; the separate FP8 and NVFP4 rows cover them.
 | --- | --- | --- | --- |
 | RTX 5090 | Gemma-4-12B-it, TP1 | Same-image stock and Emmy A/B | Primary matched-system result after semantic review |
 | RTX 5090 | Gemma-4-12B-it, TP1 (`gemma4_serving`) | The article's three-lane matrix under strict evidence | Reproduction of the article's protocol; both precision lanes |
-| 16x V100 | DeepSeek-V4-Flash-0731, TP8xPP2 | New checkpoint on the proven SM70 serving path | Portability result until a matched stock arm exists |
 | 1x A100 | Qwen3-8B BF16, TP1 | vLLM and megakernel (MPK) decode comparison | MPK harness pair and stock vLLM |
 
 All serving points disable prefix caching and use seed 0, temperature 0, and ignored EOS. Each point expands to five
@@ -330,8 +328,7 @@ mean.
 - The dynamic-FP8 runs retain the complete layer inventory and checkpoint-declaration digest. They produce no
   W8A8-only table, geometric mean, or convergence claim until a separate tool freezes the eligible target set.
 - The H200 convergence diagnostic reports all three seeds, including failures.
-- Every serving image is resolved to a digest in the evidence manifest; the private V100 recipe tag must be resolved
-  on the authorized host before publication.
+- Every serving image is resolved to a digest in the evidence manifest.
 - The suite makes no TP8 kernel claim; datacenter kernel results retain the stated unsharded corpus boundary.
 - End-to-end speedup claims require matched hardware, model revision, engine revision, workload, and stock/Emmy arms.
 - The Gemma system table additionally requires matched scheduler settings, image digest/runtime revision, and a

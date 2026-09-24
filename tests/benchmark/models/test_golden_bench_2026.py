@@ -162,39 +162,6 @@ def test_native_fp8_large_layer_supplement_is_bounded(project_root) -> None:
     assert all(task.variant.params["budget"] == 8 for task in tasks)
 
 
-def test_serving_systems_are_pinned_and_controlled(project_root) -> None:
-    systems = {
-        "serving_deepseek_v4_flash_0731_v100x16": (
-            "deepseek-ai/DeepSeek-V4-Flash-0731",
-            "7872f01b1d1fe23eabc4c98b48bffcef5a386062",
-            "NVIDIA Tesla V100 SXM3 32GB",
-            16,
-        ),
-    }
-
-    for name, (model, revision, gpu, gpu_count) in systems.items():
-        tasks = enumerate_tasks([_experiment(project_root, name)])
-        assert len(tasks) == 15
-        repeats_by_point = {}
-        for task in tasks:
-            assert task.recipe.model.huggingface == model
-            assert task.recipe.model.revision == revision
-            assert task.recipe.deploy.gpu == gpu
-            assert task.recipe.deploy.gpu_count == gpu_count
-            benchmark = task.recipe.benchmark
-            assert benchmark.seed == 0
-            assert benchmark.temperature == 0
-            assert benchmark.ignore_eos is True
-            assert benchmark.repeats == 1
-            point = (benchmark.random_input_len, benchmark.random_output_len, benchmark.max_concurrency)
-            repeats_by_point.setdefault(point, set()).add(task.variant.params["repeat"])
-            assert "--no-enable-prefix-caching" in task.recipe.engine.llm.vllm.extra_args
-            if name != "serving_deepseek_v4_flash_0731_v100x16":
-                assert "@sha256:" in task.recipe.engine.llm.vllm.image
-        assert len(repeats_by_point) == 3
-        assert all(repeats == {0, 1, 2, 3, 4} for repeats in repeats_by_point.values())
-
-
 def test_large_layer_corpus_is_bounded_and_not_labeled_tp8(project_root) -> None:
     tasks = _kernel_tasks(project_root, "large-layer")
     assert len(tasks) == 8
