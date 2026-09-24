@@ -49,6 +49,7 @@ locking).
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import sqlite3
@@ -317,10 +318,21 @@ class SearchDB:
         self._path = Path(path) if path is not None else None
         if path is None:
             self._conn = sqlite3.connect(":memory:", isolation_level=None, check_same_thread=False)
-        else:
-            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            self._create_tables()
+            return
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        # One process at a time opens the file. Several `emmy` commands opening one file within
+        # milliseconds of each other (the suite's CLI subprocesses) would otherwise each see the tables
+        # missing and collide on CREATE TABLE, and a fresh file cannot switch to WAL while another
+        # connection is mid-transaction. The lock beside the file is held for the open only.
+        with open(f"{path}.lock", "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
             self._conn = sqlite3.connect(str(path), isolation_level=None, check_same_thread=False)
             self._conn.execute("PRAGMA journal_mode=WAL")
+            self._create_tables()
+
+    def _create_tables(self) -> None:
+        """The tables, created where missing; a file another emmy wrote is re-created empty."""
         self._conn.execute("PRAGMA foreign_keys = OFF")
         if self._mismatched():
             logger.warning("%s: tables written by another emmy — re-created empty (their rows are regenerable)", self._path)
