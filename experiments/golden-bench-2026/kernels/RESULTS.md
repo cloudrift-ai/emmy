@@ -117,6 +117,10 @@ The retuned target's three kernels, after:
   the sections below remain the current lane evidence for every other target.
 - The V100 walk still fails its strict gate on `down_proj + residual` — 7 of 524288 elements at flat index 413453,
   the same row and the same values #889 recorded. Nothing in this pass touches it.
+- The compiler half costs 28 recorded rows elsewhere: 19 in `DeepSeek-V4-Flash-0731/v100_sm70.yaml`, 6 in
+  `gemma-4-12B-it/rtx5090_sm120.yaml`, 3 in `Qwen3.8-27B-FP8/v100_sm70.yaml`. All are cut pieces whose schedule was
+  composed against the per-element grid the rank rule now declines, so the piece is a different kernel and carries
+  no rows. They need their cards to re-record; the strict decode names each one.
 
 ## Three cards — the gated MLP's staging lockout (2026-09-23)
 
