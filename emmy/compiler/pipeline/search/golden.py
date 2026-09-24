@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import tempfile
@@ -29,6 +30,9 @@ from emmy.compiler.pipeline.search.data.shape import ShapeKey
 from emmy.compiler.structural import digest
 from emmy.compiler.torch_wire import graph_from_wire, validate_program_pool
 from emmy.recipe.bundled import default_recipe_root
+
+logger = logging.getLogger(__name__)
+
 
 _HARDWARE_GOLDENS_DIR = Path(__file__).parent / "goldens"
 _RECIPE_GOLDEN_DIR = "golden"
@@ -1739,8 +1743,13 @@ def evidence_rows(gpu_name: str, compute_cap: tuple[int, int]) -> list[tuple[fro
 
     rows: list[tuple[frozenset, dict, float, str]] = []
     records = records_for_card(gpu_name, compute_cap)
+    measured = wrong_regime = 0
     for record in records:
-        if record.measurements is None or record.emmy_us <= 0 or not regime_live(record):
+        if record.measurements is None or record.emmy_us <= 0:
+            continue
+        measured += 1
+        if not regime_live(record):
+            wrong_regime += 1
             continue
         row = record.schedule_row
         split = any(family_of(k) == "REDUCE" and (plan := parse_reduce(v)) is not None and plan.needs_split for k, v in row.items())
@@ -1769,7 +1778,28 @@ def evidence_rows(gpu_name: str, compute_cap: tuple[int, int]) -> list[tuple[fro
             row, kernels = piece_row(row), sorted(replay.holders)
         rows.extend((replay.signatures[kernel], row, record.emmy_us, record.name) for kernel in kernels if kernel in replay.signatures)
     flush_identity_store()
+    _warn_unused_evidence(measured, wrong_regime, len(rows))
     return rows
+
+
+def _warn_unused_evidence(measured: int, wrong_regime: int, kept: int) -> None:
+    """Say so when measured rows are in scope and NONE of them became evidence.
+
+    A row can be in scope and still price nothing: recorded in another precision regime
+    (:func:`regime_live` — ``FAST_MATH`` has been enabled by default since #868, so a row recorded
+    at ``FAST_MATH: false`` is evidence only under ``EMMY_FAST_MATH=0``), or carrying an identity
+    the replay no longer mints. Either way the deploy falls through to the prior with the file
+    apparently loaded, which is the failure this warning exists to make visible: it cost a
+    golden-bench corpus its whole recorded schedule set without a single line of output."""
+    if kept or not measured:
+        return
+    regime = f", {wrong_regime} recorded in another precision regime" if wrong_regime else ""
+    logger.warning(
+        "golden scope holds %d measured row(s) but none is evidence on this card%s — the greedy will price every "
+        "fork from the prior. Check EMMY_FAST_MATH against the rows' recorded pins, then re-record what stays unused.",
+        measured,
+        regime,
+    )
 
 
 _DOCUMENT_MEMO: dict[Path, list[GoldenRecord]] = {}

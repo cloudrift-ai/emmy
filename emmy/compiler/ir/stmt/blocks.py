@@ -47,6 +47,19 @@ def carried_cells(body: Body) -> dict[str, tuple[int | Axis, ...]]:
     return out
 
 
+def _carries_note(carries: dict[str, tuple[int | Axis, ...]]) -> str:
+    """``# carries <name>[<extent>, ...]`` for the first line of a carrying loop.
+
+    Cell EXTENTS, not axis names: the cell axes are bound inside the loop, so their names are
+    not in scope on the line this prints on.
+    """
+
+    def cell(shape: tuple[int | Axis, ...]) -> str:
+        return ", ".join(str(d if isinstance(d, int) else d.extent) for d in shape)
+
+    return "# carries " + ", ".join(f"{name}[{cell(shape)}]" for name, shape in carries.items())
+
+
 def _source_suffix(axis: Axis) -> str:
     """Render ``" (of <source.name>)"`` when ``axis`` was carved out of a parent.
 
@@ -126,7 +139,16 @@ class Loop(Stmt):
 
     def pretty(self, indent: str = "") -> list[str]:
         head = f"{indent}for {self.axis.name} in 0..{self.axis.extent}{_source_suffix(self.axis)}"
-        return [head, *pretty_body(self.body, indent + INDENT)]
+        if not self.carries:
+            return [head, *pretty_body(self.body, indent + INDENT)]
+        # The bar marks the carrying loop as :func:`carried_cells` derives it: every step the
+        # state lives across, closed by the ``# commit`` line.
+        bar = indent + "|" + " " * (len(INDENT) - 1)
+        return [
+            f"{head}  {_carries_note(self.carries)}",
+            *pretty_body(self.body, bar),
+            *(f"{bar}# commit {name}" for name in self.carries),
+        ]
 
     def render(self, ctx: RenderCtx) -> list[str]:
 

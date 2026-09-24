@@ -42,6 +42,11 @@ command:
     export EMMY_TUNE_DB=$task_dir/autotune.db
     export EMMY_ONLINE_FILE=$task_dir/online.json
     export EMMY_CUBIN_CACHE=$task_dir/cubins
+    # Fast math is the compiler default since #868, and every golden beside this recipe records
+    # FAST_MATH: false. A row is evidence only in the precision regime it was measured in, so
+    # without this pin the replay lane loads the file and then prices every fork from the prior
+    # instead of from the schedules it committed. Pin the regime the rows were recorded in.
+    export EMMY_FAST_MATH=0
     if [ "$fp8_mma" = "1" ]; then
       export EMMY_FP8_MMA=1
     fi

@@ -31873,6 +31873,90 @@ configs:
       emmy_us: 665.6000018119812
       reference_us: 665.6000018119812
       reference_backend: same-input-greedy
+  - name: post-sym.k_linear_softmax_matmul_mean_reduce_3836f9.e906d92853d9.dynamic.52983282da5e.93a00d3a5f6f
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@map.2/inner: ''
+      REDUCE@map.2/inner.2/map.2/map.1/reduce: ''
+      WORK: ''
+      RASTER: ''
+    identity: 93a00d3a5f6f5c6a5001477294cb8298d5d37162a87e687c944003400abf40fd
+    measurements:
+      emmy_us: 198.65599274635315
+      reference_us: 198.91199469566345
+      reference_backend: same-input-greedy
+  - name: post-sym.k_linear_softmax_matmul_mean_reduce_3836f9.e906d92853d9.dynamic.52983282da5e.4831276fd67c
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@map.2/inner: ''
+      REDUCE@map.2/inner.2/map.2/map.1/reduce: ''
+      WORK: ''
+      RASTER: ''
+    identity: 4831276fd67c00ab39c17aee4dcc984d96f0b8dca575874f3e03335593d9484c
+    measurements:
+      emmy_us: 177.66399681568146
+      reference_us: 177.15199291706085
+      reference_backend: same-input-greedy
+  - name: post-sym.k_linear_softmax_matmul_mean_reduce_3836f9.e906d92853d9.dynamic.52983282da5e.93a00d3a5f6f
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@map.2/inner: r2
+      REDUCE@map.2/inner.2/map.2/map.1/reduce: ''
+      WORK: ''
+      RASTER: ''
+    identity: 93a00d3a5f6f5c6a5001477294cb8298d5d37162a87e687c944003400abf40fd
+    measurements:
+      emmy_us: 200.70399343967438
+      reference_us: 200.44800639152527
+      reference_backend: same-input-greedy
+  - name: post-sym.k_linear_softmax_matmul_mean_reduce_3836f9.e906d92853d9.dynamic.52983282da5e.4831276fd67c
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@map.2/inner: r2
+      REDUCE@map.2/inner.2/map.2/map.1/reduce: ''
+      WORK: ''
+      RASTER: ''
+    identity: 4831276fd67c00ab39c17aee4dcc984d96f0b8dca575874f3e03335593d9484c
+    measurements:
+      emmy_us: 179.45599555969238
+      reference_us: 178.94400656223297
+      reference_backend: same-input-greedy
+  - name: post-sym.k_linear_softmax_matmul_mean_reduce_3836f9.e906d92853d9.dynamic.52983282da5e.93a00d3a5f6f
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@map.2/inner: coop
+      REDUCE@map.2/inner.2/map.2/map.1/reduce: coop
+      WORK: t256
+      RASTER: ''
+    identity: 93a00d3a5f6f5c6a5001477294cb8298d5d37162a87e687c944003400abf40fd
+    measurements:
+      emmy_us: 20373.504638671875
+      reference_us: 20368.383407592773
+      reference_backend: same-input-greedy
+  - name: post-sym.k_linear_softmax_matmul_mean_reduce_3836f9.e906d92853d9.dynamic.52983282da5e.4831276fd67c
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@map.2/inner: coop
+      REDUCE@map.2/inner.2/map.2/map.1/reduce: coop
+      WORK: t256
+      RASTER: ''
+    identity: 4831276fd67c00ab39c17aee4dcc984d96f0b8dca575874f3e03335593d9484c
+    measurements:
+      emmy_us: 20284.41619873047
+      reference_us: 20288.511276245117
+      reference_backend: same-input-greedy
 - program: 4
   target:
     loop: 24
@@ -36337,6 +36421,66 @@ configs:
       emmy_us: 3.2527058878365684
       reference_us: 3.549866626660029
       reference_backend: same-input-greedy
+  - name: post16.k_linear_softmax_matmul_mean_reduce_8e1e80.ee59c5a2f07f.m16.9c098e32a2f6.249f4f26e062
+    bindings:
+      num_tokens: 16
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@map.2/inner: ''
+      REDUCE@map.2/inner.2/map.2/map.1/reduce: ''
+      WORK: ''
+      RASTER: ''
+    identity: 249f4f26e062b7c5a735c8e0cac53c2f8b1518f7b2e51250a46ed00e36a28ad6
+    measurements:
+      emmy_us: 6.087111102210151
+      reference_us: 5.905066430568695
+      reference_backend: same-input-greedy
+  - name: post16.k_linear_softmax_matmul_mean_reduce_8e1e80.ee59c5a2f07f.m16.9c098e32a2f6.bf0d1dd37ef4
+    bindings:
+      num_tokens: 16
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@map.2/inner: ''
+      REDUCE@map.2/inner.2/map.2/map.1/reduce: ''
+      WORK: ''
+      RASTER: ''
+    identity: bf0d1dd37ef4b327f7cc221c20bafddb830f6892984032b66f841a1100f1464c
+    measurements:
+      emmy_us: 5.790896456817101
+      reference_us: 5.734399954477945
+      reference_backend: same-input-greedy
+  - name: post16.k_linear_softmax_matmul_mean_reduce_8e1e80.ee59c5a2f07f.m16.9c098e32a2f6.249f4f26e062
+    bindings:
+      num_tokens: 16
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@map.2/inner: coop
+      REDUCE@map.2/inner.2/map.2/map.1/reduce: coop
+      WORK: t128
+      RASTER: ''
+    identity: 249f4f26e062b7c5a735c8e0cac53c2f8b1518f7b2e51250a46ed00e36a28ad6
+    measurements:
+      emmy_us: 357.03468322753906
+      reference_us: 376.8320083618164
+      reference_backend: same-input-greedy
+  - name: post16.k_linear_softmax_matmul_mean_reduce_8e1e80.ee59c5a2f07f.m16.9c098e32a2f6.bf0d1dd37ef4
+    bindings:
+      num_tokens: 16
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@map.2/inner: coop
+      REDUCE@map.2/inner.2/map.2/map.1/reduce: coop
+      WORK: t128
+      RASTER: ''
+    identity: bf0d1dd37ef4b327f7cc221c20bafddb830f6892984032b66f841a1100f1464c
+    measurements:
+      emmy_us: 358.39998722076416
+      reference_us: 376.3200044631958
+      reference_backend: same-input-greedy
 - program: 6
   target:
     loop: 95
@@ -38582,6 +38726,96 @@ configs:
     measurements:
       emmy_us: 4.607999963419778
       reference_us: 4.726153726761158
+      reference_backend: same-input-greedy
+  - name: post4096.k_linear_softmax_matmul_mean_reduce_366777.f0fc3dc05f5c.m4096.02e3b8ae01c2.6fb643322015
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@map.2/inner: ''
+      REDUCE@map.2/inner.2/map.2/map.1/reduce: ''
+      WORK: ''
+      RASTER: ''
+    identity: 6fb643322015d86e71acf7b5360d493a760cfd325a45f1b574a967602adff80c
+    measurements:
+      emmy_us: 1398.7840414047241
+      reference_us: 1399.8080492019653
+      reference_backend: same-input-greedy
+  - name: post4096.k_linear_softmax_matmul_mean_reduce_366777.f0fc3dc05f5c.m4096.02e3b8ae01c2.7017cd1ae7a6
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@map.2/inner: ''
+      REDUCE@map.2/inner.2/map.2/map.1/reduce: ''
+      WORK: ''
+      RASTER: ''
+    identity: 7017cd1ae7a6ae3c9d50bbbedba2cdbfd1a57c9b6d3cb93a9562ed4bad9ab35b
+    measurements:
+      emmy_us: 1569.7920322418213
+      reference_us: 1567.7440166473389
+      reference_backend: same-input-greedy
+  - name: post4096.k_linear_softmax_matmul_mean_reduce_366777.f0fc3dc05f5c.m4096.02e3b8ae01c2.6fb643322015
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@map.2/inner: r2
+      REDUCE@map.2/inner.2/map.2/map.1/reduce: ''
+      WORK: ''
+      RASTER: ''
+    identity: 6fb643322015d86e71acf7b5360d493a760cfd325a45f1b574a967602adff80c
+    measurements:
+      emmy_us: 1399.8080492019653
+      reference_us: 1400.8320569992065
+      reference_backend: same-input-greedy
+  - name: post4096.k_linear_softmax_matmul_mean_reduce_366777.f0fc3dc05f5c.m4096.02e3b8ae01c2.7017cd1ae7a6
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@map.2/inner: r2
+      REDUCE@map.2/inner.2/map.2/map.1/reduce: ''
+      WORK: ''
+      RASTER: ''
+    identity: 7017cd1ae7a6ae3c9d50bbbedba2cdbfd1a57c9b6d3cb93a9562ed4bad9ab35b
+    measurements:
+      emmy_us: 1568.76802444458
+      reference_us: 1565.6960010528564
+      reference_backend: same-input-greedy
+  - name: post4096.k_linear_softmax_matmul_mean_reduce_366777.f0fc3dc05f5c.m4096.02e3b8ae01c2.6fb643322015
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@map.2/inner: coop
+      REDUCE@map.2/inner.2/map.2/map.1/reduce: coop
+      WORK: t128
+      RASTER: ''
+    identity: 6fb643322015d86e71acf7b5360d493a760cfd325a45f1b574a967602adff80c
+    measurements:
+      emmy_us: 93172.73712158203
+      reference_us: 93161.46850585938
+      reference_backend: same-input-greedy
+  - name: post4096.k_linear_softmax_matmul_mean_reduce_366777.f0fc3dc05f5c.m4096.02e3b8ae01c2.7017cd1ae7a6
+    bindings:
+      num_tokens: 4096
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@map.2/inner: coop
+      REDUCE@map.2/inner.2/map.2/map.1/reduce: coop
+      WORK: t128
+      RASTER: ''
+    identity: 7017cd1ae7a6ae3c9d50bbbedba2cdbfd1a57c9b6d3cb93a9562ed4bad9ab35b
+    measurements:
+      emmy_us: 93368.31665039062
+      reference_us: 93340.6753540039
       reference_backend: same-input-greedy
 - program: 7
   target:
