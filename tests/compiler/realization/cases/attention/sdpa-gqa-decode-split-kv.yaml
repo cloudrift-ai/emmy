@@ -1,35 +1,96 @@
+# FlashAttention-2's split-KV on GQA decode: the key range splits across CTAs, a serial finalize merges them.
 compute_cap:
 - 12
 - 0
 programs:
 - inputs: [q, k, v]
-  outputs: [scaled_dot_product_attention]
+  outputs: [reshape_3]
   nodes:
   - id: k
     op: input
-    outputs: [[k, f16, [8, 32, 2048, 128]]]
+    outputs: [[k, f16, [1, 8, 4096, 128]]]
   - id: q
     op: input
-    outputs: [[q, f16, [8, 32, 2048, 128]]]
+    outputs: [[q, f16, [1, 64, 1, 128]]]
+  - id: reshape
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [1, 8, 8, 1, 128]}}
+    inputs: [q]
+    outputs: [[reshape, f16, [1, 8, 8, 1, 128]]]
+  - id: reshape_1
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [1, 8, 1, 4096, 128]}}
+    inputs: [k]
+    outputs: [[reshape_1, f16, [1, 8, 1, 4096, 128]]]
   - id: v
     op: input
-    outputs: [[v, f16, [8, 32, 2048, 128]]]
+    outputs: [[v, f16, [1, 8, 4096, 128]]]
+  - id: reshape_2
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [1, 8, 1, 4096, 128]}}
+    inputs: [v]
+    outputs: [[reshape_2, f16, [1, 8, 1, 4096, 128]]]
   - id: scaled_dot_product_attention
     op: torch.sdpa
     attrs: {is_causal: false, sliding_window: null, scale: null}
-    inputs: [q, k, v]
-    outputs: [[scaled_dot_product_attention, f16, [8, 32, 2048, 128]]]
-gpu_name: NVIDIA GeForce RTX 5090
+    inputs: [reshape, reshape_1, reshape_2]
+    outputs: [[scaled_dot_product_attention, f16, [1, 8, 8, 1, 128]]]
+  - id: reshape_3
+    op: torch.reshape
+    attrs: {shape: {__tuple__: [1, 64, 1, 128]}}
+    inputs: [scaled_dot_product_attention]
+    outputs: [[reshape_3, f16, [1, 64, 1, 128]]]
+configs:
+- program: 0
+  target:
+    loop: 0
+    origins:
+    - reshape
+    - reshape_1
+    - reshape_2
+    - reshape_3
+    - scaled_dot_product_attention
+  realizations:
+  - name: k_sdpa_e02804
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@map.1/twist: g16k
+    identity: a271708fab619cd5bd7f315b2852df2210a1c7aa27ebdb6621c8b808a3c97ec0
+  - name: k_sdpa_e02804.335a7769bd8d
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE@twist: mma_m16n8k16_f16_f32/f1x16/k4
+      TILE@twist.1/inner: mma_m16n8k16_f16_f32/f1x8/k4
+      REDUCE@twist: ''
+      REDUCE@twist.1/inner: ''
+      STAGE@twist: d2/smem-tma
+      STAGE@twist.1/inner: d2/smem-tma
+      WORK: w4x1
+      RASTER: ''
+    identity: 335a7769bd8da939d261a778e15ad037763feece430a5cae6fb736f9f984f801
+  - name: k_sdpa_e02804.e9ae8e5f2fed
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: e9ae8e5f2fed0d6251b897e14e6a97dd9eb5701a5fa3d75a9322ad17fd237b3d
 loops:
 - inputs: [k, q, v]
-  outputs: [scaled_dot_product_attention]
+  outputs: [reshape_3]
   nodes:
   - id: k
     op: input
-    outputs: [[k, f16, [8, 32, 2048, 128]]]
+    outputs: [[k, f16, [1, 8, 4096, 128]]]
   - id: q
     op: input
-    outputs: [[q, f16, [8, 32, 2048, 128]]]
+    outputs: [[q, f16, [1, 64, 1, 128]]]
   - id: scaled_dot_product_attention_scale
     op: constant
     attrs:
@@ -45,8 +106,8 @@ loops:
     outputs: [[scaled_dot_product_attention_scale, f16, [1]]]
   - id: v
     op: input
-    outputs: [[v, f16, [8, 32, 2048, 128]]]
-  - id: scaled_dot_product_attention
+    outputs: [[v, f16, [1, 8, 4096, 128]]]
+  - id: reshape_3
     op: loop
     attrs:
       body:
@@ -59,17 +120,17 @@ loops:
             dtype: null
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 256}, window: null}}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 8}, window: null}}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 2048}, window: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 8}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 2048}, window: null}}
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 4096}, window: null}}
                         body:
                           body:
                           - class: Loop
@@ -80,23 +141,27 @@ loops:
                                 - class: Load
                                   fields:
                                     names: {tuple: [in1]}
-                                    input: k
+                                    input: q
                                     index:
                                       tuple:
-                                      - {expr: {binary: {op: //, left: {var: a0}, right: {literal: {value: 32, dtype: int}}}}}
-                                      - {expr: {binary: {op: '%', left: {var: a0}, right: {literal: {value: 32, dtype: int}}}}}
-                                      - {expr: {var: a2}}
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - expr:
+                                          binary:
+                                            op: +
+                                            left: {binary: {op: '*', left: {literal: {value: 8, dtype: int}}, right: {var: a0}}}
+                                            right: {var: a1}
+                                      - {expr: {literal: {value: 0, dtype: int}}}
                                       - {expr: {var: a3}}
                                     dtype: null
                                 - class: Load
                                   fields:
                                     names: {tuple: [in2]}
-                                    input: q
+                                    input: k
                                     index:
                                       tuple:
-                                      - {expr: {binary: {op: //, left: {var: a0}, right: {literal: {value: 32, dtype: int}}}}}
-                                      - {expr: {binary: {op: '%', left: {var: a0}, right: {literal: {value: 32, dtype: int}}}}}
-                                      - {expr: {var: a1}}
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a0}}
+                                      - {expr: {var: a2}}
                                       - {expr: {var: a3}}
                                     dtype: null
                                 - class: Assign
@@ -119,7 +184,7 @@ loops:
                         seed: true
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 2048}, window: null}}
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 4096}, window: null}}
                         body:
                           body:
                           - class: Loop
@@ -130,23 +195,27 @@ loops:
                                 - class: Load
                                   fields:
                                     names: {tuple: [in3]}
-                                    input: k
+                                    input: q
                                     index:
                                       tuple:
-                                      - {expr: {binary: {op: //, left: {var: a0}, right: {literal: {value: 32, dtype: int}}}}}
-                                      - {expr: {binary: {op: '%', left: {var: a0}, right: {literal: {value: 32, dtype: int}}}}}
-                                      - {expr: {var: a2}}
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - expr:
+                                          binary:
+                                            op: +
+                                            left: {binary: {op: '*', left: {literal: {value: 8, dtype: int}}, right: {var: a0}}}
+                                            right: {var: a1}
+                                      - {expr: {literal: {value: 0, dtype: int}}}
                                       - {expr: {var: a5}}
                                     dtype: null
                                 - class: Load
                                   fields:
                                     names: {tuple: [in4]}
-                                    input: q
+                                    input: k
                                     index:
                                       tuple:
-                                      - {expr: {binary: {op: //, left: {var: a0}, right: {literal: {value: 32, dtype: int}}}}}
-                                      - {expr: {binary: {op: '%', left: {var: a0}, right: {literal: {value: 32, dtype: int}}}}}
-                                      - {expr: {var: a1}}
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a0}}
+                                      - {expr: {var: a2}}
                                       - {expr: {var: a5}}
                                     dtype: null
                                 - class: Assign
@@ -164,8 +233,6 @@ loops:
                             fields: {name: acc3, value: v5, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
                         unroll: false
                         seed: true
-                    - class: Assign
-                      fields: {name: v6, op: {elementwise: reciprocal}, args: {tuple: [acc3]}, dtype: null}
                     - class: Loop
                       fields:
                         axis: {class: Axis, fields: {name: a6, extent: {dim: 128}, window: null}}
@@ -173,7 +240,7 @@ loops:
                           body:
                           - class: Loop
                             fields:
-                              axis: {class: Axis, fields: {name: a7, extent: {dim: 2048}, window: null}}
+                              axis: {class: Axis, fields: {name: a7, extent: {dim: 4096}, window: null}}
                               body:
                                 body:
                                 - class: Loop
@@ -184,63 +251,71 @@ loops:
                                       - class: Load
                                         fields:
                                           names: {tuple: [in5]}
-                                          input: k
+                                          input: q
                                           index:
                                             tuple:
-                                            - {expr: {binary: {op: //, left: {var: a0}, right: {literal: {value: 32, dtype: int}}}}}
-                                            - {expr: {binary: {op: '%', left: {var: a0}, right: {literal: {value: 32, dtype: int}}}}}
-                                            - {expr: {var: a7}}
+                                            - {expr: {literal: {value: 0, dtype: int}}}
+                                            - expr:
+                                                binary:
+                                                  op: +
+                                                  left: {binary: {op: '*', left: {literal: {value: 8, dtype: int}}, right: {var: a0}}}
+                                                  right: {var: a1}
+                                            - {expr: {literal: {value: 0, dtype: int}}}
                                             - {expr: {var: a8}}
                                           dtype: null
                                       - class: Load
                                         fields:
                                           names: {tuple: [in6]}
-                                          input: q
+                                          input: k
                                           index:
                                             tuple:
-                                            - {expr: {binary: {op: //, left: {var: a0}, right: {literal: {value: 32, dtype: int}}}}}
-                                            - {expr: {binary: {op: '%', left: {var: a0}, right: {literal: {value: 32, dtype: int}}}}}
-                                            - {expr: {var: a1}}
+                                            - {expr: {literal: {value: 0, dtype: int}}}
+                                            - {expr: {var: a0}}
+                                            - {expr: {var: a7}}
                                             - {expr: {var: a8}}
                                           dtype: null
                                       - class: Assign
-                                        fields: {name: v7, op: {elementwise: multiply}, args: {tuple: [in5, in6]}, dtype: {dtype: f32}}
+                                        fields: {name: v6, op: {elementwise: multiply}, args: {tuple: [in5, in6]}, dtype: {dtype: f32}}
                                       - class: Accum
-                                        fields: {name: acc4, value: v7, op: {elementwise: add}, dtype: null, axes: {tuple: [a8]}, base: null}
+                                        fields: {name: acc4, value: v6, op: {elementwise: add}, dtype: null, axes: {tuple: [a8]}, base: null}
                                     unroll: false
                                     seed: true
                                 - class: Assign
-                                  fields: {name: v8, op: {elementwise: multiply}, args: {tuple: [acc4, in0]}, dtype: null}
+                                  fields: {name: v7, op: {elementwise: multiply}, args: {tuple: [acc4, in0]}, dtype: null}
                                 - class: Assign
-                                  fields: {name: v9, op: {elementwise: subtract}, args: {tuple: [v8, acc1]}, dtype: null}
-                                - {class: Assign, fields: {name: v10, op: {elementwise: exp}, args: {tuple: [v9]}, dtype: null}}
+                                  fields: {name: v8, op: {elementwise: subtract}, args: {tuple: [v7, acc1]}, dtype: null}
+                                - {class: Assign, fields: {name: v9, op: {elementwise: exp}, args: {tuple: [v8]}, dtype: null}}
                                 - class: Assign
-                                  fields: {name: v11, op: {elementwise: multiply}, args: {tuple: [v10, v6]}, dtype: null}
+                                  fields: {name: v10, op: {elementwise: divide}, args: {tuple: [v9, acc3]}, dtype: null}
                                 - class: Load
                                   fields:
                                     names: {tuple: [in7]}
                                     input: v
                                     index:
                                       tuple:
-                                      - {expr: {binary: {op: //, left: {var: a0}, right: {literal: {value: 32, dtype: int}}}}}
-                                      - {expr: {binary: {op: '%', left: {var: a0}, right: {literal: {value: 32, dtype: int}}}}}
+                                      - {expr: {literal: {value: 0, dtype: int}}}
+                                      - {expr: {var: a0}}
                                       - {expr: {var: a7}}
                                       - {expr: {var: a6}}
                                     dtype: null
                                 - class: Assign
-                                  fields: {name: v12, op: {elementwise: multiply}, args: {tuple: [in7, v11]}, dtype: {dtype: f32}}
+                                  fields: {name: v11, op: {elementwise: multiply}, args: {tuple: [in7, v10]}, dtype: {dtype: f32}}
                                 - class: Accum
-                                  fields: {name: acc5, value: v12, op: {elementwise: add}, dtype: null, axes: {tuple: [a7]}, base: null}
+                                  fields: {name: acc5, value: v11, op: {elementwise: add}, dtype: null, axes: {tuple: [a7]}, base: null}
                               unroll: false
                               seed: true
                           - class: Write
                             fields:
-                              output: scaled_dot_product_attention
+                              output: reshape_3
                               index:
                                 tuple:
-                                - {expr: {binary: {op: //, left: {var: a0}, right: {literal: {value: 32, dtype: int}}}}}
-                                - {expr: {binary: {op: '%', left: {var: a0}, right: {literal: {value: 32, dtype: int}}}}}
-                                - {expr: {var: a1}}
+                                - {expr: {literal: {value: 0, dtype: int}}}
+                                - expr:
+                                    binary:
+                                      op: +
+                                      left: {binary: {op: '*', left: {literal: {value: 8, dtype: int}}, right: {var: a0}}}
+                                      right: {var: a1}
+                                - {expr: {literal: {value: 0, dtype: int}}}
                                 - {expr: {var: a6}}
                               values: {tuple: [acc5]}
                               value_dtype: null
@@ -252,35 +327,6 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_sdpa_5bd98e
-    inputs: [scaled_dot_product_attention_scale, q, k, v]
-    outputs: [[scaled_dot_product_attention, f16, [8, 32, 2048, 128]]]
-configs:
-- program: 0
-  target:
-    loop: 0
-    origins:
-    - scaled_dot_product_attention
-  realizations:
-  - name: k_sdpa_f1535a.ee2d8228d3d8
-    bindings: {}
-    pins:
-      FAST_MATH: false
-  - name: k_sdpa_f1535a.ee2d8228d3d8.3a91721aafda
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      TILE@map.1/twist: mma_m16n8k16_f16_f32/f1x16/k2
-      TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x4/k4
-      REDUCE@map.1/twist: ''
-      REDUCE@map.1/twist.1/inner: ''
-      STAGE@map.1/twist: d2/smem-tma
-      STAGE@map.1/twist.1/inner: d2/smem-tma
-      WORK: w4x1
-      RASTER: gm8
-    identity: 21c874768e6457d00a972ba1c5fa7dde669e38c02790e53a1db0cddda7cbacbc
-    measurements:
-      emmy_us: 2809.056043624878
-      reference_us: 2799.9041080474854
-      reference_backend: same-input-greedy
+      name: k_sdpa_56d13f
+    inputs: [scaled_dot_product_attention_scale, k, q, v]
+    outputs: [[reshape_3, f16, [1, 64, 1, 128]]]
