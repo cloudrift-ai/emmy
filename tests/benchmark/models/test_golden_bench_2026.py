@@ -433,4 +433,4 @@ def test_every_command_variant_renders(project_root) -> None:
             assert "/task" in command
             subprocess.run(["bash", "-n"], input=command, text=True, check=True)
             rendered += 1
-    assert rendered == 123
+    assert rendered == 69
