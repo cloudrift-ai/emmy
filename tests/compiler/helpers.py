@@ -146,7 +146,7 @@ def has_cuda_toolchain() -> bool:
 
 requires_cuda = pytest.mark.skipif(
     not has_cuda_toolchain(),
-    reason="CUDA not available (need the emmy_runtime extension + GPU + nvcc)",
+    reason="CUDA not available (need the emmy.emmy_runtime extension + GPU + nvcc)",
 )
 
 
@@ -211,7 +211,7 @@ def dtype_input_scale(dtype) -> float:
 def skip_if_no_cuda() -> None:
     """Skip the current test when Emmy cannot compile CUDA kernels."""
     if not has_cuda_toolchain():
-        pytest.skip("CUDA not available (need the emmy_runtime extension + GPU + nvcc)")
+        pytest.skip("CUDA not available (need the emmy.emmy_runtime extension + GPU + nvcc)")
 
 
 def matmul_graph(m: int, k: int, n: int):

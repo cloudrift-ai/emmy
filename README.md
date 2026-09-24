@@ -13,9 +13,10 @@ pip install emmy-ml          # the CLI, with the recommended recipes bundled
 emmy --version
 ```
 
-The compiler needs its own extra (`pip install "emmy-ml[compile]"` — torch, transformers, cppyy) and the runtime
-extension that launches its kernels (`pip install emmy-runtime`, the wheel built from `crates/emmy-runtime-py`). To
-hack on emmy itself, clone instead:
+The compiler needs its own extra (`pip install "emmy-ml[compile]"` — torch, transformers, cppyy). The wheel carries
+the runtime extension that launches its kernels (`emmy.emmy_runtime`, built from `crates/emmy-runtime-py`) for Linux
+x86_64; on another platform the sdist builds it when a Rust toolchain is present and installs pure without one,
+which keeps every command that needs no GPU working. To hack on emmy itself, clone instead:
 
 ```bash
 git clone https://github.com/cloudrift-ai/emmy.git
@@ -383,9 +384,8 @@ emmy vm delete cloudrift --instance-id <id>
 make test      # run the whole pytest suite — takes many minutes, run it once when finishing a PR
 make lint      # ruff check + format check
 make format    # auto-fix
-make wheel     # build the wheel into dist/
-make runtime-wheel # build the runtime extension's wheel into dist/
-make pypi-dist # dry-run the exact PyPI sdist + wheel build of both distributions into dist/
+make wheel     # build the sdist and this host's wheel into dist/
+make pypi-dist # dry-run the exact PyPI sdist + wheel build into dist/
 ```
 
 ### Release
@@ -397,9 +397,9 @@ so a failed upload leaves nothing behind. Publishing a GitHub release by hand wo
 `pyproject.toml`. Lint and the full test suite run in pull-request checks, independently of publication.
 
 Pull requests run `make pypi-dist` in a bare Python 3.13 job. The same target installs the minimal release-build
-dependencies, stages the distribution tree, and builds every artifact the publishing workflow uploads: the pure-Python
-`emmy-ml` sdist and wheel, and the `emmy-runtime` sdist plus one wheel per platform (a compiled extension, so a
-platform is a separate build). `emmy-ml` pins the runtime version exactly: the plan format couples them.
+dependencies, stages the distribution tree, and builds both artifacts the publishing workflow uploads: the sdist and
+one wheel for the runner's platform, retagged by `auditwheel` to the manylinux baseline its symbols allow, since the
+wheel carries the runtime extension and a compiled extension makes a wheel platform-specific.
 
 `scripts/prepare_dist.py` stages the tree for a distribution build: `--recipes` copies runnable recipe YAML plus all
 recipe-local model goldens into the package (`make wheel` runs this), and `--readme` rewrites this file's repo-relative
@@ -475,7 +475,7 @@ require CloudRift organization access.
 - [crates/emmy-runtime/](crates/emmy-runtime/) — The Rust runtime: the executor behind every launch, the standalone
   pack loader and cached generation (design, hosts, and qualification in
   [ARCHITECTURE.md](crates/emmy-runtime/ARCHITECTURE.md)); [crates/emmy-runtime-py/](crates/emmy-runtime-py/) is
-  its in-process host, the `emmy_runtime` extension the compiler backend imports
+  its in-process host, the `emmy.emmy_runtime` extension setuptools-rust builds into the package
 - [docs/](docs/) — Docusaurus user-docs site (getting started, benchmarking, custom configurations, deployment)
 - [tests/](tests/) — pytest tests (see [ARCHITECTURE.md](tests/ARCHITECTURE.md))
   - [compiler/passes/](tests/compiler/passes/) — compiler pass tests (see [ARCHITECTURE.md](tests/compiler/passes/ARCHITECTURE.md))

@@ -16,8 +16,8 @@ cuda/
 └── _bench_worker.py  # the SIGKILL-able child that hosts benches and the torch comparison
 ```
 
-Execution itself lives in the Rust runtime (`crates/emmy-runtime`, hosted in-process through the `emmy_runtime`
-extension built from `crates/emmy-runtime-py`): the memory layout, launches, symbolic geometry, TMA descriptors,
+Execution itself lives in the Rust runtime (`crates/emmy-runtime`, hosted in-process through the
+`emmy.emmy_runtime` extension built from `crates/emmy-runtime-py`): the memory layout, launches, symbolic geometry, TMA descriptors,
 graphs, events and the hung-launch deadline. This package allocates the memory — torch tensors the runtime borrows —
 and turns host arrays into the bytes a buffer starts from.
 

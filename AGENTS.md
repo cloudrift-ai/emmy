@@ -33,7 +33,7 @@ relevant `ARCHITECTURE.md` before answering.
 
 - Python 3.12+ with `venv`
 - A Rust toolchain (`cargo`): compiled programs execute through the Rust runtime, which `make setup` builds into the
-  venv as the `emmy_runtime` extension; use the README architecture index for the runtime's design.
+  package as the `emmy.emmy_runtime` extension; use the README architecture index for the runtime's design.
 - `make setup` to create the virtual environment and install dependencies
 - Docker and Docker Compose for local deployments
 - `HF_TOKEN` environment variable for HuggingFace model downloads

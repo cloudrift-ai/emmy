@@ -246,7 +246,7 @@ def _resolve_devices(args) -> list[int | None]:
 
 def _require_homogeneous_devices(devices: list[int | None]) -> None:
     try:
-        import emmy_runtime  # noqa: F401, PLC0415
+        from emmy import emmy_runtime  # noqa: F401, PLC0415
     except Exception:  # noqa: BLE001 — the live tune path will report the missing runtime
         return
     identities = {}
@@ -267,7 +267,7 @@ def _require_homogeneous_devices(devices: list[int | None]) -> None:
 
 def _device_properties(device_id: int | None) -> dict:
     """CUDA identity for one explicit ordinal (or the active ordinal): ``major``, ``minor``, ``name``."""
-    import emmy_runtime
+    from emmy import emmy_runtime
 
     dev = emmy_runtime.Device(0 if device_id is None else device_id)
     major, minor = dev.compute_capability()

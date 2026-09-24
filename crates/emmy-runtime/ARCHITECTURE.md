@@ -6,7 +6,7 @@ The crate has no HTTP, tokenizer, model framework, compiler, or Python dependenc
 
 ## Two hosts, one library
 
-- **In-process** through `crates/emmy-runtime-py`, the `emmy_runtime` extension (PyO3, `abi3`) that
+- **In-process** through `crates/emmy-runtime-py`, the `emmy.emmy_runtime` extension (PyO3, `abi3`) that
   `emmy/compiler/backend/cuda/program.py` imports. It exposes `Device` (one context and one stream per process, its
   properties, a context synchronize that surfaces a sticky error, kernel resource attributes read off a cubin, pointer
   attributes), `Program` (a parsed plan and its layout per environment) and `Executor` (load with lent or owned
@@ -117,7 +117,8 @@ existing retry policy and keeps healthy contexts after ordinary compiler errors.
 extension. GPU tests cover ordered launches, constants, zeroing, graph replay, stable input updates, execution with no
 Python/compiler on PATH, clean recovery after a hard deadline or CUDA error, and the hung-launch deadline. `make
 lint-native` runs Rustfmt and Clippy. Pull-request CI runs the CPU Rust gates; GPU qualification remains a separate
-hardware check. The extension is built into the venv by `make setup` (`maturin develop`).
+hardware check. The extension is built into the package by `pip install` through setuptools-rust (optional at
+build time, so a host without cargo installs pure); `make setup` is that install.
 
 ## Cached generation
 

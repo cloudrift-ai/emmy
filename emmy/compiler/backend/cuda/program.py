@@ -2,7 +2,7 @@
 
 Python compiles — nvcc into the content-addressed cubin cache, the execution plan, the host
 bytes every input and constant starts from — and hands the runtime (``crates/emmy-runtime``,
-hosted in-process through the ``emmy_runtime`` extension) the plan's JSON form, one cubin path
+hosted in-process through the ``emmy.emmy_runtime`` extension) the plan's JSON form, one cubin path
 per kernel, those bytes, and the memory every region of the program's layout lives in. The
 runtime owns the launches: it resolves symbolic geometry, encodes TMA descriptors, captures
 graphs, times events and polls a hung launch against a deadline. Nothing in this module holds
@@ -34,10 +34,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import emmy_runtime
 import numpy as np
 
-from emmy import config
+from emmy import config, emmy_runtime
 from emmy.compiler.backend import BenchmarkResult, LaunchTime, RunResult
 from emmy.compiler.backend.cuda import nvcc
 from emmy.compiler.backend.cuda.device import device

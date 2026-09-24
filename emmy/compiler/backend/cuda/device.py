@@ -13,7 +13,7 @@ def device():
     """The process's CUDA context, created on first use."""
     global _DEVICE
     if _DEVICE is None:
-        import emmy_runtime  # noqa: PLC0415 — the extension loads the driver lazily
+        from emmy import emmy_runtime  # noqa: PLC0415 — the extension loads the driver lazily
 
         _DEVICE = emmy_runtime.Device(0)
     return _DEVICE

@@ -309,7 +309,7 @@ def _is_cuda_item(item) -> bool:
     return "[cuda" in nid or "-cuda-" in nid or nid.endswith("-cuda]")
 
 
-_NO_TOOLCHAIN = "CUDA not available (need the emmy_runtime extension + GPU + nvcc)"
+_NO_TOOLCHAIN = "CUDA not available (need the emmy.emmy_runtime extension + GPU + nvcc)"
 
 
 @functools.cache
@@ -317,7 +317,7 @@ def _cuda_unavailable_reason() -> str | None:
     """Why Emmy CUDA tests cannot run here, or ``None`` when they can.
 
     A visible device is not sufficient: Emmy compiles its kernels with the CUDA
-    toolkit's ``nvcc`` binary, and launches them through the ``emmy_runtime``
+    toolkit's ``nvcc`` binary, and launches them through the ``emmy.emmy_runtime``
     extension.  Cached — the answer is a property of the host, and the probe
     touches the driver.
     """

@@ -96,6 +96,9 @@ jobs:
         with:
           python-version: "3.13"
 
+      # The wheel carries the runtime extension, built with cargo.
+      - uses: dtolnay/rust-toolchain@stable
+
       - name: Build with the release path without publishing
         run: make pypi-dist
 

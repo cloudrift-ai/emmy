@@ -41,7 +41,7 @@ def test_onecat_image_is_reproducibly_pinned(project_root) -> None:
     assert "TORCH_CUDA_ARCH_LIST=7.0" in dockerfile
     assert "FLASH_ATTN_V100_CUDA_ARCH_LIST=7.0" in dockerfile
     assert "catboost==1.2.10" in dockerfile
-    assert "emmy_runtime-*.whl" in dockerfile
+    assert "emmy_ml-*.tar.gz" in dockerfile
     assert "apt-get install -y --no-install-recommends curl" in dockerfile
     assert "strip --strip-unneeded" in dockerfile
     assert "VLLM_SM70_FLASHQLA_ORIGINAL_PREFILL=0" in dockerfile

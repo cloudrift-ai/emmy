@@ -47,17 +47,14 @@ venv/.setup-complete: pyproject.toml
 		echo "Creating virtual environment..."; \
 		python3.12 -m venv venv --prompt "emmy"; \
 	fi
-	@echo "Installing Python dependencies..."
+	@echo "Installing Python dependencies (builds the runtime extension with cargo)..."
 	./venv/bin/pip install -e ".[dev]"
-	@echo "Building the runtime extension..."
-	VIRTUAL_ENV="$(CURDIR)/venv" ./venv/bin/maturin develop --release -m crates/emmy-runtime-py/Cargo.toml
 	@touch $@
 
 setup-ci:
 	python3.13 -m venv venv --prompt "emmy"
 	./venv/bin/pip install --index-url https://download.pytorch.org/whl/cpu torch
-	./venv/bin/pip install -e ".[compile,test,image]" "maturin>=1.5,<2"
-	VIRTUAL_ENV="$(CURDIR)/venv" ./venv/bin/maturin develop --release -m crates/emmy-runtime-py/Cargo.toml
+	./venv/bin/pip install -e ".[compile,test,image]"
 	@touch venv/.setup-complete
 
 lint: setup
@@ -129,25 +126,27 @@ VLLM_VERSION ?= v0.23.0
 VLLM_BASE_IMAGE ?= vllm/vllm-openai:$(VLLM_VERSION)
 VLLM_EMMY_TAG ?= cloudriftai/vllm-emmy:$(patsubst v%,%,$(VLLM_VERSION))-$(shell git rev-parse --short HEAD)
 
+# Both artifacts: the wheel carries this host's build of the runtime extension, the sdist is what
+# the serving images build from, against their own Python and libc.
 wheel: setup
 	./venv/bin/pip install --quiet build
 	./venv/bin/python scripts/prepare_dist.py --recipes
-	rm -rf dist build && ./venv/bin/python -m build --wheel -o dist/ .
-
-# The runtime ships as its own distribution (a compiled extension, one wheel per platform);
-# ``emmy-ml`` pins it exactly because the plan format couples them.
-runtime-wheel: setup
-	./venv/bin/maturin build --release -m crates/emmy-runtime-py/Cargo.toml -o dist/
+	rm -rf dist build && ./venv/bin/python -m build -o dist/ .
 
 # The release runner starts with a bare Python. Keep its complete build contract in one
 # target so pull-request CI can exercise the exact same dependency install and staging path.
 EMMY_PYPI_PYTHON ?= python3
 pypi-dist:
-	$(EMMY_PYPI_PYTHON) -m pip install --disable-pip-version-check build PyYAML "maturin>=1.5,<2"
+	$(EMMY_PYPI_PYTHON) -m pip install --disable-pip-version-check build PyYAML auditwheel patchelf
 	$(EMMY_PYPI_PYTHON) scripts/prepare_dist.py --recipes --readme
 	rm -rf dist build
 	$(EMMY_PYPI_PYTHON) -m build
-	$(EMMY_PYPI_PYTHON) -m maturin build --release --sdist -m crates/emmy-runtime-py/Cargo.toml -o dist/
+	# The wheel embeds the runtime extension, so it is platform-specific: retag it for the manylinux
+	# baseline its symbols allow (PyPI rejects a bare linux tag), keeping only the repaired wheel.
+	# auditwheel finds patchelf on PATH, and pip put it beside the interpreter.
+	PATH="$$($(EMMY_PYPI_PYTHON) -c 'import os, sys; print(os.path.dirname(sys.executable))'):$$PATH" \
+	  $(EMMY_PYPI_PYTHON) -m auditwheel repair -w dist/ dist/emmy_ml-*-linux_x86_64.whl
+	rm dist/emmy_ml-*-linux_x86_64.whl
 
 # Image tags embed the short sha; an empty rev-parse (e.g. root over a synced tree without
 # git safe.directory) would silently tag "...:0.23.0-" — fail loudly instead.

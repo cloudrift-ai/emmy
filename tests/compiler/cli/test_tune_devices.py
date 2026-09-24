@@ -68,7 +68,7 @@ def test_gpus_below_one_exits() -> None:
 
 
 def _fake_runtime(monkeypatch, identity) -> None:
-    """Install a fake ``emmy_runtime`` whose ``Device(ordinal)`` reports ``identity(ordinal)``
+    """Install a fake ``emmy.emmy_runtime`` whose ``Device(ordinal)`` reports ``identity(ordinal)``
     as ``((major, minor), name)``."""
 
     class Device:
@@ -81,7 +81,11 @@ def _fake_runtime(monkeypatch, identity) -> None:
         def name(self):
             return identity(self.ordinal)[1]
 
-    monkeypatch.setitem(__import__("sys").modules, "emmy_runtime", SimpleNamespace(Device=Device))
+    import emmy
+
+    fake = SimpleNamespace(Device=Device)
+    monkeypatch.setitem(__import__("sys").modules, "emmy.emmy_runtime", fake)
+    monkeypatch.setattr(emmy, "emmy_runtime", fake, raising=False)
 
 
 def test_heterogeneous_devices_rejected(monkeypatch) -> None:

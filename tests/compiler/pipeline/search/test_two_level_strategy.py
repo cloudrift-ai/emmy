@@ -209,8 +209,7 @@ def test_single_node_slice_declares_unregistered_input_boundaries_in_the_runtime
     # here, and the layout would refuse it because no CUDA launch produces it.
     import json
 
-    import emmy_runtime
-
+    from emmy import emmy_runtime
     from emmy.compiler.backend.plan import plan_to_dict
 
     layout = emmy_runtime.Program(json.dumps(plan_to_dict(plan))).layout()
