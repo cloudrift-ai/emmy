@@ -27,6 +27,7 @@ async fn main() -> Result<()> {
     let worker_ready = ready.clone();
     let worker_shutdown = shutdown.clone();
     let worker = std::thread::spawn(move || {
+        let _readiness = Readiness(worker_ready.clone());
         match Worker::load(&args.artifact, args.max_model_len) {
             Ok(worker) => worker.run(receiver, worker_ready, worker_shutdown),
             Err(e) => eprintln!("native startup failed: {e:#}"),
@@ -44,4 +45,9 @@ async fn main() -> Result<()> {
     axum::serve(listener, router(app)).with_graceful_shutdown(signal).await?;
     tokio::task::spawn_blocking(move || worker.join()).await?.map_err(|_| anyhow::anyhow!("runtime thread panicked"))?;
     Ok(())
+}
+
+struct Readiness(Arc<AtomicBool>);
+impl Drop for Readiness {
+    fn drop(&mut self) { self.0.store(false, Ordering::Release); }
 }

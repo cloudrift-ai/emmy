@@ -29,6 +29,8 @@ pub struct Request {
     pub top_p: Option<f64>,
     pub seed: Option<u64>,
     pub stop: Option<Stop>,
+    pub repetition_penalty: Option<f64>,
+    pub logprobs: Option<usize>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -52,6 +54,9 @@ impl Request {
         let p = self.top_p.unwrap_or(1.0);
         if !t.is_finite() || t < 0.0 || !p.is_finite() || p <= 0.0 || p > 1.0 {
             return Err(ApiError::invalid("invalid temperature or top_p"));
+        }
+        if self.repetition_penalty.is_some_and(|p| p != 1.0) || self.logprobs.is_some() {
+            return Err(ApiError::invalid("repetition penalties and logprobs are unsupported"));
         }
         let stops = self.stops();
         if stops.len() > MAX_STOP_STRINGS || stops.iter().any(|s| s.is_empty() || s.len() > MAX_STOP_BYTES) {

@@ -95,3 +95,29 @@ fn send(job: &Job, mut item: Output, shutdown: &AtomicBool) -> bool {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::Request;
+    use tokio::sync::Semaphore;
+
+    #[test]
+    fn bounded_output_cancels_without_releasing_admission_early() {
+        let semaphore = Arc::new(Semaphore::new(1));
+        let (output, receiver) = mpsc::channel(1);
+        let job = Job { request:serde_json::from_str::<Request>(r#"{"model":"test","prompt":"hi"}"#).unwrap(), output,
+            _permit:semaphore.clone().try_acquire_owned().unwrap() };
+        job.output.try_send(Output::Started(1)).unwrap_or_else(|_| panic!("empty channel"));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let flag = shutdown.clone();
+        let worker = std::thread::spawn(move || {
+            assert!(!send(&job, Output::Text("blocked".into()), &flag));
+            assert_eq!(job._permit.num_permits(), 1);
+        });
+        assert_eq!(semaphore.available_permits(), 0);
+        drop(receiver);
+        worker.join().unwrap();
+        assert_eq!(semaphore.available_permits(), 1);
+    }
+}

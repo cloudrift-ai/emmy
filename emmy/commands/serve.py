@@ -72,7 +72,7 @@ def _add_own_flags(parser, *, suppress_defaults: bool) -> None:
         default=d(False),
         help="Start the server, run `vllm bench serve` against it, print results, shut down.",
     )
-    parser.add_argument("--max-concurrency", type=int, default=d(32), help="Bench client concurrency (with --bench).")
+    parser.add_argument("--max-concurrency", type=int, default=d(None), help="Bench client concurrency (with --bench).")
     parser.add_argument("--num-prompts", type=int, default=d(256), help="Bench request count (with --bench).")
     parser.add_argument("--random-input-len", type=int, default=d(512), help="Bench tokens per request (with --bench).")
     parser.add_argument(
@@ -496,7 +496,7 @@ def handle_serve(args):
     bench_cmd = build_bench_cmd(
         model,
         port=port,
-        max_concurrency=args.max_concurrency,
+        max_concurrency=args.max_concurrency if args.max_concurrency is not None else 32,
         num_prompts=args.num_prompts,
         random_input_len=args.random_input_len,
         seed=args.bench_seed,

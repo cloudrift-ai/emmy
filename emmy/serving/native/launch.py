@@ -73,7 +73,7 @@ def launch(args, arguments):
         raise ValueError("golden and strict evidence apply to preparation, not an existing native pack")
     root = opts.native_pack or Path(tempfile.gettempdir()) / "emmy-native-prepare"
     serve = command(model, opts, root)
-    bench = build_bench_cmd(model, port=str(opts.port), max_concurrency=args.max_concurrency, num_prompts=args.num_prompts,
+    bench = build_bench_cmd(model, port=str(opts.port), max_concurrency=args.max_concurrency if args.max_concurrency is not None else 1, num_prompts=args.num_prompts,
                            random_input_len=args.random_input_len, seed=args.bench_seed, generate=True,
                            random_output_len=args.random_output_len)
     if args.dry_run:
