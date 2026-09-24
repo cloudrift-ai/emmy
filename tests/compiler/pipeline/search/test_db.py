@@ -4,6 +4,7 @@ file another emmy wrote — a writer re-creates every table, a reader refuses it
 
 from __future__ import annotations
 
+import multiprocessing
 import sqlite3
 from dataclasses import replace
 
@@ -246,3 +247,25 @@ def test_a_file_another_emmy_wrote_is_re_created_whole_by_a_writer_and_refused_b
     ro = SearchDB.open_readonly(path)
     assert [(r.stats.median, r.knobs["WORK"]) for r in ro.iter_perf_rows()] == [(60.0, "w1x8")]
     ro.close()
+
+
+def _open_together(barrier, path: str) -> None:
+    barrier.wait()
+    SearchDB(path=path)
+
+
+def test_processes_opening_one_fresh_file_at_once_all_succeed(tmp_path):
+    """The suite's CLI subprocesses open the same file within milliseconds of each other. Every one
+    must succeed: the first creates the tables under the write lock, the others wait for it and find
+    them, instead of each seeing no tables and colliding on CREATE TABLE."""
+    path = tmp_path / "autotune.db"
+    ctx = multiprocessing.get_context("spawn")
+    barrier = ctx.Barrier(6)
+    procs = [ctx.Process(target=_open_together, args=(barrier, str(path))) for _ in range(6)]
+    for proc in procs:
+        proc.start()
+    for proc in procs:
+        proc.join(120)
+    assert [proc.exitcode for proc in procs] == [0] * 6
+    tables = {row[0] for row in sqlite3.connect(path).execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert {"kernel", "perf"} <= tables
