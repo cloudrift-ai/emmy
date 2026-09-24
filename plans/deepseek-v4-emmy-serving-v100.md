@@ -246,6 +246,13 @@ reduce is gone from this model; the prior's cooperative picks cost 10-100× unti
 pinned by hand. Next: the compiler defect, then the Qwen3.8 goldens and the other stale goldens each need the same
 restamp on their card.
 
+**Rebased onto main at #883 (2026-09-23).** #883's split of a fused grid pair re-shapes the two residual pieces of
+each post twin's cut (an extent-16,384 axis read as quotient and remainder by 4,096 becomes 4 over 4,096), so the
+eleven rows on the old six kernels — serial, the pinned register splits, cooperative — are dropped, not carried: 454
+rows, 437 live in the evidence index, 318 of 335 kernels covered. The new pieces are one-arm forks the election passes
+with a warning; their speed is unmeasured and the three cut receipts still carry the old pieces' time. Next on the
+host: record post-sym, post16 and post4096 on main.
+
 ## Operations handoff
 
 The host's address is deliberately absent from this repo; it lives in the operator's notes and is used only inside

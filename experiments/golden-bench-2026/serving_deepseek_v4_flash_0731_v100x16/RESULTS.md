@@ -570,6 +570,21 @@ under the 4.8 ms of the old file. Every other repository golden except Qwen3.5-1
 `test_stored_targets_are_the_fresh_lowering`, decodes each golden's stored targets against a fresh lowering of its own
 programs, with those files as strict xfails until each is restamped on its card.
 
+**Rebased onto main at #883 (2026-09-23).** #883 splits a cut piece's grid coordinate that its operands read only as a
+quotient and a remainder into the two axes it stands for, and the two residual pieces of each post twin's cut — the
+`k_linear_softmax_matmul_mean_reduce` kernel at widths 16 and 4,096 and in the symbolic twin — are exactly that shape:
+their extent-16,384 axis, read as `a1 / 4096` beside `a1 % 4096`, is now an axis of 4 over an axis of 4,096, so they
+are new kernels under new identities. The eleven rows that named the old six — the serial rows, the register splits
+pinned above, the cooperative rows — describe kernels the compiler no longer mints: five stopped decoding and all
+eleven left the evidence index, and they are dropped rather than carried, since a measurement of a kernel with another
+body says nothing about the new one. The single-token post twin's twenty pieces have one free axis each and are
+untouched. The committed file holds 454 measured rows over the same 149 targets; the deploy's evidence index reads 437
+of them, and 318 of the 335 kernels the nine twins mint have a measured row. The six new pieces open one-arm forks,
+the kind the strict election passed with a warning for the eleven single-token pieces above, so the twins still elect
+from the file, but each post twin runs those two pieces at whatever the one arm is until they are measured on the
+card, and the three cut receipts that price the routes carry the old pieces' time. Next on the host: record the three
+post leads on main.
+
 
 ### The M=1 decode tier: what broke and what now guards it
 
