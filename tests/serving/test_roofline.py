@@ -1,6 +1,7 @@
 """Boot roofline audit (serving/roofline.py) — decision logic and advisory-only contract.
 Pure CPU: the CUDA-touching measurement helpers are stubbed."""
 
+import contextlib
 import logging
 import types
 
@@ -194,7 +195,7 @@ def test_time_program_us_stops_after_a_warmup_that_blows_the_budget(monkeypatch)
     the V100 incident ran one such program four times and held the boot for six hours."""
     _fake_timer(monkeypatch, [2.0])
     runs = []
-    program = types.SimpleNamespace(run_once=lambda: runs.append(1))
+    program = types.SimpleNamespace(on_torch_stream=contextlib.nullcontext, run_once=lambda: runs.append(1))
     assert roofline.time_program_us(program, budget_us=1000.0) == pytest.approx(2000.0)
     assert len(runs) == 1, "a program past its budget is run once, not four times"
 
@@ -202,7 +203,7 @@ def test_time_program_us_stops_after_a_warmup_that_blows_the_budget(monkeypatch)
 def test_time_program_us_medians_the_timed_runs_inside_the_budget(monkeypatch):
     _fake_timer(monkeypatch, [0.1, 0.3, 0.2, 0.4])
     runs = []
-    program = types.SimpleNamespace(run_once=lambda: runs.append(1))
+    program = types.SimpleNamespace(on_torch_stream=contextlib.nullcontext, run_once=lambda: runs.append(1))
     assert roofline.time_program_us(program, budget_us=1000.0) == pytest.approx(300.0)
     assert len(runs) == 4, "warmup plus three timed runs"
 

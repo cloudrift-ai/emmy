@@ -118,11 +118,16 @@ def time_program_us(program, *, reps: int = 3, budget_us: float | None = None) -
     A warmup carries one-time cost (module load, allocator growth) the timed runs do not, so a
     program near the budget can bail on an inflated number. That is the deliberate direction: the
     threshold is 10x a conservative floor, the warning is advisory and says to tune the twins, and
-    a boot that never finishes tells the operator nothing at all."""
-    warmup_us = _time_ms(program.run_once) * 1e3
-    if budget_us is not None and warmup_us > budget_us:
-        return warmup_us
-    times = [_time_ms(program.run_once) * 1e3 for _ in range(reps)]
+    a boot that never finishes tells the operator nothing at all.
+
+    The launches go on torch's current stream, where the events record: un-adopted, they would
+    land on the runtime's own stream, unmeasured, and stay in flight there after the audit
+    returns — the first request's launches then raced them on the buffers the programs share."""
+    with program.on_torch_stream():
+        warmup_us = _time_ms(program.run_once) * 1e3
+        if budget_us is not None and warmup_us > budget_us:
+            return warmup_us
+        times = [_time_ms(program.run_once) * 1e3 for _ in range(reps)]
     return sorted(times)[len(times) // 2]
 
 
