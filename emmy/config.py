@@ -578,7 +578,7 @@ def pack_dir() -> Path | None:
 
 
 def nvcc_disabled() -> bool:
-    """``EMMY_NO_NVCC`` — force the cupy/NVRTC path instead of offline nvcc."""
+    """``EMMY_NO_NVCC`` — declare nvcc unavailable (every kernel compile then fails loudly)."""
     return _bool(NO_NVCC)
 
 

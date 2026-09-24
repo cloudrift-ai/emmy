@@ -17,7 +17,7 @@ What differs is `compile()` — how far the backend lowers the graph:
 |----------------|----------------------------------------------------|----------------------|
 | `NumpyBackend` | returns the graph as-is (no-op)                    | default `Backend.run`|
 | `LoopBackend`  | runs decomposition → optimization → fusion         | default `Backend.run`|
-| `CudaBackend`  | fusion + `lowering/kernel` + `lowering/cuda`       | cupy/NVRTC dispatch  |
+| `CudaBackend`  | fusion + `lowering/kernel` + `lowering/cuda`       | the Rust runtime     |
 
 `numpy` and `loop` backends share the same runtime path — the only
 distinction is whether the graph has been fused yet. See
@@ -77,7 +77,7 @@ it in-process via cppyy / Cling. That's why the same default `run` works
 for pre-fusion graphs (LoopOp absent) and post-fusion graphs (LoopOp is
 just another `Op` subclass).
 `NumpyBackend` and `LoopBackend` inherit it verbatim; `CudaBackend`
-overrides with cupy dispatch.
+overrides with the runtime's dispatch.
 
 The default `benchmark` does wall-time iterations around `run`; the
 CUDA backend overrides it to populate per-launch CUDA-event timings.
@@ -111,8 +111,8 @@ implicates fusion; loop vs CUDA disagreement implicates codegen.**
 
 ## CUDA backend (`cuda/`)
 
-See `cuda/ARCHITECTURE.md`. Runs the full lowering chain and dispatches
-kernels via cupy `RawKernel` (NVRTC-compiled).
+See `cuda/ARCHITECTURE.md`. Runs the full lowering chain, compiles every kernel with `nvcc`
+into the cubin cache, and executes the program through the Rust runtime.
 
 ## Execution plan + pack (`plan.py`, `pack.py`)
 
@@ -126,7 +126,7 @@ supervision for the native worker and compares it with the existing Python dispa
 `plan.py` defines the **execution plan** — the serializable runtime projection of a lowered `Graph[CudaOp]`:
 buffer specs (one `BufferSpec` per BUFFER — a multi-output node mints one per output slot, each with its own
 role via `graph.buffer_role`), scalar/runtime constants, the launch list (`LaunchSpec.writes` names every
-buffer a launch produces; the slab planner's first-write test reads it, falling back to `node_id` for plans
+buffer a launch produces; a scratch planner's first-write test reads it, falling back to `node_id` for plans
 stored before the field existed), symbolic-axis plumbing, kernel refs (source and/or a content-addressed
 cubin-cache key), and per-weight checkpoint bindings (`source_path` + a pack-own load-op vocabulary applied
 with pure numpy). A kernel ref also records `arch_specific` — whether it must compile for the arch-SUFFIXED
@@ -194,5 +194,5 @@ full compile — a stale pack costs a recompile, never a wrong result. The servi
   `forward`. It doesn't know about dialects — it just dispatches
   through `Op.forward`.
 - A new backend (ROCm, SYCL, Metal) reuses `ir/` and
-  `pipeline/passes/lowering/` wholesale; only its own dispatch layer
-  (equivalent of `cuda/program.py`) needs to be written.
+  `pipeline/passes/lowering/` wholesale; only its own executor
+  (the equivalent of the Rust runtime behind `cuda/program.py`) needs to be written.

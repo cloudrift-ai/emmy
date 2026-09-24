@@ -73,16 +73,16 @@ def test_coded_head_matches_decoded_weight_and_keeps_checkpoint_pointers():
     )
     assert spec is not None
     head = Exl3CodedHead(spec, source)
-    assert head.program.compiled.launches
-    assert all("exl3" not in launch.kernel_name.lower() for launch in head.program.compiled.launches)
-    pointers = {name: head.program.arrays[name].data.ptr for name in ("lm_head_trellis", "lm_head_suh", "lm_head_svh")}
+    assert head.program.plan.launches
+    assert all("exl3" not in launch.kernel_name.lower() for launch in head.program.plan.launches)
+    pointers = {name: head.program.executor.buffer(name)[0] for name in ("lm_head_trellis", "lm_head_suh", "lm_head_svh")}
     x = (torch.randn(2, 128, device="cuda") * 0.1).half()
     got = head(x)
     # ``exl3_linear_tensors`` hands back the reference in checkpoint ``(out, in)`` orientation,
     # so the logical-vocab slice takes the ROW axis and the matmul takes the transpose.
     reference = x.float() @ torch.from_numpy(np.ascontiguousarray(decoded[:251].T)).float().cuda()
     torch.testing.assert_close(got, reference, rtol=2e-2, atol=2e-2)
-    assert pointers == {name: head.program.arrays[name].data.ptr for name in pointers}
+    assert pointers == {name: head.program.executor.buffer(name)[0] for name in pointers}
 
     source = _source()
     source["lm_head.svh"] = source["lm_head.svh"].astype(np.float32)

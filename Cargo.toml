@@ -1,3 +1,3 @@
 [workspace]
-members = ["crates/emmy-runtime"]
+members = ["crates/emmy-runtime", "crates/emmy-runtime-py"]
 resolver = "3"

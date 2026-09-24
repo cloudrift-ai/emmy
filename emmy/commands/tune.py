@@ -246,7 +246,7 @@ def _resolve_devices(args) -> list[int | None]:
 
 def _require_homogeneous_devices(devices: list[int | None]) -> None:
     try:
-        import cupy  # noqa: F401, PLC0415
+        from emmy import emmy_runtime  # noqa: F401, PLC0415
     except Exception:  # noqa: BLE001 — the live tune path will report the missing runtime
         return
     identities = {}
@@ -266,11 +266,12 @@ def _require_homogeneous_devices(devices: list[int | None]) -> None:
 
 
 def _device_properties(device_id: int | None) -> dict:
-    """CUDA properties for one explicit ordinal (or the active ordinal)."""
-    import cupy as cp
+    """CUDA identity for one explicit ordinal (or the active ordinal): ``major``, ``minor``, ``name``."""
+    from emmy import emmy_runtime
 
-    ordinal = cp.cuda.Device().id if device_id is None else device_id
-    return cp.cuda.runtime.getDeviceProperties(ordinal)
+    dev = emmy_runtime.Device(0 if device_id is None else device_id)
+    major, minor = dev.compute_capability()
+    return {"major": major, "minor": minor, "name": dev.name()}
 
 
 def _context_for_device(device_id: int | None, *, target: str | None = None):
@@ -788,7 +789,6 @@ def handle_tune(args):
 def _clean_caches(db_path) -> None:
     """``--clean``: nuke the tuning DB (+ WAL/SHM sidecars) and the kernel
     caches (emmy's cubin cache + cupy's NVRTC cache) for a fresh sweep."""
-    import shutil
 
     from emmy.compiler.backend.cuda import nvcc
 
@@ -806,13 +806,6 @@ def _clean_caches(db_path) -> None:
             removed.append(str(p))
     nvcc.clear_cubin_cache()
     removed.append(str(nvcc.cubin_cache_dir()))
-    try:
-        import cupy as cp
-
-        shutil.rmtree(cp.cuda.compiler.get_cache_dir(), ignore_errors=True)
-        removed.append(cp.cuda.compiler.get_cache_dir())
-    except Exception:  # noqa: BLE001 — cupy cache clear is best-effort
-        pass
     sys.stderr.write(f"[tune] --clean: removed tuning DB + kernel caches ({', '.join(removed)})\n")
 
 

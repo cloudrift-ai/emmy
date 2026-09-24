@@ -105,9 +105,6 @@ def test_cuda_symbolic_elementwise_one_kernel_multiple_seq_lens():
     whose kernel signature carries ``int seq_len``; running it at two
     different ``seq_len`` values resolves the launch geometry from the
     actual input shape without recompiling."""
-    pytest = __import__("pytest")
-    cupy = pytest.importorskip("cupy")
-    del cupy
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.ir.cuda import CudaOp
 
@@ -167,8 +164,6 @@ def test_cuda_softmax_over_symbolic_seq_len():
     """Softmax reducing over a symbolic ``seq_len`` axis compiles to a
     single kernel whose serial reduce loop's bound is the runtime
     ``int seq_len`` arg."""
-    pytest = __import__("pytest")
-    pytest.importorskip("cupy")
     import torch
 
     from emmy.compiler.backend.cuda.backend import CudaBackend
@@ -195,8 +190,6 @@ def test_cuda_sdpa_over_symbolic_seq_len():
     """Full causal SDPA with symbolic seq_len compiles + runs
     end-to-end. Stresses symbolic on free axes (Q/K/V leading seq dim)
     AND on the matmul K axis (attn @ V)."""
-    pytest = __import__("pytest")
-    pytest.importorskip("cupy")
     import torch
 
     from emmy.compiler.backend.cuda.backend import CudaBackend
@@ -234,8 +227,6 @@ def test_cuda_symbolic_rmsnorm_traced_and_run():
     """End-to-end on a real ``torch.nn.RMSNorm`` traced with
     ``dynamic_shapes={"x": {1: Dim("seq_len")}}`` — compile once, run at
     two distinct seq_len values, compare to torch eager."""
-    pytest = __import__("pytest")
-    pytest.importorskip("cupy")
     import torch
 
     from emmy.compiler.backend.cuda.backend import CudaBackend
@@ -286,8 +277,6 @@ def test_cuda_symbolic_linear_traced_and_run():
     """End-to-end on a real ``torch.nn.Linear`` traced with
     ``dynamic_shapes={"x": {1: Dim("seq_len")}}`` — covers the
     matmul-on-symbolic-M code path."""
-    pytest = __import__("pytest")
-    pytest.importorskip("cupy")
     import torch
 
     from emmy.compiler.backend.cuda.backend import CudaBackend
@@ -341,8 +330,6 @@ def test_qwen_whole_model_dynamic_compiles_and_matches_eager():
     RoPE (the in-graph rotary used to constant-fold to ``cos=1, sin=0`` under
     ``torch.export``; the wrapper now precomputes + slices instead) and to
     wrong attention scores."""
-    pytest = __import__("pytest")
-    pytest.importorskip("cupy")
     import torch
     from transformers import AutoConfig, AutoModel
 
@@ -405,8 +392,6 @@ def _batched_dynamic_case(batch: int, run_seqs: tuple[int, ...]):
     """Shared body for the batched symbolic-seq matrix below: 1-layer random-weight
     Qwen3 trunk traced at ``(batch, hint)`` with ``seq_len`` symbolic, run at several
     seq_lens, every batch row compared against eager independently."""
-    pytest = __import__("pytest")
-    pytest.importorskip("cupy")
     import torch
     from transformers import AutoConfig, AutoModel
 
@@ -506,8 +491,6 @@ def test_qwen_layer_dynamic_compiles_and_matches_eager():
     The wrapper is load-bearing: tracing the bare block with concrete
     ``(cos, sin)`` kwargs specialises rotary to the trace seq_len, so the
     in-graph sliced-rotary buffers are what make per-layer dynamic work."""
-    pytest = __import__("pytest")
-    pytest.importorskip("cupy")
     import torch
     from transformers import AutoConfig, AutoModel
 
@@ -621,8 +604,6 @@ def test_capture_replay_cache_rmsnorm_over_capacity_buffers():
     """RMSNorm built once at capacity 64; serve S ∈ {5,12,33,64,12} through the
     per-seq_len graph cache — capture lazily, replay at each S, slice the output
     to the real shape, match torch eager. Repeats hit the cache (no re-capture)."""
-    pytest = __import__("pytest")
-    pytest.importorskip("cupy")
     import torch
 
     from emmy.compiler.backend.cuda.backend import CudaBackend
@@ -652,19 +633,17 @@ def test_capture_replay_cache_rmsnorm_over_capacity_buffers():
                 ref = torch.nn.functional.rms_norm(torch.from_numpy(x), (2048,), m.weight, eps=m.eps).numpy()
             assert out.shape == (1, s, 2048)
             np.testing.assert_allclose(out, ref, rtol=1e-4, atol=1e-4)
-        assert set(k[0][1] for k in prog._graph_cache) == {5, 12, 33, 64}, "expected one cached graph per distinct seq_len"
+        for s in (5, 12, 33, 64):
+            prog.set_sym_values({"seq_len": s})
+            assert prog.executor.has_program_graph(), f"expected a cached graph for seq_len {s}"
 
 
 @requires_cuda
 def test_capture_replay_device_io_matches_eager():
-    """Serving zero-copy device I/O: feed cupy inputs through ``upload_prefix_device``
-    and read the output buffer's prefix back as a torch tensor via ``output_prefix_device``
-    + ``torch.from_dlpack`` — NO host round-trip — and confirm it matches torch eager
-    across seq_lens. The dlpack bridge (cupy ↔ torch) is what lets the runner accept
-    torch tensors straight from vLLM. Repeats hit the per-S graph cache."""
-    pytest = __import__("pytest")
-    pytest.importorskip("cupy")
-    import cupy as cp
+    """Serving zero-copy device I/O: feed CUDA tensors through ``upload_prefix_device`` and read
+    the output buffer's prefix back as a torch view via ``output_prefix_device`` — NO host round
+    trip — and confirm it matches torch eager across seq_lens. Repeats hit the per-S graph
+    cache."""
     import torch
 
     from emmy.compiler.backend.cuda.backend import CudaBackend
@@ -683,12 +662,12 @@ def test_capture_replay_device_io_matches_eager():
         for s in (7, 32, 48, 7):
             x = np.random.RandomState(s).standard_normal((1, s, 1024)).astype(np.float32)
             prog.set_sym_values({"seq_len": s})
-            prog.upload_prefix_device({"x": cp.asarray(x)})  # cupy in — no host upload
-            prog.capture_program_graph()
-            prog.replay_program_graph()
-            out_view = prog.output_prefix_device({"seq_len": s})[out_name]  # cupy view, no .get()
-            cp.cuda.runtime.deviceSynchronize()
-            out = torch.from_dlpack(out_view).clone().cpu().numpy()  # torch view of cupy mem
+            with prog.on_stream(torch.cuda.current_stream()):
+                prog.upload_prefix_device({"x": torch.from_numpy(x).cuda()})  # device in — no host upload
+                prog.capture_program_graph()
+                prog.replay_program_graph()
+                out_view = prog.output_prefix_device({"seq_len": s})[out_name]  # torch view, no copy
+                out = out_view.clone().cpu().numpy()
             with torch.no_grad():
                 ref = torch.nn.functional.rms_norm(torch.from_numpy(x), (1024,), m.weight, eps=m.eps).numpy()
             assert out.shape == (1, s, 1024)
@@ -703,8 +682,6 @@ def test_qwen_whole_model_capture_replay_cache_matches_eager():
     (capture at exact S, replay, slice), compare against torch eager with NON-ZERO
     ids. End-to-end gate for the attention / mask / shared-capacity-buffer story.
     Run under compute-sanitizer in dev to confirm zero illegal accesses."""
-    pytest = __import__("pytest")
-    pytest.importorskip("cupy")
     import torch
     from transformers import AutoConfig, AutoModel
 

@@ -149,6 +149,14 @@ def _tune_via_subprocess(case: Case) -> None:
     )
 
 
+# The lane's own tune DB, fresh per session, unless the caller points ``EMMY_TUNE_DB`` at one
+# (``make bench-kernels-tuned``). The root conftest already keeps the machine-local online prior
+# out of every test; the box's ``~/.cache/emmy/autotune.db`` is the other machine-local, mutable
+# evidence, and a grown one also makes every compile in the lane slower. The case's own rows stay
+# the compile's evidence, which is what makes a stored latency comparable across machines.
+_LANE_TUNE_DB = os.environ.get("EMMY_TUNE_DB") or str(Path(tempfile.mkdtemp(prefix="emmy_perf_tune_db_")) / "autotune.db")
+
+
 def _bench_corpus_case(case: Case, *, profile: bool) -> PerfRow:
     """Measure one case and build its row, including the regression verdict.
 
@@ -171,7 +179,7 @@ def _bench_corpus_case(case: Case, *, profile: bool) -> PerfRow:
                 command,
                 capture_output=True,
                 text=True,
-                env={**os.environ, "EMMY_NVCC_FLAGS": "", "EMMY_DUMP_DIR": tmp},
+                env={**os.environ, "EMMY_NVCC_FLAGS": "", "EMMY_DUMP_DIR": tmp, "EMMY_TUNE_DB": _LANE_TUNE_DB},
                 timeout=1800,
             )
             if result.returncode != 0 or not output.exists():

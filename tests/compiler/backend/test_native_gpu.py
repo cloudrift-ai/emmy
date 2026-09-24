@@ -6,7 +6,7 @@ import shutil
 import numpy as np
 import pytest
 
-from emmy.compiler.backend.cuda.program import CompiledProgram
+from emmy.compiler.backend.cuda.program import CompiledProgram, kernel_attributes
 from emmy.compiler.backend.gpu_lock import gpu_lock
 from emmy.compiler.backend.native import NativeWorker
 from emmy.compiler.backend.pack import save_executable
@@ -152,8 +152,6 @@ def test_native_gpu_failure_restarts_cleanly(tmp_path, monkeypatch, fault):
 
 @pytest.mark.parametrize("static_count,dynamic_count", [(8192, 0), (0, 4096), (8192, 4096)], ids=["static", "dynamic", "mixed"])
 def test_shared_memory_uses_cubin_static_and_plan_dynamic_storage(tmp_path, static_count, dynamic_count):
-    import cupy as cp
-
     executable = shutil.which("emmy-runtime-worker")
     if not executable:
         pytest.skip("build emmy-runtime-worker and add it to PATH")
@@ -182,16 +180,11 @@ def test_shared_memory_uses_cubin_static_and_plan_dynamic_storage(tmp_path, stat
     expected = values[::-1] * len(reads)
     with gpu_lock():
         program = CompiledProgram.build_from_plan(plan, {"x": values})
-        assert program.compiled.kernels["shared"].shared_size_bytes == static_count * 4
+        assert kernel_attributes("shared", plan.kernels["shared"])["shared_size_bytes"] == static_count * 4
         program.run_once()
         np.testing.assert_array_equal(program.outputs()["y"], expected)
-        stream = cp.cuda.Stream(non_blocking=True)
-        with stream:
-            stream.begin_capture()
-            program.run_once()
-            graph = stream.end_capture()
-            graph.launch(stream)
-        stream.synchronize()
+        program.capture_program_graph()
+        program.replay_program_graph()
         np.testing.assert_array_equal(program.outputs()["y"], expected)
         root = save_executable(tmp_path / "pack", {"shared": plan}, bindings={"shared": {"x": values.tobytes()}}, key={})
 

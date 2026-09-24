@@ -216,7 +216,7 @@ The `release-serving-image` skill (`.agents/skills/release-serving-image/`) auto
 local mode, abort gates per step, a human approval pause before the push, guaranteed teardown. The manual steps:
 
 The full release session on a rented card (each step from the repo checkout; host prereqs for steps 0–4:
-`make setup` + `pip install -e ".[serving]"` + cupy + `export HF_TOKEN=…`):
+`make setup` + `pip install -e ".[serving]"` + `export HF_TOKEN=…`):
 
 0. Build the base image the warm will compile inside of:
 

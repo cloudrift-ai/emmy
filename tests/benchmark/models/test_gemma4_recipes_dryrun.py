@@ -85,7 +85,7 @@ def test_serves_emmy_on_the_fast_math_fork(recipes_dir):
     assert "cloudriftai/vllm-emmy" in llm.vllm.image
     assert "EmmyGenModel" in llm.vllm.extra_args
     assert llm.vllm.extra_env.get("EMMY_FAST_MATH") == "1"
-    # The emmy generative path claims cupy residents before vLLM profiles memory, so the
+    # The emmy generative path claims its residents before vLLM profiles memory, so the
     # utilization budget has to cover them — 0.9 fails the KV min-fit check at boot.
     assert llm.gpu_memory_utilization == 0.97
 

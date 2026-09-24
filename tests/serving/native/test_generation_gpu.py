@@ -36,14 +36,13 @@ def _python_reference(root):
 
 
 def _reset_python(program, prompt):
-    ids = np.zeros(program.arrays["prompt"].shape, dtype=np.int64)
+    ids = np.zeros(program.executor.buffer("prompt")[2], dtype=np.int64)
     ids[: len(prompt)] = prompt
-    program.arrays["prompt"].set(ids)
-    program.arrays["prompt_length"].set(np.array([len(prompt)], np.int64))
+    program.upload_prefix({"prompt": ids, "prompt_length": np.array([len(prompt)], np.int64)})
 
 
 def _python_step(program, position):
-    program.arrays["position"].set(np.array([position], np.int64))
+    program.upload_prefix({"position": np.array([position], np.int64)})
     program.run_once()
     return program.outputs()["logits"].reshape(-1)
 
@@ -445,8 +444,10 @@ def test_attention_reads_only_the_written_cache_prefix(tmp_path, near_tie):
 
 
 def test_gpu_sampling_matches_independent_nucleus_distribution():
-    import cupy as cp
-
+    from emmy.compiler.backend.cuda.program import CompiledProgram
+    from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan, KernelSpec, LaunchSpec
+    from emmy.compiler.dim import Dim
+    from emmy.compiler.dtype import F16, F64, I64, U32, U64
     from emmy.serving.native.kernels import SOURCE
 
     # FP16 logits admit an exact ordering. The reference sorts tokens directly,
@@ -455,22 +456,51 @@ def test_gpu_sampling_matches_independent_nucleus_distribution():
         "#define HIDDEN 32\n#define HEADS 4\n#define KV_HEADS 2\n#define HEAD_DIM 8\n"
         "#define VOCAB 257\n#define SCALE 0.3535533905932738f\n" + SOURCE
     )
+    inputs = [
+        BufferSpec("logits", (Dim(257),), F16, "input"),
+        BufferSpec("params", (Dim(2),), F64, "input"),
+        BufferSpec("position", (Dim(1),), I64, "input"),
+        BufferSpec("length", (Dim(1),), I64, "input"),
+        BufferSpec("seed", (Dim(1),), U64, "input"),
+    ]
+    one = ((1,), (1,), (1,))
+    histogram_launch = LaunchSpec(
+        "histogram",
+        "native_histogram",
+        ("logits", "params", "position", "length", "histogram"),
+        ((3,), (1,), (1,)),
+        ((128,), (1,), (1,)),
+        0,
+        ("histogram",),
+    )
+    sample_args = ("logits", "histogram", "params", "seed", "position", "length", "output")
+    sample_launch = LaunchSpec("output", "native_sample", sample_args, one, one, 0, ())
+    kernels = {name: KernelSpec(source=source) for name in ("native_histogram", "native_sample")}
+
+    def program(launches, histogram_role):
+        buffers = [*inputs, BufferSpec("histogram", (Dim(65536),), U32, histogram_role), BufferSpec("output", (Dim(1),), I64, "output")]
+        names = [b.name for b in buffers if b.role == "input"]
+        outputs = [b.name for b in buffers if b.role == "output"]
+        plan = ExecutionPlan("cuda", names, outputs, buffers, {}, {}, launches, kernels)
+        feed = {b.name: np.zeros(b.resolve_shape({}), b.dtype.np) for b in buffers if b.role == "input"}
+        return CompiledProgram.build_from_plan(plan, feed)
+
     with gpu_lock():
-        module = cp.RawModule(code=source, backend="nvcc")
-        histogram_kernel = module.get_function("native_histogram")
-        sample_kernel = module.get_function("native_sample")
-        histogram = cp.zeros(65536, cp.uint32)
-        position, length = cp.array([0], cp.int64), cp.array([1], cp.int64)
-        seed, output = cp.array([0], cp.uint64), cp.array([-1], cp.int64)
+        # One program per stage, so a histogram is built once per case and sampled many times;
+        # a third holds both launches for the captured-replay check.
+        hist = program([histogram_launch], "output")
+        sample = program([sample_launch], "input")
+        both = program([histogram_launch, sample_launch], "scratch")
         rng = np.random.default_rng(928)
         cases = [rng.normal(size=257).astype(np.float16), np.zeros(257, np.float16)]
         cases += [np.resize(np.array([-65504, 65504, -0.0, 0.0], np.float16), 257)]
         for values in cases:
-            logits = cp.asarray(values)
             for temperature, top_p in ((0.0, 1.0), (0.7, 0.8), (2.0, 1.0), (1e-300, 0.01), (1e300, 0.5)):
-                params = cp.array([temperature, top_p], cp.float64)
-                histogram.fill(0)
-                histogram_kernel((3,), (128,), (logits, params, position, length, histogram))
+                params = np.array([temperature, top_p], np.float64)
+                hist.upload_prefix({"logits": values, "params": params})
+                hist.run_once()
+                histogram = hist.outputs()["histogram"]
+                sample.upload_prefix({"logits": values, "params": params, "histogram": histogram})
                 if temperature == 0:
                     probabilities = np.eye(257)[values.argmax()]
                 else:
@@ -483,33 +513,23 @@ def test_gpu_sampling_matches_independent_nucleus_distribution():
                     probabilities /= probabilities.sum()
                 selected = []
                 for index in range(1024):
-                    seed.set(np.array([index], np.uint64))
-                    sample_kernel((1,), (1,), (logits, histogram, params, seed, position, length, output))
-                    token = int(output.get()[0])
+                    sample.upload_prefix({"seed": np.array([index], np.uint64)})
+                    sample.run_once()
+                    token = int(sample.outputs()["output"][0])
                     assert probabilities[token] > 0
                     selected.append(token)
                 frequencies = np.bincount(selected, minlength=257) / len(selected)
                 # Six binomial standard deviations plus one sample for rounding.
                 bounds = 6 * np.sqrt(probabilities * (1 - probabilities) / len(selected)) + 1 / len(selected)
                 assert np.all(np.abs(frequencies - probabilities) <= bounds), (temperature, top_p, frequencies, probabilities)
-                seed.set(np.array([77], np.uint64))
-                stream = cp.cuda.Stream(non_blocking=True)
-                with stream:
-                    stream.begin_capture()
-                    histogram.fill(0)
-                    histogram_kernel((3,), (128,), (logits, params, position, length, histogram))
-                    sample_kernel((1,), (1,), (logits, histogram, params, seed, position, length, output))
-                    graph = stream.end_capture()
-                    graph.launch(stream)
-                stream.synchronize()
-                assert int(output.get()[0]) == selected[77]
+                both.upload_prefix({"logits": values, "params": params, "seed": np.array([77], np.uint64)})
+                both.capture_program_graph()
+                both.replay_program_graph()
+                assert int(both.outputs()["output"][0]) == selected[77]
         for invalid in (np.nan, np.inf, -np.inf):
             values = np.zeros(257, np.float16)
             values[3] = invalid
-            logits = cp.asarray(values)
             for temperature in (0.0, 1.0):
-                params = cp.array([temperature, 1.0], cp.float64)
-                histogram.fill(0)
-                histogram_kernel((3,), (128,), (logits, params, position, length, histogram))
-                sample_kernel((1,), (1,), (logits, histogram, params, seed, position, length, output))
-                assert int(output.get()[0]) == -1
+                both.upload_prefix({"logits": values, "params": np.array([temperature, 1.0], np.float64)})
+                both.run_once()
+                assert int(both.outputs()["output"][0]) == -1

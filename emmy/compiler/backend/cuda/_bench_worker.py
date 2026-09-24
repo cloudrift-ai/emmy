@@ -24,8 +24,8 @@ Protocol (length-prefixed pickle on stdin/stdout):
   "_retire_worker": bool}`` on exception — the two kind flags rebuild parent-side the exception
   kinds a pickled string loses; ``_retire_worker`` is the child's own verdict that its context is
   done for (both response shapes carry it).
-- Worker imports cupy / torch lazily on first request, writes ``<8-byte length><pickled response>``.
-- A ``worker_warmup`` request initializes CuPy and the CUDA context without consuming a candidate's wall budget.
+- Worker imports the runtime / torch lazily on first request, writes ``<8-byte length><pickled response>``.
+- A ``worker_warmup`` request creates the CUDA context without consuming a candidate's wall budget.
 - EOF on stdin (or parent SIGKILL) terminates the worker.
 
 Errors raised inside ``benchmark_program`` (bench_compile_timeout_s,
@@ -58,8 +58,6 @@ import os
 import pickle
 import sys
 import traceback
-
-_PACK_REFERENCE = None
 
 
 @contextlib.contextmanager
@@ -132,19 +130,10 @@ async def _run_job(req: dict) -> dict:
     Rebuilding the torch side **here** (not pickling a live module) means a hung emmy kernel
     hangs *this* child, which the parent SIGKILLs — recovering the device. ``nvcc_flags`` re-points
     the compile at a given opt level (the cubin cache key folds it in)."""
-    if "pack_command" in req:
-        from emmy.compiler.backend.native import PackReference
-
-        global _PACK_REFERENCE
-        if _PACK_REFERENCE is None:
-            _PACK_REFERENCE = PackReference()
-        return _PACK_REFERENCE.command(req["pack_command"])
     if req.get("worker_warmup"):
-        import cupy as cp
+        from emmy.compiler.backend.cuda.device import device
 
-        cp.cuda.Device().use()
-        cp.cuda.runtime.free(0)
-        cp.cuda.runtime.deviceSynchronize()
+        device().synchronize()
         return {"warmed": True}
 
     from emmy import config
@@ -304,20 +293,14 @@ async def _run_job(req: dict) -> dict:
 def _context_dirty() -> bool:
     """``True`` iff the live CUDA context is in a sticky-error state.
 
-    A cheap ``deviceSynchronize`` surfaces a context-wide sticky error (e.g.
+    A context synchronize surfaces a context-wide sticky error (e.g.
     ``CUDA_ERROR_MISALIGNED_ADDRESS`` / ``CUDA_ERROR_ILLEGAL_ADDRESS``) left by
     a prior illegal access — those keep returning the same status on every call
-    until the context is torn down. Returns ``False`` when cupy was never
-    imported / no context exists (a compile-only failure touches no context),
-    or when the sync succeeds (context healthy)."""
-    cupy = sys.modules.get("cupy")
-    if cupy is None:
-        return False  # no CUDA context was ever created in this worker
-    try:
-        cupy.cuda.runtime.deviceSynchronize()
-        return False
-    except Exception:  # noqa: BLE001 — any CUDA error here means the context is unusable
-        return True
+    until the context is torn down. Returns ``False`` when no context exists in this
+    worker (a compile-only failure touches no context), or when the sync succeeds."""
+    from emmy.compiler.backend.cuda.device import context_poisoned
+
+    return context_poisoned()
 
 
 def main() -> None:

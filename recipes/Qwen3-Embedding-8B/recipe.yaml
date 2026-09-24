@@ -21,8 +21,8 @@ engine:
   llm:
     tensor_parallel_size: 1
     pipeline_parallel_size: 1
-    # 8B fp16 weights ≈ 16 GB. On the 24 GB 4090 the emmy variant's cupy-held
-    # weights are non-torch memory that vLLM's profiler subtracts from this budget —
+    # 8B fp16 weights ≈ 16 GB. On the 24 GB 4090 the emmy variant's weights sit inside
+    # this budget (the runtime borrows torch tensors, which vLLM's profiler counts) —
     # utilization must clear (weights + overhead)/24 with headroom while leaving
     # vLLM a positive remainder (the attention-free plugin needs no KV cache).
     gpu_memory_utilization: 0.92
