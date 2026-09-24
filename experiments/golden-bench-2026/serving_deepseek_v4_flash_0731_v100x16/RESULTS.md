@@ -585,6 +585,16 @@ from the file, but each post twin runs those two pieces at whatever the one arm 
 card, and the three cut receipts that price the routes carry the old pieces' time. Next on the host: record the three
 post leads on main.
 
+**Boot37: `main` as merged does not boot strict (2026-09-24).** The tree at 1494e4beb (#878 merged) booted from its
+own golden with fast math pinned off (boot37): the width-1 and width-256 expert twins refused at their cut forks as on
+every boot since #833 and rode the wider tier, and at seventeen minutes the symbolic post twin's compile raised the
+strict-evidence error at `k_linear_softmax_matmul_mean_reduce_719320__place_e812d67eba`, one of the two pieces #883
+re-shaped, whose `030_cut` fork no measured row spells; the engine died there. The paragraph above expected those
+pieces to open one-arm schedule forks, the kind the eleven single-token pieces open; they open a cut fork each, a
+kernel-set decision, and a post twin has no wider tier to ride. So `main` as merged carries a golden that decodes,
+audits and gates clean and does not serve strict. The three post leads are recorded again from this tree (rec37,
+greedy, one card each), and the boot that follows says what the new pieces cost.
+
 
 ### The M=1 decode tier: what broke and what now guards it
 
