@@ -183,8 +183,9 @@ minutes and belongs to the finalization stage of a PR — see the Contribution I
 ```bash
 pytest tests/deploy/test_recipe.py -v   # single file — the development lane
 pytest tests/deploy/ -k recipe -v      # a few tests — the development lane
-pytest tests/ -v                       # all tests, finalization only (skips the off-lane `perf` tests)
+pytest tests/ -v                       # all tests, finalization only (skips the off-lane `perf` / `lowering` tests)
 pytest tests/perf/ -m perf -v          # GPU perf suite (see tests/perf/ARCHITECTURE.md)
+make test-lowering                     # the fresh-lowering gate over every repository golden (GPU-free)
 ```
 
 Under `make test` (`-n auto --dist=loadgroup`) the root `conftest.py` routes every CUDA-touching test onto two

@@ -187,12 +187,10 @@ _UNKNOWN_COST = 0.05
 #: the plan. Nothing near the recording threshold can drift into this range.
 _GATE_SECONDS = 5.0
 #: Markers whose tests are deselected from the default suite. They cannot distort ITS bucketing,
-#: so they are exempt from the staleness gate and from the written baseline — otherwise every
-#: `make bench-kernels` would fail demanding entries that `make test`, which skips it,
-#: can never record.
-_OFF_LANE_MARKERS = ("perf",)
-#: Node ids seen carrying an off-lane marker this session (filled during collection).
-_OFF_LANE_ITEMS: set[str] = set()
+#: so they are exempt from the staleness gate and from the written baseline (their durations are
+#: never recorded) — otherwise every `make bench-kernels` or `make test-lowering` would fail
+#: demanding entries that `make test`, which skips them, can never record.
+_OFF_LANE_MARKERS = ("perf", "lowering")
 
 
 def pytest_addoption(parser):
@@ -204,7 +202,9 @@ def pytest_addoption(parser):
 
 
 def pytest_runtest_logreport(report):
-    if report.when == "call":
+    # An off-lane test's duration is never recorded. The markers ride on the report's keywords, which
+    # is what the controller sees under xdist — it collects no items of its own.
+    if report.when == "call" and not any(marker in report.keywords for marker in _OFF_LANE_MARKERS):
         _CALL_DURATIONS[report.nodeid] = report.duration
 
 
@@ -227,7 +227,7 @@ def pytest_sessionfinish(session):
         # will never run (the two whole-card gate entries, 340 s and 150 s, outlived the
         # split into shards). Regenerate with `make test-durations`, which runs the WHOLE
         # suite — pointing this at a subset writes a baseline covering only that subset.
-        fresh = {k: round(v, 2) for k, v in _CALL_DURATIONS.items() if v >= _MIN_RECORDED and k not in _OFF_LANE_ITEMS}
+        fresh = {k: round(v, 2) for k, v in _CALL_DURATIONS.items() if v >= _MIN_RECORDED}
         with open(_DURATIONS_FILE, "w") as fh:
             json.dump(dict(sorted(fresh.items())), fh, indent=1)
             fh.write("\n")
@@ -240,7 +240,7 @@ def pytest_sessionfinish(session):
     if is_controller and _CALL_DURATIONS:
         baseline = _load_baseline()
         missing = sorted(
-            ((d, n) for n, d in _CALL_DURATIONS.items() if d >= _GATE_SECONDS and n not in baseline and n not in _OFF_LANE_ITEMS),
+            ((d, n) for n, d in _CALL_DURATIONS.items() if d >= _GATE_SECONDS and n not in baseline),
             reverse=True,
         )
         if missing:
@@ -382,7 +382,6 @@ def pytest_collection_modifyitems(config, items):
     # collection (e.g. ``pytest tests/serving/``), not only runs that happen
     # to collect ``tests/perf/`` and load its conftest.
     selected = config.getoption("-m") or ""
-    _OFF_LANE_ITEMS.update(i.nodeid for i in items if any(m in i.keywords for m in _OFF_LANE_MARKERS))
     for marker in _OFF_LANE_MARKERS:
         if marker in selected:
             continue

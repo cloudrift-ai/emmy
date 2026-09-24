@@ -106,6 +106,12 @@ re-recording it is what needs the card. Rows that no longer decode are listed as
 the line is deleted. Never add a line to make a red row green. The nightly `onboard-model` workflow still owns a model
 golden's exact-GPU replay.
 
+Beside it, `make test-lowering` checks every repository golden's stored targets against a fresh lowering of its own
+programs — the drift the row decode is blind to, since it replays the stored target. It is its own lane (CI's
+`lowering` job, on a hosted runner) because a whole-model program takes minutes to lower. Goldens that no longer
+match are strict xfails in `tests/compiler/pipeline/search/golden_lowering_xfails.yaml`, under the same rule: the
+list only shrinks, and a restamp on the card is what closes a line.
+
 When running a large subset (e.g. `tests/compiler/`), pass the same `-n auto --dist=loadgroup` flags `make test` uses to
 parallelize (add `-p no:randomly` for a stable order):
 
@@ -198,13 +204,15 @@ Quick test models / scripts (for local iteration):
 ## Key Make Targets
 
 - `make setup` — create venv and install dependencies (includes ruff)
-- `make test` — run `pytest` using the venv (skips the off-lane `perf` / `goldens` tests). Compiles
+- `make test` — run `pytest` using the venv (skips the off-lane `perf` / `lowering` tests). Compiles
   kernels at `-Xcicc -O1` (correctness lane, ~12% faster than `-O3` on a cold cache; perf tests use `-O3` via
   `make bench-kernels`)
 - `make test-corpus-regen` — restamp the realization corpus's derived half after a kernel-identity or schedule-codec
   change (`make test` detects the staleness on any machine; this applies the fix)
 - `make test-durations` — re-measure `tests/durations.json`, the checked-in per-test timings the suite balances its
   xdist workers on; commit the result when the balance has drifted
+- `make test-lowering` — the fresh-lowering gate: every repository golden's stored targets against a fresh lowering
+  of its own programs (GPU-free; CI runs it as the `lowering` job)
 - `make lint` — run `ruff check` and `ruff format --check`
 - `make format` — auto-format code and fix lint violations
 - `make bench` — run benchmarks (`emmy bench recipes/*`)

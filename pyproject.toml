@@ -111,6 +111,7 @@ emmy_serving = "emmy.serving:register"
 asyncio_mode = "auto"
 markers = [
     "perf: GPU performance comparison vs PyTorch (deselected by default; run with `pytest -m perf`)",
+    "lowering: every repository golden's stored targets against a fresh lowering (deselected by default; run with `make test-lowering`)",
 ]
 
 [tool.ruff]
