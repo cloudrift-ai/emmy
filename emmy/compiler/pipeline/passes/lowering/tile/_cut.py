@@ -741,7 +741,12 @@ def _straddles_a_contraction(produced: Fold, name: str, factor: int) -> bool:
     while pending:
         term = pending.pop()
         pending.extend(term.operands)
-        if term.axis is None:
+        if term.axis is None or len(term.free_axes) < 2:
+            # TWO free axes or nothing: the pathology presupposes the contraction already HAS an m
+            # and an n and that the fused pair is one of them, so splitting only un-entangles what
+            # the tier could otherwise tile. A contraction with ONE free axis is a different shape
+            # — splitting INVENTS its second dimension — and the DeepSeek V4 post block measured
+            # what that costs: its piece stopped completing a single iteration in 90 s.
             continue
         divs = {position for position, edge in enumerate(term.operands) if _divmod_in_edge(edge, name, factor)[0]}
         mods = {position for position, edge in enumerate(term.operands) if _divmod_in_edge(edge, name, factor)[1]}
