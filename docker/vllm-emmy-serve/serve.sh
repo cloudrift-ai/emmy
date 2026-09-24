@@ -50,6 +50,14 @@
 [ -n "${EMMY_GEN_PREFILL_CAPACITY:-}" ] || unset EMMY_GEN_PREFILL_CAPACITY
 [ -n "${EMMY_GEN_PREFILL_BUCKET:-}" ] || unset EMMY_GEN_PREFILL_BUCKET
 [ -n "${EMMY_GEN_M1_TIER:-}" ] || unset EMMY_GEN_M1_TIER
+# The standard lane is this entrypoint's default, whatever the compiler's is. #868 made fast math
+# the compiler default, which would silently collapse the two serving lanes into one: every warm
+# shape without an `:fm` suffix would bake the SAME f16-accumulate cubins its `:fm` twin does, no
+# standard-lane pack would exist, and a deployment that asks for the standard lane — the golden's
+# own default, and what the experiment recipes run — would miss the pack and pay the full compiler
+# frontend on every boot. A caller wanting the other lane still says so, which is what the `:fm`
+# shapes and the recipes' EMMY_FAST_MATH=1 do.
+export EMMY_FAST_MATH="${EMMY_FAST_MATH:-0}"
 if [ -n "${SERVE_V2_MODEL_RUNNER:-}" ]; then
     export VLLM_USE_V2_MODEL_RUNNER="$SERVE_V2_MODEL_RUNNER"
 else

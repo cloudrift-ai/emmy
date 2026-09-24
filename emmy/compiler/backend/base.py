@@ -56,7 +56,7 @@ class LaunchTime:
     """Per-launch GPU-event timing inside a benchmark run.
 
     ``time_ms`` is the median over ``samples`` (the canonical selection
-    statistic — robust to single-iter outliers from cupy framing
+    statistic — robust to single-iter outliers from host framing
     jitter). ``samples`` carries every measured per-iter latency in
     ms so callers downstream (e.g. ``search.policy.terminal_bench``) can
     compute min/max/mean/variance without re-running the bench."""
@@ -122,14 +122,14 @@ class Backend(ABC):
     # event-measured ms. Catches the case where every iter is just
     # under the per-launch ``_KERNEL_TIMEOUT_MS`` watchdog (e.g. 999 ms
     # × 20 iters = 20 s of GPU time) which the watchdog by design lets
-    # through. Distinct from a wall-clock cap so Python/cupy framing
+    # through. Distinct from a wall-clock cap so host framing
     # overhead doesn't artificially shrink the budget for tiny ops.
     _bench_run_timeout_s: float = 10.0
     # Optional hard wall-clock cap on a single ``benchmark()`` call.
     # When set, the call runs in a subprocess-isolated worker so the
     # parent can SIGKILL the GPU process if a kernel keeps the device
     # busy past the in-process per-launch / per-iter budgets (those
-    # budgets rely on ``cupy.cuda.Event.done`` which never trips on
+    # budgets poll a completion event, which never trips on
     # some hangs). Set this for autotune sweeps; leave ``None`` for
     # interactive ``emmy run`` so on-iter callbacks and the
     # parent's torch instance can be shared in-process.

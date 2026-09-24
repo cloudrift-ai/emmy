@@ -3,6 +3,7 @@
 import argparse
 import json
 import types
+from pathlib import Path
 
 import pytest
 
@@ -192,9 +193,9 @@ def test_serve_cmd_generate_branch():
     # Mixed-batch full capture needs an ALWAYS-support attention backend; FA2 is
     # uniform-batch only, so the emmy arm selects TRITON_ATTN.
     assert cmd[cmd.index("--attention-backend") + 1] == "TRITON_ATTN"
-    # The emmy generative arm defaults util to 0.97 — its cupy residents are invisible to
-    # vLLM's torch-only profiler, so the 0.90 line can fall below them and fail the min-KV
-    # fit at long model lens. Stock (and the embedding plugin) keep 0.90.
+    # The emmy generative arm defaults util to 0.97, the line measured when its residents were
+    # invisible to vLLM's profiler and 0.90 failed the min-KV fit at long model lens. Stock
+    # (and the embedding plugin) keep 0.90.
     assert "--gpu-memory-utilization=0.97" in cmd
     stock_cmd = build_serve_cmd(MODEL, stock=True, vllm_args=[], generate=True)
     assert "--gpu-memory-utilization=0.9" in stock_cmd
@@ -528,20 +529,40 @@ def test_moe_probe_recognizes_the_deepseek_published_spelling(tmp_path):
     assert _is_moe_model(str(tmp_path), []) is True
 
 
-def test_golden_and_strict_evidence_reach_the_vllm_child_as_env(monkeypatch, tmp_path):
+_REGIME_GOLDEN = Path(__file__).resolve().parents[2] / "emmy" / "compiler" / "pipeline" / "search" / "goldens" / "rtx4080_sm89.yaml"
+
+
+def test_golden_and_strict_evidence_reach_the_vllm_child_as_env(monkeypatch):
     """``serve --golden PATH --strict-evidence`` spell the same flags every replaying command has; they
     are emmy's own (never forwarded to vllm) and reach the child process, where every program compiles
-    through the one evidence pick, as ``EMMY_GOLDEN_FILE`` / ``EMMY_STRICT_EVIDENCE``."""
+    through the one evidence pick, as ``EMMY_GOLDEN_FILE`` / ``EMMY_STRICT_EVIDENCE`` — together with
+    the precision regime the file's rows share, because a row is evidence only in its own regime and
+    the child learns it from nowhere else."""
     from emmy.commands import serve as serve_mod
 
-    golden = tmp_path / "working.yaml"
+    golden = _REGIME_GOLDEN
     args = _parse(["serve", "--golden", str(golden), "--strict-evidence", "--dry-run", MODEL])
     assert args.golden == str(golden) and args.strict_evidence is True
     captured = {}
+    monkeypatch.delenv("EMMY_FAST_MATH", raising=False)
     monkeypatch.setattr(serve_mod, "_vllm_bin", lambda: "/bin/vllm")
     monkeypatch.setattr(serve_mod, "_serve_and_bench", lambda cmd, *_a, env=None, **_k: captured.update({"cmd": cmd, "env": env}))
     args = _parse(["serve", MODEL, "--golden", str(golden), "--strict-evidence", "--bench"])
     handle_serve(args)
     assert captured["env"]["EMMY_GOLDEN_FILE"] == str(golden.resolve())
     assert captured["env"]["EMMY_STRICT_EVIDENCE"] == "1"
+    assert captured["env"]["EMMY_FAST_MATH"] == "False", "the rows' regime reaches the child as its pin"
     assert "--golden" not in captured["cmd"] and "--strict-evidence" not in captured["cmd"]
+
+
+def test_serve_refuses_an_environment_pin_that_contradicts_the_golden_regime(monkeypatch):
+    """An operator's ``EMMY_FAST_MATH=1`` against a file measured under ``FAST_MATH: False`` would deploy
+    an empty evidence index; the boot fails at the launcher, naming both, rather than at the first fork
+    twenty-five minutes in."""
+    from emmy.commands import serve as serve_mod
+
+    monkeypatch.setenv("EMMY_FAST_MATH", "1")
+    monkeypatch.setattr(serve_mod, "_vllm_bin", lambda: "/bin/vllm")
+    monkeypatch.setattr(serve_mod, "_serve_and_bench", lambda *_a, **_k: pytest.fail("the child must not launch"))
+    with pytest.raises(SystemExit):
+        handle_serve(_parse(["serve", MODEL, "--golden", str(_REGIME_GOLDEN), "--strict-evidence", "--bench"]))

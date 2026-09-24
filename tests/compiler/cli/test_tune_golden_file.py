@@ -33,6 +33,7 @@ from emmy.compiler.pipeline.search.working_golden import (
 )
 from emmy.compiler.torch_wire import intern_program
 from tests.compiler.helpers import loop_target
+from tests.compiler.pipeline.search.helpers import kernel_row
 
 
 def _args(path, **over):
@@ -310,7 +311,7 @@ def test_structural_multi_cuda_winner_persists_its_exact_replay_row(tmp_path):
         per_op=[
             OpResult(
                 name="mm",
-                op_key="key",
+                identity="key",
                 best_us=6.0,
                 searched_knobs=route,
                 searched_us=6.0,
@@ -438,55 +439,33 @@ def test_structural_multi_cuda_proposal_keeps_ranking_without_parent_perf(tmp_pa
     ]
     db.close()
     reloaded_db = SearchDB.open_readonly(db_path)
-    route_parent = TileOp(knobs={**live_features, **route})
-    assert route_parent.identity_key(with_io=True, with_knobs=True) != original_loop.identity_key(with_io=True, with_knobs=True)
-    perf = reloaded_db.lookup_perf(ctx, route_parent.identity_key(with_io=True, with_knobs=True), backend="cuda")
-    assert perf is None
-    assert reloaded_db.lookup_perf(ctx, original_loop.identity_key(with_io=True, with_knobs=True), backend="cuda") is None
+    loop_key = original_loop.identity_key(structural=False, with_io=True)
+    assert loop_key is not None
+    assert list(reloaded_db.iter_perf_rows()) == [], "a proposal measurement fabricates no deploy evidence"
     reloaded_db.close()
 
-    # A later ordinary search keeps its own whole-slice bookkeeping and lowering
-    # evidence under the unpinned Loop key. Neither may fabricate deploy evidence
-    # for the structural parent captured by the proposal's node lineage.
+    # A later ordinary search files its measurements under each kernel's own row. None may fabricate
+    # deploy evidence for the structural parent captured by the proposal's node lineage.
     db = SearchDB(db_path)
-    bookkeeping = PerfStats(median=106.95, min=106.95, max=106.95, mean=106.95, variance=0.0, n_samples=1)
     monolithic = PerfStats(median=153.45, min=153.45, max=153.45, mean=153.45, variance=0.0, n_samples=1)
     fallback = {**route, "REDUCE": ""}
     fallback_key = "monolithic-cuda"
-    db.record_perf(
-        ctx,
-        original_loop.identity_key(with_io=True, with_knobs=True),
-        backend="cuda",
-        status="ok",
-        stats=bookkeeping,
-        captured=True,
-    )
-    db.record_lowering(
-        original_loop.identity_key(with_io=True, with_knobs=True),
-        "loop",
-        fallback_key,
-        "cuda",
-        knobs=fallback,
-        measured_median_us=monolithic.median,
-    )
+    db.record_kernel(kernel_row(fallback_key, stamps=live_features, name=fallback_key))
     db.record_perf(
         ctx,
         fallback_key,
+        bindings={},
+        knobs={**ctx.features(), **live_features, **fallback},
         backend="cuda",
         status="ok",
         stats=monolithic,
-        knobs={**ctx.features(), **live_features, **fallback},
         captured=True,
     )
     db.close()
     reloaded_db = SearchDB.open_readonly(db_path)
-    route_perf = reloaded_db.lookup_perf(ctx, route_parent.identity_key(with_io=True, with_knobs=True), backend="cuda")
-    loop_perf = reloaded_db.lookup_perf(ctx, original_loop.identity_key(with_io=True, with_knobs=True), backend="cuda")
-    assert route_perf is None
-    assert loop_perf is not None and loop_perf.stats.median == pytest.approx(106.95)
-    lowering = reloaded_db.lookup_lowering(original_loop.identity_key(with_io=True, with_knobs=True))
-    assert lowering is not None and lowering.child_key == fallback_key
-    candidates = [{**live_features, **fallback}, {**live_features, **route}]
+    assert {row.kernel for row in reloaded_db.iter_perf(ctx, backend="cuda")} == {fallback_key}
+    # A real fork carries the kernel's exact identity beside its stamps, and a read row carries the kernel column as it.
+    candidates = [{**live_features, "I_kernel": fallback_key, **fallback}, {**live_features, "I_kernel": fallback_key, **route}]
     assert _db_measured_pick(_db_measured_index(reloaded_db, ctx).ok, candidates) == (0, 153.45)
     reloaded_db.close()
     persist_proposal_rankings(path, document, targets[0], rankings)
@@ -510,7 +489,7 @@ def test_structural_multi_cuda_proposal_keeps_ranking_without_parent_perf(tmp_pa
             max_candidates=1,
         )
     )
-    assert negative_db.lookup_perf(ctx, original_loop.identity_key(with_io=True, with_knobs=True), backend="cuda") is None
+    assert negative_db.lookup_perf(ctx, loop_key, bindings={}, knobs={}, backend="cuda") is None
     negative_db.close()
     assert ambiguous["status"] == "ambiguous_multi_kernel"
     assert ambiguous["measured_knobs"] is None

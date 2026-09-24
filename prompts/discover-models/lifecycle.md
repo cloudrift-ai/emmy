@@ -13,15 +13,23 @@ reconstruct an existing model ID.
 3. Invoke `discover-scorer` once per recipe batch and in parallel. Give each scorer the complete contents of the
    attached `score-recipes.md`, the shared source evidence, and exactly one batch. Scorers only return heat scores and
    rationales; they do not choose lifecycle states or new models.
-4. Merge the batch results, compare scores globally, and adjust only when needed to keep the heat bands consistent.
+4. Merge the batch results and reconcile them against the batches you dispatched: every batch row must come back
+   exactly once, letter for letter, and no reply may carry an ID the batch did not contain. A scorer that drops,
+   adds, or alters an ID has failed; re-dispatch that batch rather than repairing its reply by hand.
+5. Compare scores globally and adjust only when needed to keep the heat bands consistent.
 
 ## Lifecycle decisions
 
 Select exactly `maintained_count` fully configured recipes for periodic testing and optimization. The task's
 `maintainable_model_ids` is the complete set you may choose from, for both `maintained_model_ids` and
 `obsolete_models`; read it again when you assemble the answer rather than recalling which rows qualified. Every other
-recipe is an untested onboarding shell: score it, but never select it. The workflow
-will preserve their task and deployment matrix deterministically.
+recipe is an untested onboarding shell: score it, but never select it. The workflow will preserve their task and
+deployment matrix deterministically.
+
+An onboarding shell is often the hottest row in the inventory, because it was added for a model the community had
+just started talking about. Heat never promotes a row into the maintained set. A hot shell stays a shell until it has
+been onboarded and gained a complete recipe; if you want it tested, the heat score is how you say so. Select a
+maintained recipe only after finding its exact ID in `maintainable_model_ids`.
 
 Prefer current community demand, serving value, architecture coverage, and a useful spread of sizes in the maintained
 set. Every unselected complete recipe defaults to best-effort; do not return best-effort IDs because the workflow
@@ -83,8 +91,10 @@ and optionally `replacement_model_id`. Each new onboarding entry contains exactl
 `heat`; `new_onboarding_models` contains new models only. Each `onboarding_deployments` entry contains exactly
 `model_id` and `deployments`, and the array covers every new candidate exactly once.
 
-Before returning, verify that the scores cover every batch row and that the maintained count is exact. If OpenCode
-requests the final response, return the best complete selection immediately without another tool call.
+Before returning, verify against the attached task that the scores cover every batch row exactly once, that every
+ID in `maintained_model_ids` and `obsolete_models` appears in `maintainable_model_ids`, and that the maintained count
+is exact. If OpenCode requests the final response, return the best complete selection immediately without another
+tool call.
 
 Do not edit the repository, rent hardware, deploy a model, or return the final lifecycle manifest. Repository code
 validates this compact selection, restores existing onboarding data, derives best-effort decisions, and assembles the

@@ -35,8 +35,9 @@ from math import gcd
 from emmy.compiler.dtype import F32
 from emmy.compiler.dtype import get as get_dtype
 from emmy.compiler.graph import Graph, Node
+from emmy.compiler.ir.axis import Axis, Dim
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expr import BinaryExpr, Interval, Literal, SimplifyCtx, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure.fold import (
     Fold,
@@ -677,6 +678,163 @@ def _workspace_strides(produced: Fold, axes: tuple) -> dict[str, int]:
     return {name: factor for name, factor in factors.items() if factor > 1}
 
 
+class _FoldingSigma(Sigma):
+    """A substitution that FOLDS as it lands, under a fixed range context.
+
+    ``Sigma.apply`` substitutes and stops, which is right everywhere else: a σ that rewrote its
+    result would hide what it did. Here the fold is the point — the whole gain is that
+    ``i / c`` and ``i % c`` collapse to the bare split coordinates, and an index left as
+    ``((hi * c) + lo) / c`` reaches the scheduler as an expression of the fused name again."""
+
+    def apply(self, expr):
+        return expr.substitute(self.mapping).simplify(self._ctx)
+
+
+def _substitute_and_fold(produced: Fold, name: str, sigma: Sigma, ctx: SimplifyCtx) -> Fold:
+    """``produced`` with the coordinate ``name`` substituted and every index folded against ``ctx``.
+
+    Applied per STATEMENT, not to the term: a free coordinate is a lift PARAM, so a σ handed the
+    term is dropped as shadowed exactly where it has work to do. Each lift is re-closed instead —
+    the substituted name leaves the param list and :meth:`Lambda.closing` appends the two the body
+    now reads, as TRAILING params, which is where a coordinate already sat and is what keeps the
+    operand correspondence in the prefix untouched."""
+    folding = _FoldingSigma(dict(sigma.mapping))
+    object.__setattr__(folding, "_ctx", ctx)
+    operands = tuple(_substitute_and_fold(edge, name, sigma, ctx) for edge in produced.operands)
+    body = Body(rewrite_stmt(stmt, lambda n: n, folding) for stmt in produced.lift.body)
+    lift = Lambda.closing(tuple(p for p in produced.lift.params if p != name), body, produced.lift.results)
+    return replace(produced, operands=operands, lift=lift)
+
+
+def _divmod_in_edge(edge: Fold, name: str, factor: int) -> tuple[bool, bool]:
+    """``(the edge reads name / factor, the edge reads name % factor)`` anywhere under it."""
+    div = mod = False
+    pending = [edge]
+    while pending:
+        term = pending.pop()
+        pending.extend(term.operands)
+        for stmt in term.lift.body.iter():
+            for expr in stmt.exprs():
+                for part in expr.subterms():
+                    if (
+                        isinstance(part, BinaryExpr)
+                        and part.left == Var(name)
+                        and isinstance(part.right, Literal)
+                        and part.right.value == factor
+                    ):
+                        div = div or part.op in ("/", "//")
+                        mod = mod or part.op == "%"
+    return div, mod
+
+
+def _straddles_a_contraction(produced: Fold, name: str, factor: int) -> bool:
+    """Whether the pair straddles ONE contraction's operands — the div feeding a DIFFERENT edge
+    from the mod.
+
+    That straddle IS the pathology, and nothing weaker is. It says the contraction's A operand is
+    indexed by ``name / factor`` while its B operand contracts into ``name % factor``, so A depends
+    on the axis B reduces over and the term is not a matmul the warp tier can tile. A coordinate
+    that merely happens to carry a divmod somewhere — a flat index a reduce walks, a strided read —
+    is an ordinary coordinate, and splitting it only re-spells a kernel that was already scheduled.
+    """
+    pending = [produced]
+    while pending:
+        term = pending.pop()
+        pending.extend(term.operands)
+        if term.axis is None or len(term.free_axes) < 2:
+            # TWO free axes or nothing: the pathology presupposes the contraction already HAS an m
+            # and an n and that the fused pair is one of them, so splitting only un-entangles what
+            # the tier could otherwise tile. A contraction with ONE free axis is a different shape
+            # — splitting INVENTS its second dimension — and the DeepSeek V4 post block measured
+            # what that costs: its piece stopped completing a single iteration in 90 s.
+            continue
+        divs = {position for position, edge in enumerate(term.operands) if _divmod_in_edge(edge, name, factor)[0]}
+        mods = {position for position, edge in enumerate(term.operands) if _divmod_in_edge(edge, name, factor)[1]}
+        if divs and mods and (divs - mods or mods - divs):
+            return True
+    return False
+
+
+def _fused_pair_factor(produced: Fold, axes: tuple) -> tuple[str, int] | None:
+    """A grid coordinate read ONLY as ``i / c`` beside ``i % c`` is TWO coordinates wearing one
+    name — ``(the axis, c)``, or ``None``.
+
+    Attention's (head, head-dim) pair arrives fused: the projection downstream reshapes the
+    attention output to one flat width, and a cut inherits that spelling. While the pair stays
+    fused the contraction's A operand is indexed by ``i / c`` — it DEPENDS on the axis the B
+    operand contracts into — which is not a matmul, so the warp tier never offers a tile and the
+    piece falls to a per-cell reduce that walks the whole reduction once per ``c``. Splitting the
+    name restores the batched matmul the tier already schedules elsewhere.
+
+    Distinct from :func:`_workspace_strides`, which claims a coordinate used only as ``i // d``
+    and rightly declines this one: a remainder beside the division is not a narrower workspace,
+    it is a second axis."""
+    for axis in axes:
+        name = axis.name
+        if not axis.extent.is_static:
+            continue
+        extent = axis.extent.as_static()
+        divisors: set[int] = set()
+        remainders: set[int] = set()
+        uses = covered = 0
+        pending = [produced]
+        while pending:
+            term = pending.pop()
+            pending.extend(term.operands)
+            if name not in term.free_axes:
+                continue
+            for stmt in term.lift.body.iter():
+                for expr in stmt.exprs():
+                    for part in expr.subterms():
+                        if isinstance(part, Var) and part.name == name:
+                            uses += 1
+                        if (
+                            isinstance(part, BinaryExpr)
+                            and part.left == Var(name)
+                            and isinstance(part.right, Literal)
+                            and part.right.dtype == "int"
+                            and isinstance(part.right.value, int)
+                            and part.right.value > 1
+                        ):
+                            if part.op in ("/", "//"):
+                                divisors.add(int(part.right.value))
+                                covered += 1
+                            elif part.op == "%":
+                                remainders.add(int(part.right.value))
+                                covered += 1
+        if len(divisors) == 1 and divisors == remainders and uses == covered and uses:
+            (factor,) = divisors
+            if 1 < factor < extent and extent % factor == 0 and _straddles_a_contraction(produced, name, factor):
+                return name, factor
+    return None
+
+
+def _split_fused_pair(produced: Fold, axes: tuple, index: tuple) -> tuple[Fold, tuple, tuple, tuple]:
+    """``(tree, grid axes, write index, minted axes)`` with one fused pair split back into two.
+
+    The substitution ``i -> hi * c + lo`` is an exact change of iteration variables, so the tree
+    keeps its meaning whatever the detector decided; what changes is that the operands' ``i / c``
+    and ``i % c`` fold to the bare coordinates the contraction wants. The WRITE keeps the fused
+    index and the workspace its shape, so the sibling that reads it back needs no adjustment —
+    only the grid is two-dimensional where it was one."""
+    found = _fused_pair_factor(produced, axes)
+    if found is None:
+        return produced, axes, index, ()
+    name, factor = found
+    axis = next(a for a in axes if a.name == name)
+    extent = axis.extent.as_static()
+    taken = {a.name for a in axes} | set(produced.free_axes)
+    hi, lo = (f"{name}_{suffix}" for suffix in ("hi", "lo"))
+    while hi in taken or lo in taken:
+        hi, lo = f"{hi}_", f"{lo}_"
+    fused = BinaryExpr("+", BinaryExpr("*", Var(hi), Literal(factor, "int")), Var(lo))
+    ranges = {hi: Interval(0, extent // factor - 1), lo: Interval(0, factor - 1)}
+    produced = _substitute_and_fold(produced, name, Sigma({name: fused}), SimplifyCtx(ranges=ranges))
+    minted = (Axis(name=hi, extent=Dim(extent // factor)), Axis(name=lo, extent=Dim(factor)))
+    grid = tuple(part for a in axes for part in (minted if a.name == name else (a,)))
+    return produced, grid, tuple(expr.substitute({name: fused}) for expr in index), minted
+
+
 def _buffer_reads(node: Fold) -> set[str]:
     """The gmem buffers ``node``'s STORED tree reads — every lift body's loads, through the operand
     edges (a slab's body is its one load). Read off the tree, never by lowering it."""
@@ -868,8 +1026,15 @@ def realize(
         for sibling, _, channels in seam.siblings:
             read = taken.get(id(sibling), set(sibling.exposes))
             shared.update(child.exposes[channel] for position, channel in enumerate(channels) if sibling.exposes[position] in read)
-        wanted = tuple(name for name in child.exposes if name in shared)
-        slots = tuple(name in set(wanted) for name in child.exposes)
+        # ONE workspace per DISTINCT component, not one per position. A carrier seats a component
+        # once per reader, so a value two readers share is exposed at SEVERAL positions naming the
+        # one accumulator (flash's numerator, read straight and again through its normalizing
+        # wrapper). Fused lowering collapses those onto that one SSA value; a workspace keyed by
+        # position instead declares the accumulator's storage once per position and emits a
+        # redeclaration no compiler accepts. The first position owns the buffer and the rest read it.
+        owner = {name: position for position, name in reversed(list(enumerate(child.exposes))) if name in shared}
+        slots = tuple(owner.get(name) == position for position, name in enumerate(child.exposes))
+        wanted = tuple(name for position, name in enumerate(child.exposes) if slots[position])
         if front is not None:
             names = (front.name,)
             produced = front.producer
@@ -892,7 +1057,8 @@ def realize(
         # workspace read declares the seam axes it indexes, exactly as any other gmem read does.
         # Positional over what the edge exposed, ``None`` where the reader took nothing. A
         # frontier's workspace is the one raw waypoint, which the block below spells instead.
-        held = {} if front is not None else dict(zip((position for position, keep in enumerate(slots) if keep), buffers, strict=True))
+        by_name = dict(zip(wanted, buffers, strict=True))
+        held = {} if front is not None else {position: by_name[name] for position, name in enumerate(child.exposes) if name in by_name}
         loads: tuple = tuple(
             Fold.slab(Load(name=_read_name(name, token), input=held[position], index=index)) if position in held else None
             for position, name in enumerate(child.exposes)
@@ -960,14 +1126,21 @@ def realize(
     # containment makes this dependency graph acyclic, including chains whose members have the
     # same number of direct workspace reads.
     for seam, produced, axes, index, token, names, buffers in _producer_order(produced_pieces):
+        # The workspace keeps the shape the sibling already reads it back at, so the split below
+        # moves the GRID and nothing else.
+        shape = tuple(axis.extent for axis in axes)
+        produced, grid, index, minted = _split_fused_pair(produced, axes, index)
         producer = TileOp(
             op=produced,
             # The seam token keeps recursive pieces' kernel names distinct — the one-name-one-source
             # launch rule stated beside ``nvcc.load_cubin_function``: two same-named producers from
             # different cut levels would launch one kernel twice.
             name=f"{tile.name}__place_{token}",
-            place=Placement(free=axes),
-            axes=tuple(next((axis for axis in axes if axis.name == original.name), original) for original in tile.axes),
+            place=Placement(free=grid),
+            axes=(
+                *(next((axis for axis in grid if axis.name == original.name), original) for original in tile.axes),
+                *minted,
+            ),
             output_specs=tuple(
                 OutputSpec(Write(output=buffer, index=index, value=name)) for name, buffer in zip(names, buffers, strict=True)
             ),
@@ -975,7 +1148,6 @@ def realize(
             split_consumed=split_consumed,
         )
         producer = replace(_reformed(producer), knobs=consume_kernel_row(producer.knobs))
-        shape = tuple(axis.extent for axis in axes)
         workspace_tensors = tuple(Tensor(name=buffer, shape=shape, dtype=dtype) for buffer, dtype in zip(buffers, seam.dtypes, strict=True))
         reads = _buffer_reads(produced)
         fragment.add_node(

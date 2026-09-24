@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: moonshotai/Kimi-K3
-  rationale: "Fresh LMArena rank 17 signals strong current model-family interest."
-  heat: 75
+  rationale: "Prior high-spend read unconfirmed this cycle: no arena row and no OR top-10 tokens captured."
+  heat: 65
   task: generate
 matrices:
 - deploy.gpu: NVIDIA B200

@@ -20,7 +20,6 @@ pytestmark = [requires_cuda]
 @pytest.fixture(scope="module")
 def rmsnorm_setup():
     """Compiled dynamic-seq_len RMSNorm graph + its torch module."""
-    pytest.importorskip("cupy")
     import torch
 
     from emmy.compiler.backend.cuda.backend import CudaBackend
@@ -70,7 +69,7 @@ def test_rebind_runs_at_new_seq_lens(rmsnorm_setup):
 
 
 def test_rebind_same_shape_reuploads_in_place(rmsnorm_setup):
-    """Same seq_len, new contents: device arrays are reused (no realloc) and
+    """Same seq_len, new contents: every buffer keeps its address (no realloc) and
     the fresh values flow through."""
     from emmy.compiler.backend.cuda.program import CompiledProgram
     from emmy.compiler.backend.gpu_lock import gpu_lock
@@ -81,20 +80,20 @@ def test_rebind_same_shape_reuploads_in_place(rmsnorm_setup):
 
         feed, _ = _inputs(m, 16)
         prog = CompiledProgram.build(compiled, feed)
-        before = {name: id(arr) for name, arr in prog.arrays.items()}
+        before = {b.name: prog.executor.buffer(b.name)[0] for b in prog.plan.buffers}
 
         x2 = np.random.RandomState(99).standard_normal((1, 16, 256)).astype(np.float32)
         prog.rebind({"x": x2, "p_weight": feed["p_weight"]})
         prog.run_once()
         out = next(iter(prog.outputs().values()))
-        assert {name: id(arr) for name, arr in prog.arrays.items()} == before
+        assert {b.name: prog.executor.buffer(b.name)[0] for b in prog.plan.buffers} == before
         with torch.no_grad():
             ref = torch.nn.functional.rms_norm(torch.from_numpy(x2), (256,), m.weight, eps=m.eps).numpy()
         np.testing.assert_allclose(out, ref, rtol=1e-4, atol=1e-4)
 
 
 def test_rebind_keeps_weight_array_and_drops_graphs(rmsnorm_setup):
-    """Weights (static-shaped, un-supplied) keep their device array across a
+    """Weights (static-shaped, un-supplied) keep their device memory across a
     seq_len change; captured CUDA graphs are invalidated."""
     from emmy.compiler.backend.cuda.program import CompiledProgram
     from emmy.compiler.backend.gpu_lock import gpu_lock
@@ -105,17 +104,17 @@ def test_rebind_keeps_weight_array_and_drops_graphs(rmsnorm_setup):
         prog = CompiledProgram.build(compiled, feed)
         # Every static-shaped buffer that isn't the activation input — the
         # weight however the tracer named/classified it, plus static scratch.
-        weight_names = [b.name for b in prog.compiled.bufs if not b.is_symbolic and b.name != "x"]
+        weight_names = [b.name for b in prog.plan.buffers if not b.is_symbolic and b.name != "x"]
         assert weight_names, "expected at least one static-shaped buffer (the RMSNorm weight)"
-        weight_ids = {name: id(prog.arrays[name]) for name in weight_names}
+        weight_ids = {name: prog.executor.buffer(name)[0] for name in weight_names}
 
-        prog.capture_launch_graphs([1] * len(prog.compiled.launches))
-        assert prog._graphs is not None
+        prog.capture_launch_graphs([1] * len(prog.plan.launches))
+        assert prog.executor.has_launch_graphs()
 
         feed64, ref64 = _inputs(m, 64)
         prog.rebind({"x": feed64["x"]})  # weights not re-supplied — the serving pattern
-        assert prog._graphs is None, "rebind must drop captured graphs (they bake old pointers)"
-        assert {name: id(prog.arrays[name]) for name in weight_names} == weight_ids, "weights must not re-upload on rebind"
+        assert not prog.executor.has_launch_graphs(), "rebind must drop captured graphs (they bake old pointers)"
+        assert {name: prog.executor.buffer(name)[0] for name in weight_names} == weight_ids, "weights must not move on rebind"
         prog.run_once()
         out = next(iter(prog.outputs().values()))
         np.testing.assert_allclose(out, ref64, rtol=1e-4, atol=1e-4)

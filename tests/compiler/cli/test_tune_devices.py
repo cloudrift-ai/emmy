@@ -2,7 +2,7 @@
 
 ``_resolve_devices`` maps the flags to a device-id list (``--devices`` wins) and,
 for two or more devices, enforces homogeneity (one perf key per tune). The
-homogeneity probe needs cupy, so it's exercised here by monkeypatching the
+homogeneity probe needs the runtime, so it's exercised here by monkeypatching the
 device-properties call.
 """
 
@@ -67,31 +67,41 @@ def test_gpus_below_one_exits() -> None:
     assert e.value.code == 2
 
 
+def _fake_runtime(monkeypatch, identity) -> None:
+    """Install a fake ``emmy.emmy_runtime`` whose ``Device(ordinal)`` reports ``identity(ordinal)``
+    as ``((major, minor), name)``."""
+
+    class Device:
+        def __init__(self, ordinal):
+            self.ordinal = ordinal
+
+        def compute_capability(self):
+            return identity(self.ordinal)[0]
+
+        def name(self):
+            return identity(self.ordinal)[1]
+
+    import emmy
+
+    fake = SimpleNamespace(Device=Device)
+    monkeypatch.setitem(__import__("sys").modules, "emmy.emmy_runtime", fake)
+    monkeypatch.setattr(emmy, "emmy_runtime", fake, raising=False)
+
+
 def test_heterogeneous_devices_rejected(monkeypatch) -> None:
-    fake_cupy = SimpleNamespace(
-        cuda=SimpleNamespace(runtime=SimpleNamespace(getDeviceProperties=lambda d: {"major": 8 if d == 0 else 9, "minor": 0}))
-    )
-    monkeypatch.setitem(__import__("sys").modules, "cupy", fake_cupy)
+    _fake_runtime(monkeypatch, lambda d: ((8 if d == 0 else 9, 0), "NVIDIA H100"))
     with pytest.raises(SystemExit) as e:
         tune._resolve_devices(_args(devices="0,1"))
     assert e.value.code == 2
 
 
 def test_homogeneous_devices_accepted(monkeypatch) -> None:
-    fake_cupy = SimpleNamespace(cuda=SimpleNamespace(runtime=SimpleNamespace(getDeviceProperties=lambda d: {"major": 9, "minor": 0})))
-    monkeypatch.setitem(__import__("sys").modules, "cupy", fake_cupy)
+    _fake_runtime(monkeypatch, lambda d: ((9, 0), "NVIDIA H100"))
     assert tune._resolve_devices(_args(devices="0,1,2")) == [0, 1, 2]
 
 
 def test_same_capability_different_gpu_names_rejected(monkeypatch) -> None:
-    fake_cupy = SimpleNamespace(
-        cuda=SimpleNamespace(
-            runtime=SimpleNamespace(
-                getDeviceProperties=lambda d: {"major": 9, "minor": 0, "name": b"NVIDIA H100" if d == 0 else b"NVIDIA H200"}
-            )
-        )
-    )
-    monkeypatch.setitem(__import__("sys").modules, "cupy", fake_cupy)
+    _fake_runtime(monkeypatch, lambda d: ((9, 0), "NVIDIA H100" if d == 0 else "NVIDIA H200"))
     with pytest.raises(SystemExit) as exc:
         tune._resolve_devices(_args(devices="0,1"))
     assert exc.value.code == 2

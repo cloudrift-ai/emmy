@@ -63,8 +63,9 @@ lane against its own task's eager, and keep the two lanes in separate columns.
 
 The `gemma4_serving` recipe is the same article's serving table: its six points in its three vLLM lanes (stock vLLM
 0.23.0, vLLM with the Emmy plugin, and the plugin's fast-math fork), eighteen tasks on one RTX 5090 with the article's
-per-workload knobs. Every Emmy lane boots under `EMMY_STRICT_EVIDENCE=1`, so the RTX 5090 Gemma 4 serving golden's
-rows decide every kernel the server compiles and a fork no row decides fails the boot; the image is the plain
+per-workload knobs, except that the single-stream points take the recorded width-8 decode twins where the article
+took width 32. Every Emmy lane boots under `EMMY_STRICT_EVIDENCE=1`, so the RTX 5090 Gemma 4 serving golden's rows
+decide every kernel the server compiles and a fork no row decides fails the boot; the image is the plain
 `vllm-emmy` base built at the commit the run names, compiling its programs on first boot. It is a reproduction of the
 article's protocol on the current compiler, not the preregistered same-image A/B below, which runs the standard lane
 only from the warmed derivative image.
@@ -186,8 +187,13 @@ digests, driver/CUDA state, and failures. General fast
 math is outside this preregistered suite; the exact `FP8_MMA` pin is confined to the dynamic-FP8 checkpoint layer
 traces and does not establish a W8A8-only result without the deferred target filter.
 
+Both Gemma arms also declare no multimodal items. Gemma 4 12B is a multimodal checkpoint and vLLM sizes an encoder
+budget from it, so a stock server refuses to start whenever `--max-num-batched-tokens` is below
+`max_tokens_per_mm_item`, which two of the four points are; the Emmy arm never hit it because `EmmyGenModel` is
+text-only. The benchmark sends text, and the declaration is on both arms, so their argv stays identical.
+
 The Gemma stock and Emmy arms use identical per-workload `--max-num-batched-tokens` settings and the same immutable
-`cloudriftai/vllm-emmy-gemma-4-12b-it@sha256:5add12d3b7f4673790b435b76635082433538e3615fbc40227fa1c0db64c9ff3`
+`cloudriftai/vllm-emmy-gemma-4-12b-it@sha256:3a690e9f7859d46b969dd9eaaed36f52f92c25c5595dc112aee2adb781d26e28`
 image, which records vLLM source revision `91df0fad4dc98a67c7659d9dbd915245d5c43d96`. The stock arm overrides the
 image entrypoint with `python3 -m vllm.entrypoints.openai.api_server`; the Emmy arm selects `EmmyGenModel`. An
 intelligent reviewer rejects the A/B if the final evidence shows different scheduler settings, runtime revisions,

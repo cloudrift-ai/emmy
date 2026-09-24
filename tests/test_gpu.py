@@ -48,17 +48,10 @@ def test_device_features_total_mem_present_when_vram_unknown():
 
 
 def test_probe_falls_back_to_memorized(monkeypatch):
-    # Force the cupy probe to fail → memorized fallback of the named card / default.
-    import builtins
+    # No live device → memorized fallback of the named card / default.
+    from emmy.compiler.backend.cuda import device
 
-    real_import = builtins.__import__
-
-    def no_cupy(name, *a, **k):
-        if name == "cupy":
-            raise ImportError("no cupy")
-        return real_import(name, *a, **k)
-
-    monkeypatch.setattr(builtins, "__import__", no_cupy)
+    monkeypatch.setattr(device, "properties", lambda: None)
     assert gpu.probe_live_features() == gpu.DEFAULT_GPU.device_features()
     assert gpu.probe_live_features("NVIDIA GeForce RTX 4090")["sm_count"] == 128.0
     # total_mem (the same-die SKU discriminator) rides the fallback too.
@@ -68,7 +61,7 @@ def test_probe_falls_back_to_memorized(monkeypatch):
 def test_by_name_canonicalizes_reported_aliases():
     """Live datacenter cards report bare ``cudaDeviceProp.name`` strings that differ from
     the capacity-suffixed registry names; the registry aliases canonicalize them (so a
-    live node-store row and a golden built from the canonical name share one gpu string).
+    live measured row and a golden built from the canonical name share one gpu string).
     Without these, ``live_name`` canonicalization was a no-op for the exact cards it
     targets."""
     assert gpu.by_name("NVIDIA H200").name == "NVIDIA H200 141GB"

@@ -118,7 +118,9 @@ schedule tiles off the node
 and seals through the one `grid_tile` finalizer. A tiled contraction tiles its OUTPUT `(m, n)` axes (register / warp
 cells; the reduce K serial per cell); a cooperating `Fold` tiles its REDUCE axis instead (`_tile_reduce_axis` —
 BLOCK `coop` lanes at the unit level, REG `reg` ILP chains at the register level, the algebra merge — the fold's
-own `merge` — closing the fold),
+own `merge` — closing the fold; a lane loop whose per-lane trip count is short unrolls, so its loads are in flight
+together rather than one global-load latency per trip, and the cross-warp combine folds the per-warp partials with
+warp 0's butterfly behind one barrier),
 its per-cell reduce loop taken from the node's own lowering; an UNTILED root whose cones close over other reduces
 (its CHAIN MEMBERS, `ops.chain_members`: reached through zero-axis operand edges and the axis-invariant reduce
 operands members hoist ahead of their loops) binds through the chain arm (`_tile_chain_members`) when a member
@@ -399,10 +401,12 @@ and clamping only its start still copies past the extent. A **multi-channel prod
 `(b, acc)` channels over one shared A edge, either a computed cone or a materialized load; `_AtomOps.channels` reads
 them off the node) fills one B slab per channel, drains N mma chains off the ONE ldmatrix'd A fragment into
 per-channel C fragments (`_fold_frag`), and the projection (SwiGLU) combines the channels per element in the store's
-epilogue `Lambda` (`extra_frags`). Materialized A copies into the same single A slab; computed A evaluates into it. Both
-forms use the synchronous compute fill because the gmem-direct and single-sided byte-copy MMA paths remain
-single-channel. The block-scaled fp4 cell is the exception: it carries N channels on cp.async, staging `2 + 2N` slabs
-over the one shared A pair, and names each channel's block-scale fragment per channel just as its data fragment is.
+epilogue `Lambda` (`extra_frags`). Materialized A copies into the same single A slab; computed A evaluates into it. A
+computed A has only the synchronous compute fill, as anywhere else; a materialized one stages through whichever
+transport the card offers, each depositing the same `1 + N` slabs — so the gate/up GEMM rings on cp.async and reaches
+the TMA box copy, and with it wgmma. Only the gmem-direct MMA leaf stays single-channel, because it folds one B
+straight out of registers. The block-scaled fp4 cell carries N channels the same way, staging `2 + 2N` slabs over the
+one shared A pair, and names each channel's block-scale fragment per channel just as its data fragment is.
 
 **A gmem fragment's leading dimension is read off the operand's ADDRESS.** A loader reaches its operand through one
 leading dimension: one coordinate steps by 1, the other by `ldm`. Which DIM an index spells a coordinate in does not

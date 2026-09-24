@@ -363,7 +363,7 @@ configs:
       STAGE@map.1/twist.1/inner: d2/smem-async
       WORK: w4x1
       RASTER: ''
-    identity: a78dcd5c36f888fa79e31016aa2f53362e12e7ef2f23e57ca012c677c32848e6
+    identity: 99f93d427be1ab5a5169d5ea068364c04832b106d72c20989241b9db63180bde
     measurements:
       emmy_us: 41.002665956815086
       reference_us: 41.04904247366864
@@ -381,7 +381,7 @@ configs:
       STAGE@map.1/twist.1/inner: d2/smem-async
       WORK: w4x1
       RASTER: ''
-    identity: a78dcd5c36f888fa79e31016aa2f53362e12e7ef2f23e57ca012c677c32848e6
+    identity: 99f93d427be1ab5a5169d5ea068364c04832b106d72c20989241b9db63180bde
     measurements:
       emmy_us: 37.88799964464628
       reference_us: 39.64927911758423

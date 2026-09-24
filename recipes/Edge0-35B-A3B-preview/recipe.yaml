@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: Edge0/Edge0-35B-A3B-preview
-  rationale: "Breakout A3B-class MoE serving with novel low-VRAM architecture, though exact model evidence is absent from sources."
-  heat: 78
+  rationale: "Strong HF momentum: 3,552 likes, rank 12; confirms prior breakout read; A3B edge coverage."
+  heat: 72
   task: generate
 matrices:
 - deploy.gpu: NVIDIA H200 141GB

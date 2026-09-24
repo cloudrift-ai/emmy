@@ -82,8 +82,9 @@ class SpliceEvent:
     identities are stable (pre-splice, pre-id-promotion); ``graph`` is the candidate's graph,
     still holding the consumed nodes. ``knobs`` is the selected fork's delta, which cannot ride
     the fragment because Graph splices deliberately do not inherit the consumed op's knobs.
-    Strategies may mutate fragment OPS (stamp identity, thread attribution) — never the graph or
-    the cursor."""
+    ``aliases`` maps each other spelling of a key of ``knobs`` to the key it names, so a strategy
+    that stores the decision keeps one key per seam cut. Strategies may mutate fragment OPS (stamp
+    identity, thread attribution) — never the graph or the cursor."""
 
     match: Match
     fragment: Graph
@@ -91,6 +92,7 @@ class SpliceEvent:
     pass_name: str
     graph: Graph
     knobs: dict = field(default_factory=dict)
+    aliases: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

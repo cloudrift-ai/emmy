@@ -23,27 +23,6 @@ from emmy.compiler.pipeline.search.policy.greedy import (
 from tests.compiler.terms import projection
 
 
-@pytest.mark.parametrize("route", ({"PLACE": "cut"}, {"PLACE@inner.1/map": "cut"}, {"PLACE@inner.1/map": "cut", "WORK": "t32"}))
-def test_db_measured_index_files_placement_rows_as_kernel_set_prices(route, monkeypatch) -> None:
-    """A measured row that spells a placement is not a schedule for the kernel it names — its µs
-    belongs to the kernel set the route mints — so it prices that kernel-set decision (``routes``)
-    and never ranks a schedule fork (``ok``)."""
-    from emmy.compiler.pipeline.search import golden
-
-    monkeypatch.setattr(golden, "evidence_rows", lambda _gpu, _cap: [])
-    signature = frozenset({("S_shape", "128")})
-    rows = [
-        SimpleNamespace(status="ok", stats=SimpleNamespace(median=1.0), knobs={"S_shape": 128, **route}, op_key="k" * 16),
-        SimpleNamespace(status="ok", stats=SimpleNamespace(median=7.0), knobs={"S_shape": 128, "WORK": "t64"}, op_key="k" * 16),
-    ]
-    db = SimpleNamespace(iter_perf=lambda *_args, **_kwargs: rows)
-    ctx = SimpleNamespace(structural_key=lambda: "ctx", gpu_name="card", compute_capability=(8, 9), features=lambda: {"H_opt": 3.0})
-
-    index = _db_measured_index_build(db, ctx)
-    assert index.ok == {signature: [({"WORK": "t64"}, 7.0)]}
-    assert index.routes == {signature: [({k: str(v) for k, v in route.items()}, 1.0)]}
-
-
 def test_db_measured_index_collects_shapes_whose_every_measured_variant_failed() -> None:
     """A ``bench_fail`` row is evidence too — the watchdog measured that variant not finishing.
     When EVERY measured variant of one structural shape failed, the shape itself is disqualified;
@@ -226,11 +205,11 @@ def test_route_rows_become_measured_kernel_set_candidates() -> None:
     }
     index = _Measured({sig: [({"WORK": "t32"}, 3.0)]}, {}, routes)
 
-    got = _route_candidates(point, index)
+    got = _route_candidates(point, index, None)
 
     assert got == [(fuse, 3.0), (cut, 9.0), (fuse, 4.0)]
     scheduled = SimpleNamespace(**{**vars(point), "options": [SimpleNamespace(pool_id="pool", knobs={"WORK": "t8"})]})
-    assert _route_candidates(scheduled, index) == []
+    assert _route_candidates(scheduled, index, None) == []
 
 
 def test_strict_evidence_refuses_a_fork_no_measurement_decides(monkeypatch) -> None:
@@ -499,3 +478,63 @@ def test_price_memo_keys_on_exact_identity_not_the_term_hash(monkeypatch) -> Non
     assert identity_keys, "the chain must offer structural forks whose pricing probes fire"
     assert len(identity_keys) < len(calls), "mirror cut pieces must unify under the exact identity"
     assert memo_keys == identity_keys, "the memo must key on the exact identity"
+
+
+def _cut_fork(db_ctx):
+    """A placement fork on a real tile kernel: the fuse arm and one cut, the shape the cut pass offers."""
+    from tests.compiler.helpers import case_target_tile
+
+    tile = case_target_tile("fused/norm-linear-f16-scalar-reduce.yaml")
+    fuse = DeferredFork(materialize=lambda: None, knobs={"PLACE": "fuse"})
+    cut = DeferredFork(materialize=lambda: None, knobs={"PLACE@map.1/map": "cut"}, structural=True)
+    return SimpleNamespace(options=[fuse, cut], node_id="node", root_op=tile, ctx=db_ctx), tile, fuse, cut
+
+
+def test_a_stored_cut_is_priced_from_its_pieces_at_the_fork() -> None:
+    """The tune DB holds no row spelling a cut: the decision is a routing row, and at the fork it is
+    priced as the sum of its pieces' fastest rows on this card — every piece, or the arm is off the
+    ballot. The parent is matched by exact identity, so another kernel's cut never prices this one."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.pipeline.search.db import PerfStats, RoutingRow, SearchDB
+    from tests.compiler.pipeline.search.helpers import GPU_5090, kernel_row
+
+    ctx = Context.from_target((12, 0), gpu_name=GPU_5090)
+    point, tile, _fuse, cut = _cut_fork(ctx)
+    parent = tile.identity_key(structural=False, with_io=True)
+    db = SearchDB()
+    db.record_kernels([kernel_row(parent), kernel_row("c1"), kernel_row("c2")])
+    db.record_routing(RoutingRow(parent=parent, arm={"PLACE@map.1/map": "cut"}, children=("c1", "c2")))
+
+    def measured(kernel: str, us: float, work: str = "w1x8") -> None:
+        # Through the live context, so the row lands in the regime this compile reads (the suite's flags included).
+        stats = PerfStats(median=us, min=us, max=us, mean=us, variance=0.0, n_samples=30)
+        db.record_perf(ctx, kernel, bindings={}, knobs={"WORK": work}, backend="cuda", status="ok", stats=stats)
+
+    measured("c1", 30.0)
+    assert _route_candidates(point, greedy._EMPTY_MEASURED, db) == [], "a piece without a row leaves the cut unpriced"
+    measured("c2", 50.0)
+    measured("c2", 70.0, work="t8")
+    assert _route_candidates(point, greedy._EMPTY_MEASURED, db) == [(cut, 80.0)]
+    assert _route_candidates(point, greedy._EMPTY_MEASURED, None) == []
+    other = Context.from_target((12, 0), gpu_name="NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition")
+    assert _route_candidates(SimpleNamespace(**{**vars(point), "ctx": other}), greedy._EMPTY_MEASURED, db) == []
+
+
+def test_a_stored_composed_cut_is_offered_to_the_cut_pass(monkeypatch) -> None:
+    """A routing row that cuts several seams is the composed arm a later compile must offer beside the
+    single seams, keyed by the parent's stamps the way a golden route row is."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.pipeline.search import golden
+    from emmy.compiler.pipeline.search.db import RoutingRow, SearchDB
+    from emmy.compiler.pipeline.search.strategy.greedy import _measured_composed_routes
+    from tests.compiler.pipeline.search.helpers import GPU_5090, kernel_row
+
+    monkeypatch.setattr(golden, "evidence_rows", lambda _gpu, _cap: [])
+    ctx = Context.from_target((12, 0), gpu_name=GPU_5090)
+    db = SearchDB()
+    db.record_kernels([kernel_row("p", stamps={"S_x": 1.0}), kernel_row("c1"), kernel_row("c2"), kernel_row("c3")])
+    db.record_routing(RoutingRow(parent="p", arm={"PLACE@a": "cut", "PLACE@b": "cut"}, children=("c1", "c2", "c3")))
+    db.record_routing(RoutingRow(parent="p", arm={"PLACE@a": "cut"}, children=("c1", "c2")))
+
+    assert _measured_composed_routes(db, ctx) == [(frozenset({("S_x", "1.0"), ("I_kernel", "p")}), ("PLACE@a", "PLACE@b"))]
+    assert _measured_composed_routes(None, ctx) == []

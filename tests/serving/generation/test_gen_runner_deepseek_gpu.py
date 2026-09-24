@@ -73,7 +73,6 @@ def _eager_reference(torch, model, streams, ids, attn_kwargs):
 def test_deepseek_seam_matches_eager_on_gpu():
     torch = pytest.importorskip("torch")
     transformers = pytest.importorskip("transformers")
-    pytest.importorskip("cupy")
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
 
@@ -116,7 +115,6 @@ def test_sharded_expert_partials_sum_to_the_unsharded_combine_on_gpu():
     is standing in for — the invariant tensor-parallel serving rests on."""
     torch = pytest.importorskip("torch")
     transformers = pytest.importorskip("transformers")
-    pytest.importorskip("cupy")
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
 
@@ -154,7 +152,6 @@ def _cuda_kwargs(torch, attn_kwargs):
 def test_embed_opens_and_final_norm_closes_the_stream_carrier():
     torch = pytest.importorskip("torch")
     transformers = pytest.importorskip("transformers")
-    pytest.importorskip("cupy")
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
 
@@ -194,7 +191,6 @@ def test_hash_routed_layer_selects_experts_by_token_id_on_gpu():
     single boot compile runs for tens of minutes."""
     torch = pytest.importorskip("torch")
     transformers = pytest.importorskip("transformers")
-    pytest.importorskip("cupy")
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
 

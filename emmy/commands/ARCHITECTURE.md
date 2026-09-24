@@ -210,7 +210,9 @@ directly by `tune --golden PATH` and verified by `run --golden PATH [--realizati
 `compile`, `tune`, `serve` and `eval golden`: its MEASURED rows are the golden evidence that command deploys from,
 instead of the repository's per-card goldens, joining the tune DB's rows in the one measured-evidence index the
 greedy pick reads (`search.golden.records_override` in-process; `EMMY_GOLDEN_FILE` for the vLLM child `serve`
-spawns). `--realization NAME` (`run`, `compile`, `tune`) selects one realization by exact name or an unambiguous
+spawns, together with the precision regime the file's rows share — `EMMY_FAST_MATH` and friends — because a row
+is evidence only in its own regime and the child learns it from nowhere else; an environment pin at another value
+fails the boot). `--realization NAME` (`run`, `compile`, `tune`) selects one realization by exact name or an unambiguous
 substring — inside `--golden PATH`, or, on `run` / `compile` without it, inside the live card's repository goldens.
 There is no second spelling: no file flag beside `--golden`, no name flag beside `--realization`.
 
@@ -240,11 +242,10 @@ remaining live-measurement slot. A traced target normally maps to one post-fusio
 several CudaOps. A conflicting multi-CudaOp proposal is replayable only when search retains the original exact
 structural row that minted the pieces; otherwise it is reported as ambiguous instead of being assigned an invented
 winner. The measured CUDA pipeline captures the finalized single Loop identity even when the working target starts
-from stable Torch IR, then captures the consumed parent at the kernel-set-changing splice. That identity enriches the
-parent-linked node rows used for diagnostics and training. A structural whole-slice latency stays in working ranking
-feedback rather than entering `perf`: without an ordered exact child-schedule receipt, the flat parent row would price
-a different assembly after cold reload. Proposal feedback is written immediately after measurement, before MCTS, so
-an interruption preserves it.
+from stable Torch IR, then captures the consumed parent at the kernel-set-changing splice. A structural whole-slice
+latency stays in working ranking feedback rather than entering `perf`: without an ordered exact child-schedule receipt,
+the flat parent row would price a different assembly after cold reload. Proposal feedback is written immediately after
+measurement, before MCTS, so an interruption preserves it.
 The final winner annotation is emitted only when one directly searched observation supplies both the knobs and cost;
 the later greedy deploy replay cannot be paired with the search reward. The ranking pass stays at tune's fast compile
 flags and never writes the trusted
@@ -305,7 +306,7 @@ nonzero, when the env pin did not realize (`greedy_record_refusal`): the row wou
 under the pin's name and lane. It refuses a pick whose answer `--strict` rejected for the same reason. Independently of both, every clean pinned row and the greedy isolated re-bench are written into
 the tune DB by default at tune-standard measurement quality: per-kernel `perf` rows through the tuner's own writer —
 the deploy evidence the next `compile` / `run` / `serve` picks from, which is how a replayed golden or a hand-pinned
-`--ab` row becomes what the compiler chooses — and node-store leaves for the offline prior's training data. An
+`--ab` row becomes what the compiler chooses. An
 embedded golden lowers in-process, knobs and all, so it records like a traced model; only the `--ir` JSON path, whose
 serialization drops the knobs, stays unrecorded. A greedy row that fails to bench is recorded the same way the
 tuner records a hung terminal (`bench_record.record_bench_failure`, the tuner's `persist_bench_failure`): the kernel
@@ -313,7 +314,7 @@ the failure names — the one the watchdog saw hang, or the one nvcc refused to 
 kernel earns a `bench_fail` perf row at the run budget's fail sentinel and the innocent kernels earn none, so the
 next compile disqualifies that arm instead of electing the same route and failing the same way again; a failure
 that names no kernel records nothing, and a compile-budget overrun measured
-nothing and records nothing. `--no-record-nodes` opts out of all of it. This recording happens before any pinned row
+nothing and records nothing. `--no-record-evidence` opts out of all of it. This recording happens before any pinned row
 compiles — including when an embedded Loop's same-input reference completed but its repeated greedy timing crossed
 the watchdog — and a pinned row that pins no knobs beyond the greedy compile's own input regime is then skipped
 rather than re-elected and re-failed identically; a pinned row carrying its own knobs (a genuinely different config,
@@ -847,5 +848,8 @@ no Git operation.
 
 `generate --export-native DIR` prepares a standalone dense Qwen3 artifact; `generate --native-pack DIR` invokes the
 supervised Rust generation loop. These modes are mutually exclusive. The command layer owns argument parsing and
-tokenizer I/O; model preparation and binary worker transport live in `serving/native`. Sampling is currently greedy,
-and HTTP serving remains on the existing vLLM path.
+tokenizer I/O; model preparation and binary worker transport live in `serving/native`. Native execution accepts
+`--temperature`, `--top-p`, and `--seed`; temperature zero is greedy, and nonzero `--top-k` is rejected.
+`--timeout` controls the native worker operation deadline, including the complete sequential prefill/decode loop.
+HTTP serving remains on the existing vLLM path. Generation artifacts prepared before sampling support must be
+exported again.

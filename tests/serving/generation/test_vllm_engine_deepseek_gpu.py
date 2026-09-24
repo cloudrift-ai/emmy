@@ -92,7 +92,6 @@ def test_tp2_pp2_greedy_token_ids_match_the_single_rank_engine(tmp_path, monkeyp
     torch = pytest.importorskip("torch")
     transformers = pytest.importorskip("transformers")
     pytest.importorskip("vllm")
-    pytest.importorskip("cupy")
     # The DRIVER must stay off the CUDA driver (the fork-model import is NOT probed here on
     # purpose — it initializes CUDA), and the engine processes must spawn, not fork: a forked
     # EngineCore inherits a poisoned CUDA context and dies at init_device.

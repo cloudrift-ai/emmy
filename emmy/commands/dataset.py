@@ -1,14 +1,18 @@
-"""``emmy dataset {import,freeze}`` — fill a dataset DB instance, and snapshot one into a measurement freeze.
+"""``emmy dataset {import,freeze,check}`` — fill a dataset DB instance, snapshot one into a measurement
+freeze, and check that one's tables agree with themselves.
 
 A dataset DB is the tune DB's schema in its own file (``EMMY_DATASET_DB``): the measurement-data readers
 (``eval prior``) read it, and no compile ever does, so what is imported into it cannot change a deploy.
 
 - ``import`` loads sources into it: a measurement freeze directory (the checked-in one by default) or
-  a tune DB file, whose CUDA ``perf`` rows are copied over (the way a card's measurements from a rented
-  GPU reach the dataset). Rows keep the source they arrived from, and the upsert is the tune DB's own,
-  so importing the same source twice changes nothing.
+  a tune DB file, whose CUDA ``perf`` rows, ``kernel`` rows and ``routing`` rows are copied over
+  (the way a card's measurements from a rented GPU reach the dataset). Rows keep the source they
+  arrived from, and the upsert is the tune DB's own, so importing the same source twice changes nothing.
 - ``freeze`` writes a DB instance's admitted rows as a digest-pinned freeze directory — the artifact
   that gets checked in, so a reported number is one anyone can reproduce.
+- ``check`` counts the rows of an instance whose tables disagree with themselves (a knob row's digest, a
+  reference, a card, the two knob vocabularies). A DB is a cache: a row the current code disagrees with is
+  re-tuned or re-imported, so nothing here decodes what the compiler wrote.
 
 :func:`dataset_db` is the readers' way in: it resolves the instance and refuses a missing one, or a
 default one that does not hold the checked-in freeze, with the command that fixes it.
@@ -47,6 +51,10 @@ def register_dataset_command(subparsers) -> None:
     pf.add_argument("--note", default="", help="Freeform collection-policy note stamped into the manifest.")
     pf.set_defaults(func=handle_dataset_freeze)
 
+    pc = sub.add_parser("check", help="Count the rows of a DB instance whose tables disagree with themselves")
+    pc.add_argument("--db", help="DB instance to check (default: EMMY_DATASET_DB or ~/.cache/emmy/dataset.db).")
+    pc.set_defaults(func=handle_dataset_check)
+
 
 def handle_dataset_import(args) -> None:
     from emmy.compiler.pipeline.search.data.freeze import load_freeze  # noqa: PLC0415
@@ -65,20 +73,27 @@ def handle_dataset_import(args) -> None:
     try:
         for src in sources:
             if src.is_dir():
-                manifest, rows = load_freeze(src)
-                n = db.record_perf_rows(rows)
-                logger.info("imported %d row(s) from freeze %s (sha256 %s)", n, src, manifest["sha256"])
+                frozen = load_freeze(src)
+                k = db.record_kernels(frozen.kernels)
+                s = db.record_routings(frozen.routing)
+                n = db.record_perf_rows(frozen.perf)
+                logger.info(
+                    "imported %d row(s), %d kernel(s), %d routing row(s) from freeze %s (sha256 %s)",
+                    n,
+                    k,
+                    s,
+                    src,
+                    frozen.manifest["sha256"],
+                )
                 continue
             tune_db = SearchDB.open_readonly(src)
             try:
-                rows = list(tune_db.iter_perf_rows(backend="cuda"))
+                k = db.record_kernels(tune_db.iter_kernels())
+                s = db.record_routings(tune_db.iter_routing())
+                n = db.record_perf_rows(tune_db.iter_perf_rows(backend="cuda"))
             finally:
                 tune_db.close()
-            keyed = [r for r in rows if r.gpu]
-            n = db.record_perf_rows(keyed)
-            logger.info("imported %d row(s) from tune DB %s", n, src)
-            if len(rows) > len(keyed):
-                logger.info("  skipped %d row(s) recorded before the card joined the key — no dataset reads them", len(rows) - len(keyed))
+            logger.info("imported %d row(s), %d kernel(s), %d routing row(s) from tune DB %s", n, k, s, src)
     finally:
         db.close()
     logger.info("dataset DB: %s", db_path)
@@ -94,11 +109,31 @@ def handle_dataset_freeze(args) -> None:
     out = Path(args.out).expanduser()
     manifest = write_freeze(db_path, out, note=args.note)
     counts = manifest["counts"]
-    logger.info("froze %d row(s) (%d ok + %d bench_fail) from %s", counts["rows"], counts["ok"], counts["bench_fail"], db_path)
-    logger.info("  per card: %s", ", ".join(f"{gpu}: {n}" for gpu, n in counts["per_gpu"].items()))
     logger.info(
-        "  commit %s, sha256 %s over %d per-GPU file(s) -> %s/", manifest["repo_commit"], manifest["sha256"], len(manifest["files"]), out
+        "froze %d row(s) (%d ok + %d bench_fail), %d kernel(s), %d routing row(s) from %s",
+        counts["rows"],
+        counts["ok"],
+        counts["bench_fail"],
+        counts["kernels"],
+        counts["routing"],
+        db_path,
     )
+    logger.info("  per card: %s", ", ".join(f"{gpu}: {n}" for gpu, n in counts["per_gpu"].items()))
+    logger.info("  commit %s, sha256 %s over %d file(s) -> %s/", manifest["repo_commit"], manifest["sha256"], len(manifest["files"]), out)
+
+
+def handle_dataset_check(args) -> None:
+    from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
+
+    db = SearchDB.open_readonly(dataset_db(args.db))
+    try:
+        counts = db.drift()
+    finally:
+        db.close()
+    for name, n in counts.items():
+        logger.info("%s: %d row(s) fail", name, n)
+    if any(counts.values()):
+        sys.exit(1)
 
 
 def dataset_db(db_arg: str | None) -> Path:

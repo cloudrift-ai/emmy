@@ -156,7 +156,7 @@ class Context:
     # capability + compiler flags) and nothing about the card. ``None`` ⇒ unknown.
     gpu_name: str | None = None
     # Identifies which backend's perf rows this compile reads/writes — the
-    # tune DB keys ``perf`` by ``(context_key, op_key, backend)``. Defaults to
+    # tune DB keys ``perf`` by the card, the regime, the kernel and ``backend``. Defaults to
     # ``"cuda"`` — the canonical autotune target. ``run_autotune`` replaces
     # this when a live :class:`Backend` is supplied.
     backend_name: str = "cuda"
