@@ -619,6 +619,29 @@ does not move it. The completions are as degraded as boot36b's: the 5-token prom
 the 2,155-token one into a repeated fragment of the passage. `main` boots strict again from this file; what it serves
 is the correctness question the plan's next item owns.
 
+**The wrong kernel found and fixed: both expert twins computed the up projection twice (2026-09-24).** Replaying each
+twin's lead on `main` with `-v` runs its random-input check against eager, and the width-16 expert twin failed it —
+mean difference 132 on outputs whose peak is 188, 9,931 cells over the budget's 4 — while the symbolic expert twin
+failed the mean gate the same way; with `TILE=` pinned, the same twin passes to five decimals. So the tensor-core tile
+of the expert cut piece was wrong, and single-token decode, which rides that twin, served noise. Pinning the twin's
+recorded tile on one host tree per revision since the last coherent boot (the repository golden of each revision as
+its evidence; an old tree prints no check without `--bench`, so its output mean stands in) puts the break at
+85ac93329, #829 of 2026-09-20: the piece's output mean is −11.2 on every tree before it and −131.5 on every tree from
+it through main, where the cut differs and the mean is −142.6; with the cut removed the tiled fused kernel is right on
+every tree. In the piece's Tile IR after #829, the gate and up dequant cones are one producer edge exposing two
+results — its seam clustering folds "copies of one value" into one cone — and the atom's compute-filled B slab took
+that edge's last result for every contraction channel: the generated CUDA stages `v42`, the up half, into both B tiles
+and computes and discards the gate half. #893 keeps, in the fold's channel walk, the result each product multiplies
+and stages that one; a unit test with two channels over one two-result producer is red without it. On the fixed tree
+the width-16 expert twin's check is bit-exact against eager and the symbolic twin's passes at a maximum difference of
+0.25, both under their recorded tiled rows, so no row changes. Booted strict from the same file on that tree (boot39,
+main at 1494e4beb plus the fix, fast math pinned off), the server reached its serving state in 27 minutes, the first
+compile on each rank paying the cold evidence index of a new compiler fingerprint, and the completions are coherent
+again: the 5-token prompt continues into a JSON fragment on both repeats (0.70 s to first token warm, 0.53 s per
+output token) and the 2,155-token prompt continues the passage verbatim (5.54 s warm, 0.58 s per token), where boot38
+gave punctuation noise and a repeated fragment. Every timing and roofline figure equals boot38's, as a fix that
+changes which value a slab stages should leave them. Gate (c) is green again on `main` with #893.
+
 
 ### The M=1 decode tier: what broke and what now guards it
 

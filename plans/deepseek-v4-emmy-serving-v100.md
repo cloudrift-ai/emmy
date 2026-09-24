@@ -23,12 +23,13 @@ record of every boot, election and A/B is
 It serves strict from the repository golden, but slower and worse than the tree before #863 did. Boot36b (main plus
 #875 at #869, 2026-09-23, fast math pinned off): 0.73 s to first token warm at 5 prompt tokens and 5.5 s at 2,155;
 0.56 s per output token, against 0.215 s on the last boot of the old tree and about 0.15 s for the pinned fork. Its
-completions are worse than that boot's, the width-16 expert twin's election reports its random-input reproducer 9,931
-outliers over a budget of 4, and the width-4,096 post twin's reproducer returns NaN. Boot37 (`main` as merged,
-2026-09-24) did not serve: seventeen minutes in, the symbolic post twin's compile refused at one of the pieces #883
-re-shaped — the piece opens a cut fork of its own, a kernel-set decision strict cannot take without a row, and a post
-twin has no wider tier to ride — so `main` as merged did not boot strict until the three post leads were recorded
-again (boot38, item 1 below); their cut receipts still carry the old pieces' time.
+completions were worse than that boot's and the width-16 expert twin's random-input check reported 9,931 outliers over
+a budget of 4; both are #829's staging defect, fixed by #893 (item 2), after which boot39 serves coherent text at the
+same timings. The width-4,096 post twin's reproducer still returns NaN. Boot37 (`main` as merged, 2026-09-24) did not
+serve: seventeen minutes in, the symbolic post twin's compile refused at one of the pieces #883 re-shaped — the piece
+opens a cut fork of its own, a kernel-set decision strict cannot take without a row, and a post twin has no wider tier
+to ride — so `main` as merged did not boot strict until the three post leads were recorded again (boot38, item 1
+below); their cut receipts still carry the old pieces' time.
 
 Three things hold the numbers. Fast math became the default (#868) while serving published no precision pin, so every
 boot needed the regime pinned off by hand — closed by `serve --golden` publishing the rows' regime to its workers.
@@ -38,9 +39,10 @@ cooperative reduce is offered on no kernel of this model; that is most of the 0.
 cooperative picks cost 10 to 100 times wherever nothing is measured.
 
 Stages −1 to 3 are done, and Stage 0's question — can the compiler serve this model — is answered yes. Gate (c),
-coherent completions, passed on the old tree and is open again on `main`. Gate (d)'s greedy token-ID half: two of four
-prompts agree with the fork on all 32 token ids, two diverge at near-ties of about 0.2 nats; its layer-level half
-never ran, and an HF eager reference for a 156 GB checkpoint stays impractical here.
+coherent completions, passed on the old tree, was red on `main` from #829 to #893 without anyone seeing it, and is
+green again with #893. Gate (d)'s greedy token-ID half: two of four prompts agree with the fork on all 32 token ids,
+two diverge at near-ties of about 0.2 nats; its layer-level half never ran, and an HF eager reference for a 156 GB
+checkpoint stays impractical here.
 
 ## What is left, in order
 
@@ -50,12 +52,14 @@ never ran, and an HF eager reference for a 156 GB checkpoint stays impractical h
    file, and boot38 serves in thirteen minutes at the same numbers as boot36b: 0.71 s to first token warm at 5 prompt
    tokens, 5.5 s at 2,155, 0.53–0.58 s per output token, the width-4,096 post twin at 104 ms per layer, the
    completions degraded.
-2. **Correctness on `main`.** Boot `main` with those rows, probe it, and find the wrong kernel by switching twin
-   families off one at a time. Suspects: #863's reduction normalization, the cooperative-reduce codegen defect, the
-   register-split rows pinned on the post twins during the restamp. Nothing else is worth measuring until the output
-   is right. `emmy run --golden` cannot carry the verdict: the twins draw their eps and count constants as random
-   inputs, so every replay is non-finite and the only reference is serving output — a finite-input replay per twin and
-   an independent reference on `run --golden` are still owed.
+2. **Correctness on `main`.** Found and fixed 2026-09-24 (#893): since #829 the expert cut piece's compute-filled B
+   slab staged the producer edge's last result for every channel, so both tensor-core B tiles held the up half and the
+   twins computed the up projection twice; the width-16 expert twin's random-input check failed by 70% of the output's
+   peak and single-token decode served noise. Bisected by pinning the twin's recorded tile on one host tree per
+   revision; fixed in the fold's channel walk and the fill; both expert twins pass on the fixed tree under their
+   recorded rows. Boot39 from that tree serves coherent completions at boot38's timings, so gate (c) is green again.
+   Still owed: a finite-input replay per twin and an independent reference on `run --golden`, and a boot that reads
+   the election's check instead of printing it as a warning.
 3. **The cooperative-reduce codegen defect**, then the transposed cooperative reduce. GPU-free repro:
    `EMMY_KNOBS="REDUCE@map.1/map.1/reduce=coop,WORK=t128" emmy compile --golden
    recipes/DeepSeek-V4-Flash-0731/golden/v100_sm70.yaml --realization
