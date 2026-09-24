@@ -443,9 +443,9 @@ def _stage_candidates(tile: TileOp, target, node, choice: NodeSchedule) -> tuple
     if _multi_channel_cell(tile, node, choice.tile):
         # The cell's one transport: cp.async copies every stored slab, one codes and one scale slab
         # per channel, and fills the one computed slab (an activation's own codes) inside that
-        # stage (``staging._block_scaled_warp_stage``). The channel filter below is about the
-        # one-slab-per-fold transports, which this cell is not; the sync compute fill and the
-        # gmem-direct path have no per-channel spelling of the pair either.
+        # stage (``staging._block_scaled_warp_stage``). Its operands are decode CONES, so the
+        # generic reading below would send it to the compute fill, which has no per-channel
+        # spelling of the pair; neither has the gmem-direct path.
         return tuple(stage for stage in stage_moves(warp=True, ctx=target) if stage.transport == "smem-async")
     if _needs_fill(tile, node, choice.tile):
         candidates: tuple[Stage, ...] = fill_stage_moves()
@@ -515,9 +515,9 @@ def _needs_fill(tile_op, node: Fold, plan: Tile) -> bool:
     from emmy.compiler.ir.schedule import staging  # noqa: PLC0415
 
     if _multi_channel_cell(tile_op, node, plan):
-        # The cell's stage sizes and fills its slabs itself (``staging._block_scaled_warp_stage``),
-        # one codes slab and one scale slab per channel over the shared A pair; a channel count
-        # above one is its ordinary shape, not a fold count the copy transports cannot deposit.
+        # The cell's stage copies and fills its slabs itself (``staging._block_scaled_warp_stage``);
+        # its operands are decode cones, so the generic reading below would send it to the compute
+        # fill and the fill's cover and dtype rules would refuse every plan.
         return False
     if node.chunked():
         # The chunk tier's A is the WEIGHT, which never leaves registers: it is what the chunk's
