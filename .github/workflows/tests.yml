@@ -55,6 +55,9 @@ jobs:
         with:
           python-version: "3.13"
 
+      # ``make setup-ci`` builds the runtime extension with cargo, which the conftest imports.
+      - uses: dtolnay/rust-toolchain@stable
+
       - name: Install dependencies
         run: make setup-ci
 
