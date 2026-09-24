@@ -291,10 +291,11 @@ def block_scaled_atom(atom) -> bool:
     return dtype_of is not None and dtype_of("a").logical_elems == 2
 
 
-def operand_statements(edge) -> list | None:
-    """A COMPUTED operand's statements as one flat list — its slab operands as their loads ahead
-    of its body, the statement defining its result last — the spelling the shape readers above
-    walk. That is the open body of a zero-axis term (:meth:`Fold.lower` with nothing bound); a
+def operand_statements(edge, result: str | None = None) -> list | None:
+    """A COMPUTED operand's statements, optionally restricted to one result, with its definition last.
+
+    ``result`` defaults to the edge's first exposed value; a channel selects the value it multiplies.
+    That is the open body of a zero-axis term (:meth:`Fold.lower` with nothing bound); a
     term that reduces, is a bare slab, or holds a reduce among its operands is not a scalar cone
     and answers ``None``."""
     if edge.axis is not None or edge.as_slab() is not None:
@@ -305,8 +306,10 @@ def operand_statements(edge) -> list | None:
         if term.axis is not None:
             return None
         pending.extend(term.operands)
-    result = edge.exposes[0]
     stmts = list(edge.lower(axes=()))
+    if result is not None:
+        stmts = list(Body(tuple(stmts)).backward_cone([result]).members)
+    result = edge.exposes[0] if result is None else result
     root = next((stmt for stmt in stmts if result in stmt.defines()), None)
     return None if root is None else [*(stmt for stmt in stmts if stmt is not root), root]
 
@@ -327,8 +330,8 @@ def match_packed_b_node(node, inputs) -> PackedKBlockB | None:
     # operand) against one streamed B per accumulator. A gate/up edge has two, the ordinary
     # matmul one; a node with none is no contraction this reading stands on.
     reads = []
-    for _index, edge in node.bilinear_channels():
-        cone = operand_statements(edge)
+    for _index, edge, value in node.channel_operands():
+        cone = operand_statements(edge, value)
         read = match_packed_kblock_b(cone, node.axis, inputs) if cone is not None else None
         if read is None:
             return None

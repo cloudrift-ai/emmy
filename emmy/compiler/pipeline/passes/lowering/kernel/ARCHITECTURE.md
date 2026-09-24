@@ -479,8 +479,9 @@ reading keeps it. `ir.schedule.packing.match_packed_b_node` recognizes the node 
 resolver and the materializer all ask, so they cannot drift apart). `_atom._packed_operands` stages one shared A
 slab and one raw bits slab plus one compute-filled scale slab per weight channel: three slabs for one channel,
 five for a gate/up pair. Every channel shares one block extent and the number of K elements per stored byte; the
-matcher declines channels that disagree, and the stage budget counts every channel's slabs. Materialized A and
-the weight bytes copy asynchronously; the scales use `SyncTransport`. The bits slab is half the K width of a
+matcher declines channels that disagree, and the stage budget counts every channel's slabs. Each channel selects
+the result its product multiplies, even when channels share one producer edge. Materialized A and the weight bytes
+copy asynchronously; the scales use `SyncTransport`. The bits slab is half the K width of a
 16-bit one (one byte is two K elements) and is addressed canonically — row `n`, byte column `k / 2` over the
 checkpoint's `[N, K/2]` buffer —
 rather than through the cone's flattened reshape arithmetic, which says the same thing in a form no fill can chunk.

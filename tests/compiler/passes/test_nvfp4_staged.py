@@ -14,6 +14,8 @@ reading rather than lowering something the drain is not written for.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -171,6 +173,23 @@ def test_match_packed_b_node_declines_channels_that_disagree_on_block():
     generic computed-B reading rather than staging one of them at the other's block."""
     node, inputs, _axes, _ka = _two_channel_node(blocks=(16, 32))
     assert _packed(node, inputs)[0] is None
+
+
+def test_packed_channels_read_their_own_result_of_a_shared_producer():
+    node, inputs, axes, ka = _two_channel_node()
+    weights = node.operands[1:]
+    producer = projection(
+        body=tuple(stmt for edge in weights for stmt in edge.lower(axes=())),
+        results=tuple(edge.exposes[0] for edge in weights),
+    )
+    node = replace(node, operands=(node.operands[0], producer))
+    assert len(node.operands) == 2 and len(node.channel_operands()) == 2
+    packed = _packed(node, inputs)[0]
+    assert packed is not None
+    assert [channel.bits.input for channel in packed.channels] == ["g_w_bits", "u_w_bits"]
+    assert [channel.factor for channel in packed.channels] == ["g_v2", "u_v2"]
+    tile = _tile(K16, "f2x2/k2", "w1x4", axes)
+    assert resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), 100 * 1024, inputs, k_axis=ka) is not None
 
 
 def test_two_channels_resolve_both_copy_transports_and_size_a_slab_per_channel():
