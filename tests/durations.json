@@ -2435,5 +2435,6 @@
  "tests/compiler/realization/test_realization.py::test_realization[matmul/volta-gptq-cone-d1smem.yaml-realized]": 1.25,
  "tests/compiler/realization/test_realization.py::test_realization[fused/nvfp4-gate-up-requant-place-cut.yaml-built]@cuda": 1.1,
  "tests/compiler/realization/test_realization.py::test_realization[reduce/coop-t-matvec-n512.yaml-built]@cuda": 1.05,
- "tests/compiler/realization/test_realization.py::test_realization[matmul/imap-slice-a-gmem.yaml-built]@cuda": 1.03
+ "tests/compiler/realization/test_realization.py::test_realization[matmul/imap-slice-a-gmem.yaml-built]@cuda": 1.03,
+ "tests/serving/test_deepseek_native_loader.py::test_eager_layer_twin_materializes_experts_in_the_modules_own_orientation": 6.0
 }
