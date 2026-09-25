@@ -39,11 +39,6 @@ boundaries (norm, qkv, attention, o_proj, MLP), and seed each piece with the mat
 Next step: keep the roller's smaller IR but give the rolled loop parallel work (heads x batch x value columns), or leave
 short recurrences unrolled when the rolled kernel loses its parallelism.
 
-## Division instead of a hoisted reciprocal
-
-The fresh Loop IR divides per element where the old lowering hoisted one reciprocal. On the H100 the std lane (no fast
-math) measures softmax 29-42% slower (8.7 -> 12.4 us) and attention 16-29% slower. The fast-math lane is unchanged.
-
 ## Composed cuts: the V projection piece loses its name (fixed or in progress)
 
 Cutting both the attention output and the V projection of the s512 layer makes the V-projection piece carry the
