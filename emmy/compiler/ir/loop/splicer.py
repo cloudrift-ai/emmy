@@ -605,8 +605,10 @@ class _Splicer(LoopBuilder):
         # every cut on a merge that CAN be built.
         self._source_stmts = sum(1 for meta in loops.values() for _ in meta.op.body.iter())
 
-    #: Bindings per source statement past which construction is a recurrence multiplying, not a merge.
-    _BINDING_RATIO = 32
+    #: Bindings per source statement past which construction is a recurrence multiplying, not a merge. A
+    #: whole layer legitimately takes over a hundred: the tracer unrolls per-head work into copies that each
+    #: re-derive the shared input, which is one big kernel, not a blowup; a chain left unrolled doubles per stage.
+    _BINDING_RATIO = 256
 
     def run(self) -> LoopOp:
         self._seed()
