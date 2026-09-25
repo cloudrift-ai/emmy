@@ -406,7 +406,7 @@ def _two_channel_pair(tmp_path, *, m=16, n=128, k=256):
     from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 
     looped = Pipeline.build(LOOP_PASSES).run(_w4a4_gate_times_up(tmp_path, m=m, n=n, k=k))
-    tiled = Pipeline.build(["lowering/tile"], select={"lift"}).run(looped, ctx=Context.from_target((12, 0)))
+    tiled = Pipeline.build(["tile/lift"], select={"lift"}).run(looped, ctx=Context.from_target((12, 0)))
     tiles = [node.op for node in tiled.nodes.values() if isinstance(node.op, TileOp)]
     # A shared cone is one object reached through several operand edges; key on identity.
     two_channel = {
