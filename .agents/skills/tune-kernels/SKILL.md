@@ -17,7 +17,7 @@ Use one golden YAML format throughout the workflow. Keep its two trust levels se
   model and compute capability. Every realization requires an explicit knobs mapping (empty for a forkless anchor)
   and paired positive deployable `emmy_us` / `reference_us` measurements with a named `reference_backend`. Never
   write search feedback into a canonical file. Model-agnostic hardware goldens remain under
-  `emmy/compiler/pipeline/search/goldens/`.
+  `emmy/compiler/pipeline/search/golden/`.
 
 `pins` and `knobs` are both registered knob mappings with different times of application: `pins` constrains candidate
 enumeration, while `knobs` records the winner measured inside that regime. `FAST_MATH` has no special YAML field; write

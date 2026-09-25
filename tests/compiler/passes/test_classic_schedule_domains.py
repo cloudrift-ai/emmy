@@ -9,6 +9,7 @@ import pytest
 from emmy.compiler.context import Context
 from emmy.compiler.graph import Tensor
 from emmy.compiler.ir.axis import Axis, Window
+from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.schedule import Reduce, ScheduleContext, ScheduleRefused, Stage, Tile, Work
 from emmy.compiler.ir.schedule import schedule as advance_schedule
@@ -26,11 +27,11 @@ from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import carries_partition
 from emmy.compiler.pipeline.fork import iter_leaves
-from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
+from emmy.compiler.pipeline.passes.tile._fromloop import fold_from_loop
 from tests.compiler.helpers import enumerate_classic_reference
-from tests.compiler.terms import contraction, projection
+from tests.compiler.terms import contraction, projection, reduction, slab
 
-classic_forks = import_module("emmy.compiler.pipeline.passes.lowering.tile.040_schedule").classic_forks
+classic_forks = import_module("emmy.compiler.pipeline.passes.tile.schedule.040_schedule").classic_forks
 
 
 def _signature(codec, schedule) -> tuple[tuple[str, str], ...]:
@@ -299,6 +300,32 @@ def test_multi_channel_contraction_domain_is_per_cell_direct_and_warp_staged() -
     warp_transports = {choice.stage.transport for child in warp for choice in child.schedule.edges.values()}
     assert warp and not any(choice.stage.is_direct for child in warp for choice in child.schedule.edges.values())
     assert "smem" in warp_transports
+
+
+def test_a_packed_gate_up_edge_offers_no_scalar_register_tile() -> None:
+    """Two channels streamed from ONE operand edge — a packed gate/up weight decoded by one lift —
+    fold like two B edges: the scalar register tier folds a single B, so it offers only the per-cell
+    tier and the warp tier. Counting operands instead of channels offered it the scalar tile, whose
+    leaf then refused the node at materialization."""
+    m, n, k = Axis("m", 16), Axis("n", 16), Axis("k", 16)
+    loads = (Load(name="gate", input="b0", index=(Var("k"), Var("n"))), Load(name="up", input="b1", index=(Var("k"), Var("n"))))
+    packed = projection((), loads, ("gate", "up"))
+    a = slab("a_e", "a", "m", "k")
+    products = tuple(
+        Assign(name=f"{acc}__v", op=ElementwiseImpl("multiply"), args=("a_e", b)) for acc, b in (("acc0", "gate"), ("acc1", "up"))
+    )
+    root = reduction(k, (a, packed), products, ("acc0", "acc1"))
+    assert len(root.operands) == 2 and len(root.bilinear_channels()) == 2
+    tile = TileOp(
+        op=root,
+        place=Placement(free=(m, n)),
+        axes=(m, n, k),
+        inputs={name: Tensor(name, (16, 16), "f16") for name in ("a", "b0", "b1")},
+        outputs={"out": Tensor("out", (16, 16), "f16")},
+    )
+    nodes = _offers(tile, Context.from_target((7, 0))).node_site(0).nodes
+    assert not any(choice.tile.is_tiled and not choice.tile.is_warp for choice in nodes)
+    assert any(not choice.tile.is_tiled for choice in nodes)
 
 
 def test_tensor_core_enumeration_is_the_compatible_independent_product(monkeypatch) -> None:

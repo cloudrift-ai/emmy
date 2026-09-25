@@ -54,6 +54,30 @@ def _rename_ssa_vars_in_expr(e: Expr, rename: Rename) -> Expr:
 # ---------------------------------------------------------------------------
 
 
+def map_exprs(stmt: Stmt, fn: Callable[[Expr], Expr]) -> Stmt:
+    """``stmt`` with ``fn`` applied to each of its own Expr fields — an index, a predicate, a
+    stride — and not to nested bodies, which :meth:`Body.map` reaches on its own."""
+    from dataclasses import fields, replace  # noqa: PLC0415
+
+    from emmy.compiler.ir.expr import _ExprOps  # noqa: PLC0415
+    from emmy.compiler.ir.stmt.leaves import SelectBranch  # noqa: PLC0415
+
+    changes = {}
+    for f in fields(stmt):
+        value = getattr(stmt, f.name)
+        if isinstance(value, _ExprOps):
+            new = fn(value)
+        elif isinstance(value, tuple) and value and all(isinstance(item, _ExprOps) for item in value):
+            new = tuple(fn(item) for item in value)
+        elif isinstance(value, tuple) and value and all(isinstance(item, SelectBranch) for item in value):
+            new = tuple(replace(branch, select=fn(branch.select)) for branch in value)
+        else:
+            continue
+        if new != value:
+            changes[f.name] = new
+    return replace(stmt, **changes) if changes else stmt
+
+
 @singledispatch
 def _rewrite_kind(stmt: Stmt, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
     raise NotImplementedError(f"rewrite not registered for {type(stmt).__name__}")

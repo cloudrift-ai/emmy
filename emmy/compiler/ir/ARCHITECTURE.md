@@ -12,7 +12,7 @@ top-level layer/pass picture see `compiler/ARCHITECTURE.md`.
 | `frontend/ir`     | after tracing / loader spelling | `LinearOp`, `MatmulOp`, `SdpaOp`, `MeanOp`, layout ops                             |
 | `tensor/ir`       | after decomposition             | `ElementwiseOp`, `ReduceOp`, `ScanOp`, `GatherOp`, `ScatterOp`, `IndexMapOp`                          |
 | `loop/ir`         | after fusion                    | `LoopOp` + body types (`Load`, `Assign`, `Accum`, `Write`, `Select`, `Loop`, `Axis`)                  |
-| `tile/ir`         | after `lowering/tile`           | `TileOp` holding the structural root `op`, output specifications, placement, workers, knobs, a typed classic schedule, and its materialization |
+| `tile/ir`         | after `tile/schedule`           | `TileOp` holding the structural root `op`, output specifications, placement, workers, knobs, a typed classic schedule, and its materialization |
 | `kernel/ir`       | after `lowering/kernel`         | `KernelOp` + hardware stmts (`Tile`, `Smem`, `Sync`, `TreeHalve`)                                     |
 | `cuda/ir`         | after `lowering/cuda`           | `CudaOp` (rendered `__global__` source)                                                               |
 
@@ -161,7 +161,7 @@ kernel it produced went on to read.
   op; reductions are `Accum` statements inside a reduce `Loop`). `LoopOp` construction orders a free-loop chain by
   the row-major coordinate depth in its boundary writes; axis spelling is only the fallback when output storage does
   not totally order the chain. The resulting geometry, rather than source names, reaches Tile IR placement.
-- **Loop → tile** (after `lowering/tile`): `LoopOp` nodes are replaced by
+- **Loop → tile** (after the `tile/` passes): `LoopOp` nodes are replaced by
   `TileOp` holding the structural-IR root `op` directly (`tile/ir` — one `Fold` kind), structural
   placement, one accepted site-indexed `Schedule`, and separate `ClassicMaterialization`
   facts. A kernel's structure is read from each node's derived classification, not a Python kernel
@@ -326,7 +326,7 @@ nearest enclosing loop whose axis the `Carry` index does not read (`carried_cell
 the free-axis order never sorts under the cells, and its shape is the loops over its cells. The Loop IR rendering
 keeps two slots of the cell shape and commits the second after each step; how many slots survive and where they are
 stored is a schedule's question, not the statement's. The Tile lift realizes it as a serial launch axis over a state
-buffer (`lowering/tile/010_lift`). A register schedule can instead retain the state inside a CTA and realize
+buffer (`tile/lift/010_lift`). A register schedule can instead retain the state inside a CTA and realize
 the same axis as a loop, while the classic schedule keeps the ordered launches.
 
 **The algebra is in the term, not a tag.** There is no stored / derived `AlgebraKind` and no op-tree node zoo. The
@@ -512,7 +512,7 @@ Construction never fails: unresolved names are data, and chaining scope levels m
 `backward_cone` with the previous one's `external_reads`. `Body.defs_die_at(members, roots=…, allowed=…)` is the
 matching escape check (may the cone be cut out, with only the designated consumers reading its roots?). This is
 the shared substrate behind the rules that slice cones (the demoted-operand producer cut in
-`lowering/tile/030_cut`) — eligibility judgments stay in the rules, per
+`tile/cut/030_cut`) — eligibility judgments stay in the rules, per
 `pipeline/passes/ARCHITECTURE.md`.
 
 `backward_cone` resolves reads by NAME over a body it assumes is SSA, so it is only sound where one name has one
@@ -721,15 +721,15 @@ normalization and softmax therefore retain f32 internal state rather than narrow
 `splice_graph` then preserves the explicit conversion through its ordinary statement path and reconstructs no dtype
 boundary from source provenance or graph topology.
 
-Construction is bounded per statement: the dedup table shares each `(stmt, emit scope, σ)` binding, and in
-every legitimate splice no single statement takes more than a handful of distinct bindings. A recurrence-shaped
-region — each stage re-demanded under compositions of σs, DeepSeek-V4's 20-iteration Sinkhorn chain being the live
-case — multiplies bindings per stage instead of deduplicating, and such a merge cannot be constructed at any budget.
-The first statement past the cap stops the splice. The doom is structured (`UnfusableStmt` names the offending
-loop) and surfaced to the fusion pass on request, which drops that loop plus its downstream closure from the region
-and retries — so one doomed chain costs only itself, not every other merge in its region. This is a termination
-bound, not a fusion-quality gate: placement still owns every cut on a merge that CAN be built, and the refusal must
-stay cheap because the greedy policy re-runs fusion on every candidate graph it prices.
+Construction is bounded as a ratio: the dedup table shares each `(stmt, emit scope, σ)` binding, and a legitimate
+splice emits a few bindings per source statement at most (a value read at several offsets takes one each). A
+recurrence left unrolled — each stage re-demanded under compositions of σs, DeepSeek-V4's 20-iteration Sinkhorn chain
+being the live case — multiplies bindings per stage instead of deduplicating, and such a merge cannot be constructed
+at any budget. The first binding past `_BINDING_RATIO` times the region's statement count raises `UnfusableStmt`,
+which names the loop. Fusion never catches it: its regions are decided before any is spliced, so a region that
+multiplies is a recurrence for `loop/fusion/005_roll_recurrence` to roll, not a region to shrink — shrinking made the
+kernel set depend on the order the producers were visited in. This is a termination bound, not a fusion-quality gate:
+placement still owns every cut on a merge that CAN be built.
 
 Each splice memoizes `Expr.free_vars()` by expression identity while placing dependencies. Sigma expressions remain
 live for the splice, and identity avoids both repeated coordinate-tree walks and the recursive structural hashing a

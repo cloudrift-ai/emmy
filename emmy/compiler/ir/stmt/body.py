@@ -797,18 +797,61 @@ class Body(tuple[Stmt, ...]):
         return tuple(sorted(counts.items()))
 
     @cached_property
-    def unanchored_key(self) -> str:
-        """The exact identity of this body with every load index's integer anchor taken out: what
-        the copies of one computation read at successive offsets share."""
-        from emmy.compiler.ir.expr import split_anchor  # noqa: PLC0415
-        from emmy.compiler.ir.stmt.leaves import Load  # noqa: PLC0415
+    def literals_abstracted(self) -> tuple[Body, tuple[int, ...]]:
+        """This body with every integer literal of its expressions replaced by a positional
+        variable ``__lit<i>``, and the literals it held, in that order. The copies of one computation
+        an unrolled loop leaves read at successive offsets and mask at successive bounds: they share
+        the abstracted body and differ in the literals, affinely in the step."""
+        from emmy.compiler.ir.expr import BinaryExpr, Literal, Var, affine_form  # noqa: PLC0415
+        from emmy.compiler.ir.stmt.passes import map_exprs  # noqa: PLC0415
 
-        def unanchored(stmt):
-            if not isinstance(stmt, Load):
-                return stmt
-            return replace(stmt, index=tuple(split[1] if (split := split_anchor(expr)) is not None else expr for expr in stmt.index))
+        literals: list[int] = []
 
-        return self.map(unanchored).structural_key(structural=False)
+        def held(value: int) -> Var:
+            literals.append(value)
+            return Var(f"__lit{len(literals) - 1}")
+
+        def abstract(expr):
+            if isinstance(expr, Literal) and expr.dtype == "int" and type(expr.value) is int:
+                return held(expr.value)
+            return expr
+
+        def lift(expr):
+            # An affine index carries its anchor whole, a zero one included: ``a`` and ``a + 4`` are
+            # one shape read at two offsets, and normalization spells the first without the ``+ 0``.
+            if isinstance(expr, Literal):
+                return abstract(expr)
+            form = affine_form(expr, expr.free_vars())
+            try:
+                anchor = int(form[0].eval({})) if form is not None else None
+            except (KeyError, TypeError, ValueError):
+                anchor = None
+            if anchor is None:
+                return expr.rebuild(abstract)
+            rest = None
+            for name, coeff in sorted(form[1].items()):
+                term = Var(name) if coeff == 1 else BinaryExpr("*", Var(name), Literal(coeff, "int"))
+                rest = term if rest is None else BinaryExpr("+", rest, term)
+            return held(anchor) if rest is None else BinaryExpr("+", rest, held(anchor))
+
+        def abstracted(stmt):
+            from emmy.compiler.dim import Dim  # noqa: PLC0415
+            from emmy.compiler.ir.stmt.blocks import Loop  # noqa: PLC0415
+
+            # A loop's static extent is a literal too: a step whose reduction covers one more
+            # element than the last is still the same step.
+            if isinstance(stmt, Loop) and isinstance(stmt.axis.extent.expr, Literal) and type(stmt.axis.extent.expr.value) is int:
+                return replace(stmt, axis=replace(stmt.axis, extent=Dim(held(stmt.axis.extent.expr.value))))
+            return map_exprs(stmt, lift)
+
+        body = self.map(abstracted)
+        return body, tuple(literals)
+
+    @cached_property
+    def literal_free_key(self) -> str:
+        """The exact identity of this body blind to its integer literals — what the copies of one
+        computation at successive offsets and bounds share (:attr:`literals_abstracted`)."""
+        return self.literals_abstracted[0].structural_key(structural=False)
 
 
 def refs_axis(s: Stmt, name: str) -> bool:

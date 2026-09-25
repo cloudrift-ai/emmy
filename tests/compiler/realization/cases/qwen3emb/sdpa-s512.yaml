@@ -347,5 +347,5 @@ loops:
             unroll: false
             seed: true
       name: k_sdpa_6f4673
-    inputs: [o_mask_fill_c, o_mask_zero_c, o_scale, q, k, v]
+    inputs: [o_scale, o_mask_fill_c, o_mask_zero_c, k, q, v]
     outputs: [[o, f32, [1, 16, 512, 128]]]

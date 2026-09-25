@@ -178,7 +178,7 @@ def test_truncated_kernel_pipeline_registers_measured_composed_routes(monkeypatc
 
     monkeypatch.setattr(greedy_strategy, "composed_routes", capture_composed_routes)
     monkeypatch.setattr(greedy_strategy.Run, "resolve", lambda _run, graph, _decide: (graph, []))
-    pipeline = Pipeline(passes=[Pass(name="lowering/tile", rules=[], index=0), Pass(name="lowering/kernel", rules=[], index=1)])
+    pipeline = Pipeline(passes=[Pass(name="tile/cut", rules=[], index=0), Pass(name="lowering/kernel", rules=[], index=1)])
 
     GreedyStrategy(pipeline, db=object()).run(Graph(), ctx=_small_smem_ctx())
 
@@ -395,7 +395,7 @@ def test_greedy_run_raises_when_the_only_lowering_declines_silently():
 def test_greedy_run_keeps_the_tile_terminal_of_a_truncated_pipeline():
     # ``emmy compile --ir tile`` and the loop backend stop before the final lowering pass,
     # where a surviving TileOp is the requested answer — the check must not fire there.
-    terminal = _silently_declining_pipeline("lowering/tile").run(_graph_with_tile(), ctx=_small_smem_ctx())
+    terminal = _silently_declining_pipeline("tile/schedule").run(_graph_with_tile(), ctx=_small_smem_ctx())
     assert isinstance(terminal.nodes["y"].op, TileOp)
 
 

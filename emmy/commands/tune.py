@@ -420,7 +420,7 @@ def _tune_one(
 def _exit_flushed(code: int) -> None:
     """Flush stdio and ``os._exit`` — the tune teardown skips Python finalization
     because a bench-timeout can leave a daemon NVRTC worker thread holding the CUDA
-    context, which deadlocks cupy's atexit pool teardown."""
+    context, which deadlocks interpreter teardown."""
     sys.stdout.flush()
     sys.stderr.flush()
     os._exit(code)
@@ -742,7 +742,7 @@ def handle_tune(args):
                 raise
             # Bench watchdog couldn't bail (GPU queue saturated) → the parent CUDA stream
             # is dirty, so the rest of the sweep can't run reliably here. Abort (the DB has
-            # the per-op bests; a re-run resumes). os._exit bypasses the cupy atexit deadlock.
+            # the per-op bests; a re-run resumes). os._exit bypasses the teardown deadlock.
             sys.stderr.write(f"\n[tune] aborted{f' at {label}' if multi else ''}: {exc}\n")
             _cleanup_temp_dump(tmp_dump)
             _exit_flushed(1)
@@ -788,7 +788,7 @@ def handle_tune(args):
 
 def _clean_caches(db_path) -> None:
     """``--clean``: nuke the tuning DB (+ WAL/SHM sidecars) and the kernel
-    caches (emmy's cubin cache + cupy's NVRTC cache) for a fresh sweep."""
+    cache (emmy's cubin cache) for a fresh sweep."""
 
     from emmy.compiler.backend.cuda import nvcc
 

@@ -459,10 +459,22 @@ def correct(case: Case, compiled) -> None:
         want, _ = greedy.run(greedy.compile(program.copy()), input_data=dict(feed))
     narrow = _has_narrow_operand(program)
     for name in program.outputs:
-        reference = np.asarray(want.outputs[name])
-        np.testing.assert_allclose(
-            np.asarray(result.outputs[name]), reference, err_msg=f"{case.id}: output {name}", **_tolerance(narrow, reference)
-        )
+        got, reference = _comparable(program, name, np.asarray(result.outputs[name]), np.asarray(want.outputs[name]))
+        np.testing.assert_allclose(got, reference, err_msg=f"{case.id}: output {name}", **_tolerance(narrow, reference))
+
+
+def _comparable(program, name: str, got: np.ndarray, reference: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """The two sides of one output as the VALUES they stand for. A packed-pair output (two e2m1
+    codes to the byte) is decoded first: its bytes are not values, and the same value has two
+    spellings at zero — the block-scaled cell rounds a tiny negative product to the negative zero
+    code where the numpy reference lands on the positive one, and a byte comparison counts that
+    as a mismatch of every element of an all-zero output."""
+    from emmy.compiler.dtype import decode_f4x2  # noqa: PLC0415
+
+    tensor = program.buffer(name)
+    if tensor is not None and tensor.dtype.logical_elems == 2 and got.dtype == np.uint8 and reference.dtype == np.uint8:
+        return decode_f4x2(got), decode_f4x2(reference)
+    return got, reference
 
 
 def seeded_inputs(program, *, sources: dict[str, np.ndarray] | None = None) -> dict[str, np.ndarray]:

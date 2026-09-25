@@ -630,6 +630,6 @@ loops:
             unroll: false
             seed: true
       name: k_sdpa_rms_norm_reduce_bd8bcf
-    inputs: [rms_norm_mean_count, rms_norm_1_mean_count, rms_norm_eps, rms_norm_1_eps, scaled_dot_product_attention_mask_fill_c, scaled_dot_product_attention_mask_zero_c,
-      scaled_dot_product_attention_scale, x0, x1, x4, x3, x2]
+    inputs: [rms_norm_1_mean_count, rms_norm_mean_count, rms_norm_1_eps, rms_norm_eps, scaled_dot_product_attention_scale, scaled_dot_product_attention_mask_fill_c,
+      scaled_dot_product_attention_mask_zero_c, x0, x1, x4, x3, x2]
     outputs: [[scaled_dot_product_attention, f16, [1, 4, 4, 16]]]

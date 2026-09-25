@@ -250,7 +250,7 @@ def _row_line(payload: dict) -> bytes:
 
 
 def _gpu_filename(gpu_name: str, cap: tuple[int, int]) -> str:
-    """The per-GPU YAML file name, mirroring the ``goldens/`` convention —
+    """The per-GPU YAML file name, mirroring the ``golden/`` convention —
     e.g. ``nvidia_geforce_rtx_4090_sm89.yaml``."""
     slug = re.sub(r"[^a-z0-9]+", "_", gpu_name.lower()).strip("_") or "unknown_gpu"
     return f"{slug}_sm{cap[0]}{cap[1]}.yaml"

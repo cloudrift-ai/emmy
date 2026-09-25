@@ -100,5 +100,5 @@ loops:
             unroll: false
             seed: true
       name: k_linear_c636b8
-    inputs: [x, w]
+    inputs: [w, x]
     outputs: [[o, f16, [1024, 12288]]]

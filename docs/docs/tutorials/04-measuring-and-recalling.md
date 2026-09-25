@@ -109,7 +109,7 @@ Model golden configuration files live beside their recipes, one file per exact G
 find recipes -path '*/golden/*.yaml' -print
 ```
 
-The central `emmy/compiler/pipeline/search/goldens/` directory contains only model-agnostic hardware goldens.
+The central `emmy/compiler/pipeline/search/golden/` directory contains only model-agnostic hardware goldens.
 
 If a tuning database exists, the measured configurations for each kernel can be listed as a table, best first, with
 the one an ordinary compile would choose marked:

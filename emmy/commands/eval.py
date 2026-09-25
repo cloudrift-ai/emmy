@@ -419,8 +419,7 @@ def handle_eval_golden(args) -> None:
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden import (
         # noqa: PLC0415,
-        GoldenFileValidation,
-        load_golden_file,
+        load_golden,
         load_golden_records,
         sole_evidence,
     )
@@ -433,7 +432,7 @@ def handle_eval_golden(args) -> None:
         golden_path = Path(args.golden).resolve()
         if golden_path != serving.golden_file:
             raise ValueError(f"serving config names {serving.golden_file}, not {golden_path}")
-        document = load_golden_file(golden_path, validation=GoldenFileValidation.REPOSITORY)
+        document = load_golden(golden_path)
         records = load_golden_records(document)
         ctx = Context.probe()
     except (OSError, RuntimeError, ValueError) as exc:

@@ -103,7 +103,7 @@ degrades; `make` now guards this).
 mutable state: a branch switch in another session mid-release yields a hybrid tree whose wheel fails in confusing,
 distant ways. Pin the selected release branch's commit SHA up front, get the tree onto the host (fresh clone, or
 rsync of the `git ls-files` list plus `.git`), then `git checkout -f <sha>` there — and re-verify
-`git rev-parse HEAD` before any rebuild. Then run `make setup`, install `.[serving]` editable, and install cupy; the
+`git rev-parse HEAD` before any rebuild. Then run `make setup`, and install `.[serving]` editable; the
 venv supports the headroom sweep and validation script. Host toolchain: a CUDA version whose nvcc supports the
 target arch (**>= 12.9** for sm_120 — FlashInfer refuses it below that, and the misleading error is "requires sm75
 or higher"); on non-CloudRift

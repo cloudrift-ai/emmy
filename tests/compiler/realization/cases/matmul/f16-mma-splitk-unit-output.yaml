@@ -158,5 +158,5 @@ loops:
             unroll: false
             seed: true
       name: k_linear_9807df
-    inputs: [mul_12, linear_6_wt, add_5]
+    inputs: [linear_6_wt, mul_12, add_5]
     outputs: [[add_7, f16, [1, 1, 1024]]]

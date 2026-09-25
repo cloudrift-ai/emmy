@@ -151,7 +151,7 @@ class _RegisterSite(Site):
     def options(self):
         p = self.problem
         program = p.tile.register_program
-        if program is None or p.row.get("STAGE", "d1/reg") != "d1/reg":
+        if program is None or set(p.row) - set(self.keys) or p.row.get("STAGE", "d1/reg") != "d1/reg":
             return ()
         if not p.allow_f16 and "TILE" not in p.row:
             return ()
@@ -210,7 +210,10 @@ class RegisterProblem(ScheduleProblem):
         )
 
     def with_row(self, row, *, strict=False):
-        if set(row) - set(_RegisterSite.keys):
+        # A descent narrows every offered tier with the kernel's whole row. A row naming a family
+        # this tier does not own (a classic row's REDUCE, its site-scoped keys) describes another
+        # tier, so this one offers no leaf for it; only a strict row must be this tier's own.
+        if strict and set(row) - set(_RegisterSite.keys):
             raise ValueError("register schedule accepts only WORK, TILE and STAGE")
         return replace(self, row=frozendict(row))
 

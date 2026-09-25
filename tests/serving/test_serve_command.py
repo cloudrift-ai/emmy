@@ -529,7 +529,7 @@ def test_moe_probe_recognizes_the_deepseek_published_spelling(tmp_path):
     assert _is_moe_model(str(tmp_path), []) is True
 
 
-_REGIME_GOLDEN = Path(__file__).resolve().parents[2] / "emmy" / "compiler" / "pipeline" / "search" / "goldens" / "rtx4080_sm89.yaml"
+_REGIME_GOLDEN = Path(__file__).resolve().parents[2] / "emmy" / "compiler" / "pipeline" / "search" / "golden" / "rtx4080_sm89.yaml"
 
 
 def test_golden_and_strict_evidence_reach_the_vllm_child_as_env(monkeypatch):

@@ -48,6 +48,9 @@ from emmy.compiler.structural import digest
 if TYPE_CHECKING:
     from emmy.compiler.graph import Graph
 
+# The passes that lower a final fused body: a kernel minted or rebound there carries its own identity.
+_LOWERING = ("tile/", "lowering/")
+
 
 class IdentityStrategy(PipelineStrategy):
     """Stamp exact identity and structural features at birth; expose the feature signature to
@@ -56,11 +59,11 @@ class IdentityStrategy(PipelineStrategy):
     @staticmethod
     def _stamp_boundary(passes: tuple[str, ...]) -> str | None:
         """The pass whose END finalizes the fused kernel bodies for THIS pipeline: the last
-        non-lowering pass (``loop/stamp`` in the full pipeline; ``loop/fusion`` in a shorthand
+        pass before the tile passes (``loop/stamp`` in the full pipeline; ``loop/fusion`` in a shorthand
         pipeline that skips the naming pass). ``None`` for a pipeline that starts at lowering
         (a loop-stage IR resume, a slice tune) — its entry kernels are already final. Computed
         per event from the pass list, never stored: this instance is shared across runs."""
-        pre = [name for name in passes if name and not name.startswith("lowering/")]
+        pre = [name for name in passes if name and not name.startswith(_LOWERING)]
         return pre[-1] if pre else None
 
     def on_run_start(self, e: RunStartEvent) -> None:
@@ -81,7 +84,7 @@ class IdentityStrategy(PipelineStrategy):
     def on_splice(self, e: SpliceEvent) -> None:
         # Kernels minted inside lowering. Fusion-era splices are skipped: their kernels are
         # intermediate bodies whose identity is not final until the stamp boundary.
-        if not e.pass_name.startswith("lowering/"):
+        if not e.pass_name.startswith(_LOWERING):
             return
         for node in e.fragment.nodes.values():
             op = node.op
@@ -102,7 +105,7 @@ class IdentityStrategy(PipelineStrategy):
         # exact identity, re-derived here; the ``S_*`` row stays the fused body's. A rebind that
         # keeps the body (a schedule) keeps the stamp.
         op, old = e.node.op, e.replaced
-        if not e.pass_name.startswith("lowering/") or not isinstance(op, (LoopOp, TileOp)):
+        if not e.pass_name.startswith(_LOWERING) or not isinstance(op, (LoopOp, TileOp)):
             return
         same_body = type(op) is type(old) and (op.op is old.op if isinstance(op, TileOp) else op.body is old.body)
         if not same_body:
