@@ -2292,5 +2292,12 @@
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[DeepSeek-V4-Flash-0731/v100_sm70.yaml/post16.k_div_11_reduce.d81043a46649.m16.4e18a355bd66.e5578bb8f301]": 5.5,
  "tests/compiler/passes/test_cut_forks.py::test_import_files_each_row_under_the_kernel_it_decides": 3.27,
  "tests/compiler/pipeline/search/test_golden_import.py::test_the_rtx_5090_hardware_golden_deploys_from_the_db@golden_import_rtx5090": 2.77,
- "tests/compiler/passes/test_cut_forks.py::test_a_decision_consumes_the_key_that_spelled_it_on_import": 5.52
+ "tests/compiler/passes/test_cut_forks.py::test_a_decision_consumes_the_key_that_spelled_it_on_import": 5.52,
+ "tests/compiler/passes/test_maximal_fusion.py::test_every_boundary_of_a_golden_program_is_a_correctness_boundary[Qwen3.8-27B-FP8/v100_sm70.yaml]": 7.02,
+ "tests/compiler/passes/test_maximal_fusion.py::test_every_boundary_of_a_golden_program_is_a_correctness_boundary[Qwen3.8-27B-EXL3/v100_sm70.yaml]": 5.26,
+ "tests/compiler/passes/test_maximal_fusion.py::test_every_boundary_of_a_golden_program_is_a_correctness_boundary[DeepSeek-V4-Flash-0731/v100_sm70.yaml]": 4.55,
+ "tests/compiler/passes/test_maximal_fusion.py::test_every_boundary_of_a_golden_program_is_a_correctness_boundary[Qwen3.8-27B-GPTQ-Int4/v100_sm70.yaml]": 3.39,
+ "tests/compiler/passes/test_maximal_fusion.py::test_every_boundary_of_a_golden_program_is_a_correctness_boundary[gemma-4-12B-it/rtx5090_sm120.yaml]": 2.93,
+ "tests/compiler/passes/test_maximal_fusion.py::test_every_boundary_of_a_golden_program_is_a_correctness_boundary[Qwen3.8-27B-AWQ-INT4/v100_sm70.yaml]": 2.45,
+ "tests/compiler/passes/test_maximal_fusion.py::test_every_boundary_of_a_golden_program_is_a_correctness_boundary[gemma-4-12B-it/rtx4090_sm89.yaml]": 0.79
 }
