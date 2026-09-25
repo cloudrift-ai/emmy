@@ -695,7 +695,7 @@ def _merge_sibling_free_loops(body: Body) -> Body:
                 continue
             between = Body(tuple(items[k] for k in range(i + 1, j) if k not in consumed))
             between_loaded, between_written = _buffers_touched(between)
-            if between.ssa_defs & reads or between_written & incoming_loaded or between_loaded & incoming_written:
+            if between.ssa_defs & reads or between_written & (incoming_loaded | incoming_written) or between_loaded & incoming_written:
                 continue
             merged = Loop(
                 axis=merged.axis,

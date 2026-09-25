@@ -8,8 +8,10 @@ the loops after their own axes; the pass makes that one loop, and the merge-orde
 
 from __future__ import annotations
 
+import pytest
+
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.stmt.blocks import Loop
 from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.leaves import Assign, Load, Write
@@ -109,3 +111,26 @@ def test_merge_refuses_when_a_statement_between_defines_what_the_second_reads() 
     out = merge_sibling_free_loops(Body((first, scale, second)))
 
     assert len([s for s in out if isinstance(s, Loop)]) == 2
+
+
+@pytest.mark.parametrize("nested", [False, True], ids=["direct-write", "nested-write"])
+@pytest.mark.parametrize("output", ["out_b", "unrelated"])
+def test_merge_preserves_intervening_write_order(output: str, nested: bool) -> None:
+    """Moving the second loop before a write to its output would change the final value."""
+    first = _sweep(Axis("a2", 256), source="x", output="out_a", tag="a")
+    between = (
+        Loop(axis=Axis("a4", 64), body=(Write(output=output, index=(Var("a4"),), value="value"),))
+        if nested
+        else Write(output=output, index=(Literal(0, "int"),), value="value")
+    )
+    second = _sweep(Axis("a3", 256), source="y", output="out_b", tag="b")
+    body = Body((first, between, second))
+
+    out = merge_sibling_free_loops(body)
+
+    if output == "out_b":
+        assert out == body, "the second loop must remain the last writer of out_b"
+    else:
+        assert len(out) == 2
+        assert out[1] == between
+        assert [s.output for s in out[0].body if isinstance(s, Write)] == ["out_a", "out_b"]
