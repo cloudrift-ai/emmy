@@ -19,6 +19,9 @@ vLLM discovers the plugin through the
 `EmmyEmbedModel` by lazy string path; `--hf-overrides` swaps the served repo's `architectures` to it, so the
 checkpoint, tokenizer, and sentence-transformers pooling config still come from the original HF repo.
 
+The opt-in native text server is a separate consumer of the Rust execution runtime. Its preparation and launcher
+contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains this integration's default.
+
 ## Module map
 
 - `__init__.py` — `register()`, the entry-point hook. Never imports vllm/torch at module level. Besides registering

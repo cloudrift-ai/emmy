@@ -64,8 +64,8 @@ lint: setup
 .PHONY: test-native lint-native
 test-native:
 	cargo test --workspace --locked
-	cargo build --release --locked --bin emmy-runtime-worker
-	PATH="$(CURDIR)/target/release:$$PATH" ./venv/bin/pytest tests/compiler/backend/test_native.py tests/compiler/backend/test_native_gpu.py tests/serving/native/test_prepare.py tests/serving/native/test_generation_gpu.py
+	cargo build --release --locked --workspace
+	PATH="$(CURDIR)/target/release:$$PATH" ./venv/bin/pytest -n 2 --dist=loadgroup tests/compiler/backend/test_native.py tests/compiler/backend/test_native_gpu.py tests/serving/native/test_prepare.py tests/serving/native/test_generation_gpu.py tests/serving/native/test_launch.py tests/serving/native/test_text.py tests/serving/native/test_server_gpu.py
 
 lint-native:
 	cargo fmt --all --check
@@ -307,3 +307,9 @@ test-compose:
 	@echo "✅ Generated: /tmp/test-compose.yml"
 	@echo ""
 	@cat /tmp/test-compose.yml
+
+.PHONY: native-dist
+native-dist:
+	cargo build --release --locked --workspace
+	mkdir -p dist
+	tar -czf dist/emmy-native-$$(git rev-parse --short HEAD)-$$(uname -s)-$$(uname -m).tar.gz -C target/release emmy-server emmy-runtime-worker

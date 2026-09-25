@@ -167,7 +167,7 @@ fn main() -> Result<()> {
                 }
                 Command::GenerationStep { capture, logits } => {
                     let generator = generator.as_mut().context("no loaded generator")?;
-                    let token = generator.advance(capture)?;
+                    let token = generator.advance(capture, false)?;
                     if let Some(path) = logits {
                         std::fs::write(path, generator.logits()?)?;
                     }
