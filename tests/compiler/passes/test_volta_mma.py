@@ -126,6 +126,18 @@ def test_volta_atom_separates_logical_and_instruction_shapes() -> None:
     assert set(coords) == {(row, col) for row in range(16) for col in range(16)}
 
 
+@pytest.mark.parametrize("helper,left", [("gmem4", "left"), ("a_impl", "rows_left"), ("b_impl", "cols_left")])
+def test_volta_empty_fragments_skip_out_of_range_base(monkeypatch, helper, left) -> None:
+    _pin(monkeypatch, VOLTA)
+    src, _ = _source(_graph(m=3, n=4, trans=True), Context(compute_capability=(7, 0)))
+    body = src.split(f"void emmy_mma884_load_{helper}(", 1)[1].split("{", 1)[1]
+    # A wholly overhanging fragment has no valid lane to clamp onto: even g[0] is outside.
+    # Guard before computing a lane address, including in the vector loader.
+    before_lane = body.split("int lane", 1)[0]
+    assert f"if ({left} <= 0)" in before_lane
+    assert "r[0] = r[1] = 0; return;" in before_lane
+
+
 def test_atom_selection_is_target_specific() -> None:
     assert atoms_for(F16, ctx=Context(compute_capability=(7, 0))) == (VOLTA,)
     assert atoms_for(F16, acc=F16, ctx=Context(compute_capability=(7, 0))) == ("mma_m8n8k4_f16_f16",)

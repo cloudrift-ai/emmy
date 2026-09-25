@@ -267,6 +267,7 @@ static __device__ __forceinline__ void emmy_mma884_load4(unsigned* r, const T* g
 // The caller proves four-element alignment and a complete K slice.
 template <typename T, bool A>
 static __device__ __forceinline__ void emmy_mma884_load_gmem4(unsigned* r, const T* g, int ldm, int left) {
+    if (left <= 0) { r[0] = r[1] = 0; return; }
     int lane = threadIdx.x & 31;
     int comp = (lane & 15) >> 2;
     int row = ((A ? comp >> 1 : comp & 1) << 3) + (lane & 3) + ((lane >> 4) << 2);
@@ -277,6 +278,7 @@ static __device__ __forceinline__ void emmy_mma884_load_gmem4(unsigned* r, const
 template <typename T, typename F = T>
 static __device__ __forceinline__ void emmy_mma884_load_a_impl(
     unsigned* r, const T* g, int ldm, int rows_left, int k_left) {
+    if (rows_left <= 0) { r[0] = r[1] = 0; return; }
     int lane = threadIdx.x & 31;
     int comp = (lane & 15) >> 2;
     int row = ((comp >> 1) << 3) + (lane & 3) + ((lane >> 4) << 2);
@@ -294,6 +296,7 @@ static __device__ __forceinline__ void emmy_mma884_load_a_impl(
 template <typename T, typename F = T>
 static __device__ __forceinline__ void emmy_mma884_load_b_impl(
     unsigned* r, const T* g, int ldm, int cols_left, int k_left, bool trans) {
+    if (cols_left <= 0) { r[0] = r[1] = 0; return; }
     int lane = threadIdx.x & 31;
     int comp = (lane & 15) >> 2;
     int col = ((comp & 1) << 3) + (lane & 3) + ((lane >> 4) << 2);
