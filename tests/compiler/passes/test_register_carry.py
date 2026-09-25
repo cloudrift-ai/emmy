@@ -66,6 +66,17 @@ def test_register_storage_refuses_cross_warp_state_reads():
     assert tile.register_program is None
 
 
+def test_a_descent_row_naming_other_families_narrows_without_refusing():
+    """A descent narrows every offered tier with the kernel's whole row: the register tier keeps its own keys, and a
+    strict row must still be its own."""
+    (tile,) = (n.op for n in _lift(_graph()).nodes.values() if isinstance(n.op, TileOp))
+    context = _context(tile)
+    row = {"WORK": "t16x8", "TILE@map.2/inner": "f26x26", "REDUCE@map.1/inner": ""}
+    assert context.narrowed(row).problem.row == {"WORK": "t16x8"}
+    with pytest.raises(ValueError, match="accepts only WORK, TILE and STAGE"):
+        context.narrowed(row, strict=True)
+
+
 @pytest.mark.parametrize("target", [(7, 0), (12, 0)], ids=["volta", "modern"])
 def test_chunk_loop_is_inside_one_launch(target):
     with pinned_knobs({"FAST_MATH": True, "STAGE": "d1/reg"}):

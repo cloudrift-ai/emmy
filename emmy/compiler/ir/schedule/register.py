@@ -210,9 +210,12 @@ class RegisterProblem(ScheduleProblem):
         )
 
     def with_row(self, row, *, strict=False):
-        if set(row) - set(_RegisterSite.keys):
+        # A descent narrows every offered tier with the kernel's whole row, whose other families
+        # (a classic row's REDUCE, its site-scoped keys) this tier does not own: they name no leaf
+        # here, and the leaf match rejects them. Only a strict row must be this tier's own.
+        if strict and set(row) - set(_RegisterSite.keys):
             raise ValueError("register schedule accepts only WORK, TILE and STAGE")
-        return replace(self, row=frozendict(row))
+        return replace(self, row=frozendict({key: value for key, value in row.items() if key in _RegisterSite.keys}))
 
 
 @dataclass(frozen=True, slots=True)
