@@ -127,8 +127,10 @@ in the 2026-08-01 article reproduction 24 of 28 emmy benchmark cells missed the 
 about 4.5 hours of the session — and every customer following the documented per-workload knobs pays the same on
 every boot. An extra shape that will not converge normally does **not** fail the release: the pinned shape is the
 contract, and the degraded outcome for other exploratory shapes is a cold boot, not a broken image. The exception is
-an `:fm` shape selected by the final recipe. FAST_MATH is the default Emmy deployment lane when its accuracy gate does
-not regress, so that selected shape must converge and pass pack-HIT plus zero-recompile verification before release.
+an `:fm` shape selected by the final recipe: a lane a recipe deploys must converge and pass pack-HIT plus
+zero-recompile verification before release. `serve.sh` pins `EMMY_FAST_MATH=0` unless the caller sets it, so a shape
+without the suffix is the standard lane whatever the compiler's own default is — without that pin the two lanes bake
+the same cubins and the standard-lane pack never exists.
 
 ## Files
 
@@ -214,7 +216,7 @@ The `release-serving-image` skill (`.agents/skills/release-serving-image/`) auto
 local mode, abort gates per step, a human approval pause before the push, guaranteed teardown. The manual steps:
 
 The full release session on a rented card (each step from the repo checkout; host prereqs for steps 0–4:
-`make setup` + `pip install -e ".[serving]"` + cupy + `export HF_TOKEN=…`):
+`make setup` + `pip install -e ".[serving]"` + `export HF_TOKEN=…`):
 
 0. Build the base image the warm will compile inside of:
 

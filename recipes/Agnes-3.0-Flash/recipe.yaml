@@ -3,8 +3,8 @@ tags:
 - untested
 model:
   huggingface: Agnes-AI/Agnes-3.0-Flash
-  rationale: "Fresh multimodal Flash trending on Hugging Face, niche mid-size coverage."
-  heat: 45
+  rationale: "Fresh multimodal Flash; no independent current signals found this cycle; niche mid-size coverage."
+  heat: 35
   task: generate
 matrices:
 - deploy.gpu: NVIDIA H200 141GB

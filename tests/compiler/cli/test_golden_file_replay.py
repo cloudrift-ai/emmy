@@ -16,7 +16,7 @@ from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.frontend.ir import MatmulOp, ReshapeOp, RmsNormOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
-from emmy.compiler.loop_wire import loop_graph_from_wire, loop_graph_to_wire
+from emmy.compiler.loop_wire import kernel_bindings, kernel_tile, loop_graph_from_wire, loop_graph_to_wire
 from emmy.compiler.pipeline.search.golden import dump_golden_file, load_golden_file
 from emmy.compiler.pipeline.search.working_golden import write_trace_inventory
 from tests.compiler.helpers import loop_target
@@ -341,10 +341,12 @@ def test_named_frontend_kernel_set_child_stays_pinned_after_greedy_compile(tmp_p
 
 @pytest.mark.parametrize("explicit", [False, True], ids=["ordinary", "explicit"])
 def test_recorded_route_cuts_the_selected_compile_target(run_cli, tmp_path, monkeypatch, explicit):
-    """A measured routing row is the measured price of the kernel set its route spells. Selecting
-    the file makes it evidence, so at the placement fork it outranks the fused arm nothing measured
-    and the pass's own cut arm is taken: the compile splits into the placed producer plus its
-    consumers. A hand pin of the same route through ``EMMY_KNOBS`` lands identically."""
+    """``--pin-route`` compiles the named routing realization under the kernel set its route spells:
+    the route is pinned for the compile (`compile.selected_decisions`), so the pass's own cut arm is
+    taken and the compile splits into the placed producer plus its consumers. A hand pin of the
+    same route through ``EMMY_KNOBS`` lands identically, and agrees with the flag's. The routing
+    row's own time prices nothing: the receipts of its pieces, once recorded, are what a compile
+    nothing pins picks the set from."""
     path = tmp_path / "working-route.yaml"
     _working_placement_route(path)
     monkeypatch.delenv("EMMY_KNOBS", raising=False)
@@ -360,6 +362,7 @@ def test_recorded_route_cuts_the_selected_compile_target(run_cli, tmp_path, monk
         str(path),
         "--realization",
         "working.route",
+        "--pin-route",
         "--target",
         "sm_89",
         "--ir",
@@ -851,14 +854,27 @@ def test_replay_keys_its_cache_by_the_entry_identity(tmp_path):
     assert _replay(other, siblings=(owner,), lead=owner).arms == ()
 
 
+def _decision_watcher():
+    """The kernel-set decisions a compile takes, captured as ``run --record-greedy`` captures them:
+    the splice watcher, reporting ``(deploy identity of the kernel the fork was offered on, arm)``."""
+    from emmy.compiler.pipeline.search.strategy.two_level import KernelInventory, _identity
+
+    taken: list[tuple[str, dict[str, str]]] = []
+    watcher = KernelInventory(
+        _identity(), lambda *_: None, on_routing=lambda parent, arm, pieces, ids: taken.append((parent.identity_key(with_io=True), arm))
+    )
+    return watcher, taken
+
+
 @pytest.mark.parametrize("card,cap", [("NVIDIA GeForce RTX 4090", (8, 9)), ("NVIDIA A100-SXM4-40GB", (8, 0))])
 def test_recorded_greedy_pick_is_picked_again_under_strict_evidence(tmp_path, card, cap, monkeypatch):
     """The kernel set a compile picked, recorded as measured rows — one routing row per kernel-set
     decision it took and one child-identity schedule receipt per kernel — is evidence enough: those
     rows alone yield the same kernels with the same rows under strict evidence, with no prior and
-    no tune DB. A receipt carries the input regime and no route: seam spellings are
-    kernel-local, so a cut key copied onto every receipt would re-cut any piece that offers a
-    same-spelled seam."""
+    no tune DB. The pick to record takes the seed's route as ``run --record-greedy`` pins a named
+    realization's: a routing row's own time prices nothing, its pieces' receipts do. A receipt
+    carries the input regime and no route: seam spellings are kernel-local, so a cut key copied
+    onto every receipt would re-cut any piece that offers a same-spelled seam."""
     monkeypatch.setenv("EMMY_FAST_MATH", "0")
     from emmy import config
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
@@ -870,7 +886,7 @@ def test_recorded_greedy_pick_is_picked_again_under_strict_evidence(tmp_path, ca
         sole_evidence,
     )
     from emmy.compiler.pipeline.search.pins import pinned_knobs
-    from emmy.compiler.pipeline.search.working_golden import KernelSetDecisions, greedy_pick_rows, record_greedy_pick
+    from emmy.compiler.pipeline.search.working_golden import greedy_pick_rows, record_greedy_pick
 
     path = tmp_path / "working-route.yaml"
     document = _working_placement_route(path)
@@ -879,26 +895,26 @@ def test_recorded_greedy_pick_is_picked_again_under_strict_evidence(tmp_path, ca
     entry = document["configs"][0]
     seed = golden_record_from_entry(document, entry, entry["realizations"][0])
     ctx = Context.from_target(cap, gpu_name=card)
-    taken = KernelSetDecisions()
-    # The pick to record: the routing row decides the cut, the prior decides the pieces' schedules.
-    with records_override([seed]), pinned_knobs({"FAST_MATH": False}):
-        picked = Pipeline.build(CUDA_PASSES).with_strategies(taken).run(seed.target_program.copy(), ctx=ctx, db=None)
+    watcher, taken = _decision_watcher()
+    # The pick to record: the routing row's route pinned decides the cut, the prior the pieces' schedules.
+    with records_override([seed]), pinned_knobs({"FAST_MATH": False, **seed.route}):
+        picked = Pipeline.build(CUDA_PASSES).with_strategies(watcher).run(seed.target_program.copy(), ctx=ctx, db=None)
     rows = greedy_pick_rows(picked)
     # The routing row's cut first; the pieces may take further kernel-set decisions of their own
     # (a cross-CTA split of the residual), each recorded as a routing row of its own kernel.
-    assert len(rows) >= 2 and taken.decisions[0][1] == {"PLACE@inner.1/map": "cut"}
+    assert len(rows) >= 2 and taken[0][1] == {"PLACE@inner.1/map": "cut"}
 
     written = record_greedy_pick(
         path,
         "working.route",
-        decisions=[(identity, knobs, 5.0, 6.0) for identity, knobs in taken.decisions],
+        decisions=[(identity, knobs, 5.0, 6.0) for identity, knobs in taken],
         kernels=[(identity, row, 1.0, 2.0) for identity, row in rows],
         reference_backend="same-input-greedy",
     )
 
     reloaded = load_golden_file(path)
     added = [row for row in reloaded["configs"][0]["realizations"] if row["name"] in written]
-    assert len(added) == len(rows) + len(taken.decisions)
+    assert len(added) == len(rows) + len(taken)
     assert all(golden_entry_state(row) is GoldenEntryState.VERIFIED and row["identity"] for row in added)
     assert all(row["pins"] == {"FAST_MATH": False} for row in added)
     records = [golden_record_from_entry(reloaded, reloaded["configs"][0], row) for row in added]
@@ -919,7 +935,7 @@ def test_recorded_composed_pick_is_picked_again_under_strict_evidence(tmp_path, 
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
     from emmy.compiler.pipeline.search.golden import golden_record_from_entry, records_override, sole_evidence
     from emmy.compiler.pipeline.search.pins import pinned_knobs
-    from emmy.compiler.pipeline.search.working_golden import KernelSetDecisions, greedy_pick_rows, record_greedy_pick
+    from emmy.compiler.pipeline.search.working_golden import greedy_pick_rows, record_greedy_pick
 
     path = tmp_path / "working-route.yaml"
     document = _working_placement_route(path)
@@ -927,16 +943,16 @@ def test_recorded_composed_pick_is_picked_again_under_strict_evidence(tmp_path, 
     seed = golden_record_from_entry(document, entry, entry["realizations"][0])
     ctx = Context.from_target((8, 9))
     both = {"PLACE@inner.1/map": "cut", "PLACE@inner.1/map.3/map": "cut"}
-    taken = KernelSetDecisions()
+    watcher, taken = _decision_watcher()
     with records_override([]), pinned_knobs({"FAST_MATH": False, **both}):
-        picked = Pipeline.build(CUDA_PASSES).with_strategies(taken).run(seed.target_program.copy(), ctx=ctx, db=None)
+        picked = Pipeline.build(CUDA_PASSES).with_strategies(watcher).run(seed.target_program.copy(), ctx=ctx, db=None)
     rows = greedy_pick_rows(picked)
-    assert len(rows) >= 3 and taken.decisions[0][1] == both, "one composed decision minting at least two pieces"
+    assert len(rows) >= 3 and taken[0][1] == both, "one composed decision minting at least two pieces"
 
     written = record_greedy_pick(
         path,
         "working.route",
-        decisions=[(identity, knobs, 5.0, 6.0) for identity, knobs in taken.decisions],
+        decisions=[(identity, knobs, 5.0, 6.0) for identity, knobs in taken],
         kernels=[(identity, row, 1.0, 2.0) for identity, row in rows],
         reference_backend="same-input-greedy",
     )
@@ -962,7 +978,7 @@ def test_run_records_the_greedy_pick_of_an_embedded_golden(monkeypatch, tmp_path
     from emmy.commands import run as run_module
     from emmy.commands.compile import resolve_golden_arg
     from emmy.compiler import target as target_mod
-    from emmy.compiler.pipeline.search.policy.greedy import _is_route_row
+    from emmy.compiler.pipeline.search.golden import golden_record_from_entry
 
     path = tmp_path / "working-route.yaml"
     _working_placement_route(path)
@@ -982,6 +998,7 @@ def test_run_records_the_greedy_pick_of_an_embedded_golden(monkeypatch, tmp_path
         profile=False,
         record=False,
         record_greedy=True,
+        pin_route=True,
         strict_correctness=False,
     )
     resolve_golden_arg(args)
@@ -1040,9 +1057,10 @@ def test_run_records_the_greedy_pick_of_an_embedded_golden(monkeypatch, tmp_path
         target_mod.set_target(None)
 
     assert recorded["benches"] == [] and recorded["iso"].status == "ok"
-    added = load_golden_file(path)["configs"][0]["realizations"][1:]
-    routing = [row for row in added if _is_route_row(row["knobs"])]
-    receipts = [row for row in added if not _is_route_row(row["knobs"])]
+    document = load_golden_file(path)
+    added = document["configs"][0]["realizations"][1:]
+    routing = [row for row in added if golden_record_from_entry(document, document["configs"][0], row).is_routing]
+    receipts = [row for row in added if not golden_record_from_entry(document, document["configs"][0], row).is_routing]
     assert routing[0]["knobs"] == {"PLACE@inner.1/map": "cut"} and len(receipts) >= 2
     total = sum(range(1, len(receipts) + 1))
     # The root's cut produced every kernel; the residual's cross-CTA split (whichever ``g<n>`` the
@@ -1111,6 +1129,7 @@ def test_run_files_a_hung_greedy_kernel_as_bench_fail_evidence(monkeypatch, tmp_
         profile=False,
         record=False,
         record_greedy=True,
+        pin_route=True,
         strict_correctness=False,
     )
     resolve_golden_arg(args)
@@ -1152,8 +1171,13 @@ def test_run_files_a_hung_greedy_kernel_as_bench_fail_evidence(monkeypatch, tmp_
     assert len(nodes) >= 2, "the route must hold an innocent kernel beside the culprit"
     db = SearchDB(db_path)
     try:
-        keys = {n.op.kernel_name: n.op.identity_key(with_io=True, with_knobs=True) for n in nodes}
-        rows = {name: db.lookup_perf(probed, key, backend="cuda") for name, key in keys.items()}
+        tiles = {n.op.kernel_name: (kernel_tile(n.op), dict(n.op.knobs or {})) for n in nodes}
+        rows = {
+            name: db.lookup_perf(
+                probed, tile.identity_key(structural=False, with_io=True), bindings=kernel_bindings(tile), knobs=knobs, backend="cuda"
+            )
+            for name, (tile, knobs) in tiles.items()
+        }
     finally:
         db.close()
     filed = {name: row.status for name, row in rows.items() if row is not None}
@@ -1248,3 +1272,31 @@ def test_run_skips_pinned_rebench_of_the_same_election_after_a_greedy_hang(monke
 
     assert calls[0] == "record", "the bench_fail row must be recorded before the pinned walk starts"
     assert calls[1] == ("bench_golden_variants", []), "the knob-less seed pin must not be re-compiled and re-benched"
+
+
+def test_pin_route_pins_the_decisions_the_named_rows_agree_on(monkeypatch):
+    """Under ``--pin-route`` the kernel-set decisions the named rows record are one hand pin for their
+    compile — the route, a cross-CTA split — never a schedule knob; rows that disagree on a decision
+    pin nothing, as the walk leaves their receipts to replay bare; without the flag nothing is pinned.
+    It is the hand pin ``EMMY_KNOBS`` publishes, so one already set on a seam with another value is
+    refused, and one that agrees is not."""
+    from emmy.commands.compile import selected_decisions
+
+    monkeypatch.delenv("EMMY_KNOBS", raising=False)
+    cut = SimpleNamespace(pins={"FAST_MATH": False}, knobs={"PLACE@inner.1/map": "cut", "WORK": "t8"})
+    split = SimpleNamespace(pins={"FAST_MATH": False, "PLACE@inner.1/map": "cut"}, knobs={"REDUCE": "g2k", "WORK": "t8"})
+    fused = SimpleNamespace(pins={}, knobs={"PLACE@inner.1/map": "fuse"})
+    assert selected_decisions(SimpleNamespace(golden_configs=[cut, split], pin_route=True)) == {"PLACE@inner.1/map": "cut", "REDUCE": "g2k"}
+    assert selected_decisions(SimpleNamespace(golden_configs=[cut, split])) == {}
+    assert selected_decisions(SimpleNamespace(golden_configs=[cut, fused], pin_route=True)) == {}
+    assert (
+        selected_decisions(
+            SimpleNamespace(golden_configs=[SimpleNamespace(pins={}, knobs={"WORK": "t8", "REDUCE": "coop"})], pin_route=True)
+        )
+        == {}
+    )
+    monkeypatch.setenv("EMMY_KNOBS", "PLACE@inner.1/map=cut")
+    assert selected_decisions(SimpleNamespace(golden_configs=[cut], pin_route=True)) == {"PLACE@inner.1/map": "cut"}
+    monkeypatch.setenv("EMMY_KNOBS", "PLACE@inner.1/map=fuse")
+    with pytest.raises(SystemExit):
+        selected_decisions(SimpleNamespace(golden_configs=[cut], pin_route=True))

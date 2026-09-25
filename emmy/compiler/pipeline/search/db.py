@@ -1,47 +1,55 @@
-"""SQLite-backed inventory + measurement store for the search package.
+"""SQLite-backed measurement store for the search package.
 
-Pure persistence layer — no MCTS state, no propagation walks. Tables:
+Pure persistence layer — no MCTS state, no propagation walks. One schema, several instances: the tune
+DB (``EMMY_TUNE_DB``) is what compile reads and tune writes; a dataset instance (``EMMY_DATASET_DB``)
+holds the same tables filled by ``emmy dataset import``, and is what the measurement-data readers read.
 
-- ``loop_op`` / ``tile_op`` / ``kernel_op`` / ``cuda_op`` — one row per
-  op encountered along a lowering chain. Keyed by ``identity_key(with_io=True, with_knobs=True)``.
-  Each row stores the JSON form (for programmatic inspection) and the
-  pretty-printed form (for human inspection).
-- ``lowering`` — best-known child for each parent op, one row per
-  rewrite hop along the lowering chain (Loop→Tile, every intra-Tile
-  autotune step, Tile→Kernel, Kernel→Cuda). Each row carries the knob
-  delta the rule stamped at that hop plus a best-median upsert — the
-  chain :meth:`SearchDB.best_per_op_time` walks to resolve a pre-final
-  op's measured cost (greedy fork picks come from the ``Prior``, never
-  DB replay). ``record_lowering`` upserts uniformly across
-  dialects: a strictly better measured median replaces the row; a
-  None measurement (bench_fail terminal) never overwrites a
-  known-good row. Deterministic rewrites (single option) trivially
-  win their own slot via the same path.
-- ``perf`` — backend-agnostic measurement store, one row per measured kernel per card and
-  regime: keyed ``(gpu, context_key, op_key, backend)``. ``op_key`` is whichever terminal op
-  the backend measured, or the finalized Loop cache key for a directly measured whole-slice
-  structural route. ``backend`` partitions the table so the loop interpreter and the CUDA
-  backend can coexist in the same DB. ``gpu`` is the card (``Context.hardware_id``): the
-  regime key folds only the compute capability and the compiler flags, so without it two
-  cards sharing a capability (RTX 5090 / RTX PRO 6000, H100 / H200) would collide and the
-  keep-best upsert would silently drop one card's row. ``cc`` / ``opt`` spell the regime
-  readably (the key is a digest), ``feat_ver`` the featurizer vocabulary the stored knobs are
-  spelled in, and ``source`` how the row arrived — ``measured`` on this machine, or imported
-  (``freeze:<digest>``). Rows written before the card was keyed carry ``gpu = ''``: they keep
-  serving the machine that measured them and are never read as a dataset.
+Tables (the DDL is the reference):
 
-One schema, several instances: the tune DB (``EMMY_TUNE_DB``) is what compile reads and tune
-writes; a dataset instance (``EMMY_DATASET_DB``) holds the same tables filled by ``emmy dataset
-import``, and is what the measurement-data readers (``eval prior``, the fit) read.
+- ``kernel`` — one row per compilable kernel, keyed by its EXACT identity (``identity_key(structural=False,
+  with_io=True)``: the digest of the normalized body's form plus each buffer's dtype and hint-free shape).
+  The clustered deploy identity (``identity_key(with_io=True)``, pointwise ops merged — the identity
+  golden receipts store) is beside it, with the kernel's Loop IR wire and its C name. A piece a cut or a
+  split minted is a row like any other, so the same kernel reached from two parents has one definition.
+- ``kernel_feature`` — the kernel's ``S_*`` stamps, one per row: what the identity strategy writes onto a
+  kernel at the fusion boundary, a function of the fused loop body it was lifted from. The structural
+  signature deploy evidence joins and candidate pools group on is the digest of these rows, derived on
+  read (``data.group.kernel_sig``).
+- ``context`` — one row per backend, card and regime: the card's product name (``Context.hardware_id``),
+  the context's target as the backend spells it (``sm_120`` on CUDA — the regime's, never a kernel's
+  ``sm_120a``), the compiler's opt level and its residual flags (``''`` in the plain regime).
+- ``schedule`` / ``schedule_knob`` — one row per distinct schedule row: the in-kernel choices a leaf
+  kernel was measured with (``WORK``, ``TILE``, ``STAGE``, ``RASTER``, the in-kernel half of ``REDUCE``),
+  keyed by ``digest(knobs_json(row))``. Never a placement knob.
+- ``placement`` / ``placement_knob`` — one row per distinct kernel-set decision a cut arm spells:
+  ``PLACE@seam = cut`` keys and the cross-CTA half of ``REDUCE`` (``g2k``), alias-resolved (one row per
+  seam actually cut). Never an in-kernel knob; the fuse arm is no placement.
+- ``routing`` — one row per PIECE of one decision on one parent, in the fragment's order. A decision has
+  no measurement of its own: its price on a context is the sum of its children's best rows there,
+  all-or-nothing (:meth:`SearchDB.best_per_op_time`).
+- ``perf`` — one measurement per COMPILABLE kernel variant per context: the kernel, the sizes its symbolic
+  dims were benched at (``bindings``, ``{}`` static), its schedule row, the statistics, ``captured``, a
+  ``bench_fail`` row's ``error`` and ``source`` (``measured``, or ``freeze:<digest>`` when imported). No
+  route rows, no whole-slice totals, no kernel-set verdicts.
 
-Concurrency: opened in WAL mode so parallel benches can read while one
-writes. The connection is kept open for the DB's lifetime; callers can
-share one ``SearchDB`` instance across threads (sqlite3 handles
+Readers see a FLAT :class:`PerfRow`: the context's columns, and ``knobs`` reassembled as the kernel's
+stamps, its exact identity as the ``I_kernel`` stamp and the schedule row, so the featurizer, the evidence
+index, the measured pools and the freeze predicates read what they always read. The joins live here and
+nowhere else.
+
+Nothing migrates. A file whose tables have other columns than this DDL was written by another emmy: a
+writer open re-creates every table empty — the rows are regenerable (a tune DB re-tunes, a dataset DB
+re-imports with ``emmy dataset import --fresh``) — and a read-only open refuses the file. Foreign keys are
+enforced on every connection (``PRAGMA foreign_keys = ON``, off only while the re-create drops tables).
+
+Concurrency: opened in WAL mode so parallel benches can read while one writes. The connection is kept
+open for the DB's lifetime; callers can share one ``SearchDB`` instance across threads (sqlite3 handles
 locking).
 """
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import sqlite3
@@ -51,7 +59,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
+from emmy.compiler.pipeline.knob import KERNEL_IDENTITY, METADATA_PREFIXES, family_of
+from emmy.compiler.structural import digest
 
 if TYPE_CHECKING:
     from emmy.compiler.context import Context
@@ -59,21 +68,27 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _jsonable_geometry(geometry) -> list:
-    """Render a launch grid/block to a JSON-safe nested list for the inventory
-    tables. Int / str pass through; nested specs recurse; composite ``Expr``
-    factors (ceil-div block extents for hint-driven masked tiles) render to
-    their pretty string — inventory rows are for human inspection, not
-    re-execution."""
+def knobs_json(knobs) -> str:
+    """The one text spelling of a knob row — sorted keys, compact — that the DB stores and digests.
+    Native JSON values only: a value the encoder cannot spell raises instead of being stringified,
+    because the spelling identifies a row and a lossy fallback would let two writers mint two rows
+    for one."""
+    return json.dumps(dict(knobs), sort_keys=True, separators=(",", ":"), allow_nan=False)
 
-    def conv(x):
-        if isinstance(x, (int, str)):
-            return x
-        if isinstance(x, (tuple, list)):
-            return [conv(e) for e in x]
-        return x.pretty()  # Expr
 
-    return [conv(spec) for spec in geometry]
+def is_placement_knob(name: str, value) -> bool:
+    """Whether a knob is a kernel-set decision — a ``PLACE`` key, or a ``REDUCE`` value carrying a
+    cross-CTA ``g<n>`` half — as opposed to an in-kernel choice. THE rule that keeps the ``schedule`` and
+    ``placement`` vocabularies apart."""
+    family = family_of(str(name))
+    if family == "PLACE":
+        return True
+    if family != "REDUCE":
+        return False
+    from emmy.compiler.pipeline.search.pins import parse_reduce  # noqa: PLC0415
+
+    plan = parse_reduce(value)
+    return plan is not None and plan.needs_split
 
 
 @dataclass(frozen=True)
@@ -90,207 +105,212 @@ class PerfStats:
 
 @dataclass(frozen=True)
 class PerfRow:
-    """One ``perf`` row.
+    """One measurement, flat: the context's columns, the kernel, the sizes it was benched at, and ``knobs``
+    — the kernel's ``S_*`` stamps plus the schedule row, as the featurizer reads them.
 
-    ``captured``: the measurement ran under CUDA graph capture (pure GPU time);
-    False = wall semantics including per-launch dispatch (all pre-capture rows).
-    Both kinds stay usable (replay, prior training); on write, a captured
-    measurement supersedes an uncaptured one for the same key — see
-    :meth:`SearchDB.record_perf_row`.
+    ``captured``: the measurement ran under CUDA graph capture (pure GPU time); False = wall semantics
+    including per-launch dispatch. On write, a captured measurement supersedes an uncaptured one for
+    the same key — see :meth:`SearchDB.record_perf_row`. ``cc`` is in the ``H_cc`` encoding
+    (``major * 10 + minor``), read off the context's ``arch``; ``error`` is a ``bench_fail`` row's
+    failure text."""
 
-    ``gpu`` / ``cc`` / ``opt`` are the card and the regime the row was measured under — ``cc`` in
-    the ``H_cc`` encoding (``major * 10 + minor``); ``''`` / ``None`` on a row written before the
-    card was keyed. ``feat_ver`` is the featurizer vocabulary ``knobs`` is spelled in, ``source``
-    how the row arrived (see the module docstring), ``error`` a ``bench_fail`` row's failure
-    text."""
-
-    context_key: str
-    op_key: str
+    gpu: str
+    cc: int
+    opt: int
+    flags: str
+    kernel: str
+    bindings: dict
+    knobs: dict
     backend: str
     status: str
     stats: PerfStats
     measured_at: str
-    knobs: dict
     captured: bool = False
-    gpu: str = ""
-    cc: int | None = None
-    opt: int | None = None
-    feat_ver: int = FEATURIZER_VERSION
-    source: str = "measured"
     error: str | None = None
+    source: str = "measured"
 
 
 @dataclass(frozen=True)
-class PerfSample:
-    """One measured terminal kernel — a ``perf`` row with its ``cuda_op`` source when it has one.
+class KernelRow:
+    """One ``kernel`` row with its stamps: the exact identity, the clustered deploy identity, the Loop IR
+    wire (what the identities digest), the C name, and the ``S_*`` dict."""
 
-    The minimal row the per-kernel analyses read: the kernel's pretty source (for the C
-    identifier; ``None`` for an imported row, which has no compiled kernel), the recorded knobs
-    (``S_*`` stamps + tunables), and the median latency. Backs :meth:`SearchDB.iter_perf_samples`."""
-
-    pretty: str | None
-    knobs: dict
-    latency_us: float
-    error: str | None = None  # bench_fail failure text (None on ok rows)
+    exact_identity: str
+    structural_identity: str
+    loop_ir: dict
+    name: str
+    stamps: dict
 
 
 @dataclass(frozen=True)
-class LoweringRow:
-    """One ``lowering`` row — best-known child for a parent op.
+class RoutingRow:
+    """One kernel-set decision on one parent: the arm's knobs (``PLACE@seam: cut`` keys, or a cross-CTA
+    ``REDUCE`` half) and the exact identities of the pieces it minted, in the fragment's order."""
 
-    ``knobs`` is the delta added at this rewrite step (e.g.
-    ``005_blockify_launch`` adds ``{"BN": 64, "BM": 64}``). Greedy
-    replay picks the fork whose newly-stamped knobs agree with this
-    delta — no need to compare structural keys per fork."""
-
-    parent_key: str
-    parent_dialect: str
-    child_key: str
-    child_dialect: str
-    knobs: dict
-    best_median_us: float | None
+    parent: str
+    arm: dict
+    children: tuple[str, ...]
 
 
-# The ``perf`` columns a read selects, in ``_row_to_perf`` order, with the value each one reads as on
-# a DB that predates it. A writer open migrates the table (``SearchDB.__init__``); a read-only open
-# never does, so its SELECT substitutes the default for a missing column instead of failing.
-_PERF_READ_COLS = (
-    ("context_key", None),
-    ("op_key", None),
-    ("backend", None),
-    ("status", None),
-    ("latency_us_median", None),
-    ("latency_us_min", None),
-    ("latency_us_max", None),
-    ("latency_us_mean", None),
-    ("latency_us_variance", None),
-    ("n_samples", None),
-    ("measured_at", None),
-    ("knobs", None),
-    ("captured", None),
-    ("gpu", "''"),
-    ("cc", "NULL"),
-    ("opt", "NULL"),
-    ("feat_ver", "1"),
-    ("source", "'measured'"),
-    ("error", "NULL"),
-)
-
-# The columns a pre-card ``perf`` table carries over into the card-keyed one (``error`` only when present).
-_PERF_CARRIED_COLS = (
-    "context_key, op_key, backend, status, latency_us_median, latency_us_min, latency_us_max, "
-    "latency_us_mean, latency_us_variance, n_samples, measured_at, knobs, captured"
-)
-
-
-class SearchDB:
-    """Persistent inventory of compiled ops + their measured perf.
-
-    Pass ``path=None`` for an in-memory database (default — keeps tests
-    hermetic; tuning runs pass an explicit path like
-    ``~/.cache/emmy/autotune.db``).
-    """
-
-    # Bumped whenever the fork-tree topology shifts in ways that change
-    # ``parent_key`` / ``child_key`` for the same physical decision —
-    # stale ``lowering`` rows from older versions won't match the new
-    # keys and would silently slow the next tune sweep. On version
-    # mismatch we drop the ``lowering`` table only; ``perf`` /
-    # ``loop_op`` / ``tile_op`` etc. survive (source-hash keyed,
-    # parent-tree-independent).
-    #
-    # Version log:
-    #   1: M9.4 — planner-hoisted FM / FN / BN / BM forks. Parent-tree
-    #       topology shifted vs. the legacy downstream forks.
-    #   2: explicit-knob OFF sentinels — every variant now stamps every planner
-    #       knob (tier-foreign ones get an OFF value: WM/WN/MMA on scalar,
-    #       BM/BN/BR/FK on warp), so ``identity_key(with_io=True, with_knobs=True)`` (which folds the knob dict)
-    #       shifts for every TileOp/KernelOp. Stale ``lowering`` rows won't match.
-    #   3: the RASTER launch-order codec — every contraction row now spells a fifth
-    #       schedule family (``RASTER: ''``/``gm8``), so ``identity_key(with_io=True, with_knobs=True)`` shifts for every
-    #       matmul TileOp/KernelOp; cached pre-RASTER chains would silently replay
-    #       old-key kernels and starve the new rows of evidence.
-    #   4: the ``S_ext_serial_cell_work`` structural stamp — every op's knob row gains one
-    #       ``S_*`` feature, so ``identity_key(with_io=True, with_knobs=True)`` shifts for every
-    #       TileOp/KernelOp (the realization corpus's 211 restamped identities are the same
-    #       shift); stale ``lowering`` rows would silently never match.
-    #   5: typed buffer roles — ``identity_key(with_io=True)`` colors each buffer in the identity
-    #       graph by dtype and shape instead of folding an io list in declaration order, so every
-    #       deploy identity and variant key shifts; stale rows would silently never match. The same
-    #       version folds ``Const`` into the pure ``Let`` binding: the online-softmax fold's body
-    #       changes, so every softmax and attention identity shifts with it.
-    _SCHEMA_VERSION = 5
-
-    _PERF_DDL = """
-        CREATE TABLE IF NOT EXISTS perf (
-            gpu                  TEXT NOT NULL DEFAULT '',
-            context_key          TEXT NOT NULL,
-            op_key               TEXT NOT NULL,
-            backend              TEXT NOT NULL,
-            status               TEXT NOT NULL,
+# Each table's DDL and the column set a file must have for this module to read it.
+_DDL = {
+    "kernel": """
+        CREATE TABLE kernel (
+            exact_identity       TEXT PRIMARY KEY,
+            structural_identity  TEXT NOT NULL,
+            loop_ir              TEXT NOT NULL,
+            kernel_name          TEXT NOT NULL
+        )""",
+    "kernel_feature": """
+        CREATE TABLE kernel_feature (
+            kernel  TEXT NOT NULL REFERENCES kernel (exact_identity),
+            name    TEXT NOT NULL,
+            value   REAL NOT NULL,
+            PRIMARY KEY (kernel, name)
+        )""",
+    "context": """
+        CREATE TABLE context (
+            id        INTEGER PRIMARY KEY,
+            backend   TEXT NOT NULL,
+            gpu_name  TEXT NOT NULL,
+            arch      TEXT NOT NULL,
+            opt       INTEGER NOT NULL,
+            flags     TEXT NOT NULL,
+            UNIQUE (backend, gpu_name, arch, opt, flags)
+        )""",
+    "schedule": """
+        CREATE TABLE schedule (
+            id      INTEGER PRIMARY KEY,
+            digest  TEXT NOT NULL UNIQUE
+        )""",
+    "schedule_knob": """
+        CREATE TABLE schedule_knob (
+            schedule  INTEGER NOT NULL REFERENCES schedule (id),
+            name      TEXT NOT NULL,
+            value     TEXT NOT NULL,
+            PRIMARY KEY (schedule, name)
+        )""",
+    "placement": """
+        CREATE TABLE placement (
+            id      INTEGER PRIMARY KEY,
+            digest  TEXT NOT NULL UNIQUE
+        )""",
+    "placement_knob": """
+        CREATE TABLE placement_knob (
+            placement  INTEGER NOT NULL REFERENCES placement (id),
+            name       TEXT NOT NULL,
+            value      TEXT NOT NULL,
+            PRIMARY KEY (placement, name)
+        )""",
+    "routing": """
+        CREATE TABLE routing (
+            parent     TEXT NOT NULL REFERENCES kernel (exact_identity),
+            placement  INTEGER NOT NULL REFERENCES placement (id),
+            position   INTEGER NOT NULL,
+            child      TEXT NOT NULL REFERENCES kernel (exact_identity),
+            PRIMARY KEY (parent, placement, position)
+        )""",
+    "perf": """
+        CREATE TABLE perf (
+            context    INTEGER NOT NULL REFERENCES context (id),
+            kernel     TEXT NOT NULL REFERENCES kernel (exact_identity),
+            bindings   TEXT NOT NULL,
+            schedule   INTEGER NOT NULL REFERENCES schedule (id),
+            status     TEXT NOT NULL,
             latency_us_median    REAL NOT NULL,
             latency_us_min       REAL NOT NULL,
             latency_us_max       REAL NOT NULL,
             latency_us_mean      REAL NOT NULL,
             latency_us_variance  REAL NOT NULL,
-            n_samples            INTEGER NOT NULL,
-            measured_at          TEXT NOT NULL,
-            knobs                TEXT NOT NULL DEFAULT '{}',
-            captured             INTEGER NOT NULL DEFAULT 0,
-            error                TEXT,
-            cc                   INTEGER,
-            opt                  INTEGER,
-            feat_ver             INTEGER NOT NULL DEFAULT 1,
-            source               TEXT NOT NULL DEFAULT 'measured',
-            PRIMARY KEY (gpu, context_key, op_key, backend)
-        )
-        """
+            n_samples   INTEGER NOT NULL,
+            measured_at TEXT NOT NULL,
+            captured    INTEGER NOT NULL,
+            error       TEXT,
+            source      TEXT NOT NULL,
+            PRIMARY KEY (context, kernel, bindings, schedule)
+        )""",
+}
+_INDEXES = (
+    "CREATE INDEX routing_child ON routing (child)",
+    "CREATE INDEX kernel_structural ON kernel (structural_identity)",
+)
+_COLS = {
+    "kernel": ("exact_identity", "structural_identity", "loop_ir", "kernel_name"),
+    "kernel_feature": ("kernel", "name", "value"),
+    "context": ("id", "backend", "gpu_name", "arch", "opt", "flags"),
+    "schedule": ("id", "digest"),
+    "schedule_knob": ("schedule", "name", "value"),
+    "placement": ("id", "digest"),
+    "placement_knob": ("placement", "name", "value"),
+    "routing": ("parent", "placement", "position", "child"),
+    "perf": (
+        "context",
+        "kernel",
+        "bindings",
+        "schedule",
+        "status",
+        "latency_us_median",
+        "latency_us_min",
+        "latency_us_max",
+        "latency_us_mean",
+        "latency_us_variance",
+        "n_samples",
+        "measured_at",
+        "captured",
+        "error",
+        "source",
+    ),
+}
+# Tables an older emmy wrote that nothing reads any more, dropped alongside the rest on a re-create.
+_OBSOLETE_TABLES = ("loop_op", "tile_op", "kernel_op", "cuda_op", "lowering", "kernel_set")
+# Drop order respects the foreign keys; create order is the reverse.
+_DROP_ORDER = ("perf", "routing", "placement_knob", "placement", "schedule_knob", "schedule", "kernel_feature", "context", "kernel")
 
-    _SCHEMA = [
-        """
-        CREATE TABLE IF NOT EXISTS loop_op (
-            key       TEXT PRIMARY KEY,
-            body_json TEXT NOT NULL,
-            pretty    TEXT NOT NULL
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS tile_op (
-            key       TEXT PRIMARY KEY,
-            body_json TEXT NOT NULL,
-            pretty    TEXT NOT NULL
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS kernel_op (
-            key       TEXT PRIMARY KEY,
-            body_json TEXT NOT NULL,
-            pretty    TEXT NOT NULL
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS cuda_op (
-            key           TEXT PRIMARY KEY,
-            kernel_source TEXT NOT NULL,
-            arg_order     TEXT NOT NULL,
-            grid          TEXT NOT NULL,
-            block         TEXT NOT NULL,
-            smem_bytes    INTEGER NOT NULL,
-            pretty        TEXT NOT NULL
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS lowering (
-            parent_key      TEXT PRIMARY KEY,
-            parent_dialect  TEXT NOT NULL,
-            child_key       TEXT NOT NULL,
-            child_dialect   TEXT NOT NULL,
-            knobs           TEXT NOT NULL DEFAULT '{}',
-            best_median_us  REAL
-        )
-        """,
-        _PERF_DDL,
-    ]
+# What one perf read selects, in ``_row_to_perf`` order: the context's columns, then the row's.
+_PERF_SEL = (
+    "c.gpu_name, c.arch, c.opt, c.flags, c.backend, p.kernel, p.bindings, p.schedule, p.status, "
+    "p.latency_us_median, p.latency_us_min, p.latency_us_max, p.latency_us_mean, p.latency_us_variance, p.n_samples, "
+    "p.measured_at, p.captured, p.error, p.source"
+)
+_PERF_FROM = "FROM perf p JOIN context c ON c.id = p.context"
+
+
+def _arch(cc: tuple[int, int] | int) -> str:
+    """The CUDA backend's spelling of a compute capability as a context target: ``sm_120``."""
+    major, minor = cc if isinstance(cc, tuple) else divmod(cc, 10)
+    return f"sm_{major}{minor}"
+
+
+def _cc(arch: str) -> int:
+    """The ``H_cc`` encoding of a context's target: ``sm_120`` -> 120. Only the CUDA spelling has one."""
+    if not arch.startswith("sm_") or not arch[3:].isdigit():
+        raise ValueError(f"no compute capability in the context target {arch!r}")
+    return int(arch[3:])
+
+
+def _split_knobs(knobs: dict) -> dict:
+    """The schedule row of a knob dict: the in-kernel families, without ``S_*`` / ``H_*`` / ``I_*`` (they are
+    the kernel's, the context's and the kernel's identity). A placement knob here is an error — a row
+    spelling a cut or a cross-CTA split is a kernel-set decision, not a measurement of one kernel."""
+    schedule = {}
+    for name, value in knobs.items():
+        if str(name).startswith(METADATA_PREFIXES):
+            continue
+        if is_placement_knob(name, value):
+            raise ValueError(f"{name}={value!r} is a placement knob: a kernel-set decision is a routing row, not a perf row")
+        schedule[str(name)] = value
+    return schedule
+
+
+def _wire_json(wire: dict) -> str:
+    return json.dumps(wire, sort_keys=True, separators=(",", ":"))
+
+
+class SearchDB:
+    """Persistent store of compiled kernels, the decisions that minted them, and their measurements.
+
+    Pass ``path=None`` for an in-memory database (default — keeps tests hermetic; tuning runs pass an
+    explicit path like ``~/.cache/emmy/autotune.db``)."""
 
     def __init__(self, path: Path | str | None = None) -> None:
         # The backing file (``None`` for an in-memory DB) — read by the deploy-side
@@ -298,65 +318,69 @@ class SearchDB:
         self._path = Path(path) if path is not None else None
         if path is None:
             self._conn = sqlite3.connect(":memory:", isolation_level=None, check_same_thread=False)
-        else:
-            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            self._create_tables()
+            return
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        # One process at a time opens the file. Several `emmy` commands opening one file within
+        # milliseconds of each other (the suite's CLI subprocesses) would otherwise each see the tables
+        # missing and collide on CREATE TABLE, and a fresh file cannot switch to WAL while another
+        # connection is mid-transaction. The lock beside the file is held for the open only.
+        with open(f"{path}.lock", "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
             self._conn = sqlite3.connect(str(path), isolation_level=None, check_same_thread=False)
             self._conn.execute("PRAGMA journal_mode=WAL")
-        # Drop the ``lowering`` table when an older schema is detected;
-        # everything else (op inventory, perf rows) is keyed off content
-        # hashes and remains valid across fork-tree changes.
-        cur_version = self._conn.execute("PRAGMA user_version").fetchone()[0]
-        if cur_version != self._SCHEMA_VERSION:
-            self._conn.execute("DROP TABLE IF EXISTS lowering")
-            self._conn.execute(f"PRAGMA user_version = {self._SCHEMA_VERSION}")
-        if self._perf_columns() and "gpu" not in self._perf_columns():
-            self._migrate_perf_to_card_key()
-        for stmt in self._SCHEMA:
-            self._conn.execute(stmt)
-        self._perf_sel = self._perf_select()
+            self._create_tables()
 
-    def _perf_columns(self) -> set[str]:
-        """The ``perf`` table's columns — empty when there is no table (a fresh or foreign file)."""
-        return {r[1] for r in self._conn.execute("PRAGMA table_info(perf)")}
+    def _create_tables(self) -> None:
+        """The tables, created where missing; a file another emmy wrote is re-created empty."""
+        self._conn.execute("PRAGMA foreign_keys = OFF")
+        if self._mismatched():
+            logger.warning("%s: tables written by another emmy — re-created empty (their rows are regenerable)", self._path)
+            for table in _DROP_ORDER:
+                self._conn.execute(f"DROP TABLE IF EXISTS {table}")
+        for table in _OBSOLETE_TABLES:
+            self._conn.execute(f"DROP TABLE IF EXISTS {table}")
+        if not self._columns("perf"):
+            for table in reversed(_DROP_ORDER):
+                self._conn.execute(_DDL[table])
+            for stmt in _INDEXES:
+                self._conn.execute(stmt)
+        self._conn.execute("PRAGMA foreign_keys = ON")
 
-    def _migrate_perf_to_card_key(self) -> None:
-        """Rebuild a ``perf`` table written before the card joined its key.
+    def _columns(self, table: str) -> set[str]:
+        """A table's columns — empty when there is no such table (a fresh or foreign file)."""
+        return {r[1] for r in self._conn.execute(f"PRAGMA table_info({table})")}
 
-        SQLite cannot change a primary key in place, so the table is copied into the card-keyed shape in
-        one transaction. The old rows take ``gpu = ''`` (the card that measured them is not recorded
-        anywhere) and ``feat_ver = 1`` (unknown vocabulary): the machine that measured them keeps reading
-        them as deploy evidence, and no dataset reader admits them."""
-        error = "error" if "error" in self._perf_columns() else "NULL"
-        self._conn.execute("BEGIN")
+    def _mismatched(self) -> bool:
+        """Whether the file's tables are not exactly this DDL's: a table with other columns (a file another
+        emmy wrote), or some of the tables without the rest (a creation that was interrupted, or an emmy one
+        table older) — either would fail on the first read of what is missing."""
+        present = {table: self._columns(table) for table in _COLS}
+        if any(cols and cols != set(_COLS[table]) for table, cols in present.items()):
+            return True
+        return 0 < sum(bool(cols) for cols in present.values()) < len(present)
+
+    @classmethod
+    def for_compile(cls, path: Path | str) -> SearchDB | None:
+        """The DB a compile picks from, made when absent (the golden rows in scope are imported into it), or
+        ``None`` where the file cannot be made or opened — a read-only cache directory — so the compile picks
+        from an in-memory instance instead, as one given no DB does."""
         try:
-            self._conn.execute("ALTER TABLE perf RENAME TO perf_pre_card")
-            self._conn.execute(self._PERF_DDL)
-            self._conn.execute(
-                f"INSERT INTO perf ({_PERF_CARRIED_COLS}, error) SELECT {_PERF_CARRIED_COLS}, {error} FROM perf_pre_card"  # noqa: S608
-            )
-            self._conn.execute("DROP TABLE perf_pre_card")
-        except BaseException:
-            self._conn.execute("ROLLBACK")
-            raise
-        self._conn.execute("COMMIT")
-
-    def _perf_select(self, table: str = "perf") -> str:
-        """The ``perf`` SELECT list in ``_row_to_perf`` order, qualified by ``table``, with the pre-column
-        default for any column this file lacks (see :data:`_PERF_READ_COLS`)."""
-        have = self._perf_columns()
-        return ", ".join(f"{table}.{col}" if col in have or default is None else default for col, default in _PERF_READ_COLS)
+            return cls(path=Path(path))
+        except (OSError, sqlite3.OperationalError) as exc:
+            logger.warning("tune DB %s cannot be opened (%s); picking from an in-memory instance", path, exc)
+            return None
 
     @classmethod
     def open_readonly(cls, path: Path | str) -> SearchDB:
-        """Open an existing DB **read-only** — no schema creation, no version
-        check, no ``DROP TABLE lowering``, no migration, no WAL pragma — so a read-side consumer
-        (``eval``, the dataset import) never contends with a concurrent ``tune``
-        writer or mutates the file. The read methods work; any write raises (the
-        connection is ``?mode=ro``). Raises ``sqlite3.OperationalError`` if the
-        file is absent. A non-sqlite file fails HERE with a named reason (sqlite
-        itself defers header validation to the first query, which would surface
-        as a bare ``DatabaseError`` deep inside a PRAGMA) — the foreseeable case
-        being a measurement freeze directory's file handed over by mistake."""
+        """Open an existing DB **read-only** — no schema creation, no table drop, no WAL pragma — so a
+        read-side consumer (``eval``, the dataset import) never contends with a concurrent ``tune`` writer
+        or mutates the file. The read methods work; any write raises (the connection is ``?mode=ro``).
+        Raises ``sqlite3.OperationalError`` if the file is absent. A non-sqlite file fails HERE with a
+        named reason (sqlite itself defers header validation to the first query, which would surface as a
+        bare ``DatabaseError`` deep inside a PRAGMA) — the foreseeable case being a measurement freeze
+        directory's file handed over by mistake. A file whose tables another emmy wrote is refused too: a
+        reader cannot re-create them."""
         p = Path(path)
         if p.is_file():
             with p.open("rb") as fh:
@@ -366,191 +390,20 @@ class SearchDB:
         self = cls.__new__(cls)
         self._path = p
         self._conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True, check_same_thread=False)
-        self._perf_sel = self._perf_select()
+        if self._mismatched():
+            self._conn.close()
+            raise RuntimeError(f"{p}: tables written by another emmy — re-tune it, or `emmy dataset import --fresh` a dataset DB")
+        self._conn.execute("PRAGMA foreign_keys = ON")
         return self
 
-    # ------------------------------------------------------------------
-    # Op-inventory writes (idempotent INSERT OR IGNORE)
-    # ------------------------------------------------------------------
-
-    def record_loop_op(self, key: str, body_json: str, pretty: str) -> None:
-        self._conn.execute(
-            "INSERT OR IGNORE INTO loop_op (key, body_json, pretty) VALUES (?, ?, ?)",
-            (key, body_json, pretty),
-        )
-
-    def record_tile_op(self, key: str, body_json: str, pretty: str) -> None:
-        self._conn.execute(
-            "INSERT OR IGNORE INTO tile_op (key, body_json, pretty) VALUES (?, ?, ?)",
-            (key, body_json, pretty),
-        )
-
-    def record_kernel_op(self, key: str, body_json: str, pretty: str) -> None:
-        self._conn.execute(
-            "INSERT OR IGNORE INTO kernel_op (key, body_json, pretty) VALUES (?, ?, ?)",
-            (key, body_json, pretty),
-        )
-
-    def record_cuda_op(
-        self,
-        key: str,
-        *,
-        kernel_source: str,
-        arg_order: list[str],
-        grid: list[int],
-        block: list[int],
-        smem_bytes: int,
-        pretty: str,
-    ) -> None:
-        self._conn.execute(
-            "INSERT OR IGNORE INTO cuda_op (key, kernel_source, arg_order, grid, block, smem_bytes, pretty) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (
-                key,
-                kernel_source,
-                json.dumps(list(arg_order)),
-                json.dumps(_jsonable_geometry(grid)),
-                json.dumps(_jsonable_geometry(block)),
-                int(smem_bytes),
-                pretty,
-            ),
-        )
-
-    # ------------------------------------------------------------------
-    # Lowering edges
-    # ------------------------------------------------------------------
-
-    def record_lowering(
-        self,
-        parent_key: str,
-        parent_dialect: str,
-        child_key: str,
-        child_dialect: str,
-        *,
-        knobs: dict | None = None,
-        measured_median_us: float | None,
-    ) -> None:
-        """Upsert one ``parent_key`` → ``child_key`` lowering edge.
-
-        ``knobs`` is the delta this rewrite step stamps onto the child
-        (e.g. partition_loops adds ``{"BN": 64, "BM": 64, ...}``;
-        launch_geometry adds nothing). Greedy replay picks forks by
-        knob-subset match against this delta, so the row is enough to
-        reconstruct the chain without re-querying ``perf``.
-
-        Best-of upsert across every dialect — autotune fork rules live
-        at Tile→Tile (blockify, split_register_axes) and used to be excluded
-        here; recording every hop is how the chain stays replayable.
-        Rows where the rewrite is genuinely deterministic (a single
-        option) still trivially win their own slot, just via the same
-        upsert path.
-        """
-        knobs_json = json.dumps(knobs or {}, sort_keys=True, default=str)
-        existing = self._conn.execute(
-            "SELECT child_key, best_median_us FROM lowering WHERE parent_key = ?",
-            (parent_key,),
-        ).fetchone()
-        if existing is None:
-            self._conn.execute(
-                "INSERT INTO lowering (parent_key, parent_dialect, child_key, child_dialect, knobs, best_median_us) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (parent_key, parent_dialect, child_key, child_dialect, knobs_json, measured_median_us),
-            )
-            return
-        # Replace iff the new measurement is strictly better than the
-        # stored best (or the stored best is NULL). A None measurement
-        # never overwrites a known-good row.
-        cur_best = existing[1]
-        if measured_median_us is None:
-            return
-        if cur_best is None or measured_median_us < cur_best:
-            self._conn.execute(
-                "UPDATE lowering SET child_key = ?, child_dialect = ?, knobs = ?, best_median_us = ? WHERE parent_key = ?",
-                (child_key, child_dialect, knobs_json, measured_median_us, parent_key),
-            )
-
-    # ------------------------------------------------------------------
-    # Perf — write
-    # ------------------------------------------------------------------
-
-    def record_perf(
-        self,
-        ctx: Context,
-        op_key: str,
-        *,
-        backend: str,
-        status: str,
-        stats: PerfStats,
-        knobs: dict | None = None,
-        captured: bool = False,
-        error: str | None = None,
-    ) -> None:
-        """Record one measurement taken now under ``ctx``: keyed by the card and the regime ``ctx``
-        names, and upserted through :meth:`record_perf_row`. ``error`` is the failure text for a
-        ``bench_fail`` row (whitespace-collapsed, truncated) so failure forensics (``eval failures``)
-        need no tune-log grepping."""
-        from emmy.compiler.context import split_opt_level  # noqa: PLC0415
-
-        major, minor = ctx.compute_capability
-        if error is not None:
-            error = " ".join(str(error).split())[:300] or None
-        self.record_perf_row(
-            PerfRow(
-                context_key=ctx.structural_key(),
-                op_key=op_key,
-                backend=backend,
-                status=status,
-                stats=stats,
-                measured_at=datetime.now(UTC).isoformat(),
-                knobs=knobs or {},
-                captured=captured,
-                gpu=ctx.hardware_id(),
-                cc=major * 10 + minor,
-                opt=split_opt_level(ctx.compile_flags)[0],
-                error=error,
-            )
-        )
-
-    def record_perf_row(self, row: PerfRow) -> None:
-        """Upsert one ``perf`` row — a live measurement (:meth:`record_perf`) or an imported one. Keep-best-``ok``
-        policy: a ``bench_fail`` never overwrites a prior ``ok`` row, and among same-semantics ``ok``
-        rows the lowest median wins. ``captured`` (CUDA-graph-captured, pure GPU
-        time) adds a precedence axis: a captured measurement supersedes an
-        uncaptured (wall-semantics) one regardless of median — the numbers
-        aren't comparable, and captured is the better truth — while an
-        uncaptured measurement never overwrites a captured one. Rows of different cards never
-        meet: the card is part of the key."""
-        existing = self._conn.execute(
-            f"SELECT {self._perf_sel} FROM perf WHERE gpu = ? AND context_key = ? AND op_key = ? AND backend = ?",  # noqa: S608
-            (row.gpu, row.context_key, row.op_key, row.backend),
-        ).fetchone()
-        if existing is not None:
-            prev = _row_to_perf(existing)
-            if prev.status == "ok":
-                if row.status != "ok":
-                    return  # a failure never replaces a good measurement
-                if prev.captured and not row.captured:
-                    return  # wall semantics never overwrites a captured row
-                if not (row.captured and not prev.captured) and row.stats.median >= prev.stats.median:
-                    return  # same semantics: keep the best median
-        s = row.stats
-        self._conn.execute(
-            "INSERT OR REPLACE INTO perf "
-            "(gpu, context_key, op_key, backend, status, latency_us_median, latency_us_min, latency_us_max, "
-            " latency_us_mean, latency_us_variance, n_samples, measured_at, knobs, captured, error, cc, opt, feat_ver, source) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (row.gpu, row.context_key, row.op_key, row.backend, row.status, s.median, s.min, s.max, s.mean, s.variance)
-            + (s.n_samples, row.measured_at, json.dumps(row.knobs, sort_keys=True, default=str), int(row.captured), row.error)
-            + (row.cc, row.opt, row.feat_ver, row.source),
-        )
-
-    def record_perf_rows(self, rows: Iterable[PerfRow]) -> int:
-        """Upsert ``rows`` through :meth:`record_perf_row` in ONE transaction — an import of thousands of rows
-        on this autocommit connection would otherwise pay one fsync per row. Returns the rows offered."""
+    def _transaction(self, rows: Iterable, write) -> int:
+        """``write(row)`` for every row in ONE transaction — an import of thousands of rows on this
+        autocommit connection would otherwise pay one fsync per row. Returns the rows offered."""
         n = 0
         self._conn.execute("BEGIN")
         try:
             for row in rows:
-                self.record_perf_row(row)
+                write(row)
                 n += 1
         except BaseException:
             self._conn.execute("ROLLBACK")
@@ -559,123 +412,385 @@ class SearchDB:
         return n
 
     # ------------------------------------------------------------------
+    # The dimension tables: context, schedule, placement
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _regime(ctx: Context) -> tuple[str, str, int, str]:
+        """The context columns a measurement under ``ctx`` is keyed by: the card, the target, the opt level
+        and the residual compiler flags — one spelling of the regime however its flags were written
+        (:func:`~emmy.compiler.context.split_opt_level`)."""
+        from emmy.compiler.context import split_opt_level  # noqa: PLC0415
+
+        opt, flags = split_opt_level(ctx.compile_flags)
+        return ctx.hardware_id(), _arch(ctx.compute_capability), opt, flags
+
+    def _context_id(self, backend: str, gpu_name: str, arch: str, opt: int, flags: str, *, create: bool) -> int | None:
+        key = (backend, gpu_name, arch, opt, flags)
+        row = self._conn.execute(
+            "SELECT id FROM context WHERE backend = ? AND gpu_name = ? AND arch = ? AND opt = ? AND flags = ?", key
+        ).fetchone()
+        if row is not None:
+            return row[0]
+        if not create:
+            return None
+        return self._conn.execute("INSERT INTO context (backend, gpu_name, arch, opt, flags) VALUES (?, ?, ?, ?, ?)", key).lastrowid
+
+    def _row_id(self, table: str, knobs: dict, *, create: bool) -> int | None:
+        """The id of the ``schedule`` / ``placement`` row spelling ``knobs``, minted when absent: the row
+        keyed by ``digest(knobs_json(knobs))`` over the knobs as strings — a knob's value is its spelling,
+        so ``4`` and ``"4"`` are one row — its knobs one per row in the ``<table>_knob`` table."""
+        knobs = {str(name): str(value) for name, value in knobs.items()}
+        key = digest(knobs_json(knobs))
+        row = self._conn.execute(f"SELECT id FROM {table} WHERE digest = ?", (key,)).fetchone()  # noqa: S608
+        if row is not None:
+            return row[0]
+        if not create:
+            return None
+        rid = self._conn.execute(f"INSERT INTO {table} (digest) VALUES (?)", (key,)).lastrowid  # noqa: S608
+        self._conn.executemany(
+            f"INSERT INTO {table}_knob ({table}, name, value) VALUES (?, ?, ?)",  # noqa: S608
+            [(rid, name, value) for name, value in knobs.items()],
+        )
+        return rid
+
+    def _knobs_of(self, table: str, rid: int) -> dict:
+        return dict(self._conn.execute(f"SELECT name, value FROM {table}_knob WHERE {table} = ?", (rid,)))  # noqa: S608
+
+    def _stamps(self, kernel: str) -> dict:
+        return dict(self._conn.execute("SELECT name, value FROM kernel_feature WHERE kernel = ?", (kernel,)))
+
+    # ------------------------------------------------------------------
+    # Kernel
+    # ------------------------------------------------------------------
+
+    def record_kernel(self, row: KernelRow) -> None:
+        """Store a kernel's definition and its stamps. A kernel already stored keeps its row (the definition
+        is the same; the name only serves the per-kernel views); its stamps are replaced when they differ —
+        the one place a re-stamp under a new featurizer lands."""
+        fresh = (
+            self._conn.execute(
+                "INSERT OR IGNORE INTO kernel (exact_identity, structural_identity, loop_ir, kernel_name) VALUES (?, ?, ?, ?)",
+                (row.exact_identity, row.structural_identity, _wire_json(row.loop_ir), row.name),
+            ).rowcount
+            == 1
+        )
+        stamps = {str(k): float(v) for k, v in row.stamps.items()}
+        if fresh or self._stamps(row.exact_identity) != stamps:
+            self._conn.execute("DELETE FROM kernel_feature WHERE kernel = ?", (row.exact_identity,))
+            self._conn.executemany(
+                "INSERT INTO kernel_feature (kernel, name, value) VALUES (?, ?, ?)", [(row.exact_identity, k, v) for k, v in stamps.items()]
+            )
+
+    def record_kernels(self, rows: Iterable[KernelRow]) -> int:
+        return self._transaction(rows, self.record_kernel)
+
+    def kernel_names(self) -> dict[str, str]:
+        """Every stored kernel's C name by exact identity — the per-kernel views' grouping key."""
+        return dict(self._conn.execute("SELECT exact_identity, kernel_name FROM kernel"))
+
+    def iter_kernels(self) -> Iterator[KernelRow]:
+        for exact, structural, loop_ir, name in self._conn.execute(
+            "SELECT exact_identity, structural_identity, loop_ir, kernel_name FROM kernel ORDER BY exact_identity"
+        ).fetchall():
+            yield KernelRow(exact, structural, json.loads(loop_ir), name, self._stamps(exact))
+
+    # ------------------------------------------------------------------
+    # Routing
+    # ------------------------------------------------------------------
+
+    def record_routing(self, row: RoutingRow) -> None:
+        """Store what one decision on one parent minted, one row per piece; a later splice of the same
+        decision (a compiler that now mints other pieces) replaces them. The parent and the pieces must
+        be kernel rows already."""
+        if not row.arm or not all(is_placement_knob(k, v) for k, v in row.arm.items()):
+            raise ValueError(f"a routing row's arm holds placement knobs only, got {row.arm!r}")
+        pid = self._row_id("placement", row.arm, create=True)
+        self._conn.execute("DELETE FROM routing WHERE parent = ? AND placement = ?", (row.parent, pid))
+        self._conn.executemany(
+            "INSERT INTO routing (parent, placement, position, child) VALUES (?, ?, ?, ?)",
+            [(row.parent, pid, i, child) for i, child in enumerate(row.children)],
+        )
+
+    def record_routings(self, rows: Iterable[RoutingRow]) -> int:
+        return self._transaction(rows, self.record_routing)
+
+    def iter_routing(self) -> Iterator[RoutingRow]:
+        rows = self._conn.execute("SELECT parent, placement, position, child FROM routing ORDER BY parent, placement, position").fetchall()
+        grouped: dict[tuple[str, int], list[str]] = {}
+        for parent, pid, _position, child in rows:
+            grouped.setdefault((parent, pid), []).append(child)
+        for (parent, pid), children in grouped.items():
+            yield RoutingRow(parent=parent, arm=self._knobs_of("placement", pid), children=tuple(children))
+
+    # ------------------------------------------------------------------
+    # Perf — write
+    # ------------------------------------------------------------------
+
+    def record_perf(
+        self,
+        ctx: Context,
+        kernel: str,
+        *,
+        bindings: dict,
+        knobs: dict,
+        backend: str,
+        status: str,
+        stats: PerfStats,
+        captured: bool = False,
+        error: str | None = None,
+        source: str = "measured",
+    ) -> None:
+        """Record one measurement taken now under ``ctx``: keyed by the context ``ctx`` names, and upserted
+        through :meth:`record_perf_row`. ``knobs`` is the kernel's stamped dict as the tuner holds it; the
+        ``S_*`` / ``H_*`` entries are the kernel's and the context's and are not stored with the row.
+        ``error`` is the failure text for a ``bench_fail`` row (whitespace-collapsed, truncated) so failure
+        forensics (``eval failures``) need no tune-log grepping. ``source`` names where the row came from: a
+        live bench, or the golden file it was imported from (``golden:<digest>``)."""
+        gpu, arch, opt, flags = self._regime(ctx)
+        if error is not None:
+            error = " ".join(str(error).split())[:300] or None
+        self.record_perf_row(
+            PerfRow(
+                gpu=gpu,
+                cc=_cc(arch),
+                opt=opt,
+                flags=flags,
+                kernel=kernel,
+                bindings=dict(bindings),
+                knobs=dict(knobs),
+                backend=backend,
+                status=status,
+                stats=stats,
+                measured_at=datetime.now(UTC).isoformat(),
+                captured=captured,
+                error=error,
+                source=source,
+            )
+        )
+
+    def record_perf_row(self, row: PerfRow) -> None:
+        """Upsert one measurement — a live one (:meth:`record_perf`) or an imported one. Keep-best-``ok``
+        policy: a ``bench_fail`` never overwrites a prior ``ok`` row, and among same-semantics ``ok`` rows
+        the lowest median wins. ``captured`` (CUDA-graph-captured, pure GPU time) adds a precedence axis:
+        a captured measurement supersedes an uncaptured (wall-semantics) one regardless of median — the
+        numbers aren't comparable, and captured is the better truth — while an uncaptured measurement
+        never overwrites a captured one. A row measured here (``source`` ``measured``) is never replaced
+        by an imported one: the import is a cache fill, and the local row is the one copy of what this
+        machine measured. The kernel must be a ``kernel`` row already."""
+        context = self._context_id(row.backend, row.gpu, _arch(row.cc), row.opt, row.flags, create=True)
+        schedule = self._row_id("schedule", _split_knobs(row.knobs), create=True)
+        key = (context, row.kernel, knobs_json(row.bindings), schedule)
+        existing = self._conn.execute(
+            "SELECT status, captured, latency_us_median, source FROM perf "
+            "WHERE context = ? AND kernel = ? AND bindings = ? AND schedule = ?",
+            key,
+        ).fetchone()
+        if existing is not None:
+            prev_status, prev_captured, prev_median, prev_source = existing
+            if prev_source == "measured" and row.source != "measured":
+                return  # an import never replaces a measurement taken here
+            if prev_status == "ok":
+                if row.status != "ok":
+                    return  # a failure never replaces a good measurement
+                if prev_captured and not row.captured:
+                    return  # wall semantics never overwrites a captured row
+                if not (row.captured and not prev_captured) and row.stats.median >= prev_median:
+                    return  # same semantics: keep the best median
+        s = row.stats
+        self._conn.execute(
+            "INSERT OR REPLACE INTO perf (context, kernel, bindings, schedule, status, latency_us_median, latency_us_min, latency_us_max, "
+            "latency_us_mean, latency_us_variance, n_samples, measured_at, captured, error, source) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            key
+            + (
+                row.status,
+                s.median,
+                s.min,
+                s.max,
+                s.mean,
+                s.variance,
+                s.n_samples,
+                row.measured_at,
+                int(row.captured),
+                row.error,
+                row.source,
+            ),
+        )
+
+    def record_perf_rows(self, rows: Iterable[PerfRow]) -> int:
+        return self._transaction(rows, self.record_perf_row)
+
+    # ------------------------------------------------------------------
     # Perf — read
     # ------------------------------------------------------------------
 
-    def perf_sources(self) -> dict[str, int]:
-        """How many ``perf`` rows each source contributed — what a report over this instance names as its data."""
-        source = "source" if "source" in self._perf_columns() else "'measured'"
-        return dict(self._conn.execute(f"SELECT {source}, COUNT(*) FROM perf GROUP BY 1 ORDER BY 1"))  # noqa: S608
-
-    def lookup_lowering(self, parent_key: str) -> LoweringRow | None:
-        """Return the best-known child for ``parent_key``, or ``None``
-        when no row exists. Used by :meth:`best_per_op_time`'s chain
-        walk to resolve a pre-final op's measured cost."""
-        row = self._conn.execute(
-            "SELECT parent_key, parent_dialect, child_key, child_dialect, knobs, best_median_us FROM lowering WHERE parent_key = ?",
-            (parent_key,),
-        ).fetchone()
-        if row is None:
-            return None
-        return LoweringRow(
-            parent_key=row[0],
-            parent_dialect=row[1],
-            child_key=row[2],
-            child_dialect=row[3],
-            knobs=json.loads(row[4]) if row[4] else {},
-            best_median_us=row[5],
+    def perf_sources(self, ctx: Context | None = None) -> dict[str, int]:
+        """How many ``perf`` rows each source contributed — what a report over this instance names as its data;
+        the rows under ``ctx``'s card and regime only when one is given."""
+        if ctx is None:
+            return dict(self._conn.execute("SELECT source, COUNT(*) FROM perf GROUP BY 1 ORDER BY 1"))
+        return dict(
+            self._conn.execute(
+                "SELECT p.source, COUNT(*) FROM perf p JOIN context c ON c.id = p.context "
+                "WHERE c.gpu_name = ? AND c.arch = ? AND c.opt = ? AND c.flags = ? GROUP BY 1 ORDER BY 1",
+                self._regime(ctx),
+            )
         )
 
-    def lookup_perf(self, ctx: Context, op_key: str, *, backend: str) -> PerfRow | None:
-        """The row ``ctx``'s card measured for ``op_key`` under ``ctx``'s regime — or, failing that, one
-        written before the card was keyed (``gpu = ''``), which only the machine that measured it holds."""
+    def forget_perf(self, ctx: Context, source_prefix: str) -> int:
+        """Delete the rows measured under ``ctx``'s card and regime whose ``source`` starts with ``source_prefix``
+        — how the cache lets a golden file's rows go before the file's current rows are imported, since
+        keep-best would keep a stale faster row. Returns how many were deleted."""
+        gpu, arch, opt, flags = self._regime(ctx)
+        return self._conn.execute(
+            "DELETE FROM perf WHERE source LIKE ? AND context IN "
+            "(SELECT id FROM context WHERE gpu_name = ? AND arch = ? AND opt = ? AND flags = ?)",
+            (source_prefix + "%", gpu, arch, opt, flags),
+        ).rowcount
+
+    def lookup_perf(self, ctx: Context, kernel: str, *, bindings: dict, knobs: dict, backend: str) -> PerfRow | None:
+        """The row ``ctx``'s context measured for this kernel variant."""
+        gpu, arch, opt, flags = self._regime(ctx)
+        context = self._context_id(backend, gpu, arch, opt, flags, create=False)
+        schedule = self._row_id("schedule", _split_knobs(knobs), create=False)
+        if context is None or schedule is None:
+            return None
         row = self._conn.execute(
-            f"SELECT {self._perf_sel} FROM perf WHERE gpu IN (?, '') AND context_key = ? AND op_key = ? AND backend = ? "  # noqa: S608
-            "ORDER BY gpu = '' LIMIT 1",
-            (ctx.hardware_id(), ctx.structural_key(), op_key, backend),
+            f"SELECT {_PERF_SEL} {_PERF_FROM} WHERE p.context = ? AND p.kernel = ? AND p.bindings = ? AND p.schedule = ?",  # noqa: S608
+            (context, kernel, knobs_json(bindings), schedule),
         ).fetchone()
-        return _row_to_perf(row) if row else None
+        return self._row_to_perf(row) if row else None
 
     def iter_perf(self, ctx: Context, *, backend: str | None = None) -> Iterator[PerfRow]:
-        """Every row measured under ``ctx``'s regime on ``ctx``'s card, plus the rows written before the card
-        was keyed — the deploy evidence a compile under ``ctx`` may read."""
-        sql = f"SELECT {self._perf_sel} FROM perf WHERE gpu IN (?, '') AND context_key = ?"  # noqa: S608
-        params: list = [ctx.hardware_id(), ctx.structural_key()]
+        """Every row measured under ``ctx``'s regime on ``ctx``'s card — the deploy evidence a compile
+        under ``ctx`` may read."""
+        gpu, arch, opt, flags = self._regime(ctx)
+        sql = f"SELECT {_PERF_SEL} {_PERF_FROM} WHERE c.gpu_name = ? AND c.arch = ? AND c.opt = ? AND c.flags = ?"  # noqa: S608
+        params: list = [gpu, arch, opt, flags]
         if backend is not None:
-            sql += " AND backend = ?"
+            sql += " AND c.backend = ?"
             params.append(backend)
-        for row in self._conn.execute(sql, params):
-            yield _row_to_perf(row)
+        for row in self._conn.execute(sql, params).fetchall():
+            yield self._row_to_perf(row)
 
     def iter_perf_rows(self, *, backend: str | None = "cuda") -> Iterator[PerfRow]:
         """Every ``perf`` row, of every card and regime — the view the measurement-data readers and
         ``emmy dataset`` read. ``backend=None`` spans every backend."""
-        sql = f"SELECT {self._perf_sel} FROM perf"  # noqa: S608
+        sql = f"SELECT {_PERF_SEL} {_PERF_FROM}"  # noqa: S608
         params: list = []
         if backend is not None:
-            sql += " WHERE backend = ?"
+            sql += " WHERE c.backend = ?"
             params.append(backend)
-        for row in self._conn.execute(sql, params):
-            yield _row_to_perf(row)
+        for row in self._conn.execute(sql, params).fetchall():
+            yield self._row_to_perf(row)
 
-    def iter_perf_samples(self, *, backend: str | None = "cuda", status: str = "ok", min_latency_us: float = 0.0) -> Iterator[PerfSample]:
-        """Yield one :class:`PerfSample` per measured terminal kernel — ``perf``
-        with its ``cuda_op`` source where one exists (an imported row has none). The single place
-        the two tables are joined; backs ``Dataset.from_db``. ``backend=None`` spans every backend.
-        Filters to ``status`` (default ``ok``) and ``latency_us_median >
-        min_latency_us`` so callers don't re-filter stale / failed rows."""
-        sql = (
-            f"SELECT cuda_op.pretty, {self._perf_sel} "  # noqa: S608
-            "FROM perf LEFT JOIN cuda_op ON perf.op_key = cuda_op.key "
-            "WHERE perf.status = ? AND perf.latency_us_median > ?"
-        )
-        params: list = [status, min_latency_us]
-        if backend is not None:
-            sql += " AND perf.backend = ?"
-            params.append(backend)
-        for pretty, *cols in self._conn.execute(sql, params):
-            row = _row_to_perf(cols)
-            yield PerfSample(pretty=pretty, knobs=row.knobs, latency_us=row.stats.median, error=row.error)
-
-    # ------------------------------------------------------------------
-    # Per-op best time (summed into the outer terminal reward)
-    # ------------------------------------------------------------------
-
-    def best_per_op_time(self, ctx: Context, op_key: str, *, backend: str = "cuda") -> float | None:
-        """Best measured median (us) for the kernel that ``op_key`` lowers
-        to under ``ctx``, or ``None`` when it has no clean ``ok``
-        measurement.
-
-        ``op_key`` is typically a finalized ``LoopOp`` key (the unit the
-        outer search hands to the inner per-op tuner). Two ways it carries a
-        time:
-
-        1. **Direct row** — the two-level inner search records the best
-           *whole-slice* total (``Σ`` over the slice's CudaOps, so split-K
-           main + combine are both counted) under the LoopOp key itself.
-           Preferred when present.
-        2. **Chain walk** — otherwise follow the ``lowering`` best-known child
-           links down to the ``cuda`` dialect and read that terminal's
-           median under ``ctx``. A ``CudaOp`` key resolves here directly (no
-           lowering row as parent).
-        """
-        direct = self.lookup_perf(ctx, op_key, backend=backend)
-        if direct is not None and direct.status == "ok":
-            return direct.stats.median
-        cur: str | None = op_key
-        seen: set[str] = set()
-        while cur is not None and cur not in seen:
-            seen.add(cur)
-            row = self.lookup_lowering(cur)
-            if row is None:
-                break
-            cur = row.child_key
-            if row.child_dialect == "cuda":
-                break
-        if cur is None or cur == op_key:
+    def _best_leaf(self, context: int | None, kernel: str, bindings: dict) -> float | None:
+        """The fastest ``ok`` median of ``kernel`` at ``bindings`` under one context row, or ``None``."""
+        if context is None:
             return None
-        perf = self.lookup_perf(ctx, cur, backend=backend)
-        return perf.stats.median if perf is not None and perf.status == "ok" else None
+        [us] = self._conn.execute(
+            "SELECT MIN(latency_us_median) FROM perf WHERE context = ? AND kernel = ? AND bindings = ? AND status = 'ok'",
+            (context, kernel, knobs_json(bindings)),
+        ).fetchone()
+        return us
+
+    def priced_arms(self, ctx: Context, kernel: str, *, bindings: dict, backend: str = "cuda") -> list[tuple[dict, float]]:
+        """Every kernel-set decision stored on ``kernel`` that ``ctx`` can price, as ``(arm, us)``: the sum
+        of its pieces' best times there, each piece at its own projection of ``bindings`` onto the symbolic
+        dims it kept, all-or-nothing — a piece with no price leaves that decision out. A piece is priced the
+        way its parent is (:meth:`best_per_op_time`): from its own rows when it compiled, from its own pieces
+        when it was cut again, so a nested cut prices through and no cut piece needs a row. A decision has no
+        measurement of its own; this is its price wherever one is read (the tuner's reward, the deploy pick's
+        ballot)."""
+        from emmy.compiler.loop_wire import symbolic_vars  # noqa: PLC0415
+
+        pieces: dict[int, list[tuple[str, str]]] = {}
+        for pid, child, wire in self._conn.execute(
+            "SELECT r.placement, r.child, k.loop_ir FROM routing r JOIN kernel k ON k.exact_identity = r.child "
+            "WHERE r.parent = ? ORDER BY r.placement, r.position",
+            (kernel,),
+        ):
+            pieces.setdefault(pid, []).append((child, wire))
+        out: list[tuple[dict, float]] = []
+        for pid, children in pieces.items():
+            total: float | None = 0.0
+            for child, wire in children:
+                projected = {v: bindings[v] for v in symbolic_vars(json.loads(wire)) if v in bindings}
+                us = self.best_per_op_time(ctx, child, bindings=projected, backend=backend)
+                if us is None:
+                    total = None
+                    break
+                total += us
+            if total is not None:
+                out.append((self._knobs_of("placement", pid), total))
+        return out
+
+    def best_per_op_time(self, ctx: Context, kernel: str, *, bindings: dict, backend: str = "cuda") -> float | None:
+        """The best measured median (us) of ``kernel`` at ``bindings`` under ``ctx``, or ``None`` when it has
+        no clean measurement: its fastest ``ok`` row as a leaf, or the cheapest of its priced kernel-set
+        decisions (:meth:`priced_arms`), whichever is smaller."""
+        gpu, arch, opt, flags = self._regime(ctx)
+        context = self._context_id(backend, gpu, arch, opt, flags, create=False)
+        leaf = self._best_leaf(context, kernel, bindings)
+        candidates = [
+            us for us in (leaf, *(us for _arm, us in self.priced_arms(ctx, kernel, bindings=bindings, backend=backend))) if us is not None
+        ]
+        return min(candidates) if candidates else None
+
+    def drift(self) -> dict[str, int]:
+        """The drift checks — each the count of rows that fail it: a schedule or placement row whose digest is
+        not its knob rows'; a row naming a row that is gone (the foreign keys, which a file written with them
+        off can break); a context naming a card the GPU registry lost; a schedule knob that is a placement
+        knob, or a placement knob that is not. Nothing decodes a stored wire: a tune DB is a cache, and a row
+        the current code disagrees with is re-tuned or re-imported, never patched."""
+        from emmy import gpu  # noqa: PLC0415
+
+        digests = 0
+        for table in ("schedule", "placement"):
+            for rid, stored in self._conn.execute(f"SELECT id, digest FROM {table}").fetchall():  # noqa: S608
+                digests += stored != digest(knobs_json(self._knobs_of(table, rid)))
+        apart = sum(is_placement_knob(n, v) for n, v in self._conn.execute("SELECT name, value FROM schedule_knob"))
+        apart += sum(not is_placement_knob(n, v) for n, v in self._conn.execute("SELECT name, value FROM placement_knob"))
+        return {
+            "schedule and placement digests match their knob rows": digests,
+            "every row names the rows it references": len(self._conn.execute("PRAGMA foreign_key_check").fetchall()),
+            "every context names a registry card": sum(
+                gpu.by_name(n) is None for [n] in self._conn.execute("SELECT gpu_name FROM context")
+            ),
+            "schedule knobs and placement knobs stay apart": apart,
+        }
+
+    def decisions(self) -> list[tuple[str, dict, dict]]:
+        """Every stored kernel-set decision as ``(the parent's exact identity, its stamps, the arm)`` — what
+        offers a composed cut to a later compile of the parent kernel, without decoding any wire."""
+        return [
+            (parent, self._stamps(parent), self._knobs_of("placement", pid))
+            for parent, pid in self._conn.execute("SELECT DISTINCT parent, placement FROM routing ORDER BY parent, placement")
+        ]
+
+    def _row_to_perf(self, row) -> PerfRow:
+        """A row selected as :data:`_PERF_SEL`, its ``knobs`` reassembled from the kernel's stamps, its exact
+        identity (the ``I_kernel`` stamp every evidence join keys on — the ``kernel`` column itself) and the
+        schedule row."""
+        (gpu, arch, opt, flags, backend, kernel, bindings, schedule, status, med, lo, hi, mean, var, n) = row[:15]
+        measured_at, captured, error, source = row[15:]
+        return PerfRow(
+            gpu=gpu,
+            cc=_cc(arch),
+            opt=opt,
+            flags=flags,
+            kernel=kernel,
+            bindings=json.loads(bindings),
+            knobs={**self._stamps(kernel), KERNEL_IDENTITY: kernel, **self._knobs_of("schedule", schedule)},
+            backend=backend,
+            status=status,
+            stats=PerfStats(median=med, min=lo, max=hi, mean=mean, variance=var, n_samples=n),
+            measured_at=measured_at,
+            captured=bool(captured),
+            error=error,
+            source=source,
+        )
 
     # ------------------------------------------------------------------
     # House-keeping
@@ -683,25 +798,3 @@ class SearchDB:
 
     def close(self) -> None:
         self._conn.close()
-
-
-def _row_to_perf(row) -> PerfRow:
-    """A ``perf`` row selected through :meth:`SearchDB._perf_select` (:data:`_PERF_READ_COLS` order)."""
-    (ctx_key, op_key, backend, status, med, lo, hi, mean, var, n, measured_at, knobs_json, captured) = row[:13]
-    gpu, cc, opt, feat_ver, source, error = row[13:]
-    return PerfRow(
-        context_key=ctx_key,
-        op_key=op_key,
-        backend=backend,
-        status=status,
-        stats=PerfStats(median=med, min=lo, max=hi, mean=mean, variance=var, n_samples=n),
-        measured_at=measured_at,
-        knobs=json.loads(knobs_json) if knobs_json else {},
-        captured=bool(captured),
-        gpu=gpu,
-        cc=cc,
-        opt=opt,
-        feat_ver=int(feat_ver),
-        source=source,
-        error=error,
-    )

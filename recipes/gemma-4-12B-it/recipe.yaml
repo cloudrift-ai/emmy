@@ -29,10 +29,10 @@ model:
 engine:
   llm:
     tensor_parallel_size: 1
-    # 0.97 (not stock's 0.9): the emmy generative arm's embed table + norm residents live
-    # in cupy and are claimed BEFORE vLLM's torch-only memory profiler runs, so they must
-    # sit INSIDE the utilization budget or the KV-cache min-fit check fails at boot
-    # (serve.py _GENERATE_GPU_MEMORY_UTILIZATION).
+    # 0.97 (not stock's 0.9): the emmy generative arm's embed table + norm residents are
+    # claimed BEFORE vLLM's memory profiler runs, so they must sit INSIDE the utilization
+    # budget or the KV-cache min-fit check fails at boot (serve.py
+    # _GENERATE_GPU_MEMORY_UTILIZATION).
     context_length: 16384
     gpu_memory_utilization: 0.97
     vllm:
@@ -54,7 +54,7 @@ engine:
       # the measured pool is 25,131 tokens at this utilization, so 16384 leaves room for
       # roughly 1.5 full-length sequences and anything at/above ~25k fails vLLM's KV
       # min-fit check at boot. Full native context does not fit a 32 GB card at FP16.
-      image: "cloudriftai/vllm-emmy-gemma-4-12b-it:latest"
+      image: "cloudriftai/vllm-emmy-gemma-4-12b-it:0.23.0-806fef9a9"
       # --runner generate + the EmmyGenModel override + fp16 across the emmy<->vLLM seam.
       # --max-num-batched-tokens 4128 = the 4096 dynamic-dim prefill-chunk cap + the decode
       # bucket, the rider headroom the chunk+decode twin row split covers.

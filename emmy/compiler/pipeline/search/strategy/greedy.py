@@ -15,11 +15,13 @@ from typing import TYPE_CHECKING
 from emmy.compiler.context import Context
 from emmy.compiler.ir.loop.ir import LoopOp
 from emmy.compiler.ir.tile.ir import TileOp
-from emmy.compiler.pipeline.knob import family_of
+from emmy.compiler.pipeline.fork import stamp_signature
+from emmy.compiler.pipeline.knob import KERNEL_IDENTITY, family_of
 from emmy.compiler.pipeline.pipeline import Decision, LoweringError, Run
 from emmy.compiler.pipeline.search.db import SearchDB
+from emmy.compiler.pipeline.search.golden_import import evidence_db
 from emmy.compiler.pipeline.search.pins import PLACEMENT_DECISIONS_HINT, composed_routes
-from emmy.compiler.pipeline.search.policy.greedy import _db_measured_index, _strip_fork_stamps, greedy_decide, logger, tile_identity
+from emmy.compiler.pipeline.search.policy.greedy import _strip_fork_stamps, greedy_decide, logger, tile_identity
 from emmy.compiler.pipeline.search.strategy.base import SearchStrategy
 
 if TYPE_CHECKING:
@@ -72,20 +74,22 @@ class GreedyStrategy(SearchStrategy):
         backend_name = getattr(backend, "name", "cuda")
         if ctx.backend_name != backend_name:
             ctx = replace(ctx, backend_name=backend_name)
-        db = self.db if self.db is not None else SearchDB()
         t_start = time.monotonic()
 
         # Only a pipeline that runs to the final lowering pass promises a Graph[CudaOp]; a
         # truncated build terminates in an earlier dialect, where a surviving tile is the answer.
         complete = pipeline.lowers_to_cuda
         blocked: dict[str, set[frozenset]] = {}
-        # A measured route row that marks several seams of one kernel is the composed decision a
-        # pinned compile consumed them as; the cut pass offers that arm beside its single seams so
-        # the row can spell it (``spelled_arm``), the way the pinned compile that measured it did.
-        # Only a pipeline that reaches the cut pass consults it: the loop-level lowerings a golden
-        # record's derivations run (hundreds per file) never do, and must not pay the evidence import.
+        # The evidence is the DB: the tune DB's rows, and the golden rows in scope imported among them
+        # (``golden_import.evidence_db``). Only a pipeline that reaches the cut pass consults it: the
+        # loop-level lowerings a golden record's derivations run (hundreds per file) never do, and
+        # must not pay the import. A stored decision that marks several seams of one kernel is the
+        # composed decision a pinned compile consumed them as; the cut pass offers that arm beside
+        # its single seams so a row can spell it (``spelled_arm``), the way the compile that
+        # measured it did.
         reaches_placement = any(pass_.name == "lowering/tile" for pass_ in pipeline.passes)
-        with composed_routes(_measured_composed_routes(db, ctx) if reaches_placement else []):
+        db = evidence_db(self.db, ctx) if reaches_placement else (self.db if self.db is not None else SearchDB())
+        with composed_routes(_measured_composed_routes(db) if reaches_placement else []):
             for _attempt in range(_MAX_GREEDY_RETRIES):
                 rejections: list[tuple[str, str, str]] = []
                 run = Run(pipeline=pipeline, ctx=ctx, db=db, backend=backend, dump=dump, rejections=rejections)
@@ -117,16 +121,16 @@ class GreedyStrategy(SearchStrategy):
         return terminal
 
 
-def _measured_composed_routes(db, ctx) -> list[tuple[frozenset, tuple[str, ...]]]:
-    """Every measured route row in this compile's evidence that marks several seams ``cut`` — a
-    composed decision, keyed by the signature of the kernel it was recorded on (less the stamps a
-    schedule fork mints, as the evidence pick matches route rows) — for the cut pass to offer."""
+def _measured_composed_routes(db) -> list[tuple[frozenset, tuple[str, ...]]]:
+    """Every kernel-set decision ``db`` stores that marks several seams ``cut`` — a composed decision,
+    keyed by the signature of the kernel it was recorded on (less the stamps a schedule fork mints, as
+    the evidence pick matches rows) — for the cut pass to offer."""
     out: list[tuple[frozenset, tuple[str, ...]]] = []
-    for signature, rows in _db_measured_index(db, ctx).routes.items():
-        for tun, _us in rows:
-            keys = tuple(sorted(key for key, value in tun.items() if family_of(key) == "PLACE" and value == "cut"))
-            if len(keys) > 1 and (entry := (_strip_fork_stamps(signature), keys)) not in out:
-                out.append(entry)
+    for parent, stamps, arm in db.decisions():
+        keys = tuple(sorted(key for key, value in arm.items() if family_of(key) == "PLACE" and value == "cut"))
+        signature = _strip_fork_stamps(stamp_signature({**stamps, KERNEL_IDENTITY: parent}))
+        if len(keys) > 1 and (entry := (signature, keys)) not in out:
+            out.append(entry)
     return out
 
 

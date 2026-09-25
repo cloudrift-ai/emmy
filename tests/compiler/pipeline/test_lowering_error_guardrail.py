@@ -43,7 +43,7 @@ from emmy.compiler.ir.kernel.ir import KernelOp, Smem
 from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline import FINAL_LOWERING_PASS, LoweringError
 from emmy.compiler.pipeline.pipeline import Pass, Pattern, Pipeline, Rule, RuleSkipped
-from emmy.compiler.pipeline.search.policy.terminal_bench import point_stats
+from emmy.compiler.pipeline.search.policy.terminal_bench import kernel_row, point_stats
 from emmy.compiler.pipeline.search.strategy import greedy as greedy_strategy
 from emmy.compiler.pipeline.search.strategy.greedy import GreedyStrategy, _raise_on_unlowered
 from tests.compiler.helpers import drain_tune
@@ -169,7 +169,7 @@ def test_truncated_kernel_pipeline_registers_measured_composed_routes(monkeypatc
     routes = [(frozenset({("S_shape", "128")}), ("PLACE@map", "PLACE@map.1/map"))]
     registered = []
 
-    monkeypatch.setattr(greedy_strategy, "_measured_composed_routes", lambda _db, _ctx: routes)
+    monkeypatch.setattr(greedy_strategy, "_measured_composed_routes", lambda _db: routes)
 
     @contextmanager
     def capture_composed_routes(value):
@@ -223,13 +223,19 @@ def test_unlowered_terminal_is_bench_fail_despite_cached_residual_kernel():
 
     # ``x -> y (TileOp) -> z (CudaOp)`` — the split shape: an un-lowered partial
     # feeding a lowered finalize whose perf row is already cached.
+    from emmy.compiler.loop_wire import kernel_bindings
+    from tests.compiler.helpers import case_target_tile
+
     g = _graph_with_tile()
-    cuda = CudaOp(kernel_source="__global__ void k_fin() {}", kernel_name="k_fin")
+    tile = case_target_tile("fused/norm-linear-f16-scalar-reduce.yaml")
+    cuda = CudaOp(kernel_source="__global__ void k_fin() {}", kernel_name="k_fin", source=tile)
     g.add_node(op=cuda, inputs=["y"], output=Tensor("z", (4,), "f32"), node_id="z")
     g.outputs = ["z"]
     db = SearchDB()
     b = _terminal_bench(g, backend=_StubBackend(), db=db)
-    db.record_perf(b.ctx, cuda.identity_key(with_io=True, with_knobs=True), backend="cuda", status="ok", stats=point_stats(104.0))
+    identity = tile.identity_key(structural=False, with_io=True)
+    db.record_kernel(kernel_row(tile, "k_fin"))
+    db.record_perf(b.ctx, identity, bindings=kernel_bindings(tile), knobs={}, backend="cuda", status="ok", stats=point_stats(104.0))
     kind, (stats, status) = b.prelude()
     assert kind == "done"
     assert status == "bench_fail"

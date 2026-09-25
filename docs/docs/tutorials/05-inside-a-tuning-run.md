@@ -113,8 +113,8 @@ percent of the best result so far — a band wide enough to include near-ties, n
 is measured a second time at the deployable setting.
 
 Those second measurements are tagged with the regime they were taken under, and they are the numbers a deployment
-should be choosing from. They are written to the reservoir inside the prior's checkpoint and to the search-tree table,
-and — this is the asymmetry from the previous page — never to the measurements table.
+should be choosing from. They are written to the reservoir inside the prior's checkpoint, and — this is the asymmetry
+from the previous page — never to the measurements table.
 
 Every measurement, in both passes, is taken with CUDA graph capture by default, so what is recorded is GPU time
 without the launch overhead of the host loop.

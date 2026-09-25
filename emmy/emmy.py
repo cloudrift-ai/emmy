@@ -24,7 +24,6 @@ from emmy.commands.teardown import register_teardown_command
 from emmy.commands.trace import register_trace_command
 from emmy.commands.tune import register_tune_command
 from emmy.commands.vm import register_vm_command
-from emmy.compiler.target import check_nvrtc_supports_live_device
 from emmy.logging_setup import setup_cli_logging
 
 # Subcommands that never compile or launch a kernel on the local card, so they
@@ -79,8 +78,6 @@ def main():
 
     args = parser.parse_args()
     setup_cli_logging()
-    if args.command not in _NO_GPU_COMMANDS:
-        check_nvrtc_supports_live_device()
     args.func(args)
 
 

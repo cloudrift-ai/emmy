@@ -63,6 +63,12 @@ RUN cd /src/flash-attention-v100 \
     && cd /src \
     && CMAKE_BUILD_TYPE=Release python -m build --wheel --no-isolation --outdir /wheels
 
+# The emmy wheel with its runtime extension, built against this image's own Python and libc from
+# the sdist ``make wheel`` produced.
+COPY dist/emmy_ml-*.tar.gz /emmy/
+RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable \
+    && PATH=/root/.cargo/bin:$PATH pip wheel --no-cache-dir --no-deps -w /wheels /emmy/emmy_ml-*.tar.gz
+
 FROM ${CUDA_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -97,7 +103,6 @@ RUN --mount=from=builder,source=/wheels,target=/tmp/wheels,ro \
         /tmp/wheels/*.whl \
     && pip install --no-cache-dir \
         catboost==1.2.10 \
-        cupy-cuda12x==14.1.1 \
     && find /opt/venv/lib/python3.12/site-packages/vllm -type f -name '*.so' \
         -exec strip --strip-unneeded {} + \
     && find /opt/venv/lib/python3.12/site-packages -maxdepth 1 -type f \

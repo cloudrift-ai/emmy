@@ -238,7 +238,7 @@ jobs:
           # The capability is discovered ON THE HOST rather than mapped from the card's name:
           # nothing in the tree maps a name to a capability, and a table would be a second thing to
           # maintain and get wrong. A card with no matching cases is a clean no-op.
-          cap=$(./venv/bin/python -c "import cupy; c=str(cupy.cuda.Device().compute_capability); print(f'{c[:-1]}.{c[-1]}')")
+          cap=$(./venv/bin/python -c "from emmy.compiler.backend.cuda.device import compute_capability; print('%d.%d' % compute_capability())")
           echo "live compute capability sm_${cap/./}"
           mapfile -t cases < <(./venv/bin/python .github/scripts/corpus_timings.py select --compute-cap "$cap")
           echo "${#cases[@]} case(s) match this card"

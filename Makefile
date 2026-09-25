@@ -47,7 +47,7 @@ venv/.setup-complete: pyproject.toml
 		echo "Creating virtual environment..."; \
 		python3.12 -m venv venv --prompt "emmy"; \
 	fi
-	@echo "Installing Python dependencies..."
+	@echo "Installing Python dependencies (builds the runtime extension with cargo)..."
 	./venv/bin/pip install -e ".[dev]"
 	@touch $@
 
@@ -64,8 +64,8 @@ lint: setup
 .PHONY: test-native lint-native
 test-native:
 	cargo test --workspace --locked
-	cargo build --release --locked --bin emmy-runtime-worker
-	PATH="$(CURDIR)/target/release:$$PATH" ./venv/bin/pytest tests/compiler/backend/test_native.py tests/compiler/backend/test_native_gpu.py tests/serving/native/test_prepare.py tests/serving/native/test_generation_gpu.py
+	cargo build --release --locked --workspace
+	PATH="$(CURDIR)/target/release:$$PATH" ./venv/bin/pytest -n 2 --dist=loadgroup tests/compiler/backend/test_native.py tests/compiler/backend/test_native_gpu.py tests/serving/native/test_prepare.py tests/serving/native/test_generation_gpu.py tests/serving/native/test_launch.py tests/serving/native/test_text.py tests/serving/native/test_server_gpu.py
 
 lint-native:
 	cargo fmt --all --check
@@ -124,22 +124,29 @@ tune-kernels: setup
 # --- vLLM + emmy serving image (emmy/serving, docker/vllm-emmy) ---
 VLLM_VERSION ?= v0.23.0
 VLLM_BASE_IMAGE ?= vllm/vllm-openai:$(VLLM_VERSION)
-VLLM_EMMY_CUPY_PACKAGE ?= cupy-cuda13x
 VLLM_EMMY_TAG ?= cloudriftai/vllm-emmy:$(patsubst v%,%,$(VLLM_VERSION))-$(shell git rev-parse --short HEAD)
 
+# Both artifacts: the wheel carries this host's build of the runtime extension, the sdist is what
+# the serving images build from, against their own Python and libc.
 wheel: setup
 	./venv/bin/pip install --quiet build
 	./venv/bin/python scripts/prepare_dist.py --recipes
-	rm -rf dist build && ./venv/bin/python -m build --wheel -o dist/ .
+	rm -rf dist build && ./venv/bin/python -m build -o dist/ .
 
 # The release runner starts with a bare Python. Keep its complete build contract in one
 # target so pull-request CI can exercise the exact same dependency install and staging path.
 EMMY_PYPI_PYTHON ?= python3
 pypi-dist:
-	$(EMMY_PYPI_PYTHON) -m pip install --disable-pip-version-check build PyYAML
+	$(EMMY_PYPI_PYTHON) -m pip install --disable-pip-version-check build PyYAML auditwheel patchelf
 	$(EMMY_PYPI_PYTHON) scripts/prepare_dist.py --recipes --readme
 	rm -rf dist build
 	$(EMMY_PYPI_PYTHON) -m build
+	# The wheel embeds the runtime extension, so it is platform-specific: retag it for the manylinux
+	# baseline its symbols allow (PyPI rejects a bare linux tag), keeping only the repaired wheel.
+	# auditwheel finds patchelf on PATH, and pip put it beside the interpreter.
+	PATH="$$($(EMMY_PYPI_PYTHON) -c 'import os, sys; print(os.path.dirname(sys.executable))'):$$PATH" \
+	  $(EMMY_PYPI_PYTHON) -m auditwheel repair -w dist/ dist/emmy_ml-*-linux_x86_64.whl
+	rm dist/emmy_ml-*-linux_x86_64.whl
 
 # Image tags embed the short sha; an empty rev-parse (e.g. root over a synced tree without
 # git safe.directory) would silently tag "...:0.23.0-" — fail loudly instead.
@@ -150,7 +157,6 @@ git-sha-guard:
 
 vllm-emmy-image: wheel git-sha-guard
 	docker build -f docker/vllm-emmy/Dockerfile --build-arg VLLM_VERSION=$(VLLM_VERSION) --build-arg BASE_IMAGE=$(VLLM_BASE_IMAGE) \
-		--build-arg CUPY_PACKAGE=$(VLLM_EMMY_CUPY_PACKAGE) \
 		-t $(VLLM_EMMY_TAG) .
 
 vllm-emmy-push: vllm-emmy-image
@@ -301,3 +307,9 @@ test-compose:
 	@echo "✅ Generated: /tmp/test-compose.yml"
 	@echo ""
 	@cat /tmp/test-compose.yml
+
+.PHONY: native-dist
+native-dist:
+	cargo build --release --locked --workspace
+	mkdir -p dist
+	tar -czf dist/emmy-native-$$(git rev-parse --short HEAD)-$$(uname -s)-$$(uname -m).tar.gz -C target/release emmy-server emmy-runtime-worker

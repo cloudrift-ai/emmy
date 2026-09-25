@@ -4,7 +4,7 @@ use anyhow::{Context, Result, ensure};
 use emmy_runtime::{
     artifact::Artifact,
     cuda::{Device, Executor},
-    generation::Generator,
+    generation::{Generator, Sampling},
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -42,6 +42,8 @@ enum Command {
     },
     StartGeneration {
         prompt: PathBuf,
+        #[serde(default)]
+        sampling: Sampling,
     },
     GenerationStep {
         capture: bool,
@@ -50,6 +52,8 @@ enum Command {
     Generate {
         prompt: PathBuf,
         max_new_tokens: usize,
+        #[serde(default)]
+        sampling: Sampling,
         capture: bool,
         output: PathBuf,
     },
@@ -154,16 +158,16 @@ fn main() -> Result<()> {
                     generator = Some(Generator::load(context.as_ref().unwrap(), &root)?);
                     Ok(json!({"loaded": true}))
                 }
-                Command::StartGeneration { prompt } => {
+                Command::StartGeneration { prompt, sampling } => {
                     generator
                         .as_mut()
                         .context("no loaded generator")?
-                        .start(&read_tokens(&prompt)?)?;
+                        .start(&read_tokens(&prompt)?, sampling)?;
                     Ok(json!({"started": true}))
                 }
                 Command::GenerationStep { capture, logits } => {
                     let generator = generator.as_mut().context("no loaded generator")?;
-                    let token = generator.advance(capture)?;
+                    let token = generator.advance(capture, false)?;
                     if let Some(path) = logits {
                         std::fs::write(path, generator.logits()?)?;
                     }
@@ -172,13 +176,14 @@ fn main() -> Result<()> {
                 Command::Generate {
                     prompt,
                     max_new_tokens,
+                    sampling,
                     capture,
                     output,
                 } => {
                     let tokens = generator
                         .as_mut()
                         .context("no loaded generator")?
-                        .generate(&read_tokens(&prompt)?, max_new_tokens, capture)?;
+                        .generate(&read_tokens(&prompt)?, max_new_tokens, capture, sampling)?;
                     let bytes: Vec<u8> = tokens.iter().flat_map(|t| t.to_le_bytes()).collect();
                     std::fs::write(output, bytes)?;
                     Ok(json!({"generated_tokens": tokens.len()}))

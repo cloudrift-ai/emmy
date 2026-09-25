@@ -14,6 +14,7 @@ skills and CloudRift inference endpoint.
 | **Publish to PyPI** | Manual dispatch or published GitHub release | GitHub-hosted | Verifies the source and distribution, publishes to PyPI, and optionally creates the release. |
 | **Verify or onboard model** | Nightly schedule or manual dispatch | `agent-runners` / `agents` | Qualifies one available exact model/GPU deployment and updates the rolling lifecycle PR. |
 | **Discover model** | Nightly schedule or manual dispatch | `agent-runners` / `agents` | Refreshes recipe lifecycle tags and onboarding shells in one rolling PR without renting a VM. |
+| **Review agent prompts** | Nightly schedule or manual dispatch | `agent-runners` / `agents` | Reads the last discovery and qualification run and corrects one agent prompt when its wording caused the failure. |
 
 There is no generic experiment workflow or GitHub dispatch input for `emmy bench`. Requested experiment runs start
 from a developer checkout through the tracked `.agents/skills/run-experiment` skill.
@@ -209,6 +210,29 @@ red Discord notice with the credential-free gate and message. Because the notifi
 self-hosted agent job, it still runs after a failure, cancellation, or timeout. Discord delivery retries three times,
 remains non-blocking, and disables all mentions; the workflow run, durable reports, and rolling PR retain the complete
 evidence.
+
+### Nightly prompt review
+
+The discovery and qualification agents are driven entirely by the Markdown under `prompts/` and `.agents/skills/`, so
+a failure that traces to a sentence there repeats every night until someone reads a log. **Review agent prompts** runs
+at 05:00 UTC, before both, and closes that loop: it takes the most recent completed run of each, and stops without
+starting an agent unless one failed or emitted a warning annotation. Annotations rather than whole logs are what make
+a quiet night nearly free, and they are also what catches a run that eventually succeeded after burning its correction
+budget.
+
+The review is deliberately hard to use. `prompts/review-agent-prompts.md` states a four-part bar — a real failure, a
+cause traceable to the prompt as written, a repeat on the next run, and one sentence that would prevent it — and names
+the cases that are never prompt defects: infrastructure faults, correct negative conclusions, one-off flakes, and
+anything whose real fix is code or a permission rule. Changing nothing is the expected nightly outcome. The workflow
+enforces the rest mechanically rather than trusting the verdict: the agent may only modify tracked files under
+`prompts/` and `.agents/skills/`, at most two files and fifteen lines, and a verdict that disagrees with the working
+tree in either direction fails the run. Loosening a boundary, authorization, or safety rule is forbidden outright,
+because an agent blocked by such a rule is usually the rule working.
+
+A correction lands as one commit on the rolling discovery branch with a comment on the PR, so it reaches the nightly
+agents only once a person merges it. That is the review's real safety property: it proposes, and a human still
+decides. It shares the `model-discovery` concurrency group, and `.github/workflows/scripts/rolling_pr.sh` holds the
+one copy of the rolling-branch lookup and force-with-lease rebase that it and **Discover model** both use.
 
 ### Discovery lifecycle PR
 

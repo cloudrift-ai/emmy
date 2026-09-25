@@ -20,7 +20,6 @@ import zlib
 import pytest
 
 from emmy.compiler.backend.base import BenchmarkResult, LaunchTime
-from emmy.compiler.backend.cuda._planner import compute_live_intervals
 from emmy.compiler.backend.plan import plan_from_graph
 from emmy.compiler.context import Context
 from emmy.compiler.graph import Graph, Tensor
@@ -30,11 +29,12 @@ from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.ir.tile import TileOp
+from emmy.compiler.loop_wire import kernel_tile
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.search.db import SearchDB
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.pipeline.search.slice import single_node_graph
-from emmy.compiler.pipeline.search.strategy.two_level import InnerReward, OpResult, _kernel_nodes, _KernelInventory
+from emmy.compiler.pipeline.search.strategy.two_level import InnerReward, KernelInventory, OpResult, _kernel_nodes
 from tests.compiler.helpers import run_inner_reward, run_two_level
 
 # Moderate patience: each kernel explores several variants then stops on stagnation (the fake
@@ -154,7 +154,7 @@ def _fuse(graph: Graph) -> Graph:
 
 
 def test_searched_winner_requires_one_post_fusion_kernel_and_an_exact_replay_row() -> None:
-    one = OpResult(name="k", op_key="key", best_us=4.0, searched_knobs={"TILE@map.1/inner": "f2x2"}, searched_us=5.0, searched_cuda_ops=1)
+    one = OpResult(name="k", identity="key", best_us=4.0, searched_knobs={"TILE@map.1/inner": "f2x2"}, searched_us=5.0, searched_cuda_ops=1)
     assert InnerReward(total_us=4.0, ok=True, per_op=[one]).searched_winner() == ({"TILE@map.1/inner": "f2x2"}, 5.0)
     multi_cuda = OpResult(**{**one.__dict__, "searched_cuda_ops": 2})
     assert InnerReward(total_us=4.0, ok=True, per_op=[multi_cuda]).searched_winner() is None
@@ -205,10 +205,15 @@ def test_single_node_slice_declares_unregistered_input_boundaries_in_the_runtime
     assert set(sliced.inputs) == {"xa", "xb"}
     roles = {buffer.name: buffer.role for buffer in plan.buffers}
     assert roles == {"xa": "input", "xb": "input", "xc": "output"}
-    scratch = [buffer.name for buffer in plan.buffers if buffer.role == "scratch"]
-    # Exercise the allocator's exact liveness seam: an undeclared InputOp would
-    # be scratch here and fail because no CUDA launch produces it.
-    assert compute_live_intervals(scratch, plan.launches) == {}
+    # Exercise the runtime's exact liveness seam: an undeclared InputOp would be scratch
+    # here, and the layout would refuse it because no CUDA launch produces it.
+    import json
+
+    from emmy import emmy_runtime
+    from emmy.compiler.backend.plan import plan_to_dict
+
+    layout = emmy_runtime.Program(json.dumps(plan_to_dict(plan))).layout()
+    assert "scratch" not in layout["regions"]
 
 
 def test_run_drives_outer_scores_separably_and_assembles() -> None:
@@ -307,8 +312,10 @@ def test_scheduled_tile_child_is_not_reenrolled_or_rescheduled() -> None:
     assert cuda.knobs["STAGE"] == "d1/smem-async"
 
 
-def test_placement_route_total_is_not_persisted_without_a_child_schedule_receipt(monkeypatch, tmp_path) -> None:
-    """A measured route stays search evidence until its exact child tree can replay."""
+def test_a_measured_cut_is_priced_from_its_pieces_and_writes_no_row_of_its_own(monkeypatch, tmp_path) -> None:
+    """A cut the search measured leaves the DB one routing row and its pieces' own measurements:
+    no whole-slice total under the parent, no row spelling the cut. The parent's price is read back
+    as the Σ of its pieces' best rows, the same number the search scored the arm at."""
     monkeypatch.setenv("EMMY_REDUCE", "")
     graph = _placement_route_graph()
     ctx = Context.from_target((8, 0))
@@ -327,8 +334,11 @@ def test_placement_route_total_is_not_persisted_without_a_child_schedule_receipt
     assert result.best_reward is not None
     assert result.best_reward.searched_winner() == ({"PLACE": "cut"}, 2.0)
     assert backend.measured_route is not None
-    route_rows = [row for row in db.iter_perf(ctx, backend="cuda") if row.knobs.get("PLACE") == "cut"]
-    assert route_rows == []
+    [routing] = list(db.iter_routing())
+    assert routing.arm == {"PLACE": "cut"} and len(routing.children) == 2
+    assert db.lookup_perf(ctx, routing.parent, bindings={}, knobs={}, backend="cuda") is None, "no total row under the parent"
+    assert db.best_per_op_time(ctx, routing.parent, bindings={}, backend="cuda") == 2.0
+    assert [r.best_us for r in result.best_reward.per_op] == [2.0]
     db.close()
 
 
@@ -356,6 +366,32 @@ def test_pinned_placement_route_tunes_and_assembles_child_schedules(monkeypatch,
     assert assembled[1].knobs["WORK"] == "" and assembled[1].knobs.get("STAGE", "") == ""
 
 
+def test_a_pinned_cut_stores_the_routing_it_minted(monkeypatch) -> None:
+    """The tuner stores each kernel-set decision as definitions: the parent's kernel row, each
+    piece's row with a wire of its own, and one ``routing`` row linking them by exact identity —
+    the identities of the pieces the assembled route runs, bound as they stand in the graph."""
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    db = SearchDB()
+    with pinned_knobs({"PLACE": "cut"}):
+        result = run_two_level(
+            _placement_route_graph(),
+            ctx=Context.from_target((8, 0)),
+            db=db,
+            backend=_RouteBackend(),
+            patience=_PATIENCE,
+            prior=None,
+            manage_prior=False,
+        )
+    assembled = [node.op for node in result.assembled.nodes.values() if isinstance(node.op, CudaOp)]
+    pieces = {kernel_tile(op).identity_key(structural=False, with_io=True) for op in assembled}
+    assert len(pieces) == 2
+    [row] = list(db.iter_routing())
+    assert set(row.children) == pieces
+    assert row.arm == {"PLACE": "cut"} and row.parent not in pieces
+    names = db.kernel_names()
+    assert {row.parent, *pieces} <= set(names)
+
+
 def test_minted_kernels_are_enrolled_as_first_class_targets(monkeypatch, caplog) -> None:
     """A pinned cross-CTA split mints pieces inside the inner loops; the splice watcher reports
     them and the strategy enrolls each — tuned in its own slice, logged as enrolled — while the
@@ -381,7 +417,7 @@ def test_inventory_dedups_by_structural_identity() -> None:
     identity = next(s for s in discovered_strategies() if type(s).__name__ == "IdentityStrategy")
     loop_node = next(nid for nid, n in fused.nodes.items() if isinstance(n.op, LoopOp))
     reported: list[str] = []
-    inventory = _KernelInventory(identity, lambda nid, op, frag: reported.append(nid))
+    inventory = KernelInventory(identity, lambda nid, op, frag: reported.append(nid))
     event = SpliceEvent(match=None, fragment=fused, root_op=fused.nodes[loop_node].op, pass_name="lowering/tile", graph=fused)
     inventory.on_splice(event)
     assert reported == [loop_node], "first sighting reported"

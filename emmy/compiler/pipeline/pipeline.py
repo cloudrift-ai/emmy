@@ -800,7 +800,8 @@ class Run:
             # other's choice.
             domain = _structural_domain(options) if structural else None
             if structural and (chosen := _replay_structural_decision(cand.structural_decisions, match.root.op, options)) is not None:
-                cand.apply(match, chosen, knobs=_choice_knobs(chosen, chosen, match.root.op))
+                option = _concrete_option(chosen)
+                cand.apply(match, option, knobs=_choice_knobs(chosen, option, match.root.op), aliases=getattr(chosen, "aliases", None))
                 if match.rule.fixpoint:
                     return None
                 continue
@@ -815,7 +816,7 @@ class Run:
                 if option is None:
                     raise ValueError(f"decide returned a branch Fork at {match.rule.name!r} — return a concrete option or a leaf Fork")
                 knob_delta = _choice_knobs(choice, option, root_op)
-                minted = cand.apply(match, option, knobs=knob_delta)
+                minted = cand.apply(match, option, knobs=knob_delta, aliases=getattr(choice, "aliases", None))
                 if domain is not None:
                     _remember_structural_decision(cand.structural_decisions, root_op, domain, knob_delta)
                 assert trace is not None
@@ -1033,8 +1034,9 @@ def _remember_structural_decision(decisions: list, root_op, domain: tuple[str, .
 
 
 def _replay_structural_decision(decisions: list, root_op, options: list) -> object | None:
-    """The concrete option a structurally identical, already-decided offer site on this trajectory
-    took — or ``None`` (undecided / unmatchable → fork normally).
+    """The offered option (a leaf Fork, or a concrete ``Op`` / ``Graph``) a structurally identical,
+    already-decided offer site on this trajectory took — or ``None`` (undecided / unmatchable → fork
+    normally).
 
     A candidate keeps the first decision as ``(root identity, cut domain, exact knob receipt)``.
     Replay therefore preserves the old one-decision-per-identical-kernel bound without inferring a
@@ -1048,7 +1050,9 @@ def _replay_structural_decision(decisions: list, root_op, options: list) -> obje
     if receipt is None:
         return None
     matches = [option for option in options if _option_receipt(option, root_op.knobs) == receipt]
-    return _concrete_option(matches[0]) if len(matches) == 1 else None
+    if len(matches) != 1 or (isinstance(matches[0], Fork) and not matches[0].is_leaf):
+        return None
+    return matches[0]
 
 
 def _match_at(graph: Graph, start: str, rule: Rule) -> Match | None:

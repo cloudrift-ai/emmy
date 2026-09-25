@@ -5,15 +5,20 @@ the stable persistence boundary.  A traced kernel that has no frontend origin
 is instead stored as its standalone Loop IR slice so inventory generation is
 complete rather than lossy.  Golden files in this repository are regenerated
 when this implementation-level Loop IR representation changes.
+
+The same codec spells a measured KERNEL's definition (:func:`kernel_wire`): the tune DB stores one
+wire per kernel identity, whether the kernel is the fused kernel of a slice or a piece a cut or a
+split minted, so the same kernel reached from two parents has one definition and one candidate set.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import fields, is_dataclass
 from enum import Enum
 from typing import Any
 
-from emmy.compiler.dim import Dim
+from emmy.compiler.dim import DEFAULT_SEQ_HINT, Dim
 from emmy.compiler.dtype import DataType
 from emmy.compiler.dtype import get as get_dtype
 from emmy.compiler.graph import Graph
@@ -256,6 +261,68 @@ def loop_graph_from_wire(value: object) -> Graph:
             raise ValueError(f"Loop IR program references unknown boundary buffer {name!r}")
     graph.topological_order()
     return graph
+
+
+def kernel_tile(op):
+    """The tile kernel ``op`` lowered from — the first ``TileOp`` on its source chain — or ``None`` for
+    a kernel no tile stands behind. Every kernel the tuner and ``run --bench`` measure has one, the
+    kernel-cache replay included (a cached kernel keeps its chain); the deploy identity a golden
+    receipt names and the definition a ``kernel`` row stores are both read off it."""
+    from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
+
+    return next((ancestor for ancestor in op.source_chain() if isinstance(ancestor, TileOp)), None)
+
+
+def kernel_wire(tile) -> dict:
+    """The Loop IR wire of one tile kernel: a one-node program holding the tile's schedule-free body, as
+    the ``LoopOp`` normalizes it, bound to the tile's own buffers. Its decoded loop op carries the tile's
+    exact and clustered identities (the body is what they digest, the buffers the io half), so a piece a
+    cut minted has a definition of its own rather than "its parent plus the route". It is a KERNEL, not a
+    program: the Loop passes must not run over it — they normalize a size-one axis away and mint another
+    kernel."""
+    graph = Graph()
+    for name, tensor in tile.inputs.items():
+        graph.add_node(InputOp(), [], outputs=(tensor,), node_id=name)
+    # A node's primary buffer is named after the node, so the kernel node takes its primary output's
+    # buffer name as id — the shape a golden's standalone slice has too.
+    primary, *_ = tile.outputs
+    graph.add_node(LoopOp(body=tile.loop_body, name=tile.name), list(tile.inputs), outputs=tuple(tile.outputs.values()), node_id=primary)
+    graph.inputs = list(tile.inputs)
+    graph.outputs = list(tile.outputs)
+    return loop_graph_to_wire(graph)
+
+
+def symbolic_vars(wire: dict) -> set[str]:
+    """The symbolic dim vars a kernel wire's buffers name — the keys a measurement of it binds
+    (:func:`kernel_bindings`), and what a piece keeps of its parent's bindings."""
+    out: set[str] = set()
+    for node in wire["nodes"]:
+        for _name, _dtype, dims in node["outputs"]:
+            for dim in dims:
+                if isinstance(dim, dict) and "sym" in dim:
+                    out.add(str(dim["sym"]))
+                elif isinstance(dim, dict) and "expr" in dim:
+                    out |= set(expr_from_wire(dim["expr"]).free_vars())
+    return out
+
+
+def symbolic_bindings(tensors: Iterable) -> dict[str, int]:
+    """Each symbolic dim var of ``tensors`` bound to the size a bench runs it at: the dim's hint
+    (``DEFAULT_SEQ_HINT`` for a bare seq axis), which is what the backend binds when no input is
+    supplied. The first hint a var is seen with wins."""
+    bindings: dict[str, int] = {}
+    for tensor in tensors:
+        for dim in tensor.shape:
+            if isinstance(dim, Dim) and not dim.is_static:
+                for var in dim.expr.free_vars():
+                    bindings.setdefault(var, dim.hint or DEFAULT_SEQ_HINT)
+    return bindings
+
+
+def kernel_bindings(op) -> dict[str, int]:
+    """The sizes a bench of ``op`` binds its symbolic dims to (:func:`symbolic_bindings` over its
+    buffers) — what a ``perf`` row of a dynamic kernel records so rows at two sizes stay apart."""
+    return symbolic_bindings((*op.inputs.values(), *op.outputs.values()))
 
 
 def intern_loop_program(programs: list[dict], graph: Graph) -> int:

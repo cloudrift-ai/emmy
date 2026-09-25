@@ -132,13 +132,6 @@ def cuda_includes(dtypes: Iterable[str | DataType]) -> list[str]:
     return list(seen)
 
 
-def cupy_dtype(dtype: str | DataType):
-    """cupy dtype for device buffer allocation. Lazy-imports cupy."""
-    import cupy as cp  # noqa: PLC0415
-
-    return cp.dtype(_dtype.get(dtype).np)
-
-
 def nbytes_of(dtype: str | DataType) -> int:
     """Bytes per element for any dtype spelling that appears in the compiler:
 

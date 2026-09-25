@@ -32,8 +32,8 @@ relevant `ARCHITECTURE.md` before answering.
 ## Prerequisites
 
 - Python 3.12+ with `venv`
-- A Rust toolchain is required only for the experimental standalone runtime; use the README architecture index for
-  its build and qualification instructions.
+- A Rust toolchain (`cargo`): compiled programs execute through the Rust runtime, which `make setup` builds into the
+  package as the `emmy.emmy_runtime` extension; use the README architecture index for the runtime's design.
 - `make setup` to create the virtual environment and install dependencies
 - Docker and Docker Compose for local deployments
 - `HF_TOKEN` environment variable for HuggingFace model downloads
@@ -41,21 +41,27 @@ relevant `ARCHITECTURE.md` before answering.
   (graphs, CUDA kernels, execution plans) to this directory. Frontend provenance slices used by `tune --bench` stay
   in memory; stable Torch IR is persisted only inside golden YAML. Kernels are named after the operations they realize
   (`k_rms_norm`, `k_sdpa_reduce`).
-- `EMMY_FREEZE_DIR` environment variable (optional) — overrides the measurement freeze the prior is evaluated
-  against (`emmy eval prior --dataset nodes`, and `emmy fit`'s measured cells). Defaults to the repo-checked
-  `emmy/compiler/pipeline/search/freezes/` — a digest-pinned, version-stamped snapshot that is identical on every
-  machine, which is what makes a reported prior number reproducible. The tune DB and the online reservoir are
-  machine-local and mutable; reach them with `--db` when you want one machine's data, not as the default.
-  The freeze's payload YAML is tracked in **git LFS**; its manifest is plain git so provenance stays diffable.
-  Re-freeze with `scripts/freeze_node_store.py`.
+- `EMMY_FREEZE_DIR` environment variable (optional) — overrides the measurement freeze `emmy dataset import` loads
+  into the dataset DB by default, the instance `emmy eval prior --dataset db` reads. Defaults to
+  `emmy/compiler/pipeline/search/freezes/`, where a digest-pinned, version-stamped snapshot that is identical on
+  every machine is checked in once a card has been collected — what makes a reported prior number reproducible. None
+  is checked in at the moment (the RTX 5090 is re-collected through the `perf` writer); until then name a tune DB on
+  the `emmy dataset import` command line. The tune DB and the online reservoir are machine-local and mutable; reach
+  them with `--db` when you want one machine's data, not as the default. A freeze's payload YAML is tracked in
+  **git LFS**; its manifest is plain git so provenance stays diffable. Re-freeze with `emmy dataset freeze`; `emmy
+  dataset check` counts the rows of an instance whose tables disagree with themselves.
+- `EMMY_DATASET_DB` environment variable (optional) — overrides the dataset DB path (`~/.cache/emmy/dataset.db`):
+  the tune DB's tables in a file of their own, filled by `emmy dataset import` and read by the measurement-data
+  readers, never by a compile.
 - `EMMY_TUNE_DB` environment variable (optional) — overrides the default tuning SQLite cache path
-  (`~/.cache/emmy/autotune.db`). `emmy tune` reads from / writes to this path. NOTE: greedy `compile` / `run` /
-  `serve` resolve forks through ONE measured-evidence pick — the reservoir, this DB's `perf` rows and the golden rows
-  in scope (the live card's repository goldens, or the file `--golden PATH` names) rank fastest-first, a row spelling
-  a placement or a cross-CTA split prices that kernel-set decision, and the global `Prior` (the online prior with its
-  offline cold-start fallback) decides only where nothing was measured; `--strict-evidence` turns that fall-through
-  into an error. `run --golden PATH --bench` writes what it measures back into this DB, which is how a golden row
-  becomes what the next compile picks. The online prior
+  (`~/.cache/emmy/autotune.db`). `emmy tune` reads from / writes to this path, and a greedy `compile` / `run` /
+  `serve` creates it on first use: the golden rows in scope (the live card's repository goldens, or the file
+  `--golden PATH` names) are imported into it before the compile picks, once per golden digest. NOTE: those commands
+  resolve forks through ONE measured-evidence pick — the reservoir, then this DB's `perf` rows, the golden rows among
+  them, rank fastest-first; a kernel-set decision (a routing row, the tuner's or a golden's) is priced as the sum of
+  its pieces' rows; and the global `Prior` (the online prior with its offline cold-start fallback) decides only where
+  nothing was measured; `--strict-evidence` turns that fall-through into an error. `run --golden PATH --bench` writes
+  what it measures back into this DB, which is how a golden row becomes what the next compile picks. The online prior
   is a separate JSON checkpoint (`EMMY_ONLINE_FILE` → `~/.cache/emmy/online.json`; legacy `EMMY_PRIOR_FILE` still
   accepted) that `tune` writes and `compile` / `run` read. Use the README architecture index for the prior and
   two-level autotune design.
@@ -164,11 +170,12 @@ it before answering any CLI-flag question. Quickstart for the common paths:
 | `emmy deploy {local,ssh,cloud} <model> …` | deploy via docker compose locally, over SSH, or on a freshly provisioned cloud VM |
 | `emmy bench recipes/* [--filter KEY=PATTERN] [--no-teardown]` | deploy + benchmark + teardown across cloud VMs; `teardown <run_dir>` cleans up afterwards |
 | `emmy vm create gpu --gpu NAME --gpu-count N` | provision a GPU VM by name (also `vm create/delete {gcp,cloudrift}`) |
-| `emmy serve <model> [--generate] [--bench] [vllm flags…]` | serve an embedding (or `--generate` chat) model via vLLM with the emmy plugin |
+| `emmy serve <model> [--generate] [--bench] [vllm flags…]` | serve via vLLM, or opt into native text serving with `--generate --native` |
 | `emmy compile <model_or_ir> [--layer N] [--ir STAGE] [--dynamic …] [--target sm_NN]` | trace + run the compiler; print or save any IR stage |
 | `emmy run <model_or_ir_or_--code> [--bench]` | compile + execute on the CUDA backend, check accuracy, optionally bench vs eager / `torch.compile` |
 | `emmy tune <target> [--bench] [--gpus N]` | two-level autotune; writes the online prior + tune DB |
-| `emmy eval {knobs,prior,golden,variants,failures} [--dataset {golden,db,nodes}]` | inspect the priors / tune DB |
+| `emmy eval {knobs,prior,golden,variants,failures} [--dataset {golden,db}]` | inspect the priors / tune DB |
+| `emmy dataset {import,freeze,check} …` | fill the dataset DB from measurement freezes and tune DBs; snapshot a DB into a freeze; check a DB's tables agree with themselves |
 | `emmy {pull,trace,generate,inspect,compare} …` | model download, IR tracing, the naive generation oracle, IR inspection, dump diffing |
 
 Quick test models / scripts (for local iteration):
@@ -178,7 +185,7 @@ Quick test models / scripts (for local iteration):
   in chat probes for terse outputs). `TinyLlama/TinyLlama-1.1B-Chat-v1.0` stays as the ungated **Llama-arch**
   smoke model. GPU embedding model (0.6B): `Qwen/Qwen3-Embedding-0.6B`
 - Benchmark/profiling helpers live under `scripts/` (`bench_block.py`, `profile_gen_decode.py`,
-  `capture_gen_twins.py`, `new_models.py`, `merge_node_db.py`, `digest_kernels.py` — the kernel-source byte-identity
+  `capture_gen_twins.py`, `new_models.py`, `digest_kernels.py` — the kernel-source byte-identity
   gate for tile-IR storage migrations, each case also asserting its pins reached a kernel) — run with `--help` for
   usage;
   the skills that drive them document the flows.

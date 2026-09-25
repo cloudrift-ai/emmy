@@ -21,9 +21,9 @@ engine:
   llm:
     tensor_parallel_size: 1
     pipeline_parallel_size: 1
-    # High on purpose: the emmy variant's cupy-held weights are non-torch memory
-    # that vLLM's profiler subtracts from this budget, and the attention-free plugin
-    # needs no KV cache anyway.
+    # High on purpose: the emmy variant's weights sit inside this budget (the runtime
+    # borrows torch tensors, which vLLM's profiler counts), and the attention-free
+    # plugin needs no KV cache anyway.
     gpu_memory_utilization: 0.9
     context_length: 4096
     max_concurrent_requests: 32

@@ -1,127 +1,77 @@
-"""CUDA runtime dispatch for ``Graph[CudaOp]``.
+"""CUDA program execution for ``Graph[CudaOp]``: the Python facade over the runtime.
 
-Compiles each unique kernel source via NVRTC (through ``cupy.RawKernel``),
-allocates a ``cupy.ndarray`` for every buffer in the graph, and walks
-compute nodes in topological order launching kernels directly from Python.
-No host ``.cu`` is generated — the only codegen that survives is the
-per-kernel ``__global__`` function itself, emitted by ``ir/cuda/emit.py``.
+Python compiles — nvcc into the content-addressed cubin cache, the execution plan, the host
+bytes every input and constant starts from — and hands the runtime (``crates/emmy-runtime``,
+hosted in-process through the ``emmy.emmy_runtime`` extension) the plan's JSON form, one cubin path
+per kernel, those bytes, and the memory every region of the program's layout lives in. The
+runtime owns the launches: it resolves symbolic geometry, encodes TMA descriptors, captures
+graphs, times events and polls a hung launch against a deadline. Nothing in this module holds
+a device pointer for longer than it takes to hand one over.
 
-Buffer roles come from the graph: ``graph.inputs`` → input,
-``ConstantOp`` → constant, ``graph.outputs`` → output, everything else →
-scratch. Launch order is ``graph.topological_order()``.
+Memory is allocated here, through torch, so the vLLM plugin's profiler sees every byte a program
+holds and the serving runners hand tensors in and out with no copy. The runtime derives the
+layout — one region per input / constant / output buffer, every scratch buffer packed by
+liveness into one slab — and this side allocates a tensor per region (pooled across programs by
+a :class:`BufferArena`). Without torch the runtime allocates for itself.
+
+Buffer roles come from the graph: ``graph.inputs`` → input, ``ConstantOp`` → constant,
+``graph.outputs`` → output, everything else → scratch. Launch order is
+``graph.topological_order()``.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import math
 import os as _os
 import pickle
 import sys as _sys
 import time as _time_module
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
 
-from emmy import config
+from emmy import config, emmy_runtime
 from emmy.compiler.backend import BenchmarkResult, LaunchTime, RunResult
-from emmy.compiler.backend.cuda import _tma, nvcc
-from emmy.compiler.backend.cuda._planner import compute_live_intervals, plan_offsets
-from emmy.compiler.backend.cuda.dtype import cupy_dtype
+from emmy.compiler.backend.cuda import nvcc
+from emmy.compiler.backend.cuda.device import device
 from emmy.compiler.backend.plan import BufferSpec as _Buffer
-from emmy.compiler.backend.plan import ExecutionPlan, KernelSpec, apply_weight_loads, plan_from_graph
+from emmy.compiler.backend.plan import ExecutionPlan, KernelSpec, apply_weight_loads, plan_from_graph, plan_to_dict
 from emmy.compiler.backend.plan import LaunchSpec as _Launch
 from emmy.compiler.dtype import encode_bf16
 from emmy.compiler.graph import Graph
 
-if TYPE_CHECKING:
-    import cupy as cp
-
 logger = logging.getLogger(__name__)
 
-# Mirror of ``ir.kernel.render.STATIC_SMEM_CAP`` — kept here to avoid
-# pulling the renderer into the runtime path.
-_STATIC_SMEM_CAP = 48 * 1024
-
-
-def _ensure_dynamic_smem_attr(kernel: cp.RawKernel, smem_bytes: int) -> None:
-    """Opt this kernel into the device's max dynamic-smem allowance.
-
-    Required when ``smem_bytes`` exceeds the 48 KB static cap. cupy's
-    ``RawKernel.max_dynamic_shared_size_bytes`` setter calls
-    ``cuFuncSetAttribute(MaxDynamicSharedMemorySize)``; the driver
-    clamps to the device's per-block dynamic max (e.g. ~99 KB on
-    sm_120). Already-set kernels are skipped.
-    """
-    if kernel.max_dynamic_shared_size_bytes >= smem_bytes:
-        return
-    kernel.max_dynamic_shared_size_bytes = smem_bytes
+#: The runtime's hung-launch error, raised by a timed launch whose completion event misses its
+#: deadline. The kernel stays **resident on the device** after the raise — nothing in-process can
+#: evict it, only the SIGKILL-isolated bench worker resets the device — so a caller that catches
+#: it must treat the device as poisoned and stop, or its next blocking synchronize (the torch
+#: peer bench) waits behind the still-running kernel. A ``RuntimeError`` subclass, so existing
+#: ``except RuntimeError`` handlers (the autotune sweep) keep marking the variant ``bench_fail``.
+HungKernelError = emmy_runtime.HungKernelError
 
 
 # ---------------------------------------------------------------------------
-# Buffer / launch classification
+# Kernels: compile through the cubin cache, hand the runtime a path
 # ---------------------------------------------------------------------------
 
 
-def _resolved_constants(compiled: _Compiled, sym_values: dict[str, int]) -> dict[str, float]:
-    """The constant-value map for this run: the static constants plus each runtime
-    ``context_value`` constant evaluated at ``sym_values`` (``float(seq_len)``)."""
-    if not compiled.runtime_constants:
-        return compiled.constants
-    return {**compiled.constants, **{nid: float(expr.eval(sym_values)) for nid, expr in compiled.runtime_constants.items()}}
-
-
-# ---------------------------------------------------------------------------
-# Compiled program: RawKernels + buffer plan + launch list
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class _Compiled:
-    bufs: list[_Buffer]
-    buf_by_name: dict[str, _Buffer]
-    constants: dict[str, float]
-    kernels: dict[str, cp.RawKernel]  # kernel_name → RawKernel
-    launches: list[_Launch]
-    outputs: list[str]
-    # Symbolic axis name → (input_buf_name, dim_index). Resolved from input
-    # array shapes at run-time; empty when the graph has no symbolic dims.
-    symbolic_bindings: dict[str, tuple[str, int]] = field(default_factory=dict)
-    # Per-symbolic-name buffers whose shape carries that name — used to
-    # reshape ``input_data`` to the actual runtime shape before upload.
-    symbolic_buf_shape: dict[str, tuple] = field(default_factory=dict)
-    # Symbolic axis name → its ``Dim`` hint (default expected size). Used as a
-    # fallback concrete value when no ``input_data`` is supplied (the autotuner
-    # benches a symbolic graph at the hint size).
-    symbolic_hints: dict[str, int] = field(default_factory=dict)
-    # Symbolic axis name → its capacity CAP. A capacity-capped kernel (the
-    # smem-staged fused symbolic-K SDPA P@V)
-    # bakes its smem slab at the ``Dim`` hint and is only correct for runtime
-    # extents ≤ that cap, so the launch resolver hard-errors when the supplied
-    # input shape exceeds it (rather than reading/writing past the baked slab).
-    # Empty for every kernel set that tiles the symbolic extent with a ceil-div
-    # grid (those handle any runtime size); populated only by the capped cut.
-    symbolic_caps: dict[str, int] = field(default_factory=dict)
-    # ConstantOp nid → ``Expr`` (over symbolic-dim names) whose runtime value fills the
-    # constant (a dynamic mean's divisor = the runtime reduce-axis size). Resolved per run
-    # via :func:`_resolved_constants`.
-    runtime_constants: dict = field(default_factory=dict)
-
-
-def _load_kernel(name: str, spec: KernelSpec, *, cubin_dir: Path | None = None):
-    """Obtain one launchable kernel from its :class:`KernelSpec`. A ``binary_key`` (the pack
-    path) loads the content-addressed cubin straight from the cache; otherwise the ``source``
-    compiles through the same cache (``nvcc.load_function``). A key whose cubin has been
-    evicted falls back to the source when present, and errors otherwise — the pack loader
-    pre-checks cubin existence, so hitting this means the cache was cleared mid-boot."""
+def _cubin_path(name: str, spec: KernelSpec, *, cubin_dir: Path | None = None) -> Path:
+    """The cubin for one :class:`KernelSpec`. A ``binary_key`` (the pack path) names the
+    content-addressed cubin straight from the cache; otherwise the ``source`` compiles through
+    the same cache. A key whose cubin has been evicted falls back to the source when present,
+    and errors otherwise — the pack loader pre-checks cubin existence, so hitting this means the
+    cache was cleared mid-boot."""
     if spec.binary_key is not None:
         path = (cubin_dir or nvcc.cubin_cache_dir()) / f"{spec.binary_key}.cubin"
         if path.exists():
-            return nvcc.load_cubin_function(path, name)
+            return path
         if spec.source is None:
             raise RuntimeError(
                 f"kernel {name!r}: cubin {spec.binary_key} is gone from the cache and the plan carries no source — "
@@ -129,46 +79,42 @@ def _load_kernel(name: str, spec: KernelSpec, *, cubin_dir: Path | None = None):
             )
     if spec.source is None:
         raise RuntimeError(f"kernel {name!r}: plan carries neither a source nor a cached cubin")
-    # ``nvcc.load_function`` returns a cupy ``Function`` — launch-callable and
-    # smem-attr settable, compiled via offline nvcc into the content-addressed cache.
-    return nvcc.load_function(spec.source, name, arch_specific=spec.arch_specific)
+    return nvcc.compile_kernel(spec.source, name, arch_specific=spec.arch_specific)
 
 
-def _load_plan(plan: ExecutionPlan, *, deadline: float | None = None, cubin_dir: Path | None = None) -> _Compiled:
-    """Materialize the runtime object from a plan: load every kernel (cubin-by-key or
-    source-via-cache), and adopt the plan's pure-data fields as-is.
+def _compile_kernels(plan: ExecutionPlan, *, deadline: float | None = None, cubin_dir: Path | None = None) -> dict[str, str]:
+    """One cubin path per kernel of ``plan``, compiled through the cache where needed.
 
     ``deadline`` is the compile budget's monotonic expiry, checked BETWEEN kernels — the only
-    boundary a Python-level check has, since one ``_load_kernel`` is a single C call into nvcc.
-    Checking here rather than after the whole load is what keeps a cold multi-kernel compile from
+    boundary a Python-level check has, since one compile is a single call into nvcc. Checking
+    here rather than after the whole load is what keeps a cold multi-kernel compile from
     outliving the wall cap that SIGKILLs the bench worker: past the cap the operator is told a
     worker died, which reads as a slow kernel, and the fact that nothing about the kernel was
     measured is lost."""
-    kernels: dict[str, object] = {}
+    binaries: dict[str, str] = {}
     for index, (name, spec) in enumerate(plan.kernels.items(), start=1):
-        kernels[name] = _load_kernel(name, spec, cubin_dir=cubin_dir)
+        binaries[name] = str(_cubin_path(name, spec, cubin_dir=cubin_dir))
         if deadline is not None and _time_module.monotonic() > deadline:
             raise CompileBudgetExceeded(
                 f"compile stage exceeded its budget after {index} of {len(plan.kernels)} kernel(s) "
                 f"({name}) — nothing measured; raise {config.BENCH_COMPILE_TIMEOUT_S} to compile it"
             )
-    return _Compiled(
-        bufs=list(plan.buffers),
-        buf_by_name={b.name: b for b in plan.buffers},
-        constants=dict(plan.constants),
-        kernels=kernels,
-        launches=list(plan.launches),
-        outputs=list(plan.outputs),
-        symbolic_bindings=dict(plan.symbolic_bindings),
-        symbolic_hints=dict(plan.symbolic_hints),
-        symbolic_caps=dict(plan.symbolic_caps),
-        runtime_constants=dict(plan.runtime_constants),
-    )
+    return binaries
+
+
+def kernel_attributes(name: str, spec: KernelSpec) -> dict[str, int]:
+    """Register count and local / static shared bytes of one kernel, read off its cubin."""
+    return device().kernel_attributes(str(_cubin_path(name, spec)), name)
 
 
 # ---------------------------------------------------------------------------
-# Buffer materialization
+# Host bytes: the single fill policy every bound buffer starts from
 # ---------------------------------------------------------------------------
+
+
+def _is_device_tensor(value) -> bool:
+    """A torch CUDA tensor — bound by address, never copied through the host."""
+    return hasattr(value, "data_ptr") and hasattr(value, "is_cuda") and bool(value.is_cuda)
 
 
 def _numpy_storage(src, dtype) -> np.ndarray:
@@ -179,59 +125,62 @@ def _numpy_storage(src, dtype) -> np.ndarray:
     return np.ascontiguousarray(arr, dtype=dtype.np)
 
 
-def _materialize(buf: _Buffer, shape: tuple[int, ...], src: np.ndarray | cp.ndarray | None, constants: dict[str, float]) -> cp.ndarray:
-    """Build one device array for ``buf`` at ``shape`` — the single fill
-    policy shared by :func:`_allocate` and :meth:`CompiledProgram.rebind`.
-
-    ``src`` may already be a **device** (cupy) array — a constant uploaded once and
-    shared across programs (the serving runner's symbolic + decode-bucket twins bind
-    the same weights). It is used as-is, no copy, unless the dtype disagrees."""
-    import cupy as cp
-
-    cp_dtype = cupy_dtype(buf.dtype)
+def _host_bytes(buf: _Buffer, shape: tuple[int, ...], src, constants: dict[str, float]) -> bytes:
+    """The bytes one input or constant buffer starts from: the supplied array, the plan's scalar
+    constant, a deterministic pseudo-random ramp for an unsupplied input, zeros otherwise."""
     np_dtype = buf.dtype.np
     is_bf16 = getattr(buf.dtype, "name", buf.dtype) == "bf16"
+    n = math.prod(shape)
     if src is not None:
-        if isinstance(src, cp.ndarray):
-            if is_bf16 and src.dtype != np.dtype(np.uint16):
-                values = src.astype(cp.float32, copy=False).view(cp.uint32)
-                values = values + cp.uint32(0x7FFF) + ((values >> cp.uint32(16)) & cp.uint32(1))
-                src = (values >> cp.uint32(16)).astype(cp.uint16)
-            if src.dtype != np.dtype(np_dtype):
-                src = src.astype(np_dtype)
-            return src.reshape(shape) if tuple(src.shape) != tuple(shape) else src
-        return cp.asarray(_numpy_storage(src, buf.dtype).reshape(shape))
+        arr = _numpy_storage(src, buf.dtype)
+        if arr.size != n:
+            raise ValueError(f"buffer {buf.name!r}: {arr.size} element(s) supplied for shape {shape}")
+        return arr.reshape(shape).tobytes()
     if buf.role == "constant" and buf.name in constants:
         v = float(constants[buf.name])
         if is_bf16:
             # bf16 buffers ride as uint16 BITS (``BF16.np``) — casting the float would zero it;
             # encode the value to bf16 bits (round-to-nearest-even on the dropped mantissa half).
             bits = int(np.float32(v).view(np.uint32))
-            return cp.full(shape, np.uint16((bits + 0x7FFF + ((bits >> 16) & 1)) >> 16), dtype=cp_dtype)
-        return cp.full(shape, v, dtype=cp_dtype)
+            return np.full(shape, np.uint16((bits + 0x7FFF + ((bits >> 16) & 1)) >> 16), dtype=np.uint16).tobytes()
+        return np.full(shape, v, dtype=np_dtype).tobytes()
     if buf.role == "input":
-        # Pseudo-random fill for un-supplied inputs (matches old generated program).
-        n = 1
-        for d in shape:
-            n *= int(d)
-        # Build the index ramp in int64, not ``np_dtype``: a float16 buffer
-        # past 65504 elements would overflow to ``inf`` (then ``inf % 101``
-        # → ``nan``). Compute in fp32 and cast the final values — always in
+        # Pseudo-random fill for un-supplied inputs. The index ramp is built in int64, not
+        # ``np_dtype``: a float16 buffer past 65504 elements would overflow to ``inf`` (then
+        # ``inf % 101`` → ``nan``). Compute in fp32 and cast the final values — always in
         # ``[-0.5, 0.5]``, so fp16-safe.
         idx = np.arange(n, dtype=np.int64)
         vals = 0.01 * ((idx.astype(np.float32) * 7 + 13) % 101 - 50)
         vals = encode_bf16(vals) if is_bf16 else vals.astype(np_dtype)
-        return cp.asarray(vals.reshape(shape))
-    return cp.zeros(shape, dtype=cp_dtype)
+        return vals.tobytes()
+    return np.zeros(shape, dtype=np_dtype).tobytes()
 
 
-def _with_generated_constants(plan: ExecutionPlan, input_data: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+def _host_bindings(plan: ExecutionPlan, input_data: dict, sym_values: dict[str, int], *, only=None) -> dict[str, bytes]:
+    """Starting bytes for input and constant buffers (``only`` narrows the set). A buffer bound
+    to a device tensor is skipped: its memory is lent to the runtime instead. Output and scratch
+    buffers start zeroed inside the runtime. Saturating casts here are intended, not bugs: an
+    SDPA mask-fill constant (``-1e9``) is meant to become ``-inf`` in fp16 (masked → 0 after
+    softmax)."""
+    out: dict[str, bytes] = {}
+    with np.errstate(over="ignore", invalid="ignore"):
+        for buf in plan.buffers:
+            if buf.role not in ("input", "constant") or (only is not None and buf.name not in only):
+                continue
+            src = input_data.get(buf.name)
+            if _is_device_tensor(src):
+                continue
+            out[buf.name] = _host_bytes(buf, buf.resolve_shape(sym_values) or (1,), src, plan.constants)
+    return out
+
+
+def _with_generated_constants(plan: ExecutionPlan, input_data: dict) -> dict:
     """Add the plan's SELF-CONTAINED constants that ``input_data`` does not already carry.
 
     A deterministic source-free bind record is evaluated once while the graph is projected and
     its bytes ride the plan (``PLAN_FORMAT_GENERATED``) — a coded linear's Hadamard factor and
     its coordinate tables are exactly that. Nothing outside the plan can supply them, and an
-    unsupplied constant buffer materializes as ZEROS, so the runtime must read them here.
+    unsupplied constant buffer starts as ZEROS, so the runtime must read them here.
     Caller-supplied arrays win: serving binds the same specs through ``assemble_source`` and
     shares one device copy across its twins.
     """
@@ -246,169 +195,27 @@ def _with_generated_constants(plan: ExecutionPlan, input_data: dict[str, np.ndar
     return feed
 
 
-@dataclass
-class _SlabPlan:
-    """A liveness-planned layout of the program's scratch buffers into one
-    persistent device slab. ``offsets`` is the byte offset of each scratch
-    buffer's view into ``slab``; ``total_bytes`` is the slab size; ``sym_values``
-    are the (capacity) dims the layout was planned at — a re-plan is needed when
-    they change (``rebind``). ``naive_bytes`` is the sum of the per-scratch sizes
-    this layout replaces (for the reduction-factor log). ``slab`` is held for the
-    program lifetime so cupy never reclaims it under the views' baked pointers."""
-
-    offsets: dict[str, int]
-    total_bytes: int
-    sym_values: dict[str, int]
-    naive_bytes: int
-    slab: cp.ndarray | None = None
-
-
-class BufferArena:
-    """Cross-program device-buffer pool for programs that run **sequentially** (the
-    serving runner's per-layer splits). Named grow-only backings: every program built
-    with the same arena takes its scratch slab and its input/output buffers as views
-    into per-key backings, so N sequential programs hold ~one program's worth of
-    activation memory instead of N (the per-layer capacity-buffer artifact: ~350 MB ×
-    48 layers for gemma-4-12B). Growth allocates a fresh backing; programs built on an
-    older generation keep their (smaller) views alive, so captured graphs / TMA
-    descriptors never dangle. Safe iff programs sharing the arena never run
-    concurrently and each program's outputs are consumed before the next program runs
-    — the runner's contract. Constants are never pooled (persistent values; weight
-    sharing is ``gen_runner._bind_plan_constants``)."""
-
-    def __init__(self) -> None:
-        self._backings: dict[str, cp.ndarray] = {}
-
-    def backing(self, key: str, nbytes: int) -> cp.ndarray:
-        """A zero-init ``uint8`` backing of at least ``nbytes`` for ``key`` — reused
-        while it still fits, reallocated (grow-only) when it doesn't."""
-        import cupy as cp  # noqa: PLC0415
-
-        cur = self._backings.get(key)
-        if cur is None or cur.nbytes < nbytes:
-            cur = cp.zeros(max(nbytes, 1), dtype=cp.uint8)
-            self._backings[key] = cur
-        return cur
-
-
-def _scratch_sizes(compiled: _Compiled, sym_values: dict[str, int]) -> tuple[dict[str, int], dict[str, int]]:
-    """Byte size + alignment per ``scratch`` buffer at the resolved ``sym_values``."""
-    sizes: dict[str, int] = {}
-    aligns: dict[str, int] = {}
-    for buf in compiled.bufs:
-        if buf.role != "scratch":
-            continue
-        shape = buf.resolve_shape(sym_values) or (1,)
-        n = 1
-        for d in shape:
-            n *= int(d)
-        sizes[buf.name] = max(1, n) * buf.dtype.nbytes
-        aligns[buf.name] = buf.dtype.nbytes
-    return sizes, aligns
-
-
-def _plan_slab(compiled: _Compiled, sym_values: dict[str, int]) -> _SlabPlan:
-    """Liveness-plan the scratch buffers into one slab layout (no allocation)."""
-    sizes, aligns = _scratch_sizes(compiled, sym_values)
-    intervals = compute_live_intervals(list(sizes), compiled.launches)
-    offsets, total = plan_offsets(intervals, sizes, aligns)
-    return _SlabPlan(offsets=offsets, total_bytes=total, sym_values=dict(sym_values), naive_bytes=sum(sizes.values()))
-
-
-def _alloc_slab(
-    compiled: _Compiled, sym_values: dict[str, int], arena: BufferArena | None = None
-) -> tuple[dict[str, cp.ndarray], _SlabPlan]:
-    """Plan + allocate the scratch slab and return each scratch buffer as a typed
-    view into it. One zero-init ``uint8`` allocation (or a view into the shared
-    ``arena`` backing); each view's device pointer (``slab.data + offset``) is stable
-    for the program lifetime (the slab is pinned on the returned plan), so captured
-    graphs / TMA descriptors that bake the pointer stay valid across replays."""
-    import cupy as cp  # noqa: PLC0415
-
-    plan = _plan_slab(compiled, sym_values)
-    if arena is not None:
-        plan.slab = arena.backing("scratch-slab", plan.total_bytes)
-    else:
-        plan.slab = cp.zeros(plan.total_bytes or 1, dtype=cp.uint8)
-    views: dict[str, cp.ndarray] = {}
-    for buf in compiled.bufs:
-        if buf.role != "scratch":
-            continue
-        shape = buf.resolve_shape(sym_values) or (1,)
-        views[buf.name] = cp.ndarray(shape, dtype=cupy_dtype(buf.dtype), memptr=plan.slab.data + plan.offsets[buf.name])
-    return views, plan
-
-
-def _arena_view(arena: BufferArena, buf: _Buffer, shape: tuple[int, ...], src, constants: dict[str, float]) -> cp.ndarray:
-    """An input/output buffer as a view into the arena's per-``(role, name)`` backing,
-    filled under the same policy as :func:`_materialize`. Keyed by role AND name so an
-    input and an output that happen to share a tensor name never alias within one
-    program (kernels read inputs while writing outputs); across programs the aliasing
-    is the point."""
-    import cupy as cp  # noqa: PLC0415
-
-    filled = _materialize(buf, shape, src, constants)
-    backing = arena.backing(f"{buf.role}:{buf.name}", filled.nbytes)
-    view = cp.ndarray(shape, dtype=filled.dtype, memptr=backing.data)
-    view[...] = filled
-    return view
-
-
-def _allocate(
-    compiled: _Compiled, input_data: dict[str, np.ndarray] | None, arena: BufferArena | None = None
-) -> tuple[dict[str, cp.ndarray], _SlabPlan]:
-    """Materialize every buffer. ``scratch`` buffers become typed views into one
-    liveness-planned persistent slab (dead intervals share memory);
-    input/constant/output buffers stay standalone (persistent across the call) —
-    unless an ``arena`` is supplied, in which case input/output buffers (and the
-    slab) become views into its cross-program backings; constants stay standalone."""
-    input_data = input_data or {}
-    sym_values = _resolve_symbolic(compiled, input_data)
-    constants = _resolved_constants(compiled, sym_values)
-    arrays: dict[str, cp.ndarray] = {}
-    # Saturating casts here are intended, not bugs: e.g. an SDPA mask-fill
-    # constant (``-1e9``) is meant to become ``-inf`` in fp16 (masked → 0 after
-    # softmax). Ignore the over/invalid warnings so genuine output stays clean.
-    with np.errstate(over="ignore", invalid="ignore"):
-        for buf in compiled.bufs:
-            if buf.role == "scratch":
-                continue  # placed into the slab below
-            shape = buf.resolve_shape(sym_values) or (1,)
-            if arena is not None and buf.role in ("input", "output"):
-                arrays[buf.name] = _arena_view(arena, buf, shape, input_data.get(buf.name), constants)
-            else:
-                arrays[buf.name] = _materialize(buf, shape, input_data.get(buf.name), constants)
-    # ``scratch`` buffers become views into one zero-init slab. The build-time
-    # zero preserves the contract scratch had under ``cp.zeros``; per-launch
-    # ``zero_outputs`` re-zeros atomic-reduction outputs, and every other kernel
-    # fully overwrites its output (lowering contract), so a reused slot's stale
-    # contents are never read — which is also why a reused (stale) arena backing
-    # is as safe as a reused slab slot.
-    scratch_views, plan = _alloc_slab(compiled, sym_values, arena)
-    arrays.update(scratch_views)
-    return arrays, plan
-
-
-def _resolve_symbolic(compiled: _Compiled, input_data: dict[str, np.ndarray]) -> dict[str, int]:
-    """Bind every symbolic axis name to a concrete ``int``. Reads the runtime
-    value from the supplied input array shape (``compiled.symbolic_bindings``
-    says which input + dim each name reads from). When no array is supplied for
-    that input — the autotuner benches without real inputs — falls back to the
-    ``Dim`` hint so the graph runs at its expected (tuned) size."""
+def _resolve_symbolic(plan: ExecutionPlan, input_data: dict) -> dict[str, int]:
+    """Bind every symbolic axis name to a concrete ``int``. Reads the runtime value from the
+    supplied input array shape (``plan.symbolic_bindings`` says which input + dim each name
+    reads from). When no array is supplied for that input — the autotuner benches without real
+    inputs — falls back to the ``Dim`` hint so the graph runs at its expected (tuned) size. A
+    capacity-capped kernel bakes its smem slab at the hint and is only correct up to that cap,
+    so a larger supplied extent is an error rather than an out-of-bounds read."""
     env: dict[str, int] = {}
-    for name, (buf, dim_idx) in compiled.symbolic_bindings.items():
+    for name, (buf, dim_idx) in plan.symbolic_bindings.items():
         arr = input_data.get(buf)
         if arr is not None:
             env[name] = int(arr.shape[dim_idx])
-            cap = compiled.symbolic_caps.get(name)
+            cap = plan.symbolic_caps.get(name)
             if cap is not None and env[name] > cap:
                 raise ValueError(
                     f"symbolic dim {name!r} = {env[name]} exceeds the capacity-capped kernel's hint ({cap}); "
                     f"this build bakes its smem slab at {cap} and cannot run a larger extent — "
                     f"re-trace with a larger --seq-len hint or use the ceil-div (uncapped) lowering"
                 )
-        elif name in compiled.symbolic_hints:
-            env[name] = compiled.symbolic_hints[name]
+        elif name in plan.symbolic_hints:
+            env[name] = plan.symbolic_hints[name]
         else:
             raise ValueError(
                 f"symbolic dim {name!r} reads from input {buf!r}.shape[{dim_idx}] but no array was supplied and the dim carries no hint"
@@ -416,200 +223,86 @@ def _resolve_symbolic(compiled: _Compiled, input_data: dict[str, np.ndarray]) ->
     return env
 
 
-def _launch(
-    launch: _Launch,
-    compiled: _Compiled,
-    arrays: dict[str, cp.ndarray],
-    desc_args: dict[str, cp.ndarray] | None = None,
-    sym_values: dict[str, int] | None = None,
-) -> None:
-    from emmy.compiler.ir.cuda.ir import resolve_dim  # noqa: PLC0415
-
-    for zname in launch.zero_outputs:
-        # memset, not ``.fill(0)``: fill launches a cupy elementwise kernel (~the cost of the
-        # finalize kernel the atomic split saves), while memset_async records as a cheap MEMSET
-        # node under CUDA-graph capture. All-zero bytes are 0.0 in every buffer dtype.
-        buf = arrays[zname]
-        buf.data.memset_async(0, buf.nbytes)
-    kernel = compiled.kernels[launch.kernel_name]
-    desc_args = desc_args or {}
-    sym_values = sym_values or {}
-    if launch.indirect_args:
-        # Indirect operands: the marked arg's position expands in place to (table, sel, slot)
-        # — the kernel resolves ``table[sel[slot]]`` in its body preamble. Table/selector are
-        # device arrays the caller binds into ``arrays`` under the spec's names; the slot is a
-        # plain ``int`` arg (same packing as the runtime-arg tail).
-        indirect = {a: (t, s, sl) for a, t, s, sl in launch.indirect_args}
-        parts: list = []
-        for name in launch.arg_names:
-            entry = indirect.get(name)
-            if entry is not None:
-                parts.extend((arrays[entry[0]], arrays[entry[1]], entry[2]))
-            else:
-                parts.append(desc_args.get(name) if name in desc_args else arrays[name])
-        args = tuple(parts)
-    else:
-        args = tuple(desc_args.get(name) if name in desc_args else arrays[name] for name in launch.arg_names)
-    # Symbolic axes appear as ``int`` kernel params after buffers + TMA
-    # descriptors — append their resolved values to the arg pack.
-    if launch.serial:
-        # A recurrence's time: one launch per coordinate, in order, each seeing the previous
-        # step's stores.
-        (name, extent), *rest = launch.serial
-        for step in range(extent):
-            _launch(replace(launch, serial=tuple(rest)), compiled, arrays, desc_args, {**sym_values, name: step})
-        return
-    if launch.runtime_args:
-        args = (*args, *(sym_values[name] for name in launch.runtime_args))
-    grid = tuple(resolve_dim(spec, sym_values) for spec in launch.grid)
-    block = tuple(resolve_dim(spec, sym_values) for spec in launch.block)
-    # Kernels whose Smem footprint exceeds the 48 KB static cap declare
-    # an ``extern __shared__`` pool; the launch supplies the byte size
-    # via ``shared_mem=`` and (for footprints above 48 KB) opts into the
-    # device's larger dynamic-smem allowance via ``cudaFuncSetAttribute``.
-    smem_bytes = launch.smem_bytes
-    if smem_bytes > _STATIC_SMEM_CAP:
-        _ensure_dynamic_smem_attr(kernel, smem_bytes)
-        kernel(grid, block, args, shared_mem=smem_bytes)
-    else:
-        kernel(grid, block, args, shared_mem=0)
-
-
-def _collapse_inert_dims(arr_shape: tuple[int, ...], box_extents: tuple[int, ...]) -> tuple[int, ...]:
-    """Reconstruct the materializer's gap-singleton drop from runtime info.
-
-    The materializer drops gap source dims that are extent-1 singletons
-    with literal-0 origin coords (a literal-0 origin can only arise for
-    a singleton arr dim, since otherwise IR construction would have
-    emitted a ``Var`` or expression). At runtime we don't carry that
-    decision explicitly — instead we walk ``arr_shape`` and
-    ``box_extents`` innermost-first and drop any arr dim of extent 1
-    that lines up with a box dim of extent > 1. Leading singletons
-    pair with their (kept) box==1 entry and stay; gap singletons fall
-    out exactly where the materializer dropped them.
-
-    The materializer's swizzle-split path may emit a rank-(N+1) box on
-    a rank-N source by splitting an inner dim. Reinterpret the array's
-    last dim as the matching split before walking, so the rank-match
-    check below succeeds and ``encode_tiled`` sees a consistent view."""
-    arr_rev = list(reversed(arr_shape))
-    box_rev = list(reversed(box_extents))
-    if len(box_rev) == len(arr_rev) + 1 and arr_rev and box_rev[0] != 0 and arr_rev[0] % box_rev[0] == 0:
-        arr_rev = [box_rev[0], arr_rev[0] // box_rev[0], *arr_rev[1:]]
-    # Drop exactly ``arr_rank - box_rank`` inert gap singletons — no more. A
-    # *box-carrying* dim can be a runtime-extent-1 (or any extent < its box):
-    # a masked dynamic axis (e.g. ``seq_len`` = 1, 31) is legitimately small,
-    # and TMA zero-fills the overhang where the box exceeds globalDim. The old
-    # "drop every extent-1 aligned with box>1" rule mis-dropped that masked dim
-    # whenever its runtime extent hit 1, then failed the rank match (seq_len=1
-    # → ``arr=(1, 512)`` vs ``box=(64, 32)``). Shedding only the surplus dims
-    # keeps the genuine inner gap-singleton drop (arr_rank > box_rank) intact.
-    n_drop = len(arr_rev) - len(box_rev)
-    kept: list[int] = []
-    bi = 0
-    for a in arr_rev:
-        if n_drop > 0 and a == 1 and bi < len(box_rev) and box_rev[bi] != 1:
-            n_drop -= 1
-            continue  # dropped gap singleton
-        kept.append(a)
-        bi += 1
-    if n_drop != 0 or len(kept) != len(box_rev):
-        raise ValueError(f"TMA descriptor rank mismatch: arr_shape={arr_shape!r} cannot be collapsed to match box_extents={box_extents!r}")
-    return tuple(reversed(kept))
-
-
-def _prebuild_descriptors(
-    compiled: _Compiled,
-    arrays: dict[str, cp.ndarray],
-    sym_values: dict[str, int] | None = None,
-    only_symbolic: bool = False,
-) -> dict[int, dict[str, cp.ndarray]]:
-    """Encode every TMA ``CUtensorMap`` for ``compiled`` up-front.
-
-    The kernel signature takes ``const CUtensorMap*`` (not a by-value
-    ``__grid_constant__`` parameter) because cupy's arg-packing doesn't
-    guarantee the 64-byte alignment required for by-value descriptors.
-    Placing the descriptor in device memory and passing a pointer
-    sidesteps the alignment concern — the TMA load PTX dereferences
-    via a generic 64-bit pointer either way.
-
-    Why eagerly: ``cp.asarray(np.frombuffer(...))`` queues an H2D copy on
-    the current stream. Building descriptors lazily inside ``_launch``
-    means each fresh kernel's H2D races against in-flight TMA loads from
-    *previous* launches sharing the same descriptor allocator slab —
-    the next allocation can land on cupy-pool memory the prior kernel's
-    cp.async.bulk.tensor is still reading, corrupting the descriptor
-    and deadlocking the wait. Pre-building once after ``_allocate``
-    removes the race entirely; the returned dict is held alive for the
-    whole program lifetime, so cupy never reclaims the slab.
-
-    ``sym_values``: encode each SYMBOLIC-shaped source buffer at its RESOLVED
-    shape instead of the array's allocated (capacity) shape. On the serving
-    capacity-buffer path the live data is prefix-packed at the resolved shape's
-    row-major strides, so a descriptor's global strides must follow the resolved
-    extents — a capacity-baked stride reads the right rows only for the leading
-    index 0, which is why batch>1 miscomputed through every TMA-staged kernel
-    while batch-1 serving never noticed. ``only_symbolic=True`` returns just the
-    per-sym overlay entries (static-src descriptors are excluded — the prebuilt
-    ones stay valid)."""
-    import cupy as cp
-
-    out: dict[int, dict[str, cp.ndarray]] = {}
-    for li, launch in enumerate(compiled.launches):
-        if not launch.tma_descriptors:
-            continue
-        per_launch: dict[str, cp.ndarray] = {}
-        for desc in launch.tma_descriptors:
-            arr = arrays[desc.src_buf]
-            buf = compiled.buf_by_name[desc.src_buf]
-            if only_symbolic and not buf.is_symbolic:
-                continue
-            if sym_values and buf.is_symbolic:
-                base_shape = tuple(int(d) for d in (buf.resolve_shape(sym_values) or (1,)))
-            else:
-                base_shape = tuple(int(d) for d in arr.shape)
-            src_shape = _collapse_inert_dims(base_shape, desc.box_extents)
-            desc_bytes = _tma.encode_tiled(
-                global_address=int(arr.data.ptr),
-                src_shape=src_shape,
-                box_extents=desc.box_extents,
-                elem_size=int(arr.itemsize),
-                swizzle=desc.swizzle,
-            )
-            per_launch[desc.name] = cp.asarray(np.frombuffer(desc_bytes, dtype=np.uint64))
-        if per_launch:
-            out[li] = per_launch
-    if out:
-        cp.cuda.runtime.deviceSynchronize()
-    return out
-
-
 # ---------------------------------------------------------------------------
-# Iter-loop policy constants + per-event watchdog
+# Memory: torch tensors lent to the runtime, pooled across programs
 # ---------------------------------------------------------------------------
 
 
-# Per-launch wall-clock cap. Any single kernel launch exceeding this is
-# considered "broken" — too many threads, infinite loop, hung GPU — and
-# we bail out via ``HungKernelError`` so the autotune sweep doesn't stall
-# on one bad variant.
-# 2000, not 1000 (2026-07-22): the long-standing gemma-4 post4096-global "bench hang" was a
-# WATCHDOG artifact, not a kernel deadlock — under a 1 s deadline the bench_fails 5/5 at the first
-# iteration after the warmup-extension re-calibration (its wait exceeds 1 s), while at ANY deadline
-# >= 2 s the same program benches clean 9/9 with no event wait ever reaching even the 0.2 s warning
-# threshold (measured at 2/4/15/600 s). The deadline-correlation below the driver line is
-# unexplained (suspected interaction between the 1 ms cudaEventQuery poll loop's abort path and
-# in-flight graph-exec work on this 9-kernel / 96 KB-smem program); empirically 2 s is past the
-# cliff, and a real hung kernel is still evicted in 2 s. ``EMMY_KERNEL_TIMEOUT_MS`` overrides —
-# read live through ``config.kernel_timeout_ms()`` (the env owner), never cached at import.
+def _torch():
+    """torch, or ``None`` when it is missing or sees no device — the runtime then allocates."""
+    try:
+        import torch  # noqa: PLC0415
 
-# First-iteration grace: a program's FIRST uncaptured iteration may stall well past the
-# steady-state watchdog without any kernel being hung — lazy module loading (CUDA_MODULE_LOADING=
-# LAZY uploads each kernel's SASS on first launch), the smem-carveout reconfig for a 96 KB dynamic-
-# smem kernel, and allocator first-touch all land there. It runs under its own deadline,
-# ``config.first_iter_timeout_ms()`` (``EMMY_FIRST_ITER_TIMEOUT_MS``, default 30x the steady one),
-# so a genuinely hung kernel is still caught on iter 0, just later — and how much later is no
-# longer tied to the steady deadline.
+        return torch if torch.cuda.is_available() else None
+    except ImportError:
+        return None
+
+
+def _torch_dtype(np_dtype):
+    import torch  # noqa: PLC0415
+
+    return torch.from_numpy(np.zeros(0, dtype=np_dtype)).dtype
+
+
+def _new_backing(nbytes: int):
+    """One zeroed device tensor for a region."""
+    import torch  # noqa: PLC0415
+
+    return torch.zeros(max(1, int(nbytes)), dtype=torch.uint8, device="cuda")
+
+
+def _flat_bytes(tensor):
+    """The same memory as a flat byte tensor — how every lent region is kept, whatever the
+    caller's shape and dtype."""
+    import torch  # noqa: PLC0415
+
+    return tensor.contiguous().view(-1).view(torch.uint8)
+
+
+_DLPACK_CODES = {"f": 2, "i": 0, "u": 1}
+
+
+def device_view(pinned):
+    """Address a pinned (page-locked) host tensor as a CUDA tensor of the same shape and dtype:
+    under unified addressing a mapped host allocation is reachable from the device at its own
+    address, so a kernel gathers from it over PCIe with no copy. ``pinned`` must stay alive as
+    long as the view; the view owns nothing."""
+    import torch  # noqa: PLC0415
+
+    if not pinned.is_pinned() or not pinned.is_contiguous():
+        raise ValueError("device_view needs a contiguous pinned host tensor")
+    host, device_ptr = device().pointer_attributes(pinned.data_ptr())
+    if not host or device_ptr != pinned.data_ptr():
+        raise RuntimeError("this platform does not map host allocations into the device address space")
+    np_dtype = np.dtype(str(pinned.dtype).removeprefix("torch."))
+    capsule = emmy_runtime.device_tensor_capsule(
+        pinned.data_ptr(), list(pinned.shape), _DLPACK_CODES[np_dtype.kind], np_dtype.itemsize * 8, 0
+    )
+    return torch.from_dlpack(capsule)
+
+
+class BufferArena:
+    """Cross-program pooling of a program's regions. Programs that run sequentially share one
+    backing per region name (``role:name`` for activations, ``scratch`` for the slab), sized to
+    the largest request so far; constants are never pooled. Growth allocates a fresh backing and
+    keeps the older generations alive under the programs that still view them, so captured
+    graphs never dangle. Safety is the caller's contract: programs sharing an arena never run
+    concurrently, and each program's outputs are consumed before the next program runs."""
+
+    def __init__(self) -> None:
+        self._backings: dict[str, list] = {}
+
+    def backing(self, key: str, nbytes: int):
+        generations = self._backings.setdefault(key, [])
+        if generations and generations[-1].numel() >= max(1, nbytes):
+            return generations[-1]
+        generations.append(_new_backing(nbytes))
+        return generations[-1]
+
+
+# ---------------------------------------------------------------------------
+# Budgets and errors
+# ---------------------------------------------------------------------------
 
 
 def _launch_deadline_ms(iters_done: int, batch: int) -> float:
@@ -617,19 +310,6 @@ def _launch_deadline_ms(iters_done: int, batch: int) -> float:
     own budget on iter 0, the steady per-launch deadline after."""
     per_launch = config.first_iter_timeout_ms() if iters_done == 0 else config.kernel_timeout_ms()
     return per_launch * batch
-
-
-class HungKernelError(RuntimeError):
-    """A kernel launch did not complete within the per-launch watchdog window.
-
-    Distinct from a plain ``RuntimeError`` (a slow-but-completing variant) because a hung
-    kernel stays **resident on the device** after we give up polling for it — the in-process
-    bench has no way to evict it (only the SIGKILL-isolated tuning worker can reset the
-    device). A caller that runs further benches on the same device after catching this must
-    treat the device as poisoned and stop, or the next blocking ``synchronize()`` (e.g. the
-    torch peer-bench) will block behind the still-running kernel. Subclasses ``RuntimeError``
-    so existing ``except RuntimeError`` handlers (the autotune sweep) keep marking the variant
-    ``bench_fail`` unchanged."""
 
 
 class CompileBudgetExceeded(RuntimeError):
@@ -640,11 +320,11 @@ class CompileBudgetExceeded(RuntimeError):
     about the kernel. Callers must record no latency for it — inventing one mislabels the config,
     and a persisted row is worse than mislabelled, because it is then served as a cache hit and
     the config is never re-benched. Subclasses ``RuntimeError`` so existing handlers still catch
-    it. The budget is enforced BETWEEN kernels (:func:`_load_plan`) and once more when the whole
-    setup returns, so it fires on a compile that is still running rather than only on one that
-    finished. That ordering is what the distinction rests on: a bench worker's wall cap SIGKILLs
-    the child, and a killed child reports a dead worker — which reads as a slow kernel and is the
-    opposite of what a compile overrun means."""
+    it. The budget is enforced BETWEEN kernels (:func:`_compile_kernels`) and once
+    more when the whole setup returns, so it fires on a compile that is still running rather than
+    only on one that finished. That ordering is what the distinction rests on: a bench worker's
+    wall cap SIGKILLs the child, and a killed child reports a dead worker — which reads as a slow
+    kernel and is the opposite of what a compile overrun means."""
 
 
 def compile_budget_overrun(exc: BaseException) -> bool:
@@ -658,11 +338,11 @@ def compile_budget_overrun(exc: BaseException) -> bool:
 class GraphCaptureError(RuntimeError):
     """CUDA graph capture of the bench launch loop failed.
 
-    Raised by :meth:`CompiledProgram.capture_launch_graphs` after draining any
-    in-progress capture state, so the stream is clean and the caller can simply
-    retry the bench uncaptured. Only the per-kernel reproducer bench enables
-    capture (the autotune sweep never does), so this can't be misclassified as
-    a ``bench_fail`` there."""
+    Raised by :meth:`CompiledProgram.capture_launch_graphs` and
+    :meth:`CompiledProgram.capture_program_graph`; the runtime ends the capture before
+    reporting, so the stream is clean and the caller can simply retry the bench uncaptured.
+    Only the per-kernel reproducer bench enables capture (the autotune sweep never does), so
+    this can't be misclassified as a ``bench_fail`` there."""
 
 
 _AUTO_BUDGET_MS = 100.0
@@ -675,11 +355,11 @@ _AUTO_BUDGET_MS = 100.0
 # where 100 iters would over-measure relative to confidence needs).
 _AUTO_MAX_ITERS = 100
 # Target per-kernel-position timing window. Sub-millisecond kernels are
-# dominated by per-iter Python/cupy framing overhead (~100 µs); we
-# amortize it by repeating each launch ``batch_size`` times inside one
-# CUDA event window, where ``batch_size = ceil(_BATCH_TARGET_MS /
-# per_launch_ms)``. Calibrated after warmup from the last-warmup iter's
-# per-launch timings, then held fixed during measurement.
+# dominated by per-iter host framing overhead; we amortize it by repeating
+# each launch ``batch_size`` times inside one CUDA event window, where
+# ``batch_size = ceil(_BATCH_TARGET_MS / per_launch_ms)``. Calibrated after
+# warmup from the last-warmup iter's per-launch timings, then held fixed
+# during measurement.
 _BATCH_TARGET_MS = 1.0
 # Minimum total GPU time the warmup window should cover. sm_120 (and
 # other consumer GPUs with auto-boost) take several ms to ramp clocks
@@ -691,129 +371,55 @@ _BATCH_TARGET_MS = 1.0
 _WARMUP_TARGET_MS = 10.0
 
 
-def _wait_for_event(event, timeout_ms: float, label: str) -> None:
-    """Block until ``event`` completes, polling rather than calling the
-    blocking ``synchronize()``. Raises ``HungKernelError`` on timeout —
-    necessary because once a CUDA kernel is hung, ``synchronize()``
-    blocks indefinitely (the driver only resets after minutes), which
-    stalls the autotune sweep on a single bad variant.
-
-    Caveat: a hung kernel is still queued on the device after we give
-    up here, so the *next* launch queues behind it and may also be
-    slow. That's still vastly better than blocking forever in this
-    one bench."""
-    import time as _time
-
-    import cupy as _cp  # noqa: PLC0415
-
-    start = _time.perf_counter()
-    deadline = start + timeout_ms / 1000.0
-    next_warn = start + 0.2  # surface kernels stuck >200ms even if they eventually finish
-    warned = False
-    while not event.done:
-        now = _time.perf_counter()
-        if now > deadline:
-            raise HungKernelError(f"kernel {label!r} did not complete within {timeout_ms:.0f} ms — variant marked bench_fail")
-        if now > next_warn:
-            logger.warning("[cuda] kernel %r still pending after %.2fs (timeout %.1fs)", label, now - start, timeout_ms / 1000.0)
-            warned = True
-            next_warn = now + 1.0  # subsequent log every 1s while still stuck
-        _time.sleep(0.001)
-    elapsed = _time.perf_counter() - start
-    if warned:
-        logger.warning("[cuda] kernel %r completed after %.2fs of waiting", label, elapsed)
-    _cp.cuda.runtime.eventSynchronize(event.ptr)  # cheap post-completion sync
-
-
 # ---------------------------------------------------------------------------
-# CompiledProgram: post-compile GPU state + uniform iter loop
+# CompiledProgram: one loaded program in the runtime + uniform iter loop
 # ---------------------------------------------------------------------------
 
 
 @dataclass
 class CompiledProgram:
-    """Post-compile GPU state for one graph: kernels, allocated buffers,
-    pre-built TMA descriptors.
+    """One program loaded into the runtime: its plan on this side, its buffers, kernels and
+    captured graphs on the other.
 
-    Constructed inside ``gpu_lock()`` by the public entry points
-    (:func:`run_program`, :func:`run_program_debug`,
-    :func:`benchmark_program`) so every CUDA-touching phase — NVRTC
-    compile, cupy alloc, descriptor H2D, kernel-launch loop, output
-    ``.get()`` — runs with the lock held. Peer xdist workers never
-    interleave with us on the device, which previously surfaced as
-    small numerical divergence in multi-kernel attention tests when
-    the suite ran in parallel.
+    Constructed inside ``gpu_lock()`` by the public entry points (:func:`run_program`,
+    :func:`run_program_debug`, :func:`benchmark_program`) so every CUDA-touching phase — nvcc,
+    allocation, the kernel-launch loop, the output copy — runs with the lock held. Peer xdist
+    workers never interleave with us on the device, which previously surfaced as small numerical
+    divergence in multi-kernel attention tests when the suite ran in parallel.
 
-    All three entry points walk launches through the same
-    :meth:`iter_once`. What differs between them — single pass vs
-    warmup+measure vs snapshot-every-launch — collapses to which
+    All three entry points walk launches through the same :meth:`iter_once`. What differs
+    between them — single pass vs warmup+measure vs snapshot-every-launch — collapses to which
     optional callbacks they pass."""
 
-    compiled: _Compiled
-    arrays: dict[str, cp.ndarray]
-    descs: dict[int, dict[str, cp.ndarray]]
+    # Field order is teardown order: the executor drops first and synchronizes its stream, so
+    # the tensors lent to it are released only after every launch that read them completed.
+    plan: ExecutionPlan
+    program: Any
+    executor: Any
     load_times_ms: dict[str, float] = field(default_factory=dict)
-    # Per-symbolic-axis runtime ``int`` resolved at ``build`` time from the
-    # supplied input shapes — fed straight to ``_launch`` for grid /
-    # block resolution and the runtime-arg tail. Empty for fully-static
-    # graphs.
+    # The symbolic environment the program is currently bound at (``{}`` for a static graph).
     sym_values: dict[str, int] = field(default_factory=dict)
-    # Liveness-planned scratch slab: scratch ``arrays`` are views into
-    # ``slab_plan.slab``, pinned here for the program lifetime (``build`` always
-    # populates it; the default is only for dataclass construction).
-    slab_plan: _SlabPlan | None = None
-    # Cross-program :class:`BufferArena` the activation buffers + slab view into
-    # (``None`` → standalone allocation, the non-serving default). ``rebind`` re-takes
-    # its views from the same arena so sharing survives symbolic re-sizing.
+    # Cross-program pooling for the regions this program's memory came from (``None`` → the
+    # program's own tensors, or the runtime's allocations when torch is absent).
     arena: BufferArena | None = None
-    # Per-launch timing events, lazily created on first ``iter_once``
-    # and reused across every subsequent call so multi-iter bench loops
-    # don't churn the cupy ``Event`` pool (the pre-unification
-    # ``benchmark_program`` allocated events once outside the while
-    # loop; thrashing them per iter perturbs the tuner's variant
-    # ranking — close-latency siblings get reordered run-to-run, which
-    # caused ``test_tuned_variant_matches_reference`` to flake ~30%).
-    _starts: list = field(default_factory=list, repr=False)
-    _stops: list = field(default_factory=list, repr=False)
+    # Region name → the tensor lent to the runtime (empty when the runtime allocates).
+    _tensors: dict[str, Any] = field(default_factory=dict, repr=False)
     # Number of completed ``iter_once`` calls — iter 0 runs under the first-iteration watchdog
     # deadline (first-launch lazy-load / carveout stalls are not hangs; see ``_launch_deadline_ms``).
     _iters_done: int = field(default=0, repr=False)
-    # Per-launch CUDA graphs (one per launch position, each containing that
-    # launch's whole batch) captured by :meth:`capture_launch_graphs`. When
-    # set, ``iter_once`` replays ``_graphs[i]`` with one host call instead of
-    # the ``batch_sizes[i]``-long Python launch loop, so the CUDA event window
-    # measures dense GPU work rather than per-launch dispatch gaps. ``None``
-    # (the default) keeps the plain launch loop — ``run_program`` /
-    # ``run_program_debug`` and the autotune sweep never capture.
-    _graphs: list | None = field(default=None, repr=False)
-    _graph_batch_sizes: list[int] | None = field(default=None, repr=False)
-    # One CUDA graph holding EVERY launch in program order (batch 1 each),
-    # captured by :meth:`capture_program_graph` for the whole-program (e2e)
-    # timing windows — the emmy analogue of timing a captured torch
-    # forward, so the backend-comparison table is like-for-like.
-    _e2e_graph: Any | None = field(default=None, repr=False)
-    _e2e_start: Any | None = field(default=None, repr=False)
-    _e2e_stop: Any | None = field(default=None, repr=False)
-    # Whole-program graphs keyed by the resolved symbolic tuple — the serving
-    # captured-replay path holds one captured graph PER seq_len over a single
-    # capacity-sized buffer set (a graph baked at seq_len S only replays at S,
-    # since each kernel's grid + by-value seq_len are frozen by capture). LRU,
-    # bounded by ``_graph_cache_max``. The static-shape bench path uses the one
-    # ``()`` key, so it's unaffected.
-    _graph_cache: dict = field(default_factory=dict, repr=False)
-    _graph_cache_max: int = 64
-    # Per-sym-key TMA descriptor overlays (symbolic-src descriptors re-encoded at
-    # the RESOLVED shape — the capacity-buffer prefix layout's true strides; see
-    # :func:`_prebuild_descriptors`). Keyed like ``_graph_cache``; an entry must
-    # outlive any captured graph replaying at its key (the graph bakes the desc
-    # device pointers), so eviction only drops keys absent from ``_graph_cache``.
-    _sym_descs: dict = field(default_factory=dict, repr=False)
+
+    @property
+    def launches(self) -> list[_Launch]:
+        return self.plan.launches
+
+    def _buffer(self, name: str) -> _Buffer:
+        return next(b for b in self.plan.buffers if b.name == name)
 
     @classmethod
     def build(
         cls,
         graph: Graph,
-        input_data: dict[str, np.ndarray] | None = None,
+        input_data: dict | None = None,
         *,
         compile_timeout_s: float | None = None,
         arena: BufferArena | None = None,
@@ -827,338 +433,184 @@ class CompiledProgram:
     def build_from_plan(
         cls,
         plan: ExecutionPlan,
-        input_data: dict[str, np.ndarray] | None = None,
+        input_data: dict | None = None,
         *,
         compile_timeout_s: float | None = None,
         arena: BufferArena | None = None,
         cubin_dir: Path | None = None,
     ) -> CompiledProgram:
-        """Load every kernel (cubin-by-key or source-via-cache), allocate every
-        buffer (the plan's generated constants fill themselves — see
-        :func:`_with_generated_constants`), pre-build TMA descriptors. ``compile_timeout_s`` bounds the
-        setup phase at a C-call boundary: the kernel load checks it between kernels and the
-        alloc + descriptor work is checked when it returns, so an overrun raises
-        :class:`CompileBudgetExceeded` before the caller proceeds to launches, leaving no
-        in-flight kernels queued. ``arena`` pools the
-        activation buffers + scratch slab across sequentially-run
-        programs (see :class:`BufferArena`).
+        """Compile every kernel (cubin-by-key or source-via-cache), resolve the symbolic
+        environment from the supplied input shapes, allocate every region of the runtime's
+        layout, then load the program: the runtime uploads the input and constant bytes (the
+        plan's generated constants fill themselves — see :func:`_with_generated_constants`) and
+        fills the runtime constants. A constant supplied as a device tensor is lent to the
+        runtime as it is — the serving path's weights, uploaded once and shared across twins.
 
-        Caller is expected to hold ``gpu_lock()`` around this call and
-        every subsequent method on the returned program."""
+        ``compile_timeout_s`` bounds the setup phase at a C-call boundary: the kernel compile
+        checks it between kernels and the load is checked when it returns, so an overrun raises
+        :class:`CompileBudgetExceeded` before the caller proceeds to launches, leaving no
+        in-flight kernels queued. ``arena`` pools this program's regions with every other
+        program built on it (see :class:`BufferArena`).
+
+        Caller is expected to hold ``gpu_lock()`` around this call and every subsequent method
+        on the returned program."""
         t0 = _time_module.monotonic()
-        compiled = _load_plan(plan, deadline=None if compile_timeout_s is None else t0 + compile_timeout_s, cubin_dir=cubin_dir)
-        loaded = _time_module.monotonic()
+        binaries = _compile_kernels(plan, deadline=None if compile_timeout_s is None else t0 + compile_timeout_s, cubin_dir=cubin_dir)
+        compiled = _time_module.monotonic()
         input_data = _with_generated_constants(plan, input_data or {})
-        sym_values = _resolve_symbolic(compiled, input_data)
-        arrays, slab_plan = _allocate(compiled, input_data, arena)
-        allocated = _time_module.monotonic()
-        descs = _prebuild_descriptors(compiled, arrays)
+        sym_values = _resolve_symbolic(plan, input_data)
+        program = emmy_runtime.Program(json.dumps(plan_to_dict(plan)))
+        self = cls(plan=plan, program=program, executor=None, sym_values=sym_values, arena=arena)
+        regions = self._provision(sym_values, input_data)
+        bindings = _host_bindings(plan, input_data, sym_values)
+        self.executor = emmy_runtime.Executor(device(), program, binaries, bindings, sym_values, regions)
         elapsed = _time_module.monotonic() - t0
         if compile_timeout_s is not None and elapsed > compile_timeout_s:
             raise CompileBudgetExceeded(f"compile stage exceeded {compile_timeout_s:.1f}s budget ({elapsed:.2f}s) — nothing measured")
         logger.info(
             "[cuda] CompiledProgram.build: %d launch(es) compile+alloc=%.2fs kernels=[%s]",
-            len(compiled.launches),
+            len(plan.launches),
             elapsed,
-            ", ".join(f"{li}:{lc.kernel_name}" for li, lc in enumerate(compiled.launches)),
+            ", ".join(f"{li}:{lc.kernel_name}" for li, lc in enumerate(plan.launches)),
         )
-        if slab_plan.naive_bytes > 0:
-            logger.info(
-                "[cuda] buffer-reuse: scratch slab=%.2f GB (%.2f GB naive, %.1fx) over %d scratch buf(s)",
-                slab_plan.total_bytes / 1e9,
-                slab_plan.naive_bytes / 1e9,
-                slab_plan.naive_bytes / max(1, slab_plan.total_bytes),
-                len(slab_plan.offsets),
-            )
-        return cls(
-            compiled=compiled,
-            arrays=arrays,
-            descs=descs,
-            sym_values=sym_values,
-            slab_plan=slab_plan,
-            arena=arena,
-            load_times_ms={"module_ms": (loaded - t0) * 1000, "allocation_upload_submit_ms": (allocated - loaded) * 1000},
-        )
+        self.load_times_ms = {"compile_ms": (compiled - t0) * 1000, **self.executor.load_times_ms()}
+        return self
 
-    def rebind(self, input_data: dict[str, np.ndarray]) -> None:
-        """Re-bind ``input_data`` on an already-built program, re-sizing
-        symbolic-shaped buffers to the new runtime dims — the serving path,
-        where one compiled dynamic-seq_len program runs request after request.
+    def _provision(self, sym_values: dict[str, int], input_data: dict) -> dict[str, tuple[int, int]] | None:
+        """The memory every region of the layout at ``sym_values`` lives in, as ``{region:
+        (address, bytes)}`` — ``None`` when torch is absent and the runtime allocates. A region
+        already backed by a large enough tensor is kept (a rebind that grows nothing keeps every
+        address); the arena pools everything but constants; a constant bound to a device tensor
+        is that tensor."""
+        if _torch() is None:
+            return None
+        layout = self.program.layout(sym_values)
+        regions: dict[str, tuple[int, int]] = {}
+        for name, nbytes in layout["regions"].items():
+            role, _, buffer = name.partition(":")
+            src = input_data.get(buffer) if buffer else None
+            if _is_device_tensor(src):
+                if not src.is_contiguous() or src.numel() * src.element_size() < nbytes:
+                    raise ValueError(f"buffer {buffer!r}: device tensor must be contiguous and hold {nbytes} bytes")
+                tensor = _flat_bytes(src)
+            elif self.arena is not None and role != "constant":
+                tensor = self.arena.backing(name, nbytes)
+            else:
+                tensor = self._tensors.get(name)
+                if tensor is None or tensor.numel() < max(1, nbytes):
+                    tensor = _new_backing(nbytes)
+            self._tensors[name] = tensor
+            regions[name] = (tensor.data_ptr(), tensor.numel() * tensor.element_size())
+        return regions
 
-        Supplied buffers are re-uploaded: in place (``arr.set``) when the
-        resolved shape is unchanged, re-allocated otherwise. Un-supplied
-        buffers whose shape carries a symbolic dim (scratch/outputs sized by
-        seq_len) re-materialize at the new shape under the same fill policy
-        as ``build``; static-shaped un-supplied buffers — the weights — keep
-        their device arrays untouched (no re-upload). When any array was
-        re-allocated, TMA descriptors are rebuilt (they embed device pointers
-        and shapes) and captured CUDA graphs are dropped (they bake old
-        pointers). Caller must hold ``gpu_lock()``."""
-        new_sym = _resolve_symbolic(self.compiled, input_data)
-        realloc = False
-        reuse = self.slab_plan is not None
-        with np.errstate(over="ignore", invalid="ignore"):
-            for buf in self.compiled.bufs:
-                if reuse and buf.role == "scratch":
-                    continue  # slab-managed; re-planned below when dims change
-                # A runtime ``context_value`` constant (a dynamic mean's divisor) keeps a
-                # static (1,) shape but its VALUE tracks the runtime context — refill in place
-                # whenever sym_values change (the shape-change check below would skip it).
-                if buf.name in self.compiled.runtime_constants:
-                    self.arrays[buf.name].fill(float(self.compiled.runtime_constants[buf.name].eval(new_sym)))
-                    continue
-                src = input_data.get(buf.name)
-                if src is None and not buf.is_symbolic:
-                    continue
-                shape = buf.resolve_shape(new_sym) or (1,)
-                arr = self.arrays[buf.name]
-                if tuple(arr.shape) != shape:
-                    if self.arena is not None and buf.role in ("input", "output"):
-                        self.arrays[buf.name] = _arena_view(self.arena, buf, shape, src, self.compiled.constants)
-                    else:
-                        self.arrays[buf.name] = _materialize(buf, shape, src, self.compiled.constants)
-                    realloc = True
-                elif src is not None:
-                    arr.set(np.ascontiguousarray(src, dtype=buf.dtype.np).reshape(shape))
-        # Scratch slab: re-plan + reallocate at the new dims (sizes scale with the
-        # symbolic extent). The fresh slab has new pointers, so descs/graphs must
-        # be rebuilt/dropped — handled by the shared ``if realloc:`` block below.
-        if reuse and new_sym != self.slab_plan.sym_values:
-            scratch_views, self.slab_plan = _alloc_slab(self.compiled, new_sym, self.arena)
-            self.arrays.update(scratch_views)
-            realloc = True
+    def rebind(self, input_data: dict) -> None:
+        """Re-bind ``input_data`` on an already-built program, re-sizing symbolic-shaped buffers
+        to the new runtime dims — the serving path, where one compiled dynamic-seq_len program
+        runs request after request.
+
+        Supplied buffers are re-uploaded; un-supplied buffers whose shape carries a symbolic dim
+        (scratch/outputs sized by seq_len) re-materialize at the new shape under the same fill
+        policy as ``build``; static-shaped un-supplied buffers — the weights — keep their device
+        memory untouched. Regions grow when the new layout needs more bytes (the arena keeps the
+        older generation alive); captured graphs and descriptors are dropped by the runtime,
+        since they bake addresses. Caller must hold ``gpu_lock()``."""
+        new_sym = _resolve_symbolic(self.plan, input_data)
+        touched = {name for name, value in input_data.items() if not _is_device_tensor(value)}
+        touched |= {b.name for b in self.plan.buffers if b.role in ("input", "constant") and b.is_symbolic}
+        bindings = _host_bindings(self.plan, input_data, new_sym, only=touched)
+        regions = self._provision(new_sym, input_data)
+        self.executor.rebind(new_sym, bindings, regions)
         self.sym_values = new_sym
-        if realloc:
-            self.descs = _prebuild_descriptors(self.compiled, self.arrays)
-            self._graphs = None
-            self._graph_batch_sizes = None
-            self._e2e_graph = None
-            self._graph_cache.clear()
-            self._sym_descs.clear()
 
     def set_sym_values(self, values: dict[str, int]) -> None:
-        """Set the host symbolic values that resolve launch grids + by-value
-        kernel args, WITHOUT re-allocating buffers — they stay at the build
-        (capacity) shape. The serving capture path: buffers sized once at
-        capacity, grids + frozen seq_len baked per request via
-        :meth:`capture_program_graph`, results sliced to the real shape by
-        ``outputs(sym_values=…)``. Errors if any value exceeds the allocated
-        buffer capacity (the caller falls back to ``rebind`` above capacity)."""
-        merged = {**self.sym_values, **values}
-        for buf in self.compiled.bufs:
-            want = buf.resolve_shape(merged) or (1,)
-            if math.prod(want) > self.arrays[buf.name].size:
-                raise ValueError(
-                    f"set_sym_values {values}: buffer {buf.name!r} resolves to {want} "
-                    f"({math.prod(want)} elems) > capacity {self.arrays[buf.name].size}"
-                )
-        self.sym_values = merged
+        """Set the host symbolic values that resolve launch grids + by-value kernel args,
+        WITHOUT re-allocating buffers — they stay at the build (capacity) shape. The serving
+        capture path: buffers sized once at capacity, grids + frozen seq_len baked per request
+        via :meth:`capture_program_graph`, results sliced to the real shape by
+        ``outputs(sym_values=…)``. Errors if any value exceeds the allocated capacity (the caller
+        falls back to ``rebind`` above capacity)."""
+        self.executor.set_env(dict(values))
+        self.sym_values = self.executor.env()
+
+    @contextlib.contextmanager
+    def on_torch_stream(self):
+        """:meth:`on_stream` for torch's current stream when torch sees the device, else a
+        no-op — the bench and run paths, where peer torch work (the eager reference, the
+        interleaved torch benches) must stay ordered with the program's launches."""
+        torch = _torch()
+        if torch is None:
+            yield
+            return
+        with self.on_stream(torch.cuda.current_stream()):
+            yield
+
+    @contextlib.contextmanager
+    def on_stream(self, stream):
+        """Issue every launch and copy inside the block on ``stream`` (a torch CUDA stream) —
+        the serving path, where inputs arrive and outputs leave on torch's current stream and
+        the work must stay ordered with it. Under torch's own graph capture, :meth:`run_once`
+        is the recordable form; the program's own graphs are not."""
+        self.executor.set_stream(int(stream.cuda_stream))
+        try:
+            yield
+        finally:
+            self.executor.set_stream(None)
 
     def run_once(self) -> None:
-        """Launch every kernel once in program order with no per-launch event
-        record/sync/watchdog — the serving hot path (timing semantics live in
-        :meth:`iter_once`). The default stream orders the launches; the
-        caller's subsequent ``outputs()`` ``.get()`` synchronizes."""
-        descs = self._descs_now()
-        for i, launch in enumerate(self.compiled.launches):
-            _launch(launch, self.compiled, self.arrays, descs.get(i), self.sym_values)
-
-    def _descs_now(self) -> dict[int, dict[str, cp.ndarray]]:
-        """The per-launch TMA descriptors matching the CURRENT ``self.sym_values``:
-        the prebuilt (allocation-shaped) entries overlaid with per-sym re-encodes of
-        every symbolic-src descriptor. On the capacity-buffer serving path the live
-        data is prefix-packed at the resolved shape, so symbolic-src descriptors must
-        re-encode per seq_len (cached per sym key). A fully-static program (empty
-        key) returns the prebuilt dict unchanged."""
-        key = self._sym_key()
-        if not key:
-            return self.descs
-        overlay = self._sym_descs.get(key)
-        if overlay is None:
-            overlay = _prebuild_descriptors(self.compiled, self.arrays, sym_values=self.sym_values, only_symbolic=True)
-            # Bound the cache without ever dropping a key whose captured graph is
-            # still alive (its replay dereferences these device buffers).
-            evictable = [k for k in self._sym_descs if k not in self._graph_cache]
-            while evictable and len(self._sym_descs) >= max(self._graph_cache_max, len(self._graph_cache) + 1):
-                self._sym_descs.pop(evictable.pop(0))
-            self._sym_descs[key] = overlay
-        if not overlay:
-            return self.descs
-        return {li: {**self.descs.get(li, {}), **overlay.get(li, {})} for li in self.descs.keys() | overlay.keys()}
+        """Launch every kernel once in program order with no per-launch event record / sync /
+        watchdog — the serving hot path (timing semantics live in :meth:`iter_once`). The
+        caller's subsequent ``outputs()`` synchronizes."""
+        self.executor.run_once()
 
     def capture_launch_graphs(self, batch_sizes: list[int]) -> None:
-        """Capture each launch position's batch into one CUDA graph.
-
-        Stream capture is illegal on the legacy default stream, so each batch is
-        captured on a temporary side stream; ``iter_once`` then replays the graph
-        on the default stream (``Graph.launch`` targets the *current* stream), so
-        the existing cupy/torch event interleaving is untouched. The capture
-        window holds only ``_launch`` work — output zeroing + kernel launches on
-        prebuilt buffers/descriptors — no allocations, no sync, no event records
-        (the dynamic-smem attribute is already set by the uncaptured warmup iters
-        that always precede capture).
-
-        Safe to call again when batch sizes change (warmup extension re-fires the
-        calibration); a no-op when they match the captured ones. Raises
-        :class:`GraphCaptureError` on any failure, after draining the capture
-        state so the stream isn't left wedged — the caller retries uncaptured."""
-        import cupy as cp
-
-        if self._graphs is not None and self._graph_batch_sizes == list(batch_sizes):
-            return
-        self._graphs = None
-        descs = self._descs_now()
-        side = cp.cuda.Stream(non_blocking=True)
-        graphs = []
-        for i, launch in enumerate(self.compiled.launches):
-            try:
-                with side:
-                    side.begin_capture()
-                    for _ in range(batch_sizes[i]):
-                        _launch(launch, self.compiled, self.arrays, descs.get(i), self.sym_values)
-                    graphs.append(side.end_capture())
-            except Exception as exc:
-                if side.is_capturing():
-                    try:
-                        with side:
-                            side.end_capture()  # drain capture state; discard the partial graph
-                    except Exception:  # noqa: BLE001, S110 — already raising the original failure
-                        pass
-                raise GraphCaptureError(f"capture failed for launch {i} ({launch.kernel_name!r}): {exc}") from exc
-        # One throwaway replay per graph absorbs graphExec instantiation /
-        # upload cost so the first measured iter is clean. Buffers get
-        # clobbered, which is fine: accuracy was checked before benching.
-        for g in graphs:
-            g.launch()
-        cp.cuda.runtime.deviceSynchronize()
-        self._graphs = graphs
-        self._graph_batch_sizes = list(batch_sizes)
+        """Capture each launch position's batch into one CUDA graph, so :meth:`iter_once` replays
+        it with one call and the event window measures dense GPU work. Unchanged batch sizes are
+        a no-op; changed ones re-capture. A failure raises :class:`GraphCaptureError`."""
+        try:
+            self.executor.capture_launch_graphs([int(b) for b in batch_sizes])
+        except HungKernelError:
+            raise
+        except RuntimeError as exc:
+            raise GraphCaptureError(f"per-launch CUDA graph capture failed: {exc}") from exc
 
     def capture_program_graph(self) -> None:
-        """Capture every launch (batch 1, program order) into ONE CUDA graph at
-        the CURRENT ``self.sym_values``, caching it by the resolved symbolic
-        tuple and pointing ``self._e2e_graph`` at it.
-
-        Two callers:
-        - The bench's :meth:`time_program_window` (static graph → the single
-          ``()`` cache key): one event window around N back-to-back replays, the
-          same semantics the captured torch closures get.
-        - The serving path: one captured graph PER seq_len over a SHARED
-          capacity-sized buffer set. A graph baked at seq_len S only replays at S
-          (its grids + by-value seq_len are frozen by capture), so the cache is
-          keyed by ``self.sym_values`` and bounded LRU (``_graph_cache_max``).
-          Set ``self.sym_values`` (via :meth:`set_sym_values`) and upload the
-          request's input prefix (via :meth:`upload_prefix`) before calling.
-
-        Cache hit ⇒ no re-capture. Same error contract as
-        :meth:`capture_launch_graphs`: raises :class:`GraphCaptureError` after
-        draining any partial capture state."""
-        import cupy as cp
-
-        key = self._sym_key()
-        cached = self._graph_cache.get(key)
-        if cached is not None:
-            self._graph_cache[key] = self._graph_cache.pop(key)  # LRU bump
-            self._e2e_graph = cached
-            return
-        descs = self._descs_now()
-        side = cp.cuda.Stream(non_blocking=True)
+        """Capture EVERY launch in program order into one CUDA graph at the current symbolic
+        environment — the emmy analogue of timing a captured torch forward, and the serving
+        replay unit. The runtime keeps one graph per environment (a graph baked at seq_len S
+        only replays at S: every kernel's grid and by-value seq_len are frozen by capture),
+        least recently used out; a repeated environment is a no-op. A failure raises
+        :class:`GraphCaptureError`."""
         try:
-            with side:
-                side.begin_capture()
-                for i, launch in enumerate(self.compiled.launches):
-                    _launch(launch, self.compiled, self.arrays, descs.get(i), self.sym_values)
-                graph = side.end_capture()
-        except Exception as exc:
-            if side.is_capturing():
-                try:
-                    with side:
-                        side.end_capture()  # drain capture state; discard the partial graph
-                except Exception:  # noqa: BLE001, S110 — already raising the original failure
-                    pass
-            raise GraphCaptureError(f"whole-program capture failed: {exc}") from exc
-        # Throwaway replay absorbs graphExec instantiation/upload cost.
-        graph.launch()
-        cp.cuda.runtime.deviceSynchronize()
-        self._graph_cache[key] = graph
-        while len(self._graph_cache) > self._graph_cache_max:
-            evicted = next(iter(self._graph_cache))
-            self._graph_cache.pop(evicted)  # evict LRU
-            self._sym_descs.pop(evicted, None)  # its desc overlay is no longer pinned
-        self._e2e_graph = graph
-
-    def _sym_key(self) -> tuple:
-        """Hashable cache key for the current resolved symbolic values (``()`` for
-        a fully-static graph)."""
-        return tuple(sorted(self.sym_values.items()))
+            self.executor.capture_program_graph()
+        except HungKernelError:
+            raise
+        except RuntimeError as exc:
+            raise GraphCaptureError(f"whole-program CUDA graph capture failed: {exc}") from exc
 
     def replay_program_graph(self) -> None:
-        """Launch the whole-program graph for the current ``self.sym_values`` once
-        on the default stream — the serving hot path. The caller sets the request's
-        seq_len (:meth:`set_sym_values`), uploads its input prefix
-        (:meth:`upload_prefix`), and captures-or-reuses the graph
-        (:meth:`capture_program_graph`) first; results come from
-        ``outputs(sym_values=…)``. Caller must hold ``gpu_lock()``."""
-        if self._e2e_graph is None:
-            raise RuntimeError("replay_program_graph called before capture_program_graph")
-        self._e2e_graph.launch()
+        self.executor.replay_program_graph()
 
-    def upload_prefix(self, input_data: dict[str, np.ndarray]) -> None:
-        """H2D each host array into the contiguous PREFIX of its capacity-sized
-        device buffer — no re-allocation, so the captured graphs' baked pointers
-        stay valid (a logically ``(1, S, …)`` tensor occupies the first ``S*…``
-        elements of the ``(1, S_cap, …)`` allocation; the kernels, launched at
-        grids for the real S, only touch that prefix). Errors if a host array
-        exceeds its buffer's capacity. Caller must hold ``gpu_lock()``."""
-        for name, host in input_data.items():
-            buf = self.compiled.buf_by_name[name]
-            arr = self.arrays[name]
-            flat = np.ascontiguousarray(host, dtype=buf.dtype.np).ravel()
-            if flat.size > arr.size:
-                raise ValueError(f"upload_prefix: {name!r} has {flat.size} elems > capacity {arr.size}")
-            arr.ravel()[: flat.size].set(flat)
+    def upload_prefix(self, input_data: dict) -> None:
+        """H2D each supplied input into the contiguous prefix of its capacity buffer: a
+        logically ``(1, S, …)`` tensor occupies the first ``S·…`` elements."""
+        bindings = _host_bindings(self.plan, input_data, self.sym_values, only=set(input_data))
+        for name, data in bindings.items():
+            self.executor.bind(name, data)
 
-    def upload_prefix_device(self, input_data: dict[str, cp.ndarray]) -> None:
-        """Device-to-device twin of :meth:`upload_prefix`: copy each cupy source
-        into the contiguous PREFIX of its capacity-sized device buffer with NO
-        host round-trip — the serving zero-copy path, where the sources are cupy
-        views of the caller's torch GPU tensors (``cp.from_dlpack``). Same
-        prefix-packing contract and capacity check as :meth:`upload_prefix` (the
-        kernels launched at the real-S grid read only the prefix). Caller must
-        hold ``gpu_lock()`` and order the copy on the replay stream — the serving
-        runner enters a cupy external stream bound to torch's current stream so
-        the copy, the graph replay, and the output read all enqueue in order."""
-        import cupy as cp  # noqa: PLC0415
-
-        for name, src in input_data.items():
-            buf = self.compiled.buf_by_name[name]
-            arr = self.arrays[name]
-            # Self-copy skip: when the caller's source IS this buffer (the serving runner's
-            # post→pre chaining rewires a producer's output view onto this input's backing, so
-            # the "upload" would copy a buffer onto itself), there is nothing to move — and the
-            # skip is what deletes the seam copy from the captured decode graph.
-            if src.data.ptr == arr.data.ptr:
-                continue
-            flat = cp.ascontiguousarray(src, dtype=buf.dtype.np).ravel()
-            if flat.size > arr.size:
-                raise ValueError(f"upload_prefix_device: {name!r} has {flat.size} elems > capacity {arr.size}")
-            arr.ravel()[: flat.size] = flat
+    def upload_prefix_device(self, input_data: dict) -> None:
+        """Device twin of :meth:`upload_prefix`: copy each supplied CUDA tensor into its buffer's
+        prefix device-to-device on the current stream — no host hop. A tensor that already IS
+        the buffer (a producer's output chained onto this input) is skipped."""
+        for name, tensor in input_data.items():
+            if not _is_device_tensor(tensor):
+                raise TypeError(f"buffer {name!r}: expected a CUDA tensor, got {type(tensor).__name__}")
+            tensor = tensor.contiguous()
+            self.executor.bind_device(name, tensor.data_ptr(), tensor.numel() * tensor.element_size())
 
     def time_program_window(self, replays: int) -> float:
-        """One event window around ``replays`` back-to-back whole-program
-        replays of the captured e2e graph; returns per-replay ms. Caller
-        must have run :meth:`capture_program_graph` first."""
-        import cupy as cp
-
-        if self._e2e_start is None:
-            self._e2e_start, self._e2e_stop = cp.cuda.Event(), cp.cuda.Event()
-        self._e2e_start.record()
-        for _ in range(replays):
-            self._e2e_graph.launch()
-        self._e2e_stop.record()
-        n = max(1, len(self.compiled.launches))
-        _wait_for_event(self._e2e_stop, config.kernel_timeout_ms() * n * replays, "<whole-program e2e window>")
-        return cp.cuda.get_elapsed_time(self._e2e_start, self._e2e_stop) / replays
+        """Per-replay ms of ``replays`` back-to-back whole-program graph replays in one event
+        window (:meth:`capture_program_graph` must have run)."""
+        return float(self.executor.time_program_window(int(replays), _launch_deadline_ms(self._iters_done, replays)))
 
     def iter_once(
         self,
@@ -1167,130 +619,121 @@ class CompiledProgram:
         pre_iter=None,
         per_launch_hook=None,
     ) -> list[float]:
-        """Run every launch once. Returns per-launch wall time in ms,
-        already event-synced before return.
+        """Run every launch once. Returns per-launch time in ms, already event-synced before
+        return.
 
-        ``batch_sizes[i]`` repeats launch ``i`` ``N`` times inside one
-        CUDA event window so per-iter Python/cupy framing overhead
-        amortizes across launches when the kernel is faster than the
-        framing (a 9 µs kernel measured one iter at a time is mostly
-        framing noise). Returned dt is divided by the batch size so
-        callers always see per-call ms.
+        ``batch_sizes[i]`` repeats launch ``i`` ``N`` times inside one CUDA event window so
+        per-iter host framing overhead amortizes across launches when the kernel is faster than
+        the framing. Returned dt is divided by the batch size so callers always see per-call ms.
+        Once :meth:`capture_launch_graphs` ran, each window replays that launch's graph instead.
 
-        ``pre_iter(max_batch_size)`` runs once before the launch loop
-        and inside the GPU lock the caller is holding — that's where
-        ``_bench_interleaved`` issues its peer torch backends so they
-        share the same warm GPU state emmy measures from.
+        ``pre_iter(max_batch_size)`` runs once before the launch loop and inside the GPU lock the
+        caller is holding — that's where ``_bench_interleaved`` issues its peer torch backends so
+        they share the same warm GPU state emmy measures from.
 
-        ``per_launch_hook(i, launch)`` runs after each launch's stop
-        event has synced. :func:`run_program_debug` uses it to
-        snapshot every non-input buffer after each launch.
+        ``per_launch_hook(i, launch)`` runs after each launch's stop event has synced.
+        :func:`run_program_debug` uses it to snapshot every non-input buffer after each launch.
 
-        Per-kernel sync (the ``_wait_for_event(stop_i, ...)``) makes
-        per-launch attribution accurate — without it, one kernel's
-        stop event can slide into a downstream kernel's scheduling
-        window and the timing for a sub-100µs kernel ends up
-        contaminated by 0.5-0.8 ms of phantom stream-stall time. The
-        watchdog also catches hung kernels independently per launch."""
-        import cupy as cp
-
-        n = len(self.compiled.launches)
+        The runtime syncs per launch, which makes per-launch attribution accurate — without it,
+        one kernel's stop event can slide into a downstream kernel's scheduling window — and
+        polls each stop event against the watchdog deadline, so a hung kernel raises
+        :class:`HungKernelError` instead of blocking. A 0.0 reading raises too: a real launch
+        consumes at least one device cycle, so zero means a no-op launch that must never win a
+        benchmark."""
+        n = len(self.plan.launches)
         if batch_sizes is None:
             batch_sizes = [1] * n
         if pre_iter is not None:
             pre_iter(max(batch_sizes))
-        if not self._starts:
-            self._starts = [cp.cuda.Event() for _ in range(n)]
-            self._stops = [cp.cuda.Event() for _ in range(n)]
-        starts, stops = self._starts, self._stops
-        descs = self._descs_now()
         dts = [0.0] * n
-        for i, launch in enumerate(self.compiled.launches):
-            b = batch_sizes[i]
-            starts[i].record()
-            if self._graphs is not None:
-                # Captured-graph replay: one host call enqueues the whole
-                # batch, so the event window measures dense GPU work. The
-                # caller (``benchmark_program``) re-captures whenever the
-                # batch sizes change, so ``_graphs[i]`` always matches ``b``.
-                self._graphs[i].launch()
-            else:
-                for _ in range(b):
-                    _launch(launch, self.compiled, self.arrays, descs.get(i), self.sym_values)
-            stops[i].record()
-            _wait_for_event(stops[i], _launch_deadline_ms(self._iters_done, b), f"{launch.kernel_name} (iter {self._iters_done})")
-            elapsed_ms = cp.cuda.get_elapsed_time(starts[i], stops[i])
-            # CUDA event timing has sub-µs resolution and a real launch must
-            # consume at least one device cycle — a 0.0 reading means the
-            # launch was a no-op (degenerate grid like BM=1×BN=128 with the
-            # M tile entirely masked out, or a kernel that was fused into
-            # nothing). Pinning a 0µs "win" in the autotune DB would lock
-            # that variant in as the unbeatable best across re-runs. Treat
-            # as bench_fail instead — the existing worker → parent → DB
-            # path then records a normal sentinel row.
-            if elapsed_ms <= 0.0:
-                raise RuntimeError(
-                    f"kernel {launch.kernel_name!r} reported {elapsed_ms:.3f}ms elapsed — "
-                    "degenerate / no-op launch, variant marked bench_fail"
-                )
-            dts[i] = elapsed_ms / b
+        for i, launch in enumerate(self.plan.launches):
+            b = int(batch_sizes[i])
+            dts[i] = float(self.executor.time_launch(i, b, _launch_deadline_ms(self._iters_done, b)))
             if per_launch_hook is not None:
                 per_launch_hook(i, launch)
         self._iters_done += 1
         return dts
 
+    def _shape(self, name: str, sym_values: dict[str, int] | None = None) -> tuple[int, ...]:
+        return self._buffer(name).resolve_shape({**self.sym_values, **(sym_values or {})})
+
+    def _read(self, name: str, sym_values: dict[str, int] | None = None) -> np.ndarray:
+        buf = self._buffer(name)
+        shape = self._shape(name, sym_values)
+        n = math.prod(shape) if shape else 1
+        return np.frombuffer(self.executor.read(name), dtype=buf.dtype.np)[:n].reshape(shape).copy()
+
     def outputs(self, sym_values: dict[str, int] | None = None) -> dict[str, np.ndarray]:
-        """Copy every output buffer back to host. Caller must hold the
-        GPU lock — ``.get()`` is an async D2H copy on the default
-        stream, so peer workers' kernels would otherwise interleave
-        with our D2H on the shared device.
+        """Copy every output buffer back to host after every queued launch has completed.
+        Caller must hold the GPU lock so peer workers' kernels never interleave with the copy.
 
-        ``sym_values`` (serving's capture path) slices each output to its real-S
-        shape — the buffer is allocated at capacity but only the
-        ``resolve_shape(sym_values)`` prefix holds the request's result; the rest
-        is unmasked garbage from the oversized allocation. Without it (the
-        default) the whole buffer is returned (the uncaptured rebind path already
-        sizes buffers to the request)."""
-        out: dict[str, np.ndarray] = {}
-        for name in self.compiled.outputs:
-            b = self.compiled.buf_by_name[name]
-            arr = self.arrays[name]
-            if sym_values is not None:
-                shape = b.resolve_shape({**self.sym_values, **sym_values})
-                n = math.prod(shape) if shape else 1
-                out[name] = arr.ravel()[:n].get().reshape(shape)
-            else:
-                out[name] = arr.get()
-        return out
+        ``sym_values`` (serving's capture path) slices each output to its real-S shape — the
+        buffer is allocated at capacity but only the ``resolve_shape(sym_values)`` prefix holds
+        the request's result; the rest is unmasked garbage from the oversized allocation."""
+        return {name: self._read(name, sym_values) for name in self.plan.outputs}
 
-    def output_prefix_device(self, sym_values: dict[str, int] | None = None) -> dict[str, cp.ndarray]:
-        """Device twin of :meth:`outputs`: return each output buffer's real-S
-        PREFIX as a cupy view (reshaped to the resolved shape) with NO ``.get()``
-        host copy — the serving zero-copy path, where the caller wraps the view as
-        a torch tensor (``torch.from_dlpack``) and clones it (the shared buffer is
-        overwritten by the next request's replay). ``sym_values`` slices to the
-        real shape exactly like :meth:`outputs`; without it the whole buffer view
-        is returned. Caller must hold ``gpu_lock()`` (and read on the replay
-        stream — see :meth:`upload_prefix_device`)."""
-        out: dict[str, cp.ndarray] = {}
-        for name in self.compiled.outputs:
-            b = self.compiled.buf_by_name[name]
-            arr = self.arrays[name]
-            if sym_values is not None:
-                shape = b.resolve_shape({**self.sym_values, **sym_values})
-                n = math.prod(shape) if shape else 1
-                out[name] = arr.ravel()[:n].reshape(shape)
-            else:
-                out[name] = arr
-        return out
+    def buffer_view(self, name: str, sym_values: dict[str, int] | None = None):
+        """A torch view of one buffer's real-shape prefix in its lent memory — no copy. The
+        shared buffer is overwritten by the next request's replay, so a caller that keeps the
+        result clones it. Requires the program's memory to be torch's (it is whenever torch sees
+        the device)."""
+        buf = self._buffer(name)
+        placement = self.program.layout(self.sym_values)["buffers"][name]
+        backing = self._tensors.get(placement["region"])
+        if backing is None:
+            raise RuntimeError(f"buffer {name!r} lives in runtime-owned memory; device views need torch")
+        shape = self._shape(name, sym_values)
+        n = math.prod(shape) if shape else 1
+        start = placement["offset"]
+        flat = backing[start : start + placement["bytes"]].view(_torch_dtype(buf.dtype.np))
+        return flat[:n].reshape(shape)
+
+    def output_prefix_device(self, sym_values: dict[str, int] | None = None) -> dict:
+        """Device twin of :meth:`outputs`: each output buffer's real-S prefix as a torch view
+        with NO host copy — the serving zero-copy path. ``sym_values`` slices to the real shape
+        exactly like :meth:`outputs`; without it the whole buffer view is returned."""
+        return {name: self.buffer_view(name, sym_values) for name in self.plan.outputs}
+
+    def alias_buffer(self, name: str, tensor) -> None:
+        """Point one operand at ``tensor``'s memory: a buffer chained onto another program's (a
+        producer's output onto a consumer's input, so the consumer's device upload becomes a
+        self-copy skip), or an operand the plan never declares as a buffer — an indirect
+        operand's pointer table or selector, which only the caller can supply. A buffer's
+        tensor must be contiguous and at least as large as its region; the runtime drops any
+        captured graph, since it baked the old address."""
+        if not _is_device_tensor(tensor) or not tensor.is_contiguous():
+            raise TypeError(f"operand {name!r}: expected a contiguous CUDA tensor")
+        flat = _flat_bytes(tensor)
+        placement = self.program.layout(self.sym_values)["buffers"].get(name)
+        if placement is None:
+            self.executor.set_external(name, flat.data_ptr(), flat.numel())
+            self._tensors[f"external:{name}"] = flat
+        else:
+            self.executor.set_region(placement["region"], flat.data_ptr(), flat.numel())
+            self._tensors[placement["region"]] = flat
+
+    def release_buffer(self, name: str) -> None:
+        """Give a buffer's memory back: an operand the kernels resolve through an indirect table
+        and never read directly. The buffer keeps a valid one-byte address."""
+        region = self.program.layout(self.sym_values)["buffers"][name]["region"]
+        self.executor.release_region(region)
+        self._tensors.pop(region, None)
+
+    def regions(self) -> dict[str, tuple[int, int]]:
+        """Every region's ``(address, bytes)`` as lent to the runtime (empty when the runtime
+        allocates for itself)."""
+        return {name: (t.data_ptr(), t.numel() * t.element_size()) for name, t in self._tensors.items()}
+
+    def buffer_nbytes(self, name: str) -> int:
+        """The bytes a buffer holds at its allocated capacity."""
+        return int(self.executor.buffer(name)[1])
 
     def snapshot(self) -> dict[str, np.ndarray]:
-        """Copy every non-input buffer (scratch + constants + outputs)
-        to host. Used by :func:`run_program_debug` to capture every
-        intermediate state for per-launch comparison against a
-        reference backend."""
-        input_names = {b.name for b in self.compiled.bufs if b.role == "input"}
-        return {name: arr.get() for name, arr in self.arrays.items() if name not in input_names}
+        """Copy every non-input buffer (scratch + constants + outputs) to host. Used by
+        :func:`run_program_debug` to capture every intermediate state for per-launch comparison
+        against a reference backend. A scratch buffer read after its last use reflects the
+        slab slot's new tenant; each kernel's own output is valid at its launch."""
+        return {b.name: self._read(b.name) for b in self.plan.buffers if b.role != "input"}
 
 
 # ---------------------------------------------------------------------------
@@ -1300,7 +743,7 @@ class CompiledProgram:
 
 def run_program(
     graph: Graph,
-    input_data: dict[str, np.ndarray] | None = None,
+    input_data: dict | None = None,
     *,
     pre_run=None,
 ) -> tuple[RunResult, Any]:
@@ -1317,8 +760,9 @@ def run_program(
     with gpu_lock():
         pre_result = pre_run() if pre_run is not None else None
         prog = CompiledProgram.build(graph, input_data)
-        dts = prog.iter_once()
-        outputs = prog.outputs()
+        with prog.on_torch_stream():
+            dts = prog.iter_once()
+            outputs = prog.outputs()
     return RunResult(outputs=outputs, time_ms=sum(dts)), pre_result
 
 
@@ -1330,7 +774,7 @@ class DebugResult:
 
 def run_program_debug(
     graph: Graph,
-    input_data: dict[str, np.ndarray] | None = None,
+    input_data: dict | None = None,
     *,
     pre_run=None,
 ) -> tuple[DebugResult, Any]:
@@ -1342,13 +786,10 @@ def run_program_debug(
     per_launch: dict[int, dict[str, np.ndarray]] = {}
     with gpu_lock():
         pre_result = pre_run() if pre_run is not None else None
-        # Note: scratch buffers share one reused slab, so a per-launch snapshot of
-        # a buffer *after its last use* reflects whatever now occupies that slot.
-        # Each kernel's own output is valid at its launch (just written, still
-        # live) — the usual debug read.
         prog = CompiledProgram.build(graph, input_data)
-        prog.iter_once(per_launch_hook=lambda li, _lc: per_launch.__setitem__(li, prog.snapshot()))
-        outputs = prog.outputs()
+        with prog.on_torch_stream():
+            prog.iter_once(per_launch_hook=lambda li, _lc: per_launch.__setitem__(li, prog.snapshot()))
+            outputs = prog.outputs()
     return DebugResult(outputs=outputs, per_launch=per_launch), pre_result
 
 
@@ -1430,9 +871,10 @@ def benchmark_program(
 
     target_total_ms, max_measured, auto = _resolve_iter_budget(num_iters)
 
-    with gpu_lock():
+    with gpu_lock(), contextlib.ExitStack() as stack:
         prog = CompiledProgram.build(graph, input_data, compile_timeout_s=compile_timeout_s)
-        n = len(prog.compiled.launches)
+        stack.enter_context(prog.on_torch_stream())
+        n = len(prog.plan.launches)
         batch_sizes = [1] * n
         # Per-launch sample list — kept around to compute the median
         # across measured iters (more robust than the arithmetic mean
@@ -1525,7 +967,7 @@ def benchmark_program(
             if auto and cumulative_gpu_ms >= target_total_ms:
                 break
 
-    return _samples_to_result(samples, prog.compiled.launches, captured=capture_graphs, e2e_samples=e2e_samples)
+    return _samples_to_result(samples, prog.plan.launches, captured=capture_graphs, e2e_samples=e2e_samples)
 
 
 def _resolve_iter_budget(num_iters: int | str) -> tuple[float, int, bool]:
@@ -1636,7 +1078,9 @@ class _AsyncBenchWorker:
 
     @staticmethod
     def _encode(request: dict) -> bytes:
-        return pickle.dumps(request, protocol=pickle.HIGHEST_PROTOCOL)
+        from emmy.compiler.pipeline.search.space import FAST_MATH, precision_pin  # noqa: PLC0415
+
+        return pickle.dumps({**request, "fast_math": precision_pin(FAST_MATH)}, protocol=pickle.HIGHEST_PROTOCOL)
 
     @staticmethod
     def _decode(body: bytes) -> dict:
@@ -1765,9 +1209,6 @@ class _AsyncBenchWorker:
         return self._stderr_tail
 
     async def run_job(self, request_obj: dict, *, wall_timeout_s: float) -> dict:
-        from emmy.compiler.pipeline.search.space import FAST_MATH, precision_pin  # noqa: PLC0415
-
-        request_obj = {**request_obj, "fast_math": precision_pin(FAST_MATH)}
         try:
             return await self._run_job(request_obj, wall_timeout_s=wall_timeout_s)
         except BenchWorkerJobError:

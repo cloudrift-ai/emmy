@@ -14,7 +14,7 @@ oversized-grid masking); the buffers are allocated once at ``max_seq_len`` and e
 request's inputs upload into their contiguous prefix.
 
 No vllm imports here — the class is driven by ``vllm_model.EmmyEmbedModel``
-but is independently testable with torch + cupy alone.
+but is independently testable with torch alone.
 """
 
 from __future__ import annotations
@@ -186,7 +186,7 @@ class EmmyForwardRunner:
         del model, wrapper, sources, const_feed
         logger.info(
             "[serving] ready: %d launches, max_seq_len=%d, batch_cap=%d",
-            len(program.compiled.launches),
+            len(program.plan.launches),
             max_seq_len,
             batch,
         )
@@ -258,19 +258,20 @@ class EmmyForwardRunner:
 
     @property
     def hidden_size(self) -> int:
-        out = self._program.compiled.buf_by_name[self._output_name]
+        out = next(b for b in self._program.plan.buffers if b.name == self._output_name)
         return int(out.shape[-1].as_static())
 
     def _mask(self, s: int):
-        """``(1, 1, s, s)`` additive causal mask as a cached cupy device array —
+        """``(1, 1, s, s)`` additive causal mask as a cached device tensor —
         the device twin of :func:`_causal_mask_np`, built once per S on the GPU so
         the hot path never builds/uploads it from host."""
-        import cupy as cp  # noqa: PLC0415
+        import torch  # noqa: PLC0415
 
         cached = self._mask_cache.get(s)
         if cached is not None:
             return cached
-        mask = cp.triu(cp.full((s, s), float("-inf"), dtype=cp.float32), k=1).astype(self._np_dtype)[None, None, :, :]
+        dtype = torch.from_numpy(np.zeros(0, dtype=self._np_dtype)).dtype
+        mask = torch.triu(torch.full((s, s), float("-inf"), dtype=torch.float32, device="cuda"), diagonal=1).to(dtype)[None, None]
         if len(self._mask_cache) >= _MASK_CACHE_MAX:
             self._mask_cache.pop(next(iter(self._mask_cache)))
         self._mask_cache[s] = mask
@@ -281,15 +282,13 @@ class EmmyForwardRunner:
         ``S <= max_seq_len``. Returns an ``(S, hidden)`` torch CUDA tensor in the
         trunk dtype.
 
-        Zero-copy device path: bridge the torch input to cupy (``cp.from_dlpack``,
-        no host copy), size the launch grids to S, copy ids / device-built causal
+        Zero-copy device path: size the launch grids to S, copy ids / device-built causal
         mask / position_ids into the shared buffers' prefix (device-to-device),
-        capture-or-reuse the whole-program graph for this S, replay it, and wrap
-        the output buffer's prefix back as a torch tensor (``torch.from_dlpack``)
-        — no GPU↔host round-trip. All cupy work runs on torch's current stream so
-        the prefix copy, the graph replay, and the output read stay ordered; the
-        result is cloned because the shared buffer is reused by the next request."""
-        import cupy as cp  # noqa: PLC0415
+        capture-or-reuse the whole-program graph for this S, replay it, and read
+        the output buffer's prefix back as a torch view — no GPU↔host round-trip.
+        Every launch and copy runs on torch's current stream so the prefix copy, the
+        graph replay, and the output read stay ordered; the result is cloned because
+        the shared buffer is reused by the next request."""
         import torch
 
         from emmy.compiler.backend.gpu_lock import gpu_lock
@@ -297,18 +296,18 @@ class EmmyForwardRunner:
         s = int(token_ids.shape[0])
         if s > self.max_seq_len:
             raise ValueError(f"seq_len {s} exceeds max_seq_len {self.max_seq_len}")
-        with gpu_lock(), cp.cuda.Stream.from_external(torch.cuda.current_stream()):
+        with gpu_lock(), self._program.on_stream(torch.cuda.current_stream()):
             feed = {
-                self._ids_name: cp.from_dlpack(token_ids.detach().reshape(1, s)),
+                self._ids_name: token_ids.detach().reshape(1, s).to(torch.int64),
                 self._mask_name: self._mask(s),
-                self._pos_name: cp.arange(s, dtype=cp.int64).reshape(1, s),
+                self._pos_name: torch.arange(s, dtype=torch.int64, device="cuda").reshape(1, s),
             }
             self._program.set_sym_values({"seq_len": s})
             self._program.upload_prefix_device(feed)
             self._program.capture_program_graph()
             self._program.replay_program_graph()
             out = self._program.output_prefix_device({"seq_len": s})[self._output_name][0]
-            return torch.from_dlpack(out).clone()
+            return out.clone()
 
     def forward_hidden_states_batched(self, token_ids_list):
         """Run up to ``batch_cap`` sequences (each a 1-D int torch CUDA tensor of
@@ -324,7 +323,6 @@ class EmmyForwardRunner:
         that seq_len (one capture per distinct S, LRU-bounded — same cache as the
         per-sequence path). Inputs longer than ``batch_cap`` are processed in
         successive batched groups."""
-        import cupy as cp  # noqa: PLC0415
         import torch
 
         from emmy.compiler.backend.gpu_lock import gpu_lock
@@ -339,22 +337,22 @@ class EmmyForwardRunner:
             # Static: every step runs at the full (B, max_seq_len) shape. Symbolic:
             # pad only to the step's longest sequence and size the grids to it.
             s_step = self.max_seq_len if self.static else max(lens)
-            with gpu_lock(), cp.cuda.Stream.from_external(torch.cuda.current_stream()):
+            with gpu_lock(), self._program.on_stream(torch.cuda.current_stream()):
                 ids = torch.zeros((B, s_step), dtype=torch.int64, device=group[0].device)
                 for i, t in enumerate(group):
                     ids[i, : lens[i]] = t.detach().to(torch.int64)
-                feed = {self._ids_name: cp.from_dlpack(ids)}
+                feed = {self._ids_name: ids}
                 if not self.static:
                     # The mask + position_ids prefixes move with s_step; the static
                     # program's were fed once at build and never change.
                     feed[self._mask_name] = self._mask(s_step)
-                    feed[self._pos_name] = cp.tile(cp.arange(s_step, dtype=cp.int64), (B, 1))
+                    feed[self._pos_name] = torch.arange(s_step, dtype=torch.int64, device="cuda").repeat(B, 1)
                     self._program.set_sym_values({"seq_len": s_step})
                 self._program.upload_prefix_device(feed)
                 self._program.capture_program_graph()  # cached per seq_len (one entry when static)
                 self._program.replay_program_graph()
                 sym = None if self.static else {"seq_len": s_step}
-                out = torch.from_dlpack(self._program.output_prefix_device(sym)[self._output_name])
+                out = self._program.output_prefix_device(sym)[self._output_name]
                 for i, si in enumerate(lens):
                     results[start + i] = out[i, :si].clone()
         return results

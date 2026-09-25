@@ -539,7 +539,11 @@ def test_onboarding_agent_reads_shared_prompts_from_a_compact_task():
     for field in ("mode", "model_id", "gpu_count", "ssh_key", "deadline", "publish_image", "summary_path"):
         assert f"{field}:" in script
         assert f"`{field}`" in qualify
-    assert "Do not select a model or GPU, provision or delete the VM, commit, push" in qualify
+    assert "Do not select a model or GPU, rent or delete the VM, commit, push" in qualify
+    # The caller rents the node; finishing its provisioning is the run's own work, so the boundary
+    # must never read as putting the host's contents out of reach.
+    assert "The caller owns the VM's lifetime, not its contents" in qualify
+    assert "`ssh_user` has passwordless sudo" in qualify
     assert "never add a second root for a platform an existing one already covers" in qualify
     assert "`recipe.yaml` path, never a directory" in qualify
     assert "Use at most four public-web calls" in investigate

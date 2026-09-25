@@ -1829,7 +1829,6 @@ def test_write_ab_json_records_a_forkless_kernel_row(tmp_path):
 
 
 def test_kernel_stats_reuse_runtime_loader(monkeypatch):
-    from types import SimpleNamespace
 
     from emmy.commands.run import _collect_kernel_attrs
     from emmy.compiler.backend.cuda import program
@@ -1841,11 +1840,11 @@ def test_kernel_stats_reuse_runtime_loader(monkeypatch):
     graph.add_node(op=CudaOp(kernel_name="k", kernel_source=source), inputs=[], output=Tensor("out", (4,)), node_id="out")
     seen = []
 
-    def load(name, spec):
+    def attributes(name, spec):
         seen.append((name, spec.source, spec.arch_specific))
-        return SimpleNamespace(num_regs=128, local_size_bytes=0, shared_size_bytes=256)
+        return {"num_regs": 128, "local_size_bytes": 0, "shared_size_bytes": 256}
 
-    monkeypatch.setattr(program, "_load_kernel", load)
+    monkeypatch.setattr(program, "kernel_attributes", attributes)
     assert _collect_kernel_attrs(graph) == {"k": {"num_regs": 128, "local_size_bytes": 0, "shared_size_bytes": 256}}
     assert seen == [("k", source, True)]
 

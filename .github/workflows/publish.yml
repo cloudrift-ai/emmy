@@ -34,6 +34,9 @@ jobs:
         with:
           python-version: "3.13"
 
+      # The wheel carries the runtime extension, built with cargo.
+      - uses: dtolnay/rust-toolchain@stable
+
       - name: Resolve the version to publish
         id: version
         run: |
@@ -64,6 +67,8 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
+          # One wheel, for this runner's platform: it carries the runtime extension. The sdist
+          # builds the extension wherever a Rust toolchain exists and installs pure without one.
           test "$(find dist -maxdepth 1 -name '*.whl' | wc -l)" -eq 1
           test "$(find dist -maxdepth 1 -name '*.tar.gz' | wc -l)" -eq 1
           WHEEL=$(find dist -maxdepth 1 -name '*.whl' -print -quit)
@@ -71,6 +76,7 @@ jobs:
           CATALOG="$RUNNER_TEMP/emmy-recipes.json"
           python -m venv "$SMOKE_ENV"
           "$SMOKE_ENV/bin/pip" install --disable-pip-version-check "$WHEEL"
+          "$SMOKE_ENV/bin/python" -c 'import emmy.emmy_runtime'  # loads without a GPU; the driver is opened lazily
           test "$("$SMOKE_ENV/bin/emmy" --version)" = "emmy $VERSION"
           "$SMOKE_ENV/bin/emmy" recipe list --json > "$CATALOG"
           "$SMOKE_ENV/bin/python" -c \

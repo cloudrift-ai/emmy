@@ -9,21 +9,21 @@
 # faster after — EMMY_CUBIN_CACHE persists compiled cubins on the model volume).
 # Stock vLLM ignores that env var, so it sits at the base level for both variants.
 tags:
-  - maintained
+  - best-effort
 
 model:
   huggingface: "Qwen/Qwen3-Embedding-4B"
-  rationale: "Established mid-tier embedding, no fresh trend."
-  heat: 45
+  rationale: "Established mid-tier embedding model; no fresh trending signals beyond general stable family interest."
+  heat: 40
   task: embed
 
 engine:
   llm:
     tensor_parallel_size: 1
     pipeline_parallel_size: 1
-    # High on purpose: the emmy variant's cupy-held weights are non-torch memory
-    # that vLLM's profiler subtracts from this budget, and the attention-free plugin
-    # needs no KV cache anyway.
+    # High on purpose: the emmy variant's weights sit inside this budget (the runtime
+    # borrows torch tensors, which vLLM's profiler counts), and the attention-free
+    # plugin needs no KV cache anyway.
     gpu_memory_utilization: 0.9
     context_length: 4096
     max_concurrent_requests: 32

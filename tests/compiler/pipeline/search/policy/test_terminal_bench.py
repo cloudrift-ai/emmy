@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 from types import SimpleNamespace
 
 from emmy.compiler.backend.base import BenchmarkResult, LaunchTime
@@ -8,15 +9,38 @@ from emmy.compiler.context import Context
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda.ir import CudaOp
+from emmy.compiler.loop_wire import kernel_bindings, kernel_tile
 from emmy.compiler.pipeline.search.db import SearchDB
 from emmy.compiler.pipeline.search.policy.terminal_bench import bench_terminal_async
+from tests.compiler.helpers import case_target_tile
+
+# A perf row is filed under the tile kernel a CUDA kernel was rendered from, so every synthetic kernel
+# here stands on a real tile — two kernels that must not share a row stand on two different ones.
+_CASES = {
+    "k": "fused/norm-linear-f16-scalar-reduce.yaml",
+    "k_innocent": "fused/norm-linear-f16-scalar-reduce.yaml",
+    "k_culprit": "matmul/f16-mma-f16acc-gmem.yaml",
+}
+
+
+@functools.cache
+def _tile(name: str):
+    return case_target_tile(_CASES[name])
+
+
+def _row_for(db: SearchDB, ctx, op):
+    """The perf row ``op`` is filed under, or ``None``."""
+    tile = kernel_tile(op)
+    return db.lookup_perf(
+        ctx, tile.identity_key(structural=False, with_io=True), bindings=kernel_bindings(tile), knobs=dict(op.knobs or {}), backend="cuda"
+    )
 
 
 def _candidate():
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (1,)), node_id="x")
     graph.add_node(
-        CudaOp(kernel_source='extern "C" __global__ void k(float* out) {}', kernel_name="k", arg_order=("out",)),
+        CudaOp(kernel_source='extern "C" __global__ void k(float* out) {}', kernel_name="k", arg_order=("out",), source=_tile("k")),
         [],
         Tensor("out", (1,)),
         node_id="out",
@@ -75,7 +99,7 @@ class _RaisingBackend:
 
 
 def _perf_row(db: SearchDB, cand):
-    return db.lookup_perf(cand.ctx, cand.graph.nodes["out"].op.identity_key(with_io=True, with_knobs=True), backend="cuda")
+    return _row_for(db, cand.ctx, cand.graph.nodes["out"].op)
 
 
 async def test_compile_budget_overrun_records_nothing() -> None:
@@ -134,13 +158,16 @@ async def test_a_real_bench_failure_still_records_bench_fail() -> None:
     assert _perf_row(db, cand).status == "bench_fail"
 
 
-# The bodies must differ materially: ``CudaOp`` identity normalizes the kernel NAME away, so two
-# kernels differing only in name are one identity and would share a single perf row.
 _PAIR = {"k_innocent": "out[0] = 1.0f;", "k_culprit": "out[0] = 2.0f;"}
 
 
 def _cuda_op(name: str) -> CudaOp:
-    return CudaOp(kernel_source=f'extern "C" __global__ void {name}(float* out) {{ {_PAIR[name]} }}', kernel_name=name, arg_order=("out",))
+    return CudaOp(
+        kernel_source=f'extern "C" __global__ void {name}(float* out) {{ {_PAIR[name]} }}',
+        kernel_name=name,
+        arg_order=("out",),
+        source=_tile(name),
+    )
 
 
 def _candidate_pair():
@@ -167,7 +194,7 @@ def _fail_rows(db: SearchDB, cand) -> dict[str, str]:
     out = {}
     for nid in ("mid", "out"):
         op = cand.graph.nodes[nid].op
-        row = db.lookup_perf(cand.ctx, op.identity_key(with_io=True, with_knobs=True), backend="cuda")
+        row = _row_for(db, cand.ctx, op)
         if row is not None:
             out[op.kernel_name] = row.status
     return out
@@ -228,7 +255,9 @@ async def test_a_blamed_kernel_replays_the_hang_for_its_slice() -> None:
 async def test_an_unattributable_failure_blames_no_kernel() -> None:
     """A bench-worker startup timeout is not a property of any kernel — it names none, and with
     several kernels in the terminal there is no unambiguous culprit. Unknown is not failed, so
-    nothing is persisted; the terminal still reports ``bench_fail`` and the candidate is spent."""
+    nothing is persisted (the DB holds measurements of kernels and nothing else); the terminal
+    still reports ``bench_fail``, the candidate is spent for this session, and the next session
+    benches the slice again at the run budget."""
     db, cand = SearchDB(), _candidate_pair()
     exc = RuntimeError("bench worker did not accept the request within 74.0s wall budget — SIGKILL'd, stream cleaned")
 
@@ -237,30 +266,6 @@ async def test_an_unattributable_failure_blames_no_kernel() -> None:
     assert status == "bench_fail"
     assert _fail_rows(db, cand) == {}
     assert per_kernel == []
-
-
-async def test_an_unattributable_failure_is_replayed_for_its_kernel_set() -> None:
-    """What IS known after a wall kill that names no kernel is that THIS kernel set failed at that
-    budget, and that much must persist: a multi-kernel slice whose slow member could not be blamed
-    used to write nothing and re-burn its whole wall budget on every restart — 20 minutes per
-    composed arm on the DeepSeek-V4-Flash post4096 twin. The verdict is filed under the kernel
-    set's own key: no kernel earns a row, so one of them enrolled on its own still benches."""
-    db, cand = SearchDB(), _candidate_pair()
-    wall = RuntimeError("bench worker exceeded 74.0s wall budget — SIGKILL'd, stream cleaned")
-    await bench_terminal_async(cand, backend=_RaisingBackend(wall), db=db)
-
-    retry = _BudgetedBackend(iter_ms=1.0)
-    _stats, status, measured, per_kernel = await bench_terminal_async(_candidate_pair(), backend=retry, db=db)
-
-    assert retry.calls == [], "the kernel set was wall-killed at this budget — it must not burn the budget again"
-    assert (status, measured) == ("bench_fail", False)
-    assert per_kernel == [] and _fail_rows(db, cand) == {}, "still no kernel is blamed"
-
-    solo = _BudgetedBackend(iter_ms=1.0)
-    _stats, status, _measured, _ = await bench_terminal_async(_candidate_solo("k_innocent"), backend=solo, db=db)
-
-    assert solo.calls == [(1, "auto")], "a kernel of the set is not condemned — on its own it still benches"
-    assert status == "ok"
 
 
 async def test_search_cache_replay_preserves_patience() -> None:
@@ -277,3 +282,25 @@ async def test_search_cache_replay_preserves_patience() -> None:
     assert search.measurements == 1
     assert search.tree.root.visits == 5
     assert search.stop_reason is None
+
+
+def test_a_kernel_row_carries_the_stamps_the_deploy_joins_on() -> None:
+    """The row's ``S_*`` stamps are the identity strategy's — written at the fusion boundary onto the fused
+    loop body — because that is what the deploy's fork signature and the golden replay key evidence by. For
+    a twisted kernel (online softmax) they differ from the features of the stored derived body, and a row
+    stamped from the wire would never price its own fork: the RTX 5090 hardware golden's softmax and
+    attention rows fell to the prior that way, at eighty times the compile time."""
+    from emmy.compiler.pipeline.passes.identity import kernel_stamps
+    from emmy.compiler.pipeline.search.policy.terminal_bench import kernel_row
+    from tests.compiler.realization import helpers as corpus
+
+    case = corpus.load_case(corpus.CASES_DIR / "attention/sdpa-hd128-softmax-v-mma.yaml")
+    graph, _taken = corpus.lowered(case, case.context())
+    [cuda] = [node.op for node in graph.nodes.values() if isinstance(node.op, CudaOp)]
+    tile = kernel_tile(cuda)
+    row = kernel_row(tile, cuda.kernel_name)
+
+    assert row.stamps == {k: float(v) for k, v in cuda.knobs.items() if k.startswith("S_")}, (
+        "the strategy's stamps, as the kernel carries them"
+    )
+    assert row.stamps != kernel_stamps(row.loop_ir), "a twisted kernel's derived body spells another reduction"

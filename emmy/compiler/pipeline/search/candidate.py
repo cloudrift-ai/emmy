@@ -22,7 +22,7 @@ from emmy.compiler.pipeline.dump import _inline_scalar_loads, _scalar_constant_i
 from emmy.compiler.pipeline.fork import Fork, OptionFork
 from emmy.compiler.pipeline.pipeline import _REWRITE_APPLIED, Cursor, RuleSkipped, _remember_structural_decision
 from emmy.compiler.pipeline.rule_diff import display_name, emit, format_skipped, render_rule_diff
-from emmy.compiler.pipeline.strategy import SplicedEvent, SpliceEvent
+from emmy.compiler.pipeline.strategy import RebindEvent, SplicedEvent, SpliceEvent
 
 # Use the engine logger so the existing debug-emit toggles (rule-
 # skipped lines under ``compile -vv``) keep working without callers
@@ -166,7 +166,7 @@ class Candidate:
         self.apply(match, options[0])
         return _REWRITE_APPLIED
 
-    def apply(self, match: Match, option: Op | Graph, *, knobs: dict | None = None) -> tuple[str, ...] | None:
+    def apply(self, match: Match, option: Op | Graph, *, knobs: dict | None = None, aliases: dict | None = None) -> tuple[str, ...] | None:
         """Lazy mode (called by ``LazyCandidate.resolve`` and
         internally by :meth:`try_rewrite` for single-option matches):
         apply the specific ``option`` to this candidate's graph.
@@ -190,8 +190,8 @@ class Candidate:
         knob merge, which is idempotent for rules that already merged
         manually). Knobs are NOT merged forward on the ``Graph`` path —
         fragment kernels carry their own structural identity. The selected
-        fork's delta instead rides ``SpliceEvent.knobs`` for strategies that
-        need the consumed parent's route identity.
+        fork's delta instead rides ``SpliceEvent.knobs`` (with the fork's
+        ``aliases``) for strategies that need the consumed parent's route identity.
 
         What a splice MEANS in any dialect is strategy business, not
         the engine's: ``on_splice`` fires before the splice (fragment
@@ -202,10 +202,17 @@ class Candidate:
         self._log_apply(match, option)
         minted = None
         if isinstance(option, Op):
-            old_op = self.graph.nodes[match.root_node_id].op
+            node = self.graph.nodes[match.root_node_id]
+            old_op = node.op
             if option is not old_op:
                 option = replace(option, source=old_op, knobs={**old_op.knobs, **option.knobs})
-            self.graph.nodes[match.root_node_id].op = option
+            node.op = option
+            pass_ = match.rule.pass_
+            event = RebindEvent(
+                match=match, node=node, replaced=old_op, pass_name=pass_.name if pass_ is not None else "", graph=self.graph
+            )
+            for strat in self.run.pipeline.strategies:
+                strat.on_rebind(event)
         else:
             assert isinstance(option, Graph), f"expected Graph or Op; got {type(option).__name__}"
             pass_ = match.rule.pass_
@@ -218,6 +225,7 @@ class Candidate:
                 pass_name=pass_name,
                 graph=self.graph,
                 knobs=dict(knobs or {}),
+                aliases=dict(aliases or {}),
             )
             for strat in strategies:
                 strat.on_splice(event)
@@ -371,7 +379,7 @@ class LazyCandidate:
             cursor=self.cursor,
             structural_decisions=list(self.inner.structural_decisions),
         )
-        resolved.apply(match.remap(resolved.graph), option, knobs=fork.knobs)
+        resolved.apply(match.remap(resolved.graph), option, knobs=fork.knobs, aliases=getattr(fork, "aliases", None))
         if self.structural_domain is not None:
             _remember_structural_decision(resolved.structural_decisions, root_op, self.structural_domain, dict(fork.knobs))
         self.resolved_knobs = dict(fork.knobs)

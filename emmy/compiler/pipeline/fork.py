@@ -317,7 +317,13 @@ def fork_signature(root_op: Op, options: Sequence[Op | Graph | Fork], ctx) -> fr
     base = {**ctx.features(), **dict(getattr(root_op, "knobs", None) or {})}
     for option in options:
         base.update((key, value) for key, value in (getattr(option, "knobs", None) or {}).items() if key.startswith(EVIDENCE_PREFIXES))
-    return frozenset((key, str(value)) for key, value in base.items() if key.startswith(EVIDENCE_PREFIXES))
+    return stamp_signature(base)
+
+
+def stamp_signature(knobs: Mapping) -> frozenset:
+    """The evidence signature of a knob dict, values as strings: its ``S_*`` stamps and its exact ``I_kernel``
+    identity — the one spelling a measured row, a stored kernel and a fork's offer are joined on."""
+    return frozenset((key, str(value)) for key, value in knobs.items() if key.startswith(EVIDENCE_PREFIXES))
 
 
 def leaf_for(options: Sequence[Op | Graph | Fork], row: Mapping, *, skip: Callable[[dict], bool] | None = None):

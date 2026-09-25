@@ -20,54 +20,56 @@ works as a complete identity because of the stamping pass: the structural facts 
 its body, its loop extents, its data types — are already part of the row, so the merged set of values fully describes
 what is being predicted. That is what lets the prior be a pure function of it, with no need to look at a graph.
 
-**Measurement identity — the context plus the kernel's structural key.** Ground truth about kernels that were actually
-built: their measured times, the inventory of operations encountered, and the deduplication that collapses 24
-identical RMSNorm kernels into one unit of work.
+**Measurement identity — the kernel, the sizes it was benched at and its knob values, under the card and the compile
+setting.** Ground truth about kernels that were actually built: their measured times, and the deduplication that
+collapses 24 identical RMSNorm kernels into one unit of work. The kernel is named by its exact identity, a digest of
+the loop program it executes and the buffers it reads and writes, which ignores the size a dynamic axis is expected to
+take — so the sizes a measurement ran at are part of the key, and one kernel benched at two sizes is two rows.
 
-The database holds an inventory of every operation seen along any lowering path, one row per rewrite step, the
-measurements table, and the search-tree table. The last one is worth a closer look, because it is the richest and the
-most misunderstood.
+## The measurement tables
 
-## The search-tree table
+The database holds kernels, the decisions that minted them, and measurements of them, and every instance of it — the
+tuning database a compile reads, the dataset database the evaluations read — holds the same tables.
 
-One row per position in a tuning search — every partly decided branch and every complete configuration. Each row
-carries the full feature row the prior sees, a time for that position, a pointer to its parent, and the GPU it was
-measured on.
+**Kernels.** One row per kernel: its exact identity, the loop program that defines it, its structural features and its
+C name. A kernel that a cut or a split minted is a row like any other, so the same
+kernel reached from two parents has one definition, and that definition is what its candidate pool is enumerated
+from.
 
-Branch rows and leaf rows are updated by different rules, and the asymmetry is deliberate:
+**Routing.** One row per kernel a structural decision minted: the parent, the decision (which seam was cut, how a
+reduction was split across blocks), and the piece. A minted kernel with decisions of its own is the parent of further
+rows. The decision has no measurement of its own; its price on a card is the sum of its pieces' fastest measurements
+there, which is how a compile reads it.
 
-- **A branch keeps the minimum.** Its time is a bound over everything below it, and a faster descendant genuinely
-  tightens that bound.
-- **A leaf takes the newest measurement.** A leaf is a re-measurement of one single configuration, and taking the
-  minimum of several noisy medians would drift steadily toward the noise floor rather than toward the truth.
+**Measurements.** One row per measured kernel variant per card and compile setting, the schedule it ran with stored
+once and shared between rows. The GPU's name is part of the key: compute capability alone cannot separate two cards
+built on the same die — an H100 and an H200 share it, and their SM counts — so without the name their rows would
+merge and one card's data would silently overwrite the other's. A better measurement of the same variant replaces a
+worse one. **Failures are kept**, with the watchdog's placeholder time, because a search model needs negative
+examples; a working row is never downgraded by a later failure. A row that spells a cut or a split is refused: that
+is a decision, not a measurement of one kernel.
 
-The GPU's name is part of the key. Compute capability alone cannot separate two cards built on the same die — an H100
-and an H200 share it, and their SM counts — so without the name their rows would merge and one card's data would
-silently overwrite the other's.
+**Nothing migrates.** A database file written by an older version of the compiler is re-created empty on the next
+write, since every row in it can be measured again, and refused by a reader.
 
-Rows also record how much to trust their own label: how many measured configurations the label rests on, whether it is
-a real measurement or a bound, the measurement's own spread and sample count, and whether the configuration failed to
-run at all. **Failures are kept**, with the watchdog's placeholder time, because a search model needs negative
-examples. A working row is never downgraded by a later failure.
+**The tables are checked, not the code.** `emmy dataset check` verifies that an instance's tables agree with
+themselves — every knob row's digest, every reference, every card, the two knob vocabularies — and counts the rows
+that fail. It does not re-derive what the compiler wrote: the tuning database is a cache, and a row the current code
+disagrees with is re-tuned or re-imported. The freeze is what travels between machines, and one written under another
+featurizer version refuses to load.
 
-**Data measured elsewhere can be merged in.** Another machine's database can be read and re-inserted through the same
-update rules. The result does not depend on which database is merged into which: a stale leaf never comes back to
-life, and the trust counts add up when two rows share a key. This is how measurements collected on a rented card fold
-into one canonical local database.
-
-**A frozen snapshot makes a fit reproducible.** The search-tree table is a live store — tuning runs and merges keep
-writing into it — so a model fitted straight from it cannot be reproduced later. A freeze is a snapshot written as a
-directory of YAML files laid out like the golden configuration files, beside a manifest of content digests. Nothing is
-stored in feature form: the hardware description is rebuilt for the recorded card, and the structural counts are
-rebuilt by re-tracing the shape's own program. So a change to how features are encoded never invalidates a freeze.
-Loading is strict — a missing file, a foreign manifest or a digest mismatch is an error — and freezing the same
-database twice produces byte-identical digests.
+**A frozen snapshot makes a fit reproducible.** The tuning database is a live store — tuning runs keep writing into it
+— so a model fitted straight from it cannot be reproduced later. A freeze is a snapshot written as a directory of YAML
+files, one per card plus the kernel and kernel-set definitions, beside a manifest of content digests. Nothing is
+stored in feature form: the hardware description is rebuilt for the recorded card. Loading is strict — a missing
+file, a foreign manifest or a digest mismatch is an error — and freezing the same database twice produces
+byte-identical digests. A freeze checked into the repository is what `emmy dataset import` loads into the dataset
+database by default, which is what every evaluation reads; none is checked in at the moment, so a tuning database —
+from this machine or a rented card — is named on the command line instead.
 
 **Hand-run measurements are recorded too.** A `run --bench` that measured configurations with knob values forced by
-hand records each clean result as a row, so that manually found optima are not lost when the session ends. It
-is guarded: a newer measurement that is unambiguously worse — fewer samples *and* more spread — never displaces a
-stored one, so a casual measurement cannot overwrite tuning-grade data, while an honest re-measurement still repairs a
-stale row. Rows that were flagged by any of the integrity checks are never recorded at all.
+hand records each clean result through the tuner's own writer, so that manually found optima are not lost when the
+session ends. Rows that were flagged by any of the integrity checks are never recorded at all.
 
 ## The version stamp, and what raising it costs
 
@@ -138,25 +140,26 @@ Gathered in one place, honestly.
 5. **A cold compile changes which kernels exist only on evidence.** Structural choices need a trusted online model
    to be costed, so on the offline prior the current kernel set is kept — even where splitting would be much faster.
    The 1.8-times-faster split on [the goldens page](./07-golden-configurations.md) is only deployable because
-   somebody recorded it, and that measured route row is what deploys it.
+   somebody recorded it, and its recorded decision, priced from the pieces' measured rows, is what deploys it.
 6. **A recording that no longer realizes is simply not evidence**, and the kernel falls to the prior, which can be
    far slower than the number the recording advertises. `--strict-evidence` makes that fall-through an error, and
    the release gate compiles the serving matrix under it; a plain deploy without the flag falls through silently.
 7. **There is no per-fork report of which row decided.** Answering "which evidence answered this fork, and did I
    expect that one?" means correlating warnings, the resolution record and the release gate.
-8. **The richest measurements are diagnostic-only.** The search-tree table is never consulted when deploying. Fitting
-   the offline prior on a frozen snapshot of it is a planned path, not a current one — today `emmy fit` trains on the
-   golden configurations only.
+8. **The measured pools are diagnostic-only.** The dataset database is never consulted when deploying. Fitting the
+   offline prior on it is a planned path, not a current one — today `emmy fit` trains on the golden configurations
+   only.
 9. **Nothing evaluates a fork the search never descended into.** Both views score configurations that were built
    and offered as candidates. A search decides one fork at a time, and a fork it never took leaves no row
    anywhere — a good configuration sitting past one is silence that reads as health.
 
 ## See it yourself
 
-The measured view needs a tuning database, or a frozen snapshot in its place:
+The measured view reads the dataset database, filled from a freeze or from a tuning database:
 
 ```bash
-emmy eval prior --dataset nodes
+emmy dataset import ~/.cache/emmy/autotune.db
+emmy eval prior --dataset db
 ```
 
 And the two halves can be compared against candidate artifacts without touching the installed ones, which is how two

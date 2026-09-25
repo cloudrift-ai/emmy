@@ -3104,7 +3104,7 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: k_linear_mean_reduce_549927.f3a20e07e940.63e76be34df0
+  - name: k_linear_mean_reduce_549927.f3a20e07e940.55b405811625
     bindings: {}
     pins:
       FAST_MATH: false
@@ -3112,33 +3112,36 @@ configs:
       PLACE@map.2/inner.1/map: cut
     identity: 55b40581162510aa1072208b8b56cb206c8472d1ea834f0dfda7a2c5d3a3e1d8
     measurements:
-      emmy_us: 28.953654819460056
-      reference_us: 29.297777899989377
+      emmy_us: 19.415479417404764
+      reference_us: 19.497501409001288
       reference_backend: same-input-greedy
-  - name: k_linear_mean_reduce_549927.f3a20e07e940.01a429eb4a02
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs: {}
-    identity: b6a1c061cc58214fac296124fd628a551c9b37b1ba6ac62ff06bd557477f4a3e
-    measurements:
-      emmy_us: 14.763940626115941
-      reference_us: 14.77214804402104
-      reference_backend: same-input-greedy
-  - name: k_linear_mean_reduce_549927.f3a20e07e940.ebab4497bb6d
+  - name: k_linear_mean_reduce_549927.f3a20e07e940.f52823101ef9
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
-      WORK: t256
-      TILE: ''
-      REDUCE: coop-t
-      STAGE: ''
+      WORK: t128
+      REDUCE: coop
       RASTER: ''
-    identity: 7e8b2440dfd13f1f9d6745ef8652d10bba85eb0b45556db02d11f4ef443a733d
+    identity: f52823101ef9dc68a0e6610a14b94044e3fbb353975dcb1d1bab4087f17487f7
     measurements:
-      emmy_us: 14.189714193344116
-      reference_us: 14.525629855968335
+      emmy_us: 3.5190985236369388
+      reference_us: 3.5231013655137384
+      reference_backend: same-input-greedy
+  - name: k_linear_mean_reduce_549927.f3a20e07e940.b43b79869168
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x1
+      TILE: mma_m16n8k16_f16_f32/f1x8/k4
+      REDUCE: ''
+      STAGE: d2/smem-async
+      RASTER: gm8
+    identity: b43b79869168a2b0899566ce1aca2264e4cd3c2fbad94896f61a332185697d15
+    measurements:
+      emmy_us: 15.896380893767825
+      reference_us: 15.97440004348755
       reference_backend: same-input-greedy
 - program: 0
   target:

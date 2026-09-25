@@ -1,0 +1,3 @@
+# The runtime extension's sources ride in the sdist so a host with a Rust toolchain builds it.
+include Cargo.toml Cargo.lock
+recursive-include crates *.rs Cargo.toml

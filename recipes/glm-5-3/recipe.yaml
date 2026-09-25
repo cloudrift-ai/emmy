@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: THUDM/glm-5-3
-  rationale: "Active GLM-5.3 wave with high downloads, but exact repo unreadable."
-  heat: 68
+  rationale: "Active rising wave with high downloads, strong open-weight serving momentum."
+  heat: 78
   task: generate
 matrices:
 - deploy.gpu: NVIDIA B200

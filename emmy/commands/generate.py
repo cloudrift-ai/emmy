@@ -33,9 +33,10 @@ def register_generate_command(subparsers):
     parser.add_argument("--seq-len", type=int, default=DEFAULT_SEQ_HINT, help="Example seq_len for the dynamic trace (default: 512)")
     native = parser.add_mutually_exclusive_group()
     native.add_argument("--export-native", metavar="DIR", help="Prepare a standalone cached Qwen3 artifact and exit")
-    native.add_argument("--native-pack", metavar="DIR", help="Generate with a prepared Rust artifact (greedy only)")
+    native.add_argument("--native-pack", metavar="DIR", help="Generate with a prepared Rust artifact")
     parser.add_argument("--context-length", type=int, default=None, help="Native export context capacity (default: 4096)")
     parser.add_argument("--capture", action="store_true", help="Replay native token steps as a CUDA graph")
+    parser.add_argument("--timeout", type=float, help="Native worker operation deadline in seconds (default: 120)")
     parser.add_argument("--revision", help="Checkpoint and tokenizer revision")
     parser.add_argument("--golden", help="Measured compiler evidence for native export")
     parser.add_argument("--strict-evidence", action="store_true", help="Reject unmeasured choices during native export")
@@ -84,8 +85,19 @@ def _resolve_eos_ids(tokenizer, model_id, revision=None) -> set[int]:
 def handle_generate(args):
     if args.max_new_tokens < 0:
         raise ValueError("max-new-tokens must be nonnegative")
-    if (args.export_native or args.native_pack) and (args.temperature != 0 or args.top_k != 0 or args.top_p != 1):
-        raise ValueError("native generation currently supports greedy sampling only")
+    if args.export_native or args.native_pack:
+        from emmy.serving.native.client import validate_sampling
+
+        validate_sampling(args.temperature, args.top_p, args.seed)
+        if args.top_k != 0:
+            raise ValueError("native generation does not support top-k")
+    if args.timeout is not None:
+        import math
+
+        if not args.native_pack:
+            raise ValueError("timeout requires --native-pack")
+        if not math.isfinite(args.timeout) or args.timeout <= 0:
+            raise ValueError("timeout must be finite and positive")
     if args.capture and not args.native_pack:
         raise ValueError("capture requires --native-pack")
     if (args.golden or args.strict_evidence or args.context_length is not None) and not args.export_native:
@@ -124,10 +136,21 @@ def handle_generate(args):
         sys.exit(1)
     if args.native_pack:
         from emmy.compiler.backend.gpu_lock import gpu_lock
-        from emmy.serving.native.client import generate_tokens
+        from emmy.serving.native.client import DEFAULT_TIMEOUT_SECONDS, generate_tokens
 
         with gpu_lock():
-            generated = asyncio.run(generate_tokens(args.native_pack, prompt_ids, max_new_tokens=args.max_new_tokens, capture=args.capture))
+            generated = asyncio.run(
+                generate_tokens(
+                    args.native_pack,
+                    prompt_ids,
+                    max_new_tokens=args.max_new_tokens,
+                    capture=args.capture,
+                    temperature=args.temperature,
+                    top_p=args.top_p,
+                    seed=args.seed,
+                    timeout=DEFAULT_TIMEOUT_SECONDS if args.timeout is None else args.timeout,
+                )
+            )
         logger.info("%s", tokenizer.decode(generated, skip_special_tokens=True))
         return
     if len(prompt_ids) >= DYNAMIC_DIM_MAX:

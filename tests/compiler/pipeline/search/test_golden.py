@@ -317,8 +317,8 @@ def test_a_flush_from_another_compiler_tree_keeps_this_trees_derivations(tmp_pat
     def derive(fingerprint: str, key: str) -> dict:
         monkeypatch.setattr(golden, "_compiler_fingerprint", lambda: fingerprint)
         monkeypatch.setattr(golden, "_IDENTITY_STORE", None)
-        kept = dict(golden._identity_store()["replays"])
-        golden._identity_store()["replays"][key] = {}
+        kept = dict(golden._identity_store()["entries"])
+        golden._identity_store()["entries"][key] = None
         monkeypatch.setattr(golden, "_IDENTITY_STORE_DIRTY", True)
         flush_identity_store()
         return kept
@@ -359,3 +359,81 @@ def test_the_narrowing_reading_outranks_the_respelling_one() -> None:
     offered = frozenset({(("WORK", "t128"),)})
     both = unmatched_reason(((("TILE"), "f4"), ("WORK", "t512")), offered)
     assert "re-spelling" in both and "NARROWING" not in both
+
+
+#: The goldens whose stored targets no longer come out of a fresh lowering of their own programs,
+#: ``[file id]`` (see :func:`_golden_id`). Strict xfails, like the row list above: the line goes
+#: when the file is restamped.
+_LOWERING_XFAILS_FILE = Path(__file__).parent / "golden_lowering_xfails.yaml"
+
+
+def _golden_parameters():
+    listed = set(yaml.safe_load(_LOWERING_XFAILS_FILE.read_text()) or ())
+    parameters = []
+    with _repository_golden_paths() as paths:
+        for path in sorted(paths, key=_golden_id):
+            file_id = _golden_id(path)
+            marks = [pytest.mark.xfail(strict=True, reason="stored targets are not the fresh lowering")] if file_id in listed else []
+            parameters.append(pytest.param(path, id=file_id, marks=marks))
+    return parameters
+
+
+@pytest.mark.parametrize("path", _golden_parameters())
+def test_stored_targets_are_the_fresh_lowering(path: Path) -> None:
+    """Every stored target of a repository golden must be a kernel the current compiler lowers the
+    golden's own traced program to — byte for byte.
+
+    A golden's rows are evidence for the kernels its stored Loop IR names, and a deploy keys them by
+    the kernels it lowers FRESH from the model. The decode test above replays the stored target, so
+    it stays green when the two drift apart: after #863 the DeepSeek V4 V100 golden decoded row by
+    row while serving lowered kernels no row of it described and the strict boot refused. Lowering
+    is the loop passes alone, GPU-free, so this holds on any machine; a file that fails needs a
+    restamp on the card that recorded it, not a card to detect it.
+    """
+    from emmy.compiler import provenance
+    from emmy.compiler.context import Context
+    from emmy.compiler.ir.loop import LoopOp
+    from emmy.compiler.loop_wire import loop_graph_to_wire
+    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
+    from emmy.compiler.pipeline.search.golden import load_golden_file
+    from emmy.compiler.pipeline.search.slice import single_node_graph
+    from emmy.compiler.torch_wire import graph_from_wire
+
+    document = load_golden_file(path)
+    ctx = Context.from_target(tuple(document["compute_cap"]), gpu_name=document.get("gpu_name"))
+    fresh: dict[int, dict[frozenset, dict]] = {}
+    for index in sorted({entry["program"] for entry in document["configs"]}):
+        graph = graph_from_wire(document["programs"][index])
+        for node in graph.nodes.values():
+            if node.hints.get("trace.materialize") and node.id not in graph.outputs:
+                graph.outputs.append(node.id)
+        for node in graph.nodes.values():
+            node.hints.remove(provenance.PROV)
+        provenance.seed(graph)
+        fused = Pipeline.build(LOOP_PASSES).run(graph, ctx=ctx)
+        kernel_ids = [nid for nid in fused.topological_order() if isinstance(fused.nodes[nid].op, LoopOp)]
+        kernels = (loop_graph_to_wire(single_node_graph(fused, nid)) for nid in kernel_ids)
+        fresh[index] = {frozenset(wire["outputs"]): wire for wire in kernels}
+    stale = []
+    for entry in document["configs"]:
+        stored = document["loops"][entry["target"]["loop"]]
+        wire = fresh[entry["program"]].get(frozenset(stored["outputs"]))
+        if wire != stored:
+            name = entry["realizations"][0]["name"] if entry.get("realizations") else f"loop {entry['target']['loop']}"
+            stale.append(f"{name}: " + ("no fresh kernel writes its outputs" if wire is None else "the fresh kernel's Loop IR differs"))
+    assert not stale, f"{len(stale)} of {len(document['configs'])} targets are not the fresh lowering:\n  " + "\n  ".join(stale[:12])
+
+
+def test_a_stored_identity_the_compiler_re_keyed_is_refused() -> None:
+    """A row's stored identity must be one kernel the replay resolves under its pins — the target's own
+    as much as a receipt's child. A compiler change that re-keys the kernel turns the row red on the
+    commit that causes it; re-keying the file is the fix, and no import stands in for it meanwhile."""
+    from dataclasses import replace
+
+    from tests.compiler.realization import helpers as corpus
+
+    case = corpus.load_case(corpus.CASES_DIR / "fused/norm-linear-f16-scalar-reduce.yaml")
+    record = case.record
+    assert _decode(record, case.records) is None
+    stale = replace(record, identity="0" * 64)
+    assert "stored identity equals none of the kernel identities" in (_decode(stale, [stale]) or "")

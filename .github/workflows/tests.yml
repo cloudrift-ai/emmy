@@ -29,6 +29,8 @@ jobs:
         with:
           python-version: "3.13"
 
+      - uses: dtolnay/rust-toolchain@stable
+
       - name: Install dependencies
         run: make setup-ci
 
@@ -62,6 +64,9 @@ jobs:
         with:
           python-version: "3.13"
 
+      # ``make setup-ci`` builds the runtime extension with cargo.
+      - uses: dtolnay/rust-toolchain@stable
+
       - name: Install dependencies
         run: make setup-ci
 
@@ -90,6 +95,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+
+      # The wheel carries the runtime extension, built with cargo.
+      - uses: dtolnay/rust-toolchain@stable
 
       - name: Build with the release path without publishing
         run: make pypi-dist

@@ -36,14 +36,13 @@ def _python_reference(root):
 
 
 def _reset_python(program, prompt):
-    ids = np.zeros(program.arrays["prompt"].shape, dtype=np.int64)
+    ids = np.zeros(program.executor.buffer("prompt")[2], dtype=np.int64)
     ids[: len(prompt)] = prompt
-    program.arrays["prompt"].set(ids)
-    program.arrays["prompt_length"].set(np.array([len(prompt)], np.int64))
+    program.upload_prefix({"prompt": ids, "prompt_length": np.array([len(prompt)], np.int64)})
 
 
 def _python_step(program, position):
-    program.arrays["position"].set(np.array([position], np.int64))
+    program.upload_prefix({"position": np.array([position], np.int64)})
     program.run_once()
     return program.outputs()["logits"].reshape(-1)
 
@@ -108,6 +107,23 @@ def test_cached_qwen3_logits_and_generation(tmp_path, monkeypatch):
                         wall_timeout_s=30,
                     )
                     assert np.fromfile(output, np.int64).tolist() == selected[:-1]
+                # Same seed resets the random stream, including when a graph survives requests.
+                sampled = []
+                for capture, seed in ((False, 81), (True, 81), (True, 19), (True, 81)):
+                    await worker.run_job(
+                        {
+                            "op": "generate",
+                            "prompt": str(path),
+                            "max_new_tokens": 4,
+                            "capture": capture,
+                            "output": str(output),
+                            "sampling": {"temperature": 1.5, "top_p": 0.9, "seed": seed},
+                        },
+                        wall_timeout_s=30,
+                    )
+                    sampled.append(np.fromfile(output, np.int64).tolist())
+                assert sampled[0] == sampled[1] == sampled[3]
+                assert sampled[2] != sampled[0]
                 manifest_path = root / "manifest.json"
                 manifest = json.loads(manifest_path.read_text())
                 manifest["key"]["generation"]["eos_ids"] = [selected[0]]
@@ -145,6 +161,13 @@ CHECKPOINT_CASES = (
     ("heldout_math", "A box has 7 red balls and 5 blue balls. How many balls are in the box?", None, 24, False),
     ("heldout_code", "def is_even(number):\n    return", None, 24, True),
     ("heldout_context", "The train crosses a bridge and stops beside a quiet village. ", 128, 24, True),
+    ("context_1024", "The garden has a pond, a wooden bench, and a path lined with trees. ", 1008, 16, False),
+    ("context_4096", "The museum catalog describes paintings, pottery, maps, and tools from different centuries. ", 4080, 16, True),
+    # Held out until the FP32 attention-intermediate fix and its independent regression were committed.
+    ("heldout_attention", "Why does an ice cube float in water? Give a brief explanation.", None, 24, True),
+    ("heldout_context_4096", "The coastal survey records tides, winds, water temperatures, and seabird sightings. ", 4080, 16, False),
+    # Selected after the rotary precision fix; also qualifies Python dispatch beyond its old shared-memory limit.
+    ("heldout_rotary_context", "The field notebook lists soil samples, rainfall, seed counts, and flowering dates. ", 496, 16, True),
 )
 
 
@@ -185,9 +208,8 @@ def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch, name,
     with gpu_lock():
         model.cuda()
         precise.cuda()
-        # Check full-checkpoint dispatcher identity on the original two cases. Other
-        # cases independently check the model, including the longer cache histories.
-        reference_program = _python_reference(artifact) if name in ("france", "arithmetic") else None
+        # Include a longer cache history in exact dispatcher parity, exercising dynamic shared memory.
+        reference_program = _python_reference(artifact) if name in ("france", "arithmetic", "heldout_rotary_context") else None
         monkeypatch.setenv("PATH", "/nonexistent")
         monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", False)
 
@@ -239,7 +261,8 @@ def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch, name,
                             "full_model_close": bool(np.allclose(actual, expected, rtol=2e-2, atol=2e-2)),
                         }
                     )
-                    (tmp_path / "measurements.json").write_text(json.dumps(measurements, indent=2))
+                    if position % 64 == 0 or position + 1 == len(prompt) + decode_steps:
+                        (tmp_path / "measurements.json").write_text(json.dumps(measurements, indent=2))
                     if result["token"] is not None:
                         next_token = result["token"]
                         assert next_token == int(actual.argmax())
@@ -259,17 +282,24 @@ def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch, name,
                         native_rms,
                         reference_rms,
                     )
+                if prompt_length is not None and prompt_length >= 1008:
+                    # A short request after a full cache must see only its own overwritten prefix.
+                    np.asarray(prompt[:3], np.int64).tofile(path)
+                    await worker.run_job({"op": "start_generation", "prompt": str(path)}, wall_timeout_s=30)
+                    for _ in range(3):
+                        reset = await worker.run_job({"op": "generation_step", "capture": True}, wall_timeout_s=30)
+                    assert reset["token"] == measurements[2]["native_token"]
             finally:
                 await worker.aclose()
 
         asyncio.run(check())
 
 
-def test_rotary_preserves_half_precision_operation_boundaries(tmp_path):
+def test_rotary_rounds_only_the_output(tmp_path):
     from emmy.compiler.backend.pack import save_executable
     from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan, KernelSpec, LaunchSpec
     from emmy.compiler.dim import Dim
-    from emmy.compiler.dtype import F16, I64
+    from emmy.compiler.dtype import F16, F32, I64
     from emmy.serving.native.kernels import SOURCE
 
     executable = shutil.which("emmy-runtime-worker")
@@ -280,13 +310,16 @@ def test_rotary_preserves_half_precision_operation_boundaries(tmp_path):
     k = (rng.normal(size=(2, 128)) * 10).astype(np.float16)
     v = rng.normal(size=(2, 128)).astype(np.float16)
     angles = np.tile(rng.normal(size=64), 2)
-    cosine, sine = np.cos(angles).astype(np.float16), np.sin(angles).astype(np.float16)
+    cosine, sine = np.cos(angles).astype(np.float32), np.sin(angles).astype(np.float32)
     data = {"q": q, "k": k, "v": v, "cosine": cosine, "sine": sine, "position": np.array([0], np.int64)}
     source = (
         "#define HIDDEN 32\n#define HEADS 4\n#define KV_HEADS 2\n#define HEAD_DIM 128\n"
         "#define VOCAB 32\n#define SCALE 0.08838834764831845f\n" + SOURCE
     )
-    buffers = [BufferSpec(n, tuple(Dim(x) for x in a.shape), I64 if n == "position" else F16, "input") for n, a in data.items()]
+    buffers = [
+        BufferSpec(n, tuple(Dim(x) for x in a.shape), I64 if n == "position" else F32 if n in ("cosine", "sine") else F16, "input")
+        for n, a in data.items()
+    ]
     outputs = {"rotated": q, "keys": k, "values": v}
     buffers += [BufferSpec(n, tuple(Dim(x) for x in a.shape), F16, "output") for n, a in outputs.items()]
     args = tuple(data) + tuple(outputs)
@@ -317,12 +350,13 @@ def test_rotary_preserves_half_precision_operation_boundaries(tmp_path):
         asyncio.run(check())
         for name, values in (("rotated", q), ("keys", k)):
             rotated = np.concatenate((-values[:, 64:], values[:, :64]), axis=-1)
-            expected = (values * cosine + rotated * sine).astype(np.float16)
+            expected = (values.astype(np.float64) * cosine + rotated.astype(np.float64) * sine).astype(np.float16)
             np.testing.assert_array_equal(np.fromfile(tmp_path / name, np.float16).reshape(values.shape), expected)
         np.testing.assert_array_equal(np.fromfile(tmp_path / "values", np.float16).reshape(v.shape), v)
 
 
-def test_attention_reads_only_the_written_cache_prefix(tmp_path):
+@pytest.mark.parametrize("near_tie", [False, True], ids=["random", "near_tie"])
+def test_attention_reads_only_the_written_cache_prefix(tmp_path, near_tie):
     from emmy.compiler.backend.pack import save_executable
     from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan, KernelSpec, LaunchSpec
     from emmy.compiler.dim import Dim
@@ -337,6 +371,13 @@ def test_attention_reads_only_the_written_cache_prefix(tmp_path):
     query = rng.normal(size=(4, 128)).astype(np.float16)
     keys = rng.normal(size=(MAX_CONTEXT, 2, 128)).astype(np.float16)
     values = rng.normal(size=keys.shape).astype(np.float16)
+    if near_tie:
+        # QK is about 1024: FP16 score storage erases a real 0.125 difference.
+        query.fill(1)
+        keys.fill(8)
+        keys[0, :, 0] += 0.125
+        values.fill(-1)
+        values[0] = 1
     source = (
         "#define HIDDEN 32\n#define HEADS 4\n#define KV_HEADS 2\n#define HEAD_DIM 128\n"
         "#define VOCAB 32\n#define SCALE 0.08838834764831845f\n" + SOURCE
@@ -387,13 +428,12 @@ def test_attention_reads_only_the_written_cache_prefix(tmp_path):
                         {"op": "run", "warmup": 0, "iterations": 1, "capture": True, "outputs": {"attention": str(tmp_path / "result")}},
                         wall_timeout_s=30,
                     )
-                    # Independent float64 reductions, with the eager FP16 storage boundaries.
+                    # Independent float64 attention; only inputs and the final output use FP16.
                     k = keys[:count].repeat(2, axis=1).astype(np.float64)
                     v = values[:count].repeat(2, axis=1).astype(np.float64)
-                    scores = np.einsum("hd,thd->ht", query.astype(np.float64), k).astype(np.float16)
-                    scores = (scores.astype(np.float32) * np.float32(128**-0.5)).astype(np.float16).astype(np.float64)
+                    scores = np.einsum("hd,thd->ht", query.astype(np.float64), k) * 128**-0.5
                     probabilities = np.exp(scores - scores.max(axis=-1, keepdims=True))
-                    probabilities = (probabilities / probabilities.sum(axis=-1, keepdims=True)).astype(np.float16)
+                    probabilities /= probabilities.sum(axis=-1, keepdims=True)
                     expected = np.einsum("ht,thd->hd", probabilities.astype(np.float64), v).astype(np.float16)
                     actual = np.fromfile(tmp_path / "result", np.float16).reshape(query.shape)
                     np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-3)
@@ -401,3 +441,95 @@ def test_attention_reads_only_the_written_cache_prefix(tmp_path):
                 await worker.aclose()
 
         asyncio.run(check())
+
+
+def test_gpu_sampling_matches_independent_nucleus_distribution():
+    from emmy.compiler.backend.cuda.program import CompiledProgram
+    from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan, KernelSpec, LaunchSpec
+    from emmy.compiler.dim import Dim
+    from emmy.compiler.dtype import F16, F64, I64, U32, U64
+    from emmy.serving.native.kernels import SOURCE
+
+    # FP16 logits admit an exact ordering. The reference sorts tokens directly,
+    # independently of the device's histogram representation.
+    source = (
+        "#define HIDDEN 32\n#define HEADS 4\n#define KV_HEADS 2\n#define HEAD_DIM 8\n"
+        "#define VOCAB 257\n#define SCALE 0.3535533905932738f\n" + SOURCE
+    )
+    inputs = [
+        BufferSpec("logits", (Dim(257),), F16, "input"),
+        BufferSpec("params", (Dim(2),), F64, "input"),
+        BufferSpec("position", (Dim(1),), I64, "input"),
+        BufferSpec("length", (Dim(1),), I64, "input"),
+        BufferSpec("seed", (Dim(1),), U64, "input"),
+    ]
+    one = ((1,), (1,), (1,))
+    histogram_launch = LaunchSpec(
+        "histogram",
+        "native_histogram",
+        ("logits", "params", "position", "length", "histogram"),
+        ((3,), (1,), (1,)),
+        ((128,), (1,), (1,)),
+        0,
+        ("histogram",),
+    )
+    sample_args = ("logits", "histogram", "params", "seed", "position", "length", "output")
+    sample_launch = LaunchSpec("output", "native_sample", sample_args, one, one, 0, ())
+    kernels = {name: KernelSpec(source=source) for name in ("native_histogram", "native_sample")}
+
+    def program(launches, histogram_role):
+        buffers = [*inputs, BufferSpec("histogram", (Dim(65536),), U32, histogram_role), BufferSpec("output", (Dim(1),), I64, "output")]
+        names = [b.name for b in buffers if b.role == "input"]
+        outputs = [b.name for b in buffers if b.role == "output"]
+        plan = ExecutionPlan("cuda", names, outputs, buffers, {}, {}, launches, kernels)
+        feed = {b.name: np.zeros(b.resolve_shape({}), b.dtype.np) for b in buffers if b.role == "input"}
+        return CompiledProgram.build_from_plan(plan, feed)
+
+    with gpu_lock():
+        # One program per stage, so a histogram is built once per case and sampled many times;
+        # a third holds both launches for the captured-replay check.
+        hist = program([histogram_launch], "output")
+        sample = program([sample_launch], "input")
+        both = program([histogram_launch, sample_launch], "scratch")
+        rng = np.random.default_rng(928)
+        cases = [rng.normal(size=257).astype(np.float16), np.zeros(257, np.float16)]
+        cases += [np.resize(np.array([-65504, 65504, -0.0, 0.0], np.float16), 257)]
+        for values in cases:
+            for temperature, top_p in ((0.0, 1.0), (0.7, 0.8), (2.0, 1.0), (1e-300, 0.01), (1e300, 0.5)):
+                params = np.array([temperature, top_p], np.float64)
+                hist.upload_prefix({"logits": values, "params": params})
+                hist.run_once()
+                histogram = hist.outputs()["histogram"]
+                sample.upload_prefix({"logits": values, "params": params, "histogram": histogram})
+                if temperature == 0:
+                    probabilities = np.eye(257)[values.argmax()]
+                else:
+                    order = np.argsort(-values.astype(np.float64), kind="stable")
+                    weights = np.exp((values.astype(np.float64) - values.max()) / temperature)
+                    weights /= weights.sum()
+                    keep = min(257, np.searchsorted(np.cumsum(weights[order]), top_p) + 1)
+                    probabilities = np.zeros(257)
+                    probabilities[order[:keep]] = weights[order[:keep]]
+                    probabilities /= probabilities.sum()
+                selected = []
+                for index in range(1024):
+                    sample.upload_prefix({"seed": np.array([index], np.uint64)})
+                    sample.run_once()
+                    token = int(sample.outputs()["output"][0])
+                    assert probabilities[token] > 0
+                    selected.append(token)
+                frequencies = np.bincount(selected, minlength=257) / len(selected)
+                # Six binomial standard deviations plus one sample for rounding.
+                bounds = 6 * np.sqrt(probabilities * (1 - probabilities) / len(selected)) + 1 / len(selected)
+                assert np.all(np.abs(frequencies - probabilities) <= bounds), (temperature, top_p, frequencies, probabilities)
+                both.upload_prefix({"logits": values, "params": params, "seed": np.array([77], np.uint64)})
+                both.capture_program_graph()
+                both.replay_program_graph()
+                assert int(both.outputs()["output"][0]) == selected[77]
+        for invalid in (np.nan, np.inf, -np.inf):
+            values = np.zeros(257, np.float16)
+            values[3] = invalid
+            for temperature in (0.0, 1.0):
+                both.upload_prefix({"logits": values, "params": np.array([temperature, 1.0], np.float64)})
+                both.run_once()
+                assert int(both.outputs()["output"][0]) == -1

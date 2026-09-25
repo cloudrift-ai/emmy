@@ -1133,6 +1133,10 @@ def _sync_operands(
     # 4-way (64 B A rows) / 8-way (128 B B rows) bank-conflicted — the measured megakernel residual
     # (294.9 M ld conflicts / 82.5 M LSU inst on the gemma-shape fused edge, 5090).
     channels = channels or ((c.operands[1], c.exposes[0]),)
+    # The value each channel multiplies, by its accumulator: one producer edge can expose several
+    # (a packed gate/up weight decoded by one lift), and each channel stages its own, not the
+    # edge's last.
+    multiplied = {c.base.results[index]: exposed for index, _, exposed in c.channel_operands()} if c.base is not None else {}
     drain: list = []
     sync_ops: list[SyncOperand] = []
     async_ops: list[Operand] = []
@@ -1140,7 +1144,7 @@ def _sync_operands(
     (async_ops if a_copied else sync_ops).append(a_op)
     drain.append(a_op)
 
-    for f, (edge, _) in enumerate(channels):
+    for f, (edge, acc) in enumerate(channels):
         tag = "b" if f == 0 else f"b_x{f}"
         # The channel's B is a TERM: a gmem read is a slab (one ``Load`` over its coordinates) and
         # copies; anything else is a producer cone and compute-fills.
@@ -1148,13 +1152,14 @@ def _sync_operands(
         bl = slab.load if slab is not None else edge
         if not isinstance(bl, Load):
             b_body = dedup_recomputes(bl.lower(axes=axes))
+            exposed = multiplied.get(acc, bl.exposes[-1])
 
-            def b_value(k0, row, col, *, body=b_body, edge=bl):
+            def b_value(k0, row, col, *, body=b_body, exposed=exposed):
                 if b_atoms > 1:
                     row, col = _atom_major(bk_elems, mn[1].tile // b_atoms)(row, col)
                 k = BinaryExpr("+", k0, row)
                 sigma = Sigma({k_name: k_coord(k), n_name: n_coord(col)})
-                return _k_masked([s.substitute(sigma) for s in body], edge.exposes[-1], k, k_ext)
+                return _k_masked([s.substitute(sigma) for s in body], exposed, k, k_ext)
 
             op = SyncOperand(tag=tag, shape=(bk_elems * b_atoms, mn[1].tile // b_atoms), value=b_value, swizzle=swizzles[1])
             sync_ops.append(op)
@@ -1653,15 +1658,12 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             staged=stage.depth >= 2 and (not isinstance(n_chunks, int) or n_chunks >= 2),
         )
     else:
-        assert len(ops.channels) == 1, "cp.async / TMA staging is single-fold — a multi-B node rides the smem compute fill"
         # A cp.async-staged 1-byte (fp8) slab pads its rows (`BYTE_SLAB_PAD`) so the cooperative
         # byte-gather drain spreads across banks; a TMA box deposit is dense, so its byte slab
         # stays unpadded (the resolver sized the budget with the same rule).
         elems = ops.slab_elems()
         pads = tuple(BYTE_SLAB_PAD if e.nbytes == 1 and stage.transport == "smem-async" else 0 for e in elems)
-        operands = _slab_operands(
-            index_srcs=(c.operands[0].as_slab().load.index, c.operands[1].as_slab().load.index),
-            bufs=(c.operands[0].as_slab().load.input, c.operands[1].as_slab().load.input),
+        geometry = dict(
             mn=mn,
             k_axis=k_axis,
             bk_elems=stage.bk_elems,
@@ -1672,6 +1674,18 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             b_atoms=ops.b_atoms(mn),
             pads=pads,
         )
+        # One B slab per fold channel, as the compute fill already builds (:func:`_sync_operands`):
+        # the gate/up node shares ONE A across two weights, so the copy transports deposit
+        # (A, B0, B1, …) and the drain reads the same order. Only the slab count differs from the
+        # single-channel form — each B is an ordinary materialized operand under its own tag.
+        a_load = c.operands[0].as_slab().load
+        (a_op,) = _slab_operands(index_srcs=(a_load.index, None), bufs=(a_load.input, None), roles=(0,), **geometry)
+        b_ops = []
+        for f, (edge, _) in enumerate(ops.channels):
+            b_load = edge.as_slab().load
+            (b_op,) = _slab_operands(index_srcs=(None, b_load.index), bufs=(None, b_load.input), roles=(1,), **geometry)
+            b_ops.append(replace(b_op, tag="b" if f == 0 else f"b_x{f}"))
+        operands = (a_op, *b_ops)
         common = dict(
             operands=operands,
             slab_dtype=cuda_name(elem),

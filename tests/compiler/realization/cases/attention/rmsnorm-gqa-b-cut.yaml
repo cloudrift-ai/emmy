@@ -76,15 +76,6 @@ configs:
       STAGE: ''
       RASTER: ''
     identity: b73fb5f21bee1215483c0f8b5bbb16b9d2a86e833df5f5bc20dcb34ba7e1fe8e
-  - name: k_sdpa_rms_norm_reduce_2faf1c.13e687dac206
-    bindings: {}
-    pins:
-      FAST_MATH: true
-    knobs:
-      WORK: ''
-      REDUCE: ''
-      RASTER: ''
-    identity: 13e687dac206b569e6443acaf2714b8bc3c7cd4f6242b014d526185a2f786de4
   - name: k_sdpa_rms_norm_reduce_2faf1c.b7a535408e27
     bindings: {}
     pins:
@@ -94,6 +85,21 @@ configs:
       REDUCE: ''
       RASTER: ''
     identity: cbdcf3d05c479d07b3a38ed6e73efb3289df164d7f604edd7000a4ff81128d89
+  - name: k_sdpa_rms_norm_reduce_2faf1c.aca934954a34
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      TILE@map.1/twist: ''
+      TILE@map.1/twist.1/inner: ''
+      REDUCE@map.1/twist: coop
+      REDUCE@map.1/twist.1/inner: ''
+      REDUCE@map.1/twist.1/inner.1/map.3/map.1/reduce: ''
+      STAGE@map.1/twist: ''
+      STAGE@map.1/twist.1/inner: ''
+      WORK: t8
+      RASTER: ''
+    identity: aca934954a34a3eb52d93fe09bb89f7570e43928745029808256ab74f6caa669
 loops:
 - inputs: [x0, x1, x2, x3, x4]
   outputs: [scaled_dot_product_attention]

@@ -13,24 +13,21 @@ pip install emmy-ml          # the CLI, with the recommended recipes bundled
 emmy --version
 ```
 
-The compiler needs its own extra (`pip install "emmy-ml[compile]"` — torch, transformers, cppyy). To hack on emmy
-itself, clone instead:
+The compiler needs its own extra (`pip install "emmy-ml[compile]"` — torch, transformers, cppyy). The wheel carries
+the runtime extension that launches its kernels (`emmy.emmy_runtime`, built from `crates/emmy-runtime-py`) for Linux
+x86_64; on another platform the sdist builds it when a Rust toolchain is present and installs pure without one,
+which keeps every command that needs no GPU working. To hack on emmy itself, clone instead:
 
 ```bash
 git clone https://github.com/cloudrift-ai/emmy.git
 cd emmy && make setup
 ```
 
-On a pre-Turing GPU (V100 `sm_70`, P100 `sm_60`) that install lands an NVRTC that cannot compile for the card: torch
-depends on `nvidia-cuda-nvrtc` 13.x, cupy resolves NVRTC to it in preference to any CUDA 12 build, and CUDA 13 dropped
-every architecture below `sm_75`. Installing `nvidia-cuda-nvrtc-cu12` does not change the resolution; preloading a
-CUDA 12 NVRTC does:
+Kernels compile with the CUDA toolkit's `nvcc` and launch through the Rust runtime (`make setup` builds it into the
+venv, so a Rust toolchain is a prerequisite). On a pre-Turing GPU (V100 `sm_70`, P100 `sm_60`) the toolkit must be a
+CUDA 12 release: CUDA 13 dropped every architecture below `sm_75`.
 
-```bash
-LD_PRELOAD=/usr/local/cuda-12.9/lib64/libnvrtc.so.12 emmy tune ...
-```
-
-The torch wheel itself is a second, separate pre-Turing trap: the default `+cu130` build carries no `sm_70` kernels at
+The torch wheel is a separate pre-Turing trap: the default `+cu130` build carries no `sm_70` kernels at
 all, so the reference side of every accuracy check and every `--bench-backends eager,tcompile` comparison dies with
 `no kernel image is available for execution on the device`. The `2.13.0+cu126` build includes Volta kernels:
 
@@ -41,11 +38,8 @@ pip install --force-reinstall "torch==2.13.0+cu126" --index-url https://download
 Ask for the `+cu126` local version explicitly — a bare `torch==2.13.0` matches the already-installed `+cu130` wheel and
 pip reports the requirement satisfied without changing anything.
 
-Commands that compile or launch kernels locally check this at startup and abort with that remedy rather than letting
-it surface as a wall of failed benchmarks. Commands that only drive remote hardware (`deploy`, `bench`, `vm`,
-`teardown`, …) are unaffected and keep working on such a host. `make test` prints the same diagnosis in its session
-header and skips the CUDA tests naming that cause; a handful of CLI argument-validation tests still fail there, because
-the startup check aborts before argparse reaches them.
+Commands that only drive remote hardware (`deploy`, `bench`, `vm`, `teardown`, …) never touch the local toolchain and
+keep working on such a host.
 
 ## Compile
 
@@ -253,9 +247,17 @@ emmy serve Qwen/Qwen3-Embedding-0.6B --bench --random-input-len 32 --stock
 ## Experimental native generation
 
 Dense FP16 Qwen3 can be prepared as a standalone artifact and run through the Rust cached-generation loop. This
-single-request path supports greedy sampling and optional CUDA graphs. It is a correctness prototype with sequential
-prefill; vLLM remains the serving default. See the [native generation contract](emmy/serving/native/ARCHITECTURE.md)
+single-request path and experimental native HTTP adapter support greedy or seeded temperature/top-p sampling and
+optional CUDA graphs. Residuals and
+attention/rotary intermediates use FP32. It uses sequential prefill; vLLM remains the serving default. See the [native generation contract](emmy/serving/native/ARCHITECTURE.md)
 for preparation, commands, limitations, and qualification.
+
+```bash
+make native-dist  # install the archive's matching binaries on PATH
+emmy serve Qwen/Qwen3-0.6B --generate --native --revision REVISION
+```
+
+Native serving exposes text and chat completions with streaming, stop strings, usage, and one active request.
 
 ## Recipe
 
@@ -390,7 +392,7 @@ emmy vm delete cloudrift --instance-id <id>
 make test      # run the whole pytest suite — takes many minutes, run it once when finishing a PR
 make lint      # ruff check + format check
 make format    # auto-fix
-make wheel     # build the wheel into dist/
+make wheel     # build the sdist and this host's wheel into dist/
 make pypi-dist # dry-run the exact PyPI sdist + wheel build into dist/
 ```
 
@@ -403,7 +405,9 @@ so a failed upload leaves nothing behind. Publishing a GitHub release by hand wo
 `pyproject.toml`. Lint and the full test suite run in pull-request checks, independently of publication.
 
 Pull requests run `make pypi-dist` in a bare Python 3.13 job. The same target installs the minimal release-build
-dependencies, stages the distribution tree, and builds both artifacts used by the publishing workflow.
+dependencies, stages the distribution tree, and builds both artifacts the publishing workflow uploads: the sdist and
+one wheel for the runner's platform, retagged by `auditwheel` to the manylinux baseline its symbols allow, since the
+wheel carries the runtime extension and a compiled extension makes a wheel platform-specific.
 
 `scripts/prepare_dist.py` stages the tree for a distribution build: `--recipes` copies runnable recipe YAML plus all
 recipe-local model goldens into the package (`make wheel` runs this), and `--readme` rewrites this file's repo-relative
@@ -476,8 +480,12 @@ require CloudRift organization access.
 - [experiments/](experiments/) — Benchmark parameter sweeps, self-contained recipe + committed results —
   what `emmy bench` runs (see [ARCHITECTURE.md](experiments/ARCHITECTURE.md))
 - [kernels/](kernels/) — Standalone CUDA kernel sources
-- [crates/emmy-runtime/](crates/emmy-runtime/) — Experimental Rust executor for static packs and cached generation
-  (build, protocol, and qualification in [ARCHITECTURE.md](crates/emmy-runtime/ARCHITECTURE.md))
+- [crates/emmy-runtime/](crates/emmy-runtime/) — The Rust runtime: the executor behind every launch, the standalone
+  pack loader and cached generation (design, hosts, and qualification in
+  [ARCHITECTURE.md](crates/emmy-runtime/ARCHITECTURE.md)); [crates/emmy-runtime-py/](crates/emmy-runtime-py/) is
+  its in-process host, the `emmy.emmy_runtime` extension setuptools-rust builds into the package
+- [crates/emmy-server/](crates/emmy-server/) — Native text and HTTP adapter
+  (see [ARCHITECTURE.md](crates/emmy-server/ARCHITECTURE.md))
 - [docs/](docs/) — Docusaurus user-docs site (getting started, benchmarking, custom configurations, deployment)
 - [tests/](tests/) — pytest tests (see [ARCHITECTURE.md](tests/ARCHITECTURE.md))
   - [compiler/passes/](tests/compiler/passes/) — compiler pass tests (see [ARCHITECTURE.md](tests/compiler/passes/ARCHITECTURE.md))

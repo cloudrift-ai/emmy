@@ -1,9 +1,10 @@
 # Native cached generation
 
-Python prepares a standalone dense FP16 Qwen3 token-step artifact. The Rust runtime owns inference: it submits the
-exported launches, retains the KV cache, and chooses each next token on the GPU. No Python model operation runs after
-preparation. This is a single-request correctness implementation, not an HTTP server or a performance replacement for
-vLLM. The existing serving integration remains the default.
+Python prepares a standalone dense Qwen3 token-step artifact with FP16 weights, projections, logits, and KV cache.
+The Rust runtime submits the exported launches, retains the KV cache, and chooses each next token on the GPU.
+No Python model operation runs after
+preparation. The experimental native HTTP adapter serves one active request; this is not a performance replacement
+for vLLM. The existing serving integration remains the default.
 
 ## Preparation
 
@@ -16,10 +17,12 @@ identify their writes so Python scratch allocation preserves the same dependenci
 
 CUDA source lives in the packaged `kernels.cu` resource, loaded by Python during artifact preparation.
 Small CUDA kernels provide embedding lookup, default full rotary embedding, contiguous cache writes, causal grouped
-query attention, and greedy sampling. Attention accumulates products in float32; score and probability storage follow
-the FP16 eager Qwen3 contract. These kernels favor a simple independent reference implementation over speed. Rotary
-constants are prepared from the checkpoint's own rotary module. The artifact bundles all binaries and weight bytes
-through the existing standalone exporter. Its generation metadata lives in the pack key and has its own version.
+query attention, and GPU sampling. Attention keeps dot products, scores, probabilities, and value accumulation in
+FP32, rounding only its output to FP16. This avoids losing near-tied scores at large magnitudes. These kernels favor
+accuracy over speed. Residual sums stay in FP32 through the existing attention-split wrappers; normalization casts
+back to FP16 before each projection. Rotary constants come from the checkpoint's own module in FP32. Rotation also
+uses FP32 intermediates and rounds only the query/key outputs to FP16. The existing standalone exporter bundles all
+binaries and weight bytes. Generation metadata lives in the pack key and has its own version.
 
 Preparation rejects other model families, quantization, sliding attention, non-default rotary schemes, training mode,
 and non-FP16 or non-CPU parameters. Context capacity must fit both the model and the current 4,096-token limit.
@@ -41,11 +44,32 @@ between layers or deduplicate the embedding and tied output-head weight copies.
 Graph capture records one step without executing a warmup. Replaying the graph advances the model exactly once,
 including when capture is first enabled during decode. All addresses remain stable across positions and requests.
 Each step synchronizes at the CPU observation boundary. EOS or the output budget stops further submissions. A
-request whose prompt plus output budget exceeds capacity is rejected. Only greedy sampling is supported.
+request whose prompt plus output budget exceeds capacity is rejected. Greedy decoding is the default; requests may
+select temperature, top-p, and an unsigned 64-bit seed.
 
-The existing supervised native worker supplies hard deadlines and process retirement. It never retries a failed
-request. `client.generate_tokens` sends binary token files to that worker; the complete generation loop runs in Rust.
+The existing supervised native worker supplies hard deadlines and process retirement. Each worker operation has a
+120-second default deadline; `generate --timeout SECONDS` can extend it for long sequential prefills. It never retries
+a failed request. `client.generate_tokens` sends binary token files to that worker; the complete generation loop
+runs in Rust.
 The low-level start/step operations expose logits for parity checks and do not change the ordinary generation path.
+
+## Sampling contract
+
+Generation artifact version 2 adds a float64 temperature/top-p input and a uint64 seed input. Older generation
+artifacts must be exported again; the underlying execution-plan format is unchanged. Temperature must be finite and
+nonnegative, and top-p must lie in `(0, 1]`. Temperature zero selects the lowest token ID among maximum logits.
+Nonfinite logits fail the request. Top-k is unsupported.
+
+For positive temperature, a 65,536-bin histogram orders FP16 logits exactly, combining signed zeros. The sampler
+retains the smallest descending probability prefix reaching top-p, breaking ties by ascending token ID. It samples
+that distribution in token-ID order using float64 probabilities. The histogram costs 256 KiB per loaded model and is
+cleared before every step; no vocabulary-sized buffer crosses to the CPU. This simple implementation has serial
+histogram scans and token selection; it is not a sampling performance claim.
+
+A SplitMix64 counter combines the request seed and generated-token index. Prefill does not consume random draws.
+Resetting a request resets the counter, and captured and uncaptured execution select the same tokens for identical
+logits and controls. Reproducibility does not imply matching NumPy or PyTorch RNG sequences, or identical completions
+across different compiled artifacts and hardware.
 
 ## Commands and qualification
 
@@ -54,11 +78,13 @@ Build and install the matching worker before using these commands; command start
 ```bash
 emmy generate Qwen/Qwen3-0.6B --revision REVISION --export-native /tmp/qwen-native --context-length 256
 emmy generate Qwen/Qwen3-0.6B --revision REVISION --native-pack /tmp/qwen-native --prompt 'Hello' --max-new-tokens 16
-emmy generate Qwen/Qwen3-0.6B --revision REVISION --native-pack /tmp/qwen-native --prompt 'Hello' --capture
+emmy generate Qwen/Qwen3-0.6B --revision REVISION --native-pack /tmp/qwen-native --prompt 'Hello' --capture \
+  --temperature 0.7 --top-p 0.9 --seed 42
 ```
 
-Use the same checkpoint/tokenizer revision for preparation and text generation. The native artifact itself accepts
-and returns token IDs; tokenizer packaging and native text processing belong to the later API work.
+Use the same checkpoint/tokenizer revision for preparation and text generation. The runtime artifact accepts and returns
+token IDs. Native serving preparation additionally bundles the same
+checkpoint tokenizer and chat template; the HTTP adapter owns text processing.
 
 The hermetic tiny-Qwen3 GPU test checks every logit at `rtol=atol=1e-3`, greedy tokens, request reset, context bounds,
 EOS, zero output budget, graph replay, and first capture during decode. It hides Python and NVCC from the native
@@ -75,6 +101,27 @@ match. Pointwise differences remain recorded. These experimental budgets do not 
 or identical future completions when the references disagree.
 
 The [numerical investigation](../../../experiments/Qwen3-0.6B/native_generation/RESULTS.md) records the fixed rotary
-rounding defect, failed exploratory criteria, held-out qualification, and limits. Checkpoint coverage reaches 256
-positions; the 4,096-position check isolates attention rather than qualifying an entire checkpoint at that length.
+rounding defect, failed exploratory criteria, held-out qualification, and limits. The original artifact passed
+through 256 checkpoint positions. The
+[follow-up](../../../experiments/Qwen3-0.6B/native_generation/SAMPLING_CONTEXT.md) executes
+seventeen cases across 10,585 positions, including two 4,096-position prompts, within the unchanged error budgets.
+FP32 attention, rotary intermediates, and residual accumulation close the earlier numerical failures. Independent
+attention qualification also covers the full 4,096-position capacity.
 Performance and production concurrency are separate qualifications.
+
+## Native HTTP launcher
+
+`emmy serve MODEL --generate --native` prepares the artifact in a fresh temporary directory and executes a prebuilt
+`emmy-server`. Preparation uses FP16 checkpoint weights, the requested revision, and the existing golden and strict
+compiler-evidence controls. `--native-pack DIR` reuses an already prepared serving bundle; its recorded model,
+revision, and context must match. Preparation-only evidence flags are rejected when reusing a bundle.
+
+Native options are `--host`, `--port`, `--revision`, `--max-model-len`, and `--native-pack`, plus the existing Emmy
+preparation, dry-run, and benchmark controls. Context defaults to 4,096. `--native` requires `--generate`, rejects
+`--stock`, and rejects unsupported engine arguments. vLLM forwarding stays unchanged without `--native`. Dry-run
+prints preparation settings and the native command without downloading, compiling, or starting a process.
+
+`--bench` uses the existing vLLM benchmark client, with default native concurrency one. Higher explicit concurrency
+measures overload and receives busy responses. The client is an optional dependency; normal native serving does not
+import vLLM. Install the matching binaries from `make native-dist` before launching. See the
+[HTTP adapter contract](../../../crates/emmy-server/ARCHITECTURE.md) for API fields, cancellation, readiness, and tests.

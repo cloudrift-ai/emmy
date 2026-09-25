@@ -1,6 +1,7 @@
 [build-system]
-# >=77.0 for the PEP 639 `license` / `license-files` spelling used below.
-requires = ["setuptools>=77.0"]
+# >=77.0 for the PEP 639 `license` / `license-files` spelling used below. setuptools-rust
+# builds the runtime extension (``crates/emmy-runtime-py``) into the package.
+requires = ["setuptools>=77.0", "setuptools-rust>=1.10"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -62,7 +63,7 @@ eval = ["lm-eval[api]>=0.4.9"]
 visualize = ["playwright>=1.40"]
 # flash-attn requires torch at build time, install separately:
 #   pip install flash-attn --no-build-isolation
-dev = ["pytest", "pytest-asyncio", "pytest-xdist", "ruff", "matplotlib", "graphviz", "torch", "transformers>=5.13,<5.15", "diffusers>=0.39,<0.40", "cupy-cuda12x; sys_platform == 'linux'", "cppyy==3.5.0", "safetensors", "playwright>=1.40"]
+dev = ["pytest", "pytest-asyncio", "pytest-xdist", "ruff", "matplotlib", "graphviz", "torch", "transformers>=5.13,<5.15", "diffusers>=0.39,<0.40", "cppyy==3.5.0", "safetensors", "playwright>=1.40"]
 
 [project.urls]
 Homepage = "https://github.com/cloudrift-ai/emmy"
@@ -86,6 +87,22 @@ include = ["emmy*"]
 
 [project.scripts]
 emmy = "emmy.emmy:main"
+
+# The runtime that launches every compiled program, as ``emmy.emmy_runtime``. Optional at build
+# time: a host without a Rust toolchain still installs the pure package (the deploy, bench and
+# recipe commands need no GPU); the compile and serving paths then report the missing extension.
+[[tool.setuptools-rust.ext-modules]]
+target = "emmy.emmy_runtime"
+path = "crates/emmy-runtime-py/Cargo.toml"
+binding = "PyO3"
+optional = true
+debug = false
+args = ["--locked"]
+
+# The extension targets the stable ABI (PyO3 ``abi3-py312``), so one wheel serves every Python
+# from 3.12 on.
+[tool.distutils.bdist_wheel]
+py-limited-api = "cp312"
 
 [project.entry-points."vllm.general_plugins"]
 emmy_serving = "emmy.serving:register"
