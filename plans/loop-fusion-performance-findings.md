@@ -25,6 +25,10 @@ Numbers are from the refresh agents' runs on each card and are single measuremen
   code (200-630 us each on the H100); the s1 q/k projection piece (about 2 MMAC) takes 87 us; the greedy picks an A100
   s1 V projection at 7.8 ms and gate/up at 329 us, where a GEMV should take single-digit microseconds. The only
   duplicated work left is GQA's 2x: k and v pieces are indexed per q head (16), not per KV head (8).
+- **The bar to beat.** Before this change the nine-target kernel set, replayed unpinned at `-O3`,
+  `EMMY_FAST_MATH=0`, s512, summed to 197 us on the H100, 416 us on the A100 and 1192 us on the V100 (Inductor: 124,
+  314, 1239). Its gap to Inductor was `softmax x V` and `SDPA + o_proj + residual`; the same P.V work is the largest
+  piece of every whole-layer route now.
 - **More cuts are not better.** On a Qwen3.8 GDN kernel, 2 cuts gave 35.8 ms and all 4 depth-1 cuts gave 215 ms.
 
 Next step: fusion stays maximal, so the gains come from cuts. Make the greedy (or the prior) pick cuts by duplicated
