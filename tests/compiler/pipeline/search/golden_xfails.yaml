@@ -17,7 +17,6 @@ DeepSeek-V4-Flash-0731/v100_sm70.yaml:
 - post1.k_linear_softmax_matmul_mean_reduce_9e578e.8595d2e73ba3.m1.5b1191cee458.ff25313e3e06#2
 Qwen3.8-27B-FP8/v100_sm70.yaml:
 - k_to_pointwise.9516fd90e54a
-- k_linear_matmul_mean_reduce_4b396c.10c49f3e611c
 gemma-4-12B-it/rtx5090_sm120.yaml:
 - post1.k_linear_mean_reduce_97b2ad.m1.9838c7e64c9a
 - post1.k_linear_mean_reduce_97b2ad.m1.705b86ec4bc9
