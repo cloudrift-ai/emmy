@@ -69,10 +69,11 @@ does — is a regression to report, not a golden to refresh; stop there for ever
 emmy golden restamp recipes/<model>/golden/<card>.yaml    # rewrites the file in place; no card needed
 ```
 
-It replaces each stored target with the fresh Loop IR, re-keys rows to the kernel they now name (a cut receipt by its
-piece's structural signature), drops rows that no longer decode, and keeps a measurement only when the row's kernel
-renders the same CUDA source from the fresh Loop IR. Otherwise the row keeps its schedule and loses its microseconds:
-a *proposal*, no evidence until measured again. It refuses to write a file nothing survives in. Read its report:
+It replaces each stored target with the fresh Loop IR, re-keys a row naming the target to the fresh target (a row naming
+a cut or split piece keeps its identity and survives while the fresh set still mints that piece), drops rows that no
+longer decode, and keeps a measurement only when the row's kernel renders the same CUDA source from the fresh Loop IR.
+Otherwise the row keeps its schedule and loses its microseconds: a *proposal*, no evidence until measured again. It
+refuses to write a file nothing survives in. Read its report:
 
 | Report line | Meaning | Next |
 | --- | --- | --- |

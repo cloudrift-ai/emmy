@@ -215,9 +215,11 @@ check restricts the diff to the targets the file stores. `emmy golden restamp [P
 lowering; `check` and `restamp` default to every repository golden, none of the three needs a card, and the
 `refresh-golden` skill is the flow around them. What a restamp keeps per row is decided in
 `compiler/pipeline/search/restamp.py`: a measurement survives only when the row's kernel renders the same CUDA source
-from the fresh Loop IR, otherwise the row becomes a proposal; a row that no longer decodes, or whose kernel no fresh
-kernel writes, is dropped and named. The command never deletes a file: one nothing survives in is left alone and
-reported. The lowering behind the check, the restamp and `emmy trace`'s inventory is one function
+from the fresh Loop IR, otherwise the row becomes a proposal. A row naming the target takes the fresh target's
+identity; a row naming a piece of the target's cut or split set keeps its own and survives only if the fresh set
+still mints that piece. A row that no longer decodes, a row whose kernel no fresh kernel writes, and a kernel-set row
+whose members all lost their measurements are dropped and named. The command never deletes a file: one nothing survives
+in is left alone and reported. The lowering behind the check, the restamp and `emmy trace`'s inventory is one function
 (`working_golden.lowered_kernels`), and every command that reads a golden by path loads it through
 `golden.load_golden`, which validates a repository golden strictly and anything else as a working file.
 
