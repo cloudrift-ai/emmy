@@ -923,7 +923,7 @@ class EmmyGenModel(nn.Module, SupportsPP):
         # shared table stays raw (the head must read it unscaled).
         if tied and param.data.is_cuda:
             self.runner.adopt_embed_table(param.data, scale=getattr(self.runner, "_embed_scale", 1.0))
-        # RECLAIM, unconditionally: empty_cache + the cupy pool trim RELEASE freed blocks back to
+        # RECLAIM, unconditionally: empty_cache RELEASES freed blocks back to
         # the driver, and vLLM's KV-cache sizing (which runs right after load) budgets
         # ``util x total - currently-used`` off the driver's own accounting — it cannot see that a
         # cached block is free. Everything this boot churned through counts: the adopted table's

@@ -582,7 +582,7 @@ misses). Under `--speculative-config` the ladder is derived from the resulting
 round-up to that multiple cannot push a step's padded width past the decode bucket and off the static decode twin
 (`serving/ARCHITECTURE.md` carries the rule and its invariant). The emmy generative arm also defaults
 `--gpu-memory-utilization` to **0.97** (its
-cupy residents are invisible to vLLM's torch-only profiler, so the 0.90 line can fail the min-KV fit at long
+runtime residents are invisible to vLLM's torch-only profiler, so the 0.90 line can fail the min-KV fit at long
 model lens; stock keeps 0.90) and `--max-num-batched-tokens` to **the runner's prefill capacity + the decode
 bucket** — the bucket-sized rider headroom is covered by the chunk+decode twin row split
 (`serving/ARCHITECTURE.md`), so full chunk steps keep carrying their decode riders; an explicit value past that cap

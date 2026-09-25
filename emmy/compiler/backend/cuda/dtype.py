@@ -2,7 +2,7 @@
 
 Augments :class:`emmy.compiler.dtype.DataType` with CUDA-specific
 information: the C type name used in kernel source, any header that
-must be ``#include``'d, and the cupy dtype used for device allocations.
+must be ``#include``'d.
 
 Per-buffer / per-decl dtype lookup helpers (``nbytes_of``) accept the
 legacy CUDA C-name spellings (``"float"``, ``"half"``, ...) that older

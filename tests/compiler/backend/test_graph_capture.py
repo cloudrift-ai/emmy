@@ -1,6 +1,6 @@
 """CUDA graph capture of the per-kernel bench (``capture_graphs``).
 
-The per-kernel reproducer bench wraps the measured region in CUDA graphs — cupy stream capture for
+The per-kernel reproducer bench wraps the measured region in CUDA graphs — the runtime's stream capture for
 emmy's per-launch batch loop, ``torch.cuda.CUDAGraph`` for the torch closures — so the CUDA
 event windows measure dense GPU work instead of per-launch dispatch gaps. These tests cover:
 

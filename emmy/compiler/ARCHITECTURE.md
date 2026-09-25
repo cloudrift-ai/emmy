@@ -20,7 +20,7 @@ Graph[LoopOp]  (one LoopOp = one kernel)    ── Layer 2
    │  pipeline/passes/lowering/cuda         (Kernel IR → CUDA source)
    ▼
 Graph[CudaOp]                               ── Layer 3
-   │  backend/cuda                          (cupy.RawKernel via NVRTC)
+   │  backend/cuda                          (nvcc cubins, launched by the Rust runtime)
    ▼
 GPU
 ```

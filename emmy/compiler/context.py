@@ -343,7 +343,7 @@ class Context:
     @classmethod
     def probe(cls) -> Context:
         """Build by probing the live CUDA device. Falls back to (0, 0) if
-        cupy is unavailable — callers treat that as "no hardware feature
+        no CUDA device is visible — callers treat that as "no hardware feature
         support" (rules gating on capability self-skip via ``RuleSkipped``).
 
         ``max_dynamic_smem`` is the *live device's* opt-in cap, not the
