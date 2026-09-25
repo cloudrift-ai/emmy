@@ -895,11 +895,11 @@ def _target_kernel_nodes(record: GoldenRecord):
 
 def _lifted_target(record: GoldenRecord):
     """Lift the record's single selected kernel to Tile IR — the tree the cut pass schedules: the
-    lift, then the twist rewrite, exactly as ``lowering/tile`` runs them. A placement key is
+    lift, then the twist rewrite, exactly as ``tile/lift`` runs them. A placement key is
     spelled on that tree, so decoding it against the lift alone would name sites the fused
     single-pass carrier no longer has."""
-    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op  # noqa: PLC0415
-    from emmy.compiler.pipeline.passes.lowering.tile._twist import rewrite_twisted  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.tile._twist import rewrite_twisted  # noqa: PLC0415
 
     lowered, nodes = _target_kernel_nodes(record)
     if len(nodes) != 1:

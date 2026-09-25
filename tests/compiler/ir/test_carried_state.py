@@ -104,7 +104,7 @@ def _graph() -> Graph:
 def test_the_lift_spells_the_state_as_a_buffer_read_one_launch_back() -> None:
     """The loop that carries the state becomes the kernel's serial launch axis and the state a
     buffer the node owns; the step's ``W @ S`` stays a contraction, its B slab the previous state."""
-    lifted = Pipeline.build(["lowering/tile"], select=["lift"]).run(_graph())
+    lifted = Pipeline.build(["tile/lift"], select=["lift"]).run(_graph())
     (node,) = (node for node in lifted.nodes.values() if isinstance(node.op, TileOp))
     tile: TileOp = node.op
 

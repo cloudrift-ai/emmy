@@ -24,7 +24,7 @@ def _tile(body: Body):
     graph = Graph()
     graph.add_node(LoopOp(body=body), [], Tensor("out", (1,)), node_id="out")
     graph.outputs = ["out"]
-    return Pipeline.build(["lowering/tile"], select=["lift"]).run(graph).nodes["out"].op
+    return Pipeline.build(["tile/lift"], select=["lift"]).run(graph).nodes["out"].op
 
 
 def _matmul_tile(epilogue_op: str | None = None, k_extent: int = 128, n_outer: bool = False):

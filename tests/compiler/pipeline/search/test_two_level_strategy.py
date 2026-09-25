@@ -248,7 +248,7 @@ def _persisted_placement_child() -> Graph:
     """Return one unscheduled child as a Tile dump round-trip would load it."""
     fused = Pipeline.build(LOOP_PASSES).run(_placement_route_graph(), ctx=Context.from_target((8, 0)), db=SearchDB())
     with pinned_knobs({"PLACE": "cut", "REDUCE": ""}):
-        pieces = Pipeline.build(["lowering/tile"], select={"lift", "cut"}).run(fused, ctx=Context.from_target((8, 0)), db=SearchDB())
+        pieces = Pipeline.build(["tile/lift"], select={"lift", "cut"}).run(fused, ctx=Context.from_target((8, 0)), db=SearchDB())
     producer = next(node.id for node in pieces.nodes.values() if isinstance(node.op, TileOp) and "__place_" in node.op.name)
     child = single_node_graph(pieces, producer)
     return Graph.from_dict(json.loads(json.dumps(child.to_dict(), default=str)))
@@ -291,7 +291,7 @@ def test_scheduled_tile_child_is_not_reenrolled_or_rescheduled() -> None:
     """A Tile root whose worker inventory is sealed is already decided."""
     child = _persisted_placement_child()
     with pinned_knobs({"WORK": "t16x8", "STAGE": "d1/smem-async", "REDUCE": ""}):
-        scheduled = Pipeline.build(["lowering/tile"]).run(child, ctx=Context.from_target((8, 0)), db=SearchDB())
+        scheduled = Pipeline.build(["tile/lift", "tile/cut", "tile/schedule"]).run(child, ctx=Context.from_target((8, 0)), db=SearchDB())
     tile = next(node.op for node in scheduled.nodes.values() if isinstance(node.op, TileOp))
     assert tile.schedule is not None
     assert _kernel_nodes(scheduled) == []
@@ -418,7 +418,7 @@ def test_inventory_dedups_by_structural_identity() -> None:
     loop_node = next(nid for nid, n in fused.nodes.items() if isinstance(n.op, LoopOp))
     reported: list[str] = []
     inventory = KernelInventory(identity, lambda nid, op, frag: reported.append(nid))
-    event = SpliceEvent(match=None, fragment=fused, root_op=fused.nodes[loop_node].op, pass_name="lowering/tile", graph=fused)
+    event = SpliceEvent(match=None, fragment=fused, root_op=fused.nodes[loop_node].op, pass_name="tile/lift", graph=fused)
     inventory.on_splice(event)
     assert reported == [loop_node], "first sighting reported"
     inventory.on_splice(event)

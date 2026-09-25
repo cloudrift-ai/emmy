@@ -54,7 +54,7 @@ until the step has finished evaluating its outputs. The domain and choices are d
 
 ## Total lift
 
-`pipeline/passes/lowering/tile/_fromloop.py` implements the only loop conversion:
+`pipeline/passes/tile/_fromloop.py` implements the only loop conversion:
 
 1. recursively lift nested reductions in place;
 2. remove the current loop's `Accum` statements from its step body;
@@ -80,7 +80,7 @@ remains a placement fact rather than part of the Fold algebra. Where an operand 
 known output stride chooses its tiled axis. Undetermined layouts retain the trailing placement order. Stored schedules
 retain the same input and output tensors as the unscheduled Tile so reconstruction makes the same choice.
 
-The bilinear form is CANONICAL BY CONSTRUCTION: formation (`lowering/tile/_fromloop`) turns every load of a reduce
+The bilinear form is CANONICAL BY CONSTRUCTION: formation (`tile/_fromloop`) turns every load of a reduce
 step over coordinates into a slab operand (a data-dependent gather, the packed-pair table read by a decoded code,
 stays a statement of its cone: the value it indexes is not an axis) and, when the step is a semiring step — every
 accumulated value one `⊗` of two distinct names, all products sharing the `⊗`, and `⊗` distributing over the one
@@ -111,7 +111,7 @@ as well.
 
 An identity projection dissolves into its operand, or flattens its operand list into a consuming projection. A
 pass-through can make two occurrences of the same computation compare unequal, and the placement fork's value
-clustering (`lowering/tile/_cut.py`) relies on alpha-equivalent cones converging to one canonical shape. Independent
+clustering (`tile/_cut.py`) relies on alpha-equivalent cones converging to one canonical shape. Independent
 states over different free coordinates separate; statistics sharing the same coordinates remain together.
 
 Normalization ends by restoring OBJECT SHARING: same-value cones — alpha-equal with identical captures and exposed
@@ -157,7 +157,7 @@ That rule is `promoted_sweep`, and it has four readers. Construction applies it.
 CANDIDATE piece: where a kernel's stores ride axes with no axis in common, nothing promotes and the whole kernel keeps
 its one-axis grid, yet each store taken alone may promote its own — the NVFP4 encode, whose packed codes ride the
 feature axis and whose block scales ride one sixteenth of it. That is the question the output-owning cut is offered on
-(`lowering/tile/_cut.py`). The full-projection cut reads the refusal from the other side: a reduce this rule will
+(`tile/_cut.py`). The full-projection cut reads the refusal from the other side: a reduce this rule will
 not bind past is one that cut hands its own kernel, after which the piece reads a single stored value and its sweep
 binds. And a cut's PRODUCER piece is minted through it — its workspace axes are the store's sweep and an empty
 placement, so the rule decides the piece's grid rather than the cut handing it one free axis per workspace dimension,
@@ -238,7 +238,7 @@ nvcc).
 A matrix row that Loop IR elided because its static extent is one remains algebraic information, and the total lift
 restores it in TWO ways, and which one applies is decided by what the term can support.
 
-The lift BINDS it (`lowering/tile/_row.py`) when an operand has a unit dimension to bind into: the coordinate goes
+The lift BINDS it (`tile/_row.py`) when an operand has a unit dimension to bind into: the coordinate goes
 back into the indices that read it, so the row is an axis an operand carries and not merely one the placement lists.
 A contraction that owns no free axis is what asks for it — everything such a term reads it shares with the operand it
 multiplies, and a B that moves with its row is no slab per tile (`contracts`), so the family would otherwise fall to
@@ -267,13 +267,13 @@ Scoped lambda equivalence uses that normalized order. It therefore ignores SSA s
 without weakening buffer or axis identity. The emit-side same-score legality query uses this same mechanism rather
 than maintaining a second cone canonicalizer.
 
-`pipeline/passes/lowering/tile/_fromloop.py` exposes the total-lift entry used by the pass and golden replay. It peels
+`pipeline/passes/tile/_fromloop.py` exposes the total-lift entry used by the pass and golden replay. It peels
 the outer free axes, invokes the conversion, separates output specifications, checks the no-inner-loop invariant, and
 creates one zero-axis root `Fold` over the lifted cell.
 
 ## Algebraic rewrite
 
-`pipeline/passes/lowering/tile/020_twisted.py` runs after construction canonicalization and before scheduling. It
+`pipeline/passes/tile/lift/020_twisted.py` runs after construction canonicalization and before scheduling. It
 tries every twist recipe (`ir/pure/twist.py`) on every reduce that reads a reduce as an operand — the shape the lift
 gives a two-pass softmax — and rewrites the tree's operands onto each fold `Fold.fuse` returns, to a fixpoint. Pure
 softmax is the arity-two case; SDPA adds expectation components, which join by the same call once the `1/l` factor
@@ -342,7 +342,7 @@ its normal form). The named lattice points are spelled at call sites: the deploy
 (`with_io=True` — the durable join key) and the variant key (`with_io=True, with_knobs=True` —
 the search tree and measurement stores). There is no schedule-space key on
 the interface: the enumeration's `pool_id` stamp is minted at its one site in
-`lowering/tile/040_schedule` (the variant key + hints + pins + sample identity) — a stamp for the
+`tile/schedule/040_schedule` (the variant key + hints + pins + sample identity) — a stamp for the
 greedy decision memo and the budgeted descent seed, not a cache key: nothing stores pools.
 
 Identity has two flavors: the default `structural=True` is schedule-equivalent (compute-unit op
@@ -414,7 +414,7 @@ Structural choices are deliberately outside this algebra. A cut or split changes
 kernel then constructs a fresh problem and fresh sites. Search ranks encoded accepted leaves and materialization
 consumes the typed schedule, so neither layer defines schedule membership.
 
-The single `lowering/tile/030_cut` pass reaches a fixpoint over kernel-set alternatives before scheduling: placement
+The single `tile/cut/030_cut` pass reaches a fixpoint over kernel-set alternatives before scheduling: placement
 first, then cross-CTA reduction splitting. `PLACE` uses the same tree-path codec to address a
 stored non-root Fold edge. The fused sibling preserves the maximal Fold tree; each semantically closed cut sibling
 writes the child Fold's complete state tuple to workspaces and replaces every canonically shared occurrence with

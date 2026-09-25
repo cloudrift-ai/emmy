@@ -12,7 +12,7 @@ top-level layer/pass picture see `compiler/ARCHITECTURE.md`.
 | `frontend/ir`     | after tracing / loader spelling | `LinearOp`, `MatmulOp`, `SdpaOp`, `MeanOp`, layout ops                             |
 | `tensor/ir`       | after decomposition             | `ElementwiseOp`, `ReduceOp`, `ScanOp`, `GatherOp`, `ScatterOp`, `IndexMapOp`                          |
 | `loop/ir`         | after fusion                    | `LoopOp` + body types (`Load`, `Assign`, `Accum`, `Write`, `Select`, `Loop`, `Axis`)                  |
-| `tile/ir`         | after `lowering/tile`           | `TileOp` holding the structural root `op`, output specifications, placement, workers, knobs, a typed classic schedule, and its materialization |
+| `tile/ir`         | after `tile/schedule`           | `TileOp` holding the structural root `op`, output specifications, placement, workers, knobs, a typed classic schedule, and its materialization |
 | `kernel/ir`       | after `lowering/kernel`         | `KernelOp` + hardware stmts (`Tile`, `Smem`, `Sync`, `TreeHalve`)                                     |
 | `cuda/ir`         | after `lowering/cuda`           | `CudaOp` (rendered `__global__` source)                                                               |
 
@@ -161,7 +161,7 @@ kernel it produced went on to read.
   op; reductions are `Accum` statements inside a reduce `Loop`). `LoopOp` construction orders a free-loop chain by
   the row-major coordinate depth in its boundary writes; axis spelling is only the fallback when output storage does
   not totally order the chain. The resulting geometry, rather than source names, reaches Tile IR placement.
-- **Loop → tile** (after `lowering/tile`): `LoopOp` nodes are replaced by
+- **Loop → tile** (after the `tile/` passes): `LoopOp` nodes are replaced by
   `TileOp` holding the structural-IR root `op` directly (`tile/ir` — one `Fold` kind), structural
   placement, one accepted site-indexed `Schedule`, and separate `ClassicMaterialization`
   facts. A kernel's structure is read from each node's derived classification, not a Python kernel
@@ -326,7 +326,7 @@ nearest enclosing loop whose axis the `Carry` index does not read (`carried_cell
 the free-axis order never sorts under the cells, and its shape is the loops over its cells. The Loop IR rendering
 keeps two slots of the cell shape and commits the second after each step; how many slots survive and where they are
 stored is a schedule's question, not the statement's. The Tile lift realizes it as a serial launch axis over a state
-buffer (`lowering/tile/010_lift`). A register schedule can instead retain the state inside a CTA and realize
+buffer (`tile/lift/010_lift`). A register schedule can instead retain the state inside a CTA and realize
 the same axis as a loop, while the classic schedule keeps the ordered launches.
 
 **The algebra is in the term, not a tag.** There is no stored / derived `AlgebraKind` and no op-tree node zoo. The
@@ -512,7 +512,7 @@ Construction never fails: unresolved names are data, and chaining scope levels m
 `backward_cone` with the previous one's `external_reads`. `Body.defs_die_at(members, roots=…, allowed=…)` is the
 matching escape check (may the cone be cut out, with only the designated consumers reading its roots?). This is
 the shared substrate behind the rules that slice cones (the demoted-operand producer cut in
-`lowering/tile/030_cut`) — eligibility judgments stay in the rules, per
+`tile/cut/030_cut`) — eligibility judgments stay in the rules, per
 `pipeline/passes/ARCHITECTURE.md`.
 
 `backward_cone` resolves reads by NAME over a body it assumes is SSA, so it is only sound where one name has one

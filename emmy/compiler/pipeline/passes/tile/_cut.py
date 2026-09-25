@@ -59,9 +59,9 @@ from emmy.compiler.ir.tile.ops import (
 from emmy.compiler.ir.tile.path import family_sites, sites, spell
 from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.knob import consume_kernel_row
-from emmy.compiler.pipeline.passes.lowering.tile._row import lift_kernel
-from emmy.compiler.pipeline.passes.lowering.tile._split import add_output_piece, output_root
-from emmy.compiler.pipeline.passes.lowering.tile._twist import rewrite_twisted
+from emmy.compiler.pipeline.passes.tile._row import lift_kernel
+from emmy.compiler.pipeline.passes.tile._split import add_output_piece, output_root
+from emmy.compiler.pipeline.passes.tile._twist import rewrite_twisted
 from emmy.compiler.structural import digest
 from emmy.compiler.tensor import Tensor
 

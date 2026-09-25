@@ -164,7 +164,7 @@ class Context:
     # so timings under different arithmetic or optimization flags cannot rank one another.
     # Populated from the environment by probe / from_target.
     compile_flags: str = ""
-    # Whether the strict knob-pin validator (``lowering/tile/_validate``)
+    # Whether the strict knob-pin validator (``tile/_validate``)
     # is active. ``True`` on the deterministic greedy compile (``compile`` / ``run``),
     # where a force-pinned env knob foreign to the kernel's resolved tier is a user
     # error that should fail loudly instead of silently mis-compiling. ``False`` under

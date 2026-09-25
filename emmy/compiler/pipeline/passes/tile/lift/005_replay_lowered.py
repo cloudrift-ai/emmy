@@ -1,6 +1,6 @@
 """Fetch a fused kernel's finished lowering from the session kernel cache — the greedy shortcut.
 
-Fusion has settled the kernel boundary by the time ``lowering/tile`` starts, so this rule sits
+Fusion has settled the kernel boundary by the time ``tile/lift`` starts, so this rule sits
 before the lift: a ``LoopOp`` whose exact variant key (+ hints + pins) was already lowered this
 session rewrites STRAIGHT to the cached, io-rebound ``KernelOp`` — no lift, no enumeration, no
 fork, no materialization. Everything downstream treats it as any other kernel: the tile and

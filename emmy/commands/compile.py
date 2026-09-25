@@ -423,7 +423,8 @@ def add_diagnostics_args(parser) -> None:
             "-v: also pass timings and per-rule applied counts. "
             "-vv: also a unified-diff snapshot of every rule application, bracketed by "
             "``>>> <pass>:NNN_rulename`` / ``<<< <pass>:NNN_rulename`` markers (pass shorthands: "
-            "d=decomposition, o=optimization, l=lifting, f=fusion, t=tile, k=kernel, c=cuda). "
+            "d=decomposition, o=optimization, l=lifting, f=fusion, n=canonicalize, s=stamp, t=tile/lift, "
+            "p=tile/cut, h=tile/schedule, k=kernel, c=cuda). "
             "Diffs go to stdout (no ``2>&1`` needed). "
             "Slice one pass: ``... -vv | awk '/^>>> t:/,/^<<< t:/'``. "
             "Slice one rule: ``... -vv | awk '/^>>> t:005/,/^<<< t:005/'``."
@@ -549,7 +550,10 @@ def register_compile_command(subparsers):
             "Pass list to override the default. Accepts either a comma-separated list "
             "(e.g. 'decomposition,optimization,fusion') or a contiguous string of "
             "single-letter shortcuts: d=decomposition, o=optimization, l=lifting, "
-            "f=fusion, t=lowering/tile, k=lowering/kernel, c=lowering/cuda."
+            "f=fusion, n=canonicalize, s=stamp, t=tile/lift, p=tile/cut, h=tile/schedule, "
+            "k=lowering/kernel, c=lowering/cuda. 'dolfnstp' stops after the cut pass: every cut a kernel "
+            "offers resolves by pins alone and no piece is scheduled, so the offered kernel sets can be read "
+            "off the tile IR without paying for a schedule."
         ),
     )
     parser.add_argument(

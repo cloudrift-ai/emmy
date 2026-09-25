@@ -6,10 +6,10 @@ from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Node, Tensor
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.pipeline import Match, Pattern
-from emmy.compiler.pipeline.passes.lowering.tile._cut import _input_fragment
-from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op, states_as_buffers
-from emmy.compiler.pipeline.passes.lowering.tile._row import lift_kernel
-from emmy.compiler.pipeline.passes.lowering.tile._split import add_output_piece
+from emmy.compiler.pipeline.passes.tile._cut import _input_fragment
+from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op, states_as_buffers
+from emmy.compiler.pipeline.passes.tile._row import lift_kernel
+from emmy.compiler.pipeline.passes.tile._split import add_output_piece
 
 PATTERN = [Pattern("root", LoopOp)]
 

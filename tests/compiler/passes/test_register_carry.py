@@ -22,7 +22,7 @@ from tests.compiler.ir.test_carried_state import _graph, _inputs, _reference
 
 
 def _lift(graph):
-    return Pipeline.build(["lowering/tile"], select=["lift"]).run(graph)
+    return Pipeline.build(["tile/lift"], select=["lift"]).run(graph)
 
 
 def _context(tile, target=(12, 0)):

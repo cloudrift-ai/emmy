@@ -98,7 +98,7 @@ def _chunks(arrays: dict[str, np.ndarray]) -> np.ndarray:
 @pytest.mark.parametrize(("b", "t", "d", "chunk"), [(1, 6, 4, 2), (2, 16, 8, 4)])
 def test_the_rolled_kernel_matches_eager(b: int, t: int, d: int, chunk: int) -> None:
     graph, _, (module, _, _) = graph_from_code(_delta(b, t, d, chunk))
-    graph = Pipeline.build(["lowering/tile"], select=["lift"]).run(Pipeline.build(LOOP_PASSES).run(graph))
+    graph = Pipeline.build(["tile/lift"], select=["lift"]).run(Pipeline.build(LOOP_PASSES).run(graph))
     assert sum(bool(node.op.place.serial) for node in graph.nodes.values() if isinstance(node.op, TileOp)) == 1
 
     arrays = _run(graph)
@@ -140,7 +140,7 @@ m(torch.randn({t}, {d}))
 def _lifted_output(code: str, *inputs: str) -> tuple[np.ndarray, np.ndarray]:
     """The program's output through the rolled kernel, run as Loop IR after the lift, beside eager."""
     graph, _, (module, _, _) = graph_from_code(code)
-    graph = Pipeline.build(["lowering/tile"], select=["lift"]).run(Pipeline.build(LOOP_PASSES).run(graph))
+    graph = Pipeline.build(["tile/lift"], select=["lift"]).run(Pipeline.build(LOOP_PASSES).run(graph))
     assert sum(bool(node.op.place.serial) for node in graph.nodes.values() if isinstance(node.op, TileOp)) == 1
     arrays = _run(graph)
     reference = module(*(torch.from_numpy(arrays[name]) for name in inputs)).numpy()

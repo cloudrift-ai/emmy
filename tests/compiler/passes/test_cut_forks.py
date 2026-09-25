@@ -25,7 +25,7 @@ from emmy.compiler.ir.tile.path import resolve
 from emmy.compiler.loop_wire import loop_graph_to_wire
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, TILE_PASSES, Match, Pipeline, Rule
 from emmy.compiler.pipeline.fork import Fork
-from emmy.compiler.pipeline.passes.lowering.tile._cut import (
+from emmy.compiler.pipeline.passes.tile._cut import (
     CutSite,
     _producer_order,
     _workspace_axes,
@@ -49,7 +49,7 @@ from tests.compiler.helpers import case_target_tile, direct_classic_leaf, loop_r
 from tests.compiler.terms import contraction, projection, reduction, slab
 
 _CTX = Context.from_target((12, 0))
-_CUT = import_module("emmy.compiler.pipeline.passes.lowering.tile.030_cut")
+_CUT = import_module("emmy.compiler.pipeline.passes.tile.cut.030_cut")
 
 
 def _input(graph: Graph, name: str, shape, dtype="f16") -> None:
@@ -65,14 +65,14 @@ def test_cut_and_schedule_passes_share_the_generic_schedule_driver() -> None:
 
 def test_placement_cut_preserves_a_cross_cta_split_receipt() -> None:
     """A split piece can re-enter placement; cutting it must not make REDUCE pending again."""
-    from emmy.compiler.pipeline.passes.lowering.tile._split import split_pending
+    from emmy.compiler.pipeline.passes.tile._split import split_pending
 
     graph = _computed_operand_graph("a")
     tile = graph.nodes["out"].op
     # The partition receipt is the reduce axis's window in the kernel's axis table; the term names it only.
     axes = tuple(replace(axis, window=Window(parent=axis, partition=True)) if axis.name == tile.op.axis else axis for axis in tile.axes)
     graph.nodes["out"].op = replace(tile, axes=axes)
-    pipeline = Pipeline.build(["lowering/tile"], select={"cut"})
+    pipeline = Pipeline.build(["tile/cut"])
     match = pipeline.match(graph, pipeline.passes[0].rules[0])[0]
     seams = cuttable_seams(match.root.op)
 
@@ -162,7 +162,7 @@ def _softmax_graph() -> Graph:
 
 def _offered(graph: Graph, *, frontend: bool = False) -> list[dict]:
     offered: list[dict] = []
-    passes = TILE_PASSES if frontend else ["lowering/tile"]
+    passes = TILE_PASSES if frontend else ["tile/cut"]
     select = None if frontend else {"cut"}
 
     def decide(fork):
@@ -211,6 +211,24 @@ def _nested_attention_cut(pins: dict[str, str]) -> Graph:
 
 def _piece_with_seam(fragment: Graph):
     return next(node for node in fragment.nodes.values() if isinstance(node.op, TileOp) and cuttable_seams(node.op))
+
+
+def test_a_pipeline_that_stops_at_the_cut_pass_keeps_the_fused_tree_and_schedules_nothing(monkeypatch) -> None:
+    """``compile --passes dolfnstp``: a kernel-set arm is priced by scheduling its pieces, so a greedy
+    compile that never reaches ``tile/schedule`` must not price one. The offered state cut resolves to
+    the fused tree (pins alone could pick the cut), and no kernel comes out scheduled."""
+    from emmy.compiler.pipeline.search.db import SearchDB
+    from emmy.compiler.pipeline.search.policy import greedy as policy
+
+    def no_price(*_args, **_kwargs):
+        raise AssertionError("a pipeline without tile/schedule must not price an arm by scheduling its pieces")
+
+    monkeypatch.setattr(policy, "_price_kernel", no_price)
+    assert any(value == "cut" for offer in _offered(_softmax_graph(), frontend=True) for value in offer.values())
+    result = Pipeline.build([*LOOP_PASSES, "tile/lift", "tile/cut"]).run(_softmax_graph(), ctx=_CTX, db=SearchDB())
+    kernels = [node.op for node in result.nodes.values() if isinstance(node.op, TileOp)]
+    assert len(kernels) == 1
+    assert kernels[0].schedule is None
 
 
 def test_cut_workspace_retains_static_unit_axes() -> None:
@@ -861,7 +879,7 @@ def _cone_seam() -> CutSite:
 def test_alpha_equivalent_operand_cones_cluster_into_one_seam() -> None:
     """Two operand cones spelling the same value are ONE placement decision: the representative
     carries the other as a sibling with its capture correspondence."""
-    from emmy.compiler.pipeline.passes.lowering.tile._cut import _cluster_value_seams
+    from emmy.compiler.pipeline.passes.tile._cut import _cluster_value_seams
 
     same = [_cone_seam(), _cone_seam()]
 
@@ -870,7 +888,7 @@ def test_alpha_equivalent_operand_cones_cluster_into_one_seam() -> None:
 
 
 def test_a_multi_result_cone_does_not_materialize_its_own_dependency() -> None:
-    from emmy.compiler.pipeline.passes.lowering.tile._cut import _cluster_value_seams
+    from emmy.compiler.pipeline.passes.tile._cut import _cluster_value_seams
 
     norm = projection(body=(Load("x", "x", (Var("m"),)), Assign("norm", "rsqrt", ("x",))))
     maximum = reduction("k", (norm, slab("y", "y", "m", "k")), (Assign("amax__v", "multiply", ("norm", "y")),), ("amax",), "maximum")
@@ -901,7 +919,7 @@ def _norm_residual_graph(m: int = 16) -> Graph:
 def _lifted_parent(graph: Graph) -> TileOp:
     """The one fused kernel of ``graph`` as the cut pass first sees it."""
     lowered = Pipeline.build(LOOP_PASSES).run(graph, ctx=_CTX)
-    lifted = Pipeline.build(["lowering/tile"], select={"lift", "twisted"}).run(lowered, ctx=_CTX)
+    lifted = Pipeline.build(["tile/lift"], select={"lift", "twisted"}).run(lowered, ctx=_CTX)
     (tile,) = [node.op for node in lifted.nodes.values() if isinstance(node.op, TileOp)]
     return tile
 
@@ -944,7 +962,7 @@ def test_a_row_spelled_at_any_occurrence_of_a_clustered_value_names_its_cut() ->
 
     graph = _norm_residual_graph()
     lowered = Pipeline.build(LOOP_PASSES).run(graph, ctx=_CTX)
-    lifted = Pipeline.build(["lowering/tile"], select={"lift", "twisted"}).run(lowered, ctx=_CTX)
+    lifted = Pipeline.build(["tile/lift"], select={"lift", "twisted"}).run(lowered, ctx=_CTX)
     node = next(node for node in lifted.nodes.values() if isinstance(node.op, TileOp))
     (seam,) = [seam for seam in cuttable_seams(node.op) if seam.node.as_contraction() is not None]
     (alias,) = seam.aliases
@@ -1529,7 +1547,7 @@ def test_cut_piece_sweeps_the_axis_its_row_statistic_is_invariant_in() -> None:
     once per output cell, which is what a materialized q/k RoPE cone did — one cooperative block
     per element."""
     graph = _row_statistic_graph()
-    pipeline = Pipeline.build(["lowering/tile"], select={"cut"})
+    pipeline = Pipeline.build(["tile/cut"])
     match = pipeline.match(graph, pipeline.passes[0].rules[0])[0]
     seams = cuttable_seams(match.root.op)
 
