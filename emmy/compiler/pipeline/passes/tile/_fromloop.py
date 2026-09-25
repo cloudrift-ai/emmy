@@ -651,4 +651,12 @@ def lift_loop_op(op: LoopOp, *, name: str = "", body: Body | None = None, serial
     )
 
 
-__all__ = ["fold_from_loop", "lift_body", "lift_loop_op", "states_as_buffers"]
+def lift_serial(op: LoopOp, *, name: str, prefix: str) -> tuple[TileOp, dict[str, tuple]]:
+    """A kernel that carries a state lifted as a serial kernel: its carried states become state
+    buffers (:func:`states_as_buffers`, named under ``prefix``) and the loop that carries them the
+    kernel's time. Returns the tile and the state buffers' shapes."""
+    body, serial, shapes = states_as_buffers(op.body, prefix)
+    return lift_loop_op(op, name=name, body=body, serial=serial), shapes
+
+
+__all__ = ["fold_from_loop", "lift_body", "lift_loop_op", "lift_serial", "states_as_buffers"]

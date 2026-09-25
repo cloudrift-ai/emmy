@@ -896,7 +896,7 @@ def _lifted_target(record: GoldenRecord):
     lift, then the twist rewrite, exactly as ``tile/lift`` runs them. A placement key is
     spelled on that tree, so decoding it against the lift alone would name sites the fused
     single-pass carrier no longer has."""
-    from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op, states_as_buffers  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op, lift_serial  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.tile._twist import rewrite_twisted  # noqa: PLC0415
 
     lowered, nodes = _target_kernel_nodes(record)
@@ -904,12 +904,8 @@ def _lifted_target(record: GoldenRecord):
         raise ValueError(f"{record.name}: target lowers to {len(nodes)} kernels — a row decorates exactly one")
     node = nodes[0]
     node.op = node.op.with_io(lowered, node)
-    if node.op.body.carries:
-        # A serial kernel lifts its carried states as state buffers, as ``tile/lift`` does.
-        body, serial, _ = states_as_buffers(node.op.body, node.id)
-        tile = lift_loop_op(node.op, name=node.id, body=body, serial=serial)
-    else:
-        tile = lift_loop_op(node.op, name=node.id)
+    # A serial kernel lifts its carried states as state buffers, as ``tile/lift`` does.
+    tile = lift_serial(node.op, name=node.id, prefix=node.id)[0] if node.op.body.carries else lift_loop_op(node.op, name=node.id)
     tile = replace(tile, op=rewrite_twisted(tile.op, tile.axes))
     # A fork's root op is always matcher-refreshed (``_match_at`` runs ``with_io`` on every matched
     # node before the rule that offers the fork), so the record side mirrors the io through that
