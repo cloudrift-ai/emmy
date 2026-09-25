@@ -1,0 +1,37 @@
+# Profile the same qualified serving artifact used by native_serving.
+command:
+  stage: [crates, Cargo.toml, Cargo.lock]
+  run: |
+    set -eu
+    cd $repo_dir
+    export PATH=/usr/local/cuda/bin:$$PATH
+    export CUDA_VISIBLE_DEVICES=$gpu_device_ids
+    artifact=$${NATIVE_ARTIFACT:?Set NATIVE_ARTIFACT to the qualified serving bundle}
+    exec 9>/tmp/emmy-gpu.lock
+    flock 9
+    sha256sum $$artifact/manifest.json target/release/emmy-server > $task_dir/identity.txt
+    nsys profile --trace=cuda --cuda-graph-trace=node --sample=none --cpuctxsw=none \
+      --duration=20 --force-overwrite=true --output=$task_dir/native \
+      target/release/emmy-server --artifact $$artifact --model Qwen/Qwen3-0.6B \
+      --host 127.0.0.1 --port 8129 --max-model-len 4096 > $task_dir/server.log 2>&1 &
+    profiler_pid=$$!
+    trap 'kill "$$profiler_pid" 2>/dev/null || true; wait "$$profiler_pid" 2>/dev/null || true' EXIT
+    ready=0
+    for attempt in $$(seq 1 15); do
+      if curl -sf http://127.0.0.1:8129/health >/dev/null; then ready=1; break; fi
+      kill -0 "$$profiler_pid" 2>/dev/null || exit 1
+      sleep 1
+    done
+    test "$$ready" = 1
+    for repeat in 1 2 3; do
+      curl -fsS http://127.0.0.1:8129/v1/completions -H 'Content-Type: application/json' \
+        --data '{"model":"Qwen/Qwen3-0.6B","prompt":"The capital of France is","max_tokens":16,"temperature":0,"ignore_eos":true}' \
+        > $task_dir/request$$repeat.json
+    done
+    wait "$$profiler_pid" || true
+    nsys stats --report cuda_gpu_kern_sum,cuda_api_sum --format csv $task_dir/native.nsys-rep > $task_dir/kernels.csv
+  result_files: ["*.json", "*.log", "*.txt", "*.csv", "*.nsys-rep"]
+  timeout: 2400
+matrices:
+  deploy.gpu: "NVIDIA GeForce RTX 4080"
+  deploy.gpu_count: 1

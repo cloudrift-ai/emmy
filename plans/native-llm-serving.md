@@ -35,7 +35,11 @@ or its scope is explicitly revised.
 - **Milestone 3 — implemented in PR #890.** Native text and HTTP serving consume the qualified Rust runtime.
   Checkpoint template/tokenizer parity and real GPU HTTP lifecycle tests pass. The full Python suite has no test
   failures; four missing baseline timing records were added and their tests rechecked.
-- **Milestone 4 — not implemented.** Serving optimizations remain separate work.
+- **Milestone 4 — evidence collected; optimizations not implemented.** The local RTX 4080
+  [serving comparison](../experiments/Qwen3-0.6B/native_serving/RESULTS.md) and
+  [GPU profile](../experiments/Qwen3-0.6B/native_profile/RESULTS.md) show no latency advantage for the qualified
+  artifact. A repeated linear kernel accounts for 69.2% of GPU kernel time; sequential prefill dominates long prompts.
+  Choose schedule tuning versus additional serving features before expanding implementation.
 
 The [runtime report](../experiments/Qwen3-0.6B/native_runtime/RESULTS.md) shows reduced uncaptured submission cost,
 but little change in captured GPU time for the tested small programs. This is not evidence of a full-model serving
