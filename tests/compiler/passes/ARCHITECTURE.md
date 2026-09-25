@@ -189,6 +189,7 @@ These exercise shared-memory reuse across the generic and asynchronous proxies o
 
 `test_volta_mma.py` covers the SM70 atom as one capability family: cooperative global loads, paired crosswise and
 congruous staged layouts with their interleaved accumulator map, the policy-off and gmem-direct gather fallbacks,
+empty-fragment guards before out-of-range global reads,
 packed output stores including M-only tails, computed operands, C-to-A repacking for paired attention contractions,
 per-atom row reduction, and causal coordinate masking. The realization corpus supplies the exact-GPU build and
 correctness checks for the schedules that combine those paths.
