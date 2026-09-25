@@ -130,5 +130,5 @@ loops:
             unroll: false
             seed: true
       name: k_matmul_ec392d
-    inputs: [x, w]
+    inputs: [w, x]
     outputs: [[o, f16, [64, 128]]]

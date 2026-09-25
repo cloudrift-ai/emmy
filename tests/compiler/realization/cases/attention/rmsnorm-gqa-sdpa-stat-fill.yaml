@@ -594,5 +594,5 @@ loops:
             unroll: false
             seed: true
       name: k_sdpa_rms_norm_reduce_1f0387
-    inputs: [qn_mean_count, kn_mean_count, qn_eps, kn_eps, out_mask_fill_c, out_mask_zero_c, out_scale, q, k, qw, kw, v]
+    inputs: [kn_mean_count, qn_mean_count, kn_eps, qn_eps, out_scale, out_mask_fill_c, out_mask_zero_c, q, k, kw, qw, v]
     outputs: [[out, f16, [1, 4, 128, 128]]]

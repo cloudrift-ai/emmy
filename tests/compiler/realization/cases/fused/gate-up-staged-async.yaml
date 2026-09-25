@@ -166,5 +166,5 @@ loops:
             unroll: false
             seed: true
       name: k_linear_reduce_79fc56
-    inputs: [sg_one, x, wg, wu]
+    inputs: [sg_one, wg, x, wu]
     outputs: [[o, f16, [128, 512]]]
